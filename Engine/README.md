@@ -4,26 +4,29 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T17:10:29Z
-- Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Updated (UTC): 2026-04-23T19:01:41Z
+- Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
+  - `src/Tungsten/dotnet/`
   - `src/Tungsten/tests/`
   - `src/Tungsten/scripts/`
 - Related docs:
   - [Documentation Index](./docs/README.md)
   - [User Guide](./docs/user-guide.md)
   - [Usage Reference](./docs/usage-reference.md)
+  - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
   - [Inline Box Strings](./docs/inline-box-strings.md)
   - [Troubleshooting](./docs/troubleshooting.md)
 
 ## Summary
 
-Tungsten is a Python-first, PowerShell-friendly automation workspace for a local Wolfram
-installation. It exists for the workflows that are awkward in the traditional Mathematica GUI but
-natural for agents and scripts:
+Tungsten is a Python-first automation workspace for a local Wolfram installation, with thin
+PowerShell and .NET projection layers for script and application callers. It exists for the
+workflows that are awkward in the traditional Mathematica GUI but natural for agents, scripts, and
+typed host applications:
 
 - evaluate Wolfram Language code and get structured JSON back instead of scraping stdout;
 - inspect, create, and patch notebook files without needing a running kernel;
@@ -42,6 +45,8 @@ that meaningfully improves agent workflows.
 Tungsten exists to satisfy a small set of load-bearing goals:
 
 - Make local Wolfram automation practical from `pwsh`, Python, and JSON-first tooling.
+- Make the same workflows pleasant to call from C#/.NET without forcing callers to hand-roll
+  process execution or JSON deserialization.
 - Preserve machine readability. The primary outputs should be structured data, not terminal-only
   text.
 - Keep as much functionality local and offline as possible so results stay aligned with the actual
@@ -104,6 +109,7 @@ The current workspace is built around seven complementary capabilities:
   visible inline-desktop path retained as an experimental option.
 - Kernel-free Wolfram expression parsing and inert structural evaluation.
 - PowerShell wrappers for all major Tungsten surfaces.
+- A typed .NET client wrapper over the JSON CLI for C# callers.
 
 ### Deliberately narrow or experimental
 
@@ -121,6 +127,7 @@ The current workspace is built around seven complementary capabilities:
 | Package layout | `setuptools` package under `src/tungsten/` |
 | Primary execution substrate | `wolfram.exe -script` |
 | PowerShell integration | Thin JSON-first wrapper module in `pwsh/Tungsten.psm1` |
+| .NET integration | Thin typed wrapper library in `dotnet/Tungsten.DotNet/` |
 | Documentation index | SQLite FTS5 |
 | Notebook representation | Tungsten-owned structural parser for notebook expressions |
 | Expression representation | Tungsten-owned AST and Pratt-style parser |
@@ -149,10 +156,12 @@ The current workspace is built around seven complementary capabilities:
         └─────────────────────┼─────────────────────┘
                               │
                            cli.py
-                              │
-                        Tungsten.psm1
-                              │
-                 Python callers / pwsh scripts / agents
+                     ┌────────┴────────┐
+                     │                 │
+                     ▼                 ▼
+               Tungsten.psm1   Tungsten.DotNet
+                     │                 │
+       Python callers / pwsh scripts / .NET apps / agents
 ```
 
 For the deeper component model and execution flow, see [Architecture](./docs/architecture.md).
@@ -200,6 +209,24 @@ Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 Find-TungstenDocumentation -Query "NotebookGet"
 ```
+
+### C#/.NET
+
+```csharp
+using Tungsten.DotNet;
+
+var client = TungstenClient.CreateForRepositoryRoot(@"C:\Tools1\Tools");
+
+var environment = await client.GetEnvironmentAsync(probe: true);
+var expression = await client.EvaluateExpressionAsync(
+    TungstenInputSource.FromCode("ReplacePart[f[a, b, c], 2 -> x]"));
+
+Console.WriteLine(environment.InstallDir);
+Console.WriteLine(expression.Result?.FullForm);
+```
+
+See [C#/.NET API](./docs/dotnet-api.md) for the full typed surface, assistant/front-end examples,
+and failure-model guidance.
 
 ### Notebook Assistant end-to-end
 

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-23T18:33:04Z
-- Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
+- Updated (UTC): 2026-04-23T19:01:41Z
+- Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
 
 ## What this docs tree is for
 
@@ -14,6 +14,7 @@ automation workspace. The documents here are meant to answer different questions
 
 - "What is Tungsten and what does it already do?"
 - "How do I use it from Python or PowerShell?"
+- "How do I use it from C#/.NET?"
 - "What are the exact commands and payload shapes?"
 - "How is it built internally?"
 - "What are the machine-specific quirks and troubleshooting steps?"
@@ -23,6 +24,7 @@ The docs are split so readers can choose the right depth:
 - the project README is the landing page;
 - the user guide is workflow-oriented;
 - the usage reference is command-oriented;
+- the .NET API guide is integration-oriented for C# callers;
 - the architecture and implementation documents are maintainer-oriented;
 - focused guides cover specific subsystems such as Notebook Assistant, inline-box strings, and the
   expression parser.
@@ -44,6 +46,14 @@ The docs are split so readers can choose the right depth:
    embedded notebook objects
 5. [notebook-assistant.md](./notebook-assistant.md) if your workflow touches the built-in assistant
 
+### If you want to call Tungsten from C#/.NET
+
+1. [dotnet-api.md](./dotnet-api.md)
+2. [../README.md](../README.md)
+3. [architecture.md](./architecture.md) if you need to understand the wrapper boundary
+4. [usage-reference.md](./usage-reference.md) when you need to correlate a .NET call with the
+   underlying CLI shape
+
 ### If you want to extend or maintain Tungsten itself
 
 1. [../README.md](../README.md)
@@ -62,6 +72,7 @@ The docs are split so readers can choose the right depth:
 | [../README.md](../README.md) | Current-state project landing page: goals, shipped surface, architecture summary, quick start, layout, and validation. |
 | [user-guide.md](user-guide.md) | Practical usage guide with setup steps, tutorial flows, and common PowerShell/Python workflows. |
 | [usage-reference.md](usage-reference.md) | Exhaustive command reference for the CLI and PowerShell wrapper surface. |
+| [dotnet-api.md](dotnet-api.md) | Typed C#/.NET client guide with repository setup, API map, examples, and failure-model notes. |
 | [architecture.md](architecture.md) | Current architecture reference: layer ownership, execution model, and subsystem boundaries. |
 | [implementation-details.md](implementation-details.md) | Environment-specific findings and the reasoning behind important implementation choices. |
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
@@ -91,6 +102,14 @@ The docs are split so readers can choose the right depth:
 - Read [user-guide.md](./user-guide.md) sections on documentation and FrontEnd control.
 - Use [usage-reference.md](./usage-reference.md) for exact `frontend` and `docs` commands.
 - Use [troubleshooting.md](./troubleshooting.md) when FE actions fail or documentation search results look stale.
+
+### .NET application integration
+
+- Read [dotnet-api.md](./dotnet-api.md) for the typed wrapper surface and examples.
+- Read [architecture.md](./architecture.md) when deciding whether to add a new typed method versus
+  using the generic JSON escape hatch.
+- Use [usage-reference.md](./usage-reference.md) to understand the CLI command that sits underneath
+  a given .NET call.
 
 ### Kernel-free structural analysis
 

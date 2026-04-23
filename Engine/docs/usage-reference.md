@@ -4,11 +4,12 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T18:33:04Z
-- Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
+- Updated (UTC): 2026-04-23T19:01:41Z
+- Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
+  - [C#/.NET API](./dotnet-api.md)
   - [Inline Box Strings](./inline-box-strings.md)
   - [Troubleshooting](./troubleshooting.md)
   - [Notebook Assistant](./notebook-assistant.md)
@@ -20,6 +21,8 @@
 - The Python CLI is JSON-first. Every command returns structured JSON.
 - The PowerShell module is a thin wrapper over `python -m tungsten ...`; it returns deserialized
   PowerShell objects based on those JSON payloads.
+- The .NET client in [dotnet-api.md](./dotnet-api.md) is a typed wrapper over the same JSON
+  command surface documented here.
 - Kernel-backed commands depend on a real local Wolfram installation.
 - Kernel-free commands such as notebook file inspection and expression parsing do not require a
   running kernel.

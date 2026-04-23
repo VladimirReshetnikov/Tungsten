@@ -1,8 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-23T17:10:29Z
-Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+Updated (UTC): 2026-04-23T19:01:41Z
+Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
 
 ## Summary
 
@@ -19,7 +19,7 @@ That leads to a hybrid design:
 - kernel-backed capabilities are delegated to the installed Wolfram runtime;
 - notebook inspection/editing and expression parsing are implemented locally so they remain
   available even when the kernel is unavailable, undesirable, or too heavyweight for the task;
-- PowerShell support is projected from the Python CLI rather than reimplemented.
+- PowerShell and .NET support are projected from the Python CLI rather than reimplemented.
 
 This document describes the current architecture as implemented in `src/tungsten/`.
 
@@ -65,6 +65,18 @@ licensing behavior are centralized so higher-level layers can rely on one execut
 PowerShell is important for automation ergonomics, but the source of truth remains the Python
 implementation. The module wraps the CLI instead of growing a parallel implementation.
 
+### 6. Treat .NET as a typed projection layer, not a second core
+
+The .NET client exists so C# callers can use Tungsten naturally, but it is intentionally a thin
+process-wrapper layer over the JSON CLI. It should add:
+
+- typed request/response models;
+- repo-local discovery helpers;
+- option bags where the CLI surface would otherwise be awkward in C#;
+- predictable exception handling for process and JSON failures.
+
+It should not quietly fork Tungsten behavior into a second implementation stack.
+
 ## Module map
 
 The current Tungsten package is composed of the following modules.
@@ -83,6 +95,7 @@ The current Tungsten package is composed of the following modules.
 | `assistant.py` | Automate Notebook Assistant for a selected source cell and optionally insert code below it. | `kernel.py`, `notebook.py` |
 | `cli.py` | Expose the package as a JSON-first command-line interface. | All feature modules |
 | `pwsh/Tungsten.psm1` | Project the CLI into PowerShell-friendly functions. | `python -m tungsten ...` |
+| `dotnet/Tungsten.DotNet` | Project the CLI into typed .NET request/response APIs. | `python -m tungsten ...`, `System.Text.Json`, `System.Diagnostics.Process` |
 
 ## High-level layer diagram
 
@@ -112,10 +125,11 @@ The current Tungsten package is composed of the following modules.
                         └──────────┬─────────┘
                                    ▼
                                  cli.py
-                                   ▼
-                            pwsh/Tungsten.psm1
-                                   ▼
-                    Python callers / PowerShell / agents
+                    ┌──────────────┴──────────────┐
+                    ▼                             ▼
+             pwsh/Tungsten.psm1        dotnet/Tungsten.DotNet
+                    ▼                             ▼
+          Python callers / PowerShell / .NET apps / agents
 ```
 
 ## Core runtime objects

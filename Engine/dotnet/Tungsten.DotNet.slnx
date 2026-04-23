@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Tungsten.DotNet.Tests/Tungsten.DotNet.Tests.csproj" />
+  <Project Path="Tungsten.DotNet/Tungsten.DotNet.csproj" />
+</Solution>
