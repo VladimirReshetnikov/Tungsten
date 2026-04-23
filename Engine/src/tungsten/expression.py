@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+from .wolfram_strings import has_inline_boxes
+from .wolfram_strings import inline_box_segments
+from .wolfram_strings import parse_wl_string_literal
+from .wolfram_strings import wl_string
+
 
 class WolframSyntaxError(ValueError):
     """Raised when Tungsten cannot parse a Wolfram expression."""
@@ -10,40 +15,6 @@ class WolframSyntaxError(ValueError):
 
 class WolframEvaluationError(ValueError):
     """Raised when Tungsten cannot structurally evaluate a built-in expression."""
-
-
-def wl_string(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
-    escaped = escaped.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
-    return f"\"{escaped}\""
-
-
-def parse_wl_string_literal(value: str) -> str:
-    text = value
-    if len(text) >= 2 and text[0] == "\"" and text[-1] == "\"":
-        text = text[1:-1]
-
-    replacements = {
-        "\\r": "\r",
-        "\\n": "\n",
-        "\\t": "\t",
-        "\\\\": "\\",
-        "\\\"": "\"",
-    }
-
-    result: list[str] = []
-    index = 0
-    while index < len(text):
-        if text[index] == "\\" and index + 1 < len(text):
-            fragment = text[index : index + 2]
-            result.append(replacements.get(fragment, text[index + 1]))
-            index += 2
-            continue
-
-        result.append(text[index])
-        index += 1
-
-    return "".join(result)
 
 
 class Expr:
@@ -146,10 +117,16 @@ class String(Expr):
         return wl_string(self.value)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "type": "string",
             "value": self.value,
         }
+        if has_inline_boxes(self.value):
+            payload["inline_boxes"] = [
+                segment.to_dict()
+                for segment in inline_box_segments(self.value)
+            ]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -464,7 +441,7 @@ def _skip_comment(text: str, index: int) -> int:
 
 def _scan_string(text: str, start: int) -> tuple[_Token, int]:
     end = _skip_string(text, start)
-    if end <= len(text) and (end == len(text) or text[end - 1] != "\""):
+    if end == len(text) and (not text or text[end - 1] != "\""):
         raise WolframSyntaxError("Unterminated Wolfram string literal.")
     raw = text[start:end]
     return _Token(kind="string", text=raw, start=start, end=end, value=parse_wl_string_literal(raw)), end

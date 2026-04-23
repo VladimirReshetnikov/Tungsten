@@ -4,6 +4,7 @@
 - Audience: Tungsten users and maintainers diagnosing local-environment, kernel, FrontEnd, assistant, or parser failures
 - Scope: `src/Tungsten` runtime behavior on a local Windows machine
 - Created (UTC): 2026-04-23T15:36:45Z
+- Updated (UTC): 2026-04-23T17:10:29Z
 - Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 - Related docs:
   - [Project README](../README.md)
@@ -229,6 +230,29 @@ Inspect:
 - Ask a more constrained question such as:
   `Reply only with Wolfram Language code that ...`
 - Use `--insert-all-wolfram-code-below` if you expect multiple WL code blocks.
+
+## Problem: Inline-box extraction reports no objects
+
+### Symptoms
+
+- `inline-box from-cell` returns `NoInlineBoxObjectsFound`.
+- `Get-TungstenNotebookCellInlineBoxes` reports success `false`.
+
+### Meaning
+
+The selected saved cell did not contain:
+
+- a top-level `BoxData[...]` object;
+- or a string literal that already contains inline box escapes such as `\!\(\*...\)`.
+
+### Recovery
+
+- Inspect the notebook cell with `notebook inspect` and make sure you selected the intended cell.
+- Confirm the notebook has been saved if you are expecting recently generated output to be present.
+- Try an output cell or a cell that visibly contains an inline object rather than a plain text or
+  plain input cell.
+- If you need live unsaved FrontEnd selection capture, that is outside the current saved-notebook
+  scope of the feature.
 
 ## Problem: The visible inline assistant path is flaky
 

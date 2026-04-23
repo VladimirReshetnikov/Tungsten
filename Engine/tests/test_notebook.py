@@ -54,6 +54,14 @@ class NotebookDocumentTests(unittest.TestCase):
         self.assertEqual(summary["cells"][-1]["preview"], "Tail cell")
         self.assertEqual(summary["cells"][3]["preview"], "Expand[2 (a+b)]")
 
+    def test_inline_box_string_preview_collapses_to_placeholder(self) -> None:
+        document = NotebookDocument.from_text(
+            'Notebook[{Cell["hello \\!\\(\\*GraphicsBox[{CircleBox[]}]\\)", "Text"]}]'
+        )
+
+        summary = document.to_dict()
+        self.assertEqual(summary["cells"][0]["preview"], "hello [InlineBox]")
+
     def test_real_documentation_notebook_parses(self) -> None:
         installation = discover_installation()
         if not installation.docs_roots:

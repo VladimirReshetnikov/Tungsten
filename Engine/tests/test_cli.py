@@ -203,6 +203,56 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["result"]["full_form"], "List[a, b]")
 
+    def test_inline_box_compose_command(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "inline-box",
+                    "compose",
+                    "--prefix",
+                    "icon: ",
+                    "--box-expr",
+                    "GraphicsBox[{CircleBox[]}]",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["box_count"], 1)
+        self.assertEqual(payload["boxes"][0]["head"], "GraphicsBox")
+
+    def test_inline_box_from_cell_command(self) -> None:
+        with TemporaryDirectory(prefix="tungsten-cli-") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            notebook_path = temp_dir / "inline-box.nb"
+            notebook_path.write_text(
+                'Notebook[{Cell[BoxData[GraphicsBox[{CircleBox[]}]], "Output", ExpressionUUID->"uuid-graphic"]}]',
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "inline-box",
+                        "from-cell",
+                        "--file",
+                        str(notebook_path),
+                        "--expression-uuid",
+                        "uuid-graphic",
+                        "--prefix",
+                        "icon: ",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["selected_boxes"][0]["head"], "GraphicsBox")
+        self.assertEqual(payload["string_value"], r"icon: \!\(\*GraphicsBox[{CircleBox[]}]\)")
+
 
 if __name__ == "__main__":
     unittest.main()

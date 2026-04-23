@@ -1,7 +1,7 @@
 # Tungsten Implementation Details
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-23T15:42:23Z
+Updated (UTC): 2026-04-23T17:10:29Z
 Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 
 ## Summary
@@ -199,6 +199,50 @@ This is important because it keeps unrelated notebook text stable and avoids unn
 The notebook parser is optimized for resilience on notebook files. The expression parser is
 optimized for operator precedence, implicit multiplication, `Part` syntax, spans, and canonical
 rendering. Combining them would make both more complicated and less trustworthy.
+
+## Why inline-box string handling lives in shared string utilities
+
+The inline-box feature exposed a foundational issue: Tungsten's older string literal parsers would
+drop the leading backslash on unknown escape sequences. That was survivable for many ordinary
+strings, but it is wrong for Wolfram strings that intentionally contain inline box escapes such as:
+
+- `\!`
+- `\(`
+- `\*`
+- `\)`
+
+Those escapes are exactly how Mathematica stores embedded notebook objects inside strings.
+
+### Why this was fixed centrally
+
+Both `notebook.py` and `expression.py` parse Wolfram string literals. Fixing only one of them would
+have left Tungsten inconsistent and fragile. The new shared `wolfram_strings.py` module therefore
+owns:
+
+- Wolfram string literal escaping;
+- Wolfram string literal parsing;
+- inline-box escape segmentation;
+- display-oriented placeholder rendering for notebook previews.
+
+That keeps every Tungsten subsystem aligned on the same string semantics.
+
+### Why notebook-cell extraction is kernel-free
+
+For saved notebooks, the relevant object is already present in the notebook expression text. That
+means Tungsten can often extract the needed `GraphicsBox[...]`, `StyleBox[...]`, `TemplateBox[...]`,
+or similar object directly from the saved cell expression without launching a kernel or FrontEnd.
+
+That approach has several advantages:
+
+- it is faster;
+- it is more testable;
+- it works in the same kernel-free workflows as notebook inspection and patching;
+- it avoids mixing a fundamentally file-structural feature into the FE automation layer.
+
+The current implementation therefore extracts box-bearing objects from:
+
+- top-level `BoxData[...]` contents;
+- inline box escapes already embedded inside strings in the selected cell.
 
 ## Why the expression subsystem exists and why it is intentionally narrow
 
@@ -435,6 +479,8 @@ them intentionally.
 The current implementation naturally suggests a few extensions if the project continues to grow.
 
 - More notebook patch operations in `notebook.py`.
+- Live FrontEnd selection-based inline-box capture for unsaved notebook state, if a future workflow
+  really needs it.
 - More inert structural built-ins in `expression.py`, provided they remain explicit and testable.
 - Richer assistant post-processing, such as multiple insertion policies or code-block ranking.
 - Additional FE operations that still fit the "small, deterministic, Wolfram-code-addressable"

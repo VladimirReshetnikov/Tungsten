@@ -13,6 +13,8 @@ from .expression import evaluate as evaluate_expression
 from .expression import length as expression_length
 from .expression import parse_expression
 from .frontend import FrontEndController
+from .inline_boxes import compose_inline_box_payload
+from .inline_boxes import extract_inline_boxes_from_notebook_cell
 from .kernel import WolframKernelRunner
 from .notebook import NotebookDocument, apply_patch_spec, load_patch_spec, wl_string
 
@@ -43,7 +45,7 @@ def _parse_cell_path(value: str) -> list[int]:
         raise argparse.ArgumentTypeError(f"Invalid cell path: {value!r}") from exc
 
 
-def _add_assistant_selector_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_cell_selector_arguments(parser: argparse.ArgumentParser) -> None:
     selector_group = parser.add_mutually_exclusive_group(required=True)
     selector_group.add_argument("--cell-index", type=int, help="Flat cell index from notebook inspect output.")
     selector_group.add_argument(
@@ -189,7 +191,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ask Notebook Assistant about a selected cell and optionally insert Wolfram Language code below it.",
     )
     assistant_ask.add_argument("--file", type=Path, required=True)
-    _add_assistant_selector_arguments(assistant_ask)
+    _add_cell_selector_arguments(assistant_ask)
     assistant_ask.add_argument("--question", required=True)
     assistant_ask.add_argument(
         "--insert-wolfram-code-below",
@@ -226,7 +228,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Open inline Notebook Assistant for a selected cell and focus its input field.",
     )
     assistant_prepare.add_argument("--file", type=Path, required=True)
-    _add_assistant_selector_arguments(assistant_prepare)
+    _add_cell_selector_arguments(assistant_prepare)
     assistant_prepare.add_argument("--require-success", action="store_true")
 
     assistant_capture = assistant_subparsers.add_parser(
@@ -234,7 +236,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Read the current inline Notebook Assistant state and optionally insert Wolfram code below the source cell.",
     )
     assistant_capture.add_argument("--file", type=Path, required=True)
-    _add_assistant_selector_arguments(assistant_capture)
+    _add_cell_selector_arguments(assistant_capture)
     assistant_capture.add_argument(
         "--insert-wolfram-code-below",
         action="store_true",
@@ -247,6 +249,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     assistant_capture.add_argument("--save", action="store_true", help="Save the notebook after insertion.")
     assistant_capture.add_argument("--require-success", action="store_true")
+
+    inline_box_parser = subparsers.add_parser(
+        "inline-box",
+        help="Compose or extract Wolfram string literals that contain embedded inline box escapes.",
+    )
+    inline_box_subparsers = inline_box_parser.add_subparsers(dest="inline_box_command", required=True)
+
+    inline_box_compose = inline_box_subparsers.add_parser(
+        "compose",
+        help="Build a Wolfram string literal from prefix/suffix text plus box expressions.",
+    )
+    inline_box_compose.add_argument("--prefix", default="")
+    inline_box_compose.add_argument("--box-expr", action="append", default=[])
+    inline_box_compose.add_argument("--suffix", default="")
+
+    inline_box_from_cell = inline_box_subparsers.add_parser(
+        "from-cell",
+        help="Extract inline box objects from a notebook cell and compose a ready-to-use string literal.",
+    )
+    inline_box_from_cell.add_argument("--file", type=Path, required=True)
+    _add_cell_selector_arguments(inline_box_from_cell)
+    inline_box_from_cell.add_argument("--prefix", default="")
+    inline_box_from_cell.add_argument("--suffix", default="")
+    inline_box_from_cell.add_argument("--object-index", type=int, default=0)
+    inline_box_from_cell.add_argument("--all-objects", action="store_true")
+    inline_box_from_cell.add_argument("--require-success", action="store_true")
 
     return parser
 
@@ -348,6 +376,35 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 }
             )
+            return 0
+
+    if args.command == "inline-box":
+        if args.inline_box_command == "compose":
+            _json_dump(
+                compose_inline_box_payload(
+                    box_expressions=[str(item) for item in args.box_expr],
+                    prefix=args.prefix,
+                    suffix=args.suffix,
+                )
+            )
+            return 0
+
+        if args.inline_box_command == "from-cell":
+            payload = extract_inline_boxes_from_notebook_cell(
+                notebook_path=args.file,
+                cell_index=args.cell_index,
+                cell_path=args.cell_path,
+                expression_uuid=args.expression_uuid,
+                cell_id=args.cell_id,
+                cell_tag=args.cell_tag,
+                prefix=args.prefix,
+                suffix=args.suffix,
+                object_index=args.object_index,
+                all_objects=args.all_objects,
+            )
+            _json_dump(payload)
+            if args.require_success and payload.get("success") is False:
+                return 1
             return 0
 
     if args.command == "docs":

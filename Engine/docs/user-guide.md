@@ -4,6 +4,7 @@
 - Audience: Users running Tungsten locally, maintainers validating it, and script authors building automation on top of it
 - Scope: Building, running, and troubleshooting Tungsten's Python CLI and PowerShell surfaces
 - Created (UTC): 2026-04-23T15:36:45Z
+- Updated (UTC): 2026-04-23T17:10:29Z
 - Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 - Related code:
   - `src/Tungsten/src/tungsten/cli.py`
@@ -14,6 +15,7 @@
 - Related docs:
   - [Project README](../README.md)
   - [Usage Reference](./usage-reference.md)
+  - [Inline Box Strings](./inline-box-strings.md)
   - [Notebook Assistant](./notebook-assistant.md)
   - [Expression Parser](./expression-parser.md)
   - [Troubleshooting](./troubleshooting.md)
@@ -26,6 +28,7 @@ documents. It focuses on real workflows:
 - verifying that Tungsten can see the local Wolfram installation;
 - evaluating Wolfram Language code through the real kernel;
 - working with notebooks without needing the kernel;
+- constructing string literals that embed notebook objects through inline box escapes;
 - searching and reading the local documentation corpus;
 - driving selected FrontEnd actions;
 - automating the built-in Notebook Assistant;
@@ -38,6 +41,8 @@ Tungsten is most useful when you want one of these behaviors:
 
 - run small or medium Wolfram Language snippets from automation and get structured results back;
 - inspect or patch `*.nb` files in bulk;
+- build Wolfram string literals that embed images or other notebook objects through inline box
+  escapes;
 - build PowerShell workflows that need Wolfram Language without living entirely inside Mathematica;
 - search the exact locally installed documentation set instead of relying on web search;
 - mix kernel-backed and kernel-free workflows in the same toolchain;
@@ -203,7 +208,56 @@ $spec = Join-Path $env:TEMP "tungsten-patch.json"
 python -m tungsten notebook patch --file $env:TEMP\tungsten-demo.nb --spec $spec
 ```
 
-### Tutorial 4: Search and read the local documentation corpus
+### Tutorial 4: Build inline-box string literals from notebook cells
+
+Create a small notebook containing a box-bearing output cell:
+
+```powershell
+$inlineBoxNotebook = Join-Path $env:TEMP "tungsten-inline-box-demo.nb"
+@'
+Notebook[{
+Cell[BoxData[GraphicsBox[{CircleBox[]}]], "Output", ExpressionUUID->"uuid-inline-box"]
+}]
+'@ | Set-Content -Path $inlineBoxNotebook -Encoding UTF8
+```
+
+Extract the object from the selected cell and compose a ready-to-use string literal:
+
+```powershell
+python -m tungsten inline-box from-cell `
+    --file $inlineBoxNotebook `
+    --expression-uuid uuid-inline-box `
+    --prefix "icon: "
+```
+
+PowerShell equivalent:
+
+```powershell
+Get-TungstenNotebookCellInlineBoxes `
+    -Path $inlineBoxNotebook `
+    -ExpressionUuid "uuid-inline-box" `
+    -Prefix "icon: "
+```
+
+What to look for:
+
+- `selected_boxes[0].box_expression` contains the extracted box form such as
+  `GraphicsBox[{CircleBox[]}]`.
+- `string_value` contains the decoded Wolfram string content with `\!\(\*...\)` embedded.
+- `string_literal` contains the canonical Wolfram string literal text with doubled backslashes as it
+  would appear in `InputForm`.
+
+If you already have box expressions and only need composition, use:
+
+```powershell
+New-TungstenInlineBoxString `
+    -Prefix "icon: " `
+    -BoxExpression "GraphicsBox[{CircleBox[]}]"
+```
+
+For fuller details, see [Inline Box Strings](./inline-box-strings.md).
+
+### Tutorial 5: Search and read the local documentation corpus
 
 Search:
 
@@ -238,7 +292,7 @@ Key point:
 - Tungsten indexes the locally installed documentation notebooks, not a remote web corpus. Search
   results stay aligned with the exact installed machine state.
 
-### Tutorial 5: Drive selected FrontEnd actions
+### Tutorial 6: Drive selected FrontEnd actions
 
 Probe FrontEnd availability:
 
@@ -271,7 +325,7 @@ Open-TungstenNotebook -Path $nb
 Invoke-TungstenFrontEnd -Code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> True]]"
 ```
 
-### Tutorial 6: Ask Notebook Assistant about a specific cell and insert generated code below it
+### Tutorial 7: Ask Notebook Assistant about a specific cell and insert generated code below it
 
 Inspect the notebook and pick a target cell:
 
@@ -303,7 +357,7 @@ This is the recommended path. The visible inline UI backend exists, but it is no
 
 For full assistant details, see [Notebook Assistant](./notebook-assistant.md).
 
-### Tutorial 7: Parse and structurally evaluate Wolfram expressions without the kernel
+### Tutorial 8: Parse and structurally evaluate Wolfram expressions without the kernel
 
 Parse:
 

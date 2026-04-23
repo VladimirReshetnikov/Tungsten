@@ -1,7 +1,7 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-23T15:42:23Z
+Updated (UTC): 2026-04-23T17:10:29Z
 Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 
 ## Summary
@@ -74,7 +74,9 @@ The current Tungsten package is composed of the following modules.
 | `discovery.py` | Discover the local installation, documentation roots, bundled client tree, and default index location. | OS filesystem and environment variables |
 | `licensing.py` | Inspect `mathpass` and materialize a temporary deduplicated password file. | Filesystem |
 | `kernel.py` | Execute Wolfram Language through `wolfram.exe` and return structured results. | `discovery.py`, `licensing.py`, subprocess |
+| `wolfram_strings.py` | Own shared Wolfram string literal escaping, parsing, and inline-box segmentation. | Local text parsing only |
 | `notebook.py` | Parse, inspect, render, and patch notebook files without a kernel. | Local text parsing only |
+| `inline_boxes.py` | Extract box-bearing objects from saved notebook cells and compose inline-box string literals. | `notebook.py`, `wolfram_strings.py` |
 | `expression.py` | Parse Wolfram expressions and inertly evaluate a small structural built-in subset. | Local tokenizer/parser only |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
@@ -99,9 +101,9 @@ The current Tungsten package is composed of the following modules.
          ▼                    ▼                     ▼
      kernel.py           notebook.py          expression.py
          │                    │
-         │                    ├──────────────┐
-         ▼                    ▼              │
-    frontend.py         docs_index.py        │
+         │                    ├───────┬──────┐
+         ▼                    ▼       ▼      │
+    frontend.py         docs_index.py inline_boxes.py
          │                    │              │
          └──────────────┬─────┘              │
                         ▼                    │
@@ -260,6 +262,13 @@ This is the main kernel-free notebook path.
 The flattening step is especially important architecturally because it creates the stable selection
 surface used by assistant automation and by many scripts.
 
+That same structural layer now also supports kernel-free inline-box extraction. Given a saved
+notebook file and a selected cell, `inline_boxes.py` can inspect the stored cell expression and
+extract:
+
+- top-level `BoxData[...]` contents;
+- inline box escapes that are already embedded inside string literals.
+
 ### Workflow 4: Documentation indexing and search
 
 This flow is local, offline, and installation-aligned.
@@ -336,7 +345,23 @@ Experimental inline flow:
 Architecturally, the important choice is that the default path is not the visible inline UI. Tungsten
 prefers a hidden chat-notebook flow because it is much more deterministic for scripts and agents.
 
-### Workflow 7: Kernel-free expression parsing
+### Workflow 7: Kernel-free inline-box strings
+
+The inline-box subsystem sits between notebook parsing and general expression parsing.
+
+1. `wolfram_strings.py` preserves unknown backslash escapes so inline box syntax such as
+   `\!\(\*GraphicsBox[...]\)` survives round-tripping.
+2. `notebook.py` can structurally inspect a saved notebook cell and extract box-bearing objects from
+   `BoxData[...]` or from strings that already contain inline box escapes.
+3. `inline_boxes.py` turns those extracted box expressions into:
+   - decoded string values;
+   - canonical Wolfram string literals;
+   - structured metadata for each embedded object.
+
+This flow is intentionally kernel-free as long as the source notebook state is already saved to
+disk.
+
+### Workflow 8: Kernel-free expression parsing
 
 The expression subsystem is separate from notebooks because the problem shape is different.
 

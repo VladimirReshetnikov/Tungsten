@@ -4,11 +4,12 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T15:36:45Z
+- Updated (UTC): 2026-04-23T17:10:29Z
 - Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
+  - [Inline Box Strings](./inline-box-strings.md)
   - [Troubleshooting](./troubleshooting.md)
   - [Notebook Assistant](./notebook-assistant.md)
   - [Expression Parser](./expression-parser.md)
@@ -202,6 +203,86 @@ Example patch specification:
   ]
 }
 ```
+
+### `inline-box`
+
+Purpose:
+
+- compose Wolfram string literals that contain embedded inline box escapes;
+- extract box-bearing objects from saved notebook cells and immediately turn them into ready-to-use
+  string literals.
+
+#### Shared selector options
+
+These selector forms are mutually exclusive and are reused across cell-targeted inline-box
+commands:
+
+- `--cell-index <n>`
+- `--cell-path <json-or-comma-separated-int-list>`
+- `--expression-uuid <uuid>`
+- `--cell-id <int>`
+- `--cell-tag <tag>`
+
+#### `inline-box compose`
+
+Options:
+
+- `--prefix <text>`: optional
+- `--box-expr <text>`: repeatable
+- `--suffix <text>`: optional
+
+Example:
+
+```powershell
+python -m tungsten inline-box compose `
+    --prefix "icon: " `
+    --box-expr "GraphicsBox[{CircleBox[]}]"
+```
+
+Important output fields:
+
+- `boxes`
+- `string_value`
+- `string_literal`
+- `string_segments`
+
+#### `inline-box from-cell`
+
+Options:
+
+- `--file <path>`: required
+- one selector option: required
+- `--prefix <text>`: optional
+- `--suffix <text>`: optional
+- `--object-index <n>`: optional; defaults to `0`
+- `--all-objects`: optional
+- `--require-success`
+
+Examples:
+
+```powershell
+python -m tungsten inline-box from-cell `
+    --file C:\Temp\demo.nb `
+    --expression-uuid uuid-inline-box `
+    --prefix "icon: "
+
+python -m tungsten inline-box from-cell `
+    --file C:\Temp\demo.nb `
+    --cell-index 0 `
+    --all-objects `
+    --prefix "objects: "
+```
+
+Important output fields:
+
+- `source_cell`
+- `available_box_count`
+- `available_boxes`
+- `selected_box_count`
+- `selected_boxes`
+- `string_value`
+- `string_literal`
+- `string_segments`
 
 ### `expr`
 
@@ -464,6 +545,13 @@ Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
 ```
 
+### Inline-box strings
+
+```powershell
+New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{CircleBox[]}]"
+Get-TungstenNotebookCellInlineBoxes -Path C:\Temp\demo.nb -ExpressionUuid "uuid-inline-box" -Prefix "icon: "
+```
+
 ### Documentation and FrontEnd
 
 ```powershell
@@ -509,6 +597,7 @@ The smoke now covers:
 
 - environment probing;
 - kernel execution;
+- inline-box string composition and notebook-cell extraction;
 - expression parsing/evaluation;
 - documentation search;
 - notebook creation/inspection;

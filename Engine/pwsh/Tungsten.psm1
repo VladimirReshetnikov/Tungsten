@@ -304,6 +304,91 @@ function Invoke-TungstenExpression {
     Invoke-TungstenCliJson -Arguments $args
 }
 
+function New-TungstenInlineBoxString {
+    [CmdletBinding()]
+    param(
+        [string] $Prefix = "",
+
+        [string[]] $BoxExpression = @(),
+
+        [string] $Suffix = ""
+    )
+
+    $args = @("inline-box", "compose")
+    if ($Prefix -ne "") {
+        $args += @("--prefix", $Prefix)
+    }
+    foreach ($expression in $BoxExpression) {
+        $args += @("--box-expr", $expression)
+    }
+    if ($Suffix -ne "") {
+        $args += @("--suffix", $Suffix)
+    }
+
+    Invoke-TungstenCliJson -Arguments $args
+}
+
+function Get-TungstenNotebookCellInlineBoxes {
+    [CmdletBinding(DefaultParameterSetName = "CellIndex")]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory, ParameterSetName = "CellIndex")]
+        [int] $CellIndex,
+
+        [Parameter(Mandatory, ParameterSetName = "CellPath")]
+        [int[]] $CellPath,
+
+        [Parameter(Mandatory, ParameterSetName = "ExpressionUuid")]
+        [string] $ExpressionUuid,
+
+        [Parameter(Mandatory, ParameterSetName = "CellId")]
+        [int] $CellId,
+
+        [Parameter(Mandatory, ParameterSetName = "CellTag")]
+        [string] $CellTag,
+
+        [string] $Prefix = "",
+
+        [string] $Suffix = "",
+
+        [ValidateRange(0, 2147483647)]
+        [int] $ObjectIndex = 0,
+
+        [switch] $AllObjects,
+
+        [switch] $RequireSuccess
+    )
+
+    $selectorArgs = Get-TungstenNotebookAssistantSelectorArguments `
+        -ParameterSetName $PSCmdlet.ParameterSetName `
+        -CellIndex $CellIndex `
+        -CellPath $CellPath `
+        -ExpressionUuid $ExpressionUuid `
+        -CellId $CellId `
+        -CellTag $CellTag
+
+    $args = @("inline-box", "from-cell", "--file", $Path) + $selectorArgs
+    if ($Prefix -ne "") {
+        $args += @("--prefix", $Prefix)
+    }
+    if ($Suffix -ne "") {
+        $args += @("--suffix", $Suffix)
+    }
+    if ($AllObjects) {
+        $args += "--all-objects"
+    }
+    else {
+        $args += @("--object-index", $ObjectIndex.ToString())
+    }
+    if ($RequireSuccess) {
+        $args += "--require-success"
+    }
+
+    Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
+}
+
 function Get-TungstenNotebook {
     [CmdletBinding()]
     param(
@@ -830,10 +915,12 @@ Export-ModuleMember -Function @(
     "Get-TungstenDocumentationPage",
     "Get-TungstenEnvironment",
     "Get-TungstenNotebook",
+    "Get-TungstenNotebookCellInlineBoxes",
     "Invoke-TungstenFrontEnd",
     "Invoke-TungstenKernel",
     "Invoke-TungstenNotebookAssistant",
     "Invoke-TungstenExpression",
+    "New-TungstenInlineBoxString",
     "New-TungstenNotebook",
     "Open-TungstenDocumentation",
     "Open-TungstenNotebook",

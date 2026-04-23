@@ -4,6 +4,7 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
+- Updated (UTC): 2026-04-23T17:10:29Z
 - Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 
 ## What this docs tree is for
@@ -23,7 +24,8 @@ The docs are split so readers can choose the right depth:
 - the user guide is workflow-oriented;
 - the usage reference is command-oriented;
 - the architecture and implementation documents are maintainer-oriented;
-- focused guides cover specific subsystems such as Notebook Assistant and the expression parser.
+- focused guides cover specific subsystems such as Notebook Assistant, inline-box strings, and the
+  expression parser.
 
 ## Recommended reading order
 
@@ -38,7 +40,9 @@ The docs are split so readers can choose the right depth:
 1. [user-guide.md](./user-guide.md)
 2. [usage-reference.md](./usage-reference.md)
 3. [troubleshooting.md](./troubleshooting.md)
-4. [notebook-assistant.md](./notebook-assistant.md) if your workflow touches the built-in assistant
+4. [inline-box-strings.md](./inline-box-strings.md) if your workflow touches string literals with
+   embedded notebook objects
+5. [notebook-assistant.md](./notebook-assistant.md) if your workflow touches the built-in assistant
 
 ### If you want to extend or maintain Tungsten itself
 
@@ -46,8 +50,9 @@ The docs are split so readers can choose the right depth:
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
 4. [expression-parser.md](./expression-parser.md)
-5. [notebook-assistant.md](./notebook-assistant.md)
-6. [troubleshooting.md](./troubleshooting.md)
+5. [inline-box-strings.md](./inline-box-strings.md)
+6. [notebook-assistant.md](./notebook-assistant.md)
+7. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -58,6 +63,7 @@ The docs are split so readers can choose the right depth:
 | [usage-reference.md](usage-reference.md) | Exhaustive command reference for the CLI and PowerShell wrapper surface. |
 | [architecture.md](architecture.md) | Current architecture reference: layer ownership, execution model, and subsystem boundaries. |
 | [implementation-details.md](implementation-details.md) | Environment-specific findings and the reasoning behind important implementation choices. |
+| [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
@@ -73,6 +79,8 @@ The docs are split so readers can choose the right depth:
 ### Notebook-centric workflows
 
 - Read [user-guide.md](./user-guide.md) sections on notebook creation, inspection, and patching.
+- Read [inline-box-strings.md](./inline-box-strings.md) when you need to lift objects out of
+  notebook cells and embed them into string literals.
 - Use [notebook-assistant.md](./notebook-assistant.md) for assistant-specific flows.
 - Use [usage-reference.md](./usage-reference.md) for selector syntax and command options.
 

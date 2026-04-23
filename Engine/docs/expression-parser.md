@@ -1,7 +1,7 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-23T15:45:22Z
+Updated (UTC): 2026-04-23T17:10:29Z
 Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 
 ## Summary
@@ -13,6 +13,8 @@ Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 - canonical `InputForm` and `FullForm` rendering;
 - a small inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
   `Extract`, and `Level`.
+- preservation of Wolfram string literals that contain embedded inline box escapes such as
+  `\!\(\*GraphicsBox[...]\)`.
 
 The important constraint is deliberate: this is not a replacement for the Wolfram kernel. Unknown
 symbols stay inert, and Tungsten only evaluates the specific built-ins it implements itself.
@@ -50,6 +52,7 @@ The parser currently handles:
 - part syntax `expr[[...]]`;
 - span syntax `a ;; b ;; c`;
 - nested Wolfram comments `(* ... *)`.
+- string literals that contain inline-box escape sequences.
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
 particular, it is intentionally conservative around advanced pattern syntax, pure-function

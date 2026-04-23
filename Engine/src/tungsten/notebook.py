@@ -6,42 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-
-def wl_string(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
-    escaped = escaped.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
-    return f"\"{escaped}\""
-
-
-def _unescape_string_literal(value: str) -> str:
-    if len(value) >= 2 and value[0] == "\"" and value[-1] == "\"":
-        value = value[1:-1]
-
-    replacements = {
-        "\\r": "\r",
-        "\\n": "\n",
-        "\\t": "\t",
-        "\\\\": "\\",
-        "\\\"": "\"",
-    }
-
-    result: list[str] = []
-    index = 0
-    while index < len(value):
-        if value[index] == "\\" and index + 1 < len(value):
-            fragment = value[index : index + 2]
-            result.append(replacements.get(fragment, value[index + 1]))
-            index += 2
-            continue
-
-        result.append(value[index])
-        index += 1
-
-    return "".join(result)
-
-
-def parse_wl_string_literal(value: str) -> str:
-    return _unescape_string_literal(value)
+from .wolfram_strings import display_text as display_wl_string
+from .wolfram_strings import inline_box_segments
+from .wolfram_strings import parse_wl_string_literal
+from .wolfram_strings import wl_string
 
 
 def extract_string_literals(text: str) -> list[str]:
@@ -55,7 +23,7 @@ def extract_string_literals(text: str) -> list[str]:
         if text[index] == "\"":
             start = index
             index = _skip_string(text, index)
-            literals.append(_unescape_string_literal(text[start:index]))
+            literals.append(parse_wl_string_literal(text[start:index]))
             continue
 
         index += 1
@@ -195,6 +163,60 @@ def parse_list(expr: str) -> list[str]:
     return split_top_level(expr[1:-1])
 
 
+def extract_box_expressions(expr: str) -> list[str]:
+    collected: list[str] = []
+    _extract_box_expressions_into(expr, collected)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in collected:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _extract_box_expressions_into(expr: str, collected: list[str]) -> None:
+    text = expr.strip()
+    if not text:
+        return
+
+    if text.startswith("\"") and text.endswith("\""):
+        value = parse_wl_string_literal(text)
+        for segment in inline_box_segments(value):
+            collected.append(segment.box_expression)
+        return
+
+    head, args = parse_call(text)
+    if head == "BoxData" and args:
+        collected.append(args[0].strip())
+        return
+
+    if head and head.endswith("Box") and head != "BoxData":
+        collected.append(text)
+        return
+
+    if head in {"TextData", "Row", "List"} and args:
+        for arg in args:
+            if arg.startswith("{") and arg.endswith("}"):
+                for item in parse_list(arg):
+                    _extract_box_expressions_into(item, collected)
+            else:
+                _extract_box_expressions_into(arg, collected)
+        return
+
+    if head == "Cell" and args:
+        _extract_box_expressions_into(args[0], collected)
+        return
+
+    if text.startswith("{") and text.endswith("}"):
+        for item in parse_list(text):
+            _extract_box_expressions_into(item, collected)
+        return
+
+
 def rule_value(options: Iterable[str], name: str) -> str | None:
     prefix = f"{name}->"
     for option in options:
@@ -235,7 +257,8 @@ class NotebookCell:
         return "cell"
 
     def plain_text(self) -> str:
-        return collapse_text(" ".join(extract_string_literals(self.content_expr)))
+        display_fragments = [display_wl_string(value) for value in extract_string_literals(self.content_expr)]
+        return collapse_text(" ".join(display_fragments))
 
     @property
     def cell_id(self) -> int | None:
@@ -352,7 +375,7 @@ def _parse_cell(expr: str) -> NotebookCell | NotebookGroup:
     content_expr = args[0] if args else wl_string("")
     remaining = args[1:] if len(args) > 1 else []
     if remaining and "->" not in remaining[0]:
-        style = _unescape_string_literal(remaining[0])
+        style = parse_wl_string_literal(remaining[0])
         options = remaining[1:]
     else:
         options = remaining
@@ -404,7 +427,7 @@ class NotebookDocument:
         value = rule_value(self.options, "WindowTitle")
         if value is None:
             return self.path.stem if self.path else None
-        return _unescape_string_literal(value)
+        return parse_wl_string_literal(value)
 
     def to_dict(self) -> dict[str, object]:
         flattened = self.flattened_cells()
@@ -458,6 +481,28 @@ class NotebookDocument:
             if row["path"] == target:
                 return row
         raise KeyError(f"Notebook cell path {target!r} was not found.")
+
+    def item_at_path(self, path: list[int]) -> NotebookItem:
+        if not path:
+            raise KeyError("Notebook item lookup requires a non-empty path.")
+
+        item: NotebookItem | None = None
+        container = self.items
+        for depth, index in enumerate(path):
+            if index < 0 or index >= len(container):
+                raise KeyError(f"Notebook item path {path!r} was not found.")
+            item = container[index]
+            if depth < len(path) - 1:
+                if not isinstance(item, NotebookGroup):
+                    raise KeyError(f"Notebook item path {path!r} does not resolve through a group.")
+                container = item.children
+
+        assert item is not None
+        return item
+
+    def item_at_flat_index(self, index: int) -> NotebookItem:
+        row = self.cell_at_flat_index(index)
+        return self.item_at_path([int(value) for value in row["path"]])
 
     def render(self) -> str:
         rendered_items = ",\n".join(item.render() for item in self.items)

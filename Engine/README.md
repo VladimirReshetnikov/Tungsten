@@ -4,7 +4,7 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T15:36:45Z
+- Updated (UTC): 2026-04-23T17:10:29Z
 - Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 - Related code:
   - `src/Tungsten/src/tungsten/`
@@ -16,6 +16,7 @@
   - [User Guide](./docs/user-guide.md)
   - [Usage Reference](./docs/usage-reference.md)
   - [Architecture](./docs/architecture.md)
+  - [Inline Box Strings](./docs/inline-box-strings.md)
   - [Troubleshooting](./docs/troubleshooting.md)
 
 ## Summary
@@ -65,19 +66,22 @@ Tungsten is intentionally not trying to do several things:
 
 ## Current feature map
 
-The current workspace is built around six complementary capabilities:
+The current workspace is built around seven complementary capabilities:
 
 1. A kernel runner that executes Wolfram Language code through `wolfram.exe` and returns structured
    JSON instead of terminal-only output.
 2. A notebook parser/editor that can inspect and patch `*.nb` files without requiring a live
    kernel or FrontEnd.
-3. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a box-free
+3. A kernel-free inline-box string subsystem that can preserve embedded `\!\(\*...\)` escapes,
+   extract box-bearing objects from saved notebook cells, and compose ready-to-use Wolfram string
+   literals for images and other notebook objects.
+4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a box-free
    StandardForm subset, then evaluates a small inert built-in set such as `Length`, `Depth`,
    `Part`, `Extract`, and `Level`.
-4. An offline documentation index over the locally installed documentation notebooks.
-5. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
+5. An offline documentation index over the locally installed documentation notebooks.
+6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
-6. A Notebook Assistant controller that can ask the built-in assistant about a selected source cell
+7. A Notebook Assistant controller that can ask the built-in assistant about a selected source cell
    and optionally insert Wolfram Language code below that cell.
 
 ## Current status
@@ -90,6 +94,8 @@ The current workspace is built around six complementary capabilities:
 - Structured kernel evaluation with timing, messages, printed output capture, and explicit success
   metadata.
 - Structural notebook inspection, notebook creation, and JSON patch application.
+- Kernel-free inline-box string composition plus extraction of box-bearing objects from saved
+  notebook cells.
 - Offline documentation indexing and search over the installed `*.nb` documentation corpus.
 - FrontEnd probing, notebook open, documentation open, token execution, and arbitrary FE-targeted
   code execution.
@@ -137,6 +143,7 @@ The current workspace is built around six complementary capabilities:
         ▼                     ▼                     ▼
    kernel.py            notebook.py          expression.py
    docs_index.py        frontend.py          assistant.py
+                         inline_boxes.py     wolfram_strings.py
         │                     │                     │
         └─────────────────────┼─────────────────────┘
                               │
@@ -175,6 +182,7 @@ python -m tungsten env show --probe
 python -m tungsten kernel eval --code "2+2"
 python -m tungsten notebook create --file $env:TEMP\tungsten-demo.nb --title "Demo" --cell "Text:Hello" --cell "Input:2+2"
 python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
+python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
 python -m tungsten docs search NotebookGet
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 ```
@@ -186,6 +194,7 @@ Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
 
 Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
+New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{CircleBox[]}]"
 Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
 Find-TungstenDocumentation -Query "NotebookGet"
@@ -212,12 +221,33 @@ $result = Invoke-TungstenNotebookAssistant `
 
 See [User Guide](./docs/user-guide.md) for a fuller tutorial sequence.
 
+### Inline box strings from notebook cells
+
+```powershell
+$boxNotebook = Join-Path $env:TEMP "tungsten-inline-box-demo.nb"
+@'
+Notebook[{
+Cell[BoxData[GraphicsBox[{CircleBox[]}]], "Output", ExpressionUUID->"uuid-inline-box"]
+}]
+'@ | Set-Content -Path $boxNotebook -Encoding UTF8
+
+Get-TungstenNotebookCellInlineBoxes `
+    -Path $boxNotebook `
+    -ExpressionUuid "uuid-inline-box" `
+    -Prefix "icon: "
+```
+
+That returns both the extracted `GraphicsBox[...]` expression and a ready-to-use Wolfram string
+literal such as `"icon: \\!\\(\\*GraphicsBox[...]\\)"`.
+
 ## What Tungsten is good for
 
 Tungsten is especially useful when you want one of these behaviors:
 
 - run Wolfram Language from scripts and receive explicit machine-readable result metadata;
 - inspect or bulk-edit notebook files without launching Mathematica;
+- construct Wolfram string literals that embed images or other notebook objects through inline box
+  escapes;
 - automate documentation lookup locally and offline;
 - use the real FrontEnd when needed, but drive only a narrow, dependable subset of actions;
 - script Notebook Assistant workflows from PowerShell;
@@ -234,6 +264,8 @@ The current documentation should state these boundaries plainly:
 - FrontEnd automation works only for the actions Tungsten explicitly exposes.
 - Notebook Assistant inline UI driving is intentionally not the default path because it is less
   reliable for automation than the hidden chat-notebook backend.
+- Notebook-cell inline-box extraction currently operates against saved notebook files rather than
+  unsaved live FrontEnd state.
 
 ## Repository layout
 
@@ -244,7 +276,9 @@ The current documentation should state these boundaries plainly:
 | `src/Tungsten/src/tungsten/licensing.py` | `mathpass` inspection and deduplication helpers |
 | `src/Tungsten/src/tungsten/kernel.py` | Structured kernel execution wrapper |
 | `src/Tungsten/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
+| `src/Tungsten/src/tungsten/inline_boxes.py` | Inline-box string composition and notebook-cell object extraction |
 | `src/Tungsten/src/tungsten/expression.py` | Kernel-free Wolfram expression parser and inert evaluator |
+| `src/Tungsten/src/tungsten/wolfram_strings.py` | Shared Wolfram string literal and inline-box escape handling |
 | `src/Tungsten/src/tungsten/docs_index.py` | Offline documentation indexing/search |
 | `src/Tungsten/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
 | `src/Tungsten/src/tungsten/assistant.py` | Notebook Assistant automation |
@@ -290,6 +324,7 @@ If you are new to Tungsten, this reading order works well:
 5. [Architecture](./docs/architecture.md) for the detailed component model and execution flow.
 6. Focused guides as needed:
    - [Notebook Assistant](./docs/notebook-assistant.md)
+   - [Inline Box Strings](./docs/inline-box-strings.md)
    - [Expression Parser](./docs/expression-parser.md)
    - [Troubleshooting](./docs/troubleshooting.md)
    - [Implementation Details](./docs/implementation-details.md)
@@ -303,6 +338,9 @@ If you are new to Tungsten, this reading order works well:
   patch notebooks even when evaluation is unavailable or undesirable.
 - The expression subsystem is also kernel-free, but it is explicitly structural and inert rather
   than a general-purpose evaluator.
+- Inline-box string handling is also kernel-free for saved notebooks: Tungsten can extract
+  box-bearing objects from notebook cell expressions and compose canonical Wolfram string literals
+  without launching the kernel or FrontEnd.
 - Documentation search is based on the installed documentation notebooks themselves, not on browser
   automation or online-only search.
 - The recommended Notebook Assistant path is `assistant ask-cell` /

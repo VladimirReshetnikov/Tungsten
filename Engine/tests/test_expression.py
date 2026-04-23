@@ -29,6 +29,11 @@ class ExpressionParserTests(unittest.TestCase):
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
         self.assertEqual(expr.to_full_form(), 'f["alpha", beta]')
 
+    def test_parser_preserves_inline_box_escapes_inside_strings(self) -> None:
+        expr = parse_input_form(r'"hello \!\(\*GraphicsBox[{CircleBox[]}]\)"')
+        self.assertEqual(expr.to_input_form(), r'"hello \\!\\(\\*GraphicsBox[{CircleBox[]}]\\)"')
+        self.assertEqual(expr.to_dict()["inline_boxes"][0]["box_expression"], "GraphicsBox[{CircleBox[]}]")
+
 
 class ExpressionEvaluationTests(unittest.TestCase):
     def test_length(self) -> None:

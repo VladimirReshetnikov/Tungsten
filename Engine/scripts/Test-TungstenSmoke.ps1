@@ -69,6 +69,36 @@ try {
         throw "Expected at least 2 cells in the smoke notebook."
     }
 
+    $inlineBoxNotebook = Join-Path $env:TEMP "tungsten-inline-box-smoke.nb"
+    @'
+Notebook[{
+Cell[BoxData[GraphicsBox[{CircleBox[]}]], "Output", ExpressionUUID->"uuid-inline-box"],
+Cell["hello \!\(\*StyleBox[\"Hi\", FontWeight->Bold]\)", "Text", CellID->2001]
+}]
+'@ | Set-Content -Path $inlineBoxNotebook -Encoding UTF8
+
+    $inlineBoxPayload = Get-TungstenNotebookCellInlineBoxes `
+        -Path $inlineBoxNotebook `
+        -ExpressionUuid "uuid-inline-box" `
+        -Prefix "icon: " `
+        -RequireSuccess
+
+    if (-not $inlineBoxPayload.success) {
+        throw "Inline-box smoke failed: $($inlineBoxPayload.error_type) $($inlineBoxPayload.error)"
+    }
+
+    if ($inlineBoxPayload.selected_boxes[0].head -ne "GraphicsBox") {
+        throw "Inline-box smoke expected a GraphicsBox, got $($inlineBoxPayload.selected_boxes[0].head)."
+    }
+
+    $composedInlineBoxString = New-TungstenInlineBoxString `
+        -Prefix "icon: " `
+        -BoxExpression @($inlineBoxPayload.selected_boxes[0].box_expression)
+
+    if ($composedInlineBoxString.string_value -ne $inlineBoxPayload.string_value) {
+        throw "Inline-box compose smoke produced a different string value than inline-box extraction."
+    }
+
     if ($IncludeAssistant) {
         $assistant = Invoke-TungstenNotebookAssistant `
             -Path $tempNotebook `
