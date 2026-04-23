@@ -8,6 +8,10 @@ from pathlib import Path
 from .assistant import NotebookAssistantController
 from .discovery import discover_installation
 from .docs_index import DocumentationIndex
+from .expression import depth as expression_depth
+from .expression import evaluate as evaluate_expression
+from .expression import length as expression_length
+from .expression import parse_expression
 from .frontend import FrontEndController
 from .kernel import WolframKernelRunner
 from .notebook import NotebookDocument, apply_patch_spec, load_patch_spec, wl_string
@@ -102,6 +106,34 @@ def _build_parser() -> argparse.ArgumentParser:
     notebook_patch.add_argument("--file", type=Path, required=True)
     notebook_patch.add_argument("--spec", type=Path, required=True)
     notebook_patch.add_argument("--out", type=Path, help="Optional output file. Defaults to in-place.")
+
+    expr_parser = subparsers.add_parser("expr", help="Parse and structurally evaluate Wolfram expressions.")
+    expr_subparsers = expr_parser.add_subparsers(dest="expr_command", required=True)
+
+    expr_parse = expr_subparsers.add_parser("parse", help="Parse a Wolfram expression without a kernel.")
+    expr_parse_group = expr_parse.add_mutually_exclusive_group(required=True)
+    expr_parse_group.add_argument("--code", help="Inline Wolfram expression text.")
+    expr_parse_group.add_argument("--file", type=Path, help="A file containing a Wolfram expression.")
+    expr_parse.add_argument(
+        "--form",
+        choices=["input", "fullform", "standard"],
+        default="input",
+        help="Syntax form to parse.",
+    )
+
+    expr_eval = expr_subparsers.add_parser(
+        "evaluate",
+        help="Structurally evaluate built-ins such as Length, Depth, Part, Extract, and Level.",
+    )
+    expr_eval_group = expr_eval.add_mutually_exclusive_group(required=True)
+    expr_eval_group.add_argument("--code", help="Inline Wolfram expression text.")
+    expr_eval_group.add_argument("--file", type=Path, help="A file containing a Wolfram expression.")
+    expr_eval.add_argument(
+        "--form",
+        choices=["input", "fullform", "standard"],
+        default="input",
+        help="Syntax form to parse before evaluation.",
+    )
 
     docs_parser = subparsers.add_parser("docs", help="Search and read the local Wolfram documentation corpus.")
     docs_subparsers = docs_parser.add_subparsers(dest="docs_command", required=True)
@@ -277,6 +309,45 @@ def main(argv: list[str] | None = None) -> int:
             destination = args.out or args.file
             document.save(destination)
             _json_dump(document.to_dict())
+            return 0
+
+    if args.command == "expr":
+        source_text = args.code if args.code is not None else args.file.read_text(encoding="utf-8")
+        parsed = parse_expression(source_text, form=args.form)
+
+        if args.expr_command == "parse":
+            _json_dump(
+                {
+                    "command": "parse",
+                    "form": args.form,
+                    "source": source_text,
+                    "input_form": parsed.to_input_form(),
+                    "full_form": parsed.to_full_form(),
+                    "depth": expression_depth(parsed),
+                    "length": expression_length(parsed),
+                    "tree": parsed.to_dict(),
+                }
+            )
+            return 0
+
+        if args.expr_command == "evaluate":
+            result = evaluate_expression(parsed)
+            _json_dump(
+                {
+                    "command": "evaluate",
+                    "form": args.form,
+                    "source": source_text,
+                    "parsed_input_form": parsed.to_input_form(),
+                    "parsed_full_form": parsed.to_full_form(),
+                    "result": {
+                        "input_form": result.to_input_form(),
+                        "full_form": result.to_full_form(),
+                        "depth": expression_depth(result),
+                        "length": expression_length(result),
+                        "tree": result.to_dict(),
+                    },
+                }
+            )
             return 0
 
     if args.command == "docs":

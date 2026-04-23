@@ -166,6 +166,43 @@ class CliTests(unittest.TestCase):
         self.assertTrue(payload["assistant_success"])
         controller.capture_inline.assert_called_once()
 
+    def test_expr_parse_command(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "expr",
+                    "parse",
+                    "--code",
+                    "1 + 2 x^3",
+                    "--form",
+                    "input",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["full_form"], "Plus[1, Times[2, Power[x, 3]]]")
+        self.assertEqual(payload["depth"], 4)
+
+    def test_expr_evaluate_command(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "expr",
+                    "evaluate",
+                    "--code",
+                    "Level[f[a, g[b]], -1]",
+                    "--form",
+                    "input",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["result"]["full_form"], "List[a, b]")
+
 
 if __name__ == "__main__":
     unittest.main()

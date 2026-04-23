@@ -1,8 +1,8 @@
 # Tungsten Usage Reference
 
 Created (UTC): 2026-04-23T02:16:55Z  
-Updated (UTC): 2026-04-23T04:36:53Z  
-Repository HEAD: 514cecf641d6ba728984110fa239a3f7da3c516b
+Updated (UTC): 2026-04-23T14:55:38Z  
+Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
 
 ## Python CLI
 
@@ -36,6 +36,18 @@ python -m tungsten notebook patch --file C:\Temp\new.nb --spec C:\Temp\patch.jso
 ```
 
 `notebook inspect` returns flat cell metadata including `index`, `path`, `style`, `preview`, `expression_uuid`, `cell_id`, and `cell_tags`. Those values are the selectors used by Notebook Assistant automation.
+
+### Expression parsing and inert evaluation
+
+```powershell
+python -m tungsten expr parse --code "1 + 2 x^3"
+python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
+python -m tungsten expr evaluate --code "Length[{a, b, c}]"
+python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
+python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
+```
+
+The expression subsystem is fully local and does not require a running kernel. It parses FullForm, InputForm, and a box-free StandardForm subset, then optionally evaluates the small set of structural built-ins implemented in Tungsten itself.
 
 Example patch specification:
 
@@ -122,6 +134,8 @@ Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
 ```powershell
 Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
+Convert-TungstenExpression -Code "1 + 2 x^3"
+Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
 Get-TungstenNotebook -Path C:\Temp\new.nb
 New-TungstenNotebook -Path C:\Temp\demo.nb -Title "Demo" -Cell "Text:Hello" -Cell "Input:2+2"
 Set-TungstenNotebook -Path C:\Temp\demo.nb -Spec C:\Temp\patch.json
@@ -149,6 +163,16 @@ $result = Invoke-TungstenNotebookAssistant `
 ```
 
 By default the PowerShell cmdlet uses backend `NotebookChatCell`, which is the stable hidden-chat-notebook implementation. `-Backend DesktopInline` remains available for visible desktop automation and WinDesk-based testing.
+
+### Expression parsing from PowerShell
+
+```powershell
+$parsed = Convert-TungstenExpression -Code "1 + 2 x^3"
+$parsed.full_form
+
+$evaluated = Invoke-TungstenExpression -Code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+$evaluated.result.full_form
+```
 
 ## Smoke test entrypoint
 

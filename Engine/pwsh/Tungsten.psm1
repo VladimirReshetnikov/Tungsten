@@ -256,6 +256,54 @@ function Invoke-TungstenKernel {
     Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
 }
 
+function Convert-TungstenExpression {
+    [CmdletBinding(DefaultParameterSetName = "Code")]
+    param(
+        [Parameter(Mandatory, ParameterSetName = "Code")]
+        [string] $Code,
+
+        [Parameter(Mandatory, ParameterSetName = "File")]
+        [string] $File,
+
+        [ValidateSet("input", "fullform", "standard")]
+        [string] $Form = "input"
+    )
+
+    $args = @("expr", "parse", "--form", $Form)
+    if ($PSCmdlet.ParameterSetName -eq "Code") {
+        $args += @("--code", $Code)
+    }
+    else {
+        $args += @("--file", $File)
+    }
+
+    Invoke-TungstenCliJson -Arguments $args
+}
+
+function Invoke-TungstenExpression {
+    [CmdletBinding(DefaultParameterSetName = "Code")]
+    param(
+        [Parameter(Mandatory, ParameterSetName = "Code")]
+        [string] $Code,
+
+        [Parameter(Mandatory, ParameterSetName = "File")]
+        [string] $File,
+
+        [ValidateSet("input", "fullform", "standard")]
+        [string] $Form = "input"
+    )
+
+    $args = @("expr", "evaluate", "--form", $Form)
+    if ($PSCmdlet.ParameterSetName -eq "Code") {
+        $args += @("--code", $Code)
+    }
+    else {
+        $args += @("--file", $File)
+    }
+
+    Invoke-TungstenCliJson -Arguments $args
+}
+
 function Get-TungstenNotebook {
     [CmdletBinding()]
     param(
@@ -777,6 +825,7 @@ function Invoke-TungstenNotebookAssistant {
 }
 
 Export-ModuleMember -Function @(
+    "Convert-TungstenExpression",
     "Find-TungstenDocumentation",
     "Get-TungstenDocumentationPage",
     "Get-TungstenEnvironment",
@@ -784,6 +833,7 @@ Export-ModuleMember -Function @(
     "Invoke-TungstenFrontEnd",
     "Invoke-TungstenKernel",
     "Invoke-TungstenNotebookAssistant",
+    "Invoke-TungstenExpression",
     "New-TungstenNotebook",
     "Open-TungstenDocumentation",
     "Open-TungstenNotebook",

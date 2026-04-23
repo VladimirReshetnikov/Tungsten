@@ -1,8 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z  
-Updated (UTC): 2026-04-23T04:36:53Z  
-Repository HEAD: 514cecf641d6ba728984110fa239a3f7da3c516b
+Updated (UTC): 2026-04-23T14:55:38Z  
+Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
 
 ## Overview
 
@@ -13,9 +13,10 @@ Tungsten is organized as a thin set of cooperating layers:
 3. `kernel.py` runs `wolfram.exe` in a controlled, script-driven mode and returns structured JSON results.
 4. `frontend.py` builds on the kernel layer to execute `UsingFrontEnd[...]`, `NotebookOpen`, `NotebookLocate`, and `FrontEndTokenExecute`.
 5. `assistant.py` builds on the kernel and FrontEnd layers to automate the built-in Notebook Assistant against a selected source cell.
-6. `notebook.py` parses and rewrites notebook expressions directly from file text.
-7. `docs_index.py` indexes the local documentation notebook corpus into a SQLite FTS database.
-8. `pwsh/Tungsten.psm1` projects the JSON CLI into PowerShell-friendly commands.
+6. `expression.py` parses generic Wolfram expressions and structurally evaluates a small built-in subset without a kernel.
+7. `notebook.py` parses and rewrites notebook expressions directly from file text.
+8. `docs_index.py` indexes the local documentation notebook corpus into a SQLite FTS database.
+9. `pwsh/Tungsten.psm1` projects the JSON CLI into PowerShell-friendly commands.
 
 ## Execution model
 
@@ -61,6 +62,15 @@ The recommended path is deliberately two-stage:
 2. if the reply contains Wolfram Language code blocks, reopen the real source notebook, select the same source cell, and insert new `Input` cells immediately below it.
 
 That split keeps assistant generation and notebook mutation deterministic and makes the returned payload easier for Python and PowerShell callers to consume.
+
+### Expression parsing and inert evaluation
+
+`expression.py` is intentionally separate from the notebook parser. It has to solve a different problem:
+
+- notebook parsing needs structural resilience on notebook files;
+- general expression parsing needs operator precedence, implicit multiplication, `Part` syntax, spans, and canonical FullForm output.
+
+The expression subsystem therefore owns its own tokenizer and parser, then layers a small inert evaluator on top for structural built-ins such as `Length`, `Depth`, `Part`, `Extract`, and `Level`.
 
 ## Notebook model
 

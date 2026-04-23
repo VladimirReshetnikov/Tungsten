@@ -43,6 +43,16 @@ try {
         throw "Expected Tungsten evaluation result 4, got $($evaluation.result)."
     }
 
+    $parsedExpression = Convert-TungstenExpression -Code "1 + 2 x^3"
+    if ($parsedExpression.full_form -ne "Plus[1, Times[2, Power[x, 3]]]") {
+        throw "Expression parse smoke returned unexpected FullForm: $($parsedExpression.full_form)"
+    }
+
+    $evaluatedExpression = Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
+    if ($evaluatedExpression.result.full_form -ne "List[a, b]") {
+        throw "Expression evaluation smoke returned unexpected result: $($evaluatedExpression.result.full_form)"
+    }
+
     $hits = Find-TungstenDocumentation -Query "NotebookGet" -Limit 3
     if ($null -eq $hits -or $hits.Count -lt 1) {
         throw "Documentation search did not return NotebookGet."

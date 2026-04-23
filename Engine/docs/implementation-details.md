@@ -1,8 +1,8 @@
 # Tungsten Implementation Details
 
 Created (UTC): 2026-04-23T02:16:55Z  
-Updated (UTC): 2026-04-23T04:36:53Z  
-Repository HEAD: 514cecf641d6ba728984110fa239a3f7da3c516b
+Updated (UTC): 2026-04-23T14:55:38Z  
+Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
 
 ## Local machine findings that materially shaped Tungsten
 
@@ -60,6 +60,36 @@ Tungsten now defaults to a different design:
 - insert those code blocks below the original source cell in the real notebook.
 
 This is still using Mathematica's built-in assistant machinery. The change is that Tungsten routes the interaction through a text-automation-friendly surface rather than through transient visible inline UI state.
+
+### 6. Generic expression parsing needed its own subsystem
+
+The existing notebook parser was intentionally structural and notebook-specific. It was good at splitting `Notebook[...]`, `Cell[...]`, and option lists, but it was not the right foundation for a general Wolfram expression AST with operator precedence, implicit `Times`, `Part` syntax, spans, and structural operations such as `Level`.
+
+Tungsten therefore now has a separate `expression.py` subsystem with:
+
+- an explicit AST for symbols, strings, numbers, and general expressions;
+- a tokenizer that skips nested Wolfram comments and understands ambiguous tokens such as `[[` and plain `]`;
+- a Pratt-style parser for textual Wolfram syntax;
+- canonical FullForm rendering;
+- a deliberately small inert evaluator for structural built-ins.
+
+Keeping that subsystem separate from `notebook.py` preserves a clean boundary:
+
+- `notebook.py` remains a resilient structural notebook tool;
+- `expression.py` is the general-purpose Wolfram expression model.
+
+### 7. The expression evaluator is intentionally narrow
+
+The new evaluator does not try to reproduce kernel semantics wholesale. It only knows about a small set of structural built-ins:
+
+- `Length`
+- `Depth`
+- `Head`
+- `Part`
+- `Extract`
+- `Level`
+
+Everything else remains inert, including heads like `Plus`, `Times`, and `Power`. That keeps the implementation predictable and honest. For example, `1 + 2` parses to `Plus[1, 2]`, but `Length[1 + 2]` still works because `Length` is explicitly implemented.
 
 ## Why the evaluator returns strings for results
 
