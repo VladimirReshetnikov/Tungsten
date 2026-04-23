@@ -1,7 +1,7 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-23T18:33:04Z
+Updated (UTC): 2026-04-23T22:15:00Z
 Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
 
 ## Summary
@@ -12,8 +12,8 @@ Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
 - parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
-  `Extract`, `Level`, `Take`, `Drop`, `Flatten`, `ReplacePart`, and related exact-position
-  transforms;
+  `Extract`, `Level`, `Take`, `Drop`, `Flatten`, `ReplacePart`, association constructors, key
+  accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -48,6 +48,8 @@ The parser currently handles:
 - function application `head[arg1, arg2]`;
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
+- association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
+  part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
 - rules `->` and `:>`;
 - comparisons and boolean operators;
@@ -63,7 +65,10 @@ The parser currently handles:
 - `RowBox` reconstruction for the box-driven subset above, so notebook snippets such as
   `SuperscriptBox["x", RowBox[{"1", "/", "3"}]]` or
   `FractionBox[SuperscriptBox["x", "3"], RowBox[{"1", "+", "a", " ", "b"}]]` lower to ordinary
-  Tungsten expressions.
+  Tungsten expressions;
+- `RowBox`-based association examples from the installed `Association.nb` reference page,
+  including `\[Rule]`, `\[RuleDelayed]`, `\[LeftAssociation]`, and `\[RightAssociation]`
+  tokens plus nested part syntax such as `<|a -> x|>[[Key[b]]]`.
 - string literals that contain inline-box escape sequences.
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
@@ -199,6 +204,20 @@ Convenience entrypoints include:
 - `apply_head(head, expr)`
 - `map_expr(f, expr)`
 - `map_at(f, expr, positions)`
+- `association(...)`
+- `association_q(expr)`
+- `keys_expr(assoc)`
+- `values_expr(assoc)`
+- `normal(assoc)`
+- `lookup(assoc, key_spec, default=None)`
+- `key_exists_q(assoc, key)`
+- `key_member_q(assoc, key)`
+- `key_take(assoc, key_spec)`
+- `key_drop(assoc, key_spec)`
+- `key_map(f, assoc)`
+- `key_value_map(f, assoc)`
+- `association_thread(keys, values)`
+- `association_map(f, keys)`
 - `evaluate(expr)`
 
 ## CLI usage
@@ -249,14 +268,15 @@ convenient inside `pwsh` automation scripts.
 
 ## Evaluation model
 
-Tungsten currently implements structural rules for:
+Tungsten currently implements a broader structural subset that includes:
 
-- `Length`
-- `Depth`
-- `Head`
-- `Part`
-- `Extract`
-- `Level`
+- core structural queries such as `Length`, `Depth`, `Head`, `Part`, `Extract`, and `Level`;
+- sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
+  `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplacePart`,
+  `Apply`, `Map`, and `MapAt`;
+- association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
+  `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
+  `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
 
 Everything else is treated as an inert symbolic head.
 
@@ -265,7 +285,10 @@ Examples:
 - `1 + 2` parses as `Plus[1, 2]` and stays that way;
 - `Length[1 + 2]` evaluates to `2`;
 - `Part[f[a, b, c], {1, 3}]` evaluates to `f[a, c]`;
-- `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`.
+- `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`;
+- `Part[<|a -> x, b -> y|>, Key[b]]` evaluates to `y`;
+- `Map[g, <|a -> 1, b -> 2|>]` evaluates to `<|a -> g[1], b -> g[2]|>`;
+- `Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]` evaluates to `{<|a -> 1, b -> {2}|>, 9}`.
 
 That design keeps the subsystem honest: it is useful for structural analysis and manipulation
 without pretending to reproduce arbitrary kernel semantics.

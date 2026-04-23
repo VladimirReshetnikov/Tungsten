@@ -140,6 +140,9 @@ class Call(Expr):
     def args(self) -> tuple[Expr, ...]:
         return self.arguments
 
+    def is_atom(self) -> bool:
+        return False
+
     def has_head(self, name: str) -> bool:
         return isinstance(self.head_expr, Symbol) and self.head_expr.name == name
 
@@ -272,6 +275,127 @@ def list_expr(*items: Expr) -> Call:
     return call("List", *items)
 
 
+@dataclass(frozen=True)
+class _AssociationEntry:
+    rule_head: str
+    key: Expr
+    value: Expr
+
+    def to_expr(self) -> Expr:
+        return call(self.rule_head, self.key, self.value)
+
+
+@dataclass(frozen=True)
+class _IndexSelector:
+    index: int
+
+
+@dataclass(frozen=True)
+class _KeySelector:
+    key: Expr
+
+
+@dataclass(frozen=True)
+class _SelectedPart:
+    selector: _IndexSelector | _KeySelector
+    child: Expr
+    entry: _AssociationEntry | None = None
+
+
+def _rule_entry(expr: Expr) -> _AssociationEntry | None:
+    if not isinstance(expr, Call):
+        return None
+    if not expr.has_head("Rule") and not expr.has_head("RuleDelayed"):
+        return None
+    if len(expr.arguments) != 2:
+        return None
+    return _AssociationEntry(
+        rule_head=expr.head_expr.name,
+        key=expr.arguments[0],
+        value=expr.arguments[1],
+    )
+
+
+def _association_entries(expr: Expr) -> tuple[_AssociationEntry, ...] | None:
+    if not isinstance(expr, Call) or not expr.has_head("Association"):
+        return None
+
+    entries: list[_AssociationEntry] = []
+    for argument in expr.arguments:
+        entry = _rule_entry(argument)
+        if entry is None:
+            return None
+        entries.append(entry)
+    return tuple(entries)
+
+
+def _is_association(expr: Expr) -> bool:
+    return _association_entries(expr) is not None
+
+
+def _normalize_association_entries(entries: Iterable[_AssociationEntry]) -> tuple[_AssociationEntry, ...]:
+    ordered: list[_AssociationEntry | None] = []
+    last_positions: dict[Expr, int] = {}
+
+    for entry in entries:
+        previous = last_positions.get(entry.key)
+        if previous is not None:
+            ordered[previous] = None
+        last_positions[entry.key] = len(ordered)
+        ordered.append(entry)
+
+    return tuple(entry for entry in ordered if entry is not None)
+
+
+def _association_expr(entries: Iterable[_AssociationEntry]) -> Call:
+    normalized = _normalize_association_entries(entries)
+    return call("Association", *(entry.to_expr() for entry in normalized))
+
+
+def _association_entry_map(entries: Sequence[_AssociationEntry]) -> dict[Expr, _AssociationEntry]:
+    return {entry.key: entry for entry in entries}
+
+
+def _association_values(expr: Expr) -> tuple[Expr, ...]:
+    entries = _association_entries(expr)
+    if entries is None:
+        raise WolframEvaluationError(f"Expected an association, got {expr.to_input_form()}.")
+    return tuple(entry.value for entry in entries)
+
+
+def _association_from_arguments(arguments: Sequence[Expr]) -> Call | None:
+    entries: list[_AssociationEntry] = []
+
+    if len(arguments) == 1:
+        source = arguments[0]
+        nested_entries = _association_entries(source)
+        if nested_entries is not None:
+            return _association_expr(nested_entries)
+        if isinstance(source, Call) and source.has_head("List"):
+            for item in source.arguments:
+                entry = _rule_entry(item)
+                if entry is None:
+                    return None
+                entries.append(entry)
+            return _association_expr(entries)
+
+    for argument in arguments:
+        nested_entries = _association_entries(argument)
+        if nested_entries is not None:
+            entries.extend(nested_entries)
+            continue
+        entry = _rule_entry(argument)
+        if entry is None:
+            return None
+        entries.append(entry)
+
+    return _association_expr(entries)
+
+
+def _bool_symbol(value: bool) -> Symbol:
+    return symbol("True" if value else "False")
+
+
 def head_of(expr: Expr) -> Expr:
     return expr.head()
 
@@ -281,31 +405,42 @@ def length(expr: Expr) -> int:
 
 
 def depth(expr: Expr) -> int:
-    if expr.is_atom():
+    entries = _association_entries(expr)
+    if entries is not None:
+        if not entries:
+            return 2
+        return 1 + max(depth(entry.value) for entry in entries)
+
+    if not isinstance(expr, Call):
         return 1
-    return 1 + max(depth(argument) for argument in expr.args())
+
+    if not expr.arguments:
+        return 2
+    return 1 + max(depth(argument) for argument in expr.arguments)
 
 
 def part(expr: Expr, *specs: int | Expr) -> Expr:
-    current = expr
-    for spec in specs:
-        normalized = integer(spec) if isinstance(spec, int) else spec
-        current = _apply_part_spec(current, normalized)
-    return current
+    normalized = tuple(integer(spec) if isinstance(spec, int) else spec for spec in specs)
+    if not normalized:
+        return expr
+    return _part_recursive(expr, normalized)
 
 
 def extract(expr: Expr, positions: Expr | Sequence[Expr | Sequence[int] | int]) -> Expr:
     if isinstance(positions, Expr):
-        if _is_single_extract_position(positions):
-            return part(expr, *_position_components_from_expr(positions))
-        if isinstance(positions, Call) and positions.has_head("List"):
+        if _is_collection_of_position_specs(positions):
             return list_expr(*[part(expr, *_position_components_from_expr(item)) for item in positions.arguments])
+        if _is_single_position_spec_expr(positions):
+            return part(expr, *_position_components_from_expr(positions))
         raise WolframEvaluationError("Extract positions must be a position list or a list of position lists.")
 
     extracted: list[Expr] = []
     for item in positions:
         if isinstance(item, Expr):
-            extracted.append(part(expr, *_position_components_from_expr(item)))
+            if _is_collection_of_position_specs(item):
+                extracted.extend(part(expr, *_position_components_from_expr(child)) for child in item.arguments)
+            else:
+                extracted.append(part(expr, *_position_components_from_expr(item)))
             continue
         if isinstance(item, int):
             extracted.append(part(expr, item))
@@ -325,6 +460,9 @@ _MISSING = object()
 
 
 def first(expr: Expr, default: Expr | object = _MISSING) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None and entries:
+        return entries[0].value
     if isinstance(expr, Call) and expr.arguments:
         return expr.arguments[0]
     if default is not _MISSING:
@@ -333,6 +471,9 @@ def first(expr: Expr, default: Expr | object = _MISSING) -> Expr:
 
 
 def last(expr: Expr, default: Expr | object = _MISSING) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None and entries:
+        return entries[-1].value
     if isinstance(expr, Call) and expr.arguments:
         return expr.arguments[-1]
     if default is not _MISSING:
@@ -341,6 +482,12 @@ def last(expr: Expr, default: Expr | object = _MISSING) -> Expr:
 
 
 def rest(expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        if not entries:
+            raise WolframEvaluationError(f"Cannot take Rest of {expr.to_input_form()} with length zero.")
+        return _association_expr(entries[1:])
+
     compound = _require_compound(expr, "Rest")
     if not compound.arguments:
         raise WolframEvaluationError(f"Cannot take Rest of {expr.to_input_form()} with length zero.")
@@ -348,6 +495,12 @@ def rest(expr: Expr) -> Expr:
 
 
 def most(expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        if not entries:
+            raise WolframEvaluationError(f"Cannot take Most of {expr.to_input_form()} with length zero.")
+        return _association_expr(entries[:-1])
+
     compound = _require_compound(expr, "Most")
     if not compound.arguments:
         raise WolframEvaluationError(f"Cannot take Most of {expr.to_input_form()} with length zero.")
@@ -369,11 +522,28 @@ def drop(expr: Expr, *specs: Expr | int) -> Expr:
 
 
 def append(expr: Expr, item: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        entry = _rule_entry(item)
+        if entry is None:
+            raise WolframEvaluationError("Append expects a rule when appending to an Association.")
+        remaining = [existing for existing in entries if existing.key != entry.key]
+        remaining.append(entry)
+        return _association_expr(remaining)
+
     compound = _require_compound(expr, "Append")
     return _rebuild(compound, (*compound.arguments, item))
 
 
 def prepend(expr: Expr, item: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        entry = _rule_entry(item)
+        if entry is None:
+            raise WolframEvaluationError("Prepend expects a rule when prepending to an Association.")
+        remaining = [existing for existing in entries if existing.key != entry.key]
+        return _association_expr([entry, *remaining])
+
     compound = _require_compound(expr, "Prepend")
     return _rebuild(compound, (item, *compound.arguments))
 
@@ -381,6 +551,13 @@ def prepend(expr: Expr, item: Expr) -> Expr:
 def join(*exprs: Expr) -> Expr:
     if not exprs:
         raise WolframEvaluationError("Join expects at least one expression.")
+
+    if all(_is_association(expr) for expr in exprs):
+        merged: list[_AssociationEntry] = []
+        for expr in exprs:
+            assert (entries := _association_entries(expr)) is not None
+            merged.extend(entries)
+        return _association_expr(merged)
 
     compounds = [_require_compound(expr, "Join") for expr in exprs]
     head_expr = compounds[0].head_expr
@@ -395,11 +572,25 @@ def join(*exprs: Expr) -> Expr:
 
 
 def reverse(expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return _association_expr(reversed(entries))
+
     compound = _require_compound(expr, "Reverse")
     return _rebuild(compound, tuple(reversed(compound.arguments)))
 
 
 def rotate_left(expr: Expr, amount: Expr | int = 1) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        if not entries:
+            return _association_expr(entries)
+        count = len(entries)
+        offset = _normalize_integer_argument(amount, "RotateLeft") % count
+        if offset == 0:
+            return _association_expr(entries)
+        return _association_expr(entries[offset:] + entries[:offset])
+
     compound = _require_compound(expr, "RotateLeft")
     if not compound.arguments:
         return compound
@@ -424,7 +615,7 @@ def flatten(expr: Expr, level_spec: Expr | int | None = None) -> Expr:
 
 
 def delete(expr: Expr, positions: Expr | int) -> Expr:
-    paths, invalid = _expand_position_spec(expr, integer(positions) if isinstance(positions, int) else positions)
+    paths, invalid = _expand_operation_paths(expr, integer(positions) if isinstance(positions, int) else positions)
     unique_paths = _dedupe_paths(paths)
     if invalid or any(not path for path in unique_paths):
         raise WolframEvaluationError(f"Delete positions are invalid for {expr.to_input_form()}.")
@@ -439,11 +630,11 @@ def delete(expr: Expr, positions: Expr | int) -> Expr:
 
 def replace_part(expr: Expr, replacements: Expr) -> Expr:
     rules = _normalize_replace_part_rules(replacements)
-    planned: list[tuple[list[int], Expr]] = []
-    seen_paths: set[tuple[int, ...]] = set()
+    planned: list[tuple[list[_IndexSelector | _KeySelector], Expr]] = []
+    seen_paths: set[tuple[_IndexSelector | _KeySelector, ...]] = set()
 
     for position_spec, replacement in rules:
-        paths, _invalid = _expand_position_spec(expr, position_spec)
+        paths, _invalid = _expand_operation_paths(expr, position_spec)
         for path in paths:
             key = tuple(path)
             if key in seen_paths:
@@ -458,19 +649,32 @@ def replace_part(expr: Expr, replacements: Expr) -> Expr:
 
 
 def apply_head(new_head: Expr, expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return Call(head_expr=new_head, arguments=tuple(entry.value for entry in entries))
     if not isinstance(expr, Call):
         return expr
     return Call(head_expr=new_head, arguments=expr.arguments)
 
 
 def map_expr(function: Expr, expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return _association_expr(
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=Call(head_expr=function, arguments=(entry.value,)),
+            )
+            for entry in entries
+        )
     if not isinstance(expr, Call):
         return expr
     return _rebuild(expr, tuple(Call(head_expr=function, arguments=(argument,)) for argument in expr.arguments))
 
 
 def map_at(function: Expr, expr: Expr, positions: Expr | int) -> Expr:
-    paths, invalid = _expand_position_spec(expr, integer(positions) if isinstance(positions, int) else positions)
+    paths, invalid = _expand_operation_paths(expr, integer(positions) if isinstance(positions, int) else positions)
     if invalid:
         raise WolframEvaluationError(f"MapAt positions are invalid for {expr.to_input_form()}.")
 
@@ -482,10 +686,125 @@ def map_at(function: Expr, expr: Expr, positions: Expr | int) -> Expr:
     return result
 
 
+def association(*arguments: Expr) -> Expr:
+    constructed = _association_from_arguments(arguments)
+    if constructed is not None:
+        return constructed
+    return call("Association", *arguments)
+
+
+def association_q(expr: Expr) -> Symbol:
+    return _bool_symbol(_is_association(expr))
+
+
+def keys_expr(expr: Expr) -> Expr:
+    entries = _require_association_entries(expr, "Keys")
+    return list_expr(*(entry.key for entry in entries))
+
+
+def values_expr(expr: Expr) -> Expr:
+    entries = _require_association_entries(expr, "Values")
+    return list_expr(*(entry.value for entry in entries))
+
+
+def normal(expr: Expr) -> Expr:
+    entries = _require_association_entries(expr, "Normal")
+    return list_expr(*(entry.to_expr() for entry in entries))
+
+
+def lookup(expr: Expr, key_spec: Expr, default: Expr | None = None) -> Expr:
+    entries = _require_association_entries(expr, "Lookup")
+    entry_map = _association_entry_map(entries)
+
+    def lookup_one(key: Expr) -> Expr:
+        entry = entry_map.get(key)
+        if entry is not None:
+            return entry.value
+        if default is not None:
+            return default
+        return call("Missing", string("KeyAbsent"), key)
+
+    if isinstance(key_spec, Call) and key_spec.has_head("List"):
+        return list_expr(*(lookup_one(item) for item in key_spec.arguments))
+    return lookup_one(key_spec)
+
+
+def key_exists_q(expr: Expr, key: Expr) -> Symbol:
+    entries = _require_association_entries(expr, "KeyExistsQ")
+    return _bool_symbol(any(entry.key == key for entry in entries))
+
+
+def key_member_q(expr: Expr, key: Expr) -> Symbol:
+    return key_exists_q(expr, key)
+
+
+def key_take(expr: Expr, key_spec: Expr) -> Expr:
+    entries = _require_association_entries(expr, "KeyTake")
+    entry_map = _association_entry_map(entries)
+    selected: list[_AssociationEntry] = []
+    for key in _key_spec_items(key_spec):
+        entry = entry_map.get(key)
+        if entry is not None:
+            selected.append(entry)
+    return _association_expr(selected)
+
+
+def key_drop(expr: Expr, key_spec: Expr) -> Expr:
+    entries = _require_association_entries(expr, "KeyDrop")
+    keys_to_drop = set(_key_spec_items(key_spec))
+    return _association_expr(entry for entry in entries if entry.key not in keys_to_drop)
+
+
+def key_map(function: Expr, expr: Expr) -> Expr:
+    entries = _require_association_entries(expr, "KeyMap")
+    return _association_expr(
+        _AssociationEntry(
+            rule_head=entry.rule_head,
+            key=Call(head_expr=function, arguments=(entry.key,)),
+            value=entry.value,
+        )
+        for entry in entries
+    )
+
+
+def key_value_map(function: Expr, expr: Expr) -> Expr:
+    entries = _require_association_entries(expr, "KeyValueMap")
+    return list_expr(*(Call(head_expr=function, arguments=(entry.key, entry.value)) for entry in entries))
+
+
+def association_thread(keys: Expr, values: Expr) -> Expr:
+    if not isinstance(keys, Call) or not keys.has_head("List"):
+        raise WolframEvaluationError("AssociationThread expects a list of keys.")
+    if not isinstance(values, Call) or not values.has_head("List"):
+        raise WolframEvaluationError("AssociationThread expects a list of values.")
+    if len(keys.arguments) != len(values.arguments):
+        raise WolframEvaluationError("AssociationThread expects key and value lists of equal length.")
+    return _association_expr(
+        _AssociationEntry("Rule", key, value)
+        for key, value in zip(keys.arguments, values.arguments, strict=True)
+    )
+
+
+def association_map(function: Expr, keys: Expr) -> Expr:
+    if not isinstance(keys, Call) or not keys.has_head("List"):
+        raise WolframEvaluationError("AssociationMap currently supports only the key-list form.")
+    return _association_expr(
+        _AssociationEntry("Rule", key, Call(head_expr=function, arguments=(key,)))
+        for key in keys.arguments
+    )
+
+
 def _require_compound(expr: Expr, function_name: str) -> Call:
     if isinstance(expr, Call):
         return expr
     raise WolframEvaluationError(f"{function_name} expects a nonatomic expression.")
+
+
+def _require_association_entries(expr: Expr, function_name: str) -> tuple[_AssociationEntry, ...]:
+    entries = _association_entries(expr)
+    if entries is None:
+        raise WolframEvaluationError(f"{function_name} expects an Association.")
+    return entries
 
 
 def _rebuild(expr: Call, arguments: Sequence[Expr]) -> Call:
@@ -500,22 +819,37 @@ def _normalize_integer_argument(value: Expr | int, function_name: str) -> int:
     raise WolframEvaluationError(f"{function_name} expects an integer argument.")
 
 
-def _take_or_drop(expr: Call, specs: Sequence[Expr | int], *, drop: bool) -> Expr:
+def _sequence_length(expr: Expr) -> int:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return len(entries)
+    if isinstance(expr, Call):
+        return len(expr.arguments)
+    return 0
+
+
+def _take_or_drop(expr: Expr, specs: Sequence[Expr | int], *, drop: bool) -> Expr:
     function_name = "Drop" if drop else "Take"
     selectors = _normalize_take_drop_selectors(expr, specs[0], function_name)
+    entries = _association_entries(expr)
+    if entries is not None:
+        if drop:
+            removed = {_resolve_index(len(entries), selector) for selector in selectors}
+            return _association_expr(entry for index, entry in enumerate(entries) if index not in removed)
+        return _association_expr(entries[_resolve_index(len(entries), selector)] for selector in selectors)
+
+    compound = _require_compound(expr, function_name)
     if drop:
-        removed = {_resolve_index(len(expr.arguments), selector) for selector in selectors}
-        current = _rebuild(
-            expr,
-            tuple(argument for index, argument in enumerate(expr.arguments) if index not in removed),
+        removed = {_resolve_index(len(compound.arguments), selector) for selector in selectors}
+        return _rebuild(
+            compound,
+            tuple(argument for index, argument in enumerate(compound.arguments) if index not in removed),
         )
-    else:
-        current = _rebuild(expr, tuple(_select_single_part(expr, selector) for selector in selectors))
-    return current
+    return _rebuild(compound, tuple(_select_single_part_value(compound, selector) for selector in selectors))
 
 
-def _normalize_take_drop_selectors(expr: Call, spec: Expr | int, function_name: str) -> list[int]:
-    count = len(expr.arguments)
+def _normalize_take_drop_selectors(expr: Expr, spec: Expr | int, function_name: str) -> list[int]:
+    count = _sequence_length(expr)
 
     if isinstance(spec, int):
         selectors = list(range(1, spec + 1)) if spec >= 0 else list(range(count + spec + 1, count + 1))
@@ -539,15 +873,20 @@ def _normalize_take_drop_selectors(expr: Call, spec: Expr | int, function_name: 
                 return list(range(1, count + 1))
             raise WolframEvaluationError(f"{function_name} single-element list specifications must contain an integer or All.")
         if len(spec.arguments) in {2, 3}:
-            return _validate_selectors(expr, _expand_span_spec(expr, Call(head_expr=Symbol("Span"), arguments=spec.arguments)), function_name)
+            return _validate_selectors(
+                expr,
+                _expand_span_spec_from_count(count, Call(head_expr=Symbol("Span"), arguments=spec.arguments)),
+                function_name,
+            )
         raise WolframEvaluationError(f"{function_name} list specifications must contain one, two, or three items.")
 
     raise WolframEvaluationError(f"Unsupported {function_name} specification: {spec.to_input_form() if isinstance(spec, Expr) else spec!r}.")
 
 
-def _validate_selectors(expr: Call, selectors: Sequence[int], function_name: str) -> list[int]:
+def _validate_selectors(expr: Expr, selectors: Sequence[int], function_name: str) -> list[int]:
+    count = _sequence_length(expr)
     for selector in selectors:
-        _resolve_index(len(expr.arguments), selector)
+        _resolve_index(count, selector)
     return list(selectors)
 
 
@@ -597,95 +936,251 @@ def _normalize_replace_part_rules(replacements: Expr) -> list[tuple[Expr, Expr]]
     raise WolframEvaluationError("ReplacePart expects a rule or a list of rules.")
 
 
-def _expand_position_spec(expr: Expr, spec: Expr) -> tuple[list[list[int]], bool]:
-    if isinstance(spec, Integer):
-        if not isinstance(expr, Call):
-            return ([], True)
-        resolved = _try_resolve_index(len(expr.arguments), spec.value)
-        if resolved is None:
-            return ([], True)
-        return ([[resolved + 1]], False)
+def _expand_operation_paths(
+    expr: Expr,
+    positions: Expr | Sequence[Expr | Sequence[int] | int],
+) -> tuple[list[list[_IndexSelector | _KeySelector]], bool]:
+    if isinstance(positions, Expr):
+        return _expand_position_expr_to_exact_paths(expr, positions)
 
-    if isinstance(spec, Call) and spec.has_head("List") and _is_collection_of_position_specs(spec):
-        paths: list[list[int]] = []
+    paths: list[list[_IndexSelector | _KeySelector]] = []
+    invalid = False
+    for item in positions:
+        if isinstance(item, Expr):
+            expanded, had_invalid = _expand_position_expr_to_exact_paths(expr, item)
+            paths.extend(expanded)
+            invalid = invalid or had_invalid
+            continue
+        if isinstance(item, int):
+            expanded, had_invalid = _expand_position_expr_to_exact_paths(expr, integer(item))
+            paths.extend(expanded)
+            invalid = invalid or had_invalid
+            continue
+        components = [integer(component) for component in item]
+        expanded, had_invalid = _expand_exact_position_components(expr, components)
+        paths.extend(expanded)
+        invalid = invalid or had_invalid
+    return (paths, invalid)
+
+
+def _expand_position_expr_to_exact_paths(expr: Expr, spec: Expr) -> tuple[list[list[_IndexSelector | _KeySelector]], bool]:
+    if _is_collection_of_position_specs(spec):
+        paths: list[list[_IndexSelector | _KeySelector]] = []
         invalid = False
+        assert isinstance(spec, Call)
         for item in spec.arguments:
-            expanded, had_invalid = _expand_position_spec(expr, item)
+            expanded, had_invalid = _expand_exact_position_components(expr, _position_components_from_expr(item))
             paths.extend(expanded)
             invalid = invalid or had_invalid
         return (paths, invalid)
 
-    if isinstance(spec, Call) and spec.has_head("List") and all(_is_position_component(item) for item in spec.arguments):
-        return _expand_position_components(expr, list(spec.arguments))
-
-    if isinstance(spec, Call) and spec.has_head("List"):
-        paths: list[list[int]] = []
-        invalid = False
-        for item in spec.arguments:
-            expanded, had_invalid = _expand_position_spec(expr, item)
-            paths.extend(expanded)
-            invalid = invalid or had_invalid
-        return (paths, invalid)
+    if _is_single_position_spec_expr(spec):
+        return _expand_exact_position_components(expr, _position_components_from_expr(spec))
 
     raise WolframEvaluationError(f"Unsupported position specification: {spec.to_input_form()}.")
 
 
-def _expand_position_components(expr: Expr, components: Sequence[Expr]) -> tuple[list[list[int]], bool]:
+def _expand_exact_position_components(
+    expr: Expr,
+    components: Sequence[Expr],
+) -> tuple[list[list[_IndexSelector | _KeySelector]], bool]:
     if not components:
         return ([[]], False)
 
-    if not isinstance(expr, Call):
-        return ([], True)
-
-    paths: list[list[int]] = []
-    invalid = False
-    selectors = _selectors_from_position_component(expr, components[0])
-    for selector in selectors:
-        resolved = _try_resolve_index(len(expr.arguments), selector)
-        if resolved is None:
-            invalid = True
-            continue
-        child_paths, child_invalid = _expand_position_components(expr.arguments[resolved], components[1:])
+    selections, invalid = _resolve_component_selections(expr, components[0], allow_head=False, function_name="Position")
+    paths: list[list[_IndexSelector | _KeySelector]] = []
+    for selection in selections:
+        child_paths, child_invalid = _expand_exact_position_components(selection.child, components[1:])
         invalid = invalid or child_invalid
         for child_path in child_paths:
-            paths.append([resolved + 1, *child_path])
+            paths.append([selection.selector, *child_path])
     return (paths, invalid)
 
 
-def _selectors_from_position_component(expr: Call, component: Expr) -> list[int]:
-    if isinstance(component, Integer):
-        return [component.value]
-    if isinstance(component, Symbol) and component.name == "All":
-        return list(range(1, len(expr.arguments) + 1))
-    if isinstance(component, Call) and component.has_head("Span"):
-        return _expand_span_spec(expr, component)
+def _resolve_component_selections(
+    expr: Expr,
+    component: Expr,
+    *,
+    allow_head: bool,
+    function_name: str,
+) -> tuple[list[_SelectedPart], bool]:
+    if isinstance(component, Integer) and component.value == 0:
+        if not allow_head:
+            raise WolframEvaluationError(f"{function_name} does not support index 0 in this position.")
+        return ([_SelectedPart(_IndexSelector(0), head_of(expr))], False)
+
+    entries = _association_entries(expr)
+    if entries is not None:
+        return _resolve_association_component_selections(entries, component, function_name=function_name)
+
+    if isinstance(expr, Call):
+        return _resolve_call_component_selections(expr, component, function_name=function_name)
+
+    return ([], True)
+
+
+def _resolve_call_component_selections(
+    expr: Call,
+    component: Expr,
+    *,
+    function_name: str,
+) -> tuple[list[_SelectedPart], bool]:
+    selectors, invalid = _resolve_numeric_selectors(
+        len(expr.arguments),
+        component,
+        function_name=function_name,
+        allow_head=False,
+    )
+    return ([selection for selection in (_selected_part_from_exact_selector(expr, selector) for selector in selectors) if selection is not None], invalid)
+
+
+def _resolve_association_component_selections(
+    entries: Sequence[_AssociationEntry],
+    component: Expr,
+    *,
+    function_name: str,
+) -> tuple[list[_SelectedPart], bool]:
+    if _is_key_selector_atom(component):
+        key = _key_from_selector(component)
+        selection = _selected_association_part(entries, _KeySelector(key))
+        return ([selection], False) if selection is not None else ([], True)
+
     if isinstance(component, Call) and component.has_head("List"):
-        return _expand_selector_list(expr, component.arguments)
-    raise WolframEvaluationError(f"Unsupported position component: {component.to_input_form()}.")
+        kinds = {_selector_atom_kind(item) for item in component.arguments}
+        if None in kinds:
+            raise WolframEvaluationError(f"Unsupported selector inside {function_name} specification: {component.to_input_form()}.")
+        if "numeric" in kinds and "key" in kinds:
+            raise WolframEvaluationError("Association selector lists may not mix numeric and key selectors.")
+        if kinds == {"key"}:
+            selections: list[_SelectedPart] = []
+            invalid = False
+            for item in component.arguments:
+                selection = _selected_association_part(entries, _KeySelector(_key_from_selector(item)))
+                if selection is None:
+                    invalid = True
+                    continue
+                selections.append(selection)
+            return (selections, invalid)
+
+    selectors, invalid = _resolve_numeric_selectors(
+        len(entries),
+        component,
+        function_name=function_name,
+        allow_head=False,
+    )
+    selections = [selection for selection in (_selected_association_part(entries, selector) for selector in selectors) if selection is not None]
+    return (selections, invalid)
 
 
-def _is_position_component(expr: Expr) -> bool:
-    return (
-        isinstance(expr, Integer)
-        or (isinstance(expr, Symbol) and expr.name == "All")
-        or (isinstance(expr, Call) and expr.has_head("Span"))
-        or (isinstance(expr, Call) and expr.has_head("List") and all(_is_selector_atom(item) for item in expr.arguments))
+def _resolve_numeric_selectors(
+    length_value: int,
+    component: Expr,
+    *,
+    function_name: str,
+    allow_head: bool,
+) -> tuple[list[_IndexSelector], bool]:
+    if isinstance(component, Integer):
+        if component.value == 0:
+            if allow_head:
+                return ([_IndexSelector(0)], False)
+            raise WolframEvaluationError(f"{function_name} does not support index 0 in this position.")
+        resolved = _try_resolve_index(length_value, component.value)
+        if resolved is None:
+            return ([], True)
+        return ([_IndexSelector(resolved + 1)], False)
+
+    if isinstance(component, Symbol) and component.name == "All":
+        return ([_IndexSelector(index) for index in range(1, length_value + 1)], False)
+
+    if isinstance(component, Call) and component.has_head("Span"):
+        selectors: list[_IndexSelector] = []
+        invalid = False
+        for index in _expand_span_spec_from_count(length_value, component):
+            resolved = _try_resolve_index(length_value, index)
+            if resolved is None:
+                invalid = True
+                continue
+            selectors.append(_IndexSelector(resolved + 1))
+        return (selectors, invalid)
+
+    if isinstance(component, Call) and component.has_head("List"):
+        selectors: list[_IndexSelector] = []
+        invalid = False
+        for item in component.arguments:
+            kind = _selector_atom_kind(item)
+            if kind == "key":
+                raise WolframEvaluationError(f"Unsupported selector inside {function_name} specification: {item.to_input_form()}.")
+            nested, nested_invalid = _resolve_numeric_selectors(
+                length_value,
+                item,
+                function_name=function_name,
+                allow_head=False,
+            )
+            selectors.extend(nested)
+            invalid = invalid or nested_invalid
+        return (selectors, invalid)
+
+    raise WolframEvaluationError(f"Unsupported {function_name} specification: {component.to_input_form()}.")
+
+
+def _selector_atom_kind(expr: Expr) -> str | None:
+    if isinstance(expr, Integer):
+        return "numeric"
+    if isinstance(expr, Symbol) and expr.name == "All":
+        return "numeric"
+    if isinstance(expr, Call) and expr.has_head("Span"):
+        return "numeric"
+    if _is_key_selector_atom(expr):
+        return "key"
+    return None
+
+
+def _is_key_selector_atom(expr: Expr) -> bool:
+    return isinstance(expr, String) or (
+        isinstance(expr, Call)
+        and expr.has_head("Key")
+        and len(expr.arguments) == 1
     )
 
 
-def _is_collection_of_position_specs(expr: Call) -> bool:
-    return bool(expr.arguments) and all(
-        isinstance(item, Call) and item.has_head("List") and all(_is_position_component(component) for component in item.arguments)
-        for item in expr.arguments
+def _key_from_selector(expr: Expr) -> Expr:
+    if isinstance(expr, String):
+        return expr
+    if isinstance(expr, Call) and expr.has_head("Key") and len(expr.arguments) == 1:
+        return expr.arguments[0]
+    raise WolframEvaluationError(f"Expected a key selector, got {expr.to_input_form()}.")
+
+
+def _is_position_component(expr: Expr) -> bool:
+    return _is_selector_atom(expr) or (
+        isinstance(expr, Call)
+        and expr.has_head("List")
+        and all(_is_selector_atom(item) for item in expr.arguments)
+    )
+
+
+def _is_collection_of_position_specs(expr: Expr) -> bool:
+    return (
+        isinstance(expr, Call)
+        and expr.has_head("List")
+        and bool(expr.arguments)
+        and all(
+            isinstance(item, Call)
+            and item.has_head("List")
+            and all(_is_position_component(component) for component in item.arguments)
+            for item in expr.arguments
+        )
     )
 
 
 def _is_selector_atom(expr: Expr) -> bool:
-    return (
-        isinstance(expr, Integer)
-        or (isinstance(expr, Symbol) and expr.name == "All")
-        or (isinstance(expr, Call) and expr.has_head("Span"))
-    )
+    return _selector_atom_kind(expr) is not None
+
+
+def _is_single_position_spec_expr(expr: Expr) -> bool:
+    if isinstance(expr, Integer) or _is_key_selector_atom(expr):
+        return True
+    return isinstance(expr, Call) and expr.has_head("List") and all(_is_position_component(item) for item in expr.arguments)
 
 
 def _try_resolve_index(length_value: int, index: int) -> int | None:
@@ -695,9 +1190,9 @@ def _try_resolve_index(length_value: int, index: int) -> int | None:
         return None
 
 
-def _dedupe_paths(paths: Sequence[Sequence[int]]) -> list[list[int]]:
-    seen: set[tuple[int, ...]] = set()
-    unique: list[list[int]] = []
+def _dedupe_paths(paths: Sequence[Sequence[_IndexSelector | _KeySelector]]) -> list[list[_IndexSelector | _KeySelector]]:
+    seen: set[tuple[_IndexSelector | _KeySelector, ...]] = set()
+    unique: list[list[_IndexSelector | _KeySelector]] = []
     for path in paths:
         key = tuple(path)
         if key in seen:
@@ -707,29 +1202,68 @@ def _dedupe_paths(paths: Sequence[Sequence[int]]) -> list[list[int]]:
     return unique
 
 
-def _sort_paths(paths: Sequence[Sequence[int]]) -> list[list[int]]:
-    return [list(path) for path in sorted((tuple(path) for path in paths), key=lambda path: (len(path), path), reverse=True)]
-
-
-def _sort_path_items(items: Sequence[tuple[Sequence[int], Expr]]) -> list[tuple[list[int], Expr]]:
+def _sort_paths(
+    paths: Sequence[Sequence[_IndexSelector | _KeySelector]],
+) -> list[list[_IndexSelector | _KeySelector]]:
     return [
-        (list(path), value)
-        for path, value in sorted(
-            ((tuple(path), value) for path, value in items),
-            key=lambda item: (len(item[0]), item[0]),
+        list(path)
+        for path in sorted(
+            (tuple(path) for path in paths),
+            key=lambda path: (len(path), tuple(_path_component_sort_key(component) for component in path)),
             reverse=True,
         )
     ]
 
 
-def _try_delete_at_path(expr: Expr, path: Sequence[int]) -> tuple[Expr, bool]:
+def _sort_path_items(
+    items: Sequence[tuple[Sequence[_IndexSelector | _KeySelector], Expr]],
+) -> list[tuple[list[_IndexSelector | _KeySelector], Expr]]:
+    return [
+        (list(path), value)
+        for path, value in sorted(
+            ((tuple(path), value) for path, value in items),
+            key=lambda item: (len(item[0]), tuple(_path_component_sort_key(component) for component in item[0])),
+            reverse=True,
+        )
+    ]
+
+
+def _path_component_sort_key(component: _IndexSelector | _KeySelector) -> tuple[int, int | str]:
+    if isinstance(component, _IndexSelector):
+        return (0, component.index)
+    return (1, component.key.to_input_form())
+
+
+def _try_delete_at_path(
+    expr: Expr,
+    path: Sequence[_IndexSelector | _KeySelector],
+) -> tuple[Expr, bool]:
     if not path:
         return (expr, False)
+
+    entries = _association_entries(expr)
+    if entries is not None:
+        selection = _select_association_entry(entries, path[0])
+        if selection is None:
+            return (expr, False)
+        index, entry = selection
+        mutable = list(entries)
+        if len(path) == 1:
+            del mutable[index]
+            return (_association_expr(mutable), True)
+        updated_child, changed = _try_delete_at_path(entry.value, path[1:])
+        if not changed:
+            return (expr, False)
+        mutable[index] = _AssociationEntry(entry.rule_head, entry.key, updated_child)
+        return (_association_expr(mutable), True)
+
     if not isinstance(expr, Call):
         return (expr, False)
-
-    resolved = _try_resolve_index(len(expr.arguments), path[0])
-    if resolved is None:
+    selector = path[0]
+    if not isinstance(selector, _IndexSelector):
+        return (expr, False)
+    resolved = selector.index - 1
+    if not 0 <= resolved < len(expr.arguments):
         return (expr, False)
 
     arguments = list(expr.arguments)
@@ -744,14 +1278,37 @@ def _try_delete_at_path(expr: Expr, path: Sequence[int]) -> tuple[Expr, bool]:
     return (_rebuild(expr, arguments), True)
 
 
-def _try_replace_at_path(expr: Expr, path: Sequence[int], replacement: Expr) -> tuple[Expr, bool]:
+def _try_replace_at_path(
+    expr: Expr,
+    path: Sequence[_IndexSelector | _KeySelector],
+    replacement: Expr,
+) -> tuple[Expr, bool]:
     if not path:
         return (replacement, True)
+
+    entries = _association_entries(expr)
+    if entries is not None:
+        selection = _select_association_entry(entries, path[0])
+        if selection is None:
+            return (expr, False)
+        index, entry = selection
+        mutable = list(entries)
+        if len(path) == 1:
+            mutable[index] = _AssociationEntry(entry.rule_head, entry.key, replacement)
+            return (_association_expr(mutable), True)
+        updated_child, changed = _try_replace_at_path(entry.value, path[1:], replacement)
+        if not changed:
+            return (expr, False)
+        mutable[index] = _AssociationEntry(entry.rule_head, entry.key, updated_child)
+        return (_association_expr(mutable), True)
+
     if not isinstance(expr, Call):
         return (expr, False)
-
-    resolved = _try_resolve_index(len(expr.arguments), path[0])
-    if resolved is None:
+    selector = path[0]
+    if not isinstance(selector, _IndexSelector):
+        return (expr, False)
+    resolved = selector.index - 1
+    if not 0 <= resolved < len(expr.arguments):
         return (expr, False)
 
     arguments = list(expr.arguments)
@@ -762,14 +1319,41 @@ def _try_replace_at_path(expr: Expr, path: Sequence[int], replacement: Expr) -> 
     return (_rebuild(expr, arguments), True)
 
 
-def _try_map_at_path(expr: Expr, function: Expr, path: Sequence[int]) -> tuple[Expr, bool]:
+def _try_map_at_path(
+    expr: Expr,
+    function: Expr,
+    path: Sequence[_IndexSelector | _KeySelector],
+) -> tuple[Expr, bool]:
     if not path:
         return (Call(head_expr=function, arguments=(expr,)), True)
+
+    entries = _association_entries(expr)
+    if entries is not None:
+        selection = _select_association_entry(entries, path[0])
+        if selection is None:
+            return (expr, False)
+        index, entry = selection
+        mutable = list(entries)
+        if len(path) == 1:
+            mutable[index] = _AssociationEntry(
+                entry.rule_head,
+                entry.key,
+                Call(head_expr=function, arguments=(entry.value,)),
+            )
+            return (_association_expr(mutable), True)
+        updated_child, changed = _try_map_at_path(entry.value, function, path[1:])
+        if not changed:
+            return (expr, False)
+        mutable[index] = _AssociationEntry(entry.rule_head, entry.key, updated_child)
+        return (_association_expr(mutable), True)
+
     if not isinstance(expr, Call):
         return (expr, False)
-
-    resolved = _try_resolve_index(len(expr.arguments), path[0])
-    if resolved is None:
+    selector = path[0]
+    if not isinstance(selector, _IndexSelector):
+        return (expr, False)
+    resolved = selector.index - 1
+    if not 0 <= resolved < len(expr.arguments):
         return (expr, False)
 
     arguments = list(expr.arguments)
@@ -778,6 +1362,95 @@ def _try_map_at_path(expr: Expr, function: Expr, path: Sequence[int]) -> tuple[E
         return (expr, False)
     arguments[resolved] = updated_child
     return (_rebuild(expr, arguments), True)
+
+
+def _select_association_entry(
+    entries: Sequence[_AssociationEntry],
+    selector: _IndexSelector | _KeySelector,
+) -> tuple[int, _AssociationEntry] | None:
+    if isinstance(selector, _IndexSelector):
+        index = selector.index - 1
+        if 0 <= index < len(entries):
+            return (index, entries[index])
+        return None
+
+    for index, entry in enumerate(entries):
+        if entry.key == selector.key:
+            return (index, entry)
+    return None
+
+
+def _selected_association_part(
+    entries: Sequence[_AssociationEntry],
+    selector: _IndexSelector | _KeySelector,
+) -> _SelectedPart | None:
+    selected = _select_association_entry(entries, selector)
+    if selected is None:
+        return None
+    _index, entry = selected
+    return _SelectedPart(selector=selector, child=entry.value, entry=entry)
+
+
+def _selected_part_from_exact_selector(expr: Expr, selector: _IndexSelector) -> _SelectedPart | None:
+    if selector.index == 0:
+        return _SelectedPart(selector=selector, child=head_of(expr))
+    if not isinstance(expr, Call):
+        return None
+    index = selector.index - 1
+    if not 0 <= index < len(expr.arguments):
+        return None
+    return _SelectedPart(selector=selector, child=expr.arguments[index])
+
+
+def _component_is_multi(component: Expr) -> bool:
+    return (
+        (isinstance(component, Symbol) and component.name == "All")
+        or (isinstance(component, Call) and component.has_head("Span"))
+        or (isinstance(component, Call) and component.has_head("List"))
+    )
+
+
+def _part_recursive(expr: Expr, specs: Sequence[Expr]) -> Expr:
+    if not specs:
+        return expr
+
+    component = specs[0]
+    selections, invalid = _resolve_component_selections(expr, component, allow_head=True, function_name="Part")
+    multi = _component_is_multi(component)
+    if invalid or (not selections and not multi):
+        raise WolframEvaluationError(f"Part specifications are invalid for {expr.to_input_form()}.")
+
+    remaining = specs[1:]
+    if not multi:
+        return _part_recursive(selections[0].child, remaining) if remaining else selections[0].child
+
+    transformed = [(_part_recursive(selection.child, remaining) if remaining else selection.child) for selection in selections]
+    return _rebuild_selected_parts(expr, selections, transformed)
+
+
+def _rebuild_selected_parts(
+    expr: Expr,
+    selections: Sequence[_SelectedPart],
+    values: Sequence[Expr],
+) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        rebuilt_entries: list[_AssociationEntry] = []
+        for selection, value in zip(selections, values, strict=True):
+            if selection.entry is None:
+                continue
+            rebuilt_entries.append(
+                _AssociationEntry(
+                    rule_head=selection.entry.rule_head,
+                    key=selection.entry.key,
+                    value=value,
+                )
+            )
+        return _association_expr(rebuilt_entries)
+
+    if not isinstance(expr, Call):
+        raise WolframEvaluationError("Cannot rebuild selected parts from an atom.")
+    return _rebuild(expr, values)
 
 
 def evaluate(expr: Expr) -> Expr:
@@ -792,6 +1465,14 @@ def evaluate(expr: Expr) -> Expr:
         return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
 
     evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
+
+    if evaluated_head.name == "Association":
+        return association(*evaluated_arguments)
+
+    if evaluated_head.name == "AssociationQ":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("AssociationQ expects exactly one argument.")
+        return association_q(evaluated_arguments[0])
 
     if evaluated_head.name == "Length":
         if len(evaluated_arguments) != 1:
@@ -934,6 +1615,68 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 3:
             raise WolframEvaluationError("MapAt currently supports exactly three arguments.")
         return map_at(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "Keys":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Keys expects exactly one argument.")
+        return keys_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "Values":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Values expects exactly one argument.")
+        return values_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "Normal":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Normal expects exactly one argument.")
+        return normal(evaluated_arguments[0])
+
+    if evaluated_head.name == "Lookup":
+        if len(evaluated_arguments) == 2:
+            return lookup(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return lookup(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Lookup expects an association, a key specification, and an optional default.")
+
+    if evaluated_head.name == "KeyExistsQ":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("KeyExistsQ expects exactly two arguments.")
+        return key_exists_q(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "KeyMemberQ":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("KeyMemberQ expects exactly two arguments.")
+        return key_member_q(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "KeyTake":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("KeyTake expects exactly two arguments.")
+        return key_take(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "KeyDrop":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("KeyDrop expects exactly two arguments.")
+        return key_drop(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "KeyMap":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("KeyMap expects exactly two arguments.")
+        return key_map(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "KeyValueMap":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("KeyValueMap expects exactly two arguments.")
+        return key_value_map(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "AssociationThread":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("AssociationThread expects exactly two arguments.")
+        return association_thread(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "AssociationMap":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("AssociationMap expects exactly two arguments.")
+        return association_map(evaluated_arguments[0], evaluated_arguments[1])
 
     return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
@@ -1119,7 +1862,15 @@ def _try_box_rational(expr: Call) -> Expr | None:
 
 def _box_item_to_standard_text(expr: Expr) -> str:
     if isinstance(expr, String):
-        return _normalize_row_box_token(expr.value)
+        value = expr.value
+        if value.startswith("\"") and value.endswith("\"") and len(value) >= 2:
+            value = value[1:-1]
+            if value.startswith(r"\<") and value.endswith(r"\>") and len(value) >= 4:
+                return wl_string(value[2:-2])
+            return wl_string(value)
+        if value.startswith(r"\<") and value.endswith(r"\>") and len(value) >= 4:
+            return wl_string(value[2:-2])
+        return _normalize_row_box_token(value)
 
     if isinstance(expr, (Symbol, Integer, Real)):
         return expr.to_input_form()
@@ -1132,7 +1883,12 @@ def _box_item_to_standard_text(expr: Expr) -> str:
             return _box_item_to_standard_text(expr.arguments[0])
 
         if expr.has_head("RowBox"):
-            interpreted = _interpret_row_box(expr)
+            try:
+                interpreted = _interpret_row_box(expr)
+            except WolframSyntaxError:
+                if len(expr.arguments) == 1 and isinstance(expr.arguments[0], Call) and expr.arguments[0].has_head("List"):
+                    return "".join(_box_item_to_standard_text(item) for item in expr.arguments[0].arguments)
+                raise
             return interpreted.to_input_form()
 
         if expr.has_head("FractionBox") and len(expr.arguments) >= 2:
@@ -1179,6 +1935,14 @@ def _normalize_row_box_token(value: str) -> str:
     }
     if value in whitespace_tokens:
         return " "
+    token_map = {
+        r"\[Rule]": "->",
+        r"\[RuleDelayed]": ":>",
+        r"\[LeftAssociation]": "<|",
+        r"\[RightAssociation]": "|>",
+    }
+    if value in token_map:
+        return token_map[value]
     return value
 
 
@@ -1627,45 +2391,6 @@ class _Parser:
         return call(head_name, left, right)
 
 
-def _apply_part_spec(expr: Expr, spec: Expr) -> Expr:
-    if isinstance(spec, Integer):
-        return _select_single_part(expr, spec.value)
-
-    if isinstance(spec, Symbol) and spec.name == "All":
-        if expr.is_atom():
-            raise WolframEvaluationError("Part specification All cannot be applied to an atom.")
-        return Call(head_expr=head_of(expr), arguments=expr.args())
-
-    if isinstance(spec, Call) and spec.has_head("Span"):
-        return _select_multiple_parts(expr, _expand_span_spec(expr, spec))
-
-    if isinstance(spec, Call) and spec.has_head("List"):
-        selectors = _expand_selector_list(expr, spec.arguments)
-        return _select_multiple_parts(expr, selectors)
-
-    raise WolframEvaluationError(f"Unsupported Part specification: {spec.to_input_form()}.")
-
-
-def _select_single_part(expr: Expr, index: int) -> Expr:
-    if index == 0:
-        return head_of(expr)
-
-    arguments = expr.args()
-    if not arguments:
-        raise WolframEvaluationError("Part specification is deeper than the expression.")
-
-    resolved = _resolve_index(len(arguments), index)
-    return arguments[resolved]
-
-
-def _select_multiple_parts(expr: Expr, selectors: Sequence[int]) -> Expr:
-    if expr.is_atom():
-        raise WolframEvaluationError("Cannot extract multiple parts from an atom.")
-
-    extracted = tuple(_select_single_part(expr, selector) for selector in selectors)
-    return Call(head_expr=head_of(expr), arguments=extracted)
-
-
 def _resolve_index(length_value: int, index: int) -> int:
     if index > 0:
         resolved = index - 1
@@ -1679,24 +2404,19 @@ def _resolve_index(length_value: int, index: int) -> int:
     return resolved
 
 
-def _expand_selector_list(expr: Expr, items: Iterable[Expr]) -> list[int]:
-    selectors: list[int] = []
-    for item in items:
-        if isinstance(item, Integer):
-            selectors.append(item.value)
-            continue
-        if isinstance(item, Symbol) and item.name == "All":
-            selectors.extend(range(1, length(expr) + 1))
-            continue
-        if isinstance(item, Call) and item.has_head("Span"):
-            selectors.extend(_expand_span_spec(expr, item))
-            continue
-        raise WolframEvaluationError(f"Unsupported selector inside list Part specification: {item.to_input_form()}.")
-    return selectors
+def _select_single_part_value(expr: Call, index: int) -> Expr:
+    return expr.arguments[_resolve_index(len(expr.arguments), index)]
 
 
 def _expand_span_spec(expr: Expr, span: Call) -> list[int]:
-    if expr.is_atom():
+    count = _sequence_length(expr)
+    if count == 0 and not _is_association(expr) and not isinstance(expr, Call):
+        raise WolframEvaluationError("Span cannot be applied to an atom.")
+    return _expand_span_spec_from_count(count, span)
+
+
+def _expand_span_spec_from_count(length_value: int, span: Call) -> list[int]:
+    if length_value < 0:
         raise WolframEvaluationError("Span cannot be applied to an atom.")
 
     if len(span.arguments) not in {2, 3}:
@@ -1706,9 +2426,8 @@ def _expand_span_spec(expr: Expr, span: Call) -> list[int]:
     end_expr = span.arguments[1]
     step_expr = span.arguments[2] if len(span.arguments) == 3 else integer(1)
 
-    count = length(expr)
-    start = _span_endpoint_value(start_expr, count, default=1)
-    end = _span_endpoint_value(end_expr, count, default=count)
+    start = _span_endpoint_value(start_expr, length_value, default=1)
+    end = _span_endpoint_value(end_expr, length_value, default=length_value)
     step = _span_step_value(step_expr)
 
     if step == 0:
@@ -1735,19 +2454,18 @@ def _span_step_value(expr: Expr) -> int:
     raise WolframEvaluationError("Span steps must be integers.")
 
 
-def _is_single_extract_position(expr: Expr) -> bool:
-    return isinstance(expr, Call) and expr.has_head("List") and all(
-        isinstance(item, Integer) or (isinstance(item, Call) and item.has_head("Span")) or (isinstance(item, Symbol) and item.name == "All")
-        for item in expr.arguments
-    )
-
-
 def _position_components_from_expr(expr: Expr) -> list[Expr]:
-    if isinstance(expr, Integer):
+    if isinstance(expr, Integer) or _is_key_selector_atom(expr):
         return [expr]
     if isinstance(expr, Call) and expr.has_head("List"):
         return list(expr.arguments)
     raise WolframEvaluationError(f"Expected a Wolfram position list, got {expr.to_input_form()}.")
+
+
+def _key_spec_items(expr: Expr) -> list[Expr]:
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return list(expr.arguments)
+    return [expr]
 
 
 @dataclass(frozen=True)
@@ -1759,6 +2477,11 @@ class _LevelRecord:
 
 def _collect_levels(expr: Expr, positive_level: int, target: list[_LevelRecord]) -> None:
     target.append(_LevelRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
+    entries = _association_entries(expr)
+    if entries is not None:
+        for entry in entries:
+            _collect_levels(entry.value, positive_level + 1, target)
+        return
     if isinstance(expr, Call):
         for argument in expr.arguments:
             _collect_levels(argument, positive_level + 1, target)

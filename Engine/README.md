@@ -4,7 +4,7 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T19:01:41Z
+- Updated (UTC): 2026-04-23T22:15:00Z
 - Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
 - Related code:
   - `src/Tungsten/src/tungsten/`
@@ -82,8 +82,10 @@ The current workspace is built around seven complementary capabilities:
    literals for images and other notebook objects.
 4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a pragmatic
    StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
-   `RadicalBox`, and `SuperscriptBox`, then evaluates a broader inert structural built-in set such
-   as `Length`, `Depth`, `Take`, `Drop`, `Flatten`, `ReplacePart`, and `MapAt`.
+   `RadicalBox`, and `SuperscriptBox`, understands association literals and common association
+   row-box forms from the installed documentation notebooks, then evaluates a broader inert
+   structural built-in set such as `Length`, `Depth`, `Take`, `Drop`, `Flatten`, `ReplacePart`,
+   `MapAt`, `Association`, `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
@@ -289,7 +291,8 @@ The current documentation should state these boundaries plainly:
 - Kernel-backed features still require the real local installation and a working license path.
 - The expression parser handles common semantic box forms, but it still does not cover full box
   language or arbitrary StandardForm constructs.
-- The expression evaluator only implements a small built-in subset and leaves all other heads inert.
+- The expression evaluator implements a pragmatic structural subset, including associations, but it
+  still leaves all other heads inert and does not attempt general kernel semantics.
 - FrontEnd automation works only for the actions Tungsten explicitly exposes.
 - Notebook Assistant inline UI driving is intentionally not the default path because it is less
   reliable for automation than the hidden chat-notebook backend.

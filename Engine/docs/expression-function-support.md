@@ -27,6 +27,11 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `Apply` currently supports `Apply[f, expr]` only.
 - `Flatten` currently supports `Flatten[expr]` and `Flatten[expr, n]` where `n` is a non-negative
   integer or `Infinity`.
+- Association-aware exact positions currently apply only to real `Association[...]` expressions, not
+  to arbitrary lists of rules.
+- `AssociationMap` currently supports the key-list form only: `AssociationMap[f, {k1, ...}]`.
+- `Lookup`, `Keys`, `Values`, `Normal`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`,
+  `KeyMap`, and `KeyValueMap` currently expect an `Association`.
 - `ReplacePart` supports exact position rules and ignores positions that do not exist, matching the
   practical behavior of Wolfram's direct rule form.
 - `Delete` and `MapAt` support exact positions and lists of exact positions; invalid positions
@@ -37,37 +42,55 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | Function | Tungsten-supported forms | Brief description | Official Wolfram docs |
 |------|------|------|------|
 | `Length` | `Length[expr]` | Returns the number of immediate arguments in an expression. | [Length](https://reference.wolfram.com/language/ref/Length) |
-| `Depth` | `Depth[expr]` | Returns the structural depth of an expression tree. | [Depth](https://reference.wolfram.com/language/ref/Depth) |
+| `Depth` | `Depth[expr]` | Returns the structural depth of an expression tree. For associations, Tungsten measures depth through values rather than keys or raw `Rule` wrappers. | [Depth](https://reference.wolfram.com/language/ref/Depth) |
 | `Head` | `Head[expr]` | Returns the head of an expression. | [Head](https://reference.wolfram.com/language/ref/Head) |
-| `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. | [Part](https://reference.wolfram.com/language/ref/Part) |
-| `Extract` | `Extract[expr, pos]` | Extracts one or more parts using explicit position lists. | [Extract](https://reference.wolfram.com/language/ref/Extract) |
-| `Level` | `Level[expr, spec]`, `Level[expr, spec, False]` | Returns subexpressions at requested positive or negative levels. | [Level](https://reference.wolfram.com/language/ref/Level) |
-| `First` | `First[expr]`, `First[expr, default]` | Returns the first argument of an expression, with optional default for empty expressions. | [First](https://reference.wolfram.com/language/ref/First) |
-| `Last` | `Last[expr]`, `Last[expr, default]` | Returns the last argument of an expression, with optional default for empty expressions. | [Last](https://reference.wolfram.com/language/ref/Last) |
-| `Rest` | `Rest[expr]` | Returns an expression with its first argument removed. | [Rest](https://reference.wolfram.com/language/ref/Rest) |
-| `Most` | `Most[expr]` | Returns an expression with its last argument removed. | [Most](https://reference.wolfram.com/language/ref/Most) |
-| `Take` | `Take[expr, n]`, `Take[expr, All]`, `Take[expr, span]`, `Take[expr, {n}]`, `Take[expr, {m, n}]`, `Take[expr, {m, n, s}]` | Selects a first-level slice while preserving the original head. | [Take](https://reference.wolfram.com/language/ref/Take) |
-| `Drop` | `Drop[expr, n]`, `Drop[expr, All]`, `Drop[expr, span]`, `Drop[expr, {n}]`, `Drop[expr, {m, n}]`, `Drop[expr, {m, n, s}]` | Removes a first-level slice while preserving the original head. | [Drop](https://reference.wolfram.com/language/ref/Drop) |
-| `Append` | `Append[expr, item]` | Adds an argument at the end of a nonatomic expression. | [Append](https://reference.wolfram.com/language/ref/Append) |
-| `Prepend` | `Prepend[expr, item]` | Adds an argument at the beginning of a nonatomic expression. | [Prepend](https://reference.wolfram.com/language/ref/Prepend) |
-| `Join` | `Join[expr1, expr2, ...]` | Concatenates expressions that share the same head. | [Join](https://reference.wolfram.com/language/ref/Join) |
-| `Reverse` | `Reverse[expr]` | Reverses the order of the immediate arguments of an expression. | [Reverse](https://reference.wolfram.com/language/ref/Reverse) |
-| `RotateLeft` | `RotateLeft[expr]`, `RotateLeft[expr, n]` | Rotates immediate arguments to the left. | [RotateLeft](https://reference.wolfram.com/language/ref/RotateLeft) |
-| `RotateRight` | `RotateRight[expr]`, `RotateRight[expr, n]` | Rotates immediate arguments to the right. | [RotateRight](https://reference.wolfram.com/language/ref/RotateRight) |
+| `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
+| `AssociationQ` | `AssociationQ[expr]` | Returns `True` when Tungsten recognizes a structural association value. | [AssociationQ](https://reference.wolfram.com/language/ref/AssociationQ) |
+| `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. | [Part](https://reference.wolfram.com/language/ref/Part) |
+| `Extract` | `Extract[expr, pos]` | Extracts one or more parts using explicit position lists. Association positions support numeric components, `Key[key]`, and string-key shorthand. | [Extract](https://reference.wolfram.com/language/ref/Extract) |
+| `Level` | `Level[expr, spec]`, `Level[expr, spec, False]` | Returns subexpressions at requested positive or negative levels. Associations are traversed through values rather than keys. | [Level](https://reference.wolfram.com/language/ref/Level) |
+| `First` | `First[expr]`, `First[expr, default]` | Returns the first argument of an expression, with optional default for empty expressions. For associations, this is the first value. | [First](https://reference.wolfram.com/language/ref/First) |
+| `Last` | `Last[expr]`, `Last[expr, default]` | Returns the last argument of an expression, with optional default for empty expressions. For associations, this is the last value. | [Last](https://reference.wolfram.com/language/ref/Last) |
+| `Rest` | `Rest[expr]` | Returns an expression with its first argument removed. For associations, Tungsten removes the first key-value entry. | [Rest](https://reference.wolfram.com/language/ref/Rest) |
+| `Most` | `Most[expr]` | Returns an expression with its last argument removed. For associations, Tungsten removes the last key-value entry. | [Most](https://reference.wolfram.com/language/ref/Most) |
+| `Take` | `Take[expr, n]`, `Take[expr, All]`, `Take[expr, span]`, `Take[expr, {n}]`, `Take[expr, {m, n}]`, `Take[expr, {m, n, s}]` | Selects a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Take](https://reference.wolfram.com/language/ref/Take) |
+| `Drop` | `Drop[expr, n]`, `Drop[expr, All]`, `Drop[expr, span]`, `Drop[expr, {n}]`, `Drop[expr, {m, n}]`, `Drop[expr, {m, n, s}]` | Removes a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Drop](https://reference.wolfram.com/language/ref/Drop) |
+| `Append` | `Append[expr, item]` | Adds an argument at the end of a nonatomic expression. For associations, Tungsten expects a rule and updates or appends the corresponding key. | [Append](https://reference.wolfram.com/language/ref/Append) |
+| `Prepend` | `Prepend[expr, item]` | Adds an argument at the beginning of a nonatomic expression. For associations, Tungsten expects a rule and updates or prepends the corresponding key. | [Prepend](https://reference.wolfram.com/language/ref/Prepend) |
+| `Join` | `Join[expr1, expr2, ...]` | Concatenates expressions that share the same head. For associations, Tungsten concatenates entries and reapplies last-occurrence-wins normalization. | [Join](https://reference.wolfram.com/language/ref/Join) |
+| `Reverse` | `Reverse[expr]` | Reverses the order of the immediate arguments of an expression. Associations reverse entry order. | [Reverse](https://reference.wolfram.com/language/ref/Reverse) |
+| `RotateLeft` | `RotateLeft[expr]`, `RotateLeft[expr, n]` | Rotates immediate arguments to the left. Associations rotate entry order. | [RotateLeft](https://reference.wolfram.com/language/ref/RotateLeft) |
+| `RotateRight` | `RotateRight[expr]`, `RotateRight[expr, n]` | Rotates immediate arguments to the right. Associations rotate entry order. | [RotateRight](https://reference.wolfram.com/language/ref/RotateRight) |
 | `Flatten` | `Flatten[expr]`, `Flatten[expr, n]`, `Flatten[expr, Infinity]` | Flattens nested subexpressions that have the same head as the outer expression. | [Flatten](https://reference.wolfram.com/language/ref/Flatten) |
-| `Delete` | `Delete[expr, pos]` | Removes one or more exact-position parts from an expression. | [Delete](https://reference.wolfram.com/language/ref/Delete) |
-| `ReplacePart` | `ReplacePart[expr, rule]`, `ReplacePart[expr, {rule1, ...}]` | Replaces exact-position parts using explicit rules. | [ReplacePart](https://reference.wolfram.com/language/ref/ReplacePart) |
-| `Apply` | `Apply[f, expr]` | Replaces the head of a nonatomic expression with another expression. | [Apply](https://reference.wolfram.com/language/ref/Apply) |
-| `Map` | `Map[f, expr]` | Applies a function structurally to each immediate argument. | [Map](https://reference.wolfram.com/language/ref/Map) |
-| `MapAt` | `MapAt[f, expr, pos]` | Applies a function structurally at one or more exact positions. | [MapAt](https://reference.wolfram.com/language/ref/MapAt) |
+| `Delete` | `Delete[expr, pos]` | Removes one or more exact-position parts from an expression. For associations, a final top-level key or numeric selector removes an entry, while deeper suffixes operate inside the selected value. | [Delete](https://reference.wolfram.com/language/ref/Delete) |
+| `ReplacePart` | `ReplacePart[expr, rule]`, `ReplacePart[expr, {rule1, ...}]` | Replaces exact-position parts using explicit rules. For associations, top-level selectors replace entry values, not entire rules. | [ReplacePart](https://reference.wolfram.com/language/ref/ReplacePart) |
+| `Apply` | `Apply[f, expr]` | Replaces the head of a nonatomic expression with another expression. For associations, Tungsten applies over values, producing `f[value1, ...]`. | [Apply](https://reference.wolfram.com/language/ref/Apply) |
+| `Map` | `Map[f, expr]` | Applies a function structurally to each immediate argument. For associations, Tungsten maps over values and keeps keys unchanged. | [Map](https://reference.wolfram.com/language/ref/Map) |
+| `MapAt` | `MapAt[f, expr, pos]` | Applies a function structurally at one or more exact positions. Association positions target values using the same key-aware position syntax as `Part`. | [MapAt](https://reference.wolfram.com/language/ref/MapAt) |
+| `Keys` | `Keys[assoc]` | Returns the keys of an association as a list. | [Keys](https://reference.wolfram.com/language/ref/Keys) |
+| `Values` | `Values[assoc]` | Returns the values of an association as a list. | [Values](https://reference.wolfram.com/language/ref/Values) |
+| `Normal` | `Normal[assoc]` | Converts an association to a plain list of rules. | [Normal](https://reference.wolfram.com/language/ref/Normal) |
+| `Lookup` | `Lookup[assoc, key]`, `Lookup[assoc, key, default]`, `Lookup[assoc, {key1, ...}]`, `Lookup[assoc, {key1, ...}, default]` | Looks up one or more keys, returning `Missing["KeyAbsent", key]` when no default is provided. | [Lookup](https://reference.wolfram.com/language/ref/Lookup) |
+| `KeyExistsQ` | `KeyExistsQ[assoc, key]` | Tests whether an association contains a key. | [KeyExistsQ](https://reference.wolfram.com/language/ref/KeyExistsQ) |
+| `KeyMemberQ` | `KeyMemberQ[assoc, key]` | Synonym-style key-membership test supported for associations. | [KeyMemberQ](https://reference.wolfram.com/language/ref/KeyMemberQ) |
+| `KeyTake` | `KeyTake[assoc, key]`, `KeyTake[assoc, {key1, ...}]` | Selects key-value pairs by explicit key list, preserving requested-key order. | [KeyTake](https://reference.wolfram.com/language/ref/KeyTake) |
+| `KeyDrop` | `KeyDrop[assoc, key]`, `KeyDrop[assoc, {key1, ...}]` | Removes key-value pairs by explicit key list while preserving the order of the remaining entries. | [KeyDrop](https://reference.wolfram.com/language/ref/KeyDrop) |
+| `KeyMap` | `KeyMap[f, assoc]` | Applies a function to association keys while keeping values unchanged and re-normalizing duplicate mapped keys. | [KeyMap](https://reference.wolfram.com/language/ref/KeyMap) |
+| `KeyValueMap` | `KeyValueMap[f, assoc]` | Returns a list of `f[key, value]` results in association order. | [KeyValueMap](https://reference.wolfram.com/language/ref/KeyValueMap) |
+| `AssociationThread` | `AssociationThread[{k1, ...}, {v1, ...}]` | Builds an association from parallel key and value lists of equal length. | [AssociationThread](https://reference.wolfram.com/language/ref/AssociationThread) |
+| `AssociationMap` | `AssociationMap[f, {k1, ...}]` | Builds an association that maps each listed key to `f[key]`. | [AssociationMap](https://reference.wolfram.com/language/ref/AssociationMap) |
 
 ## Notes on position semantics
 
 - Tungsten position handling is exact and structural. It does not implement pattern matching.
 - The same position syntax family is shared across `Part`, `Extract`, `Delete`, `ReplacePart`, and
   `MapAt`, but not every Wolfram-language variant is implemented.
-- `Part` and `Extract` support selector-style components such as `All`, spans, and selector lists.
-- `ReplacePart` and `MapAt` support exact position lists and lists of exact position lists.
+- `Part` and `Extract` support selector-style components such as `All`, spans, selector lists,
+  `Key[key]`, and string-key shorthand inside associations.
+- On associations, selector lists may be all numeric-like (`2`, `All`, spans) or all key-like
+  (`Key[a]`, `"name"`), but Tungsten rejects mixed numeric-and-key selector lists.
+- `ReplacePart` and `MapAt` support exact position lists and lists of exact position lists, now
+  including association-aware key components.
 - Tungsten canonicalizes negative positions to concrete positive positions internally before
   applying updates, which keeps multi-update behavior deterministic.
 
@@ -79,3 +102,5 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `RotateLeft`, `RotateRight`, and `Flatten` expect a nonatomic expression.
 - Empty nonatomic expressions such as `f[]` are handled structurally where that behavior is
   straightforward and deterministic.
+- Empty associations such as `<||>` are also handled structurally where the result is
+  deterministic, for example `Depth[<||>] -> 2` and `Part[<||>, All] -> <||>`.

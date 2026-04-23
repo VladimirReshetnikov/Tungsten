@@ -8,6 +8,7 @@ from tungsten.expression import evaluate
 from tungsten.expression import parse_full_form
 from tungsten.expression import parse_input_form
 from tungsten.expression import parse_standard_form
+from tungsten.expression import WolframEvaluationError
 
 
 class ExpressionParserTests(unittest.TestCase):
@@ -55,11 +56,60 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
 
     @classmethod
     def _extract_example(cls, notebook_name: str, pattern: str) -> str:
-        notebook_text = cls._load_reference_notebook(notebook_name)
-        match = re.search(pattern, notebook_text, flags=re.DOTALL)
-        if match is None:
-            raise AssertionError(f"Could not find example matching {pattern!r} in {notebook_name}.")
-        return match.group(0)
+        for docs_root in cls.docs_roots:
+            candidate = docs_root / "ReferencePages" / "Symbols" / notebook_name
+            if not candidate.exists():
+                continue
+            notebook_text = candidate.read_text(encoding="utf-8")
+            match = re.search(pattern, notebook_text, flags=re.DOTALL)
+            if match is not None:
+                return match.group(0)
+        raise AssertionError(f"Could not find example matching {pattern!r} in any {notebook_name} copy.")
+
+    @classmethod
+    def _extract_boxdata_by_cell_id(cls, notebook_name: str, cell_id: int) -> str:
+        for docs_root in cls.docs_roots:
+            candidate = docs_root / "ReferencePages" / "Symbols" / notebook_name
+            if not candidate.exists():
+                continue
+            notebook_text = candidate.read_text(encoding="utf-8")
+            marker = f"CellID->{cell_id}"
+            marker_index = notebook_text.find(marker)
+            if marker_index < 0:
+                continue
+
+            boxdata_start = notebook_text.rfind("Cell[BoxData[", 0, marker_index)
+            if boxdata_start < 0:
+                continue
+
+            content_start = boxdata_start + len("Cell[BoxData[")
+            depth = 1
+            index = content_start
+            in_string = False
+            while index < len(notebook_text):
+                char = notebook_text[index]
+                if in_string:
+                    if char == "\\":
+                        index += 2
+                        continue
+                    if char == "\"":
+                        in_string = False
+                    index += 1
+                    continue
+
+                if char == "\"":
+                    in_string = True
+                    index += 1
+                    continue
+                if char == "[":
+                    depth += 1
+                elif char == "]":
+                    depth -= 1
+                    if depth == 0:
+                        return notebook_text[content_start:index].strip()
+                index += 1
+
+        raise AssertionError(f"Could not parse BoxData contents for input cell {cell_id} in any {notebook_name} copy.")
 
     def test_fraction_box_example_from_docs_unwraps_styled_operands(self) -> None:
         source = self._extract_example(
@@ -108,6 +158,46 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         )
         expr = parse_standard_form(source)
         self.assertEqual(expr.to_full_form(), "Times[Power[x, 3], Power[Plus[1, Times[a, b]], -1]]")
+
+    def test_association_key_part_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Association.nb", 192453798)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            "Part[Association[Rule[a, x], Rule[b, y], Rule[c, z]], Key[b]]",
+        )
+
+    def test_association_string_key_part_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Association.nb", 581979623)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            'Part[Association[Rule["a", x], Rule["b", y], Rule["c", z]], "b"]',
+        )
+
+    def test_association_numeric_part_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Association.nb", 703193542)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            "Part[Association[Rule[a, x], Rule[b, y], Rule[c, z]], 2]",
+        )
+
+    def test_association_mixed_nesting_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Association.nb", 100783286)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            "Part[List[Association[Rule[a, x], Rule[b, List[y, z]]]], 1, Key[b], 2]",
+        )
+
+    def test_association_mixed_string_key_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Association.nb", 622564489)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            'Part[List[Association[Rule["a", x], Rule["b", List[y, z]]]], 1, "b", 2]',
+        )
 
 
 class ExpressionEvaluationTests(unittest.TestCase):
@@ -222,6 +312,102 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(map_atom.to_full_form(), "x")
         self.assertEqual(map_at_result.to_full_form(), "f[a, h[g[b], c], d]")
         self.assertEqual(map_at_multiple.to_full_form(), "f[a, g[g[b]], c]")
+
+    def test_association_constructor_and_depth(self) -> None:
+        literal = evaluate(parse_input_form("<|a -> 1, a -> 2, b -> 3|>"))
+        constructor = evaluate(parse_input_form("Association[{a -> 1, a -> 2, b -> 3}]"))
+        depth_result = evaluate(parse_input_form("Depth[<|a -> <|b -> 1|>, c -> {2, 3}|>]"))
+        association_q = evaluate(parse_input_form("AssociationQ[Association[a]]"))
+        self.assertEqual(literal.to_full_form(), "Association[Rule[a, 2], Rule[b, 3]]")
+        self.assertEqual(constructor.to_full_form(), "Association[Rule[a, 2], Rule[b, 3]]")
+        self.assertEqual(depth_result.to_full_form(), "3")
+        self.assertEqual(association_q.to_full_form(), "False")
+
+    def test_association_access_conversion_and_lookup_functions(self) -> None:
+        keys_result = evaluate(parse_input_form("Keys[<|a -> x, b -> y, c -> z|>]"))
+        values_result = evaluate(parse_input_form("Values[<|a -> x, b -> y, c -> z|>]"))
+        normal_result = evaluate(parse_input_form("Normal[<|a -> x, b -> y|>]"))
+        lookup_single = evaluate(parse_input_form("Lookup[<|a -> 1, b -> 2|>, b]"))
+        lookup_missing = evaluate(parse_input_form("Lookup[<|a -> 1, b -> 2|>, d]"))
+        lookup_default = evaluate(parse_input_form("Lookup[<|a -> 1, b -> 2|>, {b, d}, q]"))
+        key_exists = evaluate(parse_input_form("KeyExistsQ[<|a -> x, b -> y|>, b]"))
+        key_member = evaluate(parse_input_form("KeyMemberQ[<|a -> x, b -> y|>, d]"))
+        self.assertEqual(keys_result.to_full_form(), "List[a, b, c]")
+        self.assertEqual(values_result.to_full_form(), "List[x, y, z]")
+        self.assertEqual(normal_result.to_full_form(), "List[Rule[a, x], Rule[b, y]]")
+        self.assertEqual(lookup_single.to_full_form(), "2")
+        self.assertEqual(lookup_missing.to_full_form(), 'Missing["KeyAbsent", d]')
+        self.assertEqual(lookup_default.to_full_form(), "List[2, q]")
+        self.assertEqual(key_exists.to_full_form(), "True")
+        self.assertEqual(key_member.to_full_form(), "False")
+
+    def test_association_key_transforms_and_constructors(self) -> None:
+        key_take = evaluate(parse_input_form("KeyTake[<|a -> 1, b -> 2, c -> 3|>, {c, a}]"))
+        key_drop = evaluate(parse_input_form("KeyDrop[<|a -> 1, b -> 2, c -> 3|>, {c, a}]"))
+        key_map = evaluate(parse_input_form("KeyMap[f, <|a -> 1, b -> 2|>]"))
+        key_value_map = evaluate(parse_input_form("KeyValueMap[f, <|a -> 1, b -> 2|>]"))
+        association_thread = evaluate(parse_input_form("AssociationThread[{a, b, c}, {1, 2, 3}]"))
+        association_map = evaluate(parse_input_form("AssociationMap[f, {a, b, c}]"))
+        self.assertEqual(key_take.to_full_form(), "Association[Rule[c, 3], Rule[a, 1]]")
+        self.assertEqual(key_drop.to_full_form(), "Association[Rule[b, 2]]")
+        self.assertEqual(key_map.to_full_form(), "Association[Rule[f[a], 1], Rule[f[b], 2]]")
+        self.assertEqual(key_value_map.to_full_form(), "List[f[a, 1], f[b, 2]]")
+        self.assertEqual(association_thread.to_full_form(), "Association[Rule[a, 1], Rule[b, 2], Rule[c, 3]]")
+        self.assertEqual(association_map.to_full_form(), "Association[Rule[a, f[a]], Rule[b, f[b]], Rule[c, f[c]]]")
+
+    def test_association_structural_functions_operate_on_values(self) -> None:
+        first_result = evaluate(parse_input_form("First[<|a -> 1, b -> 2, c -> 3|>]"))
+        last_result = evaluate(parse_input_form("Last[<|a -> 1, b -> 2, c -> 3|>]"))
+        rest_result = evaluate(parse_input_form("Rest[<|a -> 1, b -> 2, c -> 3|>]"))
+        most_result = evaluate(parse_input_form("Most[<|a -> 1, b -> 2, c -> 3|>]"))
+        take_result = evaluate(parse_input_form("Take[<|a -> 1, b -> 2, c -> 3|>, 2]"))
+        drop_result = evaluate(parse_input_form("Drop[<|a -> 1, b -> 2, c -> 3|>, 2]"))
+        append_result = evaluate(parse_input_form("Append[<|a -> 1, b -> 2|>, a -> 9]"))
+        prepend_result = evaluate(parse_input_form("Prepend[<|a -> 1, b -> 2|>, a -> 9]"))
+        join_result = evaluate(parse_input_form("Join[<|a -> 1, b -> 2|>, <|a -> 9, c -> 3|>]"))
+        apply_result = evaluate(parse_input_form("Apply[g, <|a -> 1, b -> 2|>]"))
+        map_result = evaluate(parse_input_form("Map[g, <|a -> 1, b -> 2|>]"))
+        self.assertEqual(first_result.to_full_form(), "1")
+        self.assertEqual(last_result.to_full_form(), "3")
+        self.assertEqual(rest_result.to_full_form(), "Association[Rule[b, 2], Rule[c, 3]]")
+        self.assertEqual(most_result.to_full_form(), "Association[Rule[a, 1], Rule[b, 2]]")
+        self.assertEqual(take_result.to_full_form(), "Association[Rule[a, 1], Rule[b, 2]]")
+        self.assertEqual(drop_result.to_full_form(), "Association[Rule[c, 3]]")
+        self.assertEqual(append_result.to_full_form(), "Association[Rule[b, 2], Rule[a, 9]]")
+        self.assertEqual(prepend_result.to_full_form(), "Association[Rule[a, 9], Rule[b, 2]]")
+        self.assertEqual(join_result.to_full_form(), "Association[Rule[b, 2], Rule[a, 9], Rule[c, 3]]")
+        self.assertEqual(apply_result.to_full_form(), "g[1, 2]")
+        self.assertEqual(map_result.to_full_form(), "Association[Rule[a, g[1]], Rule[b, g[2]]]")
+
+    def test_association_part_extract_delete_replacepart_and_mapat(self) -> None:
+        part_key = evaluate(parse_input_form("Part[<|a -> x, b -> y, c -> z|>, Key[b]]"))
+        part_string = evaluate(parse_input_form('Part[<|"a" -> x, "b" -> {y, z}|>, "b", 2]'))
+        part_numeric = evaluate(parse_input_form("Part[<|a -> x, b -> y, c -> z|>, 2]"))
+        part_selector = evaluate(parse_input_form("Part[<|a -> 1, b -> 2, c -> 3, d -> 4|>, {Key[a], Key[c]}]"))
+        extract_result = evaluate(parse_input_form("Extract[<|a -> 1, b -> 2, c -> 3|>, {{Key[a]}, {Key[c]}}]"))
+        extract_nested = evaluate(parse_input_form("Extract[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]"))
+        delete_result = evaluate(parse_input_form("Delete[<|a -> 1, b -> 2, c -> 3|>, {{Key[a]}, {Key[c]}}]"))
+        delete_nested = evaluate(parse_input_form("Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]"))
+        replace_result = evaluate(parse_input_form("ReplacePart[<|a -> 1, b -> 2, c -> 3|>, {{Key[a]} -> x, {Key[c]} -> z}]"))
+        replace_nested = evaluate(parse_input_form("ReplacePart[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2} -> x]"))
+        map_at_result = evaluate(parse_input_form("MapAt[f, <|a -> 1, b -> 2, c -> 3|>, {{Key[a]}, {Key[c]}}]"))
+        map_at_nested = evaluate(parse_input_form("MapAt[f, {<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]"))
+        self.assertEqual(part_key.to_full_form(), "y")
+        self.assertEqual(part_string.to_full_form(), "z")
+        self.assertEqual(part_numeric.to_full_form(), "y")
+        self.assertEqual(part_selector.to_full_form(), "Association[Rule[a, 1], Rule[c, 3]]")
+        self.assertEqual(extract_result.to_full_form(), "List[1, 3]")
+        self.assertEqual(extract_nested.to_full_form(), "3")
+        self.assertEqual(delete_result.to_full_form(), "Association[Rule[b, 2]]")
+        self.assertEqual(delete_nested.to_full_form(), "List[Association[Rule[a, 1], Rule[b, List[2]]], 9]")
+        self.assertEqual(replace_result.to_full_form(), "Association[Rule[a, x], Rule[b, 2], Rule[c, z]]")
+        self.assertEqual(replace_nested.to_full_form(), "List[Association[Rule[a, 1], Rule[b, List[2, x]]], 9]")
+        self.assertEqual(map_at_result.to_full_form(), "Association[Rule[a, f[1]], Rule[b, 2], Rule[c, f[3]]]")
+        self.assertEqual(map_at_nested.to_full_form(), "List[Association[Rule[a, 1], Rule[b, List[2, f[3]]]], 9]")
+
+    def test_association_mixed_selector_lists_are_rejected(self) -> None:
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("Part[<|a -> 1, b -> 2, c -> 3, d -> 4|>, {2, Key[d]}]"))
 
 
 if __name__ == "__main__":
