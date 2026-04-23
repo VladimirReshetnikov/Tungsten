@@ -185,6 +185,27 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["full_form"], "Plus[1, Times[2, Power[x, 3]]]")
         self.assertEqual(payload["depth"], 4)
 
+    def test_expr_parse_command_reports_json_error_payload(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "expr",
+                    "parse",
+                    "--code",
+                    "x := 5",
+                    "--form",
+                    "input",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["command"], "parse")
+        self.assertEqual(payload["error_type"], "WolframSyntaxError")
+        self.assertIn("Unexpected Wolfram syntax character", payload["error"])
+
     def test_expr_evaluate_command(self) -> None:
         stdout = io.StringIO()
         with redirect_stdout(stdout):
@@ -202,6 +223,28 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["result"]["full_form"], "List[a, b]")
+
+    def test_expr_evaluate_command_reports_json_error_payload(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "expr",
+                    "evaluate",
+                    "--code",
+                    "Part[f[a], 2]",
+                    "--form",
+                    "input",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["command"], "evaluate")
+        self.assertEqual(payload["error_type"], "WolframEvaluationError")
+        self.assertEqual(payload["parsed_full_form"], "Part[f[a], 2]")
+        self.assertIn("Part specifications are invalid", payload["error"])
 
     def test_expr_evaluate_command_with_structural_rewrite(self) -> None:
         stdout = io.StringIO()

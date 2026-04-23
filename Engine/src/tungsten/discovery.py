@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -83,6 +84,7 @@ def _discover_installation_root() -> Path | None:
 def _discover_docs_roots(install_dir: Path | None) -> tuple[Path, ...]:
     roots: list[Path] = []
     appdata = os.environ.get("APPDATA")
+    install_version_prefix = _parse_version(install_dir.name) if install_dir is not None else ()
     if appdata:
         paclet_repo = Path(appdata) / "Wolfram" / "Paclets" / "Repository"
         if paclet_repo.exists():
@@ -91,6 +93,11 @@ def _discover_docs_roots(install_dir: Path | None) -> tuple[Path, ...]:
                 reverse=True,
             )
             for update_dir in update_dirs:
+                if install_version_prefix:
+                    match = re.search(r"-(\d+(?:\.\d+)*)$", update_dir.name)
+                    update_version = _parse_version(match.group(1)) if match else ()
+                    if update_version[: len(install_version_prefix)] != install_version_prefix:
+                        continue
                 candidate = update_dir / "Documentation" / "English"
                 if candidate.exists():
                     roots.append(candidate)

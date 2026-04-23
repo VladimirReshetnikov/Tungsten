@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T22:15:00Z
-- Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
+- Updated (UTC): 2026-04-23T21:12:16Z
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -217,7 +217,7 @@ Find-TungstenDocumentation -Query "NotebookGet"
 ```csharp
 using Tungsten.DotNet;
 
-var client = TungstenClient.CreateForRepositoryRoot(@"C:\Tools1\Tools");
+var client = TungstenClient.CreateForRepositoryRoot(@"<repository-root>");
 
 var environment = await client.GetEnvironmentAsync(probe: true);
 var expression = await client.EvaluateExpressionAsync(
@@ -343,6 +343,7 @@ pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
+pwsh -File .\src\Tungsten\scripts\Update-TungstenDocsProvenance.ps1
 ```
 
 ## Documentation map

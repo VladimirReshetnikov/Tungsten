@@ -261,7 +261,6 @@ ClearAll[
     Tungsten`Private`StringList
 ];
 SetAttributes[Tungsten`Private`CapturedPrint, HoldAll];
-SetAttributes[Tungsten`Private`HeadStringify, HoldAll];
 Tungsten`Private`CapturedPrint[args___] := AppendTo[
     output,
     ToString[Unevaluated[SequenceForm[args]], OutputForm, PageWidth -> Infinity]
@@ -271,7 +270,7 @@ Tungsten`Private`Stringify[value_] := Quiet @ Check[
     "$Failed"
 ];
 Tungsten`Private`HeadStringify[value_] := Quiet @ Check[
-    ToString[Head @ Unevaluated[value], InputForm, PageWidth -> Infinity],
+    ToString[Head[value], InputForm, PageWidth -> Infinity],
     "$Failed"
 ];
 Tungsten`Private`StringList[value_] := If[

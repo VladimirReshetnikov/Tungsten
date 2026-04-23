@@ -31,7 +31,7 @@ public sealed class TungstenClientTests
             Assert.Equal(
                 ["env", "show", "--probe"],
                 response.ExtensionData["forwarded_args"].Deserialize<string[]>()!);
-            Assert.Equal(@"C:\fake\tungsten\src", response.ExtensionData["pythopath"].GetString());
+            Assert.Equal(@"C:\fake\tungsten\src", response.ExtensionData["pythonpath"].GetString());
             Assert.Equal(workingDirectory, response.ExtensionData["cwd"].GetString());
         }
         finally
@@ -164,7 +164,7 @@ public sealed class TungstenClientTests
 
             Assert.True(response.AssistantSuccess);
             Assert.Equal("2 + 2", response.Assistant?.WolframCodeBlocks[0].GetProperty("code").GetString());
-            Assert.Equal("Symbol", response.Evaluation?.ResultHead);
+            Assert.Equal("String", response.Evaluation?.ResultHead);
             var forwarded = response.ExtensionData["forwarded_args"].Deserialize<string[]>()!;
             Assert.Contains("--expression-uuid", forwarded);
             Assert.Contains("uuid-source", forwarded);
@@ -324,7 +324,7 @@ switch ($ForwardedArgs[0]) {
             default_index_path = "C:\Docs\index.sqlite3"
             probe = if ($ForwardedArgs -contains "--probe") { @{ evaluation = @{ success = $true } } } else { $null }
             forwarded_args = $ForwardedArgs
-            pythopath = $env:PYTHONPATH
+            pythonpath = $env:PYTHONPATH
             cwd = (Get-Location).Path
         }
         exit 0
@@ -455,7 +455,7 @@ switch ($ForwardedArgs[0]) {
                 exit_code = 0
                 success = $true
                 result = '"assistant payload"'
-                result_head = "Symbol"
+                result_head = "String"
                 messages = @()
                 messages_text = @()
                 output = @()
@@ -468,7 +468,7 @@ switch ($ForwardedArgs[0]) {
     default {
         Write-Json @{
             forwarded_args = $ForwardedArgs
-            pythopath = $env:PYTHONPATH
+            pythonpath = $env:PYTHONPATH
             cwd = (Get-Location).Path
         }
         exit 0

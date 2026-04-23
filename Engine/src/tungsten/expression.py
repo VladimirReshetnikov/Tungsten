@@ -6,6 +6,8 @@ from typing import Iterable, Sequence
 from .wolfram_strings import has_inline_boxes
 from .wolfram_strings import inline_box_segments
 from .wolfram_strings import parse_wl_string_literal
+from .wolfram_strings import skip_wl_comment
+from .wolfram_strings import skip_wl_string
 from .wolfram_strings import wl_string
 
 
@@ -1982,39 +1984,8 @@ class _Token:
     value: object | None = None
 
 
-def _skip_string(text: str, index: int) -> int:
-    index += 1
-    while index < len(text):
-        if text[index] == "\\":
-            index += 2
-            continue
-        if text[index] == "\"":
-            return index + 1
-        index += 1
-    return index
-
-
-def _skip_comment(text: str, index: int) -> int:
-    depth = 1
-    index += 2
-    while index < len(text) and depth > 0:
-        if text.startswith("(*", index):
-            depth += 1
-            index += 2
-            continue
-        if text.startswith("*)", index):
-            depth -= 1
-            index += 2
-            continue
-        if text[index] == "\"":
-            index = _skip_string(text, index)
-            continue
-        index += 1
-    return index
-
-
 def _scan_string(text: str, start: int) -> tuple[_Token, int]:
-    end = _skip_string(text, start)
+    end = skip_wl_string(text, start)
     if end == len(text) and (not text or text[end - 1] != "\""):
         raise WolframSyntaxError("Unterminated Wolfram string literal.")
     raw = text[start:end]
@@ -2103,7 +2074,7 @@ def _tokenize(text: str) -> list[_Token]:
             index += 1
             continue
         if text.startswith("(*", index):
-            index = _skip_comment(text, index)
+            index = skip_wl_comment(text, index)
             continue
         if text[index] == "\"":
             token, index = _scan_string(text, index)

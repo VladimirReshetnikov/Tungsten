@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-23T22:15:00Z
-Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
+Updated (UTC): 2026-04-23T21:12:16Z
+Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 
 ## Summary
 
@@ -225,7 +225,7 @@ Convenience entrypoints include:
 Parse without evaluating:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path C:\Tools1\Tools\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
 python -m tungsten expr parse --code "1 + 2 x^3"
 python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
 python -m tungsten expr parse --code "f @ x // g" --form standard
@@ -257,7 +257,7 @@ The evaluate payload also includes:
 ## PowerShell usage
 
 ```powershell
-Import-Module C:\Tools1\Tools\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
 
 Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"

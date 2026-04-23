@@ -4,8 +4,8 @@
 - Audience: Tungsten users and maintainers diagnosing local-environment, kernel, FrontEnd, assistant, or parser failures
 - Scope: `src/Tungsten` runtime behavior on a local Windows machine
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-23T17:10:29Z
-- Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Updated (UTC): 2026-04-23T21:12:16Z
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -80,6 +80,7 @@ If those five checks behave as expected, the core Tungsten stack is usually heal
 - `evaluation_available` is `false`.
 - `json_path` is `null`.
 - `stderr` contains an evaluation or launch failure.
+- the process exit code is `2`.
 
 ### Checks
 
@@ -325,6 +326,9 @@ semantics.
 - Fall back to `kernel eval` if you genuinely need the real Wolfram parser/evaluator.
 - Reduce the expression to the supported textual subset if your goal is structural analysis rather
   than full evaluation.
+- Inspect the structured `success`, `error_type`, and `error` fields from `expr parse` or
+  `expr evaluate`; Tungsten now reports syntax and inert-evaluation failures as JSON rather than as
+  raw Python tracebacks.
 
 ## Problem: Canonical `input_form` output is different from the original source text
 

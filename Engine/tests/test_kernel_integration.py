@@ -19,8 +19,18 @@ class KernelIntegrationTests(unittest.TestCase):
 
         self.assertTrue(result.evaluation_available)
         self.assertEqual(result.result, "4")
+        self.assertEqual(result.result_head, "Integer")
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(result.used_mathpass_workaround)
+
+    def test_reports_result_heads_for_common_values(self) -> None:
+        runner = WolframKernelRunner(self.installation)
+
+        list_result = runner.evaluate_text("{1, 2}")
+        string_result = runner.evaluate_text('"hello"')
+
+        self.assertEqual(list_result.result_head, "List")
+        self.assertEqual(string_result.result_head, "String")
 
     def test_reports_message_failures(self) -> None:
         runner = WolframKernelRunner(self.installation)

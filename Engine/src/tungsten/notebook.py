@@ -9,6 +9,8 @@ from typing import Iterable
 from .wolfram_strings import display_text as display_wl_string
 from .wolfram_strings import inline_box_segments
 from .wolfram_strings import parse_wl_string_literal
+from .wolfram_strings import skip_wl_comment
+from .wolfram_strings import skip_wl_string
 from .wolfram_strings import wl_string
 
 
@@ -17,12 +19,12 @@ def extract_string_literals(text: str) -> list[str]:
     index = 0
     while index < len(text):
         if text.startswith("(*", index):
-            index = _skip_comment(text, index)
+            index = skip_wl_comment(text, index)
             continue
 
         if text[index] == "\"":
             start = index
-            index = _skip_string(text, index)
+            index = skip_wl_string(text, index)
             literals.append(parse_wl_string_literal(text[start:index]))
             continue
 
@@ -38,45 +40,13 @@ def collapse_text(text: str, limit: int = 160) -> str:
     return collapsed[: limit - 1].rstrip() + "…"
 
 
-def _skip_string(text: str, index: int) -> int:
-    index += 1
-    while index < len(text):
-        char = text[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == "\"":
-            return index + 1
-        index += 1
-    return index
-
-
-def _skip_comment(text: str, index: int) -> int:
-    depth = 1
-    index += 2
-    while index < len(text) and depth > 0:
-        if text.startswith("(*", index):
-            depth += 1
-            index += 2
-            continue
-        if text.startswith("*)", index):
-            depth -= 1
-            index += 2
-            continue
-        if text[index] == "\"":
-            index = _skip_string(text, index)
-            continue
-        index += 1
-    return index
-
-
 def _skip_ws_comments(text: str, index: int) -> int:
     while index < len(text):
         if text[index].isspace():
             index += 1
             continue
         if text.startswith("(*", index):
-            index = _skip_comment(text, index)
+            index = skip_wl_comment(text, index)
             continue
         break
     return index
@@ -87,10 +57,10 @@ def _find_matching(text: str, index: int, open_char: str, close_char: str) -> in
     index += 1
     while index < len(text):
         if text.startswith("(*", index):
-            index = _skip_comment(text, index)
+            index = skip_wl_comment(text, index)
             continue
         if text[index] == "\"":
-            index = _skip_string(text, index)
+            index = skip_wl_string(text, index)
             continue
         if text[index] == open_char:
             depth += 1
@@ -109,10 +79,10 @@ def split_top_level(text: str) -> list[str]:
     stack: list[str] = []
     while index < len(text):
         if text.startswith("(*", index):
-            index = _skip_comment(text, index)
+            index = skip_wl_comment(text, index)
             continue
         if text[index] == "\"":
-            index = _skip_string(text, index)
+            index = skip_wl_string(text, index)
             continue
 
         char = text[index]
@@ -138,10 +108,10 @@ def parse_call(expr: str) -> tuple[str, list[str]]:
     index = _skip_ws_comments(expr, 0)
     while index < len(expr):
         if expr[index] == "\"":
-            index = _skip_string(expr, index)
+            index = skip_wl_string(expr, index)
             continue
         if expr.startswith("(*", index):
-            index = _skip_comment(expr, index)
+            index = skip_wl_comment(expr, index)
             continue
         if expr[index] == "[":
             head = expr[:index].strip()

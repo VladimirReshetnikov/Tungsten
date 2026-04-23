@@ -1,8 +1,11 @@
 # Tungsten Implementation Details
 
-Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-23T17:10:29Z
-Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Status: Informational and maintainership-oriented (design rationale, machine findings, and implementation-specific constraints)
+- Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
+- Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
+- Created (UTC): 2026-04-23T02:16:55Z
+- Updated (UTC): 2026-04-23T21:12:16Z
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 
 ## Summary
 
@@ -15,6 +18,22 @@ Where the architecture document says "what the layers are," this document answer
 - why the default Notebook Assistant backend is the hidden chat-notebook flow;
 - why the expression subsystem is separated from notebook parsing;
 - why some outputs are returned as strings even when they represent rich Wolfram objects.
+
+## Threat model
+
+Tungsten assumes trusted local callers. It interpolates notebook paths, prompts, selectors, JSON
+blobs, and Wolfram code snippets into generated Wolfram source through narrow string-literal
+escaping helpers because its primary job is dependable local automation, not hostile-input
+sandboxing.
+
+That means Tungsten is designed for:
+
+- repo-local scripts;
+- trusted PowerShell automation;
+- local .NET callers;
+- agents operating on the owner's machine.
+
+It is not currently hardened as a multi-tenant service boundary or untrusted-code execution broker.
 
 ## Machine findings that materially shaped the design
 
@@ -311,6 +330,16 @@ SQLite is already available, reliable, and a good fit for a local single-user in
 Many documentation lookups are effectively "find `NotebookGet.nb`" rather than "search the body
 text semantically." Using `es.exe` for that common case makes the experience dramatically faster.
 
+### Why docs-root discovery now filters update paclets by install version
+
+This machine has multiple `SystemDocsUpdate*` paclets for older Wolfram versions side by side with
+the current 14.3 installation. Indexing every update paclet would duplicate reference notebooks and
+inflate the local SQLite index.
+
+Tungsten therefore filters `SystemDocsUpdate*` roots to the current install-version prefix before
+building the documentation corpus. That keeps the offline index aligned with the active
+installation rather than with every historical docs update still cached under `%APPDATA%`.
+
 ### Why the extracted text is approximate
 
 Documentation notebooks contain a lot of UI scaffolding and non-content strings. Tungsten filters
@@ -380,6 +409,15 @@ The current default instead:
 
 This preserves the "use the built-in assistant" requirement while giving Tungsten a much more
 script-friendly control surface.
+
+### Why the assistant Wolfram helpers are shared
+
+The assistant module generates several Wolfram scripts: ask-cell, insertion, inline preparation,
+and inline capture. They all need the same notebook/cell resolution and metadata helpers.
+
+Tungsten now generates those shared helpers from one Python-side prelude template instead of
+copying near-identical Wolfram definitions into every builder method. That keeps selector behavior
+and metadata shaping aligned across assistant workflows.
 
 ### Why code insertion is a separate post-processing step
 

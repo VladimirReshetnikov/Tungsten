@@ -45,6 +45,13 @@ WolframStringSegment = StringTextSegment | StringInlineBoxSegment
 
 
 def wl_string(value: str) -> str:
+    """Encode a Python string as a Wolfram string literal.
+
+    The escaping here is intentionally narrow. Tungsten mostly uses this helper for paths,
+    prompts, JSON blobs, and other trusted short text where preserving Wolfram-specific
+    escapes such as ``\\[Pi]`` and inline box syntax ``\\!\\(\\*...\\)`` is more important
+    than aggressively normalizing every control character.
+    """
     escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
     escaped = escaped.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
     return f"\"{escaped}\""
@@ -183,11 +190,11 @@ def _parse_inline_box_segment(value: str, start: int) -> tuple[StringInlineBoxSe
             continue
 
         if value[index] == "\"":
-            index = _skip_string(value, index)
+            index = skip_wl_string(value, index)
             continue
 
         if value.startswith("(*", index):
-            index = _skip_comment(value, index)
+            index = skip_wl_comment(value, index)
             continue
 
         index += 1
@@ -195,7 +202,7 @@ def _parse_inline_box_segment(value: str, start: int) -> tuple[StringInlineBoxSe
     return None
 
 
-def _skip_string(text: str, index: int) -> int:
+def skip_wl_string(text: str, index: int) -> int:
     index += 1
     while index < len(text):
         if text[index] == "\\":
@@ -207,7 +214,7 @@ def _skip_string(text: str, index: int) -> int:
     return index
 
 
-def _skip_comment(text: str, index: int) -> int:
+def skip_wl_comment(text: str, index: int) -> int:
     depth = 1
     index += 2
     while index < len(text) and depth > 0:
@@ -220,7 +227,7 @@ def _skip_comment(text: str, index: int) -> int:
             index += 2
             continue
         if text[index] == "\"":
-            index = _skip_string(text, index)
+            index = skip_wl_string(text, index)
             continue
         index += 1
     return index

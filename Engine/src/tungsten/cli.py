@@ -12,6 +12,8 @@ from .expression import depth as expression_depth
 from .expression import evaluate as evaluate_expression
 from .expression import length as expression_length
 from .expression import parse_expression
+from .expression import WolframEvaluationError
+from .expression import WolframSyntaxError
 from .frontend import FrontEndController
 from .inline_boxes import compose_inline_box_payload
 from .inline_boxes import extract_inline_boxes_from_notebook_cell
@@ -22,6 +24,29 @@ from .notebook import NotebookDocument, apply_patch_spec, load_patch_spec, wl_st
 def _json_dump(payload: object) -> None:
     sys.stdout.write(json.dumps(payload, indent=2))
     sys.stdout.write("\n")
+
+
+def _expr_error_payload(
+    *,
+    command: str,
+    form: str,
+    source: str,
+    error: Exception,
+    parsed: object | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "command": command,
+        "form": form,
+        "source": source,
+        "success": False,
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }
+    if parsed is not None:
+        payload["parsed_input_form"] = parsed.to_input_form()
+        payload["parsed_full_form"] = parsed.to_full_form()
+        payload["parsed_tree"] = parsed.to_dict()
+    return payload
 
 
 def _parse_cell_path(value: str) -> list[int]:
@@ -341,7 +366,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "expr":
         source_text = args.code if args.code is not None else args.file.read_text(encoding="utf-8")
-        parsed = parse_expression(source_text, form=args.form)
+        try:
+            parsed = parse_expression(source_text, form=args.form)
+        except WolframSyntaxError as exc:
+            _json_dump(
+                _expr_error_payload(
+                    command=args.expr_command,
+                    form=args.form,
+                    source=source_text,
+                    error=exc,
+                )
+            )
+            return 1
 
         if args.expr_command == "parse":
             _json_dump(
@@ -359,7 +395,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.expr_command == "evaluate":
-            result = evaluate_expression(parsed)
+            try:
+                result = evaluate_expression(parsed)
+            except WolframEvaluationError as exc:
+                _json_dump(
+                    _expr_error_payload(
+                        command="evaluate",
+                        form=args.form,
+                        source=source_text,
+                        error=exc,
+                        parsed=parsed,
+                    )
+                )
+                return 1
             _json_dump(
                 {
                     "command": "evaluate",

@@ -4,8 +4,8 @@
 - Audience: Users running Tungsten locally, maintainers validating it, and script authors building automation on top of it
 - Scope: Building, running, and troubleshooting Tungsten's Python CLI and PowerShell surfaces
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-23T17:10:29Z
-- Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Updated (UTC): 2026-04-23T21:12:16Z
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 - Related code:
   - `src/Tungsten/src/tungsten/cli.py`
   - `src/Tungsten/src/tungsten/kernel.py`

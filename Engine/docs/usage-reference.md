@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T19:01:41Z
-- Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
+- Updated (UTC): 2026-04-23T21:12:16Z
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -26,6 +26,19 @@
 - Kernel-backed commands depend on a real local Wolfram installation.
 - Kernel-free commands such as notebook file inspection and expression parsing do not require a
   running kernel.
+
+## Exit codes
+
+- `0` means the command completed and produced its normal JSON payload. For commands that support
+  `--require-success`, the payload may still describe a structured failure when that switch is not
+  supplied.
+- `1` means the command reported a structured failure that Tungsten treats as user-visible failure:
+  `expr parse` and `expr evaluate` use it for syntax and structural evaluation errors, and
+  `kernel`, `frontend`, `assistant`, and `inline-box from-cell` use it when `--require-success` is
+  supplied and the returned payload reports failure.
+- `2` is currently used only by `kernel eval`, and means Tungsten could not produce a structured
+  evaluation payload at all. Typical causes include `KernelNotFound`, launch failures, or a kernel
+  run that never reached Tungsten's JSON export step.
 
 ## Python CLI
 
@@ -177,10 +190,12 @@ Example:
 python -m tungsten notebook patch --file C:\Temp\new.nb --spec C:\Temp\patch.json
 ```
 
-Patch operations currently used by Tungsten include:
+Patch operations currently supported by Tungsten include:
 
 - `append_cell`
+- `insert_cell`
 - `replace_cell`
+- `delete_item`
 - `set_option`
 
 Example patch specification:
@@ -318,6 +333,13 @@ Important output fields:
 - `length`
 - `tree`
 
+On syntax failure, `expr parse` still writes structured JSON to stdout and returns exit code `1`
+with:
+
+- `success: false`
+- `error_type: "WolframSyntaxError"`
+- `error`
+
 #### `expr evaluate`
 
 Options:
@@ -367,6 +389,16 @@ For the exact supported forms and limits of each function, see
 [expression-function-support.md](./expression-function-support.md).
 
 Everything else remains inert.
+
+On structural evaluation failure, `expr evaluate` still writes structured JSON to stdout and
+returns exit code `1` with:
+
+- `success: false`
+- `error_type: "WolframEvaluationError"`
+- `error`
+- `parsed_input_form`
+- `parsed_full_form`
+- `parsed_tree`
 
 ### `docs`
 

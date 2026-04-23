@@ -9,6 +9,124 @@ from .kernel import KernelEvaluationResult, WolframKernelRunner
 from .notebook import NotebookDocument, parse_wl_string_literal, wl_string
 
 
+_ASSISTANT_HELPER_TEMPLATE = """
+ClearAll[
+    __CLEAR_NAMES__
+];
+
+tungstenError[type_String, message_String, extra_: <||>] :=
+    Join[<|"success" -> False, "error_type" -> type, "error" -> message|>, extra];
+
+tungstenStringValue[value_] := Replace[
+    value,
+    {
+        None | Null | Inherited | Missing[__] -> Null,
+        s_String :> s,
+        other_ :> ToString[Unevaluated[other], InputForm, PageWidth -> Infinity]
+    }
+];
+
+tungstenStringList[value_] := Replace[
+    value,
+    {
+        s_String :> {s},
+        list_List :> Cases[list, tag_String :> tag, Infinity],
+        _ :> {}
+    }
+];
+
+tungstenCompactText[text_String] := StringTake[
+    StringTrim @ StringReplace[text, WhitespaceCharacter .. -> " "],
+    UpTo[240]
+];
+
+tungstenCellMetadata[cell_CellObject] := Module[
+    {cellExpr, preview},
+    cellExpr = Quiet @ Check[NotebookRead @ cell, $Failed];
+    preview = Quiet @ Check[__PREVIEW_EXPRESSION__, ""];
+    <|
+        "expression_uuid" -> tungstenStringValue @ CurrentValue[cell, ExpressionUUID],
+        "cell_id" -> Replace[CurrentValue[cell, CellID], {value_Integer :> value, _ :> Null}],
+        "cell_tags" -> tungstenStringList @ CurrentValue[cell, CellTags],
+        "style" -> tungstenStringValue @ CurrentValue[cell, CellStyle],
+        "preview" -> tungstenCompactText @ Replace[preview, Except[_String] :> ""]
+    |>
+];
+
+tungstenFindNotebook[path_String] :=
+    SelectFirst[Notebooks[], Quiet @ Check[NotebookFileName[#] === path, False] &, Missing["NotFound"]];
+
+tungstenResolveNotebook[path_String] := Module[
+    {existing, opened},
+    existing = tungstenFindNotebook @ path;
+    If[MatchQ[existing, _NotebookObject], Return[existing]];
+    opened = Quiet @ Check[NotebookOpen[path], $Failed];
+    If[
+        MatchQ[opened, _NotebookObject],
+        opened,
+        tungstenError["NotebookOpenFailed", "Unable to open the requested notebook.", <|"notebook_path" -> path|>]
+    ]
+];
+
+tungstenResolveCell[nbo_NotebookObject, selector_Association] := Module[
+    {matches = {}, cellIndex, allCells},
+    Which[
+        StringQ @ Lookup[selector, "expression_uuid", Missing["NotFound"]],
+            matches = Cells[nbo, ExpressionUUID -> selector["expression_uuid"]],
+        IntegerQ @ Lookup[selector, "cell_id", Missing["NotFound"]],
+            matches = Cells[nbo, CellID -> selector["cell_id"]],
+        StringQ @ Lookup[selector, "cell_tag", Missing["NotFound"]],
+            matches = Cells[nbo, CellTags -> selector["cell_tag"]],
+        IntegerQ @ Lookup[selector, "cell_index", Missing["NotFound"]],
+            allCells = Cells[nbo];
+            cellIndex = selector["cell_index"] + 1;
+            matches = If[1 <= cellIndex <= Length[allCells], {allCells[[cellIndex]]}, {}],
+        True,
+            matches = {}
+    ];
+
+    Which[
+        Length[matches] == 1, First[matches],
+        Length[matches] == 0,
+            tungstenError["CellNotFound", "No notebook cell matched the requested selector.", <|"selector" -> selector|>],
+        True,
+            tungstenError[
+                "AmbiguousCellSelector",
+                "More than one notebook cell matched the requested selector.",
+                <|"selector" -> selector, "match_count" -> Length[matches]|>
+            ]
+    ]
+];
+""".strip()
+
+
+def _assistant_helper_block(
+    *,
+    preview_expression: str,
+    extra_clear_names: tuple[str, ...] = (),
+) -> str:
+    clear_names = tuple(
+        dict.fromkeys(
+            (
+                "tungstenError",
+                "tungstenStringValue",
+                "tungstenStringList",
+                "tungstenCompactText",
+                "tungstenCellMetadata",
+                "tungstenFindNotebook",
+                "tungstenResolveNotebook",
+                "tungstenResolveCell",
+                *extra_clear_names,
+            )
+        )
+    )
+    return (
+        _ASSISTANT_HELPER_TEMPLATE
+        .replace("__CLEAR_NAMES__", ",\n    ".join(clear_names))
+        .replace("__PREVIEW_EXPRESSION__", preview_expression)
+    )
+
+
 @dataclass(frozen=True)
 class NotebookAssistantResult:
     evaluation: KernelEvaluationResult
@@ -556,128 +674,13 @@ tungstenExtraInstructions = {wl_string(combined_instructions)};
 tungstenChatCellEvaluate = Symbol["Wolfram`Chatbook`ChatCellEvaluate"];
 tungstenCellToString = Symbol["Wolfram`Chatbook`CellToString"];
 
-ClearAll[
-    tungstenError,
-    tungstenStringValue,
-    tungstenStringList,
-    tungstenCompactText,
-    tungstenCellMetadata,
-    tungstenFindNotebook,
-    tungstenResolveNotebook,
-    tungstenResolveCell,
-    tungstenPromptCell,
-    tungstenChatSettings
-];
-
-tungstenError[type_String, message_String, extra_: <||>] :=
-    Join[<|"success" -> False, "error_type" -> type, "error" -> message|>, extra];
-
-tungstenStringValue[value_] := Replace[
-    value,
-    {{
-        None | Null | Inherited | Missing[__] -> Null,
-        s_String :> s,
-        other_ :> ToString[Unevaluated[other], InputForm, PageWidth -> Infinity]
-    }}
-];
-
-tungstenStringList[value_] := Replace[
-    value,
-    {{
-        s_String :> {{s}},
-        list_List :> Cases[list, tag_String :> tag, Infinity],
-        _ :> {{}}
-    }}
-];
-
-tungstenCompactText[text_String] := StringTake[
-    StringTrim @ StringReplace[text, WhitespaceCharacter .. -> " "],
-    UpTo[240]
-];
-
-tungstenCellMetadata[cell_CellObject] := Module[
-    {{cellExpr, preview}},
-    cellExpr = Quiet @ Check[NotebookRead @ cell, $Failed];
-    preview = Quiet @ Check[tungstenCellToString @ cellExpr, ""];
-    <|
-        "expression_uuid" -> tungstenStringValue @ CurrentValue[cell, ExpressionUUID],
-        "cell_id" -> Replace[CurrentValue[cell, CellID], {{value_Integer :> value, _ :> Null}}],
-        "cell_tags" -> tungstenStringList @ CurrentValue[cell, CellTags],
-        "style" -> tungstenStringValue @ CurrentValue[cell, CellStyle],
-        "preview" -> tungstenCompactText @ Replace[preview, Except[_String] :> ""]
-    |>
-];
-
-tungstenFindNotebook[path_String] :=
-    SelectFirst[Notebooks[], Quiet @ Check[NotebookFileName[#] === path, False] &, Missing["NotFound"]];
-
-tungstenResolveNotebook[path_String] := Module[
-    {{existing, opened}},
-    existing = tungstenFindNotebook @ path;
-    If[MatchQ[existing, _NotebookObject], Return[existing]];
-    opened = Quiet @ Check[NotebookOpen[path], $Failed];
-    If[MatchQ[opened, _NotebookObject],
-        opened,
-        tungstenError["NotebookOpenFailed", "Unable to open the requested notebook.", <|"notebook_path" -> path|>]
-    ]
-];
-
-tungstenResolveCell[nbo_NotebookObject, selector_Association] := Module[
-    {{matches = {{}}, cellIndex, allCells}},
-    Which[
-        StringQ @ Lookup[selector, "expression_uuid", Missing["NotFound"]],
-            matches = Cells[nbo, ExpressionUUID -> selector["expression_uuid"]],
-        IntegerQ @ Lookup[selector, "cell_id", Missing["NotFound"]],
-            matches = Cells[nbo, CellID -> selector["cell_id"]],
-        StringQ @ Lookup[selector, "cell_tag", Missing["NotFound"]],
-            matches = Cells[nbo, CellTags -> selector["cell_tag"]],
-        IntegerQ @ Lookup[selector, "cell_index", Missing["NotFound"]],
-            allCells = Cells[nbo];
-            cellIndex = selector["cell_index"] + 1;
-            matches = If[1 <= cellIndex <= Length[allCells], {{allCells[[cellIndex]]}}, {{}}],
-        True,
-            matches = {{}}
-    ];
-
-    Which[
-        Length[matches] == 1, First[matches],
-        Length[matches] == 0,
-            tungstenError[
-                "CellNotFound",
-                "No notebook cell matched the requested selector.",
-                <|"selector" -> selector|>
-            ],
-        True,
-            tungstenError[
-                "AmbiguousCellSelector",
-                "More than one notebook cell matched the requested selector.",
-                <|"selector" -> selector, "match_count" -> Length[matches]|>
-            ]
-    ]
-];
-
-tungstenLatestChatOutput[nbo_NotebookObject] := Module[
-    {{outputs}},
-    outputs = Select[Cells[nbo], Quiet @ Check[CurrentValue[#, CellStyle] === "ChatOutput", False] &];
-    If[outputs === {{}}, Missing["NoChatOutput"], Last[outputs]]
-];
-
-tungstenCodeCellData[cell_Cell] := Module[
-    {{content, language}},
-    content = tungstenGetCodeBlockContent @ cell;
-    language = Which[
-        MatchQ[content, Cell[_, "Input", ___]], "WolframLanguage",
-        MatchQ[content, Cell[_, "ExternalLanguage", ___, CellEvaluationLanguage -> lang_, ___]],
-            "ExternalLanguage:" <> ToString[lang, InputForm, PageWidth -> Infinity],
-        True,
-            "Unknown"
-    ];
-    <|
-        "language" -> language,
-        "code" -> Quiet @ Check[tungstenCellToString @ content, ToString[content, InputForm, PageWidth -> Infinity]],
-        "cell_expression" -> ToString[content, InputForm, PageWidth -> Infinity]
-    |>
-];
+{_assistant_helper_block(
+    preview_expression="tungstenCellToString @ cellExpr",
+    extra_clear_names=(
+        "tungstenPromptCell",
+        "tungstenChatSettings",
+    ),
+)}
 
 tungstenPromptCell[sourceCell_CellObject] := Module[
     {{sourceExpr, sourceText, sourceStyle, styleText}},
@@ -811,100 +814,7 @@ tungstenCodes = ImportString[{wl_string(codes_json)}, "RawJSON"];
 tungstenNotebookPath = {wl_string(notebook_path.as_posix())};
 tungstenSaveNotebook = {"True" if save_notebook else "False"};
 
-ClearAll[
-    tungstenError,
-    tungstenStringValue,
-    tungstenStringList,
-    tungstenCompactText,
-    tungstenCellMetadata,
-    tungstenFindNotebook,
-    tungstenResolveNotebook,
-    tungstenResolveCell
-];
-
-tungstenError[type_String, message_String, extra_: <||>] :=
-    Join[<|"success" -> False, "error_type" -> type, "error" -> message|>, extra];
-
-tungstenStringValue[value_] := Replace[
-    value,
-    {{
-        None | Null | Inherited | Missing[__] -> Null,
-        s_String :> s,
-        other_ :> ToString[Unevaluated[other], InputForm, PageWidth -> Infinity]
-    }}
-];
-
-tungstenStringList[value_] := Replace[
-    value,
-    {{
-        s_String :> {{s}},
-        list_List :> Cases[list, tag_String :> tag, Infinity],
-        _ :> {{}}
-    }}
-];
-
-tungstenCompactText[text_String] := StringTake[
-    StringTrim @ StringReplace[text, WhitespaceCharacter .. -> " "],
-    UpTo[240]
-];
-
-tungstenCellMetadata[cell_CellObject] := Module[
-    {{cellExpr, preview}},
-    cellExpr = Quiet @ Check[NotebookRead @ cell, $Failed];
-    preview = Quiet @ Check[ToString[cellExpr, InputForm, PageWidth -> Infinity], ""];
-    <|
-        "expression_uuid" -> tungstenStringValue @ CurrentValue[cell, ExpressionUUID],
-        "cell_id" -> Replace[CurrentValue[cell, CellID], {{value_Integer :> value, _ :> Null}}],
-        "cell_tags" -> tungstenStringList @ CurrentValue[cell, CellTags],
-        "style" -> tungstenStringValue @ CurrentValue[cell, CellStyle],
-        "preview" -> tungstenCompactText @ Replace[preview, Except[_String] :> ""]
-    |>
-];
-
-tungstenFindNotebook[path_String] :=
-    SelectFirst[Notebooks[], Quiet @ Check[NotebookFileName[#] === path, False] &, Missing["NotFound"]];
-
-tungstenResolveNotebook[path_String] := Module[
-    {{existing, opened}},
-    existing = tungstenFindNotebook @ path;
-    If[MatchQ[existing, _NotebookObject], Return[existing]];
-    opened = Quiet @ Check[NotebookOpen[path], $Failed];
-    If[
-        MatchQ[opened, _NotebookObject],
-        opened,
-        tungstenError["NotebookOpenFailed", "Unable to open the requested notebook.", <|"notebook_path" -> path|>]
-    ]
-];
-
-tungstenResolveCell[nbo_NotebookObject, selector_Association] := Module[
-    {{matches = {{}}, cellIndex, allCells}},
-    Which[
-        StringQ @ Lookup[selector, "expression_uuid", Missing["NotFound"]],
-            matches = Cells[nbo, ExpressionUUID -> selector["expression_uuid"]],
-        IntegerQ @ Lookup[selector, "cell_id", Missing["NotFound"]],
-            matches = Cells[nbo, CellID -> selector["cell_id"]],
-        StringQ @ Lookup[selector, "cell_tag", Missing["NotFound"]],
-            matches = Cells[nbo, CellTags -> selector["cell_tag"]],
-        IntegerQ @ Lookup[selector, "cell_index", Missing["NotFound"]],
-            allCells = Cells[nbo];
-            cellIndex = selector["cell_index"] + 1;
-            matches = If[1 <= cellIndex <= Length[allCells], {{allCells[[cellIndex]]}}, {{}}],
-        True,
-            matches = {{}}
-    ];
-
-    Which[
-        Length[matches] == 1, First[matches],
-        Length[matches] == 0,
-            tungstenError["CellNotFound", "No notebook cell matched the requested selector.", <|"selector" -> selector|>],
-        True,
-            tungstenError[
-                "AmbiguousCellSelector",
-                "More than one notebook cell matched the requested selector.",
-                <|"selector" -> selector, "match_count" -> Length[matches]|>
-            ]
-    ]
-];
+{_assistant_helper_block(preview_expression="ToString[cellExpr, InputForm, PageWidth -> Infinity]")}
 
 tungstenResult = Module[
     {{sourceNotebook, sourceCell, insertionPoint, inserted = {{}}, code, uuid, insertedCell}},
@@ -976,101 +886,7 @@ tungstenSelector = ImportString[{wl_string(selector_json)}, "RawJSON"];
 tungstenNotebookPath = {wl_string(notebook_path.as_posix())};
 tungstenShowNotebookAssistance = Symbol["Wolfram`Chatbook`ShowNotebookAssistance"];
 tungstenCellToString = Symbol["Wolfram`Chatbook`CellToString"];
-
-ClearAll[
-    tungstenError,
-    tungstenStringValue,
-    tungstenStringList,
-    tungstenCompactText,
-    tungstenCellMetadata,
-    tungstenFindNotebook,
-    tungstenResolveNotebook,
-    tungstenResolveCell
-];
-
-tungstenError[type_String, message_String, extra_: <||>] :=
-    Join[<|"success" -> False, "error_type" -> type, "error" -> message|>, extra];
-
-tungstenStringValue[value_] := Replace[
-    value,
-    {{
-        None | Null | Inherited | Missing[__] -> Null,
-        s_String :> s,
-        other_ :> ToString[Unevaluated[other], InputForm, PageWidth -> Infinity]
-    }}
-];
-
-tungstenStringList[value_] := Replace[
-    value,
-    {{
-        s_String :> {{s}},
-        list_List :> Cases[list, tag_String :> tag, Infinity],
-        _ :> {{}}
-    }}
-];
-
-tungstenCompactText[text_String] := StringTake[
-    StringTrim @ StringReplace[text, WhitespaceCharacter .. -> " "],
-    UpTo[240]
-];
-
-tungstenCellMetadata[cell_CellObject] := Module[
-    {{cellExpr, preview}},
-    cellExpr = Quiet @ Check[NotebookRead @ cell, $Failed];
-    preview = Quiet @ Check[tungstenCellToString @ cellExpr, ""];
-    <|
-        "expression_uuid" -> tungstenStringValue @ CurrentValue[cell, ExpressionUUID],
-        "cell_id" -> Replace[CurrentValue[cell, CellID], {{value_Integer :> value, _ :> Null}}],
-        "cell_tags" -> tungstenStringList @ CurrentValue[cell, CellTags],
-        "style" -> tungstenStringValue @ CurrentValue[cell, CellStyle],
-        "preview" -> tungstenCompactText @ Replace[preview, Except[_String] :> ""]
-    |>
-];
-
-tungstenFindNotebook[path_String] :=
-    SelectFirst[Notebooks[], Quiet @ Check[NotebookFileName[#] === path, False] &, Missing["NotFound"]];
-
-tungstenResolveNotebook[path_String] := Module[
-    {{existing, opened}},
-    existing = tungstenFindNotebook @ path;
-    If[MatchQ[existing, _NotebookObject], Return[existing]];
-    opened = Quiet @ Check[NotebookOpen[path], $Failed];
-    If[
-        MatchQ[opened, _NotebookObject],
-        opened,
-        tungstenError["NotebookOpenFailed", "Unable to open the requested notebook.", <|"notebook_path" -> path|>]
-    ]
-];
-
-tungstenResolveCell[nbo_NotebookObject, selector_Association] := Module[
-    {{matches = {{}}, cellIndex, allCells}},
-    Which[
-        StringQ @ Lookup[selector, "expression_uuid", Missing["NotFound"]],
-            matches = Cells[nbo, ExpressionUUID -> selector["expression_uuid"]],
-        IntegerQ @ Lookup[selector, "cell_id", Missing["NotFound"]],
-            matches = Cells[nbo, CellID -> selector["cell_id"]],
-        StringQ @ Lookup[selector, "cell_tag", Missing["NotFound"]],
-            matches = Cells[nbo, CellTags -> selector["cell_tag"]],
-        IntegerQ @ Lookup[selector, "cell_index", Missing["NotFound"]],
-            allCells = Cells[nbo];
-            cellIndex = selector["cell_index"] + 1;
-            matches = If[1 <= cellIndex <= Length[allCells], {{allCells[[cellIndex]]}}, {{}}],
-        True,
-            matches = {{}}
-    ];
-
-    Which[
-        Length[matches] == 1, First[matches],
-        Length[matches] == 0,
-            tungstenError["CellNotFound", "No notebook cell matched the requested selector.", <|"selector" -> selector|>],
-        True,
-            tungstenError[
-                "AmbiguousCellSelector",
-                "More than one notebook cell matched the requested selector.",
-                <|"selector" -> selector, "match_count" -> Length[matches]|>
-            ]
-    ]
-];
+{_assistant_helper_block(preview_expression="tungstenCellToString @ cellExpr")}
 
 tungstenResult = Module[
     {{sourceNotebook, sourceCell, attachedCell}},
@@ -1140,105 +956,15 @@ tungstenSaveNotebook = {"True" if save_notebook else "False"};
 tungstenCellToString = Symbol["Wolfram`Chatbook`CellToString"];
 tungstenGetCodeBlockContent = Symbol["Wolfram`Chatbook`Formatting`Private`getCodeBlockContent"];
 tungstenInsertAfterChatGeneratedCells = Symbol["Wolfram`Chatbook`Formatting`Private`insertAfterChatGeneratedCells"];
-
-ClearAll[
-    tungstenError,
-    tungstenStringValue,
-    tungstenStringList,
-    tungstenCompactText,
-    tungstenCellMetadata,
-    tungstenFindNotebook,
-    tungstenResolveNotebook,
-    tungstenResolveCell,
-    tungstenFindInlineCell,
-    tungstenCodeCellData,
-    tungstenCodeBlocksFromExpression,
-    tungstenInsertBlocks
-];
-
-tungstenError[type_String, message_String, extra_: <||>] :=
-    Join[<|"success" -> False, "error_type" -> type, "error" -> message|>, extra];
-
-tungstenStringValue[value_] := Replace[
-    value,
-    {{
-        None | Null | Inherited | Missing[__] -> Null,
-        s_String :> s,
-        other_ :> ToString[Unevaluated[other], InputForm, PageWidth -> Infinity]
-    }}
-];
-
-tungstenStringList[value_] := Replace[
-    value,
-    {{
-        s_String :> {{s}},
-        list_List :> Cases[list, tag_String :> tag, Infinity],
-        _ :> {{}}
-    }}
-];
-
-tungstenCompactText[text_String] := StringTake[
-    StringTrim @ StringReplace[text, WhitespaceCharacter .. -> " "],
-    UpTo[240]
-];
-
-tungstenCellMetadata[cell_CellObject] := Module[
-    {{cellExpr, preview}},
-    cellExpr = Quiet @ Check[NotebookRead @ cell, $Failed];
-    preview = Quiet @ Check[tungstenCellToString @ cellExpr, ""];
-    <|
-        "expression_uuid" -> tungstenStringValue @ CurrentValue[cell, ExpressionUUID],
-        "cell_id" -> Replace[CurrentValue[cell, CellID], {{value_Integer :> value, _ :> Null}}],
-        "cell_tags" -> tungstenStringList @ CurrentValue[cell, CellTags],
-        "style" -> tungstenStringValue @ CurrentValue[cell, CellStyle],
-        "preview" -> tungstenCompactText @ Replace[preview, Except[_String] :> ""]
-    |>
-];
-
-tungstenFindNotebook[path_String] :=
-    SelectFirst[Notebooks[], Quiet @ Check[NotebookFileName[#] === path, False] &, Missing["NotFound"]];
-
-tungstenResolveNotebook[path_String] := Module[
-    {{existing, opened}},
-    existing = tungstenFindNotebook @ path;
-    If[MatchQ[existing, _NotebookObject], Return[existing]];
-    opened = Quiet @ Check[NotebookOpen[path], $Failed];
-    If[
-        MatchQ[opened, _NotebookObject],
-        opened,
-        tungstenError["NotebookOpenFailed", "Unable to open the requested notebook.", <|"notebook_path" -> path|>]
-    ]
-];
-
-tungstenResolveCell[nbo_NotebookObject, selector_Association] := Module[
-    {{matches = {{}}, cellIndex, allCells}},
-    Which[
-        StringQ @ Lookup[selector, "expression_uuid", Missing["NotFound"]],
-            matches = Cells[nbo, ExpressionUUID -> selector["expression_uuid"]],
-        IntegerQ @ Lookup[selector, "cell_id", Missing["NotFound"]],
-            matches = Cells[nbo, CellID -> selector["cell_id"]],
-        StringQ @ Lookup[selector, "cell_tag", Missing["NotFound"]],
-            matches = Cells[nbo, CellTags -> selector["cell_tag"]],
-        IntegerQ @ Lookup[selector, "cell_index", Missing["NotFound"]],
-            allCells = Cells[nbo];
-            cellIndex = selector["cell_index"] + 1;
-            matches = If[1 <= cellIndex <= Length[allCells], {{allCells[[cellIndex]]}}, {{}}],
-        True,
-            matches = {{}}
-    ];
-
-    Which[
-        Length[matches] == 1, First[matches],
-        Length[matches] == 0,
-            tungstenError["CellNotFound", "No notebook cell matched the requested selector.", <|"selector" -> selector|>],
-        True,
-            tungstenError[
-                "AmbiguousCellSelector",
-                "More than one notebook cell matched the requested selector.",
-                <|"selector" -> selector, "match_count" -> Length[matches]|>
-            ]
-    ]
-];
+{_assistant_helper_block(
+    preview_expression="tungstenCellToString @ cellExpr",
+    extra_clear_names=(
+        "tungstenFindInlineCell",
+        "tungstenCodeCellData",
+        "tungstenCodeBlocksFromExpression",
+        "tungstenInsertBlocks",
+    ),
+)}
 
 tungstenFindInlineCell[nbo_NotebookObject, source_CellObject] := Module[
     {{attached, marker}},

@@ -4,7 +4,8 @@
 - Audience: C#/.NET application authors, automation developers, maintainers, and reviewers
 - Scope: `src/Tungsten/dotnet` typed wrapper over Tungsten's JSON-first CLI
 - Created (UTC): 2026-04-23T19:01:41Z
-- Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
+- Updated (UTC): 2026-04-23T21:12:16Z
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 - Related code:
   - `src/Tungsten/dotnet/Tungsten.DotNet/`
   - `src/Tungsten/dotnet/Tungsten.DotNet.Tests/`
@@ -105,7 +106,7 @@ The simplest repo-local setup is a project reference:
 
 ```xml
 <ItemGroup>
-  <ProjectReference Include="C:\Tools1\Tools\src\Tungsten\dotnet\Tungsten.DotNet\Tungsten.DotNet.csproj" />
+  <ProjectReference Include="<repository-root>\src\Tungsten\dotnet\Tungsten.DotNet\Tungsten.DotNet.csproj" />
 </ItemGroup>
 ```
 
@@ -122,15 +123,15 @@ If your app is running against this repository checkout, use the repo helpers:
 ```csharp
 using Tungsten.DotNet;
 
-var client = TungstenClient.CreateForRepositoryRoot(@"C:\Tools1\Tools");
+var client = TungstenClient.CreateForRepositoryRoot(@"<repository-root>");
 ```
 
 That configures:
 
 - `python` as the launcher;
 - `-m tungsten` as the command prefix;
-- `C:\Tools1\Tools` as the working directory;
-- `C:\Tools1\Tools\src\Tungsten\src` prepended to `PYTHONPATH`.
+- `<repository-root>` as the working directory;
+- `<repository-root>\src\Tungsten\src` prepended to `PYTHONPATH`.
 
 ### Discovery-based setup
 
@@ -157,8 +158,8 @@ var client = new TungstenClient(
     {
         ExecutablePath = @"C:\Users\vresh\.pyenv\pyenv-win\versions\3.13.13\python.exe",
         LauncherArguments = ["-m", "tungsten"],
-        WorkingDirectory = @"C:\Tools1\Tools",
-        TungstenSourceRoot = @"C:\Tools1\Tools\src\Tungsten\src",
+        WorkingDirectory = @"<repository-root>",
+        TungstenSourceRoot = @"<repository-root>\src\Tungsten\src",
         DefaultTimeout = TimeSpan.FromMinutes(10),
         EnvironmentVariables = new Dictionary<string, string?>
         {
@@ -174,7 +175,7 @@ var client = new TungstenClient(
 ```csharp
 using Tungsten.DotNet;
 
-var client = TungstenClient.CreateForRepositoryRoot(@"C:\Tools1\Tools");
+var client = TungstenClient.CreateForRepositoryRoot(@"<repository-root>");
 var environment = await client.GetEnvironmentAsync(probe: true);
 
 Console.WriteLine(environment.InstallDir);
@@ -512,5 +513,5 @@ That has two important consequences:
 The current .NET wrapper was validated with:
 
 ```powershell
-dotnet test C:\Tools1\Tools\src\Tungsten\dotnet\Tungsten.DotNet.slnx
+dotnet test .\src\Tungsten\dotnet\Tungsten.DotNet.slnx
 ```

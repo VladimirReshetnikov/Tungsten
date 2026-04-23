@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-23T19:01:41Z
-- Repository HEAD: 1d773e54c198d14e169de4c6c91eabcded581b63
+- Updated (UTC): 2026-04-23T21:12:16Z
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 
 ## What this docs tree is for
 
@@ -124,6 +124,8 @@ The docs are split so readers can choose the right depth:
   explicit reports rather than in README, user-guide, or architecture text.
 - Documents include `Created (UTC)` and `Repository HEAD` metadata. Revised documents also carry an
   `Updated (UTC)` field.
+- Use `pwsh -File .\src\Tungsten\scripts\Update-TungstenDocsProvenance.ps1` after a documentation
+  pass so the shared Tungsten docs metadata stays consistent.
 - The documentation is Windows-first because Tungsten itself is currently built around local
   Windows Wolfram installations and PowerShell automation.
 - PowerShell examples assume the repository root as the working directory unless the example

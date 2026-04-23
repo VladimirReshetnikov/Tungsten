@@ -26,19 +26,55 @@ function Invoke-TungstenCliJson {
         "$sourceRoot$separator$previousPythonPath"
     }
 
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+
     try {
-        $output = & $python.Source -m tungsten @Arguments 2>&1
+        & $python.Source -m tungsten @Arguments > $stdoutFile 2> $stderrFile
         $exitCode = $LASTEXITCODE
     }
     finally {
         $env:PYTHONPATH = $previousPythonPath
     }
 
-    if (-not $AllowFailure -and $exitCode -ne 0) {
-        throw "Tungsten CLI failed with exit code $exitCode.`n$($output -join [Environment]::NewLine)"
+    try {
+        $stdout = if (Test-Path -LiteralPath $stdoutFile) {
+            Get-Content -LiteralPath $stdoutFile -Raw
+        }
+        else {
+            ""
+        }
+        $stderr = if (Test-Path -LiteralPath $stderrFile) {
+            Get-Content -LiteralPath $stderrFile -Raw
+        }
+        else {
+            ""
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
     }
 
-    $text = ($output | Out-String).Trim()
+    if (-not $AllowFailure -and $exitCode -ne 0) {
+        $details = @()
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            $details += "stderr:`n$stderr"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            $details += "stdout:`n$stdout"
+        }
+
+        $detailText = if ($details.Count -gt 0) {
+            "`n$($details -join ([Environment]::NewLine + [Environment]::NewLine))"
+        }
+        else {
+            ""
+        }
+
+        throw "Tungsten CLI failed with exit code $exitCode.$detailText"
+    }
+
+    $text = ($stdout | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($text)) {
         return $null
     }
@@ -209,12 +245,12 @@ function Get-TungstenEnvironment {
         [switch] $Probe
     )
 
-    $args = @("env", "show")
+    $cliArgs = @("env", "show")
     if ($Probe) {
-        $args += "--probe"
+        $cliArgs += "--probe"
     }
 
-    Invoke-TungstenCliJson -Arguments $args
+    Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
 function Invoke-TungstenKernel {
@@ -233,27 +269,27 @@ function Invoke-TungstenKernel {
         [switch] $RequireSuccess
     )
 
-    $args = @("kernel", "eval")
+    $cliArgs = @("kernel", "eval")
     if ($PSCmdlet.ParameterSetName -eq "Code") {
-        $args += @("--code", $Code)
+        $cliArgs += @("--code", $Code)
     }
     else {
-        $args += @("--file", $File)
+        $cliArgs += @("--file", $File)
     }
 
     if ($WorkingDirectory) {
-        $args += @("--working-directory", $WorkingDirectory)
+        $cliArgs += @("--working-directory", $WorkingDirectory)
     }
 
     if ($FrontEnd) {
-        $args += "--front-end"
+        $cliArgs += "--front-end"
     }
 
     if ($RequireSuccess) {
-        $args += "--require-success"
+        $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
 }
 
 function Convert-TungstenExpression {
@@ -269,15 +305,15 @@ function Convert-TungstenExpression {
         [string] $Form = "input"
     )
 
-    $args = @("expr", "parse", "--form", $Form)
+    $cliArgs = @("expr", "parse", "--form", $Form)
     if ($PSCmdlet.ParameterSetName -eq "Code") {
-        $args += @("--code", $Code)
+        $cliArgs += @("--code", $Code)
     }
     else {
-        $args += @("--file", $File)
+        $cliArgs += @("--file", $File)
     }
 
-    Invoke-TungstenCliJson -Arguments $args
+    Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
 function Invoke-TungstenExpression {
@@ -293,15 +329,15 @@ function Invoke-TungstenExpression {
         [string] $Form = "input"
     )
 
-    $args = @("expr", "evaluate", "--form", $Form)
+    $cliArgs = @("expr", "evaluate", "--form", $Form)
     if ($PSCmdlet.ParameterSetName -eq "Code") {
-        $args += @("--code", $Code)
+        $cliArgs += @("--code", $Code)
     }
     else {
-        $args += @("--file", $File)
+        $cliArgs += @("--file", $File)
     }
 
-    Invoke-TungstenCliJson -Arguments $args
+    Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
 function New-TungstenInlineBoxString {
@@ -314,18 +350,18 @@ function New-TungstenInlineBoxString {
         [string] $Suffix = ""
     )
 
-    $args = @("inline-box", "compose")
+    $cliArgs = @("inline-box", "compose")
     if ($Prefix -ne "") {
-        $args += @("--prefix", $Prefix)
+        $cliArgs += @("--prefix", $Prefix)
     }
     foreach ($expression in $BoxExpression) {
-        $args += @("--box-expr", $expression)
+        $cliArgs += @("--box-expr", $expression)
     }
     if ($Suffix -ne "") {
-        $args += @("--suffix", $Suffix)
+        $cliArgs += @("--suffix", $Suffix)
     }
 
-    Invoke-TungstenCliJson -Arguments $args
+    Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
 function Get-TungstenNotebookCellInlineBoxes {
@@ -369,24 +405,24 @@ function Get-TungstenNotebookCellInlineBoxes {
         -CellId $CellId `
         -CellTag $CellTag
 
-    $args = @("inline-box", "from-cell", "--file", $Path) + $selectorArgs
+    $cliArgs = @("inline-box", "from-cell", "--file", $Path) + $selectorArgs
     if ($Prefix -ne "") {
-        $args += @("--prefix", $Prefix)
+        $cliArgs += @("--prefix", $Prefix)
     }
     if ($Suffix -ne "") {
-        $args += @("--suffix", $Suffix)
+        $cliArgs += @("--suffix", $Suffix)
     }
     if ($AllObjects) {
-        $args += "--all-objects"
+        $cliArgs += "--all-objects"
     }
     else {
-        $args += @("--object-index", $ObjectIndex.ToString())
+        $cliArgs += @("--object-index", $ObjectIndex.ToString())
     }
     if ($RequireSuccess) {
-        $args += "--require-success"
+        $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
 }
 
 function Get-TungstenNotebook {
@@ -410,15 +446,15 @@ function New-TungstenNotebook {
         [string[]] $Cell = @()
     )
 
-    $args = @("notebook", "create", "--file", $Path)
+    $cliArgs = @("notebook", "create", "--file", $Path)
     if ($Title) {
-        $args += @("--title", $Title)
+        $cliArgs += @("--title", $Title)
     }
     foreach ($entry in $Cell) {
-        $args += @("--cell", $entry)
+        $cliArgs += @("--cell", $entry)
     }
 
-    Invoke-TungstenCliJson -Arguments $args
+    Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
 function Set-TungstenNotebook {
@@ -433,12 +469,12 @@ function Set-TungstenNotebook {
         [string] $OutFile
     )
 
-    $args = @("notebook", "patch", "--file", $Path, "--spec", $Spec)
+    $cliArgs = @("notebook", "patch", "--file", $Path, "--spec", $Spec)
     if ($OutFile) {
-        $args += @("--out", $OutFile)
+        $cliArgs += @("--out", $OutFile)
     }
 
-    Invoke-TungstenCliJson -Arguments $args
+    Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
 function Find-TungstenDocumentation {
@@ -454,15 +490,15 @@ function Find-TungstenDocumentation {
         [switch] $Rebuild
     )
 
-    $args = @("docs", "search", $Query, "--limit", $Limit.ToString())
+    $cliArgs = @("docs", "search", $Query, "--limit", $Limit.ToString())
     if ($IndexPath) {
-        $args += @("--index-path", $IndexPath)
+        $cliArgs += @("--index-path", $IndexPath)
     }
     if ($Rebuild) {
-        $args += "--rebuild"
+        $cliArgs += "--rebuild"
     }
 
-    $payload = Invoke-TungstenCliJson -Arguments $args
+    $payload = Invoke-TungstenCliJson -Arguments $cliArgs
     return $payload.hits
 }
 
@@ -477,15 +513,15 @@ function Get-TungstenDocumentationPage {
         [switch] $Rebuild
     )
 
-    $args = @("docs", "read", $Identifier)
+    $cliArgs = @("docs", "read", $Identifier)
     if ($IndexPath) {
-        $args += @("--index-path", $IndexPath)
+        $cliArgs += @("--index-path", $IndexPath)
     }
     if ($Rebuild) {
-        $args += "--rebuild"
+        $cliArgs += "--rebuild"
     }
 
-    Invoke-TungstenCliJson -Arguments $args
+    Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
 function Open-TungstenDocumentation {
@@ -499,15 +535,15 @@ function Open-TungstenDocumentation {
         [switch] $RequireSuccess
     )
 
-    $args = @("frontend", "open-doc", $Identifier)
+    $cliArgs = @("frontend", "open-doc", $Identifier)
     if ($IndexPath) {
-        $args += @("--index-path", $IndexPath)
+        $cliArgs += @("--index-path", $IndexPath)
     }
     if ($RequireSuccess) {
-        $args += "--require-success"
+        $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
 }
 
 function Open-TungstenNotebook {
@@ -519,12 +555,12 @@ function Open-TungstenNotebook {
         [switch] $RequireSuccess
     )
 
-    $args = @("frontend", "open-notebook", "--file", $Path)
+    $cliArgs = @("frontend", "open-notebook", "--file", $Path)
     if ($RequireSuccess) {
-        $args += "--require-success"
+        $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
 }
 
 function Invoke-TungstenFrontEnd {
@@ -538,15 +574,497 @@ function Invoke-TungstenFrontEnd {
         [switch] $RequireSuccess
     )
 
-    $args = @("frontend", "run", "--code", $Code)
+    $cliArgs = @("frontend", "run", "--code", $Code)
     if ($NoWrap) {
-        $args += "--no-wrap"
+        $cliArgs += "--no-wrap"
     }
     if ($RequireSuccess) {
-        $args += "--require-success"
+        $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
+}
+
+function Get-TungstenNotebookAssistantAskCliArguments {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Question,
+
+        [Parameter(Mandatory)]
+        [string[]] $SelectorArgs,
+
+        [switch] $InsertWolframCodeBelow,
+
+        [switch] $InsertAllWolframCodeBelow,
+
+        [switch] $Save,
+
+        [switch] $CloseAssistantNotebook,
+
+        [string] $ExtraInstructions,
+
+        [string] $ModelService,
+
+        [string] $ModelName,
+
+        [switch] $RequireSuccess
+    )
+
+    $cliArgs = @("assistant", "ask-cell", "--file", $Path, "--question", $Question) + $SelectorArgs
+    if ($InsertWolframCodeBelow) {
+        $cliArgs += "--insert-wolfram-code-below"
+    }
+    if ($InsertAllWolframCodeBelow) {
+        $cliArgs += "--insert-all-wolfram-code-below"
+    }
+    if ($Save) {
+        $cliArgs += "--save"
+    }
+    if ($CloseAssistantNotebook) {
+        $cliArgs += "--close-assistant-notebook"
+    }
+    if ($ExtraInstructions) {
+        $cliArgs += @("--extra-instructions", $ExtraInstructions)
+    }
+    if ($ModelService) {
+        $cliArgs += @("--model-service", $ModelService)
+    }
+    if ($ModelName) {
+        $cliArgs += @("--model-name", $ModelName)
+    }
+    if ($RequireSuccess) {
+        $cliArgs += "--require-success"
+    }
+
+    return $cliArgs
+}
+
+function Get-TungstenDesktopInlineAssistantWindow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Backend,
+
+        [Parameter(Mandatory)]
+        $Prepare,
+
+        [ValidateRange(1000, 900000)]
+        [int] $TimeoutMilliseconds
+    )
+
+    $windowTitle = [string] $Prepare.assistant.window_title
+    if ([string]::IsNullOrWhiteSpace($windowTitle)) {
+        return [pscustomobject]@{
+            failure = New-TungstenNotebookAssistantFailure `
+                -ErrorType "NotebookWindowTitleUnavailable" `
+                -Message "Tungsten opened the inline assistant, but the source notebook did not report a usable window title." `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                    prepare = $Prepare.assistant
+                } `
+                -Evaluation $Prepare.evaluation
+        }
+    }
+
+    Import-TungstenWinDeskModule
+
+    $window = Wait-TungstenWinDeskWindowByTitle -Title $windowTitle -TimeoutMilliseconds ([Math]::Min($TimeoutMilliseconds, 15000))
+    if ($null -eq $window) {
+        return [pscustomobject]@{
+            failure = New-TungstenNotebookAssistantFailure `
+                -ErrorType "NotebookWindowNotVisible" `
+                -Message "The notebook window '$windowTitle' was not visible to WinDesk." `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                    window_title = $windowTitle
+                    prepare = $Prepare.assistant
+                } `
+                -Evaluation $Prepare.evaluation
+        }
+    }
+
+    if ($window.IsMinimized) {
+        $restore = Set-WinDeskWindowState -Handle $window.Handle -State Restore
+        if (-not $restore.Succeeded) {
+            return [pscustomobject]@{
+                failure = New-TungstenNotebookAssistantFailure `
+                    -ErrorType "NotebookWindowRestoreFailed" `
+                    -Message ($restore.Summary ?? "Unable to restore the notebook window before driving inline assistant input.") `
+                    -Extra @{
+                        backend = $Backend
+                        notebook_path = $Path
+                        window_title = $windowTitle
+                        window_handle = $window.Handle
+                        windesk = $restore
+                    } `
+                    -Evaluation $Prepare.evaluation
+            }
+        }
+
+        Start-Sleep -Milliseconds 250
+        $window = Get-WinDeskWindow -Handle $window.Handle | Select-Object -First 1
+    }
+
+    $activation = Set-WinDeskForegroundWindow -Handle $window.Handle
+    if (-not $activation.Succeeded) {
+        return [pscustomobject]@{
+            failure = New-TungstenNotebookAssistantFailure `
+                -ErrorType "NotebookWindowActivationFailed" `
+                -Message ($activation.Summary ?? "WinDesk could not activate the notebook window.") `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                    window_title = $windowTitle
+                    window_handle = $window.Handle
+                    windesk = $activation
+                } `
+                -Evaluation $Prepare.evaluation
+        }
+    }
+
+    Start-Sleep -Milliseconds 250
+    $window = Get-WinDeskWindow -Handle $window.Handle | Select-Object -First 1
+    if ($null -eq $window -or -not $window.IsForeground) {
+        $currentWindowHandle = if ($null -ne $window) { $window.Handle } else { $null }
+        return [pscustomobject]@{
+            failure = New-TungstenNotebookAssistantFailure `
+                -ErrorType "NotebookWindowNotForeground" `
+                -Message "The notebook window could not be confirmed as the foreground window, so Tungsten refused to inject input into the desktop." `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                    window_title = $windowTitle
+                    window_handle = $currentWindowHandle
+                } `
+                -Evaluation $Prepare.evaluation
+        }
+    }
+
+    return [pscustomobject]@{
+        failure = $null
+        window = $window
+        window_title = $windowTitle
+    }
+}
+
+function Wait-TungstenInlineAssistantCompletion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Backend,
+
+        [Parameter(Mandatory)]
+        [string[]] $SelectorArgs,
+
+        [Parameter(Mandatory)]
+        [string] $WindowTitle,
+
+        [Parameter(Mandatory)]
+        [object] $WindowHandle,
+
+        [Parameter(Mandatory)]
+        $Prepare,
+
+        [ValidateRange(1000, 900000)]
+        [int] $TimeoutMilliseconds,
+
+        [ValidateRange(100, 60000)]
+        [int] $PollIntervalMilliseconds
+    )
+
+    $captureArgs = @("assistant", "capture-inline", "--file", $Path) + $SelectorArgs
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $lastCapture = $null
+
+    do {
+        Start-Sleep -Milliseconds $PollIntervalMilliseconds
+        $lastCapture = Invoke-TungstenCliJson -Arguments $captureArgs
+        if ($null -eq $lastCapture) {
+            return [pscustomobject]@{
+                failure = New-TungstenNotebookAssistantFailure `
+                    -ErrorType "InlineAssistantCaptureFailed" `
+                    -Message "capture-inline did not return a payload while waiting for the inline assistant response." `
+                    -Extra @{
+                        backend = $Backend
+                        notebook_path = $Path
+                        window_title = $WindowTitle
+                        window_handle = $WindowHandle
+                    } `
+                    -Evaluation $Prepare.evaluation
+            }
+        }
+
+        if (-not $lastCapture.assistant_success) {
+            return [pscustomobject]@{
+                failure = $lastCapture
+            }
+        }
+    }
+    while (-not $lastCapture.assistant.completed -and [DateTimeOffset]::UtcNow -lt $deadline)
+
+    if (-not $lastCapture.assistant.completed) {
+        return [pscustomobject]@{
+            failure = New-TungstenNotebookAssistantFailure `
+                -ErrorType "InlineAssistantTimedOut" `
+                -Message "The inline Notebook Assistant did not finish before the configured timeout elapsed." `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                    window_title = $WindowTitle
+                    window_handle = $WindowHandle
+                    prepare = $Prepare.assistant
+                    last_capture = $lastCapture.assistant
+                } `
+                -Evaluation $lastCapture.evaluation
+        }
+    }
+
+    return [pscustomobject]@{
+        failure = $null
+        capture_args = $captureArgs
+        last_capture = $lastCapture
+    }
+}
+
+function Complete-TungstenInlineAssistantCapture {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Backend,
+
+        [Parameter(Mandatory)]
+        [string] $WindowTitle,
+
+        [Parameter(Mandatory)]
+        [object] $WindowHandle,
+
+        [Parameter(Mandatory)]
+        [string[]] $CaptureArgs,
+
+        [Parameter(Mandatory)]
+        $LastCapture,
+
+        [switch] $InsertWolframCodeBelow,
+
+        [switch] $InsertAllWolframCodeBelow,
+
+        [switch] $Save
+    )
+
+    $final = $LastCapture
+    if ($InsertWolframCodeBelow -or $InsertAllWolframCodeBelow -or $Save) {
+        $finalArgs = @($CaptureArgs)
+        if ($InsertWolframCodeBelow) {
+            $finalArgs += "--insert-wolfram-code-below"
+        }
+        if ($InsertAllWolframCodeBelow) {
+            $finalArgs += "--insert-all-wolfram-code-below"
+        }
+        if ($Save) {
+            $finalArgs += "--save"
+        }
+
+        $final = Invoke-TungstenCliJson -Arguments $finalArgs
+        if ($null -eq $final) {
+            return [pscustomobject]@{
+                failure = New-TungstenNotebookAssistantFailure `
+                    -ErrorType "InlineAssistantFinalizeFailed" `
+                    -Message "capture-inline did not return a payload during the final insert/save step." `
+                    -Extra @{
+                        backend = $Backend
+                        notebook_path = $Path
+                        window_title = $WindowTitle
+                        window_handle = $WindowHandle
+                    } `
+                    -Evaluation $LastCapture.evaluation
+            }
+        }
+
+        if (-not $final.assistant_success) {
+            return [pscustomobject]@{
+                failure = $final
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        failure = $null
+        final = $final
+    }
+}
+
+function Invoke-TungstenDesktopInlineNotebookAssistant {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Question,
+
+        [Parameter(Mandatory)]
+        [string[]] $SelectorArgs,
+
+        [Parameter(Mandatory)]
+        [string] $Backend,
+
+        [ValidateSet("ClipboardPaste", "Keyboard")]
+        [string] $InputMethod,
+
+        [ValidateRange(1000, 900000)]
+        [int] $TimeoutMilliseconds,
+
+        [ValidateRange(100, 60000)]
+        [int] $PollIntervalMilliseconds,
+
+        [switch] $InsertWolframCodeBelow,
+
+        [switch] $InsertAllWolframCodeBelow,
+
+        [switch] $Save
+    )
+
+    $prepare = $null
+    $lastCapture = $null
+
+    try {
+        $prepare = Invoke-TungstenCliJson -Arguments (@("assistant", "prepare-inline", "--file", $Path) + $SelectorArgs)
+        if ($null -eq $prepare) {
+            return New-TungstenNotebookAssistantFailure `
+                -ErrorType "InlineAssistantPrepareFailed" `
+                -Message "prepare-inline did not return a payload." `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                }
+        }
+
+        if (-not $prepare.assistant_success) {
+            return $prepare
+        }
+
+        $windowState = Get-TungstenDesktopInlineAssistantWindow `
+            -Path $Path `
+            -Backend $Backend `
+            -Prepare $prepare `
+            -TimeoutMilliseconds $TimeoutMilliseconds
+        if ($null -ne $windowState.failure) {
+            return $windowState.failure
+        }
+
+        $window = $windowState.window
+        $windowTitle = [string] $windowState.window_title
+
+        $textResult = Send-WinDeskText -Text $Question -Method $InputMethod -ExpectedForegroundWindowHandle $window.Handle
+        if (-not $textResult.Succeeded) {
+            return New-TungstenNotebookAssistantFailure `
+                -ErrorType "InlineAssistantTextInjectionFailed" `
+                -Message ($textResult.Summary ?? "WinDesk could not send the assistant question.") `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                    window_title = $windowTitle
+                    window_handle = $window.Handle
+                    windesk = $textResult
+                } `
+                -Evaluation $prepare.evaluation
+        }
+
+        $enterResult = Send-WinDeskKeys -Gesture Enter -ExpectedForegroundWindowHandle $window.Handle
+        if (-not $enterResult.Succeeded) {
+            return New-TungstenNotebookAssistantFailure `
+                -ErrorType "InlineAssistantSubmitFailed" `
+                -Message ($enterResult.Summary ?? "WinDesk could not submit the assistant question.") `
+                -Extra @{
+                    backend = $Backend
+                    notebook_path = $Path
+                    window_title = $windowTitle
+                    window_handle = $window.Handle
+                    windesk = $enterResult
+                } `
+                -Evaluation $prepare.evaluation
+        }
+
+        $waitResult = Wait-TungstenInlineAssistantCompletion `
+            -Path $Path `
+            -Backend $Backend `
+            -SelectorArgs $SelectorArgs `
+            -WindowTitle $windowTitle `
+            -WindowHandle $window.Handle `
+            -Prepare $prepare `
+            -TimeoutMilliseconds $TimeoutMilliseconds `
+            -PollIntervalMilliseconds $PollIntervalMilliseconds
+        if ($null -ne $waitResult.failure) {
+            return $waitResult.failure
+        }
+
+        $lastCapture = $waitResult.last_capture
+
+        $finalResult = Complete-TungstenInlineAssistantCapture `
+            -Path $Path `
+            -Backend $Backend `
+            -WindowTitle $windowTitle `
+            -WindowHandle $window.Handle `
+            -CaptureArgs $waitResult.capture_args `
+            -LastCapture $lastCapture `
+            -InsertWolframCodeBelow:$InsertWolframCodeBelow `
+            -InsertAllWolframCodeBelow:$InsertAllWolframCodeBelow `
+            -Save:$Save
+        if ($null -ne $finalResult.failure) {
+            return $finalResult.failure
+        }
+
+        $final = $finalResult.final
+        $desktopAutomation = [pscustomobject]@{
+            backend = $Backend
+            input_method = $InputMethod
+            timeout_milliseconds = $TimeoutMilliseconds
+            poll_interval_milliseconds = $PollIntervalMilliseconds
+            window_title = $windowTitle
+            window_handle = $window.Handle
+        }
+        $final.assistant | Add-Member -NotePropertyName "desktop_automation" -NotePropertyValue $desktopAutomation -Force
+        return $final
+    }
+    catch {
+        $preparePayload = if ($null -ne $prepare) { $prepare.assistant } else { $null }
+        $lastCapturePayload = if ($null -ne $lastCapture) { $lastCapture.assistant } else { $null }
+        $evaluation = if ($null -ne $lastCapture) {
+            $lastCapture.evaluation
+        }
+        elseif ($null -ne $prepare) {
+            $prepare.evaluation
+        }
+        else {
+            $null
+        }
+
+        return New-TungstenNotebookAssistantFailure `
+            -ErrorType "DesktopInlineAutomationFailed" `
+            -Message $_.Exception.Message `
+            -Extra @{
+                backend = $Backend
+                notebook_path = $Path
+                prepare = $preparePayload
+                last_capture = $lastCapturePayload
+            } `
+            -Evaluation $evaluation
+    }
 }
 
 function Invoke-TungstenNotebookAssistant {
@@ -611,34 +1129,20 @@ function Invoke-TungstenNotebookAssistant {
         -CellTag $CellTag
 
     if ($Backend -in @("NotebookChatCell", "KernelWindow")) {
-        $args = @("assistant", "ask-cell", "--file", $Path, "--question", $Question) + $selectorArgs
+        $cliArgs = Get-TungstenNotebookAssistantAskCliArguments `
+            -Path $Path `
+            -Question $Question `
+            -SelectorArgs $selectorArgs `
+            -InsertWolframCodeBelow:$InsertWolframCodeBelow `
+            -InsertAllWolframCodeBelow:$InsertAllWolframCodeBelow `
+            -Save:$Save `
+            -CloseAssistantNotebook:$CloseAssistantNotebook `
+            -ExtraInstructions $ExtraInstructions `
+            -ModelService $ModelService `
+            -ModelName $ModelName `
+            -RequireSuccess:$RequireSuccess
 
-        if ($InsertWolframCodeBelow) {
-            $args += "--insert-wolfram-code-below"
-        }
-        if ($InsertAllWolframCodeBelow) {
-            $args += "--insert-all-wolfram-code-below"
-        }
-        if ($Save) {
-            $args += "--save"
-        }
-        if ($CloseAssistantNotebook) {
-            $args += "--close-assistant-notebook"
-        }
-        if ($ExtraInstructions) {
-            $args += @("--extra-instructions", $ExtraInstructions)
-        }
-        if ($ModelService) {
-            $args += @("--model-service", $ModelService)
-        }
-        if ($ModelName) {
-            $args += @("--model-name", $ModelName)
-        }
-        if ($RequireSuccess) {
-            $args += "--require-success"
-        }
-
-        return Invoke-TungstenCliJson -Arguments $args -AllowFailure:$RequireSuccess
+        return Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
     }
 
     if ($CloseAssistantNotebook) {
@@ -661,252 +1165,17 @@ function Invoke-TungstenNotebookAssistant {
             }
     }
 
-    $prepare = $null
-    $lastCapture = $null
-
-    try {
-        $prepare = Invoke-TungstenCliJson -Arguments (@("assistant", "prepare-inline", "--file", $Path) + $selectorArgs)
-        if ($null -eq $prepare) {
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "InlineAssistantPrepareFailed" `
-                -Message "prepare-inline did not return a payload." `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                }
-        }
-
-        if (-not $prepare.assistant_success) {
-            return $prepare
-        }
-
-        $windowTitle = [string] $prepare.assistant.window_title
-        if ([string]::IsNullOrWhiteSpace($windowTitle)) {
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "NotebookWindowTitleUnavailable" `
-                -Message "Tungsten opened the inline assistant, but the source notebook did not report a usable window title." `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                    prepare = $prepare.assistant
-                } `
-                -Evaluation $prepare.evaluation
-        }
-
-        Import-TungstenWinDeskModule
-
-        $window = Wait-TungstenWinDeskWindowByTitle -Title $windowTitle -TimeoutMilliseconds ([Math]::Min($TimeoutMilliseconds, 15000))
-        if ($null -eq $window) {
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "NotebookWindowNotVisible" `
-                -Message "The notebook window '$windowTitle' was not visible to WinDesk." `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                    window_title = $windowTitle
-                    prepare = $prepare.assistant
-                } `
-                -Evaluation $prepare.evaluation
-        }
-
-        if ($window.IsMinimized) {
-            $restore = Set-WinDeskWindowState -Handle $window.Handle -State Restore
-            if (-not $restore.Succeeded) {
-                return New-TungstenNotebookAssistantFailure `
-                    -ErrorType "NotebookWindowRestoreFailed" `
-                    -Message ($restore.Summary ?? "Unable to restore the notebook window before driving inline assistant input.") `
-                    -Extra @{
-                        backend = $Backend
-                        notebook_path = $Path
-                        window_title = $windowTitle
-                        window_handle = $window.Handle
-                        windesk = $restore
-                    } `
-                    -Evaluation $prepare.evaluation
-            }
-
-            Start-Sleep -Milliseconds 250
-            $window = Get-WinDeskWindow -Handle $window.Handle | Select-Object -First 1
-        }
-
-        $activation = Set-WinDeskForegroundWindow -Handle $window.Handle
-        if (-not $activation.Succeeded) {
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "NotebookWindowActivationFailed" `
-                -Message ($activation.Summary ?? "WinDesk could not activate the notebook window.") `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                    window_title = $windowTitle
-                    window_handle = $window.Handle
-                    windesk = $activation
-                } `
-                -Evaluation $prepare.evaluation
-        }
-
-        Start-Sleep -Milliseconds 250
-        $window = Get-WinDeskWindow -Handle $window.Handle | Select-Object -First 1
-        if ($null -eq $window -or -not $window.IsForeground) {
-            $currentWindowHandle = $null
-            if ($null -ne $window) {
-                $currentWindowHandle = $window.Handle
-            }
-
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "NotebookWindowNotForeground" `
-                -Message "The notebook window could not be confirmed as the foreground window, so Tungsten refused to inject input into the desktop." `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                    window_title = $windowTitle
-                    window_handle = $currentWindowHandle
-                } `
-                -Evaluation $prepare.evaluation
-        }
-
-        $textResult = Send-WinDeskText -Text $Question -Method $InputMethod -ExpectedForegroundWindowHandle $window.Handle
-        if (-not $textResult.Succeeded) {
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "InlineAssistantTextInjectionFailed" `
-                -Message ($textResult.Summary ?? "WinDesk could not send the assistant question.") `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                    window_title = $windowTitle
-                    window_handle = $window.Handle
-                    windesk = $textResult
-                } `
-                -Evaluation $prepare.evaluation
-        }
-
-        $enterResult = Send-WinDeskKeys -Gesture Enter -ExpectedForegroundWindowHandle $window.Handle
-        if (-not $enterResult.Succeeded) {
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "InlineAssistantSubmitFailed" `
-                -Message ($enterResult.Summary ?? "WinDesk could not submit the assistant question.") `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                    window_title = $windowTitle
-                    window_handle = $window.Handle
-                    windesk = $enterResult
-                } `
-                -Evaluation $prepare.evaluation
-        }
-
-        $captureArgs = @("assistant", "capture-inline", "--file", $Path) + $selectorArgs
-        $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
-
-        do {
-            Start-Sleep -Milliseconds $PollIntervalMilliseconds
-            $lastCapture = Invoke-TungstenCliJson -Arguments $captureArgs
-            if ($null -eq $lastCapture) {
-                return New-TungstenNotebookAssistantFailure `
-                    -ErrorType "InlineAssistantCaptureFailed" `
-                    -Message "capture-inline did not return a payload while waiting for the inline assistant response." `
-                    -Extra @{
-                        backend = $Backend
-                        notebook_path = $Path
-                        window_title = $windowTitle
-                        window_handle = $window.Handle
-                    } `
-                    -Evaluation $prepare.evaluation
-            }
-
-            if (-not $lastCapture.assistant_success) {
-                return $lastCapture
-            }
-        }
-        while (-not $lastCapture.assistant.completed -and [DateTimeOffset]::UtcNow -lt $deadline)
-
-        if (-not $lastCapture.assistant.completed) {
-            return New-TungstenNotebookAssistantFailure `
-                -ErrorType "InlineAssistantTimedOut" `
-                -Message "The inline Notebook Assistant did not finish before the configured timeout elapsed." `
-                -Extra @{
-                    backend = $Backend
-                    notebook_path = $Path
-                    window_title = $windowTitle
-                    window_handle = $window.Handle
-                    prepare = $prepare.assistant
-                    last_capture = $lastCapture.assistant
-                } `
-                -Evaluation $lastCapture.evaluation
-        }
-
-        $final = $lastCapture
-        if ($InsertWolframCodeBelow -or $InsertAllWolframCodeBelow -or $Save) {
-            $finalArgs = @($captureArgs)
-            if ($InsertWolframCodeBelow) {
-                $finalArgs += "--insert-wolfram-code-below"
-            }
-            if ($InsertAllWolframCodeBelow) {
-                $finalArgs += "--insert-all-wolfram-code-below"
-            }
-            if ($Save) {
-                $finalArgs += "--save"
-            }
-
-            $final = Invoke-TungstenCliJson -Arguments $finalArgs
-            if ($null -eq $final) {
-                return New-TungstenNotebookAssistantFailure `
-                    -ErrorType "InlineAssistantFinalizeFailed" `
-                    -Message "capture-inline did not return a payload during the final insert/save step." `
-                    -Extra @{
-                        backend = $Backend
-                        notebook_path = $Path
-                        window_title = $windowTitle
-                        window_handle = $window.Handle
-                    } `
-                    -Evaluation $lastCapture.evaluation
-            }
-
-            if (-not $final.assistant_success) {
-                return $final
-            }
-        }
-
-        $desktopAutomation = [pscustomobject]@{
-            backend = $Backend
-            input_method = $InputMethod
-            timeout_milliseconds = $TimeoutMilliseconds
-            poll_interval_milliseconds = $PollIntervalMilliseconds
-            window_title = $windowTitle
-            window_handle = $window.Handle
-        }
-        $final.assistant | Add-Member -NotePropertyName "desktop_automation" -NotePropertyValue $desktopAutomation -Force
-        return $final
-    }
-    catch {
-        $preparePayload = $null
-        if ($null -ne $prepare) {
-            $preparePayload = $prepare.assistant
-        }
-
-        $lastCapturePayload = $null
-        if ($null -ne $lastCapture) {
-            $lastCapturePayload = $lastCapture.assistant
-        }
-
-        $evaluation = $null
-        if ($null -ne $lastCapture) {
-            $evaluation = $lastCapture.evaluation
-        }
-        elseif ($null -ne $prepare) {
-            $evaluation = $prepare.evaluation
-        }
-
-        return New-TungstenNotebookAssistantFailure `
-            -ErrorType "DesktopInlineAutomationFailed" `
-            -Message $_.Exception.Message `
-            -Extra @{
-                backend = $Backend
-                notebook_path = $Path
-                prepare = $preparePayload
-                last_capture = $lastCapturePayload
-            } `
-            -Evaluation $evaluation
-    }
+    return Invoke-TungstenDesktopInlineNotebookAssistant `
+        -Path $Path `
+        -Question $Question `
+        -SelectorArgs $selectorArgs `
+        -Backend $Backend `
+        -InputMethod $InputMethod `
+        -TimeoutMilliseconds $TimeoutMilliseconds `
+        -PollIntervalMilliseconds $PollIntervalMilliseconds `
+        -InsertWolframCodeBelow:$InsertWolframCodeBelow `
+        -InsertAllWolframCodeBelow:$InsertAllWolframCodeBelow `
+        -Save:$Save
 }
 
 Export-ModuleMember -Function @(
