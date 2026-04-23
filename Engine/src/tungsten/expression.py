@@ -384,6 +384,8 @@ def parse_expression(text: str, form: str = "input") -> Expr:
 
     parser = _Parser(text)
     expr = parser.parse()
+    if normalized_form in {"standard", "standardform"}:
+        return _interpret_standard_form(expr)
     return expr
 
 
@@ -397,6 +399,253 @@ def parse_full_form(text: str) -> Expr:
 
 def parse_standard_form(text: str) -> Expr:
     return parse_expression(text, form="standard")
+
+
+_BOX_UNWRAP_HEADS = {
+    "AdjustmentBox",
+    "BoxData",
+    "FormBox",
+    "FrameBox",
+    "PaneBox",
+    "StyleBox",
+    "TagBox",
+    "TooltipBox",
+}
+
+
+def _interpret_standard_form(expr: Expr) -> Expr:
+    if isinstance(expr, (Symbol, Integer, Real, String)):
+        return expr
+
+    if not isinstance(expr, Call):
+        return expr
+
+    if expr.has_head("InterpretationBox") and len(expr.arguments) >= 2:
+        return _interpret_standard_form(expr.arguments[1])
+
+    if isinstance(expr.head_expr, Symbol) and expr.head_expr.name in _BOX_UNWRAP_HEADS and expr.arguments:
+        return _interpret_standard_form(expr.arguments[0])
+
+    if expr.has_head("RowBox"):
+        return _interpret_row_box(expr)
+
+    if expr.has_head("FractionBox"):
+        return _interpret_fraction_box(expr)
+
+    if expr.has_head("SqrtBox"):
+        return _interpret_sqrt_box(expr)
+
+    if expr.has_head("RadicalBox"):
+        return _interpret_radical_box(expr)
+
+    if expr.has_head("SuperscriptBox"):
+        return _interpret_superscript_box(expr)
+
+    return Call(
+        head_expr=_interpret_standard_form(expr.head_expr),
+        arguments=tuple(_interpret_standard_form(argument) for argument in expr.arguments),
+    )
+
+
+def _interpret_row_box(expr: Call) -> Expr:
+    if len(expr.arguments) != 1:
+        return expr
+
+    items = expr.arguments[0]
+    if not isinstance(items, Call) or not items.has_head("List"):
+        return expr
+
+    text = "".join(_box_item_to_standard_text(item) for item in items.arguments)
+    stripped = text.strip()
+    if not stripped:
+        return string("")
+    return parse_input_form(stripped)
+
+
+def _interpret_fraction_box(expr: Call) -> Expr:
+    if len(expr.arguments) < 2:
+        return expr
+    numerator = _interpret_box_operand(expr.arguments[0])
+    denominator = _interpret_box_operand(expr.arguments[1])
+    return _make_division(numerator, denominator)
+
+
+def _interpret_sqrt_box(expr: Call) -> Expr:
+    if not expr.arguments:
+        return expr
+    radicand = _interpret_box_operand(expr.arguments[0])
+    if _has_true_option(expr.arguments[1:], "SurdForm"):
+        return call("Surd", radicand, integer(2))
+    return call("Power", radicand, call("Rational", integer(1), integer(2)))
+
+
+def _interpret_radical_box(expr: Call) -> Expr:
+    if len(expr.arguments) < 2:
+        return expr
+    radicand = _interpret_box_operand(expr.arguments[0])
+    index = _interpret_box_operand(expr.arguments[1])
+    if _has_true_option(expr.arguments[2:], "SurdForm"):
+        return call("Surd", radicand, index)
+    return call("Power", radicand, _make_division(integer(1), index))
+
+
+def _interpret_superscript_box(expr: Call) -> Expr:
+    if len(expr.arguments) < 2:
+        return expr
+    base = _interpret_box_operand(expr.arguments[0])
+    exponent = _interpret_box_operand(expr.arguments[1])
+    return call("Power", base, exponent)
+
+
+def _interpret_box_operand(expr: Expr) -> Expr:
+    interpreted = _interpret_standard_form(expr)
+    return _coerce_box_operand(interpreted)
+
+
+def _coerce_box_operand(expr: Expr) -> Expr:
+    if isinstance(expr, String):
+        text = expr.value.strip()
+        if not text:
+            return string(expr.value)
+        try:
+            return _canonicalize_box_expression(parse_input_form(text))
+        except WolframSyntaxError:
+            return string(expr.value)
+
+    return _canonicalize_box_expression(expr)
+
+
+def _canonicalize_box_expression(expr: Expr) -> Expr:
+    if isinstance(expr, (Symbol, Integer, Real, String)):
+        return expr
+
+    if not isinstance(expr, Call):
+        return expr
+
+    normalized = call(
+        _canonicalize_box_expression(expr.head_expr),
+        *(_canonicalize_box_expression(argument) for argument in expr.arguments),
+    )
+    rational = _try_box_rational(normalized)
+    if rational is not None:
+        return rational
+    return normalized
+
+
+def _try_box_rational(expr: Call) -> Expr | None:
+    if not expr.has_head("Times") or len(expr.arguments) != 2:
+        return None
+
+    numerator, denominator_power = expr.arguments
+    if not isinstance(numerator, Integer):
+        return None
+
+    if (
+        not isinstance(denominator_power, Call)
+        or not denominator_power.has_head("Power")
+        or len(denominator_power.arguments) != 2
+    ):
+        return None
+
+    denominator, exponent = denominator_power.arguments
+    if not isinstance(denominator, Integer):
+        return None
+    if not isinstance(exponent, Integer) or exponent.value != -1:
+        return None
+
+    return call("Rational", numerator, denominator)
+
+
+def _box_item_to_standard_text(expr: Expr) -> str:
+    if isinstance(expr, String):
+        return _normalize_row_box_token(expr.value)
+
+    if isinstance(expr, (Symbol, Integer, Real)):
+        return expr.to_input_form()
+
+    if isinstance(expr, Call):
+        if expr.has_head("InterpretationBox") and len(expr.arguments) >= 2:
+            return _interpret_standard_form(expr.arguments[1]).to_input_form()
+
+        if isinstance(expr.head_expr, Symbol) and expr.head_expr.name in _BOX_UNWRAP_HEADS and expr.arguments:
+            return _box_item_to_standard_text(expr.arguments[0])
+
+        if expr.has_head("RowBox"):
+            interpreted = _interpret_row_box(expr)
+            return interpreted.to_input_form()
+
+        if expr.has_head("FractionBox") and len(expr.arguments) >= 2:
+            numerator = _box_item_to_standard_text(expr.arguments[0])
+            denominator = _box_item_to_standard_text(expr.arguments[1])
+            return f"(({numerator})/({denominator}))"
+
+        if expr.has_head("SqrtBox") and expr.arguments:
+            radicand = _box_item_to_standard_text(expr.arguments[0])
+            if _has_true_option(expr.arguments[1:], "SurdForm"):
+                return f"Surd[{radicand}, 2]"
+            return f"(({radicand})^(1/2))"
+
+        if expr.has_head("RadicalBox") and len(expr.arguments) >= 2:
+            radicand = _box_item_to_standard_text(expr.arguments[0])
+            index = _box_item_to_standard_text(expr.arguments[1])
+            if _has_true_option(expr.arguments[2:], "SurdForm"):
+                return f"Surd[{radicand}, {index}]"
+            return f"(({radicand})^(1/({index})))"
+
+        if expr.has_head("SuperscriptBox") and len(expr.arguments) >= 2:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            exponent = _box_item_to_standard_text(expr.arguments[1])
+            return f"(({base})^({exponent}))"
+
+    return _interpret_standard_form(expr).to_input_form()
+
+
+def _normalize_row_box_token(value: str) -> str:
+    whitespace_tokens = {
+        " ",
+        "\t",
+        "\n",
+        r"\[InvisibleSpace]",
+        r"\[InvisibleTimes]",
+        r"\[NegativeMediumSpace]",
+        r"\[NegativeThickSpace]",
+        r"\[NegativeThinSpace]",
+        r"\[NegativeVeryThinSpace]",
+        r"\[NoBreak]",
+        r"\[ThickSpace]",
+        r"\[ThinSpace]",
+        r"\[VeryThinSpace]",
+    }
+    if value in whitespace_tokens:
+        return " "
+    return value
+
+
+def _make_division(numerator: Expr, denominator: Expr) -> Expr:
+    if isinstance(numerator, Integer) and isinstance(denominator, Integer):
+        return call("Rational", numerator, denominator)
+
+    if isinstance(numerator, Integer) and numerator.value == 1:
+        return call("Power", denominator, integer(-1))
+
+    return call("Times", numerator, call("Power", denominator, integer(-1)))
+
+
+def _has_true_option(arguments: Sequence[Expr], name: str) -> bool:
+    for argument in arguments:
+        if not isinstance(argument, Call):
+            continue
+        if not argument.has_head("Rule") and not argument.has_head("RuleDelayed"):
+            continue
+        if len(argument.arguments) != 2:
+            continue
+        option_name, option_value = argument.arguments
+        if not isinstance(option_name, Symbol) or option_name.name != name:
+            continue
+        interpreted = _interpret_standard_form(option_value)
+        if isinstance(interpreted, Symbol) and interpreted.name == "True":
+            return True
+    return False
 
 
 @dataclass(frozen=True)

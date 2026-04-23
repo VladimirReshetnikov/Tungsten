@@ -1,15 +1,15 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-23T17:10:29Z
-Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+Updated (UTC): 2026-04-23T17:56:40Z
+Repository HEAD: 43448cc00f66236d4d6920843c725f8e92d9c791
 
 ## Summary
 
 `expression.py` gives Tungsten a real kernel-free Wolfram expression subsystem. It provides:
 
 - an AST for atoms and general expressions;
-- parsers for FullForm, InputForm, and a box-free StandardForm subset;
+- parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
 - canonical `InputForm` and `FullForm` rendering;
 - a small inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
   `Extract`, and `Level`.
@@ -51,12 +51,20 @@ The parser currently handles:
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
 - part syntax `expr[[...]]`;
 - span syntax `a ;; b ;; c`;
-- nested Wolfram comments `(* ... *)`.
+- nested Wolfram comments `(* ... *)`;
+- common semantic notebook boxes when they appear as textual box expressions:
+  `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`;
+- common wrapper boxes around those semantic forms, including `BoxData`, `FormBox`, `StyleBox`,
+  `TagBox`, `TooltipBox`, and `InterpretationBox`;
+- `RowBox` reconstruction for the box-driven subset above, so notebook snippets such as
+  `SuperscriptBox["x", RowBox[{"1", "/", "3"}]]` or
+  `FractionBox[SuperscriptBox["x", "3"], RowBox[{"1", "+", "a", " ", "b"}]]` lower to ordinary
+  Tungsten expressions.
 - string literals that contain inline-box escape sequences.
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
-particular, it is intentionally conservative around advanced pattern syntax, pure-function
-shorthand, assignments, and broader evaluation semantics.
+particular, it is intentionally conservative around advanced pattern syntax, arbitrary box
+constructs, pure-function shorthand, assignments, and broader evaluation semantics.
 
 ## Parsing forms
 
@@ -81,7 +89,7 @@ Plus[1, Times[2, Power[x, 3]]]
 
 ### `standard`
 
-Use this for the plain-text subset of StandardForm that Tungsten understands. This is useful for
+Use this for the StandardForm subset that Tungsten understands. This is useful for plain-text
 surface syntax like:
 
 ```text
@@ -90,7 +98,21 @@ f @ x // g
 expr[[1]]
 ```
 
-It is still textual parsing, not notebook box parsing.
+It also recognizes a pragmatic notebook-box subset when those boxes are represented textually:
+
+```text
+TagBox[SqrtBox["x"], DisplayForm]
+FormBox[RadicalBox["x", "3"], TraditionalForm]
+FractionBox[SuperscriptBox["x", "3"], RowBox[{"1", "+", "a", " ", "b"}]]
+```
+
+These lower to ordinary Tungsten expressions such as:
+
+```text
+Power[x, Rational[1, 2]]
+Power[x, Rational[1, 3]]
+Times[Power[x, 3], Power[Plus[1, Times[a, b]], -1]]
+```
 
 ## Output model
 
@@ -122,6 +144,9 @@ Example:
 ```text
 Plus[1, Times[2, Power[x, 3]]]
 ```
+
+For StandardForm box inputs, `full_form` is often the easiest way to confirm what Tungsten
+understood semantically.
 
 ### `tree`
 

@@ -313,7 +313,8 @@ kernel. It currently supports:
 
 - FullForm;
 - InputForm;
-- a box-free StandardForm subset;
+- a pragmatic StandardForm subset, including common semantic box forms such as `FractionBox`,
+  `SqrtBox`, `RadicalBox`, and `SuperscriptBox`;
 - a small inert evaluator for structural built-ins.
 
 It does not attempt full box language, arbitrary StandardForm surface syntax, or general kernel

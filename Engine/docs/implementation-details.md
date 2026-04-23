@@ -253,7 +253,8 @@ Wolfram semantics locally would have been a trap.
 
 `expression.py` exists to support:
 
-- parsing FullForm, InputForm, and a box-free StandardForm subset;
+- parsing FullForm, InputForm, and a pragmatic StandardForm subset with semantic lowering for
+  common notebook boxes such as `FractionBox`, `SqrtBox`, `RadicalBox`, and `SuperscriptBox`;
 - structural inspection;
 - canonical rendering;
 - a small set of structural built-ins for inert evaluation.
@@ -275,8 +276,9 @@ It keeps behavior predictable and keeps Tungsten honest about what is and is not
 ### Why StandardForm support is only a subset
 
 Box language and full StandardForm surface syntax are large topics. The practical requirement here
-was the plain-text subset that is useful for scripts, docs, and code examples, not full notebook
-box reconstruction.
+was a deterministic subset that is useful for scripts, docs, notebook inspection, and code
+examples. Tungsten now lowers a few high-value semantic boxes plus their common wrappers, but it
+still deliberately stops far short of full notebook box reconstruction.
 
 ## Why documentation indexing is notebook-backed and SQLite-backed
 

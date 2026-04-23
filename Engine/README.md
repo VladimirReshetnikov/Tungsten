@@ -75,9 +75,10 @@ The current workspace is built around seven complementary capabilities:
 3. A kernel-free inline-box string subsystem that can preserve embedded `\!\(\*...\)` escapes,
    extract box-bearing objects from saved notebook cells, and compose ready-to-use Wolfram string
    literals for images and other notebook objects.
-4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a box-free
-   StandardForm subset, then evaluates a small inert built-in set such as `Length`, `Depth`,
-   `Part`, `Extract`, and `Level`.
+4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a pragmatic
+   StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
+   `RadicalBox`, and `SuperscriptBox`, then evaluates a small inert built-in set such as
+   `Length`, `Depth`, `Part`, `Extract`, and `Level`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
@@ -108,8 +109,8 @@ The current workspace is built around seven complementary capabilities:
 
 - The visible inline Notebook Assistant desktop-driving backend remains experimental. It depends on
   a visible foreground notebook window and, in practice, on WinDesk-backed automation.
-- The expression subsystem intentionally covers only a box-free StandardForm subset and a small
-  built-in evaluation surface.
+- The expression subsystem intentionally covers only a pragmatic StandardForm subset, a limited
+  semantic box subset, and a small built-in evaluation surface.
 - FrontEnd automation is intentionally selective rather than exhaustive.
 
 ## Tech stack and operating assumptions
@@ -259,7 +260,8 @@ The current documentation should state these boundaries plainly:
 
 - Tungsten is Windows-first and expects a local Wolfram installation.
 - Kernel-backed features still require the real local installation and a working license path.
-- The expression parser does not cover full box language or arbitrary StandardForm constructs.
+- The expression parser handles common semantic box forms, but it still does not cover full box
+  language or arbitrary StandardForm constructs.
 - The expression evaluator only implements a small built-in subset and leaves all other heads inert.
 - FrontEnd automation works only for the actions Tungsten explicitly exposes.
 - Notebook Assistant inline UI driving is intentionally not the default path because it is less
