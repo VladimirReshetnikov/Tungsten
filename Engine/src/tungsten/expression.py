@@ -321,6 +321,465 @@ def level(expr: Expr, spec: Expr | int | tuple[int, int] = 1) -> list[Expr]:
     return [record.expr for record in records if _level_matches(record, level_min, level_max)]
 
 
+_MISSING = object()
+
+
+def first(expr: Expr, default: Expr | object = _MISSING) -> Expr:
+    if isinstance(expr, Call) and expr.arguments:
+        return expr.arguments[0]
+    if default is not _MISSING:
+        return default  # type: ignore[return-value]
+    raise WolframEvaluationError(f"Cannot take First of {expr.to_input_form()}.")
+
+
+def last(expr: Expr, default: Expr | object = _MISSING) -> Expr:
+    if isinstance(expr, Call) and expr.arguments:
+        return expr.arguments[-1]
+    if default is not _MISSING:
+        return default  # type: ignore[return-value]
+    raise WolframEvaluationError(f"Cannot take Last of {expr.to_input_form()}.")
+
+
+def rest(expr: Expr) -> Expr:
+    compound = _require_compound(expr, "Rest")
+    if not compound.arguments:
+        raise WolframEvaluationError(f"Cannot take Rest of {expr.to_input_form()} with length zero.")
+    return _rebuild(compound, compound.arguments[1:])
+
+
+def most(expr: Expr) -> Expr:
+    compound = _require_compound(expr, "Most")
+    if not compound.arguments:
+        raise WolframEvaluationError(f"Cannot take Most of {expr.to_input_form()} with length zero.")
+    return _rebuild(compound, compound.arguments[:-1])
+
+
+def take(expr: Expr, *specs: Expr | int) -> Expr:
+    compound = _require_compound(expr, "Take")
+    if len(specs) != 1:
+        raise WolframEvaluationError("Take currently supports exactly one specification.")
+    return _take_or_drop(compound, specs, drop=False)
+
+
+def drop(expr: Expr, *specs: Expr | int) -> Expr:
+    compound = _require_compound(expr, "Drop")
+    if len(specs) != 1:
+        raise WolframEvaluationError("Drop currently supports exactly one specification.")
+    return _take_or_drop(compound, specs, drop=True)
+
+
+def append(expr: Expr, item: Expr) -> Expr:
+    compound = _require_compound(expr, "Append")
+    return _rebuild(compound, (*compound.arguments, item))
+
+
+def prepend(expr: Expr, item: Expr) -> Expr:
+    compound = _require_compound(expr, "Prepend")
+    return _rebuild(compound, (item, *compound.arguments))
+
+
+def join(*exprs: Expr) -> Expr:
+    if not exprs:
+        raise WolframEvaluationError("Join expects at least one expression.")
+
+    compounds = [_require_compound(expr, "Join") for expr in exprs]
+    head_expr = compounds[0].head_expr
+    for compound in compounds[1:]:
+        if compound.head_expr != head_expr:
+            raise WolframEvaluationError("Join expects all expressions to have the same head.")
+
+    arguments: list[Expr] = []
+    for compound in compounds:
+        arguments.extend(compound.arguments)
+    return Call(head_expr=head_expr, arguments=tuple(arguments))
+
+
+def reverse(expr: Expr) -> Expr:
+    compound = _require_compound(expr, "Reverse")
+    return _rebuild(compound, tuple(reversed(compound.arguments)))
+
+
+def rotate_left(expr: Expr, amount: Expr | int = 1) -> Expr:
+    compound = _require_compound(expr, "RotateLeft")
+    if not compound.arguments:
+        return compound
+
+    count = len(compound.arguments)
+    offset = _normalize_integer_argument(amount, "RotateLeft") % count
+    if offset == 0:
+        return compound
+    return _rebuild(compound, compound.arguments[offset:] + compound.arguments[:offset])
+
+
+def rotate_right(expr: Expr, amount: Expr | int = 1) -> Expr:
+    return rotate_left(expr, -_normalize_integer_argument(amount, "RotateRight"))
+
+
+def flatten(expr: Expr, level_spec: Expr | int | None = None) -> Expr:
+    compound = _require_compound(expr, "Flatten")
+    max_depth = _normalize_flatten_level(level_spec)
+    if max_depth == 0:
+        return compound
+    return _flatten_same_head(compound, max_depth)
+
+
+def delete(expr: Expr, positions: Expr | int) -> Expr:
+    paths, invalid = _expand_position_spec(expr, integer(positions) if isinstance(positions, int) else positions)
+    unique_paths = _dedupe_paths(paths)
+    if invalid or any(not path for path in unique_paths):
+        raise WolframEvaluationError(f"Delete positions are invalid for {expr.to_input_form()}.")
+
+    result = expr
+    for path in _sort_paths(unique_paths):
+        result, changed = _try_delete_at_path(result, path)
+        if not changed:
+            raise WolframEvaluationError(f"Delete positions are invalid for {expr.to_input_form()}.")
+    return result
+
+
+def replace_part(expr: Expr, replacements: Expr) -> Expr:
+    rules = _normalize_replace_part_rules(replacements)
+    planned: list[tuple[list[int], Expr]] = []
+    seen_paths: set[tuple[int, ...]] = set()
+
+    for position_spec, replacement in rules:
+        paths, _invalid = _expand_position_spec(expr, position_spec)
+        for path in paths:
+            key = tuple(path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            planned.append((path, replacement))
+
+    result = expr
+    for path, replacement in _sort_path_items(planned):
+        result, _changed = _try_replace_at_path(result, path, replacement)
+    return result
+
+
+def apply_head(new_head: Expr, expr: Expr) -> Expr:
+    if not isinstance(expr, Call):
+        return expr
+    return Call(head_expr=new_head, arguments=expr.arguments)
+
+
+def map_expr(function: Expr, expr: Expr) -> Expr:
+    if not isinstance(expr, Call):
+        return expr
+    return _rebuild(expr, tuple(Call(head_expr=function, arguments=(argument,)) for argument in expr.arguments))
+
+
+def map_at(function: Expr, expr: Expr, positions: Expr | int) -> Expr:
+    paths, invalid = _expand_position_spec(expr, integer(positions) if isinstance(positions, int) else positions)
+    if invalid:
+        raise WolframEvaluationError(f"MapAt positions are invalid for {expr.to_input_form()}.")
+
+    result = expr
+    for path in _sort_paths(paths):
+        result, changed = _try_map_at_path(result, function, path)
+        if not changed:
+            raise WolframEvaluationError(f"MapAt positions are invalid for {expr.to_input_form()}.")
+    return result
+
+
+def _require_compound(expr: Expr, function_name: str) -> Call:
+    if isinstance(expr, Call):
+        return expr
+    raise WolframEvaluationError(f"{function_name} expects a nonatomic expression.")
+
+
+def _rebuild(expr: Call, arguments: Sequence[Expr]) -> Call:
+    return Call(head_expr=expr.head_expr, arguments=tuple(arguments))
+
+
+def _normalize_integer_argument(value: Expr | int, function_name: str) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Integer):
+        return value.value
+    raise WolframEvaluationError(f"{function_name} expects an integer argument.")
+
+
+def _take_or_drop(expr: Call, specs: Sequence[Expr | int], *, drop: bool) -> Expr:
+    function_name = "Drop" if drop else "Take"
+    selectors = _normalize_take_drop_selectors(expr, specs[0], function_name)
+    if drop:
+        removed = {_resolve_index(len(expr.arguments), selector) for selector in selectors}
+        current = _rebuild(
+            expr,
+            tuple(argument for index, argument in enumerate(expr.arguments) if index not in removed),
+        )
+    else:
+        current = _rebuild(expr, tuple(_select_single_part(expr, selector) for selector in selectors))
+    return current
+
+
+def _normalize_take_drop_selectors(expr: Call, spec: Expr | int, function_name: str) -> list[int]:
+    count = len(expr.arguments)
+
+    if isinstance(spec, int):
+        selectors = list(range(1, spec + 1)) if spec >= 0 else list(range(count + spec + 1, count + 1))
+        return _validate_selectors(expr, selectors, function_name)
+
+    if isinstance(spec, Integer):
+        return _normalize_take_drop_selectors(expr, spec.value, function_name)
+
+    if isinstance(spec, Symbol) and spec.name == "All":
+        return list(range(1, count + 1))
+
+    if isinstance(spec, Call) and spec.has_head("Span"):
+        return _validate_selectors(expr, _expand_span_spec(expr, spec), function_name)
+
+    if isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) == 1:
+            item = spec.arguments[0]
+            if isinstance(item, Integer):
+                return _validate_selectors(expr, [item.value], function_name)
+            if isinstance(item, Symbol) and item.name == "All":
+                return list(range(1, count + 1))
+            raise WolframEvaluationError(f"{function_name} single-element list specifications must contain an integer or All.")
+        if len(spec.arguments) in {2, 3}:
+            return _validate_selectors(expr, _expand_span_spec(expr, Call(head_expr=Symbol("Span"), arguments=spec.arguments)), function_name)
+        raise WolframEvaluationError(f"{function_name} list specifications must contain one, two, or three items.")
+
+    raise WolframEvaluationError(f"Unsupported {function_name} specification: {spec.to_input_form() if isinstance(spec, Expr) else spec!r}.")
+
+
+def _validate_selectors(expr: Call, selectors: Sequence[int], function_name: str) -> list[int]:
+    for selector in selectors:
+        _resolve_index(len(expr.arguments), selector)
+    return list(selectors)
+
+
+def _normalize_flatten_level(level_spec: Expr | int | None) -> int | None:
+    if level_spec is None:
+        return None
+    if isinstance(level_spec, int):
+        if level_spec < 0:
+            raise WolframEvaluationError("Flatten levels must be non-negative.")
+        return level_spec
+    if isinstance(level_spec, Integer):
+        return _normalize_flatten_level(level_spec.value)
+    if isinstance(level_spec, Symbol) and level_spec.name == "Infinity":
+        return None
+    raise WolframEvaluationError("Flatten levels must be a non-negative integer or Infinity.")
+
+
+def _flatten_same_head(expr: Call, remaining: int | None) -> Expr:
+    if remaining == 0:
+        return expr
+
+    arguments: list[Expr] = []
+    for argument in expr.arguments:
+        if isinstance(argument, Call) and argument.head_expr == expr.head_expr:
+            nested = _flatten_same_head(argument, None if remaining is None else remaining - 1)
+            assert isinstance(nested, Call)
+            arguments.extend(nested.arguments)
+            continue
+        arguments.append(argument)
+    return _rebuild(expr, arguments)
+
+
+def _normalize_replace_part_rules(replacements: Expr) -> list[tuple[Expr, Expr]]:
+    if isinstance(replacements, Call) and (replacements.has_head("Rule") or replacements.has_head("RuleDelayed")):
+        if len(replacements.arguments) != 2:
+            raise WolframEvaluationError("ReplacePart rules must contain exactly two arguments.")
+        return [(replacements.arguments[0], replacements.arguments[1])]
+
+    if isinstance(replacements, Call) and replacements.has_head("List"):
+        rules: list[tuple[Expr, Expr]] = []
+        for item in replacements.arguments:
+            if not isinstance(item, Call) or (not item.has_head("Rule") and not item.has_head("RuleDelayed")) or len(item.arguments) != 2:
+                raise WolframEvaluationError("ReplacePart expects a rule or a list of rules.")
+            rules.append((item.arguments[0], item.arguments[1]))
+        return rules
+
+    raise WolframEvaluationError("ReplacePart expects a rule or a list of rules.")
+
+
+def _expand_position_spec(expr: Expr, spec: Expr) -> tuple[list[list[int]], bool]:
+    if isinstance(spec, Integer):
+        if not isinstance(expr, Call):
+            return ([], True)
+        resolved = _try_resolve_index(len(expr.arguments), spec.value)
+        if resolved is None:
+            return ([], True)
+        return ([[resolved + 1]], False)
+
+    if isinstance(spec, Call) and spec.has_head("List") and _is_collection_of_position_specs(spec):
+        paths: list[list[int]] = []
+        invalid = False
+        for item in spec.arguments:
+            expanded, had_invalid = _expand_position_spec(expr, item)
+            paths.extend(expanded)
+            invalid = invalid or had_invalid
+        return (paths, invalid)
+
+    if isinstance(spec, Call) and spec.has_head("List") and all(_is_position_component(item) for item in spec.arguments):
+        return _expand_position_components(expr, list(spec.arguments))
+
+    if isinstance(spec, Call) and spec.has_head("List"):
+        paths: list[list[int]] = []
+        invalid = False
+        for item in spec.arguments:
+            expanded, had_invalid = _expand_position_spec(expr, item)
+            paths.extend(expanded)
+            invalid = invalid or had_invalid
+        return (paths, invalid)
+
+    raise WolframEvaluationError(f"Unsupported position specification: {spec.to_input_form()}.")
+
+
+def _expand_position_components(expr: Expr, components: Sequence[Expr]) -> tuple[list[list[int]], bool]:
+    if not components:
+        return ([[]], False)
+
+    if not isinstance(expr, Call):
+        return ([], True)
+
+    paths: list[list[int]] = []
+    invalid = False
+    selectors = _selectors_from_position_component(expr, components[0])
+    for selector in selectors:
+        resolved = _try_resolve_index(len(expr.arguments), selector)
+        if resolved is None:
+            invalid = True
+            continue
+        child_paths, child_invalid = _expand_position_components(expr.arguments[resolved], components[1:])
+        invalid = invalid or child_invalid
+        for child_path in child_paths:
+            paths.append([resolved + 1, *child_path])
+    return (paths, invalid)
+
+
+def _selectors_from_position_component(expr: Call, component: Expr) -> list[int]:
+    if isinstance(component, Integer):
+        return [component.value]
+    if isinstance(component, Symbol) and component.name == "All":
+        return list(range(1, len(expr.arguments) + 1))
+    if isinstance(component, Call) and component.has_head("Span"):
+        return _expand_span_spec(expr, component)
+    if isinstance(component, Call) and component.has_head("List"):
+        return _expand_selector_list(expr, component.arguments)
+    raise WolframEvaluationError(f"Unsupported position component: {component.to_input_form()}.")
+
+
+def _is_position_component(expr: Expr) -> bool:
+    return (
+        isinstance(expr, Integer)
+        or (isinstance(expr, Symbol) and expr.name == "All")
+        or (isinstance(expr, Call) and expr.has_head("Span"))
+        or (isinstance(expr, Call) and expr.has_head("List") and all(_is_selector_atom(item) for item in expr.arguments))
+    )
+
+
+def _is_collection_of_position_specs(expr: Call) -> bool:
+    return bool(expr.arguments) and all(
+        isinstance(item, Call) and item.has_head("List") and all(_is_position_component(component) for component in item.arguments)
+        for item in expr.arguments
+    )
+
+
+def _is_selector_atom(expr: Expr) -> bool:
+    return (
+        isinstance(expr, Integer)
+        or (isinstance(expr, Symbol) and expr.name == "All")
+        or (isinstance(expr, Call) and expr.has_head("Span"))
+    )
+
+
+def _try_resolve_index(length_value: int, index: int) -> int | None:
+    try:
+        return _resolve_index(length_value, index)
+    except WolframEvaluationError:
+        return None
+
+
+def _dedupe_paths(paths: Sequence[Sequence[int]]) -> list[list[int]]:
+    seen: set[tuple[int, ...]] = set()
+    unique: list[list[int]] = []
+    for path in paths:
+        key = tuple(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(list(path))
+    return unique
+
+
+def _sort_paths(paths: Sequence[Sequence[int]]) -> list[list[int]]:
+    return [list(path) for path in sorted((tuple(path) for path in paths), key=lambda path: (len(path), path), reverse=True)]
+
+
+def _sort_path_items(items: Sequence[tuple[Sequence[int], Expr]]) -> list[tuple[list[int], Expr]]:
+    return [
+        (list(path), value)
+        for path, value in sorted(
+            ((tuple(path), value) for path, value in items),
+            key=lambda item: (len(item[0]), item[0]),
+            reverse=True,
+        )
+    ]
+
+
+def _try_delete_at_path(expr: Expr, path: Sequence[int]) -> tuple[Expr, bool]:
+    if not path:
+        return (expr, False)
+    if not isinstance(expr, Call):
+        return (expr, False)
+
+    resolved = _try_resolve_index(len(expr.arguments), path[0])
+    if resolved is None:
+        return (expr, False)
+
+    arguments = list(expr.arguments)
+    if len(path) == 1:
+        del arguments[resolved]
+        return (_rebuild(expr, arguments), True)
+
+    updated_child, changed = _try_delete_at_path(arguments[resolved], path[1:])
+    if not changed:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
+def _try_replace_at_path(expr: Expr, path: Sequence[int], replacement: Expr) -> tuple[Expr, bool]:
+    if not path:
+        return (replacement, True)
+    if not isinstance(expr, Call):
+        return (expr, False)
+
+    resolved = _try_resolve_index(len(expr.arguments), path[0])
+    if resolved is None:
+        return (expr, False)
+
+    arguments = list(expr.arguments)
+    updated_child, changed = _try_replace_at_path(arguments[resolved], path[1:], replacement)
+    if not changed:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
+def _try_map_at_path(expr: Expr, function: Expr, path: Sequence[int]) -> tuple[Expr, bool]:
+    if not path:
+        return (Call(head_expr=function, arguments=(expr,)), True)
+    if not isinstance(expr, Call):
+        return (expr, False)
+
+    resolved = _try_resolve_index(len(expr.arguments), path[0])
+    if resolved is None:
+        return (expr, False)
+
+    arguments = list(expr.arguments)
+    updated_child, changed = _try_map_at_path(arguments[resolved], function, path[1:])
+    if not changed:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
 def evaluate(expr: Expr) -> Expr:
     if isinstance(expr, (Symbol, Integer, Real, String)):
         return expr
@@ -332,49 +791,151 @@ def evaluate(expr: Expr) -> Expr:
     if not isinstance(evaluated_head, Symbol):
         return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
 
+    evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
+
     if evaluated_head.name == "Length":
-        if len(expr.arguments) != 1:
+        if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Length expects exactly one argument.")
-        return integer(length(evaluate(expr.arguments[0])))
+        return integer(length(evaluated_arguments[0]))
 
     if evaluated_head.name == "Depth":
-        if len(expr.arguments) != 1:
+        if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Depth expects exactly one argument.")
-        return integer(depth(evaluate(expr.arguments[0])))
+        return integer(depth(evaluated_arguments[0]))
 
     if evaluated_head.name == "Head":
-        if len(expr.arguments) != 1:
+        if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Head expects exactly one argument.")
-        return head_of(evaluate(expr.arguments[0]))
+        return head_of(evaluated_arguments[0])
+
+    if evaluated_head.name == "First":
+        if len(evaluated_arguments) == 1:
+            return first(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return first(evaluated_arguments[0], default=evaluated_arguments[1])
+        raise WolframEvaluationError("First expects an expression and an optional default.")
+
+    if evaluated_head.name == "Last":
+        if len(evaluated_arguments) == 1:
+            return last(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return last(evaluated_arguments[0], default=evaluated_arguments[1])
+        raise WolframEvaluationError("Last expects an expression and an optional default.")
+
+    if evaluated_head.name == "Rest":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Rest expects exactly one argument.")
+        return rest(evaluated_arguments[0])
+
+    if evaluated_head.name == "Most":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Most expects exactly one argument.")
+        return most(evaluated_arguments[0])
 
     if evaluated_head.name == "Part":
-        if len(expr.arguments) < 2:
+        if len(evaluated_arguments) < 2:
             raise WolframEvaluationError("Part expects an expression and at least one part specification.")
-        subject = evaluate(expr.arguments[0])
-        specs = tuple(evaluate(argument) for argument in expr.arguments[1:])
+        subject = evaluated_arguments[0]
+        specs = evaluated_arguments[1:]
         return part(subject, *specs)
 
     if evaluated_head.name == "Extract":
-        if len(expr.arguments) != 2:
+        if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("Extract expects exactly two arguments.")
-        subject = evaluate(expr.arguments[0])
-        positions = evaluate(expr.arguments[1])
+        subject = evaluated_arguments[0]
+        positions = evaluated_arguments[1]
         return extract(subject, positions)
 
     if evaluated_head.name == "Level":
-        if len(expr.arguments) not in {2, 3}:
+        if len(evaluated_arguments) not in {2, 3}:
             raise WolframEvaluationError("Level expects an expression, a level specification, and an optional heads flag.")
-        subject = evaluate(expr.arguments[0])
-        spec = evaluate(expr.arguments[1])
-        if len(expr.arguments) == 3:
-            heads = evaluate(expr.arguments[2])
+        subject = evaluated_arguments[0]
+        spec = evaluated_arguments[1]
+        if len(evaluated_arguments) == 3:
+            heads = evaluated_arguments[2]
             if not isinstance(heads, Symbol) or heads.name not in {"True", "False"}:
                 raise WolframEvaluationError("The optional third Level argument must be True or False.")
             if heads.name == "True":
                 raise WolframEvaluationError("Level[..., ..., True] is not implemented yet.")
         return list_expr(*level(subject, spec))
 
-    return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
+    if evaluated_head.name == "Take":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Take currently supports exactly one specification.")
+        return take(evaluated_arguments[0], *evaluated_arguments[1:])
+
+    if evaluated_head.name == "Drop":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Drop currently supports exactly one specification.")
+        return drop(evaluated_arguments[0], *evaluated_arguments[1:])
+
+    if evaluated_head.name == "Append":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Append expects exactly two arguments.")
+        return append(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Prepend":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Prepend expects exactly two arguments.")
+        return prepend(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Join":
+        if len(evaluated_arguments) < 1:
+            raise WolframEvaluationError("Join expects at least one argument.")
+        return join(*evaluated_arguments)
+
+    if evaluated_head.name == "Reverse":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Reverse currently supports exactly one argument.")
+        return reverse(evaluated_arguments[0])
+
+    if evaluated_head.name == "RotateLeft":
+        if len(evaluated_arguments) == 1:
+            return rotate_left(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return rotate_left(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("RotateLeft expects an expression and an optional integer offset.")
+
+    if evaluated_head.name == "RotateRight":
+        if len(evaluated_arguments) == 1:
+            return rotate_right(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return rotate_right(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("RotateRight expects an expression and an optional integer offset.")
+
+    if evaluated_head.name == "Flatten":
+        if len(evaluated_arguments) == 1:
+            return flatten(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return flatten(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Flatten currently supports an expression and an optional level specification.")
+
+    if evaluated_head.name == "Delete":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Delete expects exactly two arguments.")
+        return delete(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ReplacePart":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ReplacePart expects exactly two arguments.")
+        return replace_part(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Apply":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Apply currently supports exactly two arguments.")
+        return apply_head(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Map":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Map currently supports exactly two arguments.")
+        return map_expr(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "MapAt":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("MapAt currently supports exactly three arguments.")
+        return map_at(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
 
 def parse_expression(text: str, form: str = "input") -> Expr:

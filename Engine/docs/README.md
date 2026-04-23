@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-23T17:10:29Z
-- Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Updated (UTC): 2026-04-23T18:33:04Z
+- Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
 
 ## What this docs tree is for
 
@@ -50,9 +50,10 @@ The docs are split so readers can choose the right depth:
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
 4. [expression-parser.md](./expression-parser.md)
-5. [inline-box-strings.md](./inline-box-strings.md)
-6. [notebook-assistant.md](./notebook-assistant.md)
-7. [troubleshooting.md](./troubleshooting.md)
+5. [expression-function-support.md](./expression-function-support.md)
+6. [inline-box-strings.md](./inline-box-strings.md)
+7. [notebook-assistant.md](./notebook-assistant.md)
+8. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -66,6 +67,7 @@ The docs are split so readers can choose the right depth:
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
+| [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
 
 ## Suggested learning path by task
@@ -93,6 +95,7 @@ The docs are split so readers can choose the right depth:
 ### Kernel-free structural analysis
 
 - Read [expression-parser.md](./expression-parser.md).
+- Read [expression-function-support.md](./expression-function-support.md) for the exact built-in coverage and official Wolfram reference links.
 - Use [usage-reference.md](./usage-reference.md) for `expr parse` and `expr evaluate`.
 - Read [architecture.md](./architecture.md) if you need to extend the expression subsystem.
 

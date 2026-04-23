@@ -125,7 +125,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     expr_eval = expr_subparsers.add_parser(
         "evaluate",
-        help="Structurally evaluate built-ins such as Length, Depth, Part, Extract, and Level.",
+        help="Structurally evaluate built-ins such as Length, Take, Flatten, ReplacePart, and MapAt.",
     )
     expr_eval_group = expr_eval.add_mutually_exclusive_group(required=True)
     expr_eval_group.add_argument("--code", help="Inline Wolfram expression text.")

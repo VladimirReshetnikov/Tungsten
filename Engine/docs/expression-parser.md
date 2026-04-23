@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-23T17:56:40Z
-Repository HEAD: 43448cc00f66236d4d6920843c725f8e92d9c791
+Updated (UTC): 2026-04-23T18:33:04Z
+Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
 
 ## Summary
 
@@ -11,13 +11,17 @@ Repository HEAD: 43448cc00f66236d4d6920843c725f8e92d9c791
 - an AST for atoms and general expressions;
 - parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
 - canonical `InputForm` and `FullForm` rendering;
-- a small inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
-  `Extract`, and `Level`.
+- an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
+  `Extract`, `Level`, `Take`, `Drop`, `Flatten`, `ReplacePart`, and related exact-position
+  transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
 The important constraint is deliberate: this is not a replacement for the Wolfram kernel. Unknown
 symbols stay inert, and Tungsten only evaluates the specific built-ins it implements itself.
+
+For the exact supported structural function list, supported forms, and official Wolfram reference
+links, read [expression-function-support.md](./expression-function-support.md).
 
 ## When to use this subsystem
 
@@ -174,9 +178,27 @@ Convenience entrypoints include:
 - `parse_standard_form(...)`
 - `length(expr)`
 - `depth(expr)`
+- `first(expr)`
+- `last(expr)`
+- `rest(expr)`
+- `most(expr)`
 - `part(expr, ...)`
 - `extract(expr, ...)`
 - `level(expr, ...)`
+- `take(expr, spec)`
+- `drop(expr, spec)`
+- `append(expr, item)`
+- `prepend(expr, item)`
+- `join(expr1, expr2, ...)`
+- `reverse(expr)`
+- `rotate_left(expr, n=1)`
+- `rotate_right(expr, n=1)`
+- `flatten(expr, n=None)`
+- `delete(expr, positions)`
+- `replace_part(expr, replacements)`
+- `apply_head(head, expr)`
+- `map_expr(f, expr)`
+- `map_at(f, expr, positions)`
 - `evaluate(expr)`
 
 ## CLI usage
@@ -196,6 +218,8 @@ Structurally evaluate implemented built-ins:
 python -m tungsten expr evaluate --code "Length[{a, b, c}]"
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
+python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 ```
 
 The parse payload includes:

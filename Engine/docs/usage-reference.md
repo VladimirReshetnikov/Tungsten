@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T17:10:29Z
-- Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Updated (UTC): 2026-04-23T18:33:04Z
+- Repository HEAD: d802d432d96644fe1275d8577806edf3bbb7ec97
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -13,6 +13,7 @@
   - [Troubleshooting](./troubleshooting.md)
   - [Notebook Assistant](./notebook-assistant.md)
   - [Expression Parser](./expression-parser.md)
+  - [Expression Function Support](./expression-function-support.md)
 
 ## Conventions
 
@@ -328,6 +329,8 @@ python -m tungsten expr evaluate --code "Length[{a, b, c}]"
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
+python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 ```
 
 The implemented inert evaluator currently covers:
@@ -335,9 +338,30 @@ The implemented inert evaluator currently covers:
 - `Length`
 - `Depth`
 - `Head`
+- `First`
+- `Last`
+- `Rest`
+- `Most`
 - `Part`
 - `Extract`
 - `Level`
+- `Take`
+- `Drop`
+- `Append`
+- `Prepend`
+- `Join`
+- `Reverse`
+- `RotateLeft`
+- `RotateRight`
+- `Flatten`
+- `Delete`
+- `ReplacePart`
+- `Apply`
+- `Map`
+- `MapAt`
+
+For the exact supported forms and limits of each function, see
+[expression-function-support.md](./expression-function-support.md).
 
 Everything else remains inert.
 

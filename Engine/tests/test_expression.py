@@ -135,6 +135,94 @@ class ExpressionEvaluationTests(unittest.TestCase):
         result = evaluate(parse_input_form("Level[f[a, g[b]], 2]"))
         self.assertEqual(result.to_full_form(), "List[a, g[b], b]")
 
+    def test_first_last_and_defaults(self) -> None:
+        first_result = evaluate(parse_input_form("First[f[a, b, c]]"))
+        last_result = evaluate(parse_input_form("Last[f[a, b, c]]"))
+        default_result = evaluate(parse_input_form("First[f[], Missing[none]]"))
+        self.assertEqual(first_result.to_full_form(), "a")
+        self.assertEqual(last_result.to_full_form(), "c")
+        self.assertEqual(default_result.to_full_form(), "Missing[none]")
+
+    def test_rest_and_most(self) -> None:
+        rest_result = evaluate(parse_input_form("Rest[f[a, b, c]]"))
+        most_result = evaluate(parse_input_form("Most[f[a, b, c]]"))
+        self.assertEqual(rest_result.to_full_form(), "f[b, c]")
+        self.assertEqual(most_result.to_full_form(), "f[a, b]")
+
+    def test_take_and_drop_support_integer_and_range_specs(self) -> None:
+        take_positive = evaluate(parse_input_form("Take[f[a, b, c, d], 2]"))
+        take_negative = evaluate(parse_input_form("Take[f[a, b, c, d], -2]"))
+        take_range = evaluate(parse_input_form("Take[f[a, b, c, d, e], {2, 5, 2}]"))
+        drop_range = evaluate(parse_input_form("Drop[f[a, b, c, d, e], {2, 5, 2}]"))
+        self.assertEqual(take_positive.to_full_form(), "f[a, b]")
+        self.assertEqual(take_negative.to_full_form(), "f[c, d]")
+        self.assertEqual(take_range.to_full_form(), "f[b, d]")
+        self.assertEqual(drop_range.to_full_form(), "f[a, c, e]")
+
+    def test_take_and_drop_support_all_and_singleton_list_specs(self) -> None:
+        take_all = evaluate(parse_input_form("Take[f[a, b, c], All]"))
+        take_singleton = evaluate(parse_input_form("Take[f[a, b, c], {2}]"))
+        drop_singleton = evaluate(parse_input_form("Drop[f[a, b, c], {2}]"))
+        self.assertEqual(take_all.to_full_form(), "f[a, b, c]")
+        self.assertEqual(take_singleton.to_full_form(), "f[b]")
+        self.assertEqual(drop_singleton.to_full_form(), "f[a, c]")
+
+    def test_append_prepend_and_join_preserve_head(self) -> None:
+        append_result = evaluate(parse_input_form("Append[f[a], b]"))
+        prepend_result = evaluate(parse_input_form("Prepend[f[a], b]"))
+        join_result = evaluate(parse_input_form("Join[f[a], f[b, c]]"))
+        self.assertEqual(append_result.to_full_form(), "f[a, b]")
+        self.assertEqual(prepend_result.to_full_form(), "f[b, a]")
+        self.assertEqual(join_result.to_full_form(), "f[a, b, c]")
+
+    def test_reverse_and_rotate(self) -> None:
+        reverse_result = evaluate(parse_input_form("Reverse[f[a, b, c]]"))
+        left_result = evaluate(parse_input_form("RotateLeft[f[a, b, c], 2]"))
+        right_result = evaluate(parse_input_form("RotateRight[f[a, b, c], 2]"))
+        self.assertEqual(reverse_result.to_full_form(), "f[c, b, a]")
+        self.assertEqual(left_result.to_full_form(), "f[c, a, b]")
+        self.assertEqual(right_result.to_full_form(), "f[b, c, a]")
+
+    def test_flatten_same_head_recursively(self) -> None:
+        flatten_all = evaluate(parse_input_form("Flatten[f[a, f[b, f[c]], d]]"))
+        flatten_one = evaluate(parse_input_form("Flatten[f[a, f[b, f[c]], d], 1]"))
+        self.assertEqual(flatten_all.to_full_form(), "f[a, b, c, d]")
+        self.assertEqual(flatten_one.to_full_form(), "f[a, b, f[c], d]")
+
+    def test_delete_removes_parts_by_position(self) -> None:
+        delete_single = evaluate(parse_input_form("Delete[f[a, b, c], 2]"))
+        delete_nested = evaluate(parse_input_form("Delete[f[a, g[b, c], d], {2, 1}]"))
+        delete_multiple = evaluate(parse_input_form("Delete[f[a, b, c, d], {{2}, {4}}]"))
+        self.assertEqual(delete_single.to_full_form(), "f[a, c]")
+        self.assertEqual(delete_nested.to_full_form(), "f[a, g[c], d]")
+        self.assertEqual(delete_multiple.to_full_form(), "f[a, c]")
+
+    def test_replace_part_updates_structure_and_ignores_missing_positions(self) -> None:
+        replace_single = evaluate(parse_input_form("ReplacePart[f[a, b, c], 2 -> x]"))
+        replace_nested = evaluate(parse_input_form("ReplacePart[f[a, g[b, c], d], {2, 1} -> x]"))
+        replace_multiple = evaluate(parse_input_form("ReplacePart[f[a, b, c], {{2} -> x, {3} -> y}]"))
+        replace_invalid = evaluate(parse_input_form("ReplacePart[x, {1} -> y]"))
+        replace_overlap = evaluate(parse_input_form("ReplacePart[f[g[a, b], c], {{1, 1} -> y, {1} -> x}]"))
+        self.assertEqual(replace_single.to_full_form(), "f[a, x, c]")
+        self.assertEqual(replace_nested.to_full_form(), "f[a, g[x, c], d]")
+        self.assertEqual(replace_multiple.to_full_form(), "f[a, x, y]")
+        self.assertEqual(replace_invalid.to_full_form(), "x")
+        self.assertEqual(replace_overlap.to_full_form(), "f[x, c]")
+
+    def test_apply_map_and_map_at_are_structural(self) -> None:
+        apply_result = evaluate(parse_input_form("Apply[g, f[a, b]]"))
+        apply_atom = evaluate(parse_input_form("Apply[g, x]"))
+        map_result = evaluate(parse_input_form("Map[g, f[a, b]]"))
+        map_atom = evaluate(parse_input_form("Map[g, x]"))
+        map_at_result = evaluate(parse_input_form("MapAt[g, f[a, h[b, c], d], {2, 1}]"))
+        map_at_multiple = evaluate(parse_input_form("MapAt[g, f[a, b, c], {{2}, {2}}]"))
+        self.assertEqual(apply_result.to_full_form(), "g[a, b]")
+        self.assertEqual(apply_atom.to_full_form(), "x")
+        self.assertEqual(map_result.to_full_form(), "f[g[a], g[b]]")
+        self.assertEqual(map_atom.to_full_form(), "x")
+        self.assertEqual(map_at_result.to_full_form(), "f[a, h[g[b], c], d]")
+        self.assertEqual(map_at_multiple.to_full_form(), "f[a, g[g[b]], c]")
+
 
 if __name__ == "__main__":
     unittest.main()

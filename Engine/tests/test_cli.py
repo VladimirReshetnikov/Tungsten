@@ -203,6 +203,24 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["result"]["full_form"], "List[a, b]")
 
+    def test_expr_evaluate_command_with_structural_rewrite(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "expr",
+                    "evaluate",
+                    "--code",
+                    "ReplacePart[f[a, b, c], 2 -> x]",
+                    "--form",
+                    "input",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["result"]["full_form"], "f[a, x, c]")
+
     def test_inline_box_compose_command(self) -> None:
         stdout = io.StringIO()
         with redirect_stdout(stdout):

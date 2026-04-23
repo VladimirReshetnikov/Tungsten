@@ -77,8 +77,8 @@ The current workspace is built around seven complementary capabilities:
    literals for images and other notebook objects.
 4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a pragmatic
    StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
-   `RadicalBox`, and `SuperscriptBox`, then evaluates a small inert built-in set such as
-   `Length`, `Depth`, `Part`, `Extract`, and `Level`.
+   `RadicalBox`, and `SuperscriptBox`, then evaluates a broader inert structural built-in set such
+   as `Length`, `Depth`, `Take`, `Drop`, `Flatten`, `ReplacePart`, and `MapAt`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
@@ -185,7 +185,7 @@ python -m tungsten notebook create --file $env:TEMP\tungsten-demo.nb --title "De
 python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
 python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
 python -m tungsten docs search NotebookGet
-python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
+python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 ```
 
 ### PowerShell
@@ -197,7 +197,7 @@ Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
 New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{CircleBox[]}]"
 Convert-TungstenExpression -Code "1 + 2 x^3"
-Invoke-TungstenExpression -Code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+Invoke-TungstenExpression -Code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 Find-TungstenDocumentation -Query "NotebookGet"
 ```
 
