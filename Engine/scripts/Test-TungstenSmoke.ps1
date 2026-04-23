@@ -1,6 +1,7 @@
 param(
     [switch] $IncludeFrontEnd,
-    [switch] $UseWinDesk
+    [switch] $UseWinDesk,
+    [switch] $IncludeAssistant
 )
 
 Set-StrictMode -Version Latest
@@ -56,6 +57,28 @@ try {
     $notebook = Get-TungstenNotebook -Path $tempNotebook
     if ($notebook.cell_count -lt 2) {
         throw "Expected at least 2 cells in the smoke notebook."
+    }
+
+    if ($IncludeAssistant) {
+        $assistant = Invoke-TungstenNotebookAssistant `
+            -Path $tempNotebook `
+            -CellIndex 1 `
+            -Question "Reply only with Wolfram Language code that computes 2+2." `
+            -InsertWolframCodeBelow `
+            -Save
+
+        if (-not $assistant.assistant_success) {
+            throw "Notebook Assistant smoke failed: $($assistant.assistant.error_type) $($assistant.assistant.error)"
+        }
+
+        if ($assistant.assistant.inserted.Count -lt 1) {
+            throw "Notebook Assistant smoke did not insert a Wolfram Language code cell."
+        }
+
+        $assistantNotebook = Get-TungstenNotebook -Path $tempNotebook
+        if ($assistantNotebook.cell_count -lt 3) {
+            throw "Notebook Assistant smoke expected at least 3 cells after insertion."
+        }
     }
 
     if ($IncludeFrontEnd) {

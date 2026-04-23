@@ -221,9 +221,11 @@ class DocumentationIndex:
         index_path: Path | None = None,
         rebuild: bool = False,
     ) -> dict[str, object]:
-        fast_hits = self._search_by_filename(identifier, limit=1)
-        if fast_hits:
-            return fast_hits[0]
+        stem = self._stem_from_identifier(identifier)
+        if stem:
+            fast_paths = self._find_notebook_paths(stem, limit=1)
+            if fast_paths:
+                return self._record_from_path(fast_paths[0]).to_dict()
 
         target = self.ensure_index(index_path=index_path, rebuild=rebuild)
         connection = sqlite3.connect(target)

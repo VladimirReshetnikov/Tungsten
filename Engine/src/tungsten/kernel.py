@@ -254,8 +254,14 @@ SetDirectory[{_to_wl_path(working_directory)}];
 userCode = Import[{_to_wl_path(code_path)}, "Text"];
 output = {{}};
 
-ClearAll[Tungsten`Private`CapturedPrint, Tungsten`Private`Stringify];
+ClearAll[
+    Tungsten`Private`CapturedPrint,
+    Tungsten`Private`Stringify,
+    Tungsten`Private`HeadStringify,
+    Tungsten`Private`StringList
+];
 SetAttributes[Tungsten`Private`CapturedPrint, HoldAll];
+SetAttributes[Tungsten`Private`HeadStringify, HoldAll];
 Tungsten`Private`CapturedPrint[args___] := AppendTo[
     output,
     ToString[Unevaluated[SequenceForm[args]], OutputForm, PageWidth -> Infinity]
@@ -263,6 +269,15 @@ Tungsten`Private`CapturedPrint[args___] := AppendTo[
 Tungsten`Private`Stringify[value_] := Quiet @ Check[
     ToString[Unevaluated[value], InputForm, PageWidth -> Infinity],
     "$Failed"
+];
+Tungsten`Private`HeadStringify[value_] := Quiet @ Check[
+    ToString[Head @ Unevaluated[value], InputForm, PageWidth -> Infinity],
+    "$Failed"
+];
+Tungsten`Private`StringList[value_] := If[
+    ListQ[value],
+    Map[Tungsten`Private`Stringify, value],
+    {{}}
 ];
 
 heldExpr = Quiet @ Check[ToExpression[userCode, InputForm, HoldComplete], $Failed];
@@ -284,6 +299,10 @@ If[
         "RawJSON"
     ];
     Exit[2];
+];
+heldExpr = Replace[
+    heldExpr,
+    HoldComplete[exprs__] :> HoldComplete[CompoundExpression[exprs]]
 ];
 
 evalExpr = If[
@@ -308,9 +327,9 @@ payload = <|
         }}
     ],
     "result" -> Tungsten`Private`Stringify[result],
-    "result_head" -> Tungsten`Private`Stringify[Head[result]],
-    "messages" -> Map[Tungsten`Private`Stringify, Lookup[ed, "Messages", {{}}]],
-    "messages_text" -> Map[Tungsten`Private`Stringify, Lookup[ed, "MessagesText", {{}}]],
+    "result_head" -> Tungsten`Private`HeadStringify[result],
+    "messages" -> Tungsten`Private`StringList[Lookup[ed, "Messages", {{}}]],
+    "messages_text" -> Tungsten`Private`StringList[Lookup[ed, "MessagesText", {{}}]],
     "output" -> output,
     "timing" -> Replace[Lookup[ed, "Timing", Missing["NotAvailable"]], Missing[__] -> Null],
     "absolute_timing" -> Replace[

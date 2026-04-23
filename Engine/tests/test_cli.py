@@ -6,6 +6,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from tungsten.cli import main
 
@@ -49,6 +50,121 @@ class CliTests(unittest.TestCase):
             payload = json.loads(inspect_stdout.getvalue())
             self.assertEqual(payload["title"], "CLI Notebook")
             self.assertEqual(payload["cell_count"], 1)
+
+    def test_assistant_command_uses_controller(self) -> None:
+        with TemporaryDirectory(prefix="tungsten-cli-") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            notebook_path = temp_dir / "assistant.nb"
+            notebook_path.write_text('Notebook[{Cell["Hello", "Text"]}]', encoding="utf-8")
+
+            with patch("tungsten.cli.NotebookAssistantController") as controller_type:
+                controller = controller_type.return_value
+                controller.ask_cell.return_value.to_dict.return_value = {
+                    "assistant_success": True,
+                    "assistant": {
+                        "success": True,
+                        "response_text": "Sample response",
+                        "inserted": [],
+                    },
+                    "evaluation": {"success": True},
+                }
+                controller.ask_cell.return_value.assistant_success = True
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "assistant",
+                            "ask-cell",
+                            "--file",
+                            str(notebook_path),
+                            "--cell-index",
+                            "0",
+                            "--question",
+                            "What does this cell do?",
+                            "--insert-wolfram-code-below",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["assistant_success"])
+        controller.ask_cell.assert_called_once()
+
+    def test_assistant_prepare_inline_uses_controller(self) -> None:
+        with TemporaryDirectory(prefix="tungsten-cli-") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            notebook_path = temp_dir / "assistant-inline.nb"
+            notebook_path.write_text('Notebook[{Cell["Hello", "Text"]}]', encoding="utf-8")
+
+            with patch("tungsten.cli.NotebookAssistantController") as controller_type:
+                controller = controller_type.return_value
+                controller.prepare_inline.return_value.to_dict.return_value = {
+                    "assistant_success": True,
+                    "assistant": {
+                        "success": True,
+                        "window_title": "Assistant Notebook",
+                    },
+                    "evaluation": {"success": True},
+                }
+                controller.prepare_inline.return_value.assistant_success = True
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "assistant",
+                            "prepare-inline",
+                            "--file",
+                            str(notebook_path),
+                            "--cell-index",
+                            "0",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["assistant_success"])
+        controller.prepare_inline.assert_called_once()
+
+    def test_assistant_capture_inline_uses_controller(self) -> None:
+        with TemporaryDirectory(prefix="tungsten-cli-") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            notebook_path = temp_dir / "assistant-inline.nb"
+            notebook_path.write_text('Notebook[{Cell["Hello", "Text"]}]', encoding="utf-8")
+
+            with patch("tungsten.cli.NotebookAssistantController") as controller_type:
+                controller = controller_type.return_value
+                controller.capture_inline.return_value.to_dict.return_value = {
+                    "assistant_success": True,
+                    "assistant": {
+                        "success": True,
+                        "completed": True,
+                        "inserted": [{"expression_uuid": "abc"}],
+                    },
+                    "evaluation": {"success": True},
+                }
+                controller.capture_inline.return_value.assistant_success = True
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "assistant",
+                            "capture-inline",
+                            "--file",
+                            str(notebook_path),
+                            "--cell-index",
+                            "0",
+                            "--insert-wolfram-code-below",
+                            "--save",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["assistant_success"])
+        controller.capture_inline.assert_called_once()
 
 
 if __name__ == "__main__":

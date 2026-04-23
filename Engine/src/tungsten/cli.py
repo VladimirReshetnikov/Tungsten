@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .assistant import NotebookAssistantController
 from .discovery import discover_installation
 from .docs_index import DocumentationIndex
 from .frontend import FrontEndController
@@ -15,6 +16,40 @@ from .notebook import NotebookDocument, apply_patch_spec, load_patch_spec, wl_st
 def _json_dump(payload: object) -> None:
     sys.stdout.write(json.dumps(payload, indent=2))
     sys.stdout.write("\n")
+
+
+def _parse_cell_path(value: str) -> list[int]:
+    text = value.strip()
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid JSON cell path: {value!r}") from exc
+        if not isinstance(parsed, list) or not all(isinstance(item, int) for item in parsed):
+            raise argparse.ArgumentTypeError("JSON cell paths must be arrays of integers.")
+        return [int(item) for item in parsed]
+
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("Cell paths must contain at least one integer.")
+
+    try:
+        return [int(part) for part in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid cell path: {value!r}") from exc
+
+
+def _add_assistant_selector_arguments(parser: argparse.ArgumentParser) -> None:
+    selector_group = parser.add_mutually_exclusive_group(required=True)
+    selector_group.add_argument("--cell-index", type=int, help="Flat cell index from notebook inspect output.")
+    selector_group.add_argument(
+        "--cell-path",
+        type=_parse_cell_path,
+        help='Notebook cell path from inspect output, for example "1,0" or "[1, 0]".',
+    )
+    selector_group.add_argument("--expression-uuid", help="Notebook cell ExpressionUUID.")
+    selector_group.add_argument("--cell-id", type=int, help="Notebook CellID value.")
+    selector_group.add_argument("--cell-tag", help="Notebook cell tag.")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -111,6 +146,75 @@ def _build_parser() -> argparse.ArgumentParser:
     fe_token.add_argument("token")
     fe_token.add_argument("--file", type=Path)
     fe_token.add_argument("--require-success", action="store_true")
+
+    assistant_parser = subparsers.add_parser(
+        "assistant",
+        help="Drive the built-in Notebook Assistant against a notebook cell.",
+    )
+    assistant_subparsers = assistant_parser.add_subparsers(dest="assistant_command", required=True)
+    assistant_ask = assistant_subparsers.add_parser(
+        "ask-cell",
+        help="Ask Notebook Assistant about a selected cell and optionally insert Wolfram Language code below it.",
+    )
+    assistant_ask.add_argument("--file", type=Path, required=True)
+    _add_assistant_selector_arguments(assistant_ask)
+    assistant_ask.add_argument("--question", required=True)
+    assistant_ask.add_argument(
+        "--insert-wolfram-code-below",
+        action="store_true",
+        help="Insert the first Wolfram Language code block from the assistant response below the target cell.",
+    )
+    assistant_ask.add_argument(
+        "--insert-all-wolfram-code-below",
+        action="store_true",
+        help="Insert every Wolfram Language code block from the assistant response below the target cell.",
+    )
+    assistant_ask.add_argument("--save", action="store_true", help="Save the notebook after insertion.")
+    assistant_ask.add_argument(
+        "--close-assistant-notebook",
+        action="store_true",
+        help="Close the temporary Notebook Assistant window after the request finishes.",
+    )
+    assistant_ask.add_argument(
+        "--extra-instructions",
+        help="Additional instructions appended to the assistant automation prompt.",
+    )
+    assistant_ask.add_argument(
+        "--model-service",
+        help="Optional service override passed to Notebook Assistant, for example OpenAI.",
+    )
+    assistant_ask.add_argument(
+        "--model-name",
+        help="Optional model name override passed to Notebook Assistant.",
+    )
+    assistant_ask.add_argument("--require-success", action="store_true")
+
+    assistant_prepare = assistant_subparsers.add_parser(
+        "prepare-inline",
+        help="Open inline Notebook Assistant for a selected cell and focus its input field.",
+    )
+    assistant_prepare.add_argument("--file", type=Path, required=True)
+    _add_assistant_selector_arguments(assistant_prepare)
+    assistant_prepare.add_argument("--require-success", action="store_true")
+
+    assistant_capture = assistant_subparsers.add_parser(
+        "capture-inline",
+        help="Read the current inline Notebook Assistant state and optionally insert Wolfram code below the source cell.",
+    )
+    assistant_capture.add_argument("--file", type=Path, required=True)
+    _add_assistant_selector_arguments(assistant_capture)
+    assistant_capture.add_argument(
+        "--insert-wolfram-code-below",
+        action="store_true",
+        help="Insert the first Wolfram Language code block from the assistant response below the target cell.",
+    )
+    assistant_capture.add_argument(
+        "--insert-all-wolfram-code-below",
+        action="store_true",
+        help="Insert every Wolfram Language code block from the assistant response below the target cell.",
+    )
+    assistant_capture.add_argument("--save", action="store_true", help="Save the notebook after insertion.")
+    assistant_capture.add_argument("--require-success", action="store_true")
 
     return parser
 
@@ -253,6 +357,64 @@ def main(argv: list[str] | None = None) -> int:
             result = controller.execute_token(args.token, notebook_path=args.file)
             _json_dump(result.to_dict())
             if args.require_success and result.success is False:
+                return 1
+            return 0
+
+    if args.command == "assistant":
+        controller = NotebookAssistantController(runner=WolframKernelRunner(installation))
+        if args.assistant_command == "ask-cell":
+            result = controller.ask_cell(
+                notebook_path=args.file,
+                question=args.question,
+                cell_index=args.cell_index,
+                cell_path=args.cell_path,
+                expression_uuid=args.expression_uuid,
+                cell_id=args.cell_id,
+                cell_tag=args.cell_tag,
+                insert_wolfram_code=args.insert_wolfram_code_below,
+                insert_all_wolfram_code=args.insert_all_wolfram_code_below,
+                save_notebook=args.save,
+                close_assistant_notebook=args.close_assistant_notebook,
+                extra_instructions=args.extra_instructions,
+                model_service=args.model_service,
+                model_name=args.model_name,
+            )
+            payload = result.to_dict()
+            _json_dump(payload)
+            if args.require_success and not result.assistant_success:
+                return 1
+            return 0
+
+        if args.assistant_command == "prepare-inline":
+            result = controller.prepare_inline(
+                notebook_path=args.file,
+                cell_index=args.cell_index,
+                cell_path=args.cell_path,
+                expression_uuid=args.expression_uuid,
+                cell_id=args.cell_id,
+                cell_tag=args.cell_tag,
+            )
+            payload = result.to_dict()
+            _json_dump(payload)
+            if args.require_success and not result.assistant_success:
+                return 1
+            return 0
+
+        if args.assistant_command == "capture-inline":
+            result = controller.capture_inline(
+                notebook_path=args.file,
+                cell_index=args.cell_index,
+                cell_path=args.cell_path,
+                expression_uuid=args.expression_uuid,
+                cell_id=args.cell_id,
+                cell_tag=args.cell_tag,
+                insert_wolfram_code=args.insert_wolfram_code_below,
+                insert_all_wolfram_code=args.insert_all_wolfram_code_below,
+                save_notebook=args.save,
+            )
+            payload = result.to_dict()
+            _json_dump(payload)
+            if args.require_success and not result.assistant_success:
                 return 1
             return 0
 

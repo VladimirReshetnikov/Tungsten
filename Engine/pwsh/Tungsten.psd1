@@ -13,6 +13,7 @@
         "Get-TungstenNotebook",
         "Invoke-TungstenFrontEnd",
         "Invoke-TungstenKernel",
+        "Invoke-TungstenNotebookAssistant",
         "New-TungstenNotebook",
         "Open-TungstenDocumentation",
         "Open-TungstenNotebook",

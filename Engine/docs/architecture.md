@@ -1,7 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z  
-Repository HEAD: e809b942e10d2495fa5a680a33e6009412da447a
+Updated (UTC): 2026-04-23T04:36:53Z  
+Repository HEAD: 514cecf641d6ba728984110fa239a3f7da3c516b
 
 ## Overview
 
@@ -11,9 +12,10 @@ Tungsten is organized as a thin set of cooperating layers:
 2. `licensing.py` converts the machine-local `mathpass` into a safe, deduplicated temporary password file for execution.
 3. `kernel.py` runs `wolfram.exe` in a controlled, script-driven mode and returns structured JSON results.
 4. `frontend.py` builds on the kernel layer to execute `UsingFrontEnd[...]`, `NotebookOpen`, `NotebookLocate`, and `FrontEndTokenExecute`.
-5. `notebook.py` parses and rewrites notebook expressions directly from file text.
-6. `docs_index.py` indexes the local documentation notebook corpus into a SQLite FTS database.
-7. `pwsh/Tungsten.psm1` projects the JSON CLI into PowerShell-friendly commands.
+5. `assistant.py` builds on the kernel and FrontEnd layers to automate the built-in Notebook Assistant against a selected source cell.
+6. `notebook.py` parses and rewrites notebook expressions directly from file text.
+7. `docs_index.py` indexes the local documentation notebook corpus into a SQLite FTS database.
+8. `pwsh/Tungsten.psm1` projects the JSON CLI into PowerShell-friendly commands.
 
 ## Execution model
 
@@ -45,6 +47,20 @@ The FrontEnd controller is intentionally small. It does not duplicate the entire
 - execute a named FrontEnd token.
 
 These are all expressed as Wolfram Language code and then delegated to the same kernel runner, which keeps licensing and process setup policy centralized.
+
+### Notebook Assistant execution
+
+`assistant.py` exposes two different execution styles:
+
+- the recommended `ask-cell` path, which uses a temporary hidden Chatbook notebook and `ChatCellEvaluate`;
+- the experimental inline path, which opens the visible inline assistant UI and is intended mainly for desktop-level testing with WinDesk.
+
+The recommended path is deliberately two-stage:
+
+1. ask the built-in assistant stack about a selected source cell and capture the reply as a `ChatObject`;
+2. if the reply contains Wolfram Language code blocks, reopen the real source notebook, select the same source cell, and insert new `Input` cells immediately below it.
+
+That split keeps assistant generation and notebook mutation deterministic and makes the returned payload easier for Python and PowerShell callers to consume.
 
 ## Notebook model
 

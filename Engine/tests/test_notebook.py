@@ -9,7 +9,7 @@ from tungsten.notebook import NotebookDocument, apply_patch_spec
 
 SAMPLE_NOTEBOOK = """(* sample header *)
 Notebook[{
-Cell["Welcome", "Title"],
+Cell["Welcome", "Title", CellID->1001, ExpressionUUID->"uuid-title", CellTags->{"intro", "top"}],
 Cell[CellGroupData[{
 Cell["Section A", "Section"],
 Cell["Body text", "Text"]
@@ -28,7 +28,13 @@ class NotebookDocumentTests(unittest.TestCase):
         self.assertEqual(summary["group_count"], 1)
         self.assertEqual(summary["cell_count"], 4)
         self.assertEqual(summary["cells"][0]["style"], "Title")
+        self.assertEqual(summary["cells"][0]["index"], 0)
+        self.assertEqual(summary["cells"][0]["cell_id"], 1001)
+        self.assertEqual(summary["cells"][0]["expression_uuid"], "uuid-title")
+        self.assertEqual(summary["cells"][0]["cell_tags"], ["intro", "top"])
         self.assertEqual(summary["cells"][1]["path"], [1, 0])
+        self.assertEqual(document.cell_at_flat_index(1)["path"], [1, 0])
+        self.assertEqual(document.cell_at_path([1, 1])["preview"], "Body text")
 
     def test_patch_operations(self) -> None:
         document = NotebookDocument.from_text(SAMPLE_NOTEBOOK)

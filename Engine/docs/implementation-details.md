@@ -1,7 +1,8 @@
 # Tungsten Implementation Details
 
 Created (UTC): 2026-04-23T02:16:55Z  
-Repository HEAD: e809b942e10d2495fa5a680a33e6009412da447a
+Updated (UTC): 2026-04-23T04:36:53Z  
+Repository HEAD: 514cecf641d6ba728984110fa239a3f7da3c516b
 
 ## Local machine findings that materially shaped Tungsten
 
@@ -38,6 +39,27 @@ The framework therefore uses the documented `wolfram.exe` CLI as the execution s
 ### 4. `UsingFrontEnd[...]` works on this machine
 
 Once Tungsten supplies a deduplicated password file, kernel-side FrontEnd actions work, including hidden document creation and close. That is why the framework exposes real FrontEnd automation commands rather than only file-based notebook operations.
+
+### 5. Notebook Assistant automation is reliable through a hidden chat notebook
+
+The first obvious design for Notebook Assistant automation was to drive the visible inline assistant attached to the target cell, because that is what a human user naturally does in the FrontEnd. Tungsten still exposes that path as an experimental backend, but it turned out to be the wrong default for robust automation.
+
+The reason is that inline assistant state is FrontEnd-local dynamic state. It is easy for a human to see and continue interacting with it, but much harder for a later helper-kernel call to rediscover and interpret reliably. In practice that produced a fragile split workflow:
+
+- one pass to open the inline assistant;
+- a desktop automation layer to type into it;
+- another pass to rediscover the transient attached-cell state and harvest the output.
+
+Tungsten now defaults to a different design:
+
+- read the selected source cell from the real notebook;
+- create a temporary hidden Chatbook notebook;
+- evaluate a `ChatInput` cell against the built-in assistant stack with `ChatCellEvaluate`;
+- parse the returned `ChatObject` text in Python;
+- extract Wolfram Language code blocks from the assistant reply;
+- insert those code blocks below the original source cell in the real notebook.
+
+This is still using Mathematica's built-in assistant machinery. The change is that Tungsten routes the interaction through a text-automation-friendly surface rather than through transient visible inline UI state.
 
 ## Why the evaluator returns strings for results
 
@@ -76,7 +98,8 @@ The cost is that the extracted text is approximate rather than a polished final 
 Tungsten does not require WinDesk at runtime. However, WinDesk is explicitly useful for:
 
 - optional visible-window capture during FrontEnd smoke tests;
+- the experimental `DesktopInline` Notebook Assistant backend, which drives the visible inline assistant UI;
 - future richer verification of notebook/documentation windows;
 - future UIA-based assertions if the project grows beyond token/document open flows.
 
-The smoke script therefore includes an optional `-UseWinDesk` path that attempts capture only when the WinDesk PowerShell module has already been built.
+The smoke script therefore includes optional `-UseWinDesk` and `-IncludeAssistant` paths. The recommended assistant backend does not require WinDesk, but the visible inline-desktop backend does.

@@ -40,6 +40,10 @@ def _unescape_string_literal(value: str) -> str:
     return "".join(result)
 
 
+def parse_wl_string_literal(value: str) -> str:
+    return _unescape_string_literal(value)
+
+
 def extract_string_literals(text: str) -> list[str]:
     literals: list[str] = []
     index = 0
@@ -200,6 +204,25 @@ def rule_value(options: Iterable[str], name: str) -> str | None:
     return None
 
 
+def _string_list_value(expr: str | None) -> list[str]:
+    if expr is None:
+        return []
+
+    expr = expr.strip()
+    if not expr:
+        return []
+
+    if expr.startswith("\"") and expr.endswith("\""):
+        return [parse_wl_string_literal(expr)]
+
+    values = []
+    for item in parse_list(expr):
+        item = item.strip()
+        if item.startswith("\"") and item.endswith("\""):
+            values.append(parse_wl_string_literal(item))
+    return values
+
+
 @dataclass
 class NotebookCell:
     content_expr: str
@@ -214,13 +237,38 @@ class NotebookCell:
     def plain_text(self) -> str:
         return collapse_text(" ".join(extract_string_literals(self.content_expr)))
 
-    def to_dict(self, path: list[int], depth: int) -> dict[str, object]:
+    @property
+    def cell_id(self) -> int | None:
+        value = rule_value(self.options, "CellID")
+        if value is None:
+            return None
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+
+    @property
+    def expression_uuid(self) -> str | None:
+        value = rule_value(self.options, "ExpressionUUID")
+        if value is None:
+            return None
+        return parse_wl_string_literal(value)
+
+    @property
+    def cell_tags(self) -> list[str]:
+        return _string_list_value(rule_value(self.options, "CellTags"))
+
+    def to_dict(self, path: list[int], depth: int, index: int | None = None) -> dict[str, object]:
         return {
+            "index": index,
             "kind": self.kind,
             "path": path,
             "depth": depth,
             "style": self.style,
             "preview": self.plain_text(),
+            "cell_id": self.cell_id,
+            "expression_uuid": self.expression_uuid,
+            "cell_tags": self.cell_tags,
             "options": self.options,
         }
 
@@ -270,8 +318,9 @@ class NotebookRawItem:
     def render(self) -> str:
         return self.expression
 
-    def to_dict(self, path: list[int], depth: int) -> dict[str, object]:
+    def to_dict(self, path: list[int], depth: int, index: int | None = None) -> dict[str, object]:
         return {
+            "index": index,
             "kind": self.kind,
             "path": path,
             "depth": depth,
@@ -390,11 +439,25 @@ class NotebookDocument:
     def flattened_cells(self) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
         for path, item, depth in self.walk_items():
+            index = len(rows)
             if isinstance(item, NotebookCell):
-                rows.append(item.to_dict(path=path, depth=depth))
+                rows.append(item.to_dict(path=path, depth=depth, index=index))
             elif isinstance(item, NotebookRawItem):
-                rows.append(item.to_dict(path=path, depth=depth))
+                rows.append(item.to_dict(path=path, depth=depth, index=index))
         return rows
+
+    def cell_at_flat_index(self, index: int) -> dict[str, object]:
+        rows = self.flattened_cells()
+        if index < 0 or index >= len(rows):
+            raise IndexError(f"Cell index {index} is out of range for notebook with {len(rows)} cells.")
+        return rows[index]
+
+    def cell_at_path(self, path: list[int]) -> dict[str, object]:
+        target = [int(value) for value in path]
+        for row in self.flattened_cells():
+            if row["path"] == target:
+                return row
+        raise KeyError(f"Notebook cell path {target!r} was not found.")
 
     def render(self) -> str:
         rendered_items = ",\n".join(item.render() for item in self.items)
