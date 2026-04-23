@@ -1,19 +1,38 @@
 # Tungsten Expression Parser
 
-Created (UTC): 2026-04-23T14:55:38Z  
-Updated (UTC): 2026-04-23T14:55:38Z  
-Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
+Created (UTC): 2026-04-23T14:55:38Z
+Updated (UTC): 2026-04-23T15:45:22Z
+Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 
-## What this subsystem is for
+## Summary
 
-`expression.py` gives Tungsten a real kernel-free Wolfram expression model:
+`expression.py` gives Tungsten a real kernel-free Wolfram expression subsystem. It provides:
 
 - an AST for atoms and general expressions;
 - parsers for FullForm, InputForm, and a box-free StandardForm subset;
-- canonical `FullForm` and `InputForm` rendering;
-- a small inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`, `Extract`, and `Level`.
+- canonical `InputForm` and `FullForm` rendering;
+- a small inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
+  `Extract`, and `Level`.
 
-The important constraint is deliberate: this is not a replacement for the Wolfram kernel. Unknown symbols stay inert, and Tungsten only evaluates the specific built-ins it implements itself.
+The important constraint is deliberate: this is not a replacement for the Wolfram kernel. Unknown
+symbols stay inert, and Tungsten only evaluates the specific built-ins it implements itself.
+
+## When to use this subsystem
+
+Use the expression subsystem when you want:
+
+- structural analysis without launching a kernel;
+- canonical formatting of textual Wolfram expressions;
+- lightweight expression traversal from Python or PowerShell;
+- deterministic scripting behavior that does not depend on evaluation rules, definitions, or
+  notebook state.
+
+Use `kernel eval` instead when you need:
+
+- real Wolfram evaluation semantics;
+- definitions from packages or notebook state;
+- full StandardForm or box-language behavior;
+- symbolic semantics beyond the inert built-ins listed here.
 
 ## Supported syntax
 
@@ -23,7 +42,7 @@ The parser currently handles:
 - function application `head[arg1, arg2]`;
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
-- arithmetic syntax such as `+`, `-`, implicit `Times`, `/`, and `^`;
+- arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
 - rules `->` and `:>`;
 - comparisons and boolean operators;
 - prefix and postfix application such as `f @ x` and `x // f`;
@@ -32,7 +51,78 @@ The parser currently handles:
 - span syntax `a ;; b ;; c`;
 - nested Wolfram comments `(* ... *)`.
 
-The parser does not attempt to cover full box language or every textual corner of Mathematica. In particular, it is intentionally conservative around advanced pattern syntax, pure-function shorthand, assignments, and broader evaluation semantics.
+The parser does not attempt to cover full box language or every textual corner of Mathematica. In
+particular, it is intentionally conservative around advanced pattern syntax, pure-function
+shorthand, assignments, and broader evaluation semantics.
+
+## Parsing forms
+
+### `input`
+
+Use this for normal textual Wolfram input such as:
+
+```text
+1 + 2 x^3
+f[a, b] /. x -> y
+expr[[1 ;; 3]]
+```
+
+### `fullform`
+
+Use this when you already have canonical head-based syntax:
+
+```text
+Rule[x, List[1, 2]]
+Plus[1, Times[2, Power[x, 3]]]
+```
+
+### `standard`
+
+Use this for the plain-text subset of StandardForm that Tungsten understands. This is useful for
+surface syntax like:
+
+```text
+f @ x // g
+1 + 2 x^3
+expr[[1]]
+```
+
+It is still textual parsing, not notebook box parsing.
+
+## Output model
+
+Both the CLI and the Python API expose a few useful normal forms.
+
+### Canonical `input_form`
+
+This is the subsystem's normalized textual rendering. It may differ from the exact original source
+spelling if the parser inserts explicit grouping or canonical head-oriented formatting.
+
+Example:
+
+```text
+1 + 2 x^3
+```
+
+may normalize to something like:
+
+```text
+1 + (2 * (x^3))
+```
+
+### Canonical `full_form`
+
+This is the explicit head-based structural representation.
+
+Example:
+
+```text
+Plus[1, Times[2, Power[x, 3]]]
+```
+
+### `tree`
+
+The CLI returns a structured AST dictionary for inspection and downstream automation.
 
 ## Python usage
 
@@ -49,7 +139,7 @@ result.to_full_form()
 # List[a, b]
 ```
 
-Convenience entrypoints:
+Convenience entrypoints include:
 
 - `parse_input_form(...)`
 - `parse_full_form(...)`
@@ -68,16 +158,30 @@ Parse without evaluating:
 ```powershell
 $env:PYTHONPATH = (Resolve-Path C:\Tools1\Tools\src\Tungsten\src)
 python -m tungsten expr parse --code "1 + 2 x^3"
+python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
+python -m tungsten expr parse --code "f @ x // g" --form standard
 ```
 
 Structurally evaluate implemented built-ins:
 
 ```powershell
+python -m tungsten expr evaluate --code "Length[{a, b, c}]"
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
 ```
 
-The parse payload includes canonical `input_form`, canonical `full_form`, `depth`, `length`, and the full AST tree. The evaluate payload also includes the original parsed forms plus the final evaluated result.
+The parse payload includes:
+
+- canonical `input_form`;
+- canonical `full_form`;
+- `depth`;
+- `length`;
+- the full `tree`.
+
+The evaluate payload also includes:
+
+- the original parsed forms;
+- the final evaluated result in the same structured shape.
 
 ## PowerShell usage
 
@@ -88,7 +192,8 @@ Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
 ```
 
-These are thin wrappers over the CLI and return deserialized JSON objects, which makes them convenient inside `pwsh` automation scripts.
+These are thin wrappers over the CLI and return deserialized JSON objects, which makes them
+convenient inside `pwsh` automation scripts.
 
 ## Evaluation model
 
@@ -101,11 +206,26 @@ Tungsten currently implements structural rules for:
 - `Extract`
 - `Level`
 
-Everything else is treated as an inert symbolic head. For example:
+Everything else is treated as an inert symbolic head.
+
+Examples:
 
 - `1 + 2` parses as `Plus[1, 2]` and stays that way;
 - `Length[1 + 2]` evaluates to `2`;
 - `Part[f[a, b, c], {1, 3}]` evaluates to `f[a, c]`;
 - `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`.
 
-That design keeps the subsystem honest: it is useful for structural analysis and manipulation, without pretending to reproduce arbitrary kernel semantics.
+That design keeps the subsystem honest: it is useful for structural analysis and manipulation
+without pretending to reproduce arbitrary kernel semantics.
+
+## Current limits
+
+The current subsystem does not aim to support:
+
+- full box language;
+- arbitrary StandardForm notebook surface syntax;
+- general evaluation;
+- definitions, attributes, or user-created transformation rules;
+- package loading or notebook-scoped semantics.
+
+Those boundaries are intentional. If you need them, use the real kernel-backed Tungsten flows.

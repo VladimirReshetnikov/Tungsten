@@ -1,8 +1,26 @@
 # Tungsten Usage Reference
 
-Created (UTC): 2026-04-23T02:16:55Z  
-Updated (UTC): 2026-04-23T14:55:38Z  
-Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
+- Status: Informational and reference-oriented (command surface and payload reference)
+- Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
+- Scope: Tungsten command-line and PowerShell surfaces
+- Created (UTC): 2026-04-23T02:16:55Z
+- Updated (UTC): 2026-04-23T15:36:45Z
+- Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Related docs:
+  - [Project README](../README.md)
+  - [User Guide](./user-guide.md)
+  - [Troubleshooting](./troubleshooting.md)
+  - [Notebook Assistant](./notebook-assistant.md)
+  - [Expression Parser](./expression-parser.md)
+
+## Conventions
+
+- The Python CLI is JSON-first. Every command returns structured JSON.
+- The PowerShell module is a thin wrapper over `python -m tungsten ...`; it returns deserialized
+  PowerShell objects based on those JSON payloads.
+- Kernel-backed commands depend on a real local Wolfram installation.
+- Kernel-free commands such as notebook file inspection and expression parsing do not require a
+  running kernel.
 
 ## Python CLI
 
@@ -12,42 +30,153 @@ Set the local source directory on `PYTHONPATH`:
 $env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
 ```
 
-### Environment and probes
+### `env`
+
+#### `env show`
+
+Purpose:
+
+- show discovered installation paths and local documentation roots;
+- optionally run live kernel and FrontEnd probes.
+
+Examples:
 
 ```powershell
 python -m tungsten env show
 python -m tungsten env show --probe
 ```
 
-### Kernel execution
+Important output fields:
+
+- `install_dir`
+- `kernel_cli`
+- `kernel_executable`
+- `frontend_executable`
+- `wolframscript`
+- `mathpass`
+- `docs_roots`
+- `bundled_python_client`
+- `default_index_path`
+- `probe` when `--probe` is supplied
+
+### `kernel`
+
+#### `kernel eval`
+
+Purpose:
+
+- evaluate inline Wolfram Language code or a file through `wolfram.exe`;
+- optionally evaluate inside `UsingFrontEnd[...]`.
+
+Options:
+
+- `--code <text>` or `--file <path>`: required, mutually exclusive
+- `--working-directory <path>`: optional
+- `--front-end`: wrap evaluation in `UsingFrontEnd[...]`
+- `--require-success`: return exit code `1` when the evaluation reports `success: false`
+
+Examples:
 
 ```powershell
 python -m tungsten kernel eval --code "2+2"
+python -m tungsten kernel eval --code "Print[Prime[10]]; Prime[20]"
 python -m tungsten kernel eval --code "NotebookLocate[\"paclet:ref/NotebookGet\"]" --front-end
 python -m tungsten kernel eval --file C:\path\to\script.wl
 ```
 
-### Notebook inspection and editing
+Important output fields:
+
+- `success`
+- `failure_type`
+- `result`
+- `result_head`
+- `messages`
+- `messages_text`
+- `output`
+- `timing`
+- `absolute_timing`
+- `evaluation_available`
+- `mathpass`
+- `used_mathpass_workaround`
+
+### `notebook`
+
+#### `notebook inspect`
+
+Purpose:
+
+- parse a notebook file structurally and return a flattened cell inventory.
+
+Example:
 
 ```powershell
 python -m tungsten notebook inspect --file C:\path\to\notebook.nb
-python -m tungsten notebook create --file C:\Temp\new.nb --title "Generated Notebook" --cell "Title:Generated Notebook" --cell "Text:Hello"
+```
+
+Important output fields:
+
+- `title`
+- `cell_count`
+- `group_count`
+- `options`
+- `cells`
+
+Each cell row may include:
+
+- `index`
+- `path`
+- `style`
+- `preview`
+- `expression_uuid`
+- `cell_id`
+- `cell_tags`
+
+#### `notebook create`
+
+Purpose:
+
+- create a notebook file from a title plus repeated `STYLE:TEXT` cell specifications.
+
+Options:
+
+- `--file <path>`: required
+- `--title <text>`: optional
+- `--cell <STYLE:TEXT>`: repeatable
+
+Example:
+
+```powershell
+python -m tungsten notebook create `
+    --file C:\Temp\new.nb `
+    --title "Generated Notebook" `
+    --cell "Title:Generated Notebook" `
+    --cell "Text:Hello" `
+    --cell "Input:2+2"
+```
+
+#### `notebook patch`
+
+Purpose:
+
+- apply a JSON patch spec to a notebook.
+
+Options:
+
+- `--file <path>`: required
+- `--spec <path>`: required
+- `--out <path>`: optional; defaults to in-place update
+
+Example:
+
+```powershell
 python -m tungsten notebook patch --file C:\Temp\new.nb --spec C:\Temp\patch.json
 ```
 
-`notebook inspect` returns flat cell metadata including `index`, `path`, `style`, `preview`, `expression_uuid`, `cell_id`, and `cell_tags`. Those values are the selectors used by Notebook Assistant automation.
+Patch operations currently used by Tungsten include:
 
-### Expression parsing and inert evaluation
-
-```powershell
-python -m tungsten expr parse --code "1 + 2 x^3"
-python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
-python -m tungsten expr evaluate --code "Length[{a, b, c}]"
-python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
-python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
-```
-
-The expression subsystem is fully local and does not require a running kernel. It parses FullForm, InputForm, and a box-free StandardForm subset, then optionally evaluates the small set of structural built-ins implemented in Tungsten itself.
+- `append_cell`
+- `replace_cell`
+- `set_option`
 
 Example patch specification:
 
@@ -74,52 +203,235 @@ Example patch specification:
 }
 ```
 
-### Documentation indexing and search
+### `expr`
+
+Purpose:
+
+- parse Wolfram expressions without a kernel;
+- structurally evaluate a small inert built-in set.
+
+#### `expr parse`
+
+Options:
+
+- `--code <text>` or `--file <path>`: required, mutually exclusive
+- `--form input|fullform|standard`: optional; defaults to `input`
+
+Examples:
+
+```powershell
+python -m tungsten expr parse --code "1 + 2 x^3"
+python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
+python -m tungsten expr parse --code "f @ x // g" --form standard
+```
+
+Important output fields:
+
+- `input_form`
+- `full_form`
+- `depth`
+- `length`
+- `tree`
+
+#### `expr evaluate`
+
+Options:
+
+- `--code <text>` or `--file <path>`: required, mutually exclusive
+- `--form input|fullform|standard`: optional; defaults to `input`
+
+Examples:
+
+```powershell
+python -m tungsten expr evaluate --code "Length[{a, b, c}]"
+python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
+python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
+python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+```
+
+The implemented inert evaluator currently covers:
+
+- `Length`
+- `Depth`
+- `Head`
+- `Part`
+- `Extract`
+- `Level`
+
+Everything else remains inert.
+
+### `docs`
+
+Purpose:
+
+- build, search, read, and open the local Wolfram documentation index.
+
+#### `docs index`
+
+Build or rebuild the local documentation index.
 
 ```powershell
 python -m tungsten docs index
+python -m tungsten docs index --path C:\Temp\tungsten-docs.sqlite3
+```
+
+#### `docs search`
+
+Search the index.
+
+Options:
+
+- positional query
+- `--limit <n>`: defaults to `10`
+- `--index-path <path>`: optional
+- `--rebuild`: force index rebuild before search
+
+Examples:
+
+```powershell
 python -m tungsten docs search NotebookGet
-python -m tungsten docs read paclet:ref/NotebookImport
+python -m tungsten docs search NotebookImport --limit 5
+```
+
+#### `docs read`
+
+Read a documentation page by title, paclet identifier, or path.
+
+```powershell
+python -m tungsten docs read NotebookGet
+python -m tungsten docs read paclet:ref/NotebookGet
+```
+
+#### `docs open`
+
+Open a documentation page in the FrontEnd.
+
+```powershell
 python -m tungsten docs open paclet:ref/NotebookGet
 ```
 
-### FrontEnd control
+### `frontend`
+
+Purpose:
+
+- run a small set of FrontEnd-oriented actions through the kernel runner.
+
+#### `frontend probe`
 
 ```powershell
 python -m tungsten frontend probe
-python -m tungsten frontend open-notebook --file C:\Temp\new.nb
-python -m tungsten frontend open-doc paclet:ref/NotebookGet
-python -m tungsten frontend token OpenCloseGroup --file C:\Temp\new.nb
-python -m tungsten frontend run --code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> True]]"
 ```
 
-### Notebook Assistant
-
-Recommended path:
+#### `frontend open-notebook`
 
 ```powershell
-python -m tungsten assistant ask-cell --file C:\Temp\new.nb --cell-index 1 --question "Explain this cell."
-python -m tungsten assistant ask-cell --file C:\Temp\new.nb --cell-index 1 --question "Reply only with Wolfram Language code that computes 2+2." --insert-wolfram-code-below --save
-python -m tungsten assistant ask-cell --file C:\Temp\new.nb --expression-uuid 11111111-1111-1111-1111-111111111111 --question "Give two Wolfram Language alternatives." --insert-all-wolfram-code-below --save
+python -m tungsten frontend open-notebook --file C:\Temp\new.nb
 ```
 
-Useful options:
+#### `frontend open-doc`
 
-- `--cell-index`, `--cell-path`, `--expression-uuid`, `--cell-id`, and `--cell-tag` select the source cell.
-- `--insert-wolfram-code-below` inserts the first Wolfram Language code block from the assistant reply.
-- `--insert-all-wolfram-code-below` inserts every Wolfram Language code block from the assistant reply.
-- `--save` saves the notebook after insertion.
-- `--extra-instructions`, `--model-service`, and `--model-name` refine the assistant request.
-- `--close-assistant-notebook` closes the temporary assistant notebook when the request completes.
+```powershell
+python -m tungsten frontend open-doc paclet:ref/NotebookGet
+```
 
-Experimental inline-desktop commands:
+#### `frontend run`
+
+```powershell
+python -m tungsten frontend run --code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> True]]"
+python -m tungsten frontend run --code "SomeCode[]" --no-wrap
+```
+
+#### `frontend token`
+
+```powershell
+python -m tungsten frontend token OpenCloseGroup --file C:\Temp\new.nb
+```
+
+Common FE options:
+
+- `--require-success` on probe/open/run/token variants
+- `--no-wrap` on `frontend run`
+
+### `assistant`
+
+Purpose:
+
+- drive the built-in Notebook Assistant against a selected source cell.
+
+#### Shared selector options
+
+These selector forms are mutually exclusive and are reused across assistant commands:
+
+- `--cell-index <n>`
+- `--cell-path <json-or-comma-separated-int-list>`
+- `--expression-uuid <uuid>`
+- `--cell-id <int>`
+- `--cell-tag <tag>`
+
+#### `assistant ask-cell`
+
+Recommended assistant workflow.
+
+Options:
+
+- `--file <path>`: required
+- one selector option: required
+- `--question <text>`: required
+- `--insert-wolfram-code-below`
+- `--insert-all-wolfram-code-below`
+- `--save`
+- `--close-assistant-notebook`
+- `--extra-instructions <text>`
+- `--model-service <name>`
+- `--model-name <name>`
+- `--require-success`
+
+Examples:
+
+```powershell
+python -m tungsten assistant ask-cell `
+    --file C:\Temp\new.nb `
+    --cell-index 1 `
+    --question "Explain this cell."
+
+python -m tungsten assistant ask-cell `
+    --file C:\Temp\new.nb `
+    --cell-index 1 `
+    --question "Reply only with Wolfram Language code that computes 2+2." `
+    --insert-wolfram-code-below `
+    --save
+```
+
+Important output fields:
+
+- `assistant_success`
+- `assistant.response_text`
+- `assistant.code_blocks`
+- `assistant.wolfram_code_blocks`
+- `assistant.inserted`
+- `assistant.saved_notebook`
+
+#### `assistant prepare-inline`
+
+Experimental visible inline-assistant setup helper.
 
 ```powershell
 python -m tungsten assistant prepare-inline --file C:\Temp\new.nb --cell-index 1
-python -m tungsten assistant capture-inline --file C:\Temp\new.nb --cell-index 1 --insert-wolfram-code-below --save
 ```
 
-Those inline commands are mainly intended for WinDesk-assisted desktop testing. For real automation, prefer `assistant ask-cell`.
+#### `assistant capture-inline`
+
+Experimental visible inline-assistant capture helper.
+
+```powershell
+python -m tungsten assistant capture-inline `
+    --file C:\Temp\new.nb `
+    --cell-index 1 `
+    --insert-wolfram-code-below `
+    --save
+```
+
+For real automation, prefer `assistant ask-cell`.
 
 ## PowerShell module
 
@@ -129,50 +441,59 @@ Import the module:
 Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
 ```
 
-### Core commands
+### Environment and kernel
 
 ```powershell
 Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
-Convert-TungstenExpression -Code "1 + 2 x^3"
-Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
-Get-TungstenNotebook -Path C:\Temp\new.nb
+Invoke-TungstenKernel -File C:\path\to\script.wl -FrontEnd
+```
+
+### Notebook operations
+
+```powershell
+Get-TungstenNotebook -Path C:\Temp\demo.nb
 New-TungstenNotebook -Path C:\Temp\demo.nb -Title "Demo" -Cell "Text:Hello" -Cell "Input:2+2"
 Set-TungstenNotebook -Path C:\Temp\demo.nb -Spec C:\Temp\patch.json
+```
+
+### Expression parsing and inert evaluation
+
+```powershell
+Convert-TungstenExpression -Code "1 + 2 x^3"
+Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
+```
+
+### Documentation and FrontEnd
+
+```powershell
 Find-TungstenDocumentation -Query "NotebookImport"
 Get-TungstenDocumentationPage -Identifier "paclet:ref/NotebookGet"
 Open-TungstenDocumentation -Identifier "paclet:ref/NotebookGet"
 Open-TungstenNotebook -Path C:\Temp\demo.nb
 Invoke-TungstenFrontEnd -Code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> True]]"
-Invoke-TungstenNotebookAssistant -Path C:\Temp\demo.nb -CellIndex 1 -Question "Explain this cell."
-Invoke-TungstenNotebookAssistant -Path C:\Temp\demo.nb -CellIndex 1 -Question "Reply only with Wolfram Language code that computes 2+2." -InsertWolframCodeBelow -Save
 ```
 
-### Notebook Assistant from PowerShell
+### Notebook Assistant
 
 ```powershell
-$notebook = Get-TungstenNotebook -Path C:\Temp\demo.nb
-$target = $notebook.cells | Where-Object { $_.style -eq "Input" } | Select-Object -First 1
-
-$result = Invoke-TungstenNotebookAssistant `
+Invoke-TungstenNotebookAssistant -Path C:\Temp\demo.nb -CellIndex 1 -Question "Explain this cell."
+Invoke-TungstenNotebookAssistant `
     -Path C:\Temp\demo.nb `
-    -CellIndex $target.index `
-    -Question "Reply only with Wolfram Language code that factors x^4-1." `
+    -CellIndex 1 `
+    -Question "Reply only with Wolfram Language code that computes 2+2." `
     -InsertWolframCodeBelow `
     -Save
 ```
 
-By default the PowerShell cmdlet uses backend `NotebookChatCell`, which is the stable hidden-chat-notebook implementation. `-Backend DesktopInline` remains available for visible desktop automation and WinDesk-based testing.
+Important assistant parameters:
 
-### Expression parsing from PowerShell
+- selector parameters: `-CellIndex`, `-CellPath`, `-ExpressionUuid`, `-CellId`, `-CellTag`
+- insertion controls: `-InsertWolframCodeBelow`, `-InsertAllWolframCodeBelow`
+- persistence: `-Save`
+- backend: `-Backend NotebookChatCell|DesktopInline|KernelWindow`
 
-```powershell
-$parsed = Convert-TungstenExpression -Code "1 + 2 x^3"
-$parsed.full_form
-
-$evaluated = Invoke-TungstenExpression -Code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
-$evaluated.result.full_form
-```
+`NotebookChatCell` is the recommended default backend.
 
 ## Smoke test entrypoint
 
@@ -184,4 +505,13 @@ pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -Inclu
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
 ```
 
-The WinDesk-assisted path is optional and activates only when the WinDesk PowerShell module has already been built. The dedicated Notebook Assistant smoke is enabled by `-IncludeAssistant`.
+The smoke now covers:
+
+- environment probing;
+- kernel execution;
+- expression parsing/evaluation;
+- documentation search;
+- notebook creation/inspection;
+- optional assistant integration;
+- optional FrontEnd integration;
+- optional WinDesk-assisted capture.

@@ -1,94 +1,275 @@
 # Tungsten
 
-Created (UTC): 2026-04-23T02:16:55Z  
-Updated (UTC): 2026-04-23T14:55:38Z  
-Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
+- Status: Informational (current-state project guide and maintainer-facing landing page)
+- Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
+- Scope: `src/Tungsten`
+- Created (UTC): 2026-04-23T02:16:55Z
+- Updated (UTC): 2026-04-23T15:36:45Z
+- Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
+- Related code:
+  - `src/Tungsten/src/tungsten/`
+  - `src/Tungsten/pwsh/`
+  - `src/Tungsten/tests/`
+  - `src/Tungsten/scripts/`
+- Related docs:
+  - [Documentation Index](./docs/README.md)
+  - [User Guide](./docs/user-guide.md)
+  - [Usage Reference](./docs/usage-reference.md)
+  - [Architecture](./docs/architecture.md)
+  - [Troubleshooting](./docs/troubleshooting.md)
 
-`Tungsten` is a Python-first, PowerShell-friendly framework for automating a local Wolfram installation from text-oriented agent workflows.
+## Summary
+
+Tungsten is a Python-first, PowerShell-friendly automation workspace for a local Wolfram
+installation. It exists for the workflows that are awkward in the traditional Mathematica GUI but
+natural for agents and scripts:
+
+- evaluate Wolfram Language code and get structured JSON back instead of scraping stdout;
+- inspect, create, and patch notebook files without needing a running kernel;
+- search and read the locally installed documentation corpus offline;
+- drive selected FrontEnd actions programmatically;
+- ask the built-in Notebook Assistant about a specific source cell and optionally insert generated
+  Wolfram Language code back into the notebook;
+- parse and structurally analyze Wolfram expressions without access to a kernel.
+
+Tungsten is deliberately not trying to be a full alternative Wolfram runtime. It is an automation
+layer over the real local installation, plus a small amount of kernel-free structural tooling where
+that meaningfully improves agent workflows.
+
+## Project goals
+
+Tungsten exists to satisfy a small set of load-bearing goals:
+
+- Make local Wolfram automation practical from `pwsh`, Python, and JSON-first tooling.
+- Preserve machine readability. The primary outputs should be structured data, not terminal-only
+  text.
+- Keep as much functionality local and offline as possible so results stay aligned with the actual
+  machine-local Wolfram installation and documentation version.
+- Treat environment quirks, especially licensing quirks, as first-class engineering constraints
+  instead of hidden one-off hacks.
+- Offer a useful fallback layer when the kernel or FrontEnd is unavailable, especially for notebook
+  and expression inspection/manipulation.
+- Be pleasant to compose from PowerShell scripts without forcing callers to write large amounts of
+  boilerplate.
+
+## Non-goals
+
+Tungsten is intentionally not trying to do several things:
+
+- It is not a full Wolfram kernel reimplementation.
+- It does not attempt full box-language parsing or full StandardForm rendering.
+- It does not try to expose the entire FrontEnd API surface.
+- It does not depend on browser automation or online-only documentation scraping.
+- It does not replace interactive GUI workflows when those are genuinely the most natural way to do
+  the work.
+
+## Current feature map
 
 The current workspace is built around six complementary capabilities:
 
-1. a kernel runner that executes Wolfram Language code through `wolfram.exe` and returns structured JSON instead of terminal-only output;
-2. a notebook parser/editor that can inspect and patch `*.nb` files without requiring a live kernel or FrontEnd;
-3. a kernel-free Wolfram expression parser for FullForm, InputForm, and a box-free StandardForm subset, plus inert structural built-ins such as `Length`, `Depth`, `Part`, `Extract`, and `Level`;
-4. an offline documentation index over the locally installed Wolfram documentation notebooks;
-5. a FrontEnd controller that can open notebooks, open documentation pages, and execute FrontEnd tokens programmatically through kernel-side `UsingFrontEnd[...]` calls;
-6. a Notebook Assistant controller that can ask the built-in Mathematica assistant about a selected cell and optionally insert Wolfram Language code from the reply directly below that cell.
+1. A kernel runner that executes Wolfram Language code through `wolfram.exe` and returns structured
+   JSON instead of terminal-only output.
+2. A notebook parser/editor that can inspect and patch `*.nb` files without requiring a live
+   kernel or FrontEnd.
+3. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a box-free
+   StandardForm subset, then evaluates a small inert built-in set such as `Length`, `Depth`,
+   `Part`, `Extract`, and `Level`.
+4. An offline documentation index over the locally installed documentation notebooks.
+5. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
+   FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
+6. A Notebook Assistant controller that can ask the built-in assistant about a selected source cell
+   and optionally insert Wolfram Language code below that cell.
 
-## Why this exists
+## Current status
 
-Humans usually drive Mathematica through the GUI FrontEnd. Agents and scripts generally need something different:
+### Shipped now
 
-- machine-readable evaluation results;
-- automation that works from `pwsh`;
-- useful notebook and documentation workflows even when the kernel is unavailable;
-- explicit diagnostics for installation and licensing problems.
+- Environment discovery for the local Wolfram installation, documentation roots, bundled Python
+  client tree, and default index path.
+- Automatic `mathpass` deduplication before kernel execution.
+- Structured kernel evaluation with timing, messages, printed output capture, and explicit success
+  metadata.
+- Structural notebook inspection, notebook creation, and JSON patch application.
+- Offline documentation indexing and search over the installed `*.nb` documentation corpus.
+- FrontEnd probing, notebook open, documentation open, token execution, and arbitrary FE-targeted
+  code execution.
+- Built-in Notebook Assistant automation through the stable hidden chat-notebook backend, with the
+  visible inline-desktop path retained as an experimental option.
+- Kernel-free Wolfram expression parsing and inert structural evaluation.
+- PowerShell wrappers for all major Tungsten surfaces.
 
-This machine has an especially relevant quirk: the installed `mathpass` contains duplicate license entries. Running the local kernel directly with that file causes `wolframscript -code ...` and similar paths to fail, but a deduplicated copy of the same file works. Tungsten treats that as a first-class environment fact and automatically runs the kernel against a temporary deduplicated password file instead of mutating the system installation.
+### Deliberately narrow or experimental
 
-## Layout
+- The visible inline Notebook Assistant desktop-driving backend remains experimental. It depends on
+  a visible foreground notebook window and, in practice, on WinDesk-backed automation.
+- The expression subsystem intentionally covers only a box-free StandardForm subset and a small
+  built-in evaluation surface.
+- FrontEnd automation is intentionally selective rather than exhaustive.
 
-- `pyproject.toml` — Python package metadata.
-- `src/tungsten/` — Tungsten implementation.
-  - `discovery.py` — installation, docs-root, and path discovery.
-  - `licensing.py` — `mathpass` inspection and deduplication helpers.
-  - `kernel.py` — structured kernel execution wrapper over `wolfram.exe`.
-  - `notebook.py` — structural notebook parser, renderer, and JSON patch support.
-  - `expression.py` — kernel-free Wolfram expression AST, parser, formatter, and inert built-ins.
-  - `docs_index.py` — SQLite FTS index for offline Wolfram documentation search.
-  - `frontend.py` — programmatic FrontEnd actions built on `UsingFrontEnd`.
-  - `assistant.py` — built-in Notebook Assistant automation for selected notebook cells.
-  - `cli.py` — JSON CLI entrypoint used directly and from PowerShell.
-- `pwsh/`
-  - `Tungsten.psm1` / `Tungsten.psd1` — PowerShell wrapper layer.
-- `tests/` — Python unit and integration coverage.
-- `scripts/Test-TungstenSmoke.ps1` — end-to-end smoke runner with optional FrontEnd, optional Notebook Assistant, and optional WinDesk-assisted capture.
-- `docs/` — architecture, implementation, usage reference, Notebook Assistant walkthroughs, and expression-parser notes.
+## Tech stack and operating assumptions
 
-## Current command surface
+| Area | Current choice |
+|------|----------------|
+| Runtime | Python 3.11+ |
+| Package layout | `setuptools` package under `src/tungsten/` |
+| Primary execution substrate | `wolfram.exe -script` |
+| PowerShell integration | Thin JSON-first wrapper module in `pwsh/Tungsten.psm1` |
+| Documentation index | SQLite FTS5 |
+| Notebook representation | Tungsten-owned structural parser for notebook expressions |
+| Expression representation | Tungsten-owned AST and Pratt-style parser |
+| Platform expectation | Windows-first local machine with a real Wolfram installation |
+| Optional desktop automation helper | WinDesk for visible-window testing and the experimental inline assistant path |
 
-Python CLI:
+## Architecture at a glance
+
+```text
+                  local Wolfram installation
+        ┌───────────────────────────────────────────────┐
+        │ wolfram.exe / WolframKernel.exe / WolframNB  │
+        │ mathpass / local docs notebooks / Chatbook   │
+        └───────────────────────────────────────────────┘
+                              ▲
+                              │
+                    discovery.py + licensing.py
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+   kernel.py            notebook.py          expression.py
+   docs_index.py        frontend.py          assistant.py
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              │
+                           cli.py
+                              │
+                        Tungsten.psm1
+                              │
+                 Python callers / pwsh scripts / agents
+```
+
+For the deeper component model and execution flow, see [Architecture](./docs/architecture.md).
+
+## The most important environment fact on this machine
+
+This machine has a real Wolfram 14.3 installation, but the installed `mathpass` contains duplicate
+license entries. That matters because the obvious command-line paths can fail if they use the raw
+installed file directly.
+
+Tungsten handles that by:
+
+- inspecting the discovered `mathpass`;
+- writing a temporary deduplicated copy;
+- invoking `wolfram.exe` with `-pwfile <temporary-deduped-copy>`;
+- never mutating the installed machine-wide licensing file.
+
+This is not a side detail. It is part of Tungsten's core execution model.
+
+## Quick start
+
+### Python CLI
 
 ```powershell
 $env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+
 python -m tungsten env show --probe
 python -m tungsten kernel eval --code "2+2"
-python -m tungsten notebook inspect --file C:\path\to\file.nb
-python -m tungsten expr parse --code "1 + 2 x^3"
-python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
+python -m tungsten notebook create --file $env:TEMP\tungsten-demo.nb --title "Demo" --cell "Text:Hello" --cell "Input:2+2"
+python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
 python -m tungsten docs search NotebookGet
-python -m tungsten frontend open-doc paclet:ref/NotebookGet
-python -m tungsten assistant ask-cell --file C:\path\to\file.nb --cell-index 7 --question "Explain what this cell does."
-python -m tungsten assistant ask-cell --file C:\path\to\file.nb --expression-uuid 11111111-1111-1111-1111-111111111111 --question "Reply only with Wolfram Language code that plots Sin[x]." --insert-wolfram-code-below --save
+python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 ```
 
-PowerShell module:
+### PowerShell
 
 ```powershell
 Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+
 Get-TungstenEnvironment -Probe
-Invoke-TungstenKernel -Code "FactorInteger[2^127-1]"
+Invoke-TungstenKernel -Code "2+2"
 Convert-TungstenExpression -Code "1 + 2 x^3"
-Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
-Find-TungstenDocumentation -Query "NotebookImport"
-Open-TungstenDocumentation -Identifier "paclet:ref/NotebookGet"
-Invoke-TungstenNotebookAssistant -Path C:\path\to\file.nb -CellIndex 7 -Question "Explain what this cell does."
-Invoke-TungstenNotebookAssistant -Path C:\path\to\file.nb -ExpressionUuid 11111111-1111-1111-1111-111111111111 -Question "Reply only with Wolfram Language code that computes 2+2." -InsertWolframCodeBelow -Save
+Invoke-TungstenExpression -Code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+Find-TungstenDocumentation -Query "NotebookGet"
 ```
 
-The shortest end-to-end guide for Notebook Assistant lives in [docs/notebook-assistant.md](C:/Tools1/Tools/src/Tungsten/docs/notebook-assistant.md).
-The expression parser and inert evaluator guide lives in [docs/expression-parser.md](C:/Tools1/Tools/src/Tungsten/docs/expression-parser.md).
-
-## Validation
-
-Run the Python tests:
+### Notebook Assistant end-to-end
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
-python -m unittest discover -s .\src\Tungsten\tests -t .\src\Tungsten
+Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+
+$nb = Join-Path $env:TEMP "tungsten-assistant-demo.nb"
+New-TungstenNotebook -Path $nb -Title "Assistant Demo" -Cell @(
+    "Text:Demo notebook",
+    "Input:2+2"
+) | Out-Null
+
+$result = Invoke-TungstenNotebookAssistant `
+    -Path $nb `
+    -CellIndex 1 `
+    -Question "Reply only with Wolfram Language code that computes 2+2." `
+    -InsertWolframCodeBelow `
+    -Save
 ```
 
-Run the repo-local smoke:
+See [User Guide](./docs/user-guide.md) for a fuller tutorial sequence.
+
+## What Tungsten is good for
+
+Tungsten is especially useful when you want one of these behaviors:
+
+- run Wolfram Language from scripts and receive explicit machine-readable result metadata;
+- inspect or bulk-edit notebook files without launching Mathematica;
+- automate documentation lookup locally and offline;
+- use the real FrontEnd when needed, but drive only a narrow, dependable subset of actions;
+- script Notebook Assistant workflows from PowerShell;
+- structurally inspect Wolfram expressions even when the kernel is unavailable.
+
+## Known limitations
+
+The current documentation should state these boundaries plainly:
+
+- Tungsten is Windows-first and expects a local Wolfram installation.
+- Kernel-backed features still require the real local installation and a working license path.
+- The expression parser does not cover full box language or arbitrary StandardForm constructs.
+- The expression evaluator only implements a small built-in subset and leaves all other heads inert.
+- FrontEnd automation works only for the actions Tungsten explicitly exposes.
+- Notebook Assistant inline UI driving is intentionally not the default path because it is less
+  reliable for automation than the hidden chat-notebook backend.
+
+## Repository layout
+
+| Path | Purpose |
+|------|---------|
+| `src/Tungsten/pyproject.toml` | Python package metadata |
+| `src/Tungsten/src/tungsten/discovery.py` | Installation, docs-root, and path discovery |
+| `src/Tungsten/src/tungsten/licensing.py` | `mathpass` inspection and deduplication helpers |
+| `src/Tungsten/src/tungsten/kernel.py` | Structured kernel execution wrapper |
+| `src/Tungsten/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
+| `src/Tungsten/src/tungsten/expression.py` | Kernel-free Wolfram expression parser and inert evaluator |
+| `src/Tungsten/src/tungsten/docs_index.py` | Offline documentation indexing/search |
+| `src/Tungsten/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
+| `src/Tungsten/src/tungsten/assistant.py` | Notebook Assistant automation |
+| `src/Tungsten/src/tungsten/cli.py` | JSON-first CLI entrypoint |
+| `src/Tungsten/pwsh/` | PowerShell wrappers |
+| `src/Tungsten/tests/` | Python unit and integration coverage |
+| `src/Tungsten/scripts/Test-TungstenSmoke.ps1` | End-to-end smoke runner |
+| `src/Tungsten/docs/` | Documentation set |
+
+## Build and validation
+
+Run the Python tests from the Tungsten workspace:
+
+```powershell
+Push-Location .\src\Tungsten
+try {
+    $env:PYTHONPATH = (Resolve-Path .\src)
+    python -m unittest discover -s tests -t .
+}
+finally {
+    Pop-Location
+}
+```
+
+Run the repository-local smoke:
 
 ```powershell
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1
@@ -98,10 +279,34 @@ pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -Inclu
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
 ```
 
+## Documentation map
+
+If you are new to Tungsten, this reading order works well:
+
+1. This README for the project map, goals, and current shipped surface.
+2. [Documentation Index](./docs/README.md) for the full docs inventory and reading orders by role.
+3. [User Guide](./docs/user-guide.md) for practical workflows, tutorials, and scripting examples.
+4. [Usage Reference](./docs/usage-reference.md) for the full command surface.
+5. [Architecture](./docs/architecture.md) for the detailed component model and execution flow.
+6. Focused guides as needed:
+   - [Notebook Assistant](./docs/notebook-assistant.md)
+   - [Expression Parser](./docs/expression-parser.md)
+   - [Troubleshooting](./docs/troubleshooting.md)
+   - [Implementation Details](./docs/implementation-details.md)
+
 ## Design notes
 
-- Tungsten intentionally uses the documented `wolfram.exe` CLI instead of trying to depend on the bundled Wolfram Python client at runtime. The bundled client is present on this machine, but its cloud-oriented dependency set is incomplete in the local Python environment, while the CLI path is stable once the `mathpass` duplication is handled.
-- Notebook parsing/editing is kept independent from the kernel so that agents can still inspect and patch notebooks when evaluation is unavailable, when the FrontEnd is not running, or when scripts are operating on notebooks in bulk.
-- The new expression subsystem is also kernel-free. It parses FullForm, InputForm, and a box-free StandardForm subset directly in Python, and it provides a deliberately small inert evaluator for structural built-ins. It is not pretending to be a full Wolfram kernel replacement.
-- Documentation search is based on the installed documentation notebooks themselves, not on browser automation or online-only search. That keeps results local, offline, and version-aligned with the installation on the machine.
-- The recommended Notebook Assistant path is `assistant ask-cell` / `Invoke-TungstenNotebookAssistant` with the default `NotebookChatCell` backend. Tungsten asks the built-in assistant through a temporary hidden chat notebook, extracts assistant text from the returned `ChatObject`, and only then performs deterministic insertion below the requested source cell. The older visible inline-desktop path remains available as the experimental `DesktopInline` backend for cases where direct UI driving is specifically desired.
+- Tungsten intentionally uses the documented `wolfram.exe` CLI instead of trying to depend on the
+  bundled Wolfram Python client at runtime. The bundled client is present on this machine, but its
+  higher-level dependency surface is not the most dependable local runtime substrate here.
+- Notebook parsing/editing is kept independent from the kernel so agents can still inspect and
+  patch notebooks even when evaluation is unavailable or undesirable.
+- The expression subsystem is also kernel-free, but it is explicitly structural and inert rather
+  than a general-purpose evaluator.
+- Documentation search is based on the installed documentation notebooks themselves, not on browser
+  automation or online-only search.
+- The recommended Notebook Assistant path is `assistant ask-cell` /
+  `Invoke-TungstenNotebookAssistant` with the default `NotebookChatCell` backend. Tungsten asks the
+  built-in assistant through a temporary hidden chat notebook, extracts assistant text from the
+  returned `ChatObject`, and only then performs deterministic insertion below the requested source
+  cell.

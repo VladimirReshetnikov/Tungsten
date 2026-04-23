@@ -1,86 +1,222 @@
 # Tungsten Implementation Details
 
-Created (UTC): 2026-04-23T02:16:55Z  
-Updated (UTC): 2026-04-23T14:55:38Z  
-Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
+Created (UTC): 2026-04-23T02:16:55Z
+Updated (UTC): 2026-04-23T15:42:23Z
+Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 
-## Local machine findings that materially shaped Tungsten
+## Summary
 
-### 1. The installation is complete enough for real automation
+This document records the machine findings, engineering choices, and reasoning that shaped
+Tungsten's current implementation. It is intentionally more specific than the architecture guide.
+Where the architecture document says "what the layers are," this document answers questions like:
 
-The machine has a real Wolfram 14.3 installation with:
+- why Tungsten executes through `wolfram.exe` instead of a different local surface;
+- why notebook editing is structural instead of semantic;
+- why the default Notebook Assistant backend is the hidden chat-notebook flow;
+- why the expression subsystem is separated from notebook parsing;
+- why some outputs are returned as strings even when they represent rich Wolfram objects.
+
+## Machine findings that materially shaped the design
+
+### 1. This machine has a real, usable Wolfram installation
+
+The target environment includes a real Wolfram 14.3 installation with the important executables and
+assets Tungsten needs:
 
 - `wolfram.exe`
 - `WolframKernel.exe`
 - `WolframNB.exe`
 - `wolframscript.exe`
-- the local documentation corpus under `Common Files\Wolfram Research\Documentation.en-us\14.3`
+- the shared documentation notebook corpus
 - the bundled `WolframClientForPython` source tree
 
-That was enough to justify a real framework rather than a file-only notebook utility.
+That justified building a real automation framework around the installation rather than a
+notebook-only utility or a mock layer.
 
-### 2. The `mathpass` file is the critical operational wrinkle
+### 2. The local `mathpass` is the key operational wrinkle
 
-The installed `mathpass` contains duplicate license entries. With the original file:
+The most important machine-specific finding was that the installed `mathpass` contains duplicate
+license entries. Using that raw file directly can cause command-line evaluation failures. A
+deduplicated copy works.
 
-- `wolframscript -code ...` fails with a license/password error;
-- the full raw `mathpass` causes command-line evaluation failures;
-- a deduplicated copy works;
-- even a file containing a single license entry works.
+This finding moved from "one weird local hack" to "core Tungsten behavior." As a result:
 
-Tungsten therefore always executes the kernel against a temporary deduplicated `mathpass` and never mutates the installed system file.
+- Tungsten never mutates the machine-wide installed `mathpass`;
+- Tungsten always inspects the discovered file;
+- Tungsten always materializes a temporary deduplicated copy before kernel execution;
+- kernel result payloads surface the inspection data so callers can see what happened.
 
-### 3. The bundled Wolfram Python client is present but not runtime-clean
+### 3. The bundled Wolfram Python client exists but is not the best runtime substrate here
 
-The local `WolframClientForPython` tree is importable, but importing its higher-level evaluation surface pulls in missing dependencies such as `oauthlib`. That made it a poor default runtime dependency for this machine.
+The installation contains `WolframClientForPython`, which is useful reference material and could be
+tempting as a runtime dependency. In practice, its higher-level evaluation surface pulls in
+dependencies that are not reliably present on this machine, such as `oauthlib`.
 
-The framework therefore uses the documented `wolfram.exe` CLI as the execution substrate and treats the bundled Python client as contextual reference material rather than as the primary runtime.
+That made it a poor default dependency for a repository-local tool whose job is to be dependable on
+this machine today. Tungsten therefore:
 
-### 4. `UsingFrontEnd[...]` works on this machine
+- treats the bundled client tree as contextual reference;
+- does not depend on it for core execution;
+- uses the documented command-line Wolfram entrypoints instead.
 
-Once Tungsten supplies a deduplicated password file, kernel-side FrontEnd actions work, including hidden document creation and close. That is why the framework exposes real FrontEnd automation commands rather than only file-based notebook operations.
+### 4. `UsingFrontEnd[...]` is good enough to support real FE automation
 
-### 5. Notebook Assistant automation is reliable through a hidden chat notebook
+Once Tungsten supplies a deduplicated password file, kernel-side FE automation works on this
+machine. That unlocked the design of:
 
-The first obvious design for Notebook Assistant automation was to drive the visible inline assistant attached to the target cell, because that is what a human user naturally does in the FrontEnd. Tungsten still exposes that path as an experimental backend, but it turned out to be the wrong default for robust automation.
+- `frontend.py`;
+- Notebook Assistant automation through a helper kernel script;
+- documentation opening through `NotebookLocate`;
+- token execution through `FrontEndTokenExecute`.
 
-The reason is that inline assistant state is FrontEnd-local dynamic state. It is easy for a human to see and continue interacting with it, but much harder for a later helper-kernel call to rediscover and interpret reliably. In practice that produced a fragile split workflow:
+Without that capability, Tungsten would have had to lean much harder on visible desktop automation.
 
-- one pass to open the inline assistant;
-- a desktop automation layer to type into it;
-- another pass to rediscover the transient attached-cell state and harvest the output.
+### 5. `es.exe` is a meaningful local performance win
 
-Tungsten now defaults to a different design:
+The Everything CLI tool is present on this machine and is extremely effective for filename-oriented
+documentation lookup. Tungsten uses it opportunistically in `docs_index.py` for fast path
+resolution before falling back to recursive traversal or SQLite FTS.
 
-- read the selected source cell from the real notebook;
-- create a temporary hidden Chatbook notebook;
-- evaluate a `ChatInput` cell against the built-in assistant stack with `ChatCellEvaluate`;
-- parse the returned `ChatObject` text in Python;
-- extract Wolfram Language code blocks from the assistant reply;
-- insert those code blocks below the original source cell in the real notebook.
+This is exactly the kind of machine-local affordance Tungsten is designed to exploit.
 
-This is still using Mathematica's built-in assistant machinery. The change is that Tungsten routes the interaction through a text-automation-friendly surface rather than through transient visible inline UI state.
+## Why Tungsten executes through `wolfram.exe`
 
-### 6. Generic expression parsing needed its own subsystem
+Several candidate execution surfaces were available:
 
-The existing notebook parser was intentionally structural and notebook-specific. It was good at splitting `Notebook[...]`, `Cell[...]`, and option lists, but it was not the right foundation for a general Wolfram expression AST with operator precedence, implicit `Times`, `Part` syntax, spans, and structural operations such as `Level`.
+- `wolfram.exe`
+- `WolframKernel.exe`
+- `wolframscript.exe`
+- the bundled Python client
 
-Tungsten therefore now has a separate `expression.py` subsystem with:
+The current default is `wolfram.exe -noprompt -script`.
 
-- an explicit AST for symbols, strings, numbers, and general expressions;
-- a tokenizer that skips nested Wolfram comments and understands ambiguous tokens such as `[[` and plain `]`;
-- a Pratt-style parser for textual Wolfram syntax;
-- canonical FullForm rendering;
-- a deliberately small inert evaluator for structural built-ins.
+### Why this choice won
 
-Keeping that subsystem separate from `notebook.py` preserves a clean boundary:
+- It is present in the discovered installation.
+- It is close to the real runtime rather than being a high-level wrapper with extra dependency
+  assumptions.
+- It works well with temporary script files and temporary result files.
+- It gives Tungsten predictable control over the exact script it is running.
+- It plays well with the deduplicated `-pwfile` workaround.
 
-- `notebook.py` remains a resilient structural notebook tool;
-- `expression.py` is the general-purpose Wolfram expression model.
+### Why Tungsten does not primarily use `wolframscript.exe`
 
-### 7. The expression evaluator is intentionally narrow
+`wolframscript.exe` is valuable and present, but on this machine it was not the most reliable
+evaluation path under the raw licensing state. Tungsten needed a substrate it could control more
+explicitly.
 
-The new evaluator does not try to reproduce kernel semantics wholesale. It only knows about a small set of structural built-ins:
+### Why Tungsten does not primarily use `WolframKernel.exe`
+
+The current implementation already achieves the needed behavior through `wolfram.exe`, and there
+was no compelling reason to add a second kernel-launch strategy. One consistent execution path is
+preferable unless a future requirement forces broader launcher support.
+
+## Why kernel execution is wrapper-script based
+
+The wrapper script is a central implementation decision.
+
+### The problem it solves
+
+Naively running arbitrary Wolfram code and reading stdout is not good enough for Tungsten's goals.
+Callers need to know:
+
+- did the process launch?
+- did the Wolfram evaluation parse?
+- did it semantically succeed?
+- what was the result?
+- what were the messages?
+- what was printed?
+- what timing metadata exists?
+
+Mixed terminal output is too ambiguous for that.
+
+### The wrapper design
+
+`kernel.py` writes a script that:
+
+- imports the user code from disk;
+- parses it with `ToExpression[..., HoldComplete]`;
+- optionally wraps it in `UsingFrontEnd[...]`;
+- evaluates it via `EvaluationData[...]`;
+- captures `Print` output by temporarily rebinding `Print`;
+- stringifies result and metadata into JSON-safe fields;
+- exports a `RawJSON` payload to a result file.
+
+### Why `HoldComplete` is used during parsing
+
+Tungsten wants a clear separation between "the input text parsed" and "the evaluation ran." Parsing
+under `HoldComplete` allows Tungsten to report parse failure deterministically before evaluation.
+
+### Why results are stringified instead of deeply serialized
+
+Arbitrary Wolfram expressions, FE objects, graphics, and symbolic constructs do not map cleanly
+onto JSON. Attempting to coerce them into a fake Python object model would create a lot of fragile
+special cases.
+
+Tungsten instead returns:
+
+- `result` as an `InputForm` string;
+- `result_head` as an `InputForm` string;
+- lists of stringified messages and printed output;
+- numeric timing fields when they are naturally numeric.
+
+This is less magical and more robust.
+
+## Why notebook editing is structural rather than semantic
+
+Notebook files are ordinary Wolfram expressions, but using the full Wolfram parser as a requirement
+for notebook editing would erase one of Tungsten's most useful properties: it can work on notebook
+files even when the kernel is unavailable.
+
+### Scope of the structural parser
+
+`notebook.py` is intentionally focused on:
+
+- strings;
+- nested comments;
+- bracket balancing;
+- splitting top-level expressions;
+- identifying `Notebook[...]`;
+- identifying `Cell[...]`;
+- identifying `Cell[CellGroupData[...]]`.
+
+That is enough to support:
+
+- notebook inventory and flattening;
+- extracting selectors such as `ExpressionUUID`, `CellID`, and `CellTags`;
+- title and option inspection;
+- deterministic cell insertion, append, and replacement.
+
+### Raw preservation strategy
+
+Notebook nodes preserve their original raw text when possible. If Tungsten edits a structure, it
+regenerates the affected region and clears raw caches only where needed.
+
+This is important because it keeps unrelated notebook text stable and avoids unnecessary churn.
+
+### Why notebook and expression parsing are separate
+
+The notebook parser is optimized for resilience on notebook files. The expression parser is
+optimized for operator precedence, implicit multiplication, `Part` syntax, spans, and canonical
+rendering. Combining them would make both more complicated and less trustworthy.
+
+## Why the expression subsystem exists and why it is intentionally narrow
+
+The request for a kernel-free expression parser was justified, but trying to fully reproduce
+Wolfram semantics locally would have been a trap.
+
+### What the subsystem is for
+
+`expression.py` exists to support:
+
+- parsing FullForm, InputForm, and a box-free StandardForm subset;
+- structural inspection;
+- canonical rendering;
+- a small set of structural built-ins for inert evaluation.
+
+### Why the evaluator is deliberately small
+
+Only a small built-in subset is implemented:
 
 - `Length`
 - `Depth`
@@ -89,47 +225,224 @@ The new evaluator does not try to reproduce kernel semantics wholesale. It only 
 - `Extract`
 - `Level`
 
-Everything else remains inert, including heads like `Plus`, `Times`, and `Power`. That keeps the implementation predictable and honest. For example, `1 + 2` parses to `Plus[1, 2]`, but `Length[1 + 2]` still works because `Length` is explicitly implemented.
+Everything else remains inert. This is a feature, not a limitation accidentally left undocumented.
+It keeps behavior predictable and keeps Tungsten honest about what is and is not kernel evaluation.
 
-## Why the evaluator returns strings for results
+### Why StandardForm support is only a subset
 
-Arbitrary Wolfram expressions do not map cleanly onto JSON. Rather than pretending otherwise, Tungsten returns:
+Box language and full StandardForm surface syntax are large topics. The practical requirement here
+was the plain-text subset that is useful for scripts, docs, and code examples, not full notebook
+box reconstruction.
 
-- `result` as an `InputForm` string;
-- `result_head` as an `InputForm` string;
-- `messages` and `messages_text` as string lists;
-- `timing` fields as numeric values when available.
+## Why documentation indexing is notebook-backed and SQLite-backed
 
-That keeps the result payload stable across symbolic, graphical, and FrontEnd object results, and it means PowerShell callers always receive something representable.
+The obvious alternative to local indexing would have been:
 
-## Why notebook editing is structural rather than semantic
+- online documentation lookup;
+- browser automation;
+- or remote search.
 
-Notebook files are ordinary Wolfram expressions, but full Wolfram parsing is not a reasonable dependency for a small repository-local automation framework. Tungsten therefore parses exactly the parts that matter for notebook manipulation:
+Tungsten deliberately avoids those as the primary path.
 
-- top-level notebook options;
-- cells;
-- cell groups.
+### What the current index buys us
 
-When precise semantic interpretation is needed, callers can still use the kernel and FrontEnd APIs. Tungsten’s local parser is deliberately the fallback and bulk-edit tool, not a replacement for the full language.
+- offline operation;
+- exact alignment with the installed documentation version and any local update paclets;
+- local search without FE startup;
+- deterministic records that can be consumed from Python and PowerShell.
 
-## Why documentation search is file-backed instead of browser-backed
+### Why SQLite FTS5
 
-The local documentation notebooks are already the authoritative installation-aligned corpus. Indexing them directly has several advantages:
+SQLite is already available, reliable, and a good fit for a local single-user index. FTS5 provides:
 
-- it works offline;
-- it respects the exact installed version and any local documentation paclet updates;
-- it avoids browser automation;
-- it makes `docs read` and `docs search` available even when the FrontEnd is not open.
+- ranking;
+- snippets;
+- incremental query support;
+- no extra service dependency.
 
-The cost is that the extracted text is approximate rather than a polished final rendering. That tradeoff is acceptable for agent workflows.
+### Why there is also a filename fast path
 
-## WinDesk relationship
+Many documentation lookups are effectively "find `NotebookGet.nb`" rather than "search the body
+text semantically." Using `es.exe` for that common case makes the experience dramatically faster.
 
-Tungsten does not require WinDesk at runtime. However, WinDesk is explicitly useful for:
+### Why the extracted text is approximate
 
-- optional visible-window capture during FrontEnd smoke tests;
-- the experimental `DesktopInline` Notebook Assistant backend, which drives the visible inline assistant UI;
-- future richer verification of notebook/documentation windows;
-- future UIA-based assertions if the project grows beyond token/document open flows.
+Documentation notebooks contain a lot of UI scaffolding and non-content strings. Tungsten filters
+obvious noise, but the resulting text is still an approximation of the notebook's semantic content.
+That tradeoff is acceptable because the index is meant for discovery and retrieval, not polished
+rendering.
 
-The smoke script therefore includes optional `-UseWinDesk` and `-IncludeAssistant` paths. The recommended assistant backend does not require WinDesk, but the visible inline-desktop backend does.
+## Why FrontEnd automation is intentionally selective
+
+It would be easy to let FrontEnd automation sprawl into a grab-bag of arbitrary UI-driving code.
+Tungsten deliberately does not do that.
+
+### What is currently considered in-scope
+
+- FE availability probing;
+- notebook open;
+- documentation open;
+- arbitrary FE-targeted Wolfram code;
+- token execution.
+
+### Why the surface is narrow
+
+- These operations have clear Wolfram-language representations.
+- They fit cleanly on top of the kernel runner.
+- They are useful for automation without requiring a full general-purpose desktop automation
+  framework.
+
+For anything more UI-fragile, Tungsten prefers to be explicit about optionality and experimental
+status.
+
+## Why Notebook Assistant defaults to the hidden chat-notebook path
+
+This was one of the most important product-level design choices.
+
+### The obvious human workflow
+
+A human user naturally:
+
+1. clicks a cell;
+2. opens the inline assistant;
+3. types a question;
+4. sees the answer in the attached assistant UI;
+5. copies or inserts code manually.
+
+That is easy in the GUI and not inherently easy for automation.
+
+### Why the visible inline assistant was not a good default
+
+The inline popup is transient FE state. It is excellent for a person but awkward for a script:
+
+- the assistant lives in visible UI state rather than in a stable file artifact;
+- state discovery is harder;
+- response harvesting is fragile;
+- desktop focus and input assumptions become part of the workflow.
+
+### Why the hidden chat-notebook backend works better
+
+The current default instead:
+
+1. resolves the source cell structurally from the notebook file;
+2. creates a temporary hidden Chatbook notebook;
+3. asks the built-in assistant through Wolfram code;
+4. returns a serialized `ChatObject` string;
+5. extracts the assistant text in Python;
+6. extracts fenced Wolfram code blocks;
+7. reinserts them below the source cell in a deterministic second step.
+
+This preserves the "use the built-in assistant" requirement while giving Tungsten a much more
+script-friendly control surface.
+
+### Why code insertion is a separate post-processing step
+
+Separating assistant generation from notebook mutation makes several things better:
+
+- reply extraction is easier to debug;
+- insertion can be disabled cleanly;
+- insertion policy is visible in Python and PowerShell rather than hidden in FE-side logic;
+- future insertion heuristics can evolve independently from assistant prompting.
+
+## Selector resolution policy for notebook-targeted workflows
+
+Tungsten needs stable ways to refer to notebook cells across different workflows. The current
+selector policy is intentionally layered.
+
+### Preferred selector order
+
+When Tungsten resolves a cell for assistant insertion or later FE targeting, it prefers:
+
+1. `ExpressionUUID`
+2. `CellID`
+3. first `CellTag`
+4. flat cell index
+
+### Why that order exists
+
+- `ExpressionUUID` is the most stable notebook-native identity when available.
+- `CellID` is often stable and numeric.
+- `CellTag` can be useful when intentionally assigned, though it may be ambiguous.
+- flat index is convenient and available even for synthetic or freshly generated notebooks, but it
+  is more sensitive to structural edits.
+
+This policy lets users write short scripts without giving up the more stable identity forms when
+the notebook already contains them.
+
+## Why the PowerShell module is thin
+
+There is a strong temptation to keep adding PowerShell-native logic once a module exists. Tungsten
+intentionally resists that.
+
+### Current PowerShell responsibilities
+
+The module mainly:
+
+- constructs CLI arguments;
+- ensures `PYTHONPATH` points at the repo-local `src/`;
+- invokes `python -m tungsten`;
+- deserializes JSON;
+- exposes user-friendly function names.
+
+### Why this is the right tradeoff
+
+- implementation logic stays in one language and one code path;
+- behavior stays consistent between Python and PowerShell callers;
+- test burden stays smaller;
+- docs can treat the PowerShell layer as a projection instead of as a second architecture.
+
+## Why validation is structured the way it is
+
+Tungsten spans pure parsing logic and live integration with an installed Wolfram environment, so no
+single test strategy is enough.
+
+### Unit and component coverage
+
+Kernel-free subsystems and CLI shaping are covered by Python unit tests.
+
+### Live machine smoke coverage
+
+The smoke script covers the actual machine integration points:
+
+- discovery;
+- kernel execution;
+- notebook workflows;
+- documentation lookup;
+- FrontEnd flows;
+- Notebook Assistant;
+- expression parsing/evaluation.
+
+### Important operational lesson
+
+FrontEnd-heavy validations should not be run in parallel with other Wolfram-heavy integration runs
+on the same machine session. The desktop and FE state are shared enough that serial execution is
+more dependable.
+
+## Current limitations that are implementation choices, not oversights
+
+Some current boundaries are deliberate and should be treated as such unless a later design changes
+them intentionally.
+
+- Tungsten is Windows-first.
+- Tungsten assumes a local Wolfram installation rather than a remote kernel.
+- The expression subsystem does not attempt full kernel semantics.
+- Notebook parsing is structural rather than fully semantic.
+- FrontEnd coverage is intentionally narrow.
+- The visible inline Notebook Assistant path remains experimental.
+
+## Likely future extension directions
+
+The current implementation naturally suggests a few extensions if the project continues to grow.
+
+- More notebook patch operations in `notebook.py`.
+- More inert structural built-ins in `expression.py`, provided they remain explicit and testable.
+- Richer assistant post-processing, such as multiple insertion policies or code-block ranking.
+- Additional FE operations that still fit the "small, deterministic, Wolfram-code-addressable"
+  model.
+- Better doc-index metadata extraction if future workflows need more precise classification.
+
+The important constraint is that future growth should preserve Tungsten's two strongest traits:
+
+- it is pleasant to automate from scripts;
+- it is honest about which parts are real Wolfram execution and which parts are local structural
+  tooling.

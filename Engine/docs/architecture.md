@@ -1,113 +1,483 @@
 # Tungsten Architecture
 
-Created (UTC): 2026-04-23T02:16:55Z  
-Updated (UTC): 2026-04-23T14:55:38Z  
-Repository HEAD: 57ab7a5664bc31c13cc3fad044e00d2246b0f07e
+Created (UTC): 2026-04-23T02:16:55Z
+Updated (UTC): 2026-04-23T15:42:23Z
+Repository HEAD: 67ad70b3bea14aa14a093684a3b033a53ca14d9e
 
-## Overview
+## Summary
 
-Tungsten is organized as a thin set of cooperating layers:
+Tungsten is a small but deliberately layered automation stack around a local Wolfram installation.
+Its architecture is shaped by two requirements that are easy to state but surprisingly important in
+practice:
 
-1. `discovery.py` locates the installation, documentation roots, and licensing artifacts.
-2. `licensing.py` converts the machine-local `mathpass` into a safe, deduplicated temporary password file for execution.
-3. `kernel.py` runs `wolfram.exe` in a controlled, script-driven mode and returns structured JSON results.
-4. `frontend.py` builds on the kernel layer to execute `UsingFrontEnd[...]`, `NotebookOpen`, `NotebookLocate`, and `FrontEndTokenExecute`.
-5. `assistant.py` builds on the kernel and FrontEnd layers to automate the built-in Notebook Assistant against a selected source cell.
-6. `expression.py` parses generic Wolfram expressions and structurally evaluates a small built-in subset without a kernel.
-7. `notebook.py` parses and rewrites notebook expressions directly from file text.
-8. `docs_index.py` indexes the local documentation notebook corpus into a SQLite FTS database.
-9. `pwsh/Tungsten.psm1` projects the JSON CLI into PowerShell-friendly commands.
+- agent and script callers want structured, deterministic outputs;
+- the real machine-local Wolfram installation remains the source of truth for evaluation,
+  documentation, and FrontEnd behavior.
 
-## Execution model
+That leads to a hybrid design:
 
-### Kernel execution
+- kernel-backed capabilities are delegated to the installed Wolfram runtime;
+- notebook inspection/editing and expression parsing are implemented locally so they remain
+  available even when the kernel is unavailable, undesirable, or too heavyweight for the task;
+- PowerShell support is projected from the Python CLI rather than reimplemented.
 
-The kernel runner does not pass user code directly on the command line. Instead, it:
+This document describes the current architecture as implemented in `src/tungsten/`.
 
-1. creates a temporary deduplicated `mathpass`;
-2. writes the requested Wolfram Language code to a temporary input file;
-3. writes a wrapper script that:
-   - imports the code,
-   - parses it with `ToExpression[..., HoldComplete]`,
-   - optionally wraps it in `UsingFrontEnd[...]`,
-   - evaluates it through `EvaluationData[...]`,
-   - stringifies the result and message metadata into JSON-compatible values,
-   - exports a JSON payload to a temporary result file;
-4. runs `wolfram.exe -noprompt -pwfile <deduped> -script <wrapper>`;
-5. reads the JSON payload back into Python.
+## Architectural principles
 
-This approach is more robust than trying to parse mixed stdout/stderr streams, and it gives Tungsten stable result objects for both kernel-only and FrontEnd-targeted flows.
+The current Tungsten design follows a few consistent principles.
 
-### FrontEnd execution
+### 1. Use the real installation where fidelity matters
 
-The FrontEnd controller is intentionally small. It does not duplicate the entire FrontEnd API; instead, it provides a dependable path for the operations that matter most in agent and automation workflows:
+If the task depends on actual Wolfram evaluation semantics, actual FrontEnd behavior, or the exact
+installed documentation set, Tungsten delegates to the local installation instead of simulating it.
 
-- open a notebook file;
-- open a documentation page by paclet identifier;
-- execute an arbitrary `UsingFrontEnd[...]` expression;
-- execute a named FrontEnd token.
+Examples:
 
-These are all expressed as Wolfram Language code and then delegated to the same kernel runner, which keeps licensing and process setup policy centralized.
+- `kernel.py` executes through `wolfram.exe`;
+- `frontend.py` executes real `UsingFrontEnd[...]` code;
+- `docs_index.py` indexes the actual local `*.nb` documentation corpus;
+- `assistant.py` uses Mathematica's built-in Notebook Assistant stack rather than inventing a fake
+  assistant layer.
 
-### Notebook Assistant execution
+### 2. Keep local fallbacks for structure-oriented workflows
 
-`assistant.py` exposes two different execution styles:
+Some tasks are structural rather than semantic. For those, Tungsten stays kernel-free on purpose.
 
-- the recommended `ask-cell` path, which uses a temporary hidden Chatbook notebook and `ChatCellEvaluate`;
-- the experimental inline path, which opens the visible inline assistant UI and is intended mainly for desktop-level testing with WinDesk.
+Examples:
 
-The recommended path is deliberately two-stage:
+- `notebook.py` parses notebook files structurally and can create/edit them without a kernel;
+- `expression.py` parses textual Wolfram expressions and evaluates a small inert structural subset.
 
-1. ask the built-in assistant stack about a selected source cell and capture the reply as a `ChatObject`;
-2. if the reply contains Wolfram Language code blocks, reopen the real source notebook, select the same source cell, and insert new `Input` cells immediately below it.
+### 3. Prefer explicit structured payloads over scraped terminal text
 
-That split keeps assistant generation and notebook mutation deterministic and makes the returned payload easier for Python and PowerShell callers to consume.
+Where possible, Tungsten serializes results into JSON and then projects them outward. This is why
+kernel execution goes through a wrapper script that writes a JSON payload to disk instead of asking
+callers to infer success from mixed stdout/stderr text.
 
-### Expression parsing and inert evaluation
+### 4. Centralize environment quirks
 
-`expression.py` is intentionally separate from the notebook parser. It has to solve a different problem:
+The machine-specific licensing workaround is not hidden in random call sites. Discovery and
+licensing behavior are centralized so higher-level layers can rely on one execution policy.
 
-- notebook parsing needs structural resilience on notebook files;
-- general expression parsing needs operator precedence, implicit multiplication, `Part` syntax, spans, and canonical FullForm output.
+### 5. Keep the PowerShell surface thin
 
-The expression subsystem therefore owns its own tokenizer and parser, then layers a small inert evaluator on top for structural built-ins such as `Length`, `Depth`, `Part`, `Extract`, and `Level`.
+PowerShell is important for automation ergonomics, but the source of truth remains the Python
+implementation. The module wraps the CLI instead of growing a parallel implementation.
 
-## Notebook model
+## Module map
 
-`notebook.py` implements a structural parser rather than a full Wolfram Language parser. The parser understands:
+The current Tungsten package is composed of the following modules.
 
-- strings, including escaped characters;
-- nested Wolfram comments `(* ... *)`;
-- bracket nesting for `[]`, `{}`, and `()`;
-- top-level expression splitting on commas;
-- the notebook patterns that matter for practical file manipulation:
-  - `Notebook[...]`
-  - `Cell[...]`
-  - `Cell[CellGroupData[...]]`
+| Module | Primary responsibility | Depends directly on |
+|--------|------------------------|---------------------|
+| `discovery.py` | Discover the local installation, documentation roots, bundled client tree, and default index location. | OS filesystem and environment variables |
+| `licensing.py` | Inspect `mathpass` and materialize a temporary deduplicated password file. | Filesystem |
+| `kernel.py` | Execute Wolfram Language through `wolfram.exe` and return structured results. | `discovery.py`, `licensing.py`, subprocess |
+| `notebook.py` | Parse, inspect, render, and patch notebook files without a kernel. | Local text parsing only |
+| `expression.py` | Parse Wolfram expressions and inertly evaluate a small structural built-in subset. | Local tokenizer/parser only |
+| `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
+| `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
+| `assistant.py` | Automate Notebook Assistant for a selected source cell and optionally insert code below it. | `kernel.py`, `notebook.py` |
+| `cli.py` | Expose the package as a JSON-first command-line interface. | All feature modules |
+| `pwsh/Tungsten.psm1` | Project the CLI into PowerShell-friendly functions. | `python -m tungsten ...` |
 
-That is deliberate. The goal is not to interpret arbitrary Wolfram code; the goal is to make notebook files inspectable and editable in a way that is resilient, local, and independent from a running kernel.
+## High-level layer diagram
 
-The model preserves raw expressions for unchanged nodes. When an operation modifies a cell or group, Tungsten regenerates only the affected structural expressions.
+```text
+                     local Wolfram installation
+       ┌─────────────────────────────────────────────────────┐
+       │ wolfram.exe / WolframNB.exe / docs notebooks /     │
+       │ mathpass / Notebook Assistant / Chatbook stack     │
+       └─────────────────────────────────────────────────────┘
+                              ▲
+                              │
+                  discovery.py + licensing.py
+                              │
+         ┌────────────────────┼─────────────────────┐
+         │                    │                     │
+         ▼                    ▼                     ▼
+     kernel.py           notebook.py          expression.py
+         │                    │
+         │                    ├──────────────┐
+         ▼                    ▼              │
+    frontend.py         docs_index.py        │
+         │                    │              │
+         └──────────────┬─────┘              │
+                        ▼                    │
+                   assistant.py              │
+                        │                    │
+                        └──────────┬─────────┘
+                                   ▼
+                                 cli.py
+                                   ▼
+                            pwsh/Tungsten.psm1
+                                   ▼
+                    Python callers / PowerShell / agents
+```
 
-## Documentation indexing
+## Core runtime objects
 
-Wolfram documentation pages are themselves notebooks. Tungsten indexes those notebook files directly:
+Several data structures act as architectural seams between layers.
 
-- it discovers local documentation roots from the shared installation tree and from user-installed `SystemDocsUpdate*` paclets;
-- it extracts a title from `WindowTitle->...`;
-- it derives an approximate paclet identifier from the file’s location in `ReferencePages`, `Guides`, `Tutorials`, and similar sections;
-- it extracts string literals from the notebook text to build a full-text search payload;
-- it stores metadata plus an FTS index in SQLite.
+### `WolframInstallation`
 
-The index is intentionally approximate rather than semantically perfect. The tradeoff is worthwhile because it stays offline, installation-local, and easy to rebuild.
+Defined in `discovery.py`, this is the canonical description of the discovered local environment.
+It includes:
 
-## PowerShell projection
+- installation paths such as `kernel_cli`, `kernel_executable`, `frontend_executable`, and
+  `wolframscript`;
+- `mathpass`;
+- discovered documentation roots;
+- the bundled `WolframClientForPython` tree if present;
+- Tungsten's default documentation index path.
 
-The PowerShell module is intentionally thin. It does not reimplement Tungsten logic; it just:
+Higher layers take this object instead of independently rediscovering the environment.
 
-- sets `PYTHONPATH` to the project `src/` directory;
-- calls `python -m tungsten ...`;
-- deserializes the resulting JSON;
-- exposes ergonomic PowerShell function names for common tasks.
+### `MathpassInspection`
 
-This keeps the authoritative implementation in one place while still making `pwsh` automation pleasant.
+Defined in `licensing.py`, this captures:
+
+- whether the discovered file exists;
+- whether a `%` header is present;
+- original line count;
+- unique entry count;
+- duplicate entry count.
+
+This is returned all the way out to callers as part of kernel result metadata, which makes
+licensing behavior observable instead of implicit.
+
+### `KernelEvaluationResult`
+
+Defined in `kernel.py`, this is the main structured payload for kernel-backed execution. It
+contains:
+
+- command-line invocation;
+- process exit code;
+- Tungsten-level success/failure metadata;
+- result and result head as strings;
+- messages, message text, and captured printed output;
+- timing fields;
+- raw stdout/stderr;
+- whether a JSON payload was successfully produced;
+- mathpass inspection details.
+
+This object is the core contract for `kernel.py`, `frontend.py`, and much of `assistant.py`.
+
+### `NotebookDocument`
+
+Defined in `notebook.py`, this is Tungsten's structural notebook model. It is intentionally simpler
+than the full Wolfram language model and is built around:
+
+- `NotebookCell`
+- `NotebookGroup`
+- `NotebookRawItem`
+
+It supports:
+
+- flattening cells for selector-based workflows;
+- inspecting notebook-level options;
+- appending/inserting/replacing cells;
+- round-tripping notebook text back to disk.
+
+### Expression AST nodes
+
+Defined in `expression.py`, these carry the general Wolfram expression model used by the inert
+parser/evaluator. The exact node types are owned by that module, but architecturally the important
+point is that they are separate from `NotebookDocument` and deliberately not reused for notebook
+structure.
+
+## Workflow architecture
+
+The easiest way to understand Tungsten is by following the main workflows end to end.
+
+### Workflow 1: Environment discovery
+
+Used by almost every CLI command.
+
+1. `cli.py` calls `discover_installation()`.
+2. `discovery.py` looks for an explicit `TUNGSTEN_WOLFRAM_HOME` override first.
+3. If no override is present, it searches the default Windows installation root under
+   `Program Files\Wolfram Research\Wolfram` and picks the highest parseable version directory.
+4. It discovers documentation roots from both:
+   - the shared installation tree under `Common Files`;
+   - user-installed documentation paclet update roots under `%APPDATA%\Wolfram\Paclets\Repository`.
+5. It discovers `mathpass` under `%ProgramData%\Wolfram\Licensing\mathpass`.
+6. It constructs a default SQLite index path under `%LOCALAPPDATA%\Tungsten\docs\`.
+
+Important property:
+
+- discovery is read-only;
+- discovery does not validate every downstream behavior by itself;
+- optional probing is a separate step exposed through `env show --probe`.
+
+### Workflow 2: Kernel evaluation
+
+This is Tungsten's most important kernel-backed workflow.
+
+1. The caller provides inline code or a file path.
+2. `kernel.py` creates a temporary working area.
+3. The user code is written to `input.wl` if necessary.
+4. `licensing.py` materializes a temporary deduplicated password file.
+5. `kernel.py` writes a wrapper script that:
+   - imports the user code;
+   - parses it with `ToExpression[..., HoldComplete]`;
+   - optionally wraps it in `UsingFrontEnd[...]`;
+   - evaluates it with `EvaluationData[...]`;
+   - captures result strings, messages, timing, and `Print` output;
+   - exports a JSON payload to disk.
+6. `wolfram.exe -noprompt -pwfile ... -script wrapper.wl` is executed.
+7. Tungsten reads the JSON payload if it was written.
+8. The final `KernelEvaluationResult` is returned to the caller.
+
+Architectural consequence:
+
+- process success and semantic success are distinct;
+- callers do not have to parse Wolfram textual output conventions on their own.
+
+### Workflow 3: Notebook file inspection and editing
+
+This is the main kernel-free notebook path.
+
+1. `NotebookDocument.load()` reads the notebook text.
+2. `NotebookDocument.from_text()` isolates the outer `Notebook[...]` expression.
+3. Structural parsing is delegated to helper functions such as:
+   - `parse_call`
+   - `parse_list`
+   - `split_top_level`
+   - comment/string skipping helpers
+4. Cells and groups are converted into Tungsten structural nodes.
+5. For inspection, the document is flattened into rows containing:
+   - `index`
+   - `path`
+   - `style`
+   - `preview`
+   - `expression_uuid`
+   - `cell_id`
+   - `cell_tags`
+6. For edits, Tungsten mutates the structure and renders it back to notebook text.
+
+The flattening step is especially important architecturally because it creates the stable selection
+surface used by assistant automation and by many scripts.
+
+### Workflow 4: Documentation indexing and search
+
+This flow is local, offline, and installation-aligned.
+
+1. `docs_index.py` enumerates notebook files beneath the discovered documentation roots.
+2. For each notebook, it extracts:
+   - a title, usually from `WindowTitle`;
+   - a paclet identifier inferred from the file path;
+   - a preview and searchable body assembled from string literals in the notebook text.
+3. The extracted records are stored in:
+   - a normal SQLite table for full records;
+   - an FTS5 virtual table for search.
+4. Searches prefer a fast filename lookup path first:
+   - if `es.exe` is available, Tungsten uses it;
+   - otherwise it falls back to recursive filesystem enumeration.
+5. If filename resolution does not win, Tungsten queries SQLite FTS.
+
+This hybrid design matters:
+
+- `es.exe` makes obvious page lookups very fast;
+- SQLite FTS provides a general offline fallback;
+- the indexed data remains tied to the exact local documentation installation.
+
+### Workflow 5: FrontEnd actions
+
+`frontend.py` is intentionally a narrow adapter rather than a broad framework.
+
+For every supported FrontEnd action:
+
+1. the controller builds a small Wolfram expression;
+2. the expression is sent through `kernel.py` with `require_front_end=True`;
+3. the result comes back as a normal `KernelEvaluationResult`.
+
+Supported action styles include:
+
+- probing FE availability;
+- opening a notebook;
+- resolving and opening a documentation page;
+- executing arbitrary FE-targeted code;
+- executing named FE tokens.
+
+Architecturally, FrontEnd control is a specialization of the kernel runner, not a separate process
+management stack.
+
+### Workflow 6: Notebook Assistant automation
+
+The assistant subsystem combines notebook inspection, FrontEnd-backed execution, and post-processing.
+
+Recommended `ask-cell` flow:
+
+1. `assistant.py` resolves the requested source cell.
+2. Resolution prefers stable selectors in this order:
+   - `ExpressionUUID`
+   - `CellID`
+   - first `CellTag`
+   - flat cell index as a fallback
+3. Tungsten generates a Wolfram script that:
+   - opens the source notebook;
+   - locates the selected cell;
+   - creates a temporary hidden assistant notebook;
+   - invokes the built-in assistant stack on behalf of that source cell;
+   - returns a JSON payload containing a `ChatObject` string and source-cell metadata.
+4. Python post-processes the returned assistant payload:
+   - extracts assistant text from the `ChatObject` string;
+   - extracts fenced code blocks from the reply;
+   - classifies Wolfram insertable blocks;
+   - optionally reinserts them below the source cell through a second FE-backed operation.
+
+Experimental inline flow:
+
+- `prepare-inline` opens/focuses the visible inline assistant UI;
+- `capture-inline` reads the current inline assistant state and optionally inserts extracted code.
+
+Architecturally, the important choice is that the default path is not the visible inline UI. Tungsten
+prefers a hidden chat-notebook flow because it is much more deterministic for scripts and agents.
+
+### Workflow 7: Kernel-free expression parsing
+
+The expression subsystem is separate from notebooks because the problem shape is different.
+
+1. The caller provides source text plus an explicit form: `input`, `fullform`, or `standard`.
+2. `expression.py` tokenizes the input.
+3. A parser with operator precedence and Wolfram-specific surface rules builds an AST.
+4. The AST is rendered back to canonical `InputForm` and `FullForm`.
+5. If requested, Tungsten applies a deliberately small inert evaluator for structural built-ins such
+   as `Length`, `Depth`, `Head`, `Part`, `Extract`, and `Level`.
+
+This module does not participate in the kernel-backed architecture and is intentionally self-contained.
+
+## Failure model
+
+Tungsten distinguishes several different classes of failure.
+
+### Discovery failure
+
+Discovery may return missing paths without throwing. Higher layers decide whether the missing path
+is fatal for the requested operation.
+
+### Process failure
+
+The external `wolfram.exe` process may fail to launch or may exit without producing Tungsten's JSON
+payload. In that case:
+
+- `exit_code` and `stderr` are still returned;
+- `evaluation_available` is `false`;
+- higher-level layers can surface a precise failure category.
+
+### Evaluation failure
+
+The wrapper script may run and produce a payload whose `success` field is `false`. That is different
+from total process failure and is preserved explicitly.
+
+### Semantic post-processing failure
+
+Some higher-level flows succeed at kernel evaluation but fail later.
+
+Examples:
+
+- assistant evaluation succeeds, but Tungsten cannot parse the assistant payload;
+- assistant reply exists, but no insertable code block is found;
+- notebook selector resolution is ambiguous.
+
+These are represented as Tungsten-level errors instead of being hidden as generic subprocess failures.
+
+## Boundary decisions
+
+Several current subsystem boundaries are intentional and worth preserving unless a later change has
+clear value.
+
+### Notebook parsing and expression parsing are separate
+
+Even though both deal with Wolfram syntax, they solve different problems and have different
+correctness criteria. Merging them would likely make both more fragile.
+
+### FrontEnd operations do not bypass the kernel layer
+
+This keeps licensing behavior, process invocation, and result capture consistent across kernel-only
+and FE-backed flows.
+
+### PowerShell is not a second implementation
+
+The module is an ergonomic projection layer. New substantive behavior should usually land in Python
+first and then be surfaced in PowerShell.
+
+### Documentation search is file-backed, not browser-backed
+
+This preserves offline behavior and installation alignment while keeping implementation complexity
+low.
+
+## Extension points
+
+The current architecture is intentionally open to a few natural kinds of extension.
+
+### Extending the CLI
+
+The usual path is:
+
+1. add or extend a Python module under `src/tungsten/`;
+2. expose it through `cli.py`;
+3. add PowerShell wrappers in `pwsh/Tungsten.psm1` if the scenario benefits from them;
+4. add tests;
+5. add or update documentation in this docs tree.
+
+### Extending notebook editing
+
+If a new notebook mutation is structural and deterministic, it belongs in `notebook.py` and the
+patch-spec surface rather than in opaque FE automation.
+
+### Extending FrontEnd automation
+
+If the action is a clean FE token or a small FE-targeted Wolfram expression, it usually belongs in
+`frontend.py`. If the action requires brittle visible-window automation, Tungsten should treat it as
+optional or experimental.
+
+### Extending inert expression evaluation
+
+New built-ins should remain explicitly enumerated and structurally defined. The architecture works
+because the evaluator is honest about being narrow.
+
+## Validation architecture
+
+Tungsten currently validates itself at three useful levels.
+
+### Unit and component tests
+
+The Python test suite covers kernel-free logic and CLI shaping, including expression parsing and
+evaluation behavior.
+
+### Integration-style tests
+
+Some tests and smoke flows exercise the real local installation and documentation state.
+
+### End-to-end smoke script
+
+`scripts/Test-TungstenSmoke.ps1` is the practical end-to-end validator for:
+
+- environment discovery;
+- kernel execution;
+- notebook create/inspect/patch;
+- documentation lookup;
+- FrontEnd interaction;
+- assistant workflows;
+- expression parsing/evaluation.
+
+One practical note belongs in the architecture record because it affects reliable validation:
+
+- FrontEnd-heavy smoke runs should be executed serially rather than in parallel with other
+  Wolfram-heavy test passes. Parallel FE integration runs can interfere with each other on the same
+  desktop session.
+
+## What is deliberately not in the architecture
+
+Tungsten currently does not attempt to own:
+
+- general GUI automation beyond a small optional WinDesk-assisted surface;
+- a full Wolfram runtime;
+- complete box-language understanding;
+- complete FrontEnd API coverage;
+- semantic notebook interpretation beyond the structural editing model.
+
+Those are not missing by accident. They are outside the current architectural scope.
