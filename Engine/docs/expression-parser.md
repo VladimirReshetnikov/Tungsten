@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T16:50:02Z
-Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+Updated (UTC): 2026-04-24T17:27:05Z
+Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
 
 ## Summary
 
@@ -21,7 +21,9 @@ Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
   `FixedPoint`, `Fold`, `MapApply`, `MapAll`, `MapIndexed`, `Through`, `Thread`, `Outer`,
   `Inner`, `Dot`, array and matrix builders such as `Array`, `Range`, `UnitVector`,
   `IdentityMatrix`, and `DiagonalMatrix`, sequence transforms such as `Partition`, `BlockMap`,
-  `TakeList`, `TakeDrop`, `FoldWhile`, `FoldPair`, `Position`, `DeleteDuplicates`, `Pick`,
+  `TakeList`, `TakeDrop`, `FoldWhile`, `FoldPair`, `Position`, `DeleteDuplicates`, byte and
+  character heads such as `ByteArray`, `BaseEncode`, `BaseDecode`, `Characters`,
+  `ToCharacterCode`, `FromCharacterCode`, `StringToByteArray`, and `ByteArrayToString`, `Pick`,
   `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
   `ReplacePart`, association constructors, key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as

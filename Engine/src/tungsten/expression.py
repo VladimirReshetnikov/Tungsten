@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -129,6 +131,30 @@ class String(Expr):
                 for segment in inline_box_segments(self.value)
             ]
         return payload
+
+
+@dataclass(frozen=True)
+class ByteArrayExpr(Expr):
+    values: tuple[int, ...]
+
+    def head(self) -> Expr:
+        return Symbol("ByteArray")
+
+    def to_full_form(self) -> str:
+        encoded = base64.b64encode(bytes(self.values)).decode("ascii")
+        return f'ByteArray["{encoded}"]'
+
+    def to_input_form(self) -> str:
+        return self.to_full_form()
+
+    def to_dict(self) -> dict[str, object]:
+        encoded = base64.b64encode(bytes(self.values)).decode("ascii")
+        return {
+            "type": "byte_array",
+            "values": list(self.values),
+            "base64": encoded,
+            "length": len(self.values),
+        }
 
 
 @dataclass(frozen=True)
@@ -265,6 +291,14 @@ def real(text: str) -> Real:
 
 def string(value: str) -> String:
     return String(value)
+
+
+def byte_array_expr(values: Iterable[int]) -> ByteArrayExpr:
+    normalized = tuple(int(value) for value in values)
+    for value in normalized:
+        if value < 0 or value > 255:
+            raise WolframEvaluationError("ByteArray values must be integers between 0 and 255.")
+    return ByteArrayExpr(normalized)
 
 
 _FLAT_HEADS = {"Alternatives"}
@@ -453,6 +487,101 @@ def _integer_values(arguments: Sequence[Expr]) -> list[int] | None:
     return values
 
 
+def _byte_array_values(expr: Expr) -> tuple[int, ...] | None:
+    if isinstance(expr, ByteArrayExpr):
+        return expr.values
+    return None
+
+
+def _normalize_base_encoding_name(value: Expr, function_name: str) -> str:
+    if not isinstance(value, String):
+        raise WolframEvaluationError(f"{function_name} expects the encoding name to be a string.")
+    normalized = value.value.strip().lower()
+    if normalized == "base16":
+        return "Base16"
+    if normalized == "base64":
+        return "Base64"
+    if normalized == "base85ascii":
+        return "Base85ASCII"
+    raise WolframEvaluationError(
+        f'{function_name} currently supports only "Base16", "Base64", and "Base85ASCII".'
+    )
+
+
+_SINGLE_BYTE_ENCODINGS = {
+    "ascii": "ascii",
+    "iso8859-1": "latin-1",
+    "iso-8859-1": "latin-1",
+    "latin1": "latin-1",
+    "latin-1": "latin-1",
+    "iso8859-15": "iso8859_15",
+    "iso-8859-15": "iso8859_15",
+}
+
+_MULTIBYTE_ENCODINGS = {
+    "utf-8": "utf-8",
+    "utf8": "utf-8",
+    "utf-16le": "utf-16le",
+    "utf16le": "utf-16le",
+    "utf-16be": "utf-16be",
+    "utf16be": "utf-16be",
+    "utf-32le": "utf-32le",
+    "utf32le": "utf-32le",
+    "utf-32be": "utf-32be",
+    "utf32be": "utf-32be",
+}
+
+
+def _normalize_character_encoding_name(
+    value: Expr | None,
+    function_name: str,
+    *,
+    default_unicode: bool = False,
+) -> tuple[str, str]:
+    if value is None:
+        return ("Unicode", "Unicode") if default_unicode else ("utf-8", "UTF-8")
+    if not isinstance(value, String):
+        raise WolframEvaluationError(f"{function_name} expects the encoding name to be a string.")
+    raw = value.value.strip()
+    normalized = raw.lower()
+    if normalized == "unicode":
+        return "Unicode", "Unicode"
+    single = _SINGLE_BYTE_ENCODINGS.get(normalized)
+    if single is not None:
+        return single, raw
+    multi = _MULTIBYTE_ENCODINGS.get(normalized)
+    if multi is not None:
+        return multi, raw
+    raise WolframEvaluationError(
+        f'{function_name} currently supports "Unicode", "UTF-8", "UTF-16LE", "UTF-16BE", '
+        '"UTF-32LE", "UTF-32BE", "ASCII", "ISO8859-1", and "ISO8859-15".'
+    )
+
+
+def _decode_bytes_to_string(data: bytes, codec_name: str) -> str:
+    if codec_name == "Unicode":
+        return "".join(chr(byte) for byte in data)
+    decoded = data.decode(codec_name, errors="surrogateescape")
+    return "".join(chr(ord(char) - 0xDC00) if 0xDC80 <= ord(char) <= 0xDCFF else char for char in decoded)
+
+
+def _string_to_character_codes(value: str, encoding_name: str) -> list[Expr]:
+    if encoding_name == "Unicode":
+        return [integer(ord(char)) for char in value]
+    if encoding_name in _SINGLE_BYTE_ENCODINGS.values():
+        codes: list[Expr] = []
+        for char in value:
+            try:
+                encoded = char.encode(encoding_name)
+            except UnicodeEncodeError:
+                codes.append(symbol("None"))
+                continue
+            assert len(encoded) == 1
+            codes.append(integer(encoded[0]))
+        return codes
+    return [integer(byte) for byte in value.encode(encoding_name)]
+
+
 def _evaluate_integer_arithmetic(expr: Call) -> Expr | None:
     if expr.has_head("Plus"):
         if not all(_is_integer_expr(argument) for argument in expr.arguments):
@@ -539,6 +668,9 @@ def _evaluate_simple_predicates(expr: Call) -> Expr | None:
 
     if expr.has_head("StringQ"):
         return _bool_symbol(isinstance(argument, String))
+
+    if expr.has_head("ByteArrayQ"):
+        return _bool_symbol(isinstance(argument, ByteArrayExpr))
 
     if expr.has_head("EvenQ"):
         return _bool_symbol(isinstance(argument, Integer) and argument.value % 2 == 0)
@@ -635,6 +767,154 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
         return integer(1 if all(value == 0 for value in values) else 0)
 
     return None
+
+
+def byte_array(arguments: Sequence[Expr]) -> ByteArrayExpr:
+    if len(arguments) != 1:
+        raise WolframEvaluationError("ByteArray expects exactly one argument.")
+    source = arguments[0]
+    if isinstance(source, ByteArrayExpr):
+        return source
+    if isinstance(source, String):
+        try:
+            decoded = base64.b64decode(source.value.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, binascii.Error) as exc:
+            raise WolframEvaluationError("ByteArray string input must be valid Base64.") from exc
+        return byte_array_expr(decoded)
+    if isinstance(source, Call) and source.has_head("List"):
+        values = _integer_values(source.arguments)
+        if values is None:
+            raise WolframEvaluationError("ByteArray list input must contain only integers.")
+        return byte_array_expr(values)
+    raise WolframEvaluationError("ByteArray expects a byte list, a Base64 string, or another ByteArray.")
+
+
+def _require_byte_array(expr: Expr, function_name: str, *, allow_empty_list: bool = False) -> ByteArrayExpr:
+    if isinstance(expr, ByteArrayExpr):
+        return expr
+    if allow_empty_list and isinstance(expr, Call) and expr.has_head("List") and not expr.arguments:
+        return byte_array_expr(())
+    raise WolframEvaluationError(f"{function_name} expects a ByteArray.")
+
+
+def base_encode(byte_array_value: Expr, encoding_value: Expr | None = None) -> String:
+    values = _require_byte_array(byte_array_value, "BaseEncode").values
+    encoding_name = "Base64" if encoding_value is None else _normalize_base_encoding_name(encoding_value, "BaseEncode")
+    payload = bytes(values)
+    if encoding_name == "Base64":
+        return string(base64.b64encode(payload).decode("ascii"))
+    if encoding_name == "Base16":
+        return string(base64.b16encode(payload).decode("ascii"))
+    assert encoding_name == "Base85ASCII"
+    return string(base64.a85encode(payload).decode("ascii"))
+
+
+def _filter_base_decode_input(text: str, encoding_name: str) -> str:
+    if encoding_name == "Base16":
+        return "".join(character for character in text if character in "0123456789abcdefABCDEF")
+    if encoding_name == "Base64":
+        return "".join(
+            character
+            for character in text
+            if character.isalnum() or character in "+/=_-"
+        )
+    return "".join(character for character in text if character == "z" or "!" <= character <= "u")
+
+
+def base_decode(text_value: Expr, encoding_value: Expr | None = None) -> ByteArrayExpr:
+    if not isinstance(text_value, String):
+        raise WolframEvaluationError("BaseDecode expects the input data to be a string.")
+    encoding_name = "Base64" if encoding_value is None else _normalize_base_encoding_name(encoding_value, "BaseDecode")
+    filtered = _filter_base_decode_input(text_value.value, encoding_name)
+    try:
+        if encoding_name == "Base64":
+            decoded = base64.b64decode(filtered.encode("ascii"), validate=False)
+        elif encoding_name == "Base16":
+            decoded = base64.b16decode(filtered.encode("ascii"), casefold=True)
+        else:
+            decoded = base64.a85decode(filtered.encode("ascii"), adobe=False, ignorechars=b" \t\n\r\v")
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise WolframEvaluationError(f"BaseDecode failed for {encoding_name}.") from exc
+    return byte_array_expr(decoded)
+
+
+def characters(expr: Expr) -> Expr:
+    if isinstance(expr, String):
+        return list_expr(*(string(character) for character in expr.value))
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return list_expr(*(characters(item) for item in expr.arguments))
+    raise WolframEvaluationError("Characters expects a string or a list of strings.")
+
+
+def to_character_code(expr: Expr, encoding_value: Expr | None = None) -> Expr:
+    encoding_name, _display_name = _normalize_character_encoding_name(
+        encoding_value,
+        "ToCharacterCode",
+        default_unicode=True,
+    )
+    if isinstance(expr, String):
+        return list_expr(*_string_to_character_codes(expr.value, encoding_name))
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return list_expr(*(to_character_code(item, encoding_value) for item in expr.arguments))
+    raise WolframEvaluationError("ToCharacterCode expects a string or a list of strings.")
+
+
+def _int_list(expr: Expr, function_name: str) -> list[int]:
+    if isinstance(expr, Integer):
+        return [expr.value]
+    if isinstance(expr, Call) and expr.has_head("List"):
+        values = _integer_values(expr.arguments)
+        if values is None:
+            raise WolframEvaluationError(f"{function_name} expects an integer or a list of integers.")
+        return values
+    raise WolframEvaluationError(f"{function_name} expects an integer or a list of integers.")
+
+
+def from_character_code(expr: Expr, encoding_value: Expr | None = None) -> String:
+    encoding_name, _display_name = _normalize_character_encoding_name(
+        encoding_value,
+        "FromCharacterCode",
+        default_unicode=True,
+    )
+    values = _int_list(expr, "FromCharacterCode")
+    if encoding_name == "Unicode":
+        try:
+            return string("".join(chr(value) for value in values))
+        except ValueError as exc:
+            raise WolframEvaluationError("FromCharacterCode Unicode input must contain valid code points.") from exc
+    if any(value < 0 or value > 255 for value in values):
+        raise WolframEvaluationError("FromCharacterCode encoded input must contain integers between 0 and 255.")
+    return string(_decode_bytes_to_string(bytes(values), encoding_name))
+
+
+def string_to_byte_array(expr: Expr, encoding_value: Expr | None = None) -> ByteArrayExpr:
+    if not isinstance(expr, String):
+        raise WolframEvaluationError("StringToByteArray expects a string.")
+    encoding_name, _display_name = _normalize_character_encoding_name(
+        encoding_value,
+        "StringToByteArray",
+        default_unicode=False,
+    )
+    if encoding_name == "Unicode":
+        raise WolframEvaluationError('StringToByteArray does not currently support the "Unicode" pseudo-encoding.')
+    try:
+        return byte_array_expr(expr.value.encode(encoding_name))
+    except UnicodeEncodeError as exc:
+        raise WolframEvaluationError(
+            f'StringToByteArray could not represent the string in encoding {encoding_value.to_input_form() if encoding_value is not None else "\"UTF-8\""}.'
+        ) from exc
+
+
+def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> String:
+    byte_values = _require_byte_array(expr, "ByteArrayToString", allow_empty_list=True).values
+    encoding_name, _display_name = _normalize_character_encoding_name(
+        encoding_value,
+        "ByteArrayToString",
+        default_unicode=False,
+    )
+    if encoding_name == "Unicode":
+        raise WolframEvaluationError('ByteArrayToString does not currently support the "Unicode" pseudo-encoding.')
+    return string(_decode_bytes_to_string(bytes(byte_values), encoding_name))
 
 
 _UNSUPPORTED_PATTERN_HEADS = {
@@ -1645,6 +1925,9 @@ def head_of(expr: Expr) -> Expr:
 
 
 def length(expr: Expr) -> int:
+    byte_values = _byte_array_values(expr)
+    if byte_values is not None:
+        return len(byte_values)
     return len(expr.args())
 
 
@@ -3251,6 +3534,9 @@ def values_expr(expr: Expr) -> Expr:
 
 
 def normal(expr: Expr) -> Expr:
+    byte_values = _byte_array_values(expr)
+    if byte_values is not None:
+        return list_expr(*(integer(value) for value in byte_values))
     entries = _require_association_entries(expr, "Normal")
     return list_expr(*(entry.to_expr() for entry in entries))
 
@@ -4140,6 +4426,9 @@ def evaluate(expr: Expr) -> Expr:
     if integer_special_result is not None:
         return integer_special_result
 
+    if evaluated_head.name == "ByteArray":
+        return byte_array(evaluated_arguments)
+
     if evaluated_head.name == "Identity":
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Identity expects exactly one argument.")
@@ -4150,6 +4439,53 @@ def evaluate(expr: Expr) -> Expr:
 
     if evaluated_head.name == "UnsameQ":
         return unsame_q(*evaluated_arguments)
+
+    if evaluated_head.name == "Characters":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Characters expects exactly one argument.")
+        return characters(evaluated_arguments[0])
+
+    if evaluated_head.name == "ToCharacterCode":
+        if len(evaluated_arguments) == 1:
+            return to_character_code(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return to_character_code(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("ToCharacterCode expects a string and an optional encoding.")
+
+    if evaluated_head.name == "FromCharacterCode":
+        if len(evaluated_arguments) == 1:
+            return from_character_code(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return from_character_code(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("FromCharacterCode expects character codes and an optional encoding.")
+
+    if evaluated_head.name == "StringToByteArray":
+        if len(evaluated_arguments) == 1:
+            return string_to_byte_array(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return string_to_byte_array(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("StringToByteArray expects a string and an optional encoding.")
+
+    if evaluated_head.name == "ByteArrayToString":
+        if len(evaluated_arguments) == 1:
+            return byte_array_to_string(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return byte_array_to_string(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("ByteArrayToString expects a byte array and an optional encoding.")
+
+    if evaluated_head.name == "BaseEncode":
+        if len(evaluated_arguments) == 1:
+            return base_encode(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return base_encode(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("BaseEncode expects a byte array and an optional base encoding.")
+
+    if evaluated_head.name == "BaseDecode":
+        if len(evaluated_arguments) == 1:
+            return base_decode(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return base_decode(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("BaseDecode expects a string and an optional base encoding.")
 
     if evaluated_head.name == "Association":
         return association(*evaluated_arguments)

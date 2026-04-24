@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T16:50:02Z
-- Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+- Updated (UTC): 2026-04-24T17:27:05Z
+- Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -97,9 +97,10 @@ The current workspace is built around seven complementary capabilities:
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
    `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot`, array and sequence builders
    such as `Array`, `Range`, `Partition`, and `BlockMap`, search and de-duplication heads such as
-   `FirstCase`, `Position`, and `DeleteDuplicates`, plus `Pick`, `Select`, `Discard`,
-   `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`,
-   `Association`, `Lookup`, and `KeyTake`.
+   `FirstCase`, `Position`, and `DeleteDuplicates`, byte and character heads such as `ByteArray`,
+   `BaseEncode`, `BaseDecode`, `ToCharacterCode`, and `StringToByteArray`, plus `Pick`, `Select`,
+   `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
+   `MapAt`, `Association`, `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.

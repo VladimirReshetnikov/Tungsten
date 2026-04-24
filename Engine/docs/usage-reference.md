@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T16:50:02Z
-- Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+- Updated (UTC): 2026-04-24T17:27:05Z
+- Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -389,6 +389,9 @@ python -m tungsten expr evaluate --code "Thread[f[{a, b}, {c, d}]]"
 python -m tungsten expr evaluate --code "Fold[f, x, {a, b, c}]"
 python -m tungsten expr evaluate --code "BlockMap[f, {a, b, c, d, e}, 2]"
 python -m tungsten expr evaluate --code "DeleteDuplicatesBy[{{a}, {b, c}, {d}}, Length]"
+python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
+python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
+python -m tungsten expr evaluate --code "ToCharacterCode[ByteArrayToString[ByteArray[{97, 195, 169}], \"UTF-8\"]]"
 ```
 
 The implemented inert evaluator currently covers:
@@ -430,6 +433,9 @@ The implemented inert evaluator currently covers:
   `FoldWhileList`, `FoldPair`, `FoldPairList`, `SequenceFold`, `SequenceFoldList`,
   `LengthWhile`, `FirstCase`, `Position`, `MemberQ`, `DeleteDuplicates`,
   `DeleteDuplicatesBy`, and `DuplicateFreeQ`
+- byte and character heads such as `ByteArray`, `ByteArrayQ`, `BaseEncode`, `BaseDecode`,
+  `Characters`, `ToCharacterCode`, `FromCharacterCode`, `StringToByteArray`, and
+  `ByteArrayToString`
 - `Pick`
 - `First`
 - `Last`

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T16:50:02Z
-- Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+- Updated (UTC): 2026-04-24T17:27:05Z
+- Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -84,8 +84,13 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `Orderless`, or short-circuit attributes here, and only evaluates the covered heads when every
   participating argument is already an explicit integer or Boolean value in the shipped subset.
 - Simple predicate heads are intentionally narrow too: Tungsten currently implements only
-  `IntegerQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
+  `IntegerQ`, `StringQ`, `ByteArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
   described in the support table below.
+- String/byte conversion heads are also intentionally bounded: Tungsten currently supports the
+  common encodings `"Unicode"`, `"UTF-8"`, `"UTF-16LE"`, `"UTF-16BE"`, `"UTF-32LE"`,
+  `"UTF-32BE"`, `"ASCII"`, `"ISO8859-1"`, and `"ISO8859-15"` where they make sense, rather than
+  the full Wolfram `$CharacterEncodings` surface.
+- Base encodings are currently bounded to `"Base16"`, `"Base64"`, and `"Base85ASCII"`.
 - The integer-only numeric family below is also intentionally narrow: Tungsten evaluates these
   heads only when the supported arguments are already explicit integers or integer lists in the
   listed direct forms.
@@ -127,6 +132,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `GreaterEqual` | `GreaterEqual[i1, ...]` and infix `>=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nonincreasing. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
 | `IntegerQ` | `IntegerQ[expr]` | Returns `True` when the argument is an explicit integer in Tungsten's AST; otherwise returns `False`. | [IntegerQ](https://reference.wolfram.com/language/ref/IntegerQ) |
 | `StringQ` | `StringQ[expr]` | Returns `True` when the argument is an explicit string in Tungsten's AST; otherwise returns `False`. | [StringQ](https://reference.wolfram.com/language/ref/StringQ) |
+| `ByteArray` | `ByteArray[{b1, ...}]`, `ByteArray["base64"]`, `ByteArray[ba]` | Constructs Tungsten byte-array values from explicit byte lists, Base64 strings, or existing byte arrays. Tungsten renders these values in Wolfram-style `ByteArray["..."]` InputForm using Base64. | [ByteArray](https://reference.wolfram.com/language/ref/ByteArray) |
+| `ByteArrayQ` | `ByteArrayQ[expr]` | Returns `True` when the argument is a Tungsten byte-array value. | [ByteArrayQ](https://reference.wolfram.com/language/ref/ByteArrayQ) |
 | `EvenQ` | `EvenQ[expr]` | Returns `True` when the argument is an explicit even integer in Tungsten's AST; otherwise returns `False`. | [EvenQ](https://reference.wolfram.com/language/ref/EvenQ) |
 | `OddQ` | `OddQ[expr]` | Returns `True` when the argument is an explicit odd integer in Tungsten's AST; otherwise returns `False`. | [OddQ](https://reference.wolfram.com/language/ref/OddQ) |
 | `TrueQ` | `TrueQ[expr]` | Returns `True` only when the argument is explicit `True`; otherwise returns `False`. | [TrueQ](https://reference.wolfram.com/language/ref/TrueQ) |
@@ -138,6 +145,13 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Switch` | `Switch[expr, form1, value1, ...]` | Evaluates the subject once, then tries forms in order using Tungsten's supported pattern matcher. Only the first matching value is evaluated. If no form matches, Tungsten returns an inert `Switch` with the evaluated subject. | [Switch](https://reference.wolfram.com/language/ref/Switch) |
 | `Piecewise` | `Piecewise[{{value1, cond1}, ...}]`, `Piecewise[{{value1, cond1}, ...}, default]` | Evaluates conditions in order, dropping explicit `False` cases and selecting the first explicit `True` case. Unknown conditions are retained in a simplified `Piecewise`, and only values that remain in the returned form are evaluated. | [Piecewise](https://reference.wolfram.com/language/ref/Piecewise) |
 | `Boole` | `Boole[cond]` | Returns `1` for explicit `True`, `0` for explicit `False`, and otherwise remains inert. | [Boole](https://reference.wolfram.com/language/ref/Boole) |
+| `Characters` | `Characters["string"]`, `Characters[{"s1", ...}]` | Splits strings into lists of one-character strings. Lists of strings are handled elementwise. | [Characters](https://reference.wolfram.com/language/ref/Characters) |
+| `ToCharacterCode` | `ToCharacterCode["string"]`, `ToCharacterCode["string", "encoding"]`, and list-of-strings forms | Converts strings to character codes. Tungsten uses Unicode code points for the default / `"Unicode"` case, byte values for the supported encoded cases, and `None` placeholders for unrepresentable characters in supported single-byte legacy encodings such as ASCII. | [ToCharacterCode](https://reference.wolfram.com/language/ref/ToCharacterCode) |
+| `FromCharacterCode` | `FromCharacterCode[n]`, `FromCharacterCode[{n1, ...}]`, and encoded forms `FromCharacterCode[..., "encoding"]` | Converts Unicode code points or encoded byte values back to strings. For encoded forms, Tungsten currently expects integers between `0` and `255`. | [FromCharacterCode](https://reference.wolfram.com/language/ref/FromCharacterCode) |
+| `StringToByteArray` | `StringToByteArray["string"]`, `StringToByteArray["string", "encoding"]` | Encodes strings to byte arrays, defaulting to UTF-8. Unsupported characters in a requested legacy encoding currently raise a Tungsten evaluation error instead of returning an inert expression with messages. | [StringToByteArray](https://reference.wolfram.com/language/ref/StringToByteArray) |
+| `ByteArrayToString` | `ByteArrayToString[ba]`, `ByteArrayToString[ba, "encoding"]`, plus the empty-list synonym `ByteArrayToString[{}]` | Decodes byte arrays to strings, defaulting to UTF-8. For UTF-style encodings, Tungsten follows Wolfram's practical behavior of preserving invalid raw bytes as literal code points in the resulting string. | [ByteArrayToString](https://reference.wolfram.com/language/ref/ByteArrayToString) |
+| `BaseEncode` | `BaseEncode[ba]`, `BaseEncode[ba, "encoding"]` | Encodes byte arrays as `"Base64"` by default, with additional support for `"Base16"` and `"Base85ASCII"`. | [BaseEncode](https://reference.wolfram.com/language/ref/BaseEncode) |
+| `BaseDecode` | `BaseDecode["text"]`, `BaseDecode["text", "encoding"]` | Decodes supported base-encoded strings to byte arrays. Tungsten currently supports `"Base64"` by default, plus `"Base16"` and `"Base85ASCII"`, and it drops nonalphabet characters before decoding in the practical Wolfram style. | [BaseDecode](https://reference.wolfram.com/language/ref/BaseDecode) |
 | `Condition` | `Condition[patt, test]`, `patt /; test`, and top-level delayed-template guards such as `lhs :> rhs /; test` | Guards a pattern or delayed-rule template. Tungsten treats the guard as satisfied only when the substituted test reduces to explicit `True` under the shipped evaluator. | [Condition](https://reference.wolfram.com/language/ref/Condition) |
 | `RuleDelayed` | `lhs :> rhs`, including guarded forms such as `lhs :> rhs /; test` | Delays right-hand-side instantiation until after pattern bindings are known. A top-level delayed-template `Condition` guard can suppress the rule and fall through to later rules when present. | [RuleDelayed](https://reference.wolfram.com/language/ref/RuleDelayed) |
 | `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous `__` / `___` sequence patterns, named patterns over `Blank`, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
