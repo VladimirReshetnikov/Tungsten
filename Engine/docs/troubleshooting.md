@@ -4,8 +4,8 @@
 - Audience: Tungsten users and maintainers diagnosing local-environment, kernel, FrontEnd, assistant, or parser failures
 - Scope: `src/Tungsten` runtime behavior on a local Windows machine
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-24T02:48:08Z
-- Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
+- Updated (UTC): 2026-04-24T04:24:45Z
+- Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)

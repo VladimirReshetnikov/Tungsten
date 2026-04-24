@@ -260,6 +260,7 @@ def string(value: str) -> String:
 _FLAT_HEADS = {"Alternatives"}
 
 _LEVEL_INFINITY = 1_000_000_000
+_MISSING = object()
 
 
 def call(head: str | Expr, *arguments: Expr) -> Call:
@@ -305,6 +306,13 @@ class _KeySelector:
 class _SelectedPart:
     selector: _IndexSelector | _KeySelector
     child: Expr
+    entry: _AssociationEntry | None = None
+
+
+@dataclass(frozen=True)
+class _SelectionItem:
+    index: int
+    value: Expr
     entry: _AssociationEntry | None = None
 
 
@@ -406,8 +414,26 @@ def _is_boolean_symbol(expr: Expr) -> bool:
     return isinstance(expr, Symbol) and expr.name in {"True", "False"}
 
 
+def _truth_value(expr: Expr) -> bool | None:
+    if isinstance(expr, Symbol):
+        if expr.name == "True":
+            return True
+        if expr.name == "False":
+            return False
+    return None
+
+
 def _is_integer_expr(expr: Expr) -> bool:
     return isinstance(expr, Integer)
+
+
+def _integer_values(arguments: Sequence[Expr]) -> list[int] | None:
+    values: list[int] = []
+    for argument in arguments:
+        if not isinstance(argument, Integer):
+            return None
+        values.append(argument.value)
+    return values
 
 
 def _evaluate_integer_arithmetic(expr: Call) -> Expr | None:
@@ -481,6 +507,115 @@ def _evaluate_boolean_logic(expr: Call) -> Expr | None:
         if not all(_is_boolean_symbol(argument) for argument in expr.arguments):
             return None
         return _bool_symbol(any(isinstance(argument, Symbol) and argument.name == "True" for argument in expr.arguments))
+
+    return None
+
+
+def _evaluate_simple_predicates(expr: Call) -> Expr | None:
+    if len(expr.arguments) != 1:
+        return None
+
+    argument = expr.arguments[0]
+
+    if expr.has_head("IntegerQ"):
+        return _bool_symbol(isinstance(argument, Integer))
+
+    if expr.has_head("StringQ"):
+        return _bool_symbol(isinstance(argument, String))
+
+    if expr.has_head("EvenQ"):
+        return _bool_symbol(isinstance(argument, Integer) and argument.value % 2 == 0)
+
+    if expr.has_head("OddQ"):
+        return _bool_symbol(isinstance(argument, Integer) and argument.value % 2 != 0)
+
+    if expr.has_head("TrueQ"):
+        return _bool_symbol(isinstance(argument, Symbol) and argument.name == "True")
+
+    return None
+
+
+def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
+    values = _integer_values(expr.arguments)
+    if values is None:
+        return None
+
+    if expr.has_head("UnitStep"):
+        return integer(1 if all(value >= 0 for value in values) else 0)
+
+    if expr.has_head("Unitize"):
+        if len(values) != 1:
+            return None
+        return integer(0 if values[0] == 0 else 1)
+
+    if expr.has_head("Sign") or expr.has_head("RealSign"):
+        if len(values) != 1:
+            return None
+        return integer((values[0] > 0) - (values[0] < 0))
+
+    if expr.has_head("Abs") or expr.has_head("RealAbs"):
+        if len(values) != 1:
+            return None
+        return integer(abs(values[0]))
+
+    if expr.has_head("Ramp"):
+        if len(values) != 1:
+            return None
+        return integer(max(values[0], 0))
+
+    if expr.has_head("Mod"):
+        if len(values) not in {2, 3}:
+            return None
+        dividend, divisor = values[0], values[1]
+        if divisor == 0:
+            return symbol("Indeterminate")
+        offset = values[2] if len(values) == 3 else 0
+        return integer(offset + ((dividend - offset) % divisor))
+
+    if expr.has_head("Quotient"):
+        if len(values) not in {2, 3}:
+            return None
+        dividend, divisor = values[0], values[1]
+        if divisor == 0:
+            return symbol("Indeterminate") if dividend == 0 else symbol("ComplexInfinity")
+        offset = values[2] if len(values) == 3 else 0
+        remainder = offset + ((dividend - offset) % divisor)
+        return integer((dividend - remainder) // divisor)
+
+    if expr.has_head("QuotientRemainder"):
+        if len(values) != 2:
+            return None
+        dividend, divisor = values
+        if divisor == 0:
+            return None
+        remainder = dividend % divisor
+        quotient = (dividend - remainder) // divisor
+        return list_expr(integer(quotient), integer(remainder))
+
+    if expr.has_head("Min"):
+        if not values:
+            return symbol("Infinity")
+        return integer(min(values))
+
+    if expr.has_head("Max"):
+        if not values:
+            return symbol("-Infinity")
+        return integer(max(values))
+
+    if expr.has_head("Clip"):
+        if len(values) == 1:
+            return integer(min(max(values[0], -1), 1))
+        return None
+
+    if expr.has_head("KroneckerDelta"):
+        if not values:
+            return integer(1)
+        if len(values) == 1:
+            return integer(1 if values[0] == 0 else 0)
+        return integer(1 if all(value == values[0] for value in values[1:]) else 0)
+
+    if expr.has_head("DiscreteDelta"):
+        return integer(1 if all(value == 0 for value in values) else 0)
 
     return None
 
@@ -779,6 +914,339 @@ def _substitute_pattern_bindings(expr: Expr, bindings: dict[str, Expr]) -> Expr:
 def _condition_test_succeeds(test: Expr, bindings: dict[str, Expr]) -> bool:
     evaluated = evaluate(_substitute_pattern_bindings(test, bindings))
     return isinstance(evaluated, Symbol) and evaluated.name == "True"
+
+
+def _missing_not_found() -> Expr:
+    return call("Missing", string("NotFound"))
+
+
+def _selection_spec(
+    criterion: Expr,
+    function_name: str,
+) -> tuple[Expr, Expr | tuple[Expr, ...] | None]:
+    if isinstance(criterion, Call) and criterion.has_head("Rule"):
+        if len(criterion.arguments) != 2:
+            raise WolframEvaluationError(
+                f"{function_name} property specifications must contain exactly two arguments."
+            )
+        selector, property_spec = criterion.arguments
+    else:
+        selector = criterion
+        property_spec = None
+
+    if property_spec is None:
+        return selector, None
+
+    if isinstance(property_spec, String):
+        if property_spec.value not in {"Element", "Index"}:
+            raise WolframEvaluationError(
+                f'{function_name} currently supports only "Element" and "Index" properties.'
+            )
+        return selector, property_spec
+
+    if isinstance(property_spec, Call) and property_spec.has_head("List"):
+        normalized: list[Expr] = []
+        for item in property_spec.arguments:
+            if not isinstance(item, String) or item.value not in {"Element", "Index"}:
+                raise WolframEvaluationError(
+                    f'{function_name} currently supports only "Element" and "Index" properties.'
+                )
+            normalized.append(item)
+        return selector, tuple(normalized)
+
+    raise WolframEvaluationError(
+        f'{function_name} currently supports only "Element" and "Index" properties.'
+    )
+
+
+def _selection_items(expr: Expr, function_name: str) -> tuple[_SelectionItem, ...]:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return tuple(
+            _SelectionItem(index=index, value=entry.value, entry=entry)
+            for index, entry in enumerate(entries, start=1)
+        )
+
+    compound = _require_compound(expr, function_name)
+    return tuple(
+        _SelectionItem(index=index, value=argument)
+        for index, argument in enumerate(compound.arguments, start=1)
+    )
+
+
+def _selection_elements(expr: Expr, items: Sequence[_SelectionItem], function_name: str) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return _association_expr(item.entry for item in items if item.entry is not None)
+
+    compound = _require_compound(expr, function_name)
+    return _rebuild(compound, tuple(item.value for item in items))
+
+
+def _selection_indices(items: Sequence[_SelectionItem]) -> Expr:
+    return list_expr(*(integer(item.index) for item in items))
+
+
+def _selection_projection(
+    expr: Expr,
+    items: Sequence[_SelectionItem],
+    function_name: str,
+    property_spec: Expr | tuple[Expr, ...] | None,
+) -> Expr:
+    if property_spec is None:
+        return _selection_elements(expr, items, function_name)
+
+    if isinstance(property_spec, String):
+        if property_spec.value == "Element":
+            return _selection_elements(expr, items, function_name)
+        if property_spec.value == "Index":
+            return _selection_indices(items)
+        raise WolframEvaluationError(
+            f'{function_name} currently supports only "Element" and "Index" properties.'
+        )
+
+    return _association_expr(
+        _AssociationEntry(
+            "Rule",
+            property_name,
+            _selection_projection(expr, items, function_name, property_name),
+        )
+        for property_name in property_spec
+    )
+
+
+def _select_first_projection(
+    item: _SelectionItem | None,
+    property_spec: Expr | tuple[Expr, ...] | None,
+    default: Expr | object = _MISSING,
+) -> Expr:
+    missing = _missing_not_found()
+
+    if property_spec is None:
+        if item is not None:
+            return item.value
+        if default is not _MISSING:
+            return default  # type: ignore[return-value]
+        return missing
+
+    if isinstance(property_spec, String):
+        if property_spec.value == "Element":
+            if item is not None:
+                return item.value
+            if default is not _MISSING:
+                return default  # type: ignore[return-value]
+            return missing
+        if property_spec.value == "Index":
+            return integer(item.index) if item is not None else missing
+        raise WolframEvaluationError(
+            'SelectFirst currently supports only "Element" and "Index" properties.'
+        )
+
+    return _association_expr(
+        _AssociationEntry(
+            "Rule",
+            property_name,
+            _select_first_projection(item, property_name, default),
+        )
+        for property_name in property_spec
+    )
+
+
+def _predicate_succeeds(criterion: Expr, value: Expr) -> bool:
+    evaluated = evaluate(_apply_callable(criterion, (value,)))
+    return isinstance(evaluated, Symbol) and evaluated.name == "True"
+
+
+def if_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {2, 3, 4}:
+        raise WolframEvaluationError("If expects a condition, a true branch, and optional false and unknown branches.")
+
+    condition = evaluate(arguments[0])
+    truth = _truth_value(condition)
+    if truth is True:
+        return evaluate(arguments[1])
+    if truth is False:
+        if len(arguments) == 2:
+            return symbol("Null")
+        return evaluate(arguments[2])
+    if len(arguments) == 4:
+        return evaluate(arguments[3])
+    return call("If", condition, *arguments[1:])
+
+
+def which_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) == 0 or len(arguments) % 2 != 0:
+        raise WolframEvaluationError("Which expects condition-value pairs.")
+
+    for index in range(0, len(arguments), 2):
+        condition = evaluate(arguments[index])
+        truth = _truth_value(condition)
+        if truth is True:
+            return evaluate(arguments[index + 1])
+        if truth is False:
+            continue
+        return call("Which", condition, arguments[index + 1], *arguments[index + 2:])
+    return symbol("Null")
+
+
+def switch_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) < 3 or len(arguments) % 2 == 0:
+        raise WolframEvaluationError("Switch expects an expression followed by form-value pairs.")
+
+    subject = evaluate(arguments[0])
+    for index in range(1, len(arguments), 2):
+        if _match_pattern(subject, arguments[index]) is not None:
+            return evaluate(arguments[index + 1])
+    return call("Switch", subject, *arguments[1:])
+
+
+def piecewise_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2}:
+        raise WolframEvaluationError("Piecewise expects a case list and an optional default value.")
+
+    cases_expr = arguments[0]
+    if not isinstance(cases_expr, Call) or not cases_expr.has_head("List"):
+        raise WolframEvaluationError("Piecewise expects its first argument to be a list of {value, condition} pairs.")
+
+    kept_cases: list[tuple[Expr, Expr]] = []
+    for item in cases_expr.arguments:
+        if not isinstance(item, Call) or not item.has_head("List") or len(item.arguments) != 2:
+            raise WolframEvaluationError("Piecewise cases must be two-element lists of {value, condition}.")
+        value_expr, condition_expr = item.arguments
+        condition = evaluate(condition_expr)
+        truth = _truth_value(condition)
+        if truth is True:
+            selected_value = evaluate(value_expr)
+            if not kept_cases:
+                return selected_value
+            return call(
+                "Piecewise",
+                list_expr(*(list_expr(value, cond) for value, cond in kept_cases)),
+                selected_value,
+            )
+        if truth is False:
+            continue
+        kept_cases.append((evaluate(value_expr), condition))
+
+    default_value = evaluate(arguments[1]) if len(arguments) == 2 else integer(0)
+    if not kept_cases:
+        return default_value
+    return call(
+        "Piecewise",
+        list_expr(*(list_expr(value, cond) for value, cond in kept_cases)),
+        default_value,
+    )
+
+
+_PICK_NONE = object()
+
+
+def _pick_recursive(
+    expr: Expr,
+    selector: Expr,
+    pattern: Expr,
+    *,
+    top_level: bool,
+) -> Expr | object:
+    if _match_pattern(selector, pattern) is not None:
+        return expr
+
+    expr_entries = _association_entries(expr)
+    selector_entries = _association_entries(selector)
+
+    expr_arguments: tuple[Expr, ...] | None
+    selector_arguments: tuple[Expr, ...] | None
+
+    if expr_entries is not None:
+        expr_arguments = tuple(entry.value for entry in expr_entries)
+    elif isinstance(expr, Call):
+        expr_arguments = expr.arguments
+    else:
+        expr_arguments = None
+
+    if selector_entries is not None:
+        selector_arguments = tuple(entry.value for entry in selector_entries)
+    elif isinstance(selector, Call):
+        selector_arguments = selector.arguments
+    else:
+        selector_arguments = None
+
+    if expr_arguments is None or selector_arguments is None:
+        if top_level:
+            raise WolframEvaluationError("Pick currently expects selector parts compatible with the data shape.")
+        return _PICK_NONE
+
+    if len(expr_arguments) != len(selector_arguments):
+        raise WolframEvaluationError("Pick currently expects selector parts compatible with the data shape.")
+
+    picked_arguments: list[Expr] = []
+    picked_entries: list[_AssociationEntry] = []
+
+    for index, (child_expr, child_selector) in enumerate(zip(expr_arguments, selector_arguments, strict=True)):
+        picked = _pick_recursive(child_expr, child_selector, pattern, top_level=False)
+        if picked is _PICK_NONE:
+            continue
+        assert isinstance(picked, Expr)
+        if expr_entries is not None:
+            entry = expr_entries[index]
+            picked_entries.append(
+                _AssociationEntry(
+                    rule_head=entry.rule_head,
+                    key=entry.key,
+                    value=picked,
+                )
+            )
+        else:
+            picked_arguments.append(picked)
+
+    if expr_entries is not None:
+        return _association_expr(picked_entries)
+    assert isinstance(expr, Call)
+    return _rebuild(expr, tuple(picked_arguments))
+
+
+def pick(expr: Expr, selector: Expr, pattern: Expr | None = None) -> Expr:
+    effective_pattern = pattern if pattern is not None else symbol("True")
+    picked = _pick_recursive(expr, selector, effective_pattern, top_level=True)
+    assert isinstance(picked, Expr)
+    return picked
+
+
+def clip_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("Clip expects one, two, or three arguments.")
+
+    x = arguments[0]
+    if not isinstance(x, Integer):
+        raise WolframEvaluationError("Clip currently evaluates only for explicit integer arguments.")
+
+    if len(arguments) == 1:
+        return integer(min(max(x.value, -1), 1))
+
+    bounds = arguments[1]
+    if not isinstance(bounds, Call) or not bounds.has_head("List") or len(bounds.arguments) != 2:
+        raise WolframEvaluationError("Clip currently expects bounds of the form {min, max}.")
+    lower, upper = bounds.arguments
+    if not isinstance(lower, Integer) or not isinstance(upper, Integer):
+        raise WolframEvaluationError("Clip currently evaluates only for explicit integer bounds.")
+
+    if x.value < lower.value:
+        if len(arguments) == 3:
+            replacements = arguments[2]
+            if not isinstance(replacements, Call) or not replacements.has_head("List") or len(replacements.arguments) != 2:
+                raise WolframEvaluationError("Clip currently expects replacement values of the form {vmin, vmax}.")
+            return replacements.arguments[0]
+        return lower
+
+    if x.value > upper.value:
+        if len(arguments) == 3:
+            replacements = arguments[2]
+            if not isinstance(replacements, Call) or not replacements.has_head("List") or len(replacements.arguments) != 2:
+                raise WolframEvaluationError("Clip currently expects replacement values of the form {vmin, vmax}.")
+            return replacements.arguments[1]
+        return upper
+
+    return x
 
 
 def _instantiate_replacement_template(
@@ -1210,10 +1678,6 @@ def level(expr: Expr, spec: Expr | int | tuple[int, int] = 1) -> list[Expr]:
     level_min, level_max = _normalize_level_spec(spec)
     return [record.expr for record in records if _level_matches(record, level_min, level_max)]
 
-
-_MISSING = object()
-
-
 def first(expr: Expr, default: Expr | object = _MISSING) -> Expr:
     entries = _association_entries(expr)
     if entries is not None and entries:
@@ -1274,6 +1738,55 @@ def drop(expr: Expr, *specs: Expr | int) -> Expr:
     if len(specs) != 1:
         raise WolframEvaluationError("Drop currently supports exactly one specification.")
     return _take_or_drop(compound, specs, drop=True)
+
+
+def select(expr: Expr, criterion: Expr, limit: Expr | int | None = None) -> Expr:
+    selector, property_spec = _selection_spec(criterion, "Select")
+    remaining = _normalize_match_limit(limit)
+    selected: list[_SelectionItem] = []
+
+    for item in _selection_items(expr, "Select"):
+        if not _predicate_succeeds(selector, item.value):
+            continue
+        if remaining == 0:
+            break
+        selected.append(item)
+        if remaining is not None:
+            remaining -= 1
+
+    return _selection_projection(expr, selected, "Select", property_spec)
+
+
+def discard(expr: Expr, criterion: Expr, limit: Expr | int | None = None) -> Expr:
+    selector, property_spec = _selection_spec(criterion, "Discard")
+    remaining = _normalize_match_limit(limit)
+    retained: list[_SelectionItem] = []
+
+    for item in _selection_items(expr, "Discard"):
+        if remaining != 0 and _predicate_succeeds(selector, item.value):
+            if remaining is not None:
+                remaining -= 1
+            continue
+        retained.append(item)
+
+    return _selection_projection(expr, retained, "Discard", property_spec)
+
+
+def select_first(expr: Expr, criterion: Expr, default: Expr | object = _MISSING) -> Expr:
+    selector, property_spec = _selection_spec(criterion, "SelectFirst")
+    for item in _selection_items(expr, "SelectFirst"):
+        if _predicate_succeeds(selector, item.value):
+            return _select_first_projection(item, property_spec, default)
+    return _select_first_projection(None, property_spec, default)
+
+
+def take_while(expr: Expr, criterion: Expr) -> Expr:
+    retained: list[_SelectionItem] = []
+    for item in _selection_items(expr, "TakeWhile"):
+        if not _predicate_succeeds(criterion, item.value):
+            break
+        retained.append(item)
+    return _selection_elements(expr, retained, "TakeWhile")
 
 
 def append(expr: Expr, item: Expr) -> Expr:
@@ -2345,6 +2858,41 @@ def evaluate(expr: Expr) -> Expr:
                 raise WolframEvaluationError("ReplaceAt expects exactly three arguments.")
             return replace_at(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
 
+        if raw_head_name == "Select":
+            if len(expr.arguments) == 1:
+                return call("Function", call("Select", call("Slot"), evaluate(expr.arguments[0])))
+
+        if raw_head_name == "Discard":
+            if len(expr.arguments) == 1:
+                return call("Function", call("Discard", call("Slot"), evaluate(expr.arguments[0])))
+
+        if raw_head_name == "SelectFirst":
+            if len(expr.arguments) == 1:
+                return call("Function", call("SelectFirst", call("Slot"), evaluate(expr.arguments[0])))
+
+        if raw_head_name == "If":
+            return if_expr(expr.arguments)
+
+        if raw_head_name == "Which":
+            return which_expr(expr.arguments)
+
+        if raw_head_name == "Switch":
+            return switch_expr(expr.arguments)
+
+        if raw_head_name == "Piecewise":
+            return piecewise_expr(expr.arguments)
+
+        if raw_head_name == "Pick":
+            if len(expr.arguments) == 2:
+                return pick(evaluate(expr.arguments[0]), evaluate(expr.arguments[1]))
+            if len(expr.arguments) == 3:
+                return pick(evaluate(expr.arguments[0]), evaluate(expr.arguments[1]), expr.arguments[2])
+            raise WolframEvaluationError("Pick expects a data expression, a selector expression, and an optional pattern.")
+
+        if raw_head_name == "Function":
+            if len(expr.arguments) == 1:
+                return expr
+
     evaluated_head = evaluate(expr.head_expr)
     if _is_positional_pure_function_expr(evaluated_head):
         return _apply_pure_function(evaluated_head, tuple(evaluate(argument) for argument in expr.arguments))
@@ -2365,6 +2913,14 @@ def evaluate(expr: Expr) -> Expr:
     boolean_result = _evaluate_boolean_logic(evaluated_expr)
     if boolean_result is not None:
         return boolean_result
+
+    predicate_result = _evaluate_simple_predicates(evaluated_expr)
+    if predicate_result is not None:
+        return predicate_result
+
+    integer_special_result = _evaluate_integer_special_functions(evaluated_expr)
+    if integer_special_result is not None:
+        return integer_special_result
 
     if evaluated_head.name == "Association":
         return association(*evaluated_arguments)
@@ -2450,6 +3006,46 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("Drop currently supports exactly one specification.")
         return drop(evaluated_arguments[0], *evaluated_arguments[1:])
 
+    if evaluated_head.name == "Select":
+        if len(evaluated_arguments) == 2:
+            return select(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return select(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "Select expects an expression, a criterion or property specification, and an optional limit."
+        )
+
+    if evaluated_head.name == "Discard":
+        if len(evaluated_arguments) == 2:
+            return discard(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return discard(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "Discard expects an expression, a criterion or property specification, and an optional limit."
+        )
+
+    if evaluated_head.name == "SelectFirst":
+        if len(evaluated_arguments) == 2:
+            return select_first(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return select_first(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "SelectFirst expects an expression, a criterion or property specification, and an optional default."
+        )
+
+    if evaluated_head.name == "TakeWhile":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("TakeWhile expects exactly two arguments.")
+        return take_while(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Boole":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Boole expects exactly one argument.")
+        truth = _truth_value(evaluated_arguments[0])
+        if truth is None:
+            return evaluated_expr
+        return integer(1 if truth else 0)
+
     if evaluated_head.name == "Append":
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("Append expects exactly two arguments.")
@@ -2515,6 +3111,9 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 3:
             raise WolframEvaluationError("MapAt currently supports exactly three arguments.")
         return map_at(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "Clip":
+        return clip_expr(evaluated_arguments)
 
     if evaluated_head.name == "Keys":
         if len(evaluated_arguments) != 1:

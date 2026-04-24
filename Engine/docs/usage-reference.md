@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T02:48:08Z
-- Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
+- Updated (UTC): 2026-04-24T04:24:45Z
+- Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -364,6 +364,19 @@ python -m tungsten expr evaluate --code "Cases[{1, -2, 3}, x_ :> x + 1 /; x > 0]
 python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
 python -m tungsten expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
 python -m tungsten expr evaluate --code "Replace[1, {x_ :> x + 1 /; x < 0, x_ :> x + 2}]"
+python -m tungsten expr evaluate --code "If[1 < 2, 1 + 2, 9]"
+python -m tungsten expr evaluate --code "Which[False, a, True, 1 + 2]"
+python -m tungsten expr evaluate --code "Switch[a, _Integer, 1, _Symbol, 2]"
+python -m tungsten expr evaluate --code "Piecewise[{{1, False}, {2, x}, {2 + 2, True}}]"
+python -m tungsten expr evaluate --code "Pick[f[a, b, c, d], {False, True, False, True}]"
+python -m tungsten expr evaluate --code "Select[f[1, a, 2, 3], IntegerQ]"
+python -m tungsten expr evaluate --code "Select[{1, a, 2, 3}, # > 1 & -> {\"Element\", \"Index\"}]"
+python -m tungsten expr evaluate --code "Discard[<|a -> 1, b -> x, c -> 2|>, IntegerQ, 1]"
+python -m tungsten expr evaluate --code "SelectFirst[{1, a, 2, 3}, # > 1 &]"
+python -m tungsten expr evaluate --code "TakeWhile[f[2, 4, 6, 7, 8], EvenQ]"
+python -m tungsten expr evaluate --code "Mod[-14, 5]"
+python -m tungsten expr evaluate --code "Clip[-7, {-5, 5}, {100, 200}]"
+python -m tungsten expr evaluate --code "KroneckerDelta[3, 3, 3]"
 python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
 python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
 python -m tungsten expr evaluate --code "Map[# + 1 &, {a, b}]"
@@ -381,6 +394,11 @@ The implemented inert evaluator currently covers:
   subexpression are explicit integers
 - integer relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
   `GreaterEqual` under the same explicit-integer rule
+- simple predicate heads such as `IntegerQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`
+- hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`
+- integer-only numeric heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`,
+  `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`, `KroneckerDelta`,
+  `DiscreteDelta`, and `Ramp`
 - Boolean heads `Not`, `And`, and `Or` when all arguments in the evaluated subexpression are
   explicit `True`/`False`
 - `MatchQ`
@@ -391,10 +409,15 @@ The implemented inert evaluator currently covers:
 - `ReplaceAll`
 - `ReplaceRepeated`
 - positional pure-function applications via `Function[body]` or `body &`
+- `Pick`
 - `First`
 - `Last`
 - `Rest`
 - `Most`
+- `Select`
+- `Discard`
+- `SelectFirst`
+- `TakeWhile`
 - `Part`
 - `Extract`
 - `Level`
@@ -432,11 +455,25 @@ and options-related pattern forms remain intentionally out of scope.
 Pure functions currently support positional slots only: `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`,
 `Function[body]`, `body &`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.
 `SlotSequence` and `##` are not implemented yet.
+Tungsten also keeps `Function[body]` inert until application, which lets pure functions safely
+contain patterns such as `MatchQ[#, _Integer] &`.
 
 Arithmetic, relational, and Boolean heads are also intentionally narrow in this pass: Tungsten
 does not flatten or reorder `Plus`, `Times`, `And`, `Or`, or the relational heads, and it does
 not apply short-circuit behavior. Operator forms still parse to those named heads, so nested
 operator syntax can partially simplify one binary layer at a time.
+
+The new selection family follows the same explicit-`True` rule as Wolfram's own docs: `Select`,
+`Discard`, `SelectFirst`, and `TakeWhile` treat their criterion as a callable predicate, not as a
+pattern shorthand. Use a pure function such as `MatchQ[#, _Integer] &` when you want
+pattern-based selection. `Select`, `Discard`, and `SelectFirst` currently support the
+`"Element"` and `"Index"` property forms, plus lists composed from those two properties.
+
+The newer conditional heads are also deliberately narrow and structural: `If`, `Which`, `Switch`,
+and `Piecewise` honor the main branch-selection behavior from the Wolfram Language, but Tungsten
+does not attempt to emulate every procedural side effect or message path. `Pick` currently
+supports selector expressions with compatible structural shapes and is strongest on the ordinary
+list/head-preserving and association-by-position cases.
 
 On structural evaluation failure, `expr evaluate` still writes structured JSON to stdout and
 returns exit code `1` with:

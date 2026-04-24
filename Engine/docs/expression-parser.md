@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T02:48:08Z
-Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
+Updated (UTC): 2026-04-24T04:24:45Z
+Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
 
 ## Summary
 
@@ -13,8 +13,11 @@ Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
   `Extract`, `Level`, integer-only arithmetic and relational heads such as `Plus`, `Times`,
-  `Power`, `Equal`, and `Less`, Boolean heads such as `Not`, `And`, and `Or`, `MatchQ`, `FreeQ`,
-  `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Function`, `Take`,
+  `Power`, `Equal`, and `Less`, simple predicates such as `IntegerQ`, `StringQ`, and `EvenQ`,
+  hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, integer-only numeric
+  heads such as `UnitStep`, `Mod`, `Clip`, and `KroneckerDelta`, Boolean heads such as `Not`,
+  `And`, and `Or`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
+  `ReplaceRepeated`, `Function`, `Pick`, `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`,
   `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, association constructors, key accessors, and
   related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
@@ -295,6 +298,17 @@ python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
 python -m tungsten expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
 python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
 python -m tungsten expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
+python -m tungsten expr evaluate --code "If[1 < 2, 1 + 2, 9]"
+python -m tungsten expr evaluate --code "Which[False, a, True, 1 + 2]"
+python -m tungsten expr evaluate --code "Piecewise[{{1, False}, {2, x}, {2 + 2, True}}]"
+python -m tungsten expr evaluate --code "Pick[f[a, b, c, d], {False, True, False, True}]"
+python -m tungsten expr evaluate --code "Select[f[1, a, 2, 3], IntegerQ]"
+python -m tungsten expr evaluate --code "SelectFirst[{1, a, 2, 3}, # > 1 &]"
+python -m tungsten expr evaluate --code "Discard[<|a -> 1, b -> x, c -> 2|>, IntegerQ, 1]"
+python -m tungsten expr evaluate --code "TakeWhile[f[2, 4, 6, 7, 8], EvenQ]"
+python -m tungsten expr evaluate --code "Mod[-14, 5]"
+python -m tungsten expr evaluate --code "Clip[-7, {-5, 5}, {100, 200}]"
+python -m tungsten expr evaluate --code "KroneckerDelta[3, 3, 3]"
 python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
 python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
 python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
@@ -337,8 +351,17 @@ Tungsten currently implements a broader structural subset that includes:
 - replacement functions such as `Replace`, `ReplaceAll`, and `ReplaceRepeated`, including the
   textual operator forms `/.` and `//.` that Tungsten lowers to named function calls during
   parsing;
+- selection functions such as `Select`, `Discard`, `SelectFirst`, and `TakeWhile`, with
+  association-aware value semantics and immediate-position `"Index"` properties for the supported
+  property forms;
 - integer-only arithmetic and relational evaluation for heads such as `Plus`, `Times`, `Power`,
   `Equal`, `Less`, and their operator forms, without flattening or orderless normalization;
+- simple predicate evaluation for heads such as `IntegerQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`;
+- hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, where only the
+  selected or retained branches are evaluated;
+- integer-only numeric evaluation for heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`,
+  `RealSign`, `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`,
+  `KroneckerDelta`, `DiscreteDelta`, and `Ramp`;
 - explicit-Boolean evaluation for `Not`, `And`, and `Or`, again without flattening or
   short-circuit behavior in this pass;
 - positional pure-function applications such as `Function[body][arg]`, `body &[arg]`, and pure
@@ -362,9 +385,21 @@ Examples:
 - `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`;
 - `MatchQ[f[a, a], f[x_, x_]]` evaluates to `True`;
 - `Cases[f[g[a]], _, {0, Infinity}]` evaluates to `List[a, g[a], f[g[a]]]`;
+- `If[1 < 2, 1 + 2, 9]` evaluates to `3`, while `If[x, 1 + 2, 9]` stays structurally inert;
+- `Which[False, a, True, 1 + 2]` evaluates to `3`;
+- `Piecewise[{{1, False}, {2, x}, {2 + 2, True}}]` evaluates to `Piecewise[{{2, x}}, 4]`;
+- `Pick[f[a, b, c, d], {False, True, False, True}]` evaluates to `f[b, d]`;
 - `f[g[a]] /. g[x_] :> x` evaluates to `f[a]`;
 - `f[a] //. f[x_] :> x` evaluates to `a`;
 - `Map[# + 1 &, {a, b}]` evaluates to `List[Plus[a, 1], Plus[b, 1]]`;
+- `Select[f[1, a, 2, 3], IntegerQ]` evaluates to `f[1, 2, 3]`;
+- `Select[{1, a, 2, 3}, # > 1 & -> {"Element", "Index"}]` evaluates to
+  `<|"Element" -> {2, 3}, "Index" -> {3, 4}|>`;
+- `Discard[<|a -> 1, b -> x, c -> 2|>, IntegerQ, 1]` evaluates to `<|b -> x, c -> 2|>`;
+- `TakeWhile[f[2, 4, 6, 7, 8], EvenQ]` evaluates to `f[2, 4, 6]`;
+- `Mod[-14, 5]` evaluates to `1`;
+- `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;
+- `KroneckerDelta[3, 3, 3]` evaluates to `1`;
 - `Part[<|a -> x, b -> y|>, Key[b]]` evaluates to `y`;
 - `Map[g, <|a -> 1, b -> 2|>]` evaluates to `<|a -> g[1], b -> g[2]|>`;
 - `Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]` evaluates to `{<|a -> 1, b -> {2}|>, 9}`.
@@ -391,6 +426,12 @@ association values, `ReplaceAll` and `ReplaceRepeated` traverse association head
 `ReplaceAt` supports key-aware exact paths into association values.
 
 Pure functions are also deliberately bounded in this pass: only positional slot forms are
-implemented, not named-parameter `Function[{x, ...}, body]`, `SlotSequence`, or `##`.
+implemented, not named-parameter `Function[{x, ...}, body]`, `SlotSequence`, or `##`. Tungsten
+does, however, keep `Function[body]` inert until application, so pure functions can safely contain
+patterns such as `MatchQ[#, _Integer] &`.
+
+`Pick` is also intentionally narrower than the full kernel: Tungsten supports compatible selector
+shapes well, including the common list/head-preserving and association-by-position cases, but it
+does not aim to reproduce every scalar-selector corner case from the Wolfram Language.
 
 Those boundaries are intentional. If you need them, use the real kernel-backed Tungsten flows.

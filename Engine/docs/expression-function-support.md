@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T02:48:08Z
-- Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
+- Updated (UTC): 2026-04-24T04:24:45Z
+- Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -25,6 +25,16 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   forms below, such as `expr /. rules` to `ReplaceAll[expr, rules]` and `expr //. rules` to
   `ReplaceRepeated[expr, rules]`.
 - `Take` and `Drop` currently support a single first-level specification only.
+- `If`, `Which`, `Switch`, `Piecewise`, and `Pick` currently support only the direct forms listed
+  below.
+- `Select`, `Discard`, and `SelectFirst` currently support their direct forms plus the one-argument
+  operator forms `Select[crit]`, `Discard[crit]`, and `SelectFirst[crit]`.
+- `Select`, `Discard`, and `SelectFirst` currently support only the `"Element"` and `"Index"`
+  property forms, plus lists composed from those two property names.
+- `TakeWhile` currently supports only the direct two-argument form.
+- `Pick` currently supports selector expressions whose immediate structural shape is compatible
+  with the data expression. Nested compatible selectors are supported, but Tungsten does not aim to
+  replicate every scalar-selector corner case from the full kernel.
 - `Map` currently supports `Map[f, expr]` only.
 - `Apply` currently supports `Apply[f, expr]` only.
 - `Flatten` currently supports `Flatten[expr]` and `Flatten[expr, n]` where `n` is a non-negative
@@ -45,6 +55,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Arithmetic and Boolean evaluation are intentionally narrow: Tungsten does not honor `Flat`,
   `Orderless`, or short-circuit attributes here, and only evaluates the covered heads when every
   participating argument is already an explicit integer or Boolean value in the shipped subset.
+- Simple predicate heads are intentionally narrow too: Tungsten currently implements only
+  `IntegerQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
+  described in the support table below.
+- The integer-only numeric family below is also intentionally narrow: Tungsten evaluates these
+  heads only when the supported arguments are already explicit integers or integer lists in the
+  listed direct forms.
 - Pure functions currently support positional slot forms only:
   `Function[body]`, `body &`, `Slot[n]`, `Slot[]`, `Slot[0]`, `#`, `#n`, `#0`, and the
   Tungsten-specific shorthand `#name` for `#1["name"]`.
@@ -80,9 +96,19 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `LessEqual` | `LessEqual[i1, ...]` and infix `<=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nondecreasing. | [LessEqual](https://reference.wolfram.com/language/ref/LessEqual) |
 | `Greater` | `Greater[i1, ...]` and infix `>` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are strictly decreasing. | [Greater](https://reference.wolfram.com/language/ref/Greater) |
 | `GreaterEqual` | `GreaterEqual[i1, ...]` and infix `>=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nonincreasing. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
+| `IntegerQ` | `IntegerQ[expr]` | Returns `True` when the argument is an explicit integer in Tungsten's AST; otherwise returns `False`. | [IntegerQ](https://reference.wolfram.com/language/ref/IntegerQ) |
+| `StringQ` | `StringQ[expr]` | Returns `True` when the argument is an explicit string in Tungsten's AST; otherwise returns `False`. | [StringQ](https://reference.wolfram.com/language/ref/StringQ) |
+| `EvenQ` | `EvenQ[expr]` | Returns `True` when the argument is an explicit even integer in Tungsten's AST; otherwise returns `False`. | [EvenQ](https://reference.wolfram.com/language/ref/EvenQ) |
+| `OddQ` | `OddQ[expr]` | Returns `True` when the argument is an explicit odd integer in Tungsten's AST; otherwise returns `False`. | [OddQ](https://reference.wolfram.com/language/ref/OddQ) |
+| `TrueQ` | `TrueQ[expr]` | Returns `True` only when the argument is explicit `True`; otherwise returns `False`. | [TrueQ](https://reference.wolfram.com/language/ref/TrueQ) |
 | `Not` | `Not[bool]` and prefix `!bool` when the argument is explicit `True` or `False` | Negates an explicit Boolean value. | [Not](https://reference.wolfram.com/language/ref/Not) |
 | `And` | `And[b1, ...]` and infix `&&` when every argument of the evaluated subexpression is explicit `True` or `False` | Computes Boolean conjunction for explicit Boolean arguments only. Tungsten does not apply short-circuit or flattening semantics in this pass. | [And](https://reference.wolfram.com/language/ref/And) |
 | `Or` | `Or[b1, ...]` and infix `||` when every argument of the evaluated subexpression is explicit `True` or `False` | Computes Boolean disjunction for explicit Boolean arguments only. Tungsten does not apply short-circuit or flattening semantics in this pass. | [Or](https://reference.wolfram.com/language/ref/Or) |
+| `If` | `If[cond, t]`, `If[cond, t, f]`, `If[cond, t, f, u]` | Evaluates the condition first, then evaluates only the selected branch. `If[cond, t]` yields `Null` when the condition is explicit `False`. The four-argument form uses `u` when the condition is neither explicit `True` nor explicit `False`. | [If](https://reference.wolfram.com/language/ref/If) |
+| `Which` | `Which[test1, value1, ...]` with condition-value pairs | Evaluates tests in order. False-leading pairs are dropped; the first explicit `True` selects its value; the first non-Boolean test stops evaluation and leaves a simplified `Which` starting at that test; all-false input yields `Null`. | [Which](https://reference.wolfram.com/language/ref/Which) |
+| `Switch` | `Switch[expr, form1, value1, ...]` | Evaluates the subject once, then tries forms in order using Tungsten's supported pattern matcher. Only the first matching value is evaluated. If no form matches, Tungsten returns an inert `Switch` with the evaluated subject. | [Switch](https://reference.wolfram.com/language/ref/Switch) |
+| `Piecewise` | `Piecewise[{{value1, cond1}, ...}]`, `Piecewise[{{value1, cond1}, ...}, default]` | Evaluates conditions in order, dropping explicit `False` cases and selecting the first explicit `True` case. Unknown conditions are retained in a simplified `Piecewise`, and only values that remain in the returned form are evaluated. | [Piecewise](https://reference.wolfram.com/language/ref/Piecewise) |
+| `Boole` | `Boole[cond]` | Returns `1` for explicit `True`, `0` for explicit `False`, and otherwise remains inert. | [Boole](https://reference.wolfram.com/language/ref/Boole) |
 | `Condition` | `Condition[patt, test]`, `patt /; test`, and top-level delayed-template guards such as `lhs :> rhs /; test` | Guards a pattern or delayed-rule template. Tungsten treats the guard as satisfied only when the substituted test reduces to explicit `True` under the shipped evaluator. | [Condition](https://reference.wolfram.com/language/ref/Condition) |
 | `RuleDelayed` | `lhs :> rhs`, including guarded forms such as `lhs :> rhs /; test` | Delays right-hand-side instantiation until after pattern bindings are known. A top-level delayed-template `Condition` guard can suppress the rule and fall through to later rules when present. | [RuleDelayed](https://reference.wolfram.com/language/ref/RuleDelayed) |
 | `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous `__` / `___` sequence patterns, named patterns over `Blank`, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
@@ -102,6 +128,26 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Last` | `Last[expr]`, `Last[expr, default]` | Returns the last argument of an expression, with optional default for empty expressions. For associations, this is the last value. | [Last](https://reference.wolfram.com/language/ref/Last) |
 | `Rest` | `Rest[expr]` | Returns an expression with its first argument removed. For associations, Tungsten removes the first key-value entry. | [Rest](https://reference.wolfram.com/language/ref/Rest) |
 | `Most` | `Most[expr]` | Returns an expression with its last argument removed. For associations, Tungsten removes the last key-value entry. | [Most](https://reference.wolfram.com/language/ref/Most) |
+| `Pick` | `Pick[data, selector]`, `Pick[data, selector, patt]` | Picks parts whose corresponding selector parts are explicit `True` or match `patt`. Tungsten preserves the original head for supported compatible selector shapes and preserves association keys when association entries are kept. | [Pick](https://reference.wolfram.com/language/ref/Pick) |
+| `Select` | `Select[expr, crit]`, `Select[expr, crit, n]`, `Select[expr, crit -> "Element"]`, `Select[expr, crit -> "Index"]`, list-property forms built from those two properties, and operator form `Select[crit]` | Keeps immediate elements for which the criterion evaluates to explicit `True`. Tungsten preserves the original head for the default `"Element"` property, works on association values while preserving keys, and uses 1-based immediate positions for the `"Index"` property. | [Select](https://reference.wolfram.com/language/ref/Select) |
+| `Discard` | `Discard[expr, crit]`, `Discard[expr, crit, n]`, `Discard[expr, crit -> "Element"]`, `Discard[expr, crit -> "Index"]`, list-property forms built from those two properties, and operator form `Discard[crit]` | Removes immediate elements for which the criterion evaluates to explicit `True`. Tungsten preserves the original head for the default `"Element"` property, works on association values while preserving keys, and uses 1-based immediate positions for the `"Index"` property. | [Discard](https://reference.wolfram.com/language/ref/Discard) |
+| `SelectFirst` | `SelectFirst[expr, crit]`, `SelectFirst[expr, crit, default]`, `SelectFirst[expr, crit -> "Element"]`, `SelectFirst[expr, crit -> "Index"]`, list-property forms built from those two properties, and operator form `SelectFirst[crit]` | Returns the first immediate element whose criterion evaluates to explicit `True`. For the default `"Element"` property, Tungsten returns `Missing["NotFound"]` when no match exists unless an explicit default is supplied. For the `"Index"` property, Tungsten returns the first 1-based immediate position or `Missing["NotFound"]`. | [SelectFirst](https://reference.wolfram.com/language/ref/SelectFirst) |
+| `TakeWhile` | `TakeWhile[expr, crit]` | Keeps the longest immediate prefix for which the criterion evaluates to explicit `True`. Tungsten preserves the original head and works on association values while preserving keys. | [TakeWhile](https://reference.wolfram.com/language/ref/TakeWhile) |
+| `UnitStep` | `UnitStep[]`, `UnitStep[i1, ...]` | Returns `1` when no explicit integer argument is negative, otherwise `0`. In this pass, Tungsten supports only explicit integer arguments. | [UnitStep](https://reference.wolfram.com/language/ref/UnitStep) |
+| `Unitize` | `Unitize[i]` | Returns `0` for integer `0` and `1` for any other explicit integer. | [Unitize](https://reference.wolfram.com/language/ref/Unitize) |
+| `Sign` | `Sign[i]` | Returns `-1`, `0`, or `1` for an explicit integer. | [Sign](https://reference.wolfram.com/language/ref/Sign) |
+| `Abs` | `Abs[i]` | Returns the absolute value of an explicit integer. | [Abs](https://reference.wolfram.com/language/ref/Abs) |
+| `RealSign` | `RealSign[i]` | Returns `-1`, `0`, or `1` for an explicit integer, using Tungsten's integer-only real subset. | [RealSign](https://reference.wolfram.com/language/ref/RealSign) |
+| `RealAbs` | `RealAbs[i]` | Returns the absolute value of an explicit integer, using Tungsten's integer-only real subset. | [RealAbs](https://reference.wolfram.com/language/ref/RealAbs) |
+| `Mod` | `Mod[m, n]`, `Mod[m, n, d]` with explicit integers | Returns the Wolfram-style remainder for explicit integer arguments, including the offset form `d`. `Mod[m, 0]` currently yields `Indeterminate`. | [Mod](https://reference.wolfram.com/language/ref/Mod) |
+| `Quotient` | `Quotient[m, n]`, `Quotient[m, n, d]` with explicit integers | Returns the Wolfram-style integer quotient corresponding to `Mod`, including the offset form `d`. `Quotient[0, 0]` currently yields `Indeterminate`, while nonzero divided by zero yields `ComplexInfinity`. | [Quotient](https://reference.wolfram.com/language/ref/Quotient) |
+| `QuotientRemainder` | `QuotientRemainder[m, n]` with explicit integers and nonzero `n` | Returns `{Quotient[m, n], Mod[m, n]}` for the supported integer subset. Division by zero currently remains inert in Tungsten. | [QuotientRemainder](https://reference.wolfram.com/language/ref/QuotientRemainder) |
+| `Min` | `Min[]`, `Min[i1, ...]` | Returns the minimum of explicit integer arguments. `Min[]` yields `Infinity`. | [Min](https://reference.wolfram.com/language/ref/Min) |
+| `Max` | `Max[]`, `Max[i1, ...]` | Returns the maximum of explicit integer arguments. `Max[]` yields `-Infinity`. | [Max](https://reference.wolfram.com/language/ref/Max) |
+| `Clip` | `Clip[i]`, `Clip[i, {min, max}]`, `Clip[i, {min, max}, {vmin, vmax}]` with explicit integers | Clips an explicit integer into the specified range. Tungsten currently requires explicit integer bounds, and for the three-argument form it returns `vmin` or `vmax` when clipping occurs. | [Clip](https://reference.wolfram.com/language/ref/Clip) |
+| `KroneckerDelta` | `KroneckerDelta[]`, `KroneckerDelta[i]`, `KroneckerDelta[i1, ...]` | Returns `1` when all supported explicit integer arguments are equal, otherwise `0`. The one-argument form tests whether the integer is `0`. | [KroneckerDelta](https://reference.wolfram.com/language/ref/KroneckerDelta) |
+| `DiscreteDelta` | `DiscreteDelta[]`, `DiscreteDelta[i1, ...]` | Returns `1` when every supported explicit integer argument is `0`, otherwise `0`. | [DiscreteDelta](https://reference.wolfram.com/language/ref/DiscreteDelta) |
+| `Ramp` | `Ramp[i]` | Returns `0` for negative explicit integers and the argument itself for nonnegative explicit integers. | [Ramp](https://reference.wolfram.com/language/ref/Ramp) |
 | `Take` | `Take[expr, n]`, `Take[expr, All]`, `Take[expr, span]`, `Take[expr, {n}]`, `Take[expr, {m, n}]`, `Take[expr, {m, n, s}]` | Selects a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Take](https://reference.wolfram.com/language/ref/Take) |
 | `Drop` | `Drop[expr, n]`, `Drop[expr, All]`, `Drop[expr, span]`, `Drop[expr, {n}]`, `Drop[expr, {m, n}]`, `Drop[expr, {m, n, s}]` | Removes a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Drop](https://reference.wolfram.com/language/ref/Drop) |
 | `Append` | `Append[expr, item]` | Adds an argument at the end of a nonatomic expression. For associations, Tungsten expects a rule and updates or appends the corresponding key. | [Append](https://reference.wolfram.com/language/ref/Append) |
@@ -178,6 +224,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   function is actually applied.
 - `#0` and `Slot[0]` refer to the pure function itself.
 - `#name` is a Tungsten-specific shorthand for `#1["name"]`; it is not named-argument support.
+- `Function[body]` keeps `body` inert until application so pure functions can safely contain
+  patterns and other expressions that would otherwise evaluate too early.
 - Tungsten does not yet implement `SlotSequence` or `##`.
 
 ## Notes on arithmetic and Boolean semantics
@@ -190,6 +238,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `1 + 2 + a` becomes `Plus[3, a]`, while `Plus[1, 2, a]` stays inert.
 - Boolean operator forms behave the same way: `True && False && x` becomes `And[False, x]`, while
   `And[True, False, x]` stays inert in this pass.
+- Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]` and `EvenQ[4]`
+  evaluate, while broader numeric or symbolic semantics remain out of scope.
 
 ## Notes on atoms and empty expressions
 
