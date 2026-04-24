@@ -1,7 +1,7 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T01:13:57Z
+Updated (UTC): 2026-04-24T01:35:43Z
 Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 
 ## Summary
@@ -12,9 +12,11 @@ Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
-  `Extract`, `Level`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
-  `ReplaceRepeated`, `Function`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
-  association constructors, key accessors, and related exact-position transforms;
+  `Extract`, `Level`, integer-only arithmetic and relational heads such as `Plus`, `Times`,
+  `Power`, `Equal`, and `Less`, Boolean heads such as `Not`, `And`, and `Or`, `MatchQ`, `FreeQ`,
+  `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Function`, `Take`,
+  `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, association constructors, key accessors, and
+  related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -210,6 +212,10 @@ rewrite_result.to_full_form()
 map_result = evaluate(parse_expression("Map[# + 1 &, {a, b}]"))
 map_result.to_full_form()
 # List[Plus[a, 1], Plus[b, 1]]
+
+integer_sum = evaluate(parse_expression("1 + 2 + 3"))
+integer_sum.to_full_form()
+# 6
 ```
 
 Convenience entrypoints include:
@@ -327,6 +333,10 @@ Tungsten currently implements a broader structural subset that includes:
 - replacement functions such as `Replace`, `ReplaceAll`, and `ReplaceRepeated`, including the
   textual operator forms `/.` and `//.` that Tungsten lowers to named function calls during
   parsing;
+- integer-only arithmetic and relational evaluation for heads such as `Plus`, `Times`, `Power`,
+  `Equal`, `Less`, and their operator forms, without flattening or orderless normalization;
+- explicit-Boolean evaluation for `Not`, `And`, and `Or`, again without flattening or
+  short-circuit behavior in this pass;
 - positional pure-function applications such as `Function[body][arg]`, `body &[arg]`, and pure
   functions used as the function argument of `Map`, `MapAt`, and `Apply`;
 - sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
@@ -340,8 +350,10 @@ Everything else is treated as an inert symbolic head.
 
 Examples:
 
-- `1 + 2` parses as `Plus[1, 2]` and stays that way;
-- `Length[1 + 2]` evaluates to `2`;
+- `1 + 2` evaluates to `3`;
+- `1 + 2 + a` evaluates to `Plus[3, a]`, while `Plus[1, 2, a]` stays inert;
+- `True && False && x` evaluates to `And[False, x]`, while `And[True, False, x]` stays inert;
+- `Length[1 + 2]` evaluates to `0`;
 - `Part[f[a, b, c], {1, 3}]` evaluates to `f[a, c]`;
 - `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`;
 - `MatchQ[f[a, a], f[x_, x_]]` evaluates to `True`;

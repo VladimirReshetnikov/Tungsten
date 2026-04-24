@@ -20,6 +20,16 @@ class ExpressionParserTests(unittest.TestCase):
         expr = parse_input_form("1 + 2 x^3")
         self.assertEqual(expr.to_full_form(), "Plus[1, Times[2, Power[x, 3]]]")
 
+    def test_arithmetic_and_boolean_operator_forms_do_not_flatten_during_parse(self) -> None:
+        plus_expr = parse_input_form("1 + 2 + 3")
+        times_expr = parse_input_form("2 * 3 * 4")
+        and_expr = parse_input_form("a && b && c")
+        or_expr = parse_input_form("a || b || c")
+        self.assertEqual(plus_expr.to_full_form(), "Plus[Plus[1, 2], 3]")
+        self.assertEqual(times_expr.to_full_form(), "Times[Times[2, 3], 4]")
+        self.assertEqual(and_expr.to_full_form(), "And[And[a, b], c]")
+        self.assertEqual(or_expr.to_full_form(), "Or[Or[a, b], c]")
+
     def test_parse_standard_form_subset_with_prefix_and_postfix_application(self) -> None:
         expr = parse_standard_form("f @ x // g")
         self.assertEqual(expr.to_full_form(), "g[f[x]]")
@@ -247,6 +257,46 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
 
 
 class ExpressionEvaluationTests(unittest.TestCase):
+    def test_integer_arithmetic_evaluates_only_when_arguments_are_explicit_integers(self) -> None:
+        nested_plus = evaluate(parse_input_form("1 + 2 + 3"))
+        nested_times = evaluate(parse_input_form("2 * 3 * 4"))
+        nested_power = evaluate(parse_input_form("2^3"))
+        mixed_operator = evaluate(parse_input_form("1 + 2 + a"))
+        mixed_head = evaluate(parse_input_form("Plus[1, 2, a]"))
+        unary_minus = evaluate(parse_input_form("-(1 + 2)"))
+        self.assertEqual(nested_plus.to_full_form(), "6")
+        self.assertEqual(nested_times.to_full_form(), "24")
+        self.assertEqual(nested_power.to_full_form(), "8")
+        self.assertEqual(mixed_operator.to_full_form(), "Plus[3, a]")
+        self.assertEqual(mixed_head.to_full_form(), "Plus[1, 2, a]")
+        self.assertEqual(unary_minus.to_full_form(), "-3")
+
+    def test_relational_operators_evaluate_on_explicit_integers_only(self) -> None:
+        equal_true = evaluate(parse_input_form("Equal[1, 1, 1]"))
+        equal_false = evaluate(parse_input_form("Equal[1, 1, 2]"))
+        less_true = evaluate(parse_input_form("Less[1, 2, 3]"))
+        greater_false = evaluate(parse_input_form("Greater[3, 3, 1]"))
+        mixed_direct = evaluate(parse_input_form("Less[1, 2, a]"))
+        mixed_operator = evaluate(parse_input_form("1 < 2 < a"))
+        self.assertEqual(equal_true.to_full_form(), "True")
+        self.assertEqual(equal_false.to_full_form(), "False")
+        self.assertEqual(less_true.to_full_form(), "True")
+        self.assertEqual(greater_false.to_full_form(), "False")
+        self.assertEqual(mixed_direct.to_full_form(), "Less[1, 2, a]")
+        self.assertEqual(mixed_operator.to_full_form(), "Less[True, a]")
+
+    def test_boolean_functions_evaluate_on_explicit_booleans_only(self) -> None:
+        not_result = evaluate(parse_input_form("!(True)"))
+        and_direct = evaluate(parse_input_form("And[True, False, x]"))
+        and_operator = evaluate(parse_input_form("True && False && x"))
+        or_direct = evaluate(parse_input_form("Or[False, False, x]"))
+        or_operator = evaluate(parse_input_form("False || False || True"))
+        self.assertEqual(not_result.to_full_form(), "False")
+        self.assertEqual(and_direct.to_full_form(), "And[True, False, x]")
+        self.assertEqual(and_operator.to_full_form(), "And[False, x]")
+        self.assertEqual(or_direct.to_full_form(), "Or[False, False, x]")
+        self.assertEqual(or_operator.to_full_form(), "True")
+
     def test_length(self) -> None:
         result = evaluate(parse_input_form("Length[{a, b, c}]"))
         self.assertEqual(result.to_full_form(), "3")

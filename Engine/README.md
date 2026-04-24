@@ -4,7 +4,7 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T01:13:57Z
+- Updated (UTC): 2026-04-24T01:35:43Z
 - Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related code:
   - `src/Tungsten/src/tungsten/`
@@ -87,9 +87,9 @@ The current workspace is built around seven complementary capabilities:
    pattern subset such as `_Integer`, `x_`, `Except[...]`, and `a | b`, parses replacement
    operators such as `/.` and `//.` into named AST calls, supports positional pure functions such
    as `Function[body]`, `body &`, `#`, `#n`, and `#0`, then evaluates a broader inert structural
-   built-in set such as `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`, `Replace`,
-   `ReplaceAll`, `ReplaceRepeated`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
-   `MapAt`, `Association`, `Lookup`, and `KeyTake`.
+   built-in set such as integer arithmetic and relational heads, Boolean heads, `Length`, `Depth`,
+   `MatchQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Take`, `Drop`,
+   `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`, `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
@@ -200,7 +200,7 @@ python -m tungsten notebook create --file $env:TEMP\tungsten-demo.nb --title "De
 python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
 python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
 python -m tungsten docs search NotebookGet
-python -m tungsten expr evaluate --code "Map[# + 1 &, {a, b}]"
+python -m tungsten expr evaluate --code "1 + 2 + 3"
 ```
 
 ### PowerShell
@@ -212,7 +212,7 @@ Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
 New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{CircleBox[]}]"
 Convert-TungstenExpression -Code "1 + 2 x^3"
-Invoke-TungstenExpression -Code "Map[# + 1 &, {a, b}]"
+Invoke-TungstenExpression -Code "True && False && x"
 Find-TungstenDocumentation -Query "NotebookGet"
 ```
 
@@ -225,7 +225,7 @@ var client = TungstenClient.CreateForRepositoryRoot(@"<repository-root>");
 
 var environment = await client.GetEnvironmentAsync(probe: true);
 var expression = await client.EvaluateExpressionAsync(
-    TungstenInputSource.FromCode("Map[# + 1 &, {a, b}]"));
+    TungstenInputSource.FromCode("1 + 2 + 3"));
 
 Console.WriteLine(environment.InstallDir);
 Console.WriteLine(expression.Result?.FullForm);

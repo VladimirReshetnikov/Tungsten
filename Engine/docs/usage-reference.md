@@ -4,7 +4,7 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T01:13:57Z
+- Updated (UTC): 2026-04-24T01:35:43Z
 - Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related docs:
   - [Project README](../README.md)
@@ -351,6 +351,8 @@ Examples:
 
 ```powershell
 python -m tungsten expr evaluate --code "Length[{a, b, c}]"
+python -m tungsten expr evaluate --code "1 + 2 + 3"
+python -m tungsten expr evaluate --code "True && False && x"
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
@@ -372,6 +374,12 @@ The implemented inert evaluator currently covers:
 - `Length`
 - `Depth`
 - `Head`
+- integer arithmetic via `Plus`, `Times`, and `Power` when all arguments in the evaluated
+  subexpression are explicit integers
+- integer relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
+  `GreaterEqual` under the same explicit-integer rule
+- Boolean heads `Not`, `And`, and `Or` when all arguments in the evaluated subexpression are
+  explicit `True`/`False`
 - `MatchQ`
 - `FreeQ`
 - `Cases`
@@ -417,6 +425,11 @@ of scope.
 Pure functions currently support positional slots only: `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`,
 `Function[body]`, `body &`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.
 `SlotSequence` and `##` are not implemented yet.
+
+Arithmetic, relational, and Boolean heads are also intentionally narrow in this pass: Tungsten
+does not flatten or reorder `Plus`, `Times`, `And`, `Or`, or the relational heads, and it does
+not apply short-circuit behavior. Operator forms still parse to those named heads, so nested
+operator syntax can partially simplify one binary layer at a time.
 
 On structural evaluation failure, `expr evaluate` still writes structured JSON to stdout and
 returns exit code `1` with:

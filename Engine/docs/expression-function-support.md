@@ -4,7 +4,7 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T01:13:57Z
+- Updated (UTC): 2026-04-24T01:35:43Z
 - Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related docs:
   - [Expression Parser](./expression-parser.md)
@@ -42,6 +42,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   single rule or a flat list of rules rather than a nested list of rule lists.
 - `ReplaceRepeated` uses a Tungsten-side iteration safety cap to avoid non-terminating rewrite
   loops.
+- Arithmetic and Boolean evaluation are intentionally narrow: Tungsten does not honor `Flat`,
+  `Orderless`, or short-circuit attributes here, and only evaluates the covered heads when every
+  participating argument is already an explicit integer or Boolean value in the shipped subset.
 - Pure functions currently support positional slot forms only:
   `Function[body]`, `body &`, `Slot[n]`, `Slot[]`, `Slot[0]`, `#`, `#n`, `#0`, and the
   Tungsten-specific shorthand `#name` for `#1["name"]`.
@@ -62,6 +65,18 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Length` | `Length[expr]` | Returns the number of immediate arguments in an expression. | [Length](https://reference.wolfram.com/language/ref/Length) |
 | `Depth` | `Depth[expr]` | Returns the structural depth of an expression tree. For associations, Tungsten measures depth through values rather than keys or raw `Rule` wrappers. | [Depth](https://reference.wolfram.com/language/ref/Depth) |
 | `Head` | `Head[expr]` | Returns the head of an expression. | [Head](https://reference.wolfram.com/language/ref/Head) |
+| `Plus` | `Plus[i1, ...]` and infix `+` when nested evaluation reaches an all-integer subexpression | Adds explicit integer arguments. `Plus[]` yields `0`. Mixed expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
+| `Times` | `Times[i1, ...]` and infix `*` when nested evaluation reaches an all-integer subexpression | Multiplies explicit integer arguments. `Times[]` yields `1`. Mixed expressions remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
+| `Power` | `Power[base, exponent]` and infix `^` when both arguments are integers and the exponent is non-negative, excluding `0^0` | Raises an integer base to a non-negative integer exponent when the result stays in the integer subset. Negative exponents remain inert in this pass. | [Power](https://reference.wolfram.com/language/ref/Power) |
+| `Equal` | `Equal[i1, ...]` and infix `==` when every argument is an explicit integer | Returns `True` when all explicit integer arguments are equal. Zero- and one-argument forms return `True`. | [Equal](https://reference.wolfram.com/language/ref/Equal) |
+| `Unequal` | `Unequal[i1, ...]` and infix `!=` when every argument is an explicit integer | Returns `True` when all explicit integer arguments are pairwise distinct. | [Unequal](https://reference.wolfram.com/language/ref/Unequal) |
+| `Less` | `Less[i1, ...]` and infix `<` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are strictly increasing. | [Less](https://reference.wolfram.com/language/ref/Less) |
+| `LessEqual` | `LessEqual[i1, ...]` and infix `<=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nondecreasing. | [LessEqual](https://reference.wolfram.com/language/ref/LessEqual) |
+| `Greater` | `Greater[i1, ...]` and infix `>` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are strictly decreasing. | [Greater](https://reference.wolfram.com/language/ref/Greater) |
+| `GreaterEqual` | `GreaterEqual[i1, ...]` and infix `>=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nonincreasing. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
+| `Not` | `Not[bool]` and prefix `!bool` when the argument is explicit `True` or `False` | Negates an explicit Boolean value. | [Not](https://reference.wolfram.com/language/ref/Not) |
+| `And` | `And[b1, ...]` and infix `&&` when every argument of the evaluated subexpression is explicit `True` or `False` | Computes Boolean conjunction for explicit Boolean arguments only. Tungsten does not apply short-circuit or flattening semantics in this pass. | [And](https://reference.wolfram.com/language/ref/And) |
+| `Or` | `Or[b1, ...]` and infix `||` when every argument of the evaluated subexpression is explicit `True` or `False` | Computes Boolean disjunction for explicit Boolean arguments only. Tungsten does not apply short-circuit or flattening semantics in this pass. | [Or](https://reference.wolfram.com/language/ref/Or) |
 | `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, named patterns, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
 | `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
 | `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
@@ -148,6 +163,17 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `#0` and `Slot[0]` refer to the pure function itself.
 - `#name` is a Tungsten-specific shorthand for `#1["name"]`; it is not named-argument support.
 - Tungsten does not yet implement `SlotSequence` or `##`.
+
+## Notes on arithmetic and Boolean semantics
+
+- Tungsten parses infix arithmetic, relational, and Boolean operators into ordinary head-based AST
+  calls such as `Plus[...]`, `Less[...]`, `And[...]`, and `Not[...]`.
+- In this pass, Tungsten does not flatten or reorder `Plus`, `Times`, `And`, `Or`, or the
+  relational heads during parsing or evaluation.
+- That means nested operator forms can partially simplify one binary layer at a time. For example,
+  `1 + 2 + a` becomes `Plus[3, a]`, while `Plus[1, 2, a]` stays inert.
+- Boolean operator forms behave the same way: `True && False && x` becomes `And[False, x]`, while
+  `And[True, False, x]` stays inert in this pass.
 
 ## Notes on atoms and empty expressions
 

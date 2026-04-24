@@ -255,7 +255,7 @@ def string(value: str) -> String:
     return String(value)
 
 
-_FLAT_HEADS = {"Plus", "Times", "And", "Or", "Alternatives"}
+_FLAT_HEADS = {"Alternatives"}
 
 _LEVEL_INFINITY = 1_000_000_000
 
@@ -398,6 +398,89 @@ def _association_from_arguments(arguments: Sequence[Expr]) -> Call | None:
 
 def _bool_symbol(value: bool) -> Symbol:
     return symbol("True" if value else "False")
+
+
+def _is_boolean_symbol(expr: Expr) -> bool:
+    return isinstance(expr, Symbol) and expr.name in {"True", "False"}
+
+
+def _is_integer_expr(expr: Expr) -> bool:
+    return isinstance(expr, Integer)
+
+
+def _evaluate_integer_arithmetic(expr: Call) -> Expr | None:
+    if expr.has_head("Plus"):
+        if not all(_is_integer_expr(argument) for argument in expr.arguments):
+            return None
+        return integer(sum(argument.value for argument in expr.arguments if isinstance(argument, Integer)))
+
+    if expr.has_head("Times"):
+        if not all(_is_integer_expr(argument) for argument in expr.arguments):
+            return None
+        product = 1
+        for argument in expr.arguments:
+            assert isinstance(argument, Integer)
+            product *= argument.value
+        return integer(product)
+
+    if expr.has_head("Power"):
+        if len(expr.arguments) != 2:
+            return None
+        base, exponent = expr.arguments
+        if not isinstance(base, Integer) or not isinstance(exponent, Integer):
+            return None
+        if exponent.value < 0:
+            return None
+        if base.value == 0 and exponent.value == 0:
+            return None
+        return integer(pow(base.value, exponent.value))
+
+    return None
+
+
+def _evaluate_integer_relation(expr: Call) -> Expr | None:
+    if not all(_is_integer_expr(argument) for argument in expr.arguments):
+        return None
+
+    values = [argument.value for argument in expr.arguments if isinstance(argument, Integer)]
+
+    if expr.has_head("Equal"):
+        return _bool_symbol(all(left == right for left, right in zip(values, values[1:])))
+    if expr.has_head("Unequal"):
+        return _bool_symbol(len(values) == len(set(values)))
+    if expr.has_head("Less"):
+        return _bool_symbol(all(left < right for left, right in zip(values, values[1:])))
+    if expr.has_head("LessEqual"):
+        return _bool_symbol(all(left <= right for left, right in zip(values, values[1:])))
+    if expr.has_head("Greater"):
+        return _bool_symbol(all(left > right for left, right in zip(values, values[1:])))
+    if expr.has_head("GreaterEqual"):
+        return _bool_symbol(all(left >= right for left, right in zip(values, values[1:])))
+
+    return None
+
+
+def _evaluate_boolean_logic(expr: Call) -> Expr | None:
+    if expr.has_head("Not"):
+        if len(expr.arguments) != 1:
+            return None
+        argument = expr.arguments[0]
+        if not _is_boolean_symbol(argument):
+            return None
+        assert isinstance(argument, Symbol)
+        return _bool_symbol(argument.name == "False")
+
+    if expr.has_head("And"):
+        if not all(_is_boolean_symbol(argument) for argument in expr.arguments):
+            return None
+        return _bool_symbol(all(isinstance(argument, Symbol) and argument.name == "True" for argument in expr.arguments))
+
+    if expr.has_head("Or"):
+        if not all(_is_boolean_symbol(argument) for argument in expr.arguments):
+            return None
+        return _bool_symbol(any(isinstance(argument, Symbol) and argument.name == "True" for argument in expr.arguments))
+
+    return None
 
 
 _UNSUPPORTED_PATTERN_HEADS = {
@@ -2139,6 +2222,19 @@ def evaluate(expr: Expr) -> Expr:
         return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
 
     evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
+    evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+
+    arithmetic_result = _evaluate_integer_arithmetic(evaluated_expr)
+    if arithmetic_result is not None:
+        return arithmetic_result
+
+    relation_result = _evaluate_integer_relation(evaluated_expr)
+    if relation_result is not None:
+        return relation_result
+
+    boolean_result = _evaluate_boolean_logic(evaluated_expr)
+    if boolean_result is not None:
+        return boolean_result
 
     if evaluated_head.name == "Association":
         return association(*evaluated_arguments)
@@ -2352,7 +2448,7 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("AssociationMap expects exactly two arguments.")
         return association_map(evaluated_arguments[0], evaluated_arguments[1])
 
-    return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+    return evaluated_expr
 
 
 def parse_expression(text: str, form: str = "input") -> Expr:
