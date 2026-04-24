@@ -1,7 +1,7 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T00:03:59Z
+Updated (UTC): 2026-04-24T01:13:57Z
 Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 
 ## Summary
@@ -13,8 +13,8 @@ Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
   `Extract`, `Level`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
-  `ReplaceRepeated`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, association
-  constructors, key accessors, and related exact-position transforms;
+  `ReplaceRepeated`, `Function`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
+  association constructors, key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -57,6 +57,8 @@ The parser currently handles:
 - comparisons and boolean operators;
 - prefix and postfix application such as `f @ x` and `x // f`;
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
+- positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, and
+  the Tungsten-specific shorthand `#name` for `#1["name"]`;
 - part syntax `expr[[...]]`;
 - span syntax `a ;; b ;; c`;
 - nested Wolfram comments `(* ... *)`;
@@ -75,7 +77,7 @@ The parser currently handles:
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
 particular, it is intentionally conservative around advanced pattern syntax, arbitrary box
-constructs, pure-function shorthand, assignments, and broader evaluation semantics.
+constructs, named-parameter function forms, assignments, and broader evaluation semantics.
 
 The currently supported pattern subset is intentionally bounded:
 
@@ -204,6 +206,10 @@ match_result.to_full_form()
 rewrite_result = evaluate(parse_expression("f[g[a]] /. g[x_] :> x"))
 rewrite_result.to_full_form()
 # f[a]
+
+map_result = evaluate(parse_expression("Map[# + 1 &, {a, b}]"))
+map_result.to_full_form()
+# List[Plus[a, 1], Plus[b, 1]]
 ```
 
 Convenience entrypoints include:
@@ -321,6 +327,8 @@ Tungsten currently implements a broader structural subset that includes:
 - replacement functions such as `Replace`, `ReplaceAll`, and `ReplaceRepeated`, including the
   textual operator forms `/.` and `//.` that Tungsten lowers to named function calls during
   parsing;
+- positional pure-function applications such as `Function[body][arg]`, `body &[arg]`, and pure
+  functions used as the function argument of `Map`, `MapAt`, and `Apply`;
 - sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
   `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplaceAt`,
   `ReplacePart`, `Apply`, `Map`, and `MapAt`;
@@ -340,6 +348,7 @@ Examples:
 - `Cases[f[g[a]], _, {0, Infinity}]` evaluates to `List[a, g[a], f[g[a]]]`;
 - `f[g[a]] /. g[x_] :> x` evaluates to `f[a]`;
 - `f[a] //. f[x_] :> x` evaluates to `a`;
+- `Map[# + 1 &, {a, b}]` evaluates to `List[Plus[a, 1], Plus[b, 1]]`;
 - `Part[<|a -> x, b -> y|>, Key[b]]` evaluates to `y`;
 - `Map[g, <|a -> 1, b -> 2|>]` evaluates to `<|a -> g[1], b -> g[2]|>`;
 - `Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]` evaluates to `{<|a -> 1, b -> {2}|>, 9}`.
@@ -364,5 +373,8 @@ treat associations as opaque leaves rather than descending into keys or values.
 Replacement functions are less conservative than those search functions. `Replace` traverses
 association values, `ReplaceAll` and `ReplaceRepeated` traverse association heads and values, and
 `ReplaceAt` supports key-aware exact paths into association values.
+
+Pure functions are also deliberately bounded in this pass: only positional slot forms are
+implemented, not named-parameter `Function[{x, ...}, body]`, `SlotSequence`, or `##`.
 
 Those boundaries are intentional. If you need them, use the real kernel-backed Tungsten flows.

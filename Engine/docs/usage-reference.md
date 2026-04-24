@@ -4,7 +4,7 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T00:03:59Z
+- Updated (UTC): 2026-04-24T01:13:57Z
 - Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related docs:
   - [Project README](../README.md)
@@ -361,6 +361,7 @@ python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
 python -m tungsten expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
 python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
 python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
+python -m tungsten expr evaluate --code "Map[# + 1 &, {a, b}]"
 python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
@@ -378,6 +379,7 @@ The implemented inert evaluator currently covers:
 - `Replace`
 - `ReplaceAll`
 - `ReplaceRepeated`
+- positional pure-function applications via `Function[body]` or `body &`
 - `First`
 - `Last`
 - `Rest`
@@ -411,6 +413,10 @@ The current pattern subset includes `_`, `_Head`, `x_`, `x_Head`, `Alternatives`
 `expr //. rules` to `ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`. Advanced
 constructs such as `__`, `___`, `?`, `/;`, and options-related pattern forms are intentionally out
 of scope.
+
+Pure functions currently support positional slots only: `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`,
+`Function[body]`, `body &`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.
+`SlotSequence` and `##` are not implemented yet.
 
 On structural evaluation failure, `expr evaluate` still writes structured JSON to stdout and
 returns exit code `1` with:

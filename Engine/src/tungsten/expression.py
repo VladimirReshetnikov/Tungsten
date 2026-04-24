@@ -1190,13 +1190,72 @@ def replace_part(expr: Expr, replacements: Expr) -> Expr:
     return result
 
 
+def _is_positional_pure_function_expr(expr: Expr) -> bool:
+    return isinstance(expr, Call) and expr.has_head("Function") and len(expr.arguments) == 1
+
+
+def _slot_index(expr: Expr) -> int | None:
+    if not isinstance(expr, Call) or not expr.has_head("Slot"):
+        return None
+    if len(expr.arguments) == 0:
+        return 1
+    if len(expr.arguments) != 1 or not isinstance(expr.arguments[0], Integer):
+        raise WolframEvaluationError("Slot expects zero arguments or a single integer index.")
+    return expr.arguments[0].value
+
+
+def _replace_slots_in_expr(expr: Expr, arguments: Sequence[Expr], self_function: Expr) -> Expr:
+    slot_index = _slot_index(expr)
+    if slot_index is not None:
+        if slot_index == 0:
+            return self_function
+        if slot_index < 0:
+            raise WolframEvaluationError("Slot indices must be non-negative integers.")
+        if slot_index > len(arguments):
+            raise WolframEvaluationError(
+                f"Slot {slot_index} cannot be filled from {len(arguments)} argument(s)."
+            )
+        return arguments[slot_index - 1]
+
+    if isinstance(expr, (Symbol, Integer, Real, String)):
+        return expr
+
+    if not isinstance(expr, Call):
+        return expr
+
+    # Slots inside nested pure functions belong to the inner function and should remain untouched.
+    if _is_positional_pure_function_expr(expr):
+        return expr
+
+    replaced_head = _replace_slots_in_expr(expr.head_expr, arguments, self_function)
+    replaced_arguments = tuple(
+        _replace_slots_in_expr(argument, arguments, self_function)
+        for argument in expr.arguments
+    )
+    return Call(head_expr=replaced_head, arguments=replaced_arguments)
+
+
+def _apply_pure_function(function: Expr, arguments: Sequence[Expr]) -> Expr:
+    if not _is_positional_pure_function_expr(function):
+        raise WolframEvaluationError("Expected a positional pure Function expression.")
+    assert isinstance(function, Call)
+    substituted = _replace_slots_in_expr(function.arguments[0], arguments, function)
+    return evaluate(substituted)
+
+
+def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
+    if _is_positional_pure_function_expr(function):
+        return _apply_pure_function(function, arguments)
+    return Call(head_expr=function, arguments=tuple(arguments))
+
+
 def apply_head(new_head: Expr, expr: Expr) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
-        return Call(head_expr=new_head, arguments=tuple(entry.value for entry in entries))
+        return _apply_callable(new_head, tuple(entry.value for entry in entries))
     if not isinstance(expr, Call):
         return expr
-    return Call(head_expr=new_head, arguments=expr.arguments)
+    return _apply_callable(new_head, expr.arguments)
 
 
 def map_expr(function: Expr, expr: Expr) -> Expr:
@@ -1206,13 +1265,13 @@ def map_expr(function: Expr, expr: Expr) -> Expr:
             _AssociationEntry(
                 rule_head=entry.rule_head,
                 key=entry.key,
-                value=Call(head_expr=function, arguments=(entry.value,)),
+                value=_apply_callable(function, (entry.value,)),
             )
             for entry in entries
         )
     if not isinstance(expr, Call):
         return expr
-    return _rebuild(expr, tuple(Call(head_expr=function, arguments=(argument,)) for argument in expr.arguments))
+    return _rebuild(expr, tuple(_apply_callable(function, (argument,)) for argument in expr.arguments))
 
 
 def map_at(function: Expr, expr: Expr, positions: Expr | int) -> Expr:
@@ -1867,7 +1926,7 @@ def _try_map_at_path(
     path: Sequence[_IndexSelector | _KeySelector],
 ) -> tuple[Expr, bool]:
     if not path:
-        return (Call(head_expr=function, arguments=(expr,)), True)
+        return (_apply_callable(function, (expr,)), True)
 
     entries = _association_entries(expr)
     if entries is not None:
@@ -1880,7 +1939,7 @@ def _try_map_at_path(
             mutable[index] = _AssociationEntry(
                 entry.rule_head,
                 entry.key,
-                Call(head_expr=function, arguments=(entry.value,)),
+                _apply_callable(function, (entry.value,)),
             )
             return (_association_expr(mutable), True)
         updated_child, changed = _try_map_at_path(entry.value, function, path[1:])
@@ -2074,6 +2133,8 @@ def evaluate(expr: Expr) -> Expr:
             return replace_at(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
 
     evaluated_head = evaluate(expr.head_expr)
+    if _is_positional_pure_function_expr(evaluated_head):
+        return _apply_pure_function(evaluated_head, tuple(evaluate(argument) for argument in expr.arguments))
     if not isinstance(evaluated_head, Symbol):
         return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
 
@@ -2717,7 +2778,7 @@ def _tokenize(text: str) -> list[_Token]:
             continue
 
         char = text[index]
-        if char in "[]{}(),+-*/^!@<>_|":
+        if char in "[]{}(),+-*/^!@<>_|&#":
             tokens.append(_Token(kind="operator", text=char, start=index, end=index + 1, value=char))
             index += 1
             continue
@@ -2746,6 +2807,7 @@ class _Parser:
     _AT_BP = 40
     _POSTFIX_BP = 30
     _SEMICOLON_BP = 20
+    _FUNCTION_BP = 10
     _SPAN_BP = 170
     _PREFIX_BP = 150
 
@@ -2824,6 +2886,13 @@ class _Parser:
                 left = self._parse_infix_span(left, min_bp, terminators)
                 continue
 
+            if token.text == "&":
+                if self._FUNCTION_BP < min_bp:
+                    break
+                self._consume()
+                left = call("Function", left)
+                continue
+
             if self._starts_primary(token):
                 if self._TIMES_BP < min_bp:
                     break
@@ -2874,6 +2943,9 @@ class _Parser:
         if token.text == "_":
             return self._parse_prefix_blank()
 
+        if token.text == "#":
+            return self._parse_prefix_slot()
+
         if token.text == "+":
             return self._parse_expression(self._PREFIX_BP, terminators)
 
@@ -2913,6 +2985,15 @@ class _Parser:
         if self._peek().kind == "symbol":
             return call("Blank", symbol(str(self._consume().value)))
         return call("Blank")
+
+    def _parse_prefix_slot(self) -> Expr:
+        next_token = self._peek()
+        if next_token.kind == "integer":
+            return call("Slot", integer(int(self._consume().value)))
+        if next_token.kind == "symbol":
+            key = string(str(self._consume().value))
+            return Call(head_expr=call("Slot", integer(1)), arguments=(key,))
+        return call("Slot", integer(1))
 
     def _parse_postfix_pattern(self, left: Expr) -> Expr:
         token = self._consume()

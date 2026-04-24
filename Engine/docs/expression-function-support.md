@@ -4,7 +4,7 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T00:03:59Z
+- Updated (UTC): 2026-04-24T01:13:57Z
 - Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related docs:
   - [Expression Parser](./expression-parser.md)
@@ -42,6 +42,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   single rule or a flat list of rules rather than a nested list of rule lists.
 - `ReplaceRepeated` uses a Tungsten-side iteration safety cap to avoid non-terminating rewrite
   loops.
+- Pure functions currently support positional slot forms only:
+  `Function[body]`, `body &`, `Slot[n]`, `Slot[]`, `Slot[0]`, `#`, `#n`, `#0`, and the
+  Tungsten-specific shorthand `#name` for `#1["name"]`.
+- `SlotSequence` and `##` are not implemented yet.
 - The current pattern subset intentionally excludes variable-length sequence patterns, options,
   conditions, pattern tests, and other advanced matching forms.
 - Pattern search on associations is deliberately conservative in this pass: associations can match
@@ -65,6 +69,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Replace` | `Replace[expr, rules]`, `Replace[expr, rules, levelspec]`, nested rule-list forms such as `Replace[expr, {{rules1...}, {rules2...}}, levelspec]` | Applies the first matching rule per visited part, with Wolfram-style levelspec semantics and bottom-up traversal over the covered subset. On associations, Tungsten traverses values rather than keys or raw `Rule` wrappers. | [Replace](https://reference.wolfram.com/language/ref/Replace) |
 | `ReplaceAll` | `ReplaceAll[expr, rule]`, `ReplaceAll[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceAll[expr, {{rules1...}, {rules2...}}]` | Performs a single top-down rewrite pass over the covered subset. Tungsten also supports the parser-lowered operator form `expr /. rules`. On associations, Tungsten rewrites the whole association first, then the head and values, but not keys or raw `Rule` wrappers. | [ReplaceAll](https://reference.wolfram.com/language/ref/ReplaceAll) |
 | `ReplaceRepeated` | `ReplaceRepeated[expr, rule]`, `ReplaceRepeated[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceRepeated[expr, {{rules1...}, {rules2...}}]` | Repeats the covered `ReplaceAll` semantics until a structural fixed point is reached. Tungsten also supports the parser-lowered operator form `expr //. rules`. Non-terminating rewrite loops stop at a Tungsten safety cap and raise an evaluation error. | [ReplaceRepeated](https://reference.wolfram.com/language/ref/ReplaceRepeated) |
+| `Function` | `Function[body]`, `body &`, plus positional slot applications such as `Function[body][arg1, ...]` | Supports positional pure functions over `Slot` forms. Tungsten recognizes `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, and the Tungsten-specific `#name` shorthand for `#1["name"]`. Nested pure functions keep their own local slots. | [Function](https://reference.wolfram.com/language/ref/Function) |
 | `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
 | `AssociationQ` | `AssociationQ[expr]` | Returns `True` when Tungsten recognizes a structural association value. | [AssociationQ](https://reference.wolfram.com/language/ref/AssociationQ) |
 | `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. | [Part](https://reference.wolfram.com/language/ref/Part) |
@@ -134,6 +139,15 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Explicit advanced pattern forms such as `BlankSequence`, `BlankNullSequence`, `PatternTest`,
   `Condition`, and `Optional` currently raise Tungsten evaluation errors instead of being silently
   treated as literals.
+
+## Notes on pure functions
+
+- `#` is parsed as `Slot[1]`.
+- `Slot[]` remains distinct in the AST, but Tungsten treats it the same as `Slot[1]` when a pure
+  function is actually applied.
+- `#0` and `Slot[0]` refer to the pure function itself.
+- `#name` is a Tungsten-specific shorthand for `#1["name"]`; it is not named-argument support.
+- Tungsten does not yet implement `SlotSequence` or `##`.
 
 ## Notes on atoms and empty expressions
 

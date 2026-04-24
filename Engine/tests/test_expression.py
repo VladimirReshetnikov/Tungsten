@@ -45,6 +45,14 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(replace_all.to_input_form(), "ReplaceAll[f[a], a -> b]")
         self.assertEqual(replace_repeated.to_full_form(), "ReplaceRepeated[f[a], Rule[a, b]]")
 
+    def test_parse_pure_function_shorthand_and_slots(self) -> None:
+        postfix = parse_input_form("f @ # &")
+        self_ref = parse_input_form("#0[x] &")
+        named = parse_input_form("#name &")
+        self.assertEqual(postfix.to_full_form(), "Function[f[Slot[1]]]")
+        self.assertEqual(self_ref.to_full_form(), "Function[Slot[0][x]]")
+        self.assertEqual(named.to_full_form(), 'Function[Slot[1]["name"]]')
+
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
         self.assertEqual(expr.to_full_form(), 'f["alpha", beta]')
@@ -350,6 +358,30 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(map_atom.to_full_form(), "x")
         self.assertEqual(map_at_result.to_full_form(), "f[a, h[g[b], c], d]")
         self.assertEqual(map_at_multiple.to_full_form(), "f[a, g[g[b]], c]")
+
+    def test_pure_functions_apply_and_integrate_with_map_apply_and_mapat(self) -> None:
+        applied = evaluate(parse_input_form("(# + 1 &)[a]"))
+        explicit_slot = evaluate(parse_input_form("Function[Slot[]][x]"))
+        apply_result = evaluate(parse_input_form("Apply[#1 + #2 &, f[a, b]]"))
+        map_result = evaluate(parse_input_form("Map[# + 1 &, {a, b}]"))
+        map_at_result = evaluate(parse_input_form("MapAt[Function[f[#]], g[a, b], 2]"))
+        named = evaluate(parse_input_form("(#name &)[obj]"))
+        self.assertEqual(applied.to_full_form(), "Plus[a, 1]")
+        self.assertEqual(explicit_slot.to_full_form(), "x")
+        self.assertEqual(apply_result.to_full_form(), "Plus[a, b]")
+        self.assertEqual(map_result.to_full_form(), "List[Plus[a, 1], Plus[b, 1]]")
+        self.assertEqual(map_at_result.to_full_form(), "g[a, f[b]]")
+        self.assertEqual(named.to_full_form(), 'obj["name"]')
+
+    def test_pure_functions_support_self_reference_and_nested_lexical_scoping(self) -> None:
+        self_reference = evaluate(parse_input_form("(#0&)[x]"))
+        nested = evaluate(parse_input_form("Function[Function[#1]][a][b]"))
+        self.assertEqual(self_reference.to_full_form(), "Function[Slot[0]]")
+        self.assertEqual(nested.to_full_form(), "b")
+
+    def test_pure_function_slot_errors_surface_when_argument_is_missing(self) -> None:
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("(#2&)[a]"))
 
     def test_association_constructor_and_depth(self) -> None:
         literal = evaluate(parse_input_form("<|a -> 1, a -> 2, b -> 3|>"))
