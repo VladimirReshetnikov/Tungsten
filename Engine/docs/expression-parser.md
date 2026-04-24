@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T17:27:05Z
-Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
+Updated (UTC): 2026-04-24T17:49:28Z
+Repository HEAD: f0c4f6ec14e951a26ce6f3f4ad3a08a10b3e900c
 
 ## Summary
 
@@ -23,9 +23,11 @@ Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
   `IdentityMatrix`, and `DiagonalMatrix`, sequence transforms such as `Partition`, `BlockMap`,
   `TakeList`, `TakeDrop`, `FoldWhile`, `FoldPair`, `Position`, `DeleteDuplicates`, byte and
   character heads such as `ByteArray`, `BaseEncode`, `BaseDecode`, `Characters`,
-  `ToCharacterCode`, `FromCharacterCode`, `StringToByteArray`, and `ByteArrayToString`, `Pick`,
-  `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
-  `ReplacePart`, association constructors, key accessors, and related exact-position transforms;
+  `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`, `StringReverse`,
+  `StringPosition`, `StringContainsQ`, `ToCharacterCode`, `FromCharacterCode`,
+  `StringToByteArray`, and `ByteArrayToString`, `Pick`, `Select`, `Discard`, `SelectFirst`,
+  `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, association constructors,
+  key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -64,7 +66,8 @@ The parser currently handles:
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
-- structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, and `.`;
+- structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, `.`, and string
+  concatenation `<>`;
 - rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
   `x_ :> rhs /; test`;
 - comparisons and boolean operators;
@@ -260,6 +263,14 @@ Convenience entrypoints include:
 - `append(expr, item)`
 - `prepend(expr, item)`
 - `join(expr1, expr2, ...)`
+- `string_length(expr)`
+- `string_take(expr, spec)`
+- `string_drop(expr, spec)`
+- `string_join(expr1, expr2, ...)`
+- `string_insert(expr, item, positions)`
+- `string_reverse(expr)`
+- `string_position(expr, pattern, limit=None)`
+- `string_contains_q(expr, pattern)`
 - `reverse(expr)`
 - `rotate_left(expr, n=1)`
 - `rotate_right(expr, n=1)`
@@ -295,6 +306,7 @@ $env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
 python -m tungsten expr parse --code "1 + 2 x^3"
 python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
 python -m tungsten expr parse --code "f @ x // g" --form standard
+python -m tungsten expr parse --code "\"a\" <> \"b\" <> \"c\""
 ```
 
 Structurally evaluate implemented built-ins:
@@ -323,6 +335,10 @@ python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
 python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
+python -m tungsten expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
+python -m tungsten expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
+python -m tungsten expr evaluate --code "StringPosition[\"ababa\", {\"ba\", \"aba\"}]"
+python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 ```
 
 The parse payload includes:
@@ -381,6 +397,9 @@ Tungsten currently implements a broader structural subset that includes:
 - sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
   `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplaceAt`,
   `ReplacePart`, `Apply`, `Map`, and `MapAt`;
+- string structural sequence heads such as `StringLength`, `StringTake`, `StringDrop`,
+  `StringJoin`, `StringInsert`, and `StringReverse`, plus literal-substring search heads
+  `StringPosition` and `StringContainsQ`;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -410,6 +429,10 @@ Examples:
   `<|"Element" -> {2, 3}, "Index" -> {3, 4}|>`;
 - `Discard[<|a -> 1, b -> x, c -> 2|>, IntegerQ, 1]` evaluates to `<|b -> x, c -> 2|>`;
 - `TakeWhile[f[2, 4, 6, 7, 8], EvenQ]` evaluates to `f[2, 4, 6]`;
+- `StringJoin[{"a", {"b", "c"}}]` evaluates to `"abc"`, and `"a" <> "b" <> "c"` parses to
+  nested `StringJoin[...]` calls before evaluating to `"abc"`;
+- `StringPosition["ababa", {"ba", "aba"}]` evaluates to `{{1, 3}, {2, 3}, {3, 5}, {4, 5}}`;
+- `Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]` evaluates to `{"ab", "ba"}`;
 - `Mod[-14, 5]` evaluates to `1`;
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;
 - `KroneckerDelta[3, 3, 3]` evaluates to `1`;

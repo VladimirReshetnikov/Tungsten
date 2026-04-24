@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from .wolfram_strings import has_inline_boxes
 from .wolfram_strings import inline_box_segments
@@ -915,6 +915,230 @@ def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> Stri
     if encoding_name == "Unicode":
         raise WolframEvaluationError('ByteArrayToString does not currently support the "Unicode" pseudo-encoding.')
     return string(_decode_bytes_to_string(bytes(byte_values), encoding_name))
+
+
+def _string_thread(
+    expr: Expr,
+    function_name: str,
+    scalar_function: Callable[[String], Expr],
+) -> Expr:
+    if isinstance(expr, String):
+        return scalar_function(expr)
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return list_expr(*(_string_thread(item, function_name, scalar_function) for item in expr.arguments))
+    raise WolframEvaluationError(f"{function_name} expects a string or a list of strings.")
+
+
+def string_length(expr: Expr) -> Expr:
+    return _string_thread(expr, "StringLength", lambda item: integer(len(item.value)))
+
+
+def _validate_string_selectors(length_value: int, selectors: Sequence[int], function_name: str) -> list[int]:
+    for selector in selectors:
+        _resolve_index(length_value, selector)
+    return list(selectors)
+
+
+def _normalize_string_take_drop_selectors(text: str, spec: Expr | int, function_name: str) -> list[int]:
+    count = len(text)
+
+    if isinstance(spec, int):
+        selectors = list(range(1, spec + 1)) if spec >= 0 else list(range(count + spec + 1, count + 1))
+        return _validate_string_selectors(count, selectors, function_name)
+
+    if isinstance(spec, Integer):
+        return _normalize_string_take_drop_selectors(text, spec.value, function_name)
+
+    if isinstance(spec, Symbol) and spec.name == "All":
+        return list(range(1, count + 1))
+
+    if isinstance(spec, Call) and spec.has_head("UpTo"):
+        if len(spec.arguments) != 1 or not isinstance(spec.arguments[0], Integer):
+            raise WolframEvaluationError(f"{function_name} currently supports only integer UpTo specifications.")
+        limit = spec.arguments[0].value
+        if limit >= 0:
+            return list(range(1, min(count, limit) + 1))
+        kept = min(count, -limit)
+        return list(range(count - kept + 1, count + 1))
+
+    if isinstance(spec, Call) and spec.has_head("Span"):
+        return _validate_string_selectors(count, _expand_span_spec_from_count(count, spec), function_name)
+
+    if isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) == 1:
+            item = spec.arguments[0]
+            if isinstance(item, Integer):
+                return _validate_string_selectors(count, [item.value], function_name)
+            if isinstance(item, Symbol) and item.name == "All":
+                return list(range(1, count + 1))
+            if isinstance(item, Call) and item.has_head("UpTo"):
+                return _normalize_string_take_drop_selectors(text, item, function_name)
+            raise WolframEvaluationError(
+                f"{function_name} single-element list specifications must contain an integer, All, or UpTo[n]."
+            )
+        if len(spec.arguments) in {2, 3}:
+            return _validate_string_selectors(
+                count,
+                _expand_span_spec_from_count(count, Call(head_expr=Symbol("Span"), arguments=spec.arguments)),
+                function_name,
+            )
+        raise WolframEvaluationError(f"{function_name} list specifications must contain one, two, or three items.")
+
+    raise WolframEvaluationError(f"Unsupported {function_name} specification: {spec.to_input_form() if isinstance(spec, Expr) else spec!r}.")
+
+
+def _string_take_or_drop_scalar(text: str, spec: Expr | int, *, drop: bool) -> String:
+    function_name = "StringDrop" if drop else "StringTake"
+    selectors = _normalize_string_take_drop_selectors(text, spec, function_name)
+    if drop:
+        removed = {_resolve_index(len(text), selector) for selector in selectors}
+        return string("".join(character for index, character in enumerate(text) if index not in removed))
+    return string("".join(text[_resolve_index(len(text), selector)] for selector in selectors))
+
+
+def string_take(expr: Expr, spec: Expr | int) -> Expr:
+    return _string_thread(expr, "StringTake", lambda item: _string_take_or_drop_scalar(item.value, spec, drop=False))
+
+
+def string_drop(expr: Expr, spec: Expr | int) -> Expr:
+    return _string_thread(expr, "StringDrop", lambda item: _string_take_or_drop_scalar(item.value, spec, drop=True))
+
+
+def _flatten_string_join_items(expr: Expr) -> list[str]:
+    if isinstance(expr, String):
+        return [expr.value]
+    if isinstance(expr, Call) and expr.has_head("List"):
+        flattened: list[str] = []
+        for item in expr.arguments:
+            flattened.extend(_flatten_string_join_items(item))
+        return flattened
+    raise WolframEvaluationError("StringJoin expects strings or nested lists of strings.")
+
+
+def string_join(*exprs: Expr) -> String:
+    pieces: list[str] = []
+    for expr in exprs:
+        pieces.extend(_flatten_string_join_items(expr))
+    return string("".join(pieces))
+
+
+def _resolve_string_insert_index(length_value: int, position: int) -> int:
+    if position > 0:
+        resolved = position - 1
+    elif position < 0:
+        resolved = length_value + position + 1
+    else:
+        raise WolframEvaluationError("StringInsert positions must be nonzero integers.")
+
+    if not 0 <= resolved <= length_value:
+        raise WolframEvaluationError(f"StringInsert position {position} is out of range for length {length_value}.")
+    return resolved
+
+
+def _normalize_string_insert_positions(length_value: int, positions: Expr | int) -> list[int]:
+    if isinstance(positions, int):
+        return [_resolve_string_insert_index(length_value, positions)]
+
+    if isinstance(positions, Integer):
+        return [_resolve_string_insert_index(length_value, positions.value)]
+
+    if isinstance(positions, Call) and positions.has_head("List"):
+        normalized: list[int] = []
+        for item in positions.arguments:
+            if not isinstance(item, Integer):
+                raise WolframEvaluationError("StringInsert position lists must contain only integers.")
+            normalized.append(_resolve_string_insert_index(length_value, item.value))
+        return normalized
+
+    raise WolframEvaluationError("StringInsert expects an integer position or a list of integer positions.")
+
+
+def _string_insert_scalar(text: str, insertion: str, positions: Expr | int) -> String:
+    resolved_positions = _normalize_string_insert_positions(len(text), positions)
+    grouped: dict[int, list[str]] = {}
+    for resolved in resolved_positions:
+        grouped.setdefault(resolved, []).append(insertion)
+
+    pieces: list[str] = []
+    for index in range(len(text) + 1):
+        pieces.extend(grouped.get(index, ()))
+        if index < len(text):
+            pieces.append(text[index])
+    return string("".join(pieces))
+
+
+def string_insert(expr: Expr, insertion: Expr, positions: Expr | int) -> Expr:
+    if not isinstance(insertion, String):
+        raise WolframEvaluationError("StringInsert expects the inserted value to be a string.")
+    return _string_thread(
+        expr,
+        "StringInsert",
+        lambda item: _string_insert_scalar(item.value, insertion.value, positions),
+    )
+
+
+def string_reverse(expr: Expr) -> Expr:
+    return _string_thread(expr, "StringReverse", lambda item: string(item.value[::-1]))
+
+
+def _string_patterns(pattern: Expr, function_name: str) -> list[str]:
+    if isinstance(pattern, String):
+        return [pattern.value]
+    if isinstance(pattern, Call) and pattern.has_head("List"):
+        values: list[str] = []
+        for item in pattern.arguments:
+            if not isinstance(item, String):
+                raise WolframEvaluationError(f"{function_name} currently supports only literal string patterns.")
+            values.append(item.value)
+        return values
+    raise WolframEvaluationError(f"{function_name} currently supports only literal string patterns.")
+
+
+def _literal_string_matches(text: str, patterns: Sequence[str], limit: int | None) -> list[tuple[int, int]]:
+    if not patterns or limit == 0:
+        return []
+
+    if any(pattern == "" for pattern in patterns):
+        matches = [(index + 1, index) for index in range(len(text) + 1)]
+        return matches if limit is None else matches[:limit]
+
+    matches: list[tuple[int, int]] = []
+    for start in range(len(text)):
+        matched_interval: tuple[int, int] | None = None
+        for pattern in patterns:
+            if text.startswith(pattern, start):
+                matched_interval = (start + 1, start + len(pattern))
+                break
+        if matched_interval is None:
+            continue
+        matches.append(matched_interval)
+        if limit is not None and len(matches) >= limit:
+            break
+    return matches
+
+
+def _string_position_scalar(text: str, patterns: Sequence[str], limit: int | None) -> Expr:
+    matches = _literal_string_matches(text, patterns, limit)
+    return list_expr(*(list_expr(integer(start), integer(end)) for start, end in matches))
+
+
+def string_position(expr: Expr, pattern: Expr, limit: Expr | int | None = None) -> Expr:
+    patterns = _string_patterns(pattern, "StringPosition")
+    normalized_limit = _normalize_match_limit(limit)
+    return _string_thread(
+        expr,
+        "StringPosition",
+        lambda item: _string_position_scalar(item.value, patterns, normalized_limit),
+    )
+
+
+def string_contains_q(expr: Expr, pattern: Expr) -> Expr:
+    patterns = _string_patterns(pattern, "StringContainsQ")
+    return _string_thread(
+        expr,
+        "StringContainsQ",
+        lambda item: _bool_symbol(bool(_literal_string_matches(item.value, patterns, 1))),
+    )
 
 
 _UNSUPPORTED_PATTERN_HEADS = {
@@ -2549,6 +2773,18 @@ def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
                 "ComapApply[functions] expects exactly one argument when used as an operator."
             )
         return comap_apply(function.arguments[0], arguments[0])
+    if isinstance(function, Call) and function.has_head("StringContainsQ") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError(
+                "StringContainsQ[patt] expects exactly one argument when used as an operator."
+            )
+        return string_contains_q(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("StringPosition") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError(
+                "StringPosition[patt] expects exactly one argument when used as an operator."
+            )
+        return string_position(arguments[0], function.arguments[0])
     return evaluate(Call(head_expr=function, arguments=tuple(arguments)))
 
 
@@ -2574,6 +2810,10 @@ def _is_callable_expr(expr: Expr) -> bool:
     if expr.has_head("Comap") and len(expr.arguments) == 1:
         return True
     if expr.has_head("ComapApply") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("StringContainsQ") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("StringPosition") and len(expr.arguments) == 1:
         return True
     return False
 
@@ -4445,6 +4685,50 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("Characters expects exactly one argument.")
         return characters(evaluated_arguments[0])
 
+    if evaluated_head.name == "StringLength":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("StringLength expects exactly one argument.")
+        return string_length(evaluated_arguments[0])
+
+    if evaluated_head.name == "StringTake":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("StringTake expects exactly two arguments.")
+        return string_take(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "StringDrop":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("StringDrop expects exactly two arguments.")
+        return string_drop(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "StringJoin":
+        return string_join(*evaluated_arguments)
+
+    if evaluated_head.name == "StringInsert":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("StringInsert expects a source string, an insertion string, and positions.")
+        return string_insert(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "StringReverse":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("StringReverse expects exactly one argument.")
+        return string_reverse(evaluated_arguments[0])
+
+    if evaluated_head.name == "StringPosition":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return string_position(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return string_position(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("StringPosition expects a string, a pattern, and an optional match limit.")
+
+    if evaluated_head.name == "StringContainsQ":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return string_contains_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("StringContainsQ expects a string and a pattern.")
+
     if evaluated_head.name == "ToCharacterCode":
         if len(evaluated_arguments) == 1:
             return to_character_code(evaluated_arguments[0])
@@ -5488,6 +5772,7 @@ _MULTI_TOKENS = (
     "___",
     "__",
     "[[",
+    "<>",
     "<|",
     "|>",
     "|->",
@@ -5840,6 +6125,7 @@ class _Parser:
             "/": (self._TIMES_BP, self._TIMES_BP + 1, None),
             "+": (self._PLUS_BP, self._PLUS_BP + 1, "Plus"),
             "-": (self._PLUS_BP, self._PLUS_BP + 1, None),
+            "<>": (self._PLUS_BP, self._PLUS_BP + 1, "StringJoin"),
             "==": (self._COMPARE_BP, self._COMPARE_BP + 1, "Equal"),
             "===": (self._COMPARE_BP, self._COMPARE_BP + 1, "SameQ"),
             "!=": (self._COMPARE_BP, self._COMPARE_BP + 1, "Unequal"),

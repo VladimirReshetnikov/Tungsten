@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T17:27:05Z
-- Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
+- Updated (UTC): 2026-04-24T17:49:28Z
+- Repository HEAD: f0c4f6ec14e951a26ce6f3f4ad3a08a10b3e900c
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -389,6 +389,10 @@ python -m tungsten expr evaluate --code "Thread[f[{a, b}, {c, d}]]"
 python -m tungsten expr evaluate --code "Fold[f, x, {a, b, c}]"
 python -m tungsten expr evaluate --code "BlockMap[f, {a, b, c, d, e}, 2]"
 python -m tungsten expr evaluate --code "DeleteDuplicatesBy[{{a}, {b, c}, {d}}, Length]"
+python -m tungsten expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
+python -m tungsten expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
+python -m tungsten expr evaluate --code "StringPosition[\"ababa\", {\"ba\", \"aba\"}]"
+python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
 python -m tungsten expr evaluate --code "ToCharacterCode[ByteArrayToString[ByteArray[{97, 195, 169}], \"UTF-8\"]]"
@@ -434,8 +438,9 @@ The implemented inert evaluator currently covers:
   `LengthWhile`, `FirstCase`, `Position`, `MemberQ`, `DeleteDuplicates`,
   `DeleteDuplicatesBy`, and `DuplicateFreeQ`
 - byte and character heads such as `ByteArray`, `ByteArrayQ`, `BaseEncode`, `BaseDecode`,
-  `Characters`, `ToCharacterCode`, `FromCharacterCode`, `StringToByteArray`, and
-  `ByteArrayToString`
+  `Characters`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`,
+  `StringReverse`, `StringPosition`, `StringContainsQ`, `ToCharacterCode`, `FromCharacterCode`,
+  `StringToByteArray`, and `ByteArrayToString`
 - `Pick`
 - `First`
 - `Last`

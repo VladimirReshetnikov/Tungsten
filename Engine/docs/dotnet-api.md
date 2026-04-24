@@ -4,8 +4,8 @@
 - Audience: C#/.NET application authors, automation developers, maintainers, and reviewers
 - Scope: `src/Tungsten/dotnet` typed wrapper over Tungsten's JSON-first CLI
 - Created (UTC): 2026-04-23T19:01:41Z
-- Updated (UTC): 2026-04-24T17:27:05Z
-- Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
+- Updated (UTC): 2026-04-24T17:49:28Z
+- Repository HEAD: f0c4f6ec14e951a26ce6f3f4ad3a08a10b3e900c
 - Related code:
   - `src/Tungsten/dotnet/Tungsten.DotNet/`
   - `src/Tungsten/dotnet/Tungsten.DotNet.Tests/`
