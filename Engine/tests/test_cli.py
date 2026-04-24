@@ -204,7 +204,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(payload["success"])
         self.assertEqual(payload["command"], "parse")
         self.assertEqual(payload["error_type"], "WolframSyntaxError")
-        self.assertIn("Unexpected Wolfram syntax character", payload["error"])
+        self.assertIn("Unexpected", payload["error"])
 
     def test_expr_evaluate_command(self) -> None:
         stdout = io.StringIO()

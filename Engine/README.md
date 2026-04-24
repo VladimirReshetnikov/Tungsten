@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T18:08:06Z
-- Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
+- Updated (UTC): 2026-04-24T19:00:45Z
+- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -122,9 +122,13 @@ The current workspace is built around seven complementary capabilities:
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
    `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot`, array and sequence builders
    such as `Array`, `Range`, `Partition`, and `BlockMap`, search and de-duplication heads such as
-   `FirstCase`, `Position`, and `DeleteDuplicates`, plus `Pick`, `Select`, `Discard`,
-   `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`,
-   `Association`, `Lookup`, and `KeyTake`.
+   `FirstCase`, `Position`, and `DeleteDuplicates`, byte and character heads such as `ByteArray`,
+   `BaseEncode`, `BaseDecode`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`,
+   `StringInsert`, `StringReverse`, string-pattern heads such as `StringMatchQ`, `StringFreeQ`,
+   `StringStartsQ`, `StringEndsQ`, `StringPosition`, `StringContainsQ`, `StringCases`, and
+   `StringReplace`, `ToCharacterCode`, and `StringToByteArray`, plus `Pick`, `Select`,
+   `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
+   `MapAt`, `Association`, `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
@@ -137,7 +141,7 @@ The current workspace is built around seven complementary capabilities:
 
 - Environment discovery for the local Wolfram installation, documentation roots, bundled Python
   client tree, and default index path.
-- Automatic `mathpass` deduplication before kernel execution.
+- Automatic `mathpass` deduplication plus launch-gate / process-scan handling before kernel execution.
 - Structured kernel evaluation with timing, messages, printed output capture, and explicit success
   metadata.
 - Structural notebook inspection, notebook creation, and JSON patch application.

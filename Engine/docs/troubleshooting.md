@@ -4,8 +4,8 @@
 - Audience: Tungsten users and maintainers diagnosing local-environment, kernel, FrontEnd, assistant, or parser failures
 - Scope: `src/Tungsten` runtime behavior on a local Windows machine
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-24T16:50:02Z
-- Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+- Updated (UTC): 2026-04-24T19:00:45Z
+- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -111,6 +111,13 @@ works around that by writing a temporary deduplicated copy and invoking:
 wolfram.exe -noprompt -pwfile <temporary-copy> -script <wrapper>
 ```
 
+Tungsten also now:
+
+- serializes its own kernel launches through a machine-wide launch gate;
+- records the observed controlling-process ceiling from successful runs;
+- scans existing Wolfram-related processes before launch;
+- cleans up orphaned Tungsten-owned headless kernels from obviously stale prior runs.
+
 ### What to inspect
 
 The kernel result payload includes:
@@ -121,11 +128,24 @@ The kernel result payload includes:
 - `mathpass.unique_entry_count`
 - `mathpass.duplicate_entry_count`
 - `used_mathpass_workaround`
+- `license_processes`
+- `max_license_processes`
+- `cached_max_license_processes`
+- `launch_gate_wait_seconds`
+- `license_wait_seconds`
+- `license_wait_satisfied`
+- `cleaned_tungsten_processes`
+- `observed_wolfram_processes`
 
 ### What to expect
 
 - `used_mathpass_workaround` will typically be `true` on this machine.
 - The deduplicated temporary file is intentional and not an error condition.
+- If `observed_wolfram_processes` contains old headless `wolfram.exe` / `WolframKernel.exe`
+  entries, they may be consuming scarce controlling-process seats.
+- On this machine, successful live runs report `max_license_processes = 2`, so a single orphaned
+  batch kernel plus one fresh launch is enough to exhaust the seat budget for any additional
+  concurrent launch.
 
 ## Problem: FrontEnd operations fail
 

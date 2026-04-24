@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-24T16:50:02Z
-- Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+- Updated (UTC): 2026-04-24T19:00:45Z
+- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
 
 ## What this docs tree is for
 
@@ -84,6 +84,7 @@ The docs are split so readers can choose the right depth:
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
 | [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
+| [reports/2026-04-24-license-seat-investigation.md](reports/2026-04-24-license-seat-investigation.md) | Investigation report for intermittent license-seat failures, ghost/orphaned Wolfram processes, and Tungsten's launch-gate mitigation. |
 
 ## Suggested learning path by task
 

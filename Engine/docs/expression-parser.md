@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T16:50:02Z
-Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+Updated (UTC): 2026-04-24T19:00:45Z
+Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
 
 ## Summary
 
@@ -21,9 +21,14 @@ Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
   `FixedPoint`, `Fold`, `MapApply`, `MapAll`, `MapIndexed`, `Through`, `Thread`, `Outer`,
   `Inner`, `Dot`, array and matrix builders such as `Array`, `Range`, `UnitVector`,
   `IdentityMatrix`, and `DiagonalMatrix`, sequence transforms such as `Partition`, `BlockMap`,
-  `TakeList`, `TakeDrop`, `FoldWhile`, `FoldPair`, `Position`, `DeleteDuplicates`, `Pick`,
-  `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
-  `ReplacePart`, association constructors, key accessors, and related exact-position transforms;
+  `TakeList`, `TakeDrop`, `FoldWhile`, `FoldPair`, `Position`, `DeleteDuplicates`, byte and
+  character heads such as `ByteArray`, `BaseEncode`, `BaseDecode`, `Characters`,
+  `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`, `StringReverse`,
+  string-pattern heads such as `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
+  `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`, `ToCharacterCode`,
+  `FromCharacterCode`, `StringToByteArray`, and `ByteArrayToString`, `Pick`, `Select`,
+  `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
+  association constructors, key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -58,11 +63,13 @@ The parser currently handles:
 - function application `head[arg1, arg2]`;
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
-- common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, `patt /; test`, and `a | b`;
+- common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, `x : patt`, `patt /; test`,
+  and `a | b`;
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
-- structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, and `.`;
+- structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, `.`, string concatenation
+  `<>`, string-pattern concatenation `~~`, and repetition suffixes `..` / `...`;
 - rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
   `x_ :> rhs /; test`;
 - comparisons and boolean operators;
@@ -86,6 +93,9 @@ The parser currently handles:
 - `RowBox`-based association examples from the installed `Association.nb` reference page,
   including `\[Rule]`, `\[RuleDelayed]`, `\[LeftAssociation]`, and `\[RightAssociation]`
   tokens plus nested part syntax such as `<|a -> x|>[[Key[b]]]`.
+- common symbolic string-pattern forms such as `StringExpression`, `StartOfString`,
+  `EndOfString`, `DigitCharacter`, `LetterCharacter`, `WhitespaceCharacter`, `WordCharacter`,
+  `CharacterRange["a", "z"]`, and `Whitespace`.
 - string literals that contain inline-box escape sequences.
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
@@ -100,6 +110,21 @@ The currently supported pattern subset is intentionally bounded:
 - not yet supported: named sequence patterns such as `x__` or `Pattern[x, BlankSequence[]]`,
   multiple `__` / `___` patterns in the same argument list, `PatternTest`, `Optional`,
   options-related pattern forms, and other advanced matching constructs.
+
+The current string-pattern subset is also intentionally bounded:
+
+- supported: literal strings, `StringExpression` / `~~`, anonymous `_`, `__`, and `___`,
+  `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures via `x : patt`,
+  `Alternatives`, `Condition` / `/;`, `HoldPattern`, `Except` over a supported one-character
+  subpattern, `CharacterRange`, `Whitespace`, and the common symbolic character classes and
+  zero-width anchors listed above;
+- string-pattern matches are leftmost-first, `StringCases` remains non-overlapping, and
+  `StringPosition` keeps Wolfram's default overlapping behavior;
+- Tungsten currently allows at most one unbounded string-pattern element per containing
+  `StringExpression`;
+- not yet supported: `Shortest`, `Longest`, `PatternTest`, `RegularExpression`, `Optional`,
+  named sequence captures such as `x : __`, qualified blank shorthand such as `_DigitCharacter`
+  or `__DigitCharacter`, and multi-character `Except[...]` subpatterns such as `Except["ab"]`.
 
 ## Parsing forms
 
@@ -258,6 +283,14 @@ Convenience entrypoints include:
 - `append(expr, item)`
 - `prepend(expr, item)`
 - `join(expr1, expr2, ...)`
+- `string_length(expr)`
+- `string_take(expr, spec)`
+- `string_drop(expr, spec)`
+- `string_join(expr1, expr2, ...)`
+- `string_insert(expr, item, positions)`
+- `string_reverse(expr)`
+- `string_position(expr, pattern, limit=None)`
+- `string_contains_q(expr, pattern)`
 - `reverse(expr)`
 - `rotate_left(expr, n=1)`
 - `rotate_right(expr, n=1)`
@@ -293,6 +326,7 @@ $env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
 python -m tungsten expr parse --code "1 + 2 x^3"
 python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
 python -m tungsten expr parse --code "f @ x // g" --form standard
+python -m tungsten expr parse --code "\"a\" <> \"b\" <> \"c\""
 ```
 
 Structurally evaluate implemented built-ins:
@@ -321,6 +355,13 @@ python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
 python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
+python -m tungsten expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
+python -m tungsten expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
+python -m tungsten expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~~ \"g\"]"
+python -m tungsten expr evaluate --code "StringCases[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
+python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
+python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
+python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 ```
 
 The parse payload includes:
@@ -379,6 +420,10 @@ Tungsten currently implements a broader structural subset that includes:
 - sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
   `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplaceAt`,
   `ReplacePart`, `Apply`, `Map`, and `MapAt`;
+- string structural sequence heads such as `StringLength`, `StringTake`, `StringDrop`,
+  `StringJoin`, `StringInsert`, and `StringReverse`, plus symbolic string-pattern heads such as
+  `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`, `StringPosition`,
+  `StringContainsQ`, `StringCases`, and `StringReplace`;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -408,6 +453,14 @@ Examples:
   `<|"Element" -> {2, 3}, "Index" -> {3, 4}|>`;
 - `Discard[<|a -> 1, b -> x, c -> 2|>, IntegerQ, 1]` evaluates to `<|b -> x, c -> 2|>`;
 - `TakeWhile[f[2, 4, 6, 7, 8], EvenQ]` evaluates to `f[2, 4, 6]`;
+- `StringJoin[{"a", {"b", "c"}}]` evaluates to `"abc"`, and `"a" <> "b" <> "c"` parses to
+  nested `StringJoin[...]` calls before evaluating to `"abc"`;
+- `StringMatchQ["catalog", "c" ~~ __ ~~ "g"]` evaluates to `True`;
+- `StringCases["abc123def", x : DigitCharacter.. :> "[" <> x <> "]"]` evaluates to `{"[123]"}`;
+- `StringReplace["abc123def", x : DigitCharacter.. :> "[" <> x <> "]"]` evaluates to
+  `"abc[123]def"`;
+- `StringPosition["ababa", "a" ~~ __ ~~ "a"]` evaluates to `{{1, 5}, {3, 5}}`;
+- `Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]` evaluates to `{"ab", "ba"}`;
 - `Mod[-14, 5]` evaluates to `1`;
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;
 - `KroneckerDelta[3, 3, 3]` evaluates to `1`;

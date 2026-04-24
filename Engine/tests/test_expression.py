@@ -98,6 +98,15 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(escaped.to_full_form(), "Function[x, Plus[x, x]]")
         self.assertEqual(nested_named.to_full_form(), "Function[x, Function[y, x[y]]]")
 
+    def test_parse_string_pattern_operators_and_named_patterns(self) -> None:
+        concatenation = parse_input_form('"a" ~~ DigitCharacter.. ~~ EndOfString')
+        named_capture = parse_input_form('x : DigitCharacter..')
+        self.assertEqual(
+            concatenation.to_full_form(),
+            'StringExpression[StringExpression["a", Repeated[DigitCharacter]], EndOfString]',
+        )
+        self.assertEqual(named_capture.to_full_form(), "Pattern[x, Repeated[DigitCharacter]]")
+
     def test_parse_structural_operator_forms(self) -> None:
         same_q = parse_input_form("a === b")
         unsame_q = parse_input_form("a =!= b")
@@ -105,12 +114,14 @@ class ExpressionParserTests(unittest.TestCase):
         right_composition = parse_input_form("f /* g")
         map_apply = parse_input_form("f @@@ xs")
         dot_expr = parse_input_form("{a, b} . {c, d}")
+        string_join = parse_input_form('"a" <> "b" <> "c"')
         self.assertEqual(same_q.to_full_form(), "SameQ[a, b]")
         self.assertEqual(unsame_q.to_full_form(), "UnsameQ[a, b]")
         self.assertEqual(composition.to_full_form(), "Composition[f, g]")
         self.assertEqual(right_composition.to_full_form(), "RightComposition[f, g]")
         self.assertEqual(map_apply.to_full_form(), "MapApply[f, xs]")
         self.assertEqual(dot_expr.to_full_form(), "Dot[List[a, b], List[c, d]]")
+        self.assertEqual(string_join.to_full_form(), 'StringJoin[StringJoin["a", "b"], "c"]')
 
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
@@ -302,6 +313,24 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         self.assertEqual(
             expr.to_full_form(),
             "ReplaceAll[List[6, -7, 3, 2, -1, -2], Rule[Condition[Pattern[x, Blank[]], Less[x, 0]], w]]",
+        )
+
+    def test_string_expression_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("StringExpression.nb", 95944117)
+        expr = parse_standard_form(source)
+        self.assertEqual(expr.to_full_form(), 'StringExpression["ab", Blank[]]')
+
+    def test_string_contains_q_repeated_digit_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("StringContainsQ.nb", 59481413)
+        expr = parse_standard_form(source)
+        self.assertEqual(expr.to_full_form(), 'StringContainsQ["a1 and a2", Repeated[DigitCharacter]]')
+
+    def test_string_position_startofstring_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("StringEndsQ.nb", 1560366778)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            'StringPosition["agaatcgagttgacacgaccgaaaacgacc", StringExpression[StringExpression[StringExpression[StartOfString, Pattern[x, Blank[]]], BlankSequence[]], Pattern[x, Blank[]]]]',
         )
 
     def test_freeq_integer_example_from_docs_parses_standard_form(self) -> None:
@@ -859,6 +888,144 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(real_sign.to_full_form(), "-1")
         self.assertEqual(real_abs.to_full_form(), "7")
         self.assertEqual(ramp_value.to_full_form(), "0")
+
+    def test_byte_array_and_string_encoding_family(self) -> None:
+        byte_array_result = evaluate(parse_input_form("ByteArray[{65, 66, 67}]"))
+        byte_array_from_base64 = evaluate(parse_input_form('ByteArray["QUJD"]'))
+        byte_array_q_true = evaluate(parse_input_form('ByteArrayQ[ByteArray["QUJD"]]'))
+        byte_array_q_false = evaluate(parse_input_form("ByteArrayQ[{65, 66, 67}]"))
+        length_result = evaluate(parse_input_form('Length[ByteArray["QUJD"]]'))
+        normal_result = evaluate(parse_input_form('Normal[ByteArray["QUJD"]]'))
+        base64_encoded = evaluate(parse_input_form('BaseEncode[ByteArray[{65, 66, 67}], "Base64"]'))
+        base16_encoded = evaluate(parse_input_form('BaseEncode[ByteArray[{0, 255}], "Base16"]'))
+        base85_encoded = evaluate(parse_input_form('BaseEncode[ByteArray[{0, 0, 0, 0}], "Base85ASCII"]'))
+        base64_decoded = evaluate(parse_input_form('Normal[BaseDecode["QUJD", "Base64"]]'))
+        base16_decoded = evaluate(parse_input_form('Normal[BaseDecode["00ff", "Base16"]]'))
+        base85_decoded = evaluate(parse_input_form('Normal[BaseDecode["z", "Base85ASCII"]]'))
+        characters_result = evaluate(parse_input_form('Characters["abc"]'))
+        characters_list_result = evaluate(parse_input_form('Characters[{"ab", "c"}]'))
+        unicode_codes = evaluate(parse_input_form('ToCharacterCode[FromCharacterCode[{97, 233}]]'))
+        utf8_codes = evaluate(parse_input_form('ToCharacterCode[FromCharacterCode[{97, 233}], "UTF-8"]'))
+        ascii_codes = evaluate(parse_input_form('ToCharacterCode[FromCharacterCode[{97, 233}], "ASCII"]'))
+        from_unicode = evaluate(parse_input_form("FromCharacterCode[{97, 233}]"))
+        from_latin1 = evaluate(parse_input_form('ToCharacterCode[FromCharacterCode[{97, 233}, "ISO8859-1"]]'))
+        string_to_byte_array = evaluate(parse_input_form('StringToByteArray[FromCharacterCode[{97, 233}], "UTF-8"]'))
+        byte_array_to_string = evaluate(parse_input_form('ToCharacterCode[ByteArrayToString[ByteArray[{97, 195, 169}], "UTF-8"]]'))
+        invalid_utf8_fallback = evaluate(parse_input_form('ToCharacterCode[ByteArrayToString[ByteArray[{97, 162, 98}], "UTF-8"]]'))
+        empty_byte_array_string = evaluate(parse_input_form("ByteArrayToString[{}]"))
+        self.assertEqual(byte_array_result.to_full_form(), 'ByteArray["QUJD"]')
+        self.assertEqual(byte_array_from_base64.to_full_form(), 'ByteArray["QUJD"]')
+        self.assertEqual(byte_array_q_true.to_full_form(), "True")
+        self.assertEqual(byte_array_q_false.to_full_form(), "False")
+        self.assertEqual(length_result.to_full_form(), "3")
+        self.assertEqual(normal_result.to_full_form(), "List[65, 66, 67]")
+        self.assertEqual(base64_encoded.to_full_form(), '"QUJD"')
+        self.assertEqual(base16_encoded.to_full_form(), '"00FF"')
+        self.assertEqual(base85_encoded.to_full_form(), '"z"')
+        self.assertEqual(base64_decoded.to_full_form(), "List[65, 66, 67]")
+        self.assertEqual(base16_decoded.to_full_form(), "List[0, 255]")
+        self.assertEqual(base85_decoded.to_full_form(), "List[0, 0, 0, 0]")
+        self.assertEqual(characters_result.to_full_form(), 'List["a", "b", "c"]')
+        self.assertEqual(characters_list_result.to_full_form(), 'List[List["a", "b"], List["c"]]')
+        self.assertEqual(unicode_codes.to_full_form(), "List[97, 233]")
+        self.assertEqual(utf8_codes.to_full_form(), "List[97, 195, 169]")
+        self.assertEqual(ascii_codes.to_full_form(), "List[97, None]")
+        self.assertEqual(from_unicode.to_full_form(), '"aé"')
+        self.assertEqual(from_latin1.to_full_form(), "List[97, 233]")
+        self.assertEqual(string_to_byte_array.to_full_form(), 'ByteArray["YcOp"]')
+        self.assertEqual(byte_array_to_string.to_full_form(), "List[97, 233]")
+        self.assertEqual(invalid_utf8_fallback.to_full_form(), "List[97, 162, 98]")
+        self.assertEqual(empty_byte_array_string.to_full_form(), '""')
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('StringToByteArray[FromCharacterCode[{97, 233}], "ASCII"]'))
+
+    def test_string_structural_operations_follow_list_like_semantics(self) -> None:
+        string_length = evaluate(parse_input_form('StringLength[{"ab", "c"}]'))
+        string_take = evaluate(parse_input_form('StringTake["abcdef", {2, 5, 2}]'))
+        string_take_upto = evaluate(parse_input_form('StringTake["abc", UpTo[5]]'))
+        string_take_list = evaluate(parse_input_form('StringTake[{"abc", "def"}, 2]'))
+        string_drop = evaluate(parse_input_form('StringDrop["abcdef", {2, 5, 2}]'))
+        string_drop_upto = evaluate(parse_input_form('StringDrop["abc", UpTo[5]]'))
+        string_join = evaluate(parse_input_form('StringJoin[{"a", {"b", "c"}}]'))
+        infix_join = evaluate(parse_input_form('"a" <> "b" <> "c"'))
+        string_insert = evaluate(parse_input_form('StringInsert["abcd", "X", {2, 4}]'))
+        string_reverse = evaluate(parse_input_form('StringReverse[{"ab", "cd"}]'))
+        string_position = evaluate(parse_input_form('StringPosition["ababa", {"ba", "aba"}]'))
+        string_position_list = evaluate(parse_input_form('StringPosition[{"ab", "ba"}, "a"]'))
+        string_position_operator = evaluate(parse_input_form('StringPosition["aba"]["ababa"]'))
+        string_position_empty = evaluate(parse_input_form('StringPosition["abc", ""]'))
+        string_contains = evaluate(parse_input_form('StringContainsQ[{"ab", "cd"}, "a"]'))
+        string_contains_empty = evaluate(parse_input_form('StringContainsQ["abc", ""]'))
+        string_contains_operator = evaluate(parse_input_form('Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]'))
+        self.assertEqual(string_length.to_full_form(), "List[2, 1]")
+        self.assertEqual(string_take.to_full_form(), '"bd"')
+        self.assertEqual(string_take_upto.to_full_form(), '"abc"')
+        self.assertEqual(string_take_list.to_full_form(), 'List["ab", "de"]')
+        self.assertEqual(string_drop.to_full_form(), '"acef"')
+        self.assertEqual(string_drop_upto.to_full_form(), '""')
+        self.assertEqual(string_join.to_full_form(), '"abc"')
+        self.assertEqual(infix_join.to_full_form(), '"abc"')
+        self.assertEqual(string_insert.to_full_form(), '"aXbcXd"')
+        self.assertEqual(string_reverse.to_full_form(), 'List["ba", "dc"]')
+        self.assertEqual(string_position.to_full_form(), "List[List[1, 3], List[2, 3], List[3, 5], List[4, 5]]")
+        self.assertEqual(string_position_list.to_full_form(), "List[List[List[1, 1]], List[List[2, 2]]]")
+        self.assertEqual(string_position_operator.to_full_form(), "List[List[1, 3], List[3, 5]]")
+        self.assertEqual(string_position_empty.to_full_form(), "List[List[1, 0], List[2, 1], List[3, 2], List[4, 3]]")
+        self.assertEqual(string_contains.to_full_form(), "List[True, False]")
+        self.assertEqual(string_contains_empty.to_full_form(), "True")
+        self.assertEqual(string_contains_operator.to_full_form(), 'List["ab", "ba"]')
+
+    def test_string_pattern_functions_support_bounded_symbolic_string_patterns(self) -> None:
+        match_q = evaluate(parse_input_form('StringMatchQ["catalog", "c" ~~ __ ~~ "g"]'))
+        free_q = evaluate(parse_input_form('StringFreeQ["catalog", DigitCharacter..]'))
+        match_empty_null = evaluate(parse_input_form('StringMatchQ["", ___]'))
+        match_empty_non_null = evaluate(parse_input_form('StringMatchQ["", __]'))
+        contains_named = evaluate(parse_input_form('StringContainsQ["abbcbccaabbabccaa", x_ ~~ x_]'))
+        starts_q = evaluate(parse_input_form('StringStartsQ["  a", WhitespaceCharacter.. ~~ LetterCharacter]'))
+        ends_q = evaluate(parse_input_form('StringEndsQ["co2x", DigitCharacter ~~ LetterCharacter..]'))
+        positions = evaluate(parse_input_form('StringPosition["catalogcat", "c" ~~ __ ~~ "t"]'))
+        cases_digits = evaluate(parse_input_form('StringCases["abc123def45", DigitCharacter..]'))
+        cases_empty_null = evaluate(parse_input_form('StringCases["", ___]'))
+        cases_empty_non_null = evaluate(parse_input_form('StringCases["", __]'))
+        cases_named = evaluate(parse_input_form('StringCases["abbcbccaabbabccaa", x_ ~~ x_]'))
+        cases_transformed = evaluate(parse_input_form('StringCases["abc123def", x : DigitCharacter.. :> "[" <> x <> "]"]'))
+        replace_digits = evaluate(parse_input_form('StringReplace["abc123def", x : DigitCharacter.. :> "[" <> x <> "]"]'))
+        replace_non_string = evaluate(parse_input_form('StringReplace["abc123", DigitCharacter.. -> tag]'))
+        starts_operator = evaluate(parse_input_form('Select[{"ab", "cd", "bc"}, StringStartsQ["a"]]'))
+        ends_operator = evaluate(parse_input_form('Select[{"ab", "ca", "za"}, StringEndsQ["a"]]'))
+        equivalent_whitespace = evaluate(parse_input_form('StringMatchQ["  a", Whitespace ~~ LetterCharacter]'))
+        character_range = evaluate(parse_input_form('StringMatchQ["abc", CharacterRange["a", "z"]..]'))
+        except_chars = evaluate(parse_input_form('StringCases["abc", Except["b"]]'))
+
+        self.assertEqual(match_q.to_full_form(), "True")
+        self.assertEqual(free_q.to_full_form(), "True")
+        self.assertEqual(match_empty_null.to_full_form(), "True")
+        self.assertEqual(match_empty_non_null.to_full_form(), "False")
+        self.assertEqual(contains_named.to_full_form(), "True")
+        self.assertEqual(starts_q.to_full_form(), "True")
+        self.assertEqual(ends_q.to_full_form(), "True")
+        self.assertEqual(positions.to_full_form(), "List[List[1, 10], List[8, 10]]")
+        self.assertEqual(cases_digits.to_full_form(), 'List["123", "45"]')
+        self.assertEqual(cases_empty_null.to_full_form(), 'List[""]')
+        self.assertEqual(cases_empty_non_null.to_full_form(), "List[]")
+        self.assertEqual(cases_named.to_full_form(), 'List["bb", "cc", "aa", "bb", "cc", "aa"]')
+        self.assertEqual(cases_transformed.to_full_form(), 'List["[123]"]')
+        self.assertEqual(replace_digits.to_full_form(), '"abc[123]def"')
+        self.assertEqual(replace_non_string.to_full_form(), 'StringExpression["abc", tag]')
+        self.assertEqual(starts_operator.to_full_form(), 'List["ab"]')
+        self.assertEqual(ends_operator.to_full_form(), 'List["ca", "za"]')
+        self.assertEqual(equivalent_whitespace.to_full_form(), "True")
+        self.assertEqual(character_range.to_full_form(), "True")
+        self.assertEqual(except_chars.to_full_form(), 'List["a", "c"]')
+
+    def test_string_pattern_subset_rejects_unsupported_shapes(self) -> None:
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('StringContainsQ["ababa", ___ ~~ "b" ~~ ___]'))
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('StringCases["123", x : __]'))
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('StringCases["abc", Except["ab"]]'))
 
     def test_integer_division_extrema_clipping_and_delta_functions(self) -> None:
         mod_two = evaluate(parse_input_form("Mod[-14, 5]"))
