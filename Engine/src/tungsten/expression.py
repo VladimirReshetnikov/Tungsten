@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import bz2
+import csv
 from dataclasses import dataclass
+import gzip
+import io
+import json
+import math
+import re
 from typing import Callable, Iterable, Sequence
 
 from .wolfram_strings import has_inline_boxes
@@ -931,6 +938,341 @@ def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> Stri
     return string(_decode_bytes_to_string(bytes(byte_values), encoding_name))
 
 
+def _normalize_import_export_format_name(value: Expr, function_name: str) -> str:
+    if not isinstance(value, String):
+        raise WolframEvaluationError(f"{function_name} expects the format name to be a string.")
+    normalized = _IMPORT_EXPORT_FORMAT_NAMES.get(value.value.strip().lower())
+    if normalized is None:
+        supported = ", ".join(f'"{name}"' for name in sorted(set(_IMPORT_EXPORT_FORMAT_NAMES.values())))
+        raise WolframEvaluationError(f"{function_name} currently supports only {supported}.")
+    return normalized
+
+
+def _normalize_import_export_format_spec(value: Expr, function_name: str) -> _ImportExportFormatSpec:
+    if isinstance(value, String):
+        return _ImportExportFormatSpec(_normalize_import_export_format_name(value, function_name))
+    if isinstance(value, Call) and value.has_head("List") and len(value.arguments) == 2:
+        outer_name = _normalize_import_export_format_name(value.arguments[0], function_name)
+        if outer_name not in _COMPRESSED_FORMAT_NAMES:
+            raise WolframEvaluationError(
+                f"{function_name} currently supports list format specifications only for compression wrappers such as {{\"GZIP\", \"Text\"}}."
+            )
+        return _ImportExportFormatSpec(
+            outer_name,
+            _normalize_import_export_format_spec(value.arguments[1], function_name),
+        )
+    raise WolframEvaluationError(
+        f"{function_name} expects a format string or a compression-wrapper format specification."
+    )
+
+
+def _raw_bytes_to_string(data: bytes) -> String:
+    return string("".join(chr(byte) for byte in data))
+
+
+def _raw_string_to_bytes(value: Expr | str, function_name: str) -> bytes:
+    text = value.value if isinstance(value, String) else value
+    byte_values: list[int] = []
+    for character in text:
+        code_point = ord(character)
+        if code_point < 0 or code_point > 255:
+            raise WolframEvaluationError(
+                f"{function_name} raw string data currently expects characters with code points between 0 and 255."
+            )
+        byte_values.append(code_point)
+    return bytes(byte_values)
+
+
+def _expr_to_byte_values(expr: Expr, function_name: str) -> tuple[int, ...]:
+    if isinstance(expr, ByteArrayExpr):
+        return expr.values
+    if isinstance(expr, Call) and expr.has_head("List"):
+        values = _integer_values(expr.arguments)
+        if values is None:
+            raise WolframEvaluationError(f"{function_name} expects a byte list or a ByteArray.")
+        return byte_array_expr(values).values
+    raise WolframEvaluationError(f"{function_name} expects a byte list or a ByteArray.")
+
+
+def _real_from_float(value: float, function_name: str) -> Real:
+    if not math.isfinite(value):
+        raise WolframEvaluationError(f"{function_name} does not currently support infinite or indeterminate real values.")
+    text = format(value, ".15g")
+    if "E" in text:
+        text = text.replace("E", "e")
+    if "e" not in text and "." not in text:
+        text += "."
+    return real(text)
+
+
+def _json_to_expr(data: object, *, raw_json: bool) -> Expr:
+    if isinstance(data, _JsonObjectPairs):
+        entries = [
+            _AssociationEntry(rule_head="Rule", key=string(key), value=_json_to_expr(value, raw_json=raw_json))
+            for key, value in data.pairs
+        ]
+        if raw_json:
+            return _association_expr(entries)
+        return list_expr(*(entry.to_expr() for entry in entries))
+    if data is None:
+        return symbol("Null")
+    if isinstance(data, bool):
+        return _bool_symbol(data)
+    if isinstance(data, int):
+        return integer(data)
+    if isinstance(data, float):
+        return _real_from_float(data, "ImportString")
+    if isinstance(data, str):
+        return string(data)
+    if isinstance(data, list):
+        return list_expr(*(_json_to_expr(item, raw_json=raw_json) for item in data))
+    raise WolframEvaluationError("Unsupported JSON value encountered during import.")
+
+
+def _rule_sequence_entries(expr: Expr) -> tuple[_AssociationEntry, ...] | None:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return None
+    entries: list[_AssociationEntry] = []
+    for item in expr.arguments:
+        entry = _rule_entry(item)
+        if entry is None:
+            return None
+        entries.append(entry)
+    return tuple(entries)
+
+
+def _expr_to_json_value(expr: Expr, function_name: str, *, raw_json: bool) -> object:
+    if isinstance(expr, String):
+        return expr.value
+    if isinstance(expr, Integer):
+        return expr.value
+    if isinstance(expr, Real):
+        try:
+            value = float(expr.text.replace("*^", "e"))
+        except ValueError as exc:
+            raise WolframEvaluationError(f"{function_name} could not convert {expr.to_input_form()} to a JSON number.") from exc
+        if not math.isfinite(value):
+            raise WolframEvaluationError(f"{function_name} does not currently support infinite or indeterminate JSON numbers.")
+        return value
+    if isinstance(expr, Symbol):
+        if expr.name == "True":
+            return True
+        if expr.name == "False":
+            return False
+        if expr.name == "Null":
+            return None
+        raise WolframEvaluationError(f"{function_name} does not currently support exporting the symbol {expr.name} to JSON.")
+
+    if isinstance(expr, Call) and expr.has_head("List"):
+        entries = _rule_sequence_entries(expr)
+        if entries is not None:
+            if raw_json:
+                raise WolframEvaluationError(f"{function_name} RawJSON export expects associations for JSON objects, not lists of rules.")
+            result: dict[str, object] = {}
+            for entry in entries:
+                if not isinstance(entry.key, String):
+                    raise WolframEvaluationError(f"{function_name} JSON object keys must be strings.")
+                result[entry.key.value] = _expr_to_json_value(entry.value, function_name, raw_json=raw_json)
+            return result
+        return [_expr_to_json_value(item, function_name, raw_json=raw_json) for item in expr.arguments]
+
+    association_entries = _association_entries(expr)
+    if association_entries is not None:
+        result: dict[str, object] = {}
+        for entry in association_entries:
+            if not isinstance(entry.key, String):
+                raise WolframEvaluationError(f"{function_name} JSON object keys must be strings.")
+            result[entry.key.value] = _expr_to_json_value(entry.value, function_name, raw_json=raw_json)
+        return result
+
+    raise WolframEvaluationError(f"{function_name} does not currently support exporting {expr.to_input_form()} as JSON.")
+
+
+def _import_json_string(data: str, function_name: str, *, raw_json: bool) -> Expr:
+    try:
+        parsed = json.loads(data, object_pairs_hook=lambda pairs: _JsonObjectPairs(tuple(pairs)))
+    except json.JSONDecodeError as exc:
+        raise WolframEvaluationError(f"{function_name} could not parse the JSON payload.") from exc
+    return _json_to_expr(parsed, raw_json=raw_json)
+
+
+def _export_json_string(expr: Expr, function_name: str, *, raw_json: bool) -> String:
+    value = _expr_to_json_value(expr, function_name, raw_json=raw_json)
+    return string(json.dumps(value, ensure_ascii=False, indent="\t", separators=(",", ":")))
+
+
+def _parse_tabular_atom(text: str) -> Expr:
+    stripped = text.strip()
+    if stripped == "":
+        return string("")
+    if re.fullmatch(r"[+-]?\d+", stripped):
+        return integer(int(stripped))
+    if _TABULAR_REAL_TOKEN.fullmatch(stripped):
+        normalized = stripped.replace("*^", "e").replace("D", "e").replace("d", "e")
+        try:
+            return _real_from_float(float(normalized), "ImportString")
+        except ValueError:
+            pass
+    return string(text)
+
+
+def _import_delimited_string(data: str, delimiter: str) -> Expr:
+    rows: list[Expr] = []
+    reader = csv.reader(io.StringIO(data), delimiter=delimiter)
+    for row in reader:
+        rows.append(list_expr(*(_parse_tabular_atom(field) for field in row)))
+    return list_expr(*rows)
+
+
+def _import_table_string(data: str) -> Expr:
+    rows: list[Expr] = []
+    for line in data.splitlines():
+        if line.strip() == "":
+            rows.append(list_expr())
+            continue
+        rows.append(list_expr(*(_parse_tabular_atom(field) for field in line.split())))
+    return list_expr(*rows)
+
+
+def _tabular_export_rows(expr: Expr, function_name: str) -> list[list[str]]:
+    def render_field(field: Expr) -> str:
+        if isinstance(field, String):
+            return field.value
+        return field.to_input_form()
+
+    if isinstance(expr, Call) and expr.has_head("List"):
+        if not expr.arguments:
+            return []
+        if all(not (isinstance(item, Call) and item.has_head("List")) for item in expr.arguments):
+            return [[render_field(item)] for item in expr.arguments]
+
+        rows: list[list[str]] = []
+        for row in expr.arguments:
+            if not isinstance(row, Call) or not row.has_head("List"):
+                raise WolframEvaluationError(f"{function_name} expects either a flat list or a list of rows.")
+            rows.append([render_field(item) for item in row.arguments])
+        return rows
+
+    return [[render_field(expr)]]
+
+
+def _export_delimited_string(expr: Expr, delimiter: str, function_name: str) -> String:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, delimiter=delimiter, lineterminator="\n")
+    writer.writerows(_tabular_export_rows(expr, function_name))
+    return string(output.getvalue())
+
+
+def _export_table_string(expr: Expr, function_name: str) -> String:
+    rows = _tabular_export_rows(expr, function_name)
+    return string("\n".join("\t".join(row) for row in rows))
+
+
+def export_string(expr: Expr, format_value: Expr) -> String:
+    spec = _normalize_import_export_format_spec(format_value, "ExportString")
+    if spec.inner is not None:
+        return _raw_bytes_to_string(export_byte_array(expr, format_value).values)
+
+    if spec.name == "Text":
+        return expr if isinstance(expr, String) else string(expr.to_input_form())
+    if spec.name == "String":
+        return expr if isinstance(expr, String) else string(expr.to_input_form())
+    if spec.name == "Byte":
+        return _raw_bytes_to_string(bytes(_expr_to_byte_values(expr, "ExportString")))
+    if spec.name == "JSON":
+        return _export_json_string(expr, "ExportString", raw_json=False)
+    if spec.name == "RawJSON":
+        return _export_json_string(expr, "ExportString", raw_json=True)
+    if spec.name == "CSV":
+        return _export_delimited_string(expr, ",", "ExportString")
+    if spec.name == "TSV":
+        return _export_delimited_string(expr, "\t", "ExportString")
+    if spec.name == "Table":
+        return _export_table_string(expr, "ExportString")
+    if spec.name == "WL":
+        return string(expr.to_input_form())
+    raise WolframEvaluationError(f"Unsupported ExportString format: {spec.name}.")
+
+
+def import_string_expr(data: Expr, format_value: Expr) -> Expr:
+    if not isinstance(data, String):
+        raise WolframEvaluationError("ImportString expects the source data to be a string.")
+    spec = _normalize_import_export_format_spec(format_value, "ImportString")
+    if spec.inner is not None:
+        compressed = _raw_string_to_bytes(data, "ImportString")
+        return import_byte_array(byte_array_expr(compressed), format_value)
+
+    if spec.name == "Text" or spec.name == "String":
+        return data
+    if spec.name == "Byte":
+        return list_expr(*(integer(value) for value in _raw_string_to_bytes(data, "ImportString")))
+    if spec.name == "JSON":
+        return _import_json_string(data.value, "ImportString", raw_json=False)
+    if spec.name == "RawJSON":
+        return _import_json_string(data.value, "ImportString", raw_json=True)
+    if spec.name == "CSV":
+        return _import_delimited_string(data.value, ",")
+    if spec.name == "TSV":
+        return _import_delimited_string(data.value, "\t")
+    if spec.name == "Table":
+        return _import_table_string(data.value)
+    if spec.name == "WL":
+        return parse_input_form(data.value)
+    raise WolframEvaluationError(f"Unsupported ImportString format: {spec.name}.")
+
+
+def _compress_bytes(data: bytes, format_name: str) -> bytes:
+    if format_name == "GZIP":
+        return gzip.compress(data)
+    if format_name == "BZIP2":
+        return bz2.compress(data)
+    raise WolframEvaluationError(f"Unsupported compression wrapper: {format_name}.")
+
+
+def _decompress_bytes(data: bytes, format_name: str, function_name: str) -> bytes:
+    try:
+        if format_name == "GZIP":
+            return gzip.decompress(data)
+        if format_name == "BZIP2":
+            return bz2.decompress(data)
+    except OSError as exc:
+        raise WolframEvaluationError(f"{function_name} could not decompress the {format_name} payload.") from exc
+    raise WolframEvaluationError(f"Unsupported compression wrapper: {format_name}.")
+
+
+def export_byte_array(expr: Expr, format_value: Expr) -> ByteArrayExpr:
+    spec = _normalize_import_export_format_spec(format_value, "ExportByteArray")
+    if spec.inner is not None:
+        inner_bytes = export_byte_array(expr, spec.inner.to_expr()).values
+        return byte_array_expr(_compress_bytes(bytes(inner_bytes), spec.name))
+
+    if spec.name == "Byte":
+        return byte_array_expr(_expr_to_byte_values(expr, "ExportByteArray"))
+    if spec.name == "String":
+        if isinstance(expr, String):
+            return byte_array_expr(_raw_string_to_bytes(expr, "ExportByteArray"))
+        return byte_array_expr(_raw_string_to_bytes(expr.to_input_form(), "ExportByteArray"))
+    if spec.name in _UTF8_TEXTUAL_FORMAT_NAMES:
+        return byte_array_expr(export_string(expr, format_value).value.encode("utf-8"))
+    raise WolframEvaluationError(f"Unsupported ExportByteArray format: {spec.name}.")
+
+
+def import_byte_array(data: Expr, format_value: Expr) -> Expr:
+    byte_values = _require_byte_array(data, "ImportByteArray").values
+    spec = _normalize_import_export_format_spec(format_value, "ImportByteArray")
+    if spec.inner is not None:
+        decompressed = _decompress_bytes(bytes(byte_values), spec.name, "ImportByteArray")
+        return import_byte_array(byte_array_expr(decompressed), spec.inner.to_expr())
+
+    if spec.name == "Byte":
+        return list_expr(*(integer(value) for value in byte_values))
+    if spec.name == "String":
+        return _raw_bytes_to_string(bytes(byte_values))
+    if spec.name in _UTF8_TEXTUAL_FORMAT_NAMES:
+        return import_string_expr(string(_decode_bytes_to_string(bytes(byte_values), "utf-8")), format_value)
+    raise WolframEvaluationError(f"Unsupported ImportByteArray format: {spec.name}.")
+
+
 def _string_thread(
     expr: Expr,
     function_name: str,
@@ -1116,6 +1458,22 @@ class _StringFoundMatch:
     spec: _StringPatternSpec
 
 
+@dataclass(frozen=True)
+class _ImportExportFormatSpec:
+    name: str
+    inner: _ImportExportFormatSpec | None = None
+
+    def to_expr(self) -> Expr:
+        if self.inner is None:
+            return string(self.name)
+        return list_expr(string(self.name), self.inner.to_expr())
+
+
+@dataclass(frozen=True)
+class _JsonObjectPairs:
+    pairs: tuple[tuple[str, object], ...]
+
+
 _STRING_CHARACTER_CLASS_SYMBOLS = {
     "DigitCharacter",
     "LetterCharacter",
@@ -1136,6 +1494,26 @@ _UNSUPPORTED_STRING_PATTERN_HEADS = {
     "RegularExpression",
     "Shortest",
 }
+
+_IMPORT_EXPORT_FORMAT_NAMES = {
+    "byte": "Byte",
+    "bzip2": "BZIP2",
+    "csv": "CSV",
+    "gzip": "GZIP",
+    "json": "JSON",
+    "rawjson": "RawJSON",
+    "string": "String",
+    "table": "Table",
+    "text": "Text",
+    "tsv": "TSV",
+    "wl": "WL",
+}
+
+_COMPRESSED_FORMAT_NAMES = {"GZIP", "BZIP2"}
+_UTF8_TEXTUAL_FORMAT_NAMES = {"CSV", "JSON", "RawJSON", "Table", "Text", "TSV", "WL"}
+_TABULAR_REAL_TOKEN = re.compile(
+    r"^[+-]?(?:\d+\.\d*|\.\d+|\d+(?:[eEdD][+-]?\d+)|\d+\*\^[+-]?\d+|\d+\.\d*(?:[eEdD][+-]?\d+)?|\.\d+(?:[eEdD][+-]?\d+)?)$"
+)
 
 
 def _unsupported_string_pattern(expr: Expr) -> WolframEvaluationError:
@@ -5486,6 +5864,26 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 2:
             return byte_array_to_string(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("ByteArrayToString expects a byte array and an optional encoding.")
+
+    if evaluated_head.name == "ExportString":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ExportString currently expects an expression and an explicit format specification.")
+        return export_string(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ImportString":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ImportString currently expects a string and an explicit format specification.")
+        return import_string_expr(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ExportByteArray":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ExportByteArray currently expects an expression and an explicit format specification.")
+        return export_byte_array(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ImportByteArray":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ImportByteArray currently expects a byte array and an explicit format specification.")
+        return import_byte_array(evaluated_arguments[0], evaluated_arguments[1])
 
     if evaluated_head.name == "BaseEncode":
         if len(evaluated_arguments) == 1:

@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T19:00:45Z
-Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
+Updated (UTC): 2026-04-24T20:06:49Z
+Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
 
 ## Summary
 
@@ -26,8 +26,9 @@ Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
   `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`, `StringReverse`,
   string-pattern heads such as `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`, `ToCharacterCode`,
-  `FromCharacterCode`, `StringToByteArray`, and `ByteArrayToString`, `Pick`, `Select`,
-  `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
+  `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
+  `ExportString`, `ImportByteArray`, and `ExportByteArray`, `Pick`, `Select`, `Discard`,
+  `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
   association constructors, key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
@@ -36,7 +37,9 @@ The important constraint is deliberate: this is not a replacement for the Wolfra
 symbols stay inert, and Tungsten only evaluates the specific built-ins it implements itself.
 
 For the exact supported structural function list, supported forms, and official Wolfram reference
-links, read [expression-function-support.md](./expression-function-support.md).
+links, read [expression-function-support.md](./expression-function-support.md). For the supported
+offline import / export format subset and its data-shape rules, read
+[import-export-formats.md](./import-export-formats.md).
 
 ## When to use this subsystem
 
@@ -361,6 +364,8 @@ python -m tungsten expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~
 python -m tungsten expr evaluate --code "StringCases[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
 python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
 python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
+python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1}\", \"JSON\"]"
+python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 ```
 
@@ -424,6 +429,9 @@ Tungsten currently implements a broader structural subset that includes:
   `StringJoin`, `StringInsert`, and `StringReverse`, plus symbolic string-pattern heads such as
   `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`, `StringPosition`,
   `StringContainsQ`, `StringCases`, and `StringReplace`;
+- practical kernel-free import / export heads such as `ImportString`, `ExportString`,
+  `ImportByteArray`, and `ExportByteArray` over a documented subset of text, JSON, tabular, raw
+  byte, and compression-wrapper formats;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -460,6 +468,9 @@ Examples:
 - `StringReplace["abc123def", x : DigitCharacter.. :> "[" <> x <> "]"]` evaluates to
   `"abc[123]def"`;
 - `StringPosition["ababa", "a" ~~ __ ~~ "a"]` evaluates to `{{1, 5}, {3, 5}}`;
+- `ImportString["{\"a\":1}", "JSON"]` evaluates to `{"a" -> 1}`;
+- `ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {"GZIP", "CSV"}], {"GZIP", "CSV"}]`
+  evaluates to `{{1, 2}, {3, 4}}`;
 - `Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]` evaluates to `{"ab", "ba"}`;
 - `Mod[-14, 5]` evaluates to `1`;
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;

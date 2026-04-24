@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T19:00:45Z
-- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
+- Updated (UTC): 2026-04-24T20:06:49Z
+- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -395,6 +395,9 @@ python -m tungsten expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~
 python -m tungsten expr evaluate --code "StringCases[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
 python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
 python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
+python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\", \"RawJSON\"]"
+python -m tungsten expr evaluate --code "ImportString[ExportString[{{1, 2}, {3, 4}}, \"CSV\"], \"CSV\"]"
+python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
@@ -444,7 +447,8 @@ The implemented inert evaluator currently covers:
   `Characters`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`,
   `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
-  `FromCharacterCode`, `StringToByteArray`, and `ByteArrayToString`
+  `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`, `ExportString`,
+  `ImportByteArray`, and `ExportByteArray`
 - `Pick`
 - `First`
 - `Last`

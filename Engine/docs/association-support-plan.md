@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
 - Scope: Association parsing and structural evaluation in `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T19:01:41Z
-- Updated (UTC): 2026-04-24T19:00:45Z
-- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
+- Updated (UTC): 2026-04-24T20:06:49Z
+- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
 - Related code:
   - `src/Tungsten/src/tungsten/expression.py`
   - `src/Tungsten/tests/test_expression.py`

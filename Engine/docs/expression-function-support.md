@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T19:00:45Z
-- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
+- Updated (UTC): 2026-04-24T20:06:49Z
+- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -95,6 +95,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   symbolic string-pattern subset for `StringMatchQ`, `StringFreeQ`, `StringStartsQ`,
   `StringEndsQ`, `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`,
   operating on explicit strings and `List`-threaded lists of explicit strings without options.
+- `ImportString`, `ExportString`, `ImportByteArray`, and `ExportByteArray` currently support only
+  explicit two-argument forms with an explicit format specification.
+- The currently supported import/export formats are `"Byte"`, `"String"`, `"Text"`, `"WL"`,
+  `"JSON"`, `"RawJSON"`, `"CSV"`, `"TSV"`, and `"Table"`, plus compression-wrapper specs
+  `{"GZIP", inner}` and `{"BZIP2", inner}`.
+- Auto-detection and general element specifications are out of scope in this pass.
 - That string-pattern subset supports literal strings, `StringExpression` / `~~`, anonymous `_`,
   `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures via
   `x : patt`, `Alternatives`, `Condition`, `HoldPattern`, `Except` over a supported
@@ -180,6 +186,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `FromCharacterCode` | `FromCharacterCode[n]`, `FromCharacterCode[{n1, ...}]`, and encoded forms `FromCharacterCode[..., "encoding"]` | Converts Unicode code points or encoded byte values back to strings. For encoded forms, Tungsten currently expects integers between `0` and `255`. | [FromCharacterCode](https://reference.wolfram.com/language/ref/FromCharacterCode) |
 | `StringToByteArray` | `StringToByteArray["string"]`, `StringToByteArray["string", "encoding"]` | Encodes strings to byte arrays, defaulting to UTF-8. Unsupported characters in a requested legacy encoding currently raise a Tungsten evaluation error instead of returning an inert expression with messages. | [StringToByteArray](https://reference.wolfram.com/language/ref/StringToByteArray) |
 | `ByteArrayToString` | `ByteArrayToString[ba]`, `ByteArrayToString[ba, "encoding"]`, plus the empty-list synonym `ByteArrayToString[{}]` | Decodes byte arrays to strings, defaulting to UTF-8. For UTF-style encodings, Tungsten follows Wolfram's practical behavior of preserving invalid raw bytes as literal code points in the resulting string. | [ByteArrayToString](https://reference.wolfram.com/language/ref/ByteArrayToString) |
+| `ImportString` | `ImportString["data", "Byte"|"String"|"Text"|"WL"|"JSON"|"RawJSON"|"CSV"|"TSV"|"Table"]` and compressed wrapper forms such as `ImportString["data", {"GZIP", "String"}]` | Imports data from a string for Tungsten's practical direct-format subset. `"JSON"` imports objects as rule lists; `"RawJSON"` imports objects as associations; `"CSV"` / `"TSV"` / `"Table"` import row lists with simple numeric recognition; compression wrappers treat the source string as raw bytes. | [ImportString](https://reference.wolfram.com/language/ref/ImportString.html) |
+| `ExportString` | `ExportString[expr, "Byte"|"String"|"Text"|"WL"|"JSON"|"RawJSON"|"CSV"|"TSV"|"Table"]` and compressed wrapper forms such as `ExportString[expr, {"GZIP", "CSV"}]` | Exports expressions through the same practical subset. `"JSON"` accepts rule-list or association objects; `"RawJSON"` expects associations; flat lists export as single-column tabular data; compression wrappers return raw byte strings. | [ExportString](https://reference.wolfram.com/language/ref/ExportString.html) |
+| `ImportByteArray` | `ImportByteArray[ba, "Byte"|"String"|"Text"|"WL"|"JSON"|"RawJSON"|"CSV"|"TSV"|"Table"]` and compressed wrapper forms such as `ImportByteArray[ba, {"BZIP2", "RawJSON"}]` | Imports from byte arrays using the same practical format subset. `"String"` maps bytes directly to character codes `0..255`; `"Text"` / `"WL"` / JSON / tabular formats decode UTF-8 first; compression wrappers decompress and then import the inner format. | [ImportByteArray](https://reference.wolfram.com/language/ref/ImportByteArray.html) |
+| `ExportByteArray` | `ExportByteArray[expr, "Byte"|"String"|"Text"|"WL"|"JSON"|"RawJSON"|"CSV"|"TSV"|"Table"]` and compressed wrapper forms such as `ExportByteArray[expr, {"GZIP", "CSV"}]` | Exports to byte arrays using the same practical subset. `"Byte"` expects a byte list or `ByteArray`; `"String"` exports raw characters with code points `0..255`; textual formats are UTF-8 encoded; compression wrappers compress the inner byte payload. | [ExportByteArray](https://reference.wolfram.com/language/ref/ExportByteArray.html) |
 | `BaseEncode` | `BaseEncode[ba]`, `BaseEncode[ba, "encoding"]` | Encodes byte arrays as `"Base64"` by default, with additional support for `"Base16"` and `"Base85ASCII"`. | [BaseEncode](https://reference.wolfram.com/language/ref/BaseEncode) |
 | `BaseDecode` | `BaseDecode["text"]`, `BaseDecode["text", "encoding"]` | Decodes supported base-encoded strings to byte arrays. Tungsten currently supports `"Base64"` by default, plus `"Base16"` and `"Base85ASCII"`, and it drops nonalphabet characters before decoding in the practical Wolfram style. | [BaseDecode](https://reference.wolfram.com/language/ref/BaseDecode) |
 | `Condition` | `Condition[patt, test]`, `patt /; test`, and top-level delayed-template guards such as `lhs :> rhs /; test` | Guards a pattern or delayed-rule template. Tungsten treats the guard as satisfied only when the substituted test reduces to explicit `True` under the shipped evaluator. | [Condition](https://reference.wolfram.com/language/ref/Condition) |
