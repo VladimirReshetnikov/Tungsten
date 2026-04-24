@@ -2,7 +2,7 @@
 live Wolfram kernel.
 
 These tests were added as part of the 2026-04-24 external consultant review.
-They fall into two groups:
+Two groups:
 
 1. ``*_current_behavior`` tests lock in what Tungsten does *today*, so that
    any accidental regression of current behavior is caught.
@@ -12,8 +12,10 @@ They fall into two groups:
    signal to remove the decorator and update the related ``*_current_behavior``
    tests accordingly.
 
-Every ``*_wolfram_target`` test has a short comment pointing at the finding ID
-in ``src/Tungsten/docs/reports/2026-04-24-parser-evaluator-kernel-parity.md``.
+Findings B1-B9 come from the original parity report
+(``2026-04-24-parser-evaluator-kernel-parity.md``); findings B10-B18 come from
+the evil-QA addendum (``2026-04-24-parser-evaluator-kernel-parity-evil-qa.md``).
+Every ``*_wolfram_target`` test has a short comment pointing at its finding ID.
 """
 from __future__ import annotations
 
@@ -271,6 +273,333 @@ class InertArithmeticBoundariesTests(unittest.TestCase):
         # Kernel: ``Length[Plus[1, 2, a]]`` = 2 after orderless flattening.
         # Tungsten leaves Plus inert so length counts the three raw args.
         self.assertEqual(_full("Length[Plus[1, 2, a]]"), "3")
+
+
+class AtPrefixPrecedenceTests(unittest.TestCase):
+    """Finding B10: the ``@`` prefix operator binds too loosely.
+
+    In Wolfram, ``f @ 1 + 2`` means ``f[1] + 2`` (the ``@`` prefix application
+    binds tighter than ``+`` and ``*``). Tungsten sets ``_AT_BP = 40``, which
+    is *lower* than ``+`` (120) and ``*`` (140), so ``f @ 1 + 2`` parses as
+    ``f[1 + 2] = f[3]``."""
+
+    def test_at_plus_current_behavior(self) -> None:
+        # Tungsten today: @ binds LOOSER than +, so f @ 1 + 2 = f[3].
+        self.assertEqual(_full("f @ 1 + 2"), "f[3]")
+
+    def test_at_times_current_behavior(self) -> None:
+        self.assertEqual(_full("f @ x * 2"), "f[Times[x, 2]]")
+
+    def test_at_right_assoc_still_works(self) -> None:
+        # Right-associative chains of @ are unaffected by the precedence bug.
+        self.assertEqual(_full("f @ g @ h @ x"), "f[g[h[x]]]")
+
+    @unittest.expectedFailure
+    def test_at_plus_wolfram_target(self) -> None:
+        # Wolfram: f @ 1 + 2 = Plus[f[1], 2] (after Orderless canonicalization).
+        # See finding B10.
+        self.assertEqual(_full("f @ 1 + 2"), "Plus[f[1], 2]")
+
+    @unittest.expectedFailure
+    def test_at_times_wolfram_target(self) -> None:
+        # Wolfram: f @ x * 2 = Times[2, f[x]].
+        self.assertEqual(_full("f @ x * 2"), "Times[2, f[x]]")
+
+
+class SpanParserTests(unittest.TestCase):
+    """Finding B11: ``;;`` parses as left-associative binary, so
+    ``1 ;; 5 ;; 2`` becomes ``Span[1, Span[5, 2]]`` instead of the Wolfram
+    canonical ``Span[1, 5, 2]``. Same root cause as B1/B7."""
+
+    def test_span_binary_current_behavior(self) -> None:
+        expr = parse_expression("1 ;; 5 ;; 2", form="input")
+        self.assertEqual(expr.to_full_form(), "Span[1, Span[5, 2]]")
+
+    def test_span_reverse_binary_current_behavior(self) -> None:
+        expr = parse_expression("5 ;; 1 ;; -1", form="input")
+        self.assertEqual(expr.to_full_form(), "Span[5, Span[1, -1]]")
+
+    def test_part_with_literal_reverse_span_current_behavior(self) -> None:
+        # Tungsten's Part with the buggy nested span returns only the first element.
+        self.assertEqual(
+            _full("{a, b, c, d, e}[[5 ;; 1 ;; -1]]"),
+            "List[e]",
+        )
+
+    def test_part_with_literal_step_span_current_behavior(self) -> None:
+        # The step is effectively ignored because of the nested shape.
+        self.assertEqual(
+            _full("{a, b, c, d, e}[[1 ;; 5 ;; 2]]"),
+            "List[a, b, c, d, e]",
+        )
+
+    def test_part_with_explicit_span_head_works(self) -> None:
+        # Using Span[...] directly bypasses the parser bug.
+        self.assertEqual(
+            _full("Part[{a, b, c, d, e}, Span[1, 5, 2]]"),
+            "List[a, c, e]",
+        )
+
+    @unittest.expectedFailure
+    def test_span_ternary_wolfram_target(self) -> None:
+        # Wolfram: 1 ;; 5 ;; 2 parses as Span[1, 5, 2]. See finding B11.
+        expr = parse_expression("1 ;; 5 ;; 2", form="input")
+        self.assertEqual(expr.to_full_form(), "Span[1, 5, 2]")
+
+    @unittest.expectedFailure
+    def test_part_reverse_span_wolfram_target(self) -> None:
+        self.assertEqual(
+            _full("{a, b, c, d, e}[[5 ;; 1 ;; -1]]"),
+            "List[e, d, c, b, a]",
+        )
+
+    @unittest.expectedFailure
+    def test_part_step_span_wolfram_target(self) -> None:
+        self.assertEqual(
+            _full("{a, b, c, d, e}[[1 ;; 5 ;; 2]]"),
+            "List[a, c, e]",
+        )
+
+
+class KeyMapEvaluationTests(unittest.TestCase):
+    """Finding B12: ``KeyMap[f, assoc]`` builds ``f[key]`` calls but never
+    re-evaluates them, so calling with a pure function or ``Identity`` leaves
+    a stale Call in each rule."""
+
+    def test_key_map_pure_fn_current_behavior(self) -> None:
+        self.assertEqual(
+            _full("KeyMap[# &, <|a -> 1, b -> 2|>]"),
+            "Association[Rule[Function[Slot[1]][a], 1], Rule[Function[Slot[1]][b], 2]]",
+        )
+
+    def test_key_map_identity_current_behavior(self) -> None:
+        self.assertEqual(
+            _full("KeyMap[Identity, <|a -> 1|>]"),
+            "Association[Rule[Identity[a], 1]]",
+        )
+
+    def test_key_map_symbol_head_passes_through(self) -> None:
+        # For a plain symbol head, no further evaluation is needed, so the
+        # bug is invisible here -- kernel also returns <|f[a] -> 1|>.
+        self.assertEqual(
+            _full("KeyMap[f, <|a -> 1|>]"),
+            "Association[Rule[f[a], 1]]",
+        )
+
+    @unittest.expectedFailure
+    def test_key_map_pure_fn_wolfram_target(self) -> None:
+        # Wolfram: ``KeyMap[# &, ...]`` returns the original association (identity
+        # on keys). See finding B12.
+        self.assertEqual(
+            _full("KeyMap[# &, <|a -> 1, b -> 2|>]"),
+            "Association[Rule[a, 1], Rule[b, 2]]",
+        )
+
+    @unittest.expectedFailure
+    def test_key_map_identity_wolfram_target(self) -> None:
+        self.assertEqual(
+            _full("KeyMap[Identity, <|a -> 1|>]"),
+            "Association[Rule[a, 1]]",
+        )
+
+
+class AssociationAsFunctionTests(unittest.TestCase):
+    """Finding B13: Wolfram associations act as functions -- ``assoc[key]``
+    returns the value for that key. Tungsten leaves the application inert,
+    which breaks the ``#name`` shorthand documented in the parser guide."""
+
+    def test_assoc_call_current_behavior(self) -> None:
+        # Tungsten: the call expression is left as-is.
+        self.assertEqual(
+            _full("<|\"name\" -> x|>[\"name\"]"),
+            'Association[Rule["name", x]]["name"]',
+        )
+
+    def test_name_shorthand_current_behavior(self) -> None:
+        # #name & [assoc] expands to assoc["name"] which also stays inert.
+        self.assertEqual(
+            _full("#name & [<|\"name\" -> x|>]"),
+            'Association[Rule["name", x]]["name"]',
+        )
+
+    def test_part_with_key_works(self) -> None:
+        # Using Part[assoc, Key[k]] or the "k" shorthand *does* work today.
+        self.assertEqual(
+            _full("<|\"name\" -> x|>[[Key[\"name\"]]]"),
+            "x",
+        )
+
+    @unittest.expectedFailure
+    def test_assoc_call_wolfram_target(self) -> None:
+        # Wolfram: assoc["key"] evaluates to the stored value. See finding B13.
+        self.assertEqual(
+            _full("<|\"name\" -> x|>[\"name\"]"),
+            "x",
+        )
+
+    @unittest.expectedFailure
+    def test_name_shorthand_wolfram_target(self) -> None:
+        self.assertEqual(
+            _full("#name & [<|\"name\" -> x|>]"),
+            "x",
+        )
+
+
+class FixedPointMaxIterationsTests(unittest.TestCase):
+    """Finding B14: ``FixedPoint[f, x, n]`` treats ``n`` as a hard error cap.
+    Wolfram treats ``n`` as a soft limit -- after n iterations, return the
+    current value without error."""
+
+    def test_fixed_point_soft_limit_current_behavior_raises(self) -> None:
+        # With n=2 and a function that never converges, Tungsten raises
+        # rather than returning the value after 2 steps.
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_expression("FixedPoint[# - 1 &, 5, 2]", form="input"))
+
+    def test_fixed_point_n_zero_current_behavior_raises(self) -> None:
+        # Even n=0 raises, where Wolfram would return the starting value 5.
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_expression("FixedPoint[# - 1 &, 5, 0]", form="input"))
+
+    def test_fixed_point_convergent_case_works(self) -> None:
+        # When convergence happens before the cap, Tungsten returns correctly.
+        self.assertEqual(_full("FixedPoint[Identity, 5, 10]"), "5")
+
+    @unittest.expectedFailure
+    def test_fixed_point_soft_limit_wolfram_target(self) -> None:
+        # Wolfram: FixedPoint[# - 1 &, 5, 2] = 3 (5 -> 4 -> 3, stop).
+        # See finding B14.
+        self.assertEqual(_full("FixedPoint[# - 1 &, 5, 2]"), "3")
+
+    @unittest.expectedFailure
+    def test_fixed_point_n_zero_wolfram_target(self) -> None:
+        # Wolfram: FixedPoint[f, x, 0] = x, no iterations.
+        self.assertEqual(_full("FixedPoint[# - 1 &, 5, 0]"), "5")
+
+
+class SequenceSplicingTests(unittest.TestCase):
+    """Finding B15: Wolfram's ``Sequence[...]`` auto-splices when it appears
+    as an argument of another call. Tungsten leaves it inert."""
+
+    def test_sequence_in_list_current_behavior(self) -> None:
+        self.assertEqual(
+            _full("{Sequence[1, 2], 3}"),
+            "List[Sequence[1, 2], 3]",
+        )
+
+    def test_sequence_in_call_current_behavior(self) -> None:
+        self.assertEqual(
+            _full("f[Sequence[1, 2], 3]"),
+            "f[Sequence[1, 2], 3]",
+        )
+
+    @unittest.expectedFailure
+    def test_sequence_in_list_wolfram_target(self) -> None:
+        # Wolfram: {Sequence[1, 2], 3} splices to {1, 2, 3}. See finding B15.
+        self.assertEqual(
+            _full("{Sequence[1, 2], 3}"),
+            "List[1, 2, 3]",
+        )
+
+    @unittest.expectedFailure
+    def test_sequence_in_call_wolfram_target(self) -> None:
+        self.assertEqual(
+            _full("f[Sequence[1, 2], 3]"),
+            "f[1, 2, 3]",
+        )
+
+
+class DoubleUnaryMinusTests(unittest.TestCase):
+    """Finding B16: parser accepts ``--5`` where Wolfram rejects it as
+    illegal syntax. Low-priority permissiveness."""
+
+    def test_double_unary_minus_current_behavior_accepts(self) -> None:
+        # Tungsten: --5 parses and evaluates to 5.
+        self.assertEqual(_full("--5"), "5")
+
+    @unittest.expectedFailure
+    def test_double_unary_minus_wolfram_target_rejects(self) -> None:
+        # Wolfram rejects --5 at parse time (it sees `--` as decrement, not
+        # a double unary negation). See finding B16.
+        with self.assertRaises((WolframSyntaxError, WolframEvaluationError)):
+            evaluate(parse_expression("--5", form="input"))
+
+
+class HoldFamilySemanticsTests(unittest.TestCase):
+    """Finding B17: ``Hold``, ``HoldComplete``, ``HoldForm``, ``Unevaluated``
+    all evaluate their arguments before wrapping them. Wolfram gives these
+    heads the HoldAll attribute, so they keep their arguments unevaluated.
+
+    Finding B18: ``ReleaseHold`` doesn't strip Hold-family heads.
+
+    These together are a single missing-feature: Tungsten has no mechanism
+    for hardcoded Hold-attribute heads. The workaround ``Function[body]`` is
+    implemented for pure functions but not for the Hold family."""
+
+    def test_hold_plus_current_behavior_evaluates(self) -> None:
+        # Tungsten evaluates 1+2 first, then wraps in Hold.
+        self.assertEqual(_full("Hold[1 + 2]"), "Hold[3]")
+
+    def test_hold_complete_current_behavior_evaluates(self) -> None:
+        self.assertEqual(_full("HoldComplete[1 + 2]"), "HoldComplete[3]")
+
+    def test_hold_form_current_behavior_evaluates(self) -> None:
+        self.assertEqual(_full("HoldForm[1 + 2]"), "HoldForm[3]")
+
+    def test_unevaluated_current_behavior_evaluates(self) -> None:
+        self.assertEqual(_full("Unevaluated[1 + 2]"), "Unevaluated[3]")
+
+    def test_release_hold_current_behavior_passthrough(self) -> None:
+        # Since Hold[1+2] already evaluates to Hold[3] in Tungsten,
+        # ReleaseHold sees Hold[3] and leaves it as ReleaseHold[Hold[3]].
+        self.assertEqual(
+            _full("ReleaseHold[Hold[1 + 2]]"),
+            "ReleaseHold[Hold[3]]",
+        )
+
+    @unittest.expectedFailure
+    def test_hold_plus_wolfram_target(self) -> None:
+        # Wolfram: Hold has HoldAll, keeps 1+2 unevaluated. See finding B17.
+        self.assertEqual(_full("Hold[1 + 2]"), "Hold[Plus[1, 2]]")
+
+    @unittest.expectedFailure
+    def test_hold_form_wolfram_target(self) -> None:
+        self.assertEqual(_full("HoldForm[1 + 2]"), "HoldForm[Plus[1, 2]]")
+
+    @unittest.expectedFailure
+    def test_release_hold_wolfram_target(self) -> None:
+        # Wolfram: ReleaseHold strips Hold and evaluates. See finding B18.
+        self.assertEqual(_full("ReleaseHold[Hold[1 + 2]]"), "3")
+
+    def test_replace_through_hold_matches_today(self) -> None:
+        # ReplaceAll traverses Hold and replaces symbols -- Tungsten and the
+        # kernel agree here today because the starting Plus[1, x] stays inert
+        # (x is unknown). Once B17 lands, the starting side changes but the
+        # result should still match.
+        self.assertEqual(
+            _full("Hold[1 + x] /. x -> 2"),
+            "Hold[Plus[1, 2]]",
+        )
+
+
+class ListableThreadingTests(unittest.TestCase):
+    """Documented behavior: Wolfram gives many heads the ``Listable`` attribute,
+    which makes them auto-thread over lists. Tungsten doesn't implement
+    attributes, so these stay inert."""
+
+    def test_sign_on_list_stays_inert(self) -> None:
+        # Wolfram: Sign[{-3, 0, 5}] = {-1, 0, 1}. Tungsten: inert.
+        self.assertEqual(_full("Sign[{-3, 0, 5}]"), "Sign[List[-3, 0, 5]]")
+
+    def test_abs_on_list_stays_inert(self) -> None:
+        self.assertEqual(_full("Abs[{-3, 4}]"), "Abs[List[-3, 4]]")
+
+    def test_plus_two_lists_stays_inert(self) -> None:
+        # Docs: Plus doesn't flatten/thread. Left as Plus[List, List].
+        self.assertEqual(
+            _full("Plus[{1, 2}, {3, 4}]"),
+            "Plus[List[1, 2], List[3, 4]]",
+        )
 
 
 class TungstenDivergenceSmokeTests(unittest.TestCase):
