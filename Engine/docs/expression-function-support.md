@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T18:20:42Z
-- Repository HEAD: dcad077d1f5fabcc31bef9998e628c916bcadfc2
+- Updated (UTC): 2026-04-24T19:00:45Z
+- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -90,11 +90,22 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   common encodings `"Unicode"`, `"UTF-8"`, `"UTF-16LE"`, `"UTF-16BE"`, `"UTF-32LE"`,
   `"UTF-32BE"`, `"ASCII"`, `"ISO8859-1"`, and `"ISO8859-15"` where they make sense, rather than
   the full Wolfram `$CharacterEncodings` surface.
-- String search and slicing are intentionally the literal-string subset in this pass: Tungsten
-  currently supports structural heads such as `StringTake`, `StringDrop`, `StringJoin`,
-  `StringInsert`, `StringReverse`, `StringPosition`, and `StringContainsQ` only for explicit
-  strings and `List`-threaded lists of explicit strings, without general symbolic string-pattern
-  semantics or options.
+- String heads are still intentionally bounded in this pass: Tungsten currently supports
+  `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`, `StringReverse`, and a pragmatic
+  symbolic string-pattern subset for `StringMatchQ`, `StringFreeQ`, `StringStartsQ`,
+  `StringEndsQ`, `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`,
+  operating on explicit strings and `List`-threaded lists of explicit strings without options.
+- That string-pattern subset supports literal strings, `StringExpression` / `~~`, anonymous `_`,
+  `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures via
+  `x : patt`, `Alternatives`, `Condition`, `HoldPattern`, `Except` over a supported
+  one-character subpattern, `CharacterRange`, `Whitespace`, and the common character classes /
+  anchors such as `DigitCharacter`, `LetterCharacter`, `WhitespaceCharacter`, `WordCharacter`,
+  `StartOfString`, and `EndOfString`.
+- Tungsten currently allows at most one unbounded string-pattern element per containing
+  `StringExpression`.
+- `Shortest`, `Longest`, `PatternTest`, `RegularExpression`, `Optional`, named sequence captures,
+  qualified blank shorthand such as `_DigitCharacter`, and multi-character `Except[...]`
+  subpatterns remain out of scope.
 - Base encodings are currently bounded to `"Base16"`, `"Base64"`, and `"Base85ASCII"`.
 - The integer-only numeric family below is also intentionally narrow: Tungsten evaluates these
   heads only when the supported arguments are already explicit integers or integer lists in the
@@ -157,8 +168,14 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `StringJoin` | `StringJoin[]`, `StringJoin["a", ...]`, `StringJoin[{...}]`, and infix `<>` | Concatenates explicit strings. Tungsten recursively flattens nested lists of strings in the practical Wolfram style before joining. | [StringJoin](https://reference.wolfram.com/language/ref/StringJoin) |
 | `StringInsert` | `StringInsert["string", "ins", pos]`, `StringInsert[{"s1", ...}, "ins", pos]` | Inserts an explicit string at one or more explicit integer positions. As in Wolfram, insertion positions refer to the original string when several insertions are requested. Lists of strings are handled elementwise. | [StringInsert](https://reference.wolfram.com/language/ref/StringInsert) |
 | `StringReverse` | `StringReverse["string"]`, `StringReverse[{"s1", ...}]` | Reverses characters in explicit strings. Lists of strings are handled elementwise. | [StringReverse](https://reference.wolfram.com/language/ref/StringReverse) |
-| `StringPosition` | `StringPosition["string", "sub"]`, `StringPosition["string", {"sub1", ...}]`, `StringPosition["string", patt, n]`, `StringPosition[{"s1", ...}, patt]`, and operator form `StringPosition[patt]` | Returns one-based inclusive `{start, end}` spans for literal substring matches. Tungsten currently supports only explicit literal-string patterns, uses Wolfram's default overlapping behavior, and threads over `List` inputs. | [StringPosition](https://reference.wolfram.com/language/ref/StringPosition) |
-| `StringContainsQ` | `StringContainsQ["string", "sub"]`, `StringContainsQ["string", {"sub1", ...}]`, `StringContainsQ[{"s1", ...}, patt]`, and operator form `StringContainsQ[patt]` | Returns `True` when a literal substring match exists. Tungsten currently supports only explicit literal-string patterns and threads over `List` inputs. | [StringContainsQ](https://reference.wolfram.com/language/ref/StringContainsQ) |
+| `StringMatchQ` | `StringMatchQ["string", patt]`, `StringMatchQ[{"s1", ...}, patt]`, and operator form `StringMatchQ[patt]` | Returns `True` when the whole string matches Tungsten's shipped string-pattern subset. Threads over `List` inputs. | [StringMatchQ](https://reference.wolfram.com/language/ref/StringMatchQ) |
+| `StringFreeQ` | `StringFreeQ["string", patt]`, `StringFreeQ[{"s1", ...}, patt]`, and operator form `StringFreeQ[patt]` | Returns `True` when no match for the shipped string-pattern subset exists anywhere in the string. Threads over `List` inputs. | [StringFreeQ](https://reference.wolfram.com/language/ref/StringFreeQ) |
+| `StringStartsQ` | `StringStartsQ["string", patt]`, `StringStartsQ[{"s1", ...}, patt]`, and operator form `StringStartsQ[patt]` | Returns `True` when a match for the shipped string-pattern subset begins at the first character. Threads over `List` inputs. | [StringStartsQ](https://reference.wolfram.com/language/ref/StringStartsQ) |
+| `StringEndsQ` | `StringEndsQ["string", patt]`, `StringEndsQ[{"s1", ...}, patt]`, and operator form `StringEndsQ[patt]` | Returns `True` when a match for the shipped string-pattern subset ends at the last character. Threads over `List` inputs. | [StringEndsQ](https://reference.wolfram.com/language/ref/StringEndsQ) |
+| `StringPosition` | `StringPosition["string", patt]`, `StringPosition["string", {patt1, ...}]`, `StringPosition["string", patt, n]`, `StringPosition[{"s1", ...}, patt]`, and operator form `StringPosition[patt]` | Returns one-based inclusive `{start, end}` spans for matches of the shipped string-pattern subset. Tungsten keeps Wolfram's default overlapping behavior and threads over `List` inputs. | [StringPosition](https://reference.wolfram.com/language/ref/StringPosition) |
+| `StringContainsQ` | `StringContainsQ["string", patt]`, `StringContainsQ["string", {patt1, ...}]`, `StringContainsQ[{"s1", ...}, patt]`, and operator form `StringContainsQ[patt]` | Returns `True` when a match for the shipped string-pattern subset exists. Threads over `List` inputs. | [StringContainsQ](https://reference.wolfram.com/language/ref/StringContainsQ) |
+| `StringCases` | `StringCases["string", patt]`, `StringCases["string", patt, n]`, `StringCases["string", patt :> rhs]`, `StringCases["string", patt -> rhs]`, `StringCases[{"s1", ...}, spec]`, and list-of-pattern / list-of-rule specs | Collects non-overlapping matches for the shipped string-pattern subset. Delayed rules bind named string captures before evaluating the replacement template. Non-string replacement results are preserved as `StringExpression[...]` pieces when needed. | [StringCases](https://reference.wolfram.com/language/ref/StringCases) |
+| `StringReplace` | `StringReplace["string", rules]`, `StringReplace["string", rules, n]`, `StringReplace[{"s1", ...}, rules]`, and flat list-of-rule forms using `->` or `:>` | Rewrites non-overlapping matches for the shipped string-pattern subset from left to right. Delayed rules bind named string captures before evaluating the replacement template, and non-string replacement results are preserved through `StringExpression[...]` when needed. | [StringReplace](https://reference.wolfram.com/language/ref/StringReplace) |
 | `ToCharacterCode` | `ToCharacterCode["string"]`, `ToCharacterCode["string", "encoding"]`, and list-of-strings forms | Converts strings to character codes. Tungsten uses Unicode code points for the default / `"Unicode"` case, byte values for the supported encoded cases, and `None` placeholders for unrepresentable characters in supported single-byte legacy encodings such as ASCII. | [ToCharacterCode](https://reference.wolfram.com/language/ref/ToCharacterCode) |
 | `FromCharacterCode` | `FromCharacterCode[n]`, `FromCharacterCode[{n1, ...}]`, and encoded forms `FromCharacterCode[..., "encoding"]` | Converts Unicode code points or encoded byte values back to strings. For encoded forms, Tungsten currently expects integers between `0` and `255`. | [FromCharacterCode](https://reference.wolfram.com/language/ref/FromCharacterCode) |
 | `StringToByteArray` | `StringToByteArray["string"]`, `StringToByteArray["string", "encoding"]` | Encodes strings to byte arrays, defaulting to UTF-8. Unsupported characters in a requested legacy encoding currently raise a Tungsten evaluation error instead of returning an inert expression with messages. | [StringToByteArray](https://reference.wolfram.com/language/ref/StringToByteArray) |

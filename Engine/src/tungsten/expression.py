@@ -184,16 +184,30 @@ class Call(Expr):
                 return "{" + ", ".join(arg.to_input_form() for arg in self.arguments) + "}"
             if head_name == "Association":
                 return "<|" + ", ".join(arg.to_input_form() for arg in self.arguments) + "|>"
+            if head_name == "StringExpression" and self.arguments:
+                return " ~~ ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "SameQ" and len(self.arguments) >= 2:
                 return " === ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "UnsameQ" and len(self.arguments) >= 2:
                 return " =!= ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "Condition" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])} /; {_wrap_infix(self.arguments[1])}"
+            if head_name == "Repeated" and len(self.arguments) == 1:
+                return f"{_wrap_infix(self.arguments[0])}.."
+            if head_name == "RepeatedNull" and len(self.arguments) == 1:
+                return f"{_wrap_infix(self.arguments[0])}..."
             if head_name == "Rule" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])} -> {_wrap_infix(self.arguments[1])}"
             if head_name == "RuleDelayed" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])} :> {_wrap_infix(self.arguments[1])}"
+            if head_name == "Pattern" and len(self.arguments) == 2 and isinstance(self.arguments[0], Symbol):
+                inner = self.arguments[1]
+                if isinstance(inner, Call) and inner.has_head("Blank"):
+                    if len(inner.arguments) == 0:
+                        return f"{self.arguments[0].to_input_form()}_"
+                    if len(inner.arguments) == 1:
+                        return f"{self.arguments[0].to_input_form()}_{inner.arguments[0].to_input_form()}"
+                return f"{self.arguments[0].to_input_form()} : {_wrap_infix(inner)}"
             if head_name == "Composition" and len(self.arguments) >= 2:
                 return " @* ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "RightComposition" and len(self.arguments) >= 2:
@@ -1081,63 +1095,699 @@ def string_reverse(expr: Expr) -> Expr:
     return _string_thread(expr, "StringReverse", lambda item: string(item.value[::-1]))
 
 
-def _string_patterns(pattern: Expr, function_name: str) -> list[str]:
-    if isinstance(pattern, String):
-        return [pattern.value]
-    if isinstance(pattern, Call) and pattern.has_head("List"):
-        values: list[str] = []
-        for item in pattern.arguments:
-            if not isinstance(item, String):
-                raise WolframEvaluationError(f"{function_name} currently supports only literal string patterns.")
-            values.append(item.value)
-        return values
-    raise WolframEvaluationError(f"{function_name} currently supports only literal string patterns.")
+@dataclass
+class _StringPatternState:
+    end: int
+    bindings: dict[str, Expr]
 
 
-def _literal_string_matches(text: str, patterns: Sequence[str], limit: int | None) -> list[tuple[int, int]]:
-    if not patterns or limit == 0:
+@dataclass(frozen=True)
+class _StringPatternSpec:
+    pattern: Expr
+    template: Expr | None
+    delayed: bool
+
+
+@dataclass
+class _StringFoundMatch:
+    start: int
+    end: int
+    bindings: dict[str, Expr]
+    spec: _StringPatternSpec
+
+
+_STRING_CHARACTER_CLASS_SYMBOLS = {
+    "DigitCharacter",
+    "LetterCharacter",
+    "WhitespaceCharacter",
+    "WordCharacter",
+}
+
+_STRING_ZERO_WIDTH_SYMBOLS = {
+    "StartOfString",
+    "EndOfString",
+}
+
+_UNSUPPORTED_STRING_PATTERN_HEADS = {
+    "Longest",
+    "Optional",
+    "OptionsPattern",
+    "PatternTest",
+    "RegularExpression",
+    "Shortest",
+}
+
+
+def _unsupported_string_pattern(expr: Expr) -> WolframEvaluationError:
+    return WolframEvaluationError(
+        f"Unsupported Wolfram string-pattern form in the current Tungsten subset: {expr.to_input_form()}."
+    )
+
+
+def _normalize_string_pattern_element(pattern: Expr) -> Expr:
+    if isinstance(pattern, Symbol) and pattern.name == "Whitespace":
+        return call("Repeated", symbol("WhitespaceCharacter"))
+    return pattern
+
+
+def _flatten_string_expression_parts(pattern: Expr) -> list[Expr]:
+    normalized = _normalize_string_pattern_element(pattern)
+    if isinstance(normalized, Call) and normalized.has_head("StringExpression"):
+        flattened: list[Expr] = []
+        for item in normalized.arguments:
+            flattened.extend(_flatten_string_expression_parts(item))
+        return flattened
+    return [normalized]
+
+
+def _is_single_character_string_class_pattern(expr: Expr) -> bool:
+    normalized = _normalize_string_pattern_element(expr)
+    if isinstance(normalized, String):
+        return len(normalized.value) == 1
+    if isinstance(normalized, Symbol):
+        return normalized.name in _STRING_CHARACTER_CLASS_SYMBOLS
+    if isinstance(normalized, Call) and isinstance(normalized.head_expr, Symbol):
+        head_name = normalized.head_expr.name
+        if head_name == "Blank":
+            return len(normalized.arguments) == 0
+        if head_name == "CharacterRange":
+            return len(normalized.arguments) == 2
+        if head_name == "HoldPattern":
+            return len(normalized.arguments) == 1 and _is_single_character_string_class_pattern(normalized.arguments[0])
+        if head_name == "Pattern":
+            return len(normalized.arguments) == 2 and _is_single_character_string_class_pattern(normalized.arguments[1])
+        if head_name == "Condition":
+            return len(normalized.arguments) == 2 and _is_single_character_string_class_pattern(normalized.arguments[0])
+        if head_name == "Alternatives":
+            return bool(normalized.arguments) and all(
+                _is_single_character_string_class_pattern(argument)
+                for argument in normalized.arguments
+            )
+        if head_name == "Except":
+            return len(normalized.arguments) == 1 and _is_single_character_string_class_pattern(normalized.arguments[0])
+    return False
+
+
+def _is_unbounded_string_pattern(expr: Expr) -> bool:
+    normalized = _normalize_string_pattern_element(expr)
+    return (
+        isinstance(normalized, Call)
+        and isinstance(normalized.head_expr, Symbol)
+        and normalized.head_expr.name in {"BlankSequence", "BlankNullSequence", "Repeated", "RepeatedNull"}
+    )
+
+
+def _character_range_bounds(pattern: Call) -> tuple[str, str]:
+    if len(pattern.arguments) != 2:
+        raise WolframEvaluationError("CharacterRange expects exactly two arguments in string patterns.")
+    start, end = pattern.arguments
+    if not isinstance(start, String) or not isinstance(end, String) or len(start.value) != 1 or len(end.value) != 1:
+        raise WolframEvaluationError("CharacterRange currently expects one-character string bounds.")
+    return start.value, end.value
+
+
+def _string_character_matches_symbol(name: str, character: str) -> bool:
+    if name == "DigitCharacter":
+        return character.isdigit()
+    if name == "LetterCharacter":
+        return character.isalpha()
+    if name == "WhitespaceCharacter":
+        return character.isspace()
+    if name == "WordCharacter":
+        return character.isalnum() or character == "_"
+    return False
+
+
+def _match_single_character_string_pattern(
+    character: str,
+    pattern: Expr,
+    bindings: dict[str, Expr],
+) -> list[dict[str, Expr]]:
+    current = dict(bindings)
+    normalized = _normalize_string_pattern_element(pattern)
+
+    if isinstance(normalized, String):
+        return [current] if normalized.value == character else []
+
+    if isinstance(normalized, Symbol):
+        if normalized.name in _STRING_CHARACTER_CLASS_SYMBOLS:
+            return [current] if _string_character_matches_symbol(normalized.name, character) else []
+        if normalized.name in _STRING_ZERO_WIDTH_SYMBOLS or normalized.name == "Whitespace":
+            raise _unsupported_string_pattern(normalized)
+        raise _unsupported_string_pattern(normalized)
+
+    if not isinstance(normalized, Call) or not isinstance(normalized.head_expr, Symbol):
+        raise _unsupported_string_pattern(normalized)
+
+    head_name = normalized.head_expr.name
+    if head_name in _UNSUPPORTED_STRING_PATTERN_HEADS:
+        raise _unsupported_string_pattern(normalized)
+
+    if head_name == "HoldPattern":
+        if len(normalized.arguments) != 1:
+            raise WolframEvaluationError("HoldPattern expects exactly one argument.")
+        return _match_single_character_string_pattern(character, normalized.arguments[0], current)
+
+    if head_name == "Alternatives":
+        matches: list[dict[str, Expr]] = []
+        for branch in normalized.arguments:
+            matches.extend(_match_single_character_string_pattern(character, branch, current))
+        return matches
+
+    if head_name == "Condition":
+        if len(normalized.arguments) != 2:
+            raise WolframEvaluationError("Condition expects exactly two arguments.")
+        matches = _match_single_character_string_pattern(character, normalized.arguments[0], current)
+        return [
+            match
+            for match in matches
+            if _condition_test_succeeds(normalized.arguments[1], match)
+        ]
+
+    if head_name == "Pattern":
+        if len(normalized.arguments) != 2:
+            raise WolframEvaluationError("Pattern expects exactly two arguments.")
+        name_expr, inner_pattern = normalized.arguments
+        if not isinstance(name_expr, Symbol):
+            raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
+        if _is_unbounded_string_pattern(inner_pattern):
+            raise _unsupported_string_pattern(normalized)
+        matches = _match_single_character_string_pattern(character, inner_pattern, current)
+        bound_value = string(character)
+        updated_matches: list[dict[str, Expr]] = []
+        for match in matches:
+            existing = match.get(name_expr.name)
+            if existing is not None and existing != bound_value:
+                continue
+            updated = dict(match)
+            updated[name_expr.name] = bound_value
+            updated_matches.append(updated)
+        return updated_matches
+
+    if head_name == "Except":
+        if len(normalized.arguments) != 1:
+            raise WolframEvaluationError("Except expects exactly one argument in string patterns.")
+        if not _is_single_character_string_class_pattern(normalized.arguments[0]):
+            raise WolframEvaluationError("String-pattern Except currently supports only single-character subpatterns.")
+        disallowed = _match_single_character_string_pattern(character, normalized.arguments[0], current)
+        return [] if disallowed else [current]
+
+    if head_name == "Blank":
+        if len(normalized.arguments) != 0:
+            raise _unsupported_string_pattern(normalized)
+        return [current]
+
+    if head_name == "CharacterRange":
+        start_char, end_char = _character_range_bounds(normalized)
+        return [current] if start_char <= character <= end_char else []
+
+    raise _unsupported_string_pattern(normalized)
+
+
+def _match_repeated_single_character_pattern(
+    pattern: Call,
+    text: str,
+    start: int,
+    bindings: dict[str, Expr],
+) -> list[_StringPatternState]:
+    head_name = pattern.head_expr.name
+    assert head_name in {"Repeated", "RepeatedNull"}
+    if len(pattern.arguments) != 1:
+        raise WolframEvaluationError(f"{head_name} expects exactly one argument in string patterns.")
+    inner = pattern.arguments[0]
+    if not _is_single_character_string_class_pattern(inner):
+        raise WolframEvaluationError(
+            f"{head_name} currently supports only single-character subpatterns in Tungsten string patterns."
+        )
+
+    states: list[_StringPatternState] = [_StringPatternState(end=start, bindings=dict(bindings))]
+    frontier: list[_StringPatternState] = [_StringPatternState(end=start, bindings=dict(bindings))]
+
+    while frontier:
+        next_frontier: list[_StringPatternState] = []
+        for state in frontier:
+            if state.end >= len(text):
+                continue
+            matches = _match_single_character_string_pattern(text[state.end], inner, state.bindings)
+            for matched_bindings in matches:
+                next_frontier.append(_StringPatternState(end=state.end + 1, bindings=matched_bindings))
+        if not next_frontier:
+            break
+        states.extend(next_frontier)
+        frontier = next_frontier
+
+    minimum_length = 0 if head_name == "RepeatedNull" else 1
+    return [
+        state
+        for state in sorted(states, key=lambda item: item.end, reverse=True)
+        if state.end - start >= minimum_length
+    ]
+
+
+def _match_string_expression_parts(
+    parts: Sequence[Expr],
+    text: str,
+    start: int,
+    bindings: dict[str, Expr],
+) -> list[_StringPatternState]:
+    normalized_parts = [_normalize_string_pattern_element(part) for part in parts]
+    unbounded_indexes = [
+        index
+        for index, item in enumerate(normalized_parts)
+        if _is_unbounded_string_pattern(item)
+    ]
+
+    if len(unbounded_indexes) > 1:
+        raise WolframEvaluationError(
+            "Tungsten currently supports at most one unbounded string-pattern element per StringExpression."
+        )
+
+    if not unbounded_indexes:
+        states = [_StringPatternState(end=start, bindings=dict(bindings))]
+        for item in normalized_parts:
+            next_states: list[_StringPatternState] = []
+            for state in states:
+                next_states.extend(_match_string_pattern_states(item, text, state.end, state.bindings))
+            if not next_states:
+                return []
+            states = next_states
+        return states
+
+    variable_index = unbounded_indexes[0]
+    prefix = normalized_parts[:variable_index]
+    suffix = normalized_parts[variable_index + 1:]
+
+    prefix_states = _match_string_expression_parts(prefix, text, start, bindings) if prefix else [
+        _StringPatternState(end=start, bindings=dict(bindings))
+    ]
+
+    results: list[_StringPatternState] = []
+    for prefix_state in prefix_states:
+        variable_states = _match_string_pattern_states(
+            normalized_parts[variable_index],
+            text,
+            prefix_state.end,
+            prefix_state.bindings,
+        )
+        for variable_state in variable_states:
+            if suffix:
+                results.extend(_match_string_expression_parts(suffix, text, variable_state.end, variable_state.bindings))
+            else:
+                results.append(variable_state)
+    return results
+
+
+def _match_string_pattern_states(
+    pattern: Expr,
+    text: str,
+    start: int,
+    bindings: dict[str, Expr] | None = None,
+) -> list[_StringPatternState]:
+    current = {} if bindings is None else dict(bindings)
+    normalized = _normalize_string_pattern_element(pattern)
+
+    if isinstance(normalized, String):
+        if text.startswith(normalized.value, start):
+            return [_StringPatternState(end=start + len(normalized.value), bindings=current)]
         return []
 
-    if any(pattern == "" for pattern in patterns):
-        matches = [(index + 1, index) for index in range(len(text) + 1)]
-        return matches if limit is None else matches[:limit]
+    if isinstance(normalized, Symbol):
+        if normalized.name == "Whitespace":
+            return _match_string_pattern_states(call("Repeated", symbol("WhitespaceCharacter")), text, start, current)
+        if normalized.name == "StartOfString":
+            return [_StringPatternState(end=start, bindings=current)] if start == 0 else []
+        if normalized.name == "EndOfString":
+            return [_StringPatternState(end=start, bindings=current)] if start == len(text) else []
+        if normalized.name in _STRING_CHARACTER_CLASS_SYMBOLS:
+            if start >= len(text):
+                return []
+            matches = _match_single_character_string_pattern(text[start], normalized, current)
+            return [_StringPatternState(end=start + 1, bindings=match) for match in matches]
+        raise _unsupported_string_pattern(normalized)
 
-    matches: list[tuple[int, int]] = []
-    for start in range(len(text)):
-        matched_interval: tuple[int, int] | None = None
-        for pattern in patterns:
-            if text.startswith(pattern, start):
-                matched_interval = (start + 1, start + len(pattern))
+    if not isinstance(normalized, Call) or not isinstance(normalized.head_expr, Symbol):
+        raise _unsupported_string_pattern(normalized)
+
+    head_name = normalized.head_expr.name
+    if head_name in _UNSUPPORTED_STRING_PATTERN_HEADS:
+        raise _unsupported_string_pattern(normalized)
+
+    if head_name == "HoldPattern":
+        if len(normalized.arguments) != 1:
+            raise WolframEvaluationError("HoldPattern expects exactly one argument.")
+        return _match_string_pattern_states(normalized.arguments[0], text, start, current)
+
+    if head_name == "StringExpression":
+        return _match_string_expression_parts(_flatten_string_expression_parts(normalized), text, start, current)
+
+    if head_name == "Alternatives":
+        matches: list[_StringPatternState] = []
+        for branch in normalized.arguments:
+            matches.extend(_match_string_pattern_states(branch, text, start, current))
+        return matches
+
+    if head_name == "Condition":
+        if len(normalized.arguments) != 2:
+            raise WolframEvaluationError("Condition expects exactly two arguments.")
+        matches = _match_string_pattern_states(normalized.arguments[0], text, start, current)
+        return [
+            state
+            for state in matches
+            if _condition_test_succeeds(normalized.arguments[1], state.bindings)
+        ]
+
+    if head_name == "Pattern":
+        if len(normalized.arguments) != 2:
+            raise WolframEvaluationError("Pattern expects exactly two arguments.")
+        name_expr, inner_pattern = normalized.arguments
+        if not isinstance(name_expr, Symbol):
+            raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
+        if _sequence_pattern_head_name(inner_pattern) is not None:
+            raise _unsupported_string_pattern(normalized)
+        matches = _match_string_pattern_states(inner_pattern, text, start, current)
+        updated_matches: list[_StringPatternState] = []
+        for state in matches:
+            bound_value = string(text[start:state.end])
+            existing = state.bindings.get(name_expr.name)
+            if existing is not None and existing != bound_value:
+                continue
+            updated_bindings = dict(state.bindings)
+            updated_bindings[name_expr.name] = bound_value
+            updated_matches.append(_StringPatternState(end=state.end, bindings=updated_bindings))
+        return updated_matches
+
+    if head_name == "Blank":
+        if len(normalized.arguments) != 0:
+            raise _unsupported_string_pattern(normalized)
+        if start >= len(text):
+            return []
+        return [_StringPatternState(end=start + 1, bindings=current)]
+
+    if head_name in {"BlankSequence", "BlankNullSequence"}:
+        if len(normalized.arguments) != 0:
+            raise _unsupported_string_pattern(normalized)
+        minimum_length = 0 if head_name == "BlankNullSequence" else 1
+        return [
+            _StringPatternState(end=end, bindings=dict(current))
+            for end in range(len(text), start + minimum_length - 1, -1)
+        ]
+
+    if head_name in {"Repeated", "RepeatedNull"}:
+        return _match_repeated_single_character_pattern(normalized, text, start, current)
+
+    if head_name == "Except":
+        if start >= len(text):
+            return []
+        matches = _match_single_character_string_pattern(text[start], normalized, current)
+        return [_StringPatternState(end=start + 1, bindings=match) for match in matches]
+
+    if head_name == "CharacterRange":
+        if start >= len(text):
+            return []
+        matches = _match_single_character_string_pattern(text[start], normalized, current)
+        return [_StringPatternState(end=start + 1, bindings=match) for match in matches]
+
+    raise _unsupported_string_pattern(normalized)
+
+
+def _normalize_string_pattern_specs(pattern: Expr, function_name: str) -> list[_StringPatternSpec]:
+    if isinstance(pattern, Call) and pattern.has_head("List"):
+        return [_StringPatternSpec(item, None, False) for item in pattern.arguments]
+    return [_StringPatternSpec(pattern, None, False)]
+
+
+def _normalize_string_cases_specs(pattern_spec: Expr) -> list[_StringPatternSpec]:
+    if isinstance(pattern_spec, Call) and pattern_spec.has_head("List"):
+        specs: list[_StringPatternSpec] = []
+        for item in pattern_spec.arguments:
+            specs.extend(_normalize_string_cases_specs(item))
+        return specs
+    if _is_replacement_rule_expr(pattern_spec):
+        assert isinstance(pattern_spec, Call)
+        pattern, template = pattern_spec.arguments
+        delayed = pattern_spec.has_head("RuleDelayed")
+        if not delayed:
+            template = evaluate(template)
+        return [_StringPatternSpec(pattern, template, delayed)]
+    return [_StringPatternSpec(pattern_spec, None, False)]
+
+
+def _normalize_string_replace_specs(rules: Expr) -> list[_StringPatternSpec]:
+    if isinstance(rules, Call) and rules.has_head("List"):
+        specs: list[_StringPatternSpec] = []
+        for item in rules.arguments:
+            specs.extend(_normalize_string_replace_specs(item))
+        return specs
+    if not _is_replacement_rule_expr(rules):
+        raise WolframEvaluationError("StringReplace expects a rule or a list of rules.")
+    assert isinstance(rules, Call)
+    pattern, template = rules.arguments
+    delayed = rules.has_head("RuleDelayed")
+    if not delayed:
+        template = evaluate(template)
+    return [_StringPatternSpec(pattern, template, delayed)]
+
+
+def _first_string_match_at(
+    text: str,
+    start: int,
+    specs: Sequence[_StringPatternSpec],
+    *,
+    require_end: bool = False,
+) -> _StringFoundMatch | None:
+    for spec in specs:
+        matches = _match_string_pattern_states(spec.pattern, text, start)
+        for match in matches:
+            if require_end and match.end != len(text):
+                continue
+            return _StringFoundMatch(start=start, end=match.end, bindings=match.bindings, spec=spec)
+    return None
+
+
+def _collect_string_matches(
+    text: str,
+    specs: Sequence[_StringPatternSpec],
+    *,
+    overlaps: bool,
+    limit: int | None = None,
+    require_start: bool = False,
+    require_end: bool = False,
+) -> list[_StringFoundMatch]:
+    matches: list[_StringFoundMatch] = []
+    start = 0
+    while start <= len(text):
+        found = _first_string_match_at(text, start, specs, require_end=require_end)
+        if found is None:
+            if require_start:
                 break
-        if matched_interval is None:
+            start += 1
             continue
-        matches.append(matched_interval)
+        matches.append(found)
         if limit is not None and len(matches) >= limit:
             break
+        if require_start:
+            break
+        if overlaps:
+            start += 1
+        else:
+            start = found.end if found.end > start else start + 1
     return matches
 
 
-def _string_position_scalar(text: str, patterns: Sequence[str], limit: int | None) -> Expr:
-    matches = _literal_string_matches(text, patterns, limit)
-    return list_expr(*(list_expr(integer(start), integer(end)) for start, end in matches))
+def _match_string_boolean(
+    text: str,
+    specs: Sequence[_StringPatternSpec],
+    *,
+    require_start: bool = False,
+    require_end: bool = False,
+) -> bool:
+    return bool(_collect_string_matches(text, specs, overlaps=True, limit=1, require_start=require_start, require_end=require_end))
+
+
+def _string_position_scalar(text: str, specs: Sequence[_StringPatternSpec], limit: int | None) -> Expr:
+    matches = _collect_string_matches(text, specs, overlaps=True, limit=limit)
+    return list_expr(*(list_expr(integer(match.start + 1), integer(match.end)) for match in matches))
+
+
+def _flatten_string_expression_pieces(expr: Expr) -> list[Expr]:
+    if isinstance(expr, Call) and expr.has_head("StringExpression"):
+        flattened: list[Expr] = []
+        for item in expr.arguments:
+            flattened.extend(_flatten_string_expression_pieces(item))
+        return flattened
+    return [expr]
+
+
+def _string_expression_from_pieces(pieces: Sequence[Expr]) -> Expr:
+    flattened: list[Expr] = []
+    for piece in pieces:
+        flattened.extend(_flatten_string_expression_pieces(piece))
+
+    if not flattened:
+        return string("")
+
+    merged: list[Expr] = []
+    string_buffer = ""
+    for piece in flattened:
+        if isinstance(piece, String):
+            string_buffer += piece.value
+            continue
+        if string_buffer:
+            merged.append(string(string_buffer))
+            string_buffer = ""
+        merged.append(piece)
+    if string_buffer:
+        merged.append(string(string_buffer))
+
+    if not merged:
+        return string("")
+    if len(merged) == 1:
+        return merged[0]
+    if all(isinstance(piece, String) for piece in merged):
+        return string("".join(piece.value for piece in merged if isinstance(piece, String)))
+    return call("StringExpression", *merged)
+
+
+def string_match_q(expr: Expr, pattern: Expr) -> Expr:
+    specs = _normalize_string_pattern_specs(pattern, "StringMatchQ")
+    return _string_thread(
+        expr,
+        "StringMatchQ",
+        lambda item: _bool_symbol(_match_string_boolean(item.value, specs, require_start=True, require_end=True)),
+    )
+
+
+def string_free_q(expr: Expr, pattern: Expr) -> Expr:
+    specs = _normalize_string_pattern_specs(pattern, "StringFreeQ")
+    return _string_thread(
+        expr,
+        "StringFreeQ",
+        lambda item: _bool_symbol(not _match_string_boolean(item.value, specs)),
+    )
 
 
 def string_position(expr: Expr, pattern: Expr, limit: Expr | int | None = None) -> Expr:
-    patterns = _string_patterns(pattern, "StringPosition")
+    specs = _normalize_string_pattern_specs(pattern, "StringPosition")
     normalized_limit = _normalize_match_limit(limit)
     return _string_thread(
         expr,
         "StringPosition",
-        lambda item: _string_position_scalar(item.value, patterns, normalized_limit),
+        lambda item: _string_position_scalar(item.value, specs, normalized_limit),
     )
 
 
 def string_contains_q(expr: Expr, pattern: Expr) -> Expr:
-    patterns = _string_patterns(pattern, "StringContainsQ")
+    specs = _normalize_string_pattern_specs(pattern, "StringContainsQ")
     return _string_thread(
         expr,
         "StringContainsQ",
-        lambda item: _bool_symbol(bool(_literal_string_matches(item.value, patterns, 1))),
+        lambda item: _bool_symbol(_match_string_boolean(item.value, specs)),
+    )
+
+
+def string_starts_q(expr: Expr, pattern: Expr) -> Expr:
+    specs = _normalize_string_pattern_specs(pattern, "StringStartsQ")
+    return _string_thread(
+        expr,
+        "StringStartsQ",
+        lambda item: _bool_symbol(_match_string_boolean(item.value, specs, require_start=True)),
+    )
+
+
+def string_ends_q(expr: Expr, pattern: Expr) -> Expr:
+    specs = _normalize_string_pattern_specs(pattern, "StringEndsQ")
+    return _string_thread(
+        expr,
+        "StringEndsQ",
+        lambda item: _bool_symbol(_match_string_boolean(item.value, specs, require_end=True)),
+    )
+
+
+def _first_string_case_or_replacement_match_at(
+    text: str,
+    start: int,
+    specs: Sequence[_StringPatternSpec],
+) -> tuple[_StringFoundMatch, Expr] | None:
+    for spec in specs:
+        matches = _match_string_pattern_states(spec.pattern, text, start)
+        for match in matches:
+            found = _StringFoundMatch(start=start, end=match.end, bindings=match.bindings, spec=spec)
+            if spec.template is None:
+                return (found, string(text[start:match.end]))
+            transformed, applied = _instantiate_replacement_template(
+                spec.template,
+                match.bindings,
+                delayed=spec.delayed,
+            )
+            if not applied:
+                continue
+            assert transformed is not None
+            return (found, transformed)
+    return None
+
+
+def _string_cases_scalar(text: str, specs: Sequence[_StringPatternSpec], limit: int | None) -> Expr:
+    results: list[Expr] = []
+    position = 0
+    while position <= len(text):
+        if limit is not None and len(results) >= limit:
+            break
+        found = _first_string_case_or_replacement_match_at(text, position, specs)
+        if found is None:
+            if position >= len(text):
+                break
+            position += 1
+            continue
+        match, result = found
+        results.append(result)
+        position = match.end if match.end > position else position + 1
+    return list_expr(*results)
+
+
+def string_cases(expr: Expr, pattern_spec: Expr, limit: Expr | int | None = None) -> Expr:
+    specs = _normalize_string_cases_specs(pattern_spec)
+    normalized_limit = _normalize_match_limit(limit)
+    return _string_thread(
+        expr,
+        "StringCases",
+        lambda item: _string_cases_scalar(item.value, specs, normalized_limit),
+    )
+
+
+def _string_replace_scalar(text: str, specs: Sequence[_StringPatternSpec], limit: int | None) -> Expr:
+    pieces: list[Expr] = []
+    position = 0
+    replacements = 0
+
+    while position <= len(text):
+        if limit is not None and replacements >= limit:
+            break
+        found = _first_string_case_or_replacement_match_at(text, position, specs)
+        if found is None:
+            if position >= len(text):
+                break
+            pieces.append(string(text[position]))
+            position += 1
+            continue
+        match, transformed = found
+        pieces.append(transformed)
+        replacements += 1
+        next_position = match.end if match.end > position else position + 1
+        position = next_position
+
+    if position < len(text):
+        pieces.append(string(text[position:]))
+
+    return _string_expression_from_pieces(pieces)
+
+
+def string_replace(expr: Expr, rules: Expr, limit: Expr | int | None = None) -> Expr:
+    specs = _normalize_string_replace_specs(rules)
+    normalized_limit = _normalize_match_limit(limit)
+    return _string_thread(
+        expr,
+        "StringReplace",
+        lambda item: _string_replace_scalar(item.value, specs, normalized_limit),
     )
 
 
@@ -2779,6 +3429,22 @@ def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
                 "StringContainsQ[patt] expects exactly one argument when used as an operator."
             )
         return string_contains_q(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("StringMatchQ") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("StringMatchQ[patt] expects exactly one argument when used as an operator.")
+        return string_match_q(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("StringFreeQ") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("StringFreeQ[patt] expects exactly one argument when used as an operator.")
+        return string_free_q(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("StringStartsQ") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("StringStartsQ[patt] expects exactly one argument when used as an operator.")
+        return string_starts_q(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("StringEndsQ") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("StringEndsQ[patt] expects exactly one argument when used as an operator.")
+        return string_ends_q(arguments[0], function.arguments[0])
     if isinstance(function, Call) and function.has_head("StringPosition") and len(function.arguments) == 1:
         if len(arguments) != 1:
             raise WolframEvaluationError(
@@ -2812,6 +3478,14 @@ def _is_callable_expr(expr: Expr) -> bool:
     if expr.has_head("ComapApply") and len(expr.arguments) == 1:
         return True
     if expr.has_head("StringContainsQ") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("StringMatchQ") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("StringFreeQ") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("StringStartsQ") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("StringEndsQ") and len(expr.arguments) == 1:
         return True
     if expr.has_head("StringPosition") and len(expr.arguments) == 1:
         return True
@@ -4600,6 +5274,20 @@ def evaluate(expr: Expr) -> Expr:
                 raise WolframEvaluationError("ReplaceAt expects exactly three arguments.")
             return replace_at(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
 
+        if raw_head_name == "StringCases":
+            if len(expr.arguments) == 2:
+                return string_cases(evaluate(expr.arguments[0]), expr.arguments[1])
+            if len(expr.arguments) == 3:
+                return string_cases(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            raise WolframEvaluationError("StringCases expects a string, a pattern or rule, and an optional match limit.")
+
+        if raw_head_name == "StringReplace":
+            if len(expr.arguments) == 2:
+                return string_replace(evaluate(expr.arguments[0]), expr.arguments[1])
+            if len(expr.arguments) == 3:
+                return string_replace(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            raise WolframEvaluationError("StringReplace expects a string, rules, and an optional replacement limit.")
+
         if raw_head_name == "Select":
             if len(expr.arguments) == 1:
                 return call("Function", call("Select", call("Slot"), evaluate(expr.arguments[0])))
@@ -4728,6 +5416,48 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 2:
             return string_contains_q(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("StringContainsQ expects a string and a pattern.")
+
+    if evaluated_head.name == "StringMatchQ":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return string_match_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("StringMatchQ expects a string and a pattern.")
+
+    if evaluated_head.name == "StringFreeQ":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return string_free_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("StringFreeQ expects a string and a pattern.")
+
+    if evaluated_head.name == "StringStartsQ":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return string_starts_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("StringStartsQ expects a string and a pattern.")
+
+    if evaluated_head.name == "StringEndsQ":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return string_ends_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("StringEndsQ expects a string and a pattern.")
+
+    if evaluated_head.name == "StringCases":
+        if len(evaluated_arguments) == 2:
+            return string_cases(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return string_cases(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("StringCases expects a string, a pattern or rule, and an optional match limit.")
+
+    if evaluated_head.name == "StringReplace":
+        if len(evaluated_arguments) == 2:
+            return string_replace(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return string_replace(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("StringReplace expects a string, rules, and an optional replacement limit.")
 
     if evaluated_head.name == "ToCharacterCode":
         if len(evaluated_arguments) == 1:
@@ -5771,7 +6501,10 @@ _MULTI_TOKENS = (
     "=!=",
     "___",
     "__",
+    "...",
+    "..",
     "[[",
+    "~~",
     "<>",
     "<|",
     "|>",
@@ -5857,7 +6590,7 @@ def _tokenize(text: str) -> list[_Token]:
             continue
 
         char = text[index]
-        if char in "[]{}(),.+-*/^!@<>_|&#=":
+        if char in "[]{}(),.:+-*/^!@<>_|&#=":
             tokens.append(_Token(kind="operator", text=char, start=index, end=index + 1, value=char))
             index += 1
             continue
@@ -5879,6 +6612,8 @@ class _Parser:
     _AND_BP = 80
     _OR_BP = 70
     _ALTERNATIVES_BP = 65
+    _STRING_EXPRESSION_BP = 64
+    _NAMED_PATTERN_BP = 63
     _CONDITION_BP = 62
     _RULE_BP = 60
     _REPLACE_BP = 50
@@ -5940,6 +6675,13 @@ class _Parser:
                 if self._PATTERN_BP < min_bp:
                     break
                 left = self._parse_postfix_pattern(left)
+                continue
+
+            if token.text in {"..", "..."}:
+                if self._PATTERN_BP < min_bp:
+                    break
+                self._consume()
+                left = call("RepeatedNull" if token.text == "..." else "Repeated", left)
                 continue
 
             if token.text == "[":
@@ -6137,6 +6879,8 @@ class _Parser:
             "&&": (self._AND_BP, self._AND_BP + 1, "And"),
             "||": (self._OR_BP, self._OR_BP + 1, "Or"),
             "|": (self._ALTERNATIVES_BP, self._ALTERNATIVES_BP + 1, "Alternatives"),
+            "~~": (self._STRING_EXPRESSION_BP, self._STRING_EXPRESSION_BP + 1, "StringExpression"),
+            ":": (self._NAMED_PATTERN_BP, self._NAMED_PATTERN_BP, "Pattern"),
             "/;": (self._CONDITION_BP, self._CONDITION_BP + 1, "Condition"),
             "->": (self._RULE_BP, self._RULE_BP, "Rule"),
             ":>": (self._RULE_BP, self._RULE_BP, "RuleDelayed"),
@@ -6170,6 +6914,12 @@ class _Parser:
             return call("Times", left, call("Power", right, integer(-1)))
         if text == "-":
             return call("Plus", left, call("Times", integer(-1), right))
+        if text == ":":
+            if not isinstance(left, Symbol):
+                raise WolframSyntaxError(
+                    f"Named pattern shorthand requires a symbol before ':' at offset {token.start}."
+                )
+            return call("Pattern", left, right)
         if text == "@":
             return Call(head_expr=left, arguments=(right,))
         if text == "//":

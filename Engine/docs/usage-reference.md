@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T18:20:42Z
-- Repository HEAD: dcad077d1f5fabcc31bef9998e628c916bcadfc2
+- Updated (UTC): 2026-04-24T19:00:45Z
+- Repository HEAD: 0f0deaa2352a72e61557b4a58db49f13f1e1613a
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -391,7 +391,10 @@ python -m tungsten expr evaluate --code "BlockMap[f, {a, b, c, d, e}, 2]"
 python -m tungsten expr evaluate --code "DeleteDuplicatesBy[{{a}, {b, c}, {d}}, Length]"
 python -m tungsten expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
 python -m tungsten expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
-python -m tungsten expr evaluate --code "StringPosition[\"ababa\", {\"ba\", \"aba\"}]"
+python -m tungsten expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~~ \"g\"]"
+python -m tungsten expr evaluate --code "StringCases[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
+python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
+python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
@@ -439,8 +442,9 @@ The implemented inert evaluator currently covers:
   `DeleteDuplicatesBy`, and `DuplicateFreeQ`
 - byte and character heads such as `ByteArray`, `ByteArrayQ`, `BaseEncode`, `BaseDecode`,
   `Characters`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`,
-  `StringReverse`, `StringPosition`, `StringContainsQ`, `ToCharacterCode`, `FromCharacterCode`,
-  `StringToByteArray`, and `ByteArrayToString`
+  `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
+  `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
+  `FromCharacterCode`, `StringToByteArray`, and `ByteArrayToString`
 - `Pick`
 - `First`
 - `Last`
