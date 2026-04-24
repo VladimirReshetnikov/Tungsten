@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T15:10:03Z
-- Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
+- Updated (UTC): 2026-04-24T16:50:02Z
+- Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -383,6 +383,12 @@ python -m tungsten expr evaluate --code "Map[# + 1 &, {a, b}]"
 python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
+python -m tungsten expr evaluate --code "Composition[f, g][x]"
+python -m tungsten expr evaluate --code "MapApply[f, {g[a, b], h[c]}]"
+python -m tungsten expr evaluate --code "Thread[f[{a, b}, {c, d}]]"
+python -m tungsten expr evaluate --code "Fold[f, x, {a, b, c}]"
+python -m tungsten expr evaluate --code "BlockMap[f, {a, b, c, d, e}, 2]"
+python -m tungsten expr evaluate --code "DeleteDuplicatesBy[{{a}, {b, c}, {d}}, Length]"
 ```
 
 The implemented inert evaluator currently covers:
@@ -411,6 +417,19 @@ The implemented inert evaluator currently covers:
 - positional pure-function applications via `Function[body]` or `body &`
 - named pure-function applications via `Function[x, body]`, `Function[{x, y}, body]`,
   `x |-> body`, and `x \[Function] body`
+- structural function combinators such as `Identity`, `SameQ`, `UnsameQ`, `SameAs`,
+  `Construct`, `Composition`, `RightComposition`, `ComposeList`, `Nest`, `NestList`,
+  `NestWhile`, `NestWhileList`, `FixedPoint`, `FixedPointList`, `Operate`, `Comap`, and
+  `ComapApply`
+- higher-order structural traversal heads such as `Scan`, `MapApply`, `MapAll`, `MapIndexed`,
+  `Through`, `MapThread`, `Thread`, `Distribute`, `Outer`, `Inner`, and `Dot`
+- array, matrix, and sequence-construction heads such as `Tuples`, `Array`, `ConstantArray`,
+  `Range`, `UnitVector`, `IdentityMatrix`, `DiagonalMatrix`, `Partition`, `BlockMap`,
+  `TakeList`, and `TakeDrop`
+- fold, search, and de-duplication heads such as `Fold`, `FoldList`, `FoldWhile`,
+  `FoldWhileList`, `FoldPair`, `FoldPairList`, `SequenceFold`, `SequenceFoldList`,
+  `LengthWhile`, `FirstCase`, `Position`, `MemberQ`, `DeleteDuplicates`,
+  `DeleteDuplicatesBy`, and `DuplicateFreeQ`
 - `Pick`
 - `First`
 - `Last`

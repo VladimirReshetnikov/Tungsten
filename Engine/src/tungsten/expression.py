@@ -158,12 +158,20 @@ class Call(Expr):
                 return "{" + ", ".join(arg.to_input_form() for arg in self.arguments) + "}"
             if head_name == "Association":
                 return "<|" + ", ".join(arg.to_input_form() for arg in self.arguments) + "|>"
+            if head_name == "SameQ" and len(self.arguments) >= 2:
+                return " === ".join(_wrap_infix(arg) for arg in self.arguments)
+            if head_name == "UnsameQ" and len(self.arguments) >= 2:
+                return " =!= ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "Condition" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])} /; {_wrap_infix(self.arguments[1])}"
             if head_name == "Rule" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])} -> {_wrap_infix(self.arguments[1])}"
             if head_name == "RuleDelayed" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])} :> {_wrap_infix(self.arguments[1])}"
+            if head_name == "Composition" and len(self.arguments) >= 2:
+                return " @* ".join(_wrap_infix(arg) for arg in self.arguments)
+            if head_name == "RightComposition" and len(self.arguments) >= 2:
+                return " /* ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "Plus" and self.arguments:
                 pieces: list[str] = []
                 for index, arg in enumerate(self.arguments):
@@ -178,6 +186,8 @@ class Call(Expr):
                 return " * ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "Power" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])}^{_wrap_infix(self.arguments[1])}"
+            if head_name == "Dot" and len(self.arguments) >= 2:
+                return " . ".join(_wrap_infix(arg) for arg in self.arguments)
             if head_name == "Not" and len(self.arguments) == 1:
                 return "!" + _wrap_infix(self.arguments[0])
             if head_name == "Span" and self.arguments:
@@ -1059,9 +1069,13 @@ def _select_first_projection(
     )
 
 
-def _predicate_succeeds(criterion: Expr, value: Expr) -> bool:
-    evaluated = evaluate(_apply_callable(criterion, (value,)))
+def _predicate_succeeds_with_arguments(criterion: Expr, arguments: Sequence[Expr]) -> bool:
+    evaluated = evaluate(_apply_callable(criterion, arguments))
     return isinstance(evaluated, Symbol) and evaluated.name == "True"
+
+
+def _predicate_succeeds(criterion: Expr, value: Expr) -> bool:
+    return _predicate_succeeds_with_arguments(criterion, (value,))
 
 
 def if_expr(arguments: Sequence[Expr]) -> Expr:
@@ -2206,9 +2220,977 @@ def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
         return _apply_pure_function(function, arguments)
     if _is_named_pure_function_expr(function):
         return _apply_named_pure_function(function, arguments)
-    return Call(head_expr=function, arguments=tuple(arguments))
+    if isinstance(function, Call) and function.has_head("SameAs") and len(function.arguments) == 1:
+        return same_q(*arguments, function.arguments[0])
+    if isinstance(function, Call) and function.has_head("Composition"):
+        return composition_apply(function.arguments, arguments)
+    if isinstance(function, Call) and function.has_head("RightComposition"):
+        return right_composition_apply(function.arguments, arguments)
+    if isinstance(function, Call) and function.has_head("Scan"):
+        if len(function.arguments) == 1:
+            if len(arguments) != 1:
+                raise WolframEvaluationError("Scan[f] expects exactly one argument when used as an operator.")
+            return scan(function.arguments[0], arguments[0])
+        if len(function.arguments) == 2:
+            if len(arguments) != 1:
+                raise WolframEvaluationError("Scan[f, levelspec] expects exactly one argument when used as an operator.")
+            return scan(function.arguments[0], arguments[0], function.arguments[1])
+    if isinstance(function, Call) and function.has_head("MapApply"):
+        if len(function.arguments) == 1:
+            if len(arguments) != 1:
+                raise WolframEvaluationError("MapApply[f] expects exactly one argument when used as an operator.")
+            return map_apply(function.arguments[0], arguments[0])
+    if isinstance(function, Call) and function.has_head("MapAll"):
+        if len(function.arguments) == 1:
+            if len(arguments) != 1:
+                raise WolframEvaluationError("MapAll[f] expects exactly one argument when used as an operator.")
+            return map_all(function.arguments[0], arguments[0])
+    if isinstance(function, Call) and function.has_head("MapIndexed"):
+        if len(function.arguments) == 1:
+            if len(arguments) != 1:
+                raise WolframEvaluationError("MapIndexed[f] expects exactly one argument when used as an operator.")
+            return map_indexed(function.arguments[0], arguments[0])
+        if len(function.arguments) == 2:
+            if len(arguments) != 1:
+                raise WolframEvaluationError(
+                    "MapIndexed[f, levelspec] expects exactly one argument when used as an operator."
+                )
+            return map_indexed(function.arguments[0], arguments[0], function.arguments[1])
+    if isinstance(function, Call) and function.has_head("Comap") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("Comap[functions] expects exactly one argument when used as an operator.")
+        return comap(function.arguments[0], arguments[0])
+    if isinstance(function, Call) and function.has_head("ComapApply") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError(
+                "ComapApply[functions] expects exactly one argument when used as an operator."
+            )
+        return comap_apply(function.arguments[0], arguments[0])
+    return evaluate(Call(head_expr=function, arguments=tuple(arguments)))
 
 
+def _is_callable_expr(expr: Expr) -> bool:
+    if _is_pure_function_expr(expr):
+        return True
+    if not isinstance(expr, Call):
+        return False
+    if expr.has_head("SameAs") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("Composition"):
+        return True
+    if expr.has_head("RightComposition"):
+        return True
+    if expr.has_head("MapApply") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("MapAll") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("MapIndexed") and len(expr.arguments) in {1, 2}:
+        return True
+    if expr.has_head("Scan") and len(expr.arguments) in {1, 2}:
+        return True
+    if expr.has_head("Comap") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("ComapApply") and len(expr.arguments) == 1:
+        return True
+    return False
+
+
+def same_q(*arguments: Expr) -> Symbol:
+    if len(arguments) <= 1:
+        return _bool_symbol(True)
+    first_argument = arguments[0]
+    return _bool_symbol(all(argument == first_argument for argument in arguments[1:]))
+
+
+def unsame_q(*arguments: Expr) -> Symbol:
+    seen: set[Expr] = set()
+    for argument in arguments:
+        if argument in seen:
+            return _bool_symbol(False)
+        seen.add(argument)
+    return _bool_symbol(True)
+
+
+def scan(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Symbol:
+    level_spec = integer(1) if spec is None else spec
+    for item in level(expr, level_spec):
+        _apply_callable(function, (item,))
+    return symbol("Null")
+
+
+def map_apply(function: Expr, expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return _association_expr(
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=apply_head(function, entry.value),
+            )
+            for entry in entries
+        )
+    if not isinstance(expr, Call):
+        return expr
+    return _rebuild(expr, tuple(apply_head(function, argument) for argument in expr.arguments))
+
+
+def _map_all_recursive(function: Expr, expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        rebuilt = _association_expr(
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=_map_all_recursive(function, entry.value),
+            )
+            for entry in entries
+        )
+        return _apply_callable(function, (rebuilt,))
+
+    if isinstance(expr, Call):
+        rebuilt = _rebuild(
+            expr,
+            tuple(_map_all_recursive(function, argument) for argument in expr.arguments),
+        )
+        return _apply_callable(function, (rebuilt,))
+
+    return _apply_callable(function, (expr,))
+
+
+def map_all(function: Expr, expr: Expr) -> Expr:
+    return _map_all_recursive(function, expr)
+
+
+def map_indexed(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Expr:
+    if spec is not None and spec != integer(1) and spec != 1:
+        raise WolframEvaluationError("MapIndexed currently supports only the default level specification.")
+
+    entries = _association_entries(expr)
+    if entries is not None:
+        return _association_expr(
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=_apply_callable(function, (entry.value, list_expr(integer(index)))),
+            )
+            for index, entry in enumerate(entries, start=1)
+        )
+
+    compound = _require_compound(expr, "MapIndexed")
+    return _rebuild(
+        compound,
+        tuple(
+            _apply_callable(function, (argument, list_expr(integer(index))))
+            for index, argument in enumerate(compound.arguments, start=1)
+        ),
+    )
+
+
+def construct(function: Expr, *arguments: Expr) -> Expr:
+    return _apply_callable(function, arguments)
+
+
+def composition_apply(functions: Sequence[Expr], arguments: Sequence[Expr]) -> Expr:
+    if not functions:
+        if len(arguments) == 1:
+            return arguments[0]
+        return list_expr(*arguments)
+
+    current = _apply_callable(functions[-1], arguments)
+    for function in reversed(functions[:-1]):
+        current = _apply_callable(function, (current,))
+    return current
+
+
+def right_composition_apply(functions: Sequence[Expr], arguments: Sequence[Expr]) -> Expr:
+    if not functions:
+        if len(arguments) == 1:
+            return arguments[0]
+        return list_expr(*arguments)
+
+    current = _apply_callable(functions[0], arguments)
+    for function in functions[1:]:
+        current = _apply_callable(function, (current,))
+    return current
+
+
+def compose_list(functions_expr: Expr, initial: Expr) -> Expr:
+    if not isinstance(functions_expr, Call):
+        raise WolframEvaluationError("ComposeList expects a list or other nonatomic expression of functions.")
+
+    current = initial
+    results = [initial]
+    for function in functions_expr.arguments:
+        current = _apply_callable(function, (current,))
+        results.append(current)
+    return list_expr(*results)
+
+
+def nest(function: Expr, expr: Expr, count: Expr | int) -> Expr:
+    iterations = _normalize_integer_argument(count, "Nest")
+    if iterations < 0:
+        raise WolframEvaluationError("Nest expects a non-negative integer iteration count.")
+    current = expr
+    for _ in range(iterations):
+        current = _apply_callable(function, (current,))
+    return current
+
+
+def nest_list(function: Expr, expr: Expr, count: Expr | int) -> Expr:
+    iterations = _normalize_integer_argument(count, "NestList")
+    if iterations < 0:
+        raise WolframEvaluationError("NestList expects a non-negative integer iteration count.")
+    current = expr
+    results = [expr]
+    for _ in range(iterations):
+        current = _apply_callable(function, (current,))
+        results.append(current)
+    return list_expr(*results)
+
+
+_ITERATION_SAFETY_LIMIT = 65536
+
+
+def nest_while(function: Expr, expr: Expr, test: Expr) -> Expr:
+    current = expr
+    for _ in range(_ITERATION_SAFETY_LIMIT):
+        if not _predicate_succeeds(test, current):
+            return current
+        current = _apply_callable(function, (current,))
+    raise WolframEvaluationError("NestWhile exceeded the Tungsten iteration safety limit.")
+
+
+def nest_while_list(function: Expr, expr: Expr, test: Expr) -> Expr:
+    current = expr
+    results = [expr]
+    for _ in range(_ITERATION_SAFETY_LIMIT):
+        if not _predicate_succeeds(test, current):
+            return list_expr(*results)
+        current = _apply_callable(function, (current,))
+        results.append(current)
+    raise WolframEvaluationError("NestWhileList exceeded the Tungsten iteration safety limit.")
+
+
+def fixed_point(function: Expr, expr: Expr, max_iterations: Expr | int | None = None) -> Expr:
+    limit = _ITERATION_SAFETY_LIMIT if max_iterations is None else _normalize_integer_argument(max_iterations, "FixedPoint")
+    if limit < 0:
+        raise WolframEvaluationError("FixedPoint expects a non-negative maximum iteration count.")
+    current = expr
+    for _ in range(limit + 1):
+        updated = _apply_callable(function, (current,))
+        if updated == current:
+            return current
+        current = updated
+    raise WolframEvaluationError("FixedPoint exceeded the allowed iteration count before reaching a fixed point.")
+
+
+def fixed_point_list(function: Expr, expr: Expr, max_iterations: Expr | int | None = None) -> Expr:
+    limit = _ITERATION_SAFETY_LIMIT if max_iterations is None else _normalize_integer_argument(max_iterations, "FixedPointList")
+    if limit < 0:
+        raise WolframEvaluationError("FixedPointList expects a non-negative maximum iteration count.")
+    current = expr
+    results = [expr]
+    for _ in range(limit + 1):
+        updated = _apply_callable(function, (current,))
+        results.append(updated)
+        if updated == current:
+            return list_expr(*results)
+        current = updated
+    raise WolframEvaluationError("FixedPointList exceeded the allowed iteration count before reaching a fixed point.")
+
+
+def operate(operator: Expr, expr: Expr, level_value: Expr | int = 1) -> Expr:
+    level_number = _normalize_integer_argument(level_value, "Operate")
+    if level_number < 1:
+        raise WolframEvaluationError("Operate expects a positive integer level.")
+    if not isinstance(expr, Call):
+        return expr
+    if level_number == 1:
+        return Call(head_expr=_apply_callable(operator, (expr.head_expr,)), arguments=expr.arguments)
+    if not isinstance(expr.head_expr, Call):
+        return expr
+    return Call(head_expr=operate(operator, expr.head_expr, level_number - 1), arguments=expr.arguments)
+
+
+def comap(functions_expr: Expr, expr: Expr) -> Expr:
+    entries = _association_entries(functions_expr)
+    if entries is not None:
+        return _association_expr(
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=_apply_callable(entry.value, (expr,)),
+            )
+            for entry in entries
+        )
+    if not isinstance(functions_expr, Call):
+        return functions_expr
+    return _rebuild(
+        functions_expr,
+        tuple(_apply_callable(function, (expr,)) for function in functions_expr.arguments),
+    )
+
+
+def comap_apply(functions_expr: Expr, expr: Expr) -> Expr:
+    entries = _association_entries(functions_expr)
+    if entries is not None:
+        return _association_expr(
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=apply_head(entry.value, expr),
+            )
+            for entry in entries
+        )
+    if not isinstance(functions_expr, Call):
+        return functions_expr
+    return _rebuild(
+        functions_expr,
+        tuple(apply_head(function, expr) for function in functions_expr.arguments),
+    )
+
+
+def through(expr: Expr) -> Expr:
+    if not isinstance(expr, Call):
+        return expr
+    head_entries = _association_entries(expr.head_expr)
+    if head_entries is not None:
+        return _association_expr(
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=_apply_callable(entry.value, expr.arguments),
+            )
+            for entry in head_entries
+        )
+    if not isinstance(expr.head_expr, Call):
+        return expr
+    return _rebuild(
+        expr.head_expr,
+        tuple(_apply_callable(function, expr.arguments) for function in expr.head_expr.arguments),
+    )
+
+
+def _sequence_values(expr: Expr, function_name: str) -> tuple[Expr, ...]:
+    return tuple(item.value for item in _selection_items(expr, function_name))
+
+
+def map_thread(function: Expr, sequences_expr: Expr, level_value: Expr | int | None = None) -> Expr:
+    if level_value is not None and _normalize_integer_argument(level_value, "MapThread") != 1:
+        raise WolframEvaluationError("MapThread currently supports only level 1.")
+    if not isinstance(sequences_expr, Call) or not sequences_expr.has_head("List"):
+        raise WolframEvaluationError("MapThread expects a list of sequences.")
+
+    sequences = list(sequences_expr.arguments)
+    if not sequences:
+        return list_expr()
+
+    if not all(isinstance(sequence, Call) and sequence.has_head("List") for sequence in sequences):
+        raise WolframEvaluationError("MapThread currently expects a list of List expressions.")
+
+    lengths = {len(sequence.arguments) for sequence in sequences if isinstance(sequence, Call)}
+    if len(lengths) != 1:
+        raise WolframEvaluationError("MapThread expects sequences of the same length.")
+
+    assert len(lengths) == 1
+    length_value = lengths.pop()
+    return list_expr(*(
+        _apply_callable(function, tuple(sequence.arguments[index] for sequence in sequences if isinstance(sequence, Call)))
+        for index in range(length_value)
+    ))
+
+
+def thread(expr: Expr, thread_head: Expr | None = None) -> Expr:
+    if not isinstance(expr, Call):
+        return expr
+
+    effective_head = symbol("List") if thread_head is None else thread_head
+    lengths: set[int] = set()
+    for argument in expr.arguments:
+        if isinstance(argument, Call) and argument.head_expr == effective_head:
+            lengths.add(len(argument.arguments))
+
+    if not lengths:
+        return expr
+    if len(lengths) != 1:
+        raise WolframEvaluationError("Thread expects all threaded arguments to have the same length.")
+
+    length_value = lengths.pop()
+    results: list[Expr] = []
+    for index in range(length_value):
+        threaded_arguments: list[Expr] = []
+        for argument in expr.arguments:
+            if isinstance(argument, Call) and argument.head_expr == effective_head:
+                threaded_arguments.append(argument.arguments[index])
+            else:
+                threaded_arguments.append(argument)
+        results.append(Call(head_expr=expr.head_expr, arguments=tuple(threaded_arguments)))
+
+    return Call(head_expr=effective_head, arguments=tuple(results))
+
+
+def distribute(expr: Expr, distributed_head: Expr | None = None, outer_head: Expr | None = None) -> Expr:
+    if not isinstance(expr, Call):
+        return expr
+
+    effective_distributed_head = symbol("Plus") if distributed_head is None else distributed_head
+    if outer_head is not None and expr.head_expr != outer_head:
+        return expr
+
+    argument_options: list[tuple[Expr, ...]] = []
+    found = False
+    for argument in expr.arguments:
+        if isinstance(argument, Call) and argument.head_expr == effective_distributed_head:
+            argument_options.append(argument.arguments)
+            found = True
+        else:
+            argument_options.append((argument,))
+
+    if not found:
+        return expr
+
+    distributed_arguments: list[Expr] = []
+
+    def recurse(index: int, chosen: list[Expr]) -> None:
+        if index == len(argument_options):
+            distributed_arguments.append(Call(head_expr=expr.head_expr, arguments=tuple(chosen)))
+            return
+        for option in argument_options[index]:
+            recurse(index + 1, [*chosen, option])
+
+    recurse(0, [])
+    return Call(head_expr=effective_distributed_head, arguments=tuple(distributed_arguments))
+
+
+def outer(function: Expr, *sequences: Expr) -> Expr:
+    if not sequences:
+        raise WolframEvaluationError("Outer expects at least one sequence.")
+    normalized_sequences: list[Call] = []
+    for sequence in sequences:
+        compound = _require_compound(sequence, "Outer")
+        normalized_sequences.append(compound)
+
+    def recurse(index: int, chosen: list[Expr]) -> Expr:
+        if index == len(normalized_sequences):
+            return _apply_callable(function, tuple(chosen))
+        current = normalized_sequences[index]
+        return Call(
+            head_expr=current.head_expr,
+            arguments=tuple(recurse(index + 1, [*chosen, item]) for item in current.arguments),
+        )
+
+    return recurse(0, [])
+
+
+def inner(function: Expr, left: Expr, right: Expr, combiner: Expr) -> Expr:
+    left_compound = _require_compound(left, "Inner")
+    right_compound = _require_compound(right, "Inner")
+    if len(left_compound.arguments) != len(right_compound.arguments):
+        raise WolframEvaluationError("Inner expects expressions with the same length.")
+    combined = [
+        _apply_callable(function, (left_item, right_item))
+        for left_item, right_item in zip(left_compound.arguments, right_compound.arguments, strict=True)
+    ]
+    return _apply_callable(combiner, tuple(combined))
+
+
+def tuples_expr(items: Expr, count: Expr | int | None = None) -> Expr:
+    if count is None:
+        if not isinstance(items, Call) or not items.has_head("List"):
+            raise WolframEvaluationError("Tuples expects a list of sequences or a sequence with a repetition count.")
+        sequences = [_sequence_values(item, "Tuples") for item in items.arguments]
+    else:
+        repetitions = _normalize_integer_argument(count, "Tuples")
+        if repetitions < 0:
+            raise WolframEvaluationError("Tuples expects a non-negative repetition count.")
+        base_items = _sequence_values(items, "Tuples")
+        sequences = [base_items] * repetitions
+
+    results: list[Expr] = [list_expr()]
+    for sequence in sequences:
+        next_results: list[Expr] = []
+        for prefix in results:
+            assert isinstance(prefix, Call) and prefix.has_head("List")
+            for item in sequence:
+                next_results.append(list_expr(*prefix.arguments, item))
+        results = next_results
+    return list_expr(*results)
+
+
+def _normalize_dimensions(dimensions: Expr | int, function_name: str) -> list[int]:
+    if isinstance(dimensions, int):
+        if dimensions < 0:
+            raise WolframEvaluationError(f"{function_name} expects non-negative dimensions.")
+        return [dimensions]
+    if isinstance(dimensions, Integer):
+        return _normalize_dimensions(dimensions.value, function_name)
+    if isinstance(dimensions, Call) and dimensions.has_head("List"):
+        values = [_normalize_integer_argument(item, function_name) for item in dimensions.arguments]
+        if any(value < 0 for value in values):
+            raise WolframEvaluationError(f"{function_name} expects non-negative dimensions.")
+        return values
+    raise WolframEvaluationError(f"{function_name} expects an integer dimension or a list of dimensions.")
+
+
+def _build_array_from_dimensions(
+    dimensions: Sequence[int],
+    builder,
+    indices: tuple[int, ...] = (),
+) -> Expr:
+    if not dimensions:
+        return builder(indices)
+    size = dimensions[0]
+    return list_expr(*(
+        _build_array_from_dimensions(dimensions[1:], builder, (*indices, index))
+        for index in range(1, size + 1)
+    ))
+
+
+def array(function: Expr, dimensions: Expr | int) -> Expr:
+    normalized_dimensions = _normalize_dimensions(dimensions, "Array")
+    return _build_array_from_dimensions(
+        normalized_dimensions,
+        lambda indices: _apply_callable(function, tuple(integer(index) for index in indices)),
+    )
+
+
+def constant_array(value: Expr, dimensions: Expr | int) -> Expr:
+    normalized_dimensions = _normalize_dimensions(dimensions, "ConstantArray")
+    return _build_array_from_dimensions(normalized_dimensions, lambda _indices: value)
+
+
+def range_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("Range expects one, two, or three integer arguments.")
+    values = _integer_values(arguments)
+    if values is None:
+        raise WolframEvaluationError("Range currently supports only explicit integer arguments.")
+    if len(values) == 1:
+        start, end, step = 1, values[0], 1
+    elif len(values) == 2:
+        start, end = values
+        step = 1
+    else:
+        start, end, step = values
+    if step == 0:
+        raise WolframEvaluationError("Range step cannot be zero.")
+    if (step > 0 and start > end) or (step < 0 and start < end):
+        return list_expr()
+    stop = end + (1 if step > 0 else -1)
+    return list_expr(*(integer(item) for item in range(start, stop, step)))
+
+
+def unit_vector(arguments: Sequence[Expr]) -> Expr:
+    values = _integer_values(arguments)
+    if values is None or len(values) != 2:
+        raise WolframEvaluationError("UnitVector currently supports exactly two explicit integer arguments.")
+    length_value, position = values
+    if length_value < 0:
+        raise WolframEvaluationError("UnitVector expects a non-negative length.")
+    if position < 1 or position > length_value:
+        raise WolframEvaluationError("UnitVector position must be between 1 and the vector length.")
+    return list_expr(*(
+        integer(1 if index == position else 0)
+        for index in range(1, length_value + 1)
+    ))
+
+
+def identity_matrix(size: Expr | int) -> Expr:
+    dimension = _normalize_integer_argument(size, "IdentityMatrix")
+    if dimension < 0:
+        raise WolframEvaluationError("IdentityMatrix expects a non-negative integer size.")
+    return list_expr(*(
+        list_expr(*(integer(1 if row == column else 0) for column in range(1, dimension + 1)))
+        for row in range(1, dimension + 1)
+    ))
+
+
+def diagonal_matrix(values_expr: Expr) -> Expr:
+    values = _sequence_values(values_expr, "DiagonalMatrix")
+    return list_expr(*(
+        list_expr(*(values[row - 1] if row == column else integer(0) for column in range(1, len(values) + 1)))
+        for row in range(1, len(values) + 1)
+    ))
+
+
+def partition(expr: Expr, size: Expr | int, offset: Expr | int | None = None) -> Expr:
+    window = _normalize_integer_argument(size, "Partition")
+    step = window if offset is None else _normalize_integer_argument(offset, "Partition")
+    if window <= 0 or step <= 0:
+        raise WolframEvaluationError("Partition expects positive integer block sizes and offsets.")
+    items = _selection_items(expr, "Partition")
+    results: list[Expr] = []
+    for start in range(0, len(items) - window + 1, step):
+        chunk = items[start:start + window]
+        results.append(_selection_elements(expr, chunk, "Partition"))
+    return list_expr(*results)
+
+
+def block_map(function: Expr, expr: Expr, size: Expr | int, offset: Expr | int | None = None) -> Expr:
+    window = _normalize_integer_argument(size, "BlockMap")
+    step = window if offset is None else _normalize_integer_argument(offset, "BlockMap")
+    if window <= 0 or step <= 0:
+        raise WolframEvaluationError("BlockMap expects positive integer block sizes and offsets.")
+    items = _selection_items(expr, "BlockMap")
+    results: list[Expr] = []
+    for start in range(0, len(items) - window + 1, step):
+        block_expr = _selection_elements(expr, items[start:start + window], "BlockMap")
+        results.append(_apply_callable(function, (block_expr,)))
+    return list_expr(*results)
+
+
+def take_list(expr: Expr, specs_expr: Expr) -> Expr:
+    if not isinstance(specs_expr, Call) or not specs_expr.has_head("List"):
+        raise WolframEvaluationError("TakeList expects a list of specifications.")
+    remaining = expr
+    taken: list[Expr] = []
+    for spec in specs_expr.arguments:
+        if isinstance(spec, Symbol) and spec.name == "All":
+            taken.append(remaining)
+            entries = _association_entries(remaining)
+            if entries is not None:
+                remaining = _association_expr([])
+            elif isinstance(remaining, Call):
+                remaining = _rebuild(remaining, ())
+            else:
+                remaining = remaining
+            continue
+        taken.append(take(remaining, spec))
+        remaining = drop(remaining, spec)
+    return list_expr(*taken)
+
+
+def take_drop(expr: Expr, spec: Expr) -> Expr:
+    return list_expr(take(expr, spec), drop(expr, spec))
+
+
+def fold(function: Expr, initial: Expr, expr: Expr) -> Expr:
+    current = initial
+    for item in _selection_items(expr, "Fold"):
+        current = _apply_callable(function, (current, item.value))
+    return current
+
+
+def fold_list(function: Expr, initial: Expr, expr: Expr) -> Expr:
+    current = initial
+    results = [initial]
+    for item in _selection_items(expr, "FoldList"):
+        current = _apply_callable(function, (current, item.value))
+        results.append(current)
+    return list_expr(*results)
+
+
+def sequence_fold(function: Expr, initial_expr: Expr, expr: Expr, arity: Expr | int | None = None) -> Expr:
+    history_expr = sequence_fold_list(function, initial_expr, expr, arity)
+    assert isinstance(history_expr, Call) and history_expr.has_head("List")
+    return history_expr.arguments[-1]
+
+
+def sequence_fold_list(function: Expr, initial_expr: Expr, expr: Expr, arity: Expr | int | None = None) -> Expr:
+    initial_values = _sequence_values(initial_expr, "SequenceFoldList")
+    inputs = list(_sequence_values(expr, "SequenceFoldList"))
+    if not initial_values:
+        raise WolframEvaluationError("SequenceFoldList expects at least one initial value.")
+
+    state_values = list(initial_values)
+    results = list(initial_values)
+    argument_count = len(initial_values) + 1 if arity is None else _normalize_integer_argument(arity, "SequenceFoldList")
+    if argument_count < len(initial_values):
+        raise WolframEvaluationError("SequenceFoldList expects an argument count greater than or equal to the number of initial values.")
+    consumed_per_step = argument_count - len(initial_values)
+    if consumed_per_step <= 0:
+        raise WolframEvaluationError("SequenceFoldList currently expects each step to consume at least one input element.")
+
+    index = 0
+    while index + consumed_per_step <= len(inputs):
+        step_arguments = tuple(state_values[-len(initial_values):]) + tuple(inputs[index:index + consumed_per_step])
+        current = _apply_callable(function, step_arguments)
+        results.append(current)
+        state_values.append(current)
+        index += consumed_per_step
+    return list_expr(*results)
+
+
+def _fold_while_history_arguments(results: Sequence[Expr], history_spec: Expr | int | None) -> tuple[Expr, ...]:
+    if history_spec is None:
+        return (results[-1],)
+    if isinstance(history_spec, Symbol) and history_spec.name == "All":
+        return tuple(results)
+    history_length = _normalize_integer_argument(history_spec, "FoldWhileList")
+    if history_length <= 0:
+        raise WolframEvaluationError("FoldWhileList expects a positive history length or All.")
+    return tuple(results[-min(history_length, len(results)):])
+
+
+def fold_while_list(
+    function: Expr,
+    initial: Expr,
+    expr: Expr,
+    test: Expr,
+    history_spec: Expr | int | None = None,
+    extra_results: Expr | int | None = None,
+) -> Expr:
+    inputs = [item.value for item in _selection_items(expr, "FoldWhileList")]
+    results: list[Expr] = [initial]
+
+    if not _predicate_succeeds_with_arguments(test, _fold_while_history_arguments(results, history_spec)):
+        return list_expr(*results)
+
+    failure_detected = False
+    index = 0
+    while index < len(inputs):
+        updated = _apply_callable(function, (results[-1], inputs[index]))
+        results.append(updated)
+        index += 1
+        if not _predicate_succeeds_with_arguments(test, _fold_while_history_arguments(results, history_spec)):
+            failure_detected = True
+            break
+
+    if not failure_detected:
+        return list_expr(*results)
+
+    trailing = 0 if extra_results is None else _normalize_integer_argument(extra_results, "FoldWhileList")
+    if trailing < 0:
+        keep_count = max(1, len(results) + trailing)
+        return list_expr(*results[:keep_count])
+
+    while trailing > 0 and index < len(inputs):
+        results.append(_apply_callable(function, (results[-1], inputs[index])))
+        index += 1
+        trailing -= 1
+    return list_expr(*results)
+
+
+def fold_while(
+    function: Expr,
+    initial: Expr,
+    expr: Expr,
+    test: Expr,
+    history_spec: Expr | int | None = None,
+    extra_results: Expr | int | None = None,
+) -> Expr:
+    history_expr = fold_while_list(function, initial, expr, test, history_spec, extra_results)
+    assert isinstance(history_expr, Call) and history_expr.has_head("List")
+    return history_expr.arguments[-1]
+
+
+def _fold_pair_project(pair_values: tuple[Expr, Expr], projection: Expr | None) -> Expr:
+    if projection is None:
+        return pair_values[0]
+    return _apply_callable(projection, (list_expr(*pair_values),))
+
+
+def fold_pair_list(function: Expr, initial: Expr, expr: Expr, projection: Expr | None = None) -> Expr:
+    inputs = [item.value for item in _selection_items(expr, "FoldPairList")]
+    current = initial
+    results: list[Expr] = []
+    for input_value in inputs:
+        pair_expr = _apply_callable(function, (current, input_value))
+        if not isinstance(pair_expr, Call) or not pair_expr.has_head("List") or len(pair_expr.arguments) != 2:
+            raise WolframEvaluationError(
+                f"FoldPairList expects each function application to return a list of two elements, got {pair_expr.to_input_form()}."
+            )
+        pair_values = (pair_expr.arguments[0], pair_expr.arguments[1])
+        results.append(_fold_pair_project(pair_values, projection))
+        current = pair_values[1]
+    return list_expr(*results)
+
+
+def fold_pair(function: Expr, initial: Expr, expr: Expr, projection: Expr | None = None) -> Expr:
+    history_expr = fold_pair_list(function, initial, expr, projection)
+    assert isinstance(history_expr, Call) and history_expr.has_head("List")
+    if not history_expr.arguments:
+        return call("FoldPair", function, initial, expr) if projection is None else call("FoldPair", function, initial, expr, projection)
+    return history_expr.arguments[-1]
+
+
+def length_while(expr: Expr, criterion: Expr) -> Integer:
+    count = 0
+    for item in _selection_items(expr, "LengthWhile"):
+        if not _predicate_succeeds(criterion, item.value):
+            break
+        count += 1
+    return integer(count)
+
+
+def first_case(
+    expr: Expr,
+    pattern_spec: Expr,
+    default: Expr | object = _MISSING,
+    spec: Expr | int | tuple[int, int] | None = None,
+) -> Expr:
+    results = cases(expr, pattern_spec, spec=spec, limit=1)
+    if results.arguments:
+        return results.arguments[0]
+    if default is not _MISSING:
+        return default  # type: ignore[return-value]
+    return _missing_not_found()
+
+
+def position(
+    expr: Expr,
+    pattern: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+    limit: Expr | int | None = None,
+) -> Expr:
+    level_spec = integer(1) if spec is None else spec
+    level_min, level_max = _normalize_level_spec(level_spec)
+    remaining = _normalize_match_limit(limit)
+    results: list[Expr] = []
+
+    def recurse(current: Expr, positive_level: int, path: list[int]) -> None:
+        nonlocal remaining
+        if remaining == 0:
+            return
+        if _is_association(current):
+            if _level_in_range(positive_level, level_min, level_max) and _match_pattern(current, pattern) is not None:
+                results.append(list_expr(*(integer(index) for index in path)))
+                if remaining is not None:
+                    remaining -= 1
+            return
+
+        if isinstance(current, Call):
+            for index, argument in enumerate(current.arguments, start=1):
+                recurse(argument, positive_level + 1, [*path, index])
+                if remaining == 0:
+                    return
+
+        if _level_in_range(positive_level, level_min, level_max) and _match_pattern(current, pattern) is not None:
+            results.append(list_expr(*(integer(index) for index in path)))
+            if remaining is not None:
+                remaining -= 1
+
+    recurse(expr, 0, [])
+    return list_expr(*results)
+
+
+def member_q(
+    expr: Expr,
+    pattern: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+) -> Symbol:
+    positions = position(expr, pattern, spec=spec, limit=1)
+    assert isinstance(positions, Call) and positions.has_head("List")
+    return _bool_symbol(bool(positions.arguments))
+
+
+def _duplicate_test_succeeds(test: Expr | None, left: Expr, right: Expr) -> bool:
+    if test is None:
+        return left == right
+    evaluated = evaluate(_apply_callable(test, (left, right)))
+    return isinstance(evaluated, Symbol) and evaluated.name == "True"
+
+
+def delete_duplicates(expr: Expr, test: Expr | None = None) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        kept: list[_AssociationEntry] = []
+        seen_values: list[Expr] = []
+        for entry in entries:
+            if any(_duplicate_test_succeeds(test, entry.value, prior) for prior in seen_values):
+                continue
+            kept.append(entry)
+            seen_values.append(entry.value)
+        return _association_expr(kept)
+
+    compound = _require_compound(expr, "DeleteDuplicates")
+    kept_arguments: list[Expr] = []
+    for argument in compound.arguments:
+        if any(_duplicate_test_succeeds(test, argument, prior) for prior in kept_arguments):
+            continue
+        kept_arguments.append(argument)
+    return _rebuild(compound, kept_arguments)
+
+
+def delete_duplicates_by(expr: Expr, function: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        kept: list[_AssociationEntry] = []
+        seen_keys: list[Expr] = []
+        for entry in entries:
+            key = _apply_callable(function, (entry.value,))
+            if any(key == prior for prior in seen_keys):
+                continue
+            kept.append(entry)
+            seen_keys.append(key)
+        return _association_expr(kept)
+
+    compound = _require_compound(expr, "DeleteDuplicatesBy")
+    kept_arguments: list[Expr] = []
+    seen_keys: list[Expr] = []
+    for argument in compound.arguments:
+        key = _apply_callable(function, (argument,))
+        if any(key == prior for prior in seen_keys):
+            continue
+        kept_arguments.append(argument)
+        seen_keys.append(key)
+    return _rebuild(compound, kept_arguments)
+
+
+def duplicate_free_q(expr: Expr, test: Expr | None = None) -> Symbol:
+    entries = _association_entries(expr)
+    values = [entry.value for entry in entries] if entries is not None else list(_require_compound(expr, "DuplicateFreeQ").arguments)
+    for index, left in enumerate(values):
+        for right in values[index + 1:]:
+            if _duplicate_test_succeeds(test, left, right):
+                return _bool_symbol(False)
+    return _bool_symbol(True)
+
+
+def _list_rows(expr: Expr, function_name: str) -> list[tuple[Expr, ...]] | None:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return None
+    rows: list[tuple[Expr, ...]] = []
+    for argument in expr.arguments:
+        if not isinstance(argument, Call) or not argument.has_head("List"):
+            return None
+        rows.append(argument.arguments)
+    return rows
+
+
+def dot(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) < 2:
+        raise WolframEvaluationError("Dot expects at least two arguments.")
+
+    def dot_two(left: Expr, right: Expr) -> Expr:
+        left_rows = _list_rows(left, "Dot")
+        right_rows = _list_rows(right, "Dot")
+
+        if isinstance(left, Call) and left.has_head("List") and isinstance(right, Call) and right.has_head("List") and left_rows is None and right_rows is None:
+            if len(left.arguments) != len(right.arguments):
+                raise WolframEvaluationError("Dot expects vectors of the same length.")
+            return call("Plus", *(
+                call("Times", left_item, right_item)
+                for left_item, right_item in zip(left.arguments, right.arguments, strict=True)
+            ))
+
+        if left_rows is not None and right_rows is None and isinstance(right, Call) and right.has_head("List"):
+            return list_expr(*(dot_two(list_expr(*row), right) for row in left_rows))
+
+        if left_rows is None and isinstance(left, Call) and left.has_head("List") and right_rows is not None:
+            width = len(right_rows[0]) if right_rows else 0
+            if any(len(row) != width for row in right_rows):
+                raise WolframEvaluationError("Dot currently expects rectangular matrices.")
+            columns = [
+                list_expr(*(row[column_index] for row in right_rows))
+                for column_index in range(width)
+            ]
+            return list_expr(*(dot_two(left, column) for column in columns))
+
+        if left_rows is not None and right_rows is not None:
+            width = len(left_rows[0]) if left_rows else 0
+            if any(len(row) != width for row in left_rows):
+                raise WolframEvaluationError("Dot currently expects rectangular matrices.")
+            if any(len(row) != width for row in right_rows):
+                raise WolframEvaluationError("Dot currently expects compatible matrix dimensions.")
+            return list_expr(*(dot_two(list_expr(*row), right) for row in left_rows))
+
+        raise WolframEvaluationError("Dot currently supports List vectors and List matrices only.")
+
+    current = arguments[0]
+    for argument in arguments[1:]:
+        current = dot_two(current, argument)
+    return current
 def apply_head(new_head: Expr, expr: Expr) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
@@ -3128,7 +4110,7 @@ def evaluate(expr: Expr) -> Expr:
                 return expr
 
     evaluated_head = evaluate(expr.head_expr)
-    if _is_pure_function_expr(evaluated_head):
+    if _is_callable_expr(evaluated_head):
         return _apply_callable(evaluated_head, tuple(evaluate(argument) for argument in expr.arguments))
     if _is_function_expr(evaluated_head):
         raise WolframEvaluationError("Unsupported Function parameter specification.")
@@ -3157,6 +4139,17 @@ def evaluate(expr: Expr) -> Expr:
     integer_special_result = _evaluate_integer_special_functions(evaluated_expr)
     if integer_special_result is not None:
         return integer_special_result
+
+    if evaluated_head.name == "Identity":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Identity expects exactly one argument.")
+        return evaluated_arguments[0]
+
+    if evaluated_head.name == "SameQ":
+        return same_q(*evaluated_arguments)
+
+    if evaluated_head.name == "UnsameQ":
+        return unsame_q(*evaluated_arguments)
 
     if evaluated_head.name == "Association":
         return association(*evaluated_arguments)
@@ -3333,15 +4326,49 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("ReplacePart expects exactly two arguments.")
         return replace_part(evaluated_arguments[0], evaluated_arguments[1])
 
+    if evaluated_head.name == "Scan":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return scan(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return scan(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Scan expects a function, an expression, and an optional level specification.")
+
     if evaluated_head.name == "Apply":
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("Apply currently supports exactly two arguments.")
         return apply_head(evaluated_arguments[0], evaluated_arguments[1])
 
+    if evaluated_head.name == "MapApply":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("MapApply currently supports exactly two arguments.")
+        return map_apply(evaluated_arguments[0], evaluated_arguments[1])
+
     if evaluated_head.name == "Map":
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("Map currently supports exactly two arguments.")
         return map_expr(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "MapAll":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("MapAll currently supports exactly two arguments.")
+        return map_all(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "MapIndexed":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return map_indexed(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return map_indexed(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "MapIndexed expects a function, an expression, and an optional level specification."
+        )
 
     if evaluated_head.name == "MapAt":
         if len(evaluated_arguments) != 3:
@@ -3350,6 +4377,355 @@ def evaluate(expr: Expr) -> Expr:
 
     if evaluated_head.name == "Clip":
         return clip_expr(evaluated_arguments)
+
+    if evaluated_head.name == "Construct":
+        if not evaluated_arguments:
+            raise WolframEvaluationError("Construct expects at least one argument.")
+        return construct(evaluated_arguments[0], *evaluated_arguments[1:])
+
+    if evaluated_head.name == "ComposeList":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ComposeList expects exactly two arguments.")
+        return compose_list(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Nest":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("Nest expects exactly three arguments.")
+        return nest(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "NestList":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("NestList expects exactly three arguments.")
+        return nest_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "NestWhile":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("NestWhile currently supports exactly three arguments.")
+        return nest_while(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "NestWhileList":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("NestWhileList currently supports exactly three arguments.")
+        return nest_while_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "FixedPoint":
+        if len(evaluated_arguments) == 2:
+            return fixed_point(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return fixed_point(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("FixedPoint expects a function, an expression, and an optional iteration limit.")
+
+    if evaluated_head.name == "FixedPointList":
+        if len(evaluated_arguments) == 2:
+            return fixed_point_list(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return fixed_point_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "FixedPointList expects a function, an expression, and an optional iteration limit."
+        )
+
+    if evaluated_head.name == "Operate":
+        if len(evaluated_arguments) == 2:
+            return operate(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return operate(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Operate expects an operator, an expression, and an optional positive level.")
+
+    if evaluated_head.name == "Comap":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Comap expects exactly two arguments.")
+        return comap(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ComapApply":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ComapApply expects exactly two arguments.")
+        return comap_apply(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Through":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Through currently supports exactly one argument.")
+        return through(evaluated_arguments[0])
+
+    if evaluated_head.name == "MapThread":
+        if len(evaluated_arguments) == 2:
+            return map_thread(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return map_thread(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("MapThread expects a function, a list of sequences, and an optional level.")
+
+    if evaluated_head.name == "Thread":
+        if len(evaluated_arguments) == 1:
+            return thread(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return thread(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Thread expects an expression and an optional thread head.")
+
+    if evaluated_head.name == "Distribute":
+        if len(evaluated_arguments) == 1:
+            return distribute(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return distribute(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return distribute(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "Distribute currently supports an expression, an optional distributed head, and an optional outer head."
+        )
+
+    if evaluated_head.name == "Outer":
+        if len(evaluated_arguments) < 2:
+            raise WolframEvaluationError("Outer expects a function and at least one sequence.")
+        return outer(evaluated_arguments[0], *evaluated_arguments[1:])
+
+    if evaluated_head.name == "Inner":
+        if len(evaluated_arguments) != 4:
+            raise WolframEvaluationError("Inner expects exactly four arguments.")
+        return inner(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2], evaluated_arguments[3])
+
+    if evaluated_head.name == "Dot":
+        return dot(evaluated_arguments)
+
+    if evaluated_head.name == "Tuples":
+        if len(evaluated_arguments) == 1:
+            return tuples_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return tuples_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Tuples expects a list of sequences or a sequence with a repetition count.")
+
+    if evaluated_head.name == "Array":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Array currently supports exactly two arguments.")
+        return array(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ConstantArray":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ConstantArray currently supports exactly two arguments.")
+        return constant_array(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Range":
+        return range_expr(evaluated_arguments)
+
+    if evaluated_head.name == "UnitVector":
+        return unit_vector(evaluated_arguments)
+
+    if evaluated_head.name == "IdentityMatrix":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("IdentityMatrix expects exactly one argument.")
+        return identity_matrix(evaluated_arguments[0])
+
+    if evaluated_head.name == "DiagonalMatrix":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("DiagonalMatrix expects exactly one argument.")
+        return diagonal_matrix(evaluated_arguments[0])
+
+    if evaluated_head.name == "Partition":
+        if len(evaluated_arguments) == 2:
+            return partition(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return partition(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Partition currently supports an expression, a block size, and an optional offset.")
+
+    if evaluated_head.name == "BlockMap":
+        if len(evaluated_arguments) == 3:
+            return block_map(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return block_map(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError("BlockMap currently supports a function, an expression, a block size, and an optional offset.")
+
+    if evaluated_head.name == "TakeList":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("TakeList expects exactly two arguments.")
+        return take_list(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "TakeDrop":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("TakeDrop expects exactly two arguments.")
+        return take_drop(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Fold":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("Fold expects exactly three arguments.")
+        return fold(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "FoldList":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("FoldList expects exactly three arguments.")
+        return fold_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+
+    if evaluated_head.name == "SequenceFold":
+        if len(evaluated_arguments) == 3:
+            return sequence_fold(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return sequence_fold(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError(
+            "SequenceFold expects a function, initial values, inputs, and an optional argument count."
+        )
+
+    if evaluated_head.name == "SequenceFoldList":
+        if len(evaluated_arguments) == 3:
+            return sequence_fold_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return sequence_fold_list(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError(
+            "SequenceFoldList expects a function, initial values, inputs, and an optional argument count."
+        )
+
+    if evaluated_head.name == "FoldWhile":
+        if len(evaluated_arguments) == 4:
+            return fold_while(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        if len(evaluated_arguments) == 5:
+            return fold_while(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+                evaluated_arguments[4],
+            )
+        if len(evaluated_arguments) == 6:
+            return fold_while(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+                evaluated_arguments[4],
+                evaluated_arguments[5],
+            )
+        raise WolframEvaluationError(
+            "FoldWhile currently supports a function, an initial value, inputs, a test, and optional history and trailing counts."
+        )
+
+    if evaluated_head.name == "FoldWhileList":
+        if len(evaluated_arguments) == 4:
+            return fold_while_list(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        if len(evaluated_arguments) == 5:
+            return fold_while_list(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+                evaluated_arguments[4],
+            )
+        if len(evaluated_arguments) == 6:
+            return fold_while_list(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+                evaluated_arguments[4],
+                evaluated_arguments[5],
+            )
+        raise WolframEvaluationError(
+            "FoldWhileList currently supports a function, an initial value, inputs, a test, and optional history and trailing counts."
+        )
+
+    if evaluated_head.name == "FoldPair":
+        if len(evaluated_arguments) == 3:
+            return fold_pair(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return fold_pair(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError(
+            "FoldPair currently supports a function, an initial value, inputs, and an optional projection."
+        )
+
+    if evaluated_head.name == "FoldPairList":
+        if len(evaluated_arguments) == 3:
+            return fold_pair_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return fold_pair_list(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError(
+            "FoldPairList currently supports a function, an initial value, inputs, and an optional projection."
+        )
+
+    if evaluated_head.name == "LengthWhile":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("LengthWhile expects exactly two arguments.")
+        return length_while(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "FirstCase":
+        if len(evaluated_arguments) == 2:
+            return first_case(evaluated_arguments[0], expr.arguments[1])
+        if len(evaluated_arguments) == 3:
+            return first_case(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return first_case(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2], evaluated_arguments[3])
+        raise WolframEvaluationError(
+            "FirstCase expects an expression, a pattern, and optional default and level specification."
+        )
+
+    if evaluated_head.name == "Position":
+        if len(evaluated_arguments) == 2:
+            return position(evaluated_arguments[0], expr.arguments[1])
+        if len(evaluated_arguments) == 3:
+            return position(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return position(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2], evaluated_arguments[3])
+        raise WolframEvaluationError(
+            "Position expects an expression, a pattern, and optional level and result limits."
+        )
+
+    if evaluated_head.name == "MemberQ":
+        if len(evaluated_arguments) == 2:
+            return member_q(evaluated_arguments[0], expr.arguments[1])
+        if len(evaluated_arguments) == 3:
+            return member_q(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("MemberQ expects an expression, a pattern, and an optional level specification.")
+
+    if evaluated_head.name == "DeleteDuplicates":
+        if len(evaluated_arguments) == 1:
+            return delete_duplicates(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return delete_duplicates(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("DeleteDuplicates expects an expression and an optional binary test.")
+
+    if evaluated_head.name == "DeleteDuplicatesBy":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("DeleteDuplicatesBy expects exactly two arguments.")
+        return delete_duplicates_by(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "DuplicateFreeQ":
+        if len(evaluated_arguments) == 1:
+            return duplicate_free_q(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return duplicate_free_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("DuplicateFreeQ expects an expression and an optional binary test.")
 
     if evaluated_head.name == "Keys":
         if len(evaluated_arguments) != 1:
@@ -3771,12 +5147,16 @@ def _is_symbol_continue(char: str) -> bool:
 
 
 _MULTI_TOKENS = (
+    "===",
+    "=!=",
     "___",
     "__",
     "[[",
     "<|",
     "|>",
     "|->",
+    "@*",
+    "/*",
     ":>",
     "->",
     "/;",
@@ -3856,7 +5236,7 @@ def _tokenize(text: str) -> list[_Token]:
             continue
 
         char = text[index]
-        if char in "[]{}(),+-*/^!@<>_|&#":
+        if char in "[]{}(),.+-*/^!@<>_|&#=":
             tokens.append(_Token(kind="operator", text=char, start=index, end=index + 1, value=char))
             index += 1
             continue
@@ -3883,6 +5263,7 @@ class _Parser:
     _REPLACE_BP = 50
     _MAP_BP = 45
     _APPLY_BP = 44
+    _COMPOSITION_BP = 43
     _AT_BP = 40
     _POSTFIX_BP = 30
     _SEMICOLON_BP = 20
@@ -4124,7 +5505,9 @@ class _Parser:
             "+": (self._PLUS_BP, self._PLUS_BP + 1, "Plus"),
             "-": (self._PLUS_BP, self._PLUS_BP + 1, None),
             "==": (self._COMPARE_BP, self._COMPARE_BP + 1, "Equal"),
+            "===": (self._COMPARE_BP, self._COMPARE_BP + 1, "SameQ"),
             "!=": (self._COMPARE_BP, self._COMPARE_BP + 1, "Unequal"),
+            "=!=": (self._COMPARE_BP, self._COMPARE_BP + 1, "UnsameQ"),
             "<": (self._COMPARE_BP, self._COMPARE_BP + 1, "Less"),
             "<=": (self._COMPARE_BP, self._COMPARE_BP + 1, "LessEqual"),
             ">": (self._COMPARE_BP, self._COMPARE_BP + 1, "Greater"),
@@ -4140,10 +5523,13 @@ class _Parser:
             "/@": (self._MAP_BP, self._MAP_BP + 1, "Map"),
             "//@": (self._MAP_BP, self._MAP_BP + 1, "MapAll"),
             "@@": (self._APPLY_BP, self._APPLY_BP + 1, "Apply"),
-            "@@@": (self._APPLY_BP, self._APPLY_BP + 1, None),
+            "@@@": (self._APPLY_BP, self._APPLY_BP + 1, "MapApply"),
+            "@*": (self._COMPOSITION_BP, self._COMPOSITION_BP, "Composition"),
+            "/*": (self._COMPOSITION_BP, self._COMPOSITION_BP, "RightComposition"),
             "@": (self._AT_BP, self._AT_BP, None),
             "//": (self._POSTFIX_BP, self._POSTFIX_BP + 1, None),
             ";": (self._SEMICOLON_BP, self._SEMICOLON_BP + 1, "CompoundExpression"),
+            ".": (self._TIMES_BP, self._TIMES_BP + 1, "Dot"),
             "|->": (self._FUNCTION_BP, self._FUNCTION_BP, "Function"),
         }
 
@@ -4166,8 +5552,6 @@ class _Parser:
             return Call(head_expr=left, arguments=(right,))
         if text == "//":
             return Call(head_expr=right, arguments=(left,))
-        if text == "@@@":
-            return call("Apply", left, right, list_expr(integer(1)))
         if head_name is None:
             raise WolframSyntaxError(f"Unhandled Wolfram operator {text!r}.")
         return call(head_name, left, right)

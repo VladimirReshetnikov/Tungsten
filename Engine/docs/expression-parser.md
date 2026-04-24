@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T15:10:03Z
-Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
+Updated (UTC): 2026-04-24T16:50:02Z
+Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
 
 ## Summary
 
@@ -17,9 +17,13 @@ Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
   hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, integer-only numeric
   heads such as `UnitStep`, `Mod`, `Clip`, and `KroneckerDelta`, Boolean heads such as `Not`,
   `And`, and `Or`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
-  `ReplaceRepeated`, `Function`, `Pick`, `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`,
-  `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, association constructors, key accessors, and
-  related exact-position transforms;
+  `ReplaceRepeated`, `Function`, functional combinators such as `Composition`, `Nest`,
+  `FixedPoint`, `Fold`, `MapApply`, `MapAll`, `MapIndexed`, `Through`, `Thread`, `Outer`,
+  `Inner`, `Dot`, array and matrix builders such as `Array`, `Range`, `UnitVector`,
+  `IdentityMatrix`, and `DiagonalMatrix`, sequence transforms such as `Partition`, `BlockMap`,
+  `TakeList`, `TakeDrop`, `FoldWhile`, `FoldPair`, `Position`, `DeleteDuplicates`, `Pick`,
+  `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
+  `ReplacePart`, association constructors, key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -58,6 +62,7 @@ The parser currently handles:
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
+- structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, and `.`;
 - rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
   `x_ :> rhs /; test`;
 - comparisons and boolean operators;

@@ -98,6 +98,20 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(escaped.to_full_form(), "Function[x, Plus[x, x]]")
         self.assertEqual(nested_named.to_full_form(), "Function[x, Function[y, x[y]]]")
 
+    def test_parse_structural_operator_forms(self) -> None:
+        same_q = parse_input_form("a === b")
+        unsame_q = parse_input_form("a =!= b")
+        composition = parse_input_form("f @* g")
+        right_composition = parse_input_form("f /* g")
+        map_apply = parse_input_form("f @@@ xs")
+        dot_expr = parse_input_form("{a, b} . {c, d}")
+        self.assertEqual(same_q.to_full_form(), "SameQ[a, b]")
+        self.assertEqual(unsame_q.to_full_form(), "UnsameQ[a, b]")
+        self.assertEqual(composition.to_full_form(), "Composition[f, g]")
+        self.assertEqual(right_composition.to_full_form(), "RightComposition[f, g]")
+        self.assertEqual(map_apply.to_full_form(), "MapApply[f, xs]")
+        self.assertEqual(dot_expr.to_full_form(), "Dot[List[a, b], List[c, d]]")
+
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
         self.assertEqual(expr.to_full_form(), 'f["alpha", beta]')
@@ -503,6 +517,178 @@ class ExpressionEvaluationTests(unittest.TestCase):
             evaluate(parse_input_form("(Function[{x, y}, x + y])[a]"))
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form("(Function[f[x], x])[a]"))
+
+    def test_identity_sameq_unsameq_sameas_and_composition_family(self) -> None:
+        identity = evaluate(parse_input_form("Identity[x]"))
+        same_q = evaluate(parse_input_form("SameQ[a, a, a]"))
+        unsame_q = evaluate(parse_input_form("UnsameQ[a, b, c]"))
+        unsame_q_false = evaluate(parse_input_form("UnsameQ[a, b, a]"))
+        same_as_true = evaluate(parse_input_form("SameAs[y][y]"))
+        same_as_false = evaluate(parse_input_form("SameAs[y][x, y]"))
+        composition = evaluate(parse_input_form("Composition[f, g][x]"))
+        right_composition = evaluate(parse_input_form("RightComposition[f, g][x]"))
+        compose_list = evaluate(parse_input_form("ComposeList[{f, g, h}, x]"))
+        self.assertEqual(identity.to_full_form(), "x")
+        self.assertEqual(same_q.to_full_form(), "True")
+        self.assertEqual(unsame_q.to_full_form(), "True")
+        self.assertEqual(unsame_q_false.to_full_form(), "False")
+        self.assertEqual(same_as_true.to_full_form(), "True")
+        self.assertEqual(same_as_false.to_full_form(), "False")
+        self.assertEqual(composition.to_full_form(), "f[g[x]]")
+        self.assertEqual(right_composition.to_full_form(), "g[f[x]]")
+        self.assertEqual(compose_list.to_full_form(), "List[x, f[x], g[f[x]], h[g[f[x]]]]")
+
+    def test_structural_callable_family_supports_map_scan_construct_and_through(self) -> None:
+        scan_result = evaluate(parse_input_form("Scan[f, {a, b}]"))
+        map_apply = evaluate(parse_input_form("MapApply[f, {g[a, b], h[c]}]"))
+        map_apply_operator = evaluate(parse_input_form("MapApply[f][{g[a, b], h[c]}]"))
+        map_all = evaluate(parse_input_form("MapAll[f, g[a, b]]"))
+        map_indexed = evaluate(parse_input_form("MapIndexed[f, g[a, b]]"))
+        construct = evaluate(parse_input_form("Construct[# + 1 &, 2]"))
+        operate = evaluate(parse_input_form("Operate[p, f[x, y]]"))
+        comap = evaluate(parse_input_form("Comap[{f, g}, x]"))
+        comap_apply = evaluate(parse_input_form("ComapApply[{f, g}, {x, y}]"))
+        through_result = evaluate(parse_input_form("Through[p[f, g][x, y]]"))
+        self.assertEqual(scan_result.to_full_form(), "Null")
+        self.assertEqual(map_apply.to_full_form(), "List[f[a, b], f[c]]")
+        self.assertEqual(map_apply_operator.to_full_form(), "List[f[a, b], f[c]]")
+        self.assertEqual(map_all.to_full_form(), "f[g[f[a], f[b]]]")
+        self.assertEqual(map_indexed.to_full_form(), "g[f[a, List[1]], f[b, List[2]]]")
+        self.assertEqual(construct.to_full_form(), "3")
+        self.assertEqual(operate.to_full_form(), "p[f][x, y]")
+        self.assertEqual(comap.to_full_form(), "List[f[x], g[x]]")
+        self.assertEqual(comap_apply.to_full_form(), "List[f[x, y], g[x, y]]")
+        self.assertEqual(through_result.to_full_form(), "p[f[x, y], g[x, y]]")
+
+    def test_nesting_threading_arrays_and_linear_algebra_family(self) -> None:
+        nest_result = evaluate(parse_input_form("Nest[f, x, 3]"))
+        nest_list_result = evaluate(parse_input_form("NestList[f, x, 3]"))
+        nest_while_result = evaluate(parse_input_form("NestWhile[# + 1 &, 0, # < 3 &]"))
+        nest_while_list_result = evaluate(parse_input_form("NestWhileList[# + 1 &, 0, # < 3 &]"))
+        fixed_point_result = evaluate(parse_input_form("FixedPoint[# /. a -> b &, a]"))
+        fixed_point_list_result = evaluate(parse_input_form("FixedPointList[# /. a -> b &, a]"))
+        map_thread_result = evaluate(parse_input_form("MapThread[f, {{a, b}, {c, d}}]"))
+        thread_result = evaluate(parse_input_form("Thread[f[{a, b}, {c, d}]]"))
+        outer_result = evaluate(parse_input_form("Outer[f, {a, b}, {c, d}]"))
+        inner_result = evaluate(parse_input_form("Inner[f, {a, b}, {c, d}, g]"))
+        dot_result = evaluate(parse_input_form("{a, b} . {c, d}"))
+        tuples_result = evaluate(parse_input_form("Tuples[{{a, b}, {c, d}}]"))
+        array_result = evaluate(parse_input_form("Array[f, 3]"))
+        constant_array_result = evaluate(parse_input_form("ConstantArray[x, 3]"))
+        range_result = evaluate(parse_input_form("Range[2, 5]"))
+        unit_vector_result = evaluate(parse_input_form("UnitVector[4, 2]"))
+        identity_matrix_result = evaluate(parse_input_form("IdentityMatrix[2]"))
+        diagonal_matrix_result = evaluate(parse_input_form("DiagonalMatrix[{a, b}]"))
+        partition_result = evaluate(parse_input_form("Partition[{a, b, c, d, e}, 2]"))
+        take_list_result = evaluate(parse_input_form("TakeList[{a, b, c, d, e}, {2, 1}]"))
+        take_drop_result = evaluate(parse_input_form("TakeDrop[{a, b, c, d}, 2]"))
+        self.assertEqual(nest_result.to_full_form(), "f[f[f[x]]]")
+        self.assertEqual(nest_list_result.to_full_form(), "List[x, f[x], f[f[x]], f[f[f[x]]]]")
+        self.assertEqual(nest_while_result.to_full_form(), "3")
+        self.assertEqual(nest_while_list_result.to_full_form(), "List[0, 1, 2, 3]")
+        self.assertEqual(fixed_point_result.to_full_form(), "b")
+        self.assertEqual(fixed_point_list_result.to_full_form(), "List[a, b, b]")
+        self.assertEqual(map_thread_result.to_full_form(), "List[f[a, c], f[b, d]]")
+        self.assertEqual(thread_result.to_full_form(), "List[f[a, c], f[b, d]]")
+        self.assertEqual(
+            outer_result.to_full_form(),
+            "List[List[f[a, c], f[a, d]], List[f[b, c], f[b, d]]]",
+        )
+        self.assertEqual(inner_result.to_full_form(), "g[f[a, c], f[b, d]]")
+        self.assertEqual(dot_result.to_full_form(), "Plus[Times[a, c], Times[b, d]]")
+        self.assertEqual(tuples_result.to_full_form(), "List[List[a, c], List[a, d], List[b, c], List[b, d]]")
+        self.assertEqual(array_result.to_full_form(), "List[f[1], f[2], f[3]]")
+        self.assertEqual(constant_array_result.to_full_form(), "List[x, x, x]")
+        self.assertEqual(range_result.to_full_form(), "List[2, 3, 4, 5]")
+        self.assertEqual(unit_vector_result.to_full_form(), "List[0, 1, 0, 0]")
+        self.assertEqual(identity_matrix_result.to_full_form(), "List[List[1, 0], List[0, 1]]")
+        self.assertEqual(diagonal_matrix_result.to_full_form(), "List[List[a, 0], List[0, b]]")
+        self.assertEqual(partition_result.to_full_form(), "List[List[a, b], List[c, d]]")
+        self.assertEqual(take_list_result.to_full_form(), "List[List[a, b], List[c]]")
+        self.assertEqual(take_drop_result.to_full_form(), "List[List[a, b], List[c, d]]")
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("UnitVector[3]"))
+
+    def test_fold_search_and_duplicate_family(self) -> None:
+        fold_result = evaluate(parse_input_form("Fold[f, x, {a, b, c}]"))
+        fold_list_result = evaluate(parse_input_form("FoldList[f, x, {a, b, c}]"))
+        sequence_fold_result = evaluate(parse_input_form("SequenceFold[f, {x0, x1}, {a, b, c}]"))
+        sequence_fold_list_result = evaluate(parse_input_form("SequenceFoldList[f, {x0, x1}, {a, b, c}]"))
+        length_while_result = evaluate(parse_input_form("LengthWhile[{2, 4, 6, 7, 8}, EvenQ]"))
+        first_case_result = evaluate(parse_input_form("FirstCase[{a, 1, b, 2}, _Integer]"))
+        position_result = evaluate(parse_input_form("Position[f[a, g[a]], a, Infinity]"))
+        member_q_result = evaluate(parse_input_form("MemberQ[f[a, g[a]], a, Infinity]"))
+        delete_duplicates_result = evaluate(parse_input_form("DeleteDuplicates[{a, b, a, c, b}]"))
+        delete_duplicates_by_result = evaluate(parse_input_form("DeleteDuplicatesBy[{{a}, {b, c}, {d}, {e, f}}, Length]"))
+        duplicate_free_true = evaluate(parse_input_form("DuplicateFreeQ[{a, b, c}]"))
+        duplicate_free_false = evaluate(parse_input_form("DuplicateFreeQ[{a, b, a}]"))
+        self.assertEqual(fold_result.to_full_form(), "f[f[f[x, a], b], c]")
+        self.assertEqual(
+            fold_list_result.to_full_form(),
+            "List[x, f[x, a], f[f[x, a], b], f[f[f[x, a], b], c]]",
+        )
+        self.assertEqual(
+            sequence_fold_result.to_full_form(),
+            "f[f[x0, x1, a], f[x1, f[x0, x1, a], b], c]",
+        )
+        self.assertEqual(
+            sequence_fold_list_result.to_full_form(),
+            "List[x0, x1, f[x0, x1, a], f[x1, f[x0, x1, a], b], f[f[x0, x1, a], f[x1, f[x0, x1, a], b], c]]",
+        )
+        self.assertEqual(length_while_result.to_full_form(), "3")
+        self.assertEqual(first_case_result.to_full_form(), "1")
+        self.assertEqual(position_result.to_full_form(), "List[List[1], List[2, 1]]")
+        self.assertEqual(member_q_result.to_full_form(), "True")
+        self.assertEqual(delete_duplicates_result.to_full_form(), "List[a, b, c]")
+        self.assertEqual(delete_duplicates_by_result.to_full_form(), "List[List[a], List[b, c]]")
+        self.assertEqual(duplicate_free_true.to_full_form(), "True")
+        self.assertEqual(duplicate_free_false.to_full_form(), "False")
+
+    def test_blockmap_distribute_foldwhile_and_foldpair_family(self) -> None:
+        block_map_result = evaluate(parse_input_form("BlockMap[f, {a, b, c, d, e}, 2]"))
+        block_map_overlap = evaluate(parse_input_form("BlockMap[f, {a, b, c, d, e}, 2, 1]"))
+        block_map_head = evaluate(parse_input_form("BlockMap[f, h[a, b, c, d, e], 2]"))
+        distribute_default = evaluate(parse_input_form("Distribute[f[a + b, c + d]]"))
+        distribute_head = evaluate(parse_input_form("Distribute[f[g[a, b], h[c, d]], g]"))
+        fold_while_result = evaluate(parse_input_form("FoldWhile[#1 + #2 &, 0, {1, 2, 3, 4}, # < 4 &]"))
+        fold_while_list_result = evaluate(parse_input_form("FoldWhileList[#1 + #2 &, 0, {1, 2, 3, 4}, # < 4 &]"))
+        fold_while_history = evaluate(parse_input_form("FoldWhileList[#1 + #2 &, 0, {1, 2, 3, 4}, # < 4 &, 2]"))
+        fold_pair_list_result = evaluate(
+            parse_input_form("FoldPairList[Function[{y, x}, {y + x, y - x}], y0, {a, b, c}]")
+        )
+        fold_pair_result = evaluate(
+            parse_input_form("FoldPair[Function[{y, x}, {y + x, y - x}], y0, {a, b, c}]")
+        )
+        fold_pair_last = evaluate(
+            parse_input_form("FoldPairList[Function[{y, x}, {y + x, y - x}], y0, {a, b, c}, Last]")
+        )
+        self.assertEqual(block_map_result.to_full_form(), "List[f[List[a, b]], f[List[c, d]]]")
+        self.assertEqual(
+            block_map_overlap.to_full_form(),
+            "List[f[List[a, b]], f[List[b, c]], f[List[c, d]], f[List[d, e]]]",
+        )
+        self.assertEqual(block_map_head.to_full_form(), "List[f[h[a, b]], f[h[c, d]]]")
+        self.assertEqual(
+            distribute_default.to_full_form(),
+            "Plus[f[a, c], f[a, d], f[b, c], f[b, d]]",
+        )
+        self.assertEqual(distribute_head.to_full_form(), "g[f[a, h[c, d]], f[b, h[c, d]]]")
+        self.assertEqual(fold_while_result.to_full_form(), "6")
+        self.assertEqual(fold_while_list_result.to_full_form(), "List[0, 1, 3, 6]")
+        self.assertEqual(fold_while_history.to_full_form(), "List[0, 1, 3, 6, 10]")
+        self.assertEqual(
+            fold_pair_list_result.to_full_form(),
+            "List[Plus[y0, a], Plus[Plus[y0, Times[-1, a]], b], Plus[Plus[Plus[y0, Times[-1, a]], Times[-1, b]], c]]",
+        )
+        self.assertEqual(
+            fold_pair_result.to_full_form(),
+            "Plus[Plus[Plus[y0, Times[-1, a]], Times[-1, b]], c]",
+        )
+        self.assertEqual(
+            fold_pair_last.to_full_form(),
+            "List[Plus[y0, Times[-1, a]], Plus[Plus[y0, Times[-1, a]], Times[-1, b]], Plus[Plus[Plus[y0, Times[-1, a]], Times[-1, b]], Times[-1, c]]]",
+        )
 
     def test_association_constructor_and_depth(self) -> None:
         literal = evaluate(parse_input_form("<|a -> 1, a -> 2, b -> 3|>"))
