@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T16:50:02Z
-- Repository HEAD: 6c97e4ba7ff2c691ed7494ad9ba968faf4c6cdec
+- Updated (UTC): 2026-04-24T18:08:06Z
+- Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -63,11 +63,36 @@ Tungsten exists to satisfy a small set of load-bearing goals:
 Tungsten is intentionally not trying to do several things:
 
 - It is not a full Wolfram kernel reimplementation.
-- It does not attempt full box-language parsing or full StandardForm rendering.
+- Today it does not attempt full box-language parsing or full StandardForm rendering.
 - It does not try to expose the entire FrontEnd API surface.
 - It does not depend on browser automation or online-only documentation scraping.
 - It does not replace interactive GUI workflows when those are genuinely the most natural way to do
   the work.
+
+## Longer-term expression direction
+
+The shipped expression subsystem is intentionally narrower than the long-term target. Over time, the
+kernel-free Tungsten expression stack is intended to:
+
+- successfully parse all Wolfram Language syntax, including all built-in box forms;
+- evaluate structural expression manipulation;
+- evaluate pure functions;
+- evaluate functional and iterative programming helpers;
+- evaluate scoping and control-flow constructs;
+- perform exact integer arithmetic;
+- perform floating-point arithmetic;
+- handle array, matrix, and tensor manipulation, including sparse forms;
+- support some basic integer arithmetic functions such as `GCD` and `Divisors`.
+
+Even in that broader future direction, Tungsten is not intended to implement:
+
+- real- or complex-valued elementary or special mathematical functions;
+- expression simplification algorithms;
+- equation solving;
+- polynomial algebra;
+- derivatives or integrals;
+- optimization problems;
+- anything that requires specialized mathematical algorithms.
 
 ## Current feature map
 
