@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T17:49:28Z
-- Repository HEAD: f0c4f6ec14e951a26ce6f3f4ad3a08a10b3e900c
+- Updated (UTC): 2026-04-24T18:20:42Z
+- Repository HEAD: dcad077d1f5fabcc31bef9998e628c916bcadfc2
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -115,7 +115,7 @@ The current workspace is built around seven complementary capabilities:
 
 - Environment discovery for the local Wolfram installation, documentation roots, bundled Python
   client tree, and default index path.
-- Automatic `mathpass` deduplication before kernel execution.
+- Automatic `mathpass` deduplication plus launch-gate / process-scan handling before kernel execution.
 - Structured kernel evaluation with timing, messages, printed output capture, and explicit success
   metadata.
 - Structural notebook inspection, notebook creation, and JSON patch application.

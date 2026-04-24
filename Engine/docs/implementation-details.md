@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T17:49:28Z
-- Repository HEAD: f0c4f6ec14e951a26ce6f3f4ad3a08a10b3e900c
+- Updated (UTC): 2026-04-24T18:20:42Z
+- Repository HEAD: dcad077d1f5fabcc31bef9998e628c916bcadfc2
 
 ## Summary
 
@@ -64,6 +64,22 @@ This finding moved from "one weird local hack" to "core Tungsten behavior." As a
 - Tungsten always inspects the discovered file;
 - Tungsten always materializes a temporary deduplicated copy before kernel execution;
 - kernel result payloads surface the inspection data so callers can see what happened.
+
+### 2a. License-seat contention, not just duplicate entries, is part of the real machine story
+
+Later live investigation showed that the local license ceiling is also materially relevant:
+
+- successful runs report `$MaxLicenseProcesses = 2`;
+- a single orphaned headless `wolfram.exe` can consume one controlling-process seat;
+- parallel Tungsten launches can then exhaust the remaining seat and surface as `No valid password found.`
+
+Tungsten therefore now pairs the `mathpass` workaround with lightweight runtime seat management:
+
+- a machine-wide launch gate serializes Tungsten's own kernel launches;
+- successful runs cache the observed `max_license_processes`;
+- prelaunch process scans record likely controlling-process consumers;
+- clearly orphaned Tungsten-owned headless kernels from prior crashed runs are cleaned up before
+  new launches.
 
 ### 3. The bundled Wolfram Python client exists but is not the best runtime substrate here
 

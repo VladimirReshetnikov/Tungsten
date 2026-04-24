@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
 - Scope: kernel-free Wolfram pattern parsing and structural matching in `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T23:55:57Z
-- Updated (UTC): 2026-04-24T17:49:28Z
-- Repository HEAD: f0c4f6ec14e951a26ce6f3f4ad3a08a10b3e900c
+- Updated (UTC): 2026-04-24T18:20:42Z
+- Repository HEAD: dcad077d1f5fabcc31bef9998e628c916bcadfc2
 - Related code:
   - `src/Tungsten/src/tungsten/expression.py`
   - `src/Tungsten/tests/test_expression.py`

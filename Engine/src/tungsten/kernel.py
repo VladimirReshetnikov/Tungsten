@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +10,12 @@ from tempfile import TemporaryDirectory
 from .discovery import WolframInstallation, discover_installation
 from .licensing import MathpassInspection, deduped_mathpass
 from .notebook import wl_string
+from .wolfram_processes import cleanup_stale_tungsten_processes
+from .wolfram_processes import read_cached_max_license_processes
+from .wolfram_processes import snapshot_wolfram_processes
+from .wolfram_processes import tungsten_wolfram_launch_gate
+from .wolfram_processes import wait_for_wolfram_license_slot
+from .wolfram_processes import write_cached_max_license_processes
 
 
 def _to_wl_path(path: Path) -> str:
@@ -34,6 +41,14 @@ class KernelEvaluationResult:
     evaluation_available: bool
     mathpass: MathpassInspection
     used_mathpass_workaround: bool
+    license_processes: int | None
+    max_license_processes: int | None
+    launch_gate_wait_seconds: float
+    license_wait_seconds: float
+    license_wait_satisfied: bool | None
+    cached_max_license_processes: int | None
+    cleaned_tungsten_processes: list[int]
+    observed_wolfram_processes: list[dict[str, object]]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -54,6 +69,14 @@ class KernelEvaluationResult:
             "evaluation_available": self.evaluation_available,
             "mathpass": self.mathpass.to_dict(),
             "used_mathpass_workaround": self.used_mathpass_workaround,
+            "license_processes": self.license_processes,
+            "max_license_processes": self.max_license_processes,
+            "launch_gate_wait_seconds": self.launch_gate_wait_seconds,
+            "license_wait_seconds": self.license_wait_seconds,
+            "license_wait_satisfied": self.license_wait_satisfied,
+            "cached_max_license_processes": self.cached_max_license_processes,
+            "cleaned_tungsten_processes": self.cleaned_tungsten_processes,
+            "observed_wolfram_processes": self.observed_wolfram_processes,
         }
 
 
@@ -145,40 +168,101 @@ class WolframKernelRunner:
                     duplicate_entry_count=0,
                 ),
                 used_mathpass_workaround=False,
+                license_processes=None,
+                max_license_processes=None,
+                launch_gate_wait_seconds=0.0,
+                license_wait_seconds=0.0,
+                license_wait_satisfied=None,
+                cached_max_license_processes=read_cached_max_license_processes(),
+                cleaned_tungsten_processes=[],
+                observed_wolfram_processes=[],
             )
 
         execution_directory = (working_directory or Path.cwd()).resolve()
-        with deduped_mathpass(mathpass) as (deduped_path, inspection), TemporaryDirectory(
-            prefix="tungsten-wrapper-"
-        ) as wrapper_dir_name:
-            wrapper_dir = Path(wrapper_dir_name)
-            wrapper_path = wrapper_dir / "wrapper.wl"
-            wrapper_path.write_text(
-                self._build_wrapper_script(
-                    code_path=code_path.resolve(),
-                    result_path=result_path.resolve(),
-                    working_directory=execution_directory,
-                    require_front_end=require_front_end,
+        cached_max_license_processes = read_cached_max_license_processes()
+        command: list[str] = []
+        try:
+            with tungsten_wolfram_launch_gate() as launch_gate_wait_seconds:
+                cleaned_tungsten_processes = cleanup_stale_tungsten_processes()
+                if cleaned_tungsten_processes:
+                    time.sleep(0.5)
+
+                _, license_wait_seconds, license_wait_satisfied = wait_for_wolfram_license_slot(
+                    cached_max_license_processes,
+                    timeout_seconds=15.0,
+                )
+
+                with deduped_mathpass(mathpass) as (deduped_path, inspection), TemporaryDirectory(
+                    prefix="tungsten-wrapper-"
+                ) as wrapper_dir_name:
+                    wrapper_dir = Path(wrapper_dir_name)
+                    wrapper_path = wrapper_dir / "wrapper.wl"
+                    wrapper_path.write_text(
+                        self._build_wrapper_script(
+                            code_path=code_path.resolve(),
+                            result_path=result_path.resolve(),
+                            working_directory=execution_directory,
+                            require_front_end=require_front_end,
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    command = [str(kernel_cli), "-noprompt"]
+                    if deduped_path is not None:
+                        command.extend(["-pwfile", str(deduped_path)])
+                    command.extend(["-script", str(wrapper_path)])
+
+                    completed = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+        except TimeoutError as exc:
+            return KernelEvaluationResult(
+                command=command,
+                exit_code=124,
+                success=None,
+                failure_type="LaunchGateTimeout",
+                result=None,
+                result_head=None,
+                messages=[],
+                messages_text=[],
+                output=[],
+                timing=None,
+                absolute_timing=None,
+                stdout="",
+                stderr=str(exc),
+                json_path=None,
+                evaluation_available=False,
+                mathpass=MathpassInspection(
+                    path=str(mathpass) if mathpass else None,
+                    header_present=False,
+                    original_line_count=0,
+                    unique_entry_count=0,
+                    duplicate_entry_count=0,
                 ),
-                encoding="utf-8",
-            )
-
-            command = [str(kernel_cli), "-noprompt"]
-            if deduped_path is not None:
-                command.extend(["-pwfile", str(deduped_path)])
-            command.extend(["-script", str(wrapper_path)])
-
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                used_mathpass_workaround=False,
+                license_processes=None,
+                max_license_processes=None,
+                launch_gate_wait_seconds=0.0,
+                license_wait_seconds=0.0,
+                license_wait_satisfied=None,
+                cached_max_license_processes=cached_max_license_processes,
+                cleaned_tungsten_processes=[],
+                observed_wolfram_processes=[process.to_dict() for process in snapshot_wolfram_processes().processes],
             )
 
         parsed: dict[str, object] | None = None
         if result_path.exists():
             parsed = json.loads(result_path.read_text(encoding="utf-8"))
+            max_license_processes = self._as_optional_int(parsed, "max_license_processes")
+            if max_license_processes is not None and max_license_processes > 0:
+                write_cached_max_license_processes(max_license_processes)
+        else:
+            max_license_processes = None
+        observed_wolfram_processes = [process.to_dict() for process in snapshot_wolfram_processes().processes]
 
         return KernelEvaluationResult(
             command=command,
@@ -198,6 +282,14 @@ class WolframKernelRunner:
             evaluation_available=result_path.exists(),
             mathpass=inspection,
             used_mathpass_workaround=deduped_path is not None,
+            license_processes=self._as_optional_int(parsed, "license_processes"),
+            max_license_processes=max_license_processes,
+            launch_gate_wait_seconds=launch_gate_wait_seconds,
+            license_wait_seconds=license_wait_seconds,
+            license_wait_satisfied=license_wait_satisfied,
+            cached_max_license_processes=cached_max_license_processes,
+            cleaned_tungsten_processes=cleaned_tungsten_processes,
+            observed_wolfram_processes=observed_wolfram_processes,
         )
 
     @staticmethod
@@ -227,6 +319,17 @@ class WolframKernelRunner:
             return None
         if isinstance(value, (int, float)):
             return float(value)
+        return None
+
+    @staticmethod
+    def _as_optional_int(payload: dict[str, object] | None, key: str) -> int | None:
+        if payload is None or key not in payload:
+            return None
+        value = payload.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
         return None
 
     @staticmethod
@@ -327,6 +430,8 @@ payload = <|
     ],
     "result" -> Tungsten`Private`Stringify[result],
     "result_head" -> Tungsten`Private`HeadStringify[result],
+    "license_processes" -> Quiet @ Check[$LicenseProcesses, Null],
+    "max_license_processes" -> Quiet @ Check[$MaxLicenseProcesses, Null],
     "messages" -> Tungsten`Private`StringList[Lookup[ed, "Messages", {{}}]],
     "messages_text" -> Tungsten`Private`StringList[Lookup[ed, "MessagesText", {{}}]],
     "output" -> output,
