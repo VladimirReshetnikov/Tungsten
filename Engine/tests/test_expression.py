@@ -38,6 +38,13 @@ class ExpressionParserTests(unittest.TestCase):
         expr = parse_input_form("expr[[1, 2 ;; -1]]")
         self.assertEqual(expr.to_full_form(), "Part[expr, 1, Span[2, -1]]")
 
+    def test_parse_replace_operator_forms_to_named_functions(self) -> None:
+        replace_all = parse_input_form("f[a] /. a -> b")
+        replace_repeated = parse_standard_form("f[a] //. a -> b")
+        self.assertEqual(replace_all.to_full_form(), "ReplaceAll[f[a], Rule[a, b]]")
+        self.assertEqual(replace_all.to_input_form(), "ReplaceAll[f[a], a -> b]")
+        self.assertEqual(replace_repeated.to_full_form(), "ReplaceRepeated[f[a], Rule[a, b]]")
+
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
         self.assertEqual(expr.to_full_form(), 'f["alpha", beta]')
@@ -485,6 +492,58 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(default_levels.to_full_form(), "f[g[a]]")
         self.assertEqual(all_levels.to_full_form(), "f[g[]]")
         self.assertEqual(limited.to_full_form(), "List[1, 2, a]")
+
+    def test_replace_supports_levelspecs_and_nested_rulesets(self) -> None:
+        root_result = evaluate(parse_input_form("Replace[f[a], f[x_] :> x]"))
+        positive_levels = evaluate(parse_input_form("Replace[f[g[a]], _ -> z, 2]"))
+        negative_levels = evaluate(parse_input_form("Replace[f[g[a]], _Symbol -> s, -1]"))
+        deep_result = evaluate(parse_input_form("Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"))
+        nested_rulesets = evaluate(parse_input_form("Replace[f[a], {{f[x_] :> x}, {a -> y}}]"))
+        self.assertEqual(root_result.to_full_form(), "a")
+        self.assertEqual(positive_levels.to_full_form(), "f[z]")
+        self.assertEqual(negative_levels.to_full_form(), "f[g[s]]")
+        self.assertEqual(deep_result.to_full_form(), "p[f[p[g[p[a]]]]]")
+        self.assertEqual(nested_rulesets.to_full_form(), "List[a, f[a]]")
+
+    def test_replace_all_and_replace_repeated_support_operator_forms_and_fixed_points(self) -> None:
+        replace_all = evaluate(parse_input_form("f[g[a]] /. g[x_] :> x"))
+        replace_all_root = evaluate(parse_input_form("f[g[a]] /. x_ :> p[x]"))
+        replace_all_nested_rulesets = evaluate(parse_input_form("f[a] /. {{a -> x}, {a -> y}}"))
+        replace_repeated = evaluate(parse_input_form("f[a] //. f[x_] :> x"))
+        replace_repeated_identity = evaluate(parse_input_form("f[a] //. x_ :> x"))
+        replace_repeated_nested_rulesets = evaluate(parse_input_form("ReplaceRepeated[f[a], {{f[x_] :> x}, {a -> y}}]"))
+        self.assertEqual(replace_all.to_full_form(), "f[a]")
+        self.assertEqual(replace_all_root.to_full_form(), "p[f[g[a]]]")
+        self.assertEqual(replace_all_nested_rulesets.to_full_form(), "List[f[x], f[y]]")
+        self.assertEqual(replace_repeated.to_full_form(), "a")
+        self.assertEqual(replace_repeated_identity.to_full_form(), "f[a]")
+        self.assertEqual(replace_repeated_nested_rulesets.to_full_form(), "List[a, f[y]]")
+
+    def test_replace_at_rewrites_only_exact_target_parts(self) -> None:
+        single = evaluate(parse_input_form("ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"))
+        multiple = evaluate(parse_input_form("ReplaceAt[f[g[a], h[a]], a -> x, {{1, 1}, {2, 1}}]"))
+        ruleset = evaluate(parse_input_form("ReplaceAt[f[g[a]], {g[x_] :> x, a -> x}, {1}]"))
+        no_match = evaluate(parse_input_form("ReplaceAt[f[a, b, c], a -> x, 2]"))
+        self.assertEqual(single.to_full_form(), "f[g[a], h[x]]")
+        self.assertEqual(multiple.to_full_form(), "f[g[x], h[x]]")
+        self.assertEqual(ruleset.to_full_form(), "f[a]")
+        self.assertEqual(no_match.to_full_form(), "f[a, b, c]")
+
+    def test_replace_family_handles_association_roots_values_and_key_paths(self) -> None:
+        replace_root = evaluate(parse_input_form("Replace[<|a -> 1|>, _Association -> x]"))
+        replace_value = evaluate(parse_input_form("Replace[<|a -> 1|>, _Integer -> x, Infinity]"))
+        replace_all_root = evaluate(parse_input_form("<|a -> 1|> /. _Association -> z"))
+        replace_all_value = evaluate(parse_input_form("<|a -> 1|> /. _Integer -> x"))
+        replace_all_head = evaluate(parse_input_form("<|a -> 1|> /. _Symbol -> s"))
+        replace_at_key = evaluate(parse_input_form("ReplaceAt[<|a -> 1, b -> 2|>, _Integer -> x, Key[b]]"))
+        replace_at_nested = evaluate(parse_input_form("ReplaceAt[{<|a -> 1|>, 2}, _Integer -> x, {1, Key[a]}]"))
+        self.assertEqual(replace_root.to_full_form(), "x")
+        self.assertEqual(replace_value.to_full_form(), "Association[Rule[a, x]]")
+        self.assertEqual(replace_all_root.to_full_form(), "z")
+        self.assertEqual(replace_all_value.to_full_form(), "Association[Rule[a, x]]")
+        self.assertEqual(replace_all_head.to_full_form(), "s[Rule[a, 1]]")
+        self.assertEqual(replace_at_key.to_full_form(), "Association[Rule[a, 1], Rule[b, x]]")
+        self.assertEqual(replace_at_nested.to_full_form(), "List[Association[Rule[a, x]], 2]")
 
     def test_pattern_search_treats_associations_as_opaque_for_now(self) -> None:
         match_assoc = evaluate(parse_input_form("MatchQ[<|a -> 1|>, _Association]"))

@@ -358,6 +358,10 @@ python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
 python -m tungsten expr evaluate --code "FreeQ[f[a], f]"
 python -m tungsten expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
 python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
+python -m tungsten expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
+python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
+python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
+python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 ```
@@ -371,6 +375,9 @@ The implemented inert evaluator currently covers:
 - `FreeQ`
 - `Cases`
 - `DeleteCases`
+- `Replace`
+- `ReplaceAll`
+- `ReplaceRepeated`
 - `First`
 - `Last`
 - `Rest`
@@ -388,6 +395,7 @@ The implemented inert evaluator currently covers:
 - `RotateRight`
 - `Flatten`
 - `Delete`
+- `ReplaceAt`
 - `ReplacePart`
 - `Apply`
 - `Map`
@@ -399,8 +407,10 @@ For the exact supported forms and limits of each function, see
 Everything else remains inert.
 
 The current pattern subset includes `_`, `_Head`, `x_`, `x_Head`, `Alternatives` via `|`,
-`Except`, `HoldPattern`, and `Verbatim`. Advanced constructs such as `__`, `___`, `?`, `/;`, and
-options-related pattern forms are intentionally out of scope.
+`Except`, `HoldPattern`, and `Verbatim`. The parser also lowers `expr /. rules` and
+`expr //. rules` to `ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`. Advanced
+constructs such as `__`, `___`, `?`, `/;`, and options-related pattern forms are intentionally out
+of scope.
 
 On structural evaluation failure, `expr evaluate` still writes structured JSON to stdout and
 returns exit code `1` with:

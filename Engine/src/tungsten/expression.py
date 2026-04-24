@@ -595,6 +595,238 @@ def _substitute_pattern_bindings(expr: Expr, bindings: dict[str, Expr]) -> Expr:
     )
 
 
+@dataclass(frozen=True)
+class _ReplacementRule:
+    pattern: Expr
+    template: Expr
+
+
+_REPLACE_REPEATED_MAX_ITERATIONS = 65536
+
+
+def _is_replacement_rule_expr(expr: Expr) -> bool:
+    return (
+        isinstance(expr, Call)
+        and (expr.has_head("Rule") or expr.has_head("RuleDelayed"))
+        and len(expr.arguments) == 2
+    )
+
+
+def _replacement_rule_from_expr(rule: Expr, function_name: str) -> _ReplacementRule:
+    if not _is_replacement_rule_expr(rule):
+        raise WolframEvaluationError(f"{function_name} expects a rule or a list of rules.")
+    assert isinstance(rule, Call)
+    pattern, template = rule.arguments
+    if rule.has_head("Rule"):
+        template = evaluate(template)
+    return _ReplacementRule(pattern=pattern, template=template)
+
+
+def _normalize_single_replacement_ruleset(rules: Expr, function_name: str) -> list[_ReplacementRule]:
+    if _is_replacement_rule_expr(rules):
+        return [_replacement_rule_from_expr(rules, function_name)]
+    if isinstance(rules, Call) and rules.has_head("List"):
+        if not rules.arguments:
+            return []
+        if all(_is_replacement_rule_expr(item) for item in rules.arguments):
+            return [_replacement_rule_from_expr(item, function_name) for item in rules.arguments]
+    raise WolframEvaluationError(f"{function_name} expects a rule or a list of rules.")
+
+
+def _is_nested_replacement_rules_list(rules: Expr) -> bool:
+    return (
+        isinstance(rules, Call)
+        and rules.has_head("List")
+        and bool(rules.arguments)
+        and not all(_is_replacement_rule_expr(item) for item in rules.arguments)
+        and all(
+            _is_replacement_rule_expr(item)
+            or (isinstance(item, Call) and item.has_head("List"))
+            for item in rules.arguments
+        )
+    )
+
+
+def _apply_replacement_rules(expr: Expr, ruleset: Sequence[_ReplacementRule]) -> tuple[Expr, bool]:
+    for rule in ruleset:
+        bindings = _match_pattern(expr, rule.pattern)
+        if bindings is None:
+            continue
+        return (evaluate(_substitute_pattern_bindings(rule.template, bindings)), True)
+    return (expr, False)
+
+
+def _replace_recursive(
+    expr: Expr,
+    ruleset: Sequence[_ReplacementRule],
+    *,
+    positive_level: int,
+    level_min: int,
+    level_max: int,
+) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        mutable_entries: list[_AssociationEntry] = []
+        changed = False
+        for entry in entries:
+            updated_value = _replace_recursive(
+                entry.value,
+                ruleset,
+                positive_level=positive_level + 1,
+                level_min=level_min,
+                level_max=level_max,
+            )
+            mutable_entries.append(_AssociationEntry(entry.rule_head, entry.key, updated_value))
+            changed = changed or updated_value != entry.value
+        rebuilt = _association_expr(mutable_entries) if changed else expr
+    elif isinstance(expr, Call):
+        updated_arguments = tuple(
+            _replace_recursive(
+                argument,
+                ruleset,
+                positive_level=positive_level + 1,
+                level_min=level_min,
+                level_max=level_max,
+            )
+            for argument in expr.arguments
+        )
+        rebuilt = _rebuild(expr, updated_arguments) if updated_arguments != expr.arguments else expr
+    else:
+        rebuilt = expr
+
+    negative_level = -depth(rebuilt)
+    if _level_in_range(positive_level, level_min, level_max) or _level_in_range(negative_level, level_min, level_max):
+        replaced, _did_replace = _apply_replacement_rules(rebuilt, ruleset)
+        return replaced
+    return rebuilt
+
+
+def replace(
+    expr: Expr,
+    rules: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+) -> Expr:
+    if _is_nested_replacement_rules_list(rules):
+        assert isinstance(rules, Call)
+        return list_expr(*(replace(expr, item, spec) for item in rules.arguments))
+    ruleset = _normalize_single_replacement_ruleset(rules, "Replace")
+    if spec is None:
+        return _apply_replacement_rules(expr, ruleset)[0]
+    level_min, level_max = _normalize_level_spec(spec)
+    return _replace_recursive(expr, ruleset, positive_level=0, level_min=level_min, level_max=level_max)
+
+
+def _replace_all_single_pass(expr: Expr, ruleset: Sequence[_ReplacementRule]) -> tuple[Expr, bool]:
+    replaced, did_replace = _apply_replacement_rules(expr, ruleset)
+    if did_replace:
+        return (replaced, replaced != expr)
+
+    entries = _association_entries(expr)
+    if entries is not None:
+        updated_head, head_changed = _replace_all_single_pass(expr.head_expr, ruleset)
+        mutable_entries: list[_AssociationEntry] = []
+        changed = head_changed
+        for entry in entries:
+            updated_value, value_changed = _replace_all_single_pass(entry.value, ruleset)
+            mutable_entries.append(_AssociationEntry(entry.rule_head, entry.key, updated_value))
+            changed = changed or value_changed
+        if not changed:
+            return (expr, False)
+        if isinstance(updated_head, Symbol) and updated_head.name == "Association":
+            return (_association_expr(mutable_entries), True)
+        return (Call(head_expr=updated_head, arguments=tuple(entry.to_expr() for entry in mutable_entries)), True)
+
+    if not isinstance(expr, Call):
+        return (expr, False)
+
+    updated_head, head_changed = _replace_all_single_pass(expr.head_expr, ruleset)
+    updated_arguments: list[Expr] = []
+    changed = head_changed
+    for argument in expr.arguments:
+        updated_argument, argument_changed = _replace_all_single_pass(argument, ruleset)
+        updated_arguments.append(updated_argument)
+        changed = changed or argument_changed
+    if not changed:
+        return (expr, False)
+    return (Call(head_expr=updated_head, arguments=tuple(updated_arguments)), True)
+
+
+def replace_all(expr: Expr, rules: Expr) -> Expr:
+    if _is_nested_replacement_rules_list(rules):
+        assert isinstance(rules, Call)
+        return list_expr(*(replace_all(expr, item) for item in rules.arguments))
+    ruleset = _normalize_single_replacement_ruleset(rules, "ReplaceAll")
+    return _replace_all_single_pass(expr, ruleset)[0]
+
+
+def replace_repeated(expr: Expr, rules: Expr) -> Expr:
+    if _is_nested_replacement_rules_list(rules):
+        assert isinstance(rules, Call)
+        return list_expr(*(replace_repeated(expr, item) for item in rules.arguments))
+    ruleset = _normalize_single_replacement_ruleset(rules, "ReplaceRepeated")
+    current = expr
+    for _ in range(_REPLACE_REPEATED_MAX_ITERATIONS):
+        updated, changed = _replace_all_single_pass(current, ruleset)
+        if not changed:
+            return current
+        current = updated
+    raise WolframEvaluationError("ReplaceRepeated exceeded the Tungsten iteration safety limit.")
+
+
+def _try_replace_using_rules_at_path(
+    expr: Expr,
+    ruleset: Sequence[_ReplacementRule],
+    path: Sequence[_IndexSelector | _KeySelector],
+) -> tuple[Expr, bool]:
+    if not path:
+        return (_apply_replacement_rules(expr, ruleset)[0], True)
+
+    entries = _association_entries(expr)
+    if entries is not None:
+        selection = _select_association_entry(entries, path[0])
+        if selection is None:
+            return (expr, False)
+        index, entry = selection
+        mutable = list(entries)
+        updated_child, valid = _try_replace_using_rules_at_path(entry.value, ruleset, path[1:])
+        if not valid:
+            return (expr, False)
+        mutable[index] = _AssociationEntry(entry.rule_head, entry.key, updated_child)
+        return (_association_expr(mutable), True)
+
+    if not isinstance(expr, Call):
+        return (expr, False)
+    selector = path[0]
+    if not isinstance(selector, _IndexSelector):
+        return (expr, False)
+    resolved = selector.index - 1
+    if not 0 <= resolved < len(expr.arguments):
+        return (expr, False)
+
+    arguments = list(expr.arguments)
+    updated_child, valid = _try_replace_using_rules_at_path(arguments[resolved], ruleset, path[1:])
+    if not valid:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
+def replace_at(expr: Expr, rules: Expr, positions: Expr | int) -> Expr:
+    if _is_nested_replacement_rules_list(rules):
+        raise WolframEvaluationError("ReplaceAt currently expects a rule or a flat list of rules.")
+    ruleset = _normalize_single_replacement_ruleset(rules, "ReplaceAt")
+    paths, invalid = _expand_operation_paths(expr, integer(positions) if isinstance(positions, int) else positions)
+    if invalid:
+        raise WolframEvaluationError(f"ReplaceAt positions are invalid for {expr.to_input_form()}.")
+
+    result = expr
+    for path in _sort_paths(paths):
+        result, valid = _try_replace_using_rules_at_path(result, ruleset, path)
+        if not valid:
+            raise WolframEvaluationError(f"ReplaceAt positions are invalid for {expr.to_input_form()}.")
+    return result
+
+
 def cases(
     expr: Expr,
     pattern_spec: Expr,
@@ -1816,6 +2048,30 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError(
                 "DeleteCases expects an expression, a pattern, and optional level and match limits."
             )
+
+        if raw_head_name == "Replace":
+            if len(expr.arguments) == 2:
+                return replace(evaluate(expr.arguments[0]), expr.arguments[1])
+            if len(expr.arguments) == 3:
+                return replace(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            raise WolframEvaluationError(
+                "Replace expects an expression, replacement rules, and an optional level specification."
+            )
+
+        if raw_head_name == "ReplaceAll":
+            if len(expr.arguments) != 2:
+                raise WolframEvaluationError("ReplaceAll expects exactly two arguments.")
+            return replace_all(evaluate(expr.arguments[0]), expr.arguments[1])
+
+        if raw_head_name == "ReplaceRepeated":
+            if len(expr.arguments) != 2:
+                raise WolframEvaluationError("ReplaceRepeated expects exactly two arguments.")
+            return replace_repeated(evaluate(expr.arguments[0]), expr.arguments[1])
+
+        if raw_head_name == "ReplaceAt":
+            if len(expr.arguments) != 3:
+                raise WolframEvaluationError("ReplaceAt expects exactly three arguments.")
+            return replace_at(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
 
     evaluated_head = evaluate(expr.head_expr)
     if not isinstance(evaluated_head, Symbol):

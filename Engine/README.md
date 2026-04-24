@@ -84,9 +84,11 @@ The current workspace is built around seven complementary capabilities:
    StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
    `RadicalBox`, and `SuperscriptBox`, understands association literals and common association
    row-box forms from the installed documentation notebooks, understands a bounded but useful
-   pattern subset such as `_Integer`, `x_`, `Except[...]`, and `a | b`, then evaluates a broader
-   inert structural built-in set such as `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
-   `Take`, `Drop`, `Flatten`, `ReplacePart`, `MapAt`, `Association`, `Lookup`, and `KeyTake`.
+   pattern subset such as `_Integer`, `x_`, `Except[...]`, and `a | b`, parses replacement
+   operators such as `/.` and `//.` into named AST calls, then evaluates a broader inert
+   structural built-in set such as `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
+   `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
+   `ReplacePart`, `MapAt`, `Association`, `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
@@ -197,7 +199,7 @@ python -m tungsten notebook create --file $env:TEMP\tungsten-demo.nb --title "De
 python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
 python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
 python -m tungsten docs search NotebookGet
-python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
+python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
 ```
 
 ### PowerShell
@@ -209,7 +211,7 @@ Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
 New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{CircleBox[]}]"
 Convert-TungstenExpression -Code "1 + 2 x^3"
-Invoke-TungstenExpression -Code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
+Invoke-TungstenExpression -Code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 Find-TungstenDocumentation -Query "NotebookGet"
 ```
 
@@ -222,7 +224,7 @@ var client = TungstenClient.CreateForRepositoryRoot(@"<repository-root>");
 
 var environment = await client.GetEnvironmentAsync(probe: true);
 var expression = await client.EvaluateExpressionAsync(
-    TungstenInputSource.FromCode("ReplacePart[f[a, b, c], 2 -> x]"));
+    TungstenInputSource.FromCode("f[g[a]] /. g[x_] :> x"));
 
 Console.WriteLine(environment.InstallDir);
 Console.WriteLine(expression.Result?.FullForm);

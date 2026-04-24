@@ -21,7 +21,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 
 - The functions below are implemented only for the direct forms listed in the "Tungsten-supported
   forms" column.
-- Operator forms are generally out of scope unless they happen to reduce to the direct forms below.
+- Operator forms are generally out of scope unless Tungsten explicitly lowers them to the direct
+  forms below, such as `expr /. rules` to `ReplaceAll[expr, rules]` and `expr //. rules` to
+  `ReplaceRepeated[expr, rules]`.
 - `Take` and `Drop` currently support a single first-level specification only.
 - `Map` currently supports `Map[f, expr]` only.
 - `Apply` currently supports `Apply[f, expr]` only.
@@ -36,11 +38,18 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   practical behavior of Wolfram's direct rule form.
 - `Delete` and `MapAt` support exact positions and lists of exact positions; invalid positions
   currently surface as Tungsten evaluation errors.
+- `ReplaceAt` supports exact positions and lists of exact positions, but it currently expects a
+  single rule or a flat list of rules rather than a nested list of rule lists.
+- `ReplaceRepeated` uses a Tungsten-side iteration safety cap to avoid non-terminating rewrite
+  loops.
 - The current pattern subset intentionally excludes variable-length sequence patterns, options,
   conditions, pattern tests, and other advanced matching forms.
 - Pattern search on associations is deliberately conservative in this pass: associations can match
   as whole expressions such as `_Association`, but `FreeQ`, `Cases`, and `DeleteCases` currently
   treat associations as opaque leaves instead of descending into keys or values.
+- Replacement functions are less conservative than the search functions above: `Replace` traverses
+  association values, `ReplaceAll` and `ReplaceRepeated` traverse association heads and values, and
+  `ReplaceAt` supports key-aware exact paths into association values.
 
 ## Supported functions
 
@@ -53,6 +62,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
 | `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
 | `DeleteCases` | `DeleteCases[expr, patt]`, `DeleteCases[expr, patt, levelspec]`, `DeleteCases[expr, patt, levelspec, n]` | Removes matching subexpressions in depth-first postorder, deleting leaves before roots. Whole-expression deletion at level `0` is not implemented yet. | [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases) |
+| `Replace` | `Replace[expr, rules]`, `Replace[expr, rules, levelspec]`, nested rule-list forms such as `Replace[expr, {{rules1...}, {rules2...}}, levelspec]` | Applies the first matching rule per visited part, with Wolfram-style levelspec semantics and bottom-up traversal over the covered subset. On associations, Tungsten traverses values rather than keys or raw `Rule` wrappers. | [Replace](https://reference.wolfram.com/language/ref/Replace) |
+| `ReplaceAll` | `ReplaceAll[expr, rule]`, `ReplaceAll[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceAll[expr, {{rules1...}, {rules2...}}]` | Performs a single top-down rewrite pass over the covered subset. Tungsten also supports the parser-lowered operator form `expr /. rules`. On associations, Tungsten rewrites the whole association first, then the head and values, but not keys or raw `Rule` wrappers. | [ReplaceAll](https://reference.wolfram.com/language/ref/ReplaceAll) |
+| `ReplaceRepeated` | `ReplaceRepeated[expr, rule]`, `ReplaceRepeated[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceRepeated[expr, {{rules1...}, {rules2...}}]` | Repeats the covered `ReplaceAll` semantics until a structural fixed point is reached. Tungsten also supports the parser-lowered operator form `expr //. rules`. Non-terminating rewrite loops stop at a Tungsten safety cap and raise an evaluation error. | [ReplaceRepeated](https://reference.wolfram.com/language/ref/ReplaceRepeated) |
 | `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
 | `AssociationQ` | `AssociationQ[expr]` | Returns `True` when Tungsten recognizes a structural association value. | [AssociationQ](https://reference.wolfram.com/language/ref/AssociationQ) |
 | `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. | [Part](https://reference.wolfram.com/language/ref/Part) |
@@ -72,6 +84,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `RotateRight` | `RotateRight[expr]`, `RotateRight[expr, n]` | Rotates immediate arguments to the right. Associations rotate entry order. | [RotateRight](https://reference.wolfram.com/language/ref/RotateRight) |
 | `Flatten` | `Flatten[expr]`, `Flatten[expr, n]`, `Flatten[expr, Infinity]` | Flattens nested subexpressions that have the same head as the outer expression. | [Flatten](https://reference.wolfram.com/language/ref/Flatten) |
 | `Delete` | `Delete[expr, pos]` | Removes one or more exact-position parts from an expression. For associations, a final top-level key or numeric selector removes an entry, while deeper suffixes operate inside the selected value. | [Delete](https://reference.wolfram.com/language/ref/Delete) |
+| `ReplaceAt` | `ReplaceAt[expr, rule, pos]`, `ReplaceAt[expr, {rule1, ...}, pos]` | Applies replacement rules only at explicitly targeted exact positions. If the target position exists but none of the supplied rules matches there, the result is left unchanged. Association positions reuse the same key-aware exact-path syntax as `Part`. | [ReplaceAt](https://reference.wolfram.com/language/ref/ReplaceAt) |
 | `ReplacePart` | `ReplacePart[expr, rule]`, `ReplacePart[expr, {rule1, ...}]` | Replaces exact-position parts using explicit rules. For associations, top-level selectors replace entry values, not entire rules. | [ReplacePart](https://reference.wolfram.com/language/ref/ReplacePart) |
 | `Apply` | `Apply[f, expr]` | Replaces the head of a nonatomic expression with another expression. For associations, Tungsten applies over values, producing `f[value1, ...]`. | [Apply](https://reference.wolfram.com/language/ref/Apply) |
 | `Map` | `Map[f, expr]` | Applies a function structurally to each immediate argument. For associations, Tungsten maps over values and keeps keys unchanged. | [Map](https://reference.wolfram.com/language/ref/Map) |

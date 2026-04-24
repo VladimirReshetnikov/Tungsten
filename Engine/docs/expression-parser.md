@@ -12,8 +12,9 @@ Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
-  `Extract`, `Level`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Take`, `Drop`, `Flatten`,
-  `ReplacePart`, association constructors, key accessors, and related exact-position transforms;
+  `Extract`, `Level`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
+  `ReplaceRepeated`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, association
+  constructors, key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -199,6 +200,10 @@ result.to_full_form()
 match_result = evaluate(parse_expression("MatchQ[f[a, a], f[x_, x_]]"))
 match_result.to_full_form()
 # True
+
+rewrite_result = evaluate(parse_expression("f[g[a]] /. g[x_] :> x"))
+rewrite_result.to_full_form()
+# f[a]
 ```
 
 Convenience entrypoints include:
@@ -219,6 +224,9 @@ Convenience entrypoints include:
 - `free_q(expr, pattern, spec=None)`
 - `cases(expr, pattern_spec, spec=None, limit=None)`
 - `delete_cases(expr, pattern, spec=None, limit=None)`
+- `replace(expr, rules, spec=None)`
+- `replace_all(expr, rules)`
+- `replace_repeated(expr, rules)`
 - `take(expr, spec)`
 - `drop(expr, spec)`
 - `append(expr, item)`
@@ -229,6 +237,7 @@ Convenience entrypoints include:
 - `rotate_right(expr, n=1)`
 - `flatten(expr, n=None)`
 - `delete(expr, positions)`
+- `replace_at(expr, rules, positions)`
 - `replace_part(expr, replacements)`
 - `apply_head(head, expr)`
 - `map_expr(f, expr)`
@@ -269,6 +278,10 @@ python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
 python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
 python -m tungsten expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
 python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
+python -m tungsten expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
+python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
+python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
+python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 ```
@@ -305,9 +318,12 @@ Tungsten currently implements a broader structural subset that includes:
 - core structural queries such as `Length`, `Depth`, `Head`, `Part`, `Extract`, and `Level`;
 - pattern-search functions such as `MatchQ`, `FreeQ`, `Cases`, and `DeleteCases` over Tungsten's
   supported pattern subset;
+- replacement functions such as `Replace`, `ReplaceAll`, and `ReplaceRepeated`, including the
+  textual operator forms `/.` and `//.` that Tungsten lowers to named function calls during
+  parsing;
 - sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
-  `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplacePart`,
-  `Apply`, `Map`, and `MapAt`;
+  `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplaceAt`,
+  `ReplacePart`, `Apply`, `Map`, and `MapAt`;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -322,6 +338,8 @@ Examples:
 - `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`;
 - `MatchQ[f[a, a], f[x_, x_]]` evaluates to `True`;
 - `Cases[f[g[a]], _, {0, Infinity}]` evaluates to `List[a, g[a], f[g[a]]]`;
+- `f[g[a]] /. g[x_] :> x` evaluates to `f[a]`;
+- `f[a] //. f[x_] :> x` evaluates to `a`;
 - `Part[<|a -> x, b -> y|>, Key[b]]` evaluates to `y`;
 - `Map[g, <|a -> 1, b -> 2|>]` evaluates to `<|a -> g[1], b -> g[2]|>`;
 - `Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]` evaluates to `{<|a -> 1, b -> {2}|>, 9}`.
@@ -342,5 +360,9 @@ The current subsystem does not aim to support:
 One additional current boundary matters for pattern workflows: association-aware pattern traversal is
 not implemented yet. In this pass, search functions such as `FreeQ`, `Cases`, and `DeleteCases`
 treat associations as opaque leaves rather than descending into keys or values.
+
+Replacement functions are less conservative than those search functions. `Replace` traverses
+association values, `ReplaceAll` and `ReplaceRepeated` traverse association heads and values, and
+`ReplaceAt` supports key-aware exact paths into association values.
 
 Those boundaries are intentional. If you need them, use the real kernel-backed Tungsten flows.
