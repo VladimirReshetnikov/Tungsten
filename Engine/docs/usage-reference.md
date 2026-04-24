@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T01:35:43Z
-- Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
+- Updated (UTC): 2026-04-24T02:24:13Z
+- Repository HEAD: 5152667bb85be73fd9d7d6678e0bc4f9aa8d335a
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -416,11 +416,13 @@ For the exact supported forms and limits of each function, see
 
 Everything else remains inert.
 
-The current pattern subset includes `_`, `_Head`, `x_`, `x_Head`, `Alternatives` via `|`,
-`Except`, `HoldPattern`, and `Verbatim`. The parser also lowers `expr /. rules` and
-`expr //. rules` to `ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`. Advanced
-constructs such as `__`, `___`, `?`, `/;`, and options-related pattern forms are intentionally out
-of scope.
+The current pattern subset includes `_`, `_Head`, anonymous `__`, `___`, head-qualified anonymous
+sequence forms such as `__Integer`, named `x_`, `x_Head`, `Alternatives` via `|`, `Except`,
+`HoldPattern`, and `Verbatim`. The parser also lowers `expr /. rules` and `expr //. rules` to
+`ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`. Anonymous `__` and `___` match a
+single candidate expression directly, and they also support multi-element matching when there is
+at most one such pattern in a containing argument list. Named sequence patterns, `?`, `/;`, and
+options-related pattern forms remain intentionally out of scope.
 
 Pure functions currently support positional slots only: `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`,
 `Function[body]`, `body &`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.

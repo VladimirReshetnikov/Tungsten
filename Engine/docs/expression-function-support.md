@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T01:35:43Z
-- Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
+- Updated (UTC): 2026-04-24T02:24:13Z
+- Repository HEAD: 5152667bb85be73fd9d7d6678e0bc4f9aa8d335a
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -49,8 +49,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `Function[body]`, `body &`, `Slot[n]`, `Slot[]`, `Slot[0]`, `#`, `#n`, `#0`, and the
   Tungsten-specific shorthand `#name` for `#1["name"]`.
 - `SlotSequence` and `##` are not implemented yet.
-- The current pattern subset intentionally excludes variable-length sequence patterns, options,
-  conditions, pattern tests, and other advanced matching forms.
+- The current pattern subset includes a deliberately narrow slice of variable-length sequence
+  patterns: anonymous `__`, `___`, `BlankSequence[...]`, and `BlankNullSequence[...]` match a
+  single candidate expression directly, and they also support multi-element matching when there is
+  at most one such pattern in a containing argument list.
+- Named sequence patterns such as `x__`, `x___`, and `Pattern[x, BlankSequence[]]` remain out of
+  scope, as do options, conditions, pattern tests, and other advanced matching forms.
 - Pattern search on associations is deliberately conservative in this pass: associations can match
   as whole expressions such as `_Association`, but `FreeQ`, `Cases`, and `DeleteCases` currently
   treat associations as opaque leaves instead of descending into keys or values.
@@ -77,10 +81,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Not` | `Not[bool]` and prefix `!bool` when the argument is explicit `True` or `False` | Negates an explicit Boolean value. | [Not](https://reference.wolfram.com/language/ref/Not) |
 | `And` | `And[b1, ...]` and infix `&&` when every argument of the evaluated subexpression is explicit `True` or `False` | Computes Boolean conjunction for explicit Boolean arguments only. Tungsten does not apply short-circuit or flattening semantics in this pass. | [And](https://reference.wolfram.com/language/ref/And) |
 | `Or` | `Or[b1, ...]` and infix `||` when every argument of the evaluated subexpression is explicit `True` or `False` | Computes Boolean disjunction for explicit Boolean arguments only. Tungsten does not apply short-circuit or flattening semantics in this pass. | [Or](https://reference.wolfram.com/language/ref/Or) |
-| `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, named patterns, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
-| `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
-| `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
-| `DeleteCases` | `DeleteCases[expr, patt]`, `DeleteCases[expr, patt, levelspec]`, `DeleteCases[expr, patt, levelspec, n]` | Removes matching subexpressions in depth-first postorder, deleting leaves before roots. Whole-expression deletion at level `0` is not implemented yet. | [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases) |
+| `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous `__` / `___` sequence patterns, named patterns over `Blank`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
+| `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
+| `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. Anonymous `__` / `___` patterns are supported under Tungsten's one-per-argument-list limit. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
+| `DeleteCases` | `DeleteCases[expr, patt]`, `DeleteCases[expr, patt, levelspec]`, `DeleteCases[expr, patt, levelspec, n]` | Removes matching subexpressions in depth-first postorder, deleting leaves before roots. Whole-expression deletion at level `0` is not implemented yet. Anonymous `__` / `___` patterns are supported under Tungsten's one-per-argument-list limit. | [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases) |
 | `Replace` | `Replace[expr, rules]`, `Replace[expr, rules, levelspec]`, nested rule-list forms such as `Replace[expr, {{rules1...}, {rules2...}}, levelspec]` | Applies the first matching rule per visited part, with Wolfram-style levelspec semantics and bottom-up traversal over the covered subset. On associations, Tungsten traverses values rather than keys or raw `Rule` wrappers. | [Replace](https://reference.wolfram.com/language/ref/Replace) |
 | `ReplaceAll` | `ReplaceAll[expr, rule]`, `ReplaceAll[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceAll[expr, {{rules1...}, {rules2...}}]` | Performs a single top-down rewrite pass over the covered subset. Tungsten also supports the parser-lowered operator form `expr /. rules`. On associations, Tungsten rewrites the whole association first, then the head and values, but not keys or raw `Rule` wrappers. | [ReplaceAll](https://reference.wolfram.com/language/ref/ReplaceAll) |
 | `ReplaceRepeated` | `ReplaceRepeated[expr, rule]`, `ReplaceRepeated[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceRepeated[expr, {{rules1...}, {rules2...}}]` | Repeats the covered `ReplaceAll` semantics until a structural fixed point is reached. Tungsten also supports the parser-lowered operator form `expr //. rules`. Non-terminating rewrite loops stop at a Tungsten safety cap and raise an evaluation error. | [ReplaceRepeated](https://reference.wolfram.com/language/ref/ReplaceRepeated) |
@@ -138,8 +142,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 
 ## Notes on pattern semantics
 
-- The supported shorthand syntax includes `_`, `_Head`, `x_`, `x_Head`, and infix alternatives
-  such as `a | b`.
+- The supported shorthand syntax includes `_`, `_Head`, anonymous `__`, `___`, optional
+  head-qualified forms such as `__Integer`, named `x_`, `x_Head`, and infix alternatives such as
+  `a | b`.
 - Tungsten lowers pattern shorthand to ordinary AST nodes such as `Blank[...]`, `Pattern[...]`, and
   `Alternatives[...]`, so canonical `input_form` output is explicit rather than shorthand-preserving.
 - `Cases` and `DeleteCases` use Wolfram-compatible defaults for the implemented subset:
@@ -151,9 +156,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   both the collected result order and the delete order.
 - `Cases[..., patt :> rhs]` supports named-pattern substitution and then structurally evaluates the
   substituted result with Tungsten's inert evaluator.
-- Explicit advanced pattern forms such as `BlankSequence`, `BlankNullSequence`, `PatternTest`,
-  `Condition`, and `Optional` currently raise Tungsten evaluation errors instead of being silently
-  treated as literals.
+- Anonymous `BlankSequence` / `BlankNullSequence` patterns match a single candidate expression
+  directly, and they also support multi-element matching in direct argument lists when there is at
+  most one such pattern in the containing list.
+- Named sequence patterns and other advanced forms such as `PatternTest`, `Condition`, and
+  `Optional` currently raise Tungsten evaluation errors instead of being silently treated as
+  literals.
 
 ## Notes on pure functions
 

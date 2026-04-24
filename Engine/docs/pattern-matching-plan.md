@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
 - Scope: kernel-free Wolfram pattern parsing and structural matching in `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T23:55:57Z
-- Updated (UTC): 2026-04-24T00:03:59Z
-- Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
+- Updated (UTC): 2026-04-24T02:24:13Z
+- Repository HEAD: 5152667bb85be73fd9d7d6678e0bc4f9aa8d335a
 - Related code:
   - `src/Tungsten/src/tungsten/expression.py`
   - `src/Tungsten/tests/test_expression.py`
@@ -185,7 +185,7 @@ Supported:
 - `Alternatives[p1, p2, ...]`;
 - infix `p1 | p2` as syntax sugar for `Alternatives[p1, p2]`.
 
-Intentionally out of scope in this pass:
+Originally out of scope in this pass:
 
 - `BlankSequence`, `BlankNullSequence`, `__`, `___`;
 - `Repeated`, `RepeatedNull`;
@@ -248,10 +248,16 @@ The parser should lower shorthand patterns directly into ordinary Tungsten AST n
 
 This keeps the matcher engine independent of textual surface syntax.
 
-### 2. Keep unsupported shorthand explicit
+### 2. Follow-up extension note
 
-Unsupported syntax such as `__`, `___`, `?`, and `/;` should continue to fail clearly at parse
-time rather than being half-recognized.
+This design note predates the later anonymous-sequence-pattern extension. Tungsten now supports a
+deliberately narrow slice of `BlankSequence` / `BlankNullSequence`:
+
+- anonymous `__`, `___`, `__Head`, and `___Head`;
+- only when there is at most one such pattern in the containing argument list;
+- still not for named forms such as `x__` or `x___`.
+
+Other advanced shorthand such as `?` and `/;` remains unsupported.
 
 ## Matcher plan
 

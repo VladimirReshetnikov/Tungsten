@@ -36,13 +36,23 @@ class ExpressionParserTests(unittest.TestCase):
 
     def test_parse_input_form_pattern_shorthand_and_alternatives(self) -> None:
         blank = parse_input_form("_Integer")
+        sequence = parse_input_form("__Symbol")
+        null_sequence = parse_input_form("___")
         named = parse_input_form("f[x_Integer, y_]")
         alternatives = parse_input_form("a | b | c")
         head_blank = parse_input_form("_[1]")
         self.assertEqual(blank.to_full_form(), "Blank[Integer]")
+        self.assertEqual(sequence.to_full_form(), "BlankSequence[Symbol]")
+        self.assertEqual(null_sequence.to_full_form(), "BlankNullSequence[]")
         self.assertEqual(named.to_full_form(), "f[Pattern[x, Blank[Integer]], Pattern[y, Blank[]]]")
         self.assertEqual(alternatives.to_full_form(), "Alternatives[a, b, c]")
         self.assertEqual(head_blank.to_full_form(), "Blank[][1]")
+
+    def test_parse_input_form_rejects_named_sequence_pattern_shorthand(self) -> None:
+        with self.assertRaises(WolframEvaluationError):
+            parse_input_form("x__")
+        with self.assertRaises(WolframEvaluationError):
+            parse_input_form("x___")
 
     def test_parse_part_and_span_syntax(self) -> None:
         expr = parse_input_form("expr[[1, 2 ;; -1]]")
@@ -547,6 +557,31 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(except_false.to_full_form(), "False")
         self.assertEqual(verbatim.to_full_form(), "True")
 
+    def test_sequence_patterns_support_one_anonymous_blanksequence_per_argument_list(self) -> None:
+        top_level = evaluate(parse_input_form("MatchQ[a, __]"))
+        top_level_typed = evaluate(parse_input_form("MatchQ[1, __Symbol]"))
+        non_empty = evaluate(parse_input_form("MatchQ[f[a, b], f[__]]"))
+        empty_false = evaluate(parse_input_form("MatchQ[f[], f[__]]"))
+        empty_true = evaluate(parse_input_form("MatchQ[f[], f[___]]"))
+        typed_true = evaluate(parse_input_form("MatchQ[f[a, b], f[__Symbol]]"))
+        typed_false = evaluate(parse_input_form("MatchQ[f[a, 1], f[__Symbol]]"))
+        middle_true = evaluate(parse_input_form("MatchQ[f[a, b, c], f[a, __, c]]"))
+        middle_false = evaluate(parse_input_form("MatchQ[f[a, c], f[a, __, c]]"))
+        middle_null_true = evaluate(parse_input_form("MatchQ[f[a, c], f[a, ___, c]]"))
+        self.assertEqual(top_level.to_full_form(), "True")
+        self.assertEqual(top_level_typed.to_full_form(), "False")
+        self.assertEqual(non_empty.to_full_form(), "True")
+        self.assertEqual(empty_false.to_full_form(), "False")
+        self.assertEqual(empty_true.to_full_form(), "True")
+        self.assertEqual(typed_true.to_full_form(), "True")
+        self.assertEqual(typed_false.to_full_form(), "False")
+        self.assertEqual(middle_true.to_full_form(), "True")
+        self.assertEqual(middle_false.to_full_form(), "False")
+        self.assertEqual(middle_null_true.to_full_form(), "True")
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("MatchQ[f[a, b], f[__, ___]]"))
+
     def test_freeq_defaults_to_heads_true_and_honors_levelspec(self) -> None:
         head_search = evaluate(parse_input_form("FreeQ[f[a], f]"))
         head_level = evaluate(parse_input_form("FreeQ[f[a], f, {1}]"))
@@ -566,6 +601,16 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(postorder.to_full_form(), "List[a, g[a], f[g[a]]]")
         self.assertEqual(limited.to_full_form(), "List[a]")
         self.assertEqual(transformed.to_full_form(), "List[List[a, a], List[b, b]]")
+
+    def test_cases_and_deletecases_support_anonymous_sequence_patterns(self) -> None:
+        non_empty_cases = evaluate(parse_input_form("Cases[{f[a], f[a, b], f[]}, f[__]]"))
+        all_cases = evaluate(parse_input_form("Cases[{f[a], f[a, b], f[]}, f[___]]"))
+        typed_cases = evaluate(parse_input_form("Cases[{f[a, 1], f[a, b]}, f[__Symbol]]"))
+        delete_non_empty = evaluate(parse_input_form("DeleteCases[{f[a], f[a, b], f[]}, f[__]]"))
+        self.assertEqual(non_empty_cases.to_full_form(), "List[f[a], f[a, b]]")
+        self.assertEqual(all_cases.to_full_form(), "List[f[a], f[a, b], f[]]")
+        self.assertEqual(typed_cases.to_full_form(), "List[f[a, b]]")
+        self.assertEqual(delete_non_empty.to_full_form(), "List[f[]]")
 
     def test_delete_cases_is_depth_first_and_supports_limits(self) -> None:
         default_levels = evaluate(parse_input_form("DeleteCases[f[a, g[a]], a]"))

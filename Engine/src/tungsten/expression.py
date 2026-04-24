@@ -484,8 +484,6 @@ def _evaluate_boolean_logic(expr: Call) -> Expr | None:
 
 
 _UNSUPPORTED_PATTERN_HEADS = {
-    "BlankNullSequence",
-    "BlankSequence",
     "Condition",
     "Longest",
     "OptionsPattern",
@@ -501,6 +499,96 @@ def _unsupported_pattern(expr: Expr) -> WolframEvaluationError:
     return WolframEvaluationError(
         f"Unsupported Wolfram pattern form in the current Tungsten subset: {expr.to_input_form()}."
     )
+
+
+_SEQUENCE_PATTERN_HEADS = {"BlankSequence", "BlankNullSequence"}
+
+
+def _sequence_pattern_head_name(expr: Expr) -> str | None:
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol) and expr.head_expr.name in _SEQUENCE_PATTERN_HEADS:
+        return expr.head_expr.name
+    return None
+
+
+def _match_sequence_pattern_elements(
+    exprs: Sequence[Expr],
+    pattern: Expr,
+    bindings: dict[str, Expr],
+) -> dict[str, Expr] | None:
+    head_name = _sequence_pattern_head_name(pattern)
+    if head_name is None:
+        raise WolframEvaluationError("Expected a sequence pattern.")
+    assert isinstance(pattern, Call)
+    if len(pattern.arguments) > 1:
+        raise WolframEvaluationError(f"{head_name} expects zero or one argument.")
+    if not exprs and head_name == "BlankSequence":
+        return None
+
+    matched = dict(bindings)
+    element_pattern = call("Blank", *pattern.arguments)
+    for item in exprs:
+        matched = _match_pattern(item, element_pattern, matched)
+        if matched is None:
+            return None
+    return matched
+
+
+def _match_call_arguments(
+    expr_arguments: Sequence[Expr],
+    pattern_arguments: Sequence[Expr],
+    bindings: dict[str, Expr],
+) -> dict[str, Expr] | None:
+    sequence_indexes = [
+        index
+        for index, pattern_argument in enumerate(pattern_arguments)
+        if _sequence_pattern_head_name(pattern_argument) is not None
+    ]
+
+    if len(sequence_indexes) > 1:
+        raise WolframEvaluationError(
+            "Tungsten currently supports at most one anonymous __ or ___ pattern per argument list."
+        )
+
+    matched = dict(bindings)
+    if not sequence_indexes:
+        if len(expr_arguments) != len(pattern_arguments):
+            return None
+        for candidate_arg, pattern_arg in zip(expr_arguments, pattern_arguments, strict=True):
+            matched = _match_pattern(candidate_arg, pattern_arg, matched)
+            if matched is None:
+                return None
+        return matched
+
+    sequence_index = sequence_indexes[0]
+    prefix_count = sequence_index
+    suffix_count = len(pattern_arguments) - sequence_index - 1
+    sequence_length = len(expr_arguments) - prefix_count - suffix_count
+    if sequence_length < 0:
+        return None
+
+    for index in range(prefix_count):
+        matched = _match_pattern(expr_arguments[index], pattern_arguments[index], matched)
+        if matched is None:
+            return None
+
+    matched = _match_sequence_pattern_elements(
+        expr_arguments[prefix_count:prefix_count + sequence_length],
+        pattern_arguments[sequence_index],
+        matched,
+    )
+    if matched is None:
+        return None
+
+    suffix_start = prefix_count + sequence_length
+    for index in range(suffix_count):
+        matched = _match_pattern(
+            expr_arguments[suffix_start + index],
+            pattern_arguments[sequence_index + 1 + index],
+            matched,
+        )
+        if matched is None:
+            return None
+    return matched
 
 
 def _match_pattern(
@@ -551,6 +639,8 @@ def _match_pattern(
             name_expr, inner_pattern = pattern.arguments
             if not isinstance(name_expr, Symbol):
                 raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
+            if _sequence_pattern_head_name(inner_pattern) is not None:
+                raise _unsupported_pattern(pattern)
             matched = _match_pattern(expr, inner_pattern, current)
             if matched is None:
                 return None
@@ -567,19 +657,18 @@ def _match_pattern(
                 return _match_pattern(head_of(expr), pattern.arguments[0], current)
             raise WolframEvaluationError("Blank expects zero or one argument.")
 
+        if head_name in _SEQUENCE_PATTERN_HEADS:
+            if len(pattern.arguments) > 1:
+                raise WolframEvaluationError(f"{head_name} expects zero or one argument.")
+            return _match_pattern(expr, call("Blank", *pattern.arguments), current)
+
     if isinstance(pattern, Call):
         if not isinstance(expr, Call):
-            return None
-        if len(expr.arguments) != len(pattern.arguments):
             return None
         matched = _match_pattern(head_of(expr), pattern.head_expr, current)
         if matched is None:
             return None
-        for candidate_arg, pattern_arg in zip(expr.arguments, pattern.arguments, strict=True):
-            matched = _match_pattern(candidate_arg, pattern_arg, matched)
-            if matched is None:
-                return None
-        return matched
+        return _match_call_arguments(expr.arguments, pattern.arguments, matched)
 
     return current if expr == pattern else None
 
@@ -3034,7 +3123,7 @@ class _Parser:
             return call("Association", *items)
 
         if token.text in {"__", "___"}:
-            raise _unsupported_pattern(call("BlankSequence" if token.text == "__" else "BlankNullSequence"))
+            return self._parse_prefix_sequence_blank("BlankSequence" if token.text == "__" else "BlankNullSequence")
 
         if token.text == "_":
             return self._parse_prefix_blank()
@@ -3081,6 +3170,11 @@ class _Parser:
         if self._peek().kind == "symbol":
             return call("Blank", symbol(str(self._consume().value)))
         return call("Blank")
+
+    def _parse_prefix_sequence_blank(self, head_name: str) -> Expr:
+        if self._peek().kind == "symbol":
+            return call(head_name, symbol(str(self._consume().value)))
+        return call(head_name)
 
     def _parse_prefix_slot(self) -> Expr:
         next_token = self._peek()
