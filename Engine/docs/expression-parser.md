@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T04:24:45Z
-Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
+Updated (UTC): 2026-04-24T15:10:03Z
+Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
 
 ## Summary
 
@@ -65,6 +65,8 @@ The parser currently handles:
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
 - positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, and
   the Tungsten-specific shorthand `#name` for `#1["name"]`;
+- named pure-function syntax such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`,
+  `{x, y} |-> body`, and `x \[Function] body`;
 - part syntax `expr[[...]]`;
 - span syntax `a ;; b ;; c`;
 - nested Wolfram comments `(* ... *)`;
@@ -83,7 +85,7 @@ The parser currently handles:
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
 particular, it is intentionally conservative around advanced pattern syntax, arbitrary box
-constructs, named-parameter function forms, assignments, and broader evaluation semantics.
+constructs, assignments, and broader evaluation semantics.
 
 The currently supported pattern subset is intentionally bounded:
 
@@ -366,6 +368,9 @@ Tungsten currently implements a broader structural subset that includes:
   short-circuit behavior in this pass;
 - positional pure-function applications such as `Function[body][arg]`, `body &[arg]`, and pure
   functions used as the function argument of `Map`, `MapAt`, and `Apply`;
+- named pure-function applications such as `Function[x, body][arg]`, `x |-> body`, and
+  `{x, y} |-> body`, including Tungsten's kernel-backed capture-avoiding renaming rule for nested
+  named functions whose bodies are modified by outer pure-function application;
 - sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
   `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplaceAt`,
   `ReplacePart`, `Apply`, `Map`, and `MapAt`;
@@ -392,6 +397,7 @@ Examples:
 - `f[g[a]] /. g[x_] :> x` evaluates to `f[a]`;
 - `f[a] //. f[x_] :> x` evaluates to `a`;
 - `Map[# + 1 &, {a, b}]` evaluates to `List[Plus[a, 1], Plus[b, 1]]`;
+- `(x |-> y |-> x[y])[y]` evaluates to `Function[y$, y[y$]]`;
 - `Select[f[1, a, 2, 3], IntegerQ]` evaluates to `f[1, 2, 3]`;
 - `Select[{1, a, 2, 3}, # > 1 & -> {"Element", "Index"}]` evaluates to
   `<|"Element" -> {2, 3}, "Index" -> {3, 4}|>`;
@@ -425,10 +431,11 @@ Replacement functions are less conservative than those search functions. `Replac
 association values, `ReplaceAll` and `ReplaceRepeated` traverse association heads and values, and
 `ReplaceAt` supports key-aware exact paths into association values.
 
-Pure functions are also deliberately bounded in this pass: only positional slot forms are
-implemented, not named-parameter `Function[{x, ...}, body]`, `SlotSequence`, or `##`. Tungsten
-does, however, keep `Function[body]` inert until application, so pure functions can safely contain
-patterns such as `MatchQ[#, _Integer] &`.
+Pure functions are still deliberately bounded in this pass. Tungsten now supports both positional
+slot forms and named-parameter forms, but it does not yet implement `SlotSequence`, `##`, named
+arguments, or attribute-aware `Function[params, body, attrs]` semantics. Tungsten keeps
+`Function[body]` and `Function[params, body]` inert until application, so pure functions can
+safely contain patterns such as `MatchQ[#, _Integer] &`.
 
 `Pick` is also intentionally narrower than the full kernel: Tungsten supports compatible selector
 shapes well, including the common list/head-preserving and association-by-position cases, but it

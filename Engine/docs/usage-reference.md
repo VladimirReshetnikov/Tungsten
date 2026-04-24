@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T04:24:45Z
-- Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
+- Updated (UTC): 2026-04-24T15:10:03Z
+- Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -409,6 +409,8 @@ The implemented inert evaluator currently covers:
 - `ReplaceAll`
 - `ReplaceRepeated`
 - positional pure-function applications via `Function[body]` or `body &`
+- named pure-function applications via `Function[x, body]`, `Function[{x, y}, body]`,
+  `x |-> body`, and `x \[Function] body`
 - `Pick`
 - `First`
 - `Last`
@@ -452,11 +454,15 @@ Guards via `/;` are supported in patterns and delayed-rule right-hand sides when
 guard reduces to explicit `True` under Tungsten's shipped evaluator. Named sequence patterns, `?`,
 and options-related pattern forms remain intentionally out of scope.
 
-Pure functions currently support positional slots only: `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`,
-`Function[body]`, `body &`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.
+Pure functions support positional slots plus named parameters: `#`, `#n`, `#0`, `Slot[]`,
+`Slot[n]`, `Function[body]`, `body &`, `Function[x, body]`, `Function[{x, y}, body]`,
+`x |-> body`, `x \[Function] body`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.
 `SlotSequence` and `##` are not implemented yet.
-Tungsten also keeps `Function[body]` inert until application, which lets pure functions safely
-contain patterns such as `MatchQ[#, _Integer] &`.
+Tungsten keeps `Function[body]` and `Function[params, body]` inert until application, which lets
+pure functions safely contain patterns such as `MatchQ[#, _Integer] &`.
+Nested named pure functions use capture-avoiding renaming when an outer application modifies the
+inner body. The exact rule is documented in
+[named-pure-functions-spec.md](./named-pure-functions-spec.md).
 
 Arithmetic, relational, and Boolean heads are also intentionally narrow in this pass: Tungsten
 does not flatten or reorder `Plus`, `Times`, `And`, `Or`, or the relational heads, and it does

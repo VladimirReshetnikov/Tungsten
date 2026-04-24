@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T04:24:45Z
-- Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
+- Updated (UTC): 2026-04-24T15:10:03Z
+- Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -87,13 +87,15 @@ The current workspace is built around seven complementary capabilities:
    pattern subset such as `_Integer`, anonymous `__` / `___`, guarded patterns via `/;`, `x_`,
    `Except[...]`, and `a | b`, parses replacement operators such as `/.` and `//.` into named AST
    calls, supports positional pure functions such as `Function[body]`, `body &`, `#`, `#n`, and
-   `#0`, then evaluates a broader inert structural built-in set such as hold-like conditionals
-   (`If`, `Which`, `Switch`, `Piecewise`), integer arithmetic and relational heads, simple
-   predicates such as `IntegerQ`, `StringQ`, and `EvenQ`, integer-only numeric heads such as
-   `UnitStep`, `Mod`, `Min`, `Clip`, and `KroneckerDelta`, Boolean heads, `Length`, `Depth`,
-   `MatchQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Pick`,
-   `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
-   `ReplacePart`, `MapAt`, `Association`, `Lookup`, and `KeyTake`.
+   `#0`, supports named pure functions such as `Function[x, body]`, `x |-> body`, and
+   `x \[Function] body` with capture-avoiding parameter renaming, then evaluates a broader inert
+   structural built-in set such as hold-like conditionals (`If`, `Which`, `Switch`, `Piecewise`),
+   integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `StringQ`, and
+   `EvenQ`, integer-only numeric heads such as `UnitStep`, `Mod`, `Min`, `Clip`, and
+   `KroneckerDelta`, Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
+   `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Pick`, `Select`, `Discard`, `SelectFirst`,
+   `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`,
+   `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.

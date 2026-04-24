@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-24T04:24:45Z
-- Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
+- Updated (UTC): 2026-04-24T15:10:03Z
+- Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
 
 ## What this docs tree is for
 
@@ -60,11 +60,12 @@ The docs are split so readers can choose the right depth:
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
 4. [expression-parser.md](./expression-parser.md)
-5. [expression-function-support.md](./expression-function-support.md)
-6. [pattern-matching-plan.md](./pattern-matching-plan.md)
-7. [inline-box-strings.md](./inline-box-strings.md)
-8. [notebook-assistant.md](./notebook-assistant.md)
-9. [troubleshooting.md](./troubleshooting.md)
+5. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
+6. [expression-function-support.md](./expression-function-support.md)
+7. [pattern-matching-plan.md](./pattern-matching-plan.md)
+8. [inline-box-strings.md](./inline-box-strings.md)
+9. [notebook-assistant.md](./notebook-assistant.md)
+10. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -79,6 +80,7 @@ The docs are split so readers can choose the right depth:
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
+| [named-pure-functions-spec.md](named-pure-functions-spec.md) | Detailed specification for named-parameter pure functions and Tungsten's capture-avoiding renaming rules. |
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
 | [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
@@ -116,6 +118,8 @@ The docs are split so readers can choose the right depth:
 ### Kernel-free structural analysis
 
 - Read [expression-parser.md](./expression-parser.md).
+- Read [named-pure-functions-spec.md](./named-pure-functions-spec.md) if you need the exact
+  capture-avoiding renaming rule for named pure functions.
 - Read [expression-function-support.md](./expression-function-support.md) for the exact built-in coverage and official Wolfram reference links.
 - Read [pattern-matching-plan.md](./pattern-matching-plan.md) if you need the design boundaries and validation strategy for the new pattern subset.
 - Use [usage-reference.md](./usage-reference.md) for `expr parse` and `expr evaluate`.

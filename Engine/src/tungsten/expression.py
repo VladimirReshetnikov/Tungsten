@@ -261,6 +261,13 @@ _FLAT_HEADS = {"Alternatives"}
 
 _LEVEL_INFINITY = 1_000_000_000
 _MISSING = object()
+_ESCAPED_TOKEN_MAP = {
+    r"\[Function]": "|->",
+    r"\[Rule]": "->",
+    r"\[RuleDelayed]": ":>",
+    r"\[LeftAssociation]": "<|",
+    r"\[RightAssociation]": "|>",
+}
 
 
 def call(head: str | Expr, *arguments: Expr) -> Call:
@@ -1916,8 +1923,207 @@ def replace_part(expr: Expr, replacements: Expr) -> Expr:
     return result
 
 
+def _is_function_expr(expr: Expr) -> bool:
+    return isinstance(expr, Call) and expr.has_head("Function")
+
+
 def _is_positional_pure_function_expr(expr: Expr) -> bool:
-    return isinstance(expr, Call) and expr.has_head("Function") and len(expr.arguments) == 1
+    return _is_function_expr(expr) and len(expr.arguments) == 1
+
+
+def _named_function_parameter_symbols(expr: Expr) -> tuple[Symbol, ...] | None:
+    if not _is_function_expr(expr):
+        return None
+
+    assert isinstance(expr, Call)
+    if len(expr.arguments) not in {2, 3}:
+        return None
+
+    parameter_expr = expr.arguments[0]
+    if isinstance(parameter_expr, Symbol):
+        return (parameter_expr,)
+
+    if isinstance(parameter_expr, Call) and parameter_expr.has_head("List") and all(
+        isinstance(argument, Symbol)
+        for argument in parameter_expr.arguments
+    ):
+        return tuple(parameter_expr.arguments)
+
+    return None
+
+
+def _is_named_pure_function_expr(expr: Expr) -> bool:
+    return _named_function_parameter_symbols(expr) is not None
+
+
+def _is_pure_function_expr(expr: Expr) -> bool:
+    return _is_positional_pure_function_expr(expr) or _is_named_pure_function_expr(expr)
+
+
+def _named_function_body(expr: Call) -> Expr:
+    return expr.arguments[1]
+
+
+def _rebuild_named_parameter_expr(original: Expr, parameters: Sequence[Symbol]) -> Expr:
+    if isinstance(original, Symbol):
+        if len(parameters) != 1:
+            raise WolframEvaluationError("Function with a single-symbol parameter specification expects exactly one parameter.")
+        return parameters[0]
+    if isinstance(original, Call) and original.has_head("List"):
+        return list_expr(*parameters)
+    raise WolframEvaluationError("Unsupported named Function parameter specification.")
+
+
+def _rebuild_named_function(function: Call, parameters: Sequence[Symbol], body: Expr) -> Call:
+    rebuilt_arguments: list[Expr] = [
+        _rebuild_named_parameter_expr(function.arguments[0], parameters),
+        body,
+    ]
+    if len(function.arguments) == 3:
+        rebuilt_arguments.append(function.arguments[2])
+    return Call(head_expr=function.head_expr, arguments=tuple(rebuilt_arguments))
+
+
+def _collect_symbol_names(expr: Expr, target: set[str]) -> None:
+    if isinstance(expr, Symbol):
+        target.add(expr.name)
+        return
+
+    if isinstance(expr, Call):
+        _collect_symbol_names(expr.head_expr, target)
+        for argument in expr.arguments:
+            _collect_symbol_names(argument, target)
+
+
+def _fresh_symbol_name(base_name: str, unavailable_names: set[str]) -> str:
+    candidate = f"{base_name}$"
+    if candidate not in unavailable_names:
+        unavailable_names.add(candidate)
+        return candidate
+
+    index = 1
+    while True:
+        candidate = f"{base_name}${index}"
+        if candidate not in unavailable_names:
+            unavailable_names.add(candidate)
+            return candidate
+        index += 1
+
+
+def _fresh_parameter_symbols(
+    parameters: Sequence[Symbol],
+    unavailable_names: set[str],
+) -> tuple[tuple[Symbol, ...], dict[str, Symbol]]:
+    fresh_parameters: list[Symbol] = []
+    rename_map: dict[str, Symbol] = {}
+    for parameter in parameters:
+        fresh_symbol = symbol(_fresh_symbol_name(parameter.name, unavailable_names))
+        fresh_parameters.append(fresh_symbol)
+        rename_map[parameter.name] = fresh_symbol
+    return tuple(fresh_parameters), rename_map
+
+
+def _rename_bound_symbols_in_expr(expr: Expr, rename_map: dict[str, Symbol]) -> Expr:
+    if not rename_map:
+        return expr
+
+    if isinstance(expr, Symbol):
+        return rename_map.get(expr.name, expr)
+
+    if isinstance(expr, (Integer, Real, String)):
+        return expr
+
+    if not isinstance(expr, Call):
+        return expr
+
+    inner_parameters = _named_function_parameter_symbols(expr)
+    if inner_parameters is not None:
+        assert isinstance(expr, Call)
+        shadowed_names = {parameter.name for parameter in inner_parameters}
+        nested_rename_map = {
+            name: replacement
+            for name, replacement in rename_map.items()
+            if name not in shadowed_names
+        }
+        if not nested_rename_map:
+            return expr
+        renamed_body = _rename_bound_symbols_in_expr(_named_function_body(expr), nested_rename_map)
+        return _rebuild_named_function(expr, inner_parameters, renamed_body)
+
+    renamed_head = _rename_bound_symbols_in_expr(expr.head_expr, rename_map)
+    renamed_arguments = tuple(
+        _rename_bound_symbols_in_expr(argument, rename_map)
+        for argument in expr.arguments
+    )
+    return Call(head_expr=renamed_head, arguments=renamed_arguments)
+
+
+def _substitute_named_symbols_in_expr(
+    expr: Expr,
+    substitutions: dict[str, Expr],
+    unavailable_names: set[str],
+) -> tuple[Expr, bool]:
+    if not substitutions:
+        return expr, False
+
+    if isinstance(expr, Symbol):
+        replacement = substitutions.get(expr.name)
+        if replacement is None:
+            return expr, False
+        return replacement, True
+
+    if isinstance(expr, (Integer, Real, String)):
+        return expr, False
+
+    if not isinstance(expr, Call):
+        return expr, False
+
+    inner_parameters = _named_function_parameter_symbols(expr)
+    if inner_parameters is not None:
+        assert isinstance(expr, Call)
+        shadowed_names = {parameter.name for parameter in inner_parameters}
+        active_substitutions = {
+            name: replacement
+            for name, replacement in substitutions.items()
+            if name not in shadowed_names
+        }
+        if not active_substitutions:
+            return expr, False
+
+        _preview_body, body_changed = _substitute_named_symbols_in_expr(
+            _named_function_body(expr),
+            active_substitutions,
+            unavailable_names | shadowed_names,
+        )
+        if not body_changed:
+            return expr, False
+
+        rename_unavailable = set(unavailable_names)
+        _collect_symbol_names(expr.arguments[0], rename_unavailable)
+        _collect_symbol_names(_named_function_body(expr), rename_unavailable)
+        for replacement in active_substitutions.values():
+            _collect_symbol_names(replacement, rename_unavailable)
+
+        fresh_parameters, rename_map = _fresh_parameter_symbols(inner_parameters, rename_unavailable)
+        renamed_body = _rename_bound_symbols_in_expr(_named_function_body(expr), rename_map)
+        substituted_body, _ = _substitute_named_symbols_in_expr(
+            renamed_body,
+            active_substitutions,
+            unavailable_names | {parameter.name for parameter in fresh_parameters},
+        )
+        return _rebuild_named_function(expr, fresh_parameters, substituted_body), True
+
+    substituted_head, head_changed = _substitute_named_symbols_in_expr(expr.head_expr, substitutions, unavailable_names)
+    changed = head_changed
+    substituted_arguments: list[Expr] = []
+    for argument in expr.arguments:
+        substituted_argument, argument_changed = _substitute_named_symbols_in_expr(argument, substitutions, unavailable_names)
+        substituted_arguments.append(substituted_argument)
+        changed = changed or argument_changed
+
+    if not changed:
+        return expr, False
+    return Call(head_expr=substituted_head, arguments=tuple(substituted_arguments)), True
 
 
 def _slot_index(expr: Expr) -> int | None:
@@ -1969,9 +2175,37 @@ def _apply_pure_function(function: Expr, arguments: Sequence[Expr]) -> Expr:
     return evaluate(substituted)
 
 
+def _apply_named_pure_function(function: Expr, arguments: Sequence[Expr]) -> Expr:
+    parameter_symbols = _named_function_parameter_symbols(function)
+    if parameter_symbols is None:
+        raise WolframEvaluationError("Expected a named-parameter Function expression.")
+
+    if len(arguments) < len(parameter_symbols):
+        raise WolframEvaluationError(
+            f"Function expects {len(parameter_symbols)} named argument(s), but only {len(arguments)} were supplied."
+        )
+
+    assert isinstance(function, Call)
+    substitutions = {
+        parameter.name: arguments[index]
+        for index, parameter in enumerate(parameter_symbols)
+    }
+    unavailable_names = {parameter.name for parameter in parameter_symbols}
+    for argument in arguments[:len(parameter_symbols)]:
+        _collect_symbol_names(argument, unavailable_names)
+    substituted, _ = _substitute_named_symbols_in_expr(
+        _named_function_body(function),
+        substitutions,
+        unavailable_names,
+    )
+    return evaluate(substituted)
+
+
 def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
     if _is_positional_pure_function_expr(function):
         return _apply_pure_function(function, arguments)
+    if _is_named_pure_function_expr(function):
+        return _apply_named_pure_function(function, arguments)
     return Call(head_expr=function, arguments=tuple(arguments))
 
 
@@ -2890,12 +3124,14 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("Pick expects a data expression, a selector expression, and an optional pattern.")
 
         if raw_head_name == "Function":
-            if len(expr.arguments) == 1:
+            if len(expr.arguments) in {1, 2, 3}:
                 return expr
 
     evaluated_head = evaluate(expr.head_expr)
-    if _is_positional_pure_function_expr(evaluated_head):
-        return _apply_pure_function(evaluated_head, tuple(evaluate(argument) for argument in expr.arguments))
+    if _is_pure_function_expr(evaluated_head):
+        return _apply_callable(evaluated_head, tuple(evaluate(argument) for argument in expr.arguments))
+    if _is_function_expr(evaluated_head):
+        raise WolframEvaluationError("Unsupported Function parameter specification.")
     if not isinstance(evaluated_head, Symbol):
         return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
 
@@ -3434,14 +3670,8 @@ def _normalize_row_box_token(value: str) -> str:
     }
     if value in whitespace_tokens:
         return " "
-    token_map = {
-        r"\[Rule]": "->",
-        r"\[RuleDelayed]": ":>",
-        r"\[LeftAssociation]": "<|",
-        r"\[RightAssociation]": "|>",
-    }
-    if value in token_map:
-        return token_map[value]
+    if value in _ESCAPED_TOKEN_MAP:
+        return _ESCAPED_TOKEN_MAP[value]
     return value
 
 
@@ -3546,6 +3776,7 @@ _MULTI_TOKENS = (
     "[[",
     "<|",
     "|>",
+    "|->",
     ":>",
     "->",
     "/;",
@@ -3566,6 +3797,22 @@ _MULTI_TOKENS = (
 )
 
 
+def _scan_escaped_token(text: str, start: int) -> tuple[_Token, int] | None:
+    if not text.startswith(r"\[", start):
+        return None
+
+    end = text.find("]", start + 2)
+    if end < 0:
+        raise WolframSyntaxError(f"Unterminated Wolfram escaped token at offset {start}.")
+
+    raw = text[start:end + 1]
+    normalized = _ESCAPED_TOKEN_MAP.get(raw)
+    if normalized is None:
+        raise WolframSyntaxError(f"Unsupported Wolfram escaped token {raw!r} at offset {start}.")
+
+    return _Token(kind="operator", text=normalized, start=start, end=end + 1, value=normalized), end + 1
+
+
 def _tokenize(text: str) -> list[_Token]:
     tokens: list[_Token] = []
     index = 0
@@ -3578,6 +3825,11 @@ def _tokenize(text: str) -> list[_Token]:
             continue
         if text[index] == "\"":
             token, index = _scan_string(text, index)
+            tokens.append(token)
+            continue
+        escaped_token = _scan_escaped_token(text, index)
+        if escaped_token is not None:
+            token, index = escaped_token
             tokens.append(token)
             continue
         if text[index].isdigit() or (text[index] == "." and index + 1 < len(text) and text[index + 1].isdigit()):
@@ -3892,6 +4144,7 @@ class _Parser:
             "@": (self._AT_BP, self._AT_BP, None),
             "//": (self._POSTFIX_BP, self._POSTFIX_BP + 1, None),
             ";": (self._SEMICOLON_BP, self._SEMICOLON_BP + 1, "CompoundExpression"),
+            "|->": (self._FUNCTION_BP, self._FUNCTION_BP, "Function"),
         }
 
         spec = binary_specs.get(text)

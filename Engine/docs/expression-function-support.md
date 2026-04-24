@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T04:24:45Z
-- Repository HEAD: 078e521a368bd61c48df4bd9bb25ebac45ee6215
+- Updated (UTC): 2026-04-24T15:10:03Z
+- Repository HEAD: b8fd16b435a7f746caf9982e70e22c8618032093
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -61,9 +61,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - The integer-only numeric family below is also intentionally narrow: Tungsten evaluates these
   heads only when the supported arguments are already explicit integers or integer lists in the
   listed direct forms.
-- Pure functions currently support positional slot forms only:
-  `Function[body]`, `body &`, `Slot[n]`, `Slot[]`, `Slot[0]`, `#`, `#n`, `#0`, and the
-  Tungsten-specific shorthand `#name` for `#1["name"]`.
+- Pure functions currently support positional slot forms plus named-parameter forms such as
+  `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and `x \[Function] body`.
+- Named pure functions use Tungsten's capture-avoiding renaming rule for nested named functions.
+  The exact rule is documented in [named-pure-functions-spec.md](./named-pure-functions-spec.md).
 - `SlotSequence` and `##` are not implemented yet.
 - The current pattern subset includes a deliberately narrow slice of variable-length sequence
   patterns: anonymous `__`, `___`, `BlankSequence[...]`, and `BlankNullSequence[...]` match a
@@ -118,7 +119,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Replace` | `Replace[expr, rules]`, `Replace[expr, rules, levelspec]`, nested rule-list forms such as `Replace[expr, {{rules1...}, {rules2...}}, levelspec]` | Applies the first matching rule per visited part, with Wolfram-style levelspec semantics and bottom-up traversal over the covered subset. Guarded left-hand-side patterns are supported, and delayed right-hand-side guards such as `lhs :> rhs /; test` fire only when the substituted guard reduces to explicit `True`. On associations, Tungsten traverses values rather than keys or raw `Rule` wrappers. | [Replace](https://reference.wolfram.com/language/ref/Replace) |
 | `ReplaceAll` | `ReplaceAll[expr, rule]`, `ReplaceAll[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceAll[expr, {{rules1...}, {rules2...}}]` | Performs a single top-down rewrite pass over the covered subset. Tungsten also supports the parser-lowered operator form `expr /. rules`. Guarded left-hand-side patterns are supported, and delayed right-hand-side guards such as `lhs :> rhs /; test` can suppress a rule and fall through to later rules. On associations, Tungsten rewrites the whole association first, then the head and values, but not keys or raw `Rule` wrappers. | [ReplaceAll](https://reference.wolfram.com/language/ref/ReplaceAll) |
 | `ReplaceRepeated` | `ReplaceRepeated[expr, rule]`, `ReplaceRepeated[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceRepeated[expr, {{rules1...}, {rules2...}}]` | Repeats the covered `ReplaceAll` semantics until a structural fixed point is reached. Tungsten also supports the parser-lowered operator form `expr //. rules`. Non-terminating rewrite loops stop at a Tungsten safety cap and raise an evaluation error. Guarded delayed rules are reapplied until the guard stops succeeding or a structural fixed point is reached. | [ReplaceRepeated](https://reference.wolfram.com/language/ref/ReplaceRepeated) |
-| `Function` | `Function[body]`, `body &`, plus positional slot applications such as `Function[body][arg1, ...]` | Supports positional pure functions over `Slot` forms. Tungsten recognizes `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, and the Tungsten-specific `#name` shorthand for `#1["name"]`. Nested pure functions keep their own local slots. | [Function](https://reference.wolfram.com/language/ref/Function) |
+| `Function` | `Function[body]`, `body &`, positional slot applications such as `Function[body][arg1, ...]`, named forms such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and `x \[Function] body` | Supports positional pure functions over `Slot` forms plus named-parameter pure functions with lexical scoping and capture-avoiding renaming. Tungsten recognizes `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, the Tungsten-specific `#name` shorthand for `#1["name"]`, and nested named-function alpha-renaming when an inner body is modified by outer pure-function application. | [Function](https://reference.wolfram.com/language/ref/Function) |
 | `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
 | `AssociationQ` | `AssociationQ[expr]` | Returns `True` when Tungsten recognizes a structural association value. | [AssociationQ](https://reference.wolfram.com/language/ref/AssociationQ) |
 | `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. | [Part](https://reference.wolfram.com/language/ref/Part) |
@@ -224,8 +225,13 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   function is actually applied.
 - `#0` and `Slot[0]` refer to the pure function itself.
 - `#name` is a Tungsten-specific shorthand for `#1["name"]`; it is not named-argument support.
-- `Function[body]` keeps `body` inert until application so pure functions can safely contain
-  patterns and other expressions that would otherwise evaluate too early.
+- `Function[body]` and `Function[params, body]` keep `body` inert until application so pure
+  functions can safely contain patterns and other expressions that would otherwise evaluate too
+  early.
+- Named pure functions accept a single-symbol parameter specification or a list of symbols.
+- Tungsten alpha-renames named parameters in nested pure functions when an outer pure-function
+  application modifies the inner body. For the exact rule and examples, read
+  [named-pure-functions-spec.md](./named-pure-functions-spec.md).
 - Tungsten does not yet implement `SlotSequence` or `##`.
 
 ## Notes on arithmetic and Boolean semantics

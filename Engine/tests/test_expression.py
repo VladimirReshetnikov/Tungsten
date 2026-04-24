@@ -86,9 +86,17 @@ class ExpressionParserTests(unittest.TestCase):
         postfix = parse_input_form("f @ # &")
         self_ref = parse_input_form("#0[x] &")
         named = parse_input_form("#name &")
+        named_symbol = parse_input_form("x |-> x + x")
+        named_list = parse_input_form("{x, y} |-> x + y")
+        escaped = parse_input_form(r"x \[Function] x + x")
+        nested_named = parse_input_form("x |-> y |-> x[y]")
         self.assertEqual(postfix.to_full_form(), "Function[f[Slot[1]]]")
         self.assertEqual(self_ref.to_full_form(), "Function[Slot[0][x]]")
         self.assertEqual(named.to_full_form(), 'Function[Slot[1]["name"]]')
+        self.assertEqual(named_symbol.to_full_form(), "Function[x, Plus[x, x]]")
+        self.assertEqual(named_list.to_full_form(), "Function[List[x, y], Plus[x, y]]")
+        self.assertEqual(escaped.to_full_form(), "Function[x, Plus[x, x]]")
+        self.assertEqual(nested_named.to_full_form(), "Function[x, Function[y, x[y]]]")
 
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
@@ -467,6 +475,34 @@ class ExpressionEvaluationTests(unittest.TestCase):
     def test_pure_function_slot_errors_surface_when_argument_is_missing(self) -> None:
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form("(#2&)[a]"))
+
+    def test_named_pure_functions_apply_with_capture_avoiding_renaming(self) -> None:
+        direct = evaluate(parse_input_form("(Function[x, x + x])[a]"))
+        list_syntax = evaluate(parse_input_form("(({x, y} |-> x + y))[a, b]"))
+        escaped = evaluate(parse_input_form(r"(x \[Function] x + x)[a]"))
+        nested_capture = evaluate(parse_input_form("(x |-> y |-> x[y])[y]"))
+        nested_no_capture = evaluate(parse_input_form("(x |-> y |-> x[y])[z]"))
+        liberal_rename = evaluate(parse_input_form("(x |-> y |-> f[x])[a]"))
+        no_rename = evaluate(parse_input_form("(x |-> y |-> y)[a]"))
+        shadowed = evaluate(parse_input_form("(x |-> x |-> x[y])[y]"))
+        recursive = evaluate(parse_input_form("(x |-> y |-> z |-> {x, y, z})[y]"))
+        positional_nested = evaluate(parse_input_form("(Function[x, # + x &])[a]"))
+        self.assertEqual(direct.to_full_form(), "Plus[a, a]")
+        self.assertEqual(list_syntax.to_full_form(), "Plus[a, b]")
+        self.assertEqual(escaped.to_full_form(), "Plus[a, a]")
+        self.assertEqual(nested_capture.to_full_form(), "Function[y$, y[y$]]")
+        self.assertEqual(nested_no_capture.to_full_form(), "Function[y$, z[y$]]")
+        self.assertEqual(liberal_rename.to_full_form(), "Function[y$, f[a]]")
+        self.assertEqual(no_rename.to_full_form(), "Function[y, y]")
+        self.assertEqual(shadowed.to_full_form(), "Function[x, x[y]]")
+        self.assertEqual(recursive.to_full_form(), "Function[y$, Function[z$, List[y, y$, z$]]]")
+        self.assertEqual(positional_nested.to_full_form(), "Function[Plus[Slot[1], a]]")
+
+    def test_named_pure_function_errors_when_arguments_or_parameters_are_invalid(self) -> None:
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("(Function[{x, y}, x + y])[a]"))
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("(Function[f[x], x])[a]"))
 
     def test_association_constructor_and_depth(self) -> None:
         literal = evaluate(parse_input_form("<|a -> 1, a -> 2, b -> 3|>"))
