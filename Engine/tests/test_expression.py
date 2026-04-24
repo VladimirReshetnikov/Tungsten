@@ -65,6 +65,23 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(replace_all.to_input_form(), "ReplaceAll[f[a], a -> b]")
         self.assertEqual(replace_repeated.to_full_form(), "ReplaceRepeated[f[a], Rule[a, b]]")
 
+    def test_parse_condition_and_delayed_rule_precedence(self) -> None:
+        condition = parse_input_form("x_ /; x > 0")
+        delayed_rhs_condition = parse_input_form("x_ :> x + 1 /; x > 0")
+        alternatives_condition = parse_input_form("a | b /; False")
+        self.assertEqual(
+            condition.to_full_form(),
+            "Condition[Pattern[x, Blank[]], Greater[x, 0]]",
+        )
+        self.assertEqual(
+            delayed_rhs_condition.to_full_form(),
+            "RuleDelayed[Pattern[x, Blank[]], Condition[Plus[x, 1], Greater[x, 0]]]",
+        )
+        self.assertEqual(
+            alternatives_condition.to_full_form(),
+            "Condition[Alternatives[a, b], False]",
+        )
+
     def test_parse_pure_function_shorthand_and_slots(self) -> None:
         postfix = parse_input_form("f @ # &")
         self_ref = parse_input_form("#0[x] &")
@@ -255,6 +272,14 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         self.assertEqual(
             expr.to_full_form(),
             "Cases[List[1, 1, f[a], 2, 3, y, f[8], 9, f[10]], Except[Blank[Integer]]]",
+        )
+
+    def test_condition_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Condition.nb", 152728435)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            "ReplaceAll[List[6, -7, 3, 2, -1, -2], Rule[Condition[Pattern[x, Blank[]], Less[x, 0]], w]]",
         )
 
     def test_freeq_integer_example_from_docs_parses_standard_form(self) -> None:
@@ -557,6 +582,16 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(except_false.to_full_form(), "False")
         self.assertEqual(verbatim.to_full_form(), "True")
 
+    def test_condition_patterns_filter_matches_and_respect_precedence(self) -> None:
+        positive = evaluate(parse_input_form("MatchQ[f[2], f[x_ /; x > 0]]"))
+        negative = evaluate(parse_input_form("MatchQ[f[-1], f[x_ /; x > 0]]"))
+        precedence = evaluate(parse_input_form("MatchQ[a, a | b /; False]"))
+        parenthesized = evaluate(parse_input_form("MatchQ[a, a | (b /; False)]"))
+        self.assertEqual(positive.to_full_form(), "True")
+        self.assertEqual(negative.to_full_form(), "False")
+        self.assertEqual(precedence.to_full_form(), "False")
+        self.assertEqual(parenthesized.to_full_form(), "True")
+
     def test_sequence_patterns_support_one_anonymous_blanksequence_per_argument_list(self) -> None:
         top_level = evaluate(parse_input_form("MatchQ[a, __]"))
         top_level_typed = evaluate(parse_input_form("MatchQ[1, __Symbol]"))
@@ -602,6 +637,12 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(limited.to_full_form(), "List[a]")
         self.assertEqual(transformed.to_full_form(), "List[List[a, a], List[b, b]]")
 
+    def test_condition_patterns_and_delayed_rules_work_in_cases(self) -> None:
+        guarded_pattern = evaluate(parse_input_form("Cases[{1, -2, 3}, x_ /; x > 0]"))
+        guarded_template = evaluate(parse_input_form("Cases[{1, -2, 3}, x_ :> x + 1 /; x > 0]"))
+        self.assertEqual(guarded_pattern.to_full_form(), "List[1, 3]")
+        self.assertEqual(guarded_template.to_full_form(), "List[2, 4]")
+
     def test_cases_and_deletecases_support_anonymous_sequence_patterns(self) -> None:
         non_empty_cases = evaluate(parse_input_form("Cases[{f[a], f[a, b], f[]}, f[__]]"))
         all_cases = evaluate(parse_input_form("Cases[{f[a], f[a, b], f[]}, f[___]]"))
@@ -620,6 +661,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(all_levels.to_full_form(), "f[g[]]")
         self.assertEqual(limited.to_full_form(), "List[1, 2, a]")
 
+    def test_delete_cases_supports_condition_patterns(self) -> None:
+        result = evaluate(parse_input_form("DeleteCases[{1, -2, 3}, x_ /; x > 0]"))
+        self.assertEqual(result.to_full_form(), "List[-2]")
+
     def test_replace_supports_levelspecs_and_nested_rulesets(self) -> None:
         root_result = evaluate(parse_input_form("Replace[f[a], f[x_] :> x]"))
         positive_levels = evaluate(parse_input_form("Replace[f[g[a]], _ -> z, 2]"))
@@ -631,6 +676,18 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(negative_levels.to_full_form(), "f[g[s]]")
         self.assertEqual(deep_result.to_full_form(), "p[f[p[g[p[a]]]]]")
         self.assertEqual(nested_rulesets.to_full_form(), "List[a, f[a]]")
+
+    def test_condition_patterns_and_delayed_rules_work_in_replace(self) -> None:
+        lhs_condition_true = evaluate(parse_input_form("Replace[2, x_ /; x > 0 :> x + 1]"))
+        lhs_condition_false = evaluate(parse_input_form("Replace[-1, x_ /; x > 0 :> x + 1]"))
+        rhs_condition_true = evaluate(parse_input_form("Replace[2, x_ :> x + 1 /; x > 0]"))
+        rhs_condition_false = evaluate(parse_input_form("Replace[-1, x_ :> x + 1 /; x > 0]"))
+        fallback_rule = evaluate(parse_input_form("Replace[1, {x_ :> x + 1 /; x < 0, x_ :> x + 2}]"))
+        self.assertEqual(lhs_condition_true.to_full_form(), "3")
+        self.assertEqual(lhs_condition_false.to_full_form(), "-1")
+        self.assertEqual(rhs_condition_true.to_full_form(), "3")
+        self.assertEqual(rhs_condition_false.to_full_form(), "-1")
+        self.assertEqual(fallback_rule.to_full_form(), "3")
 
     def test_replace_all_and_replace_repeated_support_operator_forms_and_fixed_points(self) -> None:
         replace_all = evaluate(parse_input_form("f[g[a]] /. g[x_] :> x"))
@@ -645,6 +702,16 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(replace_repeated.to_full_form(), "a")
         self.assertEqual(replace_repeated_identity.to_full_form(), "f[a]")
         self.assertEqual(replace_repeated_nested_rulesets.to_full_form(), "List[a, f[y]]")
+
+    def test_condition_patterns_and_delayed_rules_work_in_replace_all_and_repeated(self) -> None:
+        replace_all_lhs = evaluate(parse_input_form("f[2] /. f[x_ /; x > 0] :> x + 1"))
+        replace_all_rhs = evaluate(parse_input_form("2 /. x_ :> x + 1 /; x > 0"))
+        replace_all_rhs_false = evaluate(parse_input_form("-1 /. x_ :> x + 1 /; x > 0"))
+        replace_repeated = evaluate(parse_input_form("1 //. x_ :> x + 1 /; x < 3"))
+        self.assertEqual(replace_all_lhs.to_full_form(), "3")
+        self.assertEqual(replace_all_rhs.to_full_form(), "3")
+        self.assertEqual(replace_all_rhs_false.to_full_form(), "-1")
+        self.assertEqual(replace_repeated.to_full_form(), "3")
 
     def test_replace_at_rewrites_only_exact_target_parts(self) -> None:
         single = evaluate(parse_input_form("ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"))

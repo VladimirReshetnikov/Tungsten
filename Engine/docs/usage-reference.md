@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T02:24:13Z
-- Repository HEAD: 5152667bb85be73fd9d7d6678e0bc4f9aa8d335a
+- Updated (UTC): 2026-04-24T02:48:08Z
+- Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -357,10 +357,13 @@ python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
 python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
+python -m tungsten expr evaluate --code "MatchQ[f[2], f[x_ /; x > 0]]"
 python -m tungsten expr evaluate --code "FreeQ[f[a], f]"
 python -m tungsten expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
+python -m tungsten expr evaluate --code "Cases[{1, -2, 3}, x_ :> x + 1 /; x > 0]"
 python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
 python -m tungsten expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
+python -m tungsten expr evaluate --code "Replace[1, {x_ :> x + 1 /; x < 0, x_ :> x + 2}]"
 python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
 python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
 python -m tungsten expr evaluate --code "Map[# + 1 &, {a, b}]"
@@ -417,12 +420,14 @@ For the exact supported forms and limits of each function, see
 Everything else remains inert.
 
 The current pattern subset includes `_`, `_Head`, anonymous `__`, `___`, head-qualified anonymous
-sequence forms such as `__Integer`, named `x_`, `x_Head`, `Alternatives` via `|`, `Except`,
-`HoldPattern`, and `Verbatim`. The parser also lowers `expr /. rules` and `expr //. rules` to
-`ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`. Anonymous `__` and `___` match a
-single candidate expression directly, and they also support multi-element matching when there is
-at most one such pattern in a containing argument list. Named sequence patterns, `?`, `/;`, and
-options-related pattern forms remain intentionally out of scope.
+sequence forms such as `__Integer`, named `x_`, `x_Head`, guarded patterns via `/;`,
+`Alternatives` via `|`, `Except`, `HoldPattern`, and `Verbatim`. The parser also lowers
+`expr /. rules` and `expr //. rules` to `ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`.
+Anonymous `__` and `___` match a single candidate expression directly, and they also support
+multi-element matching when there is at most one such pattern in a containing argument list.
+Guards via `/;` are supported in patterns and delayed-rule right-hand sides when the substituted
+guard reduces to explicit `True` under Tungsten's shipped evaluator. Named sequence patterns, `?`,
+and options-related pattern forms remain intentionally out of scope.
 
 Pure functions currently support positional slots only: `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`,
 `Function[body]`, `body &`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.

@@ -158,6 +158,8 @@ class Call(Expr):
                 return "{" + ", ".join(arg.to_input_form() for arg in self.arguments) + "}"
             if head_name == "Association":
                 return "<|" + ", ".join(arg.to_input_form() for arg in self.arguments) + "|>"
+            if head_name == "Condition" and len(self.arguments) == 2:
+                return f"{_wrap_infix(self.arguments[0])} /; {_wrap_infix(self.arguments[1])}"
             if head_name == "Rule" and len(self.arguments) == 2:
                 return f"{_wrap_infix(self.arguments[0])} -> {_wrap_infix(self.arguments[1])}"
             if head_name == "RuleDelayed" and len(self.arguments) == 2:
@@ -484,7 +486,6 @@ def _evaluate_boolean_logic(expr: Call) -> Expr | None:
 
 
 _UNSUPPORTED_PATTERN_HEADS = {
-    "Condition",
     "Longest",
     "OptionsPattern",
     "Optional",
@@ -633,6 +634,14 @@ def _match_pattern(
                     return matched
             return None
 
+        if head_name == "Condition":
+            if len(pattern.arguments) != 2:
+                raise WolframEvaluationError("Condition expects exactly two arguments.")
+            matched = _match_pattern(expr, pattern.arguments[0], current)
+            if matched is None:
+                return None
+            return matched if _condition_test_succeeds(pattern.arguments[1], matched) else None
+
         if head_name == "Pattern":
             if len(pattern.arguments) != 2:
                 raise WolframEvaluationError("Pattern expects exactly two arguments.")
@@ -734,16 +743,16 @@ def _normalize_match_limit(limit: Expr | int | None) -> int | None:
     raise WolframEvaluationError("Match limits must be non-negative integers or Infinity.")
 
 
-def _cases_pattern_spec(spec: Expr) -> tuple[Expr, Expr | None]:
+def _cases_pattern_spec(spec: Expr) -> tuple[Expr, Expr | None, bool]:
     if isinstance(spec, Call) and spec.has_head("Rule"):
         if len(spec.arguments) != 2:
             raise WolframEvaluationError("Cases transformation rules must contain exactly two arguments.")
-        return spec.arguments[0], evaluate(spec.arguments[1])
+        return spec.arguments[0], evaluate(spec.arguments[1]), False
     if isinstance(spec, Call) and spec.has_head("RuleDelayed"):
         if len(spec.arguments) != 2:
             raise WolframEvaluationError("Cases transformation rules must contain exactly two arguments.")
-        return spec.arguments[0], spec.arguments[1]
-    return spec, None
+        return spec.arguments[0], spec.arguments[1], True
+    return spec, None, False
 
 
 def _substitute_pattern_bindings(expr: Expr, bindings: dict[str, Expr]) -> Expr:
@@ -767,10 +776,33 @@ def _substitute_pattern_bindings(expr: Expr, bindings: dict[str, Expr]) -> Expr:
     )
 
 
+def _condition_test_succeeds(test: Expr, bindings: dict[str, Expr]) -> bool:
+    evaluated = evaluate(_substitute_pattern_bindings(test, bindings))
+    return isinstance(evaluated, Symbol) and evaluated.name == "True"
+
+
+def _instantiate_replacement_template(
+    template: Expr,
+    bindings: dict[str, Expr],
+    *,
+    delayed: bool,
+) -> tuple[Expr | None, bool]:
+    substituted = _substitute_pattern_bindings(template, bindings)
+    if delayed and isinstance(substituted, Call) and substituted.has_head("Condition"):
+        if len(substituted.arguments) != 2:
+            raise WolframEvaluationError("Condition expects exactly two arguments.")
+        body, test = substituted.arguments
+        if not _condition_test_succeeds(test, {}):
+            return (None, False)
+        return _instantiate_replacement_template(body, {}, delayed=True)
+    return (evaluate(substituted), True)
+
+
 @dataclass(frozen=True)
 class _ReplacementRule:
     pattern: Expr
     template: Expr
+    delayed: bool
 
 
 _REPLACE_REPEATED_MAX_ITERATIONS = 65536
@@ -789,9 +821,10 @@ def _replacement_rule_from_expr(rule: Expr, function_name: str) -> _ReplacementR
         raise WolframEvaluationError(f"{function_name} expects a rule or a list of rules.")
     assert isinstance(rule, Call)
     pattern, template = rule.arguments
+    delayed = rule.has_head("RuleDelayed")
     if rule.has_head("Rule"):
         template = evaluate(template)
-    return _ReplacementRule(pattern=pattern, template=template)
+    return _ReplacementRule(pattern=pattern, template=template, delayed=delayed)
 
 
 def _normalize_single_replacement_ruleset(rules: Expr, function_name: str) -> list[_ReplacementRule]:
@@ -824,7 +857,11 @@ def _apply_replacement_rules(expr: Expr, ruleset: Sequence[_ReplacementRule]) ->
         bindings = _match_pattern(expr, rule.pattern)
         if bindings is None:
             continue
-        return (evaluate(_substitute_pattern_bindings(rule.template, bindings)), True)
+        replacement, applied = _instantiate_replacement_template(rule.template, bindings, delayed=rule.delayed)
+        if not applied:
+            continue
+        assert replacement is not None
+        return (replacement, True)
     return (expr, False)
 
 
@@ -1008,7 +1045,7 @@ def cases(
     level_spec = integer(1) if spec is None else spec
     level_min, level_max = _normalize_level_spec(level_spec)
     remaining = _normalize_match_limit(limit)
-    pattern, template = _cases_pattern_spec(pattern_spec)
+    pattern, template, delayed = _cases_pattern_spec(pattern_spec)
 
     records: list[_PatternRecord] = []
     _collect_pattern_records(expr, 0, records, heads=False)
@@ -1025,7 +1062,11 @@ def cases(
         if template is None:
             results.append(record.expr)
         else:
-            results.append(evaluate(_substitute_pattern_bindings(template, bindings)))
+            transformed, applied = _instantiate_replacement_template(template, bindings, delayed=delayed)
+            if not applied:
+                continue
+            assert transformed is not None
+            results.append(transformed)
         if remaining is not None:
             remaining -= 1
 
@@ -2908,6 +2949,7 @@ _MULTI_TOKENS = (
     "|>",
     ":>",
     "->",
+    "/;",
     "//.",
     "//@",
     "//",
@@ -2985,6 +3027,7 @@ class _Parser:
     _AND_BP = 80
     _OR_BP = 70
     _ALTERNATIVES_BP = 65
+    _CONDITION_BP = 62
     _RULE_BP = 60
     _REPLACE_BP = 50
     _MAP_BP = 45
@@ -3238,6 +3281,7 @@ class _Parser:
             "&&": (self._AND_BP, self._AND_BP + 1, "And"),
             "||": (self._OR_BP, self._OR_BP + 1, "Or"),
             "|": (self._ALTERNATIVES_BP, self._ALTERNATIVES_BP + 1, "Alternatives"),
+            "/;": (self._CONDITION_BP, self._CONDITION_BP + 1, "Condition"),
             "->": (self._RULE_BP, self._RULE_BP, "Rule"),
             ":>": (self._RULE_BP, self._RULE_BP, "RuleDelayed"),
             "/.": (self._REPLACE_BP, self._REPLACE_BP + 1, "ReplaceAll"),

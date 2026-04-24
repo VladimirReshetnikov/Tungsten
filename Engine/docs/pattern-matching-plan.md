@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
 - Scope: kernel-free Wolfram pattern parsing and structural matching in `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T23:55:57Z
-- Updated (UTC): 2026-04-24T02:24:13Z
-- Repository HEAD: 5152667bb85be73fd9d7d6678e0bc4f9aa8d335a
+- Updated (UTC): 2026-04-24T02:48:08Z
+- Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
 - Related code:
   - `src/Tungsten/src/tungsten/expression.py`
   - `src/Tungsten/tests/test_expression.py`
@@ -190,7 +190,7 @@ Originally out of scope in this pass:
 - `BlankSequence`, `BlankNullSequence`, `__`, `___`;
 - `Repeated`, `RepeatedNull`;
 - `Optional` and options-related pattern forms;
-- `PatternTest` (`?`) and `Condition` (`/;`);
+- `PatternTest` (`?`);
 - `Longest`, `Shortest`, and similar match-shaping forms;
 - full rule-based replacement semantics outside the narrow `Cases[..., patt :> rhs]` path;
 - association-aware pattern traversal.
@@ -257,7 +257,17 @@ deliberately narrow slice of `BlankSequence` / `BlankNullSequence`:
 - only when there is at most one such pattern in the containing argument list;
 - still not for named forms such as `x__` or `x___`.
 
-Other advanced shorthand such as `?` and `/;` remains unsupported.
+Other advanced shorthand such as `?` remains unsupported.
+
+This design note also predates the later guarded-pattern extension. Tungsten now supports a
+deliberately narrow slice of `Condition` / `/;`:
+
+- guarded patterns such as `x_ /; x > 0`;
+- guarded delayed-rule right-hand sides such as `x_ :> rhs /; x > 0`;
+- only when the substituted guard reduces to explicit `True` under Tungsten's shipped evaluator.
+
+Immediate-rule right-hand sides such as `x_ -> rhs /; test` still follow Tungsten's more inert
+rule semantics rather than trying to emulate every kernel evaluation nuance.
 
 ## Matcher plan
 

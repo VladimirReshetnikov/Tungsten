@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T02:24:13Z
-- Repository HEAD: 5152667bb85be73fd9d7d6678e0bc4f9aa8d335a
+- Updated (UTC): 2026-04-24T02:48:08Z
+- Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -84,13 +84,13 @@ The current workspace is built around seven complementary capabilities:
    StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
    `RadicalBox`, and `SuperscriptBox`, understands association literals and common association
    row-box forms from the installed documentation notebooks, understands a bounded but useful
-   pattern subset such as `_Integer`, anonymous `__` / `___`, `x_`, `Except[...]`, and `a | b`,
-   parses replacement operators such as `/.` and `//.` into named AST calls, supports positional
-   pure functions such as `Function[body]`, `body &`, `#`, `#n`, and `#0`, then evaluates a
-   broader inert structural built-in set such as integer arithmetic and relational heads, Boolean
-   heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
-   `ReplaceRepeated`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`,
-   `Association`, `Lookup`, and `KeyTake`.
+   pattern subset such as `_Integer`, anonymous `__` / `___`, guarded patterns via `/;`, `x_`,
+   `Except[...]`, and `a | b`, parses replacement operators such as `/.` and `//.` into named AST
+   calls, supports positional pure functions such as `Function[body]`, `body &`, `#`, `#n`, and
+   `#0`, then evaluates a broader inert structural built-in set such as integer arithmetic and
+   relational heads, Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
+   `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
+   `ReplacePart`, `MapAt`, `Association`, `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.

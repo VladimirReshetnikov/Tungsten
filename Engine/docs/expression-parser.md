@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T02:24:13Z
-Repository HEAD: 5152667bb85be73fd9d7d6678e0bc4f9aa8d335a
+Updated (UTC): 2026-04-24T02:48:08Z
+Repository HEAD: b434ae1b0cac0653c6954d72f4f6df6148ecb345
 
 ## Summary
 
@@ -51,11 +51,12 @@ The parser currently handles:
 - function application `head[arg1, arg2]`;
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
-- common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, and `a | b`;
+- common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, `patt /; test`, and `a | b`;
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
-- rules `->` and `:>`;
+- rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
+  `x_ :> rhs /; test`;
 - comparisons and boolean operators;
 - prefix and postfix application such as `f @ x` and `x // f`;
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
@@ -84,11 +85,11 @@ constructs, named-parameter function forms, assignments, and broader evaluation 
 The currently supported pattern subset is intentionally bounded:
 
 - supported: `Blank`, anonymous `BlankSequence` / `BlankNullSequence` via `__`, `___`, optional
-  head-qualified forms such as `__Integer`, named patterns over `Blank`, `Alternatives`, `Except`,
-  `HoldPattern`, and `Verbatim`;
+  head-qualified forms such as `__Integer`, named patterns over `Blank`, guarded patterns via
+  `Condition` / `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`;
 - not yet supported: named sequence patterns such as `x__` or `Pattern[x, BlankSequence[]]`,
-  multiple `__` / `___` patterns in the same argument list, `PatternTest`, `Condition`,
-  `Optional`, options-related pattern forms, and other advanced matching constructs.
+  multiple `__` / `___` patterns in the same argument list, `PatternTest`, `Optional`,
+  options-related pattern forms, and other advanced matching constructs.
 
 ## Parsing forms
 
