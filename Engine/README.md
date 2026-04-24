@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T21:12:16Z
-- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
+- Updated (UTC): 2026-04-24T00:03:59Z
+- Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -83,9 +83,10 @@ The current workspace is built around seven complementary capabilities:
 4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a pragmatic
    StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
    `RadicalBox`, and `SuperscriptBox`, understands association literals and common association
-   row-box forms from the installed documentation notebooks, then evaluates a broader inert
-   structural built-in set such as `Length`, `Depth`, `Take`, `Drop`, `Flatten`, `ReplacePart`,
-   `MapAt`, `Association`, `Lookup`, and `KeyTake`.
+   row-box forms from the installed documentation notebooks, understands a bounded but useful
+   pattern subset such as `_Integer`, `x_`, `Except[...]`, and `a | b`, then evaluates a broader
+   inert structural built-in set such as `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
+   `Take`, `Drop`, `Flatten`, `ReplacePart`, `MapAt`, `Association`, `Lookup`, and `KeyTake`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.

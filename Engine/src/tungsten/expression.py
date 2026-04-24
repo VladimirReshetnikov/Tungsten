@@ -255,7 +255,9 @@ def string(value: str) -> String:
     return String(value)
 
 
-_FLAT_HEADS = {"Plus", "Times", "And", "Or"}
+_FLAT_HEADS = {"Plus", "Times", "And", "Or", "Alternatives"}
+
+_LEVEL_INFINITY = 1_000_000_000
 
 
 def call(head: str | Expr, *arguments: Expr) -> Call:
@@ -396,6 +398,312 @@ def _association_from_arguments(arguments: Sequence[Expr]) -> Call | None:
 
 def _bool_symbol(value: bool) -> Symbol:
     return symbol("True" if value else "False")
+
+
+_UNSUPPORTED_PATTERN_HEADS = {
+    "BlankNullSequence",
+    "BlankSequence",
+    "Condition",
+    "Longest",
+    "OptionsPattern",
+    "Optional",
+    "PatternTest",
+    "Repeated",
+    "RepeatedNull",
+    "Shortest",
+}
+
+
+def _unsupported_pattern(expr: Expr) -> WolframEvaluationError:
+    return WolframEvaluationError(
+        f"Unsupported Wolfram pattern form in the current Tungsten subset: {expr.to_input_form()}."
+    )
+
+
+def _match_pattern(
+    expr: Expr,
+    pattern: Expr,
+    bindings: dict[str, Expr] | None = None,
+) -> dict[str, Expr] | None:
+    current = {} if bindings is None else dict(bindings)
+
+    if isinstance(pattern, Call) and isinstance(pattern.head_expr, Symbol):
+        head_name = pattern.head_expr.name
+
+        if head_name in _UNSUPPORTED_PATTERN_HEADS:
+            raise _unsupported_pattern(pattern)
+
+        if head_name == "HoldPattern":
+            if len(pattern.arguments) != 1:
+                raise WolframEvaluationError("HoldPattern expects exactly one argument.")
+            return _match_pattern(expr, pattern.arguments[0], current)
+
+        if head_name == "Verbatim":
+            if len(pattern.arguments) != 1:
+                raise WolframEvaluationError("Verbatim expects exactly one argument.")
+            return current if expr == pattern.arguments[0] else None
+
+        if head_name == "Except":
+            if len(pattern.arguments) == 1:
+                return current if _match_pattern(expr, pattern.arguments[0], current) is None else None
+            if len(pattern.arguments) == 2:
+                allowed = _match_pattern(expr, pattern.arguments[1], current)
+                if allowed is None:
+                    return None
+                return allowed if _match_pattern(expr, pattern.arguments[0], current) is None else None
+            raise WolframEvaluationError("Except expects one or two arguments.")
+
+        if head_name == "Alternatives":
+            if not pattern.arguments:
+                return None
+            for branch in pattern.arguments:
+                matched = _match_pattern(expr, branch, current)
+                if matched is not None:
+                    return matched
+            return None
+
+        if head_name == "Pattern":
+            if len(pattern.arguments) != 2:
+                raise WolframEvaluationError("Pattern expects exactly two arguments.")
+            name_expr, inner_pattern = pattern.arguments
+            if not isinstance(name_expr, Symbol):
+                raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
+            matched = _match_pattern(expr, inner_pattern, current)
+            if matched is None:
+                return None
+            bound = matched.get(name_expr.name)
+            if bound is not None:
+                return matched if bound == expr else None
+            matched[name_expr.name] = expr
+            return matched
+
+        if head_name == "Blank":
+            if len(pattern.arguments) == 0:
+                return current
+            if len(pattern.arguments) == 1:
+                return _match_pattern(head_of(expr), pattern.arguments[0], current)
+            raise WolframEvaluationError("Blank expects zero or one argument.")
+
+    if isinstance(pattern, Call):
+        if not isinstance(expr, Call):
+            return None
+        if len(expr.arguments) != len(pattern.arguments):
+            return None
+        matched = _match_pattern(head_of(expr), pattern.head_expr, current)
+        if matched is None:
+            return None
+        for candidate_arg, pattern_arg in zip(expr.arguments, pattern.arguments, strict=True):
+            matched = _match_pattern(candidate_arg, pattern_arg, matched)
+            if matched is None:
+                return None
+        return matched
+
+    return current if expr == pattern else None
+
+
+def match_q(expr: Expr, pattern: Expr) -> Symbol:
+    return _bool_symbol(_match_pattern(expr, pattern) is not None)
+
+
+@dataclass(frozen=True)
+class _PatternRecord:
+    expr: Expr
+    positive_level: int
+
+
+def _collect_pattern_records(
+    expr: Expr,
+    positive_level: int,
+    target: list[_PatternRecord],
+    *,
+    heads: bool,
+) -> None:
+    if _is_association(expr):
+        target.append(_PatternRecord(expr=expr, positive_level=positive_level))
+        return
+
+    if isinstance(expr, Call):
+        if heads:
+            _collect_pattern_records(expr.head_expr, positive_level + 1, target, heads=heads)
+        for argument in expr.arguments:
+            _collect_pattern_records(argument, positive_level + 1, target, heads=heads)
+
+    target.append(_PatternRecord(expr=expr, positive_level=positive_level))
+
+
+def _level_in_range(level_value: int, level_min: int, level_max: int) -> bool:
+    return level_min <= level_value <= level_max
+
+
+def free_q(expr: Expr, pattern: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Symbol:
+    level_spec = list_expr(integer(0), symbol("Infinity")) if spec is None else spec
+    records: list[_PatternRecord] = []
+    _collect_pattern_records(expr, 0, records, heads=True)
+    level_min, level_max = _normalize_level_spec(level_spec)
+    for record in records:
+        if not _level_in_range(record.positive_level, level_min, level_max):
+            continue
+        if _match_pattern(record.expr, pattern) is not None:
+            return _bool_symbol(False)
+    return _bool_symbol(True)
+
+
+def _normalize_match_limit(limit: Expr | int | None) -> int | None:
+    if limit is None:
+        return None
+    if isinstance(limit, int):
+        if limit < 0:
+            raise WolframEvaluationError("Match limits must be non-negative integers or Infinity.")
+        return limit
+    if isinstance(limit, Integer):
+        return _normalize_match_limit(limit.value)
+    if isinstance(limit, Symbol) and limit.name == "Infinity":
+        return None
+    raise WolframEvaluationError("Match limits must be non-negative integers or Infinity.")
+
+
+def _cases_pattern_spec(spec: Expr) -> tuple[Expr, Expr | None]:
+    if isinstance(spec, Call) and spec.has_head("Rule"):
+        if len(spec.arguments) != 2:
+            raise WolframEvaluationError("Cases transformation rules must contain exactly two arguments.")
+        return spec.arguments[0], evaluate(spec.arguments[1])
+    if isinstance(spec, Call) and spec.has_head("RuleDelayed"):
+        if len(spec.arguments) != 2:
+            raise WolframEvaluationError("Cases transformation rules must contain exactly two arguments.")
+        return spec.arguments[0], spec.arguments[1]
+    return spec, None
+
+
+def _substitute_pattern_bindings(expr: Expr, bindings: dict[str, Expr]) -> Expr:
+    if isinstance(expr, Symbol):
+        return bindings.get(expr.name, expr)
+    if isinstance(expr, (Integer, Real, String)):
+        return expr
+    if not isinstance(expr, Call):
+        return expr
+
+    if expr.has_head("Pattern") and len(expr.arguments) == 2 and isinstance(expr.arguments[0], Symbol):
+        return call(
+            _substitute_pattern_bindings(expr.head_expr, bindings),
+            expr.arguments[0],
+            _substitute_pattern_bindings(expr.arguments[1], bindings),
+        )
+
+    return call(
+        _substitute_pattern_bindings(expr.head_expr, bindings),
+        *(_substitute_pattern_bindings(argument, bindings) for argument in expr.arguments),
+    )
+
+
+def cases(
+    expr: Expr,
+    pattern_spec: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+    limit: Expr | int | None = None,
+) -> Call:
+    level_spec = integer(1) if spec is None else spec
+    level_min, level_max = _normalize_level_spec(level_spec)
+    remaining = _normalize_match_limit(limit)
+    pattern, template = _cases_pattern_spec(pattern_spec)
+
+    records: list[_PatternRecord] = []
+    _collect_pattern_records(expr, 0, records, heads=False)
+
+    results: list[Expr] = []
+    for record in records:
+        if remaining == 0:
+            break
+        if not _level_in_range(record.positive_level, level_min, level_max):
+            continue
+        bindings = _match_pattern(record.expr, pattern)
+        if bindings is None:
+            continue
+        if template is None:
+            results.append(record.expr)
+        else:
+            results.append(evaluate(_substitute_pattern_bindings(template, bindings)))
+        if remaining is not None:
+            remaining -= 1
+
+    return list_expr(*results)
+
+
+_DELETE_SENTINEL = object()
+
+
+def _delete_cases_recursive(
+    expr: Expr,
+    pattern: Expr,
+    *,
+    positive_level: int,
+    level_min: int,
+    level_max: int,
+    remaining: list[int | None],
+) -> Expr | object:
+    if _is_association(expr):
+        if _level_in_range(positive_level, level_min, level_max) and remaining[0] != 0:
+            if _match_pattern(expr, pattern) is not None:
+                if positive_level == 0:
+                    return _DELETE_SENTINEL
+                if remaining[0] is not None:
+                    remaining[0] -= 1
+                return _DELETE_SENTINEL
+        return expr
+
+    if isinstance(expr, Call):
+        transformed_args: list[Expr] = []
+        for argument in expr.arguments:
+            transformed = _delete_cases_recursive(
+                argument,
+                pattern,
+                positive_level=positive_level + 1,
+                level_min=level_min,
+                level_max=level_max,
+                remaining=remaining,
+            )
+            if transformed is _DELETE_SENTINEL:
+                continue
+            assert isinstance(transformed, Expr)
+            transformed_args.append(transformed)
+        rebuilt: Expr = call(expr.head_expr, *transformed_args)
+    else:
+        rebuilt = expr
+
+    if remaining[0] == 0:
+        return rebuilt
+
+    if _level_in_range(positive_level, level_min, level_max) and _match_pattern(rebuilt, pattern) is not None:
+        if positive_level == 0:
+            return _DELETE_SENTINEL
+        if remaining[0] is not None:
+            remaining[0] -= 1
+        return _DELETE_SENTINEL
+    return rebuilt
+
+
+def delete_cases(
+    expr: Expr,
+    pattern: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+    limit: Expr | int | None = None,
+) -> Expr:
+    level_spec = integer(1) if spec is None else spec
+    level_min, level_max = _normalize_level_spec(level_spec)
+    remaining = [_normalize_match_limit(limit)]
+    transformed = _delete_cases_recursive(
+        expr,
+        pattern,
+        positive_level=0,
+        level_min=level_min,
+        level_max=level_max,
+        remaining=remaining,
+    )
+    if transformed is _DELETE_SENTINEL:
+        raise WolframEvaluationError(
+            "DeleteCases does not currently support deleting the whole expression."
+        )
+    assert isinstance(transformed, Expr)
+    return transformed
 
 
 def head_of(expr: Expr) -> Expr:
@@ -1462,6 +1770,53 @@ def evaluate(expr: Expr) -> Expr:
     if not isinstance(expr, Call):
         return expr
 
+    if isinstance(expr.head_expr, Symbol):
+        raw_head_name = expr.head_expr.name
+
+        if raw_head_name == "MatchQ":
+            if len(expr.arguments) != 2:
+                raise WolframEvaluationError("MatchQ expects exactly two arguments.")
+            return match_q(evaluate(expr.arguments[0]), expr.arguments[1])
+
+        if raw_head_name == "FreeQ":
+            if len(expr.arguments) == 2:
+                return free_q(evaluate(expr.arguments[0]), expr.arguments[1])
+            if len(expr.arguments) == 3:
+                return free_q(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            raise WolframEvaluationError("FreeQ expects an expression, a pattern, and an optional level specification.")
+
+        if raw_head_name == "Cases":
+            if len(expr.arguments) == 2:
+                return cases(evaluate(expr.arguments[0]), expr.arguments[1])
+            if len(expr.arguments) == 3:
+                return cases(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            if len(expr.arguments) == 4:
+                return cases(
+                    evaluate(expr.arguments[0]),
+                    expr.arguments[1],
+                    evaluate(expr.arguments[2]),
+                    evaluate(expr.arguments[3]),
+                )
+            raise WolframEvaluationError(
+                "Cases expects an expression, a pattern or transformation rule, and optional level and match limits."
+            )
+
+        if raw_head_name == "DeleteCases":
+            if len(expr.arguments) == 2:
+                return delete_cases(evaluate(expr.arguments[0]), expr.arguments[1])
+            if len(expr.arguments) == 3:
+                return delete_cases(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            if len(expr.arguments) == 4:
+                return delete_cases(
+                    evaluate(expr.arguments[0]),
+                    expr.arguments[1],
+                    evaluate(expr.arguments[2]),
+                    evaluate(expr.arguments[3]),
+                )
+            raise WolframEvaluationError(
+                "DeleteCases expects an expression, a pattern, and optional level and match limits."
+            )
+
     evaluated_head = evaluate(expr.head_expr)
     if not isinstance(evaluated_head, Symbol):
         return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
@@ -2044,6 +2399,8 @@ def _is_symbol_continue(char: str) -> bool:
 
 
 _MULTI_TOKENS = (
+    "___",
+    "__",
     "[[",
     "<|",
     "|>",
@@ -2104,7 +2461,7 @@ def _tokenize(text: str) -> list[_Token]:
             continue
 
         char = text[index]
-        if char in "[]{}(),+-*/^!@<>":
+        if char in "[]{}(),+-*/^!@<>_|":
             tokens.append(_Token(kind="operator", text=char, start=index, end=index + 1, value=char))
             index += 1
             continue
@@ -2118,12 +2475,14 @@ def _tokenize(text: str) -> list[_Token]:
 class _Parser:
     _PART_BP = 190
     _CALL_BP = 190
+    _PATTERN_BP = 185
     _POWER_BP = 160
     _TIMES_BP = 140
     _PLUS_BP = 120
     _COMPARE_BP = 100
     _AND_BP = 80
     _OR_BP = 70
+    _ALTERNATIVES_BP = 65
     _RULE_BP = 60
     _REPLACE_BP = 50
     _MAP_BP = 45
@@ -2177,6 +2536,12 @@ class _Parser:
             token = self._peek()
             if token.text in terminators or token.kind in terminators or token.kind == "eof":
                 break
+
+            if token.text in {"_", "__", "___"}:
+                if self._PATTERN_BP < min_bp:
+                    break
+                left = self._parse_postfix_pattern(left)
+                continue
 
             if token.text == "[":
                 if self._CALL_BP < min_bp:
@@ -2247,6 +2612,12 @@ class _Parser:
             self._expect("|>")
             return call("Association", *items)
 
+        if token.text in {"__", "___"}:
+            raise _unsupported_pattern(call("BlankSequence" if token.text == "__" else "BlankNullSequence"))
+
+        if token.text == "_":
+            return self._parse_prefix_blank()
+
         if token.text == "+":
             return self._parse_expression(self._PREFIX_BP, terminators)
 
@@ -2281,6 +2652,22 @@ class _Parser:
 
     def _starts_primary(self, token: _Token) -> bool:
         return token.kind in {"integer", "real", "string", "symbol"} or token.text in {"(", "{", "<|"}
+
+    def _parse_prefix_blank(self) -> Expr:
+        if self._peek().kind == "symbol":
+            return call("Blank", symbol(str(self._consume().value)))
+        return call("Blank")
+
+    def _parse_postfix_pattern(self, left: Expr) -> Expr:
+        token = self._consume()
+        if token.text in {"__", "___"}:
+            raise _unsupported_pattern(call("BlankSequence" if token.text == "__" else "BlankNullSequence"))
+        if not isinstance(left, Symbol):
+            raise WolframSyntaxError(
+                f"Named pattern shorthand requires a symbol before '_' at offset {token.start}."
+            )
+        blank = self._parse_prefix_blank()
+        return call("Pattern", left, blank)
 
     def _parse_infix_span(self, left: Expr, min_bp: int, terminators: set[str]) -> Expr:
         del min_bp
@@ -2323,6 +2710,7 @@ class _Parser:
             ">=": (self._COMPARE_BP, self._COMPARE_BP + 1, "GreaterEqual"),
             "&&": (self._AND_BP, self._AND_BP + 1, "And"),
             "||": (self._OR_BP, self._OR_BP + 1, "Or"),
+            "|": (self._ALTERNATIVES_BP, self._ALTERNATIVES_BP + 1, "Alternatives"),
             "->": (self._RULE_BP, self._RULE_BP, "Rule"),
             ":>": (self._RULE_BP, self._RULE_BP, "RuleDelayed"),
             "/.": (self._REPLACE_BP, self._REPLACE_BP + 1, "ReplaceAll"),
@@ -2458,6 +2846,14 @@ def _collect_levels(expr: Expr, positive_level: int, target: list[_LevelRecord])
             _collect_levels(argument, positive_level + 1, target)
 
 
+def _normalize_level_bound(expr: Expr) -> int:
+    if isinstance(expr, Integer):
+        return expr.value
+    if isinstance(expr, Symbol) and expr.name == "Infinity":
+        return _LEVEL_INFINITY
+    raise WolframEvaluationError(f"Unsupported level bound: {expr.to_input_form()}.")
+
+
 def _normalize_level_spec(spec: Expr | int | tuple[int, int]) -> tuple[int, int]:
     if isinstance(spec, int):
         if spec >= 0:
@@ -2472,12 +2868,18 @@ def _normalize_level_spec(spec: Expr | int | tuple[int, int]) -> tuple[int, int]
     if isinstance(spec, Integer):
         return _normalize_level_spec(spec.value)
 
+    if isinstance(spec, Symbol) and spec.name == "Infinity":
+        return (1, _LEVEL_INFINITY)
+
     if isinstance(spec, Call) and spec.has_head("List"):
-        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
-            value = spec.arguments[0].value
+        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], (Integer, Symbol)):
+            value = _normalize_level_bound(spec.arguments[0])
             return (value, value)
-        if len(spec.arguments) == 2 and all(isinstance(item, Integer) for item in spec.arguments):
-            return (spec.arguments[0].value, spec.arguments[1].value)
+        if len(spec.arguments) == 2 and all(
+            isinstance(item, Integer) or (isinstance(item, Symbol) and item.name == "Infinity")
+            for item in spec.arguments
+        ):
+            return (_normalize_level_bound(spec.arguments[0]), _normalize_level_bound(spec.arguments[1]))
 
     raise WolframEvaluationError(f"Unsupported Level specification: {spec.to_input_form() if isinstance(spec, Expr) else spec!r}.")
 

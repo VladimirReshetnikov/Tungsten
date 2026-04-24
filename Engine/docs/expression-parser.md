@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-23T21:12:16Z
-Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
+Updated (UTC): 2026-04-24T00:03:59Z
+Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 
 ## Summary
 
@@ -12,8 +12,8 @@ Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 - parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
-  `Extract`, `Level`, `Take`, `Drop`, `Flatten`, `ReplacePart`, association constructors, key
-  accessors, and related exact-position transforms;
+  `Extract`, `Level`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Take`, `Drop`, `Flatten`,
+  `ReplacePart`, association constructors, key accessors, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -48,6 +48,7 @@ The parser currently handles:
 - function application `head[arg1, arg2]`;
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
+- common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, and `a | b`;
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
@@ -75,6 +76,12 @@ The parser does not attempt to cover full box language or every textual corner o
 particular, it is intentionally conservative around advanced pattern syntax, arbitrary box
 constructs, pure-function shorthand, assignments, and broader evaluation semantics.
 
+The currently supported pattern subset is intentionally bounded:
+
+- supported: `Blank`, named patterns, `Alternatives`, `Except`, `HoldPattern`, `Verbatim`;
+- not yet supported: `BlankSequence`, `BlankNullSequence`, `PatternTest`, `Condition`,
+  `Optional`, options-related pattern forms, and other advanced matching constructs.
+
 ## Parsing forms
 
 ### `input`
@@ -85,6 +92,7 @@ Use this for normal textual Wolfram input such as:
 1 + 2 x^3
 f[a, b] /. x -> y
 expr[[1 ;; 3]]
+Cases[{f[a], f[b]}, f[x_] :> x]
 ```
 
 ### `fullform`
@@ -121,6 +129,19 @@ These lower to ordinary Tungsten expressions such as:
 Power[x, Rational[1, 2]]
 Power[x, Rational[1, 3]]
 Times[Power[x, 3], Power[Plus[1, Times[a, b]], -1]]
+```
+
+For pattern shorthand, Tungsten currently normalizes to explicit heads in canonical output. For
+example:
+
+```text
+f[x_Integer, y_]
+```
+
+parses structurally as:
+
+```text
+f[Pattern[x, Blank[Integer]], Pattern[y, Blank[]]]
 ```
 
 ## Output model
@@ -174,6 +195,10 @@ expr.to_full_form()
 result = evaluate(parse_expression("Level[f[a, g[b]], -1]"))
 result.to_full_form()
 # List[a, b]
+
+match_result = evaluate(parse_expression("MatchQ[f[a, a], f[x_, x_]]"))
+match_result.to_full_form()
+# True
 ```
 
 Convenience entrypoints include:
@@ -190,6 +215,10 @@ Convenience entrypoints include:
 - `part(expr, ...)`
 - `extract(expr, ...)`
 - `level(expr, ...)`
+- `match_q(expr, pattern)`
+- `free_q(expr, pattern, spec=None)`
+- `cases(expr, pattern_spec, spec=None, limit=None)`
+- `delete_cases(expr, pattern, spec=None, limit=None)`
 - `take(expr, spec)`
 - `drop(expr, spec)`
 - `append(expr, item)`
@@ -237,6 +266,9 @@ Structurally evaluate implemented built-ins:
 python -m tungsten expr evaluate --code "Length[{a, b, c}]"
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
+python -m tungsten expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
+python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 ```
@@ -271,6 +303,8 @@ convenient inside `pwsh` automation scripts.
 Tungsten currently implements a broader structural subset that includes:
 
 - core structural queries such as `Length`, `Depth`, `Head`, `Part`, `Extract`, and `Level`;
+- pattern-search functions such as `MatchQ`, `FreeQ`, `Cases`, and `DeleteCases` over Tungsten's
+  supported pattern subset;
 - sequence-style transforms such as `First`, `Last`, `Rest`, `Most`, `Take`, `Drop`, `Append`,
   `Prepend`, `Join`, `Reverse`, `RotateLeft`, `RotateRight`, `Flatten`, `Delete`, `ReplacePart`,
   `Apply`, `Map`, and `MapAt`;
@@ -286,6 +320,8 @@ Examples:
 - `Length[1 + 2]` evaluates to `2`;
 - `Part[f[a, b, c], {1, 3}]` evaluates to `f[a, c]`;
 - `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`;
+- `MatchQ[f[a, a], f[x_, x_]]` evaluates to `True`;
+- `Cases[f[g[a]], _, {0, Infinity}]` evaluates to `List[a, g[a], f[g[a]]]`;
 - `Part[<|a -> x, b -> y|>, Key[b]]` evaluates to `y`;
 - `Map[g, <|a -> 1, b -> 2|>]` evaluates to `<|a -> g[1], b -> g[2]|>`;
 - `Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]` evaluates to `{<|a -> 1, b -> {2}|>, 9}`.
@@ -302,5 +338,9 @@ The current subsystem does not aim to support:
 - general evaluation;
 - definitions, attributes, or user-created transformation rules;
 - package loading or notebook-scoped semantics.
+
+One additional current boundary matters for pattern workflows: association-aware pattern traversal is
+not implemented yet. In this pass, search functions such as `FreeQ`, `Cases`, and `DeleteCases`
+treat associations as opaque leaves rather than descending into keys or values.
 
 Those boundaries are intentional. If you need them, use the real kernel-backed Tungsten flows.

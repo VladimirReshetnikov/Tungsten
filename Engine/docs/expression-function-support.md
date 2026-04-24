@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-23T21:12:16Z
-- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
+- Updated (UTC): 2026-04-24T00:03:59Z
+- Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -21,7 +21,6 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 
 - The functions below are implemented only for the direct forms listed in the "Tungsten-supported
   forms" column.
-- Pattern-driven functions are intentionally out of scope for this subsystem.
 - Operator forms are generally out of scope unless they happen to reduce to the direct forms below.
 - `Take` and `Drop` currently support a single first-level specification only.
 - `Map` currently supports `Map[f, expr]` only.
@@ -37,6 +36,11 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   practical behavior of Wolfram's direct rule form.
 - `Delete` and `MapAt` support exact positions and lists of exact positions; invalid positions
   currently surface as Tungsten evaluation errors.
+- The current pattern subset intentionally excludes variable-length sequence patterns, options,
+  conditions, pattern tests, and other advanced matching forms.
+- Pattern search on associations is deliberately conservative in this pass: associations can match
+  as whole expressions such as `_Association`, but `FreeQ`, `Cases`, and `DeleteCases` currently
+  treat associations as opaque leaves instead of descending into keys or values.
 
 ## Supported functions
 
@@ -45,6 +49,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Length` | `Length[expr]` | Returns the number of immediate arguments in an expression. | [Length](https://reference.wolfram.com/language/ref/Length) |
 | `Depth` | `Depth[expr]` | Returns the structural depth of an expression tree. For associations, Tungsten measures depth through values rather than keys or raw `Rule` wrappers. | [Depth](https://reference.wolfram.com/language/ref/Depth) |
 | `Head` | `Head[expr]` | Returns the head of an expression. | [Head](https://reference.wolfram.com/language/ref/Head) |
+| `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, named patterns, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
+| `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
+| `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
+| `DeleteCases` | `DeleteCases[expr, patt]`, `DeleteCases[expr, patt, levelspec]`, `DeleteCases[expr, patt, levelspec, n]` | Removes matching subexpressions in depth-first postorder, deleting leaves before roots. Whole-expression deletion at level `0` is not implemented yet. | [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases) |
 | `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
 | `AssociationQ` | `AssociationQ[expr]` | Returns `True` when Tungsten recognizes a structural association value. | [AssociationQ](https://reference.wolfram.com/language/ref/AssociationQ) |
 | `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. | [Part](https://reference.wolfram.com/language/ref/Part) |
@@ -94,6 +102,25 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   including association-aware key components.
 - Tungsten canonicalizes negative positions to concrete positive positions internally before
   applying updates, which keeps multi-update behavior deterministic.
+
+## Notes on pattern semantics
+
+- The supported shorthand syntax includes `_`, `_Head`, `x_`, `x_Head`, and infix alternatives
+  such as `a | b`.
+- Tungsten lowers pattern shorthand to ordinary AST nodes such as `Blank[...]`, `Pattern[...]`, and
+  `Alternatives[...]`, so canonical `input_form` output is explicit rather than shorthand-preserving.
+- `Cases` and `DeleteCases` use Wolfram-compatible defaults for the implemented subset:
+  `levelspec` defaults to `{1}` and heads are not searched in this pass.
+- `FreeQ` uses Wolfram-compatible defaults for the implemented subset:
+  `levelspec` defaults to `{0, Infinity}` and heads are searched.
+- `Cases` and `DeleteCases` currently traverse expressions in the same depth-first postorder that
+  the live kernel exhibits for the covered examples, which means leaves appear before parents in
+  both the collected result order and the delete order.
+- `Cases[..., patt :> rhs]` supports named-pattern substitution and then structurally evaluates the
+  substituted result with Tungsten's inert evaluator.
+- Explicit advanced pattern forms such as `BlankSequence`, `BlankNullSequence`, `PatternTest`,
+  `Condition`, and `Optional` currently raise Tungsten evaluation errors instead of being silently
+  treated as literals.
 
 ## Notes on atoms and empty expressions
 

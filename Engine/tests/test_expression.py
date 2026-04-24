@@ -24,6 +24,16 @@ class ExpressionParserTests(unittest.TestCase):
         expr = parse_standard_form("f @ x // g")
         self.assertEqual(expr.to_full_form(), "g[f[x]]")
 
+    def test_parse_input_form_pattern_shorthand_and_alternatives(self) -> None:
+        blank = parse_input_form("_Integer")
+        named = parse_input_form("f[x_Integer, y_]")
+        alternatives = parse_input_form("a | b | c")
+        head_blank = parse_input_form("_[1]")
+        self.assertEqual(blank.to_full_form(), "Blank[Integer]")
+        self.assertEqual(named.to_full_form(), "f[Pattern[x, Blank[Integer]], Pattern[y, Blank[]]]")
+        self.assertEqual(alternatives.to_full_form(), "Alternatives[a, b, c]")
+        self.assertEqual(head_blank.to_full_form(), "Blank[][1]")
+
     def test_parse_part_and_span_syntax(self) -> None:
         expr = parse_input_form("expr[[1, 2 ;; -1]]")
         self.assertEqual(expr.to_full_form(), "Part[expr, 1, Span[2, -1]]")
@@ -197,6 +207,27 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         self.assertEqual(
             expr.to_full_form(),
             'Part[List[Association[Rule["a", x], Rule["b", List[y, z]]]], 1, "b", 2]',
+        )
+
+    def test_matchq_example_from_docs_parses_standard_form_pattern_shorthand(self) -> None:
+        source = self._extract_boxdata_by_cell_id("MatchQ.nb", 407610699)
+        expr = parse_standard_form(source)
+        self.assertEqual(expr.to_full_form(), "MatchQ[12345, Blank[Integer]]")
+
+    def test_cases_except_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Cases.nb", 648587074)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            "Cases[List[1, 1, f[a], 2, 3, y, f[8], 9, f[10]], Except[Blank[Integer]]]",
+        )
+
+    def test_freeq_integer_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("FreeQ.nb", 205371076)
+        expr = parse_standard_form(source)
+        self.assertEqual(
+            expr.to_full_form(),
+            "FreeQ[List[a, b, b, a, a, a], Blank[Integer]]",
         )
 
 
@@ -408,6 +439,62 @@ class ExpressionEvaluationTests(unittest.TestCase):
     def test_association_mixed_selector_lists_are_rejected(self) -> None:
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form("Part[<|a -> 1, b -> 2, c -> 3, d -> 4|>, {2, Key[d]}]"))
+
+    def test_matchq_supports_pattern_subset(self) -> None:
+        wildcard = evaluate(parse_input_form("MatchQ[f[1], _[1]]"))
+        typed = evaluate(parse_input_form("MatchQ[f[1, g[a]], f[_Integer, g[_Symbol]]]"))
+        repeated_true = evaluate(parse_input_form("MatchQ[f[a, a], f[x_, x_]]"))
+        repeated_false = evaluate(parse_input_form("MatchQ[f[a, b], f[x_, x_]]"))
+        alternatives = evaluate(parse_input_form("MatchQ[g[a], f[_] | g[_]]"))
+        except_true = evaluate(parse_input_form("MatchQ[a, Except[_Integer]]"))
+        except_false = evaluate(parse_input_form("MatchQ[2, Except[_Integer]]"))
+        verbatim = evaluate(parse_input_form("MatchQ[_, Verbatim[_]]"))
+        self.assertEqual(wildcard.to_full_form(), "True")
+        self.assertEqual(typed.to_full_form(), "True")
+        self.assertEqual(repeated_true.to_full_form(), "True")
+        self.assertEqual(repeated_false.to_full_form(), "False")
+        self.assertEqual(alternatives.to_full_form(), "True")
+        self.assertEqual(except_true.to_full_form(), "True")
+        self.assertEqual(except_false.to_full_form(), "False")
+        self.assertEqual(verbatim.to_full_form(), "True")
+
+    def test_freeq_defaults_to_heads_true_and_honors_levelspec(self) -> None:
+        head_search = evaluate(parse_input_form("FreeQ[f[a], f]"))
+        head_level = evaluate(parse_input_form("FreeQ[f[a], f, {1}]"))
+        root_only = evaluate(parse_input_form("FreeQ[f[a], f, {0}]"))
+        integer_search = evaluate(parse_input_form("FreeQ[{a, b, b, a}, _Integer]"))
+        self.assertEqual(head_search.to_full_form(), "False")
+        self.assertEqual(head_level.to_full_form(), "False")
+        self.assertEqual(root_only.to_full_form(), "True")
+        self.assertEqual(integer_search.to_full_form(), "True")
+
+    def test_cases_supports_postorder_levels_limits_and_templates(self) -> None:
+        leaf_search = evaluate(parse_input_form("Cases[f[a, g[a]], a, Infinity]"))
+        postorder = evaluate(parse_input_form("Cases[f[g[a]], _, {0, Infinity}]"))
+        limited = evaluate(parse_input_form("Cases[f[a, g[a]], a, Infinity, 1]"))
+        transformed = evaluate(parse_input_form("Cases[{f[a], f[b]}, f[x_] :> {x, x}]"))
+        self.assertEqual(leaf_search.to_full_form(), "List[a, a]")
+        self.assertEqual(postorder.to_full_form(), "List[a, g[a], f[g[a]]]")
+        self.assertEqual(limited.to_full_form(), "List[a]")
+        self.assertEqual(transformed.to_full_form(), "List[List[a, a], List[b, b]]")
+
+    def test_delete_cases_is_depth_first_and_supports_limits(self) -> None:
+        default_levels = evaluate(parse_input_form("DeleteCases[f[a, g[a]], a]"))
+        all_levels = evaluate(parse_input_form("DeleteCases[f[a, g[a]], a, Infinity]"))
+        limited = evaluate(parse_input_form("DeleteCases[{1, a, 2, a}, a, Infinity, 1]"))
+        self.assertEqual(default_levels.to_full_form(), "f[g[a]]")
+        self.assertEqual(all_levels.to_full_form(), "f[g[]]")
+        self.assertEqual(limited.to_full_form(), "List[1, 2, a]")
+
+    def test_pattern_search_treats_associations_as_opaque_for_now(self) -> None:
+        match_assoc = evaluate(parse_input_form("MatchQ[<|a -> 1|>, _Association]"))
+        free_q_assoc = evaluate(parse_input_form("FreeQ[<|a -> 1|>, _Integer]"))
+        cases_assoc = evaluate(parse_input_form("Cases[{<|a -> 1|>}, _Integer, Infinity]"))
+        delete_assoc = evaluate(parse_input_form("DeleteCases[{<|a -> 1|>}, _Integer, Infinity]"))
+        self.assertEqual(match_assoc.to_full_form(), "True")
+        self.assertEqual(free_q_assoc.to_full_form(), "True")
+        self.assertEqual(cases_assoc.to_full_form(), "List[]")
+        self.assertEqual(delete_assoc.to_full_form(), "List[Association[Rule[a, 1]]]")
 
 
 if __name__ == "__main__":

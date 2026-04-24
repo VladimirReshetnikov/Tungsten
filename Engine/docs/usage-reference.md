@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-23T21:12:16Z
-- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
+- Updated (UTC): 2026-04-24T00:03:59Z
+- Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -354,6 +354,10 @@ python -m tungsten expr evaluate --code "Length[{a, b, c}]"
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
+python -m tungsten expr evaluate --code "FreeQ[f[a], f]"
+python -m tungsten expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
+python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
 ```
@@ -363,6 +367,10 @@ The implemented inert evaluator currently covers:
 - `Length`
 - `Depth`
 - `Head`
+- `MatchQ`
+- `FreeQ`
+- `Cases`
+- `DeleteCases`
 - `First`
 - `Last`
 - `Rest`
@@ -389,6 +397,10 @@ For the exact supported forms and limits of each function, see
 [expression-function-support.md](./expression-function-support.md).
 
 Everything else remains inert.
+
+The current pattern subset includes `_`, `_Head`, `x_`, `x_Head`, `Alternatives` via `|`,
+`Except`, `HoldPattern`, and `Verbatim`. Advanced constructs such as `__`, `___`, `?`, `/;`, and
+options-related pattern forms are intentionally out of scope.
 
 On structural evaluation failure, `expr evaluate` still writes structured JSON to stdout and
 returns exit code `1` with:

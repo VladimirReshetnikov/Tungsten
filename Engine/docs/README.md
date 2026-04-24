@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-23T21:12:16Z
-- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
+- Updated (UTC): 2026-04-24T00:03:59Z
+- Repository HEAD: 045755896703fa8adf55c28e40b1ff9903a03f98
 
 ## What this docs tree is for
 
@@ -61,9 +61,10 @@ The docs are split so readers can choose the right depth:
 3. [implementation-details.md](./implementation-details.md)
 4. [expression-parser.md](./expression-parser.md)
 5. [expression-function-support.md](./expression-function-support.md)
-6. [inline-box-strings.md](./inline-box-strings.md)
-7. [notebook-assistant.md](./notebook-assistant.md)
-8. [troubleshooting.md](./troubleshooting.md)
+6. [pattern-matching-plan.md](./pattern-matching-plan.md)
+7. [inline-box-strings.md](./inline-box-strings.md)
+8. [notebook-assistant.md](./notebook-assistant.md)
+9. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -79,6 +80,7 @@ The docs are split so readers can choose the right depth:
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
+| [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
 
 ## Suggested learning path by task
@@ -115,6 +117,7 @@ The docs are split so readers can choose the right depth:
 
 - Read [expression-parser.md](./expression-parser.md).
 - Read [expression-function-support.md](./expression-function-support.md) for the exact built-in coverage and official Wolfram reference links.
+- Read [pattern-matching-plan.md](./pattern-matching-plan.md) if you need the design boundaries and validation strategy for the new pattern subset.
 - Use [usage-reference.md](./usage-reference.md) for `expr parse` and `expr evaluate`.
 - Read [architecture.md](./architecture.md) if you need to extend the expression subsystem.
 
