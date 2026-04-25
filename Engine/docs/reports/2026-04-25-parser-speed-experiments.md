@@ -1,7 +1,9 @@
 # Tungsten Parser Speed Experiments
 
 - Created (UTC): 2026-04-25T18:54:39Z
+- Updated (UTC): 2026-04-25T19:18:25Z
 - Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
+- Span-internals implementation baseline HEAD: e59d8c00d977185644fc59a814d9bea96bb78cac
 - Corpus root: `C:\TestData\tungsten-wolfram-parser-corpus`
 - Scope: Tungsten notebook parsing and parser-corpus throughput
 
@@ -142,13 +144,23 @@ Result: 9 tests passed, 1 skipped.
 
 ## Measurement-Backed Proposals
 
-1. Introduce span-based notebook internals.
+1. Introduce span-based notebook internals. Implemented after the initial report.
 
-   The optimized parser still spends most of its time scanning strings and then materializing
-   stripped substrings for arguments. A span-oriented representation for internal notebook parsing
-   could keep `(text, start, end)` views until content is actually needed. The profile says this is
-   the next real notebook hot path: `_split_call_arguments` plus `split_top_level` account for most
-   remaining profiler time.
+   The optimized parser still spent much of its allocation budget materializing stripped substrings
+   for arguments, cell raw text, cell content, group tails, and notebook options. The implemented
+   representation now keeps `SourceSpan(source, start, end)` values through notebook construction
+   and materializes strings only at public API boundaries such as `content_expr`, `options`,
+   `to_dict()`, rendering, option decoding, and preview extraction.
+
+   A/B wall-clock measurements against the previous optimized parser were intentionally treated as
+   neutral: median parse time ranged from 0.93x to 1.01x of the previous implementation on the
+   four measured 1-2 MiB notebooks. The actual win was memory behavior. `tracemalloc` peak
+   allocations dropped from 11.6-22.0 MB to 0.32-0.54 MB on the same samples, a 24x-70x reduction,
+   while cell/group/option counts stayed identical.
+
+   Parser-corpus throughput is therefore expected to be roughly neutral for ordinary 2 MiB-capped
+   runs, but the parser now has much more headroom for large-notebook stress runs and parallel
+   workers.
 
 2. Add a dedicated parser-corpus notebook acceptance mode.
 
