@@ -109,7 +109,9 @@ The current workspace is built around seven complementary capabilities:
    literals for images and other notebook objects.
 4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a pragmatic
    StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
-   `RadicalBox`, and `SuperscriptBox`, understands association literals and common association
+   `RadicalBox`, `SuperscriptBox`, `SubscriptBox`, and related script boxes, understands
+   named-character operators such as `\[CirclePlus]` as inert structural heads, understands
+   association literals and common association
    row-box forms from the installed documentation notebooks, understands a bounded but useful
    pattern subset such as `_Integer`, anonymous `__` / `___`, guarded patterns via `/;`, `x_`,
    `Except[...]`, and `a | b`, parses replacement operators such as `/.` and `//.` into named AST
@@ -129,7 +131,8 @@ The current workspace is built around seven complementary capabilities:
    `StringInsert`, `StringReverse`, string-pattern heads such as `StringMatchQ`, `StringFreeQ`,
    `StringStartsQ`, `StringEndsQ`, `StringPosition`, `StringContainsQ`, `StringCases`, and
    `StringReplace`, `ToCharacterCode`, `StringToByteArray`, `ImportString`, `ExportString`,
-   `ImportByteArray`, and `ExportByteArray`, plus `Pick`, `Select`, `Discard`, `SelectFirst`,
+   `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
+   `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`, plus `Pick`, `Select`, `Discard`, `SelectFirst`,
    `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`,
    `Lookup`, `KeyTake`, and symbol/context registry heads such as `Symbol`, `SymbolName`,
    `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`.

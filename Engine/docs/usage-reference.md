@@ -407,6 +407,10 @@ python -m tungsten expr evaluate --code "ImportString[ExportString[{{1, 2}, {3, 
 python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
 python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
 python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
+python -m tungsten expr evaluate --code 'ToExpression[RowBox[{"a", "\[CirclePlus]", "b"}], StandardForm, HoldComplete]'
+python -m tungsten expr evaluate --code 'MakeExpression[SubscriptBox["x", "i"], StandardForm]'
+python -m tungsten expr evaluate --code 'StripBoxes[RowBox[{"1", " ", StyleBox["+", Red], "2"}]]'
+python -m tungsten expr evaluate --code 'SyntaxQ["a \[CirclePlus] b", StandardForm]'
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
@@ -459,7 +463,8 @@ The implemented inert evaluator currently covers:
   `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`, `ExportString`,
-  `ImportByteArray`, `ExportByteArray`, `ToString`, and `ToExpression`
+  `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
+  `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`
 - `Pick`
 - `First`
 - `Last`

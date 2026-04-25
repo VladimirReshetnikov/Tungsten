@@ -347,6 +347,26 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
             "FreeQ[List[a, b, b, a, a, a], Blank[Integer]]",
         )
 
+    def test_named_character_symbols_and_inert_operators_parse_in_standard_form(self) -> None:
+        escaped_operator = parse_standard_form(r"a \[CirclePlus] b")
+        greek_symbols = parse_standard_form(r"\[Alpha] + \[Beta]")
+        self.assertEqual(escaped_operator.to_full_form(), "CirclePlus[a, b]")
+        self.assertEqual(greek_symbols.to_full_form(), r"Plus[\[Alpha], \[Beta]]")
+
+    def test_row_box_named_character_operator_parses_in_standard_form(self) -> None:
+        expr = parse_standard_form(r'RowBox[{"a", "\\[CirclePlus]", "b"}]')
+        self.assertEqual(expr.to_full_form(), "CirclePlus[a, b]")
+
+    def test_common_script_boxes_parse_in_standard_form(self) -> None:
+        subscript = parse_standard_form('SubscriptBox["x", "i"]')
+        subsuperscript = parse_standard_form('SubsuperscriptBox["x", "i", "2"]')
+        overscript = parse_standard_form('OverscriptBox["x", "~"]')
+        underoverscript = parse_standard_form('UnderoverscriptBox["x", "a", "b"]')
+        self.assertEqual(subscript.to_full_form(), "Subscript[x, i]")
+        self.assertEqual(subsuperscript.to_full_form(), "Subsuperscript[x, i, 2]")
+        self.assertEqual(overscript.to_full_form(), 'Overscript[x, "~"]')
+        self.assertEqual(underoverscript.to_full_form(), "Underoverscript[x, a, b]")
+
 
 class ExpressionEvaluationTests(unittest.TestCase):
     def test_integer_arithmetic_evaluates_only_when_arguments_are_explicit_integers(self) -> None:
@@ -1091,6 +1111,31 @@ class ExpressionEvaluationTests(unittest.TestCase):
             evaluate(parse_input_form("ToString[x, OutputForm]"))
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form('ToExpression["x", TraditionalForm]'))
+
+    def test_box_conversion_and_syntax_builtins(self) -> None:
+        make_expression = evaluate(parse_input_form('MakeExpression[RowBox[{"1", "+", "2"}], StandardForm]'))
+        make_boxes = evaluate(parse_input_form("MakeBoxes[1 + 2, StandardForm]"))
+        to_boxes = evaluate(parse_input_form("ToBoxes[1 + 2, StandardForm]"))
+        box_to_expression = evaluate(
+            parse_input_form("ToExpression[MakeBoxes[HoldComplete[1 + 2], StandardForm], StandardForm]")
+        )
+        strip_boxes = evaluate(parse_input_form('StripBoxes[RowBox[{"1", " ", StyleBox["+", Red], "2"}]]'))
+        syntax_true = evaluate(parse_input_form('SyntaxQ["1 + 2"]'))
+        syntax_false = evaluate(parse_input_form('SyntaxQ["1 +"]'))
+        syntax_box = evaluate(parse_input_form('SyntaxQ[RowBox[{"1", "+", "2"}]]'))
+        syntax_length = evaluate(parse_input_form('SyntaxLength["1+2"]'))
+        incomplete_length = evaluate(parse_input_form('SyntaxLength["1+"]'))
+
+        self.assertEqual(make_expression.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(make_boxes.to_full_form(), 'RowBox[List["1", "+", "2"]]')
+        self.assertEqual(to_boxes.to_full_form(), '"3"')
+        self.assertEqual(box_to_expression.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(strip_boxes.to_full_form(), 'BoxData[RowBox[List["1", "+", "2"]]]')
+        self.assertEqual(syntax_true.to_full_form(), "True")
+        self.assertEqual(syntax_false.to_full_form(), "False")
+        self.assertEqual(syntax_box.to_full_form(), "True")
+        self.assertEqual(syntax_length.to_full_form(), "3")
+        self.assertEqual(incomplete_length.to_full_form(), "4")
 
     def test_symbol_context_registry_and_name_queries(self) -> None:
         current_context = evaluate(parse_input_form("$Context"))

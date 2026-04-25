@@ -27,7 +27,8 @@ Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
   string-pattern heads such as `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
-  `ExportString`, `ImportByteArray`, `ExportByteArray`, `ToString`, and `ToExpression`, `Pick`,
+  `ExportString`, `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`,
+  `MakeBoxes`, `MakeExpression`, `StripBoxes`, `SyntaxQ`, `SyntaxLength`, `Pick`,
   `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
   `ReplacePart`, association constructors, key accessors, symbol and context registry functions
   such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`,
@@ -95,13 +96,18 @@ The parser currently handles:
 - span syntax `a ;; b ;; c`;
 - nested Wolfram comments `(* ... *)`;
 - common semantic notebook boxes when they appear as textual box expressions:
-  `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`;
+  `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`, `SubscriptBox`,
+  `SubsuperscriptBox`, `OverscriptBox`, `UnderscriptBox`, and `UnderoverscriptBox`;
 - common wrapper boxes around those semantic forms, including `BoxData`, `FormBox`, `StyleBox`,
   `TagBox`, `TooltipBox`, and `InterpretationBox`;
 - `RowBox` reconstruction for the box-driven subset above, so notebook snippets such as
   `SuperscriptBox["x", RowBox[{"1", "/", "3"}]]` or
   `FractionBox[SuperscriptBox["x", "3"], RowBox[{"1", "+", "a", " ", "b"}]]` lower to ordinary
   Tungsten expressions;
+- named-character symbols and common named-character infix operators. Letter-like forms such as
+  `\[Alpha]` remain symbols, while operator forms such as `a \[CirclePlus] b` lower to inert
+  head calls such as `CirclePlus[a, b]` unless Tungsten has an explicit evaluator rule for that
+  head;
 - `RowBox`-based association examples from the installed `Association.nb` reference page,
   including `\[Rule]`, `\[RuleDelayed]`, `\[LeftAssociation]`, and `\[RightAssociation]`
   tokens plus nested part syntax such as `<|a -> x|>[[Key[b]]]`.
@@ -112,7 +118,8 @@ The parser currently handles:
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
 particular, it is intentionally conservative around advanced pattern syntax, arbitrary box
-constructs, assignments, and broader evaluation semantics.
+constructs, assignments, custom notation definitions, stylesheet-dependent interpretation, and
+broader evaluation semantics.
 
 The currently supported pattern subset is intentionally bounded:
 
@@ -181,6 +188,8 @@ It also recognizes a pragmatic notebook-box subset when those boxes are represen
 TagBox[SqrtBox["x"], DisplayForm]
 FormBox[RadicalBox["x", "3"], TraditionalForm]
 FractionBox[SuperscriptBox["x", "3"], RowBox[{"1", "+", "a", " ", "b"}]]
+SubscriptBox["x", "i"]
+RowBox[{"a", "\[CirclePlus]", "b"}]
 ```
 
 These lower to ordinary Tungsten expressions such as:
@@ -189,7 +198,15 @@ These lower to ordinary Tungsten expressions such as:
 Power[x, Rational[1, 2]]
 Power[x, Rational[1, 3]]
 Times[Power[x, 3], Power[Plus[1, Times[a, b]], -1]]
+Subscript[x, i]
+CirclePlus[a, b]
 ```
+
+The evaluator also exposes the corresponding conversion boundary through `ToBoxes`, `MakeBoxes`,
+`MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`. These are kernel-free structural
+approximations of the Wolfram functions: `MakeBoxes` is held, `ToBoxes` boxes evaluated input,
+`MakeExpression` returns `HoldComplete[...]`, and `ToExpression[boxes]` uses the same supported
+StandardForm box interpretation.
 
 For pattern shorthand, Tungsten currently normalizes to explicit heads in canonical output. For
 example:

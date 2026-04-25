@@ -185,12 +185,18 @@ _SYSTEM_SYMBOL_NAMES = {
     "BlankSequence",
     "BlockMap",
     "Boole",
+    "BoxData",
     "ByteArray",
     "ByteArrayQ",
     "ByteArrayToString",
     "Cases",
     "CharacterRange",
     "Characters",
+    "CenterDot",
+    "CircleDot",
+    "CircleMinus",
+    "CirclePlus",
+    "CircleTimes",
     "Clip",
     "Comap",
     "ComapApply",
@@ -198,25 +204,38 @@ _SYSTEM_SYMBOL_NAMES = {
     "ComposeList",
     "Composition",
     "Condition",
+    "Congruent",
     "ConstantArray",
     "Construct",
     "Context",
     "Contexts",
+    "Cross",
     "Delete",
     "DeleteCases",
     "DeleteDuplicates",
     "DeleteDuplicatesBy",
     "Depth",
     "DiagonalMatrix",
+    "Diamond",
     "Discard",
+    "DirectedEdge",
     "DiscreteDelta",
+    "DiscreteRatio",
+    "DiscreteShift",
     "Distribute",
     "Divide",
     "Dot",
+    "DoubleLeftArrow",
+    "DoubleLeftRightArrow",
+    "DoubleRightArrow",
+    "DoubleVerticalBar",
+    "DownArrow",
     "Drop",
     "DuplicateFreeQ",
+    "Element",
     "EndOfString",
     "Equal",
+    "Equivalent",
     "EvenQ",
     "Except",
     "ExportByteArray",
@@ -249,9 +268,11 @@ _SYSTEM_SYMBOL_NAMES = {
     "If",
     "ImportByteArray",
     "ImportString",
+    "Implies",
     "Indeterminate",
     "Infinity",
     "Inner",
+    "Intersection",
     "Integer",
     "IntegerQ",
     "Join",
@@ -269,9 +290,15 @@ _SYSTEM_SYMBOL_NAMES = {
     "LengthWhile",
     "Less",
     "LessEqual",
+    "LessEqualGreater",
     "Level",
     "List",
     "Lookup",
+    "LongLeftArrow",
+    "LongLeftRightArrow",
+    "LongRightArrow",
+    "MakeBoxes",
+    "MakeExpression",
     "Map",
     "MapAll",
     "MapApply",
@@ -283,6 +310,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "MemberQ",
     "Min",
     "Missing",
+    "MinusPlus",
     "Mod",
     "Most",
     "Names",
@@ -293,21 +321,32 @@ _SYSTEM_SYMBOL_NAMES = {
     "None",
     "Normal",
     "Not",
+    "NotElement",
+    "NotSubset",
+    "NotSubsetEqual",
+    "NotSuperset",
+    "NotSupersetEqual",
     "Nothing",
     "Null",
     "OddQ",
     "Operate",
     "Or",
     "Outer",
+    "Overscript",
+    "OverscriptBox",
     "Part",
     "Partition",
     "Pattern",
     "Piecewise",
     "Pick",
     "Plus",
+    "PlusMinus",
     "Position",
     "Power",
+    "Precedes",
+    "PrecedesEqual",
     "Prepend",
+    "Proportion",
     "Quotient",
     "QuotientRemainder",
     "Ramp",
@@ -327,6 +366,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Rest",
     "Reverse",
     "RightComposition",
+    "RightArrow",
     "RotateLeft",
     "RotateRight",
     "Rule",
@@ -341,7 +381,15 @@ _SYSTEM_SYMBOL_NAMES = {
     "SequenceFoldList",
     "Sign",
     "Slot",
+    "SmallCircle",
     "Span",
+    "SquareIntersection",
+    "SquareSubset",
+    "SquareSubsetEqual",
+    "SquareSuperset",
+    "SquareSupersetEqual",
+    "SquareUnion",
+    "Star",
     "StartOfString",
     "String",
     "StringCases",
@@ -361,6 +409,19 @@ _SYSTEM_SYMBOL_NAMES = {
     "StringStartsQ",
     "StringTake",
     "StringToByteArray",
+    "StripBoxes",
+    "Subset",
+    "SubsetEqual",
+    "Subscript",
+    "SubscriptBox",
+    "Subsuperscript",
+    "SubsuperscriptBox",
+    "Succeeds",
+    "SucceedsEqual",
+    "Superset",
+    "SupersetEqual",
+    "SyntaxLength",
+    "SyntaxQ",
     "Switch",
     "Symbol",
     "SymbolName",
@@ -371,6 +432,12 @@ _SYSTEM_SYMBOL_NAMES = {
     "Thread",
     "Through",
     "Times",
+    "TensorProduct",
+    "Tilde",
+    "TildeEqual",
+    "TildeFullEqual",
+    "TildeTilde",
+    "ToBoxes",
     "ToCharacterCode",
     "ToExpression",
     "ToString",
@@ -379,14 +446,25 @@ _SYSTEM_SYMBOL_NAMES = {
     "Tuples",
     "Unequal",
     "Unevaluated",
+    "Underscript",
+    "UnderscriptBox",
+    "UndirectedEdge",
+    "Underoverscript",
+    "UnderoverscriptBox",
     "UnitStep",
     "UnitVector",
     "Unitize",
+    "Union",
+    "UpArrow",
     "Unique",
     "UnsameQ",
     "ValueQ",
     "Values",
     "Verbatim",
+    "VerticalBar",
+    "VerticalSeparator",
+    "Vee",
+    "Wedge",
     "Which",
 }
 
@@ -752,12 +830,249 @@ _FLAT_HEADS = {"Alternatives"}
 _LEVEL_INFINITY = 1_000_000_000
 _MISSING = object()
 _ESCAPED_TOKEN_MAP = {
+    r"\[And]": "&&",
+    r"\[Equal]": "==",
     r"\[Function]": "|->",
+    r"\[GreaterEqual]": ">=",
+    r"\[InvisibleApplication]": "@",
+    r"\[InvisibleTimes]": "*",
     r"\[Rule]": "->",
     r"\[RuleDelayed]": ":>",
+    r"\[LessEqual]": "<=",
     r"\[LeftAssociation]": "<|",
+    r"\[NotEqual]": "!=",
+    r"\[Or]": "||",
     r"\[RightAssociation]": "|>",
 }
+
+
+_ESCAPED_SYMBOL_ALIASES = {
+    r"\[ExponentialE]": "E",
+    r"\[ImaginaryI]": "I",
+    r"\[ImaginaryJ]": "I",
+    r"\[Infinity]": "Infinity",
+    r"\[Pi]": "Pi",
+}
+
+
+_ESCAPED_INFIX_OPERATOR_HEADS = {
+    r"\[CenterDot]": "CenterDot",
+    r"\[CircleDot]": "CircleDot",
+    r"\[CircleMinus]": "CircleMinus",
+    r"\[CirclePlus]": "CirclePlus",
+    r"\[CircleTimes]": "CircleTimes",
+    r"\[Congruent]": "Congruent",
+    r"\[Cross]": "Cross",
+    r"\[Diamond]": "Diamond",
+    r"\[DirectedEdge]": "DirectedEdge",
+    r"\[DiscreteRatio]": "DiscreteRatio",
+    r"\[DiscreteShift]": "DiscreteShift",
+    r"\[DoubleLeftArrow]": "DoubleLeftArrow",
+    r"\[DoubleLeftRightArrow]": "DoubleLeftRightArrow",
+    r"\[DoubleRightArrow]": "DoubleRightArrow",
+    r"\[DoubleVerticalBar]": "DoubleVerticalBar",
+    r"\[DownArrow]": "DownArrow",
+    r"\[Element]": "Element",
+    r"\[Equivalent]": "Equivalent",
+    r"\[Implies]": "Implies",
+    r"\[Intersection]": "Intersection",
+    r"\[LeftArrow]": "LeftArrow",
+    r"\[LeftRightArrow]": "LeftRightArrow",
+    r"\[LessEqualGreater]": "LessEqualGreater",
+    r"\[LongLeftArrow]": "LongLeftArrow",
+    r"\[LongLeftRightArrow]": "LongLeftRightArrow",
+    r"\[LongRightArrow]": "LongRightArrow",
+    r"\[MinusPlus]": "MinusPlus",
+    r"\[NotElement]": "NotElement",
+    r"\[NotSubset]": "NotSubset",
+    r"\[NotSubsetEqual]": "NotSubsetEqual",
+    r"\[NotSuperset]": "NotSuperset",
+    r"\[NotSupersetEqual]": "NotSupersetEqual",
+    r"\[PlusMinus]": "PlusMinus",
+    r"\[Precedes]": "Precedes",
+    r"\[PrecedesEqual]": "PrecedesEqual",
+    r"\[Proportion]": "Proportion",
+    r"\[RightArrow]": "RightArrow",
+    r"\[SmallCircle]": "SmallCircle",
+    r"\[SquareIntersection]": "SquareIntersection",
+    r"\[SquareSubset]": "SquareSubset",
+    r"\[SquareSubsetEqual]": "SquareSubsetEqual",
+    r"\[SquareSuperset]": "SquareSuperset",
+    r"\[SquareSupersetEqual]": "SquareSupersetEqual",
+    r"\[SquareUnion]": "SquareUnion",
+    r"\[Star]": "Star",
+    r"\[Subset]": "Subset",
+    r"\[SubsetEqual]": "SubsetEqual",
+    r"\[Succeeds]": "Succeeds",
+    r"\[SucceedsEqual]": "SucceedsEqual",
+    r"\[Superset]": "Superset",
+    r"\[SupersetEqual]": "SupersetEqual",
+    r"\[TensorProduct]": "TensorProduct",
+    r"\[Tilde]": "Tilde",
+    r"\[TildeEqual]": "TildeEqual",
+    r"\[TildeFullEqual]": "TildeFullEqual",
+    r"\[TildeTilde]": "TildeTilde",
+    r"\[UndirectedEdge]": "UndirectedEdge",
+    r"\[Union]": "Union",
+    r"\[UnionPlus]": "UnionPlus",
+    r"\[UpArrow]": "UpArrow",
+    r"\[Vee]": "Vee",
+    r"\[VerticalBar]": "VerticalBar",
+    r"\[VerticalSeparator]": "VerticalSeparator",
+    r"\[Wedge]": "Wedge",
+}
+
+
+_ADDITIONAL_ESCAPED_INFIX_OPERATOR_HEAD_NAMES = {
+    "Backslash",
+    "Because",
+    "Cap",
+    "Coproduct",
+    "Cup",
+    "CupCap",
+    "Del",
+    "DotEqual",
+    "DoubleDownArrow",
+    "DoubleLeftTee",
+    "DoubleLongLeftArrow",
+    "DoubleLongLeftRightArrow",
+    "DoubleLongRightArrow",
+    "DoubleUpArrow",
+    "DoubleUpDownArrow",
+    "DownArrowBar",
+    "DownArrowUpArrow",
+    "DownLeftRightVector",
+    "DownLeftTeeVector",
+    "DownLeftVector",
+    "DownLeftVectorBar",
+    "DownRightTeeVector",
+    "DownRightVector",
+    "DownRightVectorBar",
+    "DownTee",
+    "DownTeeArrow",
+    "EqualTilde",
+    "Equilibrium",
+    "GreaterEqualLess",
+    "GreaterFullEqual",
+    "GreaterGreater",
+    "GreaterLess",
+    "GreaterSlantEqual",
+    "GreaterTilde",
+    "HumpDownHump",
+    "HumpEqual",
+    "LeftArrowBar",
+    "LeftArrowRightArrow",
+    "LeftDownTeeVector",
+    "LeftDownVector",
+    "LeftDownVectorBar",
+    "LeftTee",
+    "LeftTeeArrow",
+    "LeftTeeVector",
+    "LeftTriangle",
+    "LeftTriangleBar",
+    "LeftTriangleEqual",
+    "LeftUpDownVector",
+    "LeftUpTeeVector",
+    "LeftUpVector",
+    "LeftUpVectorBar",
+    "LeftVector",
+    "LeftVectorBar",
+    "LessFullEqual",
+    "LessGreater",
+    "LessLess",
+    "LessSlantEqual",
+    "LessTilde",
+    "LowerLeftArrow",
+    "LowerRightArrow",
+    "Nand",
+    "NestedGreaterGreater",
+    "NestedLessLess",
+    "Nor",
+    "NotCongruent",
+    "NotCupCap",
+    "NotDoubleVerticalBar",
+    "NotGreater",
+    "NotGreaterEqual",
+    "NotGreaterFullEqual",
+    "NotGreaterLess",
+    "NotGreaterTilde",
+    "NotLeftTriangle",
+    "NotLeftTriangleEqual",
+    "NotLess",
+    "NotLessEqual",
+    "NotLessFullEqual",
+    "NotLessGreater",
+    "NotLessTilde",
+    "NotPrecedes",
+    "NotPrecedesSlantEqual",
+    "NotPrecedesTilde",
+    "NotReverseElement",
+    "NotRightTriangle",
+    "NotRightTriangleEqual",
+    "NotSquareSubsetEqual",
+    "NotSquareSupersetEqual",
+    "NotSucceeds",
+    "NotSucceedsSlantEqual",
+    "NotSucceedsTilde",
+    "NotTilde",
+    "NotTildeEqual",
+    "NotTildeFullEqual",
+    "NotTildeTilde",
+    "Perpendicular",
+    "PrecedesSlantEqual",
+    "PrecedesTilde",
+    "Proportional",
+    "ReverseElement",
+    "ReverseEquilibrium",
+    "ReverseUpEquilibrium",
+    "RightArrowBar",
+    "RightArrowLeftArrow",
+    "RightDownTeeVector",
+    "RightDownVector",
+    "RightDownVectorBar",
+    "RightTee",
+    "RightTeeArrow",
+    "RightTeeVector",
+    "RightTriangle",
+    "RightTriangleBar",
+    "RightTriangleEqual",
+    "RightUpDownVector",
+    "RightUpTeeVector",
+    "RightUpVector",
+    "RightUpVectorBar",
+    "RightVector",
+    "RightVectorBar",
+    "RoundImplies",
+    "ShortDownArrow",
+    "ShortLeftArrow",
+    "ShortRightArrow",
+    "ShortUpArrow",
+    "Square",
+    "SuchThat",
+    "SucceedsSlantEqual",
+    "SucceedsTilde",
+    "Therefore",
+    "UpArrowBar",
+    "UpArrowDownArrow",
+    "UpDownArrow",
+    "UpEquilibrium",
+    "UpTee",
+    "UpTeeArrow",
+    "UpperLeftArrow",
+    "UpperRightArrow",
+    "VerticalTilde",
+    "Xor",
+}
+
+_ESCAPED_INFIX_OPERATOR_HEADS.update(
+    {f"\\[{name}]": name for name in _ADDITIONAL_ESCAPED_INFIX_OPERATOR_HEAD_NAMES}
+)
+
+for _escaped_operator_head in set(_ESCAPED_INFIX_OPERATOR_HEADS.values()):
+    try:
+        _SYMBOL_REGISTRY.ensure_full_name(f"System`{_escaped_operator_head}", built_in=True)
+    except WolframEvaluationError:
+        pass
 
 
 def call(head: str | Expr, *arguments: Expr) -> Call:
@@ -1395,14 +1710,25 @@ def _normalize_textual_expression_form(value: Expr | None, function_name: str) -
     return normalized
 
 
+def _normalize_box_expression_form(value: Expr | None, function_name: str) -> str:
+    if value is None:
+        return "StandardForm"
+    return _normalize_textual_expression_form(value, function_name)
+
+
 _STANDARD_FORM_BOX_HEADS = {
     "AdjustmentBox",
     "BoxData",
     "FormBox",
     "FrameBox",
+    "GridBox",
+    "OverscriptBox",
     "PaneBox",
     "StyleBox",
+    "SubscriptBox",
+    "SubsuperscriptBox",
     "TagBox",
+    "TemplateBox",
     "TooltipBox",
     "FractionBox",
     "InterpretationBox",
@@ -1410,6 +1736,8 @@ _STANDARD_FORM_BOX_HEADS = {
     "RowBox",
     "SqrtBox",
     "SuperscriptBox",
+    "UnderscriptBox",
+    "UnderoverscriptBox",
 }
 
 
@@ -1456,6 +1784,252 @@ def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper
     if wrapper_head is not None:
         parsed = Call(head_expr=wrapper_head, arguments=(parsed,))
     return evaluate(parsed)
+
+
+def to_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
+    form_name = _normalize_box_expression_form(form_value, "ToBoxes")
+    return _make_boxes(expr, form_name)
+
+
+def make_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
+    form_name = _normalize_box_expression_form(form_value, "MakeBoxes")
+    return _make_boxes(expr, form_name)
+
+
+def make_expression_expr(box_expr: Expr, form_value: Expr | None = None) -> Expr:
+    form_name = _normalize_box_expression_form(form_value, "MakeExpression")
+    try:
+        if isinstance(box_expr, String):
+            parsed = parse_input_form(box_expr.value) if form_name == "InputForm" else parse_standard_form(box_expr.value)
+        elif form_name == "StandardForm" and _looks_like_standard_form_boxes(box_expr):
+            parsed = _interpret_standard_form(box_expr)
+        else:
+            raise WolframEvaluationError("MakeExpression expects a string or a supported StandardForm box expression.")
+    except WolframSyntaxError as exc:
+        raise WolframEvaluationError(f"MakeExpression could not parse the input as {form_name}.") from exc
+    return call("HoldComplete", parsed)
+
+
+def strip_boxes_expr(box_expr: Expr) -> Expr:
+    return call("BoxData", _strip_box_expression(box_expr))
+
+
+def syntax_q_expr(input_expr: Expr, form_value: Expr | None = None) -> Symbol:
+    return _bool_symbol(_syntax_q(input_expr, form_value))
+
+
+def syntax_length_expr(input_expr: Expr, form_value: Expr | None = None) -> Integer:
+    if isinstance(input_expr, String):
+        form_name = _normalize_textual_expression_form(form_value, "SyntaxLength")
+        return integer(_syntax_length_text(input_expr.value, form_name))
+    if _looks_like_standard_form_boxes(input_expr):
+        text = _box_expr_to_standard_text(input_expr)
+        return integer(_syntax_length_text(text, "StandardForm"))
+    raise WolframEvaluationError("SyntaxLength expects a string or a supported StandardForm box expression.")
+
+
+def _make_boxes(expr: Expr, form_name: str) -> Expr:
+    if form_name not in {"InputForm", "StandardForm"}:
+        raise WolframEvaluationError("Box conversion currently supports only InputForm and StandardForm.")
+    if form_name == "InputForm":
+        return string(expr.to_input_form())
+    return _make_standard_boxes(expr)
+
+
+def _make_standard_boxes(expr: Expr) -> Expr:
+    if isinstance(expr, Symbol):
+        return string(expr.to_input_form())
+    if isinstance(expr, Integer):
+        return string(str(expr.value))
+    if isinstance(expr, Real):
+        return string(expr.text)
+    if isinstance(expr, String):
+        return string(wl_string(expr.value))
+    if isinstance(expr, ByteArrayExpr):
+        return _make_standard_boxes(call("ByteArray", list_expr(*(integer(value) for value in expr.values))))
+    if not isinstance(expr, Call):
+        return string(expr.to_input_form())
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name == "List":
+            return _bracketed_row_box("{", expr.arguments, "}")
+        if head_name == "Association":
+            return _bracketed_row_box("<|", expr.arguments, "|>")
+        if head_name == "Rule" and len(expr.arguments) == 2:
+            return _infix_row_box(expr.arguments[0], "->", expr.arguments[1])
+        if head_name == "RuleDelayed" and len(expr.arguments) == 2:
+            return _infix_row_box(expr.arguments[0], ":>", expr.arguments[1])
+        if head_name == "Plus" and len(expr.arguments) >= 2:
+            return _separated_row_box(expr.arguments, "+")
+        if head_name == "Times" and len(expr.arguments) >= 2:
+            return _separated_row_box(expr.arguments, " ")
+        if head_name == "Power" and len(expr.arguments) == 2:
+            base, exponent = expr.arguments
+            if isinstance(exponent, Integer) and exponent.value == -1:
+                return call("FractionBox", string("1"), _make_standard_boxes(base))
+            return call("SuperscriptBox", _make_standard_boxes(base), _make_standard_boxes(exponent))
+        if head_name == "Rational" and len(expr.arguments) == 2:
+            return call("FractionBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Subscript" and len(expr.arguments) == 2:
+            return call("SubscriptBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Subsuperscript" and len(expr.arguments) == 3:
+            return call(
+                "SubsuperscriptBox",
+                _make_standard_boxes(expr.arguments[0]),
+                _make_standard_boxes(expr.arguments[1]),
+                _make_standard_boxes(expr.arguments[2]),
+            )
+        if head_name == "Overscript" and len(expr.arguments) == 2:
+            return call("OverscriptBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Underscript" and len(expr.arguments) == 2:
+            return call("UnderscriptBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Underoverscript" and len(expr.arguments) == 3:
+            return call(
+                "UnderoverscriptBox",
+                _make_standard_boxes(expr.arguments[0]),
+                _make_standard_boxes(expr.arguments[1]),
+                _make_standard_boxes(expr.arguments[2]),
+            )
+
+    return _generic_call_boxes(expr)
+
+
+def _bracketed_row_box(open_token: str, arguments: Sequence[Expr], close_token: str) -> Expr:
+    if arguments:
+        middle = _separated_row_box(arguments, ",")
+    else:
+        middle = string("")
+    return _row_box(string(open_token), middle, string(close_token))
+
+
+def _generic_call_boxes(expr: Call) -> Expr:
+    if expr.arguments:
+        arguments = _separated_row_box(expr.arguments, ",")
+    else:
+        arguments = string("")
+    return _row_box(_make_standard_boxes(expr.head_expr), string("["), arguments, string("]"))
+
+
+def _infix_row_box(left: Expr, operator: str, right: Expr) -> Expr:
+    return _row_box(_make_standard_boxes(left), string(operator), _make_standard_boxes(right))
+
+
+def _separated_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
+    pieces: list[Expr] = []
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(string(separator))
+        pieces.append(_make_standard_boxes(argument))
+    return _row_box(*pieces)
+
+
+def _row_box(*items: Expr) -> Expr:
+    return call("RowBox", list_expr(*items))
+
+
+def _strip_box_expression(expr: Expr) -> Expr:
+    if isinstance(expr, Call):
+        if expr.has_head("BoxData") and len(expr.arguments) == 1:
+            return _strip_box_expression(expr.arguments[0])
+        if (
+            isinstance(expr.head_expr, Symbol)
+            and expr.head_expr.name in {"AdjustmentBox", "FormBox", "FrameBox", "PaneBox", "StyleBox", "TooltipBox"}
+            and expr.arguments
+        ):
+            return _strip_box_expression(expr.arguments[0])
+        if expr.has_head("RowBox") and len(expr.arguments) == 1:
+            items = expr.arguments[0]
+            if isinstance(items, Call) and items.has_head("List"):
+                stripped_items = [
+                    stripped
+                    for item in items.arguments
+                    for stripped in _strip_row_box_item(item)
+                ]
+                return call("RowBox", list_expr(*stripped_items))
+        return Call(
+            head_expr=_strip_box_expression(expr.head_expr),
+            arguments=tuple(_strip_box_expression(argument) for argument in expr.arguments),
+        )
+    return expr
+
+
+def _strip_row_box_item(expr: Expr) -> list[Expr]:
+    stripped = _strip_box_expression(expr)
+    if isinstance(stripped, String) and _is_nonsemantic_row_box_token(stripped.value):
+        return []
+    return [stripped]
+
+
+def _is_nonsemantic_row_box_token(value: str) -> bool:
+    if value.isspace():
+        return True
+    if value.startswith("(*"):
+        try:
+            return skip_wl_comment(value, 0) == len(value)
+        except WolframSyntaxError:
+            return False
+    return value in {
+        r"\[InvisibleSpace]",
+        r"\[NegativeMediumSpace]",
+        r"\[NegativeThickSpace]",
+        r"\[NegativeThinSpace]",
+        r"\[NegativeVeryThinSpace]",
+        r"\[NoBreak]",
+        r"\[ThickSpace]",
+        r"\[ThinSpace]",
+        r"\[VeryThinSpace]",
+    }
+
+
+def _syntax_q(input_expr: Expr, form_value: Expr | None) -> bool:
+    if isinstance(input_expr, String):
+        if not input_expr.value:
+            return False
+        form_name = _normalize_textual_expression_form(form_value, "SyntaxQ")
+        try:
+            parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+            return True
+        except WolframSyntaxError:
+            return False
+    if _looks_like_standard_form_boxes(input_expr):
+        try:
+            _interpret_standard_form(input_expr)
+            return True
+        except WolframSyntaxError:
+            return False
+    raise WolframEvaluationError("SyntaxQ expects a string or a supported StandardForm box expression.")
+
+
+def _syntax_length_text(text: str, form_name: str) -> int:
+    if not text:
+        return 0
+    try:
+        parse_input_form(text) if form_name == "InputForm" else parse_standard_form(text)
+        return len(text)
+    except WolframSyntaxError as exc:
+        message = str(exc)
+        offset = _syntax_error_offset(message)
+        if offset is not None:
+            if offset >= len(text) or "found ''" in message or "Unexpected ''" in message:
+                return len(text) + 2
+            return max(0, offset)
+        return len(text) + 1
+
+
+def _syntax_error_offset(message: str) -> int | None:
+    match = re.search(r"offset (\d+)", message)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _box_expr_to_standard_text(expr: Expr) -> str:
+    if isinstance(expr, Call) and expr.has_head("BoxData") and len(expr.arguments) == 1:
+        return _box_expr_to_standard_text(expr.arguments[0])
+    if isinstance(expr, Call) and expr.has_head("RowBox"):
+        return _row_box_to_standard_text(expr)
+    return _box_item_to_standard_text(expr)
 
 
 def symbol_expr(name: Expr) -> Symbol:
@@ -6432,6 +7006,20 @@ def evaluate(expr: Expr) -> Expr:
                 raise WolframEvaluationError("ValueQ expects exactly one argument.")
             return value_q_expr(expr.arguments[0])
 
+        if raw_head_name == "MakeBoxes":
+            if len(expr.arguments) == 1:
+                return make_boxes_expr(expr.arguments[0])
+            if len(expr.arguments) == 2:
+                return make_boxes_expr(expr.arguments[0], evaluate(expr.arguments[1]))
+            raise WolframEvaluationError("MakeBoxes expects an expression and an optional form.")
+
+        if raw_head_name == "MakeExpression":
+            if len(expr.arguments) == 1:
+                return make_expression_expr(expr.arguments[0])
+            if len(expr.arguments) == 2:
+                return make_expression_expr(expr.arguments[0], evaluate(expr.arguments[1]))
+            raise WolframEvaluationError("MakeExpression expects boxes and an optional form.")
+
         if raw_head_name == "MatchQ":
             if len(expr.arguments) != 2:
                 raise WolframEvaluationError("MatchQ expects exactly two arguments.")
@@ -6643,14 +7231,40 @@ def evaluate(expr: Expr) -> Expr:
             return context_expr(evaluated_arguments[0])
         raise WolframEvaluationError("Context expects zero arguments or one symbol/name argument.")
 
-    if evaluated_head.name == "ToString":
+    if evaluated_head_name == "ToString":
         if len(evaluated_arguments) == 1:
             return to_string_expr(evaluated_arguments[0])
         if len(evaluated_arguments) == 2:
             return to_string_expr(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("ToString expects an expression and an optional InputForm or StandardForm specifier.")
 
-    if evaluated_head.name == "ToExpression":
+    if evaluated_head_name == "ToBoxes":
+        if len(evaluated_arguments) == 1:
+            return to_boxes_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return to_boxes_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("ToBoxes expects an expression and an optional form.")
+
+    if evaluated_head_name == "StripBoxes":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("StripBoxes expects exactly one box expression.")
+        return strip_boxes_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "SyntaxQ":
+        if len(evaluated_arguments) == 1:
+            return syntax_q_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return syntax_q_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("SyntaxQ expects input and an optional form.")
+
+    if evaluated_head_name == "SyntaxLength":
+        if len(evaluated_arguments) == 1:
+            return syntax_length_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return syntax_length_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("SyntaxLength expects input and an optional form.")
+
+    if evaluated_head_name == "ToExpression":
         if len(evaluated_arguments) == 1:
             return to_expression_expr(evaluated_arguments[0])
         if len(evaluated_arguments) == 2:
@@ -7525,6 +8139,21 @@ def _interpret_standard_form(expr: Expr) -> Expr:
     if expr.has_head("SuperscriptBox"):
         return _interpret_superscript_box(expr)
 
+    if expr.has_head("SubscriptBox"):
+        return _interpret_script_box(expr, "Subscript", 2)
+
+    if expr.has_head("SubsuperscriptBox"):
+        return _interpret_script_box(expr, "Subsuperscript", 3)
+
+    if expr.has_head("OverscriptBox"):
+        return _interpret_script_box(expr, "Overscript", 2)
+
+    if expr.has_head("UnderscriptBox"):
+        return _interpret_script_box(expr, "Underscript", 2)
+
+    if expr.has_head("UnderoverscriptBox"):
+        return _interpret_script_box(expr, "Underoverscript", 3)
+
     return Call(
         head_expr=_interpret_standard_form(expr.head_expr),
         arguments=tuple(_interpret_standard_form(argument) for argument in expr.arguments),
@@ -7539,11 +8168,44 @@ def _interpret_row_box(expr: Call) -> Expr:
     if not isinstance(items, Call) or not items.has_head("List"):
         return expr
 
-    text = "".join(_box_item_to_standard_text(item) for item in items.arguments)
+    text = _row_box_to_standard_text(expr)
     stripped = text.strip()
     if not stripped:
         return string("")
-    return parse_input_form(stripped)
+    return parse_standard_form(stripped)
+
+
+def _row_box_to_standard_text(expr: Call) -> str:
+    if len(expr.arguments) != 1:
+        return expr.to_input_form()
+    items = expr.arguments[0]
+    if not isinstance(items, Call) or not items.has_head("List"):
+        return expr.to_input_form()
+    return _join_row_box_text(_box_item_to_standard_text(item) for item in items.arguments)
+
+
+def _join_row_box_text(pieces: Iterable[str]) -> str:
+    text = ""
+    previous = ""
+    for piece in pieces:
+        if piece == "":
+            continue
+        if not text:
+            text = piece
+        elif _needs_row_box_separator(previous, piece):
+            text += " " + piece
+        else:
+            text += piece
+        previous = piece
+    return text
+
+
+def _needs_row_box_separator(left: str, right: str) -> bool:
+    if left.isspace() or right.isspace() or left.endswith((" ", "\t", "\n")) or right.startswith((" ", "\t", "\n")):
+        return False
+    if left[-1:] in "[({<,.;+-*/^!@&|=_:" or right[:1] in "])}>,.;+-*/^!@&|=_:":
+        return False
+    return True
 
 
 def _interpret_fraction_box(expr: Call) -> Expr:
@@ -7579,6 +8241,12 @@ def _interpret_superscript_box(expr: Call) -> Expr:
     base = _interpret_box_operand(expr.arguments[0])
     exponent = _interpret_box_operand(expr.arguments[1])
     return call("Power", base, exponent)
+
+
+def _interpret_script_box(expr: Call, head_name: str, arity: int) -> Expr:
+    if len(expr.arguments) < arity:
+        return expr
+    return call(head_name, *(_interpret_box_operand(argument) for argument in expr.arguments[:arity]))
 
 
 def _interpret_box_operand(expr: Expr) -> Expr:
@@ -7667,7 +8335,7 @@ def _box_item_to_standard_text(expr: Expr) -> str:
                 interpreted = _interpret_row_box(expr)
             except WolframSyntaxError:
                 if len(expr.arguments) == 1 and isinstance(expr.arguments[0], Call) and expr.arguments[0].has_head("List"):
-                    return "".join(_box_item_to_standard_text(item) for item in expr.arguments[0].arguments)
+                    return _join_row_box_text(_box_item_to_standard_text(item) for item in expr.arguments[0].arguments)
                 raise
             return interpreted.to_input_form()
 
@@ -7693,6 +8361,33 @@ def _box_item_to_standard_text(expr: Expr) -> str:
             base = _box_item_to_standard_text(expr.arguments[0])
             exponent = _box_item_to_standard_text(expr.arguments[1])
             return f"(({base})^({exponent}))"
+
+        if expr.has_head("SubscriptBox") and len(expr.arguments) >= 2:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            subscript = _box_item_to_standard_text(expr.arguments[1])
+            return f"Subscript[{base}, {subscript}]"
+
+        if expr.has_head("SubsuperscriptBox") and len(expr.arguments) >= 3:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            subscript = _box_item_to_standard_text(expr.arguments[1])
+            superscript = _box_item_to_standard_text(expr.arguments[2])
+            return f"Subsuperscript[{base}, {subscript}, {superscript}]"
+
+        if expr.has_head("OverscriptBox") and len(expr.arguments) >= 2:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            overscript = _box_item_to_standard_text(expr.arguments[1])
+            return f"Overscript[{base}, {overscript}]"
+
+        if expr.has_head("UnderscriptBox") and len(expr.arguments) >= 2:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            underscript = _box_item_to_standard_text(expr.arguments[1])
+            return f"Underscript[{base}, {underscript}]"
+
+        if expr.has_head("UnderoverscriptBox") and len(expr.arguments) >= 3:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            underscript = _box_item_to_standard_text(expr.arguments[1])
+            overscript = _box_item_to_standard_text(expr.arguments[2])
+            return f"Underoverscript[{base}, {underscript}, {overscript}]"
 
     return _interpret_standard_form(expr).to_input_form()
 
@@ -7872,10 +8567,17 @@ def _scan_escaped_token(text: str, start: int) -> tuple[_Token, int] | None:
 
     raw = text[start:end + 1]
     normalized = _ESCAPED_TOKEN_MAP.get(raw)
-    if normalized is None:
-        raise WolframSyntaxError(f"Unsupported Wolfram escaped token {raw!r} at offset {start}.")
+    if normalized is not None:
+        return _Token(kind="operator", text=normalized, start=start, end=end + 1, value=normalized), end + 1
 
-    return _Token(kind="operator", text=normalized, start=start, end=end + 1, value=normalized), end + 1
+    alias = _ESCAPED_SYMBOL_ALIASES.get(raw)
+    if alias is not None:
+        return _Token(kind="symbol", text=raw, start=start, end=end + 1, value=alias), end + 1
+
+    if raw in _ESCAPED_INFIX_OPERATOR_HEADS:
+        return _Token(kind="operator", text=raw, start=start, end=end + 1, value=raw), end + 1
+
+    return _Token(kind="symbol", text=raw, start=start, end=end + 1, value=raw), end + 1
 
 
 def _tokenize(text: str) -> list[_Token]:
@@ -8242,6 +8944,9 @@ class _Parser:
         }
 
         spec = binary_specs.get(text)
+        escaped_operator_head = _ESCAPED_INFIX_OPERATOR_HEADS.get(text)
+        if spec is None and escaped_operator_head is not None:
+            spec = (self._COMPARE_BP, self._COMPARE_BP + 1, escaped_operator_head)
         if spec is None:
             return None
 
