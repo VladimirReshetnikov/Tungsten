@@ -1043,6 +1043,55 @@ class ExpressionEvaluationTests(unittest.TestCase):
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form('ExportString[{"a" -> 1}, "RawJSON"]'))
 
+    def test_to_string_and_to_expression_round_trip_input_and_standard_forms(self) -> None:
+        input_string = evaluate(parse_input_form("ToString[HoldComplete[1 + 2], InputForm]"))
+        standard_string = evaluate(parse_input_form("ToString[HoldComplete[f @ x // g], StandardForm]"))
+        default_string = evaluate(parse_input_form("ToString[HoldComplete[{a -> b, f[x]}]]"))
+        input_round_trip = evaluate(
+            parse_input_form(
+                "SameQ[ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm], HoldComplete[1 + 2]]"
+            )
+        )
+        standard_round_trip = evaluate(
+            parse_input_form(
+                "SameQ[ToExpression[ToString[HoldComplete[f @ x // g], StandardForm], StandardForm], HoldComplete[g[f[x]]]]"
+            )
+        )
+        byte_array_round_trip = evaluate(
+            parse_input_form(
+                "SameQ[ToExpression[ToString[ByteArray[{1, 2, 255}], InputForm], InputForm], ByteArray[{1, 2, 255}]]"
+            )
+        )
+        self.assertEqual(input_string.to_full_form(), '"HoldComplete[1 + 2]"')
+        self.assertEqual(standard_string.to_full_form(), '"HoldComplete[g[f[x]]]"')
+        self.assertEqual(default_string.to_full_form(), '"HoldComplete[{a -> b, f[x]}]"')
+        self.assertEqual(input_round_trip.to_full_form(), "True")
+        self.assertEqual(standard_round_trip.to_full_form(), "True")
+        self.assertEqual(byte_array_round_trip.to_full_form(), "True")
+
+    def test_to_expression_evaluates_after_optional_wrapper(self) -> None:
+        default_input = evaluate(parse_input_form('ToExpression["1 + 2"]'))
+        held_input = evaluate(parse_input_form('ToExpression["1 + 2", InputForm, HoldComplete]'))
+        held_standard = evaluate(parse_input_form('ToExpression["f @ x // g", StandardForm, HoldComplete]'))
+        identity_wrapped = evaluate(parse_input_form('ToExpression["1 + 2", InputForm, Identity]'))
+        list_wrapped = evaluate(parse_input_form('ToExpression["f[a]", InputForm, List]'))
+        box_default = evaluate(parse_input_form('ToExpression[RowBox[{"1", "+", "2"}], StandardForm, HoldComplete]'))
+        box_implicit_standard = evaluate(parse_input_form('ToExpression[RowBox[{"1", "+", "2"}]]'))
+        listable = evaluate(parse_input_form('ToExpression[{"1 + 2", "f @ x // g"}, StandardForm, HoldComplete]'))
+        self.assertEqual(default_input.to_full_form(), "3")
+        self.assertEqual(held_input.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(held_standard.to_full_form(), "HoldComplete[g[f[x]]]")
+        self.assertEqual(identity_wrapped.to_full_form(), "3")
+        self.assertEqual(list_wrapped.to_full_form(), "List[f[a]]")
+        self.assertEqual(box_default.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(box_implicit_standard.to_full_form(), "3")
+        self.assertEqual(listable.to_full_form(), "List[HoldComplete[Plus[1, 2]], HoldComplete[g[f[x]]]]")
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("ToString[x, OutputForm]"))
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('ToExpression["x", TraditionalForm]'))
+
     def test_string_structural_operations_follow_list_like_semantics(self) -> None:
         string_length = evaluate(parse_input_form('StringLength[{"ab", "c"}]'))
         string_take = evaluate(parse_input_form('StringTake["abcdef", {2, 5, 2}]'))

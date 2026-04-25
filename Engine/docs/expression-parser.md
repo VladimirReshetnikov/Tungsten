@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T02:09:44Z
-Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
+Updated (UTC): 2026-04-25T02:39:15Z
+Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
 
 ## Summary
 
@@ -27,10 +27,10 @@ Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
   string-pattern heads such as `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
-  `ExportString`, `ImportByteArray`, and `ExportByteArray`, `Pick`, `Select`, `Discard`,
-  `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
-  association constructors, key accessors, `Sequence` splicing, `Nothing` removal in evaluated
-  list contexts, Hold-family wrappers, and related exact-position transforms;
+  `ExportString`, `ImportByteArray`, `ExportByteArray`, `ToString`, and `ToExpression`, `Pick`,
+  `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
+  `ReplacePart`, association constructors, key accessors, `Sequence` splicing, `Nothing` removal
+  in evaluated list contexts, Hold-family wrappers, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -375,6 +375,8 @@ python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitC
 python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
 python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1}\", \"JSON\"]"
 python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
+python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
+python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 ```
 
@@ -441,6 +443,8 @@ Tungsten currently implements a broader structural subset that includes:
 - practical kernel-free import / export heads such as `ImportString`, `ExportString`,
   `ImportByteArray`, and `ExportByteArray` over a documented subset of text, JSON, tabular, raw
   byte, and compression-wrapper formats;
+- textual expression conversion through `ToString` and `ToExpression` for `InputForm` and the
+  supported textual `StandardForm` subset;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -490,6 +494,9 @@ Examples:
 - `ImportString["{\"a\":1}", "JSON"]` evaluates to `{"a" -> 1}`;
 - `ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {"GZIP", "CSV"}], {"GZIP", "CSV"}]`
   evaluates to `{{1, 2}, {3, 4}}`;
+- `ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]` evaluates to
+  `HoldComplete[1 + 2]`;
+- `ToExpression["f @ x // g", StandardForm, HoldComplete]` evaluates to `HoldComplete[g[f[x]]]`;
 - `Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]` evaluates to `{"ab", "ba"}`;
 - `Mod[-14, 5]` evaluates to `1`;
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;

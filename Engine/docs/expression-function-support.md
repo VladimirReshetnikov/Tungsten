@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T02:09:44Z
-- Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
+- Updated (UTC): 2026-04-25T02:39:15Z
+- Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Sequence and Nothing Evaluation](./sequence-nothing-evaluation.md)
@@ -119,6 +119,11 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `"JSON"`, `"RawJSON"`, `"CSV"`, `"TSV"`, and `"Table"`, plus compression-wrapper specs
   `{"GZIP", inner}` and `{"BZIP2", inner}`.
 - Auto-detection and general element specifications are out of scope in this pass.
+- `ToString` and `ToExpression` currently support only `InputForm` and Tungsten's textual
+  `StandardForm` subset. Unlike the Wolfram kernel, one-argument `ToString[expr]` renders
+  canonical `InputForm` so the result is parseable by Tungsten's kernel-free `ToExpression`.
+  FrontEnd box-string rendering and formats such as `OutputForm`, `TraditionalForm`, `TeXForm`,
+  and `MathMLForm` are out of scope.
 - That string-pattern subset supports literal strings, `StringExpression` / `~~`, anonymous `_`,
   `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures via
   `x : patt`, `Alternatives`, `Condition`, `HoldPattern`, `Except` over a supported
@@ -209,6 +214,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `ExportString` | `ExportString[expr, "Byte"|"String"|"Text"|"WL"|"JSON"|"RawJSON"|"CSV"|"TSV"|"Table"]` and compressed wrapper forms such as `ExportString[expr, {"GZIP", "CSV"}]` | Exports expressions through the same practical subset. `"JSON"` accepts rule-list or association objects; `"RawJSON"` expects associations; flat lists export as single-column tabular data; compression wrappers return raw byte strings. | [ExportString](https://reference.wolfram.com/language/ref/ExportString.html) |
 | `ImportByteArray` | `ImportByteArray[ba, "Byte"|"String"|"Text"|"WL"|"JSON"|"RawJSON"|"CSV"|"TSV"|"Table"]` and compressed wrapper forms such as `ImportByteArray[ba, {"BZIP2", "RawJSON"}]` | Imports from byte arrays using the same practical format subset. `"String"` maps bytes directly to character codes `0..255`; `"Text"` / `"WL"` / JSON / tabular formats decode UTF-8 first; compression wrappers decompress and then import the inner format. | [ImportByteArray](https://reference.wolfram.com/language/ref/ImportByteArray.html) |
 | `ExportByteArray` | `ExportByteArray[expr, "Byte"|"String"|"Text"|"WL"|"JSON"|"RawJSON"|"CSV"|"TSV"|"Table"]` and compressed wrapper forms such as `ExportByteArray[expr, {"GZIP", "CSV"}]` | Exports to byte arrays using the same practical subset. `"Byte"` expects a byte list or `ByteArray`; `"String"` exports raw characters with code points `0..255`; textual formats are UTF-8 encoded; compression wrappers compress the inner byte payload. | [ExportByteArray](https://reference.wolfram.com/language/ref/ExportByteArray.html) |
+| `ToString` | `ToString[expr]`, `ToString[expr, InputForm]`, `ToString[expr, StandardForm]` | Converts an evaluated expression to parseable text. `InputForm` and `StandardForm` both use Tungsten's canonical textual renderer rather than byte-for-byte kernel or FrontEnd formatting. The one-argument form is a Tungsten-specific parseable `InputForm` default. | [ToString](https://reference.wolfram.com/language/ref/ToString.html) |
+| `ToExpression` | `ToExpression["text"]`, `ToExpression["text", InputForm|StandardForm]`, `ToExpression["text", InputForm|StandardForm, h]`, lists of supported inputs, and supported StandardForm box expressions such as `RowBox[...]` | Parses text or supported box expressions, then evaluates the result. The three-argument form wraps the parsed expression in `h` before evaluation, so `HoldComplete` can preserve parsed syntax. Lists are handled elementwise. Syntax failures raise a Tungsten evaluation error instead of returning `$Failed`. | [ToExpression](https://reference.wolfram.com/language/ref/ToExpression.html) |
 | `BaseEncode` | `BaseEncode[ba]`, `BaseEncode[ba, "encoding"]` | Encodes byte arrays as `"Base64"` by default, with additional support for `"Base16"` and `"Base85ASCII"`. | [BaseEncode](https://reference.wolfram.com/language/ref/BaseEncode) |
 | `BaseDecode` | `BaseDecode["text"]`, `BaseDecode["text", "encoding"]` | Decodes supported base-encoded strings to byte arrays. Tungsten currently supports `"Base64"` by default, plus `"Base16"` and `"Base85ASCII"`, and it drops nonalphabet characters before decoding in the practical Wolfram style. | [BaseDecode](https://reference.wolfram.com/language/ref/BaseDecode) |
 | `Condition` | `Condition[patt, test]`, `patt /; test`, and top-level delayed-template guards such as `lhs :> rhs /; test` | Guards a pattern or delayed-rule template. Tungsten treats the guard as satisfied only when the substituted test reduces to explicit `True` under the shipped evaluator. | [Condition](https://reference.wolfram.com/language/ref/Condition) |

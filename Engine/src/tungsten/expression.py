@@ -947,6 +947,92 @@ def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> Stri
     return string(_decode_bytes_to_string(bytes(byte_values), encoding_name))
 
 
+_TEXTUAL_EXPRESSION_FORM_NAMES = {
+    "input": "InputForm",
+    "inputform": "InputForm",
+    "standard": "StandardForm",
+    "standardform": "StandardForm",
+}
+
+
+def _normalize_textual_expression_form(value: Expr | None, function_name: str) -> str:
+    if value is None:
+        return "InputForm"
+    if isinstance(value, Symbol):
+        key = value.name.strip().lower()
+    elif isinstance(value, String):
+        key = value.value.strip().lower()
+    else:
+        raise WolframEvaluationError(f"{function_name} expects InputForm or StandardForm as the form specification.")
+    normalized = _TEXTUAL_EXPRESSION_FORM_NAMES.get(key)
+    if normalized is None:
+        raise WolframEvaluationError(f"{function_name} currently supports only InputForm and StandardForm.")
+    return normalized
+
+
+_STANDARD_FORM_BOX_HEADS = {
+    "AdjustmentBox",
+    "BoxData",
+    "FormBox",
+    "FrameBox",
+    "PaneBox",
+    "StyleBox",
+    "TagBox",
+    "TooltipBox",
+    "FractionBox",
+    "InterpretationBox",
+    "RadicalBox",
+    "RowBox",
+    "SqrtBox",
+    "SuperscriptBox",
+}
+
+
+def _looks_like_standard_form_boxes(expr: Expr) -> bool:
+    return (
+        isinstance(expr, Call)
+        and isinstance(expr.head_expr, Symbol)
+        and expr.head_expr.name in _STANDARD_FORM_BOX_HEADS
+    )
+
+
+def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
+    form_name = _normalize_textual_expression_form(form_value, "ToString")
+    if form_name == "InputForm":
+        return string(expr.to_input_form())
+    if form_name == "StandardForm":
+        # Tungsten's StandardForm string subset intentionally renders as parseable WL text,
+        # not as FrontEnd box escapes. The parser accepts it through parse_standard_form.
+        return string(expr.to_input_form())
+    raise AssertionError(f"Unhandled textual expression form: {form_name}")
+
+
+def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper_head: Expr | None = None) -> Expr:
+    if isinstance(input_expr, Call) and input_expr.has_head("List"):
+        return _evaluated_list_expr(
+            *(to_expression_expr(item, form_value, wrapper_head) for item in input_expr.arguments)
+        )
+
+    if form_value is None and _looks_like_standard_form_boxes(input_expr):
+        form_name = "StandardForm"
+    else:
+        form_name = _normalize_textual_expression_form(form_value, "ToExpression")
+
+    try:
+        if isinstance(input_expr, String):
+            parsed = parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+        elif form_name == "StandardForm" and _looks_like_standard_form_boxes(input_expr):
+            parsed = _interpret_standard_form(input_expr)
+        else:
+            raise WolframEvaluationError("ToExpression expects a string or a supported StandardForm box expression.")
+    except WolframSyntaxError as exc:
+        raise WolframEvaluationError(f"ToExpression could not parse the input as {form_name}.") from exc
+
+    if wrapper_head is not None:
+        parsed = Call(head_expr=wrapper_head, arguments=(parsed,))
+    return evaluate(parsed)
+
+
 def _normalize_import_export_format_name(value: Expr, function_name: str) -> str:
     if not isinstance(value, String):
         raise WolframEvaluationError(f"{function_name} expects the format name to be a string.")
@@ -6005,6 +6091,24 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Identity expects exactly one argument.")
         return evaluated_arguments[0]
+
+    if evaluated_head.name == "ToString":
+        if len(evaluated_arguments) == 1:
+            return to_string_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return to_string_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("ToString expects an expression and an optional InputForm or StandardForm specifier.")
+
+    if evaluated_head.name == "ToExpression":
+        if len(evaluated_arguments) == 1:
+            return to_expression_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return to_expression_expr(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return to_expression_expr(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "ToExpression expects input, an optional InputForm or StandardForm specifier, and an optional wrapper head."
+        )
 
     if evaluated_head.name == "SameQ":
         return same_q(*evaluated_arguments)

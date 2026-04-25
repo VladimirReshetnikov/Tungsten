@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T02:12:28Z
-- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
+- Updated (UTC): 2026-04-25T02:39:15Z
+- Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -400,6 +400,8 @@ python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~
 python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\", \"RawJSON\"]"
 python -m tungsten expr evaluate --code "ImportString[ExportString[{{1, 2}, {3, 4}}, \"CSV\"], \"CSV\"]"
 python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
+python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
+python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
@@ -450,7 +452,7 @@ The implemented inert evaluator currently covers:
   `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`, `ExportString`,
-  `ImportByteArray`, and `ExportByteArray`
+  `ImportByteArray`, `ExportByteArray`, `ToString`, and `ToExpression`
 - `Pick`
 - `First`
 - `Last`
