@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TypeAlias
 
 from .wolfram_strings import display_text as display_wl_string
 from .wolfram_strings import inline_box_segments
@@ -12,6 +12,67 @@ from .wolfram_strings import parse_wl_string_literal
 from .wolfram_strings import skip_wl_comment
 from .wolfram_strings import skip_wl_string
 from .wolfram_strings import wl_string
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSpan:
+    """Lazy source slice used by the notebook parser to avoid substring copies."""
+
+    source: str
+    start: int
+    end: int
+
+    def text(self) -> str:
+        return self.source[self.start : self.end]
+
+    def strip(self) -> "SourceSpan":
+        start, end = _trim_range(self.source, self.start, self.end)
+        return SourceSpan(self.source, start, end)
+
+    def startswith(self, prefix: str) -> bool:
+        return self.source.startswith(prefix, self.start, self.end)
+
+    def endswith(self, suffix: str) -> bool:
+        return self.source.endswith(suffix, self.start, self.end)
+
+    def __bool__(self) -> bool:
+        return self.start < self.end
+
+    def __str__(self) -> str:
+        return self.text()
+
+
+SourceText: TypeAlias = str | SourceSpan
+
+
+def _expr_text(expr: SourceText) -> str:
+    return expr.text() if isinstance(expr, SourceSpan) else expr
+
+
+def _expr_list_text(expressions: Iterable[SourceText]) -> list[str]:
+    return [_expr_text(expression) for expression in expressions]
+
+
+def _trim_range(text: str, start: int, end: int) -> tuple[int, int]:
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return start, end
+
+
+def _span_from_text(text: str) -> SourceSpan:
+    start, end = _trim_range(text, 0, len(text))
+    return SourceSpan(text, start, end)
+
+
+def _as_span(expr: SourceText) -> SourceSpan:
+    return expr.strip() if isinstance(expr, SourceSpan) else _span_from_text(expr)
+
+
+def _trim_span(text: str, start: int, end: int) -> SourceSpan:
+    start, end = _trim_range(text, start, end)
+    return SourceSpan(text, start, end)
 
 
 def extract_string_literals(text: str) -> list[str]:
@@ -43,50 +104,36 @@ def collapse_text(text: str, limit: int = 160) -> str:
 
 
 def _skip_ws_comments(text: str, index: int) -> int:
-    length = len(text)
-    while index < length:
+    return _skip_ws_comments_in_range(text, index, len(text))
+
+
+def _skip_ws_comments_in_range(text: str, index: int, end: int) -> int:
+    while index < end:
         char = text[index]
         if char.isspace():
             index += 1
             continue
-        if char == "(" and index + 1 < length and text[index + 1] == "*":
+        if char == "(" and index + 1 < end and text[index + 1] == "*":
             index = skip_wl_comment(text, index)
             continue
         break
     return index
 
 
-def _find_matching(text: str, index: int, open_char: str, close_char: str) -> int:
-    depth = 1
-    index += 1
-    length = len(text)
-    while index < length:
-        char = text[index]
-        if char == "(" and index + 1 < length and text[index + 1] == "*":
-            index = skip_wl_comment(text, index)
-            continue
-        if char == "\"":
-            index = skip_wl_string(text, index)
-            continue
-        if char == open_char:
-            depth += 1
-        elif char == close_char:
-            depth -= 1
-            if depth == 0:
-                return index
-        index += 1
-    raise ValueError(f"Unmatched {open_char!r} in Wolfram expression.")
-
-
 def split_top_level(text: str) -> list[str]:
-    parts: list[str] = []
-    start = 0
-    index = 0
+    return _expr_list_text(_split_top_level_spans(_span_from_text(text)))
+
+
+def _split_top_level_spans(span: SourceSpan) -> list[SourceSpan]:
+    parts: list[SourceSpan] = []
+    start = span.start
     depth = 0
-    length = len(text)
-    while index < length:
+    text = span.source
+    index = span.start
+    end = span.end
+    while index < end:
         char = text[index]
-        if char == "(" and index + 1 < length and text[index + 1] == "*":
+        if char == "(" and index + 1 < end and text[index + 1] == "*":
             index = skip_wl_comment(text, index)
             continue
         if char == "\"":
@@ -99,27 +146,27 @@ def split_top_level(text: str) -> list[str]:
             if depth:
                 depth -= 1
         elif char == "," and depth == 0:
-            parts.append(text[start:index].strip())
+            parts.append(_trim_span(text, start, index))
             start = index + 1
         index += 1
 
-    tail = text[start:].strip()
+    tail = _trim_span(text, start, end)
     if tail:
         parts.append(tail)
 
     return parts
 
 
-def _split_call_arguments(text: str, open_index: int) -> tuple[int, list[str]]:
-    parts: list[str] = []
+def _split_call_arguments(text: str, open_index: int, end: int | None = None) -> tuple[int, list[SourceSpan]]:
+    parts: list[SourceSpan] = []
     start = open_index + 1
     index = start
     square_depth = 1
     nested_depth = 0
-    length = len(text)
-    while index < length:
+    limit = len(text) if end is None else end
+    while index < limit:
         char = text[index]
-        if char == "(" and index + 1 < length and text[index + 1] == "*":
+        if char == "(" and index + 1 < limit and text[index + 1] == "*":
             index = skip_wl_comment(text, index)
             continue
         if char == "\"":
@@ -132,7 +179,7 @@ def _split_call_arguments(text: str, open_index: int) -> tuple[int, list[str]]:
         elif char == "]":
             square_depth -= 1
             if square_depth == 0:
-                tail = text[start:index].strip()
+                tail = _trim_span(text, start, index)
                 if tail:
                     parts.append(tail)
                 return index, parts
@@ -144,7 +191,7 @@ def _split_call_arguments(text: str, open_index: int) -> tuple[int, list[str]]:
             if nested_depth:
                 nested_depth -= 1
         elif char == "," and nested_depth == 0:
-            parts.append(text[start:index].strip())
+            parts.append(_trim_span(text, start, index))
             start = index + 1
         index += 1
 
@@ -152,37 +199,49 @@ def _split_call_arguments(text: str, open_index: int) -> tuple[int, list[str]]:
 
 
 def parse_call(expr: str) -> tuple[str, list[str]]:
-    expr = expr.strip()
-    index = _skip_ws_comments(expr, 0)
-    length = len(expr)
-    while index < length:
-        char = expr[index]
+    head, args = _parse_call_span(expr)
+    return head, _expr_list_text(args)
+
+
+def _parse_call_span(expr: SourceText) -> tuple[str, list[SourceSpan]]:
+    span = _as_span(expr)
+    text = span.source
+    index = _skip_ws_comments_in_range(text, span.start, span.end)
+    while index < span.end:
+        char = text[index]
         if char == "\"":
-            index = skip_wl_string(expr, index)
+            index = skip_wl_string(text, index)
             continue
-        if char == "(" and index + 1 < length and expr[index + 1] == "*":
-            index = skip_wl_comment(expr, index)
+        if char == "(" and index + 1 < span.end and text[index + 1] == "*":
+            index = skip_wl_comment(text, index)
             continue
         if char == "[":
-            head = expr[:index].strip()
-            close_index, args = _split_call_arguments(expr, index)
-            tail_index = _skip_ws_comments(expr, close_index + 1)
-            if tail_index != length:
-                return expr, []
+            head = text[span.start : index].strip()
+            close_index, args = _split_call_arguments(text, index, span.end)
+            tail_index = _skip_ws_comments_in_range(text, close_index + 1, span.end)
+            if tail_index != span.end:
+                return span.text(), []
             return head, args
         index += 1
 
-    return expr, []
+    return span.text(), []
 
 
 def parse_list(expr: str) -> list[str]:
-    expr = expr.strip()
-    if not expr.startswith("{") or not expr.endswith("}"):
+    return _expr_list_text(_parse_list_span(expr))
+
+
+def _parse_list_span(expr: SourceText) -> list[SourceSpan]:
+    span = _as_span(expr)
+    if span.end <= span.start:
         return []
-    return split_top_level(expr[1:-1])
+    text = span.source
+    if text[span.start] != "{" or text[span.end - 1] != "}":
+        return []
+    return _split_top_level_spans(SourceSpan(text, span.start + 1, span.end - 1))
 
 
-def extract_box_expressions(expr: str) -> list[str]:
+def extract_box_expressions(expr: SourceText) -> list[str]:
     collected: list[str] = []
     _extract_box_expressions_into(expr, collected)
 
@@ -197,8 +256,8 @@ def extract_box_expressions(expr: str) -> list[str]:
     return deduped
 
 
-def _extract_box_expressions_into(expr: str, collected: list[str]) -> None:
-    text = expr.strip()
+def _extract_box_expressions_into(expr: SourceText, collected: list[str]) -> None:
+    text = _expr_text(expr).strip()
     if not text:
         return
 
@@ -236,12 +295,13 @@ def _extract_box_expressions_into(expr: str, collected: list[str]) -> None:
         return
 
 
-def rule_value(options: Iterable[str], name: str) -> str | None:
+def rule_value(options: Iterable[SourceText], name: str) -> str | None:
     prefix = f"{name}->"
     for option in options:
-        compact = option.replace(" ", "")
+        option_text = _expr_text(option)
+        compact = option_text.replace(" ", "")
         if compact.startswith(prefix):
-            return option.split("->", 1)[1].strip()
+            return option_text.split("->", 1)[1].strip()
     return None
 
 
@@ -264,24 +324,60 @@ def _string_list_value(expr: str | None) -> list[str]:
     return values
 
 
-@dataclass
+@dataclass(init=False)
 class NotebookCell:
-    content_expr: str
+    _content_expr: SourceText
     style: str | None = None
-    options: list[str] = field(default_factory=list)
-    raw: str | None = None
+    _options: list[SourceText] = field(default_factory=list)
+    _raw: SourceText | None = None
+
+    def __init__(
+        self,
+        content_expr: SourceText,
+        style: str | None = None,
+        options: Iterable[SourceText] | None = None,
+        raw: SourceText | None = None,
+    ) -> None:
+        self._content_expr = content_expr
+        self.style = style
+        self._options = list(options or [])
+        self._raw = raw
 
     @property
     def kind(self) -> str:
         return "cell"
 
+    @property
+    def content_expr(self) -> str:
+        return _expr_text(self._content_expr)
+
+    @content_expr.setter
+    def content_expr(self, value: SourceText) -> None:
+        self._content_expr = value
+
+    @property
+    def options(self) -> list[str]:
+        return _expr_list_text(self._options)
+
+    @options.setter
+    def options(self, values: Iterable[SourceText]) -> None:
+        self._options = list(values)
+
+    @property
+    def raw(self) -> str | None:
+        return _expr_text(self._raw) if self._raw is not None else None
+
+    @raw.setter
+    def raw(self, value: SourceText | None) -> None:
+        self._raw = value
+
     def plain_text(self) -> str:
-        display_fragments = [display_wl_string(value) for value in extract_string_literals(self.content_expr)]
+        display_fragments = [display_wl_string(value) for value in extract_string_literals(_expr_text(self._content_expr))]
         return collapse_text(" ".join(display_fragments))
 
     @property
     def cell_id(self) -> int | None:
-        value = rule_value(self.options, "CellID")
+        value = rule_value(self._options, "CellID")
         if value is None:
             return None
         try:
@@ -291,14 +387,14 @@ class NotebookCell:
 
     @property
     def expression_uuid(self) -> str | None:
-        value = rule_value(self.options, "ExpressionUUID")
+        value = rule_value(self._options, "ExpressionUUID")
         if value is None:
             return None
         return parse_wl_string_literal(value)
 
     @property
     def cell_tags(self) -> list[str]:
-        return _string_list_value(rule_value(self.options, "CellTags"))
+        return _string_list_value(rule_value(self._options, "CellTags"))
 
     def to_dict(self, path: list[int], depth: int, index: int | None = None) -> dict[str, object]:
         return {
@@ -311,54 +407,101 @@ class NotebookCell:
             "cell_id": self.cell_id,
             "expression_uuid": self.expression_uuid,
             "cell_tags": self.cell_tags,
-            "options": self.options,
+            "options": _expr_list_text(self._options),
         }
 
     def render(self) -> str:
-        if self.raw is not None:
-            return self.raw
+        if self._raw is not None:
+            return _expr_text(self._raw)
 
-        parts = [self.content_expr]
+        parts = [_expr_text(self._content_expr)]
         if self.style is not None:
             parts.append(wl_string(self.style))
-        parts.extend(self.options)
+        parts.extend(_expr_list_text(self._options))
         return f"Cell[{', '.join(parts)}]"
 
 
-@dataclass
+@dataclass(init=False)
 class NotebookGroup:
     children: list["NotebookItem"]
-    group_tail: list[str] = field(default_factory=list)
-    wrapper_options: list[str] = field(default_factory=list)
-    raw: str | None = None
+    _group_tail: list[SourceText] = field(default_factory=list)
+    _wrapper_options: list[SourceText] = field(default_factory=list)
+    _raw: SourceText | None = None
+
+    def __init__(
+        self,
+        children: list["NotebookItem"],
+        group_tail: Iterable[SourceText] | None = None,
+        wrapper_options: Iterable[SourceText] | None = None,
+        raw: SourceText | None = None,
+    ) -> None:
+        self.children = children
+        self._group_tail = list(group_tail or [])
+        self._wrapper_options = list(wrapper_options or [])
+        self._raw = raw
 
     @property
     def kind(self) -> str:
         return "group"
 
+    @property
+    def group_tail(self) -> list[str]:
+        return _expr_list_text(self._group_tail)
+
+    @group_tail.setter
+    def group_tail(self, values: Iterable[SourceText]) -> None:
+        self._group_tail = list(values)
+
+    @property
+    def wrapper_options(self) -> list[str]:
+        return _expr_list_text(self._wrapper_options)
+
+    @wrapper_options.setter
+    def wrapper_options(self, values: Iterable[SourceText]) -> None:
+        self._wrapper_options = list(values)
+
+    @property
+    def raw(self) -> str | None:
+        return _expr_text(self._raw) if self._raw is not None else None
+
+    @raw.setter
+    def raw(self, value: SourceText | None) -> None:
+        self._raw = value
+
     def render(self) -> str:
-        if self.raw is not None:
-            return self.raw
+        if self._raw is not None:
+            return _expr_text(self._raw)
 
         group_parts = [
             "{\n" + ",\n".join(child.render() for child in self.children) + "\n}"
         ]
-        group_parts.extend(self.group_tail)
+        group_parts.extend(_expr_list_text(self._group_tail))
         cell_parts = [f"CellGroupData[{', '.join(group_parts)}]"]
-        cell_parts.extend(self.wrapper_options)
+        cell_parts.extend(_expr_list_text(self._wrapper_options))
         return f"Cell[{', '.join(cell_parts)}]"
 
 
-@dataclass
+@dataclass(init=False)
 class NotebookRawItem:
-    expression: str
+    _expression: SourceText
+
+    def __init__(self, expression: SourceText) -> None:
+        self._expression = expression
 
     @property
     def kind(self) -> str:
         return "raw"
 
+    @property
+    def expression(self) -> str:
+        return _expr_text(self._expression)
+
+    @expression.setter
+    def expression(self, value: SourceText) -> None:
+        self._expression = value
+
     def render(self) -> str:
-        return self.expression
+        return _expr_text(self._expression)
 
     def to_dict(self, path: list[int], depth: int, index: int | None = None) -> dict[str, object]:
         return {
@@ -366,33 +509,35 @@ class NotebookRawItem:
             "kind": self.kind,
             "path": path,
             "depth": depth,
-            "preview": collapse_text(self.expression),
+            "preview": collapse_text(_expr_text(self._expression)),
         }
 
 
 NotebookItem = NotebookCell | NotebookGroup | NotebookRawItem
 
 
-def _has_call_head(expr: str, expected_head: str) -> bool:
-    index = _skip_ws_comments(expr, 0)
-    if expr[index : index + len(expected_head)] != expected_head:
+def _has_call_head(expr: SourceText, expected_head: str) -> bool:
+    span = _as_span(expr)
+    text = span.source
+    index = _skip_ws_comments_in_range(text, span.start, span.end)
+    if text[index : index + len(expected_head)] != expected_head:
         return False
-    bracket_index = _skip_ws_comments(expr, index + len(expected_head))
-    return bracket_index < len(expr) and expr[bracket_index] == "["
+    bracket_index = _skip_ws_comments_in_range(text, index + len(expected_head), span.end)
+    return bracket_index < span.end and text[bracket_index] == "["
 
 
-def _parse_cell(expr: str, args: list[str] | None = None) -> NotebookItem:
+def _parse_cell(expr: SourceText, args: list[SourceSpan] | None = None) -> NotebookItem:
     if args is None:
-        head, args = parse_call(expr)
+        head, args = _parse_call_span(expr)
     else:
         head = "Cell"
     if head != "Cell":
         return NotebookRawItem(expr)
 
     if args and _has_call_head(args[0], "CellGroupData"):
-        group_head, group_args = parse_call(args[0])
+        group_head, group_args = _parse_call_span(args[0])
         if group_head == "CellGroupData" and group_args:
-            children = [_parse_item(item) for item in parse_list(group_args[0])]
+            children = [_parse_item(item) for item in _parse_list_span(group_args[0])]
             return NotebookGroup(
                 children=children,
                 group_tail=group_args[1:],
@@ -401,11 +546,11 @@ def _parse_cell(expr: str, args: list[str] | None = None) -> NotebookItem:
             )
 
     style: str | None = None
-    options: list[str] = []
+    options: list[SourceText] = []
     content_expr = args[0] if args else wl_string("")
     remaining = args[1:] if len(args) > 1 else []
-    if remaining and "->" not in remaining[0]:
-        style = parse_wl_string_literal(remaining[0])
+    if remaining and "->" not in _expr_text(remaining[0]):
+        style = parse_wl_string_literal(_expr_text(remaining[0]))
         options = remaining[1:]
     else:
         options = remaining
@@ -418,19 +563,31 @@ def _parse_cell(expr: str, args: list[str] | None = None) -> NotebookItem:
     )
 
 
-def _parse_item(expr: str) -> NotebookItem:
-    head, args = parse_call(expr)
+def _parse_item(expr: SourceText) -> NotebookItem:
+    head, args = _parse_call_span(expr)
     if head == "Cell":
         return _parse_cell(expr, args)
     return NotebookRawItem(expr)
 
 
-@dataclass
+@dataclass(init=False)
 class NotebookDocument:
     items: list[NotebookItem]
-    options: list[str] = field(default_factory=list)
+    _options: list[SourceText] = field(default_factory=list)
     preamble: str = ""
     path: Path | None = None
+
+    def __init__(
+        self,
+        items: list[NotebookItem],
+        options: Iterable[SourceText] | None = None,
+        preamble: str = "",
+        path: Path | None = None,
+    ) -> None:
+        self.items = items
+        self._options = list(options or [])
+        self.preamble = preamble
+        self.path = path
 
     @classmethod
     def from_text(cls, text: str, path: Path | None = None) -> "NotebookDocument":
@@ -439,12 +596,12 @@ class NotebookDocument:
             raise ValueError("Notebook expression not found.")
 
         preamble = text[:notebook_start]
-        expr = text[notebook_start:].strip()
-        head, args = parse_call(expr)
+        expr = _trim_span(text, notebook_start, len(text))
+        head, args = _parse_call_span(expr)
         if head != "Notebook":
             raise ValueError("Top-level expression is not a Notebook.")
 
-        items = [_parse_item(item) for item in parse_list(args[0] if args else "{}")]
+        items = [_parse_item(item) for item in _parse_list_span(args[0] if args else "{}")]
         options = args[1:] if len(args) > 1 else []
         return cls(items=items, options=options, preamble=preamble, path=path)
 
@@ -454,10 +611,18 @@ class NotebookDocument:
 
     @property
     def title(self) -> str | None:
-        value = rule_value(self.options, "WindowTitle")
+        value = rule_value(self._options, "WindowTitle")
         if value is None:
             return self.path.stem if self.path else None
         return parse_wl_string_literal(value)
+
+    @property
+    def options(self) -> list[str]:
+        return _expr_list_text(self._options)
+
+    @options.setter
+    def options(self, values: Iterable[SourceText]) -> None:
+        self._options = list(values)
 
     def summary(self) -> dict[str, object]:
         cell_count = 0
@@ -472,7 +637,7 @@ class NotebookDocument:
             "title": self.title,
             "cell_count": cell_count,
             "group_count": group_count,
-            "option_count": len(self.options),
+            "option_count": len(self._options),
         }
 
     def to_dict(self) -> dict[str, object]:
@@ -483,7 +648,7 @@ class NotebookDocument:
             "title": self.title,
             "cell_count": len(flattened),
             "group_count": group_count,
-            "options": self.options,
+            "options": _expr_list_text(self._options),
             "cells": flattened,
         }
 
@@ -553,7 +718,7 @@ class NotebookDocument:
     def render(self) -> str:
         rendered_items = ",\n".join(item.render() for item in self.items)
         args = [f"{{\n{rendered_items}\n}}"]
-        args.extend(self.options)
+        args.extend(_expr_list_text(self._options))
         return f"{self.preamble}Notebook[{', '.join(args)}]\n"
 
     def save(self, path: Path | None = None) -> Path:
@@ -649,12 +814,12 @@ class NotebookDocument:
 
     def set_option(self, name: str, value_expr: str) -> None:
         replacement = f"{name}->{value_expr}"
-        for index, option in enumerate(self.options):
-            compact = option.replace(" ", "")
+        for index, option in enumerate(self._options):
+            compact = _expr_text(option).replace(" ", "")
             if compact.startswith(f"{name}->"):
-                self.options[index] = replacement
+                self._options[index] = replacement
                 return
-        self.options.append(replacement)
+        self._options.append(replacement)
 
 
 def load_patch_spec(path: Path) -> dict[str, object]:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
 from tungsten.discovery import discover_installation
-from tungsten.notebook import NotebookDocument, apply_patch_spec, parse_call
+from tungsten.notebook import NotebookDocument, SourceSpan, apply_patch_spec, parse_call
 
 
 SAMPLE_NOTEBOOK = """(* sample header *)
@@ -45,6 +46,16 @@ class NotebookDocumentTests(unittest.TestCase):
         self.assertEqual(summary["cells"][1]["path"], [1, 0])
         self.assertEqual(document.cell_at_flat_index(1)["path"], [1, 0])
         self.assertEqual(document.cell_at_path([1, 1])["preview"], "Body text")
+
+    def test_notebook_parser_keeps_public_text_api_over_span_internals(self) -> None:
+        document = NotebookDocument.from_text(SAMPLE_NOTEBOOK)
+        cell = document.item_at_flat_index(0)
+
+        self.assertIsInstance(cell.content_expr, str)  # type: ignore[attr-defined]
+        self.assertIsInstance(cell.options[0], str)  # type: ignore[attr-defined]
+        self.assertIsInstance(cell._content_expr, SourceSpan)  # type: ignore[attr-defined]
+        self.assertEqual(document.summary()["cell_count"], 4)
+        json.dumps(document.to_dict())
 
     def test_patch_operations(self) -> None:
         document = NotebookDocument.from_text(SAMPLE_NOTEBOOK)
