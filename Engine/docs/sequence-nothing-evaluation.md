@@ -4,7 +4,7 @@
 - Audience: Tungsten maintainers and users who need precise offline evaluation behavior
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T01:00:00Z
-- Updated (UTC): 2026-04-25T20:58:10Z
+- Updated (UTC): 2026-04-25T23:42:00Z
 - Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related Wolfram docs:
   - [Sequence](https://reference.wolfram.com/language/ref/Sequence.html)
@@ -12,6 +12,10 @@
   - [HoldAll](https://reference.wolfram.com/language/ref/HoldAll.html)
   - [HoldAllComplete](https://reference.wolfram.com/language/ref/HoldAllComplete.html)
   - [SequenceHold](https://reference.wolfram.com/language/ref/SequenceHold.html)
+  - [Evaluate](https://reference.wolfram.com/language/ref/Evaluate.html)
+  - [Unevaluated](https://reference.wolfram.com/language/ref/Unevaluated.html)
+  - [Inactive](https://reference.wolfram.com/language/ref/Inactive.html)
+  - [Activate](https://reference.wolfram.com/language/ref/Activate.html)
 
 ## Purpose
 
@@ -21,8 +25,7 @@ bounded, explicit version of those rules so common structural transformations su
 list element with `Nothing` or constructing a call with `Sequence` work without launching a kernel.
 
 This document defines that behavior. It also states where Tungsten deliberately stops because it
-does not implement evaluator-wide attribute semantics, definitions, upvalues, or inactive
-expressions. The separate symbol registry can report read-only Wolfram 14.3 <code>System`</code> attributes,
+does not implement evaluator-wide attribute semantics, definitions, or upvalues. The separate symbol registry can report read-only Wolfram 14.3 <code>System`</code> attributes,
 but most of those attributes do not drive evaluation here.
 
 ## Source Observations
@@ -51,6 +54,11 @@ Live-kernel probes on Wolfram 14.3 confirmed these representative cases:
 | `<|a -> Nothing, b -> 1|>` | `<|a -> Nothing, b -> 1|>` |
 | `{a, b} /. a -> Nothing` | `{b}` |
 | `Hold[{a, b}] /. a -> Nothing` | `Hold[{Nothing, b}]` |
+| `Hold[Evaluate[1 + 2]]` | `Hold[3]` |
+| `HoldComplete[Evaluate[1 + 2]]` | `HoldComplete[Evaluate[1 + 2]]` |
+| `Evaluate[Unevaluated[1 + 2]]` | `3` |
+| `Inactive[Plus][1 + 2, 3 + 4]` | `Inactive[Plus][3, 7]` |
+| `Activate[Inactive[Plus][Inactive[Times][2, 3], 4], Times]` | `Inactive[Plus][6, 4]` |
 
 ## Evaluation Phases
 
@@ -86,6 +94,13 @@ Tungsten treats `Sequence` as follows:
   sequence payload.
 - Tungsten suppresses `Sequence` splicing for `HoldComplete`, `Unevaluated`, `Rule`, and
   `RuleDelayed`.
+- Direct `Evaluate[...]` inside `Hold`, `HoldForm`, `HoldPattern`, `Function`, or `Inactive`
+  overrides holding for that one argument before sequence splicing. `HoldComplete` and
+  `Unevaluated` have `HoldAllComplete` behavior in Tungsten and therefore keep `Evaluate[...]`
+  inert.
+- Direct `Unevaluated[expr]` subjects are treated transparently by supported structural functions
+  such as `Length`, `Head`, `Part`, `Map`, pattern functions, and replacement functions. Tungsten
+  deliberately does not strip `Unevaluated` from inert unknown heads or from list construction.
 
 Tungsten does not implement evaluator-wide attributes. User-defined or unknown symbols cannot
 acquire `SequenceHold` or `HoldAllComplete` behavior in the offline evaluator. The suppression list
@@ -130,8 +145,6 @@ Tungsten does not implement:
 
 - mutable `Attributes` or evaluator-wide attribute semantics;
 - user-defined `SequenceHold` or `HoldAllComplete`;
-- `Inactive`;
-- `Unevaluated` stripping outside the narrow held-wrapper behavior already documented;
 - side-effect fidelity for discarded arguments, beyond structurally evaluating arguments before
   `Nothing[...]` collapses to `Nothing`.
 

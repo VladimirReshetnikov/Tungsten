@@ -864,72 +864,7 @@ class Call(Expr):
         return f"{self.head_expr.to_full_form()}[{', '.join(arg.to_full_form() for arg in self.arguments)}]"
 
     def to_input_form(self) -> str:
-        if isinstance(self.head_expr, Symbol):
-            head_name = self.head_expr.name
-            if head_name == "List":
-                return "{" + ", ".join(arg.to_input_form() for arg in self.arguments) + "}"
-            if head_name == "Association":
-                return "<|" + ", ".join(arg.to_input_form() for arg in self.arguments) + "|>"
-            if head_name == "StringExpression" and self.arguments:
-                return " ~~ ".join(_wrap_infix(arg) for arg in self.arguments)
-            if head_name == "SameQ" and len(self.arguments) >= 2:
-                return " === ".join(_wrap_infix(arg) for arg in self.arguments)
-            if head_name == "UnsameQ" and len(self.arguments) >= 2:
-                return " =!= ".join(_wrap_infix(arg) for arg in self.arguments)
-            if head_name == "Condition" and len(self.arguments) == 2:
-                return f"{_wrap_infix(self.arguments[0])} /; {_wrap_infix(self.arguments[1])}"
-            if head_name == "PatternTest" and len(self.arguments) == 2:
-                return f"{_wrap_pattern_operand(self.arguments[0])}?{_wrap_pattern_operand(self.arguments[1])}"
-            if head_name == "Optional" and len(self.arguments) == 1:
-                return f"{_wrap_optional_operand(self.arguments[0])}."
-            if head_name == "Optional" and len(self.arguments) == 2:
-                return f"{_wrap_optional_operand(self.arguments[0])}:{_wrap_infix(self.arguments[1])}"
-            if head_name == "Repeated" and len(self.arguments) == 1:
-                return f"{_wrap_infix(self.arguments[0])}.."
-            if head_name == "RepeatedNull" and len(self.arguments) == 1:
-                return f"{_wrap_infix(self.arguments[0])}..."
-            if head_name == "Rule" and len(self.arguments) == 2:
-                return f"{_wrap_infix(self.arguments[0])} -> {_wrap_infix(self.arguments[1])}"
-            if head_name == "RuleDelayed" and len(self.arguments) == 2:
-                return f"{_wrap_infix(self.arguments[0])} :> {_wrap_infix(self.arguments[1])}"
-            if head_name == "Pattern" and len(self.arguments) == 2 and isinstance(self.arguments[0], Symbol):
-                inner = self.arguments[1]
-                if isinstance(inner, Call) and inner.has_head("Blank"):
-                    if len(inner.arguments) == 0:
-                        return f"{self.arguments[0].to_input_form()}_"
-                    if len(inner.arguments) == 1:
-                        return f"{self.arguments[0].to_input_form()}_{inner.arguments[0].to_input_form()}"
-                return f"{self.arguments[0].to_input_form()} : {_wrap_infix(inner)}"
-            if head_name == "Composition" and len(self.arguments) >= 2:
-                return " @* ".join(_wrap_infix(arg) for arg in self.arguments)
-            if head_name == "RightComposition" and len(self.arguments) >= 2:
-                return " /* ".join(_wrap_infix(arg) for arg in self.arguments)
-            if head_name == "Plus" and self.arguments:
-                pieces: list[str] = []
-                for index, arg in enumerate(self.arguments):
-                    if index > 0 and _is_negative_term(arg):
-                        pieces.append("- " + _wrap_infix(_strip_negative_term(arg)))
-                    elif index > 0:
-                        pieces.append("+ " + _wrap_infix(arg))
-                    else:
-                        pieces.append(_wrap_infix(arg))
-                return " ".join(pieces)
-            if head_name == "Times" and self.arguments:
-                return " * ".join(_wrap_infix(arg) for arg in self.arguments)
-            if head_name == "Power" and len(self.arguments) == 2:
-                return f"{_wrap_infix(self.arguments[0])}^{_wrap_infix(self.arguments[1])}"
-            if head_name == "Dot" and len(self.arguments) >= 2:
-                return " . ".join(_wrap_infix(arg) for arg in self.arguments)
-            if head_name == "Not" and len(self.arguments) == 1:
-                return "!" + _wrap_infix(self.arguments[0])
-            if head_name == "Span" and self.arguments:
-                return _format_span(self.arguments)
-            if head_name == "Part" and len(self.arguments) >= 1:
-                expr = _wrap_infix(self.arguments[0])
-                spec = ", ".join(arg.to_input_form() for arg in self.arguments[1:])
-                return f"{expr}[[{spec}]]"
-
-        return f"{self.head_expr.to_input_form()}[{', '.join(arg.to_input_form() for arg in self.arguments)}]"
+        return _format_input(self)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -939,36 +874,316 @@ class Call(Expr):
         }
 
 
-def _wrap_infix(expr: Expr) -> str:
-    if isinstance(expr, (Symbol, Integer, Real, String)):
-        return expr.to_input_form()
-    return f"({expr.to_input_form()})"
+_PREC_ATOM = 1000
+_PREC_CALL = 190
+_PREC_PART = 190
+_PREC_PATTERN = 185
+_PREC_PATTERN_TEST = 184
+_PREC_POWER = 160
+_PREC_PREFIX = 150
+_PREC_TIMES = 140
+_PREC_PLUS = 120
+_PREC_COMPARE = 100
+_PREC_AND = 80
+_PREC_OR = 70
+_PREC_ALTERNATIVES = 65
+_PREC_STRING_EXPRESSION = 64
+_PREC_NAMED_PATTERN = 63
+_PREC_CONDITION = 62
+_PREC_RULE = 60
+_PREC_REPLACE = 50
+_PREC_MAP = 45
+_PREC_APPLY = 44
+_PREC_COMPOSITION = 43
+_PREC_POSTFIX = 30
+_PREC_SEMICOLON = 20
+_PREC_FUNCTION = 10
+_PREC_LOWEST = 0
 
 
-def _wrap_pattern_operand(expr: Expr) -> str:
-    if isinstance(expr, (Symbol, Integer, Real, String)):
-        return expr.to_input_form()
-    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
-        if expr.head_expr.name in {
-            "Blank",
-            "BlankSequence",
-            "BlankNullSequence",
-            "Pattern",
-            "PatternTest",
-            "Repeated",
-            "RepeatedNull",
-        }:
-            return expr.to_input_form()
-    return f"({expr.to_input_form()})"
+_INFIX_OPERATOR_HEADS: dict[str, tuple[str, int, bool, bool]] = {
+    "Equal": ("==", _PREC_COMPARE, True, True),
+    "Unequal": ("!=", _PREC_COMPARE, True, True),
+    "SameQ": ("===", _PREC_COMPARE, True, True),
+    "UnsameQ": ("=!=", _PREC_COMPARE, True, True),
+    "Less": ("<", _PREC_COMPARE, True, True),
+    "LessEqual": ("<=", _PREC_COMPARE, True, True),
+    "Greater": (">", _PREC_COMPARE, True, True),
+    "GreaterEqual": (">=", _PREC_COMPARE, True, True),
+    "And": ("&&", _PREC_AND, False, True),
+    "Or": ("||", _PREC_OR, False, True),
+    "Alternatives": ("|", _PREC_ALTERNATIVES, False, True),
+    "StringExpression": ("~~", _PREC_STRING_EXPRESSION, False, False),
+    "Rule": ("->", _PREC_RULE, True, True),
+    "RuleDelayed": (":>", _PREC_RULE, True, True),
+    "ReplaceAll": ("/.", _PREC_REPLACE, False, True),
+    "ReplaceRepeated": ("//.", _PREC_REPLACE, False, True),
+    "Map": ("/@", _PREC_MAP, False, True),
+    "MapAll": ("//@", _PREC_MAP, False, True),
+    "Apply": ("@@", _PREC_APPLY, False, True),
+    "MapApply": ("@@@", _PREC_APPLY, False, True),
+    "Composition": ("@*", _PREC_COMPOSITION, True, True),
+    "RightComposition": ("/*", _PREC_COMPOSITION, True, True),
+    "Dot": (".", _PREC_TIMES, False, True),
+    "StringJoin": ("<>", _PREC_PLUS, False, True),
+}
 
 
-def _wrap_optional_operand(expr: Expr) -> str:
-    if isinstance(expr, (Symbol, Integer, Real, String)):
-        return expr.to_input_form()
-    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
-        if expr.head_expr.name in {"Blank", "BlankSequence", "BlankNullSequence", "Pattern", "PatternTest"}:
-            return expr.to_input_form()
-    return f"({expr.to_input_form()})"
+def _format_input(expr: Expr, parent_precedence: int = _PREC_LOWEST) -> str:
+    if isinstance(expr, Call):
+        text, precedence = _format_call_input(expr)
+    else:
+        text, precedence = expr.to_input_form(), _PREC_ATOM
+
+    if precedence < parent_precedence:
+        return f"({text})"
+    return text
+
+
+def _format_call_input(expr: Call) -> tuple[str, int]:
+    slot_name = _format_slot_name_shorthand(expr)
+    if slot_name is not None:
+        return slot_name, _PREC_ATOM
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+
+        if head_name == "List":
+            return "{" + ", ".join(_format_input(arg) for arg in arguments) + "}", _PREC_ATOM
+        if head_name == "Association":
+            return "<|" + ", ".join(_format_input(arg) for arg in arguments) + "|>", _PREC_ATOM
+        if head_name in {"Blank", "BlankSequence", "BlankNullSequence"}:
+            formatted_blank = _format_blank(head_name, arguments)
+            if formatted_blank is not None:
+                return formatted_blank, _PREC_ATOM
+        if head_name == "Slot":
+            formatted_slot = _format_slot(arguments)
+            if formatted_slot is not None:
+                return formatted_slot, _PREC_ATOM
+        if head_name == "SlotSequence":
+            formatted_slot_sequence = _format_slot_sequence(arguments)
+            if formatted_slot_sequence is not None:
+                return formatted_slot_sequence, _PREC_ATOM
+        if head_name == "Out":
+            formatted_out = _format_out(arguments)
+            if formatted_out is not None:
+                return formatted_out, _PREC_ATOM
+        if head_name == "Pattern" and len(arguments) == 2 and isinstance(arguments[0], Symbol):
+            return _format_pattern(arguments[0], arguments[1]), _PREC_PATTERN
+        if head_name == "PatternTest" and len(arguments) == 2:
+            return (
+                f"{_format_input(arguments[0], _PREC_PATTERN_TEST)}?{_format_input(arguments[1], _PREC_PATTERN_TEST + 1)}",
+                _PREC_PATTERN_TEST,
+            )
+        if head_name == "Optional" and len(arguments) == 1:
+            return f"{_format_input(arguments[0], _PREC_PATTERN)}.", _PREC_PATTERN
+        if head_name == "Optional" and len(arguments) == 2:
+            return (
+                f"{_format_input(arguments[0], _PREC_NAMED_PATTERN)}:{_format_input(arguments[1], _PREC_NAMED_PATTERN)}",
+                _PREC_NAMED_PATTERN,
+            )
+        if head_name == "Repeated" and len(arguments) == 1:
+            return f"{_format_input(arguments[0], _PREC_POSTFIX)}..", _PREC_POSTFIX
+        if head_name == "RepeatedNull" and len(arguments) == 1:
+            return f"{_format_input(arguments[0], _PREC_POSTFIX)}...", _PREC_POSTFIX
+        if head_name == "Condition" and len(arguments) == 2:
+            return (
+                f"{_format_input(arguments[0], _PREC_CONDITION)} /; {_format_input(arguments[1], _PREC_CONDITION + 1)}",
+                _PREC_CONDITION,
+            )
+        if head_name == "Function":
+            formatted_function = _format_function(arguments)
+            if formatted_function is not None:
+                return formatted_function
+        if head_name in _INFIX_OPERATOR_HEADS and len(arguments) >= 2:
+            operator, precedence, right_associative, spaced = _INFIX_OPERATOR_HEADS[head_name]
+            return _format_infix(arguments, operator, precedence, right_associative=right_associative, spaced=spaced), precedence
+        if head_name == "Plus" and arguments:
+            return _format_plus(arguments), _PREC_PLUS
+        if head_name == "Times" and arguments:
+            return _format_times(arguments), _PREC_TIMES
+        if head_name == "Power" and len(arguments) == 2:
+            return _format_power(arguments[0], arguments[1]), _PREC_POWER
+        if head_name == "Not" and len(arguments) == 1:
+            return "!" + _format_input(arguments[0], _PREC_PREFIX), _PREC_PREFIX
+        if head_name == "Span" and arguments:
+            return _format_span(arguments), _PREC_FUNCTION
+        if head_name == "Part" and len(arguments) >= 1:
+            target = _format_input(arguments[0], _PREC_PART)
+            spec = ", ".join(_format_input(arg) for arg in arguments[1:])
+            return f"{target}[[{spec}]]", _PREC_PART
+
+    head = _format_input(expr.head_expr, _PREC_CALL)
+    args = ", ".join(_format_input(arg) for arg in expr.arguments)
+    return f"{head}[{args}]", _PREC_CALL
+
+
+def _format_infix(
+    arguments: Sequence[Expr],
+    operator: str,
+    precedence: int,
+    *,
+    right_associative: bool,
+    spaced: bool,
+) -> str:
+    separator = f" {operator} " if spaced else operator
+    pieces: list[str] = []
+    last_index = len(arguments) - 1
+    for index, argument in enumerate(arguments):
+        if right_associative:
+            operand_precedence = precedence + 1 if index == 0 else precedence
+        else:
+            operand_precedence = precedence if index == 0 else precedence + 1
+        if 0 < index < last_index:
+            operand_precedence = precedence + 1
+        pieces.append(_format_input(argument, operand_precedence))
+    return separator.join(pieces)
+
+
+def _format_blank(head_name: str, arguments: Sequence[Expr]) -> str | None:
+    prefix = {
+        "Blank": "_",
+        "BlankSequence": "__",
+        "BlankNullSequence": "___",
+    }[head_name]
+    if len(arguments) == 0:
+        return prefix
+    if len(arguments) == 1 and isinstance(arguments[0], Symbol):
+        return prefix + arguments[0].to_input_form()
+    return None
+
+
+def _format_pattern(name: Symbol, pattern: Expr) -> str:
+    if isinstance(pattern, Call) and isinstance(pattern.head_expr, Symbol):
+        head_name = _system_dispatch_name(pattern.head_expr)
+        if head_name in {"Blank", "BlankSequence", "BlankNullSequence"}:
+            formatted_blank = _format_blank(head_name, pattern.arguments)
+            if formatted_blank is not None:
+                return f"{name.to_input_form()}{formatted_blank}"
+    return f"{name.to_input_form()} : {_format_input(pattern, _PREC_NAMED_PATTERN)}"
+
+
+def _format_function(arguments: Sequence[Expr]) -> tuple[str, int] | None:
+    if len(arguments) == 1:
+        return f"{_format_input(arguments[0], _PREC_FUNCTION + 1)} &", _PREC_FUNCTION
+    if len(arguments) == 2:
+        parameters, body = arguments
+        return (
+            f"{_format_function_parameters(parameters)} |-> {_format_input(body, _PREC_FUNCTION)}",
+            _PREC_FUNCTION,
+        )
+    return None
+
+
+def _format_function_parameters(parameters: Expr) -> str:
+    if isinstance(parameters, Call) and parameters.has_head("List"):
+        return "{" + ", ".join(_format_input(parameter) for parameter in parameters.arguments) + "}"
+    return _format_input(parameters, _PREC_FUNCTION + 1)
+
+
+def _format_slot(arguments: Sequence[Expr]) -> str | None:
+    if len(arguments) == 0:
+        return "#"
+    if len(arguments) == 1 and isinstance(arguments[0], Integer):
+        if arguments[0].value == 1:
+            return "#"
+        return f"#{arguments[0].value}"
+    if len(arguments) == 1 and isinstance(arguments[0], String) and _is_simple_slot_name(arguments[0].value):
+        return f"#{arguments[0].value}"
+    return None
+
+
+def _format_slot_sequence(arguments: Sequence[Expr]) -> str | None:
+    if len(arguments) == 0:
+        return "##"
+    if len(arguments) == 1 and isinstance(arguments[0], Integer):
+        if arguments[0].value == 1:
+            return "##"
+        return f"##{arguments[0].value}"
+    return None
+
+
+def _format_slot_name_shorthand(expr: Call) -> str | None:
+    if len(expr.arguments) != 1 or not isinstance(expr.arguments[0], String):
+        return None
+    if not isinstance(expr.head_expr, Call) or not expr.head_expr.has_head("Slot"):
+        return None
+    if len(expr.head_expr.arguments) != 1:
+        return None
+    slot_index = expr.head_expr.arguments[0]
+    if not isinstance(slot_index, Integer) or slot_index.value != 1:
+        return None
+    if not _is_simple_slot_name(expr.arguments[0].value):
+        return None
+    return f"#{expr.arguments[0].value}"
+
+
+def _is_simple_slot_name(value: str) -> bool:
+    return re.fullmatch(r"[$A-Za-z][$A-Za-z0-9]*", value) is not None
+
+
+def _format_out(arguments: Sequence[Expr]) -> str | None:
+    if len(arguments) != 1 or not isinstance(arguments[0], Integer):
+        return None
+    line = arguments[0].value
+    if line < 0:
+        return "%" * abs(line)
+    return None
+
+
+def _format_plus(arguments: Sequence[Expr]) -> str:
+    pieces: list[str] = []
+    for index, argument in enumerate(arguments):
+        if _is_negative_term(argument):
+            stripped = _strip_negative_term(argument)
+            if index == 0:
+                formatted = _format_input(stripped, _PREC_PREFIX)
+                pieces.append("-" + formatted)
+            else:
+                formatted = _format_input(stripped, _PREC_PLUS + 1)
+                pieces.append("- " + formatted)
+        elif index == 0:
+            pieces.append(_format_input(argument, _PREC_PLUS))
+        else:
+            pieces.append("+ " + _format_input(argument, _PREC_PLUS + 1))
+    return " ".join(pieces)
+
+
+def _format_times(arguments: Sequence[Expr]) -> str:
+    if len(arguments) == 2:
+        denominator = _inverse_denominator(arguments[1])
+        if denominator is not None:
+            return f"{_format_input(arguments[0], _PREC_TIMES)} / {_format_input(denominator, _PREC_TIMES + 1)}"
+
+    if arguments and isinstance(arguments[0], Integer) and arguments[0].value == -1:
+        stripped = arguments[1] if len(arguments) == 2 else call("Times", *arguments[1:])
+        if len(arguments) == 2:
+            return "-" + _format_input(stripped, _PREC_PREFIX)
+        return "-" + _format_input(stripped, _PREC_PREFIX)
+
+    return " * ".join(_format_input(argument, _PREC_TIMES + (0 if index == 0 else 1)) for index, argument in enumerate(arguments))
+
+
+def _inverse_denominator(expr: Expr) -> Expr | None:
+    if (
+        isinstance(expr, Call)
+        and expr.has_head("Power")
+        and len(expr.arguments) == 2
+        and isinstance(expr.arguments[1], Integer)
+        and expr.arguments[1].value == -1
+    ):
+        return expr.arguments[0]
+    return None
+
+
+def _format_power(base: Expr, exponent: Expr) -> str:
+    formatted_base = _format_input(base, _PREC_POWER + 1)
+    if isinstance(exponent, Integer) and exponent.value < 0:
+        formatted_exponent = f"({exponent.to_input_form()})"
+    else:
+        formatted_exponent = _format_input(exponent, _PREC_POWER)
+    return f"{formatted_base}^{formatted_exponent}"
 
 
 def _is_negative_term(expr: Expr) -> bool:
@@ -4140,6 +4355,8 @@ def _match_optional_sequence(
     exprs: Sequence[Expr],
     pattern: Call,
     bindings: dict[str, Expr],
+    *,
+    ignore_inactive: bool = False,
 ) -> dict[str, Expr] | None:
     if len(pattern.arguments) not in {1, 2}:
         raise WolframEvaluationError("Optional expects one or two arguments.")
@@ -4147,7 +4364,12 @@ def _match_optional_sequence(
         if len(pattern.arguments) == 1:
             return None
         return _bind_optional_default(pattern.arguments[0], pattern.arguments[1], bindings)
-    return _match_sequence_pattern_elements(exprs, pattern.arguments[0], bindings)
+    return _match_sequence_pattern_elements(
+        exprs,
+        pattern.arguments[0],
+        bindings,
+        ignore_inactive=ignore_inactive,
+    )
 
 
 def _is_option_expr(expr: Expr) -> bool:
@@ -4173,6 +4395,8 @@ def _match_repeated_sequence(
     exprs: Sequence[Expr],
     pattern: Call,
     bindings: dict[str, Expr],
+    *,
+    ignore_inactive: bool = False,
 ) -> dict[str, Expr] | None:
     if len(pattern.arguments) not in {1, 2}:
         raise WolframEvaluationError(f"{pattern.head_expr.name} expects one or two arguments.")
@@ -4195,7 +4419,12 @@ def _match_repeated_sequence(
         if concrete_min > concrete_max:
             return None
         for length in _sequence_length_order(item_pattern, concrete_min, concrete_max):
-            matched = _match_sequence_pattern_elements(exprs[position:position + length], item_pattern, current)
+            matched = _match_sequence_pattern_elements(
+                exprs[position:position + length],
+                item_pattern,
+                current,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 continue
             result = recurse(position + length, count + 1, matched)
@@ -4212,11 +4441,13 @@ def _match_orderless_pattern_sequence(
     exprs: Sequence[Expr],
     pattern: Call,
     bindings: dict[str, Expr],
+    *,
+    ignore_inactive: bool = False,
 ) -> dict[str, Expr] | None:
     if not pattern.arguments:
         return dict(bindings) if not exprs else None
     for permutation in itertools.permutations(pattern.arguments):
-        matched = _match_call_arguments(exprs, permutation, bindings)
+        matched = _match_call_arguments(exprs, permutation, bindings, ignore_inactive=ignore_inactive)
         if matched is not None:
             return matched
     return None
@@ -4226,6 +4457,8 @@ def _match_sequence_pattern_elements(
     exprs: Sequence[Expr],
     pattern: Expr,
     bindings: dict[str, Expr],
+    *,
+    ignore_inactive: bool = False,
 ) -> dict[str, Expr] | None:
     if isinstance(pattern, Call) and isinstance(pattern.head_expr, Symbol):
         head_name = pattern.head_expr.name
@@ -4234,7 +4467,12 @@ def _match_sequence_pattern_elements(
             if not pattern.arguments:
                 return None
             for branch in pattern.arguments:
-                matched = _match_sequence_pattern_elements(exprs, branch, bindings)
+                matched = _match_sequence_pattern_elements(
+                    exprs,
+                    branch,
+                    bindings,
+                    ignore_inactive=ignore_inactive,
+                )
                 if matched is not None:
                     return matched
             return None
@@ -4242,12 +4480,32 @@ def _match_sequence_pattern_elements(
         if head_name == "HoldPattern":
             if len(pattern.arguments) != 1:
                 raise WolframEvaluationError("HoldPattern expects exactly one argument.")
-            return _match_sequence_pattern_elements(exprs, pattern.arguments[0], bindings)
+            return _match_sequence_pattern_elements(
+                exprs,
+                pattern.arguments[0],
+                bindings,
+                ignore_inactive=ignore_inactive,
+            )
+
+        if head_name == "IgnoringInactive":
+            if len(pattern.arguments) != 1:
+                raise WolframEvaluationError("IgnoringInactive expects exactly one pattern.")
+            return _match_sequence_pattern_elements(
+                exprs,
+                pattern.arguments[0],
+                bindings,
+                ignore_inactive=True,
+            )
 
         if head_name == "Condition":
             if len(pattern.arguments) != 2:
                 raise WolframEvaluationError("Condition expects exactly two arguments.")
-            matched = _match_sequence_pattern_elements(exprs, pattern.arguments[0], bindings)
+            matched = _match_sequence_pattern_elements(
+                exprs,
+                pattern.arguments[0],
+                bindings,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 return None
             return matched if _condition_test_succeeds(pattern.arguments[1], matched) else None
@@ -4255,18 +4513,28 @@ def _match_sequence_pattern_elements(
         if head_name in {"Longest", "Shortest"}:
             if len(pattern.arguments) not in {1, 2}:
                 raise WolframEvaluationError(f"{head_name} expects one or two arguments.")
-            return _match_sequence_pattern_elements(exprs, pattern.arguments[0], bindings)
+            return _match_sequence_pattern_elements(
+                exprs,
+                pattern.arguments[0],
+                bindings,
+                ignore_inactive=ignore_inactive,
+            )
 
         if head_name == "PatternTest":
             if len(pattern.arguments) != 2:
                 raise WolframEvaluationError("PatternTest expects exactly two arguments.")
-            matched = _match_sequence_pattern_elements(exprs, pattern.arguments[0], bindings)
+            matched = _match_sequence_pattern_elements(
+                exprs,
+                pattern.arguments[0],
+                bindings,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 return None
             return matched if all(_predicate_succeeds(pattern.arguments[1], expr) for expr in exprs) else None
 
         if head_name == "Optional":
-            return _match_optional_sequence(exprs, pattern, bindings)
+            return _match_optional_sequence(exprs, pattern, bindings, ignore_inactive=ignore_inactive)
 
         if head_name == "Pattern":
             if len(pattern.arguments) != 2:
@@ -4274,28 +4542,33 @@ def _match_sequence_pattern_elements(
             name_expr, inner_pattern = pattern.arguments
             if not isinstance(name_expr, Symbol):
                 raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
-            matched = _match_sequence_pattern_elements(exprs, inner_pattern, bindings)
+            matched = _match_sequence_pattern_elements(
+                exprs,
+                inner_pattern,
+                bindings,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 return None
             return _bind_pattern_name(matched, name_expr.name, _sequence_binding_value(exprs))
 
         if head_name == "PatternSequence":
-            return _match_call_arguments(exprs, pattern.arguments, bindings)
+            return _match_call_arguments(exprs, pattern.arguments, bindings, ignore_inactive=ignore_inactive)
 
         if head_name == "OrderlessPatternSequence":
-            return _match_orderless_pattern_sequence(exprs, pattern, bindings)
+            return _match_orderless_pattern_sequence(exprs, pattern, bindings, ignore_inactive=ignore_inactive)
 
         if head_name == "OptionsPattern":
             return _match_options_pattern_sequence(exprs, pattern, bindings)
 
         if head_name in {"Repeated", "RepeatedNull"}:
-            return _match_repeated_sequence(exprs, pattern, bindings)
+            return _match_repeated_sequence(exprs, pattern, bindings, ignore_inactive=ignore_inactive)
 
     head_name = _direct_sequence_pattern_head_name(pattern)
     if head_name is None:
         if len(exprs) != 1:
             return None
-        return _match_pattern(exprs[0], pattern, bindings)
+        return _match_pattern(exprs[0], pattern, bindings, ignore_inactive=ignore_inactive)
 
     assert isinstance(pattern, Call)
     if len(pattern.arguments) > 1:
@@ -4306,7 +4579,7 @@ def _match_sequence_pattern_elements(
     matched = dict(bindings)
     element_pattern = call("Blank", *pattern.arguments)
     for item in exprs:
-        matched = _match_pattern(item, element_pattern, matched)
+        matched = _match_pattern(item, element_pattern, matched, ignore_inactive=ignore_inactive)
         if matched is None:
             return None
     return matched
@@ -4316,6 +4589,8 @@ def _match_call_arguments(
     expr_arguments: Sequence[Expr],
     pattern_arguments: Sequence[Expr],
     bindings: dict[str, Expr],
+    *,
+    ignore_inactive: bool = False,
 ) -> dict[str, Expr] | None:
     def recurse(expr_index: int, pattern_index: int, current: dict[str, Expr]) -> dict[str, Expr] | None:
         if pattern_index == len(pattern_arguments):
@@ -4327,7 +4602,12 @@ def _match_call_arguments(
         if not _is_sequence_argument_pattern(pattern_argument):
             if expr_index >= len(expr_arguments):
                 return None
-            matched = _match_pattern(expr_arguments[expr_index], pattern_argument, current)
+            matched = _match_pattern(
+                expr_arguments[expr_index],
+                pattern_argument,
+                current,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 return None
             return recurse(expr_index + 1, pattern_index + 1, matched)
@@ -4337,7 +4617,12 @@ def _match_call_arguments(
         max_length = min(pattern_max_length, len(expr_arguments) - expr_index - remaining_minimum)
         for length in _sequence_length_order(pattern_argument, min_length, max_length):
             segment = expr_arguments[expr_index:expr_index + length]
-            matched = _match_sequence_pattern_elements(segment, pattern_argument, current)
+            matched = _match_sequence_pattern_elements(
+                segment,
+                pattern_argument,
+                current,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 continue
             final = recurse(expr_index + length, pattern_index + 1, matched)
@@ -4404,88 +4689,176 @@ def _match_key_value_pattern(
     return recurse(0, frozenset(), dict(bindings))
 
 
+def _active_view(expr: Expr) -> Expr:
+    if _is_inactive_wrapper(expr):
+        assert isinstance(expr, Call)
+        return _active_view(expr.arguments[0])
+    if isinstance(expr, Call):
+        return Call(
+            head_expr=_active_view(expr.head_expr),
+            arguments=tuple(_active_view(argument) for argument in expr.arguments),
+        )
+    return expr
+
+
+def _inactive_ignoring_argument_view(expr: Expr, structural_expr: Expr) -> tuple[Expr, ...]:
+    if (
+        isinstance(expr, Call)
+        and isinstance(structural_expr, Call)
+        and not _is_inactive_wrapper(expr)
+        and len(expr.arguments) == len(structural_expr.arguments)
+    ):
+        return expr.arguments
+    if isinstance(structural_expr, Call):
+        return structural_expr.arguments
+    return ()
+
+
+def _inactive_ignoring_head_view(expr: Expr, structural_expr: Expr) -> Expr:
+    if isinstance(structural_expr, Call) and _is_inactive_wrapper(expr):
+        return structural_expr.head_expr
+    return head_of(expr)
+
+
 def _match_pattern(
     expr: Expr,
     pattern: Expr,
     bindings: dict[str, Expr] | None = None,
+    *,
+    ignore_inactive: bool = False,
 ) -> dict[str, Expr] | None:
     current = {} if bindings is None else dict(bindings)
+    structural_expr = _active_view(expr) if ignore_inactive else expr
+    structural_pattern = _active_view(pattern) if ignore_inactive else pattern
 
-    if isinstance(pattern, Call) and isinstance(pattern.head_expr, Symbol):
-        head_name = pattern.head_expr.name
+    if isinstance(structural_pattern, Call) and isinstance(structural_pattern.head_expr, Symbol):
+        head_name = structural_pattern.head_expr.name
+
+        if head_name == "IgnoringInactive":
+            if len(structural_pattern.arguments) != 1:
+                raise WolframEvaluationError("IgnoringInactive expects exactly one pattern.")
+            assert isinstance(pattern, Call)
+            return _match_pattern(expr, pattern.arguments[0], current, ignore_inactive=True)
 
         if head_name in _UNSUPPORTED_PATTERN_HEADS:
-            raise _unsupported_pattern(pattern)
+            raise _unsupported_pattern(structural_pattern)
 
         if head_name == "HoldPattern":
-            if len(pattern.arguments) != 1:
+            if len(structural_pattern.arguments) != 1:
                 raise WolframEvaluationError("HoldPattern expects exactly one argument.")
-            return _match_pattern(expr, pattern.arguments[0], current)
+            return _match_pattern(
+                expr,
+                structural_pattern.arguments[0],
+                current,
+                ignore_inactive=ignore_inactive,
+            )
 
         if head_name == "Verbatim":
-            if len(pattern.arguments) != 1:
+            if len(structural_pattern.arguments) != 1:
                 raise WolframEvaluationError("Verbatim expects exactly one argument.")
-            return current if expr == pattern.arguments[0] else None
+            if ignore_inactive:
+                return current if _active_view(expr) == _active_view(structural_pattern.arguments[0]) else None
+            return current if expr == structural_pattern.arguments[0] else None
 
         if head_name == "Except":
-            if len(pattern.arguments) == 1:
-                return current if _match_pattern(expr, pattern.arguments[0], current) is None else None
-            if len(pattern.arguments) == 2:
-                allowed = _match_pattern(expr, pattern.arguments[1], current)
+            if len(structural_pattern.arguments) == 1:
+                return current if _match_pattern(
+                    expr,
+                    structural_pattern.arguments[0],
+                    current,
+                    ignore_inactive=ignore_inactive,
+                ) is None else None
+            if len(structural_pattern.arguments) == 2:
+                allowed = _match_pattern(
+                    expr,
+                    structural_pattern.arguments[1],
+                    current,
+                    ignore_inactive=ignore_inactive,
+                )
                 if allowed is None:
                     return None
-                return allowed if _match_pattern(expr, pattern.arguments[0], current) is None else None
+                return allowed if _match_pattern(
+                    expr,
+                    structural_pattern.arguments[0],
+                    current,
+                    ignore_inactive=ignore_inactive,
+                ) is None else None
             raise WolframEvaluationError("Except expects one or two arguments.")
 
         if head_name == "Alternatives":
-            if not pattern.arguments:
+            if not structural_pattern.arguments:
                 return None
-            for branch in pattern.arguments:
-                matched = _match_pattern(expr, branch, current)
+            for branch in structural_pattern.arguments:
+                matched = _match_pattern(expr, branch, current, ignore_inactive=ignore_inactive)
                 if matched is not None:
                     return matched
             return None
 
         if head_name == "Condition":
-            if len(pattern.arguments) != 2:
+            if len(structural_pattern.arguments) != 2:
                 raise WolframEvaluationError("Condition expects exactly two arguments.")
-            matched = _match_pattern(expr, pattern.arguments[0], current)
+            matched = _match_pattern(
+                expr,
+                structural_pattern.arguments[0],
+                current,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 return None
-            return matched if _condition_test_succeeds(pattern.arguments[1], matched) else None
+            return matched if _condition_test_succeeds(structural_pattern.arguments[1], matched) else None
 
         if head_name in {"Longest", "Shortest"}:
-            if len(pattern.arguments) not in {1, 2}:
+            if len(structural_pattern.arguments) not in {1, 2}:
                 raise WolframEvaluationError(f"{head_name} expects one or two arguments.")
-            return _match_pattern(expr, pattern.arguments[0], current)
+            return _match_pattern(
+                expr,
+                structural_pattern.arguments[0],
+                current,
+                ignore_inactive=ignore_inactive,
+            )
 
         if head_name == "PatternTest":
-            if len(pattern.arguments) != 2:
+            if len(structural_pattern.arguments) != 2:
                 raise WolframEvaluationError("PatternTest expects exactly two arguments.")
-            matched = _match_pattern(expr, pattern.arguments[0], current)
+            matched = _match_pattern(
+                expr,
+                structural_pattern.arguments[0],
+                current,
+                ignore_inactive=ignore_inactive,
+            )
             if matched is None:
                 return None
-            return matched if _predicate_succeeds(pattern.arguments[1], expr) else None
+            return matched if _predicate_succeeds(structural_pattern.arguments[1], expr) else None
 
         if head_name == "Optional":
-            if len(pattern.arguments) not in {1, 2}:
+            if len(structural_pattern.arguments) not in {1, 2}:
                 raise WolframEvaluationError("Optional expects one or two arguments.")
-            return _match_pattern(expr, pattern.arguments[0], current)
+            return _match_pattern(
+                expr,
+                structural_pattern.arguments[0],
+                current,
+                ignore_inactive=ignore_inactive,
+            )
 
         if head_name == "KeyValuePattern":
-            if len(pattern.arguments) != 1:
+            if len(structural_pattern.arguments) != 1:
                 raise WolframEvaluationError("KeyValuePattern expects exactly one argument.")
-            return _match_key_value_pattern(expr, pattern.arguments[0], current)
+            return _match_key_value_pattern(expr, structural_pattern.arguments[0], current)
 
         if head_name == "Pattern":
-            if len(pattern.arguments) != 2:
+            if len(structural_pattern.arguments) != 2:
                 raise WolframEvaluationError("Pattern expects exactly two arguments.")
-            name_expr, inner_pattern = pattern.arguments
+            name_expr, inner_pattern = structural_pattern.arguments
             if not isinstance(name_expr, Symbol):
                 raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
             if _is_sequence_argument_pattern(inner_pattern):
-                return _match_sequence_pattern_elements((expr,), pattern, current)
-            matched = _match_pattern(expr, inner_pattern, current)
+                return _match_sequence_pattern_elements(
+                    (expr,),
+                    structural_pattern,
+                    current,
+                    ignore_inactive=ignore_inactive,
+                )
+            matched = _match_pattern(expr, inner_pattern, current, ignore_inactive=ignore_inactive)
             if matched is None:
                 return None
             bound = matched.get(name_expr.name)
@@ -4494,23 +4867,42 @@ def _match_pattern(
             return _bind_pattern_name(matched, name_expr.name, expr)
 
         if head_name == "Blank":
-            if len(pattern.arguments) == 0:
+            if len(structural_pattern.arguments) == 0:
                 return current
-            if len(pattern.arguments) == 1:
-                return _match_pattern(head_of(expr), pattern.arguments[0], current)
+            if len(structural_pattern.arguments) == 1:
+                return _match_pattern(
+                    head_of(expr),
+                    structural_pattern.arguments[0],
+                    current,
+                    ignore_inactive=ignore_inactive,
+                )
             raise WolframEvaluationError("Blank expects zero or one argument.")
 
         if head_name in _SEQUENCE_PATTERN_HEADS:
-            return _match_sequence_pattern_elements((expr,), pattern, current)
+            return _match_sequence_pattern_elements(
+                (expr,),
+                structural_pattern,
+                current,
+                ignore_inactive=ignore_inactive,
+            )
 
-    if isinstance(pattern, Call):
-        if not isinstance(expr, Call):
+    if isinstance(structural_pattern, Call):
+        if not isinstance(structural_expr, Call):
             return None
-        matched = _match_pattern(head_of(expr), pattern.head_expr, current)
+        expr_head = _inactive_ignoring_head_view(expr, structural_expr) if ignore_inactive else head_of(expr)
+        matched = _match_pattern(expr_head, structural_pattern.head_expr, current, ignore_inactive=ignore_inactive)
         if matched is None:
             return None
-        return _match_call_arguments(expr.arguments, pattern.arguments, matched)
+        assert isinstance(structural_expr, Call)
+        return _match_call_arguments(
+            _inactive_ignoring_argument_view(expr, structural_expr),
+            structural_pattern.arguments,
+            matched,
+            ignore_inactive=ignore_inactive,
+        )
 
+    if ignore_inactive:
+        return current if structural_expr == structural_pattern else None
     return current if expr == pattern else None
 
 
@@ -5513,11 +5905,161 @@ _SEQUENCE_SUPPRESSING_HEADS = {
 }
 
 
+_HOLD_ALL_COMPLETE_HEADS = {
+    "HoldComplete",
+    "Unevaluated",
+}
+
+
 _RELEASE_HOLD_HEADS = {
     "Hold",
     "HoldComplete",
     "HoldForm",
     "Unevaluated",
+}
+
+
+_UNEVALUATED_TRANSPARENT_HEADS = {
+    "Abs",
+    "And",
+    "Append",
+    "Apply",
+    "Array",
+    "BaseDecode",
+    "BaseEncode",
+    "BlockMap",
+    "Boole",
+    "ByteArray",
+    "ByteArrayQ",
+    "ByteArrayToString",
+    "Cases",
+    "Characters",
+    "Clip",
+    "Comap",
+    "ComapApply",
+    "ComposeList",
+    "Composition",
+    "ConstantArray",
+    "Construct",
+    "Delete",
+    "DeleteCases",
+    "DeleteDuplicates",
+    "DeleteDuplicatesBy",
+    "Depth",
+    "Discard",
+    "DiscreteDelta",
+    "Dot",
+    "Drop",
+    "DuplicateFreeQ",
+    "Equal",
+    "Extract",
+    "First",
+    "FirstCase",
+    "FixedPoint",
+    "FixedPointList",
+    "Flatten",
+    "Fold",
+    "FoldList",
+    "FoldPair",
+    "FoldPairList",
+    "FoldWhile",
+    "FoldWhileList",
+    "FreeQ",
+    "FromCharacterCode",
+    "Greater",
+    "GreaterEqual",
+    "Head",
+    "Identity",
+    "If",
+    "IntegerQ",
+    "Join",
+    "KroneckerDelta",
+    "Last",
+    "Length",
+    "LengthWhile",
+    "Less",
+    "LessEqual",
+    "Level",
+    "Lookup",
+    "Map",
+    "MapAll",
+    "MapApply",
+    "MapAt",
+    "MapIndexed",
+    "MapThread",
+    "MatchQ",
+    "Max",
+    "MemberQ",
+    "Min",
+    "Mod",
+    "Most",
+    "Nest",
+    "NestList",
+    "NestWhile",
+    "NestWhileList",
+    "Not",
+    "Operate",
+    "Or",
+    "Outer",
+    "Part",
+    "Partition",
+    "Pick",
+    "Plus",
+    "Position",
+    "Power",
+    "Prepend",
+    "Quotient",
+    "QuotientRemainder",
+    "Ramp",
+    "Range",
+    "RealAbs",
+    "RealSign",
+    "Replace",
+    "ReplaceAll",
+    "ReplaceAt",
+    "ReplacePart",
+    "ReplaceRepeated",
+    "Rest",
+    "Reverse",
+    "RightComposition",
+    "RotateLeft",
+    "RotateRight",
+    "SameQ",
+    "Scan",
+    "Select",
+    "SelectFirst",
+    "SequenceFold",
+    "SequenceFoldList",
+    "Sign",
+    "StringContainsQ",
+    "StringDrop",
+    "StringEndsQ",
+    "StringFreeQ",
+    "StringInsert",
+    "StringJoin",
+    "StringLength",
+    "StringMatchQ",
+    "StringPosition",
+    "StringReplace",
+    "StringReverse",
+    "StringStartsQ",
+    "StringTake",
+    "StringToByteArray",
+    "Switch",
+    "Take",
+    "TakeDrop",
+    "TakeList",
+    "TakeWhile",
+    "Thread",
+    "Through",
+    "Times",
+    "ToCharacterCode",
+    "Tuples",
+    "UnitStep",
+    "UnitVector",
+    "Unitize",
+    "UnsameQ",
+    "Which",
 }
 
 
@@ -5537,6 +6079,56 @@ def _is_nothing_expr(expr: Expr) -> bool:
 
 def _drop_nothing_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     return tuple(argument for argument in arguments if not _is_nothing_expr(argument))
+
+
+def _is_direct_evaluate_expr(expr: Expr) -> bool:
+    return isinstance(expr, Call) and expr.has_head("Evaluate") and len(expr.arguments) == 1
+
+
+def _is_direct_unevaluated_expr(expr: Expr) -> bool:
+    return isinstance(expr, Call) and expr.has_head("Unevaluated") and len(expr.arguments) == 1
+
+
+def _strip_unevaluated_argument(expr: Expr) -> Expr:
+    return expr.arguments[0] if _is_direct_unevaluated_expr(expr) and isinstance(expr, Call) else expr
+
+
+def _strip_unevaluated_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    return tuple(_strip_unevaluated_argument(argument) for argument in arguments)
+
+
+def _evaluate_direct_evaluate_argument(expr: Expr) -> Expr:
+    if not _is_direct_evaluate_expr(expr):
+        return expr
+    assert isinstance(expr, Call)
+    payload = expr.arguments[0]
+    # Wolfram's Evaluate only overrides holding at the first level. An
+    # Unevaluated wrapper immediately inside it blocks that override when the
+    # whole Evaluate[...] appears as the direct held argument.
+    if _is_direct_unevaluated_expr(payload):
+        return payload
+    return evaluate(payload)
+
+
+def _evaluate_evaluate_payload(expr: Expr) -> Expr:
+    if _is_direct_unevaluated_expr(expr):
+        assert isinstance(expr, Call)
+        return evaluate(expr.arguments[0])
+    return evaluate(expr)
+
+
+def _evaluate_transparent_argument(expr: Expr) -> Expr:
+    return _strip_unevaluated_argument(evaluate(expr))
+
+
+def _normalize_held_arguments_for_head(head_name: str, arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    normalized: list[Expr] = []
+    for argument in arguments:
+        if head_name not in _HOLD_ALL_COMPLETE_HEADS and _is_direct_evaluate_expr(argument):
+            normalized.append(_evaluate_direct_evaluate_argument(argument))
+        else:
+            normalized.append(argument)
+    return _normalize_arguments_for_head(head_name, normalized, evaluated=False)
 
 
 def _normalize_arguments_for_head(
@@ -5563,6 +6155,35 @@ def release_hold(expr: Expr) -> Expr:
             return evaluate(expr.arguments[0])
         return evaluate(call("Sequence", *expr.arguments))
     return expr
+
+
+def _is_inactive_wrapper(expr: Expr) -> bool:
+    return isinstance(expr, Call) and expr.has_head("Inactive") and len(expr.arguments) == 1
+
+
+def _inactive_target_matches(target: Expr, pattern: Expr | None) -> bool:
+    return pattern is None or _match_pattern(target, pattern) is not None
+
+
+def _activate_inactive(expr: Expr, pattern: Expr | None) -> Expr:
+    if _is_inactive_wrapper(expr):
+        assert isinstance(expr, Call)
+        target = expr.arguments[0]
+        activated_target = _activate_inactive(target, pattern)
+        if _inactive_target_matches(target, pattern):
+            return activated_target
+        return Call(head_expr=expr.head_expr, arguments=(activated_target,))
+
+    if isinstance(expr, Call):
+        activated_head = _activate_inactive(expr.head_expr, pattern)
+        activated_arguments = tuple(_activate_inactive(argument, pattern) for argument in expr.arguments)
+        return Call(head_expr=activated_head, arguments=activated_arguments)
+
+    return expr
+
+
+def activate_expr(expr: Expr, pattern: Expr | None = None) -> Expr:
+    return evaluate(_activate_inactive(expr, pattern))
 
 
 def first(expr: Expr, default: Expr | object = _MISSING) -> Expr:
@@ -8148,8 +8769,24 @@ def _evaluate(expr: Expr) -> Expr:
                 raise WolframEvaluationError("Attributes expects exactly one symbol, string name, or list argument.")
             return attributes_expr(expr.arguments[0])
 
+        if raw_head_name == "Evaluate":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("Evaluate expects exactly one argument.")
+            return _evaluate_evaluate_payload(expr.arguments[0])
+
+        if raw_head_name == "Inactive":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("Inactive expects exactly one argument.")
+            held_arguments = _normalize_held_arguments_for_head(raw_head_name, expr.arguments)
+            if len(held_arguments) != 1:
+                raise WolframEvaluationError("Inactive expects exactly one argument after Sequence splicing.")
+            target = held_arguments[0]
+            if isinstance(target, (Integer, Real, String, ByteArrayExpr)):
+                return target
+            return Call(head_expr=expr.head_expr, arguments=(target,))
+
         if raw_head_name in _HELD_ARGUMENT_HEADS:
-            held_arguments = _normalize_arguments_for_head(raw_head_name, expr.arguments, evaluated=False)
+            held_arguments = _normalize_held_arguments_for_head(raw_head_name, expr.arguments)
 
             if raw_head_name == "Function" and len(held_arguments) not in {1, 2, 3}:
                 raise WolframEvaluationError("Function expects one, two, or three arguments.")
@@ -8160,6 +8797,13 @@ def _evaluate(expr: Expr) -> Expr:
             if len(expr.arguments) != 1:
                 raise WolframEvaluationError("ReleaseHold expects exactly one argument.")
             return release_hold(evaluate(expr.arguments[0]))
+
+        if raw_head_name == "Activate":
+            if len(expr.arguments) == 1:
+                return activate_expr(evaluate(expr.arguments[0]))
+            if len(expr.arguments) == 2:
+                return activate_expr(evaluate(expr.arguments[0]), evaluate(expr.arguments[1]))
+            raise WolframEvaluationError("Activate expects an expression and an optional pattern.")
 
         if raw_head_name == "ValueQ":
             if len(expr.arguments) != 1:
@@ -8183,23 +8827,23 @@ def _evaluate(expr: Expr) -> Expr:
         if raw_head_name == "MatchQ":
             if len(expr.arguments) != 2:
                 raise WolframEvaluationError("MatchQ expects exactly two arguments.")
-            return match_q(evaluate(expr.arguments[0]), expr.arguments[1])
+            return match_q(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
 
         if raw_head_name == "FreeQ":
             if len(expr.arguments) == 2:
-                return free_q(evaluate(expr.arguments[0]), expr.arguments[1])
+                return free_q(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
             if len(expr.arguments) == 3:
-                return free_q(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+                return free_q(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
             raise WolframEvaluationError("FreeQ expects an expression, a pattern, and an optional level specification.")
 
         if raw_head_name == "Cases":
             if len(expr.arguments) == 2:
-                return cases(evaluate(expr.arguments[0]), expr.arguments[1])
+                return cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
             if len(expr.arguments) == 3:
-                return cases(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+                return cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
             if len(expr.arguments) == 4:
                 return cases(
-                    evaluate(expr.arguments[0]),
+                    _evaluate_transparent_argument(expr.arguments[0]),
                     expr.arguments[1],
                     evaluate(expr.arguments[2]),
                     evaluate(expr.arguments[3]),
@@ -8210,12 +8854,12 @@ def _evaluate(expr: Expr) -> Expr:
 
         if raw_head_name == "DeleteCases":
             if len(expr.arguments) == 2:
-                return delete_cases(evaluate(expr.arguments[0]), expr.arguments[1])
+                return delete_cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
             if len(expr.arguments) == 3:
-                return delete_cases(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+                return delete_cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
             if len(expr.arguments) == 4:
                 return delete_cases(
-                    evaluate(expr.arguments[0]),
+                    _evaluate_transparent_argument(expr.arguments[0]),
                     expr.arguments[1],
                     evaluate(expr.arguments[2]),
                     evaluate(expr.arguments[3]),
@@ -8226,9 +8870,9 @@ def _evaluate(expr: Expr) -> Expr:
 
         if raw_head_name == "Replace":
             if len(expr.arguments) == 2:
-                return replace(evaluate(expr.arguments[0]), expr.arguments[1])
+                return replace(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
             if len(expr.arguments) == 3:
-                return replace(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+                return replace(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
             raise WolframEvaluationError(
                 "Replace expects an expression, replacement rules, and an optional level specification."
             )
@@ -8236,30 +8880,30 @@ def _evaluate(expr: Expr) -> Expr:
         if raw_head_name == "ReplaceAll":
             if len(expr.arguments) != 2:
                 raise WolframEvaluationError("ReplaceAll expects exactly two arguments.")
-            return replace_all(evaluate(expr.arguments[0]), expr.arguments[1])
+            return replace_all(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
 
         if raw_head_name == "ReplaceRepeated":
             if len(expr.arguments) != 2:
                 raise WolframEvaluationError("ReplaceRepeated expects exactly two arguments.")
-            return replace_repeated(evaluate(expr.arguments[0]), expr.arguments[1])
+            return replace_repeated(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
 
         if raw_head_name == "ReplaceAt":
             if len(expr.arguments) != 3:
                 raise WolframEvaluationError("ReplaceAt expects exactly three arguments.")
-            return replace_at(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            return replace_at(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
 
         if raw_head_name == "StringCases":
             if len(expr.arguments) == 2:
-                return string_cases(evaluate(expr.arguments[0]), expr.arguments[1])
+                return string_cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
             if len(expr.arguments) == 3:
-                return string_cases(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+                return string_cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
             raise WolframEvaluationError("StringCases expects a string, a pattern or rule, and an optional match limit.")
 
         if raw_head_name == "StringReplace":
             if len(expr.arguments) == 2:
-                return string_replace(evaluate(expr.arguments[0]), expr.arguments[1])
+                return string_replace(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
             if len(expr.arguments) == 3:
-                return string_replace(evaluate(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+                return string_replace(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
             raise WolframEvaluationError("StringReplace expects a string, rules, and an optional replacement limit.")
 
         if raw_head_name == "Select":
@@ -8288,9 +8932,13 @@ def _evaluate(expr: Expr) -> Expr:
 
         if raw_head_name == "Pick":
             if len(expr.arguments) == 2:
-                return pick(evaluate(expr.arguments[0]), evaluate(expr.arguments[1]))
+                return pick(_evaluate_transparent_argument(expr.arguments[0]), _evaluate_transparent_argument(expr.arguments[1]))
             if len(expr.arguments) == 3:
-                return pick(evaluate(expr.arguments[0]), evaluate(expr.arguments[1]), expr.arguments[2])
+                return pick(
+                    _evaluate_transparent_argument(expr.arguments[0]),
+                    _evaluate_transparent_argument(expr.arguments[1]),
+                    expr.arguments[2],
+                )
             raise WolframEvaluationError("Pick expects a data expression, a selector expression, and an optional pattern.")
 
     evaluated_head = evaluate(expr.head_expr)
@@ -8321,6 +8969,8 @@ def _evaluate(expr: Expr) -> Expr:
     evaluated_head_name = _system_dispatch_name(evaluated_head)
     evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
     evaluated_arguments = _normalize_arguments_for_head(evaluated_head_name, evaluated_arguments, evaluated=True)
+    if evaluated_head_name in _UNEVALUATED_TRANSPARENT_HEADS:
+        evaluated_arguments = _strip_unevaluated_arguments(evaluated_arguments)
     evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     arithmetic_result = _evaluate_integer_arithmetic(evaluated_expr)

@@ -76,8 +76,9 @@ class ExpressionParserTests(unittest.TestCase):
         replace_all = parse_input_form("f[a] /. a -> b")
         replace_repeated = parse_standard_form("f[a] //. a -> b")
         self.assertEqual(replace_all.to_full_form(), "ReplaceAll[f[a], Rule[a, b]]")
-        self.assertEqual(replace_all.to_input_form(), "ReplaceAll[f[a], a -> b]")
+        self.assertEqual(replace_all.to_input_form(), "f[a] /. a -> b")
         self.assertEqual(replace_repeated.to_full_form(), "ReplaceRepeated[f[a], Rule[a, b]]")
+        self.assertEqual(replace_repeated.to_input_form(), "f[a] //. a -> b")
 
     def test_parse_condition_and_delayed_rule_precedence(self) -> None:
         condition = parse_input_form("x_ /; x > 0")
@@ -95,6 +96,9 @@ class ExpressionParserTests(unittest.TestCase):
             alternatives_condition.to_full_form(),
             "Condition[Alternatives[a, b], False]",
         )
+        self.assertEqual(condition.to_input_form(), "x_ /; x > 0")
+        self.assertEqual(delayed_rhs_condition.to_input_form(), "x_ :> x + 1 /; x > 0")
+        self.assertEqual(alternatives_condition.to_input_form(), "a | b /; False")
 
     def test_parse_pure_function_shorthand_and_slots(self) -> None:
         postfix = parse_input_form("f @ # &")
@@ -142,6 +146,38 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(dot_expr.to_full_form(), "Dot[List[a, b], List[c, d]]")
         self.assertEqual(string_join.to_full_form(), 'StringJoin[StringJoin["a", "b"], "c"]')
         self.assertEqual(output_history.to_full_form(), "Plus[Plus[Out[-1], Out[-2]], Out[12]]")
+        self.assertEqual(same_q.to_input_form(), "a === b")
+        self.assertEqual(unsame_q.to_input_form(), "a =!= b")
+        self.assertEqual(composition.to_input_form(), "f @* g")
+        self.assertEqual(right_composition.to_input_form(), "f /* g")
+        self.assertEqual(map_apply.to_input_form(), "f @@@ xs")
+        self.assertEqual(dot_expr.to_input_form(), "{a, b} . {c, d}")
+        self.assertEqual(string_join.to_input_form(), '"a" <> "b" <> "c"')
+        self.assertEqual(output_history.to_input_form(), "% + %% + Out[12]")
+
+    def test_input_form_uses_operator_forms_without_unnecessary_parentheses(self) -> None:
+        downvalue = parse_full_form("RuleDelayed[HoldPattern[In[1]], Range[10]]")
+        downvalue_with_replacement = parse_full_form(
+            "RuleDelayed[HoldPattern[In[2]], ReplaceAll[Range[10], Rule[5, 55]]]"
+        )
+        held_replacement = parse_full_form("Hold[ReplaceAll[Range[10], Rule[5, 55]]]")
+        typed_sequence = parse_input_form("__Integer")
+        null_sequence = parse_input_form("___")
+        map_expr = parse_input_form("f /@ xs")
+        apply_expr = parse_input_form("f @@ xs")
+        map_all_expr = parse_input_form("f //@ xs")
+
+        self.assertEqual(downvalue.to_input_form(), "HoldPattern[In[1]] :> Range[10]")
+        self.assertEqual(
+            downvalue_with_replacement.to_input_form(),
+            "HoldPattern[In[2]] :> (Range[10] /. 5 -> 55)",
+        )
+        self.assertEqual(held_replacement.to_input_form(), "Hold[Range[10] /. 5 -> 55]")
+        self.assertEqual(typed_sequence.to_input_form(), "__Integer")
+        self.assertEqual(null_sequence.to_input_form(), "___")
+        self.assertEqual(map_expr.to_input_form(), "f /@ xs")
+        self.assertEqual(apply_expr.to_input_form(), "f @@ xs")
+        self.assertEqual(map_all_expr.to_input_form(), "f //@ xs")
 
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
@@ -416,6 +452,58 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Nothing[1 + 1]")).to_full_form(), "Nothing")
         self.assertEqual(evaluate(parse_input_form("Hold[Nothing]")).to_full_form(), "Hold[Nothing]")
         self.assertEqual(evaluate(parse_input_form("ReleaseHold[Hold[{Nothing, 1}]]")).to_full_form(), "List[1]")
+
+    def test_evaluation_control_heads_match_wolfram_ordering(self) -> None:
+        inactive_sum = evaluate(parse_input_form("Inactive[Plus][1, 2]"))
+        inactive_evaluates_arguments = evaluate(parse_input_form("Inactive[Plus][1 + 2, 3 + 4]"))
+        inactive_non_symbol_atom = evaluate(parse_input_form("Inactive[3]"))
+        inactive_direct_evaluate = evaluate(parse_input_form("Inactive[Evaluate[1 + 2]]"))
+        activated_sum = evaluate(parse_input_form("Activate[Inactive[Plus][1, 2]]"))
+        activated_held_sum = evaluate(parse_input_form("Activate[Hold[Inactive[Plus][1, 2]]]"))
+        activated_times_only = evaluate(parse_input_form("Activate[Inactive[Plus][Inactive[Times][2, 3], 4], Times]"))
+        evaluate_in_hold = evaluate(parse_input_form("Hold[Evaluate[1 + 2]]"))
+        evaluate_in_hold_complete = evaluate(parse_input_form("HoldComplete[Evaluate[1 + 2]]"))
+        evaluate_unevaluated_top_level = evaluate(parse_input_form("Evaluate[Unevaluated[1 + 2]]"))
+        evaluate_unevaluated_in_hold = evaluate(parse_input_form("Hold[Evaluate[Unevaluated[1 + 2]]]"))
+        length_unevaluated = evaluate(parse_input_form("Length[Unevaluated[1 + 2]]"))
+        head_unevaluated = evaluate(parse_input_form("Head[Unevaluated[1 + 2]]"))
+        part_unevaluated = evaluate(parse_input_form("Part[Unevaluated[f[a, b]], 1]"))
+
+        self.assertEqual(inactive_sum.to_full_form(), "Inactive[Plus][1, 2]")
+        self.assertEqual(inactive_evaluates_arguments.to_full_form(), "Inactive[Plus][3, 7]")
+        self.assertEqual(inactive_non_symbol_atom.to_full_form(), "3")
+        self.assertEqual(inactive_direct_evaluate.to_full_form(), "3")
+        self.assertEqual(activated_sum.to_full_form(), "3")
+        self.assertEqual(activated_held_sum.to_full_form(), "Hold[Plus[1, 2]]")
+        self.assertEqual(activated_times_only.to_full_form(), "Inactive[Plus][6, 4]")
+        self.assertEqual(evaluate_in_hold.to_full_form(), "Hold[3]")
+        self.assertEqual(evaluate_in_hold_complete.to_full_form(), "HoldComplete[Evaluate[Plus[1, 2]]]")
+        self.assertEqual(evaluate_unevaluated_top_level.to_full_form(), "3")
+        self.assertEqual(evaluate_unevaluated_in_hold.to_full_form(), "Hold[Unevaluated[Plus[1, 2]]]")
+        self.assertEqual(length_unevaluated.to_full_form(), "2")
+        self.assertEqual(head_unevaluated.to_full_form(), "Plus")
+        self.assertEqual(part_unevaluated.to_full_form(), "a")
+
+    def test_ignoring_inactive_patterns_match_active_and_inactive_forms(self) -> None:
+        inactive_match = evaluate(parse_input_form("MatchQ[Inactive[f][1], IgnoringInactive[f[_]]]"))
+        active_pattern_match = evaluate(
+            parse_input_form("MatchQ[Inactive[Plus][1, 2], IgnoringInactive[HoldPattern[Plus[_, _]]]]")
+        )
+        free_q = evaluate(parse_input_form("FreeQ[{Inactive[Plus][1, 2]}, IgnoringInactive[HoldPattern[Plus[_, _]]]]"))
+        cases = evaluate(
+            parse_input_form("Cases[{Inactive[Plus][1, 2], Inactive[f][1]}, IgnoringInactive[HoldPattern[Plus[_, _]]]]")
+        )
+        replacement = evaluate(parse_input_form("Inactive[f][1] /. IgnoringInactive[f[x_]] :> x"))
+        original_binding = evaluate(parse_input_form("Inactive[f][Inactive[g][1]] /. IgnoringInactive[f[x_]] :> x"))
+        inactive_wrapper_binding = evaluate(parse_input_form("Inactive[f[1]] /. IgnoringInactive[f[x_]] :> x"))
+
+        self.assertEqual(inactive_match.to_full_form(), "True")
+        self.assertEqual(active_pattern_match.to_full_form(), "True")
+        self.assertEqual(free_q.to_full_form(), "False")
+        self.assertEqual(cases.to_full_form(), "List[Inactive[Plus][1, 2]]")
+        self.assertEqual(replacement.to_full_form(), "1")
+        self.assertEqual(original_binding.to_full_form(), "Inactive[g][1]")
+        self.assertEqual(inactive_wrapper_binding.to_full_form(), "1")
 
     def test_nothing_is_removed_from_evaluated_list_results_only(self) -> None:
         self.assertEqual(evaluate(parse_input_form("<|Nothing, a -> 1|>")).to_full_form(), "Association[Rule[a, 1]]")
