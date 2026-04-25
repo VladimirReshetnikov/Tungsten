@@ -4976,6 +4976,7 @@ def _instantiate_replacement_template(
     bindings: dict[str, Expr],
     *,
     delayed: bool,
+    evaluate_result: bool = True,
 ) -> tuple[Expr | None, bool]:
     substituted = _substitute_pattern_bindings(template, bindings)
     if delayed and isinstance(substituted, Call) and substituted.has_head("Condition"):
@@ -4984,7 +4985,9 @@ def _instantiate_replacement_template(
         body, test = substituted.arguments
         if not _condition_test_succeeds(test, {}):
             return (None, False)
-        return _instantiate_replacement_template(body, {}, delayed=True)
+        return _instantiate_replacement_template(body, {}, delayed=True, evaluate_result=evaluate_result)
+    if delayed and not evaluate_result:
+        return (substituted, True)
     return (evaluate(substituted), True)
 
 
@@ -5028,6 +5031,30 @@ def _normalize_single_replacement_ruleset(rules: Expr, function_name: str) -> li
     raise WolframEvaluationError(f"{function_name} expects a rule or a list of rules.")
 
 
+def _is_replacement_rules_argument(expr: Expr) -> bool:
+    return (
+        _is_replacement_rule_expr(expr)
+        or (
+            isinstance(expr, Call)
+            and expr.has_head("List")
+            and (
+                not expr.arguments
+                or all(_is_replacement_rule_expr(item) for item in expr.arguments)
+                or _is_nested_replacement_rules_list(expr)
+            )
+        )
+    )
+
+
+def _evaluate_replacement_rules_argument(rules: Expr) -> Expr:
+    # Literal Rule/RuleDelayed expressions are definition-like data. Keep them
+    # unevaluated so delayed RHS expressions stay delayed, but allow symbols or
+    # calls such as DownValues[In] to resolve to the actual rules they denote.
+    if _is_replacement_rules_argument(rules):
+        return rules
+    return evaluate(rules)
+
+
 def _is_nested_replacement_rules_list(rules: Expr) -> bool:
     return (
         isinstance(rules, Call)
@@ -5042,12 +5069,22 @@ def _is_nested_replacement_rules_list(rules: Expr) -> bool:
     )
 
 
-def _apply_replacement_rules(expr: Expr, ruleset: Sequence[_ReplacementRule]) -> tuple[Expr, bool]:
+def _apply_replacement_rules(
+    expr: Expr,
+    ruleset: Sequence[_ReplacementRule],
+    *,
+    held_context: bool = False,
+) -> tuple[Expr, bool]:
     for rule in ruleset:
         bindings = _match_pattern(expr, rule.pattern)
         if bindings is None:
             continue
-        replacement, applied = _instantiate_replacement_template(rule.template, bindings, delayed=rule.delayed)
+        replacement, applied = _instantiate_replacement_template(
+            rule.template,
+            bindings,
+            delayed=rule.delayed,
+            evaluate_result=not held_context,
+        )
         if not applied:
             continue
         assert replacement is not None
@@ -5109,7 +5146,7 @@ def _replace_recursive(
 
     negative_level = -depth(rebuilt)
     if _level_bounds_match(positive_level, negative_level, level_min, level_max):
-        replaced, _did_replace = _apply_replacement_rules(rebuilt, ruleset)
+        replaced, _did_replace = _apply_replacement_rules(rebuilt, ruleset, held_context=held_context)
         return replaced
     return rebuilt
 
@@ -5119,6 +5156,7 @@ def replace(
     rules: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
 ) -> Expr:
+    rules = _evaluate_replacement_rules_argument(rules)
     if _is_nested_replacement_rules_list(rules):
         assert isinstance(rules, Call)
         return _evaluated_list_expr(*(replace(expr, item, spec) for item in rules.arguments))
@@ -5135,7 +5173,7 @@ def _replace_all_single_pass(
     *,
     held_context: bool = False,
 ) -> tuple[Expr, bool]:
-    replaced, did_replace = _apply_replacement_rules(expr, ruleset)
+    replaced, did_replace = _apply_replacement_rules(expr, ruleset, held_context=held_context)
     if did_replace:
         return (replaced, replaced != expr)
 
@@ -5185,6 +5223,7 @@ def _replace_all_single_pass(
 
 
 def replace_all(expr: Expr, rules: Expr) -> Expr:
+    rules = _evaluate_replacement_rules_argument(rules)
     if _is_nested_replacement_rules_list(rules):
         assert isinstance(rules, Call)
         return _evaluated_list_expr(*(replace_all(expr, item) for item in rules.arguments))
@@ -5193,6 +5232,7 @@ def replace_all(expr: Expr, rules: Expr) -> Expr:
 
 
 def replace_repeated(expr: Expr, rules: Expr) -> Expr:
+    rules = _evaluate_replacement_rules_argument(rules)
     if _is_nested_replacement_rules_list(rules):
         assert isinstance(rules, Call)
         return _evaluated_list_expr(*(replace_repeated(expr, item) for item in rules.arguments))
@@ -5245,6 +5285,7 @@ def _try_replace_using_rules_at_path(
 
 
 def replace_at(expr: Expr, rules: Expr, positions: Expr | int) -> Expr:
+    rules = _evaluate_replacement_rules_argument(rules)
     if _is_nested_replacement_rules_list(rules):
         raise WolframEvaluationError("ReplaceAt currently expects a rule or a flat list of rules.")
     ruleset = _normalize_single_replacement_ruleset(rules, "ReplaceAt")

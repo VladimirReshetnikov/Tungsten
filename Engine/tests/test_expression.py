@@ -1343,6 +1343,24 @@ class ExpressionEvaluationTests(unittest.TestCase):
         session.finish_output(result)
         self.assertEqual(result.to_full_form(), "In[1]")
 
+    def test_repl_downvalues_can_be_used_as_replacement_rules_under_hold(self) -> None:
+        session = EvaluationSession()
+
+        def submit(code: str) -> str:
+            parsed = parse_input_form(code)
+            session.begin_input(code, parsed)
+            result = evaluate(parsed, session=session)
+            session.finish_output(result)
+            return result.to_full_form()
+
+        self.assertEqual(submit("Range[10]"), "List[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]")
+        self.assertEqual(submit("Range[10] /. 5 -> 55"), "List[1, 2, 3, 4, 55, 6, 7, 8, 9, 10]")
+        self.assertEqual(
+            submit("Hold[In[2]] /. DownValues[In]"),
+            "Hold[ReplaceAll[Range[10], Rule[5, 55]]]",
+        )
+        self.assertEqual(submit("Hold[x] /. x :> 1 + 2"), "Hold[Plus[1, 2]]")
+
     def test_repl_exit_and_quit_raise_session_exit(self) -> None:
         session = EvaluationSession()
         session.begin_input("Quit", parse_input_form("Quit"))
