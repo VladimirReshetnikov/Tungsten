@@ -289,7 +289,9 @@ Wolfram semantics locally would have been a trap.
 `expression.py` exists to support:
 
 - parsing FullForm, InputForm, and a pragmatic StandardForm subset with semantic lowering for
-  common notebook boxes such as `FractionBox`, `SqrtBox`, `RadicalBox`, and `SuperscriptBox`;
+  common notebook boxes such as `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`,
+  `SubscriptBox`, and related script boxes, plus named-character operators such as
+  `\[CirclePlus]`;
 - structural inspection;
 - canonical rendering;
 - a small set of structural built-ins for inert evaluation.

@@ -328,16 +328,15 @@ still stay on the structural side.
 Explicit non-goals for this pass:
 
 - mutation forms that require stateful in-place semantics such as `AssociateTo` and `KeyDropFrom`;
-- predicate-driven key selection such as `KeySelect` unless we later decide to support a very small
-  inert subset;
 - ordering/comparison-driven functions such as `KeySort`, `KeySortBy`, `Counts`, `CountsBy`, and
   `GroupBy`;
 - full `RuleDelayed` evaluation semantics;
 - dataset-specific operators or query language;
-- pattern forms such as `KeyValuePattern`.
 
-If some of these become cheap follow-on wins after the core association model is in place, they can
-be added later, but they should not dilute the main implementation in this pass.
+Follow-up work after the first milestone added the two deliberately postponed pieces that are still
+structural and kernel-free: `KeySelect`, and entry-level pattern matching through
+`KeyValuePattern`. The remaining non-goals above require either mutation semantics, ordering and
+aggregation policies, or richer evaluation rules.
 
 ## Design approach
 

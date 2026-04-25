@@ -347,6 +347,26 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
             "FreeQ[List[a, b, b, a, a, a], Blank[Integer]]",
         )
 
+    def test_named_character_symbols_and_inert_operators_parse_in_standard_form(self) -> None:
+        escaped_operator = parse_standard_form(r"a \[CirclePlus] b")
+        greek_symbols = parse_standard_form(r"\[Alpha] + \[Beta]")
+        self.assertEqual(escaped_operator.to_full_form(), "CirclePlus[a, b]")
+        self.assertEqual(greek_symbols.to_full_form(), r"Plus[\[Alpha], \[Beta]]")
+
+    def test_row_box_named_character_operator_parses_in_standard_form(self) -> None:
+        expr = parse_standard_form(r'RowBox[{"a", "\\[CirclePlus]", "b"}]')
+        self.assertEqual(expr.to_full_form(), "CirclePlus[a, b]")
+
+    def test_common_script_boxes_parse_in_standard_form(self) -> None:
+        subscript = parse_standard_form('SubscriptBox["x", "i"]')
+        subsuperscript = parse_standard_form('SubsuperscriptBox["x", "i", "2"]')
+        overscript = parse_standard_form('OverscriptBox["x", "~"]')
+        underoverscript = parse_standard_form('UnderoverscriptBox["x", "a", "b"]')
+        self.assertEqual(subscript.to_full_form(), "Subscript[x, i]")
+        self.assertEqual(subsuperscript.to_full_form(), "Subsuperscript[x, i, 2]")
+        self.assertEqual(overscript.to_full_form(), 'Overscript[x, "~"]')
+        self.assertEqual(underoverscript.to_full_form(), "Underoverscript[x, a, b]")
+
 
 class ExpressionEvaluationTests(unittest.TestCase):
     def test_integer_arithmetic_evaluates_only_when_arguments_are_explicit_integers(self) -> None:
@@ -799,12 +819,16 @@ class ExpressionEvaluationTests(unittest.TestCase):
     def test_association_key_transforms_and_constructors(self) -> None:
         key_take = evaluate(parse_input_form("KeyTake[<|a -> 1, b -> 2, c -> 3|>, {c, a}]"))
         key_drop = evaluate(parse_input_form("KeyDrop[<|a -> 1, b -> 2, c -> 3|>, {c, a}]"))
+        key_select = evaluate(parse_input_form('KeySelect[<|"a" -> 1, bb -> 2|>, StringQ]'))
+        key_select_operator = evaluate(parse_input_form('KeySelect[StringQ][<|"a" -> 1, bb -> 2|>]'))
         key_map = evaluate(parse_input_form("KeyMap[f, <|a -> 1, b -> 2|>]"))
         key_value_map = evaluate(parse_input_form("KeyValueMap[f, <|a -> 1, b -> 2|>]"))
         association_thread = evaluate(parse_input_form("AssociationThread[{a, b, c}, {1, 2, 3}]"))
         association_map = evaluate(parse_input_form("AssociationMap[f, {a, b, c}]"))
         self.assertEqual(key_take.to_full_form(), "Association[Rule[c, 3], Rule[a, 1]]")
         self.assertEqual(key_drop.to_full_form(), "Association[Rule[b, 2]]")
+        self.assertEqual(key_select.to_full_form(), 'Association[Rule["a", 1]]')
+        self.assertEqual(key_select_operator.to_full_form(), 'Association[Rule["a", 1]]')
         self.assertEqual(key_map.to_full_form(), "Association[Rule[f[a], 1], Rule[f[b], 2]]")
         self.assertEqual(key_value_map.to_full_form(), "List[f[a, 1], f[b, 2]]")
         self.assertEqual(association_thread.to_full_form(), "Association[Rule[a, 1], Rule[b, 2], Rule[c, 3]]")
@@ -822,6 +846,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         join_result = evaluate(parse_input_form("Join[<|a -> 1, b -> 2|>, <|a -> 9, c -> 3|>]"))
         apply_result = evaluate(parse_input_form("Apply[g, <|a -> 1, b -> 2|>]"))
         map_result = evaluate(parse_input_form("Map[g, <|a -> 1, b -> 2|>]"))
+        map_indexed = evaluate(parse_input_form("MapIndexed[f, <|a -> x, b -> y|>]"))
         self.assertEqual(first_result.to_full_form(), "1")
         self.assertEqual(last_result.to_full_form(), "3")
         self.assertEqual(rest_result.to_full_form(), "Association[Rule[b, 2], Rule[c, 3]]")
@@ -833,6 +858,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(join_result.to_full_form(), "Association[Rule[a, 9], Rule[b, 2], Rule[c, 3]]")
         self.assertEqual(apply_result.to_full_form(), "g[1, 2]")
         self.assertEqual(map_result.to_full_form(), "Association[Rule[a, g[1]], Rule[b, g[2]]]")
+        self.assertEqual(
+            map_indexed.to_full_form(),
+            "Association[Rule[a, f[x, List[Key[a]]]], Rule[b, f[y, List[Key[b]]]]]",
+        )
 
     def test_select_family_supports_predicates_properties_limits_and_operator_forms(self) -> None:
         select_result = evaluate(parse_input_form("Select[f[1, a, 2, 3], IntegerQ]"))
@@ -1042,6 +1071,153 @@ class ExpressionEvaluationTests(unittest.TestCase):
 
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form('ExportString[{"a" -> 1}, "RawJSON"]'))
+
+    def test_to_string_and_to_expression_round_trip_input_and_standard_forms(self) -> None:
+        input_string = evaluate(parse_input_form("ToString[HoldComplete[1 + 2], InputForm]"))
+        standard_string = evaluate(parse_input_form("ToString[HoldComplete[f @ x // g], StandardForm]"))
+        default_string = evaluate(parse_input_form("ToString[HoldComplete[{a -> b, f[x]}]]"))
+        input_round_trip = evaluate(
+            parse_input_form(
+                "SameQ[ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm], HoldComplete[1 + 2]]"
+            )
+        )
+        standard_round_trip = evaluate(
+            parse_input_form(
+                "SameQ[ToExpression[ToString[HoldComplete[f @ x // g], StandardForm], StandardForm], HoldComplete[g[f[x]]]]"
+            )
+        )
+        byte_array_round_trip = evaluate(
+            parse_input_form(
+                "SameQ[ToExpression[ToString[ByteArray[{1, 2, 255}], InputForm], InputForm], ByteArray[{1, 2, 255}]]"
+            )
+        )
+        self.assertEqual(input_string.to_full_form(), '"HoldComplete[1 + 2]"')
+        self.assertEqual(standard_string.to_full_form(), '"HoldComplete[g[f[x]]]"')
+        self.assertEqual(default_string.to_full_form(), '"HoldComplete[{a -> b, f[x]}]"')
+        self.assertEqual(input_round_trip.to_full_form(), "True")
+        self.assertEqual(standard_round_trip.to_full_form(), "True")
+        self.assertEqual(byte_array_round_trip.to_full_form(), "True")
+
+    def test_to_expression_evaluates_after_optional_wrapper(self) -> None:
+        default_input = evaluate(parse_input_form('ToExpression["1 + 2"]'))
+        held_input = evaluate(parse_input_form('ToExpression["1 + 2", InputForm, HoldComplete]'))
+        held_standard = evaluate(parse_input_form('ToExpression["f @ x // g", StandardForm, HoldComplete]'))
+        identity_wrapped = evaluate(parse_input_form('ToExpression["1 + 2", InputForm, Identity]'))
+        list_wrapped = evaluate(parse_input_form('ToExpression["f[a]", InputForm, List]'))
+        box_default = evaluate(parse_input_form('ToExpression[RowBox[{"1", "+", "2"}], StandardForm, HoldComplete]'))
+        box_implicit_standard = evaluate(parse_input_form('ToExpression[RowBox[{"1", "+", "2"}]]'))
+        listable = evaluate(parse_input_form('ToExpression[{"1 + 2", "f @ x // g"}, StandardForm, HoldComplete]'))
+        self.assertEqual(default_input.to_full_form(), "3")
+        self.assertEqual(held_input.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(held_standard.to_full_form(), "HoldComplete[g[f[x]]]")
+        self.assertEqual(identity_wrapped.to_full_form(), "3")
+        self.assertEqual(list_wrapped.to_full_form(), "List[f[a]]")
+        self.assertEqual(box_default.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(box_implicit_standard.to_full_form(), "3")
+        self.assertEqual(listable.to_full_form(), "List[HoldComplete[Plus[1, 2]], HoldComplete[g[f[x]]]]")
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("ToString[x, OutputForm]"))
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('ToExpression["x", TraditionalForm]'))
+
+    def test_box_conversion_and_syntax_builtins(self) -> None:
+        make_expression = evaluate(parse_input_form('MakeExpression[RowBox[{"1", "+", "2"}], StandardForm]'))
+        make_boxes = evaluate(parse_input_form("MakeBoxes[1 + 2, StandardForm]"))
+        to_boxes = evaluate(parse_input_form("ToBoxes[1 + 2, StandardForm]"))
+        box_to_expression = evaluate(
+            parse_input_form("ToExpression[MakeBoxes[HoldComplete[1 + 2], StandardForm], StandardForm]")
+        )
+        strip_boxes = evaluate(parse_input_form('StripBoxes[RowBox[{"1", " ", StyleBox["+", Red], "2"}]]'))
+        syntax_true = evaluate(parse_input_form('SyntaxQ["1 + 2"]'))
+        syntax_false = evaluate(parse_input_form('SyntaxQ["1 +"]'))
+        syntax_box = evaluate(parse_input_form('SyntaxQ[RowBox[{"1", "+", "2"}]]'))
+        syntax_length = evaluate(parse_input_form('SyntaxLength["1+2"]'))
+        incomplete_length = evaluate(parse_input_form('SyntaxLength["1+"]'))
+
+        self.assertEqual(make_expression.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(make_boxes.to_full_form(), 'RowBox[List["1", "+", "2"]]')
+        self.assertEqual(to_boxes.to_full_form(), '"3"')
+        self.assertEqual(box_to_expression.to_full_form(), "HoldComplete[Plus[1, 2]]")
+        self.assertEqual(strip_boxes.to_full_form(), 'BoxData[RowBox[List["1", "+", "2"]]]')
+        self.assertEqual(syntax_true.to_full_form(), "True")
+        self.assertEqual(syntax_false.to_full_form(), "False")
+        self.assertEqual(syntax_box.to_full_form(), "True")
+        self.assertEqual(syntax_length.to_full_form(), "3")
+        self.assertEqual(incomplete_length.to_full_form(), "4")
+
+    def test_symbol_context_registry_and_name_queries(self) -> None:
+        current_context = evaluate(parse_input_form("$Context"))
+        context_path = evaluate(parse_input_form("$ContextPath"))
+        qualified_context_path = evaluate(parse_input_form("System`$ContextPath"))
+        context_function = evaluate(parse_input_form("Context[]"))
+        system_context = evaluate(parse_input_form("Context[Plus]"))
+        qualified_system_context = evaluate(parse_input_form("Context[System`Plus]"))
+        symbol_name = evaluate(parse_input_form('SymbolName[Symbol["TungstenRegistryTest`alpha"]]'))
+        symbol_context = evaluate(parse_input_form('Context[Symbol["TungstenRegistryTest`alpha"]]'))
+        another_symbol = evaluate(parse_input_form('Symbol["TungstenRegistryTest`beta"]'))
+        global_symbol = evaluate(parse_input_form('Symbol["Global`tungstenGlobalSymbol"]'))
+        qualified_constructor = evaluate(parse_input_form('System`Symbol["Global`tungstenQualifiedSymbol"]'))
+        system_symbol = evaluate(parse_input_form('Symbol["System`Plus"]'))
+        contexts = evaluate(parse_input_form('Contexts["TungstenRegistryTest`*"]'))
+        names = evaluate(parse_input_form('Names["TungstenRegistryTest`*"]'))
+        visible_name = evaluate(parse_input_form('Names["System`Plus"]'))
+        name_q_true = evaluate(parse_input_form('NameQ["TungstenRegistryTest`alpha"]'))
+        name_q_wildcard = evaluate(parse_input_form('NameQ["TungstenRegistryTest`*"]'))
+        name_q_false = evaluate(parse_input_form('NameQ["TungstenRegistryMissing`*"]'))
+        visible_builtin = evaluate(parse_input_form('NameQ["Plus"]'))
+        self.assertEqual(current_context.to_full_form(), '"Global`"')
+        self.assertEqual(context_path.to_full_form(), 'List["System`", "Global`"]')
+        self.assertEqual(qualified_context_path.to_full_form(), 'List["System`", "Global`"]')
+        self.assertEqual(context_function.to_full_form(), '"Global`"')
+        self.assertEqual(system_context.to_full_form(), '"System`"')
+        self.assertEqual(qualified_system_context.to_full_form(), '"System`"')
+        self.assertEqual(symbol_name.to_full_form(), '"alpha"')
+        self.assertEqual(symbol_context.to_full_form(), '"TungstenRegistryTest`"')
+        self.assertEqual(another_symbol.to_full_form(), "TungstenRegistryTest`beta")
+        self.assertEqual(global_symbol.to_full_form(), "tungstenGlobalSymbol")
+        self.assertEqual(qualified_constructor.to_full_form(), "tungstenQualifiedSymbol")
+        self.assertEqual(system_symbol.to_full_form(), "Plus")
+        self.assertEqual(contexts.to_full_form(), 'List["TungstenRegistryTest`"]')
+        self.assertEqual(
+            names.to_full_form(),
+            'List["TungstenRegistryTest`alpha", "TungstenRegistryTest`beta"]',
+        )
+        self.assertEqual(visible_name.to_full_form(), 'List["Plus"]')
+        self.assertEqual(name_q_true.to_full_form(), "True")
+        self.assertEqual(name_q_wildcard.to_full_form(), "True")
+        self.assertEqual(name_q_false.to_full_form(), "False")
+        self.assertEqual(visible_builtin.to_full_form(), "True")
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('Symbol["not a symbol"]'))
+
+    def test_unique_and_valueq_use_symbol_registry(self) -> None:
+        unique_default = evaluate(parse_input_form("Unique[]"))
+        unique_symbol = evaluate(parse_input_form("Unique[tungstenUniqueSymbol]"))
+        unique_string_name = evaluate(parse_input_form('SymbolName[Unique["tungstenUniqueString"]]'))
+        unique_list = evaluate(parse_input_form('Unique[{tungstenUniqueList, "tungstenUniqueListString"}]'))
+        distinct = evaluate(parse_input_form('UnsameQ[Unique["tungstenDistinct"], Unique["tungstenDistinct"]]'))
+        value_user_symbol = evaluate(parse_input_form("ValueQ[tungstenValueQSymbol]"))
+        value_context = evaluate(parse_input_form("ValueQ[$Context]"))
+        value_qualified_context = evaluate(parse_input_form("ValueQ[System`$Context]"))
+        value_literal = evaluate(parse_input_form("ValueQ[1]"))
+        value_evaluatable = evaluate(parse_input_form("ValueQ[1 + 2]"))
+        value_inert_call = evaluate(parse_input_form("ValueQ[tungstenValueQHead[tungstenValueQSymbol]]"))
+        self.assertRegex(unique_default.to_input_form(), r"^\$\d+$")
+        self.assertRegex(unique_symbol.to_input_form(), r"^tungstenUniqueSymbol\$\d+$")
+        self.assertRegex(unique_string_name.to_full_form(), r'^"tungstenUniqueString\d+"$')
+        self.assertRegex(
+            unique_list.to_full_form(),
+            r"^List\[tungstenUniqueList\$\d+, tungstenUniqueListString\d+\]$",
+        )
+        self.assertEqual(distinct.to_full_form(), "True")
+        self.assertEqual(value_user_symbol.to_full_form(), "False")
+        self.assertEqual(value_context.to_full_form(), "True")
+        self.assertEqual(value_qualified_context.to_full_form(), "True")
+        self.assertEqual(value_literal.to_full_form(), "True")
+        self.assertEqual(value_evaluatable.to_full_form(), "True")
+        self.assertEqual(value_inert_call.to_full_form(), "False")
 
     def test_string_structural_operations_follow_list_like_semantics(self) -> None:
         string_length = evaluate(parse_input_form('StringLength[{"ab", "c"}]'))
@@ -1431,15 +1607,55 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(replace_at_key.to_full_form(), "Association[Rule[a, 1], Rule[b, x]]")
         self.assertEqual(replace_at_nested.to_full_form(), "List[Association[Rule[a, x]], 2]")
 
-    def test_pattern_search_treats_associations_as_opaque_for_now(self) -> None:
+    def test_pattern_search_descends_association_values_not_keys(self) -> None:
         match_assoc = evaluate(parse_input_form("MatchQ[<|a -> 1|>, _Association]"))
         free_q_assoc = evaluate(parse_input_form("FreeQ[<|a -> 1|>, _Integer]"))
+        free_q_key = evaluate(parse_input_form("FreeQ[<|a -> 1|>, a]"))
+        free_q_head = evaluate(parse_input_form("FreeQ[<|a -> 1|>, Association]"))
+        cases_direct = evaluate(parse_input_form("Cases[<|a -> x, b -> 2|>, _Integer]"))
         cases_assoc = evaluate(parse_input_form("Cases[{<|a -> 1|>}, _Integer, Infinity]"))
-        delete_assoc = evaluate(parse_input_form("DeleteCases[{<|a -> 1|>}, _Integer, Infinity]"))
+        cases_key = evaluate(parse_input_form("Cases[<|a -> x, b -> 2|>, a, {0, Infinity}]"))
+        delete_direct = evaluate(parse_input_form("DeleteCases[<|a -> 1, b -> x, c -> 2|>, _Integer]"))
+        delete_assoc = evaluate(parse_input_form("DeleteCases[{<|a -> 1, b -> x|>}, _Integer, Infinity]"))
+        position_assoc = evaluate(parse_input_form("Position[<|a -> 1, b -> {2, x}|>, _Integer]"))
+        member_key = evaluate(parse_input_form("MemberQ[<|a -> x, b -> 2|>, a, Infinity]"))
+        member_value = evaluate(parse_input_form("MemberQ[<|a -> x, b -> 2|>, x, Infinity]"))
+        first_case = evaluate(parse_input_form("FirstCase[<|a -> x, b -> 2|>, _Integer]"))
         self.assertEqual(match_assoc.to_full_form(), "True")
-        self.assertEqual(free_q_assoc.to_full_form(), "True")
-        self.assertEqual(cases_assoc.to_full_form(), "List[]")
-        self.assertEqual(delete_assoc.to_full_form(), "List[Association[Rule[a, 1]]]")
+        self.assertEqual(free_q_assoc.to_full_form(), "False")
+        self.assertEqual(free_q_key.to_full_form(), "True")
+        self.assertEqual(free_q_head.to_full_form(), "False")
+        self.assertEqual(cases_direct.to_full_form(), "List[2]")
+        self.assertEqual(cases_assoc.to_full_form(), "List[1]")
+        self.assertEqual(cases_key.to_full_form(), "List[]")
+        self.assertEqual(delete_direct.to_full_form(), "Association[Rule[b, x]]")
+        self.assertEqual(delete_assoc.to_full_form(), "List[Association[Rule[b, x]]]")
+        self.assertEqual(position_assoc.to_full_form(), "List[List[Key[a]], List[Key[b], 1]]")
+        self.assertEqual(member_key.to_full_form(), "False")
+        self.assertEqual(member_value.to_full_form(), "True")
+        self.assertEqual(first_case.to_full_form(), "2")
+
+    def test_key_value_pattern_matches_association_entries_explicitly(self) -> None:
+        simple_match = evaluate(parse_input_form("MatchQ[<|a -> 1, b -> 2|>, KeyValuePattern[a -> _Integer]]"))
+        orderless_match = evaluate(parse_input_form("MatchQ[<|a -> 1, b -> 2|>, KeyValuePattern[{b -> 2, a -> _}]]"))
+        missing_match = evaluate(parse_input_form("MatchQ[<|a -> 1|>, KeyValuePattern[b -> _]]"))
+        nested_nonrecursive = evaluate(parse_input_form("MatchQ[<|a -> <|b -> 2|>|>, KeyValuePattern[b -> _]]"))
+        bound_cases = evaluate(parse_input_form("Cases[{<|a -> 1|>, <|b -> x|>}, KeyValuePattern[k_ -> v_] :> {k, v}]"))
+        nested_cases = evaluate(parse_input_form("Cases[<|x -> <|a -> 1|>, y -> <|b -> 2|>|>, KeyValuePattern[a -> _], {0, Infinity}]"))
+        list_of_rules = evaluate(parse_input_form("MatchQ[{a -> 1, b -> 2}, KeyValuePattern[b -> _Integer]]"))
+        rule_delayed_distinction = evaluate(parse_input_form("MatchQ[<|a :> 1|>, KeyValuePattern[a -> _]]"))
+        rule_delayed_match = evaluate(parse_input_form("MatchQ[<|a :> 1|>, KeyValuePattern[a :> _]]"))
+        duplicate_pattern = evaluate(parse_input_form("MatchQ[<|a -> 1|>, KeyValuePattern[{a -> _, a -> 1}]]"))
+        self.assertEqual(simple_match.to_full_form(), "True")
+        self.assertEqual(orderless_match.to_full_form(), "True")
+        self.assertEqual(missing_match.to_full_form(), "False")
+        self.assertEqual(nested_nonrecursive.to_full_form(), "False")
+        self.assertEqual(bound_cases.to_full_form(), "List[List[a, 1], List[b, x]]")
+        self.assertEqual(nested_cases.to_full_form(), "List[Association[Rule[a, 1]]]")
+        self.assertEqual(list_of_rules.to_full_form(), "True")
+        self.assertEqual(rule_delayed_distinction.to_full_form(), "False")
+        self.assertEqual(rule_delayed_match.to_full_form(), "True")
+        self.assertEqual(duplicate_pattern.to_full_form(), "False")
 
 
 if __name__ == "__main__":

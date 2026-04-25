@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T02:09:44Z
-Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
+Updated (UTC): 2026-04-25T17:48:49Z
+Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
 
 ## Summary
 
@@ -27,10 +27,13 @@ Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
   string-pattern heads such as `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
-  `ExportString`, `ImportByteArray`, and `ExportByteArray`, `Pick`, `Select`, `Discard`,
-  `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
-  association constructors, key accessors, `Sequence` splicing, `Nothing` removal in evaluated
-  list contexts, Hold-family wrappers, and related exact-position transforms;
+  `ExportString`, `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`,
+  `MakeBoxes`, `MakeExpression`, `StripBoxes`, `SyntaxQ`, `SyntaxLength`, `Pick`,
+  `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
+  `ReplacePart`, association constructors, key accessors, symbol and context registry functions
+  such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`,
+  `$ContextPath`, and `ValueQ`, `Sequence` splicing, `Nothing` removal in evaluated list contexts,
+  Hold-family wrappers, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -42,13 +45,15 @@ links, read [expression-function-support.md](./expression-function-support.md). 
 offline import / export format subset and its data-shape rules, read
 [import-export-formats.md](./import-export-formats.md). For the evaluator ordering rules that make
 `Sequence` and `Nothing` special without a live kernel, read
-[sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md).
+[sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md). For the process-local name
+registry and fixed context state, read [symbol-context-registry.md](./symbol-context-registry.md).
 
 ## When to use this subsystem
 
 Use the expression subsystem when you want:
 
 - structural analysis without launching a kernel;
+- symbol and context name queries without launching a kernel;
 - canonical formatting of textual Wolfram expressions;
 - lightweight expression traversal from Python or PowerShell;
 - deterministic scripting behavior that does not depend on evaluation rules, definitions, or
@@ -91,13 +96,18 @@ The parser currently handles:
 - span syntax `a ;; b ;; c`;
 - nested Wolfram comments `(* ... *)`;
 - common semantic notebook boxes when they appear as textual box expressions:
-  `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`;
+  `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`, `SubscriptBox`,
+  `SubsuperscriptBox`, `OverscriptBox`, `UnderscriptBox`, and `UnderoverscriptBox`;
 - common wrapper boxes around those semantic forms, including `BoxData`, `FormBox`, `StyleBox`,
   `TagBox`, `TooltipBox`, and `InterpretationBox`;
 - `RowBox` reconstruction for the box-driven subset above, so notebook snippets such as
   `SuperscriptBox["x", RowBox[{"1", "/", "3"}]]` or
   `FractionBox[SuperscriptBox["x", "3"], RowBox[{"1", "+", "a", " ", "b"}]]` lower to ordinary
   Tungsten expressions;
+- named-character symbols and common named-character infix operators. Letter-like forms such as
+  `\[Alpha]` remain symbols, while operator forms such as `a \[CirclePlus] b` lower to inert
+  head calls such as `CirclePlus[a, b]` unless Tungsten has an explicit evaluator rule for that
+  head;
 - `RowBox`-based association examples from the installed `Association.nb` reference page,
   including `\[Rule]`, `\[RuleDelayed]`, `\[LeftAssociation]`, and `\[RightAssociation]`
   tokens plus nested part syntax such as `<|a -> x|>[[Key[b]]]`.
@@ -108,7 +118,8 @@ The parser currently handles:
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
 particular, it is intentionally conservative around advanced pattern syntax, arbitrary box
-constructs, assignments, and broader evaluation semantics.
+constructs, assignments, custom notation definitions, stylesheet-dependent interpretation, and
+broader evaluation semantics.
 
 The currently supported pattern subset is intentionally bounded:
 
@@ -177,6 +188,8 @@ It also recognizes a pragmatic notebook-box subset when those boxes are represen
 TagBox[SqrtBox["x"], DisplayForm]
 FormBox[RadicalBox["x", "3"], TraditionalForm]
 FractionBox[SuperscriptBox["x", "3"], RowBox[{"1", "+", "a", " ", "b"}]]
+SubscriptBox["x", "i"]
+RowBox[{"a", "\[CirclePlus]", "b"}]
 ```
 
 These lower to ordinary Tungsten expressions such as:
@@ -185,7 +198,15 @@ These lower to ordinary Tungsten expressions such as:
 Power[x, Rational[1, 2]]
 Power[x, Rational[1, 3]]
 Times[Power[x, 3], Power[Plus[1, Times[a, b]], -1]]
+Subscript[x, i]
+CirclePlus[a, b]
 ```
+
+The evaluator also exposes the corresponding conversion boundary through `ToBoxes`, `MakeBoxes`,
+`MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`. These are kernel-free structural
+approximations of the Wolfram functions: `MakeBoxes` is held, `ToBoxes` boxes evaluated input,
+`MakeExpression` returns `HoldComplete[...]`, and `ToExpression[boxes]` uses the same supported
+StandardForm box interpretation.
 
 For pattern shorthand, Tungsten currently normalizes to explicit heads in canonical output. For
 example:
@@ -345,6 +366,9 @@ Structurally evaluate implemented built-ins:
 
 ```powershell
 python -m tungsten expr evaluate --code "Length[{a, b, c}]"
+python -m tungsten expr evaluate --code '$ContextPath'
+python -m tungsten expr evaluate --code 'Context[System`Plus]'
+python -m tungsten expr evaluate --code '{Symbol["TungstenParser`alpha"], Names["TungstenParser`*"]}'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
 python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
@@ -375,6 +399,8 @@ python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitC
 python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
 python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1}\", \"JSON\"]"
 python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
+python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
+python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 ```
 
@@ -441,6 +467,10 @@ Tungsten currently implements a broader structural subset that includes:
 - practical kernel-free import / export heads such as `ImportString`, `ExportString`,
   `ImportByteArray`, and `ExportByteArray` over a documented subset of text, JSON, tabular, raw
   byte, and compression-wrapper formats;
+- textual expression conversion through `ToString` and `ToExpression` for `InputForm` and the
+  supported textual `StandardForm` subset;
+- process-local symbol/context registry behavior for `Symbol`, `SymbolName`, `Unique`, `Names`,
+  `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -490,6 +520,12 @@ Examples:
 - `ImportString["{\"a\":1}", "JSON"]` evaluates to `{"a" -> 1}`;
 - `ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {"GZIP", "CSV"}], {"GZIP", "CSV"}]`
   evaluates to `{{1, 2}, {3, 4}}`;
+- `ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]` evaluates to
+  `HoldComplete[1 + 2]`;
+- `ToExpression["f @ x // g", StandardForm, HoldComplete]` evaluates to `HoldComplete[g[f[x]]]`;
+- <code>{Symbol["TungstenParser`alpha"], Names["TungstenParser`*"]}</code> evaluates to
+  <code>{TungstenParser`alpha, {"TungstenParser`alpha"}}</code>;
+- `ValueQ[userDefinedSymbol]` evaluates to `False`;
 - `Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]` evaluates to `{"ab", "ba"}`;
 - `Mod[-14, 5]` evaluates to `1`;
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;
@@ -529,8 +565,10 @@ These are intentional current boundaries, not hidden TODOs:
   but Tungsten does not reproduce every kernel `FullForm` nuance for precision-bearing reals.
 - The parser currently accepts `--5` as repeated unary minus. The Wolfram parser treats `--` as a
   different token family and rejects that expression in this context.
-- Pattern search through associations is conservative: `FreeQ`, `Cases`, and `DeleteCases` can
-  match an association as a whole expression, but do not descend into association keys or values.
+- Pattern search through associations follows Wolfram's values-only convention: `FreeQ`, `Cases`,
+  `DeleteCases`, `Position`, `MemberQ`, and `FirstCase` descend into values and can match whole
+  associations, but they do not search keys or raw `Rule` wrappers. Use `KeyValuePattern` for
+  entry-level matching that intentionally sees keys.
 
 Common Wolfram `Listable` heads that stay inert on list arguments include `Plus`, `Times`, `Power`,
 `Equal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`, `UnitStep`, `Unitize`, `Sign`, `Abs`,
@@ -538,13 +576,10 @@ Common Wolfram `Listable` heads that stay inert on list arguments include `Plus`
 `DiscreteDelta`, and `Ramp`. Use `Map`, `MapThread`, or explicit structural code when you want
 that behavior offline.
 
-One additional current boundary matters for pattern workflows: association-aware pattern traversal is
-not implemented yet. In this pass, search functions such as `FreeQ`, `Cases`, and `DeleteCases`
-treat associations as opaque leaves rather than descending into keys or values.
-
-Replacement functions are less conservative than those search functions. `Replace` traverses
-association values, `ReplaceAll` and `ReplaceRepeated` traverse association heads and values, and
-`ReplaceAt` supports key-aware exact paths into association values.
+Association pattern traversal deliberately does not expose keys to ordinary search. This matches the
+kernel's values-only association model and keeps `FreeQ[<|a -> 1|>, a]` true while still allowing
+`KeyValuePattern[a -> _]` to match the entry explicitly. `Position` emits association value paths
+with `Key[key]` components so the paths can be reused by `Extract`, `ReplacePart`, and `MapAt`.
 
 Pure functions are still deliberately bounded in this pass. Tungsten now supports both positional
 slot forms and named-parameter forms, but it does not yet implement `SlotSequence`, `##`, named

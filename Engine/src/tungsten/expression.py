@@ -164,6 +164,504 @@ class ByteArrayExpr(Expr):
         }
 
 
+_SYSTEM_SYMBOL_NAMES = {
+    "$Context",
+    "$ContextPath",
+    "Abs",
+    "All",
+    "Alternatives",
+    "And",
+    "Append",
+    "Apply",
+    "Array",
+    "Association",
+    "AssociationMap",
+    "AssociationQ",
+    "AssociationThread",
+    "BaseDecode",
+    "BaseEncode",
+    "Blank",
+    "BlankNullSequence",
+    "BlankSequence",
+    "BlockMap",
+    "Boole",
+    "BoxData",
+    "ByteArray",
+    "ByteArrayQ",
+    "ByteArrayToString",
+    "Cases",
+    "CharacterRange",
+    "Characters",
+    "CenterDot",
+    "CircleDot",
+    "CircleMinus",
+    "CirclePlus",
+    "CircleTimes",
+    "Clip",
+    "Comap",
+    "ComapApply",
+    "ComplexInfinity",
+    "ComposeList",
+    "Composition",
+    "Condition",
+    "Congruent",
+    "ConstantArray",
+    "Construct",
+    "Context",
+    "Contexts",
+    "Cross",
+    "Delete",
+    "DeleteCases",
+    "DeleteDuplicates",
+    "DeleteDuplicatesBy",
+    "Depth",
+    "DiagonalMatrix",
+    "Diamond",
+    "Discard",
+    "DirectedEdge",
+    "DiscreteDelta",
+    "DiscreteRatio",
+    "DiscreteShift",
+    "Distribute",
+    "Divide",
+    "Dot",
+    "DoubleLeftArrow",
+    "DoubleLeftRightArrow",
+    "DoubleRightArrow",
+    "DoubleVerticalBar",
+    "DownArrow",
+    "Drop",
+    "DuplicateFreeQ",
+    "Element",
+    "EndOfString",
+    "Equal",
+    "Equivalent",
+    "EvenQ",
+    "Except",
+    "ExportByteArray",
+    "ExportString",
+    "Extract",
+    "False",
+    "First",
+    "FirstCase",
+    "FixedPoint",
+    "FixedPointList",
+    "Flatten",
+    "Fold",
+    "FoldList",
+    "FoldPair",
+    "FoldPairList",
+    "FoldWhile",
+    "FoldWhileList",
+    "FreeQ",
+    "FromCharacterCode",
+    "Function",
+    "Greater",
+    "GreaterEqual",
+    "Head",
+    "Hold",
+    "HoldComplete",
+    "HoldForm",
+    "HoldPattern",
+    "Identity",
+    "IdentityMatrix",
+    "If",
+    "ImportByteArray",
+    "ImportString",
+    "Implies",
+    "Indeterminate",
+    "Infinity",
+    "Inner",
+    "Intersection",
+    "Integer",
+    "IntegerQ",
+    "Join",
+    "Key",
+    "KeyDrop",
+    "KeyExistsQ",
+    "KeyMap",
+    "KeyMemberQ",
+    "KeySelect",
+    "KeyTake",
+    "KeyValueMap",
+    "KeyValuePattern",
+    "Keys",
+    "KroneckerDelta",
+    "Last",
+    "Length",
+    "LengthWhile",
+    "Less",
+    "LessEqual",
+    "LessEqualGreater",
+    "Level",
+    "List",
+    "Lookup",
+    "LongLeftArrow",
+    "LongLeftRightArrow",
+    "LongRightArrow",
+    "MakeBoxes",
+    "MakeExpression",
+    "Map",
+    "MapAll",
+    "MapApply",
+    "MapAt",
+    "MapIndexed",
+    "MapThread",
+    "MatchQ",
+    "Max",
+    "MemberQ",
+    "Min",
+    "Missing",
+    "MinusPlus",
+    "Mod",
+    "Most",
+    "Names",
+    "Nest",
+    "NestList",
+    "NestWhile",
+    "NestWhileList",
+    "None",
+    "Normal",
+    "Not",
+    "NotElement",
+    "NotSubset",
+    "NotSubsetEqual",
+    "NotSuperset",
+    "NotSupersetEqual",
+    "Nothing",
+    "Null",
+    "OddQ",
+    "Operate",
+    "Or",
+    "Outer",
+    "Overscript",
+    "OverscriptBox",
+    "Part",
+    "Partition",
+    "Pattern",
+    "Piecewise",
+    "Pick",
+    "Plus",
+    "PlusMinus",
+    "Position",
+    "Power",
+    "Precedes",
+    "PrecedesEqual",
+    "Prepend",
+    "Proportion",
+    "Quotient",
+    "QuotientRemainder",
+    "Ramp",
+    "Range",
+    "Rational",
+    "Real",
+    "RealAbs",
+    "RealSign",
+    "ReleaseHold",
+    "Repeated",
+    "RepeatedNull",
+    "Replace",
+    "ReplaceAll",
+    "ReplaceAt",
+    "ReplacePart",
+    "ReplaceRepeated",
+    "Rest",
+    "Reverse",
+    "RightComposition",
+    "RightArrow",
+    "RotateLeft",
+    "RotateRight",
+    "Rule",
+    "RuleDelayed",
+    "SameAs",
+    "SameQ",
+    "Scan",
+    "Select",
+    "SelectFirst",
+    "Sequence",
+    "SequenceFold",
+    "SequenceFoldList",
+    "Sign",
+    "Slot",
+    "SmallCircle",
+    "Span",
+    "SquareIntersection",
+    "SquareSubset",
+    "SquareSubsetEqual",
+    "SquareSuperset",
+    "SquareSupersetEqual",
+    "SquareUnion",
+    "Star",
+    "StartOfString",
+    "String",
+    "StringCases",
+    "StringContainsQ",
+    "StringDrop",
+    "StringEndsQ",
+    "StringExpression",
+    "StringFreeQ",
+    "StringInsert",
+    "StringJoin",
+    "StringLength",
+    "StringMatchQ",
+    "StringPosition",
+    "StringQ",
+    "StringReplace",
+    "StringReverse",
+    "StringStartsQ",
+    "StringTake",
+    "StringToByteArray",
+    "StripBoxes",
+    "Subset",
+    "SubsetEqual",
+    "Subscript",
+    "SubscriptBox",
+    "Subsuperscript",
+    "SubsuperscriptBox",
+    "Succeeds",
+    "SucceedsEqual",
+    "Superset",
+    "SupersetEqual",
+    "SyntaxLength",
+    "SyntaxQ",
+    "Switch",
+    "Symbol",
+    "SymbolName",
+    "Take",
+    "TakeDrop",
+    "TakeList",
+    "TakeWhile",
+    "Thread",
+    "Through",
+    "Times",
+    "TensorProduct",
+    "Tilde",
+    "TildeEqual",
+    "TildeFullEqual",
+    "TildeTilde",
+    "ToBoxes",
+    "ToCharacterCode",
+    "ToExpression",
+    "ToString",
+    "True",
+    "TrueQ",
+    "Tuples",
+    "Unequal",
+    "Unevaluated",
+    "Underscript",
+    "UnderscriptBox",
+    "UndirectedEdge",
+    "Underoverscript",
+    "UnderoverscriptBox",
+    "UnitStep",
+    "UnitVector",
+    "Unitize",
+    "Union",
+    "UpArrow",
+    "Unique",
+    "UnsameQ",
+    "ValueQ",
+    "Values",
+    "Verbatim",
+    "VerticalBar",
+    "VerticalSeparator",
+    "Vee",
+    "Wedge",
+    "Which",
+}
+
+
+@dataclass
+class SymbolRecord:
+    full_name: str
+    context: str
+    short_name: str
+    built_in: bool = False
+    attributes: tuple[str, ...] = ()
+    own_value: Expr | None = None
+    down_values: tuple[Expr, ...] = ()
+    up_values: tuple[Expr, ...] = ()
+    sub_values: tuple[Expr, ...] = ()
+
+
+class SymbolRegistry:
+    def __init__(self) -> None:
+        self.current_context = "Global`"
+        self.context_path = ("System`", "Global`")
+        self._symbols: dict[str, SymbolRecord] = {}
+        self._contexts: set[str] = {self.current_context, *self.context_path}
+        self._module_number = 0
+        self._string_unique_counters: dict[str, int] = {}
+        for name in sorted(_SYSTEM_SYMBOL_NAMES):
+            self.ensure_full_name(f"System`{name}", built_in=True)
+
+    @property
+    def contexts(self) -> tuple[str, ...]:
+        return tuple(sorted(self._contexts))
+
+    def ensure_full_name(self, full_name: str, *, built_in: bool = False) -> SymbolRecord:
+        context, short_name = _split_symbol_full_name(full_name)
+        if not _is_valid_context_name(context) or not _is_valid_symbol_short_name(short_name):
+            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {full_name!r}.")
+        record = self._symbols.get(full_name)
+        if record is None:
+            record = SymbolRecord(full_name=full_name, context=context, short_name=short_name, built_in=built_in)
+            self._symbols[full_name] = record
+        elif built_in and not record.built_in:
+            record.built_in = True
+        self._contexts.add(context)
+        return record
+
+    def ensure_name(self, name: str, *, built_in: bool = False) -> SymbolRecord:
+        return self.ensure_full_name(self.resolve_full_name(name), built_in=built_in)
+
+    def resolve_full_name(self, name: str) -> str:
+        if "`" in name:
+            context, short_name = _split_symbol_full_name(name)
+            if not context:
+                context = self.current_context
+            if not _is_valid_context_name(context) or not _is_valid_symbol_short_name(short_name):
+                raise WolframEvaluationError(f"Invalid Wolfram symbol name: {name!r}.")
+            return f"{context}{short_name}"
+        if not _is_valid_symbol_short_name(name):
+            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {name!r}.")
+        for context in self.context_path:
+            full_name = f"{context}{name}"
+            if full_name in self._symbols:
+                return full_name
+        return f"{self.current_context}{name}"
+
+    def resolve_existing(self, name: str) -> SymbolRecord | None:
+        try:
+            full_name = self.resolve_full_name(name)
+        except WolframEvaluationError:
+            return None
+        return self._symbols.get(full_name)
+
+    def record_for_symbol(self, expr: Symbol) -> SymbolRecord:
+        return self.ensure_name(expr.name)
+
+    def symbol_from_name(self, name: str) -> Symbol:
+        record = self.ensure_name(name)
+        return self._display_symbol_for_record(record)
+
+    def unique_symbol(self, base: Expr | None = None) -> Symbol:
+        if base is None:
+            self._module_number += 1
+            return self._display_symbol_for_record(self.ensure_full_name(f"{self.current_context}${self._module_number}"))
+        if isinstance(base, Symbol):
+            base_record = self.record_for_symbol(base)
+            self._module_number += 1
+            return self._display_symbol_for_record(
+                self.ensure_full_name(f"{base_record.context}{base_record.short_name}${self._module_number}")
+            )
+        if isinstance(base, String):
+            prefix = base.value
+            if not prefix or not _is_valid_symbol_short_name(f"{prefix}1"):
+                raise WolframEvaluationError("Unique expects a valid symbol or symbol-name prefix.")
+            next_index = self._string_unique_counters.get(prefix, 0) + 1
+            while self.resolve_existing(f"{self.current_context}{prefix}{next_index}") is not None:
+                next_index += 1
+            self._string_unique_counters[prefix] = next_index
+            return self._display_symbol_for_record(self.ensure_full_name(f"{self.current_context}{prefix}{next_index}"))
+        raise WolframEvaluationError("Unique expects no argument, a symbol, a string prefix, or a list of those forms.")
+
+    def _display_symbol_for_record(self, record: SymbolRecord) -> Symbol:
+        if record.context in set(self.context_path) | {self.current_context}:
+            return Symbol(record.short_name)
+        return Symbol(record.full_name)
+
+    def names(self, pattern: Expr | None = None) -> tuple[str, ...]:
+        if pattern is None:
+            patterns = (string("*"),)
+        elif isinstance(pattern, Call) and pattern.has_head("List"):
+            patterns = tuple(pattern.arguments)
+        else:
+            patterns = (pattern,)
+        matched: set[str] = set()
+        for item in patterns:
+            if not isinstance(item, String):
+                raise WolframEvaluationError("Names expects a string pattern or a list of string patterns.")
+            matched.update(self._names_for_string_pattern(item.value))
+        return tuple(sorted(matched))
+
+    def _names_for_string_pattern(self, pattern: str) -> tuple[str, ...]:
+        has_context = "`" in pattern
+        regex = _wolfram_name_pattern_to_regex(pattern)
+        result: list[str] = []
+        visible_contexts = set(self.context_path) | {self.current_context}
+        for record in self._symbols.values():
+            candidate = record.full_name if has_context else record.short_name
+            if not has_context and record.context not in visible_contexts:
+                continue
+            if regex.fullmatch(candidate):
+                result.append(record.short_name if record.context in visible_contexts else record.full_name)
+        return tuple(result)
+
+    def contexts_matching(self, pattern: Expr | None = None) -> tuple[str, ...]:
+        if pattern is None:
+            return self.contexts
+        if not isinstance(pattern, String):
+            raise WolframEvaluationError("Contexts expects an optional string pattern.")
+        regex = _wolfram_name_pattern_to_regex(pattern.value)
+        return tuple(context for context in self.contexts if regex.fullmatch(context))
+
+    def name_q(self, pattern: Expr) -> Symbol:
+        return _bool_symbol(bool(self.names(pattern)))
+
+
+def _split_symbol_full_name(name: str) -> tuple[str, str]:
+    index = name.rfind("`")
+    if index < 0:
+        return "", name
+    return name[:index + 1], name[index + 1:]
+
+
+def _is_valid_context_name(context: str) -> bool:
+    if not context or not context.endswith("`"):
+        return False
+    parts = context[:-1].split("`")
+    return all(part and _is_valid_symbol_short_name(part) for part in parts)
+
+
+def _is_valid_symbol_short_name(name: str) -> bool:
+    if not name:
+        return False
+    first = name[0]
+    if not (first.isalpha() or first == "$"):
+        return False
+    return all(char.isalnum() or char == "$" for char in name[1:])
+
+
+def _wolfram_name_pattern_to_regex(pattern: str) -> re.Pattern[str]:
+    pieces: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\" and index + 1 < len(pattern):
+            pieces.append(re.escape(pattern[index + 1]))
+            index += 2
+            continue
+        if char == "*":
+            pieces.append(".*")
+        elif char == "@":
+            pieces.append("[^A-Z]+")
+        else:
+            pieces.append(re.escape(char))
+        index += 1
+    return re.compile("".join(pieces))
+
+
+_SYMBOL_REGISTRY = SymbolRegistry()
+
+
+def _system_dispatch_name(expr: Symbol) -> str:
+    record = _SYMBOL_REGISTRY.resolve_existing(expr.name)
+    if record is not None and record.context == "System`" and record.built_in:
+        return record.short_name
+    return expr.name
+
+
 @dataclass(frozen=True)
 class Call(Expr):
     head_expr: Expr
@@ -179,7 +677,7 @@ class Call(Expr):
         return False
 
     def has_head(self, name: str) -> bool:
-        return isinstance(self.head_expr, Symbol) and self.head_expr.name == name
+        return isinstance(self.head_expr, Symbol) and _system_dispatch_name(self.head_expr) == name
 
     def to_full_form(self) -> str:
         return f"{self.head_expr.to_full_form()}[{', '.join(arg.to_full_form() for arg in self.arguments)}]"
@@ -299,6 +797,13 @@ def _format_span(arguments: Sequence[Expr]) -> str:
 
 
 def symbol(name: str) -> Symbol:
+    try:
+        _SYMBOL_REGISTRY.ensure_name(name)
+    except WolframEvaluationError:
+        # Existing AST code uses a few structural pseudo-symbol spellings, such as
+        # -Infinity, that are not constructible Wolfram identifiers. Keep the atom;
+        # user-facing Symbol["..."] validation still goes through the registry.
+        pass
     return Symbol(name)
 
 
@@ -327,12 +832,249 @@ _FLAT_HEADS = {"Alternatives"}
 _LEVEL_INFINITY = 1_000_000_000
 _MISSING = object()
 _ESCAPED_TOKEN_MAP = {
+    r"\[And]": "&&",
+    r"\[Equal]": "==",
     r"\[Function]": "|->",
+    r"\[GreaterEqual]": ">=",
+    r"\[InvisibleApplication]": "@",
+    r"\[InvisibleTimes]": "*",
     r"\[Rule]": "->",
     r"\[RuleDelayed]": ":>",
+    r"\[LessEqual]": "<=",
     r"\[LeftAssociation]": "<|",
+    r"\[NotEqual]": "!=",
+    r"\[Or]": "||",
     r"\[RightAssociation]": "|>",
 }
+
+
+_ESCAPED_SYMBOL_ALIASES = {
+    r"\[ExponentialE]": "E",
+    r"\[ImaginaryI]": "I",
+    r"\[ImaginaryJ]": "I",
+    r"\[Infinity]": "Infinity",
+    r"\[Pi]": "Pi",
+}
+
+
+_ESCAPED_INFIX_OPERATOR_HEADS = {
+    r"\[CenterDot]": "CenterDot",
+    r"\[CircleDot]": "CircleDot",
+    r"\[CircleMinus]": "CircleMinus",
+    r"\[CirclePlus]": "CirclePlus",
+    r"\[CircleTimes]": "CircleTimes",
+    r"\[Congruent]": "Congruent",
+    r"\[Cross]": "Cross",
+    r"\[Diamond]": "Diamond",
+    r"\[DirectedEdge]": "DirectedEdge",
+    r"\[DiscreteRatio]": "DiscreteRatio",
+    r"\[DiscreteShift]": "DiscreteShift",
+    r"\[DoubleLeftArrow]": "DoubleLeftArrow",
+    r"\[DoubleLeftRightArrow]": "DoubleLeftRightArrow",
+    r"\[DoubleRightArrow]": "DoubleRightArrow",
+    r"\[DoubleVerticalBar]": "DoubleVerticalBar",
+    r"\[DownArrow]": "DownArrow",
+    r"\[Element]": "Element",
+    r"\[Equivalent]": "Equivalent",
+    r"\[Implies]": "Implies",
+    r"\[Intersection]": "Intersection",
+    r"\[LeftArrow]": "LeftArrow",
+    r"\[LeftRightArrow]": "LeftRightArrow",
+    r"\[LessEqualGreater]": "LessEqualGreater",
+    r"\[LongLeftArrow]": "LongLeftArrow",
+    r"\[LongLeftRightArrow]": "LongLeftRightArrow",
+    r"\[LongRightArrow]": "LongRightArrow",
+    r"\[MinusPlus]": "MinusPlus",
+    r"\[NotElement]": "NotElement",
+    r"\[NotSubset]": "NotSubset",
+    r"\[NotSubsetEqual]": "NotSubsetEqual",
+    r"\[NotSuperset]": "NotSuperset",
+    r"\[NotSupersetEqual]": "NotSupersetEqual",
+    r"\[PlusMinus]": "PlusMinus",
+    r"\[Precedes]": "Precedes",
+    r"\[PrecedesEqual]": "PrecedesEqual",
+    r"\[Proportion]": "Proportion",
+    r"\[RightArrow]": "RightArrow",
+    r"\[SmallCircle]": "SmallCircle",
+    r"\[SquareIntersection]": "SquareIntersection",
+    r"\[SquareSubset]": "SquareSubset",
+    r"\[SquareSubsetEqual]": "SquareSubsetEqual",
+    r"\[SquareSuperset]": "SquareSuperset",
+    r"\[SquareSupersetEqual]": "SquareSupersetEqual",
+    r"\[SquareUnion]": "SquareUnion",
+    r"\[Star]": "Star",
+    r"\[Subset]": "Subset",
+    r"\[SubsetEqual]": "SubsetEqual",
+    r"\[Succeeds]": "Succeeds",
+    r"\[SucceedsEqual]": "SucceedsEqual",
+    r"\[Superset]": "Superset",
+    r"\[SupersetEqual]": "SupersetEqual",
+    r"\[TensorProduct]": "TensorProduct",
+    r"\[Tilde]": "Tilde",
+    r"\[TildeEqual]": "TildeEqual",
+    r"\[TildeFullEqual]": "TildeFullEqual",
+    r"\[TildeTilde]": "TildeTilde",
+    r"\[UndirectedEdge]": "UndirectedEdge",
+    r"\[Union]": "Union",
+    r"\[UnionPlus]": "UnionPlus",
+    r"\[UpArrow]": "UpArrow",
+    r"\[Vee]": "Vee",
+    r"\[VerticalBar]": "VerticalBar",
+    r"\[VerticalSeparator]": "VerticalSeparator",
+    r"\[Wedge]": "Wedge",
+}
+
+
+_ADDITIONAL_ESCAPED_INFIX_OPERATOR_HEAD_NAMES = {
+    "Backslash",
+    "Because",
+    "Cap",
+    "Coproduct",
+    "Cup",
+    "CupCap",
+    "Del",
+    "DotEqual",
+    "DoubleDownArrow",
+    "DoubleLeftTee",
+    "DoubleLongLeftArrow",
+    "DoubleLongLeftRightArrow",
+    "DoubleLongRightArrow",
+    "DoubleUpArrow",
+    "DoubleUpDownArrow",
+    "DownArrowBar",
+    "DownArrowUpArrow",
+    "DownLeftRightVector",
+    "DownLeftTeeVector",
+    "DownLeftVector",
+    "DownLeftVectorBar",
+    "DownRightTeeVector",
+    "DownRightVector",
+    "DownRightVectorBar",
+    "DownTee",
+    "DownTeeArrow",
+    "EqualTilde",
+    "Equilibrium",
+    "GreaterEqualLess",
+    "GreaterFullEqual",
+    "GreaterGreater",
+    "GreaterLess",
+    "GreaterSlantEqual",
+    "GreaterTilde",
+    "HumpDownHump",
+    "HumpEqual",
+    "LeftArrowBar",
+    "LeftArrowRightArrow",
+    "LeftDownTeeVector",
+    "LeftDownVector",
+    "LeftDownVectorBar",
+    "LeftTee",
+    "LeftTeeArrow",
+    "LeftTeeVector",
+    "LeftTriangle",
+    "LeftTriangleBar",
+    "LeftTriangleEqual",
+    "LeftUpDownVector",
+    "LeftUpTeeVector",
+    "LeftUpVector",
+    "LeftUpVectorBar",
+    "LeftVector",
+    "LeftVectorBar",
+    "LessFullEqual",
+    "LessGreater",
+    "LessLess",
+    "LessSlantEqual",
+    "LessTilde",
+    "LowerLeftArrow",
+    "LowerRightArrow",
+    "Nand",
+    "NestedGreaterGreater",
+    "NestedLessLess",
+    "Nor",
+    "NotCongruent",
+    "NotCupCap",
+    "NotDoubleVerticalBar",
+    "NotGreater",
+    "NotGreaterEqual",
+    "NotGreaterFullEqual",
+    "NotGreaterLess",
+    "NotGreaterTilde",
+    "NotLeftTriangle",
+    "NotLeftTriangleEqual",
+    "NotLess",
+    "NotLessEqual",
+    "NotLessFullEqual",
+    "NotLessGreater",
+    "NotLessTilde",
+    "NotPrecedes",
+    "NotPrecedesSlantEqual",
+    "NotPrecedesTilde",
+    "NotReverseElement",
+    "NotRightTriangle",
+    "NotRightTriangleEqual",
+    "NotSquareSubsetEqual",
+    "NotSquareSupersetEqual",
+    "NotSucceeds",
+    "NotSucceedsSlantEqual",
+    "NotSucceedsTilde",
+    "NotTilde",
+    "NotTildeEqual",
+    "NotTildeFullEqual",
+    "NotTildeTilde",
+    "Perpendicular",
+    "PrecedesSlantEqual",
+    "PrecedesTilde",
+    "Proportional",
+    "ReverseElement",
+    "ReverseEquilibrium",
+    "ReverseUpEquilibrium",
+    "RightArrowBar",
+    "RightArrowLeftArrow",
+    "RightDownTeeVector",
+    "RightDownVector",
+    "RightDownVectorBar",
+    "RightTee",
+    "RightTeeArrow",
+    "RightTeeVector",
+    "RightTriangle",
+    "RightTriangleBar",
+    "RightTriangleEqual",
+    "RightUpDownVector",
+    "RightUpTeeVector",
+    "RightUpVector",
+    "RightUpVectorBar",
+    "RightVector",
+    "RightVectorBar",
+    "RoundImplies",
+    "ShortDownArrow",
+    "ShortLeftArrow",
+    "ShortRightArrow",
+    "ShortUpArrow",
+    "Square",
+    "SuchThat",
+    "SucceedsSlantEqual",
+    "SucceedsTilde",
+    "Therefore",
+    "UpArrowBar",
+    "UpArrowDownArrow",
+    "UpDownArrow",
+    "UpEquilibrium",
+    "UpTee",
+    "UpTeeArrow",
+    "UpperLeftArrow",
+    "UpperRightArrow",
+    "VerticalTilde",
+    "Xor",
+}
+
+_ESCAPED_INFIX_OPERATOR_HEADS.update(
+    {f"\\[{name}]": name for name in _ADDITIONAL_ESCAPED_INFIX_OPERATOR_HEAD_NAMES}
+)
+
+for _escaped_operator_head in set(_ESCAPED_INFIX_OPERATOR_HEADS.values()):
+    try:
+        _SYMBOL_REGISTRY.ensure_full_name(f"System`{_escaped_operator_head}", built_in=True)
+    except WolframEvaluationError:
+        pass
 
 
 def call(head: str | Expr, *arguments: Expr) -> Call:
@@ -945,6 +1687,417 @@ def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> Stri
     if encoding_name == "Unicode":
         raise WolframEvaluationError('ByteArrayToString does not currently support the "Unicode" pseudo-encoding.')
     return string(_decode_bytes_to_string(bytes(byte_values), encoding_name))
+
+
+_TEXTUAL_EXPRESSION_FORM_NAMES = {
+    "input": "InputForm",
+    "inputform": "InputForm",
+    "standard": "StandardForm",
+    "standardform": "StandardForm",
+}
+
+
+def _normalize_textual_expression_form(value: Expr | None, function_name: str) -> str:
+    if value is None:
+        return "InputForm"
+    if isinstance(value, Symbol):
+        key = value.name.strip().lower()
+    elif isinstance(value, String):
+        key = value.value.strip().lower()
+    else:
+        raise WolframEvaluationError(f"{function_name} expects InputForm or StandardForm as the form specification.")
+    normalized = _TEXTUAL_EXPRESSION_FORM_NAMES.get(key)
+    if normalized is None:
+        raise WolframEvaluationError(f"{function_name} currently supports only InputForm and StandardForm.")
+    return normalized
+
+
+def _normalize_box_expression_form(value: Expr | None, function_name: str) -> str:
+    if value is None:
+        return "StandardForm"
+    return _normalize_textual_expression_form(value, function_name)
+
+
+_STANDARD_FORM_BOX_HEADS = {
+    "AdjustmentBox",
+    "BoxData",
+    "FormBox",
+    "FrameBox",
+    "GridBox",
+    "OverscriptBox",
+    "PaneBox",
+    "StyleBox",
+    "SubscriptBox",
+    "SubsuperscriptBox",
+    "TagBox",
+    "TemplateBox",
+    "TooltipBox",
+    "FractionBox",
+    "InterpretationBox",
+    "RadicalBox",
+    "RowBox",
+    "SqrtBox",
+    "SuperscriptBox",
+    "UnderscriptBox",
+    "UnderoverscriptBox",
+}
+
+
+def _looks_like_standard_form_boxes(expr: Expr) -> bool:
+    return (
+        isinstance(expr, Call)
+        and isinstance(expr.head_expr, Symbol)
+        and expr.head_expr.name in _STANDARD_FORM_BOX_HEADS
+    )
+
+
+def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
+    form_name = _normalize_textual_expression_form(form_value, "ToString")
+    if form_name == "InputForm":
+        return string(expr.to_input_form())
+    if form_name == "StandardForm":
+        # Tungsten's StandardForm string subset intentionally renders as parseable WL text,
+        # not as FrontEnd box escapes. The parser accepts it through parse_standard_form.
+        return string(expr.to_input_form())
+    raise AssertionError(f"Unhandled textual expression form: {form_name}")
+
+
+def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper_head: Expr | None = None) -> Expr:
+    if isinstance(input_expr, Call) and input_expr.has_head("List"):
+        return _evaluated_list_expr(
+            *(to_expression_expr(item, form_value, wrapper_head) for item in input_expr.arguments)
+        )
+
+    if form_value is None and _looks_like_standard_form_boxes(input_expr):
+        form_name = "StandardForm"
+    else:
+        form_name = _normalize_textual_expression_form(form_value, "ToExpression")
+
+    try:
+        if isinstance(input_expr, String):
+            parsed = parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+        elif form_name == "StandardForm" and _looks_like_standard_form_boxes(input_expr):
+            parsed = _interpret_standard_form(input_expr)
+        else:
+            raise WolframEvaluationError("ToExpression expects a string or a supported StandardForm box expression.")
+    except WolframSyntaxError as exc:
+        raise WolframEvaluationError(f"ToExpression could not parse the input as {form_name}.") from exc
+
+    if wrapper_head is not None:
+        parsed = Call(head_expr=wrapper_head, arguments=(parsed,))
+    return evaluate(parsed)
+
+
+def to_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
+    form_name = _normalize_box_expression_form(form_value, "ToBoxes")
+    return _make_boxes(expr, form_name)
+
+
+def make_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
+    form_name = _normalize_box_expression_form(form_value, "MakeBoxes")
+    return _make_boxes(expr, form_name)
+
+
+def make_expression_expr(box_expr: Expr, form_value: Expr | None = None) -> Expr:
+    form_name = _normalize_box_expression_form(form_value, "MakeExpression")
+    try:
+        if isinstance(box_expr, String):
+            parsed = parse_input_form(box_expr.value) if form_name == "InputForm" else parse_standard_form(box_expr.value)
+        elif form_name == "StandardForm" and _looks_like_standard_form_boxes(box_expr):
+            parsed = _interpret_standard_form(box_expr)
+        else:
+            raise WolframEvaluationError("MakeExpression expects a string or a supported StandardForm box expression.")
+    except WolframSyntaxError as exc:
+        raise WolframEvaluationError(f"MakeExpression could not parse the input as {form_name}.") from exc
+    return call("HoldComplete", parsed)
+
+
+def strip_boxes_expr(box_expr: Expr) -> Expr:
+    return call("BoxData", _strip_box_expression(box_expr))
+
+
+def syntax_q_expr(input_expr: Expr, form_value: Expr | None = None) -> Symbol:
+    return _bool_symbol(_syntax_q(input_expr, form_value))
+
+
+def syntax_length_expr(input_expr: Expr, form_value: Expr | None = None) -> Integer:
+    if isinstance(input_expr, String):
+        form_name = _normalize_textual_expression_form(form_value, "SyntaxLength")
+        return integer(_syntax_length_text(input_expr.value, form_name))
+    if _looks_like_standard_form_boxes(input_expr):
+        text = _box_expr_to_standard_text(input_expr)
+        return integer(_syntax_length_text(text, "StandardForm"))
+    raise WolframEvaluationError("SyntaxLength expects a string or a supported StandardForm box expression.")
+
+
+def _make_boxes(expr: Expr, form_name: str) -> Expr:
+    if form_name not in {"InputForm", "StandardForm"}:
+        raise WolframEvaluationError("Box conversion currently supports only InputForm and StandardForm.")
+    if form_name == "InputForm":
+        return string(expr.to_input_form())
+    return _make_standard_boxes(expr)
+
+
+def _make_standard_boxes(expr: Expr) -> Expr:
+    if isinstance(expr, Symbol):
+        return string(expr.to_input_form())
+    if isinstance(expr, Integer):
+        return string(str(expr.value))
+    if isinstance(expr, Real):
+        return string(expr.text)
+    if isinstance(expr, String):
+        return string(wl_string(expr.value))
+    if isinstance(expr, ByteArrayExpr):
+        return _make_standard_boxes(call("ByteArray", list_expr(*(integer(value) for value in expr.values))))
+    if not isinstance(expr, Call):
+        return string(expr.to_input_form())
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name == "List":
+            return _bracketed_row_box("{", expr.arguments, "}")
+        if head_name == "Association":
+            return _bracketed_row_box("<|", expr.arguments, "|>")
+        if head_name == "Rule" and len(expr.arguments) == 2:
+            return _infix_row_box(expr.arguments[0], "->", expr.arguments[1])
+        if head_name == "RuleDelayed" and len(expr.arguments) == 2:
+            return _infix_row_box(expr.arguments[0], ":>", expr.arguments[1])
+        if head_name == "Plus" and len(expr.arguments) >= 2:
+            return _separated_row_box(expr.arguments, "+")
+        if head_name == "Times" and len(expr.arguments) >= 2:
+            return _separated_row_box(expr.arguments, " ")
+        if head_name == "Power" and len(expr.arguments) == 2:
+            base, exponent = expr.arguments
+            if isinstance(exponent, Integer) and exponent.value == -1:
+                return call("FractionBox", string("1"), _make_standard_boxes(base))
+            return call("SuperscriptBox", _make_standard_boxes(base), _make_standard_boxes(exponent))
+        if head_name == "Rational" and len(expr.arguments) == 2:
+            return call("FractionBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Subscript" and len(expr.arguments) == 2:
+            return call("SubscriptBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Subsuperscript" and len(expr.arguments) == 3:
+            return call(
+                "SubsuperscriptBox",
+                _make_standard_boxes(expr.arguments[0]),
+                _make_standard_boxes(expr.arguments[1]),
+                _make_standard_boxes(expr.arguments[2]),
+            )
+        if head_name == "Overscript" and len(expr.arguments) == 2:
+            return call("OverscriptBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Underscript" and len(expr.arguments) == 2:
+            return call("UnderscriptBox", _make_standard_boxes(expr.arguments[0]), _make_standard_boxes(expr.arguments[1]))
+        if head_name == "Underoverscript" and len(expr.arguments) == 3:
+            return call(
+                "UnderoverscriptBox",
+                _make_standard_boxes(expr.arguments[0]),
+                _make_standard_boxes(expr.arguments[1]),
+                _make_standard_boxes(expr.arguments[2]),
+            )
+
+    return _generic_call_boxes(expr)
+
+
+def _bracketed_row_box(open_token: str, arguments: Sequence[Expr], close_token: str) -> Expr:
+    if arguments:
+        middle = _separated_row_box(arguments, ",")
+    else:
+        middle = string("")
+    return _row_box(string(open_token), middle, string(close_token))
+
+
+def _generic_call_boxes(expr: Call) -> Expr:
+    if expr.arguments:
+        arguments = _separated_row_box(expr.arguments, ",")
+    else:
+        arguments = string("")
+    return _row_box(_make_standard_boxes(expr.head_expr), string("["), arguments, string("]"))
+
+
+def _infix_row_box(left: Expr, operator: str, right: Expr) -> Expr:
+    return _row_box(_make_standard_boxes(left), string(operator), _make_standard_boxes(right))
+
+
+def _separated_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
+    pieces: list[Expr] = []
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(string(separator))
+        pieces.append(_make_standard_boxes(argument))
+    return _row_box(*pieces)
+
+
+def _row_box(*items: Expr) -> Expr:
+    return call("RowBox", list_expr(*items))
+
+
+def _strip_box_expression(expr: Expr) -> Expr:
+    if isinstance(expr, Call):
+        if expr.has_head("BoxData") and len(expr.arguments) == 1:
+            return _strip_box_expression(expr.arguments[0])
+        if (
+            isinstance(expr.head_expr, Symbol)
+            and expr.head_expr.name in {"AdjustmentBox", "FormBox", "FrameBox", "PaneBox", "StyleBox", "TooltipBox"}
+            and expr.arguments
+        ):
+            return _strip_box_expression(expr.arguments[0])
+        if expr.has_head("RowBox") and len(expr.arguments) == 1:
+            items = expr.arguments[0]
+            if isinstance(items, Call) and items.has_head("List"):
+                stripped_items = [
+                    stripped
+                    for item in items.arguments
+                    for stripped in _strip_row_box_item(item)
+                ]
+                return call("RowBox", list_expr(*stripped_items))
+        return Call(
+            head_expr=_strip_box_expression(expr.head_expr),
+            arguments=tuple(_strip_box_expression(argument) for argument in expr.arguments),
+        )
+    return expr
+
+
+def _strip_row_box_item(expr: Expr) -> list[Expr]:
+    stripped = _strip_box_expression(expr)
+    if isinstance(stripped, String) and _is_nonsemantic_row_box_token(stripped.value):
+        return []
+    return [stripped]
+
+
+def _is_nonsemantic_row_box_token(value: str) -> bool:
+    if value.isspace():
+        return True
+    if value.startswith("(*"):
+        try:
+            return skip_wl_comment(value, 0) == len(value)
+        except WolframSyntaxError:
+            return False
+    return value in {
+        r"\[InvisibleSpace]",
+        r"\[NegativeMediumSpace]",
+        r"\[NegativeThickSpace]",
+        r"\[NegativeThinSpace]",
+        r"\[NegativeVeryThinSpace]",
+        r"\[NoBreak]",
+        r"\[ThickSpace]",
+        r"\[ThinSpace]",
+        r"\[VeryThinSpace]",
+    }
+
+
+def _syntax_q(input_expr: Expr, form_value: Expr | None) -> bool:
+    if isinstance(input_expr, String):
+        if not input_expr.value:
+            return False
+        form_name = _normalize_textual_expression_form(form_value, "SyntaxQ")
+        try:
+            parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+            return True
+        except WolframSyntaxError:
+            return False
+    if _looks_like_standard_form_boxes(input_expr):
+        try:
+            _interpret_standard_form(input_expr)
+            return True
+        except WolframSyntaxError:
+            return False
+    raise WolframEvaluationError("SyntaxQ expects a string or a supported StandardForm box expression.")
+
+
+def _syntax_length_text(text: str, form_name: str) -> int:
+    if not text:
+        return 0
+    try:
+        parse_input_form(text) if form_name == "InputForm" else parse_standard_form(text)
+        return len(text)
+    except WolframSyntaxError as exc:
+        message = str(exc)
+        offset = _syntax_error_offset(message)
+        if offset is not None:
+            if offset >= len(text) or "found ''" in message or "Unexpected ''" in message:
+                return len(text) + 2
+            return max(0, offset)
+        return len(text) + 1
+
+
+def _syntax_error_offset(message: str) -> int | None:
+    match = re.search(r"offset (\d+)", message)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _box_expr_to_standard_text(expr: Expr) -> str:
+    if isinstance(expr, Call) and expr.has_head("BoxData") and len(expr.arguments) == 1:
+        return _box_expr_to_standard_text(expr.arguments[0])
+    if isinstance(expr, Call) and expr.has_head("RowBox"):
+        return _row_box_to_standard_text(expr)
+    return _box_item_to_standard_text(expr)
+
+
+def symbol_expr(name: Expr) -> Symbol:
+    if not isinstance(name, String):
+        raise WolframEvaluationError("Symbol expects a string symbol name.")
+    return _SYMBOL_REGISTRY.symbol_from_name(name.value)
+
+
+def symbol_name_expr(expr: Expr) -> String:
+    if isinstance(expr, Symbol):
+        return string(_SYMBOL_REGISTRY.record_for_symbol(expr).short_name)
+    if isinstance(expr, String):
+        record = _SYMBOL_REGISTRY.resolve_existing(expr.value)
+        if record is not None:
+            return string(record.short_name)
+        context, short_name = _split_symbol_full_name(expr.value)
+        if context and _is_valid_symbol_short_name(short_name):
+            return string(short_name)
+    raise WolframEvaluationError("SymbolName expects a symbol or an existing symbol name.")
+
+
+def context_expr(expr: Expr | None = None) -> String:
+    if expr is None:
+        return string(_SYMBOL_REGISTRY.current_context)
+    if isinstance(expr, Symbol):
+        return string(_SYMBOL_REGISTRY.record_for_symbol(expr).context)
+    if isinstance(expr, String):
+        record = _SYMBOL_REGISTRY.resolve_existing(expr.value)
+        if record is None:
+            raise WolframEvaluationError(f"Context could not find a symbol named {expr.value!r}.")
+        return string(record.context)
+    raise WolframEvaluationError("Context expects zero arguments, a symbol, or an existing symbol name.")
+
+
+def contexts_expr(pattern: Expr | None = None) -> Call:
+    return _evaluated_list_expr(*(string(context) for context in _SYMBOL_REGISTRY.contexts_matching(pattern)))
+
+
+def names_expr(pattern: Expr | None = None) -> Call:
+    return _evaluated_list_expr(*(string(name) for name in _SYMBOL_REGISTRY.names(pattern)))
+
+
+def name_q_expr(pattern: Expr) -> Symbol:
+    return _SYMBOL_REGISTRY.name_q(pattern)
+
+
+def unique_expr(spec: Expr | None = None) -> Expr:
+    if spec is None:
+        return _SYMBOL_REGISTRY.unique_symbol()
+    if isinstance(spec, Call) and spec.has_head("List"):
+        return _evaluated_list_expr(*(_SYMBOL_REGISTRY.unique_symbol(item) for item in spec.arguments))
+    return _SYMBOL_REGISTRY.unique_symbol(spec)
+
+
+def value_q_expr(expr: Expr) -> Symbol:
+    if isinstance(expr, Symbol):
+        record = _SYMBOL_REGISTRY.record_for_symbol(expr)
+        if record.full_name in {"System`$Context", "System`$ContextPath"}:
+            return _bool_symbol(True)
+        return _bool_symbol(record.own_value is not None)
+    if isinstance(expr, (Integer, Real, String, ByteArrayExpr)):
+        return _bool_symbol(True)
+    try:
+        return _bool_symbol(evaluate(expr) != expr)
+    except WolframEvaluationError:
+        return _bool_symbol(False)
 
 
 def _normalize_import_export_format_name(value: Expr, function_name: str) -> str:
@@ -2362,6 +3515,62 @@ def _match_call_arguments(
     return recurse(0, 0, dict(bindings))
 
 
+def _key_value_pattern_elements(expr: Expr) -> tuple[Expr, ...] | None:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return tuple(entry.to_expr() for entry in entries)
+
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return None
+
+    elements: list[Expr] = []
+    for argument in expr.arguments:
+        if _rule_entry(argument) is None:
+            return None
+        elements.append(argument)
+    return tuple(elements)
+
+
+def _key_value_pattern_items(spec: Expr) -> tuple[Expr, ...]:
+    if isinstance(spec, Call) and spec.has_head("List"):
+        return spec.arguments
+    return (spec,)
+
+
+def _match_key_value_pattern(
+    expr: Expr,
+    spec: Expr,
+    bindings: dict[str, Expr],
+) -> dict[str, Expr] | None:
+    elements = _key_value_pattern_elements(expr)
+    if elements is None:
+        return None
+
+    patterns = _key_value_pattern_items(spec)
+
+    def recurse(
+        pattern_index: int,
+        used_indices: frozenset[int],
+        current: dict[str, Expr],
+    ) -> dict[str, Expr] | None:
+        if pattern_index == len(patterns):
+            return current
+
+        pattern = patterns[pattern_index]
+        for index, element in enumerate(elements):
+            if index in used_indices:
+                continue
+            matched = _match_pattern(element, pattern, current)
+            if matched is None:
+                continue
+            result = recurse(pattern_index + 1, used_indices | {index}, matched)
+            if result is not None:
+                return result
+        return None
+
+    return recurse(0, frozenset(), dict(bindings))
+
+
 def _match_pattern(
     expr: Expr,
     pattern: Expr,
@@ -2411,6 +3620,11 @@ def _match_pattern(
             if matched is None:
                 return None
             return matched if _condition_test_succeeds(pattern.arguments[1], matched) else None
+
+        if head_name == "KeyValuePattern":
+            if len(pattern.arguments) != 1:
+                raise WolframEvaluationError("KeyValuePattern expects exactly one argument.")
+            return _match_key_value_pattern(expr, pattern.arguments[0], current)
 
         if head_name == "Pattern":
             if len(pattern.arguments) != 2:
@@ -2469,7 +3683,12 @@ def _collect_pattern_records(
     *,
     heads: bool,
 ) -> None:
-    if _is_association(expr):
+    entries = _association_entries(expr)
+    if entries is not None:
+        if heads:
+            _collect_pattern_records(expr.head_expr, positive_level + 1, target, heads=heads)
+        for entry in entries:
+            _collect_pattern_records(entry.value, positive_level + 1, target, heads=heads)
         target.append(_PatternRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
         return
 
@@ -3241,18 +4460,27 @@ def _delete_cases_recursive(
     level_max: int,
     remaining: list[int | None],
 ) -> Expr | object:
-    if _is_association(expr):
-        negative_level = -depth(expr)
-        if _level_bounds_match(positive_level, negative_level, level_min, level_max) and remaining[0] != 0:
-            if _match_pattern(expr, pattern) is not None:
-                if positive_level == 0:
-                    return _DELETE_SENTINEL
-                if remaining[0] is not None:
-                    remaining[0] -= 1
-                return _DELETE_SENTINEL
-        return expr
-
-    if isinstance(expr, Call):
+    entries = _association_entries(expr)
+    if entries is not None:
+        transformed_entries: list[_AssociationEntry] = []
+        changed = False
+        for entry in entries:
+            transformed = _delete_cases_recursive(
+                entry.value,
+                pattern,
+                positive_level=positive_level + 1,
+                level_min=level_min,
+                level_max=level_max,
+                remaining=remaining,
+            )
+            if transformed is _DELETE_SENTINEL:
+                changed = True
+                continue
+            assert isinstance(transformed, Expr)
+            transformed_entries.append(_AssociationEntry(entry.rule_head, entry.key, transformed))
+            changed = changed or transformed != entry.value
+        rebuilt: Expr = _association_expr(transformed_entries) if changed else expr
+    elif isinstance(expr, Call):
         transformed_args: list[Expr] = []
         for argument in expr.arguments:
             transformed = _delete_cases_recursive(
@@ -4004,6 +5232,10 @@ def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
                     "MapIndexed[f, levelspec] expects exactly one argument when used as an operator."
                 )
             return map_indexed(function.arguments[0], arguments[0], function.arguments[1])
+    if isinstance(function, Call) and function.has_head("KeySelect") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("KeySelect[crit] expects exactly one argument when used as an operator.")
+        return key_select(arguments[0], function.arguments[0])
     if isinstance(function, Call) and function.has_head("Comap") and len(function.arguments) == 1:
         if len(arguments) != 1:
             raise WolframEvaluationError("Comap[functions] expects exactly one argument when used as an operator.")
@@ -4061,6 +5293,8 @@ def _is_callable_expr(expr: Expr) -> bool:
     if expr.has_head("MapAll") and len(expr.arguments) == 1:
         return True
     if expr.has_head("MapIndexed") and len(expr.arguments) in {1, 2}:
+        return True
+    if expr.has_head("KeySelect") and len(expr.arguments) == 1:
         return True
     if expr.has_head("Scan") and len(expr.arguments) in {1, 2}:
         return True
@@ -4159,9 +5393,9 @@ def map_indexed(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] |
             _AssociationEntry(
                 rule_head=entry.rule_head,
                 key=entry.key,
-                value=_apply_callable(function, (entry.value, list_expr(integer(index)))),
+                value=_apply_callable(function, (entry.value, list_expr(call("Key", entry.key)))),
             )
-            for index, entry in enumerate(entries, start=1)
+            for entry in entries
         )
 
     compound = _require_compound(expr, "MapIndexed")
@@ -4843,24 +6077,40 @@ def position(
     remaining = _normalize_match_limit(limit)
     results: list[Expr] = []
 
-    def recurse(current: Expr, positive_level: int, path: list[int]) -> None:
+    def append_match_path(path: Sequence[Expr]) -> None:
+        nonlocal remaining
+        results.append(list_expr(*path))
+        if remaining is not None:
+            remaining -= 1
+
+    def recurse(current: Expr, positive_level: int, path: list[Expr]) -> None:
         nonlocal remaining
         if remaining == 0:
             return
-        if _is_association(current):
+
+        entries = _association_entries(current)
+        if entries is not None:
+            recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
+            if remaining == 0:
+                return
+            for entry in entries:
+                recurse(entry.value, positive_level + 1, [*path, call("Key", entry.key)])
+                if remaining == 0:
+                    return
             negative_level = -depth(current)
             if (
                 _level_bounds_match(positive_level, negative_level, level_min, level_max)
                 and _match_pattern(current, pattern) is not None
             ):
-                results.append(list_expr(*(integer(index) for index in path)))
-                if remaining is not None:
-                    remaining -= 1
+                append_match_path(path)
             return
 
         if isinstance(current, Call):
+            recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
+            if remaining == 0:
+                return
             for index, argument in enumerate(current.arguments, start=1):
-                recurse(argument, positive_level + 1, [*path, index])
+                recurse(argument, positive_level + 1, [*path, integer(index)])
                 if remaining == 0:
                     return
 
@@ -4869,9 +6119,7 @@ def position(
             _level_bounds_match(positive_level, negative_level, level_min, level_max)
             and _match_pattern(current, pattern) is not None
         ):
-            results.append(list_expr(*(integer(index) for index in path)))
-            if remaining is not None:
-                remaining -= 1
+            append_match_path(path)
 
     recurse(expr, 0, [])
     return list_expr(*results)
@@ -5114,6 +6362,11 @@ def key_drop(expr: Expr, key_spec: Expr) -> Expr:
     entries = _require_association_entries(expr, "KeyDrop")
     keys_to_drop = set(_key_spec_items(key_spec))
     return _association_expr(entry for entry in entries if entry.key not in keys_to_drop)
+
+
+def key_select(expr: Expr, criterion: Expr) -> Expr:
+    entries = _require_association_entries(expr, "KeySelect")
+    return _association_expr(entry for entry in entries if _predicate_succeeds(criterion, entry.key))
 
 
 def key_map(function: Expr, expr: Expr) -> Expr:
@@ -5817,14 +7070,25 @@ def _rebuild_selected_parts(
 
 
 def evaluate(expr: Expr) -> Expr:
-    if isinstance(expr, (Symbol, Integer, Real, String)):
+    if isinstance(expr, Symbol):
+        try:
+            record = _SYMBOL_REGISTRY.ensure_name(expr.name)
+        except WolframEvaluationError:
+            return expr
+        if record.full_name == "System`$Context":
+            return string(_SYMBOL_REGISTRY.current_context)
+        if record.full_name == "System`$ContextPath":
+            return _evaluated_list_expr(*(string(context) for context in _SYMBOL_REGISTRY.context_path))
+        return expr
+
+    if isinstance(expr, (Integer, Real, String)):
         return expr
 
     if not isinstance(expr, Call):
         return expr
 
     if isinstance(expr.head_expr, Symbol):
-        raw_head_name = expr.head_expr.name
+        raw_head_name = _system_dispatch_name(expr.head_expr)
 
         if raw_head_name in _HELD_ARGUMENT_HEADS:
             held_arguments = _normalize_arguments_for_head(raw_head_name, expr.arguments, evaluated=False)
@@ -5838,6 +7102,25 @@ def evaluate(expr: Expr) -> Expr:
             if len(expr.arguments) != 1:
                 raise WolframEvaluationError("ReleaseHold expects exactly one argument.")
             return release_hold(evaluate(expr.arguments[0]))
+
+        if raw_head_name == "ValueQ":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("ValueQ expects exactly one argument.")
+            return value_q_expr(expr.arguments[0])
+
+        if raw_head_name == "MakeBoxes":
+            if len(expr.arguments) == 1:
+                return make_boxes_expr(expr.arguments[0])
+            if len(expr.arguments) == 2:
+                return make_boxes_expr(expr.arguments[0], evaluate(expr.arguments[1]))
+            raise WolframEvaluationError("MakeBoxes expects an expression and an optional form.")
+
+        if raw_head_name == "MakeExpression":
+            if len(expr.arguments) == 1:
+                return make_expression_expr(expr.arguments[0])
+            if len(expr.arguments) == 2:
+                return make_expression_expr(expr.arguments[0], evaluate(expr.arguments[1]))
+            raise WolframEvaluationError("MakeExpression expects boxes and an optional form.")
 
         if raw_head_name == "MatchQ":
             if len(expr.arguments) != 2:
@@ -5953,7 +7236,7 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("Pick expects a data expression, a selector expression, and an optional pattern.")
 
     evaluated_head = evaluate(expr.head_expr)
-    if isinstance(evaluated_head, Symbol) and evaluated_head.name == "Nothing":
+    if isinstance(evaluated_head, Symbol) and _system_dispatch_name(evaluated_head) == "Nothing":
         tuple(evaluate(argument) for argument in expr.arguments)
         return symbol("Nothing")
 
@@ -5974,8 +7257,9 @@ def evaluate(expr: Expr) -> Expr:
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
+    evaluated_head_name = _system_dispatch_name(evaluated_head)
     evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
-    evaluated_arguments = _normalize_arguments_for_head(evaluated_head.name, evaluated_arguments, evaluated=True)
+    evaluated_arguments = _normalize_arguments_for_head(evaluated_head_name, evaluated_arguments, evaluated=True)
     evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     arithmetic_result = _evaluate_integer_arithmetic(evaluated_expr)
@@ -6005,6 +7289,93 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Identity expects exactly one argument.")
         return evaluated_arguments[0]
+
+    if evaluated_head_name == "Symbol":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Symbol expects exactly one string argument.")
+        return symbol_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "SymbolName":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("SymbolName expects exactly one argument.")
+        return symbol_name_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "Unique":
+        if len(evaluated_arguments) == 0:
+            return unique_expr()
+        if len(evaluated_arguments) == 1:
+            return unique_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Unique currently expects zero arguments or one symbol, string, or list argument.")
+
+    if evaluated_head_name == "Names":
+        if len(evaluated_arguments) == 0:
+            return names_expr()
+        if len(evaluated_arguments) == 1:
+            return names_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Names expects zero arguments or one string pattern/list of string patterns.")
+
+    if evaluated_head_name == "NameQ":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("NameQ expects exactly one string pattern.")
+        return name_q_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "Contexts":
+        if len(evaluated_arguments) == 0:
+            return contexts_expr()
+        if len(evaluated_arguments) == 1:
+            return contexts_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Contexts expects zero arguments or one string pattern.")
+
+    if evaluated_head_name == "Context":
+        if len(evaluated_arguments) == 0:
+            return context_expr()
+        if len(evaluated_arguments) == 1:
+            return context_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Context expects zero arguments or one symbol/name argument.")
+
+    if evaluated_head_name == "ToString":
+        if len(evaluated_arguments) == 1:
+            return to_string_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return to_string_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("ToString expects an expression and an optional InputForm or StandardForm specifier.")
+
+    if evaluated_head_name == "ToBoxes":
+        if len(evaluated_arguments) == 1:
+            return to_boxes_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return to_boxes_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("ToBoxes expects an expression and an optional form.")
+
+    if evaluated_head_name == "StripBoxes":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("StripBoxes expects exactly one box expression.")
+        return strip_boxes_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "SyntaxQ":
+        if len(evaluated_arguments) == 1:
+            return syntax_q_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return syntax_q_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("SyntaxQ expects input and an optional form.")
+
+    if evaluated_head_name == "SyntaxLength":
+        if len(evaluated_arguments) == 1:
+            return syntax_length_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return syntax_length_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("SyntaxLength expects input and an optional form.")
+
+    if evaluated_head_name == "ToExpression":
+        if len(evaluated_arguments) == 1:
+            return to_expression_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return to_expression_expr(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return to_expression_expr(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "ToExpression expects input, an optional InputForm or StandardForm specifier, and an optional wrapper head."
+        )
 
     if evaluated_head.name == "SameQ":
         return same_q(*evaluated_arguments)
@@ -6783,6 +8154,13 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("KeyDrop expects exactly two arguments.")
         return key_drop(evaluated_arguments[0], evaluated_arguments[1])
 
+    if evaluated_head.name == "KeySelect":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return key_select(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("KeySelect expects an association and a criterion.")
+
     if evaluated_head.name == "KeyMap":
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("KeyMap expects exactly two arguments.")
@@ -6870,6 +8248,21 @@ def _interpret_standard_form(expr: Expr) -> Expr:
     if expr.has_head("SuperscriptBox"):
         return _interpret_superscript_box(expr)
 
+    if expr.has_head("SubscriptBox"):
+        return _interpret_script_box(expr, "Subscript", 2)
+
+    if expr.has_head("SubsuperscriptBox"):
+        return _interpret_script_box(expr, "Subsuperscript", 3)
+
+    if expr.has_head("OverscriptBox"):
+        return _interpret_script_box(expr, "Overscript", 2)
+
+    if expr.has_head("UnderscriptBox"):
+        return _interpret_script_box(expr, "Underscript", 2)
+
+    if expr.has_head("UnderoverscriptBox"):
+        return _interpret_script_box(expr, "Underoverscript", 3)
+
     return Call(
         head_expr=_interpret_standard_form(expr.head_expr),
         arguments=tuple(_interpret_standard_form(argument) for argument in expr.arguments),
@@ -6884,11 +8277,44 @@ def _interpret_row_box(expr: Call) -> Expr:
     if not isinstance(items, Call) or not items.has_head("List"):
         return expr
 
-    text = "".join(_box_item_to_standard_text(item) for item in items.arguments)
+    text = _row_box_to_standard_text(expr)
     stripped = text.strip()
     if not stripped:
         return string("")
-    return parse_input_form(stripped)
+    return parse_standard_form(stripped)
+
+
+def _row_box_to_standard_text(expr: Call) -> str:
+    if len(expr.arguments) != 1:
+        return expr.to_input_form()
+    items = expr.arguments[0]
+    if not isinstance(items, Call) or not items.has_head("List"):
+        return expr.to_input_form()
+    return _join_row_box_text(_box_item_to_standard_text(item) for item in items.arguments)
+
+
+def _join_row_box_text(pieces: Iterable[str]) -> str:
+    text = ""
+    previous = ""
+    for piece in pieces:
+        if piece == "":
+            continue
+        if not text:
+            text = piece
+        elif _needs_row_box_separator(previous, piece):
+            text += " " + piece
+        else:
+            text += piece
+        previous = piece
+    return text
+
+
+def _needs_row_box_separator(left: str, right: str) -> bool:
+    if left.isspace() or right.isspace() or left.endswith((" ", "\t", "\n")) or right.startswith((" ", "\t", "\n")):
+        return False
+    if left[-1:] in "[({<,.;+-*/^!@&|=_:" or right[:1] in "])}>,.;+-*/^!@&|=_:":
+        return False
+    return True
 
 
 def _interpret_fraction_box(expr: Call) -> Expr:
@@ -6924,6 +8350,12 @@ def _interpret_superscript_box(expr: Call) -> Expr:
     base = _interpret_box_operand(expr.arguments[0])
     exponent = _interpret_box_operand(expr.arguments[1])
     return call("Power", base, exponent)
+
+
+def _interpret_script_box(expr: Call, head_name: str, arity: int) -> Expr:
+    if len(expr.arguments) < arity:
+        return expr
+    return call(head_name, *(_interpret_box_operand(argument) for argument in expr.arguments[:arity]))
 
 
 def _interpret_box_operand(expr: Expr) -> Expr:
@@ -7012,7 +8444,7 @@ def _box_item_to_standard_text(expr: Expr) -> str:
                 interpreted = _interpret_row_box(expr)
             except WolframSyntaxError:
                 if len(expr.arguments) == 1 and isinstance(expr.arguments[0], Call) and expr.arguments[0].has_head("List"):
-                    return "".join(_box_item_to_standard_text(item) for item in expr.arguments[0].arguments)
+                    return _join_row_box_text(_box_item_to_standard_text(item) for item in expr.arguments[0].arguments)
                 raise
             return interpreted.to_input_form()
 
@@ -7038,6 +8470,33 @@ def _box_item_to_standard_text(expr: Expr) -> str:
             base = _box_item_to_standard_text(expr.arguments[0])
             exponent = _box_item_to_standard_text(expr.arguments[1])
             return f"(({base})^({exponent}))"
+
+        if expr.has_head("SubscriptBox") and len(expr.arguments) >= 2:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            subscript = _box_item_to_standard_text(expr.arguments[1])
+            return f"Subscript[{base}, {subscript}]"
+
+        if expr.has_head("SubsuperscriptBox") and len(expr.arguments) >= 3:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            subscript = _box_item_to_standard_text(expr.arguments[1])
+            superscript = _box_item_to_standard_text(expr.arguments[2])
+            return f"Subsuperscript[{base}, {subscript}, {superscript}]"
+
+        if expr.has_head("OverscriptBox") and len(expr.arguments) >= 2:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            overscript = _box_item_to_standard_text(expr.arguments[1])
+            return f"Overscript[{base}, {overscript}]"
+
+        if expr.has_head("UnderscriptBox") and len(expr.arguments) >= 2:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            underscript = _box_item_to_standard_text(expr.arguments[1])
+            return f"Underscript[{base}, {underscript}]"
+
+        if expr.has_head("UnderoverscriptBox") and len(expr.arguments) >= 3:
+            base = _box_item_to_standard_text(expr.arguments[0])
+            underscript = _box_item_to_standard_text(expr.arguments[1])
+            overscript = _box_item_to_standard_text(expr.arguments[2])
+            return f"Underoverscript[{base}, {underscript}, {overscript}]"
 
     return _interpret_standard_form(expr).to_input_form()
 
@@ -7217,10 +8676,17 @@ def _scan_escaped_token(text: str, start: int) -> tuple[_Token, int] | None:
 
     raw = text[start:end + 1]
     normalized = _ESCAPED_TOKEN_MAP.get(raw)
-    if normalized is None:
-        raise WolframSyntaxError(f"Unsupported Wolfram escaped token {raw!r} at offset {start}.")
+    if normalized is not None:
+        return _Token(kind="operator", text=normalized, start=start, end=end + 1, value=normalized), end + 1
 
-    return _Token(kind="operator", text=normalized, start=start, end=end + 1, value=normalized), end + 1
+    alias = _ESCAPED_SYMBOL_ALIASES.get(raw)
+    if alias is not None:
+        return _Token(kind="symbol", text=raw, start=start, end=end + 1, value=alias), end + 1
+
+    if raw in _ESCAPED_INFIX_OPERATOR_HEADS:
+        return _Token(kind="operator", text=raw, start=start, end=end + 1, value=raw), end + 1
+
+    return _Token(kind="symbol", text=raw, start=start, end=end + 1, value=raw), end + 1
 
 
 def _tokenize(text: str) -> list[_Token]:
@@ -7587,6 +9053,9 @@ class _Parser:
         }
 
         spec = binary_specs.get(text)
+        escaped_operator_head = _ESCAPED_INFIX_OPERATOR_HEADS.get(text)
+        if spec is None and escaped_operator_head is not None:
+            spec = (self._COMPARE_BP, self._COMPARE_BP + 1, escaped_operator_head)
         if spec is None:
             return None
 

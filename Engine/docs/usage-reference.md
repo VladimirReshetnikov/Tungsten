@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T02:12:28Z
-- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
+- Updated (UTC): 2026-04-25T17:48:49Z
+- Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -14,6 +14,7 @@
   - [Troubleshooting](./troubleshooting.md)
   - [Notebook Assistant](./notebook-assistant.md)
   - [Expression Parser](./expression-parser.md)
+  - [Symbol and Context Registry](./symbol-context-registry.md)
   - [Expression Function Support](./expression-function-support.md)
   - [Sequence Pattern Matching](./sequence-pattern-matching.md)
   - [Parser Corpus](./parser-corpus.md)
@@ -355,6 +356,10 @@ Examples:
 python -m tungsten expr evaluate --code "Length[{a, b, c}]"
 python -m tungsten expr evaluate --code "1 + 2 + 3"
 python -m tungsten expr evaluate --code "True && False && x"
+python -m tungsten expr evaluate --code '$ContextPath'
+python -m tungsten expr evaluate --code 'Context[System`Plus]'
+python -m tungsten expr evaluate --code '{Symbol["TungstenUsage`alpha"], Names["TungstenUsage`*"]}'
+python -m tungsten expr evaluate --code 'ValueQ[userDefinedSymbol]'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
@@ -400,6 +405,12 @@ python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~
 python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\", \"RawJSON\"]"
 python -m tungsten expr evaluate --code "ImportString[ExportString[{{1, 2}, {3, 4}}, \"CSV\"], \"CSV\"]"
 python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
+python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
+python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
+python -m tungsten expr evaluate --code 'ToExpression[RowBox[{"a", "\[CirclePlus]", "b"}], StandardForm, HoldComplete]'
+python -m tungsten expr evaluate --code 'MakeExpression[SubscriptBox["x", "i"], StandardForm]'
+python -m tungsten expr evaluate --code 'StripBoxes[RowBox[{"1", " ", StyleBox["+", Red], "2"}]]'
+python -m tungsten expr evaluate --code 'SyntaxQ["a \[CirclePlus] b", StandardForm]'
 python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
@@ -411,6 +422,8 @@ The implemented inert evaluator currently covers:
 - `Length`
 - `Depth`
 - `Head`
+- symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
+  `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`
 - integer arithmetic via `Plus`, `Times`, and `Power` when all arguments in the evaluated
   subexpression are explicit integers
 - integer relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
@@ -450,7 +463,8 @@ The implemented inert evaluator currently covers:
   `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`, `ExportString`,
-  `ImportByteArray`, and `ExportByteArray`
+  `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
+  `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`
 - `Pick`
 - `First`
 - `Last`

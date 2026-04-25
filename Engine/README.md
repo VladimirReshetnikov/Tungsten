@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T02:12:28Z
-- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
+- Updated (UTC): 2026-04-25T17:48:49Z
+- Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -18,6 +18,7 @@
   - [Usage Reference](./docs/usage-reference.md)
   - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
+  - [Symbol and Context Registry](./docs/symbol-context-registry.md)
   - [Parser Corpus](./docs/parser-corpus.md)
   - [Inline Box Strings](./docs/inline-box-strings.md)
   - [Troubleshooting](./docs/troubleshooting.md)
@@ -108,7 +109,9 @@ The current workspace is built around seven complementary capabilities:
    literals for images and other notebook objects.
 4. A kernel-free Wolfram expression subsystem that parses FullForm, InputForm, and a pragmatic
    StandardForm subset, including common semantic box forms such as `FractionBox`, `SqrtBox`,
-   `RadicalBox`, and `SuperscriptBox`, understands association literals and common association
+   `RadicalBox`, `SuperscriptBox`, `SubscriptBox`, and related script boxes, understands
+   named-character operators such as `\[CirclePlus]` as inert structural heads, understands
+   association literals and common association
    row-box forms from the installed documentation notebooks, understands a bounded but useful
    pattern subset such as `_Integer`, anonymous `__` / `___`, guarded patterns via `/;`, `x_`,
    `Except[...]`, and `a | b`, parses replacement operators such as `/.` and `//.` into named AST
@@ -128,9 +131,11 @@ The current workspace is built around seven complementary capabilities:
    `StringInsert`, `StringReverse`, string-pattern heads such as `StringMatchQ`, `StringFreeQ`,
    `StringStartsQ`, `StringEndsQ`, `StringPosition`, `StringContainsQ`, `StringCases`, and
    `StringReplace`, `ToCharacterCode`, `StringToByteArray`, `ImportString`, `ExportString`,
-   `ImportByteArray`, and `ExportByteArray`, plus `Pick`, `Select`, `Discard`, `SelectFirst`,
+   `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
+   `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`, plus `Pick`, `Select`, `Discard`, `SelectFirst`,
    `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`,
-   `Lookup`, and `KeyTake`.
+   `Lookup`, `KeyTake`, and symbol/context registry heads such as `Symbol`, `SymbolName`,
+   `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`.
 5. An offline documentation index over the locally installed documentation notebooks.
 6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
@@ -242,6 +247,8 @@ python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
 python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
 python -m tungsten docs search NotebookGet
 python -m tungsten expr evaluate --code "1 + 2 + 3"
+python -m tungsten expr evaluate --code '$ContextPath'
+python -m tungsten expr evaluate --code '{Symbol["TungstenReadme`alpha"], Names["TungstenReadme`*"]}'
 python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2 --tungsten-workers 8
 ```
 
@@ -255,6 +262,7 @@ Invoke-TungstenKernel -Code "2+2"
 New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{CircleBox[]}]"
 Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "True && False && x"
+Invoke-TungstenExpression -Code '$ContextPath'
 Find-TungstenDocumentation -Query "NotebookGet"
 Compare-TungstenParserCorpus -MaxFiles 25 -MaxFileMB 2 -TungstenWorkers 8
 ```
