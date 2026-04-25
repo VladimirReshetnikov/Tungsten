@@ -281,8 +281,10 @@ _SYSTEM_SYMBOL_NAMES = {
     "KeyExistsQ",
     "KeyMap",
     "KeyMemberQ",
+    "KeySelect",
     "KeyTake",
     "KeyValueMap",
+    "KeyValuePattern",
     "Keys",
     "KroneckerDelta",
     "Last",
@@ -3513,6 +3515,62 @@ def _match_call_arguments(
     return recurse(0, 0, dict(bindings))
 
 
+def _key_value_pattern_elements(expr: Expr) -> tuple[Expr, ...] | None:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return tuple(entry.to_expr() for entry in entries)
+
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return None
+
+    elements: list[Expr] = []
+    for argument in expr.arguments:
+        if _rule_entry(argument) is None:
+            return None
+        elements.append(argument)
+    return tuple(elements)
+
+
+def _key_value_pattern_items(spec: Expr) -> tuple[Expr, ...]:
+    if isinstance(spec, Call) and spec.has_head("List"):
+        return spec.arguments
+    return (spec,)
+
+
+def _match_key_value_pattern(
+    expr: Expr,
+    spec: Expr,
+    bindings: dict[str, Expr],
+) -> dict[str, Expr] | None:
+    elements = _key_value_pattern_elements(expr)
+    if elements is None:
+        return None
+
+    patterns = _key_value_pattern_items(spec)
+
+    def recurse(
+        pattern_index: int,
+        used_indices: frozenset[int],
+        current: dict[str, Expr],
+    ) -> dict[str, Expr] | None:
+        if pattern_index == len(patterns):
+            return current
+
+        pattern = patterns[pattern_index]
+        for index, element in enumerate(elements):
+            if index in used_indices:
+                continue
+            matched = _match_pattern(element, pattern, current)
+            if matched is None:
+                continue
+            result = recurse(pattern_index + 1, used_indices | {index}, matched)
+            if result is not None:
+                return result
+        return None
+
+    return recurse(0, frozenset(), dict(bindings))
+
+
 def _match_pattern(
     expr: Expr,
     pattern: Expr,
@@ -3562,6 +3620,11 @@ def _match_pattern(
             if matched is None:
                 return None
             return matched if _condition_test_succeeds(pattern.arguments[1], matched) else None
+
+        if head_name == "KeyValuePattern":
+            if len(pattern.arguments) != 1:
+                raise WolframEvaluationError("KeyValuePattern expects exactly one argument.")
+            return _match_key_value_pattern(expr, pattern.arguments[0], current)
 
         if head_name == "Pattern":
             if len(pattern.arguments) != 2:
@@ -3620,7 +3683,12 @@ def _collect_pattern_records(
     *,
     heads: bool,
 ) -> None:
-    if _is_association(expr):
+    entries = _association_entries(expr)
+    if entries is not None:
+        if heads:
+            _collect_pattern_records(expr.head_expr, positive_level + 1, target, heads=heads)
+        for entry in entries:
+            _collect_pattern_records(entry.value, positive_level + 1, target, heads=heads)
         target.append(_PatternRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
         return
 
@@ -4392,18 +4460,27 @@ def _delete_cases_recursive(
     level_max: int,
     remaining: list[int | None],
 ) -> Expr | object:
-    if _is_association(expr):
-        negative_level = -depth(expr)
-        if _level_bounds_match(positive_level, negative_level, level_min, level_max) and remaining[0] != 0:
-            if _match_pattern(expr, pattern) is not None:
-                if positive_level == 0:
-                    return _DELETE_SENTINEL
-                if remaining[0] is not None:
-                    remaining[0] -= 1
-                return _DELETE_SENTINEL
-        return expr
-
-    if isinstance(expr, Call):
+    entries = _association_entries(expr)
+    if entries is not None:
+        transformed_entries: list[_AssociationEntry] = []
+        changed = False
+        for entry in entries:
+            transformed = _delete_cases_recursive(
+                entry.value,
+                pattern,
+                positive_level=positive_level + 1,
+                level_min=level_min,
+                level_max=level_max,
+                remaining=remaining,
+            )
+            if transformed is _DELETE_SENTINEL:
+                changed = True
+                continue
+            assert isinstance(transformed, Expr)
+            transformed_entries.append(_AssociationEntry(entry.rule_head, entry.key, transformed))
+            changed = changed or transformed != entry.value
+        rebuilt: Expr = _association_expr(transformed_entries) if changed else expr
+    elif isinstance(expr, Call):
         transformed_args: list[Expr] = []
         for argument in expr.arguments:
             transformed = _delete_cases_recursive(
@@ -5155,6 +5232,10 @@ def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
                     "MapIndexed[f, levelspec] expects exactly one argument when used as an operator."
                 )
             return map_indexed(function.arguments[0], arguments[0], function.arguments[1])
+    if isinstance(function, Call) and function.has_head("KeySelect") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("KeySelect[crit] expects exactly one argument when used as an operator.")
+        return key_select(arguments[0], function.arguments[0])
     if isinstance(function, Call) and function.has_head("Comap") and len(function.arguments) == 1:
         if len(arguments) != 1:
             raise WolframEvaluationError("Comap[functions] expects exactly one argument when used as an operator.")
@@ -5212,6 +5293,8 @@ def _is_callable_expr(expr: Expr) -> bool:
     if expr.has_head("MapAll") and len(expr.arguments) == 1:
         return True
     if expr.has_head("MapIndexed") and len(expr.arguments) in {1, 2}:
+        return True
+    if expr.has_head("KeySelect") and len(expr.arguments) == 1:
         return True
     if expr.has_head("Scan") and len(expr.arguments) in {1, 2}:
         return True
@@ -5310,9 +5393,9 @@ def map_indexed(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] |
             _AssociationEntry(
                 rule_head=entry.rule_head,
                 key=entry.key,
-                value=_apply_callable(function, (entry.value, list_expr(integer(index)))),
+                value=_apply_callable(function, (entry.value, list_expr(call("Key", entry.key)))),
             )
-            for index, entry in enumerate(entries, start=1)
+            for entry in entries
         )
 
     compound = _require_compound(expr, "MapIndexed")
@@ -5994,24 +6077,40 @@ def position(
     remaining = _normalize_match_limit(limit)
     results: list[Expr] = []
 
-    def recurse(current: Expr, positive_level: int, path: list[int]) -> None:
+    def append_match_path(path: Sequence[Expr]) -> None:
+        nonlocal remaining
+        results.append(list_expr(*path))
+        if remaining is not None:
+            remaining -= 1
+
+    def recurse(current: Expr, positive_level: int, path: list[Expr]) -> None:
         nonlocal remaining
         if remaining == 0:
             return
-        if _is_association(current):
+
+        entries = _association_entries(current)
+        if entries is not None:
+            recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
+            if remaining == 0:
+                return
+            for entry in entries:
+                recurse(entry.value, positive_level + 1, [*path, call("Key", entry.key)])
+                if remaining == 0:
+                    return
             negative_level = -depth(current)
             if (
                 _level_bounds_match(positive_level, negative_level, level_min, level_max)
                 and _match_pattern(current, pattern) is not None
             ):
-                results.append(list_expr(*(integer(index) for index in path)))
-                if remaining is not None:
-                    remaining -= 1
+                append_match_path(path)
             return
 
         if isinstance(current, Call):
+            recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
+            if remaining == 0:
+                return
             for index, argument in enumerate(current.arguments, start=1):
-                recurse(argument, positive_level + 1, [*path, index])
+                recurse(argument, positive_level + 1, [*path, integer(index)])
                 if remaining == 0:
                     return
 
@@ -6020,9 +6119,7 @@ def position(
             _level_bounds_match(positive_level, negative_level, level_min, level_max)
             and _match_pattern(current, pattern) is not None
         ):
-            results.append(list_expr(*(integer(index) for index in path)))
-            if remaining is not None:
-                remaining -= 1
+            append_match_path(path)
 
     recurse(expr, 0, [])
     return list_expr(*results)
@@ -6265,6 +6362,11 @@ def key_drop(expr: Expr, key_spec: Expr) -> Expr:
     entries = _require_association_entries(expr, "KeyDrop")
     keys_to_drop = set(_key_spec_items(key_spec))
     return _association_expr(entry for entry in entries if entry.key not in keys_to_drop)
+
+
+def key_select(expr: Expr, criterion: Expr) -> Expr:
+    entries = _require_association_entries(expr, "KeySelect")
+    return _association_expr(entry for entry in entries if _predicate_succeeds(criterion, entry.key))
 
 
 def key_map(function: Expr, expr: Expr) -> Expr:
@@ -8051,6 +8153,13 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("KeyDrop expects exactly two arguments.")
         return key_drop(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "KeySelect":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return key_select(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("KeySelect expects an association and a criterion.")
 
     if evaluated_head.name == "KeyMap":
         if len(evaluated_arguments) != 2:

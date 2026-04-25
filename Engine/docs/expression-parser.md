@@ -565,8 +565,10 @@ These are intentional current boundaries, not hidden TODOs:
   but Tungsten does not reproduce every kernel `FullForm` nuance for precision-bearing reals.
 - The parser currently accepts `--5` as repeated unary minus. The Wolfram parser treats `--` as a
   different token family and rejects that expression in this context.
-- Pattern search through associations is conservative: `FreeQ`, `Cases`, and `DeleteCases` can
-  match an association as a whole expression, but do not descend into association keys or values.
+- Pattern search through associations follows Wolfram's values-only convention: `FreeQ`, `Cases`,
+  `DeleteCases`, `Position`, `MemberQ`, and `FirstCase` descend into values and can match whole
+  associations, but they do not search keys or raw `Rule` wrappers. Use `KeyValuePattern` for
+  entry-level matching that intentionally sees keys.
 
 Common Wolfram `Listable` heads that stay inert on list arguments include `Plus`, `Times`, `Power`,
 `Equal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`, `UnitStep`, `Unitize`, `Sign`, `Abs`,
@@ -574,13 +576,10 @@ Common Wolfram `Listable` heads that stay inert on list arguments include `Plus`
 `DiscreteDelta`, and `Ramp`. Use `Map`, `MapThread`, or explicit structural code when you want
 that behavior offline.
 
-One additional current boundary matters for pattern workflows: association-aware pattern traversal is
-not implemented yet. In this pass, search functions such as `FreeQ`, `Cases`, and `DeleteCases`
-treat associations as opaque leaves rather than descending into keys or values.
-
-Replacement functions are less conservative than those search functions. `Replace` traverses
-association values, `ReplaceAll` and `ReplaceRepeated` traverse association heads and values, and
-`ReplaceAt` supports key-aware exact paths into association values.
+Association pattern traversal deliberately does not expose keys to ordinary search. This matches the
+kernel's values-only association model and keeps `FreeQ[<|a -> 1|>, a]` true while still allowing
+`KeyValuePattern[a -> _]` to match the entry explicitly. `Position` emits association value paths
+with `Key[key]` components so the paths can be reused by `Extract`, `ReplacePart`, and `MapAt`.
 
 Pure functions are still deliberately bounded in this pass. Tungsten now supports both positional
 slot forms and named-parameter forms, but it does not yet implement `SlotSequence`, `##`, named

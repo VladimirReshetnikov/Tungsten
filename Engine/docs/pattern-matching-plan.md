@@ -49,11 +49,12 @@ Implemented highlights:
 - notebook-derived parser tests from installed `MatchQ.nb`, `Cases.nb`, and `FreeQ.nb`;
 - live-kernel spot-check validation for the covered subset.
 
-The main deliberate boundary kept for this pass is association traversal:
+Follow-up Association work has also been carried through:
 
-- whole associations can still match as structural expressions such as `_Association`;
-- `FreeQ`, `Cases`, and `DeleteCases` currently treat associations as opaque leaves and do not
-  descend into keys or values yet.
+- ordinary pattern search now descends through association values while leaving keys and raw
+  `Rule` wrappers inert;
+- whole associations still match as structural expressions such as `_Association`;
+- `KeyValuePattern` provides explicit entry-level matching for associations and lists of rules.
 
 Validation completed:
 
@@ -211,24 +212,25 @@ Implement:
 - `DeleteCases[expr, patt, levelspec]`;
 - `DeleteCases[expr, patt, levelspec, n]`.
 
-Deliberate non-goals for this pass:
+Original deliberate non-goals for the first pass:
 
 - operator forms such as `MatchQ[patt]` and `Cases[patt]`;
 - `Heads -> True` options on `Cases` and `DeleteCases`;
 - association-specific value-only traversal and key-aware matching.
 
-### Association boundary for this pass
+### Association boundary from the first pass
 
-The user explicitly allowed postponing association pattern matching, so this implementation will
-take the conservative route:
+The user explicitly allowed postponing association pattern matching in the first implementation,
+so that pass took the conservative route:
 
 - association expressions may still participate as whole structural expressions;
 - the matcher may succeed on whole-association literals such as `_Association`;
-- `FreeQ`, `Cases`, and `DeleteCases` will treat associations as opaque leaves instead of
+- `FreeQ`, `Cases`, and `DeleteCases` treated associations as opaque leaves instead of
   descending into rules, keys, or values.
 
-This avoids shipping incorrect semantics for associations while still allowing the rest of the
-pattern subsystem to become useful.
+That postponed work is now implemented. Current Tungsten pattern search descends into association
+values but not keys or raw rules, `Position` reports value paths with `Key[key]` components, and
+`KeyValuePattern` handles the key-aware cases explicitly.
 
 ## Parser plan
 
