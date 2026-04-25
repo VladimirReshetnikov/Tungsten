@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
 - Scope: Association parsing and structural evaluation in `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T19:01:41Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-04-25T00:40:00Z
+- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 - Related code:
   - `src/Tungsten/src/tungsten/expression.py`
   - `src/Tungsten/tests/test_expression.py`
@@ -37,7 +37,8 @@ This plan has now been carried through in `expression.py` and `test_expression.p
 
 Implemented highlights:
 
-- association constructor normalization with last-occurrence-wins key semantics;
+- association constructor normalization with last-occurrence-wins key semantics while preserving
+  the first occurrence position of duplicate keys;
 - association-aware parsing in both `InputForm` and the supported textual/row-box `StandardForm`
   subset;
 - association-aware exact-position handling for `Part`, `Extract`, `Delete`, `ReplacePart`, and
@@ -196,19 +197,20 @@ operating on raw `Rule` arguments.
 
 These findings define the first implementation scope below.
 
-## Current Tungsten gaps
+## Original Tungsten gaps addressed by this plan
 
-The current evaluator already parses `<|...|>` textually, but several important areas are missing
-or incorrect.
+The evaluator already parsed `<|...|>` textually when this plan was written, but several important
+areas were missing or incorrect. They are retained here as historical design motivation, not as a
+current status list.
 
 ### 1. No association-aware constructor semantics
 
-`evaluate()` currently leaves `Association[...]` inert, so duplicate-key normalization and
-constructor variants such as `Association[{rules}]` are not modeled.
+`evaluate()` originally left `Association[...]` inert, so duplicate-key normalization and
+constructor variants such as `Association[{rules}]` were not modeled.
 
 ### 2. Existing generic structural functions treat rules as values
 
-For associations, current Tungsten behavior is currently wrong or incomplete for:
+For associations, Tungsten behavior was originally wrong or incomplete for:
 
 - `Depth`
 - `First`
@@ -222,7 +224,7 @@ For associations, current Tungsten behavior is currently wrong or incomplete for
 
 ### 3. Position handling has no `Key[...]` or string-key support
 
-Current position helpers understand integers, `All`, spans, and selector lists, but not:
+Position helpers originally understood integers, `All`, spans, and selector lists, but not:
 
 - `Key[key]`
 - string-key shorthand in part specs

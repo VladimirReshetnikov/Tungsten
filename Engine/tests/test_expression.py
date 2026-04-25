@@ -369,7 +369,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(less_true.to_full_form(), "True")
         self.assertEqual(greater_false.to_full_form(), "False")
         self.assertEqual(mixed_direct.to_full_form(), "Less[1, 2, a]")
-        self.assertEqual(mixed_operator.to_full_form(), "Less[True, a]")
+        self.assertEqual(mixed_operator.to_full_form(), "Less[1, 2, a]")
 
     def test_boolean_functions_evaluate_on_explicit_booleans_only(self) -> None:
         not_result = evaluate(parse_input_form("!(True)"))
@@ -401,11 +401,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
 
     def test_level_negative_one_returns_leaves(self) -> None:
         result = evaluate(parse_input_form("Level[f[a, g[b]], -1]"))
-        self.assertEqual(result.to_full_form(), "List[a, b]")
+        self.assertEqual(result.to_full_form(), "List[a, b, g[b]]")
 
     def test_level_positive_two_returns_first_two_levels(self) -> None:
         result = evaluate(parse_input_form("Level[f[a, g[b]], 2]"))
-        self.assertEqual(result.to_full_form(), "List[a, g[b], b]")
+        self.assertEqual(result.to_full_form(), "List[a, b, g[b]]")
 
     def test_first_last_and_defaults(self) -> None:
         first_result = evaluate(parse_input_form("First[f[a, b, c]]"))
@@ -781,7 +781,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(drop_result.to_full_form(), "Association[Rule[c, 3]]")
         self.assertEqual(append_result.to_full_form(), "Association[Rule[b, 2], Rule[a, 9]]")
         self.assertEqual(prepend_result.to_full_form(), "Association[Rule[a, 9], Rule[b, 2]]")
-        self.assertEqual(join_result.to_full_form(), "Association[Rule[b, 2], Rule[a, 9], Rule[c, 3]]")
+        self.assertEqual(join_result.to_full_form(), "Association[Rule[a, 9], Rule[b, 2], Rule[c, 3]]")
         self.assertEqual(apply_result.to_full_form(), "g[1, 2]")
         self.assertEqual(map_result.to_full_form(), "Association[Rule[a, g[1]], Rule[b, g[2]]]")
 
@@ -1215,19 +1215,23 @@ class ExpressionEvaluationTests(unittest.TestCase):
         head_search = evaluate(parse_input_form("FreeQ[f[a], f]"))
         head_level = evaluate(parse_input_form("FreeQ[f[a], f, {1}]"))
         root_only = evaluate(parse_input_form("FreeQ[f[a], f, {0}]"))
+        negative_level = evaluate(parse_input_form("FreeQ[f[a, g[b]], g[_], -1]"))
         integer_search = evaluate(parse_input_form("FreeQ[{a, b, b, a}, _Integer]"))
         self.assertEqual(head_search.to_full_form(), "False")
         self.assertEqual(head_level.to_full_form(), "False")
         self.assertEqual(root_only.to_full_form(), "True")
+        self.assertEqual(negative_level.to_full_form(), "False")
         self.assertEqual(integer_search.to_full_form(), "True")
 
     def test_cases_supports_postorder_levels_limits_and_templates(self) -> None:
         leaf_search = evaluate(parse_input_form("Cases[f[a, g[a]], a, Infinity]"))
         postorder = evaluate(parse_input_form("Cases[f[g[a]], _, {0, Infinity}]"))
+        negative_level = evaluate(parse_input_form("Cases[f[a, g[b]], _, -1]"))
         limited = evaluate(parse_input_form("Cases[f[a, g[a]], a, Infinity, 1]"))
         transformed = evaluate(parse_input_form("Cases[{f[a], f[b]}, f[x_] :> {x, x}]"))
         self.assertEqual(leaf_search.to_full_form(), "List[a, a]")
         self.assertEqual(postorder.to_full_form(), "List[a, g[a], f[g[a]]]")
+        self.assertEqual(negative_level.to_full_form(), "List[a, b, g[b]]")
         self.assertEqual(limited.to_full_form(), "List[a]")
         self.assertEqual(transformed.to_full_form(), "List[List[a, a], List[b, b]]")
 
@@ -1250,9 +1254,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
     def test_delete_cases_is_depth_first_and_supports_limits(self) -> None:
         default_levels = evaluate(parse_input_form("DeleteCases[f[a, g[a]], a]"))
         all_levels = evaluate(parse_input_form("DeleteCases[f[a, g[a]], a, Infinity]"))
+        negative_level = evaluate(parse_input_form("DeleteCases[f[a, g[a]], _Symbol, -1]"))
         limited = evaluate(parse_input_form("DeleteCases[{1, a, 2, a}, a, Infinity, 1]"))
         self.assertEqual(default_levels.to_full_form(), "f[g[a]]")
         self.assertEqual(all_levels.to_full_form(), "f[g[]]")
+        self.assertEqual(negative_level.to_full_form(), "f[g[]]")
         self.assertEqual(limited.to_full_form(), "List[1, 2, a]")
 
     def test_delete_cases_supports_condition_patterns(self) -> None:

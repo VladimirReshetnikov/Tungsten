@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-24T20:06:49Z
-Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+Updated (UTC): 2026-04-25T00:40:00Z
+Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 
 ## Summary
 
@@ -29,7 +29,8 @@ Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
   `ExportString`, `ImportByteArray`, and `ExportByteArray`, `Pick`, `Select`, `Discard`,
   `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
-  association constructors, key accessors, and related exact-position transforms;
+  association constructors, key accessors, `Sequence` splicing, Hold-family wrappers, and related
+  exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -75,8 +76,10 @@ The parser currently handles:
   `<>`, string-pattern concatenation `~~`, and repetition suffixes `..` / `...`;
 - rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
   `x_ :> rhs /; test`;
-- comparisons and boolean operators;
-- prefix and postfix application such as `f @ x` and `x // f`;
+- comparisons and boolean operators, with same-head chained comparisons parsed as n-ary relation
+  calls such as `Less[a, b, c]`;
+- prefix and postfix application such as `f @ x` and `x // f`, with `@` binding tighter than
+  arithmetic but looser than direct function application;
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
 - positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, and
   the Tungsten-specific shorthand `#name` for `#1["name"]`;
@@ -241,7 +244,7 @@ expr.to_full_form()
 
 result = evaluate(parse_expression("Level[f[a, g[b]], -1]"))
 result.to_full_form()
-# List[a, b]
+# List[a, b, g[b]]
 
 match_result = evaluate(parse_expression("MatchQ[f[a, a], f[x_, x_]]"))
 match_result.to_full_form()
@@ -445,7 +448,13 @@ Examples:
 - `True && False && x` evaluates to `And[False, x]`, while `And[True, False, x]` stays inert;
 - `Length[1 + 2]` evaluates to `0`;
 - `Part[f[a, b, c], {1, 3}]` evaluates to `f[a, c]`;
-- `Level[f[a, g[b]], -1]` evaluates to `List[a, b]`;
+- `Level[f[a, g[b]], -1]` evaluates to `List[a, b, g[b]]`;
+- `Position[f[a, g[b, a]], a]` evaluates to `List[List[1], List[2, 2]]`;
+- `1 < 2 < 3` evaluates to `True`, while `1 < 3 < 2` evaluates to `False`;
+- `f @ 1 + 2` evaluates to `Plus[f[1], 2]`;
+- `{a, b, c, d, e}[[1 ;; 5 ;; 2]]` evaluates to `List[a, c, e]`;
+- `{Sequence[1, 2], 3}` evaluates to `List[1, 2, 3]`;
+- `Hold[1 + 2]` evaluates to `Hold[Plus[1, 2]]`, and `ReleaseHold[Hold[1 + 2]]` evaluates to `3`;
 - `MatchQ[f[a, a], f[x_, x_]]` evaluates to `True`;
 - `Cases[f[g[a]], _, {0, Infinity}]` evaluates to `List[a, g[a], f[g[a]]]`;
 - `If[1 < 2, 1 + 2, 9]` evaluates to `3`, while `If[x, 1 + 2, 9]` stays structurally inert;
@@ -476,6 +485,8 @@ Examples:
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;
 - `KroneckerDelta[3, 3, 3]` evaluates to `1`;
 - `Part[<|a -> x, b -> y|>, Key[b]]` evaluates to `y`;
+- `<|"name" -> x|>["name"]` evaluates to `x`;
+- `KeyMap[Identity, <|a -> 1|>]` evaluates to `<|a -> 1|>`;
 - `Map[g, <|a -> 1, b -> 2|>]` evaluates to `<|a -> g[1], b -> g[2]|>`;
 - `Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]` evaluates to `{<|a -> 1, b -> {2}|>, 9}`.
 
@@ -491,6 +502,34 @@ The current subsystem does not aim to support:
 - general evaluation;
 - definitions, attributes, or user-created transformation rules;
 - package loading or notebook-scoped semantics.
+
+## Known kernel divergences
+
+These are intentional current boundaries, not hidden TODOs:
+
+- `Plus`, `Times`, `And`, and `Or` are not given `Flat`, `Orderless`, `OneIdentity`,
+  short-circuit, or `Listable` attributes. Direct mixed calls such as `Plus[1, 2, a]` stay inert,
+  while nested infix forms can still simplify one parsed layer at a time.
+- The parser now gives same-head comparison chains Wolfram-style n-ary shapes, but it still keeps
+  arithmetic and Boolean operator chains as ordinary nested calls. This preserves Tungsten's
+  explicit no-`Flat` evaluator contract.
+- Empty `Min[]` and `Max[]` currently render as `Infinity` and `-Infinity` rather than Wolfram's
+  `DirectedInfinity[1]` and `DirectedInfinity[-1]` FullForm spelling.
+- Real-number precision marks using backticks are parsed as part of the accepted real literal text,
+  but Tungsten does not reproduce every kernel `FullForm` nuance for precision-bearing reals.
+- The parser currently accepts `--5` as repeated unary minus. The Wolfram parser treats `--` as a
+  different token family and rejects that expression in this context.
+- Named sequence patterns such as `x__` and `x___` remain unsupported. Anonymous `__` and `___`
+  are supported only under Tungsten's documented one-variable-length-pattern-per-argument-list
+  restriction.
+- Pattern search through associations is conservative: `FreeQ`, `Cases`, and `DeleteCases` can
+  match an association as a whole expression, but do not descend into association keys or values.
+
+Common Wolfram `Listable` heads that stay inert on list arguments include `Plus`, `Times`, `Power`,
+`Equal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`, `UnitStep`, `Unitize`, `Sign`, `Abs`,
+`RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min`, `Max`, `Clip`, `KroneckerDelta`,
+`DiscreteDelta`, and `Ramp`. Use `Map`, `MapThread`, or explicit structural code when you want
+that behavior offline.
 
 One additional current boundary matters for pattern workflows: association-aware pattern traversal is
 not implemented yet. In this pass, search functions such as `FreeQ`, `Cases`, and `DeleteCases`

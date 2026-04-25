@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-04-25T00:40:00Z
+- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
@@ -26,6 +26,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `expr //. rules` to `ReplaceRepeated[expr, rules]`, and callable compound forms such as
   `SameAs[q]`, `Composition[f, g]`, `RightComposition[f, g]`, `MapApply[f]`, `MapAll[f]`,
   `MapIndexed[f]`, `Scan[f]`, `Comap[fs]`, and `ComapApply[fs]`.
+- Parser-lowered operator syntax includes `@`, `//`, `/@`, `@@`, `@@@`, `@*`, `/*`, `.`, `/.`,
+  `//.`, `;;`, arithmetic operators, comparison operators, Boolean operators, and string
+  concatenation / string-pattern operators. Callable operator forms such as `Map[f]`, `Cases[p]`,
+  or `ReplaceAll[rules]` are not implemented unless explicitly listed in this document.
 - `Take` and `Drop` currently support a single first-level specification only.
 - `If`, `Which`, `Switch`, `Piecewise`, and `Pick` currently support only the direct forms listed
   below.
@@ -72,6 +76,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `AssociationMap` currently supports the key-list form only: `AssociationMap[f, {k1, ...}]`.
 - `Lookup`, `Keys`, `Values`, `Normal`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`,
   `KeyMap`, and `KeyValueMap` currently expect an `Association`.
+- Associations in function position support the common single-key lookup form `assoc[key]`,
+  returning `Missing["KeyAbsent", key]` when no entry exists.
 - `ReplacePart` supports exact position rules and ignores positions that do not exist, matching the
   practical behavior of Wolfram's direct rule form.
 - `Delete` and `MapAt` support exact positions and lists of exact positions; invalid positions
@@ -83,6 +89,11 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Arithmetic and Boolean evaluation are intentionally narrow: Tungsten does not honor `Flat`,
   `Orderless`, or short-circuit attributes here, and only evaluates the covered heads when every
   participating argument is already an explicit integer or Boolean value in the shipped subset.
+- `Sequence[...]` splices into evaluated call arguments, including lists and ordinary symbolic
+  calls. Tungsten does not splice through Hold-family heads, `Function`, `Rule`, or `RuleDelayed`.
+- Hold-family wrappers `Hold`, `HoldComplete`, `HoldForm`, `HoldPattern`, and `Unevaluated` keep
+  their arguments unevaluated in Tungsten's structural evaluator. `ReleaseHold` strips one outer
+  Hold-family wrapper and evaluates the released payload.
 - Simple predicate heads are intentionally narrow too: Tungsten currently implements only
   `IntegerQ`, `StringQ`, `ByteArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
   described in the support table below.
@@ -194,6 +205,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `BaseDecode` | `BaseDecode["text"]`, `BaseDecode["text", "encoding"]` | Decodes supported base-encoded strings to byte arrays. Tungsten currently supports `"Base64"` by default, plus `"Base16"` and `"Base85ASCII"`, and it drops nonalphabet characters before decoding in the practical Wolfram style. | [BaseDecode](https://reference.wolfram.com/language/ref/BaseDecode) |
 | `Condition` | `Condition[patt, test]`, `patt /; test`, and top-level delayed-template guards such as `lhs :> rhs /; test` | Guards a pattern or delayed-rule template. Tungsten treats the guard as satisfied only when the substituted test reduces to explicit `True` under the shipped evaluator. | [Condition](https://reference.wolfram.com/language/ref/Condition) |
 | `RuleDelayed` | `lhs :> rhs`, including guarded forms such as `lhs :> rhs /; test` | Delays right-hand-side instantiation until after pattern bindings are known. A top-level delayed-template `Condition` guard can suppress the rule and fall through to later rules when present. | [RuleDelayed](https://reference.wolfram.com/language/ref/RuleDelayed) |
+| `Sequence` | `Sequence[e1, ...]` as an evaluated argument of a non-holding call | Splices its arguments into the enclosing call, including `List[...]` and ordinary symbolic calls. Hold-family heads, `Function`, `Rule`, and `RuleDelayed` do not splice. | [Sequence](https://reference.wolfram.com/language/ref/Sequence) |
 | `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous `__` / `___` sequence patterns, named patterns over `Blank`, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
 | `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list, and guarded patterns succeed only when the guard reduces to explicit `True`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
 | `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. Anonymous `__` / `___` patterns are supported under Tungsten's one-per-argument-list limit, and delayed templates may use `/;` as a post-substitution guard. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
@@ -202,6 +214,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `ReplaceAll` | `ReplaceAll[expr, rule]`, `ReplaceAll[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceAll[expr, {{rules1...}, {rules2...}}]` | Performs a single top-down rewrite pass over the covered subset. Tungsten also supports the parser-lowered operator form `expr /. rules`. Guarded left-hand-side patterns are supported, and delayed right-hand-side guards such as `lhs :> rhs /; test` can suppress a rule and fall through to later rules. On associations, Tungsten rewrites the whole association first, then the head and values, but not keys or raw `Rule` wrappers. | [ReplaceAll](https://reference.wolfram.com/language/ref/ReplaceAll) |
 | `ReplaceRepeated` | `ReplaceRepeated[expr, rule]`, `ReplaceRepeated[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceRepeated[expr, {{rules1...}, {rules2...}}]` | Repeats the covered `ReplaceAll` semantics until a structural fixed point is reached. Tungsten also supports the parser-lowered operator form `expr //. rules`. Non-terminating rewrite loops stop at a Tungsten safety cap and raise an evaluation error. Guarded delayed rules are reapplied until the guard stops succeeding or a structural fixed point is reached. | [ReplaceRepeated](https://reference.wolfram.com/language/ref/ReplaceRepeated) |
 | `Function` | `Function[body]`, `body &`, positional slot applications such as `Function[body][arg1, ...]`, named forms such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and `x \[Function] body` | Supports positional pure functions over `Slot` forms plus named-parameter pure functions with lexical scoping and capture-avoiding renaming. Tungsten recognizes `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, the Tungsten-specific `#name` shorthand for `#1["name"]`, and nested named-function alpha-renaming when an inner body is modified by outer pure-function application. | [Function](https://reference.wolfram.com/language/ref/Function) |
+| `Hold` / `HoldComplete` / `HoldForm` / `Unevaluated` | `Hold[expr]`, `HoldComplete[expr]`, `HoldForm[expr]`, `Unevaluated[expr]` | Preserve arguments unevaluated under Tungsten's structural evaluator. `HoldPattern` has the same holding behavior for pattern expressions. | [Hold](https://reference.wolfram.com/language/ref/Hold) |
+| `ReleaseHold` | `ReleaseHold[expr]` | Strips one outer `Hold`, `HoldComplete`, `HoldForm`, or `Unevaluated` wrapper and evaluates the released payload. Non-held arguments are returned after ordinary argument evaluation. | [ReleaseHold](https://reference.wolfram.com/language/ref/ReleaseHold) |
 | `Identity` | `Identity[expr]` | Returns its argument unchanged. Tungsten also benefits from this when `Identity` is used as a callable argument to higher-order structural functions. | [Identity](https://reference.wolfram.com/language/ref/Identity) |
 | `SameQ` | `SameQ[e1, ...]` and infix `===` | Returns `True` when all arguments are structurally identical in Tungsten's AST. | [SameQ](https://reference.wolfram.com/language/ref/SameQ) |
 | `UnsameQ` | `UnsameQ[e1, ...]` and infix `=!=` | Returns `True` when all arguments are pairwise structurally distinct in Tungsten's AST. | [UnsameQ](https://reference.wolfram.com/language/ref/UnsameQ) |
@@ -214,16 +228,16 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `NestList` | `NestList[f, expr, n]` | Returns the successive values produced by repeated function application. | [NestList](https://reference.wolfram.com/language/ref/NestList) |
 | `NestWhile` | `NestWhile[f, expr, test]` | Repeats function application while the current value satisfies the predicate. Tungsten currently supports the direct three-argument form only. | [NestWhile](https://reference.wolfram.com/language/ref/NestWhile) |
 | `NestWhileList` | `NestWhileList[f, expr, test]` | Returns the successive values produced while the current value satisfies the predicate, including the first value that fails the test. Tungsten currently supports the direct three-argument form only. | [NestWhileList](https://reference.wolfram.com/language/ref/NestWhileList) |
-| `FixedPoint` | `FixedPoint[f, expr]`, `FixedPoint[f, expr, n]` | Repeats function application until a structural fixed point is reached or the optional iteration bound is exhausted. | [FixedPoint](https://reference.wolfram.com/language/ref/FixedPoint) |
-| `FixedPointList` | `FixedPointList[f, expr]`, `FixedPointList[f, expr, n]` | Returns the successive values produced up to the first structural fixed point. | [FixedPointList](https://reference.wolfram.com/language/ref/FixedPointList) |
+| `FixedPoint` | `FixedPoint[f, expr]`, `FixedPoint[f, expr, n]` | Repeats function application until a structural fixed point is reached. With an explicit `n`, Tungsten follows Wolfram's soft-limit behavior and returns the value after at most `n` iterations. | [FixedPoint](https://reference.wolfram.com/language/ref/FixedPoint) |
+| `FixedPointList` | `FixedPointList[f, expr]`, `FixedPointList[f, expr, n]` | Returns the successive values through the first structural fixed point or through the explicit soft iteration limit. | [FixedPointList](https://reference.wolfram.com/language/ref/FixedPointList) |
 | `Operate` | `Operate[p, expr]`, `Operate[p, expr, n]` | Applies a function to the head at the requested nesting depth, leaving arguments unchanged. | [Operate](https://reference.wolfram.com/language/ref/Operate) |
 | `Comap` | `Comap[functions, expr]` and callable operator form `Comap[functions]` | Applies one expression to every function in a function collection while preserving the collection's outer structure. | [Comap](https://reference.wolfram.com/language/ref/Comap) |
 | `ComapApply` | `ComapApply[functions, expr]` and callable operator form `ComapApply[functions]` | Applies the arguments of a nonatomic expression to every function in a function collection while preserving the collection's outer structure. | [ComapApply](https://reference.wolfram.com/language/ref/ComapApply) |
-| `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
+| `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]`, and single-key function-position lookup `assoc[key]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics while preserving the first occurrence position of a duplicate key. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
 | `AssociationQ` | `AssociationQ[expr]` | Returns `True` when Tungsten recognizes a structural association value. | [AssociationQ](https://reference.wolfram.com/language/ref/AssociationQ) |
 | `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. | [Part](https://reference.wolfram.com/language/ref/Part) |
 | `Extract` | `Extract[expr, pos]` | Extracts one or more parts using explicit position lists. Association positions support numeric components, `Key[key]`, and string-key shorthand. | [Extract](https://reference.wolfram.com/language/ref/Extract) |
-| `Level` | `Level[expr, spec]`, `Level[expr, spec, False]` | Returns subexpressions at requested positive or negative levels. Associations are traversed through values rather than keys. | [Level](https://reference.wolfram.com/language/ref/Level) |
+| `Level` | `Level[expr, spec]`, `Level[expr, spec, False]` | Returns subexpressions at requested positive or negative levels in postorder. Negative integer shorthand such as `-1` follows Wolfram's `{1, -1}` meaning. Associations are traversed through values rather than keys. | [Level](https://reference.wolfram.com/language/ref/Level) |
 | `First` | `First[expr]`, `First[expr, default]` | Returns the first argument of an expression, with optional default for empty expressions. For associations, this is the first value. | [First](https://reference.wolfram.com/language/ref/First) |
 | `Last` | `Last[expr]`, `Last[expr, default]` | Returns the last argument of an expression, with optional default for empty expressions. For associations, this is the last value. | [Last](https://reference.wolfram.com/language/ref/Last) |
 | `Rest` | `Rest[expr]` | Returns an expression with its first argument removed. For associations, Tungsten removes the first key-value entry. | [Rest](https://reference.wolfram.com/language/ref/Rest) |
@@ -273,7 +287,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Distribute` | `Distribute[expr]`, `Distribute[expr, g]`, `Distribute[expr, g, f]` | Distributes a nonatomic outer expression over immediate arguments with the chosen distributed head. Tungsten currently implements the common one-dimensional direct forms only. | [Distribute](https://reference.wolfram.com/language/ref/Distribute) |
 | `Outer` | `Outer[f, seq1, ...]` | Forms the outer combination of several nonatomic expressions while preserving each sequence's head nesting. | [Outer](https://reference.wolfram.com/language/ref/Outer) |
 | `Inner` | `Inner[f, left, right, g]` | Combines corresponding first-level elements with `f` and then combines the results with `g`. Tungsten currently supports only equal-length first-level compounds. | [Inner](https://reference.wolfram.com/language/ref/Inner) |
-| `Dot` | `Dot[a, b, ...]` and infix `.` | Supports `List` vector-vector, matrix-vector, vector-matrix, and matrix-matrix products over Tungsten's inert arithmetic AST. | [Dot](https://reference.wolfram.com/language/ref/Dot) |
+| `Dot` | `Dot[a, b, ...]` and infix `.` | Supports `List` vector-vector, matrix-vector, vector-matrix, and matrix-matrix products, then re-evaluates the generated arithmetic so all-integer products simplify. | [Dot](https://reference.wolfram.com/language/ref/Dot) |
 | `Tuples` | `Tuples[{{...}, ...}]`, `Tuples[items, n]` | Returns Cartesian products either from an explicit list of sequences or by repeating one base sequence. | [Tuples](https://reference.wolfram.com/language/ref/Tuples) |
 | `Array` | `Array[f, dims]` | Builds nested `List` arrays by calling `f` on one-based integer index tuples. | [Array](https://reference.wolfram.com/language/ref/Array) |
 | `ConstantArray` | `ConstantArray[value, dims]` | Builds nested `List` arrays filled with a constant value. | [ConstantArray](https://reference.wolfram.com/language/ref/ConstantArray) |
@@ -295,7 +309,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `SequenceFoldList` | `SequenceFoldList[f, initValues, expr]`, `SequenceFoldList[f, initValues, expr, arity]` | Returns the successive states for `SequenceFold`, beginning with the initial values themselves. | [SequenceFoldList](https://reference.wolfram.com/language/ref/SequenceFoldList) |
 | `LengthWhile` | `LengthWhile[expr, crit]` | Counts the longest immediate prefix whose elements satisfy the predicate. | [LengthWhile](https://reference.wolfram.com/language/ref/LengthWhile) |
 | `FirstCase` | `FirstCase[expr, patt]`, `FirstCase[expr, patt, default]`, `FirstCase[expr, patt, default, levelspec]` | Returns the first matching case under Tungsten's `Cases` traversal rules, or `Missing["NotFound"]` / the supplied default when there is no match. | [FirstCase](https://reference.wolfram.com/language/ref/FirstCase) |
-| `Position` | `Position[expr, patt]`, `Position[expr, patt, levelspec]`, `Position[expr, patt, levelspec, n]` | Returns exact structural positions of matching subexpressions. Associations are currently treated as opaque leaves for pattern search. | [Position](https://reference.wolfram.com/language/ref/Position) |
+| `Position` | `Position[expr, patt]`, `Position[expr, patt, levelspec]`, `Position[expr, patt, levelspec, n]` | Returns exact structural positions of matching subexpressions. The default levelspec is `{0, Infinity}`, matching Wolfram. Associations are currently treated as opaque leaves for pattern search. | [Position](https://reference.wolfram.com/language/ref/Position) |
 | `MemberQ` | `MemberQ[expr, patt]`, `MemberQ[expr, patt, levelspec]` | Returns `True` when `Position` would find at least one matching structural position. | [MemberQ](https://reference.wolfram.com/language/ref/MemberQ) |
 | `DeleteDuplicates` | `DeleteDuplicates[expr]`, `DeleteDuplicates[expr, test]` | Removes later duplicates while preserving the first occurrence of each retained element. Associations deduplicate by values while preserving the first surviving key for each retained value. | [DeleteDuplicates](https://reference.wolfram.com/language/ref/DeleteDuplicates) |
 | `DeleteDuplicatesBy` | `DeleteDuplicatesBy[expr, f]` | Removes later elements whose computed keys are structurally identical after Tungsten evaluates the supported key function. | [DeleteDuplicatesBy](https://reference.wolfram.com/language/ref/DeleteDuplicatesBy) |
@@ -315,7 +329,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 
 ## Notes on position semantics
 
-- Tungsten position handling is exact and structural. It does not implement pattern matching.
+- `Part`, `Extract`, `Delete`, `ReplacePart`, `MapAt`, and related exact-position functions are
+  exact and structural. `Position` and `MemberQ` use the documented Tungsten pattern subset.
+- `Position` defaults to `{0, Infinity}`; `Cases` and `DeleteCases` default to `{1}`.
 - The same position syntax family is shared across `Part`, `Extract`, `Delete`, `ReplacePart`, and
   `MapAt`, but not every Wolfram-language variant is implemented.
 - `Part` and `Extract` support selector-style components such as `All`, spans, selector lists,
@@ -370,18 +386,37 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   [named-pure-functions-spec.md](./named-pure-functions-spec.md).
 - Tungsten does not yet implement `SlotSequence` or `##`.
 
+## Notes on Hold and Sequence
+
+- `Hold`, `HoldComplete`, `HoldForm`, `HoldPattern`, and `Unevaluated` keep their arguments
+  unevaluated. This is a hardcoded structural subset of Wolfram's attribute behavior, not a general
+  attribute system.
+- `ReleaseHold` strips one outer Hold-family wrapper and evaluates the released payload.
+- `Sequence[...]` is spliced after its own arguments evaluate and before ordinary head dispatch.
+  It is not spliced inside Hold-family heads, `Function`, `Rule`, or `RuleDelayed`.
+
 ## Notes on arithmetic and Boolean semantics
 
 - Tungsten parses infix arithmetic, relational, and Boolean operators into ordinary head-based AST
   calls such as `Plus[...]`, `Less[...]`, `And[...]`, and `Not[...]`.
-- In this pass, Tungsten does not flatten or reorder `Plus`, `Times`, `And`, `Or`, or the
-  relational heads during parsing or evaluation.
+- Tungsten parses same-head chained comparisons such as `1 < 2 < 3` as n-ary relation calls so the
+  integer relation evaluator can match Wolfram's ordinary chain behavior.
+- In this pass, Tungsten does not flatten or reorder `Plus`, `Times`, `And`, or `Or` during
+  parsing or evaluation, and it does not implement `Orderless` canonicalization for any head.
 - That means nested operator forms can partially simplify one binary layer at a time. For example,
   `1 + 2 + a` becomes `Plus[3, a]`, while `Plus[1, 2, a]` stays inert.
 - Boolean operator forms behave the same way: `True && False && x` becomes `And[False, x]`, while
   `And[True, False, x]` stays inert in this pass.
 - Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]` and `EvenQ[4]`
   evaluate, while broader numeric or symbolic semantics remain out of scope.
+
+## Listable Heads Not Implemented
+
+Wolfram marks many common numeric and logical functions as `Listable`; Tungsten intentionally does
+not. These heads therefore stay inert on list arguments unless the support table says otherwise:
+`Plus`, `Times`, `Power`, `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`,
+`UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min`, `Max`,
+`Clip`, `KroneckerDelta`, `DiscreteDelta`, and `Ramp`.
 
 ## Notes on atoms and empty expressions
 

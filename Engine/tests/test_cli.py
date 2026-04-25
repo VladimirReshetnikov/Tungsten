@@ -222,7 +222,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["result"]["full_form"], "List[a, b]")
+        self.assertEqual(payload["result"]["full_form"], "List[a, b, g[b]]")
 
     def test_expr_evaluate_command_reports_json_error_payload(self) -> None:
         stdout = io.StringIO()

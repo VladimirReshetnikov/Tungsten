@@ -420,17 +420,19 @@ def _is_association(expr: Expr) -> bool:
 
 
 def _normalize_association_entries(entries: Iterable[_AssociationEntry]) -> tuple[_AssociationEntry, ...]:
-    ordered: list[_AssociationEntry | None] = []
-    last_positions: dict[Expr, int] = {}
+    ordered: list[_AssociationEntry] = []
+    first_positions: dict[Expr, int] = {}
 
     for entry in entries:
-        previous = last_positions.get(entry.key)
-        if previous is not None:
-            ordered[previous] = None
-        last_positions[entry.key] = len(ordered)
-        ordered.append(entry)
+        previous = first_positions.get(entry.key)
+        if previous is None:
+            first_positions[entry.key] = len(ordered)
+            ordered.append(entry)
+        else:
+            # Wolfram associations keep the key's first slot and update the value.
+            ordered[previous] = entry
 
-    return tuple(entry for entry in ordered if entry is not None)
+    return tuple(ordered)
 
 
 def _association_expr(entries: Iterable[_AssociationEntry]) -> Call:
@@ -2374,6 +2376,7 @@ def match_q(expr: Expr, pattern: Expr) -> Symbol:
 class _PatternRecord:
     expr: Expr
     positive_level: int
+    negative_level: int
 
 
 def _collect_pattern_records(
@@ -2384,7 +2387,7 @@ def _collect_pattern_records(
     heads: bool,
 ) -> None:
     if _is_association(expr):
-        target.append(_PatternRecord(expr=expr, positive_level=positive_level))
+        target.append(_PatternRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
         return
 
     if isinstance(expr, Call):
@@ -2393,11 +2396,17 @@ def _collect_pattern_records(
         for argument in expr.arguments:
             _collect_pattern_records(argument, positive_level + 1, target, heads=heads)
 
-    target.append(_PatternRecord(expr=expr, positive_level=positive_level))
+    target.append(_PatternRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
 
 
-def _level_in_range(level_value: int, level_min: int, level_max: int) -> bool:
-    return level_min <= level_value <= level_max
+def _level_bounds_match(positive_level: int, negative_level: int, level_min: int, level_max: int) -> bool:
+    if level_min >= 0 and level_max >= 0:
+        return level_min <= positive_level <= level_max
+    if level_min < 0 and level_max < 0:
+        return level_min <= negative_level <= level_max
+    if level_min >= 0 and level_max < 0:
+        return positive_level >= level_min and negative_level <= level_max
+    return negative_level >= level_min or positive_level <= level_max
 
 
 def free_q(expr: Expr, pattern: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Symbol:
@@ -2406,7 +2415,7 @@ def free_q(expr: Expr, pattern: Expr, spec: Expr | int | tuple[int, int] | None 
     _collect_pattern_records(expr, 0, records, heads=True)
     level_min, level_max = _normalize_level_spec(level_spec)
     for record in records:
-        if not _level_in_range(record.positive_level, level_min, level_max):
+        if not _level_bounds_match(record.positive_level, record.negative_level, level_min, level_max):
             continue
         if _match_pattern(record.expr, pattern) is not None:
             return _bool_symbol(False)
@@ -2925,7 +2934,7 @@ def _replace_recursive(
         rebuilt = expr
 
     negative_level = -depth(rebuilt)
-    if _level_in_range(positive_level, level_min, level_max) or _level_in_range(negative_level, level_min, level_max):
+    if _level_bounds_match(positive_level, negative_level, level_min, level_max):
         replaced, _did_replace = _apply_replacement_rules(rebuilt, ruleset)
         return replaced
     return rebuilt
@@ -3075,7 +3084,7 @@ def cases(
     for record in records:
         if remaining == 0:
             break
-        if not _level_in_range(record.positive_level, level_min, level_max):
+        if not _level_bounds_match(record.positive_level, record.negative_level, level_min, level_max):
             continue
         bindings = _match_pattern(record.expr, pattern)
         if bindings is None:
@@ -3107,7 +3116,8 @@ def _delete_cases_recursive(
     remaining: list[int | None],
 ) -> Expr | object:
     if _is_association(expr):
-        if _level_in_range(positive_level, level_min, level_max) and remaining[0] != 0:
+        negative_level = -depth(expr)
+        if _level_bounds_match(positive_level, negative_level, level_min, level_max) and remaining[0] != 0:
             if _match_pattern(expr, pattern) is not None:
                 if positive_level == 0:
                     return _DELETE_SENTINEL
@@ -3138,7 +3148,11 @@ def _delete_cases_recursive(
     if remaining[0] == 0:
         return rebuilt
 
-    if _level_in_range(positive_level, level_min, level_max) and _match_pattern(rebuilt, pattern) is not None:
+    negative_level = -depth(rebuilt)
+    if (
+        _level_bounds_match(positive_level, negative_level, level_min, level_max)
+        and _match_pattern(rebuilt, pattern) is not None
+    ):
         if positive_level == 0:
             return _DELETE_SENTINEL
         if remaining[0] is not None:
@@ -3233,6 +3247,52 @@ def level(expr: Expr, spec: Expr | int | tuple[int, int] = 1) -> list[Expr]:
     _collect_levels(expr, 0, records)
     level_min, level_max = _normalize_level_spec(spec)
     return [record.expr for record in records if _level_matches(record, level_min, level_max)]
+
+
+_HOLD_ALL_HEADS = {
+    "Function",
+    "Hold",
+    "HoldComplete",
+    "HoldForm",
+    "HoldPattern",
+    "Unevaluated",
+}
+
+
+_RELEASE_HOLD_HEADS = {
+    "Hold",
+    "HoldComplete",
+    "HoldForm",
+    "Unevaluated",
+}
+
+
+_SEQUENCE_HOLDING_HEADS = _HOLD_ALL_HEADS | {
+    "Rule",
+    "RuleDelayed",
+}
+
+
+def _splice_sequence_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    spliced: list[Expr] = []
+    for argument in arguments:
+        if isinstance(argument, Call) and argument.has_head("Sequence"):
+            spliced.extend(argument.arguments)
+        else:
+            spliced.append(argument)
+    return tuple(spliced)
+
+
+def release_hold(expr: Expr) -> Expr:
+    if (
+        isinstance(expr, Call)
+        and isinstance(expr.head_expr, Symbol)
+        and expr.head_expr.name in _RELEASE_HOLD_HEADS
+    ):
+        if len(expr.arguments) == 1:
+            return evaluate(expr.arguments[0])
+        return evaluate(call("Sequence", *expr.arguments))
+    return expr
 
 def first(expr: Expr, default: Expr | object = _MISSING) -> Expr:
     entries = _association_entries(expr)
@@ -4047,31 +4107,37 @@ def nest_while_list(function: Expr, expr: Expr, test: Expr) -> Expr:
 
 
 def fixed_point(function: Expr, expr: Expr, max_iterations: Expr | int | None = None) -> Expr:
+    explicit_limit = max_iterations is not None
     limit = _ITERATION_SAFETY_LIMIT if max_iterations is None else _normalize_integer_argument(max_iterations, "FixedPoint")
     if limit < 0:
         raise WolframEvaluationError("FixedPoint expects a non-negative maximum iteration count.")
     current = expr
-    for _ in range(limit + 1):
+    for _ in range(limit):
         updated = _apply_callable(function, (current,))
         if updated == current:
             return current
         current = updated
-    raise WolframEvaluationError("FixedPoint exceeded the allowed iteration count before reaching a fixed point.")
+    if explicit_limit:
+        return current
+    raise WolframEvaluationError("FixedPoint exceeded the Tungsten iteration safety limit.")
 
 
 def fixed_point_list(function: Expr, expr: Expr, max_iterations: Expr | int | None = None) -> Expr:
+    explicit_limit = max_iterations is not None
     limit = _ITERATION_SAFETY_LIMIT if max_iterations is None else _normalize_integer_argument(max_iterations, "FixedPointList")
     if limit < 0:
         raise WolframEvaluationError("FixedPointList expects a non-negative maximum iteration count.")
     current = expr
     results = [expr]
-    for _ in range(limit + 1):
+    for _ in range(limit):
         updated = _apply_callable(function, (current,))
         results.append(updated)
         if updated == current:
             return list_expr(*results)
         current = updated
-    raise WolframEvaluationError("FixedPointList exceeded the allowed iteration count before reaching a fixed point.")
+    if explicit_limit:
+        return list_expr(*results)
+    raise WolframEvaluationError("FixedPointList exceeded the Tungsten iteration safety limit.")
 
 
 def operate(operator: Expr, expr: Expr, level_value: Expr | int = 1) -> Expr:
@@ -4608,7 +4674,7 @@ def position(
     spec: Expr | int | tuple[int, int] | None = None,
     limit: Expr | int | None = None,
 ) -> Expr:
-    level_spec = integer(1) if spec is None else spec
+    level_spec: Expr | int | tuple[int, int] = (0, _LEVEL_INFINITY) if spec is None else spec
     level_min, level_max = _normalize_level_spec(level_spec)
     remaining = _normalize_match_limit(limit)
     results: list[Expr] = []
@@ -4618,7 +4684,11 @@ def position(
         if remaining == 0:
             return
         if _is_association(current):
-            if _level_in_range(positive_level, level_min, level_max) and _match_pattern(current, pattern) is not None:
+            negative_level = -depth(current)
+            if (
+                _level_bounds_match(positive_level, negative_level, level_min, level_max)
+                and _match_pattern(current, pattern) is not None
+            ):
                 results.append(list_expr(*(integer(index) for index in path)))
                 if remaining is not None:
                     remaining -= 1
@@ -4630,7 +4700,11 @@ def position(
                 if remaining == 0:
                     return
 
-        if _level_in_range(positive_level, level_min, level_max) and _match_pattern(current, pattern) is not None:
+        negative_level = -depth(current)
+        if (
+            _level_bounds_match(positive_level, negative_level, level_min, level_max)
+            and _match_pattern(current, pattern) is not None
+        ):
             results.append(list_expr(*(integer(index) for index in path)))
             if remaining is not None:
                 remaining -= 1
@@ -4764,8 +4838,10 @@ def dot(arguments: Sequence[Expr]) -> Expr:
 
     current = arguments[0]
     for argument in arguments[1:]:
-        current = dot_two(current, argument)
+        current = evaluate(dot_two(current, argument))
     return current
+
+
 def apply_head(new_head: Expr, expr: Expr) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
@@ -4881,7 +4957,7 @@ def key_map(function: Expr, expr: Expr) -> Expr:
     return _association_expr(
         _AssociationEntry(
             rule_head=entry.rule_head,
-            key=Call(head_expr=function, arguments=(entry.key,)),
+            key=_apply_callable(function, (entry.key,)),
             value=entry.value,
         )
         for entry in entries
@@ -4890,7 +4966,7 @@ def key_map(function: Expr, expr: Expr) -> Expr:
 
 def key_value_map(function: Expr, expr: Expr) -> Expr:
     entries = _require_association_entries(expr, "KeyValueMap")
-    return list_expr(*(Call(head_expr=function, arguments=(entry.key, entry.value)) for entry in entries))
+    return list_expr(*(_apply_callable(function, (entry.key, entry.value)) for entry in entries))
 
 
 def association_thread(keys: Expr, values: Expr) -> Expr:
@@ -4910,7 +4986,7 @@ def association_map(function: Expr, keys: Expr) -> Expr:
     if not isinstance(keys, Call) or not keys.has_head("List"):
         raise WolframEvaluationError("AssociationMap currently supports only the key-list form.")
     return _association_expr(
-        _AssociationEntry("Rule", key, Call(head_expr=function, arguments=(key,)))
+        _AssociationEntry("Rule", key, _apply_callable(function, (key,)))
         for key in keys.arguments
     )
 
@@ -5584,6 +5660,19 @@ def evaluate(expr: Expr) -> Expr:
     if isinstance(expr.head_expr, Symbol):
         raw_head_name = expr.head_expr.name
 
+        if raw_head_name == "Function":
+            if len(expr.arguments) in {1, 2, 3}:
+                return expr
+            raise WolframEvaluationError("Function expects one, two, or three arguments.")
+
+        if raw_head_name in _HOLD_ALL_HEADS:
+            return expr
+
+        if raw_head_name == "ReleaseHold":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("ReleaseHold expects exactly one argument.")
+            return release_hold(evaluate(expr.arguments[0]))
+
         if raw_head_name == "MatchQ":
             if len(expr.arguments) != 2:
                 raise WolframEvaluationError("MatchQ expects exactly two arguments.")
@@ -5697,19 +5786,27 @@ def evaluate(expr: Expr) -> Expr:
                 return pick(evaluate(expr.arguments[0]), evaluate(expr.arguments[1]), expr.arguments[2])
             raise WolframEvaluationError("Pick expects a data expression, a selector expression, and an optional pattern.")
 
-        if raw_head_name == "Function":
-            if len(expr.arguments) in {1, 2, 3}:
-                return expr
-
     evaluated_head = evaluate(expr.head_expr)
     if _is_callable_expr(evaluated_head):
-        return _apply_callable(evaluated_head, tuple(evaluate(argument) for argument in expr.arguments))
+        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        return _apply_callable(evaluated_head, evaluated_arguments)
     if _is_function_expr(evaluated_head):
         raise WolframEvaluationError("Unsupported Function parameter specification.")
+
+    association_head_entries = _association_entries(evaluated_head)
+    if association_head_entries is not None:
+        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        if len(evaluated_arguments) == 1:
+            return lookup(evaluated_head, evaluated_arguments[0])
+        return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+
     if not isinstance(evaluated_head, Symbol):
-        return Call(head_expr=evaluated_head, arguments=tuple(evaluate(argument) for argument in expr.arguments))
+        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
+    if evaluated_head.name not in _SEQUENCE_HOLDING_HEADS:
+        evaluated_arguments = _splice_sequence_arguments(evaluated_arguments)
     evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     arithmetic_result = _evaluate_integer_arithmetic(evaluated_expr)
@@ -6929,6 +7026,18 @@ _MULTI_TOKENS = (
 )
 
 
+_CHAINABLE_COMPARISON_HEADS = {
+    "Equal",
+    "Greater",
+    "GreaterEqual",
+    "Less",
+    "LessEqual",
+    "SameQ",
+    "Unequal",
+    "UnsameQ",
+}
+
+
 def _scan_escaped_token(text: str, start: int) -> tuple[_Token, int] | None:
     if not text.startswith(r"\[", start):
         return None
@@ -7018,7 +7127,7 @@ class _Parser:
     _MAP_BP = 45
     _APPLY_BP = 44
     _COMPOSITION_BP = 43
-    _AT_BP = 40
+    _AT_BP = 180
     _POSTFIX_BP = 30
     _SEMICOLON_BP = 20
     _FUNCTION_BP = 10
@@ -7236,6 +7345,8 @@ class _Parser:
         del min_bp
         self._expect(";;")
         end = self._parse_span_argument(default=symbol("All"), terminators=terminators)
+        if isinstance(end, Call) and end.has_head("Span") and len(end.arguments) == 2:
+            return call("Span", left, end.arguments[0], end.arguments[1])
         if self._match(";;") is not None:
             step = self._parse_span_argument(default=integer(1), terminators=terminators)
             return call("Span", left, end, step)
@@ -7243,6 +7354,8 @@ class _Parser:
 
     def _parse_prefix_span(self, terminators: set[str]) -> Expr:
         end = self._parse_span_argument(default=symbol("All"), terminators=terminators)
+        if isinstance(end, Call) and end.has_head("Span") and len(end.arguments) == 2:
+            return call("Span", integer(1), end.arguments[0], end.arguments[1])
         if self._match(";;") is not None:
             step = self._parse_span_argument(default=integer(1), terminators=terminators)
             return call("Span", integer(1), end, step)
@@ -7266,14 +7379,14 @@ class _Parser:
             "+": (self._PLUS_BP, self._PLUS_BP + 1, "Plus"),
             "-": (self._PLUS_BP, self._PLUS_BP + 1, None),
             "<>": (self._PLUS_BP, self._PLUS_BP + 1, "StringJoin"),
-            "==": (self._COMPARE_BP, self._COMPARE_BP + 1, "Equal"),
-            "===": (self._COMPARE_BP, self._COMPARE_BP + 1, "SameQ"),
-            "!=": (self._COMPARE_BP, self._COMPARE_BP + 1, "Unequal"),
-            "=!=": (self._COMPARE_BP, self._COMPARE_BP + 1, "UnsameQ"),
-            "<": (self._COMPARE_BP, self._COMPARE_BP + 1, "Less"),
-            "<=": (self._COMPARE_BP, self._COMPARE_BP + 1, "LessEqual"),
-            ">": (self._COMPARE_BP, self._COMPARE_BP + 1, "Greater"),
-            ">=": (self._COMPARE_BP, self._COMPARE_BP + 1, "GreaterEqual"),
+            "==": (self._COMPARE_BP, self._COMPARE_BP, "Equal"),
+            "===": (self._COMPARE_BP, self._COMPARE_BP, "SameQ"),
+            "!=": (self._COMPARE_BP, self._COMPARE_BP, "Unequal"),
+            "=!=": (self._COMPARE_BP, self._COMPARE_BP, "UnsameQ"),
+            "<": (self._COMPARE_BP, self._COMPARE_BP, "Less"),
+            "<=": (self._COMPARE_BP, self._COMPARE_BP, "LessEqual"),
+            ">": (self._COMPARE_BP, self._COMPARE_BP, "Greater"),
+            ">=": (self._COMPARE_BP, self._COMPARE_BP, "GreaterEqual"),
             "&&": (self._AND_BP, self._AND_BP + 1, "And"),
             "||": (self._OR_BP, self._OR_BP + 1, "Or"),
             "|": (self._ALTERNATIVES_BP, self._ALTERNATIVES_BP + 1, "Alternatives"),
@@ -7324,6 +7437,12 @@ class _Parser:
             return Call(head_expr=right, arguments=(left,))
         if head_name is None:
             raise WolframSyntaxError(f"Unhandled Wolfram operator {text!r}.")
+        if (
+            head_name in _CHAINABLE_COMPARISON_HEADS
+            and isinstance(right, Call)
+            and right.has_head(head_name)
+        ):
+            return call(head_name, left, *right.arguments)
         return call(head_name, left, right)
 
 
@@ -7412,15 +7531,16 @@ class _LevelRecord:
 
 
 def _collect_levels(expr: Expr, positive_level: int, target: list[_LevelRecord]) -> None:
-    target.append(_LevelRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
     entries = _association_entries(expr)
     if entries is not None:
         for entry in entries:
             _collect_levels(entry.value, positive_level + 1, target)
+        target.append(_LevelRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
         return
     if isinstance(expr, Call):
         for argument in expr.arguments:
             _collect_levels(argument, positive_level + 1, target)
+    target.append(_LevelRecord(expr=expr, positive_level=positive_level, negative_level=-depth(expr)))
 
 
 def _normalize_level_bound(expr: Expr) -> int:
@@ -7435,7 +7555,7 @@ def _normalize_level_spec(spec: Expr | int | tuple[int, int]) -> tuple[int, int]
     if isinstance(spec, int):
         if spec >= 0:
             return (0 if spec == 0 else 1, spec)
-        return (spec, -1)
+        return (1, spec)
 
     if isinstance(spec, tuple):
         if len(spec) != 2:
@@ -7462,7 +7582,4 @@ def _normalize_level_spec(spec: Expr | int | tuple[int, int]) -> tuple[int, int]
 
 
 def _level_matches(record: _LevelRecord, level_min: int, level_max: int) -> bool:
-    return (
-        level_min <= record.positive_level <= level_max
-        or level_min <= record.negative_level <= level_max
-    )
+    return _level_bounds_match(record.positive_level, record.negative_level, level_min, level_max)
