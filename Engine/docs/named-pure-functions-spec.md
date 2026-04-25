@@ -1,11 +1,11 @@
 # Named Pure Functions in Tungsten
 
-- Status: Draft implementation specification for kernel-free named-parameter pure functions
+- Status: Draft implementation specification for kernel-free pure-function scoping and attributes
 - Audience: Tungsten maintainers and contributors extending the expression subsystem
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-24T16:05:00Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-04-25T20:25:51Z
+- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
 
 ## Purpose
 
@@ -65,8 +65,18 @@ means:
 - arguments are substituted into the held body during function application;
 - only the substituted result is then passed back through ordinary Tungsten evaluation.
 
-Tungsten does not currently assign special semantics to the third-argument attribute form
-`Function[params, body, attrs]`. The body is still held, but `attrs` is not interpreted.
+Tungsten now assigns evaluator semantics to the third-argument attribute form
+`Function[params, body, attrs]` for attributes that affect pure-function application in the
+offline evaluator:
+
+- `HoldFirst`, `HoldRest`, `HoldAll`, and `HoldAllComplete` control which actual arguments are
+  evaluated before substitution into the held body.
+- `SequenceHold` and `HoldAllComplete` suppress direct `Sequence[...]` argument splicing before
+  substitution.
+- `Listable` threads the pure function over same-length list arguments, reusing scalar arguments.
+
+Other attribute names are accepted and preserved structurally, but they do not yet change
+Tungsten evaluation.
 
 ## Application model
 
@@ -83,6 +93,10 @@ of reproducing kernel messages.
 
 This is slightly stricter than the live kernel for named functions, but it matches Tungsten's
 existing treatment of missing positional `Slot` arguments.
+
+For `Function[Null, body]` and `Function[Null, body, attrs]`, Tungsten uses the positional-slot
+application model rather than treating `Null` as a named parameter. This mirrors Wolfram's explicit
+parameter-placeholder form for functions whose body refers to `#`, `#n`, `#name`, `##`, and `##n`.
 
 ## Lexical scoping and shadowing
 
@@ -231,14 +245,14 @@ positional pure functions as scope boundaries for `Slot` references.
 This implementation does not attempt to reproduce every Wolfram scoping construct. In particular:
 
 - no named arguments;
-- no `SlotSequence` / `##`;
 - no interaction-specific renaming across rules, pattern names, `With`, `Module`, or other scoping
   constructs beyond ordinary recursive traversal;
-- no evaluation semantics for `Function[params, body, attrs]` attributes;
+- no general attribute registry beyond the pure-function application subset described above;
 - no attempt to mimic kernel messages exactly.
 
-The current milestone is specifically about named pure functions and capture-avoiding substitution
-within nested named pure functions.
+The original milestone was specifically about named pure functions and capture-avoiding
+substitution. The current implementation also covers positional `SlotSequence` splicing and the
+pure-function attribute subset above because those semantics share the same application boundary.
 
 ## Validation examples
 
@@ -248,8 +262,12 @@ These examples should be locked in as Tungsten tests:
   - `x |-> x + x` -> `Function[x, Plus[x, x]]`
   - `{x, y} |-> x + y` -> `Function[List[x, y], Plus[x, y]]`
   - `x \[Function] x + x` -> `Function[x, Plus[x, x]]`
+  - `##2 &` -> `Function[SlotSequence[2]]`
 - evaluate:
   - `(Function[x, x + x])[a]` -> `Plus[a, a]`
+  - `(f[##2] &)[a, b, c]` -> `f[b, c]`
+  - `Function[Null, HoldComplete[#], HoldAll][1 + 2]` -> `HoldComplete[Plus[1, 2]]`
+  - `Function[Null, f[#], Listable][{a, b}]` -> `List[f[a], f[b]]`
   - `(({x, y} |-> x + y))[a, b]` -> `Plus[a, b]`
   - `(x |-> y |-> x[y])[y]` -> `Function[y$, y[y$]]`
   - `(x |-> y |-> f[x])[a]` -> `Function[y$, f[a]]`

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T17:48:49Z
-- Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
+- Updated (UTC): 2026-04-25T20:25:51Z
+- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -387,6 +387,9 @@ python -m tungsten expr evaluate --code "KroneckerDelta[3, 3, 3]"
 python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
 python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
 python -m tungsten expr evaluate --code "Map[# + 1 &, {a, b}]"
+python -m tungsten expr evaluate --code "(f[##2] &)[a, b, c]"
+python -m tungsten expr evaluate --code "Function[Null, HoldComplete[#], HoldAll][1 + 2]"
+python -m tungsten expr evaluate --code "Function[Null, f[#], Listable][{a, b}]"
 python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
 python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
 python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
@@ -400,6 +403,10 @@ python -m tungsten expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
 python -m tungsten expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
 python -m tungsten expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~~ \"g\"]"
 python -m tungsten expr evaluate --code "StringCases[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
+python -m tungsten expr evaluate --code "StringCases[\"abc123def45\", LetterCharacter.. ~~ DigitCharacter..]"
+python -m tungsten expr evaluate --code "StringPosition[\"ababa\", Shortest[\"a\" ~~ ___ ~~ \"a\"]]"
+python -m tungsten expr evaluate --code "StringCases[\"on 2026-04-25 ok\", DatePattern[{\"Year\", \"Month\", \"Day\"}]]"
+python -m tungsten expr evaluate --code "StringCases[\"abc123\", RegularExpression[\"[a-z]+\"]]"
 python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
 python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
 python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\", \"RawJSON\"]"
@@ -499,22 +506,40 @@ For the exact supported forms and limits of each function, see
 Everything else remains inert.
 
 The current pattern subset includes `_`, `_Head`, anonymous and named `__`, `___`, head-qualified
-sequence forms such as `__Integer` and `x___Symbol`, named `x_`, `x_Head`, guarded patterns via `/;`,
-`Alternatives` via `|`, `Except`, `HoldPattern`, and `Verbatim`. The parser also lowers
-`expr /. rules` and `expr //. rules` to `ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`.
+sequence forms such as `__Integer` and `x___Symbol`, named `x_`, `x_Head`, pattern tests via `?`,
+optional arguments via `patt:def` and `_.`, guarded patterns via `/;`, `Alternatives` via `|`,
+`Except`, `HoldPattern`, `Verbatim`, `Repeated`, `RepeatedNull`, `PatternSequence`,
+`OrderlessPatternSequence`, `Longest`, `Shortest`, `OptionsPattern`, and `KeyValuePattern`. The
+parser also lowers `expr /. rules` and `expr //. rules` to `ReplaceAll[expr, rules]` and
+`ReplaceRepeated[expr, rules]`.
 `__` and `___` match a single candidate expression directly, and they also support multi-element
 matching with multiple occurrences in a containing argument list. The allocation rule is documented
 in [sequence-pattern-matching.md](./sequence-pattern-matching.md).
 Guards via `/;` are supported in patterns and delayed-rule right-hand sides when the substituted
-guard reduces to explicit `True` under Tungsten's shipped evaluator. `?`, `Longest`, `Shortest`,
-`PatternSequence`, and options-related pattern forms remain intentionally out of scope.
+guard reduces to explicit `True` under Tungsten's shipped evaluator. The structural matcher still
+does not implement `Flat`, `Orderless`, or `OneIdentity` attribute matching, user-defined
+`Default[...]` values for omitted `Optional[patt]` arguments, or `OptionValue` lookup for
+`OptionsPattern`.
 
-Pure functions support positional slots plus named parameters: `#`, `#n`, `#0`, `Slot[]`,
-`Slot[n]`, `Function[body]`, `body &`, `Function[x, body]`, `Function[{x, y}, body]`,
-`x |-> body`, `x \[Function] body`, and the Tungsten-specific shorthand `#name` for `#1["name"]`.
-`SlotSequence` and `##` are not implemented yet.
-Tungsten keeps `Function[body]` and `Function[params, body]` inert until application, which lets
-pure functions safely contain patterns such as `MatchQ[#, _Integer] &`.
+The current string-pattern subset includes literal strings, `StringExpression` / `~~`, `_`, `__`,
+`___`, `Repeated` / `..`, `RepeatedNull` / `...`, named string captures including `x : __`,
+`Alternatives`, `Condition`, `PatternTest`, `Shortest`, `Longest`, `Except` over supported
+one-character patterns, `CharacterRange`, `RegularExpression`, a practical `DatePattern` subset,
+`NumberString`, `Whitespace`, common character classes such as `DigitCharacter`,
+`HexadecimalCharacter`, `LetterCharacter`, `PunctuationCharacter`, `WhitespaceCharacter`, and
+`WordCharacter`, and anchors such as `StartOfString`, `EndOfString`, `StartOfLine`, `EndOfLine`,
+and `WordBoundary`. Tungsten uses Python's regex and Unicode facilities here, so exact PCRE-version
+and Unicode-version parity with the Wolfram kernel is not promised.
+
+Pure functions support positional slots plus named parameters: `#`, `#n`, `#0`, `##`, `##n`,
+`Slot[]`, `Slot[n]`, `SlotSequence[]`, `SlotSequence[n]`, `Function[body]`, `body &`,
+`Function[Null, body]`, `Function[Null, body, attrs]`, `Function[x, body]`,
+`Function[{x, y}, body]`, `Function[params, body, attrs]`, `x |-> body`,
+`x \[Function] body`, and Wolfram's `#name` first-argument association/key shorthand.
+Tungsten keeps function bodies inert until application, which lets pure functions safely contain
+patterns such as `MatchQ[#, _Integer] &`. Third-argument attributes currently honored by the
+offline evaluator are `HoldFirst`, `HoldRest`, `HoldAll`, `HoldAllComplete`, `SequenceHold`, and
+`Listable`.
 Nested named pure functions use capture-avoiding renaming when an outer application modifies the
 inner body. The exact rule is documented in
 [named-pure-functions-spec.md](./named-pure-functions-spec.md).
