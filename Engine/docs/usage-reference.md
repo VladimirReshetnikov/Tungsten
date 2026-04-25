@@ -575,7 +575,7 @@ returns exit code `1` with:
 
 Purpose:
 
-- discover parser-corpus files under `C:\TestData\tungsten-wolfram-parser-corpus`;
+- discover parser-corpus files under `C:\TestData\wolfram\tungsten-wolfram-parser-corpus`;
 - parse selected files with Tungsten;
 - compare parse acceptance with the local Wolfram kernel without evaluating corpus code.
 
@@ -593,7 +593,7 @@ python -m tungsten parser-corpus discover --include-glob "github/woxi/**" --exte
 
 Important options:
 
-- `--corpus-root <path>`: defaults to `C:\TestData\tungsten-wolfram-parser-corpus`
+- `--corpus-root <path>`: defaults to `C:\TestData\wolfram\tungsten-wolfram-parser-corpus`
 - `--extension <ext>`: repeatable extension filter
 - `--include-glob <glob>` / `--exclude-glob <glob>`: repeatable relative path filters
 - `--max-files <n>`: cap selected files

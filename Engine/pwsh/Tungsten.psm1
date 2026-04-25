@@ -343,7 +343,7 @@ function Invoke-TungstenExpression {
 function Get-TungstenParserCorpus {
     [CmdletBinding()]
     param(
-        [string] $CorpusRoot = "C:\TestData\tungsten-wolfram-parser-corpus",
+        [string] $CorpusRoot = "C:\TestData\wolfram\tungsten-wolfram-parser-corpus",
 
         [string[]] $Extension = @(),
 
@@ -383,7 +383,7 @@ function Get-TungstenParserCorpus {
 function Compare-TungstenParserCorpus {
     [CmdletBinding()]
     param(
-        [string] $CorpusRoot = "C:\TestData\tungsten-wolfram-parser-corpus",
+        [string] $CorpusRoot = "C:\TestData\wolfram\tungsten-wolfram-parser-corpus",
 
         [string] $OutDir,
 

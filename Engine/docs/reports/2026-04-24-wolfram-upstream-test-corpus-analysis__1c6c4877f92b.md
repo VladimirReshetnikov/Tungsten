@@ -2,14 +2,14 @@
 
 - Status: Report (analysis of the downloaded upstream Wolfram-language corpus for Tungsten parser/evaluator test adaptation)
 - Audience: Vladimir Reshetnikov, Tungsten maintainers, future expression-subsystem contributors
-- Scope: `src/Tungsten` expression parsing/evaluation work, plus the local corpus under `C:\TestData\tungsten-wolfram-upstream-tests`
+- Scope: `src/Tungsten` expression parsing/evaluation work, plus the local corpus under `C:\TestData\wolfram\tungsten-wolfram-upstream-tests`
 - Created (UTC): 2026-04-24T18:06:25Z
 - Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
 - Inputs:
-  - Corpus root: `C:\TestData\tungsten-wolfram-upstream-tests`
-  - Corpus manifest: `C:\TestData\tungsten-wolfram-upstream-tests\manifest.json`
+  - Corpus root: `C:\TestData\wolfram\tungsten-wolfram-upstream-tests`
+  - Corpus manifest: `C:\TestData\wolfram\tungsten-wolfram-upstream-tests\manifest.json`
   - Analyzer script: `src/Tungsten/scripts/analyze_upstream_wolfram_tests.py`
-  - Analyzer output: `C:\TestData\tungsten-wolfram-upstream-tests\analysis.json`
+  - Analyzer output: `C:\TestData\wolfram\tungsten-wolfram-upstream-tests\analysis.json`
 
 ## Executive summary
 
@@ -67,10 +67,10 @@ The recommendations below are therefore based on the analyzer plus direct file i
 
 `wolfram-codeparser` is the strongest single source for Tungsten's long-term parser goal.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\wolfram-codeparser\Tests\Parse.mt` is a pure parser
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\wolfram-codeparser\Tests\Parse.mt` is a pure parser
 golden corpus over raw WL source strings and expected parse-equivalence behavior.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\wolfram-codeparser\Tests\Boxes.mt` is the most useful
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\wolfram-codeparser\Tests\Boxes.mt` is the most useful
 box-language source in the whole corpus. It covers `RowBox`, `TagBox`, `InterpretationBox`,
 integral forms, `DifferentialD`, `SubsuperscriptBox`, and contour-integral variants. This is
 precisely the kind of corpus Tungsten will need when it moves from today's semantic-box subset to
@@ -88,20 +88,20 @@ Recommended use:
 `mathics3-scanner` and Symja's parser data files are the best sources for parser tables rather than
 for literal test copying.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics3-scanner\test\test_tokeniser.py` contains
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics3-scanner\test\test_tokeniser.py` contains
 useful token-level cases for escaped named characters, row-box escapes, comments, and operator
 tokenization.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics3-scanner\test\test_mathics_precedence.py`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics3-scanner\test\test_mathics_precedence.py`
 documents precedence ordering mismatches between Wolfram's reported precedence values and actual
 parsing behavior. That is especially relevant for Tungsten's Pratt parser as the operator surface
 grows.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-parser\src\test\resources\data\operators.yml`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-parser\src\test\resources\data\operators.yml`
 is a high-value data source for operator precedence, associativity, boxing operators, and FullForm
 names.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-parser\src\test\resources\data\named-characters.yml`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-parser\src\test\resources\data\named-characters.yml`
 is a large catalog of WL named characters and operator-name associations, including entries for
 `Rule`, `RuleDelayed`, `ReplaceAll`, `ReplaceRepeated`, `Span`, `Function`,
 `LeftAssociation` / `RightAssociation`, `RightComposition`, `SameQ`, `UnsameQ`, and
@@ -117,7 +117,7 @@ Recommended use:
 
 `mmaclone` and `mathics-core` provide the most directly portable textual parser cases for Tungsten.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mmaclone\mmaclone\test\Parser\NewParseSpec.hs`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mmaclone\mmaclone\test\Parser\NewParseSpec.hs`
 covers exactly the kinds of forms Tungsten already cares about and plans to expand:
 
 - part syntax;
@@ -129,15 +129,15 @@ covers exactly the kinds of forms Tungsten already cares about and plans to expa
 - `/;`;
 - pattern alternatives.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics-core\test\core\parser\test_parser.py`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics-core\test\core\parser\test_parser.py`
 contains good precedence and associativity cases, message names, slots, patterns, comments, and
 named characters.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics-core\test\core\parser\test_box_parser.py`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics-core\test\core\parser\test_box_parser.py`
 contains useful escaped-box parsing cases and box operators such as `SuperscriptBox`,
 `SubscriptBox`, and `FractionBox`.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-parser\src\test\java\org\matheclipse\parser\test\ParserTestCase.java`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-parser\src\test\java\org\matheclipse\parser\test\ParserTestCase.java`
 and `...WMAParserTestCase.java` add more coverage for:
 
 - `Part` and `Span`;
@@ -148,9 +148,9 @@ and `...WMAParserTestCase.java` add more coverage for:
 - derivative syntax;
 - mixed precedence edge cases.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\woxi\tests\parser_tests.rs` is also useful, but in a
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\woxi\tests\parser_tests.rs` is also useful, but in a
 different way: it is mainly a parse-acceptance smoke suite rather than a detailed AST-golden
-corpus. Likewise, `C:\TestData\tungsten-wolfram-upstream-tests\woxi\all_mathics_tests.txt` looks
+corpus. Likewise, `C:\TestData\wolfram\tungsten-wolfram-upstream-tests\woxi\all_mathics_tests.txt` looks
 better suited to a later bulk parse-smoke or fuzz-style harness than to first-wave unit tests.
 
 ### Parser extraction recommendation
@@ -176,7 +176,7 @@ valuable.
 `mmaclone` is the best starting point for Tungsten evaluator adaptation, despite its small size.
 The reason is not raw coverage; it is fit.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mmaclone\mmaclone\test\Eval\EvalSpec.hs`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mmaclone\mmaclone\test\Eval\EvalSpec.hs`
 contains compact, direct expected-result cases for:
 
 - `Map` and `Apply`;
@@ -193,7 +193,7 @@ math than the larger systems.
 
 `woxi` is the strongest source for explicit control-flow constructs.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\woxi\tests\interpreter_tests\control_flow.rs`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\woxi\tests\interpreter_tests\control_flow.rs`
 contains direct result cases for:
 
 - `For`;
@@ -212,15 +212,15 @@ constructs, and this file already expresses the expected observable behavior in 
 
 There are three particularly strong sources here.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\list\test_association.py`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\list\test_association.py`
 has many structural association cases, including malformed inputs, `Keys`, `Values`, `Map` over
 associations, nested associations, and key lookup behavior.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\woxi\tests\interpreter_tests\association.rs`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\woxi\tests\interpreter_tests\association.rs`
 is smaller and cleaner, with very direct cases for `Keys`, `Values`, `KeyExistsQ`, `KeyDropFrom`,
 association part extraction, updates, nested lookup, and `AssociationThread`.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-core\src\test\java\org\matheclipse\core\system\AssociationTest.java`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-core\src\test\java\org\matheclipse\core\system\AssociationTest.java`
 is broad and valuable for later waves:
 
 - association normalization and duplicate-key overwrite behavior;
@@ -233,15 +233,15 @@ is broad and valuable for later waves:
 
 `mathics-core` and Symja are both useful here.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\test_patterns.py`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\test_patterns.py`
 and `...test\builtin\test_rules.py` are good sources for filtered structural matching and rewrite
 behavior.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-core\src\test\java\org\matheclipse\core\system\PatternMatchingTestCase.java`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-core\src\test\java\org\matheclipse\core\system\PatternMatchingTestCase.java`
 contains cases that combine pattern conditions with `Block`, `Module`, and `With`, which makes it
 especially relevant to Tungsten's intended interaction between matching and control/scoping.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\expreduce\expreduce\interp_test.go` is also very
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\expreduce\expreduce\interp_test.go` is also very
 good for parser-lowered replacement/operator precedence cases such as:
 
 - `/.` and `//.`;
@@ -255,7 +255,7 @@ good for parser-lowered replacement/operator precedence cases such as:
 
 `expreduce` and `mathics-core` are strongest here.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\expreduce\expreduce\resources\functional.m`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\expreduce\expreduce\resources\functional.m`
 contains compact expected-result examples for:
 
 - `Function` and `Slot`;
@@ -267,7 +267,7 @@ contains compact expected-result examples for:
 - `FixedPoint` and `FixedPointList`;
 - `Array`.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\test_procedural.py`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\test_procedural.py`
 adds useful control-flow and compound-expression behavior, including `Do`, `For`, `While`,
 `Switch`, `CompoundExpression`, and history-sensitive semicolon behavior.
 
@@ -275,7 +275,7 @@ adds useful control-flow and compound-expression behavior, including `Do`, `For`
 
 Symja is the best array/sparse-array source in the current corpus.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-core\src\test\java\org\matheclipse\core\system\SparseArrayTest.java`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\symja_android_library\symja_android_library\matheclipse-core\src\test\java\org\matheclipse\core\system\SparseArrayTest.java`
 contains strong direct cases for:
 
 - `SparseArray`;
@@ -295,7 +295,7 @@ forms.
 
 `woxi`, `mathics-core`, and `expreduce` all contribute useful cases, but with different tradeoffs.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\woxi\tests\interpreter_tests\math\number_theory.rs`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\woxi\tests\interpreter_tests\math\number_theory.rs`
 is the richest single file for exact integer and rational arithmetic edge cases, including:
 
 - `GCD`;
@@ -309,12 +309,12 @@ However, the same file also covers `FactorInteger`, `Fibonacci`, `EulerPhi`, `Ex
 other algorithms that are either explicitly out of scope or at least beyond the currently stated
 "basic integer arithmetic functions" boundary.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\numbers\test_numbertheory.py`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\mathics-core\test\builtin\numbers\test_numbertheory.py`
 contains a small number of very relevant `Divisors` cases, but the same file also mixes in
 `FractionalPart`, `MantissaExponent`, `RandomPrime`, and real/complex-related behavior that should
 not be part of Tungsten's first evaluator waves.
 
-`C:\TestData\tungsten-wolfram-upstream-tests\expreduce\expreduce\resources\numbertheory.m`
+`C:\TestData\wolfram\tungsten-wolfram-upstream-tests\expreduce\expreduce\resources\numbertheory.m`
 has good `GCD`, `LCM`, `Mod`, `EvenQ`, `OddQ`, and `FactorInteger` coverage, but it too extends
 well past the currently stated boundary.
 

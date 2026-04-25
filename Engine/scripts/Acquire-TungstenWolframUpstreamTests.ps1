@@ -6,7 +6,7 @@ Acquires sparse snapshots of upstream Wolfram-language parser and evaluator test
 .DESCRIPTION
 Clones a curated set of upstream repositories with `--filter=blob:none`, checks out only the
 selected test and dataset paths via sparse checkout, preserves root license/readme files when
-present, and writes snapshot provenance into `C:\TestData` by default.
+present, and writes snapshot provenance into `C:\TestData\wolfram` by default.
 
 This is intended for local corpus mining and later adaptation into Tungsten tests. The downloaded
 snapshots are not guaranteed to be directly runnable in isolation because some upstream projects
@@ -29,7 +29,7 @@ LFS-backed assets are not materialized unnecessarily.
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string] $OutDir = 'C:\TestData\tungsten-wolfram-upstream-tests',
+    [string] $OutDir = 'C:\TestData\wolfram\tungsten-wolfram-upstream-tests',
 
     [Parameter()]
     [string[]] $Repository,

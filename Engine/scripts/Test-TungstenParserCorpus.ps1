@@ -9,7 +9,7 @@ This is a Windows-friendly wrapper around:
     python -m tungsten parser-corpus compare
 
 By default it parses a bounded sample from
-`C:\TestData\tungsten-wolfram-parser-corpus`, compares Tungsten parse acceptance with the local
+`C:\TestData\wolfram\tungsten-wolfram-parser-corpus`, compares Tungsten parse acceptance with the local
 Wolfram kernel using held parsing, and writes JSON/Markdown artifacts under the corpus
 `validation` directory.
 
@@ -21,7 +21,7 @@ Use `-TungstenWorkers 8` on this machine for broad notebook-heavy runs.
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string] $CorpusRoot = 'C:\TestData\tungsten-wolfram-parser-corpus',
+    [string] $CorpusRoot = 'C:\TestData\wolfram\tungsten-wolfram-parser-corpus',
 
     [Parameter()]
     [string] $OutDir,

@@ -2,7 +2,7 @@
 
 - Created (UTC): 2026-04-25T02:11:38Z
 - Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
-- Corpus root: `C:\TestData\tungsten-wolfram-parser-corpus`
+- Corpus root: `C:\TestData\wolfram\tungsten-wolfram-parser-corpus`
 - Runner: `python -m tungsten parser-corpus compare`
 
 ## Summary
@@ -27,7 +27,7 @@ Recommended broad-run command on this machine:
 
 ```powershell
 python -m tungsten parser-corpus compare `
-    --corpus-root C:\TestData\tungsten-wolfram-parser-corpus `
+    --corpus-root C:\TestData\wolfram\tungsten-wolfram-parser-corpus `
     --max-file-mb 2 `
     --kernel-batch-size 100 `
     --tungsten-workers 8 `
@@ -117,7 +117,7 @@ The best estimate point was a 250-file run:
 
 ```powershell
 python -m tungsten parser-corpus compare `
-    --corpus-root C:\TestData\tungsten-wolfram-parser-corpus `
+    --corpus-root C:\TestData\wolfram\tungsten-wolfram-parser-corpus `
     --max-files 250 `
     --max-file-mb 2 `
     --shuffle `
@@ -193,7 +193,7 @@ real wins are parser-level:
 The default validation artifact was refreshed with timing data:
 
 ```text
-C:\TestData\tungsten-wolfram-parser-corpus\validation\parser-corpus-summary.json
-C:\TestData\tungsten-wolfram-parser-corpus\validation\parser-corpus-results.jsonl
-C:\TestData\tungsten-wolfram-parser-corpus\validation\parser-corpus-report.md
+C:\TestData\wolfram\tungsten-wolfram-parser-corpus\validation\parser-corpus-summary.json
+C:\TestData\wolfram\tungsten-wolfram-parser-corpus\validation\parser-corpus-results.jsonl
+C:\TestData\wolfram\tungsten-wolfram-parser-corpus\validation\parser-corpus-report.md
 ```

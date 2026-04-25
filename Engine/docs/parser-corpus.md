@@ -14,7 +14,7 @@
 
 ## Purpose
 
-The local parser corpus at `C:\TestData\tungsten-wolfram-parser-corpus` is a stress corpus for
+The local parser corpus at `C:\TestData\wolfram\tungsten-wolfram-parser-corpus` is a stress corpus for
 Tungsten's Wolfram Language parsers. It intentionally contains notebooks, packages, scripts, tests,
 and some noisy false positives such as non-Wolfram `.m` files discovered from public repositories.
 
@@ -55,16 +55,16 @@ Discover the current corpus selection:
 
 ```powershell
 python -m tungsten parser-corpus discover `
-    --corpus-root C:\TestData\tungsten-wolfram-parser-corpus `
+    --corpus-root C:\TestData\wolfram\tungsten-wolfram-parser-corpus `
     --sample 30
 ```
 
 Run a bounded comparison and write artifacts under
-`C:\TestData\tungsten-wolfram-parser-corpus\validation`:
+`C:\TestData\wolfram\tungsten-wolfram-parser-corpus\validation`:
 
 ```powershell
 python -m tungsten parser-corpus compare `
-    --corpus-root C:\TestData\tungsten-wolfram-parser-corpus `
+    --corpus-root C:\TestData\wolfram\tungsten-wolfram-parser-corpus `
     --max-files 100 `
     --max-file-mb 2 `
     --kernel-batch-size 100 `
@@ -75,7 +75,7 @@ Run Tungsten only, without launching Wolfram:
 
 ```powershell
 python -m tungsten parser-corpus compare `
-    --corpus-root C:\TestData\tungsten-wolfram-parser-corpus `
+    --corpus-root C:\TestData\wolfram\tungsten-wolfram-parser-corpus `
     --skip-wolfram `
     --no-write `
     --include-results
@@ -147,7 +147,7 @@ By default `parser-corpus compare` writes:
 The default output directory is:
 
 ```text
-C:\TestData\tungsten-wolfram-parser-corpus\validation
+C:\TestData\wolfram\tungsten-wolfram-parser-corpus\validation
 ```
 
 Use `--out-dir` to write elsewhere, or `--no-write` for stdout-only summaries.

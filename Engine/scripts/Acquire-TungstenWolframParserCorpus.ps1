@@ -6,7 +6,7 @@ Acquires a large notebook/package corpus for Tungsten's Wolfram parser work.
 .DESCRIPTION
 Wraps `acquire_wolfram_parser_corpus.py` with Windows-friendly defaults so the corpus can be
 refreshed with a single PowerShell command. The underlying Python script downloads Wolfram
-notebooks and packages into `C:\TestData` by default, preserving provenance and writing a manifest
+notebooks and packages into `C:\TestData\wolfram` by default, preserving provenance and writing a manifest
 and README alongside the corpus.
 
 This corpus is intended for local parser-corpus use only. It is not meant to be bundled into
@@ -51,7 +51,7 @@ Concurrent Notebook Archive download workers.
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string] $OutDir = 'C:\TestData\tungsten-wolfram-parser-corpus',
+    [string] $OutDir = 'C:\TestData\wolfram\tungsten-wolfram-parser-corpus',
 
     [Parameter()]
     [switch] $Force,

@@ -911,7 +911,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path(r"C:\TestData\tungsten-wolfram-parser-corpus"),
+        default=Path(r"C:\TestData\wolfram\tungsten-wolfram-parser-corpus"),
         help="Output directory.",
     )
     parser.add_argument(
