@@ -19,6 +19,13 @@ from .inline_boxes import compose_inline_box_payload
 from .inline_boxes import extract_inline_boxes_from_notebook_cell
 from .kernel import WolframKernelRunner
 from .notebook import NotebookDocument, apply_patch_spec, load_patch_spec, wl_string
+from .parser_corpus import DEFAULT_CORPUS_ROOT as DEFAULT_PARSER_CORPUS_ROOT
+from .parser_corpus import DEFAULT_KERNEL_BATCH_SIZE
+from .parser_corpus import DEFAULT_MAX_BYTES as DEFAULT_PARSER_CORPUS_MAX_BYTES
+from .parser_corpus import DEFAULT_PREVIEW_CHARS as DEFAULT_PARSER_CORPUS_PREVIEW_CHARS
+from .parser_corpus import compare_parser_corpus
+from .parser_corpus import discover_corpus_files
+from .parser_corpus import summarize_discovery
 
 
 def _json_dump(payload: object) -> None:
@@ -81,6 +88,44 @@ def _add_cell_selector_arguments(parser: argparse.ArgumentParser) -> None:
     selector_group.add_argument("--expression-uuid", help="Notebook cell ExpressionUUID.")
     selector_group.add_argument("--cell-id", type=int, help="Notebook CellID value.")
     selector_group.add_argument("--cell-tag", help="Notebook cell tag.")
+
+
+def _add_parser_corpus_discovery_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--corpus-root",
+        type=Path,
+        default=DEFAULT_PARSER_CORPUS_ROOT,
+        help="Root of the local Wolfram parser corpus.",
+    )
+    parser.add_argument(
+        "--extension",
+        action="append",
+        default=[],
+        help="File extension to include, for example .wl or nb. May be repeated.",
+    )
+    parser.add_argument(
+        "--include-glob",
+        action="append",
+        default=[],
+        help='Relative path glob to include, for example "github/woxi/**". May be repeated.',
+    )
+    parser.add_argument(
+        "--exclude-glob",
+        action="append",
+        default=[],
+        help='Relative path glob to exclude, for example "**/README*". May be repeated.',
+    )
+    parser.add_argument("--max-files", type=int, help="Maximum number of matching files to consider.")
+    parser.add_argument("--shuffle", action="store_true", help="Shuffle matching files before applying --max-files.")
+    parser.add_argument("--seed", type=int, default=0, help="Deterministic shuffle seed.")
+
+
+def _parser_corpus_max_bytes(args: argparse.Namespace) -> int | None:
+    if args.no_max_bytes:
+        return None
+    if args.max_bytes is not None:
+        return int(args.max_bytes)
+    return int(float(args.max_file_mb) * 1024 * 1024)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -160,6 +205,97 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["input", "fullform", "standard"],
         default="input",
         help="Syntax form to parse before evaluation.",
+    )
+
+    parser_corpus_parser = subparsers.add_parser(
+        "parser-corpus",
+        help="Run Tungsten parser corpus checks and compare accepted files with the Wolfram kernel.",
+    )
+    parser_corpus_subparsers = parser_corpus_parser.add_subparsers(
+        dest="parser_corpus_command",
+        required=True,
+    )
+
+    parser_corpus_discover = parser_corpus_subparsers.add_parser(
+        "discover",
+        help="Summarize parser-corpus files selected by the current filters.",
+    )
+    _add_parser_corpus_discovery_arguments(parser_corpus_discover)
+    parser_corpus_discover.add_argument(
+        "--sample",
+        type=int,
+        default=20,
+        help="Number of selected relative paths to include in the JSON summary.",
+    )
+
+    parser_corpus_compare = parser_corpus_subparsers.add_parser(
+        "compare",
+        help="Parse selected corpus files with Tungsten and the Wolfram kernel held parser.",
+    )
+    _add_parser_corpus_discovery_arguments(parser_corpus_compare)
+    parser_corpus_compare.add_argument(
+        "--out-dir",
+        type=Path,
+        help="Directory for parser-corpus-summary.json, parser-corpus-results.jsonl, and report markdown.",
+    )
+    parser_corpus_compare.add_argument(
+        "--max-file-mb",
+        type=float,
+        default=DEFAULT_PARSER_CORPUS_MAX_BYTES / 1024 / 1024,
+        help="Skip files larger than this many MiB. Defaults to 2 MiB.",
+    )
+    parser_corpus_compare.add_argument(
+        "--max-bytes",
+        type=int,
+        help="Skip files larger than this exact byte count. Overrides --max-file-mb.",
+    )
+    parser_corpus_compare.add_argument(
+        "--no-max-bytes",
+        action="store_true",
+        help="Do not skip large files by byte size.",
+    )
+    parser_corpus_compare.add_argument(
+        "--form",
+        choices=["input", "fullform", "standard"],
+        default="input",
+        help="Tungsten expression form for non-notebook source files.",
+    )
+    parser_corpus_compare.add_argument(
+        "--skip-wolfram",
+        action="store_true",
+        help="Only run the Tungsten parser side; do not launch the Wolfram kernel.",
+    )
+    parser_corpus_compare.add_argument(
+        "--kernel-batch-size",
+        type=int,
+        default=DEFAULT_KERNEL_BATCH_SIZE,
+        help="Number of files parsed by each Wolfram kernel batch.",
+    )
+    parser_corpus_compare.add_argument(
+        "--preview-chars",
+        type=int,
+        default=DEFAULT_PARSER_CORPUS_PREVIEW_CHARS,
+        help="Maximum preview characters stored for parser outputs and errors.",
+    )
+    parser_corpus_compare.add_argument(
+        "--no-write",
+        action="store_true",
+        help="Return a JSON summary without writing report/result files.",
+    )
+    parser_corpus_compare.add_argument(
+        "--include-results",
+        action="store_true",
+        help="Include per-file results in stdout JSON. Output files always contain per-file results.",
+    )
+    parser_corpus_compare.add_argument(
+        "--fail-on-tungsten-gap",
+        action="store_true",
+        help="Return exit code 1 when Wolfram accepts a file that Tungsten rejects.",
+    )
+    parser_corpus_compare.add_argument(
+        "--fail-on-mismatch",
+        action="store_true",
+        help="Return exit code 1 on either Wolfram-accepted Tungsten gaps or Tungsten-only successes.",
     )
 
     docs_parser = subparsers.add_parser("docs", help="Search and read the local Wolfram documentation corpus.")
@@ -424,6 +560,55 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 }
             )
+            return 0
+
+    if args.command == "parser-corpus":
+        extensions = args.extension or None
+        if args.parser_corpus_command == "discover":
+            files = discover_corpus_files(
+                args.corpus_root,
+                extensions=extensions,
+                include_globs=args.include_glob,
+                exclude_globs=args.exclude_glob,
+                max_files=args.max_files,
+                shuffle=args.shuffle,
+                seed=args.seed,
+            )
+            payload = summarize_discovery(files, corpus_root=args.corpus_root)
+            payload["sample_files"] = [
+                file.to_dict()
+                for file in files[: max(0, args.sample)]
+            ]
+            _json_dump(payload)
+            return 0
+
+        if args.parser_corpus_command == "compare":
+            run = compare_parser_corpus(
+                corpus_root=args.corpus_root,
+                out_dir=args.out_dir,
+                extensions=extensions,
+                include_globs=args.include_glob,
+                exclude_globs=args.exclude_glob,
+                max_files=args.max_files,
+                max_bytes=_parser_corpus_max_bytes(args),
+                source_form=args.form,
+                compare_wolfram=not args.skip_wolfram,
+                kernel_batch_size=args.kernel_batch_size,
+                preview_chars=args.preview_chars,
+                shuffle=args.shuffle,
+                seed=args.seed,
+                runner=None if args.skip_wolfram else WolframKernelRunner(installation),
+                write_outputs=not args.no_write,
+            )
+            _json_dump(run.to_dict(include_results=args.include_results))
+
+            outcomes = run.summary.get("outcomes", {})
+            tungsten_gaps = int(outcomes.get("tungsten_gap", 0)) if isinstance(outcomes, dict) else 0
+            tungsten_only = int(outcomes.get("tungsten_only_success", 0)) if isinstance(outcomes, dict) else 0
+            if args.fail_on_mismatch and (tungsten_gaps or tungsten_only):
+                return 1
+            if args.fail_on_tungsten_gap and tungsten_gaps:
+                return 1
             return 0
 
     if args.command == "inline-box":

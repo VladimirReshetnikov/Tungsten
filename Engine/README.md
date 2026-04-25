@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-04-25T00:53:10Z
+- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -18,6 +18,7 @@
   - [Usage Reference](./docs/usage-reference.md)
   - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
+  - [Parser Corpus](./docs/parser-corpus.md)
   - [Inline Box Strings](./docs/inline-box-strings.md)
   - [Troubleshooting](./docs/troubleshooting.md)
 
@@ -241,6 +242,7 @@ python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
 python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
 python -m tungsten docs search NotebookGet
 python -m tungsten expr evaluate --code "1 + 2 + 3"
+python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2
 ```
 
 ### PowerShell
@@ -254,6 +256,7 @@ New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{Circle
 Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "True && False && x"
 Find-TungstenDocumentation -Query "NotebookGet"
+Compare-TungstenParserCorpus -MaxFiles 25 -MaxFileMB 2
 ```
 
 ### C#/.NET
@@ -354,6 +357,7 @@ The current documentation should state these boundaries plainly:
 | `src/Tungsten/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
 | `src/Tungsten/src/tungsten/inline_boxes.py` | Inline-box string composition and notebook-cell object extraction |
 | `src/Tungsten/src/tungsten/expression.py` | Kernel-free Wolfram expression parser and inert evaluator |
+| `src/Tungsten/src/tungsten/parser_corpus.py` | Local parser corpus discovery and Wolfram held-parser comparison |
 | `src/Tungsten/src/tungsten/wolfram_strings.py` | Shared Wolfram string literal and inline-box escape handling |
 | `src/Tungsten/src/tungsten/docs_index.py` | Offline documentation indexing/search |
 | `src/Tungsten/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
@@ -362,6 +366,7 @@ The current documentation should state these boundaries plainly:
 | `src/Tungsten/pwsh/` | PowerShell wrappers |
 | `src/Tungsten/tests/` | Python unit and integration coverage |
 | `src/Tungsten/scripts/Test-TungstenSmoke.ps1` | End-to-end smoke runner |
+| `src/Tungsten/scripts/Test-TungstenParserCorpus.ps1` | Parser corpus comparison runner |
 | `src/Tungsten/docs/` | Documentation set |
 
 ## Build and validation
@@ -387,6 +392,7 @@ pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
+pwsh -File .\src\Tungsten\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100
 pwsh -File .\src\Tungsten\scripts\Update-TungstenDocsProvenance.ps1
 ```
 

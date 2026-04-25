@@ -264,6 +264,55 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["result"]["full_form"], "f[a, x, c]")
 
+    def test_parser_corpus_discover_command(self) -> None:
+        with TemporaryDirectory(prefix="tungsten-cli-") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            (temp_dir / "expr.wl").write_text("1 + 2", encoding="utf-8")
+            (temp_dir / "ignored.txt").write_text("not wolfram", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "parser-corpus",
+                        "discover",
+                        "--corpus-root",
+                        str(temp_dir),
+                        "--sample",
+                        "1",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["file_count"], 1)
+        self.assertEqual(payload["sample_files"][0]["relative_path"], "expr.wl")
+
+    def test_parser_corpus_compare_command_can_skip_wolfram(self) -> None:
+        with TemporaryDirectory(prefix="tungsten-cli-") as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            (temp_dir / "expr.wl").write_text("1 + 2", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "parser-corpus",
+                        "compare",
+                        "--corpus-root",
+                        str(temp_dir),
+                        "--skip-wolfram",
+                        "--no-write",
+                        "--include-results",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["summary"]["file_count"], 1)
+        self.assertEqual(payload["results"][0]["tungsten"]["status"], "success")
+        self.assertEqual(payload["results"][0]["wolfram"]["error_type"], "WolframComparisonDisabled")
+
     def test_inline_box_compose_command(self) -> None:
         stdout = io.StringIO()
         with redirect_stdout(stdout):

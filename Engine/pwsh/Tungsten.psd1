@@ -7,12 +7,14 @@
     Copyright = "MIT-0"
     PowerShellVersion = "7.4"
     FunctionsToExport = @(
+        "Compare-TungstenParserCorpus",
         "Convert-TungstenExpression",
         "Find-TungstenDocumentation",
         "Get-TungstenDocumentationPage",
         "Get-TungstenEnvironment",
         "Get-TungstenNotebook",
         "Get-TungstenNotebookCellInlineBoxes",
+        "Get-TungstenParserCorpus",
         "Invoke-TungstenFrontEnd",
         "Invoke-TungstenKernel",
         "Invoke-TungstenNotebookAssistant",

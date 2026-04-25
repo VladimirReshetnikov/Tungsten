@@ -16,6 +16,7 @@
   - [Expression Parser](./expression-parser.md)
   - [Expression Function Support](./expression-function-support.md)
   - [Sequence Pattern Matching](./sequence-pattern-matching.md)
+  - [Parser Corpus](./parser-corpus.md)
 
 ## Conventions
 
@@ -531,6 +532,67 @@ returns exit code `1` with:
 - `parsed_full_form`
 - `parsed_tree`
 
+### `parser-corpus`
+
+Purpose:
+
+- discover parser-corpus files under `C:\TestData\tungsten-wolfram-parser-corpus`;
+- parse selected files with Tungsten;
+- compare parse acceptance with the local Wolfram kernel without evaluating corpus code.
+
+The Wolfram side imports each file as text and calls
+`ToExpression[text, InputForm, HoldComplete]`. The held expression is not released.
+
+#### `parser-corpus discover`
+
+Examples:
+
+```powershell
+python -m tungsten parser-corpus discover --sample 30
+python -m tungsten parser-corpus discover --include-glob "github/woxi/**" --extension wls
+```
+
+Important options:
+
+- `--corpus-root <path>`: defaults to `C:\TestData\tungsten-wolfram-parser-corpus`
+- `--extension <ext>`: repeatable extension filter
+- `--include-glob <glob>` / `--exclude-glob <glob>`: repeatable relative path filters
+- `--max-files <n>`: cap selected files
+- `--shuffle --seed <n>`: deterministic shuffled selection before applying `--max-files`
+- `--sample <n>`: include this many selected file records in stdout JSON
+
+#### `parser-corpus compare`
+
+Examples:
+
+```powershell
+python -m tungsten parser-corpus compare --max-files 100 --max-file-mb 2
+python -m tungsten parser-corpus compare --skip-wolfram --no-write --include-results
+python -m tungsten parser-corpus compare --include-glob "github/wolframresearch-codeparser/**" --extension wl
+```
+
+Important options:
+
+- `--out-dir <path>`: output directory for summary, JSONL results, and Markdown report
+- `--max-file-mb <n>` / `--max-bytes <n>` / `--no-max-bytes`: large-file behavior
+- `--form input|fullform|standard`: Tungsten expression form for non-notebook source files
+- `--skip-wolfram`: run only the Tungsten side
+- `--kernel-batch-size <n>`: number of files per Wolfram kernel batch
+- `--preview-chars <n>`: maximum preview text stored per attempt
+- `--no-write`: stdout-only summary
+- `--include-results`: include per-file results in stdout JSON
+- `--fail-on-tungsten-gap`: return exit code `1` if Wolfram accepts a file Tungsten rejects
+- `--fail-on-mismatch`: return exit code `1` for either `tungsten_gap` or
+  `tungsten_only_success`
+
+Default output files are written under the corpus `validation` directory:
+
+- `parser-corpus-summary.json`
+- `parser-corpus-results.jsonl`
+- `parser-corpus-report.md`
+
+For details, see [parser-corpus.md](./parser-corpus.md).
+
 ### `docs`
 
 Purpose:
@@ -735,6 +797,14 @@ Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
 ```
 
+### Parser corpus
+
+```powershell
+Get-TungstenParserCorpus -Sample 30
+Compare-TungstenParserCorpus -MaxFiles 100 -MaxFileMB 2
+Compare-TungstenParserCorpus -SkipWolfram -NoWrite -IncludeResults
+```
+
 ### Inline-box strings
 
 ```powershell
@@ -781,6 +851,7 @@ pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
+pwsh -File .\src\Tungsten\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100
 ```
 
 The smoke now covers:

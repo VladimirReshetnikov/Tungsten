@@ -26,8 +26,8 @@ The docs are split so readers can choose the right depth:
 - the usage reference is command-oriented;
 - the .NET API guide is integration-oriented for C# callers;
 - the architecture and implementation documents are maintainer-oriented;
-- focused guides cover specific subsystems such as Notebook Assistant, inline-box strings, and the
-  the expression parser.
+- focused guides cover specific subsystems such as Notebook Assistant, inline-box strings, parser
+  corpus validation, and the expression parser.
 
 ## Recommended reading order
 
@@ -66,9 +66,10 @@ The docs are split so readers can choose the right depth:
 8. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
 9. [expression-function-support.md](./expression-function-support.md)
 10. [pattern-matching-plan.md](./pattern-matching-plan.md)
-11. [inline-box-strings.md](./inline-box-strings.md)
-12. [notebook-assistant.md](./notebook-assistant.md)
-13. [troubleshooting.md](./troubleshooting.md)
+11. [parser-corpus.md](./parser-corpus.md)
+12. [inline-box-strings.md](./inline-box-strings.md)
+13. [notebook-assistant.md](./notebook-assistant.md)
+14. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -89,6 +90,7 @@ The docs are split so readers can choose the right depth:
 | [named-pure-functions-spec.md](named-pure-functions-spec.md) | Detailed specification for named-parameter pure functions and Tungsten's capture-avoiding renaming rules. |
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
 | [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
+| [parser-corpus.md](parser-corpus.md) | Parser corpus discovery, Wolfram held-parser comparison, outputs, and test-entrypoint reference. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
 | [reports/2026-04-24-license-seat-investigation.md](reports/2026-04-24-license-seat-investigation.md) | Investigation report for intermittent license-seat failures, ghost/orphaned Wolfram processes, and Tungsten's launch-gate mitigation. |
 
@@ -137,6 +139,8 @@ The docs are split so readers can choose the right depth:
 - Read [expression-function-support.md](./expression-function-support.md) for the exact built-in coverage and official Wolfram reference links.
 - Read [pattern-matching-plan.md](./pattern-matching-plan.md) if you need the design boundaries and validation strategy for the new pattern subset.
 - Use [usage-reference.md](./usage-reference.md) for `expr parse` and `expr evaluate`.
+- Use [parser-corpus.md](./parser-corpus.md) when measuring parser acceptance against the local
+  notebook/package corpus and Wolfram held-parser oracle.
 - Read [architecture.md](./architecture.md) if you need to extend the expression subsystem.
 
 ## Conventions

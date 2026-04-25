@@ -340,6 +340,143 @@ function Invoke-TungstenExpression {
     Invoke-TungstenCliJson -Arguments $cliArgs
 }
 
+function Get-TungstenParserCorpus {
+    [CmdletBinding()]
+    param(
+        [string] $CorpusRoot = "C:\TestData\tungsten-wolfram-parser-corpus",
+
+        [string[]] $Extension = @(),
+
+        [string[]] $IncludeGlob = @(),
+
+        [string[]] $ExcludeGlob = @(),
+
+        [Nullable[int]] $MaxFiles = $null,
+
+        [switch] $Shuffle,
+
+        [int] $Seed = 0,
+
+        [int] $Sample = 20
+    )
+
+    $cliArgs = @("parser-corpus", "discover", "--corpus-root", $CorpusRoot, "--sample", $Sample, "--seed", $Seed)
+    foreach ($item in $Extension) {
+        $cliArgs += @("--extension", $item)
+    }
+    foreach ($item in $IncludeGlob) {
+        $cliArgs += @("--include-glob", $item)
+    }
+    foreach ($item in $ExcludeGlob) {
+        $cliArgs += @("--exclude-glob", $item)
+    }
+    if ($null -ne $MaxFiles) {
+        $cliArgs += @("--max-files", $MaxFiles)
+    }
+    if ($Shuffle) {
+        $cliArgs += "--shuffle"
+    }
+
+    Invoke-TungstenCliJson -Arguments $cliArgs
+}
+
+function Compare-TungstenParserCorpus {
+    [CmdletBinding()]
+    param(
+        [string] $CorpusRoot = "C:\TestData\tungsten-wolfram-parser-corpus",
+
+        [string] $OutDir,
+
+        [string[]] $Extension = @(),
+
+        [string[]] $IncludeGlob = @(),
+
+        [string[]] $ExcludeGlob = @(),
+
+        [Nullable[int]] $MaxFiles = $null,
+
+        [double] $MaxFileMB = 2.0,
+
+        [Nullable[int]] $MaxBytes = $null,
+
+        [switch] $NoMaxBytes,
+
+        [ValidateSet("input", "fullform", "standard")]
+        [string] $Form = "input",
+
+        [switch] $SkipWolfram,
+
+        [int] $KernelBatchSize = 25,
+
+        [int] $PreviewChars = 2000,
+
+        [switch] $NoWrite,
+
+        [switch] $IncludeResults,
+
+        [switch] $Shuffle,
+
+        [int] $Seed = 0,
+
+        [switch] $FailOnTungstenGap,
+
+        [switch] $FailOnMismatch
+    )
+
+    $cliArgs = @(
+        "parser-corpus",
+        "compare",
+        "--corpus-root", $CorpusRoot,
+        "--max-file-mb", $MaxFileMB,
+        "--form", $Form,
+        "--kernel-batch-size", $KernelBatchSize,
+        "--preview-chars", $PreviewChars,
+        "--seed", $Seed
+    )
+
+    if ($OutDir) {
+        $cliArgs += @("--out-dir", $OutDir)
+    }
+    foreach ($item in $Extension) {
+        $cliArgs += @("--extension", $item)
+    }
+    foreach ($item in $IncludeGlob) {
+        $cliArgs += @("--include-glob", $item)
+    }
+    foreach ($item in $ExcludeGlob) {
+        $cliArgs += @("--exclude-glob", $item)
+    }
+    if ($null -ne $MaxFiles) {
+        $cliArgs += @("--max-files", $MaxFiles)
+    }
+    if ($null -ne $MaxBytes) {
+        $cliArgs += @("--max-bytes", $MaxBytes)
+    }
+    if ($NoMaxBytes) {
+        $cliArgs += "--no-max-bytes"
+    }
+    if ($SkipWolfram) {
+        $cliArgs += "--skip-wolfram"
+    }
+    if ($NoWrite) {
+        $cliArgs += "--no-write"
+    }
+    if ($IncludeResults) {
+        $cliArgs += "--include-results"
+    }
+    if ($Shuffle) {
+        $cliArgs += "--shuffle"
+    }
+    if ($FailOnTungstenGap) {
+        $cliArgs += "--fail-on-tungsten-gap"
+    }
+    if ($FailOnMismatch) {
+        $cliArgs += "--fail-on-mismatch"
+    }
+
+    Invoke-TungstenCliJson -Arguments $cliArgs
+}
+
 function New-TungstenInlineBoxString {
     [CmdletBinding()]
     param(
@@ -1179,12 +1316,14 @@ function Invoke-TungstenNotebookAssistant {
 }
 
 Export-ModuleMember -Function @(
+    "Compare-TungstenParserCorpus",
     "Convert-TungstenExpression",
     "Find-TungstenDocumentation",
     "Get-TungstenDocumentationPage",
     "Get-TungstenEnvironment",
     "Get-TungstenNotebook",
     "Get-TungstenNotebookCellInlineBoxes",
+    "Get-TungstenParserCorpus",
     "Invoke-TungstenFrontEnd",
     "Invoke-TungstenKernel",
     "Invoke-TungstenNotebookAssistant",
