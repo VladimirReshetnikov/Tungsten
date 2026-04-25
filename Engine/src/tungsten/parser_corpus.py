@@ -20,7 +20,7 @@ from .notebook import wl_string
 from .wolfram_strings import parse_wl_string_literal
 
 
-DEFAULT_CORPUS_ROOT = Path(r"C:\TestData\tungsten-wolfram-parser-corpus")
+DEFAULT_CORPUS_ROOT = Path(r"C:\TestData\wolfram\tungsten-wolfram-parser-corpus")
 DEFAULT_OUTPUT_DIRECTORY_NAME = "validation"
 DEFAULT_EXTENSIONS = (".wl", ".m", ".wls", ".mt", ".wlt", ".nb", ".nbp")
 NOTEBOOK_EXTENSIONS = (".nb", ".nbp")

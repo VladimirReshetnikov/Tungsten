@@ -4,7 +4,7 @@
 - Updated (UTC): 2026-04-25T19:18:25Z
 - Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
 - Span-internals implementation baseline HEAD: e59d8c00d977185644fc59a814d9bea96bb78cac
-- Corpus root: `C:\TestData\tungsten-wolfram-parser-corpus`
+- Corpus root: `C:\TestData\wolfram\tungsten-wolfram-parser-corpus`
 - Scope: Tungsten notebook parsing and parser-corpus throughput
 
 ## Summary
@@ -32,7 +32,7 @@ This pass landed four low-risk improvements:
 Profile target:
 
 ```text
-C:\TestData\tungsten-wolfram-parser-corpus\github\rulebasedintegration-rubi\Rubi\IntegrationRules\1 Algebraic functions\1.1 Binomial products\1.1.1 Linear\1.1.1.4 (a+b x)^m (c+d x)^n (e+f x)^p (g+h x)^q.nb
+C:\TestData\wolfram\tungsten-wolfram-parser-corpus\github\rulebasedintegration-rubi\Rubi\IntegrationRules\1 Algebraic functions\1.1 Binomial products\1.1.1 Linear\1.1.1.4 (a+b x)^m (c+d x)^n (e+f x)^p (g+h x)^q.nb
 ```
 
 The profile used `NotebookDocument.from_text(...)` on the same 1.3 MB notebook. `cProfile` times
@@ -82,7 +82,7 @@ All corpus runs used:
 
 ```powershell
 python -m tungsten parser-corpus compare `
-    --corpus-root C:\TestData\tungsten-wolfram-parser-corpus `
+    --corpus-root C:\TestData\wolfram\tungsten-wolfram-parser-corpus `
     --max-file-mb 2 `
     --shuffle `
     --seed 20260425

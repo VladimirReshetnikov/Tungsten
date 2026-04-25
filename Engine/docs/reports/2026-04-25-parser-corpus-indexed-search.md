@@ -2,7 +2,7 @@
 
 - Created (UTC): 2026-04-25T19:36:30Z
 - Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
-- Corpus root: `C:\TestData\tungsten-wolfram-parser-corpus`
+- Corpus root: `C:\TestData\wolfram\tungsten-wolfram-parser-corpus`
 - Indexed candidate: `src/Indexed`
 - Scope: Fast indexed content search for Wolfram parser-corpus notebooks, packages, scripts, and tests
 
@@ -59,7 +59,7 @@ Indexed already matches most of the shape we need:
 
 | Need | Indexed status |
 |---|---|
-| Recursive directory corpus target | Supported through `--root C:\TestData\tungsten-wolfram-parser-corpus`. |
+| Recursive directory corpus target | Supported through `--root C:\TestData\wolfram\tungsten-wolfram-parser-corpus`. |
 | Repeated fast literal search | Supported by the contentless FTS5 trigram code index. |
 | Regex search | Supported by Indexed's regex path after candidate narrowing. |
 | Extension/path filtering | Supported at query time with repeatable `--glob` and `--exclude`. |
@@ -153,7 +153,7 @@ skipping the 23 huge notebooks is acceptable. The practical command shape is:
 
 ```powershell
 $idx = "C:\Tools3\Tools\src\Indexed\src\Indexed.Cli\bin\Release\net10.0-windows\idx.exe"
-$root = "C:\TestData\tungsten-wolfram-parser-corpus"
+$root = "C:\TestData\wolfram\tungsten-wolfram-parser-corpus"
 
 & $idx find "CellGroupData" `
     --root $root `
@@ -171,7 +171,7 @@ over 50 MiB.
 For a robust Tungsten-facing feature, implement the Indexed extensions above, then add a small
 Tungsten command or script that:
 
-- starts or discovers the Indexed target for `C:\TestData\tungsten-wolfram-parser-corpus`;
+- starts or discovers the Indexed target for `C:\TestData\wolfram\tungsten-wolfram-parser-corpus`;
 - passes Wolfram extension globs by default;
 - optionally queries Indexed over HTTP instead of spawning the CLI for each search;
 - enriches results with Tungsten corpus metadata;

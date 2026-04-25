@@ -292,7 +292,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--corpus-root",
         type=Path,
-        default=Path(r"C:\TestData\tungsten-wolfram-upstream-tests"),
+        default=Path(r"C:\TestData\wolfram\tungsten-wolfram-upstream-tests"),
         help="Corpus root created by Acquire-TungstenWolframUpstreamTests.ps1.",
     )
     parser.add_argument(
