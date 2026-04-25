@@ -324,6 +324,22 @@ class SequenceSplicingTests(unittest.TestCase):
             "2",
         )
 
+    def test_sequence_splices_inside_hold_but_not_holdcomplete(self) -> None:
+        self.assertEqual(
+            _full("Hold[Sequence[1 + 1, 2 + 2]]"),
+            "Hold[Plus[1, 1], Plus[2, 2]]",
+        )
+        self.assertEqual(
+            _full("HoldComplete[Sequence[1 + 1, 2 + 2]]"),
+            "HoldComplete[Sequence[Plus[1, 1], Plus[2, 2]]]",
+        )
+
+    def test_nothing_drops_from_lists_but_not_ordinary_calls(self) -> None:
+        self.assertEqual(_full("{Nothing, 1}"), "List[1]")
+        self.assertEqual(_full("f[Nothing, 1]"), "f[Nothing, 1]")
+        self.assertEqual(_full("{a, b} /. a -> Nothing"), "List[b]")
+        self.assertEqual(_full("Hold[{a, b}] /. a -> Nothing"), "Hold[List[Nothing, b]]")
+
 
 class DoubleUnaryMinusTests(unittest.TestCase):
     """Finding B16: parser accepts ``--5`` where Wolfram rejects it as

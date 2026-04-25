@@ -4,10 +4,11 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T00:40:00Z
-- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
+- Updated (UTC): 2026-04-25T01:46:40Z
+- Repository HEAD: dac74d643ce319a384a81fd5a91d6cd1f961f9f2
 - Related docs:
   - [Expression Parser](./expression-parser.md)
+  - [Sequence and Nothing Evaluation](./sequence-nothing-evaluation.md)
   - [Usage Reference](./usage-reference.md)
   - [Project README](../README.md)
 
@@ -90,7 +91,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `Orderless`, or short-circuit attributes here, and only evaluates the covered heads when every
   participating argument is already an explicit integer or Boolean value in the shipped subset.
 - `Sequence[...]` splices into evaluated call arguments, including lists and ordinary symbolic
-  calls. Tungsten does not splice through Hold-family heads, `Function`, `Rule`, or `RuleDelayed`.
+  calls. It also splices structurally, without evaluating its payload, inside held-but-not-
+  sequence-suppressing heads such as `Hold`, `HoldForm`, `HoldPattern`, and `Function`.
+  Tungsten suppresses splicing for `HoldComplete`, `Unevaluated`, `Rule`, and `RuleDelayed`.
+- `Nothing` is removed from evaluated `List[...]` result lists and from direct `Association[...]`
+  constructor placeholders. It is retained as an ordinary argument to non-list heads, retained as an
+  association value such as `Rule[key, Nothing]`, and retained inside held subexpressions.
 - Hold-family wrappers `Hold`, `HoldComplete`, `HoldForm`, `HoldPattern`, and `Unevaluated` keep
   their arguments unevaluated in Tungsten's structural evaluator. `ReleaseHold` strips one outer
   Hold-family wrapper and evaluates the released payload.
@@ -205,7 +211,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `BaseDecode` | `BaseDecode["text"]`, `BaseDecode["text", "encoding"]` | Decodes supported base-encoded strings to byte arrays. Tungsten currently supports `"Base64"` by default, plus `"Base16"` and `"Base85ASCII"`, and it drops nonalphabet characters before decoding in the practical Wolfram style. | [BaseDecode](https://reference.wolfram.com/language/ref/BaseDecode) |
 | `Condition` | `Condition[patt, test]`, `patt /; test`, and top-level delayed-template guards such as `lhs :> rhs /; test` | Guards a pattern or delayed-rule template. Tungsten treats the guard as satisfied only when the substituted test reduces to explicit `True` under the shipped evaluator. | [Condition](https://reference.wolfram.com/language/ref/Condition) |
 | `RuleDelayed` | `lhs :> rhs`, including guarded forms such as `lhs :> rhs /; test` | Delays right-hand-side instantiation until after pattern bindings are known. A top-level delayed-template `Condition` guard can suppress the rule and fall through to later rules when present. | [RuleDelayed](https://reference.wolfram.com/language/ref/RuleDelayed) |
-| `Sequence` | `Sequence[e1, ...]` as an evaluated argument of a non-holding call | Splices its arguments into the enclosing call, including `List[...]` and ordinary symbolic calls. Hold-family heads, `Function`, `Rule`, and `RuleDelayed` do not splice. | [Sequence](https://reference.wolfram.com/language/ref/Sequence) |
+| `Sequence` | `Sequence[e1, ...]` as a direct argument of a call | Splices its arguments into the enclosing call after argument evaluation for ordinary calls, and structurally without payload evaluation for `Hold`, `HoldForm`, `HoldPattern`, and `Function`. Splicing is suppressed for `HoldComplete`, `Unevaluated`, `Rule`, and `RuleDelayed`. | [Sequence](https://reference.wolfram.com/language/ref/Sequence) |
+| `Nothing` | `Nothing`, `Nothing[...]` | `Nothing[...]` evaluates to `Nothing`; direct `Nothing` is removed from evaluated `List[...]` outputs and direct association-constructor placeholders, while remaining inert in ordinary calls, held expressions, and association values. | [Nothing](https://reference.wolfram.com/language/ref/Nothing) |
 | `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous `__` / `___` sequence patterns, named patterns over `Blank`, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
 | `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list, and guarded patterns succeed only when the guard reduces to explicit `True`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
 | `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. Anonymous `__` / `___` patterns are supported under Tungsten's one-per-argument-list limit, and delayed templates may use `/;` as a post-substitution guard. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
@@ -386,14 +393,22 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   [named-pure-functions-spec.md](./named-pure-functions-spec.md).
 - Tungsten does not yet implement `SlotSequence` or `##`.
 
-## Notes on Hold and Sequence
+## Notes on Hold, Sequence, and Nothing
 
 - `Hold`, `HoldComplete`, `HoldForm`, `HoldPattern`, and `Unevaluated` keep their arguments
   unevaluated. This is a hardcoded structural subset of Wolfram's attribute behavior, not a general
   attribute system.
 - `ReleaseHold` strips one outer Hold-family wrapper and evaluates the released payload.
-- `Sequence[...]` is spliced after its own arguments evaluate and before ordinary head dispatch.
-  It is not spliced inside Hold-family heads, `Function`, `Rule`, or `RuleDelayed`.
+- `Sequence[...]` is spliced after its own arguments evaluate and before ordinary head dispatch for
+  ordinary calls. `Hold`, `HoldForm`, `HoldPattern`, and `Function` still splice direct
+  `Sequence[...]` arguments, but do so structurally without evaluating the payload. `HoldComplete`,
+  `Unevaluated`, `Rule`, and `RuleDelayed` suppress splicing.
+- `Nothing` is removed only when Tungsten is constructing or rebuilding an evaluated list, or when
+  `Association[...]` receives direct `Nothing` placeholders. Held lists keep direct `Nothing`;
+  ordinary calls such as `f[Nothing, x]` keep it as a normal argument; association values such as
+  `<|a -> Nothing|>` remain present.
+- The precise ordering and examples are specified in
+  [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md).
 
 ## Notes on arithmetic and Boolean semantics
 

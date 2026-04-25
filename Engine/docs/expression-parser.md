@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T00:40:00Z
-Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
+Updated (UTC): 2026-04-25T01:46:40Z
+Repository HEAD: dac74d643ce319a384a81fd5a91d6cd1f961f9f2
 
 ## Summary
 
@@ -29,8 +29,8 @@ Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
   `ExportString`, `ImportByteArray`, and `ExportByteArray`, `Pick`, `Select`, `Discard`,
   `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`,
-  association constructors, key accessors, `Sequence` splicing, Hold-family wrappers, and related
-  exact-position transforms;
+  association constructors, key accessors, `Sequence` splicing, `Nothing` removal in evaluated
+  list contexts, Hold-family wrappers, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -40,7 +40,9 @@ symbols stay inert, and Tungsten only evaluates the specific built-ins it implem
 For the exact supported structural function list, supported forms, and official Wolfram reference
 links, read [expression-function-support.md](./expression-function-support.md). For the supported
 offline import / export format subset and its data-shape rules, read
-[import-export-formats.md](./import-export-formats.md).
+[import-export-formats.md](./import-export-formats.md). For the evaluator ordering rules that make
+`Sequence` and `Nothing` special without a live kernel, read
+[sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md).
 
 ## When to use this subsystem
 
@@ -454,6 +456,10 @@ Examples:
 - `f @ 1 + 2` evaluates to `Plus[f[1], 2]`;
 - `{a, b, c, d, e}[[1 ;; 5 ;; 2]]` evaluates to `List[a, c, e]`;
 - `{Sequence[1, 2], 3}` evaluates to `List[1, 2, 3]`;
+- `Hold[Sequence[1 + 1, 2 + 2]]` evaluates to `Hold[Plus[1, 1], Plus[2, 2]]`, while
+  `HoldComplete[Sequence[1 + 1, 2 + 2]]` keeps the `Sequence[...]` wrapper;
+- `{Nothing, 1}` and `Cases[{1, 2, 3}, 2 :> Nothing]` evaluate to `List[1]` and `List[]`;
+- `f[Nothing, 1]` keeps `Nothing` as an ordinary argument;
 - `Hold[1 + 2]` evaluates to `Hold[Plus[1, 2]]`, and `ReleaseHold[Hold[1 + 2]]` evaluates to `3`;
 - `MatchQ[f[a, a], f[x_, x_]]` evaluates to `True`;
 - `Cases[f[g[a]], _, {0, Infinity}]` evaluates to `List[a, g[a], f[g[a]]]`;

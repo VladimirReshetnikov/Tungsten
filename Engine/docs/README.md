@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-04-25T01:46:40Z
+- Repository HEAD: dac74d643ce319a384a81fd5a91d6cd1f961f9f2
 
 ## What this docs tree is for
 
@@ -60,13 +60,14 @@ The docs are split so readers can choose the right depth:
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
 4. [expression-parser.md](./expression-parser.md)
-5. [import-export-formats.md](./import-export-formats.md)
-6. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
-7. [expression-function-support.md](./expression-function-support.md)
-8. [pattern-matching-plan.md](./pattern-matching-plan.md)
-9. [inline-box-strings.md](./inline-box-strings.md)
-10. [notebook-assistant.md](./notebook-assistant.md)
-11. [troubleshooting.md](./troubleshooting.md)
+5. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
+6. [import-export-formats.md](./import-export-formats.md)
+7. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
+8. [expression-function-support.md](./expression-function-support.md)
+9. [pattern-matching-plan.md](./pattern-matching-plan.md)
+10. [inline-box-strings.md](./inline-box-strings.md)
+11. [notebook-assistant.md](./notebook-assistant.md)
+12. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -81,6 +82,7 @@ The docs are split so readers can choose the right depth:
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
+| [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
 | [import-export-formats.md](import-export-formats.md) | Focused guide for kernel-free `ImportString` / `ExportString` / `ImportByteArray` / `ExportByteArray` support and the implemented format subset. |
 | [named-pure-functions-spec.md](named-pure-functions-spec.md) | Detailed specification for named-parameter pure functions and Tungsten's capture-avoiding renaming rules. |
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
@@ -121,6 +123,8 @@ The docs are split so readers can choose the right depth:
 ### Kernel-free structural analysis
 
 - Read [expression-parser.md](./expression-parser.md).
+- Read [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md) if you need precise
+  `Sequence` / `Nothing` evaluation-order behavior.
 - Read [import-export-formats.md](./import-export-formats.md) if you need the exact string /
   byte-array format subset and the data-shape rules for JSON, tabular text, and compression wrappers.
 - Read [named-pure-functions-spec.md](./named-pure-functions-spec.md) if you need the exact

@@ -354,6 +354,12 @@ def list_expr(*items: Expr) -> Call:
     return call("List", *items)
 
 
+def _evaluated_list_expr(*items: Expr) -> Call:
+    # Raw parser lists must preserve Nothing in held syntax. Evaluator-created
+    # lists instead mirror Wolfram's ordinary List construction behavior.
+    return call("List", *_drop_nothing_arguments(items))
+
+
 @dataclass(frozen=True)
 class _AssociationEntry:
     rule_head: str
@@ -2121,7 +2127,7 @@ def _string_cases_scalar(text: str, specs: Sequence[_StringPatternSpec], limit: 
         match, result = found
         results.append(result)
         position = match.end if match.end > position else position + 1
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def string_cases(expr: Expr, pattern_spec: Expr, limit: Expr | int | None = None) -> Expr:
@@ -2902,6 +2908,7 @@ def _replace_recursive(
     positive_level: int,
     level_min: int,
     level_max: int,
+    held_context: bool = False,
 ) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
@@ -2914,11 +2921,16 @@ def _replace_recursive(
                 positive_level=positive_level + 1,
                 level_min=level_min,
                 level_max=level_max,
+                held_context=held_context,
             )
             mutable_entries.append(_AssociationEntry(entry.rule_head, entry.key, updated_value))
             changed = changed or updated_value != entry.value
         rebuilt = _association_expr(mutable_entries) if changed else expr
     elif isinstance(expr, Call):
+        child_held_context = held_context or (
+            isinstance(expr.head_expr, Symbol)
+            and expr.head_expr.name in _HELD_ARGUMENT_HEADS
+        )
         updated_arguments = tuple(
             _replace_recursive(
                 argument,
@@ -2926,10 +2938,18 @@ def _replace_recursive(
                 positive_level=positive_level + 1,
                 level_min=level_min,
                 level_max=level_max,
+                held_context=child_held_context,
             )
             for argument in expr.arguments
         )
-        rebuilt = _rebuild(expr, updated_arguments) if updated_arguments != expr.arguments else expr
+        if updated_arguments != expr.arguments:
+            rebuilt = (
+                Call(head_expr=expr.head_expr, arguments=updated_arguments)
+                if held_context
+                else _rebuild(expr, updated_arguments)
+            )
+        else:
+            rebuilt = expr
     else:
         rebuilt = expr
 
@@ -2947,7 +2967,7 @@ def replace(
 ) -> Expr:
     if _is_nested_replacement_rules_list(rules):
         assert isinstance(rules, Call)
-        return list_expr(*(replace(expr, item, spec) for item in rules.arguments))
+        return _evaluated_list_expr(*(replace(expr, item, spec) for item in rules.arguments))
     ruleset = _normalize_single_replacement_ruleset(rules, "Replace")
     if spec is None:
         return _apply_replacement_rules(expr, ruleset)[0]
@@ -2955,18 +2975,23 @@ def replace(
     return _replace_recursive(expr, ruleset, positive_level=0, level_min=level_min, level_max=level_max)
 
 
-def _replace_all_single_pass(expr: Expr, ruleset: Sequence[_ReplacementRule]) -> tuple[Expr, bool]:
+def _replace_all_single_pass(
+    expr: Expr,
+    ruleset: Sequence[_ReplacementRule],
+    *,
+    held_context: bool = False,
+) -> tuple[Expr, bool]:
     replaced, did_replace = _apply_replacement_rules(expr, ruleset)
     if did_replace:
         return (replaced, replaced != expr)
 
     entries = _association_entries(expr)
     if entries is not None:
-        updated_head, head_changed = _replace_all_single_pass(expr.head_expr, ruleset)
+        updated_head, head_changed = _replace_all_single_pass(expr.head_expr, ruleset, held_context=held_context)
         mutable_entries: list[_AssociationEntry] = []
         changed = head_changed
         for entry in entries:
-            updated_value, value_changed = _replace_all_single_pass(entry.value, ruleset)
+            updated_value, value_changed = _replace_all_single_pass(entry.value, ruleset, held_context=held_context)
             mutable_entries.append(_AssociationEntry(entry.rule_head, entry.key, updated_value))
             changed = changed or value_changed
         if not changed:
@@ -2978,22 +3003,32 @@ def _replace_all_single_pass(expr: Expr, ruleset: Sequence[_ReplacementRule]) ->
     if not isinstance(expr, Call):
         return (expr, False)
 
-    updated_head, head_changed = _replace_all_single_pass(expr.head_expr, ruleset)
+    updated_head, head_changed = _replace_all_single_pass(expr.head_expr, ruleset, held_context=held_context)
     updated_arguments: list[Expr] = []
     changed = head_changed
+    child_held_context = held_context or (
+        isinstance(expr.head_expr, Symbol)
+        and expr.head_expr.name in _HELD_ARGUMENT_HEADS
+    )
     for argument in expr.arguments:
-        updated_argument, argument_changed = _replace_all_single_pass(argument, ruleset)
+        updated_argument, argument_changed = _replace_all_single_pass(
+            argument,
+            ruleset,
+            held_context=child_held_context,
+        )
         updated_arguments.append(updated_argument)
         changed = changed or argument_changed
     if not changed:
         return (expr, False)
+    if not held_context and isinstance(updated_head, Symbol) and updated_head.name == "List":
+        updated_arguments = list(_drop_nothing_arguments(updated_arguments))
     return (Call(head_expr=updated_head, arguments=tuple(updated_arguments)), True)
 
 
 def replace_all(expr: Expr, rules: Expr) -> Expr:
     if _is_nested_replacement_rules_list(rules):
         assert isinstance(rules, Call)
-        return list_expr(*(replace_all(expr, item) for item in rules.arguments))
+        return _evaluated_list_expr(*(replace_all(expr, item) for item in rules.arguments))
     ruleset = _normalize_single_replacement_ruleset(rules, "ReplaceAll")
     return _replace_all_single_pass(expr, ruleset)[0]
 
@@ -3001,7 +3036,7 @@ def replace_all(expr: Expr, rules: Expr) -> Expr:
 def replace_repeated(expr: Expr, rules: Expr) -> Expr:
     if _is_nested_replacement_rules_list(rules):
         assert isinstance(rules, Call)
-        return list_expr(*(replace_repeated(expr, item) for item in rules.arguments))
+        return _evaluated_list_expr(*(replace_repeated(expr, item) for item in rules.arguments))
     ruleset = _normalize_single_replacement_ruleset(rules, "ReplaceRepeated")
     current = expr
     for _ in range(_REPLACE_REPEATED_MAX_ITERATIONS):
@@ -3100,7 +3135,7 @@ def cases(
         if remaining is not None:
             remaining -= 1
 
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 _DELETE_SENTINEL = object()
@@ -3222,7 +3257,9 @@ def part(expr: Expr, *specs: int | Expr) -> Expr:
 def extract(expr: Expr, positions: Expr | Sequence[Expr | Sequence[int] | int]) -> Expr:
     if isinstance(positions, Expr):
         if _is_collection_of_position_specs(positions):
-            return list_expr(*[part(expr, *_position_components_from_expr(item)) for item in positions.arguments])
+            return _evaluated_list_expr(
+                *[part(expr, *_position_components_from_expr(item)) for item in positions.arguments]
+            )
         if _is_single_position_spec_expr(positions):
             return part(expr, *_position_components_from_expr(positions))
         raise WolframEvaluationError("Extract positions must be a position list or a list of position lists.")
@@ -3239,7 +3276,7 @@ def extract(expr: Expr, positions: Expr | Sequence[Expr | Sequence[int] | int]) 
             extracted.append(part(expr, item))
             continue
         extracted.append(part(expr, *item))
-    return list_expr(*extracted)
+    return _evaluated_list_expr(*extracted)
 
 
 def level(expr: Expr, spec: Expr | int | tuple[int, int] = 1) -> list[Expr]:
@@ -3249,7 +3286,7 @@ def level(expr: Expr, spec: Expr | int | tuple[int, int] = 1) -> list[Expr]:
     return [record.expr for record in records if _level_matches(record, level_min, level_max)]
 
 
-_HOLD_ALL_HEADS = {
+_HELD_ARGUMENT_HEADS = {
     "Function",
     "Hold",
     "HoldComplete",
@@ -3259,17 +3296,19 @@ _HOLD_ALL_HEADS = {
 }
 
 
+_SEQUENCE_SUPPRESSING_HEADS = {
+    "HoldComplete",
+    "Rule",
+    "RuleDelayed",
+    "Unevaluated",
+}
+
+
 _RELEASE_HOLD_HEADS = {
     "Hold",
     "HoldComplete",
     "HoldForm",
     "Unevaluated",
-}
-
-
-_SEQUENCE_HOLDING_HEADS = _HOLD_ALL_HEADS | {
-    "Rule",
-    "RuleDelayed",
 }
 
 
@@ -3283,6 +3322,28 @@ def _splice_sequence_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     return tuple(spliced)
 
 
+def _is_nothing_expr(expr: Expr) -> bool:
+    return isinstance(expr, Symbol) and expr.name == "Nothing"
+
+
+def _drop_nothing_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    return tuple(argument for argument in arguments if not _is_nothing_expr(argument))
+
+
+def _normalize_arguments_for_head(
+    head_name: str,
+    arguments: Sequence[Expr],
+    *,
+    evaluated: bool,
+) -> tuple[Expr, ...]:
+    normalized = tuple(arguments)
+    if head_name not in _SEQUENCE_SUPPRESSING_HEADS:
+        normalized = _splice_sequence_arguments(normalized)
+    if evaluated and head_name in {"Association", "List"}:
+        normalized = _drop_nothing_arguments(normalized)
+    return normalized
+
+
 def release_hold(expr: Expr) -> Expr:
     if (
         isinstance(expr, Call)
@@ -3293,6 +3354,7 @@ def release_hold(expr: Expr) -> Expr:
             return evaluate(expr.arguments[0])
         return evaluate(call("Sequence", *expr.arguments))
     return expr
+
 
 def first(expr: Expr, default: Expr | object = _MISSING) -> Expr:
     entries = _association_entries(expr)
@@ -4029,7 +4091,7 @@ def composition_apply(functions: Sequence[Expr], arguments: Sequence[Expr]) -> E
     if not functions:
         if len(arguments) == 1:
             return arguments[0]
-        return list_expr(*arguments)
+        return _evaluated_list_expr(*arguments)
 
     current = _apply_callable(functions[-1], arguments)
     for function in reversed(functions[:-1]):
@@ -4041,7 +4103,7 @@ def right_composition_apply(functions: Sequence[Expr], arguments: Sequence[Expr]
     if not functions:
         if len(arguments) == 1:
             return arguments[0]
-        return list_expr(*arguments)
+        return _evaluated_list_expr(*arguments)
 
     current = _apply_callable(functions[0], arguments)
     for function in functions[1:]:
@@ -4058,7 +4120,7 @@ def compose_list(functions_expr: Expr, initial: Expr) -> Expr:
     for function in functions_expr.arguments:
         current = _apply_callable(function, (current,))
         results.append(current)
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def nest(function: Expr, expr: Expr, count: Expr | int) -> Expr:
@@ -4080,7 +4142,7 @@ def nest_list(function: Expr, expr: Expr, count: Expr | int) -> Expr:
     for _ in range(iterations):
         current = _apply_callable(function, (current,))
         results.append(current)
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 _ITERATION_SAFETY_LIMIT = 65536
@@ -4100,7 +4162,7 @@ def nest_while_list(function: Expr, expr: Expr, test: Expr) -> Expr:
     results = [expr]
     for _ in range(_ITERATION_SAFETY_LIMIT):
         if not _predicate_succeeds(test, current):
-            return list_expr(*results)
+            return _evaluated_list_expr(*results)
         current = _apply_callable(function, (current,))
         results.append(current)
     raise WolframEvaluationError("NestWhileList exceeded the Tungsten iteration safety limit.")
@@ -4133,10 +4195,10 @@ def fixed_point_list(function: Expr, expr: Expr, max_iterations: Expr | int | No
         updated = _apply_callable(function, (current,))
         results.append(updated)
         if updated == current:
-            return list_expr(*results)
+            return _evaluated_list_expr(*results)
         current = updated
     if explicit_limit:
-        return list_expr(*results)
+        return _evaluated_list_expr(*results)
     raise WolframEvaluationError("FixedPointList exceeded the Tungsten iteration safety limit.")
 
 
@@ -4224,7 +4286,7 @@ def map_thread(function: Expr, sequences_expr: Expr, level_value: Expr | int | N
 
     sequences = list(sequences_expr.arguments)
     if not sequences:
-        return list_expr()
+        return _evaluated_list_expr()
 
     if not all(isinstance(sequence, Call) and sequence.has_head("List") for sequence in sequences):
         raise WolframEvaluationError("MapThread currently expects a list of List expressions.")
@@ -4235,10 +4297,15 @@ def map_thread(function: Expr, sequences_expr: Expr, level_value: Expr | int | N
 
     assert len(lengths) == 1
     length_value = lengths.pop()
-    return list_expr(*(
-        _apply_callable(function, tuple(sequence.arguments[index] for sequence in sequences if isinstance(sequence, Call)))
-        for index in range(length_value)
-    ))
+    return _evaluated_list_expr(
+        *(
+            _apply_callable(
+                function,
+                tuple(sequence.arguments[index] for sequence in sequences if isinstance(sequence, Call)),
+            )
+            for index in range(length_value)
+        )
+    )
 
 
 def thread(expr: Expr, thread_head: Expr | None = None) -> Expr:
@@ -4267,6 +4334,8 @@ def thread(expr: Expr, thread_head: Expr | None = None) -> Expr:
                 threaded_arguments.append(argument)
         results.append(Call(head_expr=expr.head_expr, arguments=tuple(threaded_arguments)))
 
+    if isinstance(effective_head, Symbol) and effective_head.name == "List":
+        return _evaluated_list_expr(*results)
     return Call(head_expr=effective_head, arguments=tuple(results))
 
 
@@ -4315,9 +4384,9 @@ def outer(function: Expr, *sequences: Expr) -> Expr:
         if index == len(normalized_sequences):
             return _apply_callable(function, tuple(chosen))
         current = normalized_sequences[index]
-        return Call(
-            head_expr=current.head_expr,
-            arguments=tuple(recurse(index + 1, [*chosen, item]) for item in current.arguments),
+        return _rebuild(
+            current,
+            tuple(recurse(index + 1, [*chosen, item]) for item in current.arguments),
         )
 
     return recurse(0, [])
@@ -4347,15 +4416,15 @@ def tuples_expr(items: Expr, count: Expr | int | None = None) -> Expr:
         base_items = _sequence_values(items, "Tuples")
         sequences = [base_items] * repetitions
 
-    results: list[Expr] = [list_expr()]
+    results: list[Expr] = [_evaluated_list_expr()]
     for sequence in sequences:
         next_results: list[Expr] = []
         for prefix in results:
             assert isinstance(prefix, Call) and prefix.has_head("List")
             for item in sequence:
-                next_results.append(list_expr(*prefix.arguments, item))
+                next_results.append(_evaluated_list_expr(*prefix.arguments, item))
         results = next_results
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def _normalize_dimensions(dimensions: Expr | int, function_name: str) -> list[int]:
@@ -4381,7 +4450,7 @@ def _build_array_from_dimensions(
     if not dimensions:
         return builder(indices)
     size = dimensions[0]
-    return list_expr(*(
+    return _evaluated_list_expr(*(
         _build_array_from_dimensions(dimensions[1:], builder, (*indices, index))
         for index in range(1, size + 1)
     ))
@@ -4416,9 +4485,9 @@ def range_expr(arguments: Sequence[Expr]) -> Expr:
     if step == 0:
         raise WolframEvaluationError("Range step cannot be zero.")
     if (step > 0 and start > end) or (step < 0 and start < end):
-        return list_expr()
+        return _evaluated_list_expr()
     stop = end + (1 if step > 0 else -1)
-    return list_expr(*(integer(item) for item in range(start, stop, step)))
+    return _evaluated_list_expr(*(integer(item) for item in range(start, stop, step)))
 
 
 def unit_vector(arguments: Sequence[Expr]) -> Expr:
@@ -4430,7 +4499,7 @@ def unit_vector(arguments: Sequence[Expr]) -> Expr:
         raise WolframEvaluationError("UnitVector expects a non-negative length.")
     if position < 1 or position > length_value:
         raise WolframEvaluationError("UnitVector position must be between 1 and the vector length.")
-    return list_expr(*(
+    return _evaluated_list_expr(*(
         integer(1 if index == position else 0)
         for index in range(1, length_value + 1)
     ))
@@ -4440,18 +4509,22 @@ def identity_matrix(size: Expr | int) -> Expr:
     dimension = _normalize_integer_argument(size, "IdentityMatrix")
     if dimension < 0:
         raise WolframEvaluationError("IdentityMatrix expects a non-negative integer size.")
-    return list_expr(*(
-        list_expr(*(integer(1 if row == column else 0) for column in range(1, dimension + 1)))
+    return _evaluated_list_expr(*(
+        _evaluated_list_expr(*(integer(1 if row == column else 0) for column in range(1, dimension + 1)))
         for row in range(1, dimension + 1)
     ))
 
 
 def diagonal_matrix(values_expr: Expr) -> Expr:
     values = _sequence_values(values_expr, "DiagonalMatrix")
-    return list_expr(*(
-        list_expr(*(values[row - 1] if row == column else integer(0) for column in range(1, len(values) + 1)))
-        for row in range(1, len(values) + 1)
-    ))
+    return _evaluated_list_expr(
+        *(
+            _evaluated_list_expr(
+                *(values[row - 1] if row == column else integer(0) for column in range(1, len(values) + 1))
+            )
+            for row in range(1, len(values) + 1)
+        )
+    )
 
 
 def partition(expr: Expr, size: Expr | int, offset: Expr | int | None = None) -> Expr:
@@ -4464,7 +4537,7 @@ def partition(expr: Expr, size: Expr | int, offset: Expr | int | None = None) ->
     for start in range(0, len(items) - window + 1, step):
         chunk = items[start:start + window]
         results.append(_selection_elements(expr, chunk, "Partition"))
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def block_map(function: Expr, expr: Expr, size: Expr | int, offset: Expr | int | None = None) -> Expr:
@@ -4477,7 +4550,7 @@ def block_map(function: Expr, expr: Expr, size: Expr | int, offset: Expr | int |
     for start in range(0, len(items) - window + 1, step):
         block_expr = _selection_elements(expr, items[start:start + window], "BlockMap")
         results.append(_apply_callable(function, (block_expr,)))
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def take_list(expr: Expr, specs_expr: Expr) -> Expr:
@@ -4498,11 +4571,11 @@ def take_list(expr: Expr, specs_expr: Expr) -> Expr:
             continue
         taken.append(take(remaining, spec))
         remaining = drop(remaining, spec)
-    return list_expr(*taken)
+    return _evaluated_list_expr(*taken)
 
 
 def take_drop(expr: Expr, spec: Expr) -> Expr:
-    return list_expr(take(expr, spec), drop(expr, spec))
+    return _evaluated_list_expr(take(expr, spec), drop(expr, spec))
 
 
 def fold(function: Expr, initial: Expr, expr: Expr) -> Expr:
@@ -4518,7 +4591,7 @@ def fold_list(function: Expr, initial: Expr, expr: Expr) -> Expr:
     for item in _selection_items(expr, "FoldList"):
         current = _apply_callable(function, (current, item.value))
         results.append(current)
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def sequence_fold(function: Expr, initial_expr: Expr, expr: Expr, arity: Expr | int | None = None) -> Expr:
@@ -4549,7 +4622,7 @@ def sequence_fold_list(function: Expr, initial_expr: Expr, expr: Expr, arity: Ex
         results.append(current)
         state_values.append(current)
         index += consumed_per_step
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def _fold_while_history_arguments(results: Sequence[Expr], history_spec: Expr | int | None) -> tuple[Expr, ...]:
@@ -4575,7 +4648,7 @@ def fold_while_list(
     results: list[Expr] = [initial]
 
     if not _predicate_succeeds_with_arguments(test, _fold_while_history_arguments(results, history_spec)):
-        return list_expr(*results)
+        return _evaluated_list_expr(*results)
 
     failure_detected = False
     index = 0
@@ -4588,18 +4661,18 @@ def fold_while_list(
             break
 
     if not failure_detected:
-        return list_expr(*results)
+        return _evaluated_list_expr(*results)
 
     trailing = 0 if extra_results is None else _normalize_integer_argument(extra_results, "FoldWhileList")
     if trailing < 0:
         keep_count = max(1, len(results) + trailing)
-        return list_expr(*results[:keep_count])
+        return _evaluated_list_expr(*results[:keep_count])
 
     while trailing > 0 and index < len(inputs):
         results.append(_apply_callable(function, (results[-1], inputs[index])))
         index += 1
         trailing -= 1
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def fold_while(
@@ -4634,7 +4707,7 @@ def fold_pair_list(function: Expr, initial: Expr, expr: Expr, projection: Expr |
         pair_values = (pair_expr.arguments[0], pair_expr.arguments[1])
         results.append(_fold_pair_project(pair_values, projection))
         current = pair_values[1]
-    return list_expr(*results)
+    return _evaluated_list_expr(*results)
 
 
 def fold_pair(function: Expr, initial: Expr, expr: Expr, projection: Expr | None = None) -> Expr:
@@ -4893,12 +4966,12 @@ def association_q(expr: Expr) -> Symbol:
 
 def keys_expr(expr: Expr) -> Expr:
     entries = _require_association_entries(expr, "Keys")
-    return list_expr(*(entry.key for entry in entries))
+    return _evaluated_list_expr(*(entry.key for entry in entries))
 
 
 def values_expr(expr: Expr) -> Expr:
     entries = _require_association_entries(expr, "Values")
-    return list_expr(*(entry.value for entry in entries))
+    return _evaluated_list_expr(*(entry.value for entry in entries))
 
 
 def normal(expr: Expr) -> Expr:
@@ -4922,7 +4995,7 @@ def lookup(expr: Expr, key_spec: Expr, default: Expr | None = None) -> Expr:
         return call("Missing", string("KeyAbsent"), key)
 
     if isinstance(key_spec, Call) and key_spec.has_head("List"):
-        return list_expr(*(lookup_one(item) for item in key_spec.arguments))
+        return _evaluated_list_expr(*(lookup_one(item) for item in key_spec.arguments))
     return lookup_one(key_spec)
 
 
@@ -4966,7 +5039,7 @@ def key_map(function: Expr, expr: Expr) -> Expr:
 
 def key_value_map(function: Expr, expr: Expr) -> Expr:
     entries = _require_association_entries(expr, "KeyValueMap")
-    return list_expr(*(_apply_callable(function, (entry.key, entry.value)) for entry in entries))
+    return _evaluated_list_expr(*(_apply_callable(function, (entry.key, entry.value)) for entry in entries))
 
 
 def association_thread(keys: Expr, values: Expr) -> Expr:
@@ -5005,6 +5078,8 @@ def _require_association_entries(expr: Expr, function_name: str) -> tuple[_Assoc
 
 
 def _rebuild(expr: Call, arguments: Sequence[Expr]) -> Call:
+    if isinstance(expr.head_expr, Symbol) and expr.head_expr.name == "List":
+        arguments = _drop_nothing_arguments(arguments)
     return Call(head_expr=expr.head_expr, arguments=tuple(arguments))
 
 
@@ -5660,13 +5735,13 @@ def evaluate(expr: Expr) -> Expr:
     if isinstance(expr.head_expr, Symbol):
         raw_head_name = expr.head_expr.name
 
-        if raw_head_name == "Function":
-            if len(expr.arguments) in {1, 2, 3}:
-                return expr
-            raise WolframEvaluationError("Function expects one, two, or three arguments.")
+        if raw_head_name in _HELD_ARGUMENT_HEADS:
+            held_arguments = _normalize_arguments_for_head(raw_head_name, expr.arguments, evaluated=False)
 
-        if raw_head_name in _HOLD_ALL_HEADS:
-            return expr
+            if raw_head_name == "Function" and len(held_arguments) not in {1, 2, 3}:
+                raise WolframEvaluationError("Function expects one, two, or three arguments.")
+
+            return Call(head_expr=expr.head_expr, arguments=held_arguments)
 
         if raw_head_name == "ReleaseHold":
             if len(expr.arguments) != 1:
@@ -5787,6 +5862,10 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("Pick expects a data expression, a selector expression, and an optional pattern.")
 
     evaluated_head = evaluate(expr.head_expr)
+    if isinstance(evaluated_head, Symbol) and evaluated_head.name == "Nothing":
+        tuple(evaluate(argument) for argument in expr.arguments)
+        return symbol("Nothing")
+
     if _is_callable_expr(evaluated_head):
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
         return _apply_callable(evaluated_head, evaluated_arguments)
@@ -5805,8 +5884,7 @@ def evaluate(expr: Expr) -> Expr:
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
-    if evaluated_head.name not in _SEQUENCE_HOLDING_HEADS:
-        evaluated_arguments = _splice_sequence_arguments(evaluated_arguments)
+    evaluated_arguments = _normalize_arguments_for_head(evaluated_head.name, evaluated_arguments, evaluated=True)
     evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     arithmetic_result = _evaluate_integer_arithmetic(evaluated_expr)
@@ -6068,7 +6146,7 @@ def evaluate(expr: Expr) -> Expr:
                 raise WolframEvaluationError("The optional third Level argument must be True or False.")
             if heads.name == "True":
                 raise WolframEvaluationError("Level[..., ..., True] is not implemented yet.")
-        return list_expr(*level(subject, spec))
+        return _evaluated_list_expr(*level(subject, spec))
 
     if evaluated_head.name == "Take":
         if len(evaluated_arguments) != 2:

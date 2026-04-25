@@ -357,6 +357,49 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(mixed_head.to_full_form(), "Plus[1, 2, a]")
         self.assertEqual(unary_minus.to_full_form(), "-3")
 
+    def test_sequence_and_nothing_follow_argument_list_rules(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("{Sequence[1, 2], 3}")).to_full_form(), "List[1, 2, 3]")
+        self.assertEqual(evaluate(parse_input_form("f[Sequence[1, 2], 3]")).to_full_form(), "f[1, 2, 3]")
+        self.assertEqual(
+            evaluate(parse_input_form("Hold[Sequence[1 + 1, 2 + 2]]")).to_full_form(),
+            "Hold[Plus[1, 1], Plus[2, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("HoldComplete[Sequence[1 + 1, 2 + 2]]")).to_full_form(),
+            "HoldComplete[Sequence[Plus[1, 1], Plus[2, 2]]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Function[Sequence[x, x + x]][a]")).to_full_form(), "Plus[a, a]")
+        self.assertEqual(evaluate(parse_input_form("{Sequence[Nothing, 1], 2}")).to_full_form(), "List[1, 2]")
+        self.assertEqual(evaluate(parse_input_form("f[Sequence[Nothing, 1], 2]")).to_full_form(), "f[Nothing, 1, 2]")
+        self.assertEqual(evaluate(parse_input_form("{Nothing[1 + 1], 2}")).to_full_form(), "List[2]")
+        self.assertEqual(evaluate(parse_input_form("f[Nothing, 1]")).to_full_form(), "f[Nothing, 1]")
+        self.assertEqual(evaluate(parse_input_form("Nothing[1 + 1]")).to_full_form(), "Nothing")
+        self.assertEqual(evaluate(parse_input_form("Hold[Nothing]")).to_full_form(), "Hold[Nothing]")
+        self.assertEqual(evaluate(parse_input_form("ReleaseHold[Hold[{Nothing, 1}]]")).to_full_form(), "List[1]")
+
+    def test_nothing_is_removed_from_evaluated_list_results_only(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("<|Nothing, a -> 1|>")).to_full_form(), "Association[Rule[a, 1]]")
+        self.assertEqual(
+            evaluate(parse_input_form("<|a -> Nothing, b -> 1|>")).to_full_form(),
+            "Association[Rule[a, Nothing], Rule[b, 1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("{a, b} /. a -> Nothing")).to_full_form(), "List[b]")
+        self.assertEqual(
+            evaluate(parse_input_form("Hold[{a, b}] /. a -> Nothing")).to_full_form(),
+            "Hold[List[Nothing, b]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("f[a, b] /. a -> Nothing")).to_full_form(), "f[Nothing, b]")
+        self.assertEqual(evaluate(parse_input_form("Cases[{1, 2, 3}, 2 :> Nothing]")).to_full_form(), "List[]")
+        self.assertEqual(evaluate(parse_input_form("Map[If[# > 0, #, Nothing] &, {-1, 2}]")).to_full_form(), "List[2]")
+        self.assertEqual(evaluate(parse_input_form("Values[<|a -> Nothing, b -> 1|>]")).to_full_form(), "List[1]")
+        self.assertEqual(evaluate(parse_input_form("Lookup[<|a -> Nothing, b -> 1|>, {a, b}]")).to_full_form(), "List[1]")
+        self.assertEqual(evaluate(parse_input_form("Keys[<|Nothing -> 1, a -> 2|>]")).to_full_form(), "List[a]")
+        self.assertEqual(evaluate(parse_input_form("Level[Hold[Nothing], {-1}]")).to_full_form(), "List[]")
+        self.assertEqual(evaluate(parse_input_form("ReplacePart[{a, b}, 1 -> Nothing]")).to_full_form(), "List[b]")
+        self.assertEqual(evaluate(parse_input_form("MapAt[Nothing &, {a, b}, 1]")).to_full_form(), "List[b]")
+        self.assertEqual(evaluate(parse_input_form("ConstantArray[Nothing, 3]")).to_full_form(), "List[]")
+        self.assertEqual(evaluate(parse_input_form("Array[Nothing &, 3]")).to_full_form(), "List[]")
+
     def test_relational_operators_evaluate_on_explicit_integers_only(self) -> None:
         equal_true = evaluate(parse_input_form("Equal[1, 1, 1]"))
         equal_false = evaluate(parse_input_form("Equal[1, 1, 2]"))
