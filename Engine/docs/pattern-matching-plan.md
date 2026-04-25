@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
 - Scope: kernel-free Wolfram pattern parsing and structural matching in `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T23:55:57Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-04-25T02:09:44Z
+- Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
 - Related code:
   - `src/Tungsten/src/tungsten/expression.py`
   - `src/Tungsten/tests/test_expression.py`
@@ -13,6 +13,7 @@
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Expression Function Support](./expression-function-support.md)
+  - [Sequence Pattern Matching](./sequence-pattern-matching.md)
   - [MatchQ](https://reference.wolfram.com/language/ref/MatchQ)
   - [FreeQ](https://reference.wolfram.com/language/ref/FreeQ)
   - [Cases](https://reference.wolfram.com/language/ref/Cases)
@@ -250,12 +251,20 @@ This keeps the matcher engine independent of textual surface syntax.
 
 ### 2. Follow-up extension note
 
-This design note predates the later anonymous-sequence-pattern extension. Tungsten now supports a
-deliberately narrow slice of `BlankSequence` / `BlankNullSequence`:
+This design note predates the later full sequence-pattern extension. Tungsten now supports the
+ordinary-argument-list subset of `BlankSequence` / `BlankNullSequence`:
 
-- anonymous `__`, `___`, `__Head`, and `___Head`;
-- only when there is at most one such pattern in the containing argument list;
-- still not for named forms such as `x__` or `x___`.
+- anonymous and named `__`, `___`, `__Head`, and `___Head` forms;
+- explicit `Pattern[x, BlankSequence[...]]` and `Pattern[x, BlankNullSequence[...]]` forms;
+- multiple sequence patterns in the same non-`Flat`, non-`Orderless` argument list;
+- shortest-first left-to-right split allocation with recursive backtracking;
+- repeated named sequence bindings, where equal repeated names must receive structurally equal
+  matched sequences;
+- rule-template substitution that represents multi-element sequence bindings as `Sequence[...]`
+  and then splices them during ordinary expression reconstruction.
+
+The exact allocation and binding rules are now normative in
+[Sequence Pattern Matching](./sequence-pattern-matching.md).
 
 Other advanced shorthand such as `?` remains unsupported.
 

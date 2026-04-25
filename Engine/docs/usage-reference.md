@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-04-25T02:09:44Z
+- Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -15,6 +15,7 @@
   - [Notebook Assistant](./notebook-assistant.md)
   - [Expression Parser](./expression-parser.md)
   - [Expression Function Support](./expression-function-support.md)
+  - [Sequence Pattern Matching](./sequence-pattern-matching.md)
 
 ## Conventions
 
@@ -482,15 +483,16 @@ For the exact supported forms and limits of each function, see
 
 Everything else remains inert.
 
-The current pattern subset includes `_`, `_Head`, anonymous `__`, `___`, head-qualified anonymous
-sequence forms such as `__Integer`, named `x_`, `x_Head`, guarded patterns via `/;`,
+The current pattern subset includes `_`, `_Head`, anonymous and named `__`, `___`, head-qualified
+sequence forms such as `__Integer` and `x___Symbol`, named `x_`, `x_Head`, guarded patterns via `/;`,
 `Alternatives` via `|`, `Except`, `HoldPattern`, and `Verbatim`. The parser also lowers
 `expr /. rules` and `expr //. rules` to `ReplaceAll[expr, rules]` and `ReplaceRepeated[expr, rules]`.
-Anonymous `__` and `___` match a single candidate expression directly, and they also support
-multi-element matching when there is at most one such pattern in a containing argument list.
+`__` and `___` match a single candidate expression directly, and they also support multi-element
+matching with multiple occurrences in a containing argument list. The allocation rule is documented
+in [sequence-pattern-matching.md](./sequence-pattern-matching.md).
 Guards via `/;` are supported in patterns and delayed-rule right-hand sides when the substituted
-guard reduces to explicit `True` under Tungsten's shipped evaluator. Named sequence patterns, `?`,
-and options-related pattern forms remain intentionally out of scope.
+guard reduces to explicit `True` under Tungsten's shipped evaluator. `?`, `Longest`, `Shortest`,
+`PatternSequence`, and options-related pattern forms remain intentionally out of scope.
 
 Pure functions support positional slots plus named parameters: `#`, `#n`, `#0`, `Slot[]`,
 `Slot[n]`, `Function[body]`, `body &`, `Function[x, body]`, `Function[{x, y}, body]`,

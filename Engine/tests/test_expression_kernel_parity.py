@@ -422,9 +422,16 @@ class TungstenDivergenceSmokeTests(unittest.TestCase):
         # but does not simplify.
         self.assertEqual(_full("6 / 2"), "Times[6, Power[2, -1]]")
 
-    def test_named_sequence_pattern_rejected_per_docs(self) -> None:
-        with self.assertRaises((WolframSyntaxError, WolframEvaluationError)):
-            parse_expression("MatchQ[f[a, b, c], f[x__]]", form="input")
+    def test_named_sequence_patterns_match_and_substitute(self) -> None:
+        self.assertEqual(_full("MatchQ[f[a, b, c], f[x__]]"), "True")
+        self.assertEqual(
+            _full("Cases[{f[a, b, c]}, f[x__, y__] :> HoldComplete[{x}, {y}]]"),
+            "List[HoldComplete[List[a], List[b, c]]]",
+        )
+        self.assertEqual(
+            _full("Cases[{f[a, b, a, b]}, f[x__, x__] :> HoldComplete[{x}]]"),
+            "List[HoldComplete[List[a, b]]]",
+        )
 
     def test_two_unbounded_string_patterns_rejected_per_docs(self) -> None:
         with self.assertRaises((WolframSyntaxError, WolframEvaluationError)):

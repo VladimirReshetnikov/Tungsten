@@ -357,7 +357,8 @@ def list_expr(*items: Expr) -> Call:
 def _evaluated_list_expr(*items: Expr) -> Call:
     # Raw parser lists must preserve Nothing in held syntax. Evaluator-created
     # lists instead mirror Wolfram's ordinary List construction behavior.
-    return call("List", *_drop_nothing_arguments(items))
+    arguments = _normalize_arguments_for_head("List", items, evaluated=True)
+    return call("List", *arguments)
 
 
 @dataclass(frozen=True)
@@ -1848,7 +1849,7 @@ def _match_string_pattern_states(
         name_expr, inner_pattern = normalized.arguments
         if not isinstance(name_expr, Symbol):
             raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
-        if _sequence_pattern_head_name(inner_pattern) is not None:
+        if _is_sequence_argument_pattern(inner_pattern):
             raise _unsupported_string_pattern(normalized)
         matches = _match_string_pattern_states(inner_pattern, text, start, current)
         updated_matches: list[_StringPatternState] = []
@@ -2197,10 +2198,68 @@ def _unsupported_pattern(expr: Expr) -> WolframEvaluationError:
 _SEQUENCE_PATTERN_HEADS = {"BlankSequence", "BlankNullSequence"}
 
 
-def _sequence_pattern_head_name(expr: Expr) -> str | None:
+def _direct_sequence_pattern_head_name(expr: Expr) -> str | None:
     if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol) and expr.head_expr.name in _SEQUENCE_PATTERN_HEADS:
         return expr.head_expr.name
     return None
+
+
+def _is_sequence_argument_pattern(pattern: Expr) -> bool:
+    if _direct_sequence_pattern_head_name(pattern) is not None:
+        return True
+    if isinstance(pattern, Call) and isinstance(pattern.head_expr, Symbol):
+        head_name = pattern.head_expr.name
+        if head_name in {"HoldPattern", "Condition"} and pattern.arguments:
+            return _is_sequence_argument_pattern(pattern.arguments[0])
+        if head_name == "Pattern" and len(pattern.arguments) == 2:
+            return _is_sequence_argument_pattern(pattern.arguments[1])
+        if head_name == "Alternatives":
+            return any(_is_sequence_argument_pattern(argument) for argument in pattern.arguments)
+    return False
+
+
+def _sequence_pattern_min_length(pattern: Expr) -> int:
+    head_name = _direct_sequence_pattern_head_name(pattern)
+    if head_name == "BlankSequence":
+        return 1
+    if head_name == "BlankNullSequence":
+        return 0
+    if isinstance(pattern, Call) and isinstance(pattern.head_expr, Symbol):
+        if pattern.head_expr.name in {"HoldPattern", "Condition"} and pattern.arguments:
+            return _sequence_pattern_min_length(pattern.arguments[0])
+        if pattern.head_expr.name == "Pattern" and len(pattern.arguments) == 2:
+            return _sequence_pattern_min_length(pattern.arguments[1])
+        if pattern.head_expr.name == "Alternatives" and pattern.arguments:
+            return min(
+                _sequence_pattern_min_length(argument) if _is_sequence_argument_pattern(argument) else 1
+                for argument in pattern.arguments
+            )
+    raise WolframEvaluationError(f"Expected a sequence pattern, got {pattern.to_input_form()}.")
+
+
+def _minimum_argument_count(pattern_arguments: Sequence[Expr]) -> int:
+    count = 0
+    for pattern_argument in pattern_arguments:
+        if _is_sequence_argument_pattern(pattern_argument):
+            count += _sequence_pattern_min_length(pattern_argument)
+        else:
+            count += 1
+    return count
+
+
+def _sequence_binding_value(exprs: Sequence[Expr]) -> Expr:
+    if len(exprs) == 1:
+        return exprs[0]
+    return call("Sequence", *exprs)
+
+
+def _bind_pattern_name(bindings: dict[str, Expr], name: str, value: Expr) -> dict[str, Expr] | None:
+    bound = bindings.get(name)
+    if bound is not None:
+        return bindings if bound == value else None
+    matched = dict(bindings)
+    matched[name] = value
+    return matched
 
 
 def _match_sequence_pattern_elements(
@@ -2208,9 +2267,50 @@ def _match_sequence_pattern_elements(
     pattern: Expr,
     bindings: dict[str, Expr],
 ) -> dict[str, Expr] | None:
-    head_name = _sequence_pattern_head_name(pattern)
+    if isinstance(pattern, Call) and isinstance(pattern.head_expr, Symbol):
+        head_name = pattern.head_expr.name
+
+        if head_name == "Alternatives":
+            if not pattern.arguments:
+                return None
+            for branch in pattern.arguments:
+                matched = _match_sequence_pattern_elements(exprs, branch, bindings)
+                if matched is not None:
+                    return matched
+            return None
+
+        if head_name == "HoldPattern":
+            if len(pattern.arguments) != 1:
+                raise WolframEvaluationError("HoldPattern expects exactly one argument.")
+            return _match_sequence_pattern_elements(exprs, pattern.arguments[0], bindings)
+
+        if head_name == "Condition":
+            if len(pattern.arguments) != 2:
+                raise WolframEvaluationError("Condition expects exactly two arguments.")
+            matched = _match_sequence_pattern_elements(exprs, pattern.arguments[0], bindings)
+            if matched is None:
+                return None
+            return matched if _condition_test_succeeds(pattern.arguments[1], matched) else None
+
+        if head_name == "Pattern":
+            if len(pattern.arguments) != 2:
+                raise WolframEvaluationError("Pattern expects exactly two arguments.")
+            name_expr, inner_pattern = pattern.arguments
+            if not isinstance(name_expr, Symbol):
+                raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
+            if not _is_sequence_argument_pattern(inner_pattern):
+                raise WolframEvaluationError("Pattern is not wrapping a sequence pattern.")
+            matched = _match_sequence_pattern_elements(exprs, inner_pattern, bindings)
+            if matched is None:
+                return None
+            return _bind_pattern_name(matched, name_expr.name, _sequence_binding_value(exprs))
+
+    head_name = _direct_sequence_pattern_head_name(pattern)
     if head_name is None:
-        raise WolframEvaluationError("Expected a sequence pattern.")
+        if len(exprs) != 1:
+            return None
+        return _match_pattern(exprs[0], pattern, bindings)
+
     assert isinstance(pattern, Call)
     if len(pattern.arguments) > 1:
         raise WolframEvaluationError(f"{head_name} expects zero or one argument.")
@@ -2231,57 +2331,35 @@ def _match_call_arguments(
     pattern_arguments: Sequence[Expr],
     bindings: dict[str, Expr],
 ) -> dict[str, Expr] | None:
-    sequence_indexes = [
-        index
-        for index, pattern_argument in enumerate(pattern_arguments)
-        if _sequence_pattern_head_name(pattern_argument) is not None
-    ]
-
-    if len(sequence_indexes) > 1:
-        raise WolframEvaluationError(
-            "Tungsten currently supports at most one anonymous __ or ___ pattern per argument list."
-        )
-
-    matched = dict(bindings)
-    if not sequence_indexes:
-        if len(expr_arguments) != len(pattern_arguments):
+    def recurse(expr_index: int, pattern_index: int, current: dict[str, Expr]) -> dict[str, Expr] | None:
+        if pattern_index == len(pattern_arguments):
+            return current if expr_index == len(expr_arguments) else None
+        if expr_index > len(expr_arguments):
             return None
-        for candidate_arg, pattern_arg in zip(expr_arguments, pattern_arguments, strict=True):
-            matched = _match_pattern(candidate_arg, pattern_arg, matched)
+
+        pattern_argument = pattern_arguments[pattern_index]
+        if not _is_sequence_argument_pattern(pattern_argument):
+            if expr_index >= len(expr_arguments):
+                return None
+            matched = _match_pattern(expr_arguments[expr_index], pattern_argument, current)
             if matched is None:
                 return None
-        return matched
+            return recurse(expr_index + 1, pattern_index + 1, matched)
 
-    sequence_index = sequence_indexes[0]
-    prefix_count = sequence_index
-    suffix_count = len(pattern_arguments) - sequence_index - 1
-    sequence_length = len(expr_arguments) - prefix_count - suffix_count
-    if sequence_length < 0:
+        min_length = _sequence_pattern_min_length(pattern_argument)
+        remaining_minimum = _minimum_argument_count(pattern_arguments[pattern_index + 1:])
+        max_length = len(expr_arguments) - expr_index - remaining_minimum
+        for length in range(min_length, max_length + 1):
+            segment = expr_arguments[expr_index:expr_index + length]
+            matched = _match_sequence_pattern_elements(segment, pattern_argument, current)
+            if matched is None:
+                continue
+            final = recurse(expr_index + length, pattern_index + 1, matched)
+            if final is not None:
+                return final
         return None
 
-    for index in range(prefix_count):
-        matched = _match_pattern(expr_arguments[index], pattern_arguments[index], matched)
-        if matched is None:
-            return None
-
-    matched = _match_sequence_pattern_elements(
-        expr_arguments[prefix_count:prefix_count + sequence_length],
-        pattern_arguments[sequence_index],
-        matched,
-    )
-    if matched is None:
-        return None
-
-    suffix_start = prefix_count + sequence_length
-    for index in range(suffix_count):
-        matched = _match_pattern(
-            expr_arguments[suffix_start + index],
-            pattern_arguments[sequence_index + 1 + index],
-            matched,
-        )
-        if matched is None:
-            return None
-    return matched
+    return recurse(0, 0, dict(bindings))
 
 
 def _match_pattern(
@@ -2340,16 +2418,15 @@ def _match_pattern(
             name_expr, inner_pattern = pattern.arguments
             if not isinstance(name_expr, Symbol):
                 raise WolframEvaluationError("Pattern expects a symbol as its first argument.")
-            if _sequence_pattern_head_name(inner_pattern) is not None:
-                raise _unsupported_pattern(pattern)
+            if _is_sequence_argument_pattern(inner_pattern):
+                return _match_sequence_pattern_elements((expr,), pattern, current)
             matched = _match_pattern(expr, inner_pattern, current)
             if matched is None:
                 return None
             bound = matched.get(name_expr.name)
             if bound is not None:
                 return matched if bound == expr else None
-            matched[name_expr.name] = expr
-            return matched
+            return _bind_pattern_name(matched, name_expr.name, expr)
 
         if head_name == "Blank":
             if len(pattern.arguments) == 0:
@@ -2469,9 +2546,18 @@ def _substitute_pattern_bindings(expr: Expr, bindings: dict[str, Expr]) -> Expr:
             _substitute_pattern_bindings(expr.arguments[1], bindings),
         )
 
+    substituted_arguments: list[Expr] = []
+    for argument in expr.arguments:
+        if isinstance(argument, Symbol):
+            bound = bindings.get(argument.name)
+            if isinstance(bound, Call) and bound.has_head("Sequence"):
+                substituted_arguments.extend(bound.arguments)
+                continue
+        substituted_arguments.append(_substitute_pattern_bindings(argument, bindings))
+
     return call(
         _substitute_pattern_bindings(expr.head_expr, bindings),
-        *(_substitute_pattern_bindings(argument, bindings) for argument in expr.arguments),
+        *substituted_arguments,
     )
 
 
@@ -3020,8 +3106,13 @@ def _replace_all_single_pass(
         changed = changed or argument_changed
     if not changed:
         return (expr, False)
-    if not held_context and isinstance(updated_head, Symbol) and updated_head.name == "List":
-        updated_arguments = list(_drop_nothing_arguments(updated_arguments))
+    if not held_context:
+        if isinstance(updated_head, Symbol):
+            updated_arguments = list(
+                _normalize_arguments_for_head(updated_head.name, updated_arguments, evaluated=True)
+            )
+        else:
+            updated_arguments = list(_splice_sequence_arguments(updated_arguments))
     return (Call(head_expr=updated_head, arguments=tuple(updated_arguments)), True)
 
 
@@ -5078,8 +5169,8 @@ def _require_association_entries(expr: Expr, function_name: str) -> tuple[_Assoc
 
 
 def _rebuild(expr: Call, arguments: Sequence[Expr]) -> Call:
-    if isinstance(expr.head_expr, Symbol) and expr.head_expr.name == "List":
-        arguments = _drop_nothing_arguments(arguments)
+    if isinstance(expr.head_expr, Symbol):
+        arguments = _normalize_arguments_for_head(expr.head_expr.name, arguments, evaluated=True)
     return Call(head_expr=expr.head_expr, arguments=tuple(arguments))
 
 
@@ -7411,7 +7502,14 @@ class _Parser:
     def _parse_postfix_pattern(self, left: Expr) -> Expr:
         token = self._consume()
         if token.text in {"__", "___"}:
-            raise _unsupported_pattern(call("BlankSequence" if token.text == "__" else "BlankNullSequence"))
+            if not isinstance(left, Symbol):
+                raise WolframSyntaxError(
+                    f"Named sequence pattern shorthand requires a symbol before {token.text!r} at offset {token.start}."
+                )
+            blank = self._parse_prefix_sequence_blank(
+                "BlankSequence" if token.text == "__" else "BlankNullSequence"
+            )
+            return call("Pattern", left, blank)
         if not isinstance(left, Symbol):
             raise WolframSyntaxError(
                 f"Named pattern shorthand requires a symbol before '_' at offset {token.start}."

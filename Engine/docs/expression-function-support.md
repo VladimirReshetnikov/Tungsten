@@ -4,11 +4,12 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T01:46:40Z
-- Repository HEAD: dac74d643ce319a384a81fd5a91d6cd1f961f9f2
+- Updated (UTC): 2026-04-25T02:09:44Z
+- Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Sequence and Nothing Evaluation](./sequence-nothing-evaluation.md)
+  - [Sequence Pattern Matching](./sequence-pattern-matching.md)
   - [Usage Reference](./usage-reference.md)
   - [Project README](../README.md)
 
@@ -126,8 +127,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `StartOfString`, and `EndOfString`.
 - Tungsten currently allows at most one unbounded string-pattern element per containing
   `StringExpression`.
-- `Shortest`, `Longest`, `PatternTest`, `RegularExpression`, `Optional`, named sequence captures,
-  qualified blank shorthand such as `_DigitCharacter`, and multi-character `Except[...]`
+- `Shortest`, `Longest`, `PatternTest`, `RegularExpression`, `Optional`, qualified blank shorthand
+  such as `_DigitCharacter`, named string-sequence captures, and multi-character `Except[...]`
   subpatterns remain out of scope.
 - Base encodings are currently bounded to `"Base16"`, `"Base64"`, and `"Base85ASCII"`.
 - The integer-only numeric family below is also intentionally narrow: Tungsten evaluates these
@@ -138,14 +139,15 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Named pure functions use Tungsten's capture-avoiding renaming rule for nested named functions.
   The exact rule is documented in [named-pure-functions-spec.md](./named-pure-functions-spec.md).
 - `SlotSequence` and `##` are not implemented yet.
-- The current pattern subset includes a deliberately narrow slice of variable-length sequence
-  patterns: anonymous `__`, `___`, `BlankSequence[...]`, and `BlankNullSequence[...]` match a
-  single candidate expression directly, and they also support multi-element matching when there is
-  at most one such pattern in a containing argument list.
+- The current pattern subset includes variable-length sequence patterns: anonymous and named
+  `__`, `___`, `BlankSequence[...]`, and `BlankNullSequence[...]` match a single candidate
+  expression directly, and support multiple occurrences in ordinary non-`Flat`, non-`Orderless`
+  argument lists. Allocation is left-to-right shortest-first with backtracking, as documented in
+  [sequence-pattern-matching.md](./sequence-pattern-matching.md).
 - `Condition` / `/;` is supported in patterns and in delayed-rule right-hand sides, but only when
   the substituted guard expression reduces to explicit `True` under Tungsten's shipped evaluator.
-- Named sequence patterns such as `x__`, `x___`, and `Pattern[x, BlankSequence[]]` remain out of
-  scope, as do options, pattern tests, and other advanced matching forms.
+- Options, pattern tests, `Longest`, `Shortest`, `PatternSequence`, and other advanced matching
+  forms remain out of scope.
 - Pattern search on associations is deliberately conservative in this pass: associations can match
   as whole expressions such as `_Association`, but `FreeQ`, `Cases`, and `DeleteCases` currently
   treat associations as opaque leaves instead of descending into keys or values.
@@ -213,10 +215,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `RuleDelayed` | `lhs :> rhs`, including guarded forms such as `lhs :> rhs /; test` | Delays right-hand-side instantiation until after pattern bindings are known. A top-level delayed-template `Condition` guard can suppress the rule and fall through to later rules when present. | [RuleDelayed](https://reference.wolfram.com/language/ref/RuleDelayed) |
 | `Sequence` | `Sequence[e1, ...]` as a direct argument of a call | Splices its arguments into the enclosing call after argument evaluation for ordinary calls, and structurally without payload evaluation for `Hold`, `HoldForm`, `HoldPattern`, and `Function`. Splicing is suppressed for `HoldComplete`, `Unevaluated`, `Rule`, and `RuleDelayed`. | [Sequence](https://reference.wolfram.com/language/ref/Sequence) |
 | `Nothing` | `Nothing`, `Nothing[...]` | `Nothing[...]` evaluates to `Nothing`; direct `Nothing` is removed from evaluated `List[...]` outputs and direct association-constructor placeholders, while remaining inert in ordinary calls, held expressions, and association values. | [Nothing](https://reference.wolfram.com/language/ref/Nothing) |
-| `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous `__` / `___` sequence patterns, named patterns over `Blank`, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
-| `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. Multi-element `__` / `___` matching is limited to one such pattern per containing argument list, and guarded patterns succeed only when the guard reduces to explicit `True`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
-| `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. Anonymous `__` / `___` patterns are supported under Tungsten's one-per-argument-list limit, and delayed templates may use `/;` as a post-substitution guard. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
-| `DeleteCases` | `DeleteCases[expr, patt]`, `DeleteCases[expr, patt, levelspec]`, `DeleteCases[expr, patt, levelspec, n]` | Removes matching subexpressions in depth-first postorder, deleting leaves before roots. Whole-expression deletion at level `0` is not implemented yet. Anonymous `__` / `___` patterns and guarded patterns are supported under Tungsten's documented limits. | [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases) |
+| `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous and named `__` / `___` sequence patterns, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`. Multiple sequence patterns in one ordinary argument list are matched with Tungsten's documented shortest-first backtracking rule. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
+| `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`. Multiple `__` / `___` patterns and guarded patterns are supported under the same documented sequence allocation and guard rules as `MatchQ`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
+| `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. Named sequence bindings substitute through `Sequence[...]`-style splicing, and delayed templates may use `/;` as a post-substitution guard. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
+| `DeleteCases` | `DeleteCases[expr, patt]`, `DeleteCases[expr, patt, levelspec]`, `DeleteCases[expr, patt, levelspec, n]` | Removes matching subexpressions in depth-first postorder, deleting leaves before roots. Whole-expression deletion at level `0` is not implemented yet. Anonymous and named `__` / `___` patterns and guarded patterns are supported under Tungsten's documented limits. | [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases) |
 | `Replace` | `Replace[expr, rules]`, `Replace[expr, rules, levelspec]`, nested rule-list forms such as `Replace[expr, {{rules1...}, {rules2...}}, levelspec]` | Applies the first matching rule per visited part, with Wolfram-style levelspec semantics and bottom-up traversal over the covered subset. Guarded left-hand-side patterns are supported, and delayed right-hand-side guards such as `lhs :> rhs /; test` fire only when the substituted guard reduces to explicit `True`. On associations, Tungsten traverses values rather than keys or raw `Rule` wrappers. | [Replace](https://reference.wolfram.com/language/ref/Replace) |
 | `ReplaceAll` | `ReplaceAll[expr, rule]`, `ReplaceAll[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceAll[expr, {{rules1...}, {rules2...}}]` | Performs a single top-down rewrite pass over the covered subset. Tungsten also supports the parser-lowered operator form `expr /. rules`. Guarded left-hand-side patterns are supported, and delayed right-hand-side guards such as `lhs :> rhs /; test` can suppress a rule and fall through to later rules. On associations, Tungsten rewrites the whole association first, then the head and values, but not keys or raw `Rule` wrappers. | [ReplaceAll](https://reference.wolfram.com/language/ref/ReplaceAll) |
 | `ReplaceRepeated` | `ReplaceRepeated[expr, rule]`, `ReplaceRepeated[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceRepeated[expr, {{rules1...}, {rules2...}}]` | Repeats the covered `ReplaceAll` semantics until a structural fixed point is reached. Tungsten also supports the parser-lowered operator form `expr //. rules`. Non-terminating rewrite loops stop at a Tungsten safety cap and raise an evaluation error. Guarded delayed rules are reapplied until the guard stops succeeding or a structural fixed point is reached. | [ReplaceRepeated](https://reference.wolfram.com/language/ref/ReplaceRepeated) |
@@ -371,11 +373,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Delayed rule right-hand sides such as `x_ :> rhs /; test` are supported as guarded delayed
   templates. If the substituted guard is not explicit `True`, Tungsten treats that rule as not
   having fired and continues to later rules when present.
-- Anonymous `BlankSequence` / `BlankNullSequence` patterns match a single candidate expression
-  directly, and they also support multi-element matching in direct argument lists when there is at
-  most one such pattern in the containing list.
-- Named sequence patterns and other advanced forms such as `PatternTest` and `Optional` currently
-  raise Tungsten evaluation errors instead of being silently treated as literals.
+- `BlankSequence` / `BlankNullSequence` patterns match a single candidate expression directly,
+  and they also support multi-element matching in direct argument lists, including named forms such
+  as `x__` and multiple occurrences in the same list. For the exact allocation rule, read
+  [sequence-pattern-matching.md](./sequence-pattern-matching.md).
+- Advanced forms such as `PatternTest`, `Optional`, `Longest`, and `Shortest` currently raise
+  Tungsten evaluation errors instead of being silently treated as literals.
 
 ## Notes on pure functions
 

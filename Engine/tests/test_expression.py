@@ -48,11 +48,17 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(alternatives.to_full_form(), "Alternatives[a, b, c]")
         self.assertEqual(head_blank.to_full_form(), "Blank[][1]")
 
-    def test_parse_input_form_rejects_named_sequence_pattern_shorthand(self) -> None:
-        with self.assertRaises(WolframEvaluationError):
-            parse_input_form("x__")
-        with self.assertRaises(WolframEvaluationError):
-            parse_input_form("x___")
+    def test_parse_input_form_named_sequence_pattern_shorthand(self) -> None:
+        sequence = parse_input_form("x__")
+        null_sequence = parse_input_form("x___")
+        typed_sequence = parse_input_form("x__Integer")
+        typed_null_sequence = parse_input_form("x___Symbol")
+        colon_sequence = parse_input_form("x : __")
+        self.assertEqual(sequence.to_full_form(), "Pattern[x, BlankSequence[]]")
+        self.assertEqual(null_sequence.to_full_form(), "Pattern[x, BlankNullSequence[]]")
+        self.assertEqual(typed_sequence.to_full_form(), "Pattern[x, BlankSequence[Integer]]")
+        self.assertEqual(typed_null_sequence.to_full_form(), "Pattern[x, BlankNullSequence[Symbol]]")
+        self.assertEqual(colon_sequence.to_full_form(), "Pattern[x, BlankSequence[]]")
 
     def test_parse_part_and_span_syntax(self) -> None:
         expr = parse_input_form("expr[[1, 2 ;; -1]]")
@@ -1229,7 +1235,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(precedence.to_full_form(), "False")
         self.assertEqual(parenthesized.to_full_form(), "True")
 
-    def test_sequence_patterns_support_one_anonymous_blanksequence_per_argument_list(self) -> None:
+    def test_sequence_patterns_support_anonymous_blanksequence_argument_lists(self) -> None:
         top_level = evaluate(parse_input_form("MatchQ[a, __]"))
         top_level_typed = evaluate(parse_input_form("MatchQ[1, __Symbol]"))
         non_empty = evaluate(parse_input_form("MatchQ[f[a, b], f[__]]"))
@@ -1240,6 +1246,9 @@ class ExpressionEvaluationTests(unittest.TestCase):
         middle_true = evaluate(parse_input_form("MatchQ[f[a, b, c], f[a, __, c]]"))
         middle_false = evaluate(parse_input_form("MatchQ[f[a, c], f[a, __, c]]"))
         middle_null_true = evaluate(parse_input_form("MatchQ[f[a, c], f[a, ___, c]]"))
+        multiple_true = evaluate(parse_input_form("MatchQ[f[a, b, c], f[__, __]]"))
+        multiple_false = evaluate(parse_input_form("MatchQ[f[a], f[__, __]]"))
+        multiple_null_true = evaluate(parse_input_form("MatchQ[f[a], f[___, ___]]"))
         self.assertEqual(top_level.to_full_form(), "True")
         self.assertEqual(top_level_typed.to_full_form(), "False")
         self.assertEqual(non_empty.to_full_form(), "True")
@@ -1250,9 +1259,49 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(middle_true.to_full_form(), "True")
         self.assertEqual(middle_false.to_full_form(), "False")
         self.assertEqual(middle_null_true.to_full_form(), "True")
+        self.assertEqual(multiple_true.to_full_form(), "True")
+        self.assertEqual(multiple_false.to_full_form(), "False")
+        self.assertEqual(multiple_null_true.to_full_form(), "True")
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("MatchQ[f[a, b], f[__, ___]]"))
+    def test_sequence_patterns_support_multiple_occurrences_and_named_bindings(self) -> None:
+        split_two = evaluate(parse_input_form("Cases[{f[a, b, c]}, f[x__, y__] :> HoldComplete[{x}, {y}]]"))
+        split_three = evaluate(
+            parse_input_form("Cases[{f[a, b, c, d]}, f[x__, y__, z__] :> HoldComplete[{x}, {y}, {z}]]")
+        )
+        null_prefix = evaluate(parse_input_form("Cases[{f[a, b, c]}, f[x___, y__] :> HoldComplete[{x}, {y}]]"))
+        same_name_pair = evaluate(parse_input_form("Cases[{f[a, b, a, b]}, f[x__, x__] :> HoldComplete[{x}]]"))
+        same_name_single = evaluate(parse_input_form("Cases[{f[a, a]}, f[x__, x__] :> HoldComplete[{x}]]"))
+        same_name_failure = evaluate(parse_input_form("Cases[{f[a, b, c]}, f[x__, x__] :> HoldComplete[{x}]]"))
+        null_repeated_empty = evaluate(parse_input_form("Cases[{f[]}, f[x___, x___] :> HoldComplete[{x}]]"))
+        null_repeated_single_failure = evaluate(parse_input_form("Cases[{f[a]}, f[x___, x___] :> HoldComplete[{x}]]"))
+        null_repeated_pair = evaluate(parse_input_form("Cases[{f[a, a]}, f[x___, x___] :> HoldComplete[{x}]]"))
+        typed_success = evaluate(parse_input_form("Cases[{f[1, 2, a]}, f[x__Integer, y___Symbol] :> HoldComplete[{x}, {y}]]"))
+        typed_failure = evaluate(parse_input_form("Cases[{f[1, a, 2]}, f[x__Integer, y___Symbol] :> HoldComplete[{x}, {y}]]"))
+        self.assertEqual(split_two.to_full_form(), "List[HoldComplete[List[a], List[b, c]]]")
+        self.assertEqual(split_three.to_full_form(), "List[HoldComplete[List[a], List[b], List[c, d]]]")
+        self.assertEqual(null_prefix.to_full_form(), "List[HoldComplete[List[], List[a, b, c]]]")
+        self.assertEqual(same_name_pair.to_full_form(), "List[HoldComplete[List[a, b]]]")
+        self.assertEqual(same_name_single.to_full_form(), "List[HoldComplete[List[a]]]")
+        self.assertEqual(same_name_failure.to_full_form(), "List[]")
+        self.assertEqual(null_repeated_empty.to_full_form(), "List[HoldComplete[List[]]]")
+        self.assertEqual(null_repeated_single_failure.to_full_form(), "List[]")
+        self.assertEqual(null_repeated_pair.to_full_form(), "List[HoldComplete[List[a]]]")
+        self.assertEqual(typed_success.to_full_form(), "List[HoldComplete[List[1, 2], List[a]]]")
+        self.assertEqual(typed_failure.to_full_form(), "List[]")
+
+    def test_sequence_bindings_splice_in_replacements_and_conditions(self) -> None:
+        cases_splice = evaluate(parse_input_form("Cases[{f[a, b]}, f[x__] :> x]"))
+        replace_inside_call = evaluate(parse_input_form("f[g[a, b]] /. g[x__] :> x"))
+        replace_with_hold = evaluate(parse_input_form("f[g[a, b]] /. g[x__] :> HoldComplete[x]"))
+        guarded_true = evaluate(parse_input_form("Cases[{f[a, b], f[a]}, f[x__ /; Length[{x}] == 2] :> HoldComplete[x]]"))
+        guarded_false = evaluate(parse_input_form("Cases[{f[a]}, f[x__ /; Length[{x}] == 2] :> HoldComplete[x]]"))
+        null_top_level = evaluate(parse_input_form("Cases[{f[]}, f[x___] :> x]"))
+        self.assertEqual(cases_splice.to_full_form(), "List[a, b]")
+        self.assertEqual(replace_inside_call.to_full_form(), "f[a, b]")
+        self.assertEqual(replace_with_hold.to_full_form(), "f[HoldComplete[a, b]]")
+        self.assertEqual(guarded_true.to_full_form(), "List[HoldComplete[a, b]]")
+        self.assertEqual(guarded_false.to_full_form(), "List[]")
+        self.assertEqual(null_top_level.to_full_form(), "List[]")
 
     def test_freeq_defaults_to_heads_true_and_honors_levelspec(self) -> None:
         head_search = evaluate(parse_input_form("FreeQ[f[a], f]"))

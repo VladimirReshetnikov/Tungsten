@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T01:46:40Z
-Repository HEAD: dac74d643ce319a384a81fd5a91d6cd1f961f9f2
+Updated (UTC): 2026-04-25T02:09:44Z
+Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
 
 ## Summary
 
@@ -112,12 +112,16 @@ constructs, assignments, and broader evaluation semantics.
 
 The currently supported pattern subset is intentionally bounded:
 
-- supported: `Blank`, anonymous `BlankSequence` / `BlankNullSequence` via `__`, `___`, optional
-  head-qualified forms such as `__Integer`, named patterns over `Blank`, guarded patterns via
-  `Condition` / `/;`, `Alternatives`, `Except`, `HoldPattern`, and `Verbatim`;
-- not yet supported: named sequence patterns such as `x__` or `Pattern[x, BlankSequence[]]`,
-  multiple `__` / `___` patterns in the same argument list, `PatternTest`, `Optional`,
-  options-related pattern forms, and other advanced matching constructs.
+- supported: `Blank`, `BlankSequence`, and `BlankNullSequence` forms via `_`, `__`, `___`,
+  optional head-qualified forms such as `__Integer`, named patterns such as `x_`, `x__`, and
+  `x___Integer`, guarded patterns via `Condition` / `/;`, `Alternatives`, `Except`, `HoldPattern`,
+  and `Verbatim`;
+- sequence patterns support named bindings and multiple occurrences in the same argument list for
+  ordinary non-`Flat`, non-`Orderless` heads. Tungsten follows Wolfram's left-to-right
+  shortest-first allocation rule with backtracking; see
+  [sequence-pattern-matching.md](./sequence-pattern-matching.md);
+- not yet supported: `PatternTest`, `Optional`, options-related pattern forms, `Longest`,
+  `Shortest`, `PatternSequence`, and other advanced matching constructs.
 
 The current string-pattern subset is also intentionally bounded:
 
@@ -525,9 +529,6 @@ These are intentional current boundaries, not hidden TODOs:
   but Tungsten does not reproduce every kernel `FullForm` nuance for precision-bearing reals.
 - The parser currently accepts `--5` as repeated unary minus. The Wolfram parser treats `--` as a
   different token family and rejects that expression in this context.
-- Named sequence patterns such as `x__` and `x___` remain unsupported. Anonymous `__` and `___`
-  are supported only under Tungsten's documented one-variable-length-pattern-per-argument-list
-  restriction.
 - Pattern search through associations is conservative: `FreeQ`, `Cases`, and `DeleteCases` can
   match an association as a whole expression, but do not descend into association keys or values.
 
