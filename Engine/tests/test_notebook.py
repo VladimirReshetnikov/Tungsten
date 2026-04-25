@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from tungsten.discovery import discover_installation
-from tungsten.notebook import NotebookDocument, apply_patch_spec
+from tungsten.notebook import NotebookDocument, apply_patch_spec, parse_call
 
 
 SAMPLE_NOTEBOOK = """(* sample header *)
@@ -20,6 +20,16 @@ Cell["2+2", "Input"]
 
 
 class NotebookDocumentTests(unittest.TestCase):
+    def test_parse_call_splits_arguments_in_one_pass_without_losing_edge_cases(self) -> None:
+        head, args = parse_call('f[a, g[1, 2], {x, y}, "literal, comma", (* comment, *) h]')
+
+        self.assertEqual(head, "f")
+        self.assertEqual(args, ["a", "g[1, 2]", "{x, y}", '"literal, comma"', "(* comment, *) h"])
+        self.assertEqual(parse_call("f[]"), ("f", []))
+        self.assertEqual(parse_call("f[a,]"), ("f", ["a"]))
+        self.assertEqual(parse_call("f[,a]"), ("f", ["", "a"]))
+        self.assertEqual(parse_call("f[a] trailing"), ("f[a] trailing", []))
+
     def test_parse_and_flatten(self) -> None:
         document = NotebookDocument.from_text(SAMPLE_NOTEBOOK)
         summary = document.to_dict()

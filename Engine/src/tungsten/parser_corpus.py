@@ -195,13 +195,7 @@ def parse_file_with_tungsten(
         text = file.path.read_text(encoding="utf-8", errors="replace")
         if file.kind == "notebook":
             document = NotebookDocument.from_text(text, path=file.path)
-            payload = document.to_dict()
-            summary = {
-                "title": payload.get("title"),
-                "cell_count": payload.get("cell_count"),
-                "group_count": payload.get("group_count"),
-                "option_count": len(payload.get("options", [])),
-            }
+            summary = document.summary()
         else:
             expression = parse_expression(text, form=source_form)
             summary = {
@@ -248,14 +242,24 @@ def _parse_files_with_tungsten(
         }
 
     attempts: dict[str, ParserAttempt] = {}
-    worker_inputs = [
-        (file, source_form, max_bytes, preview_chars)
-        for file in files
-    ]
+    worker_inputs = sorted(
+        [
+            (file, source_form, max_bytes, preview_chars)
+            for file in files
+        ],
+        key=_tungsten_worker_sort_key,
+        reverse=True,
+    )
     with concurrent.futures.ProcessPoolExecutor(max_workers=normalized_workers) as executor:
         for relative_path, attempt in executor.map(_parse_file_with_tungsten_worker, worker_inputs):
             attempts[relative_path] = attempt
     return attempts
+
+
+def _tungsten_worker_sort_key(payload: tuple[CorpusFile, str, int | None, int]) -> tuple[int, int]:
+    file, _source_form, max_bytes, _preview_chars = payload
+    eligible = max_bytes is None or file.size_bytes <= max_bytes
+    return (1 if eligible else 0, file.size_bytes if eligible else 0)
 
 
 def _parse_file_with_tungsten_worker(payload: tuple[CorpusFile, str, int | None, int]) -> tuple[str, ParserAttempt]:

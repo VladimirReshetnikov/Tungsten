@@ -204,11 +204,13 @@ def _parse_inline_box_segment(value: str, start: int) -> tuple[StringInlineBoxSe
 
 def skip_wl_string(text: str, index: int) -> int:
     index += 1
-    while index < len(text):
-        if text[index] == "\\":
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "\\":
             index += 2
             continue
-        if text[index] == "\"":
+        if char == "\"":
             return index + 1
         index += 1
     return index
@@ -217,16 +219,18 @@ def skip_wl_string(text: str, index: int) -> int:
 def skip_wl_comment(text: str, index: int) -> int:
     depth = 1
     index += 2
-    while index < len(text) and depth > 0:
-        if text.startswith("(*", index):
+    length = len(text)
+    while index < length and depth > 0:
+        char = text[index]
+        if char == "(" and index + 1 < length and text[index + 1] == "*":
             depth += 1
             index += 2
             continue
-        if text.startswith("*)", index):
+        if char == "*" and index + 1 < length and text[index + 1] == ")":
             depth -= 1
             index += 2
             continue
-        if text[index] == "\"":
+        if char == "\"":
             index = skip_wl_string(text, index)
             continue
         index += 1

@@ -17,12 +17,14 @@ from .wolfram_strings import wl_string
 def extract_string_literals(text: str) -> list[str]:
     literals: list[str] = []
     index = 0
-    while index < len(text):
-        if text.startswith("(*", index):
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "(" and index + 1 < length and text[index + 1] == "*":
             index = skip_wl_comment(text, index)
             continue
 
-        if text[index] == "\"":
+        if char == "\"":
             start = index
             index = skip_wl_string(text, index)
             literals.append(parse_wl_string_literal(text[start:index]))
@@ -41,11 +43,13 @@ def collapse_text(text: str, limit: int = 160) -> str:
 
 
 def _skip_ws_comments(text: str, index: int) -> int:
-    while index < len(text):
-        if text[index].isspace():
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char.isspace():
             index += 1
             continue
-        if text.startswith("(*", index):
+        if char == "(" and index + 1 < length and text[index + 1] == "*":
             index = skip_wl_comment(text, index)
             continue
         break
@@ -55,16 +59,18 @@ def _skip_ws_comments(text: str, index: int) -> int:
 def _find_matching(text: str, index: int, open_char: str, close_char: str) -> int:
     depth = 1
     index += 1
-    while index < len(text):
-        if text.startswith("(*", index):
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "(" and index + 1 < length and text[index + 1] == "*":
             index = skip_wl_comment(text, index)
             continue
-        if text[index] == "\"":
+        if char == "\"":
             index = skip_wl_string(text, index)
             continue
-        if text[index] == open_char:
+        if char == open_char:
             depth += 1
-        elif text[index] == close_char:
+        elif char == close_char:
             depth -= 1
             if depth == 0:
                 return index
@@ -76,22 +82,23 @@ def split_top_level(text: str) -> list[str]:
     parts: list[str] = []
     start = 0
     index = 0
-    stack: list[str] = []
-    while index < len(text):
-        if text.startswith("(*", index):
+    depth = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "(" and index + 1 < length and text[index + 1] == "*":
             index = skip_wl_comment(text, index)
             continue
-        if text[index] == "\"":
+        if char == "\"":
             index = skip_wl_string(text, index)
             continue
 
-        char = text[index]
-        if char in "[{(":
-            stack.append(char)
-        elif char in "]})":
-            if stack:
-                stack.pop()
-        elif char == "," and not stack:
+        if char == "[" or char == "{" or char == "(":
+            depth += 1
+        elif char == "]" or char == "}" or char == ")":
+            if depth:
+                depth -= 1
+        elif char == "," and depth == 0:
             parts.append(text[start:index].strip())
             start = index + 1
         index += 1
@@ -103,24 +110,66 @@ def split_top_level(text: str) -> list[str]:
     return parts
 
 
+def _split_call_arguments(text: str, open_index: int) -> tuple[int, list[str]]:
+    parts: list[str] = []
+    start = open_index + 1
+    index = start
+    square_depth = 1
+    nested_depth = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "(" and index + 1 < length and text[index + 1] == "*":
+            index = skip_wl_comment(text, index)
+            continue
+        if char == "\"":
+            index = skip_wl_string(text, index)
+            continue
+
+        if char == "[":
+            square_depth += 1
+            nested_depth += 1
+        elif char == "]":
+            square_depth -= 1
+            if square_depth == 0:
+                tail = text[start:index].strip()
+                if tail:
+                    parts.append(tail)
+                return index, parts
+            if nested_depth:
+                nested_depth -= 1
+        elif char == "{" or char == "(":
+            nested_depth += 1
+        elif char == "}" or char == ")":
+            if nested_depth:
+                nested_depth -= 1
+        elif char == "," and nested_depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+
+    raise ValueError("Unmatched '[' in Wolfram expression.")
+
+
 def parse_call(expr: str) -> tuple[str, list[str]]:
     expr = expr.strip()
     index = _skip_ws_comments(expr, 0)
-    while index < len(expr):
-        if expr[index] == "\"":
+    length = len(expr)
+    while index < length:
+        char = expr[index]
+        if char == "\"":
             index = skip_wl_string(expr, index)
             continue
-        if expr.startswith("(*", index):
+        if char == "(" and index + 1 < length and expr[index + 1] == "*":
             index = skip_wl_comment(expr, index)
             continue
-        if expr[index] == "[":
+        if char == "[":
             head = expr[:index].strip()
-            close_index = _find_matching(expr, index, "[", "]")
+            close_index, args = _split_call_arguments(expr, index)
             tail_index = _skip_ws_comments(expr, close_index + 1)
-            if tail_index != len(expr):
+            if tail_index != length:
                 return expr, []
-            body = expr[index + 1 : close_index]
-            return head, split_top_level(body)
+            return head, args
         index += 1
 
     return expr, []
@@ -324,12 +373,23 @@ class NotebookRawItem:
 NotebookItem = NotebookCell | NotebookGroup | NotebookRawItem
 
 
-def _parse_cell(expr: str) -> NotebookCell | NotebookGroup:
-    head, args = parse_call(expr)
+def _has_call_head(expr: str, expected_head: str) -> bool:
+    index = _skip_ws_comments(expr, 0)
+    if expr[index : index + len(expected_head)] != expected_head:
+        return False
+    bracket_index = _skip_ws_comments(expr, index + len(expected_head))
+    return bracket_index < len(expr) and expr[bracket_index] == "["
+
+
+def _parse_cell(expr: str, args: list[str] | None = None) -> NotebookItem:
+    if args is None:
+        head, args = parse_call(expr)
+    else:
+        head = "Cell"
     if head != "Cell":
         return NotebookRawItem(expr)
 
-    if args:
+    if args and _has_call_head(args[0], "CellGroupData"):
         group_head, group_args = parse_call(args[0])
         if group_head == "CellGroupData" and group_args:
             children = [_parse_item(item) for item in parse_list(group_args[0])]
@@ -359,9 +419,9 @@ def _parse_cell(expr: str) -> NotebookCell | NotebookGroup:
 
 
 def _parse_item(expr: str) -> NotebookItem:
-    head, _ = parse_call(expr)
+    head, args = parse_call(expr)
     if head == "Cell":
-        return _parse_cell(expr)
+        return _parse_cell(expr, args)
     return NotebookRawItem(expr)
 
 
@@ -398,6 +458,22 @@ class NotebookDocument:
         if value is None:
             return self.path.stem if self.path else None
         return parse_wl_string_literal(value)
+
+    def summary(self) -> dict[str, object]:
+        cell_count = 0
+        group_count = 0
+        for _path, item, _depth in self.walk_items():
+            if isinstance(item, NotebookGroup):
+                group_count += 1
+            elif isinstance(item, NotebookCell | NotebookRawItem):
+                cell_count += 1
+
+        return {
+            "title": self.title,
+            "cell_count": cell_count,
+            "group_count": group_count,
+            "option_count": len(self.options),
+        }
 
     def to_dict(self) -> dict[str, object]:
         flattened = self.flattened_cells()
