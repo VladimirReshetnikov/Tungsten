@@ -87,7 +87,7 @@ The docs are split so readers can choose the right depth:
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
 | [symbol-context-registry.md](symbol-context-registry.md) | Normative design note for Tungsten's process-local symbol registry, fixed context state, name queries, `Unique`, and `ValueQ` boundaries. |
 | [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
-| [sequence-pattern-matching.md](sequence-pattern-matching.md) | Normative specification for `__` / `___` pattern allocation, named sequence bindings, and repeated sequence variables. |
+| [sequence-pattern-matching.md](sequence-pattern-matching.md) | Normative specification for structural sequence-pattern allocation, named sequence bindings, repetition, optional arguments, options patterns, and match-priority wrappers. |
 | [import-export-formats.md](import-export-formats.md) | Focused guide for kernel-free `ImportString` / `ExportString` / `ImportByteArray` / `ExportByteArray` support and the implemented format subset. |
 | [named-pure-functions-spec.md](named-pure-functions-spec.md) | Detailed specification for named-parameter pure functions and Tungsten's capture-avoiding renaming rules. |
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
@@ -137,8 +137,8 @@ The docs are split so readers can choose the right depth:
 - Read [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md) if you need precise
   `Sequence` / `Nothing` evaluation-order behavior.
 - Read [sequence-pattern-matching.md](./sequence-pattern-matching.md) if you need the exact
-  allocation and binding rules for `__`, `___`, named sequence patterns, and repeated sequence
-  variables.
+  allocation and binding rules for `__`, `___`, `Repeated`, `PatternSequence`, `Optional`,
+  `OptionsPattern`, named sequence patterns, and repeated sequence variables.
 - Read [import-export-formats.md](./import-export-formats.md) if you need the exact string /
   byte-array format subset and the data-shape rules for JSON, tabular text, and compression wrappers.
 - Read [named-pure-functions-spec.md](./named-pure-functions-spec.md) if you need the exact

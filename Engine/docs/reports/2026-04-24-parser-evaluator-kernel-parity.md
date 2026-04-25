@@ -382,6 +382,11 @@ The differential run flagged the following as "mismatches" but they are all expl
 | `Plus[1, 2, a]` (direct call) | inert | `3 + a` | Docs: direct `Plus[...]` evaluates only when every arg is explicit integer |
 | `Total[{1, 2, 3}]`, `Count[{1, 2, 3, 2, 1}, 2]`, `Max[{3, 1, 4}]`, `Sort[{3, 1, 4}]` | inert | kernel value | Simply not implemented yet. `Max`, `Min` accept `Max[i1, ...]` but not a list argument, because Tungsten doesn't flatten. Worth tracking as a follow-up if these are useful for user scripts. |
 
+Status note added 2026-04-25: the named sequence-pattern and multiple-unbounded-string-pattern
+rows above were accurate when this historical report was written, but both limitations have since
+been removed. Current string-pattern coverage is documented in
+`docs/expression-function-support.md`.
+
 One doc-level observation: `Position`'s default levelspec is **not** stated in `docs/expression-function-support.md` (the row just says "Returns exact structural positions"). Once B2 is fixed, add a line like *"Default levelspec is `{0, Infinity}`, matching the kernel."* This prevents the same confusion from resurfacing.
 
 ## Recommended fix roadmap

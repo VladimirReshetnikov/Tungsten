@@ -433,12 +433,15 @@ class TungstenDivergenceSmokeTests(unittest.TestCase):
             "List[HoldComplete[List[a, b]]]",
         )
 
-    def test_two_unbounded_string_patterns_rejected_per_docs(self) -> None:
-        with self.assertRaises((WolframSyntaxError, WolframEvaluationError)):
-            evaluate(parse_expression(
-                "StringMatchQ[\"abc123\", LetterCharacter.. ~~ DigitCharacter..]",
-                form="input",
-            ))
+    def test_multiple_unbounded_string_patterns_match(self) -> None:
+        self.assertEqual(
+            _full("StringMatchQ[\"abc123\", LetterCharacter.. ~~ DigitCharacter..]"),
+            "True",
+        )
+        self.assertEqual(
+            _full("StringCases[\"abc123def45\", LetterCharacter.. ~~ DigitCharacter..]"),
+            'List["abc123", "def45"]',
+        )
 
 
 if __name__ == "__main__":

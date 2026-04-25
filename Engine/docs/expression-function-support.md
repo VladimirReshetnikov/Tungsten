@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T17:48:49Z
-- Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
+- Updated (UTC): 2026-04-25T20:25:51Z
+- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -103,8 +103,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   their arguments unevaluated in Tungsten's structural evaluator. `ReleaseHold` strips one outer
   Hold-family wrapper and evaluates the released payload.
 - Simple predicate heads are intentionally narrow too: Tungsten currently implements only
-  `IntegerQ`, `StringQ`, `ByteArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
-  described in the support table below.
+  `IntegerQ`, `StringQ`, `DigitQ`, `LetterQ`, `ByteArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only
+  over the explicit values described in the support table below.
 - String/byte conversion heads are also intentionally bounded: Tungsten currently supports the
   common encodings `"Unicode"`, `"UTF-8"`, `"UTF-16LE"`, `"UTF-16BE"`, `"UTF-32LE"`,
   `"UTF-32BE"`, `"ASCII"`, `"ISO8859-1"`, and `"ISO8859-15"` where they make sense, rather than
@@ -135,34 +135,51 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   are fixed to <code>"Global`"</code> and <code>{"System`", "Global`"}</code> for now; user-defined
   symbols have no own values, down values, up values, sub values, or attributes yet.
 - That string-pattern subset supports literal strings, `StringExpression` / `~~`, anonymous `_`,
-  `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures via
-  `x : patt`, `Alternatives`, `Condition`, `HoldPattern`, `Except` over a supported
-  one-character subpattern, `CharacterRange`, `Whitespace`, and the common character classes /
-  anchors such as `DigitCharacter`, `LetterCharacter`, `WhitespaceCharacter`, `WordCharacter`,
-  `StartOfString`, and `EndOfString`.
-- Tungsten currently allows at most one unbounded string-pattern element per containing
-  `StringExpression`.
-- `Shortest`, `Longest`, `PatternTest`, `RegularExpression`, `Optional`, qualified blank shorthand
-  such as `_DigitCharacter`, named string-sequence captures, and multi-character `Except[...]`
-  subpatterns remain out of scope.
+  `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures including
+  `x : __` and `x : ___`, `Alternatives`, `Condition`, `PatternTest`, `HoldPattern`,
+  `Shortest`, `Longest`, `Except` over supported one-character disallowed and allowed patterns,
+  `CharacterRange`, `RegularExpression`, a practical `DatePattern` subset, `Whitespace`, and the
+  common character classes / anchors such as `DigitCharacter`, `HexadecimalCharacter`,
+  `LetterCharacter`, `NumberString`, `PunctuationCharacter`, `WhitespaceCharacter`,
+  `WordCharacter`, `StartOfString`, `EndOfString`, `StartOfLine`, `EndOfLine`, and
+  `WordBoundary`.
+- String patterns no longer have a single-unbounded-element limit. Ambiguous string sequences are
+  greedy by default, `Shortest[...]` makes the wrapped subtree non-greedy, and `Longest[...]`
+  requests greedy allocation explicitly.
+- Tungsten delegates `RegularExpression` to Python's `re` implementation and uses Python /
+  Unicode-library predicates for character classes. This is intentional: the compatibility goal is
+  structural and practical rather than exact PCRE-version or Unicode-version parity with the
+  Wolfram kernel.
+- String-pattern `Optional`, `OptionsPattern`, string-function options such as `IgnoreCase` /
+  `Overlaps`, qualified blank shorthand such as `_DigitCharacter`, and multi-character
+  `Except[...]` disallowed atoms such as `Except["ab"]` remain out of scope.
 - Base encodings are currently bounded to `"Base16"`, `"Base64"`, and `"Base85ASCII"`.
 - The integer-only numeric family below is also intentionally narrow: Tungsten evaluates these
   heads only when the supported arguments are already explicit integers or integer lists in the
   listed direct forms.
-- Pure functions currently support positional slot forms plus named-parameter forms such as
-  `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and `x \[Function] body`.
+- Pure functions currently support positional slot forms, `SlotSequence` / `##`, named-parameter
+  forms such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and
+  `x \[Function] body`, and the evaluation-impact subset of third-argument `Function` attributes.
 - Named pure functions use Tungsten's capture-avoiding renaming rule for nested named functions.
   The exact rule is documented in [named-pure-functions-spec.md](./named-pure-functions-spec.md).
-- `SlotSequence` and `##` are not implemented yet.
-- The current pattern subset includes variable-length sequence patterns: anonymous and named
-  `__`, `___`, `BlankSequence[...]`, and `BlankNullSequence[...]` match a single candidate
-  expression directly, and support multiple occurrences in ordinary non-`Flat`, non-`Orderless`
-  argument lists. Allocation is left-to-right shortest-first with backtracking, as documented in
+- `Function[params, body, attrs]` currently honors `HoldFirst`, `HoldRest`, `HoldAll`,
+  `HoldAllComplete`, `SequenceHold`, and `Listable`. Other attribute names are accepted
+  structurally but do not yet change evaluation.
+- The current structural pattern subset includes variable-length sequence patterns and the common
+  advanced argument-pattern forms: anonymous and named `__`, `___`, `BlankSequence[...]`,
+  `BlankNullSequence[...]`, `Repeated`, `RepeatedNull`, `PatternSequence`,
+  `OrderlessPatternSequence`, `Optional`, `PatternTest`, `Longest`, `Shortest`, and
+  `OptionsPattern`. Allocation is left-to-right shortest-first with backtracking unless a wrapped
+  pattern explicitly requests greedy `Longest` behavior, as documented in
   [sequence-pattern-matching.md](./sequence-pattern-matching.md).
 - `Condition` / `/;` is supported in patterns and in delayed-rule right-hand sides, but only when
   the substituted guard expression reduces to explicit `True` under Tungsten's shipped evaluator.
-- Options, pattern tests, `Longest`, `Shortest`, `PatternSequence`, and other advanced matching
-  forms remain out of scope.
+- `Optional[patt, default]` can match an omitted argument and bind named variables to `default`;
+  Tungsten intentionally does not yet have a `Default[...]` registry, so `Optional[patt]` / `_.`
+  without an explicit default does not synthesize omitted values for arbitrary user-defined heads.
+- `OptionsPattern` structurally matches zero or more option rules, `RuleDelayed` option rules, and
+  nested lists of option rules with symbol or string keys. It does not validate options against
+  `Options[f]` or implement `OptionValue`.
 - Association-aware pattern search follows Wolfram's values-only association model. `FreeQ`,
   `Cases`, `DeleteCases`, `FirstCase`, `Position`, and `MemberQ` traverse association values and
   whole associations, but not keys or raw `Rule` wrappers. Use `KeyValuePattern` when a pattern
@@ -200,6 +217,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `GreaterEqual` | `GreaterEqual[i1, ...]` and infix `>=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nonincreasing. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
 | `IntegerQ` | `IntegerQ[expr]` | Returns `True` when the argument is an explicit integer in Tungsten's AST; otherwise returns `False`. | [IntegerQ](https://reference.wolfram.com/language/ref/IntegerQ) |
 | `StringQ` | `StringQ[expr]` | Returns `True` when the argument is an explicit string in Tungsten's AST; otherwise returns `False`. | [StringQ](https://reference.wolfram.com/language/ref/StringQ) |
+| `DigitQ` | `DigitQ["string"]` | Returns `True` when the argument is a non-empty explicit string whose characters all satisfy Tungsten's Unicode digit predicate. | [DigitQ](https://reference.wolfram.com/language/ref/DigitQ) |
+| `LetterQ` | `LetterQ["string"]` | Returns `True` when the argument is a non-empty explicit string whose characters all satisfy Tungsten's Unicode letter predicate. | [LetterQ](https://reference.wolfram.com/language/ref/LetterQ) |
 | `ByteArray` | `ByteArray[{b1, ...}]`, `ByteArray["base64"]`, `ByteArray[ba]` | Constructs Tungsten byte-array values from explicit byte lists, Base64 strings, or existing byte arrays. Tungsten renders these values in Wolfram-style `ByteArray["..."]` InputForm using Base64. | [ByteArray](https://reference.wolfram.com/language/ref/ByteArray) |
 | `ByteArrayQ` | `ByteArrayQ[expr]` | Returns `True` when the argument is a Tungsten byte-array value. | [ByteArrayQ](https://reference.wolfram.com/language/ref/ByteArrayQ) |
 | `EvenQ` | `EvenQ[expr]` | Returns `True` when the argument is an explicit even integer in Tungsten's AST; otherwise returns `False`. | [EvenQ](https://reference.wolfram.com/language/ref/EvenQ) |
@@ -228,6 +247,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `StringContainsQ` | `StringContainsQ["string", patt]`, `StringContainsQ["string", {patt1, ...}]`, `StringContainsQ[{"s1", ...}, patt]`, and operator form `StringContainsQ[patt]` | Returns `True` when a match for the shipped string-pattern subset exists. Threads over `List` inputs. | [StringContainsQ](https://reference.wolfram.com/language/ref/StringContainsQ) |
 | `StringCases` | `StringCases["string", patt]`, `StringCases["string", patt, n]`, `StringCases["string", patt :> rhs]`, `StringCases["string", patt -> rhs]`, `StringCases[{"s1", ...}, spec]`, and list-of-pattern / list-of-rule specs | Collects non-overlapping matches for the shipped string-pattern subset. Delayed rules bind named string captures before evaluating the replacement template. Non-string replacement results are preserved as `StringExpression[...]` pieces when needed. | [StringCases](https://reference.wolfram.com/language/ref/StringCases) |
 | `StringReplace` | `StringReplace["string", rules]`, `StringReplace["string", rules, n]`, `StringReplace[{"s1", ...}, rules]`, and flat list-of-rule forms using `->` or `:>` | Rewrites non-overlapping matches for the shipped string-pattern subset from left to right. Delayed rules bind named string captures before evaluating the replacement template, and non-string replacement results are preserved through `StringExpression[...]` when needed. | [StringReplace](https://reference.wolfram.com/language/ref/StringReplace) |
+| `RegularExpression` | `RegularExpression["regex"]` inside supported string patterns | Matches a prefix using Python's regular-expression engine. Inline flags such as `(?i)` are honored by Python when accepted by `re`. | [RegularExpression](https://reference.wolfram.com/language/ref/RegularExpression.html) |
+| `DatePattern` | `DatePattern[{"Year", ...}]`, `DatePattern[{"Year", ...}, sep]` inside supported string patterns | Recognizes common date/time substrings from documented date element names using Tungsten's practical regex-backed subset. Default separators are `/`, `-`, `:`, and `.`; supported explicit separators can be literal strings or simple string-pattern expressions convertible to regex. | [DatePattern](https://reference.wolfram.com/language/ref/DatePattern.html) |
 | `ToCharacterCode` | `ToCharacterCode["string"]`, `ToCharacterCode["string", "encoding"]`, and list-of-strings forms | Converts strings to character codes. Tungsten uses Unicode code points for the default / `"Unicode"` case, byte values for the supported encoded cases, and `None` placeholders for unrepresentable characters in supported single-byte legacy encodings such as ASCII. | [ToCharacterCode](https://reference.wolfram.com/language/ref/ToCharacterCode) |
 | `FromCharacterCode` | `FromCharacterCode[n]`, `FromCharacterCode[{n1, ...}]`, and encoded forms `FromCharacterCode[..., "encoding"]` | Converts Unicode code points or encoded byte values back to strings. For encoded forms, Tungsten currently expects integers between `0` and `255`. | [FromCharacterCode](https://reference.wolfram.com/language/ref/FromCharacterCode) |
 | `StringToByteArray` | `StringToByteArray["string"]`, `StringToByteArray["string", "encoding"]` | Encodes strings to byte arrays, defaulting to UTF-8. Unsupported characters in a requested legacy encoding currently raise a Tungsten evaluation error instead of returning an inert expression with messages. | [StringToByteArray](https://reference.wolfram.com/language/ref/StringToByteArray) |
@@ -246,19 +267,30 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `SyntaxLength` | `SyntaxLength["text"]`, `SyntaxLength["text", InputForm|StandardForm]`, plus Tungsten-supported box expressions | Returns the number of characters in a syntactically complete leading expression, or an approximate parser error/continuation position for incomplete input. Tungsten uses its own parser diagnostics rather than Wolfram's exact byte-for-byte values. | [SyntaxLength](https://reference.wolfram.com/language/ref/SyntaxLength.html) |
 | `BaseEncode` | `BaseEncode[ba]`, `BaseEncode[ba, "encoding"]` | Encodes byte arrays as `"Base64"` by default, with additional support for `"Base16"` and `"Base85ASCII"`. | [BaseEncode](https://reference.wolfram.com/language/ref/BaseEncode) |
 | `BaseDecode` | `BaseDecode["text"]`, `BaseDecode["text", "encoding"]` | Decodes supported base-encoded strings to byte arrays. Tungsten currently supports `"Base64"` by default, plus `"Base16"` and `"Base85ASCII"`, and it drops nonalphabet characters before decoding in the practical Wolfram style. | [BaseDecode](https://reference.wolfram.com/language/ref/BaseDecode) |
+| `PatternTest` | `PatternTest[patt, test]` and shorthand `patt?test` | Pattern object that first matches `patt`, then applies `test` as a callable predicate to the matched expression. For sequence patterns such as `__?IntegerQ`, Tungsten requires every consumed element to satisfy the predicate. | [PatternTest](https://reference.wolfram.com/language/ref/PatternTest.html) |
+| `Optional` | `Optional[patt, default]`, shorthand `patt:default`, `Optional[patt]`, and shorthand `_.` / `x_.` | Pattern object for optional arguments. Explicit defaults can fill omitted arguments and named variables bind to the default even when the default would not itself match the present-argument pattern. Without an explicit default, Tungsten treats the pattern as present-only because user-defined and built-in `Default[...]` values are not represented yet. | [Optional](https://reference.wolfram.com/language/ref/Optional.html) |
+| `Repeated` | `Repeated[patt]`, `Repeated[patt, max]`, `Repeated[patt, {min, max}]`, `Repeated[patt, {n}]`, and suffix `patt..` | Matches one or more adjacent arguments, or the bounded count requested by the repetition specification. The repeated item may itself be a fixed-width pattern or a sequence pattern such as `PatternSequence[a, b]`. | [Repeated](https://reference.wolfram.com/language/ref/Repeated.html) |
+| `RepeatedNull` | `RepeatedNull[patt]`, bounded forms parallel to `Repeated`, and suffix `patt...` | Matches zero or more adjacent arguments, or the bounded count requested by the repetition specification. | [RepeatedNull](https://reference.wolfram.com/language/ref/RepeatedNull.html) |
+| `PatternSequence` | `PatternSequence[p1, p2, ...]` | Matches a fixed-order sequence of adjacent arguments. Named wrappers bind the consumed sequence using Tungsten's `Sequence[...]` splicing representation. | [PatternSequence](https://reference.wolfram.com/language/ref/PatternSequence.html) |
+| `OrderlessPatternSequence` | `OrderlessPatternSequence[p1, p2, ...]` | Matches a local adjacent argument segment against the supplied sequence patterns in any order while preserving the candidate argument order in named bindings and replacements. This does not make the enclosing head globally `Orderless`. | [OrderlessPatternSequence](https://reference.wolfram.com/language/ref/OrderlessPatternSequence.html) |
+| `Longest` | `Longest[patt]` | Requests greedy allocation for the wrapped ambiguous sequence pattern within Tungsten's ordinary argument-list matcher. It is a match-priority wrapper only; Tungsten still does not implement attribute-driven `Flat` or `Orderless` matching. | [Longest](https://reference.wolfram.com/language/ref/Longest.html) |
+| `Shortest` | `Shortest[patt]` | Requests non-greedy allocation for the wrapped ambiguous sequence pattern. This is also Tungsten's default for ordinary ambiguous sequence patterns. | [Shortest](https://reference.wolfram.com/language/ref/Shortest.html) |
+| `OptionsPattern` | `OptionsPattern[]`, `OptionsPattern[spec]` as a structural pattern object | Matches zero or more option rules, delayed option rules, and nested lists of such rules whose keys are symbols or strings. The optional spec is accepted syntactically but Tungsten does not yet validate against `Options[f]` or support `OptionValue`. | [OptionsPattern](https://reference.wolfram.com/language/ref/OptionsPattern.html) |
 | `Condition` | `Condition[patt, test]`, `patt /; test`, and top-level delayed-template guards such as `lhs :> rhs /; test` | Guards a pattern or delayed-rule template. Tungsten treats the guard as satisfied only when the substituted test reduces to explicit `True` under the shipped evaluator. | [Condition](https://reference.wolfram.com/language/ref/Condition) |
 | `RuleDelayed` | `lhs :> rhs`, including guarded forms such as `lhs :> rhs /; test` | Delays right-hand-side instantiation until after pattern bindings are known. A top-level delayed-template `Condition` guard can suppress the rule and fall through to later rules when present. | [RuleDelayed](https://reference.wolfram.com/language/ref/RuleDelayed) |
 | `Sequence` | `Sequence[e1, ...]` as a direct argument of a call | Splices its arguments into the enclosing call after argument evaluation for ordinary calls, and structurally without payload evaluation for `Hold`, `HoldForm`, `HoldPattern`, and `Function`. Splicing is suppressed for `HoldComplete`, `Unevaluated`, `Rule`, and `RuleDelayed`. | [Sequence](https://reference.wolfram.com/language/ref/Sequence) |
 | `Nothing` | `Nothing`, `Nothing[...]` | `Nothing[...]` evaluates to `Nothing`; direct `Nothing` is removed from evaluated `List[...]` outputs and direct association-constructor placeholders, while remaining inert in ordinary calls, held expressions, and association values. | [Nothing](https://reference.wolfram.com/language/ref/Nothing) |
-| `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous and named `__` / `___` sequence patterns, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, `Verbatim`, and `KeyValuePattern`. Multiple sequence patterns in one ordinary argument list are matched with Tungsten's documented shortest-first backtracking rule. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
-| `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`; associations contribute their head, values, and whole expression, but not keys or raw rules. Multiple `__` / `___` patterns and guarded patterns are supported under the same documented sequence allocation and guard rules as `MatchQ`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
+| `MatchQ` | `MatchQ[expr, patt]` | Structurally tests whether `expr` matches Tungsten's supported pattern subset, including `Blank`, anonymous and named `__` / `___` sequence patterns, `Repeated`, `PatternSequence`, `Optional`, `PatternTest`, guarded patterns via `/;`, `Alternatives`, `Except`, `HoldPattern`, `Verbatim`, `OptionsPattern`, and `KeyValuePattern`. Multiple sequence patterns in one ordinary argument list are matched with Tungsten's documented backtracking rule. | [MatchQ](https://reference.wolfram.com/language/ref/MatchQ) |
+| `FreeQ` | `FreeQ[expr, patt]`, `FreeQ[expr, patt, levelspec]` | Returns `True` when no searched subexpression matches the supported pattern subset. Tungsten follows Wolfram's default `Heads -> True` behavior for `FreeQ`; associations contribute their head, values, and whole expression, but not keys or raw rules. Advanced structural pattern forms use the same documented sequence allocation and guard rules as `MatchQ`. | [FreeQ](https://reference.wolfram.com/language/ref/FreeQ) |
 | `Cases` | `Cases[expr, patt]`, `Cases[expr, patt, levelspec]`, `Cases[expr, patt, levelspec, n]`, `Cases[expr, patt :> rhs]`, `Cases[expr, patt :> rhs, levelspec]` | Collects matching subexpressions in depth-first postorder, with optional template substitution through named-pattern bindings. On associations, Tungsten picks out matching values and nested value subexpressions; `KeyValuePattern` matches whole associations or lists of rules when keys must participate. Named sequence bindings substitute through `Sequence[...]`-style splicing, and delayed templates may use `/;` as a post-substitution guard. | [Cases](https://reference.wolfram.com/language/ref/Cases) |
 | `DeleteCases` | `DeleteCases[expr, patt]`, `DeleteCases[expr, patt, levelspec]`, `DeleteCases[expr, patt, levelspec, n]` | Removes matching subexpressions in depth-first postorder, deleting leaves before roots. On associations, matching values are removed from their owning entries and deeper matches are removed inside nested values. Whole-expression deletion at level `0` is not implemented yet. Anonymous and named `__` / `___` patterns and guarded patterns are supported under Tungsten's documented limits. | [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases) |
 | `KeyValuePattern` | `KeyValuePattern[patt]`, `KeyValuePattern[{patt1, ...}]` | Pattern object for matching associations or lists of rules by their entries. Entry patterns are matched in the supplied order, may appear in any association order, and each entry can satisfy at most one pattern. Tungsten distinguishes `Rule` from `RuleDelayed` and supports named captures inside key and value patterns. | [KeyValuePattern](https://reference.wolfram.com/language/ref/KeyValuePattern) |
 | `Replace` | `Replace[expr, rules]`, `Replace[expr, rules, levelspec]`, nested rule-list forms such as `Replace[expr, {{rules1...}, {rules2...}}, levelspec]` | Applies the first matching rule per visited part, with Wolfram-style levelspec semantics and bottom-up traversal over the covered subset. Guarded left-hand-side patterns are supported, and delayed right-hand-side guards such as `lhs :> rhs /; test` fire only when the substituted guard reduces to explicit `True`. On associations, Tungsten traverses values rather than keys or raw `Rule` wrappers. | [Replace](https://reference.wolfram.com/language/ref/Replace) |
 | `ReplaceAll` | `ReplaceAll[expr, rule]`, `ReplaceAll[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceAll[expr, {{rules1...}, {rules2...}}]` | Performs a single top-down rewrite pass over the covered subset. Tungsten also supports the parser-lowered operator form `expr /. rules`. Guarded left-hand-side patterns are supported, and delayed right-hand-side guards such as `lhs :> rhs /; test` can suppress a rule and fall through to later rules. On associations, Tungsten rewrites the whole association first, then the head and values, but not keys or raw `Rule` wrappers. | [ReplaceAll](https://reference.wolfram.com/language/ref/ReplaceAll) |
 | `ReplaceRepeated` | `ReplaceRepeated[expr, rule]`, `ReplaceRepeated[expr, {rule1, ...}]`, nested rule-list forms such as `ReplaceRepeated[expr, {{rules1...}, {rules2...}}]` | Repeats the covered `ReplaceAll` semantics until a structural fixed point is reached. Tungsten also supports the parser-lowered operator form `expr //. rules`. Non-terminating rewrite loops stop at a Tungsten safety cap and raise an evaluation error. Guarded delayed rules are reapplied until the guard stops succeeding or a structural fixed point is reached. | [ReplaceRepeated](https://reference.wolfram.com/language/ref/ReplaceRepeated) |
-| `Function` | `Function[body]`, `body &`, positional slot applications such as `Function[body][arg1, ...]`, named forms such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and `x \[Function] body` | Supports positional pure functions over `Slot` forms plus named-parameter pure functions with lexical scoping and capture-avoiding renaming. Tungsten recognizes `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, the Tungsten-specific `#name` shorthand for `#1["name"]`, and nested named-function alpha-renaming when an inner body is modified by outer pure-function application. | [Function](https://reference.wolfram.com/language/ref/Function) |
+| `Function` | `Function[body]`, `body &`, `Function[Null, body]`, `Function[Null, body, attrs]`, positional slot applications such as `Function[body][arg1, ...]`, named forms such as `Function[x, body]`, `Function[{x, y}, body]`, `Function[params, body, attrs]`, `x |-> body`, and `x \[Function] body` | Supports positional pure functions over `Slot` and `SlotSequence` forms plus named-parameter pure functions with lexical scoping and capture-avoiding renaming. Tungsten recognizes `#`, `#n`, `#0`, `##`, `##n`, `Slot[]`, `Slot[n]`, `SlotSequence[]`, `SlotSequence[n]`, Wolfram's `#name` shorthand for first-argument association lookup, third-argument hold / sequence / listable attributes, and nested named-function alpha-renaming when an inner body is modified by outer pure-function application. | [Function](https://reference.wolfram.com/language/ref/Function) |
+| `Slot` | `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, `#name` | Represents a positional pure-function argument. `Slot[]` is treated like `Slot[1]` on application; `#0` refers to the pure function itself; `#name` is Wolfram's first-argument association/key shorthand and parses as `#1["name"]` in Tungsten's AST. | [Slot](https://reference.wolfram.com/language/ref/Slot.html) |
+| `SlotSequence` | `##`, `##n`, `SlotSequence[]`, `SlotSequence[n]` | Represents all remaining arguments in a positional pure function, starting at argument `n` (`1` by default), and splices them into the function body before the substituted body is evaluated. | [SlotSequence](https://reference.wolfram.com/language/ref/SlotSequence.html) |
 | `Hold` / `HoldComplete` / `HoldForm` / `Unevaluated` | `Hold[expr]`, `HoldComplete[expr]`, `HoldForm[expr]`, `Unevaluated[expr]` | Preserve arguments unevaluated under Tungsten's structural evaluator. `HoldPattern` has the same holding behavior for pattern expressions. | [Hold](https://reference.wolfram.com/language/ref/Hold) |
 | `ReleaseHold` | `ReleaseHold[expr]` | Strips one outer `Hold`, `HoldComplete`, `HoldForm`, or `Unevaluated` wrapper and evaluates the released payload. Non-held arguments are returned after ordinary argument evaluation. | [ReleaseHold](https://reference.wolfram.com/language/ref/ReleaseHold) |
 | `Identity` | `Identity[expr]` | Returns its argument unchanged. Tungsten also benefits from this when `Identity` is used as a callable argument to higher-order structural functions. | [Identity](https://reference.wolfram.com/language/ref/Identity) |
@@ -421,8 +453,11 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   and they also support multi-element matching in direct argument lists, including named forms such
   as `x__` and multiple occurrences in the same list. For the exact allocation rule, read
   [sequence-pattern-matching.md](./sequence-pattern-matching.md).
-- Advanced forms such as `PatternTest`, `Optional`, `Longest`, and `Shortest` currently raise
-  Tungsten evaluation errors instead of being silently treated as literals.
+- Advanced structural forms such as `PatternTest`, `Optional`, `Repeated`, `RepeatedNull`,
+  `PatternSequence`, `OrderlessPatternSequence`, `Longest`, `Shortest`, and `OptionsPattern` use
+  the same matcher core. Remaining non-string limits are now about missing global evaluator state
+  or attributes, not unsupported pattern heads: no `Flat`, `Orderless`, or `OneIdentity`
+  matching; no user-defined `Default[...]` registry; and no `OptionValue`.
 
 ## Notes on pure functions
 
@@ -430,15 +465,22 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `Slot[]` remains distinct in the AST, but Tungsten treats it the same as `Slot[1]` when a pure
   function is actually applied.
 - `#0` and `Slot[0]` refer to the pure function itself.
-- `#name` is a Tungsten-specific shorthand for `#1["name"]`; it is not named-argument support.
-- `Function[body]` and `Function[params, body]` keep `body` inert until application so pure
-  functions can safely contain patterns and other expressions that would otherwise evaluate too
-  early.
+- `#name` is Wolfram syntax for first-argument association/key lookup. Tungsten lowers it to
+  `#1["name"]`; it is not named-argument support.
+- `##` and `##n` parse to `SlotSequence[1]` and `SlotSequence[n]`. On application, the selected
+  argument sequence is spliced structurally into the body before evaluating the substituted result.
+- `Function[body]`, `Function[Null, body]`, `Function[params, body]`, and their third-argument
+  attribute forms keep `body` inert until application so pure functions can safely contain patterns
+  and other expressions that would otherwise evaluate too early.
 - Named pure functions accept a single-symbol parameter specification or a list of symbols.
 - Tungsten alpha-renames named parameters in nested pure functions when an outer pure-function
   application modifies the inner body. For the exact rule and examples, read
   [named-pure-functions-spec.md](./named-pure-functions-spec.md).
-- Tungsten does not yet implement `SlotSequence` or `##`.
+- The implemented `Function` attribute subset affects pure-function applications only:
+  `HoldFirst`, `HoldRest`, `HoldAll`, and `HoldAllComplete` control which actual arguments are
+  evaluated before substitution; `SequenceHold` and `HoldAllComplete` suppress direct
+  `Sequence[...]` argument splicing; `Listable` threads the pure function over same-length list
+  arguments, reusing scalar arguments.
 
 ## Notes on Hold, Sequence, and Nothing
 
@@ -469,8 +511,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `1 + 2 + a` becomes `Plus[3, a]`, while `Plus[1, 2, a]` stays inert.
 - Boolean operator forms behave the same way: `True && False && x` becomes `And[False, x]`, while
   `And[True, False, x]` stays inert in this pass.
-- Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]` and `EvenQ[4]`
-  evaluate, while broader numeric or symbolic semantics remain out of scope.
+- Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]`, `EvenQ[4]`,
+  `DigitQ["123"]`, and `LetterQ["abc"]` evaluate, while broader numeric or symbolic semantics
+  remain out of scope.
 
 ## Listable Heads Not Implemented
 
@@ -479,6 +522,9 @@ not. These heads therefore stay inert on list arguments unless the support table
 `Plus`, `Times`, `Power`, `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`,
 `UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min`, `Max`,
 `Clip`, `KroneckerDelta`, `DiscreteDelta`, and `Ramp`.
+
+This does not apply to `Function[..., Listable]`: Tungsten honors `Listable` when it is explicitly
+supplied as a third-argument pure-function attribute.
 
 ## Notes on atoms and empty expressions
 

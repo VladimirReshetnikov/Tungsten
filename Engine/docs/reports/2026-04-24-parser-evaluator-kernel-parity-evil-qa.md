@@ -413,6 +413,11 @@ Not strictly bugs, but worth a pass for consistency with the `Plus[]` / `Times[]
 no way to degrade gracefully (e.g., fall back to regex). Not a bug — just a rough edge for
 users exploring string patterns.
 
+Status note added 2026-04-25: this historical rough edge has since been fixed. Tungsten's
+string-pattern matcher now supports multiple unbounded pieces in one `StringExpression`, named
+string sequence captures, `Shortest` / `Longest`, `PatternTest`, `RegularExpression`, and a
+practical `DatePattern` subset.
+
 ## Recommended roadmap (updated from first report)
 
 With B10–B18 in hand, the priority stack is:

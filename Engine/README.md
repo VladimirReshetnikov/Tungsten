@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T17:48:49Z
-- Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
+- Updated (UTC): 2026-04-25T20:25:51Z
+- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -115,22 +115,29 @@ The current workspace is built around seven complementary capabilities:
    row-box forms from the installed documentation notebooks, understands a bounded but useful
    pattern subset such as `_Integer`, anonymous `__` / `___`, guarded patterns via `/;`, `x_`,
    `Except[...]`, and `a | b`, parses replacement operators such as `/.` and `//.` into named AST
-   calls, supports positional pure functions such as `Function[body]`, `body &`, `#`, `#n`, and
-   `#0`, supports named pure functions such as `Function[x, body]`, `x |-> body`, and
-   `x \[Function] body` with capture-avoiding parameter renaming, then evaluates a broader inert
+   calls, supports positional pure functions such as `Function[body]`, `body &`, `#`, `#n`, `#0`,
+   `##`, `##n`, and `Function[Null, body, attrs]`, supports named pure functions such as
+   `Function[x, body]`, `Function[params, body, attrs]`, `x |-> body`, and
+   `x \[Function] body` with capture-avoiding parameter renaming and the pure-function attribute
+   subset for hold, sequence, and listable behavior, then evaluates a broader inert
    structural built-in set such as hold-like conditionals (`If`, `Which`, `Switch`, `Piecewise`),
-   integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `StringQ`, and
-   `EvenQ`, integer-only numeric heads such as `UnitStep`, `Mod`, `Min`, `Clip`, and
-   `KroneckerDelta`, Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
+   integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `StringQ`,
+   `DigitQ`, `LetterQ`, and `EvenQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
+   `Min`, `Clip`, and `KroneckerDelta`, Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
    `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot`, array and sequence builders
    such as `Array`, `Range`, `Partition`, and `BlockMap`, search and de-duplication heads such as
    `FirstCase`, `Position`, and `DeleteDuplicates`, byte and character heads such as `ByteArray`,
    `BaseEncode`, `BaseDecode`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`,
-   `StringInsert`, `StringReverse`, string-pattern heads such as `StringMatchQ`, `StringFreeQ`,
+   `StringInsert`, `StringReverse`, structural pattern forms such as `PatternTest`, `Optional`,
+   `Repeated`, `PatternSequence`, `OrderlessPatternSequence`, `OptionsPattern`, `Longest`, and
+   `Shortest`, string-pattern heads such as `StringMatchQ`, `StringFreeQ`,
    `StringStartsQ`, `StringEndsQ`, `StringPosition`, `StringContainsQ`, `StringCases`, and
-   `StringReplace`, `ToCharacterCode`, `StringToByteArray`, `ImportString`, `ExportString`,
+   `StringReplace` with support for `RegularExpression`, practical `DatePattern`, named string
+   sequence captures, greedy/non-greedy `Longest` / `Shortest`, line/word anchors, and common
+   Unicode-backed character classes, `ToCharacterCode`, `StringToByteArray`, `ImportString`,
+   `ExportString`,
    `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
    `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`, plus `Pick`, `Select`, `Discard`, `SelectFirst`,
    `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`,

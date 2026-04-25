@@ -187,7 +187,7 @@ Supported:
 - `Alternatives[p1, p2, ...]`;
 - infix `p1 | p2` as syntax sugar for `Alternatives[p1, p2]`.
 
-Originally out of scope in this pass:
+Originally out of scope in this pass, but implemented by later follow-up work:
 
 - `BlankSequence`, `BlankNullSequence`, `__`, `___`;
 - `Repeated`, `RepeatedNull`;
@@ -268,7 +268,20 @@ ordinary-argument-list subset of `BlankSequence` / `BlankNullSequence`:
 The exact allocation and binding rules are now normative in
 [Sequence Pattern Matching](./sequence-pattern-matching.md).
 
-Other advanced shorthand such as `?` remains unsupported.
+This design note also predates the later advanced structural-pattern extension. Tungsten now
+parses and matches the common remaining non-string pattern forms:
+
+- `PatternTest` and shorthand `patt?test`;
+- `Optional[patt, default]`, shorthand `patt:default`, and the present-argument side of `_.`;
+- `Repeated`, `RepeatedNull`, and their suffix forms `..` / `...`;
+- `PatternSequence` and `OrderlessPatternSequence`;
+- `Longest` and `Shortest`;
+- `OptionsPattern` as a structural option-rule matcher.
+
+The remaining limits are documented in
+[Sequence Pattern Matching](./sequence-pattern-matching.md): no attribute-driven `Flat`,
+`Orderless`, or `OneIdentity` matching; no user-defined `Default[...]` registry for omitted
+`Optional[patt]`; no `OptionValue`; and no expansion of the separate string-pattern subset.
 
 This design note also predates the later guarded-pattern extension. Tungsten now supports a
 deliberately narrow slice of `Condition` / `/;`:

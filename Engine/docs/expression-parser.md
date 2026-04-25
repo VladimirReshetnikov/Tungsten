@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T17:48:49Z
-Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
+Updated (UTC): 2026-04-25T20:25:51Z
+Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
 
 ## Summary
 
@@ -13,7 +13,8 @@ Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
   `Extract`, `Level`, integer-only arithmetic and relational heads such as `Plus`, `Times`,
-  `Power`, `Equal`, and `Less`, simple predicates such as `IntegerQ`, `StringQ`, and `EvenQ`,
+  `Power`, `Equal`, and `Less`, simple predicates such as `IntegerQ`, `StringQ`, `DigitQ`,
+  `LetterQ`, and `EvenQ`,
   hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, integer-only numeric
   heads such as `UnitStep`, `Mod`, `Clip`, and `KroneckerDelta`, Boolean heads such as `Not`,
   `And`, and `Or`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
@@ -25,7 +26,8 @@ Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
   character heads such as `ByteArray`, `BaseEncode`, `BaseDecode`, `Characters`,
   `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`, `StringReverse`,
   string-pattern heads such as `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
-  `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace`, `ToCharacterCode`,
+  `StringPosition`, `StringContainsQ`, `StringCases`, and `StringReplace` with `RegularExpression`
+  and practical `DatePattern` support, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
   `ExportString`, `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`,
   `MakeBoxes`, `MakeExpression`, `StripBoxes`, `SyntaxQ`, `SyntaxLength`, `Pick`,
@@ -74,8 +76,8 @@ The parser currently handles:
 - function application `head[arg1, arg2]`;
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
-- common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, `x : patt`, `patt /; test`,
-  and `a | b`;
+- common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, `x : patt`, `patt?test`,
+  `patt:def`, `_.`, `patt /; test`, and `a | b`;
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
@@ -88,10 +90,12 @@ The parser currently handles:
 - prefix and postfix application such as `f @ x` and `x // f`, with `@` binding tighter than
   arithmetic but looser than direct function application;
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
-- positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `Slot[]`, `Slot[n]`, and
-  the Tungsten-specific shorthand `#name` for `#1["name"]`;
+- positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `##`, `##n`, `Slot[]`,
+  `Slot[n]`, `SlotSequence[]`, `SlotSequence[n]`, and Wolfram's `#name` shorthand for
+  `#["name"]` / `#1["name"]`;
 - named pure-function syntax such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`,
-  `{x, y} |-> body`, and `x \[Function] body`;
+  `{x, y} |-> body`, and `x \[Function] body`, plus explicit-attribute forms such as
+  `Function[Null, body, attrs]` and `Function[params, body, attrs]`;
 - part syntax `expr[[...]]`;
 - span syntax `a ;; b ;; c`;
 - nested Wolfram comments `(* ... *)`;
@@ -112,42 +116,58 @@ The parser currently handles:
   including `\[Rule]`, `\[RuleDelayed]`, `\[LeftAssociation]`, and `\[RightAssociation]`
   tokens plus nested part syntax such as `<|a -> x|>[[Key[b]]]`.
 - common symbolic string-pattern forms such as `StringExpression`, `StartOfString`,
-  `EndOfString`, `DigitCharacter`, `LetterCharacter`, `WhitespaceCharacter`, `WordCharacter`,
-  `CharacterRange["a", "z"]`, and `Whitespace`.
+  `EndOfString`, `StartOfLine`, `EndOfLine`, `WordBoundary`, `DigitCharacter`,
+  `HexadecimalCharacter`, `LetterCharacter`, `NumberString`, `PunctuationCharacter`,
+  `WhitespaceCharacter`, `WordCharacter`, `CharacterRange["a", "z"]`, `RegularExpression[...]`,
+  practical `DatePattern[...]` forms, and `Whitespace`.
 - string literals that contain inline-box escape sequences.
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
-particular, it is intentionally conservative around advanced pattern syntax, arbitrary box
-constructs, assignments, custom notation definitions, stylesheet-dependent interpretation, and
-broader evaluation semantics.
+particular, it is intentionally conservative around attribute-driven pattern semantics,
+arbitrary box constructs, assignments, custom notation definitions, stylesheet-dependent
+interpretation, and broader evaluation semantics.
 
 The currently supported pattern subset is intentionally bounded:
 
 - supported: `Blank`, `BlankSequence`, and `BlankNullSequence` forms via `_`, `__`, `___`,
   optional head-qualified forms such as `__Integer`, named patterns such as `x_`, `x__`, and
-  `x___Integer`, guarded patterns via `Condition` / `/;`, `Alternatives`, `Except`, `HoldPattern`,
-  and `Verbatim`;
+  `x___Integer`, `PatternTest` via `?`, explicit-default `Optional` forms via `patt:def`,
+  global-default placeholders via `_.`, guarded patterns via `Condition` / `/;`, `Alternatives`,
+  `Except`, `HoldPattern`, `Verbatim`, `Repeated`, `RepeatedNull`, `PatternSequence`,
+  `OrderlessPatternSequence`, `Longest`, `Shortest`, `OptionsPattern`, and `KeyValuePattern`;
 - sequence patterns support named bindings and multiple occurrences in the same argument list for
   ordinary non-`Flat`, non-`Orderless` heads. Tungsten follows Wolfram's left-to-right
-  shortest-first allocation rule with backtracking; see
+  shortest-first allocation rule with backtracking, while `Longest` switches the wrapped ambiguous
+  sequence to greedy allocation; see
   [sequence-pattern-matching.md](./sequence-pattern-matching.md);
-- not yet supported: `PatternTest`, `Optional`, options-related pattern forms, `Longest`,
-  `Shortest`, `PatternSequence`, and other advanced matching constructs.
+- limitations: Tungsten still does not implement attributes such as `Flat`, `Orderless`, or
+  `OneIdentity`, user-defined `Default[...]` values for `Optional[patt]` / `_.`, or `OptionValue`
+  lookup for `OptionsPattern`.
 
 The current string-pattern subset is also intentionally bounded:
 
 - supported: literal strings, `StringExpression` / `~~`, anonymous `_`, `__`, and `___`,
-  `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures via `x : patt`,
-  `Alternatives`, `Condition` / `/;`, `HoldPattern`, `Except` over a supported one-character
-  subpattern, `CharacterRange`, `Whitespace`, and the common symbolic character classes and
+  `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures including named string
+  sequence captures via `x : __` and `x : ___`, `Alternatives`, `Condition` / `/;`,
+  `PatternTest` / `?`, `HoldPattern`, `Shortest`, `Longest`, `Except` over supported
+  one-character disallowed and allowed patterns, `CharacterRange`, `RegularExpression`, a
+  practical `DatePattern` subset, `Whitespace`, and the common symbolic character classes and
   zero-width anchors listed above;
 - string-pattern matches are leftmost-first, `StringCases` remains non-overlapping, and
   `StringPosition` keeps Wolfram's default overlapping behavior;
-- Tungsten currently allows at most one unbounded string-pattern element per containing
-  `StringExpression`;
-- not yet supported: `Shortest`, `Longest`, `PatternTest`, `RegularExpression`, `Optional`,
-  named sequence captures such as `x : __`, qualified blank shorthand such as `_DigitCharacter`
-  or `__DigitCharacter`, and multi-character `Except[...]` subpatterns such as `Except["ab"]`.
+- ambiguous string sequence patterns use greedy allocation by default; wrapping a string-pattern
+  subtree in `Shortest[...]` switches that subtree to non-greedy allocation, while `Longest[...]`
+  explicitly requests greedy allocation;
+- `RegularExpression` is delegated to Python's `re` engine and character-class tests use Python /
+  Unicode-library predicates rather than trying to match Wolfram's exact PCRE and Unicode-version
+  behavior byte for byte;
+- `DatePattern` supports the documented date-element strings and simple supported separator
+  string patterns, with range checks for the common numeric fields; it is a practical recognizer,
+  not a full calendar validator;
+- still not supported as string patterns: `Optional`, `OptionsPattern`, string-function options
+  such as `IgnoreCase` / `Overlaps`, qualified blank shorthand such as `_DigitCharacter` or
+  `__DigitCharacter`, and multi-character `Except[...]` disallowed subpatterns such as
+  `Except["ab"]`, which the live Wolfram kernel also rejects as a string-pattern atom.
 
 ## Parsing forms
 
@@ -581,11 +601,14 @@ kernel's values-only association model and keeps `FreeQ[<|a -> 1|>, a]` true whi
 `KeyValuePattern[a -> _]` to match the entry explicitly. `Position` emits association value paths
 with `Key[key]` components so the paths can be reused by `Extract`, `ReplacePart`, and `MapAt`.
 
-Pure functions are still deliberately bounded in this pass. Tungsten now supports both positional
-slot forms and named-parameter forms, but it does not yet implement `SlotSequence`, `##`, named
-arguments, or attribute-aware `Function[params, body, attrs]` semantics. Tungsten keeps
-`Function[body]` and `Function[params, body]` inert until application, so pure functions can
-safely contain patterns such as `MatchQ[#, _Integer] &`.
+Pure functions are still deliberately bounded in this pass, but the common argument machinery is now
+covered. Tungsten supports positional slots, `SlotSequence` / `##`, named-parameter forms, and the
+evaluation-impact subset of `Function[params, body, attrs]`. `Function[Null, body]` and
+`Function[Null, body, attrs]` are positional-slot functions with an explicit parameter placeholder.
+Supported attributes are `HoldFirst`, `HoldRest`, `HoldAll`, `HoldAllComplete`, `SequenceHold`,
+and `Listable`; other attribute names are preserved in the syntax but have no evaluator effect yet.
+Tungsten keeps function bodies inert until application, so pure functions can safely contain
+patterns such as `MatchQ[#, _Integer] &`.
 
 `Pick` is also intentionally narrower than the full kernel: Tungsten supports compatible selector
 shapes well, including the common list/head-preserving and association-by-position cases, but it
