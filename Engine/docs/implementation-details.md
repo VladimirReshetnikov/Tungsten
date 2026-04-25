@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T00:40:00Z
-- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
+- Updated (UTC): 2026-04-25T20:58:10Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 
 ## Summary
 
@@ -528,9 +528,11 @@ them intentionally.
 - Tungsten is Windows-first.
 - Tungsten assumes a local Wolfram installation rather than a remote kernel.
 - The expression subsystem does not attempt full kernel semantics.
-- The expression subsystem intentionally does not implement general attributes such as `Flat`,
-  `Orderless`, `Listable`, or short-circuit evaluation. A small hardcoded Hold-family subset is
-  implemented because it is required for predictable structural manipulation.
+- The expression subsystem can report read-only Wolfram 14.3 <code>System`</code> attributes through the
+  symbol registry, but it intentionally does not implement evaluator-wide semantics for general
+  attributes such as `Flat`, `Orderless`, `Listable`, or short-circuit evaluation. A small
+  hardcoded Hold-family subset is implemented because it is required for predictable structural
+  manipulation.
 - FullForm cosmetics such as `DirectedInfinity[1]` for `Infinity`, exact precision-bearing real
   rendering, and Wolfram's rejection of textual `--5` are documented divergences for now.
 - Notebook parsing is structural rather than fully semantic.

@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import binascii
 import bz2
+from contextvars import ContextVar
 import csv
 from dataclasses import dataclass
 import gzip
+from importlib import resources
 import io
 import itertools
 import json
@@ -28,6 +30,14 @@ class WolframSyntaxError(ValueError):
 
 class WolframEvaluationError(ValueError):
     """Raised when Tungsten cannot structurally evaluate a built-in expression."""
+
+
+class TungstenExitRequested(Exception):
+    """Raised when kernel-free evaluation reaches Exit or Quit."""
+
+    def __init__(self, code: int = 0) -> None:
+        super().__init__(code)
+        self.code = int(code)
 
 
 class Expr:
@@ -169,6 +179,7 @@ class ByteArrayExpr(Expr):
 _SYSTEM_SYMBOL_NAMES = {
     "$Context",
     "$ContextPath",
+    "$Line",
     "Abs",
     "All",
     "Alternatives",
@@ -180,6 +191,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "AssociationMap",
     "AssociationQ",
     "AssociationThread",
+    "Attributes",
     "BaseDecode",
     "BaseEncode",
     "Blank",
@@ -207,6 +219,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Composition",
     "Condition",
     "Congruent",
+    "Constant",
     "ConstantArray",
     "Construct",
     "Context",
@@ -235,6 +248,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "DoubleRightArrow",
     "DoubleVerticalBar",
     "DownArrow",
+    "DownValues",
     "Drop",
     "DuplicateFreeQ",
     "Element",
@@ -247,11 +261,13 @@ _SYSTEM_SYMBOL_NAMES = {
     "ExportByteArray",
     "ExportString",
     "Extract",
+    "Exit",
     "False",
     "First",
     "FirstCase",
     "FixedPoint",
     "FixedPointList",
+    "Flat",
     "Flatten",
     "Fold",
     "FoldList",
@@ -277,6 +293,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "Identity",
     "IdentityMatrix",
     "If",
+    "In",
+    "InString",
     "ImportByteArray",
     "ImportString",
     "Implies",
@@ -309,6 +327,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Level",
     "List",
     "Listable",
+    "Locked",
     "Lookup",
     "Longest",
     "LongLeftArrow",
@@ -335,6 +354,10 @@ _SYSTEM_SYMBOL_NAMES = {
     "NestList",
     "NestWhile",
     "NestWhileList",
+    "NHoldAll",
+    "NHoldFirst",
+    "NHoldRest",
+    "NonThreadable",
     "None",
     "Normal",
     "Not",
@@ -346,14 +369,18 @@ _SYSTEM_SYMBOL_NAMES = {
     "Nothing",
     "Null",
     "NumberString",
+    "NumericFunction",
     "OddQ",
+    "OneIdentity",
     "Operate",
     "Or",
+    "Out",
     "Outer",
     "Overscript",
     "OverscriptBox",
     "OptionsPattern",
     "Optional",
+    "Orderless",
     "OrderlessPatternSequence",
     "Part",
     "Partition",
@@ -370,15 +397,18 @@ _SYSTEM_SYMBOL_NAMES = {
     "PrecedesEqual",
     "Prepend",
     "Proportion",
+    "Protected",
     "PunctuationCharacter",
     "Quotient",
     "QuotientRemainder",
+    "Quit",
     "Ramp",
     "Range",
     "Rational",
     "Real",
     "RealAbs",
     "RealSign",
+    "ReadProtected",
     "ReleaseHold",
     "RegularExpression",
     "Repeated",
@@ -502,6 +532,33 @@ _SYSTEM_SYMBOL_NAMES = {
 }
 
 
+_SYSTEM_SYMBOL_SNAPSHOT_RESOURCE = "data/system_symbols_wolfram_14_3.json"
+
+
+def _load_system_symbol_snapshot() -> dict[str, tuple[str, ...]]:
+    try:
+        resource = resources.files(__package__).joinpath(_SYSTEM_SYMBOL_SNAPSHOT_RESOURCE)
+        payload = json.loads(resource.read_text(encoding="utf-8-sig"))
+    except (AttributeError, FileNotFoundError, ModuleNotFoundError, TypeError, json.JSONDecodeError):
+        return {}
+
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        return {}
+
+    result: dict[str, tuple[str, ...]] = {}
+    for row in symbols:
+        if not isinstance(row, list | tuple) or len(row) != 2:
+            continue
+        name, attributes = row
+        if not isinstance(name, str):
+            continue
+        if not isinstance(attributes, list):
+            attributes = []
+        result[name] = tuple(attribute for attribute in attributes if isinstance(attribute, str))
+    return result
+
+
 @dataclass
 class SymbolRecord:
     full_name: str
@@ -525,41 +582,72 @@ class SymbolRegistry:
         self._string_unique_counters: dict[str, int] = {}
         for name in sorted(_SYSTEM_SYMBOL_NAMES):
             self.ensure_full_name(f"System`{name}", built_in=True)
+        for name, attributes in _load_system_symbol_snapshot().items():
+            self.ensure_full_name(f"System`{name}", built_in=True, attributes=attributes, validate=False)
 
     @property
     def contexts(self) -> tuple[str, ...]:
         return tuple(sorted(self._contexts))
 
-    def ensure_full_name(self, full_name: str, *, built_in: bool = False) -> SymbolRecord:
-        context, short_name = _split_symbol_full_name(full_name)
-        if not _is_valid_context_name(context) or not _is_valid_symbol_short_name(short_name):
-            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {full_name!r}.")
+    def ensure_full_name(
+        self,
+        full_name: str,
+        *,
+        built_in: bool = False,
+        attributes: Sequence[str] | None = None,
+        validate: bool = True,
+    ) -> SymbolRecord:
         record = self._symbols.get(full_name)
-        if record is None:
-            record = SymbolRecord(full_name=full_name, context=context, short_name=short_name, built_in=built_in)
-            self._symbols[full_name] = record
-        elif built_in and not record.built_in:
-            record.built_in = True
+        if record is not None:
+            if built_in and not record.built_in:
+                record.built_in = True
+            if attributes is not None:
+                record.attributes = tuple(attributes)
+            self._contexts.add(record.context)
+            return record
+
+        context, short_name = _split_symbol_full_name(full_name)
+        if validate and (not _is_valid_context_name(context) or not _is_valid_symbol_short_name(short_name)):
+            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {full_name!r}.")
+        if not _is_valid_context_name(context):
+            raise WolframEvaluationError(f"Invalid Wolfram symbol context: {full_name!r}.")
+        record = SymbolRecord(
+            full_name=full_name,
+            context=context,
+            short_name=short_name,
+            built_in=built_in,
+            attributes=tuple(attributes or ()),
+        )
+        self._symbols[full_name] = record
         self._contexts.add(context)
         return record
 
     def ensure_name(self, name: str, *, built_in: bool = False) -> SymbolRecord:
-        return self.ensure_full_name(self.resolve_full_name(name), built_in=built_in)
+        full_name = self.resolve_full_name(name)
+        record = self._symbols.get(full_name)
+        if record is not None:
+            if built_in and not record.built_in:
+                record.built_in = True
+            return record
+        return self.ensure_full_name(full_name, built_in=built_in)
 
     def resolve_full_name(self, name: str) -> str:
         if "`" in name:
             context, short_name = _split_symbol_full_name(name)
             if not context:
                 context = self.current_context
+            full_name = f"{context}{short_name}"
+            if full_name in self._symbols:
+                return full_name
             if not _is_valid_context_name(context) or not _is_valid_symbol_short_name(short_name):
                 raise WolframEvaluationError(f"Invalid Wolfram symbol name: {name!r}.")
-            return f"{context}{short_name}"
-        if not _is_valid_symbol_short_name(name):
-            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {name!r}.")
+            return full_name
         for context in self.context_path:
             full_name = f"{context}{name}"
             if full_name in self._symbols:
                 return full_name
+        if not _is_valid_symbol_short_name(name):
+            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {name!r}.")
         return f"{self.current_context}{name}"
 
     def resolve_existing(self, name: str) -> SymbolRecord | None:
@@ -640,6 +728,15 @@ class SymbolRegistry:
     def name_q(self, pattern: Expr) -> Symbol:
         return _bool_symbol(bool(self.names(pattern)))
 
+    def attributes_for_symbol(self, expr: Symbol) -> tuple[str, ...]:
+        return self.record_for_symbol(expr).attributes
+
+    def attributes_for_name(self, name: str) -> tuple[str, ...]:
+        record = self.resolve_existing(name)
+        if record is None:
+            return ()
+        return record.attributes
+
 
 def _split_symbol_full_name(name: str) -> tuple[str, str]:
     index = name.rfind("`")
@@ -681,6 +778,59 @@ def _wolfram_name_pattern_to_regex(pattern: str) -> re.Pattern[str]:
             pieces.append(re.escape(char))
         index += 1
     return re.compile("".join(pieces))
+
+
+@dataclass
+class EvaluationSession:
+    """Process-local evaluator state for Wolfram-console-style history."""
+
+    line: int = 0
+    inputs: dict[int, Expr] | None = None
+    in_strings: dict[int, str] | None = None
+    outputs: dict[int, Expr] | None = None
+    expanding_inputs: set[int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.inputs is None:
+            self.inputs = {}
+        if self.in_strings is None:
+            self.in_strings = {}
+        if self.outputs is None:
+            self.outputs = {}
+        if self.expanding_inputs is None:
+            self.expanding_inputs = set()
+
+    def begin_input(self, source: str, expr: Expr) -> int:
+        self.line += 1
+        assert self.inputs is not None
+        assert self.in_strings is not None
+        self.inputs[self.line] = expr
+        self.in_strings[self.line] = source
+        return self.line
+
+    def finish_output(self, expr: Expr) -> None:
+        assert self.outputs is not None
+        self.outputs[self.line] = expr
+
+    def resolve_index(self, argument: Expr | None) -> int:
+        if argument is None:
+            return self.line - 1
+        evaluated = evaluate(argument, session=self)
+        if not isinstance(evaluated, Integer):
+            raise WolframEvaluationError("History functions expect an integer line specification.")
+        if evaluated.value < 0:
+            return self.line + evaluated.value
+        return evaluated.value
+
+
+_ACTIVE_EVALUATION_SESSION: ContextVar[EvaluationSession | None] = ContextVar(
+    "tungsten_active_evaluation_session",
+    default=None,
+)
+
+
+def _active_evaluation_session() -> EvaluationSession | None:
+    return _ACTIVE_EVALUATION_SESSION.get()
 
 
 _SYMBOL_REGISTRY = SymbolRegistry()
@@ -2153,6 +2303,92 @@ def names_expr(pattern: Expr | None = None) -> Call:
 
 def name_q_expr(pattern: Expr) -> Symbol:
     return _SYMBOL_REGISTRY.name_q(pattern)
+
+
+def attributes_expr(expr: Expr) -> Call:
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return _evaluated_list_expr(*(attributes_expr(item) for item in expr.arguments))
+    if isinstance(expr, Symbol):
+        attributes = _SYMBOL_REGISTRY.attributes_for_symbol(expr)
+        return _evaluated_list_expr(*(symbol(attribute) for attribute in attributes))
+    if isinstance(expr, String):
+        attributes = _SYMBOL_REGISTRY.attributes_for_name(expr.value)
+        return _evaluated_list_expr(*(symbol(attribute) for attribute in attributes))
+    raise WolframEvaluationError("Attributes expects a symbol, string symbol name, or list of symbols/names.")
+
+
+def history_expr(head_name: str, arguments: Sequence[Expr]) -> Expr:
+    session = _active_evaluation_session()
+    if session is None:
+        return call(head_name, *arguments)
+    if len(arguments) > 1:
+        raise WolframEvaluationError(f"{head_name} expects zero or one line specification.")
+
+    index = session.resolve_index(arguments[0] if arguments else None)
+    if head_name == "In":
+        assert session.inputs is not None
+        assert session.expanding_inputs is not None
+        stored = session.inputs.get(index)
+        if stored is None or index in session.expanding_inputs:
+            return call("In", integer(index))
+        session.expanding_inputs.add(index)
+        try:
+            return evaluate(stored, session=session)
+        finally:
+            session.expanding_inputs.discard(index)
+    if head_name == "InString":
+        assert session.in_strings is not None
+        stored_text = session.in_strings.get(index)
+        return string(stored_text) if stored_text is not None else call("InString", integer(index))
+    if head_name == "Out":
+        assert session.outputs is not None
+        stored_output = session.outputs.get(index)
+        return stored_output if stored_output is not None else call("Out", integer(index))
+    raise WolframEvaluationError(f"Unsupported history function {head_name}.")
+
+
+def down_values_expr(expr: Expr) -> Call:
+    session = _active_evaluation_session()
+    if session is None or not isinstance(expr, Symbol):
+        return _evaluated_list_expr()
+
+    name = _system_dispatch_name(expr)
+    if name == "In":
+        assert session.inputs is not None
+        return _evaluated_list_expr(
+            *(
+                call("RuleDelayed", call("HoldPattern", call("In", integer(index))), value)
+                for index, value in sorted(session.inputs.items())
+            )
+        )
+    if name == "InString":
+        assert session.in_strings is not None
+        return _evaluated_list_expr(
+            *(
+                call("RuleDelayed", call("HoldPattern", call("InString", integer(index))), string(value))
+                for index, value in sorted(session.in_strings.items())
+            )
+        )
+    if name == "Out":
+        assert session.outputs is not None
+        return _evaluated_list_expr(
+            *(
+                call("RuleDelayed", call("HoldPattern", call("Out", integer(index))), value)
+                for index, value in sorted(session.outputs.items())
+            )
+        )
+    return _evaluated_list_expr()
+
+
+def exit_expr(arguments: Sequence[Expr]) -> None:
+    if len(arguments) == 0:
+        raise TungstenExitRequested(0)
+    if len(arguments) == 1:
+        code = evaluate(arguments[0])
+        if not isinstance(code, Integer):
+            raise WolframEvaluationError("Exit and Quit expect an optional integer exit code.")
+        raise TungstenExitRequested(code.value)
+    raise WolframEvaluationError("Exit and Quit expect zero or one argument.")
 
 
 def unique_expr(spec: Expr | None = None) -> Expr:
@@ -7818,7 +8054,17 @@ def _rebuild_selected_parts(
     return _rebuild(expr, values)
 
 
-def evaluate(expr: Expr) -> Expr:
+def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
+    if session is None:
+        return _evaluate(expr)
+    token = _ACTIVE_EVALUATION_SESSION.set(session)
+    try:
+        return _evaluate(expr)
+    finally:
+        _ACTIVE_EVALUATION_SESSION.reset(token)
+
+
+def _evaluate(expr: Expr) -> Expr:
     if isinstance(expr, Symbol):
         try:
             record = _SYMBOL_REGISTRY.ensure_name(expr.name)
@@ -7828,6 +8074,12 @@ def evaluate(expr: Expr) -> Expr:
             return string(_SYMBOL_REGISTRY.current_context)
         if record.full_name == "System`$ContextPath":
             return _evaluated_list_expr(*(string(context) for context in _SYMBOL_REGISTRY.context_path))
+        if record.full_name == "System`$Line":
+            session = _active_evaluation_session()
+            if session is not None:
+                return integer(session.line)
+        if record.full_name in {"System`Exit", "System`Quit"} and _active_evaluation_session() is not None:
+            raise TungstenExitRequested(0)
         return expr
 
     if isinstance(expr, (Integer, Real, String)):
@@ -7838,6 +8090,22 @@ def evaluate(expr: Expr) -> Expr:
 
     if isinstance(expr.head_expr, Symbol):
         raw_head_name = _system_dispatch_name(expr.head_expr)
+
+        if raw_head_name in {"Exit", "Quit"} and _active_evaluation_session() is not None:
+            exit_expr(expr.arguments)
+
+        if raw_head_name in {"In", "InString", "Out"}:
+            return history_expr(raw_head_name, expr.arguments)
+
+        if raw_head_name == "DownValues":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("DownValues expects exactly one symbol.")
+            return down_values_expr(expr.arguments[0])
+
+        if raw_head_name == "Attributes":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("Attributes expects exactly one symbol, string name, or list argument.")
+            return attributes_expr(expr.arguments[0])
 
         if raw_head_name in _HELD_ARGUMENT_HEADS:
             held_arguments = _normalize_arguments_for_head(raw_head_name, expr.arguments, evaluated=False)
@@ -9363,6 +9631,21 @@ def _scan_number(text: str, start: int) -> tuple[_Token, int]:
     return _Token(kind="real", text=token_text, start=start, end=index, value=token_text), index
 
 
+def _scan_percent_history(text: str, start: int) -> tuple[_Token, int]:
+    index = start
+    while index < len(text) and text[index] == "%":
+        index += 1
+
+    digits_start = index
+    while index < len(text) and text[index].isdigit():
+        index += 1
+
+    token_text = text[start:index]
+    if digits_start < index:
+        return _Token(kind="percent", text=token_text, start=start, end=index, value=int(text[digits_start:index])), index
+    return _Token(kind="percent", text=token_text, start=start, end=index, value=-(index - start)), index
+
+
 def _is_symbol_start(char: str) -> bool:
     return char.isalpha() or char in {"$", "`"}
 
@@ -9463,6 +9746,10 @@ def _tokenize(text: str) -> list[_Token]:
             continue
         if text[index].isdigit() or (text[index] == "." and index + 1 < len(text) and text[index + 1].isdigit()):
             token, index = _scan_number(text, index)
+            tokens.append(token)
+            continue
+        if text[index] == "%":
+            token, index = _scan_percent_history(text, index)
             tokens.append(token)
             continue
         if _is_symbol_start(text[index]):
@@ -9656,6 +9943,9 @@ class _Parser:
         if token.kind == "string":
             return string(str(token.value))
 
+        if token.kind == "percent":
+            return call("Out", integer(int(token.value)))
+
         if token.kind == "symbol":
             return symbol(str(token.value))
 
@@ -9719,7 +10009,7 @@ class _Parser:
         return items
 
     def _starts_primary(self, token: _Token) -> bool:
-        return token.kind in {"integer", "real", "string", "symbol"} or token.text in {"(", "{", "<|"}
+        return token.kind in {"integer", "real", "string", "symbol", "percent"} or token.text in {"(", "{", "<|"}
 
     def _parse_prefix_blank(self) -> Expr:
         if self._peek().kind == "symbol":

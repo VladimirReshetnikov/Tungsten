@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="Tungsten.DotNet.Tests/Tungsten.DotNet.Tests.csproj" />
   <Project Path="Tungsten.DotNet/Tungsten.DotNet.csproj" />
+  <Project Path="Tungsten.Console/Tungsten.Console.csproj" />
 </Solution>

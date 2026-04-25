@@ -4,7 +4,8 @@
 - Audience: Tungsten maintainers and users who rely on `__` / `___` matching without a live kernel
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T02:03:31Z
-- Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
+- Updated (UTC): 2026-04-25T20:58:10Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related Wolfram docs:
   - [BlankSequence](https://reference.wolfram.com/language/ref/BlankSequence.html)
   - [BlankNullSequence](https://reference.wolfram.com/language/ref/BlankNullSequence.html)
@@ -31,8 +32,9 @@ specifies the variable-length argument-list subset implemented for `BlankSequenc
 list.
 
 The goal is Wolfram-compatible behavior for ordinary non-`Flat`, non-`Orderless` expression heads.
-Tungsten still does not implement general attributes, global `Flat` matching, global `Orderless`
-matching, `OneIdentity`, user-defined `Default[...]` values, or `OptionValue`.
+Tungsten can report read-only Wolfram 14.3 attributes through `Attributes`, but it still does not
+implement evaluator-wide attribute semantics, global `Flat` matching, global `Orderless` matching,
+`OneIdentity`, user-defined `Default[...]` values, or `OptionValue`.
 
 ## Source Semantics
 

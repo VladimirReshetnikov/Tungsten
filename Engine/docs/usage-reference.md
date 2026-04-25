@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T20:25:51Z
-- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
+- Updated (UTC): 2026-04-25T21:57:56Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -42,6 +42,8 @@
 - `2` is currently used only by `kernel eval`, and means Tungsten could not produce a structured
   evaluation payload at all. Typical causes include `KernelNotFound`, launch failures, or a kernel
   run that never reached Tungsten's JSON export step.
+- `repl` returns the integer supplied to `Exit[code]` or `Quit[code]`. Plain `Exit`, `Exit[]`,
+  `Quit`, and `Quit[]` return `0`.
 
 ## Python CLI
 
@@ -50,6 +52,42 @@ Set the local source directory on `PYTHONPATH`:
 ```powershell
 $env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
 ```
+
+### `repl`
+
+Purpose:
+
+- start the kernel-free Tungsten interpreter with `wolfram.exe`-style prompts;
+- maintain session history through `$Line`, `In`, `InString`, `Out`, `DownValues`, and `%`
+  shorthand;
+- exit through `Exit`, `Exit[code]`, `Quit`, or `Quit[code]`.
+
+Examples:
+
+```powershell
+python -m tungsten repl
+python -m tungsten repl --no-banner
+python -m tungsten
+python -m pip install -e .\src\Tungsten
+tungsten.exe
+dotnet build .\src\Tungsten\dotnet\Tungsten.DotNet.slnx
+.\src\Tungsten\dotnet\Tungsten.Console\bin\Debug\net10.0\tungsten.exe
+```
+
+Inside the REPL:
+
+```wolfram
+1 + 2
+$Line
+In[1]
+InString[1]
+Out[1]
+% + 10
+DownValues[In]
+Quit
+```
+
+Read [repl.md](./repl.md) for the exact supported history behavior.
 
 ### `env`
 
@@ -359,6 +397,9 @@ python -m tungsten expr evaluate --code "True && False && x"
 python -m tungsten expr evaluate --code '$ContextPath'
 python -m tungsten expr evaluate --code 'Context[System`Plus]'
 python -m tungsten expr evaluate --code '{Symbol["TungstenUsage`alpha"], Names["TungstenUsage`*"]}'
+python -m tungsten expr evaluate --code 'Length[Names["System`*"]]'
+python -m tungsten expr evaluate --code 'NameQ["System`AASTriangle"]'
+python -m tungsten expr evaluate --code 'Attributes[Plus]'
 python -m tungsten expr evaluate --code 'ValueQ[userDefinedSymbol]'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
@@ -430,7 +471,7 @@ The implemented inert evaluator currently covers:
 - `Depth`
 - `Head`
 - symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
-  `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`
+  `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, and `ValueQ`
 - integer arithmetic via `Plus`, `Times`, and `Power` when all arguments in the evaluated
   subexpression are explicit integers
 - integer relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T20:25:51Z
-- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
+- Updated (UTC): 2026-04-25T21:57:56Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -18,6 +18,7 @@
   - [Usage Reference](./docs/usage-reference.md)
   - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
+  - [REPL](./docs/repl.md)
   - [Symbol and Context Registry](./docs/symbol-context-registry.md)
   - [Parser Corpus](./docs/parser-corpus.md)
   - [Inline Box Strings](./docs/inline-box-strings.md)
@@ -47,6 +48,8 @@ that meaningfully improves agent workflows.
 Tungsten exists to satisfy a small set of load-bearing goals:
 
 - Make local Wolfram automation practical from `pwsh`, Python, and JSON-first tooling.
+- Provide a console-mode `tungsten.exe` REPL that feels familiar to `wolfram.exe` users while
+  staying kernel-free.
 - Make the same workflows pleasant to call from C#/.NET without forcing callers to hand-roll
   process execution or JSON deserialization.
 - Preserve machine readability. The primary outputs should be structured data, not terminal-only
@@ -142,11 +145,17 @@ The current workspace is built around seven complementary capabilities:
    `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`, plus `Pick`, `Select`, `Discard`, `SelectFirst`,
    `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`,
    `Lookup`, `KeyTake`, and symbol/context registry heads such as `Symbol`, `SymbolName`,
-   `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`.
-5. An offline documentation index over the locally installed documentation notebooks.
-6. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
+   `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`,
+   read-only `Attributes`, and `ValueQ`. The registry is pre-seeded with the immediate
+   <code>System`</code> symbol catalog and attributes from the installed Wolfram 14.3 kernel so
+   built-ins are discoverable even when Tungsten does not implement their evaluation rules.
+5. A console-mode `tungsten.exe` / `python -m tungsten repl` interpreter with `wolfram.exe`-style
+   `In[n]:=` / `Out[n]=` prompts, `$Line`, `In`, `InString`, `Out`, read-only history
+   `DownValues`, `%` output-history shorthand, and `Exit` / `Quit`.
+6. An offline documentation index over the locally installed documentation notebooks.
+7. A FrontEnd controller that can open notebooks, open documentation pages, and execute selected
    FrontEnd operations through kernel-side `UsingFrontEnd[...]` calls.
-7. A Notebook Assistant controller that can ask the built-in assistant about a selected source cell
+8. A Notebook Assistant controller that can ask the built-in assistant about a selected source cell
    and optionally insert Wolfram Language code below that cell.
 
 ## Current status
@@ -167,6 +176,8 @@ The current workspace is built around seven complementary capabilities:
 - Built-in Notebook Assistant automation through the stable hidden chat-notebook backend, with the
   visible inline-desktop path retained as an experimental option.
 - Kernel-free Wolfram expression parsing and inert structural evaluation.
+- Kernel-free `wolfram.exe`-style REPL through `python -m tungsten repl`, no-argument
+  `python -m tungsten`, and the installable `tungsten.exe` console entry point.
 - PowerShell wrappers for all major Tungsten surfaces.
 - A typed .NET client wrapper over the JSON CLI for C# callers.
 
@@ -255,6 +266,8 @@ python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[
 python -m tungsten docs search NotebookGet
 python -m tungsten expr evaluate --code "1 + 2 + 3"
 python -m tungsten expr evaluate --code '$ContextPath'
+python -m tungsten expr evaluate --code 'Attributes[Plus]'
+python -m tungsten repl
 python -m tungsten expr evaluate --code '{Symbol["TungstenReadme`alpha"], Names["TungstenReadme`*"]}'
 python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2 --tungsten-workers 8
 ```
@@ -270,6 +283,7 @@ New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{Circle
 Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "True && False && x"
 Invoke-TungstenExpression -Code '$ContextPath'
+Invoke-TungstenExpression -Code 'Attributes[Plus]'
 Find-TungstenDocumentation -Query "NotebookGet"
 Compare-TungstenParserCorpus -MaxFiles 25 -MaxFileMB 2 -TungstenWorkers 8
 ```

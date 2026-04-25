@@ -27,6 +27,7 @@ from .parser_corpus import DEFAULT_TUNGSTEN_WORKERS
 from .parser_corpus import compare_parser_corpus
 from .parser_corpus import discover_corpus_files
 from .parser_corpus import summarize_discovery
+from .repl import run_repl
 
 
 def _json_dump(payload: object) -> None:
@@ -132,6 +133,9 @@ def _parser_corpus_max_bytes(args: argparse.Namespace) -> int | None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tungsten")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    repl_parser = subparsers.add_parser("repl", help="Start the kernel-free Tungsten interpreter REPL.")
+    repl_parser.add_argument("--no-banner", action="store_true", help="Suppress the startup banner.")
 
     env_parser = subparsers.add_parser("env", help="Inspect the local Tungsten/Wolfram environment.")
     env_subparsers = env_parser.add_subparsers(dest="env_command", required=True)
@@ -448,7 +452,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    effective_argv = sys.argv[1:] if argv is None else argv
+    if not effective_argv:
+        return run_repl()
+
+    args = _build_parser().parse_args(effective_argv)
+
+    if args.command == "repl":
+        return run_repl(show_banner=not args.no_banner)
+
     installation = discover_installation()
 
     if args.command == "env":

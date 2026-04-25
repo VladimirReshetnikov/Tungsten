@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-25T19:36:30Z
-- Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
+- Updated (UTC): 2026-04-25T21:57:56Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 
 ## What this docs tree is for
 
@@ -131,9 +131,12 @@ The docs are split so readers can choose the right depth:
 
 ### Kernel-free structural analysis
 
+- Read [repl.md](./repl.md) if you want the console-mode `tungsten.exe` interpreter and its
+  `wolfram.exe`-style history behavior.
 - Read [expression-parser.md](./expression-parser.md).
 - Read [symbol-context-registry.md](./symbol-context-registry.md) if you need precise
-  `$Context`, `$ContextPath`, `Names`, `Symbol`, `Unique`, or `ValueQ` behavior.
+  `$Context`, `$ContextPath`, `Names`, `NameQ`, `Attributes`, `Symbol`, `Unique`, or `ValueQ`
+  behavior, including the Wolfram 14.3 <code>System`</code> symbol snapshot.
 - Read [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md) if you need precise
   `Sequence` / `Nothing` evaluation-order behavior.
 - Read [sequence-pattern-matching.md](./sequence-pattern-matching.md) if you need the exact

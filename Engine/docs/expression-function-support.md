@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T20:25:51Z
-- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
+- Updated (UTC): 2026-04-25T21:57:56Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -133,7 +133,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   custom notation, stylesheet-dependent box rules, or the Notation package.
 - Symbol and context functions use Tungsten's process-local registry. `$Context` and `$ContextPath`
   are fixed to <code>"Global`"</code> and <code>{"System`", "Global`"}</code> for now; user-defined
-  symbols have no own values, down values, up values, sub values, or attributes yet.
+  symbols have no own values, down values, up values, or sub values yet. The registry is seeded
+  from a Wolfram 14.3 snapshot of 7800 immediate <code>System`</code> symbols, including read-only
+  per-symbol attributes used by `Attributes`, `Names`, and `NameQ`.
 - That string-pattern subset supports literal strings, `StringExpression` / `~~`, anonymous `_`,
   `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures including
   `x : __` and `x : ___`, `Alternatives`, `Condition`, `PatternTest`, `HoldPattern`,
@@ -165,6 +167,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `Function[params, body, attrs]` currently honors `HoldFirst`, `HoldRest`, `HoldAll`,
   `HoldAllComplete`, `SequenceHold`, and `Listable`. Other attribute names are accepted
   structurally but do not yet change evaluation.
+- REPL-only session history heads `In`, `InString`, `Out`, `$Line`, and `DownValues` require an
+  active `EvaluationSession`, normally created by `python -m tungsten repl` or `tungsten.exe`.
+  Outside that context they remain inert or return empty read-only metadata.
 - The current structural pattern subset includes variable-length sequence patterns and the common
   advanced argument-pattern forms: anonymous and named `__`, `___`, `BlankSequence[...]`,
   `BlankNullSequence[...]`, `Repeated`, `RepeatedNull`, `PatternSequence`,
@@ -204,6 +209,13 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Contexts` | `Contexts[]`, `Contexts["pattern"]` | Lists contexts known to the process-local registry, optionally filtered with Wolfram-style name wildcards. | [Contexts](https://reference.wolfram.com/language/ref/Contexts.html) |
 | `Names` | `Names[]`, `Names["pattern"]`, `Names[{"p1", ...}]` | Lists registered symbol names visible to the registry. Visible contexts render by short name; non-visible contexts render fully qualified. | [Names](https://reference.wolfram.com/language/ref/Names.html) |
 | `NameQ` | `NameQ["pattern"]` | Returns `True` when `Names["pattern"]` would produce at least one registered symbol. | [NameQ](https://reference.wolfram.com/language/ref/NameQ.html) |
+| `Attributes` | `Attributes[sym]`, `Attributes["name"]`, `Attributes[{s1, ...}]` | Returns read-only attribute metadata from the registry. The shipped snapshot mirrors immediate <code>System`</code> symbols from the installed Wolfram 14.3 kernel; user-defined symbols currently have empty attribute lists. Attribute metadata is discoverable even when Tungsten has no evaluator rule for that symbol. | [Attributes](https://reference.wolfram.com/language/ref/Attributes.html) |
+| `$Line` | `$Line` in a REPL session | Returns the current REPL input line number during evaluation. Outside an active session it remains inert. | [$Line](https://reference.wolfram.com/language/ref/%24Line.html) |
+| `In` | `In[n]`, `In[]`, `In[-k]` in a REPL session | Returns and evaluates stored input expressions from the current REPL session. | [In](https://reference.wolfram.com/language/ref/In.html) |
+| `InString` | `InString[n]`, `InString[]`, `InString[-k]` in a REPL session | Returns stored raw input text from the current REPL session. | [InString](https://reference.wolfram.com/language/ref/InString.html) |
+| `Out` | `Out[n]`, `Out[]`, `Out[-k]`, plus parser shorthand `%`, `%%`, `%n` | Returns stored output expressions from the current REPL session. | [Out](https://reference.wolfram.com/language/ref/Out.html) |
+| `DownValues` | `DownValues[In]`, `DownValues[InString]`, `DownValues[Out]` in a REPL session | Returns read-only history downvalues for the active REPL session. Other symbols currently return `{}` in Tungsten's offline evaluator. | [DownValues](https://reference.wolfram.com/language/ref/DownValues.html) |
+| `Exit`, `Quit` | `Exit`, `Exit[]`, `Exit[code]`, `Quit`, `Quit[]`, `Quit[code]` in the REPL | Terminates the Tungsten REPL. Optional integer arguments become the process exit code. | [Exit](https://reference.wolfram.com/language/ref/Exit.html), [Quit](https://reference.wolfram.com/language/ref/Quit.html) |
 | `Unique` | `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, `Unique[{spec1, ...}]` | Generates fresh registered symbols using Tungsten's module counter or per-prefix string counters. | [Unique](https://reference.wolfram.com/language/ref/Unique.html) |
 | `ValueQ` | `ValueQ[expr]` | Returns `True` for explicit numeric, string, and byte-array literals, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally. This is conservative for unreduced built-in calls until Tungsten has value/rule storage; user-defined symbols currently return `False`. | [ValueQ](https://reference.wolfram.com/language/ref/ValueQ.html) |
 | `Plus` | `Plus[i1, ...]` and infix `+` when nested evaluation reaches an all-integer subexpression | Adds explicit integer arguments. `Plus[]` yields `0`. Mixed expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |

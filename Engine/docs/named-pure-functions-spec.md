@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers and contributors extending the expression subsystem
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-24T16:05:00Z
-- Updated (UTC): 2026-04-25T20:25:51Z
-- Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
+- Updated (UTC): 2026-04-25T20:58:10Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 
 ## Purpose
 
@@ -247,7 +247,9 @@ This implementation does not attempt to reproduce every Wolfram scoping construc
 - no named arguments;
 - no interaction-specific renaming across rules, pattern names, `With`, `Module`, or other scoping
   constructs beyond ordinary recursive traversal;
-- no general attribute registry beyond the pure-function application subset described above;
+- no mutable attribute registry or evaluator-wide attribute semantics beyond the pure-function
+  application subset described above. Tungsten does have a read-only Wolfram 14.3
+  <code>System`</code> attribute snapshot for `Attributes`, `Names`, and `NameQ`;
 - no attempt to mimic kernel messages exactly.
 
 The original milestone was specifically about named pure functions and capture-avoiding

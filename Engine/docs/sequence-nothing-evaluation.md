@@ -4,7 +4,8 @@
 - Audience: Tungsten maintainers and users who need precise offline evaluation behavior
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T01:00:00Z
-- Repository HEAD: dac74d643ce319a384a81fd5a91d6cd1f961f9f2
+- Updated (UTC): 2026-04-25T20:58:10Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related Wolfram docs:
   - [Sequence](https://reference.wolfram.com/language/ref/Sequence.html)
   - [Nothing](https://reference.wolfram.com/language/ref/Nothing.html)
@@ -20,7 +21,9 @@ bounded, explicit version of those rules so common structural transformations su
 list element with `Nothing` or constructing a call with `Sequence` work without launching a kernel.
 
 This document defines that behavior. It also states where Tungsten deliberately stops because it
-does not implement general attributes, definitions, upvalues, or inactive expressions.
+does not implement evaluator-wide attribute semantics, definitions, upvalues, or inactive
+expressions. The separate symbol registry can report read-only Wolfram 14.3 <code>System`</code> attributes,
+but most of those attributes do not drive evaluation here.
 
 ## Source Observations
 
@@ -84,9 +87,9 @@ Tungsten treats `Sequence` as follows:
 - Tungsten suppresses `Sequence` splicing for `HoldComplete`, `Unevaluated`, `Rule`, and
   `RuleDelayed`.
 
-Tungsten does not implement general attributes. User-defined or unknown symbols cannot acquire
-`SequenceHold` or `HoldAllComplete` behavior in the offline evaluator. The suppression list above is
-hardcoded and intentionally small.
+Tungsten does not implement evaluator-wide attributes. User-defined or unknown symbols cannot
+acquire `SequenceHold` or `HoldAllComplete` behavior in the offline evaluator. The suppression list
+above is hardcoded and intentionally small.
 
 ## Nothing Rules
 
@@ -125,7 +128,7 @@ This gives the expected practical behavior:
 
 Tungsten does not implement:
 
-- general `Attributes`;
+- mutable `Attributes` or evaluator-wide attribute semantics;
 - user-defined `SequenceHold` or `HoldAllComplete`;
 - `Inactive`;
 - `Unevaluated` stripping outside the narrow held-wrapper behavior already documented;

@@ -13,8 +13,14 @@ authors = [
   { name = "OpenAI Codex" }
 ]
 
+[project.scripts]
+tungsten = "tungsten.cli:main"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+tungsten = ["data/*.json"]

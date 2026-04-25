@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T20:25:51Z
-Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
+Updated (UTC): 2026-04-25T21:57:56Z
+Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 
 ## Summary
 
@@ -34,7 +34,8 @@ Repository HEAD: 72110c8dffa0787c9469a648fcffcb44f1eb3101
   `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
   `ReplacePart`, association constructors, key accessors, symbol and context registry functions
   such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`,
-  `$ContextPath`, and `ValueQ`, `Sequence` splicing, `Nothing` removal in evaluated list contexts,
+  `$ContextPath`, `Attributes`, and `ValueQ`, `Sequence` splicing, `Nothing` removal in evaluated
+  list contexts, REPL history heads such as `$Line`, `In`, `InString`, `Out`, and `DownValues`,
   Hold-family wrappers, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
@@ -56,6 +57,7 @@ Use the expression subsystem when you want:
 
 - structural analysis without launching a kernel;
 - symbol and context name queries without launching a kernel;
+- read-only Wolfram 14.3 <code>System`</code> symbol and attribute discovery without launching a kernel;
 - canonical formatting of textual Wolfram expressions;
 - lightweight expression traversal from Python or PowerShell;
 - deterministic scripting behavior that does not depend on evaluation rules, definitions, or
@@ -90,6 +92,8 @@ The parser currently handles:
 - prefix and postfix application such as `f @ x` and `x // f`, with `@` binding tighter than
   arithmetic but looser than direct function application;
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
+- output-history shorthand `%`, `%%`, and `%n`, which lower to `Out[-1]`, `Out[-2]`, and
+  `Out[n]`;
 - positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `##`, `##n`, `Slot[]`,
   `Slot[n]`, `SlotSequence[]`, `SlotSequence[n]`, and Wolfram's `#name` shorthand for
   `#["name"]` / `#1["name"]`;
@@ -566,7 +570,7 @@ The current subsystem does not aim to support:
 - full box language;
 - arbitrary StandardForm notebook surface syntax;
 - general evaluation;
-- definitions, attributes, or user-created transformation rules;
+- definitions, mutable attributes, or user-created transformation rules;
 - package loading or notebook-scoped semantics.
 
 ## Known kernel divergences

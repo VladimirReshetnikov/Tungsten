@@ -4,6 +4,8 @@ import re
 import unittest
 
 from tungsten.discovery import discover_installation
+from tungsten.expression import EvaluationSession
+from tungsten.expression import TungstenExitRequested
 from tungsten.expression import evaluate
 from tungsten.expression import parse_full_form
 from tungsten.expression import parse_input_form
@@ -131,6 +133,7 @@ class ExpressionParserTests(unittest.TestCase):
         map_apply = parse_input_form("f @@@ xs")
         dot_expr = parse_input_form("{a, b} . {c, d}")
         string_join = parse_input_form('"a" <> "b" <> "c"')
+        output_history = parse_input_form("% + %% + %12")
         self.assertEqual(same_q.to_full_form(), "SameQ[a, b]")
         self.assertEqual(unsame_q.to_full_form(), "UnsameQ[a, b]")
         self.assertEqual(composition.to_full_form(), "Composition[f, g]")
@@ -138,6 +141,7 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(map_apply.to_full_form(), "MapApply[f, xs]")
         self.assertEqual(dot_expr.to_full_form(), "Dot[List[a, b], List[c, d]]")
         self.assertEqual(string_join.to_full_form(), 'StringJoin[StringJoin["a", "b"], "c"]')
+        self.assertEqual(output_history.to_full_form(), "Plus[Plus[Out[-1], Out[-2]], Out[12]]")
 
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
@@ -1226,6 +1230,13 @@ class ExpressionEvaluationTests(unittest.TestCase):
         name_q_wildcard = evaluate(parse_input_form('NameQ["TungstenRegistryTest`*"]'))
         name_q_false = evaluate(parse_input_form('NameQ["TungstenRegistryMissing`*"]'))
         visible_builtin = evaluate(parse_input_form('NameQ["Plus"]'))
+        system_symbol_count = evaluate(parse_input_form('Length[Names["System`*"]]'))
+        unimplemented_system_symbol = evaluate(parse_input_form('NameQ["System`AASTriangle"]'))
+        plus_attributes = evaluate(parse_input_form("Attributes[Plus]"))
+        string_attributes = evaluate(parse_input_form('Attributes["System`Plus"]'))
+        attributes_attributes = evaluate(parse_input_form("Attributes[Attributes]"))
+        listable_attributes = evaluate(parse_input_form("Attributes[{Plus, Times}]"))
+        user_symbol_attributes = evaluate(parse_input_form("Attributes[tungstenNoAttributesSymbol]"))
         self.assertEqual(current_context.to_full_form(), '"Global`"')
         self.assertEqual(context_path.to_full_form(), 'List["System`", "Global`"]')
         self.assertEqual(qualified_context_path.to_full_form(), 'List["System`", "Global`"]')
@@ -1248,9 +1259,26 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(name_q_wildcard.to_full_form(), "True")
         self.assertEqual(name_q_false.to_full_form(), "False")
         self.assertEqual(visible_builtin.to_full_form(), "True")
+        self.assertEqual(system_symbol_count.to_full_form(), "7800")
+        self.assertEqual(unimplemented_system_symbol.to_full_form(), "True")
+        self.assertEqual(
+            plus_attributes.to_full_form(),
+            "List[Flat, Listable, NumericFunction, OneIdentity, Orderless, Protected]",
+        )
+        self.assertEqual(string_attributes.to_full_form(), plus_attributes.to_full_form())
+        self.assertEqual(attributes_attributes.to_full_form(), "List[HoldAll, Listable, Protected]")
+        self.assertEqual(
+            listable_attributes.to_full_form(),
+            "List[List[Flat, Listable, NumericFunction, OneIdentity, Orderless, Protected], "
+            "List[Flat, Listable, NumericFunction, OneIdentity, Orderless, Protected]]",
+        )
+        self.assertEqual(user_symbol_attributes.to_full_form(), "List[]")
 
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form('Symbol["not a symbol"]'))
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form("Attributes[1 + 1]"))
 
     def test_unique_and_valueq_use_symbol_registry(self) -> None:
         unique_default = evaluate(parse_input_form("Unique[]"))
@@ -1278,6 +1306,54 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(value_literal.to_full_form(), "True")
         self.assertEqual(value_evaluatable.to_full_form(), "True")
         self.assertEqual(value_inert_call.to_full_form(), "False")
+
+    def test_repl_history_symbols_and_downvalues_use_session_state(self) -> None:
+        session = EvaluationSession()
+
+        def submit(code: str) -> str:
+            parsed = parse_input_form(code)
+            session.begin_input(code, parsed)
+            result = evaluate(parsed, session=session)
+            session.finish_output(result)
+            return result.to_full_form()
+
+        self.assertEqual(submit("1 + 2"), "3")
+        self.assertEqual(submit("$Line"), "2")
+        self.assertEqual(submit("In[1]"), "3")
+        self.assertEqual(submit("InString[1]"), '"1 + 2"')
+        self.assertEqual(submit("Out[1]"), "3")
+        self.assertEqual(submit("In[]"), "3")
+        self.assertEqual(submit("InString[]"), '"In[]"')
+        self.assertEqual(submit("Out[]"), '"In[]"')
+        self.assertEqual(submit("%1 + 10"), "13")
+
+        in_downvalues = submit("DownValues[In]")
+        in_string_downvalues = submit("DownValues[InString]")
+        out_downvalues = submit("DownValues[Out]")
+
+        self.assertIn("RuleDelayed[HoldPattern[In[1]], Plus[1, 2]]", in_downvalues)
+        self.assertIn('RuleDelayed[HoldPattern[InString[1]], "1 + 2"]', in_string_downvalues)
+        self.assertIn("RuleDelayed[HoldPattern[Out[1]], 3]", out_downvalues)
+
+    def test_repl_in_history_self_reference_stays_inert(self) -> None:
+        session = EvaluationSession()
+        parsed = parse_input_form("In[1]")
+        session.begin_input("In[1]", parsed)
+        result = evaluate(parsed, session=session)
+        session.finish_output(result)
+        self.assertEqual(result.to_full_form(), "In[1]")
+
+    def test_repl_exit_and_quit_raise_session_exit(self) -> None:
+        session = EvaluationSession()
+        session.begin_input("Quit", parse_input_form("Quit"))
+        with self.assertRaises(TungstenExitRequested) as quit_context:
+            evaluate(parse_input_form("Quit"), session=session)
+        self.assertEqual(quit_context.exception.code, 0)
+
+        session.begin_input("Exit[5]", parse_input_form("Exit[5]"))
+        with self.assertRaises(TungstenExitRequested) as exit_context:
+            evaluate(parse_input_form("Exit[5]"), session=session)
+        self.assertEqual(exit_context.exception.code, 5)
 
     def test_string_structural_operations_follow_list_like_semantics(self) -> None:
         string_length = evaluate(parse_input_form('StringLength[{"ab", "c"}]'))
