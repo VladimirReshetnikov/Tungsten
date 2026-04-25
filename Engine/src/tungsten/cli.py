@@ -23,6 +23,7 @@ from .parser_corpus import DEFAULT_CORPUS_ROOT as DEFAULT_PARSER_CORPUS_ROOT
 from .parser_corpus import DEFAULT_KERNEL_BATCH_SIZE
 from .parser_corpus import DEFAULT_MAX_BYTES as DEFAULT_PARSER_CORPUS_MAX_BYTES
 from .parser_corpus import DEFAULT_PREVIEW_CHARS as DEFAULT_PARSER_CORPUS_PREVIEW_CHARS
+from .parser_corpus import DEFAULT_TUNGSTEN_WORKERS
 from .parser_corpus import compare_parser_corpus
 from .parser_corpus import discover_corpus_files
 from .parser_corpus import summarize_discovery
@@ -270,6 +271,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_KERNEL_BATCH_SIZE,
         help="Number of files parsed by each Wolfram kernel batch.",
+    )
+    parser_corpus_compare.add_argument(
+        "--tungsten-workers",
+        type=int,
+        default=DEFAULT_TUNGSTEN_WORKERS,
+        help="Number of local worker processes used for Tungsten-side parsing.",
     )
     parser_corpus_compare.add_argument(
         "--preview-chars",
@@ -594,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_form=args.form,
                 compare_wolfram=not args.skip_wolfram,
                 kernel_batch_size=args.kernel_batch_size,
+                tungsten_workers=args.tungsten_workers,
                 preview_chars=args.preview_chars,
                 shuffle=args.shuffle,
                 seed=args.seed,

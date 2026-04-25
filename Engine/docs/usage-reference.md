@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T02:09:44Z
-- Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
+- Updated (UTC): 2026-04-25T02:12:28Z
+- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -577,7 +577,8 @@ Important options:
 - `--max-file-mb <n>` / `--max-bytes <n>` / `--no-max-bytes`: large-file behavior
 - `--form input|fullform|standard`: Tungsten expression form for non-notebook source files
 - `--skip-wolfram`: run only the Tungsten side
-- `--kernel-batch-size <n>`: number of files per Wolfram kernel batch
+- `--kernel-batch-size <n>`: number of files per Wolfram kernel batch; defaults to `100`
+- `--tungsten-workers <n>`: local worker processes for Tungsten-side parsing
 - `--preview-chars <n>`: maximum preview text stored per attempt
 - `--no-write`: stdout-only summary
 - `--include-results`: include per-file results in stdout JSON
@@ -801,7 +802,7 @@ Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
 
 ```powershell
 Get-TungstenParserCorpus -Sample 30
-Compare-TungstenParserCorpus -MaxFiles 100 -MaxFileMB 2
+Compare-TungstenParserCorpus -MaxFiles 100 -MaxFileMB 2 -KernelBatchSize 100 -TungstenWorkers 8
 Compare-TungstenParserCorpus -SkipWolfram -NoWrite -IncludeResults
 ```
 

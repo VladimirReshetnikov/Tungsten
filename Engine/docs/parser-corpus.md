@@ -4,7 +4,7 @@
 - Audience: Tungsten maintainers and parser/evaluator contributors
 - Scope: Local parser-corpus discovery, Tungsten parser runs, and Wolfram held-parser comparison
 - Created (UTC): 2026-04-25T00:50:09Z
-- Updated (UTC): 2026-04-25T00:53:10Z
+- Updated (UTC): 2026-04-25T02:12:28Z
 - Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 - Related docs:
   - [Project README](../README.md)
@@ -67,7 +67,8 @@ python -m tungsten parser-corpus compare `
     --corpus-root C:\TestData\tungsten-wolfram-parser-corpus `
     --max-files 100 `
     --max-file-mb 2 `
-    --kernel-batch-size 25
+    --kernel-batch-size 100 `
+    --tungsten-workers 8
 ```
 
 Run Tungsten only, without launching Wolfram:
@@ -99,6 +100,14 @@ Useful failure switches:
 These switches are intended for focused subsets or milestone gates. The full corpus is expected to
 contain many known gaps while Tungsten is still growing toward full Wolfram Language syntax.
 
+Performance-oriented options:
+
+- `--kernel-batch-size <n>` controls how many files each Wolfram kernel launch parses. The default
+  is `100`; larger batches reduce kernel startup overhead but delay partial results if one batch is
+  interrupted.
+- `--tungsten-workers <n>` controls local worker processes for Tungsten-side parsing. Use `8` on
+  this machine for broad notebook-heavy runs.
+
 ## PowerShell
 
 Import the Tungsten module:
@@ -116,7 +125,7 @@ Get-TungstenParserCorpus -Sample 30
 Compare:
 
 ```powershell
-Compare-TungstenParserCorpus -MaxFiles 100 -MaxFileMB 2 -KernelBatchSize 25
+Compare-TungstenParserCorpus -MaxFiles 100 -MaxFileMB 2 -KernelBatchSize 100 -TungstenWorkers 8
 ```
 
 The repository also includes a script wrapper:

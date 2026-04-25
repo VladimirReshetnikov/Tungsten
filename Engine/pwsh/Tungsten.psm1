@@ -406,7 +406,9 @@ function Compare-TungstenParserCorpus {
 
         [switch] $SkipWolfram,
 
-        [int] $KernelBatchSize = 25,
+        [int] $KernelBatchSize = 100,
+
+        [int] $TungstenWorkers = 1,
 
         [int] $PreviewChars = 2000,
 
@@ -430,6 +432,7 @@ function Compare-TungstenParserCorpus {
         "--max-file-mb", $MaxFileMB,
         "--form", $Form,
         "--kernel-batch-size", $KernelBatchSize,
+        "--tungsten-workers", $TungstenWorkers,
         "--preview-chars", $PreviewChars,
         "--seed", $Seed
     )

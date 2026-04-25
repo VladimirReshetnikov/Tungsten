@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-25T02:09:44Z
-- Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
+- Updated (UTC): 2026-04-25T02:12:28Z
+- Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 
 ## What this docs tree is for
 
@@ -92,6 +92,7 @@ The docs are split so readers can choose the right depth:
 | [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
 | [parser-corpus.md](parser-corpus.md) | Parser corpus discovery, Wolfram held-parser comparison, outputs, and test-entrypoint reference. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
+| [reports/2026-04-25-parser-corpus-speed.md](reports/2026-04-25-parser-corpus-speed.md) | Parser corpus throughput measurements, bottleneck analysis, implemented optimizations, and full-corpus runtime estimates. |
 | [reports/2026-04-24-license-seat-investigation.md](reports/2026-04-24-license-seat-investigation.md) | Investigation report for intermittent license-seat failures, ghost/orphaned Wolfram processes, and Tungsten's launch-gate mitigation. |
 
 ## Suggested learning path by task

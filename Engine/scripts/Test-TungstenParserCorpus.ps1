@@ -15,6 +15,8 @@ Wolfram kernel using held parsing, and writes JSON/Markdown artifacts under the 
 
 The Wolfram side uses `ToExpression[..., InputForm, HoldComplete]`; corpus files are parsed but
 not evaluated.
+
+Use `-TungstenWorkers 8` on this machine for broad notebook-heavy runs.
 #>
 [CmdletBinding()]
 param(
@@ -53,7 +55,10 @@ param(
     [switch] $SkipWolfram,
 
     [Parameter()]
-    [int] $KernelBatchSize = 25,
+    [int] $KernelBatchSize = 100,
+
+    [Parameter()]
+    [int] $TungstenWorkers = 1,
 
     [Parameter()]
     [int] $PreviewChars = 2000,
@@ -100,6 +105,7 @@ $arguments = @(
     '--max-file-mb', $MaxFileMB,
     '--form', $Form,
     '--kernel-batch-size', $KernelBatchSize,
+    '--tungsten-workers', $TungstenWorkers,
     '--preview-chars', $PreviewChars,
     '--seed', $Seed
 )

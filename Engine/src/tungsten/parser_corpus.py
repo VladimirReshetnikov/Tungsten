@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import fnmatch
+import concurrent.futures
 import json
 import random
 import time
@@ -24,7 +25,8 @@ DEFAULT_OUTPUT_DIRECTORY_NAME = "validation"
 DEFAULT_EXTENSIONS = (".wl", ".m", ".wls", ".mt", ".wlt", ".nb", ".nbp")
 NOTEBOOK_EXTENSIONS = (".nb", ".nbp")
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
-DEFAULT_KERNEL_BATCH_SIZE = 25
+DEFAULT_KERNEL_BATCH_SIZE = 100
+DEFAULT_TUNGSTEN_WORKERS = 1
 DEFAULT_PREVIEW_CHARS = 2_000
 
 
@@ -225,6 +227,50 @@ def parse_file_with_tungsten(
         )
 
 
+def _parse_files_with_tungsten(
+    files: Sequence[CorpusFile],
+    *,
+    source_form: str,
+    max_bytes: int | None,
+    preview_chars: int,
+    workers: int,
+) -> dict[str, ParserAttempt]:
+    normalized_workers = max(1, int(workers))
+    if normalized_workers == 1 or len(files) <= 1:
+        return {
+            file.relative_path: parse_file_with_tungsten(
+                file,
+                source_form=source_form,
+                max_bytes=max_bytes,
+                preview_chars=preview_chars,
+            )
+            for file in files
+        }
+
+    attempts: dict[str, ParserAttempt] = {}
+    worker_inputs = [
+        (file, source_form, max_bytes, preview_chars)
+        for file in files
+    ]
+    with concurrent.futures.ProcessPoolExecutor(max_workers=normalized_workers) as executor:
+        for relative_path, attempt in executor.map(_parse_file_with_tungsten_worker, worker_inputs):
+            attempts[relative_path] = attempt
+    return attempts
+
+
+def _parse_file_with_tungsten_worker(payload: tuple[CorpusFile, str, int | None, int]) -> tuple[str, ParserAttempt]:
+    file, source_form, max_bytes, preview_chars = payload
+    return (
+        file.relative_path,
+        parse_file_with_tungsten(
+            file,
+            source_form=source_form,
+            max_bytes=max_bytes,
+            preview_chars=preview_chars,
+        ),
+    )
+
+
 def parse_files_with_wolfram_kernel(
     files: Sequence[CorpusFile],
     *,
@@ -326,6 +372,7 @@ def compare_parser_corpus(
     source_form: str = "input",
     compare_wolfram: bool = True,
     kernel_batch_size: int = DEFAULT_KERNEL_BATCH_SIZE,
+    tungsten_workers: int = DEFAULT_TUNGSTEN_WORKERS,
     preview_chars: int = DEFAULT_PREVIEW_CHARS,
     shuffle: bool = False,
     seed: int = 0,
@@ -333,6 +380,8 @@ def compare_parser_corpus(
     wolfram_batch_parser: WolframBatchParser | None = None,
     write_outputs: bool = True,
 ) -> ParserCorpusRun:
+    total_start = time.perf_counter()
+    discovery_start = time.perf_counter()
     files = discover_corpus_files(
         corpus_root,
         extensions=extensions,
@@ -342,19 +391,22 @@ def compare_parser_corpus(
         shuffle=shuffle,
         seed=seed,
     )
+    discovery_elapsed_ms = _elapsed_ms(discovery_start)
 
-    tungsten_attempts = {
-        file.relative_path: parse_file_with_tungsten(
-            file,
-            source_form=source_form,
-            max_bytes=max_bytes,
-            preview_chars=preview_chars,
-        )
-        for file in files
-    }
+    tungsten_start = time.perf_counter()
+    tungsten_attempts = _parse_files_with_tungsten(
+        files,
+        source_form=source_form,
+        max_bytes=max_bytes,
+        preview_chars=preview_chars,
+        workers=tungsten_workers,
+    )
+    tungsten_elapsed_ms = _elapsed_ms(tungsten_start)
 
     wolfram_attempts: dict[str, ParserAttempt] = {}
+    wolfram_elapsed_ms = 0.0
     if compare_wolfram:
+        wolfram_start = time.perf_counter()
         eligible_files = [
             file
             for file in files
@@ -370,6 +422,7 @@ def compare_parser_corpus(
                     preview_chars=preview_chars,
                 )
             wolfram_attempts.update(batch_attempts)
+        wolfram_elapsed_ms = _elapsed_ms(wolfram_start)
 
     for file in files:
         if file.relative_path in wolfram_attempts:
@@ -418,19 +471,36 @@ def compare_parser_corpus(
             "source_form": source_form,
             "compare_wolfram": compare_wolfram,
             "kernel_batch_size": kernel_batch_size,
+            "tungsten_workers": tungsten_workers,
             "preview_chars": preview_chars,
             "shuffle": shuffle,
             "seed": seed,
         },
+        timings={
+            "discovery_elapsed_ms": discovery_elapsed_ms,
+            "tungsten_wall_elapsed_ms": tungsten_elapsed_ms,
+            "wolfram_wall_elapsed_ms": wolfram_elapsed_ms,
+        },
     )
 
+    output_elapsed_ms = 0.0
     if write_outputs and output_directory is not None:
+        output_start = time.perf_counter()
         output_files = write_parser_corpus_outputs(
             output_directory,
             summary=summary,
             results=results,
         )
+        output_elapsed_ms = _elapsed_ms(output_start)
         summary["output_files"] = output_files
+    summary.setdefault("timings", {})["output_write_elapsed_ms"] = output_elapsed_ms
+    summary["timings"]["total_elapsed_ms"] = _elapsed_ms(total_start)
+    summary_path = output_files.get("summary")
+    if summary_path is not None:
+        Path(summary_path).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    report_path = output_files.get("report")
+    if report_path is not None:
+        Path(report_path).write_text(_render_markdown_report(summary, results), encoding="utf-8")
 
     return ParserCorpusRun(summary=summary, results=results, output_files=output_files)
 
@@ -465,6 +535,7 @@ def _build_run_summary(
     files: Sequence[CorpusFile],
     results: Sequence[ParserCorpusResult],
     options: Mapping[str, object],
+    timings: Mapping[str, float] | None = None,
 ) -> dict[str, object]:
     tungsten_failure_types = Counter(
         result.tungsten.error_type or "Unknown"
@@ -476,10 +547,34 @@ def _build_run_summary(
         for result in results
         if result.wolfram.status == "failure"
     )
+    timing_payload = dict(timings or {})
+    tungsten_attempt_elapsed_ms = sum(
+        result.tungsten.elapsed_ms or 0.0
+        for result in results
+        if result.tungsten.status != "skipped"
+    )
+    wolfram_attempt_elapsed_ms = sum(
+        result.wolfram.elapsed_ms or 0.0
+        for result in results
+        if result.wolfram.status != "skipped"
+    )
+    timing_payload.update(
+        {
+            "tungsten_attempt_elapsed_ms": round(tungsten_attempt_elapsed_ms, 3),
+            "wolfram_attempt_elapsed_ms": round(wolfram_attempt_elapsed_ms, 3),
+            "tungsten_files_per_second_wall": _rate(len(results), timing_payload.get("tungsten_wall_elapsed_ms")),
+            "wolfram_files_per_second_wall": _rate(
+                sum(1 for result in results if result.wolfram.status != "skipped"),
+                timing_payload.get("wolfram_wall_elapsed_ms"),
+            ),
+        }
+    )
+
     return {
         "generated_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "corpus_root": str(Path(corpus_root).resolve()),
         "options": dict(options),
+        "timings": timing_payload,
         "file_count": len(files),
         "total_bytes": sum(file.size_bytes for file in files),
         "by_extension": dict(sorted(Counter(file.extension for file in files).items())),
@@ -516,6 +611,23 @@ def _render_markdown_report(summary: Mapping[str, object], results: Sequence[Par
             lines.append(f"- `{key}`: `{value}`")
     else:
         lines.append("- None")
+
+    timings = summary.get("timings")
+    lines.extend(["", "## Timings", ""])
+    if isinstance(timings, dict) and timings:
+        for key in (
+            "total_elapsed_ms",
+            "discovery_elapsed_ms",
+            "tungsten_wall_elapsed_ms",
+            "wolfram_wall_elapsed_ms",
+            "output_write_elapsed_ms",
+            "tungsten_files_per_second_wall",
+            "wolfram_files_per_second_wall",
+        ):
+            if key in timings:
+                lines.append(f"- `{key}`: `{timings[key]}`")
+    else:
+        lines.append("- Not recorded.")
 
     lines.extend(["", "## First Wolfram-Accepted Tungsten Gaps", ""])
     gaps = [result for result in results if result.outcome == "tungsten_gap"][:50]
@@ -692,6 +804,12 @@ def _skipped_attempt(parser: str, reason: str, message: str) -> ParserAttempt:
 
 def _elapsed_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 3)
+
+
+def _rate(count: int, elapsed_ms: float | None) -> float | None:
+    if elapsed_ms is None or elapsed_ms <= 0:
+        return None
+    return round(count / (elapsed_ms / 1000), 3)
 
 
 def _optional_float(value: object) -> float | None:

@@ -4,7 +4,7 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T00:53:10Z
+- Updated (UTC): 2026-04-25T02:12:28Z
 - Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 - Related code:
   - `src/Tungsten/src/tungsten/`
@@ -242,7 +242,7 @@ python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
 python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
 python -m tungsten docs search NotebookGet
 python -m tungsten expr evaluate --code "1 + 2 + 3"
-python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2
+python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2 --tungsten-workers 8
 ```
 
 ### PowerShell
@@ -256,7 +256,7 @@ New-TungstenInlineBoxString -Prefix "icon: " -BoxExpression "GraphicsBox[{Circle
 Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "True && False && x"
 Find-TungstenDocumentation -Query "NotebookGet"
-Compare-TungstenParserCorpus -MaxFiles 25 -MaxFileMB 2
+Compare-TungstenParserCorpus -MaxFiles 25 -MaxFileMB 2 -TungstenWorkers 8
 ```
 
 ### C#/.NET
@@ -392,7 +392,7 @@ pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
 pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
-pwsh -File .\src\Tungsten\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100
+pwsh -File .\src\Tungsten\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100 -TungstenWorkers 8
 pwsh -File .\src\Tungsten\scripts\Update-TungstenDocsProvenance.ps1
 ```
 
