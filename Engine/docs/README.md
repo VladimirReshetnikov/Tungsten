@@ -60,16 +60,17 @@ The docs are split so readers can choose the right depth:
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
 4. [expression-parser.md](./expression-parser.md)
-5. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
-6. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
-7. [import-export-formats.md](./import-export-formats.md)
-8. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
-9. [expression-function-support.md](./expression-function-support.md)
-10. [pattern-matching-plan.md](./pattern-matching-plan.md)
-11. [parser-corpus.md](./parser-corpus.md)
-12. [inline-box-strings.md](./inline-box-strings.md)
-13. [notebook-assistant.md](./notebook-assistant.md)
-14. [troubleshooting.md](./troubleshooting.md)
+5. [symbol-context-registry.md](./symbol-context-registry.md)
+6. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
+7. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
+8. [import-export-formats.md](./import-export-formats.md)
+9. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
+10. [expression-function-support.md](./expression-function-support.md)
+11. [pattern-matching-plan.md](./pattern-matching-plan.md)
+12. [parser-corpus.md](./parser-corpus.md)
+13. [inline-box-strings.md](./inline-box-strings.md)
+14. [notebook-assistant.md](./notebook-assistant.md)
+15. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -84,6 +85,7 @@ The docs are split so readers can choose the right depth:
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
+| [symbol-context-registry.md](symbol-context-registry.md) | Normative design note for Tungsten's process-local symbol registry, fixed context state, name queries, `Unique`, and `ValueQ` boundaries. |
 | [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
 | [sequence-pattern-matching.md](sequence-pattern-matching.md) | Normative specification for `__` / `___` pattern allocation, named sequence bindings, and repeated sequence variables. |
 | [import-export-formats.md](import-export-formats.md) | Focused guide for kernel-free `ImportString` / `ExportString` / `ImportByteArray` / `ExportByteArray` support and the implemented format subset. |
@@ -129,6 +131,8 @@ The docs are split so readers can choose the right depth:
 ### Kernel-free structural analysis
 
 - Read [expression-parser.md](./expression-parser.md).
+- Read [symbol-context-registry.md](./symbol-context-registry.md) if you need precise
+  `$Context`, `$ContextPath`, `Names`, `Symbol`, `Unique`, or `ValueQ` behavior.
 - Read [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md) if you need precise
   `Sequence` / `Nothing` evaluation-order behavior.
 - Read [sequence-pattern-matching.md](./sequence-pattern-matching.md) if you need the exact

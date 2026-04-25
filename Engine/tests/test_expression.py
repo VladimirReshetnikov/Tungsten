@@ -1092,6 +1092,79 @@ class ExpressionEvaluationTests(unittest.TestCase):
         with self.assertRaises(WolframEvaluationError):
             evaluate(parse_input_form('ToExpression["x", TraditionalForm]'))
 
+    def test_symbol_context_registry_and_name_queries(self) -> None:
+        current_context = evaluate(parse_input_form("$Context"))
+        context_path = evaluate(parse_input_form("$ContextPath"))
+        qualified_context_path = evaluate(parse_input_form("System`$ContextPath"))
+        context_function = evaluate(parse_input_form("Context[]"))
+        system_context = evaluate(parse_input_form("Context[Plus]"))
+        qualified_system_context = evaluate(parse_input_form("Context[System`Plus]"))
+        symbol_name = evaluate(parse_input_form('SymbolName[Symbol["TungstenRegistryTest`alpha"]]'))
+        symbol_context = evaluate(parse_input_form('Context[Symbol["TungstenRegistryTest`alpha"]]'))
+        another_symbol = evaluate(parse_input_form('Symbol["TungstenRegistryTest`beta"]'))
+        global_symbol = evaluate(parse_input_form('Symbol["Global`tungstenGlobalSymbol"]'))
+        qualified_constructor = evaluate(parse_input_form('System`Symbol["Global`tungstenQualifiedSymbol"]'))
+        system_symbol = evaluate(parse_input_form('Symbol["System`Plus"]'))
+        contexts = evaluate(parse_input_form('Contexts["TungstenRegistryTest`*"]'))
+        names = evaluate(parse_input_form('Names["TungstenRegistryTest`*"]'))
+        visible_name = evaluate(parse_input_form('Names["System`Plus"]'))
+        name_q_true = evaluate(parse_input_form('NameQ["TungstenRegistryTest`alpha"]'))
+        name_q_wildcard = evaluate(parse_input_form('NameQ["TungstenRegistryTest`*"]'))
+        name_q_false = evaluate(parse_input_form('NameQ["TungstenRegistryMissing`*"]'))
+        visible_builtin = evaluate(parse_input_form('NameQ["Plus"]'))
+        self.assertEqual(current_context.to_full_form(), '"Global`"')
+        self.assertEqual(context_path.to_full_form(), 'List["System`", "Global`"]')
+        self.assertEqual(qualified_context_path.to_full_form(), 'List["System`", "Global`"]')
+        self.assertEqual(context_function.to_full_form(), '"Global`"')
+        self.assertEqual(system_context.to_full_form(), '"System`"')
+        self.assertEqual(qualified_system_context.to_full_form(), '"System`"')
+        self.assertEqual(symbol_name.to_full_form(), '"alpha"')
+        self.assertEqual(symbol_context.to_full_form(), '"TungstenRegistryTest`"')
+        self.assertEqual(another_symbol.to_full_form(), "TungstenRegistryTest`beta")
+        self.assertEqual(global_symbol.to_full_form(), "tungstenGlobalSymbol")
+        self.assertEqual(qualified_constructor.to_full_form(), "tungstenQualifiedSymbol")
+        self.assertEqual(system_symbol.to_full_form(), "Plus")
+        self.assertEqual(contexts.to_full_form(), 'List["TungstenRegistryTest`"]')
+        self.assertEqual(
+            names.to_full_form(),
+            'List["TungstenRegistryTest`alpha", "TungstenRegistryTest`beta"]',
+        )
+        self.assertEqual(visible_name.to_full_form(), 'List["Plus"]')
+        self.assertEqual(name_q_true.to_full_form(), "True")
+        self.assertEqual(name_q_wildcard.to_full_form(), "True")
+        self.assertEqual(name_q_false.to_full_form(), "False")
+        self.assertEqual(visible_builtin.to_full_form(), "True")
+
+        with self.assertRaises(WolframEvaluationError):
+            evaluate(parse_input_form('Symbol["not a symbol"]'))
+
+    def test_unique_and_valueq_use_symbol_registry(self) -> None:
+        unique_default = evaluate(parse_input_form("Unique[]"))
+        unique_symbol = evaluate(parse_input_form("Unique[tungstenUniqueSymbol]"))
+        unique_string_name = evaluate(parse_input_form('SymbolName[Unique["tungstenUniqueString"]]'))
+        unique_list = evaluate(parse_input_form('Unique[{tungstenUniqueList, "tungstenUniqueListString"}]'))
+        distinct = evaluate(parse_input_form('UnsameQ[Unique["tungstenDistinct"], Unique["tungstenDistinct"]]'))
+        value_user_symbol = evaluate(parse_input_form("ValueQ[tungstenValueQSymbol]"))
+        value_context = evaluate(parse_input_form("ValueQ[$Context]"))
+        value_qualified_context = evaluate(parse_input_form("ValueQ[System`$Context]"))
+        value_literal = evaluate(parse_input_form("ValueQ[1]"))
+        value_evaluatable = evaluate(parse_input_form("ValueQ[1 + 2]"))
+        value_inert_call = evaluate(parse_input_form("ValueQ[tungstenValueQHead[tungstenValueQSymbol]]"))
+        self.assertRegex(unique_default.to_input_form(), r"^\$\d+$")
+        self.assertRegex(unique_symbol.to_input_form(), r"^tungstenUniqueSymbol\$\d+$")
+        self.assertRegex(unique_string_name.to_full_form(), r'^"tungstenUniqueString\d+"$')
+        self.assertRegex(
+            unique_list.to_full_form(),
+            r"^List\[tungstenUniqueList\$\d+, tungstenUniqueListString\d+\]$",
+        )
+        self.assertEqual(distinct.to_full_form(), "True")
+        self.assertEqual(value_user_symbol.to_full_form(), "False")
+        self.assertEqual(value_context.to_full_form(), "True")
+        self.assertEqual(value_qualified_context.to_full_form(), "True")
+        self.assertEqual(value_literal.to_full_form(), "True")
+        self.assertEqual(value_evaluatable.to_full_form(), "True")
+        self.assertEqual(value_inert_call.to_full_form(), "False")
+
     def test_string_structural_operations_follow_list_like_semantics(self) -> None:
         string_length = evaluate(parse_input_form('StringLength[{"ab", "c"}]'))
         string_take = evaluate(parse_input_form('StringTake["abcdef", {2, 5, 2}]'))

@@ -164,6 +164,424 @@ class ByteArrayExpr(Expr):
         }
 
 
+_SYSTEM_SYMBOL_NAMES = {
+    "$Context",
+    "$ContextPath",
+    "Abs",
+    "All",
+    "Alternatives",
+    "And",
+    "Append",
+    "Apply",
+    "Array",
+    "Association",
+    "AssociationMap",
+    "AssociationQ",
+    "AssociationThread",
+    "BaseDecode",
+    "BaseEncode",
+    "Blank",
+    "BlankNullSequence",
+    "BlankSequence",
+    "BlockMap",
+    "Boole",
+    "ByteArray",
+    "ByteArrayQ",
+    "ByteArrayToString",
+    "Cases",
+    "CharacterRange",
+    "Characters",
+    "Clip",
+    "Comap",
+    "ComapApply",
+    "ComplexInfinity",
+    "ComposeList",
+    "Composition",
+    "Condition",
+    "ConstantArray",
+    "Construct",
+    "Context",
+    "Contexts",
+    "Delete",
+    "DeleteCases",
+    "DeleteDuplicates",
+    "DeleteDuplicatesBy",
+    "Depth",
+    "DiagonalMatrix",
+    "Discard",
+    "DiscreteDelta",
+    "Distribute",
+    "Divide",
+    "Dot",
+    "Drop",
+    "DuplicateFreeQ",
+    "EndOfString",
+    "Equal",
+    "EvenQ",
+    "Except",
+    "ExportByteArray",
+    "ExportString",
+    "Extract",
+    "False",
+    "First",
+    "FirstCase",
+    "FixedPoint",
+    "FixedPointList",
+    "Flatten",
+    "Fold",
+    "FoldList",
+    "FoldPair",
+    "FoldPairList",
+    "FoldWhile",
+    "FoldWhileList",
+    "FreeQ",
+    "FromCharacterCode",
+    "Function",
+    "Greater",
+    "GreaterEqual",
+    "Head",
+    "Hold",
+    "HoldComplete",
+    "HoldForm",
+    "HoldPattern",
+    "Identity",
+    "IdentityMatrix",
+    "If",
+    "ImportByteArray",
+    "ImportString",
+    "Indeterminate",
+    "Infinity",
+    "Inner",
+    "Integer",
+    "IntegerQ",
+    "Join",
+    "Key",
+    "KeyDrop",
+    "KeyExistsQ",
+    "KeyMap",
+    "KeyMemberQ",
+    "KeyTake",
+    "KeyValueMap",
+    "Keys",
+    "KroneckerDelta",
+    "Last",
+    "Length",
+    "LengthWhile",
+    "Less",
+    "LessEqual",
+    "Level",
+    "List",
+    "Lookup",
+    "Map",
+    "MapAll",
+    "MapApply",
+    "MapAt",
+    "MapIndexed",
+    "MapThread",
+    "MatchQ",
+    "Max",
+    "MemberQ",
+    "Min",
+    "Missing",
+    "Mod",
+    "Most",
+    "Names",
+    "Nest",
+    "NestList",
+    "NestWhile",
+    "NestWhileList",
+    "None",
+    "Normal",
+    "Not",
+    "Nothing",
+    "Null",
+    "OddQ",
+    "Operate",
+    "Or",
+    "Outer",
+    "Part",
+    "Partition",
+    "Pattern",
+    "Piecewise",
+    "Pick",
+    "Plus",
+    "Position",
+    "Power",
+    "Prepend",
+    "Quotient",
+    "QuotientRemainder",
+    "Ramp",
+    "Range",
+    "Rational",
+    "Real",
+    "RealAbs",
+    "RealSign",
+    "ReleaseHold",
+    "Repeated",
+    "RepeatedNull",
+    "Replace",
+    "ReplaceAll",
+    "ReplaceAt",
+    "ReplacePart",
+    "ReplaceRepeated",
+    "Rest",
+    "Reverse",
+    "RightComposition",
+    "RotateLeft",
+    "RotateRight",
+    "Rule",
+    "RuleDelayed",
+    "SameAs",
+    "SameQ",
+    "Scan",
+    "Select",
+    "SelectFirst",
+    "Sequence",
+    "SequenceFold",
+    "SequenceFoldList",
+    "Sign",
+    "Slot",
+    "Span",
+    "StartOfString",
+    "String",
+    "StringCases",
+    "StringContainsQ",
+    "StringDrop",
+    "StringEndsQ",
+    "StringExpression",
+    "StringFreeQ",
+    "StringInsert",
+    "StringJoin",
+    "StringLength",
+    "StringMatchQ",
+    "StringPosition",
+    "StringQ",
+    "StringReplace",
+    "StringReverse",
+    "StringStartsQ",
+    "StringTake",
+    "StringToByteArray",
+    "Switch",
+    "Symbol",
+    "SymbolName",
+    "Take",
+    "TakeDrop",
+    "TakeList",
+    "TakeWhile",
+    "Thread",
+    "Through",
+    "Times",
+    "ToCharacterCode",
+    "ToExpression",
+    "ToString",
+    "True",
+    "TrueQ",
+    "Tuples",
+    "Unequal",
+    "Unevaluated",
+    "UnitStep",
+    "UnitVector",
+    "Unitize",
+    "Unique",
+    "UnsameQ",
+    "ValueQ",
+    "Values",
+    "Verbatim",
+    "Which",
+}
+
+
+@dataclass
+class SymbolRecord:
+    full_name: str
+    context: str
+    short_name: str
+    built_in: bool = False
+    attributes: tuple[str, ...] = ()
+    own_value: Expr | None = None
+    down_values: tuple[Expr, ...] = ()
+    up_values: tuple[Expr, ...] = ()
+    sub_values: tuple[Expr, ...] = ()
+
+
+class SymbolRegistry:
+    def __init__(self) -> None:
+        self.current_context = "Global`"
+        self.context_path = ("System`", "Global`")
+        self._symbols: dict[str, SymbolRecord] = {}
+        self._contexts: set[str] = {self.current_context, *self.context_path}
+        self._module_number = 0
+        self._string_unique_counters: dict[str, int] = {}
+        for name in sorted(_SYSTEM_SYMBOL_NAMES):
+            self.ensure_full_name(f"System`{name}", built_in=True)
+
+    @property
+    def contexts(self) -> tuple[str, ...]:
+        return tuple(sorted(self._contexts))
+
+    def ensure_full_name(self, full_name: str, *, built_in: bool = False) -> SymbolRecord:
+        context, short_name = _split_symbol_full_name(full_name)
+        if not _is_valid_context_name(context) or not _is_valid_symbol_short_name(short_name):
+            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {full_name!r}.")
+        record = self._symbols.get(full_name)
+        if record is None:
+            record = SymbolRecord(full_name=full_name, context=context, short_name=short_name, built_in=built_in)
+            self._symbols[full_name] = record
+        elif built_in and not record.built_in:
+            record.built_in = True
+        self._contexts.add(context)
+        return record
+
+    def ensure_name(self, name: str, *, built_in: bool = False) -> SymbolRecord:
+        return self.ensure_full_name(self.resolve_full_name(name), built_in=built_in)
+
+    def resolve_full_name(self, name: str) -> str:
+        if "`" in name:
+            context, short_name = _split_symbol_full_name(name)
+            if not context:
+                context = self.current_context
+            if not _is_valid_context_name(context) or not _is_valid_symbol_short_name(short_name):
+                raise WolframEvaluationError(f"Invalid Wolfram symbol name: {name!r}.")
+            return f"{context}{short_name}"
+        if not _is_valid_symbol_short_name(name):
+            raise WolframEvaluationError(f"Invalid Wolfram symbol name: {name!r}.")
+        for context in self.context_path:
+            full_name = f"{context}{name}"
+            if full_name in self._symbols:
+                return full_name
+        return f"{self.current_context}{name}"
+
+    def resolve_existing(self, name: str) -> SymbolRecord | None:
+        try:
+            full_name = self.resolve_full_name(name)
+        except WolframEvaluationError:
+            return None
+        return self._symbols.get(full_name)
+
+    def record_for_symbol(self, expr: Symbol) -> SymbolRecord:
+        return self.ensure_name(expr.name)
+
+    def symbol_from_name(self, name: str) -> Symbol:
+        record = self.ensure_name(name)
+        return self._display_symbol_for_record(record)
+
+    def unique_symbol(self, base: Expr | None = None) -> Symbol:
+        if base is None:
+            self._module_number += 1
+            return self._display_symbol_for_record(self.ensure_full_name(f"{self.current_context}${self._module_number}"))
+        if isinstance(base, Symbol):
+            base_record = self.record_for_symbol(base)
+            self._module_number += 1
+            return self._display_symbol_for_record(
+                self.ensure_full_name(f"{base_record.context}{base_record.short_name}${self._module_number}")
+            )
+        if isinstance(base, String):
+            prefix = base.value
+            if not prefix or not _is_valid_symbol_short_name(f"{prefix}1"):
+                raise WolframEvaluationError("Unique expects a valid symbol or symbol-name prefix.")
+            next_index = self._string_unique_counters.get(prefix, 0) + 1
+            while self.resolve_existing(f"{self.current_context}{prefix}{next_index}") is not None:
+                next_index += 1
+            self._string_unique_counters[prefix] = next_index
+            return self._display_symbol_for_record(self.ensure_full_name(f"{self.current_context}{prefix}{next_index}"))
+        raise WolframEvaluationError("Unique expects no argument, a symbol, a string prefix, or a list of those forms.")
+
+    def _display_symbol_for_record(self, record: SymbolRecord) -> Symbol:
+        if record.context in set(self.context_path) | {self.current_context}:
+            return Symbol(record.short_name)
+        return Symbol(record.full_name)
+
+    def names(self, pattern: Expr | None = None) -> tuple[str, ...]:
+        if pattern is None:
+            patterns = (string("*"),)
+        elif isinstance(pattern, Call) and pattern.has_head("List"):
+            patterns = tuple(pattern.arguments)
+        else:
+            patterns = (pattern,)
+        matched: set[str] = set()
+        for item in patterns:
+            if not isinstance(item, String):
+                raise WolframEvaluationError("Names expects a string pattern or a list of string patterns.")
+            matched.update(self._names_for_string_pattern(item.value))
+        return tuple(sorted(matched))
+
+    def _names_for_string_pattern(self, pattern: str) -> tuple[str, ...]:
+        has_context = "`" in pattern
+        regex = _wolfram_name_pattern_to_regex(pattern)
+        result: list[str] = []
+        visible_contexts = set(self.context_path) | {self.current_context}
+        for record in self._symbols.values():
+            candidate = record.full_name if has_context else record.short_name
+            if not has_context and record.context not in visible_contexts:
+                continue
+            if regex.fullmatch(candidate):
+                result.append(record.short_name if record.context in visible_contexts else record.full_name)
+        return tuple(result)
+
+    def contexts_matching(self, pattern: Expr | None = None) -> tuple[str, ...]:
+        if pattern is None:
+            return self.contexts
+        if not isinstance(pattern, String):
+            raise WolframEvaluationError("Contexts expects an optional string pattern.")
+        regex = _wolfram_name_pattern_to_regex(pattern.value)
+        return tuple(context for context in self.contexts if regex.fullmatch(context))
+
+    def name_q(self, pattern: Expr) -> Symbol:
+        return _bool_symbol(bool(self.names(pattern)))
+
+
+def _split_symbol_full_name(name: str) -> tuple[str, str]:
+    index = name.rfind("`")
+    if index < 0:
+        return "", name
+    return name[:index + 1], name[index + 1:]
+
+
+def _is_valid_context_name(context: str) -> bool:
+    if not context or not context.endswith("`"):
+        return False
+    parts = context[:-1].split("`")
+    return all(part and _is_valid_symbol_short_name(part) for part in parts)
+
+
+def _is_valid_symbol_short_name(name: str) -> bool:
+    if not name:
+        return False
+    first = name[0]
+    if not (first.isalpha() or first == "$"):
+        return False
+    return all(char.isalnum() or char == "$" for char in name[1:])
+
+
+def _wolfram_name_pattern_to_regex(pattern: str) -> re.Pattern[str]:
+    pieces: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\" and index + 1 < len(pattern):
+            pieces.append(re.escape(pattern[index + 1]))
+            index += 2
+            continue
+        if char == "*":
+            pieces.append(".*")
+        elif char == "@":
+            pieces.append("[^A-Z]+")
+        else:
+            pieces.append(re.escape(char))
+        index += 1
+    return re.compile("".join(pieces))
+
+
+_SYMBOL_REGISTRY = SymbolRegistry()
+
+
+def _system_dispatch_name(expr: Symbol) -> str:
+    record = _SYMBOL_REGISTRY.resolve_existing(expr.name)
+    if record is not None and record.context == "System`" and record.built_in:
+        return record.short_name
+    return expr.name
+
+
 @dataclass(frozen=True)
 class Call(Expr):
     head_expr: Expr
@@ -179,7 +597,7 @@ class Call(Expr):
         return False
 
     def has_head(self, name: str) -> bool:
-        return isinstance(self.head_expr, Symbol) and self.head_expr.name == name
+        return isinstance(self.head_expr, Symbol) and _system_dispatch_name(self.head_expr) == name
 
     def to_full_form(self) -> str:
         return f"{self.head_expr.to_full_form()}[{', '.join(arg.to_full_form() for arg in self.arguments)}]"
@@ -299,6 +717,13 @@ def _format_span(arguments: Sequence[Expr]) -> str:
 
 
 def symbol(name: str) -> Symbol:
+    try:
+        _SYMBOL_REGISTRY.ensure_name(name)
+    except WolframEvaluationError:
+        # Existing AST code uses a few structural pseudo-symbol spellings, such as
+        # -Infinity, that are not constructible Wolfram identifiers. Keep the atom;
+        # user-facing Symbol["..."] validation still goes through the registry.
+        pass
     return Symbol(name)
 
 
@@ -1031,6 +1456,72 @@ def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper
     if wrapper_head is not None:
         parsed = Call(head_expr=wrapper_head, arguments=(parsed,))
     return evaluate(parsed)
+
+
+def symbol_expr(name: Expr) -> Symbol:
+    if not isinstance(name, String):
+        raise WolframEvaluationError("Symbol expects a string symbol name.")
+    return _SYMBOL_REGISTRY.symbol_from_name(name.value)
+
+
+def symbol_name_expr(expr: Expr) -> String:
+    if isinstance(expr, Symbol):
+        return string(_SYMBOL_REGISTRY.record_for_symbol(expr).short_name)
+    if isinstance(expr, String):
+        record = _SYMBOL_REGISTRY.resolve_existing(expr.value)
+        if record is not None:
+            return string(record.short_name)
+        context, short_name = _split_symbol_full_name(expr.value)
+        if context and _is_valid_symbol_short_name(short_name):
+            return string(short_name)
+    raise WolframEvaluationError("SymbolName expects a symbol or an existing symbol name.")
+
+
+def context_expr(expr: Expr | None = None) -> String:
+    if expr is None:
+        return string(_SYMBOL_REGISTRY.current_context)
+    if isinstance(expr, Symbol):
+        return string(_SYMBOL_REGISTRY.record_for_symbol(expr).context)
+    if isinstance(expr, String):
+        record = _SYMBOL_REGISTRY.resolve_existing(expr.value)
+        if record is None:
+            raise WolframEvaluationError(f"Context could not find a symbol named {expr.value!r}.")
+        return string(record.context)
+    raise WolframEvaluationError("Context expects zero arguments, a symbol, or an existing symbol name.")
+
+
+def contexts_expr(pattern: Expr | None = None) -> Call:
+    return _evaluated_list_expr(*(string(context) for context in _SYMBOL_REGISTRY.contexts_matching(pattern)))
+
+
+def names_expr(pattern: Expr | None = None) -> Call:
+    return _evaluated_list_expr(*(string(name) for name in _SYMBOL_REGISTRY.names(pattern)))
+
+
+def name_q_expr(pattern: Expr) -> Symbol:
+    return _SYMBOL_REGISTRY.name_q(pattern)
+
+
+def unique_expr(spec: Expr | None = None) -> Expr:
+    if spec is None:
+        return _SYMBOL_REGISTRY.unique_symbol()
+    if isinstance(spec, Call) and spec.has_head("List"):
+        return _evaluated_list_expr(*(_SYMBOL_REGISTRY.unique_symbol(item) for item in spec.arguments))
+    return _SYMBOL_REGISTRY.unique_symbol(spec)
+
+
+def value_q_expr(expr: Expr) -> Symbol:
+    if isinstance(expr, Symbol):
+        record = _SYMBOL_REGISTRY.record_for_symbol(expr)
+        if record.full_name in {"System`$Context", "System`$ContextPath"}:
+            return _bool_symbol(True)
+        return _bool_symbol(record.own_value is not None)
+    if isinstance(expr, (Integer, Real, String, ByteArrayExpr)):
+        return _bool_symbol(True)
+    try:
+        return _bool_symbol(evaluate(expr) != expr)
+    except WolframEvaluationError:
+        return _bool_symbol(False)
 
 
 def _normalize_import_export_format_name(value: Expr, function_name: str) -> str:
@@ -5903,14 +6394,25 @@ def _rebuild_selected_parts(
 
 
 def evaluate(expr: Expr) -> Expr:
-    if isinstance(expr, (Symbol, Integer, Real, String)):
+    if isinstance(expr, Symbol):
+        try:
+            record = _SYMBOL_REGISTRY.ensure_name(expr.name)
+        except WolframEvaluationError:
+            return expr
+        if record.full_name == "System`$Context":
+            return string(_SYMBOL_REGISTRY.current_context)
+        if record.full_name == "System`$ContextPath":
+            return _evaluated_list_expr(*(string(context) for context in _SYMBOL_REGISTRY.context_path))
+        return expr
+
+    if isinstance(expr, (Integer, Real, String)):
         return expr
 
     if not isinstance(expr, Call):
         return expr
 
     if isinstance(expr.head_expr, Symbol):
-        raw_head_name = expr.head_expr.name
+        raw_head_name = _system_dispatch_name(expr.head_expr)
 
         if raw_head_name in _HELD_ARGUMENT_HEADS:
             held_arguments = _normalize_arguments_for_head(raw_head_name, expr.arguments, evaluated=False)
@@ -5924,6 +6426,11 @@ def evaluate(expr: Expr) -> Expr:
             if len(expr.arguments) != 1:
                 raise WolframEvaluationError("ReleaseHold expects exactly one argument.")
             return release_hold(evaluate(expr.arguments[0]))
+
+        if raw_head_name == "ValueQ":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("ValueQ expects exactly one argument.")
+            return value_q_expr(expr.arguments[0])
 
         if raw_head_name == "MatchQ":
             if len(expr.arguments) != 2:
@@ -6039,7 +6546,7 @@ def evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("Pick expects a data expression, a selector expression, and an optional pattern.")
 
     evaluated_head = evaluate(expr.head_expr)
-    if isinstance(evaluated_head, Symbol) and evaluated_head.name == "Nothing":
+    if isinstance(evaluated_head, Symbol) and _system_dispatch_name(evaluated_head) == "Nothing":
         tuple(evaluate(argument) for argument in expr.arguments)
         return symbol("Nothing")
 
@@ -6060,8 +6567,9 @@ def evaluate(expr: Expr) -> Expr:
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
+    evaluated_head_name = _system_dispatch_name(evaluated_head)
     evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
-    evaluated_arguments = _normalize_arguments_for_head(evaluated_head.name, evaluated_arguments, evaluated=True)
+    evaluated_arguments = _normalize_arguments_for_head(evaluated_head_name, evaluated_arguments, evaluated=True)
     evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     arithmetic_result = _evaluate_integer_arithmetic(evaluated_expr)
@@ -6091,6 +6599,49 @@ def evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Identity expects exactly one argument.")
         return evaluated_arguments[0]
+
+    if evaluated_head_name == "Symbol":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Symbol expects exactly one string argument.")
+        return symbol_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "SymbolName":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("SymbolName expects exactly one argument.")
+        return symbol_name_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "Unique":
+        if len(evaluated_arguments) == 0:
+            return unique_expr()
+        if len(evaluated_arguments) == 1:
+            return unique_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Unique currently expects zero arguments or one symbol, string, or list argument.")
+
+    if evaluated_head_name == "Names":
+        if len(evaluated_arguments) == 0:
+            return names_expr()
+        if len(evaluated_arguments) == 1:
+            return names_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Names expects zero arguments or one string pattern/list of string patterns.")
+
+    if evaluated_head_name == "NameQ":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("NameQ expects exactly one string pattern.")
+        return name_q_expr(evaluated_arguments[0])
+
+    if evaluated_head_name == "Contexts":
+        if len(evaluated_arguments) == 0:
+            return contexts_expr()
+        if len(evaluated_arguments) == 1:
+            return contexts_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Contexts expects zero arguments or one string pattern.")
+
+    if evaluated_head_name == "Context":
+        if len(evaluated_arguments) == 0:
+            return context_expr()
+        if len(evaluated_arguments) == 1:
+            return context_expr(evaluated_arguments[0])
+        raise WolframEvaluationError("Context expects zero arguments or one symbol/name argument.")
 
     if evaluated_head.name == "ToString":
         if len(evaluated_arguments) == 1:

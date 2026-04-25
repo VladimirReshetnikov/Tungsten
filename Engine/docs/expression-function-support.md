@@ -4,10 +4,11 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T02:39:15Z
-- Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
+- Updated (UTC): 2026-04-25T17:48:49Z
+- Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
 - Related docs:
   - [Expression Parser](./expression-parser.md)
+  - [Symbol and Context Registry](./symbol-context-registry.md)
   - [Sequence and Nothing Evaluation](./sequence-nothing-evaluation.md)
   - [Sequence Pattern Matching](./sequence-pattern-matching.md)
   - [Usage Reference](./usage-reference.md)
@@ -124,6 +125,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   canonical `InputForm` so the result is parseable by Tungsten's kernel-free `ToExpression`.
   FrontEnd box-string rendering and formats such as `OutputForm`, `TraditionalForm`, `TeXForm`,
   and `MathMLForm` are out of scope.
+- Symbol and context functions use Tungsten's process-local registry. `$Context` and `$ContextPath`
+  are fixed to <code>"Global`"</code> and <code>{"System`", "Global`"}</code> for now; user-defined
+  symbols have no own values, down values, up values, sub values, or attributes yet.
 - That string-pattern subset supports literal strings, `StringExpression` / `~~`, anonymous `_`,
   `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures via
   `x : patt`, `Alternatives`, `Condition`, `HoldPattern`, `Except` over a supported
@@ -167,6 +171,16 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Length` | `Length[expr]` | Returns the number of immediate arguments in an expression. | [Length](https://reference.wolfram.com/language/ref/Length) |
 | `Depth` | `Depth[expr]` | Returns the structural depth of an expression tree. For associations, Tungsten measures depth through values rather than keys or raw `Rule` wrappers. | [Depth](https://reference.wolfram.com/language/ref/Depth) |
 | `Head` | `Head[expr]` | Returns the head of an expression. | [Head](https://reference.wolfram.com/language/ref/Head) |
+| `$Context` | `$Context` and <code>System`$Context</code> | Returns Tungsten's fixed current context string <code>"Global`"</code>. Assignment is not implemented. | [$Context](https://reference.wolfram.com/language/ref/%24Context.html) |
+| `$ContextPath` | `$ContextPath` and <code>System`$ContextPath</code> | Returns Tungsten's fixed visible context list <code>{"System`", "Global`"}</code>. Assignment is not implemented. | [$ContextPath](https://reference.wolfram.com/language/ref/%24ContextPath.html) |
+| `Symbol` | `Symbol["name"]` | Validates and registers a symbol name, then returns the symbol using visible-context rendering. Names in <code>System`</code> or <code>Global`</code> display by short name; names in other contexts display fully qualified. | [Symbol](https://reference.wolfram.com/language/ref/Symbol.html) |
+| `SymbolName` | `SymbolName[sym]` and practical string-name forms | Returns a symbol's short name. Tungsten also accepts strings that name existing symbols, plus explicit valid context-qualified strings. | [SymbolName](https://reference.wolfram.com/language/ref/SymbolName.html) |
+| `Context` | `Context[]`, `Context[sym]`, and practical string-name forms for existing symbols | Returns the current context or the registered context of a symbol. | [Context](https://reference.wolfram.com/language/ref/Context.html) |
+| `Contexts` | `Contexts[]`, `Contexts["pattern"]` | Lists contexts known to the process-local registry, optionally filtered with Wolfram-style name wildcards. | [Contexts](https://reference.wolfram.com/language/ref/Contexts.html) |
+| `Names` | `Names[]`, `Names["pattern"]`, `Names[{"p1", ...}]` | Lists registered symbol names visible to the registry. Visible contexts render by short name; non-visible contexts render fully qualified. | [Names](https://reference.wolfram.com/language/ref/Names.html) |
+| `NameQ` | `NameQ["pattern"]` | Returns `True` when `Names["pattern"]` would produce at least one registered symbol. | [NameQ](https://reference.wolfram.com/language/ref/NameQ.html) |
+| `Unique` | `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, `Unique[{spec1, ...}]` | Generates fresh registered symbols using Tungsten's module counter or per-prefix string counters. | [Unique](https://reference.wolfram.com/language/ref/Unique.html) |
+| `ValueQ` | `ValueQ[expr]` | Returns `True` for explicit numeric, string, and byte-array literals, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally. This is conservative for unreduced built-in calls until Tungsten has value/rule storage; user-defined symbols currently return `False`. | [ValueQ](https://reference.wolfram.com/language/ref/ValueQ.html) |
 | `Plus` | `Plus[i1, ...]` and infix `+` when nested evaluation reaches an all-integer subexpression | Adds explicit integer arguments. `Plus[]` yields `0`. Mixed expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
 | `Times` | `Times[i1, ...]` and infix `*` when nested evaluation reaches an all-integer subexpression | Multiplies explicit integer arguments. `Times[]` yields `1`. Mixed expressions remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
 | `Power` | `Power[base, exponent]` and infix `^` when both arguments are integers and the exponent is non-negative, excluding `0^0` | Raises an integer base to a non-negative integer exponent when the result stays in the integer subset. Negative exponents remain inert in this pass. | [Power](https://reference.wolfram.com/language/ref/Power) |

@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T02:39:15Z
-Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
+Updated (UTC): 2026-04-25T17:48:49Z
+Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
 
 ## Summary
 
@@ -29,8 +29,10 @@ Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`,
   `ExportString`, `ImportByteArray`, `ExportByteArray`, `ToString`, and `ToExpression`, `Pick`,
   `Select`, `Discard`, `SelectFirst`, `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`,
-  `ReplacePart`, association constructors, key accessors, `Sequence` splicing, `Nothing` removal
-  in evaluated list contexts, Hold-family wrappers, and related exact-position transforms;
+  `ReplacePart`, association constructors, key accessors, symbol and context registry functions
+  such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`,
+  `$ContextPath`, and `ValueQ`, `Sequence` splicing, `Nothing` removal in evaluated list contexts,
+  Hold-family wrappers, and related exact-position transforms;
 - preservation of Wolfram string literals that contain embedded inline box escapes such as
   `\!\(\*GraphicsBox[...]\)`.
 
@@ -42,13 +44,15 @@ links, read [expression-function-support.md](./expression-function-support.md). 
 offline import / export format subset and its data-shape rules, read
 [import-export-formats.md](./import-export-formats.md). For the evaluator ordering rules that make
 `Sequence` and `Nothing` special without a live kernel, read
-[sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md).
+[sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md). For the process-local name
+registry and fixed context state, read [symbol-context-registry.md](./symbol-context-registry.md).
 
 ## When to use this subsystem
 
 Use the expression subsystem when you want:
 
 - structural analysis without launching a kernel;
+- symbol and context name queries without launching a kernel;
 - canonical formatting of textual Wolfram expressions;
 - lightweight expression traversal from Python or PowerShell;
 - deterministic scripting behavior that does not depend on evaluation rules, definitions, or
@@ -345,6 +349,9 @@ Structurally evaluate implemented built-ins:
 
 ```powershell
 python -m tungsten expr evaluate --code "Length[{a, b, c}]"
+python -m tungsten expr evaluate --code '$ContextPath'
+python -m tungsten expr evaluate --code 'Context[System`Plus]'
+python -m tungsten expr evaluate --code '{Symbol["TungstenParser`alpha"], Names["TungstenParser`*"]}'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
 python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
@@ -445,6 +452,8 @@ Tungsten currently implements a broader structural subset that includes:
   byte, and compression-wrapper formats;
 - textual expression conversion through `ToString` and `ToExpression` for `InputForm` and the
   supported textual `StandardForm` subset;
+- process-local symbol/context registry behavior for `Symbol`, `SymbolName`, `Unique`, `Names`,
+  `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -497,6 +506,9 @@ Examples:
 - `ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]` evaluates to
   `HoldComplete[1 + 2]`;
 - `ToExpression["f @ x // g", StandardForm, HoldComplete]` evaluates to `HoldComplete[g[f[x]]]`;
+- <code>{Symbol["TungstenParser`alpha"], Names["TungstenParser`*"]}</code> evaluates to
+  <code>{TungstenParser`alpha, {"TungstenParser`alpha"}}</code>;
+- `ValueQ[userDefinedSymbol]` evaluates to `False`;
 - `Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]` evaluates to `{"ab", "ba"}`;
 - `Mod[-14, 5]` evaluates to `1`;
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;

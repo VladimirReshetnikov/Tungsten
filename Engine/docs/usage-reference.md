@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T02:39:15Z
-- Repository HEAD: 83607cff26e26661814ef7dcfb906fef4799b5b3
+- Updated (UTC): 2026-04-25T17:48:49Z
+- Repository HEAD: 7312c7acbea3192296e6e3f8ff6f4ff36f1529f1
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -14,6 +14,7 @@
   - [Troubleshooting](./troubleshooting.md)
   - [Notebook Assistant](./notebook-assistant.md)
   - [Expression Parser](./expression-parser.md)
+  - [Symbol and Context Registry](./symbol-context-registry.md)
   - [Expression Function Support](./expression-function-support.md)
   - [Sequence Pattern Matching](./sequence-pattern-matching.md)
   - [Parser Corpus](./parser-corpus.md)
@@ -355,6 +356,10 @@ Examples:
 python -m tungsten expr evaluate --code "Length[{a, b, c}]"
 python -m tungsten expr evaluate --code "1 + 2 + 3"
 python -m tungsten expr evaluate --code "True && False && x"
+python -m tungsten expr evaluate --code '$ContextPath'
+python -m tungsten expr evaluate --code 'Context[System`Plus]'
+python -m tungsten expr evaluate --code '{Symbol["TungstenUsage`alpha"], Names["TungstenUsage`*"]}'
+python -m tungsten expr evaluate --code 'ValueQ[userDefinedSymbol]'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
@@ -413,6 +418,8 @@ The implemented inert evaluator currently covers:
 - `Length`
 - `Depth`
 - `Head`
+- symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
+  `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`
 - integer arithmetic via `Plus`, `Times`, and `Power` when all arguments in the evaluated
   subexpression are explicit integers
 - integer relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
