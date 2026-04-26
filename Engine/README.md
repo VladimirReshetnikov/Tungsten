@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T21:57:56Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-26T19:29:11Z
+- Repository HEAD: a71088d55007ea86a1e13192cd8a437f53057c7c
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -126,14 +126,25 @@ The current workspace is built around seven complementary capabilities:
    structural built-in set such as hold-like conditionals (`If`, `Which`, `Switch`, `Piecewise`),
    integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `StringQ`,
    `DigitQ`, `LetterQ`, and `EvenQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
-   `Min`, `Clip`, and `KroneckerDelta`, Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
+   `Min`/`Max` (with single-list-argument fold), `Clip`, and `KroneckerDelta`, real-rounding heads
+   `Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, and `Sqrt` over the explicit-number
+   subset, number-theory heads `GCD`, `LCM`, `Divisors`, `PrimeQ`, `CompositeQ`, `EulerPhi`,
+   `MoebiusMu`, `Prime`, `PrimePi`, `NextPrime`, `PowerMod`, `IntegerLength`, `IntegerDigits`,
+   `FromDigits`, and bitwise `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`,
+   Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
    `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot`, array and sequence builders
    such as `Array`, `Range`, `Partition`, and `BlockMap`, search and de-duplication heads such as
-   `FirstCase`, `Position`, and `DeleteDuplicates`, byte and character heads such as `ByteArray`,
+   `FirstCase`, `Position`, and `DeleteDuplicates`, statistical helpers `Mean`, `Median`,
+   `Tally`, `Counts`, `Catenate`, `Differences`, `Accumulate`, `Riffle`, `Total`, `Count`,
+   `AllTrue`/`AnyTrue`/`NoneTrue`, `ContainsAll`/`ContainsAny`/`ContainsExactly`/`ContainsNone`,
+   combinatorial helpers `Subsets`, `Permutations`, `Union`, `Intersection`, `Complement`, and
+   one-dimensional `PadLeft` and `PadRight`, byte and character heads such as `ByteArray`,
    `BaseEncode`, `BaseDecode`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`,
-   `StringInsert`, `StringReverse`, structural pattern forms such as `PatternTest`, `Optional`,
+   `StringInsert`, `StringReverse`, `StringSplit`, `StringRiffle`, `StringTrim`,
+   `StringPadLeft`/`StringPadRight`, `StringRepeat`, `StringCount`, `ToUpperCase`/`ToLowerCase`,
+   `Capitalize`, structural pattern forms such as `PatternTest`, `Optional`,
    `Repeated`, `PatternSequence`, `OrderlessPatternSequence`, `OptionsPattern`, `Longest`, and
    `Shortest`, string-pattern heads such as `StringMatchQ`, `StringFreeQ`,
    `StringStartsQ`, `StringEndsQ`, `StringPosition`, `StringContainsQ`, `StringCases`, and
@@ -144,7 +155,7 @@ The current workspace is built around seven complementary capabilities:
    `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
    `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`, plus `Pick`, `Select`, `Discard`, `SelectFirst`,
    `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`,
-   `Lookup`, `KeyTake`, and symbol/context registry heads such as `Symbol`, `SymbolName`,
+   `Lookup`, `KeyTake`, `KeySort`, and symbol/context registry heads such as `Symbol`, `SymbolName`,
    `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`,
    read-only `Attributes`, and `ValueQ`. The registry is pre-seeded with the immediate
    <code>System`</code> symbol catalog and attributes from the installed Wolfram 14.3 kernel so

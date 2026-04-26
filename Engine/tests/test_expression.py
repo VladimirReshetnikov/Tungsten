@@ -572,7 +572,12 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(nested_times.to_full_form(), "24")
         self.assertEqual(nested_power.to_full_form(), "8")
         self.assertEqual(mixed_operator.to_full_form(), "Plus[3, a]")
-        self.assertEqual(mixed_head.to_full_form(), "Plus[1, 2, a]")
+        # Mixed numeric/symbolic arguments fold the numeric prefix into a
+        # single combined number that leads the result, matching Wolfram's
+        # canonical Plus[3, a] shape. The symbolic remainder retains its
+        # input order; we still do not implement Orderless rearrangement
+        # of the symbolic part.
+        self.assertEqual(mixed_head.to_full_form(), "Plus[3, a]")
         self.assertEqual(unary_minus.to_full_form(), "-3")
 
     def test_sequence_and_nothing_follow_argument_list_rules(self) -> None:
@@ -1126,10 +1131,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         slot_sequence_from_second = evaluate(parse_input_form("(f[##2] &)[a, b, c]"))
         slot_sequence_top_level = evaluate(parse_input_form("(## &)[a, b]"))
         slot_sequence_missing = evaluate(parse_input_form("(f[##4] &)[a, b, c]"))
-        self.assertEqual(applied.to_full_form(), "Plus[a, 1]")
+        self.assertEqual(applied.to_full_form(), "Plus[1, a]")
         self.assertEqual(explicit_slot.to_full_form(), "x")
         self.assertEqual(apply_result.to_full_form(), "Plus[a, b]")
-        self.assertEqual(map_result.to_full_form(), "List[Plus[a, 1], Plus[b, 1]]")
+        self.assertEqual(map_result.to_full_form(), "List[Plus[1, a], Plus[1, b]]")
         self.assertEqual(map_at_result.to_full_form(), "g[a, f[b]]")
         self.assertEqual(named.to_full_form(), 'obj["name"]')
         self.assertEqual(slot_sequence.to_full_form(), "f[a, b, c]")
@@ -2744,6 +2749,248 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(rule_delayed_distinction.to_full_form(), "False")
         self.assertEqual(rule_delayed_match.to_full_form(), "True")
         self.assertEqual(duplicate_pattern.to_full_form(), "False")
+
+
+class NumericRoundingTests(unittest.TestCase):
+    """Floor / Ceiling / Round / IntegerPart / FractionalPart / Sqrt for the
+    explicit-number subset. Round uses banker's rounding to match Wolfram."""
+
+    def test_floor_and_ceiling_on_real(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Floor[3.7]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("Floor[-3.7]")).to_full_form(), "-4")
+        self.assertEqual(evaluate(parse_input_form("Ceiling[3.2]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("Ceiling[-3.2]")).to_full_form(), "-3")
+
+    def test_floor_on_rational(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Floor[7/2]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("Ceiling[7/2]")).to_full_form(), "4")
+
+    def test_round_uses_banker_rounding(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Round[3.5]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("Round[2.5]")).to_full_form(), "2")
+        self.assertEqual(evaluate(parse_input_form("Round[7/2]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("Round[5/2]")).to_full_form(), "2")
+
+    def test_integer_and_fractional_part(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("IntegerPart[3.7]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("IntegerPart[-3.7]")).to_full_form(), "-3")
+        self.assertEqual(evaluate(parse_input_form("IntegerPart[5/3]")).to_full_form(), "1")
+
+    def test_sqrt_perfect_square_and_radical(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Sqrt[16]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("Sqrt[2]")).to_full_form(), "Power[2, Rational[1, 2]]")
+        self.assertEqual(evaluate(parse_input_form("Sqrt[1/4]")).to_full_form(), "Rational[1, 2]")
+        self.assertEqual(evaluate(parse_input_form("Sqrt[-4]")).to_full_form(), "Times[2, I]")
+
+    def test_min_max_fold_through_single_list(self) -> None:
+        # Wolfram's Min/Max fold a single wrapping List the same as direct
+        # n-ary call form.
+        self.assertEqual(evaluate(parse_input_form("Min[{1, 2, 3}]")).to_full_form(), "1")
+        self.assertEqual(evaluate(parse_input_form("Max[{1, 2, 3}]")).to_full_form(), "3")
+
+
+class NumberTheoryTests(unittest.TestCase):
+    def test_gcd_lcm_basic(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("GCD[12, 18]")).to_full_form(), "6")
+        self.assertEqual(evaluate(parse_input_form("GCD[12, 18, 30]")).to_full_form(), "6")
+        self.assertEqual(evaluate(parse_input_form("LCM[4, 6]")).to_full_form(), "12")
+        self.assertEqual(evaluate(parse_input_form("LCM[]")).to_full_form(), "1")
+        self.assertEqual(evaluate(parse_input_form("GCD[]")).to_full_form(), "0")
+
+    def test_divisors(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Divisors[12]")).to_full_form(), "List[1, 2, 3, 4, 6, 12]")
+        self.assertEqual(evaluate(parse_input_form("Divisors[7]")).to_full_form(), "List[1, 7]")
+
+    def test_prime_q_handles_large_values(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("PrimeQ[7]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("PrimeQ[8]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("PrimeQ[1000000007]")).to_full_form(), "True")
+
+    def test_euler_phi_and_moebius(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("EulerPhi[12]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("MoebiusMu[6]")).to_full_form(), "1")
+        self.assertEqual(evaluate(parse_input_form("MoebiusMu[12]")).to_full_form(), "0")
+
+    def test_prime_navigation(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("PrimePi[10]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("PrimePi[100]")).to_full_form(), "25")
+        self.assertEqual(evaluate(parse_input_form("Prime[10]")).to_full_form(), "29")
+        self.assertEqual(evaluate(parse_input_form("NextPrime[10]")).to_full_form(), "11")
+
+    def test_power_mod_and_bit_ops(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("PowerMod[3, 5, 7]")).to_full_form(), "5")
+        self.assertEqual(evaluate(parse_input_form("PowerMod[3, -1, 7]")).to_full_form(), "5")
+        self.assertEqual(evaluate(parse_input_form("BitAnd[12, 10]")).to_full_form(), "8")
+        self.assertEqual(evaluate(parse_input_form("BitOr[12, 10]")).to_full_form(), "14")
+        self.assertEqual(evaluate(parse_input_form("BitXor[12, 10]")).to_full_form(), "6")
+        self.assertEqual(evaluate(parse_input_form("BitShiftLeft[3, 2]")).to_full_form(), "12")
+
+    def test_integer_digits_and_length(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("IntegerDigits[12345]")).to_full_form(), "List[1, 2, 3, 4, 5]")
+        self.assertEqual(evaluate(parse_input_form("IntegerDigits[12345, 16]")).to_full_form(), "List[3, 0, 3, 9]")
+        self.assertEqual(evaluate(parse_input_form("IntegerDigits[12, 2, 8]")).to_full_form(), "List[0, 0, 0, 0, 1, 1, 0, 0]")
+        self.assertEqual(evaluate(parse_input_form("FromDigits[{1, 2, 3, 4}]")).to_full_form(), "1234")
+        self.assertEqual(evaluate(parse_input_form("FromDigits[{1, 2, 3, 4}, 16]")).to_full_form(), "4660")
+        self.assertEqual(evaluate(parse_input_form("FromDigits[\"abc\", 16]")).to_full_form(), "2748")
+        self.assertEqual(evaluate(parse_input_form("IntegerLength[12345]")).to_full_form(), "5")
+
+
+class StructuralListTests(unittest.TestCase):
+    def test_total_on_list_and_matrix_and_assoc(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Total[{1, 2, 3, 4}]")).to_full_form(), "10")
+        self.assertEqual(evaluate(parse_input_form("Total[{{1, 2}, {3, 4}}]")).to_full_form(), "List[4, 6]")
+        self.assertEqual(evaluate(parse_input_form("Total[<|a -> 1, b -> 2|>]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("Total[{}]")).to_full_form(), "0")
+
+    def test_tally_and_counts_preserve_first_occurrence_order(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Tally[{a, b, a, c, a, b}]")).to_full_form(),
+            "List[List[a, 3], List[b, 2], List[c, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Counts[{a, b, a, c, a, b}]")).to_full_form(),
+            "Association[Rule[a, 3], Rule[b, 2], Rule[c, 1]]",
+        )
+
+    def test_catenate_handles_lists_and_associations(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Catenate[{{a, b}, {c, d}}]")).to_full_form(), "List[a, b, c, d]")
+        self.assertEqual(
+            evaluate(parse_input_form("Catenate[<|a -> {1, 2}, b -> {3, 4}|>]")).to_full_form(),
+            "List[1, 2, 3, 4]",
+        )
+
+    def test_differences_and_accumulate(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Differences[{1, 3, 6, 10}]")).to_full_form(), "List[2, 3, 4]")
+        self.assertEqual(evaluate(parse_input_form("Accumulate[{1, 2, 3, 4}]")).to_full_form(), "List[1, 3, 6, 10]")
+        self.assertEqual(
+            evaluate(parse_input_form("Accumulate[<|a -> 1, b -> 2, c -> 3|>]")).to_full_form(),
+            "Association[Rule[a, 1], Rule[b, 3], Rule[c, 6]]",
+        )
+
+    def test_riffle(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Riffle[{a, b, c}, x]")).to_full_form(), "List[a, x, b, x, c]")
+        self.assertEqual(
+            evaluate(parse_input_form("Riffle[{a, b, c, d}, {x, y}]")).to_full_form(),
+            "List[a, x, b, y, c, x, d]",
+        )
+
+    def test_count_and_collection_predicates(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Count[{1, 2, 3, 2, 1}, 2]")).to_full_form(), "2")
+        self.assertEqual(evaluate(parse_input_form("Count[{1, 2, 3, 2, 1}, _Integer]")).to_full_form(), "5")
+        self.assertEqual(evaluate(parse_input_form("AllTrue[{1, 2, 3}, IntegerQ]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("AnyTrue[{1, 2, 3, x}, StringQ]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("NoneTrue[{1, 2, 3}, StringQ]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("ContainsAll[{1, 2, 3, 4}, {2, 4}]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("ContainsAny[{1, 2, 3}, {3, 4, 5}]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("ContainsNone[{1, 2, 3}, {4, 5}]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("ContainsExactly[{1, 2, 3}, {3, 2, 1}]")).to_full_form(), "True")
+
+    def test_subsets_and_permutations(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Subsets[{a, b, c}]")).to_full_form(),
+            "List[List[], List[a], List[b], List[c], List[a, b], List[a, c], List[b, c], List[a, b, c]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Subsets[{a, b, c, d}, {2}]")).to_full_form(),
+            "List[List[a, b], List[a, c], List[a, d], List[b, c], List[b, d], List[c, d]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Permutations[{a, b, c}]")).to_full_form(),
+            "List[List[a, b, c], List[a, c, b], List[b, a, c], List[b, c, a], List[c, a, b], List[c, b, a]]",
+        )
+
+    def test_set_operations_match_kernel(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Union[{1, 2, 3}, {2, 3, 4}]")).to_full_form(), "List[1, 2, 3, 4]")
+        self.assertEqual(evaluate(parse_input_form("Intersection[{1, 2, 3}, {2, 3, 4}]")).to_full_form(), "List[2, 3]")
+        self.assertEqual(evaluate(parse_input_form("Complement[{1, 2, 3, 4}, {2, 4}]")).to_full_form(), "List[1, 3]")
+
+    def test_pad_left_right_and_key_sort(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("PadLeft[{1, 2, 3}, 5]")).to_full_form(), "List[0, 0, 1, 2, 3]")
+        self.assertEqual(evaluate(parse_input_form("PadRight[{1, 2}, 5, x]")).to_full_form(), "List[1, 2, x, x, x]")
+        self.assertEqual(
+            evaluate(parse_input_form("KeySort[<|b -> 2, a -> 1|>]")).to_full_form(),
+            "Association[Rule[a, 1], Rule[b, 2]]",
+        )
+
+    def test_mean_and_median(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Mean[{1, 2, 3, 4, 5}]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("Mean[{1, 2, 3, 4}]")).to_full_form(), "Rational[5, 2]")
+        self.assertEqual(evaluate(parse_input_form("Median[{1, 2, 3, 4, 5}]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("Median[{1, 2, 3, 4}]")).to_full_form(), "Rational[5, 2]")
+
+
+class StringHelperTests(unittest.TestCase):
+    def test_upper_lower_capitalize(self) -> None:
+        self.assertEqual(evaluate(parse_input_form('ToUpperCase["hello"]')).to_full_form(), '"HELLO"')
+        self.assertEqual(evaluate(parse_input_form('ToLowerCase["WORLD"]')).to_full_form(), '"world"')
+        self.assertEqual(evaluate(parse_input_form('Capitalize["hello world"]')).to_full_form(), '"Hello world"')
+
+    def test_string_split(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form('StringSplit["a,b,c", ","]')).to_full_form(),
+            'List["a", "b", "c"]',
+        )
+        self.assertEqual(
+            evaluate(parse_input_form('StringSplit["  hello   world  "]')).to_full_form(),
+            'List["hello", "world"]',
+        )
+        self.assertEqual(
+            evaluate(parse_input_form('StringSplit["a:b;c", {":", ";"}]')).to_full_form(),
+            'List["a", "b", "c"]',
+        )
+
+    def test_string_riffle(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form('StringRiffle[{"a", "b", "c"}]')).to_full_form(),
+            '"a b c"',
+        )
+        self.assertEqual(
+            evaluate(parse_input_form('StringRiffle[{"a", "b", "c"}, "-"]')).to_full_form(),
+            '"a-b-c"',
+        )
+        self.assertEqual(
+            evaluate(parse_input_form('StringRiffle[{"a", "b", "c"}, {"<", "+", ">"}]')).to_full_form(),
+            '"<a+b+c>"',
+        )
+
+    def test_string_pad_repeat_count_trim(self) -> None:
+        self.assertEqual(evaluate(parse_input_form('StringPadLeft["abc", 6]')).to_full_form(), '"   abc"')
+        self.assertEqual(evaluate(parse_input_form('StringPadLeft["abc", 6, "0"]')).to_full_form(), '"000abc"')
+        self.assertEqual(evaluate(parse_input_form('StringPadRight["abc", 6, "*"]')).to_full_form(), '"abc***"')
+        self.assertEqual(evaluate(parse_input_form('StringRepeat["ab", 3]')).to_full_form(), '"ababab"')
+        self.assertEqual(evaluate(parse_input_form('StringCount["abcabcabc", "a"]')).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form('StringTrim["   hello   "]')).to_full_form(), '"hello"')
+        self.assertEqual(evaluate(parse_input_form('StringTrim["abcXYZdef", "abc"]')).to_full_form(), '"XYZdef"')
+
+
+class MemberQDefaultLevelTests(unittest.TestCase):
+    """Finding C8a (2026-04-26 deep parity review): MemberQ defaults to level
+    {1} like Cases, not {0, Infinity} like Position."""
+
+    def test_member_q_default_does_not_recurse_into_sublists(self) -> None:
+        # 3 is not a direct element of {1, {2, 3}, 4}; only {2, 3} is.
+        self.assertEqual(
+            evaluate(parse_input_form("MemberQ[{1, {2, 3}, 4}, 3]")).to_full_form(),
+            "False",
+        )
+
+    def test_member_q_at_infinity_finds_nested_match(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("MemberQ[{1, {2, 3}, 4}, 3, Infinity]")).to_full_form(),
+            "True",
+        )
+
+    def test_member_q_default_finds_direct_element(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("MemberQ[{1, 2, 3}, 2]")).to_full_form(),
+            "True",
+        )
+
+    def test_member_q_default_matches_blank_pattern_at_level_one(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("MemberQ[{1, 2, 3}, _Integer]")).to_full_form(),
+            "True",
+        )
 
 
 if __name__ == "__main__":

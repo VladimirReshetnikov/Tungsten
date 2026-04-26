@@ -172,44 +172,69 @@ class ParserNaryGroupingTests(unittest.TestCase):
         self.assertEqual(expr.to_full_form(), "Times[a, b, c]")
 
 
-class InertArithmeticBoundariesTests(unittest.TestCase):
-    """Documented boundary behavior: direct-call ``Plus[1, 2, a]`` stays inert,
-    but infix ``1 + 2 + a`` evaluates to ``Plus[3, a]`` via the binary-tree
-    evaluation pass. These tests lock in the current documented behavior so
-    any change is conscious."""
+class ArithmeticPrefixFoldTests(unittest.TestCase):
+    """Finding C6 (2026-04-26 deep parity review): mixed numeric/symbolic
+    arguments to direct ``Plus[...]`` and ``Times[...]`` calls fold the
+    numeric prefix into a single combined number that leads the result. This
+    matches Wolfram's canonical ``Plus[3, a]`` shape for the common case.
+    Tungsten still does not implement Orderless rearrangement of the
+    *symbolic* part, so symbolic order is preserved as it appeared in the
+    input, just after the combined numeric constant.
+    """
 
-    def test_plus_direct_call_mixed_inert(self) -> None:
-        # Per docs: ``Plus[i1, ...]`` evaluates only when every argument is an
-        # explicit integer. Mixed arguments remain inert.
-        self.assertEqual(_full("Plus[1, 2, a]"), "Plus[1, 2, a]")
+    def test_plus_direct_call_mixed_folds_prefix(self) -> None:
+        self.assertEqual(_full("Plus[1, 2, a]"), "Plus[3, a]")
+
+    def test_plus_direct_call_with_symbolic_first(self) -> None:
+        self.assertEqual(_full("Plus[a, 1, 2]"), "Plus[3, a]")
+
+    def test_plus_direct_call_with_multiple_symbolic(self) -> None:
+        self.assertEqual(_full("Plus[2, a, 3, b]"), "Plus[5, a, b]")
 
     def test_plus_infix_mixed_simplifies_inner(self) -> None:
         self.assertEqual(_full("1 + 2 + a"), "Plus[3, a]")
 
-    def test_length_of_inert_plus(self) -> None:
-        # Kernel: ``Length[Plus[1, 2, a]]`` = 2 after orderless flattening.
-        # Tungsten leaves Plus inert so length counts the three raw args.
-        self.assertEqual(_full("Length[Plus[1, 2, a]]"), "3")
+    def test_times_direct_call_mixed_folds_prefix(self) -> None:
+        self.assertEqual(_full("Times[2, 3, a, 4]"), "Times[24, a]")
+
+    def test_times_direct_zero_collapses_to_zero(self) -> None:
+        # Times[0, a] is 0 because the numeric fold reaches an exact zero.
+        self.assertEqual(_full("Times[0, a]"), "0")
+
+    def test_plus_zero_drops(self) -> None:
+        self.assertEqual(_full("Plus[0, a]"), "a")
+
+    def test_times_one_drops(self) -> None:
+        self.assertEqual(_full("Times[1, a]"), "a")
+
+    def test_length_of_folded_plus(self) -> None:
+        # After folding, Plus[1, 2, a] -> Plus[3, a]; length is 2.
+        self.assertEqual(_full("Length[Plus[1, 2, a]]"), "2")
+
+    def test_empty_power_returns_one(self) -> None:
+        self.assertEqual(_full("Power[]"), "1")
+
+    def test_unary_power_returns_argument(self) -> None:
+        self.assertEqual(_full("Power[x]"), "x")
 
 
 class AtPrefixPrecedenceTests(unittest.TestCase):
-    """Finding B10: the ``@`` prefix operator binds tighter than arithmetic."""
+    """Finding B10: the ``@`` prefix operator binds tighter than arithmetic.
+
+    Now also locks in the C6 numeric-prefix folding for the @ + numeric
+    interaction; Tungsten matches the kernel's ``Plus[2, f[1]]`` canonical
+    order for the supported subset.
+    """
 
     def test_at_plus(self) -> None:
-        self.assertEqual(_full("f @ 1 + 2"), "Plus[f[1], 2]")
+        self.assertEqual(_full("f @ 1 + 2"), "Plus[2, f[1]]")
 
     def test_at_times(self) -> None:
-        self.assertEqual(_full("f @ x * 2"), "Times[f[x], 2]")
+        self.assertEqual(_full("f @ x * 2"), "Times[2, f[x]]")
 
     def test_at_right_assoc_still_works(self) -> None:
         # Right-associative chains of @ are unaffected by the precedence bug.
         self.assertEqual(_full("f @ g @ h @ x"), "f[g[h[x]]]")
-
-    @unittest.expectedFailure
-    def test_at_times_wolfram_target(self) -> None:
-        # Wolfram additionally canonicalizes Times arguments via Orderless;
-        # Tungsten intentionally does not implement Orderless attributes.
-        self.assertEqual(_full("f @ x * 2"), "Times[2, f[x]]")
 
 
 class SpanParserTests(unittest.TestCase):

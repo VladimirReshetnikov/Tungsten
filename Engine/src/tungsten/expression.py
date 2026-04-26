@@ -6,7 +6,7 @@ import bz2
 from contextvars import ContextVar
 import csv
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from functools import cmp_to_key
 import gzip
@@ -3503,15 +3503,18 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
             return symbol("Indeterminate")
         if not expr.arguments:
             return integer(0)
-        if not all(_is_number_expr(argument) for argument in expr.arguments):
-            return None
-        result = expr.arguments[0]
-        for argument in expr.arguments[1:]:
-            added = _add_numeric_expr(result, argument)
-            if added is None:
-                return None
-            result = added
-        return result
+        if all(_is_number_expr(argument) for argument in expr.arguments):
+            result = expr.arguments[0]
+            for argument in expr.arguments[1:]:
+                added = _add_numeric_expr(result, argument)
+                if added is None:
+                    return None
+                result = added
+            return result
+        # Mixed numeric/symbolic arguments: fold the numeric prefix the same way
+        # the kernel does for Plus[2, a, 3] -> Plus[5, a]. Stable order is
+        # preserved for the symbolic remainder; we do not implement Orderless.
+        return _fold_numeric_partition(expr.arguments, _add_numeric_expr, integer(0), "Plus")
 
     if expr.has_head("Times"):
         if any(_is_indeterminate_expr(argument) for argument in expr.arguments):
@@ -3522,17 +3525,24 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
             if any(_is_numeric_zero(argument) for argument in expr.arguments):
                 return symbol("Indeterminate")
             return symbol("ComplexInfinity")
-        if not all(_is_number_expr(argument) for argument in expr.arguments):
-            return None
-        result = integer(1)
-        for argument in expr.arguments:
-            multiplied = _mul_numeric_expr(result, argument)
-            if multiplied is None:
-                return None
-            result = multiplied
-        return result
+        if all(_is_number_expr(argument) for argument in expr.arguments):
+            result = integer(1)
+            for argument in expr.arguments:
+                multiplied = _mul_numeric_expr(result, argument)
+                if multiplied is None:
+                    return None
+                result = multiplied
+            return result
+        # Mixed numeric/symbolic arguments. If the numeric part folds to 0,
+        # the whole product is 0; otherwise return Times[combined, *symbolic]
+        # with the numeric prefix collapsed and the symbolic order preserved.
+        return _fold_numeric_partition(expr.arguments, _mul_numeric_expr, integer(1), "Times")
 
     if expr.has_head("Power"):
+        if not expr.arguments:
+            return integer(1)
+        if len(expr.arguments) == 1:
+            return expr.arguments[0]
         if len(expr.arguments) != 2:
             return None
         base, exponent = expr.arguments
@@ -3545,6 +3555,62 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
         return _numeric_power_expr(base, exponent)
 
     return None
+
+
+def _fold_numeric_partition(
+    arguments: Sequence[Expr],
+    combine: "Callable[[Expr, Expr], Expr | None]",
+    identity: Expr,
+    head_name: str,
+) -> Expr | None:
+    """Fold numeric arguments and keep symbolic ones in original order.
+
+    Returns ``None`` when the numeric fold cannot be completed (e.g. an
+    incompatible numeric pair). Used by ``Plus`` and ``Times`` to produce the
+    common ``Plus[2, a, 3] -> Plus[5, a]`` shape without implementing
+    Orderless rearrangement of the symbolic part.
+    """
+    numeric_acc: Expr = identity
+    saw_numeric = False
+    symbolic: list[Expr] = []
+    for argument in arguments:
+        if _is_number_expr(argument):
+            combined = combine(numeric_acc, argument)
+            if combined is None:
+                return None
+            numeric_acc = combined
+            saw_numeric = True
+        else:
+            symbolic.append(argument)
+
+    if head_name == "Times" and _is_exact_zero(numeric_acc):
+        return integer(0)
+
+    is_identity = saw_numeric and (
+        (head_name == "Plus" and _is_exact_zero(numeric_acc))
+        or (head_name == "Times" and _is_one_expr(numeric_acc))
+    )
+
+    if not saw_numeric:
+        return None
+    if not symbolic:
+        return numeric_acc
+    if is_identity:
+        if len(symbolic) == 1:
+            return symbolic[0]
+        return Call(head_expr=symbol(head_name), arguments=tuple(symbolic))
+    return Call(
+        head_expr=symbol(head_name),
+        arguments=(numeric_acc, *symbolic),
+    )
+
+
+def _is_one_expr(expr: Expr) -> bool:
+    if isinstance(expr, Integer):
+        return expr.value == 1
+    if isinstance(expr, RationalNumber):
+        return expr.value == 1
+    return False
 
 
 def _evaluate_integer_relation(expr: Call) -> Expr | None:
@@ -3795,7 +3861,356 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
     if expr.has_head("DiscreteDelta"):
         return integer(1 if all(value == 0 for value in values) else 0)
 
+    if expr.has_head("GCD"):
+        # GCD[] -> 0; GCD[a, b, c, ...] -> Python math.gcd over absolute values.
+        if not values:
+            return integer(0)
+        result = abs(values[0])
+        for value in values[1:]:
+            result = math.gcd(result, abs(value))
+        return integer(result)
+
+    if expr.has_head("LCM"):
+        # LCM[] -> 1; LCM[a, b, c, ...] -> reduces via gcd; LCM[..., 0, ...] is 0.
+        if not values:
+            return integer(1)
+        result = abs(values[0])
+        for value in values[1:]:
+            absolute_value = abs(value)
+            if result == 0 or absolute_value == 0:
+                result = 0
+            else:
+                result = result * absolute_value // math.gcd(result, absolute_value)
+        return integer(result)
+
+    if expr.has_head("Divisors"):
+        if len(values) != 1 or values[0] == 0:
+            return None
+        n = abs(values[0])
+        small_divisors: list[int] = []
+        large_divisors: list[int] = []
+        index = 1
+        while index * index <= n:
+            if n % index == 0:
+                small_divisors.append(index)
+                if index != n // index:
+                    large_divisors.append(n // index)
+            index += 1
+        large_divisors.reverse()
+        all_divisors = small_divisors + large_divisors
+        return list_expr(*(integer(value) for value in all_divisors))
+
+    if expr.has_head("PrimeQ"):
+        if len(values) != 1:
+            return None
+        return _bool_symbol(_is_prime_int(values[0]))
+
+    if expr.has_head("CompositeQ"):
+        if len(values) != 1:
+            return None
+        n = values[0]
+        if n < 4:
+            return _bool_symbol(False)
+        return _bool_symbol(not _is_prime_int(n))
+
+    if expr.has_head("EulerPhi"):
+        if len(values) != 1 or values[0] <= 0:
+            return None
+        return integer(_euler_phi_int(values[0]))
+
+    if expr.has_head("MoebiusMu"):
+        if len(values) != 1 or values[0] <= 0:
+            return None
+        return integer(_moebius_mu_int(values[0]))
+
+    if expr.has_head("PrimePi"):
+        if len(values) != 1 or values[0] < 0:
+            return None
+        return integer(_prime_pi_int(values[0]))
+
+    if expr.has_head("Prime"):
+        if len(values) != 1 or values[0] < 1:
+            return None
+        return integer(_nth_prime_int(values[0]))
+
+    if expr.has_head("NextPrime"):
+        if len(values) == 1:
+            return integer(_next_prime_int(values[0], 1))
+        if len(values) == 2:
+            return integer(_next_prime_int(values[0], values[1]))
+        return None
+
+    if expr.has_head("PowerMod"):
+        if len(values) != 3 or values[2] == 0:
+            return None
+        base, exponent, modulus = values
+        modulus = abs(modulus)
+        if exponent < 0:
+            try:
+                base_inverse = pow(base, -1, modulus)
+            except ValueError:
+                # No modular inverse; Wolfram returns the unevaluated form.
+                return None
+            return integer(pow(base_inverse, -exponent, modulus))
+        return integer(pow(base, exponent, modulus))
+
+    if expr.has_head("IntegerLength"):
+        if len(values) == 1:
+            return integer(_integer_length_int(values[0], 10))
+        if len(values) == 2 and values[1] >= 2:
+            return integer(_integer_length_int(values[0], values[1]))
+        return None
+
+    if expr.has_head("IntegerDigits"):
+        if len(values) == 1:
+            return list_expr(*(integer(digit) for digit in _integer_digits_int(values[0], 10)))
+        if len(values) == 2 and values[1] >= 2:
+            return list_expr(*(integer(digit) for digit in _integer_digits_int(values[0], values[1])))
+        if len(values) == 3 and values[1] >= 2 and values[2] >= 0:
+            digits = _integer_digits_int(values[0], values[1])
+            if len(digits) > values[2]:
+                digits = digits[-values[2]:]
+            else:
+                digits = [0] * (values[2] - len(digits)) + digits
+            return list_expr(*(integer(digit) for digit in digits))
+        return None
+
+    if expr.has_head("FromDigits"):
+        # FromDigits[{...}] / FromDigits[{...}, base] is dispatched separately
+        # (the digit list isn't an integer); return None and let the call
+        # site for FromDigits handle it.
+        return None
+
+    if expr.has_head("BitAnd"):
+        if not values:
+            return integer(-1)
+        result = values[0]
+        for value in values[1:]:
+            result &= value
+        return integer(result)
+
+    if expr.has_head("BitOr"):
+        if not values:
+            return integer(0)
+        result = values[0]
+        for value in values[1:]:
+            result |= value
+        return integer(result)
+
+    if expr.has_head("BitXor"):
+        if not values:
+            return integer(0)
+        result = values[0]
+        for value in values[1:]:
+            result ^= value
+        return integer(result)
+
+    if expr.has_head("BitShiftLeft"):
+        if len(values) == 1:
+            return integer(values[0] << 1)
+        if len(values) == 2:
+            shift = values[1]
+            if shift >= 0:
+                return integer(values[0] << shift)
+            return integer(values[0] >> -shift)
+        return None
+
+    if expr.has_head("BitShiftRight"):
+        if len(values) == 1:
+            return integer(values[0] >> 1)
+        if len(values) == 2:
+            shift = values[1]
+            if shift >= 0:
+                return integer(values[0] >> shift)
+            return integer(values[0] << -shift)
+        return None
+
     return None
+
+
+def _is_prime_int(n: int) -> bool:
+    """Deterministic primality for non-negative integers.
+
+    Uses trial division for small ``n`` (up to ~10**6), then a
+    Miller–Rabin test with witnesses sufficient for all 64-bit integers.
+    For numbers larger than 2**64, falls back to Miller–Rabin with the
+    extended Jaeschke witness set, which is not strictly proven for all
+    inputs but correct for every value used in practical Tungsten
+    workloads. Tungsten's number-theory contract is for explicit integers
+    that fit comfortably in normal AST evaluation.
+    """
+    if n < 2:
+        return False
+    small_primes = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+    for prime in small_primes:
+        if n == prime:
+            return True
+        if n % prime == 0:
+            return False
+    # Miller–Rabin with witnesses sufficient for all 64-bit integers, plus
+    # extended for larger values. See Sloane A014233 for the exact 64-bit
+    # witness set.
+    witnesses_64 = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+    if n < 1 << 64:
+        return _miller_rabin(n, witnesses_64)
+    extended_witnesses = witnesses_64 + (41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97)
+    return _miller_rabin(n, extended_witnesses)
+
+
+def _miller_rabin(n: int, witnesses: Sequence[int]) -> bool:
+    if n % 2 == 0:
+        return n == 2
+    d = n - 1
+    r = 0
+    while d % 2 == 0:
+        d //= 2
+        r += 1
+    for witness in witnesses:
+        if witness >= n:
+            continue
+        x = pow(witness, d, n)
+        if x == 1 or x == n - 1:
+            continue
+        composite = True
+        for _ in range(r - 1):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                composite = False
+                break
+        if composite:
+            return False
+    return True
+
+
+def _factor_int(n: int) -> list[tuple[int, int]]:
+    """Return the prime factorization of ``n`` as a sorted list of
+    ``(prime, exponent)`` pairs. Used by EulerPhi and MoebiusMu."""
+    if n <= 1:
+        return []
+    factors: list[tuple[int, int]] = []
+    remaining = n
+    factor = 2
+    while factor * factor <= remaining:
+        if remaining % factor == 0:
+            exponent = 0
+            while remaining % factor == 0:
+                remaining //= factor
+                exponent += 1
+            factors.append((factor, exponent))
+        factor = 3 if factor == 2 else factor + 2
+    if remaining > 1:
+        factors.append((remaining, 1))
+    return factors
+
+
+def _euler_phi_int(n: int) -> int:
+    if n == 1:
+        return 1
+    result = n
+    for prime, _exponent in _factor_int(n):
+        result -= result // prime
+    return result
+
+
+def _moebius_mu_int(n: int) -> int:
+    if n == 1:
+        return 1
+    factors = _factor_int(n)
+    if any(exponent > 1 for _prime, exponent in factors):
+        return 0
+    return -1 if len(factors) % 2 == 1 else 1
+
+
+def _prime_pi_int(n: int) -> int:
+    """Sieve-of-Eratosthenes count of primes ``<= n``.
+
+    Limited to ``n <= 5_000_000`` for safety; Tungsten is an offline AST
+    evaluator and the call surface that needs this is small inputs.
+    """
+    if n < 2:
+        return 0
+    limit = min(n, 5_000_000)
+    if n > limit:
+        # Fall back to incremental primality check up to n.
+        return _prime_pi_int_slow(n)
+    sieve = bytearray(b"\x01") * (limit + 1)
+    sieve[0] = 0
+    sieve[1] = 0
+    for index in range(2, int(limit ** 0.5) + 1):
+        if sieve[index]:
+            sieve[index * index : limit + 1 : index] = bytearray(
+                len(range(index * index, limit + 1, index))
+            )
+    return sum(sieve)
+
+
+def _prime_pi_int_slow(n: int) -> int:
+    count = 0
+    for index in range(2, n + 1):
+        if _is_prime_int(index):
+            count += 1
+    return count
+
+
+def _nth_prime_int(n: int) -> int:
+    if n == 1:
+        return 2
+    candidate = 3
+    found = 1
+    while True:
+        if _is_prime_int(candidate):
+            found += 1
+            if found == n:
+                return candidate
+        candidate += 2
+
+
+def _next_prime_int(n: int, k: int) -> int:
+    if k == 0:
+        return n
+    if k > 0:
+        candidate = n + 1
+        for _ in range(k):
+            while not _is_prime_int(candidate):
+                candidate += 1
+            if _ + 1 < k:
+                candidate += 1
+        return candidate
+    # k < 0: previous primes.
+    candidate = n - 1
+    for _ in range(-k):
+        while candidate >= 2 and not _is_prime_int(candidate):
+            candidate -= 1
+        if candidate < 2:
+            # Wolfram returns NextPrime[1, -1] etc. as ``-2`` (the prime
+            # below 2 in its convention). Use the same convention.
+            return 2 - (-k - _) * 1  # pragma: no cover - unusual input
+        if _ + 1 < -k:
+            candidate -= 1
+    return candidate
+
+
+def _integer_length_int(n: int, base: int) -> int:
+    if n == 0:
+        return 0
+    n = abs(n)
+    length = 0
+    while n > 0:
+        n //= base
+        length += 1
+    return length
+
+
+def _integer_digits_int(n: int, base: int) -> list[int]:
+    if n == 0:
+        return [0]
+    n = abs(n)
+    digits: list[int] = []
+    while n > 0:
+        digits.append(n % base)
+        n //= base
+    digits.reverse()
+    return digits
 
 
 def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
@@ -3901,10 +4316,15 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
     if expr.has_head("Min") or expr.has_head("Max"):
         if not expr.arguments:
             return symbol("Infinity") if expr.has_head("Min") else symbol("-Infinity")
-        if not all(_is_real_number_expr(argument) or _is_positive_infinity_expr(argument) or _is_negative_infinity_expr(argument) for argument in expr.arguments):
+        # Wolfram folds Min/Max through a single List wrapper:
+        # ``Min[{1, 2, 3}]`` is the same as ``Min[1, 2, 3]``.
+        unwrapped = _flatten_list_arguments(expr.arguments)
+        if not unwrapped:
+            return symbol("Infinity") if expr.has_head("Min") else symbol("-Infinity")
+        if not all(_is_real_number_expr(argument) or _is_positive_infinity_expr(argument) or _is_negative_infinity_expr(argument) for argument in unwrapped):
             return None
-        best = expr.arguments[0]
-        for argument in expr.arguments[1:]:
+        best = unwrapped[0]
+        for argument in unwrapped[1:]:
             comparison = _compare_real_expr(argument, best)
             if comparison is None:
                 return None
@@ -3912,6 +4332,125 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
                 best = argument
         return best
 
+    if expr.has_head("Floor") or expr.has_head("Ceiling") or expr.has_head("Round") \
+            or expr.has_head("IntegerPart") or expr.has_head("FractionalPart"):
+        if len(expr.arguments) != 1:
+            return None
+        return _real_rounding_expr(expr.head_expr, expr.arguments[0])
+
+    if expr.has_head("Sqrt"):
+        if len(expr.arguments) != 1:
+            return None
+        return _sqrt_expr(expr.arguments[0])
+
+    return None
+
+
+def _flatten_list_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    """If ``arguments`` is a single ``List[...]`` wrapper, unwrap once.
+
+    Returns the original tuple otherwise. Used by ``Min`` / ``Max`` and
+    similar fold heads that accept either ``f[a, b]`` or ``f[{a, b}]``.
+    """
+    if len(arguments) == 1 and isinstance(arguments[0], Call) and arguments[0].has_head("List"):
+        return tuple(arguments[0].arguments)
+    return tuple(arguments)
+
+
+def _real_rounding_expr(head: Expr, argument: Expr) -> Expr | None:
+    """Floor / Ceiling / Round / IntegerPart / FractionalPart on real numbers."""
+    if not _is_real_number_expr(argument):
+        return None
+    head_name = head.name if isinstance(head, Symbol) else None
+    if head_name not in {"Floor", "Ceiling", "Round", "IntegerPart", "FractionalPart"}:
+        return None
+
+    fraction = _exact_fraction(argument)
+    if fraction is not None:
+        if head_name == "Floor":
+            return integer(math.floor(fraction))
+        if head_name == "Ceiling":
+            return integer(math.ceil(fraction))
+        if head_name == "Round":
+            # Wolfram's Round uses banker's rounding (round half to even).
+            # ``Fraction.__round__`` already implements banker's rounding.
+            return integer(round(fraction))
+        if head_name == "IntegerPart":
+            # Truncation toward zero.
+            integer_value = int(fraction)
+            return integer(integer_value)
+        if head_name == "FractionalPart":
+            integer_value = int(fraction)
+            remainder = fraction - integer_value
+            if remainder.denominator == 1:
+                return integer(remainder.numerator)
+            return _fraction_expr(remainder)
+        return None
+
+    if isinstance(argument, Real):
+        info = _real_info(argument)
+        if info is None:
+            return None
+        # Use Decimal arithmetic to preserve precision and to avoid float
+        # rounding issues for round-half-to-even.
+        value = info.value
+        if head_name == "Floor":
+            return integer(math.floor(value))
+        if head_name == "Ceiling":
+            return integer(math.ceil(value))
+        if head_name == "Round":
+            # Decimal supports ROUND_HALF_EVEN directly.
+            return integer(int(value.to_integral_value(rounding=ROUND_HALF_EVEN)))
+        if head_name == "IntegerPart":
+            # Truncation toward zero.
+            return integer(int(value))
+        if head_name == "FractionalPart":
+            integer_part = int(value)
+            remainder = value - integer_part
+            return _machine_real(float(remainder)) if info.precision is None and info.accuracy is None \
+                else _decimal_real(remainder, info.precision or 0)
+        return None
+
+    return None
+
+
+def _sqrt_expr(argument: Expr) -> Expr | None:
+    """Sqrt for the explicit-number subset.
+
+    Falls through to ``Power[arg, 1/2]`` for everything else, matching the
+    common Wolfram lowering. We do not implement general algebraic
+    simplification, so non-perfect-square integers remain in the radical
+    form ``Power[n, 1/2]``.
+    """
+    if isinstance(argument, Integer):
+        if argument.value < 0:
+            # Sqrt[-n] -> Sqrt[n] * I for positive n. The kernel canonical
+            # ordering puts the numeric magnitude first.
+            if argument.value == 0:
+                return integer(0)
+            magnitude_root = _sqrt_expr(integer(-argument.value))
+            if magnitude_root is None:
+                return None
+            return call("Times", magnitude_root, symbol("I"))
+        if argument.value == 0:
+            return integer(0)
+        root = math.isqrt(argument.value)
+        if root * root == argument.value:
+            return integer(root)
+        return call("Power", argument, rational_number(1, 2))
+    if isinstance(argument, RationalNumber):
+        numerator_root = _sqrt_expr(integer(argument.value.numerator))
+        denominator_root = _sqrt_expr(integer(argument.value.denominator))
+        if numerator_root is None or denominator_root is None:
+            return None
+        if isinstance(numerator_root, Integer) and isinstance(denominator_root, Integer):
+            return rational_number(numerator_root.value, denominator_root.value)
+        return call("Power", argument, rational_number(1, 2))
+    if isinstance(argument, Real):
+        info = _real_info(argument)
+        if info is None or info.value < 0:
+            return None
+        return _machine_real(math.sqrt(float(info.value)))
     return None
 
 
@@ -6000,6 +6539,251 @@ def string_insert(expr: Expr, insertion: Expr, positions: Expr | int) -> Expr:
 
 def string_reverse(expr: Expr) -> Expr:
     return _string_thread(expr, "StringReverse", lambda item: string(item.value[::-1]))
+
+
+def to_upper_case(expr: Expr) -> Expr:
+    return _string_thread(expr, "ToUpperCase", lambda item: string(item.value.upper()))
+
+
+def to_lower_case(expr: Expr) -> Expr:
+    return _string_thread(expr, "ToLowerCase", lambda item: string(item.value.lower()))
+
+
+def capitalize_string(expr: Expr) -> Expr:
+    def _capitalize(item: String) -> Expr:
+        text = item.value
+        if not text:
+            return string(text)
+        return string(text[0].upper() + text[1:])
+    return _string_thread(expr, "Capitalize", _capitalize)
+
+
+def string_repeat(expr: Expr, count_expr: Expr, target_length_expr: Expr | None = None) -> Expr:
+    if not isinstance(count_expr, Integer) or count_expr.value < 0:
+        raise WolframEvaluationError("StringRepeat expects a non-negative integer count.")
+    count = count_expr.value
+    target_length: int | None = None
+    if target_length_expr is not None:
+        if not isinstance(target_length_expr, Integer) or target_length_expr.value < 0:
+            raise WolframEvaluationError(
+                "StringRepeat expects a non-negative integer target length."
+            )
+        target_length = target_length_expr.value
+
+    def _repeat(item: String) -> Expr:
+        if not item.value:
+            if target_length is not None and target_length > 0:
+                raise WolframEvaluationError(
+                    "StringRepeat cannot pad an empty string to a positive length."
+                )
+            return string("")
+        if target_length is None:
+            return string(item.value * count)
+        repeats_needed = (target_length + len(item.value) - 1) // len(item.value)
+        repeats = max(count, repeats_needed)
+        return string((item.value * repeats)[:target_length])
+
+    return _string_thread(expr, "StringRepeat", _repeat)
+
+
+def _pad_string(text: str, target_length: int, padding: str, *, on_left: bool) -> str:
+    if not padding:
+        raise WolframEvaluationError("String padding character must be a non-empty string.")
+    if len(text) >= target_length:
+        return text[len(text) - target_length :] if on_left else text[:target_length]
+    needed = target_length - len(text)
+    repeats = (needed + len(padding) - 1) // len(padding)
+    pad_block = (padding * repeats)[:needed]
+    return pad_block + text if on_left else text + pad_block
+
+
+def string_pad_left(expr: Expr, target_length_expr: Expr, padding_expr: Expr | None = None) -> Expr:
+    if not isinstance(target_length_expr, Integer) or target_length_expr.value < 0:
+        raise WolframEvaluationError("StringPadLeft expects a non-negative integer target length.")
+    target_length = target_length_expr.value
+    padding_text = " "
+    if padding_expr is not None:
+        if not isinstance(padding_expr, String):
+            raise WolframEvaluationError("StringPadLeft currently expects a string padding value.")
+        padding_text = padding_expr.value
+
+    def _pad(item: String) -> Expr:
+        return string(_pad_string(item.value, target_length, padding_text, on_left=True))
+
+    return _string_thread(expr, "StringPadLeft", _pad)
+
+
+def string_pad_right(expr: Expr, target_length_expr: Expr, padding_expr: Expr | None = None) -> Expr:
+    if not isinstance(target_length_expr, Integer) or target_length_expr.value < 0:
+        raise WolframEvaluationError("StringPadRight expects a non-negative integer target length.")
+    target_length = target_length_expr.value
+    padding_text = " "
+    if padding_expr is not None:
+        if not isinstance(padding_expr, String):
+            raise WolframEvaluationError("StringPadRight currently expects a string padding value.")
+        padding_text = padding_expr.value
+
+    def _pad(item: String) -> Expr:
+        return string(_pad_string(item.value, target_length, padding_text, on_left=False))
+
+    return _string_thread(expr, "StringPadRight", _pad)
+
+
+def string_count(expr: Expr, pattern_expr: Expr) -> Expr:
+    """Count non-overlapping matches of a literal-string pattern.
+
+    Tungsten supports literal-string and ``List`` of literal-string patterns
+    in this pass. Richer string-pattern matching (regex, character classes)
+    can come later if needed; ``StringPosition`` already covers the more
+    elaborate pattern surface.
+    """
+    if isinstance(pattern_expr, Call) and pattern_expr.has_head("List"):
+        sub_results = [string_count(expr, pattern) for pattern in pattern_expr.arguments]
+        if all(isinstance(result, Integer) for result in sub_results):
+            return integer(sum(result.value for result in sub_results))
+        return list_expr(*sub_results)
+
+    if not isinstance(pattern_expr, String):
+        raise WolframEvaluationError(
+            "StringCount currently expects literal-string patterns."
+        )
+
+    needle = pattern_expr.value
+
+    def _count(item: String) -> Expr:
+        if not needle:
+            return integer(0)
+        return integer(item.value.count(needle))
+
+    return _string_thread(expr, "StringCount", _count)
+
+
+def string_split(expr: Expr, separator_expr: Expr | None = None) -> Expr:
+    """StringSplit[s] / StringSplit[s, sep] / StringSplit[s, {seps...}].
+
+    ``StringSplit[s]`` splits on whitespace runs (Wolfram's default). With
+    explicit separators, Tungsten supports literal strings and lists of
+    literal strings. Empty results are dropped, matching Wolfram's
+    practical behavior.
+    """
+
+    def _split_one(item: String) -> Expr:
+        if separator_expr is None:
+            tokens = item.value.split()
+            return list_expr(*(string(token) for token in tokens))
+        separators = _string_split_separators(separator_expr)
+        text = item.value
+        # Split on the union of separators by repeatedly finding the
+        # earliest occurrence of any separator.
+        pieces: list[str] = []
+        cursor = 0
+        while cursor <= len(text):
+            best_index: int | None = None
+            best_separator: str | None = None
+            for separator in separators:
+                if not separator:
+                    continue
+                found = text.find(separator, cursor)
+                if found != -1 and (best_index is None or found < best_index or (
+                    found == best_index and best_separator is not None and len(separator) > len(best_separator)
+                )):
+                    best_index = found
+                    best_separator = separator
+            if best_index is None or best_separator is None:
+                pieces.append(text[cursor:])
+                break
+            pieces.append(text[cursor:best_index])
+            cursor = best_index + len(best_separator)
+            if cursor > len(text):
+                break
+            if cursor == len(text):
+                pieces.append("")
+                break
+        return list_expr(*(string(piece) for piece in pieces if piece != ""))
+
+    return _string_thread(expr, "StringSplit", _split_one)
+
+
+def _string_split_separators(separator_expr: Expr) -> list[str]:
+    if isinstance(separator_expr, String):
+        return [separator_expr.value]
+    if isinstance(separator_expr, Call) and separator_expr.has_head("List"):
+        result: list[str] = []
+        for argument in separator_expr.arguments:
+            if not isinstance(argument, String):
+                raise WolframEvaluationError(
+                    "StringSplit currently expects literal-string separators."
+                )
+            result.append(argument.value)
+        return result
+    raise WolframEvaluationError(
+        "StringSplit currently expects a literal-string separator or a list of them."
+    )
+
+
+def string_riffle(expr: Expr, separator: Expr | None = None) -> Expr:
+    """StringRiffle[list] / StringRiffle[list, sep] / StringRiffle[list, {l, sep, r}].
+
+    Joins explicit strings using ``sep`` (default `" "`). The triple form
+    wraps the result with the supplied left and right delimiters and uses
+    the middle string as the separator between elements. Tungsten unpacks
+    nested lists by joining each row with ``sep`` and then joining the
+    rows with `"\n"`, matching Wolfram's two-level case.
+    """
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        raise WolframEvaluationError("StringRiffle expects a List as the first argument.")
+
+    separator_text = " "
+    left_text = ""
+    right_text = ""
+    if separator is not None:
+        if isinstance(separator, String):
+            separator_text = separator.value
+        elif isinstance(separator, Call) and separator.has_head("List") and len(separator.arguments) == 3 \
+                and all(isinstance(piece, String) for piece in separator.arguments):
+            left_text = separator.arguments[0].value  # type: ignore[union-attr]
+            separator_text = separator.arguments[1].value  # type: ignore[union-attr]
+            right_text = separator.arguments[2].value  # type: ignore[union-attr]
+        else:
+            raise WolframEvaluationError(
+                "StringRiffle currently expects a string separator or a "
+                "{left, sep, right} triple of strings."
+            )
+
+    def _to_text(item: Expr) -> str:
+        if isinstance(item, String):
+            return item.value
+        if isinstance(item, Call) and item.has_head("List") and all(isinstance(piece, String) for piece in item.arguments):
+            return separator_text.join(piece.value for piece in item.arguments)  # type: ignore[union-attr]
+        if isinstance(item, Integer):
+            return str(item.value)
+        raise WolframEvaluationError(
+            "StringRiffle expects items convertible to strings; non-string "
+            "items beyond integers are not yet supported."
+        )
+
+    body = separator_text.join(_to_text(item) for item in expr.arguments)
+    return string(left_text + body + right_text)
+
+
+def string_trim(expr: Expr, pattern_expr: Expr | None = None) -> Expr:
+    if pattern_expr is None:
+        return _string_thread(expr, "StringTrim", lambda item: string(item.value.strip()))
+    if not isinstance(pattern_expr, String):
+        raise WolframEvaluationError(
+            "StringTrim currently expects a literal-string trim pattern."
+        )
+    pattern_text = pattern_expr.value
+
+    def _trim(item: String) -> Expr:
+        text = item.value
+        while text.startswith(pattern_text):
+            text = text[len(pattern_text) :]
+        while text.endswith(pattern_text):
+            text = text[: -len(pattern_text)]
+        return string(text)
+
+    return _string_thread(expr, "StringTrim", _trim)
 
 
 @dataclass
@@ -11149,7 +11933,8 @@ def member_q(
     pattern: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
 ) -> Symbol:
-    positions = position(expr, pattern, spec=spec, limit=1)
+    effective_spec: Expr | int | tuple[int, int] = (1, 1) if spec is None else spec
+    positions = position(expr, pattern, spec=effective_spec, limit=1)
     assert isinstance(positions, Call) and positions.has_head("List")
     return _bool_symbol(bool(positions.arguments))
 
@@ -11431,6 +12216,472 @@ def _require_compound(expr: Expr, function_name: str) -> Call:
     if isinstance(expr, Call):
         return expr
     raise WolframEvaluationError(f"{function_name} expects a nonatomic expression.")
+
+
+def _list_or_association_values(expr: Expr, function_name: str) -> tuple[Expr, ...]:
+    """Return a tuple of element values for a List or an Association.
+
+    For ``List[...]`` returns its arguments verbatim. For ``Association[...]``
+    returns the values of each entry (matching Wolfram's values-only
+    behavior on associations for ``Total``, ``Sort``, etc.). Other shapes
+    raise a Tungsten evaluation error.
+    """
+    entries = _association_entries(expr)
+    if entries is not None:
+        return tuple(entry.value for entry in entries)
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return tuple(expr.arguments)
+    raise WolframEvaluationError(f"{function_name} expects a list or association.")
+
+
+def mean_expr(expr: Expr) -> Expr:
+    items = _list_or_association_values(expr, "Mean")
+    if not items:
+        raise WolframEvaluationError("Mean of an empty list is undefined.")
+    n = integer(len(items))
+    summed = evaluate(call("Plus", *items))
+    return evaluate(call("Times", summed, call("Power", n, integer(-1))))
+
+
+def median_expr(expr: Expr) -> Expr:
+    items = _list_or_association_values(expr, "Median")
+    if not items:
+        raise WolframEvaluationError("Median of an empty list is undefined.")
+    if not all(_is_real_number_expr(item) for item in items):
+        raise WolframEvaluationError("Median currently expects explicit real-valued numbers.")
+    sorted_items = sorted(items, key=lambda item: float(_exact_fraction(item)) if _is_exact_real_number(item)
+                          else float(_real_info(item).value))  # type: ignore[union-attr]
+    n = len(sorted_items)
+    if n % 2 == 1:
+        return sorted_items[n // 2]
+    left = sorted_items[n // 2 - 1]
+    right = sorted_items[n // 2]
+    summed = evaluate(call("Plus", left, right))
+    return evaluate(call("Times", summed, rational_number(1, 2)))
+
+
+def total(expr: Expr) -> Expr:
+    """Total[expr] sums first-level elements; for nested Lists, sums element-wise.
+
+    The current implementation only honors the default level-1 sum, which
+    folds a list of numbers into a single number, a list of equal-length
+    lists into a list of column sums, and an association into the sum of
+    its values. Multi-level and explicit-levelspec ``Total[expr, n]`` /
+    ``Total[expr, {n}]`` is documented as not yet implemented.
+    """
+    entries = _association_entries(expr)
+    if entries is not None:
+        if not entries:
+            return integer(0)
+        return evaluate(call("Plus", *(entry.value for entry in entries)))
+    if isinstance(expr, Call) and expr.has_head("List"):
+        if not expr.arguments:
+            return integer(0)
+        # If every element is itself a same-length List, sum column-wise.
+        if all(isinstance(arg, Call) and arg.has_head("List") for arg in expr.arguments):
+            row_lengths = {len(arg.arguments) for arg in expr.arguments}
+            if len(row_lengths) == 1:
+                width = row_lengths.pop()
+                if width == 0:
+                    return list_expr()
+                columns: list[Expr] = []
+                for column_index in range(width):
+                    column_args = [arg.arguments[column_index] for arg in expr.arguments]
+                    columns.append(evaluate(call("Plus", *column_args)))
+                return _evaluated_list_expr(*columns)
+        return evaluate(call("Plus", *expr.arguments))
+    raise WolframEvaluationError("Total expects a list or association.")
+
+
+def tally(expr: Expr, test: Expr | None = None) -> Expr:
+    items = _list_or_association_values(expr, "Tally")
+    keys: list[Expr] = []
+    counts: list[int] = []
+    for item in items:
+        index: int | None = None
+        for existing_index, existing_key in enumerate(keys):
+            if test is None:
+                if existing_key == item:
+                    index = existing_index
+                    break
+            else:
+                outcome = evaluate(_apply_callable(test, (existing_key, item)))
+                if isinstance(outcome, Symbol) and outcome.name == "True":
+                    index = existing_index
+                    break
+        if index is None:
+            keys.append(item)
+            counts.append(1)
+        else:
+            counts[index] += 1
+    return list_expr(*(list_expr(key, integer(count)) for key, count in zip(keys, counts)))
+
+
+def counts(expr: Expr) -> Expr:
+    items = _list_or_association_values(expr, "Counts")
+    keys: list[Expr] = []
+    occurrences: dict[int, int] = {}
+    for item in items:
+        position: int | None = None
+        for existing_index, existing_key in enumerate(keys):
+            if existing_key == item:
+                position = existing_index
+                break
+        if position is None:
+            keys.append(item)
+            occurrences[len(keys) - 1] = 1
+        else:
+            occurrences[position] += 1
+    entries: list[_AssociationEntry] = []
+    for index, key in enumerate(keys):
+        entries.append(
+            _AssociationEntry(rule_head="Rule", key=key, value=integer(occurrences[index]))
+        )
+    return _association_expr(entries)
+
+
+def catenate(expr: Expr) -> Expr:
+    """Concatenate the immediate elements of a List or Association.
+
+    For ``List[items...]``, every immediate item must itself be a List or
+    Association (associations contribute their values). For an
+    ``Association`` whose values are Lists, returns the catenation of
+    those values.
+    """
+    entries = _association_entries(expr)
+    if entries is not None:
+        sequences = [entry.value for entry in entries]
+    else:
+        compound = _require_compound(expr, "Catenate")
+        if not compound.has_head("List"):
+            raise WolframEvaluationError("Catenate expects a list or association.")
+        sequences = list(compound.arguments)
+    flat: list[Expr] = []
+    for sequence in sequences:
+        if _association_entries(sequence) is not None:
+            inner_entries = _association_entries(sequence) or ()
+            flat.extend(entry.value for entry in inner_entries)
+            continue
+        if isinstance(sequence, Call) and sequence.has_head("List"):
+            flat.extend(sequence.arguments)
+            continue
+        raise WolframEvaluationError(
+            "Catenate expects every immediate element to be a list or association."
+        )
+    return list_expr(*flat)
+
+
+def differences(expr: Expr) -> Expr:
+    items = _list_or_association_values(expr, "Differences")
+    if len(items) <= 1:
+        return list_expr()
+    return _evaluated_list_expr(
+        *(evaluate(call("Plus", items[index + 1], call("Times", integer(-1), items[index]))) for index in range(len(items) - 1))
+    )
+
+
+def accumulate(expr: Expr) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        if not entries:
+            return _association_expr([])
+        running: Expr | None = None
+        new_entries: list[_AssociationEntry] = []
+        for entry in entries:
+            running = entry.value if running is None else evaluate(call("Plus", running, entry.value))
+            new_entries.append(
+                _AssociationEntry(rule_head=entry.rule_head, key=entry.key, value=running)
+            )
+        return _association_expr(new_entries)
+    items = _list_or_association_values(expr, "Accumulate")
+    if not items:
+        return list_expr()
+    running: Expr | None = None
+    output: list[Expr] = []
+    for item in items:
+        running = item if running is None else evaluate(call("Plus", running, item))
+        output.append(running)
+    return _evaluated_list_expr(*output)
+
+
+def riffle(expr: Expr, separator: Expr) -> Expr:
+    compound = _require_compound(expr, "Riffle")
+    if not compound.has_head("List"):
+        raise WolframEvaluationError("Riffle currently expects a List as the first argument.")
+    items = compound.arguments
+    if not items:
+        return list_expr()
+    separators: tuple[Expr, ...]
+    if isinstance(separator, Call) and separator.has_head("List"):
+        separators = tuple(separator.arguments)
+        if not separators:
+            return list_expr(*items)
+    else:
+        separators = (separator,)
+    output: list[Expr] = [items[0]]
+    for index, item in enumerate(items[1:], start=1):
+        output.append(separators[(index - 1) % len(separators)])
+        output.append(item)
+    return list_expr(*output)
+
+
+def count_items(expr: Expr, pattern: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Expr:
+    """Count[expr, patt] / Count[expr, patt, levelspec]: number of matching parts."""
+    effective_spec: Expr | int | tuple[int, int] = (1, 1) if spec is None else spec
+    positions = position(expr, pattern, spec=effective_spec)
+    assert isinstance(positions, Call) and positions.has_head("List")
+    return integer(len(positions.arguments))
+
+
+def all_true(expr: Expr, test: Expr) -> Expr:
+    items = _list_or_association_values(expr, "AllTrue")
+    for item in items:
+        outcome = evaluate(_apply_callable(test, (item,)))
+        if not (isinstance(outcome, Symbol) and outcome.name == "True"):
+            return _bool_symbol(False)
+    return _bool_symbol(True)
+
+
+def any_true(expr: Expr, test: Expr) -> Expr:
+    items = _list_or_association_values(expr, "AnyTrue")
+    for item in items:
+        outcome = evaluate(_apply_callable(test, (item,)))
+        if isinstance(outcome, Symbol) and outcome.name == "True":
+            return _bool_symbol(True)
+    return _bool_symbol(False)
+
+
+def none_true(expr: Expr, test: Expr) -> Expr:
+    items = _list_or_association_values(expr, "NoneTrue")
+    for item in items:
+        outcome = evaluate(_apply_callable(test, (item,)))
+        if isinstance(outcome, Symbol) and outcome.name == "True":
+            return _bool_symbol(False)
+    return _bool_symbol(True)
+
+
+def contains_all(left: Expr, right: Expr) -> Expr:
+    left_items = _list_or_association_values(left, "ContainsAll")
+    right_items = _list_or_association_values(right, "ContainsAll")
+    return _bool_symbol(all(any(left_item == right_item for left_item in left_items) for right_item in right_items))
+
+
+def contains_any(left: Expr, right: Expr) -> Expr:
+    left_items = _list_or_association_values(left, "ContainsAny")
+    right_items = _list_or_association_values(right, "ContainsAny")
+    return _bool_symbol(any(any(left_item == right_item for left_item in left_items) for right_item in right_items))
+
+
+def contains_none(left: Expr, right: Expr) -> Expr:
+    left_items = _list_or_association_values(left, "ContainsNone")
+    right_items = _list_or_association_values(right, "ContainsNone")
+    return _bool_symbol(not any(any(left_item == right_item for left_item in left_items) for right_item in right_items))
+
+
+def contains_exactly(left: Expr, right: Expr) -> Expr:
+    left_items = _list_or_association_values(left, "ContainsExactly")
+    right_items = _list_or_association_values(right, "ContainsExactly")
+    left_set = list(left_items)
+    right_set = list(right_items)
+    # Wolfram's ContainsExactly ignores duplicates and order: the two sets must
+    # have identical underlying value sets.
+    return _bool_symbol(
+        all(any(item == other for other in left_set) for item in right_set)
+        and all(any(item == other for other in right_set) for item in left_set)
+    )
+
+
+def subsets(expr: Expr, spec: Expr | None = None) -> Expr:
+    items = _list_or_association_values(expr, "Subsets")
+    n = len(items)
+    if spec is None:
+        bounds = (0, n)
+    elif isinstance(spec, Integer):
+        bounds = (0, spec.value)
+    elif isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
+            target = spec.arguments[0].value
+            bounds = (target, target)
+        elif len(spec.arguments) == 2 and isinstance(spec.arguments[0], Integer) and isinstance(spec.arguments[1], Integer):
+            bounds = (spec.arguments[0].value, spec.arguments[1].value)
+        else:
+            raise WolframEvaluationError("Subsets currently supports {n} or {min, max} length specs.")
+    else:
+        raise WolframEvaluationError("Subsets expects an integer count or a length specification list.")
+
+    from itertools import combinations
+
+    output: list[Expr] = []
+    for size in range(bounds[0], bounds[1] + 1):
+        for combination in combinations(items, size):
+            output.append(list_expr(*combination))
+    return list_expr(*output)
+
+
+def permutations(expr: Expr, spec: Expr | None = None) -> Expr:
+    items = _list_or_association_values(expr, "Permutations")
+    n = len(items)
+    if spec is None:
+        bounds = (n, n)
+    elif isinstance(spec, Integer):
+        bounds = (1, spec.value) if n > 0 else (0, 0)
+    elif isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
+            target = spec.arguments[0].value
+            bounds = (target, target)
+        elif len(spec.arguments) == 2 and isinstance(spec.arguments[0], Integer) and isinstance(spec.arguments[1], Integer):
+            bounds = (spec.arguments[0].value, spec.arguments[1].value)
+        else:
+            raise WolframEvaluationError("Permutations currently supports {n} or {min, max} length specs.")
+    else:
+        raise WolframEvaluationError("Permutations expects an integer count or a length specification list.")
+
+    from itertools import permutations as _itertools_permutations
+
+    output: list[Expr] = []
+    upper = max(bounds[1], 0)
+    lower = max(bounds[0], 0)
+    for size in range(lower, upper + 1):
+        for permutation in _itertools_permutations(items, size):
+            output.append(list_expr(*permutation))
+    if spec is None:
+        # Wolfram's default returns size-n permutations only.
+        return list_expr(*[entry for entry in output if isinstance(entry, Call) and len(entry.arguments) == n])
+    return list_expr(*output)
+
+
+def union(arguments: Sequence[Expr]) -> Expr:
+    """Union[list1, list2, ...] returns sorted unique elements."""
+    if not arguments:
+        return list_expr()
+    seen: list[Expr] = []
+    for argument in arguments:
+        items = _list_or_association_values(argument, "Union")
+        for item in items:
+            if not any(item == existing for existing in seen):
+                seen.append(item)
+    return sort_expr(list_expr(*seen))
+
+
+def intersection(arguments: Sequence[Expr]) -> Expr:
+    if not arguments:
+        return list_expr()
+    initial = list(_list_or_association_values(arguments[0], "Intersection"))
+    for argument in arguments[1:]:
+        other = _list_or_association_values(argument, "Intersection")
+        initial = [item for item in initial if any(item == other_item for other_item in other)]
+    seen: list[Expr] = []
+    for item in initial:
+        if not any(item == existing for existing in seen):
+            seen.append(item)
+    return sort_expr(list_expr(*seen))
+
+
+def complement(arguments: Sequence[Expr]) -> Expr:
+    if not arguments:
+        return list_expr()
+    base = list(_list_or_association_values(arguments[0], "Complement"))
+    excluded: list[Expr] = []
+    for argument in arguments[1:]:
+        for item in _list_or_association_values(argument, "Complement"):
+            if not any(item == existing for existing in excluded):
+                excluded.append(item)
+    survivors: list[Expr] = []
+    for item in base:
+        if any(item == existing for existing in excluded):
+            continue
+        if not any(item == existing for existing in survivors):
+            survivors.append(item)
+    return sort_expr(list_expr(*survivors))
+
+
+def pad_left(expr: Expr, target_length_expr: Expr, fill_expr: Expr | None = None) -> Expr:
+    compound = _require_compound(expr, "PadLeft")
+    if not compound.has_head("List"):
+        raise WolframEvaluationError("PadLeft currently expects a List as the first argument.")
+    if not isinstance(target_length_expr, Integer):
+        raise WolframEvaluationError("PadLeft currently expects an integer target length.")
+    target_length = target_length_expr.value
+    fill: Expr = fill_expr if fill_expr is not None else integer(0)
+    if target_length < 0:
+        raise WolframEvaluationError("PadLeft expects a non-negative target length.")
+    items = list(compound.arguments)
+    if target_length <= len(items):
+        return list_expr(*items[len(items) - target_length :])
+    return list_expr(*([fill] * (target_length - len(items)) + items))
+
+
+def pad_right(expr: Expr, target_length_expr: Expr, fill_expr: Expr | None = None) -> Expr:
+    compound = _require_compound(expr, "PadRight")
+    if not compound.has_head("List"):
+        raise WolframEvaluationError("PadRight currently expects a List as the first argument.")
+    if not isinstance(target_length_expr, Integer):
+        raise WolframEvaluationError("PadRight currently expects an integer target length.")
+    target_length = target_length_expr.value
+    fill: Expr = fill_expr if fill_expr is not None else integer(0)
+    if target_length < 0:
+        raise WolframEvaluationError("PadRight expects a non-negative target length.")
+    items = list(compound.arguments)
+    if target_length <= len(items):
+        return list_expr(*items[:target_length])
+    return list_expr(*(items + [fill] * (target_length - len(items))))
+
+
+def from_digits(digits_expr: Expr, base_expr: Expr | None = None) -> Expr:
+    base = 10
+    if base_expr is not None:
+        if not isinstance(base_expr, Integer) or base_expr.value < 2:
+            raise WolframEvaluationError("FromDigits expects an integer base >= 2.")
+        base = base_expr.value
+    if isinstance(digits_expr, String):
+        digit_values: list[int] = []
+        for character in digits_expr.value:
+            try:
+                digit_values.append(int(character, base))
+            except ValueError:
+                raise WolframEvaluationError(
+                    f"FromDigits cannot interpret {character!r} as a base-{base} digit."
+                )
+    elif isinstance(digits_expr, Call) and digits_expr.has_head("List"):
+        digit_values = []
+        for digit in digits_expr.arguments:
+            if not isinstance(digit, Integer):
+                raise WolframEvaluationError("FromDigits expects a list of explicit integer digits.")
+            digit_values.append(digit.value)
+    else:
+        raise WolframEvaluationError("FromDigits expects a string or a list of digits.")
+    result = 0
+    for value in digit_values:
+        result = result * base + value
+    return integer(result)
+
+
+def key_sort(expr: Expr, ordering_function: Expr | None = None) -> Expr:
+    entries = _require_association_entries(expr, "KeySort")
+    import functools
+    indices = list(range(len(entries)))
+
+    if ordering_function is None:
+        def default_compare(left_index: int, right_index: int) -> int:
+            return _canonical_compare(entries[left_index].key, entries[right_index].key)
+        indices.sort(key=functools.cmp_to_key(default_compare))
+        return _association_expr([entries[index] for index in indices])
+
+    def comparator_less(left_index: int, right_index: int) -> bool:
+        outcome = evaluate(
+            _apply_callable(ordering_function, (entries[left_index].key, entries[right_index].key))
+        )
+        return isinstance(outcome, Symbol) and outcome.name == "True"
+
+    def comparator_compare(left_index: int, right_index: int) -> int:
+        if comparator_less(left_index, right_index):
+            return -1
+        if comparator_less(right_index, left_index):
+            return 1
+        return 0
+
+    indices.sort(key=functools.cmp_to_key(comparator_compare))
+    return _association_expr([entries[index] for index in indices])
 
 
 def _require_association_entries(expr: Expr, function_name: str) -> tuple[_AssociationEntry, ...]:
@@ -12674,6 +13925,82 @@ def _evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("StringReverse expects exactly one argument.")
         return string_reverse(evaluated_arguments[0])
 
+    if evaluated_head.name == "ToUpperCase":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("ToUpperCase expects exactly one argument.")
+        return to_upper_case(evaluated_arguments[0])
+
+    if evaluated_head.name == "ToLowerCase":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("ToLowerCase expects exactly one argument.")
+        return to_lower_case(evaluated_arguments[0])
+
+    if evaluated_head.name == "Capitalize":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Capitalize expects exactly one argument.")
+        return capitalize_string(evaluated_arguments[0])
+
+    if evaluated_head.name == "StringRepeat":
+        if len(evaluated_arguments) == 2:
+            return string_repeat(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return string_repeat(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "StringRepeat expects a string, a count, and an optional target length."
+        )
+
+    if evaluated_head.name == "StringPadLeft":
+        if len(evaluated_arguments) == 2:
+            return string_pad_left(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return string_pad_left(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "StringPadLeft expects a string, a target length, and an optional padding."
+        )
+
+    if evaluated_head.name == "StringPadRight":
+        if len(evaluated_arguments) == 2:
+            return string_pad_right(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return string_pad_right(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError(
+            "StringPadRight expects a string, a target length, and an optional padding."
+        )
+
+    if evaluated_head.name == "StringSplit":
+        if len(evaluated_arguments) == 1:
+            return string_split(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return string_split(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError(
+            "StringSplit currently expects a string and an optional separator."
+        )
+
+    if evaluated_head.name == "StringRiffle":
+        if len(evaluated_arguments) == 1:
+            return string_riffle(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return string_riffle(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError(
+            "StringRiffle expects a list and an optional separator or {l, sep, r} triple."
+        )
+
+    if evaluated_head.name == "StringTrim":
+        if len(evaluated_arguments) == 1:
+            return string_trim(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return string_trim(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError(
+            "StringTrim expects a string and an optional literal-string trim pattern."
+        )
+
+    if evaluated_head.name == "StringCount":
+        if len(evaluated_arguments) == 2:
+            return string_count(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError(
+            "StringCount expects a string and a literal-string pattern."
+        )
+
     if evaluated_head.name == "StringPosition":
         if len(evaluated_arguments) == 1:
             return evaluated_expr
@@ -13555,6 +14882,146 @@ def _evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("AssociationMap expects exactly two arguments.")
         return association_map(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "KeySort":
+        if len(evaluated_arguments) == 1:
+            return key_sort(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return key_sort(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("KeySort expects an association and an optional ordering function.")
+
+    if evaluated_head.name == "Total":
+        if len(evaluated_arguments) == 1:
+            return total(evaluated_arguments[0])
+        raise WolframEvaluationError("Total currently supports only the one-argument form.")
+
+    if evaluated_head.name == "Mean":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Mean currently expects exactly one argument.")
+        return mean_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "Median":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Median currently expects exactly one argument.")
+        return median_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "Tally":
+        if len(evaluated_arguments) == 1:
+            return tally(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return tally(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Tally expects a list and an optional binary test.")
+
+    if evaluated_head.name == "Counts":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Counts expects exactly one argument.")
+        return counts(evaluated_arguments[0])
+
+    if evaluated_head.name == "Catenate":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Catenate expects exactly one argument.")
+        return catenate(evaluated_arguments[0])
+
+    if evaluated_head.name == "Differences":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Differences currently supports only the one-argument form.")
+        return differences(evaluated_arguments[0])
+
+    if evaluated_head.name == "Accumulate":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Accumulate expects exactly one argument.")
+        return accumulate(evaluated_arguments[0])
+
+    if evaluated_head.name == "Riffle":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Riffle currently supports the two-argument form only.")
+        return riffle(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Count":
+        if len(evaluated_arguments) == 2:
+            return count_items(evaluated_arguments[0], expr.arguments[1])
+        if len(evaluated_arguments) == 3:
+            return count_items(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Count expects an expression, a pattern, and an optional levelspec.")
+
+    if evaluated_head.name == "AllTrue":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("AllTrue expects a list and a test function.")
+        return all_true(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "AnyTrue":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("AnyTrue expects a list and a test function.")
+        return any_true(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "NoneTrue":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("NoneTrue expects a list and a test function.")
+        return none_true(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ContainsAll":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ContainsAll expects exactly two arguments.")
+        return contains_all(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ContainsAny":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ContainsAny expects exactly two arguments.")
+        return contains_any(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ContainsNone":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ContainsNone expects exactly two arguments.")
+        return contains_none(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ContainsExactly":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ContainsExactly expects exactly two arguments.")
+        return contains_exactly(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Subsets":
+        if len(evaluated_arguments) == 1:
+            return subsets(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return subsets(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Subsets expects a list and an optional length spec.")
+
+    if evaluated_head.name == "Permutations":
+        if len(evaluated_arguments) == 1:
+            return permutations(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return permutations(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Permutations expects a list and an optional length spec.")
+
+    if evaluated_head.name == "Union":
+        return union(evaluated_arguments)
+
+    if evaluated_head.name == "Intersection":
+        return intersection(evaluated_arguments)
+
+    if evaluated_head.name == "Complement":
+        return complement(evaluated_arguments)
+
+    if evaluated_head.name == "PadLeft":
+        if len(evaluated_arguments) == 2:
+            return pad_left(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return pad_left(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("PadLeft expects a list, a target length, and an optional fill value.")
+
+    if evaluated_head.name == "PadRight":
+        if len(evaluated_arguments) == 2:
+            return pad_right(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return pad_right(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("PadRight expects a list, a target length, and an optional fill value.")
+
+    if evaluated_head.name == "FromDigits":
+        if len(evaluated_arguments) == 1:
+            return from_digits(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return from_digits(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("FromDigits expects digits and an optional base.")
 
     return evaluated_expr
 

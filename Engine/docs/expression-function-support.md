@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-26T05:21:30Z
-- Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
+- Updated (UTC): 2026-04-26T19:29:11Z
+- Repository HEAD: a71088d55007ea86a1e13192cd8a437f53057c7c
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -104,10 +104,14 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   single rule or a flat list of rules rather than a nested list of rule lists.
 - `ReplaceRepeated` uses a Tungsten-side iteration safety cap to avoid non-terminating rewrite
   loops.
-- Arithmetic and Boolean evaluation are intentionally narrow: Tungsten does not honor `Flat`,
-  `Orderless`, or short-circuit attributes here, and only evaluates the covered arithmetic and
-  relational heads when every participating argument is already an explicit Tungsten number in the
-  shipped numeric tower. Mixed symbolic expressions remain inert.
+- Arithmetic and Boolean evaluation are intentionally narrow: Tungsten does not honor general
+  `Flat`, `Orderless`, or short-circuit attributes here. The one explicit exception is the
+  `Plus` / `Times` numeric prefix fold: when every numeric argument can be combined into a single
+  number, `Plus[2, a, 3]` evaluates to `Plus[5, a]` and `Times[2, 3, a, 4]` evaluates to
+  `Times[24, a]`, with the symbolic remainder preserved in input order. The combined number leads
+  the result, matching the kernel's canonical `Plus[3, a]` shape; Tungsten still does not reorder
+  the symbolic part. Empty `Power[]` is `1`. Other heads (`And`, `Or`, etc.) and mixed symbolic
+  expressions outside the prefix-fold case still remain inert.
 - `Sequence[...]` splices into evaluated call arguments, including lists and ordinary symbolic
   calls. It also splices structurally, without evaluating its payload, inside held-but-not-
   sequence-suppressing heads such as `Hold`, `HoldForm`, `HoldPattern`, and `Function`.
@@ -471,8 +475,30 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Mod` | `Mod[m, n]`, `Mod[m, n, d]` with explicit integers | Returns the Wolfram-style remainder for explicit integer arguments, including the offset form `d`. `Mod[m, 0]` currently yields `Indeterminate`. | [Mod](https://reference.wolfram.com/language/ref/Mod) |
 | `Quotient` | `Quotient[m, n]`, `Quotient[m, n, d]` with explicit integers | Returns the Wolfram-style integer quotient corresponding to `Mod`, including the offset form `d`. `Quotient[0, 0]` currently yields `Indeterminate`, while nonzero divided by zero yields `ComplexInfinity`. | [Quotient](https://reference.wolfram.com/language/ref/Quotient) |
 | `QuotientRemainder` | `QuotientRemainder[m, n]` with explicit integers and nonzero `n` | Returns `{Quotient[m, n], Mod[m, n]}` for the supported integer subset. Division by zero currently remains inert in Tungsten. | [QuotientRemainder](https://reference.wolfram.com/language/ref/QuotientRemainder) |
-| `Min` | `Min[]`, `Min[n1, ...]` | Returns the minimum of explicit real-valued numeric arguments. `Min[]` yields `Infinity`. Complex arguments remain inert. | [Min](https://reference.wolfram.com/language/ref/Min) |
-| `Max` | `Max[]`, `Max[n1, ...]` | Returns the maximum of explicit real-valued numeric arguments. `Max[]` yields `-Infinity`. Complex arguments remain inert. | [Max](https://reference.wolfram.com/language/ref/Max) |
+| `Min` | `Min[]`, `Min[n1, ...]`, `Min[{n1, ...}]` | Returns the minimum of explicit real-valued numeric arguments. `Min[]` yields `Infinity`. A single wrapping `List` is unwrapped, matching the common `Min[Range[n]]` idiom. Complex arguments remain inert. | [Min](https://reference.wolfram.com/language/ref/Min) |
+| `Max` | `Max[]`, `Max[n1, ...]`, `Max[{n1, ...}]` | Returns the maximum of explicit real-valued numeric arguments. `Max[]` yields `-Infinity`. A single wrapping `List` is unwrapped. Complex arguments remain inert. | [Max](https://reference.wolfram.com/language/ref/Max) |
+| `Floor` | `Floor[x]` for explicit integers, rationals, and reals | Returns the largest integer not exceeding `x`. Symbolic and unsupported arguments remain inert. | [Floor](https://reference.wolfram.com/language/ref/Floor) |
+| `Ceiling` | `Ceiling[x]` for explicit integers, rationals, and reals | Returns the smallest integer at least `x`. Symbolic and unsupported arguments remain inert. | [Ceiling](https://reference.wolfram.com/language/ref/Ceiling) |
+| `Round` | `Round[x]` for explicit integers, rationals, and reals | Round half to even (banker's rounding), matching Wolfram's `Round[2.5] -> 2`. | [Round](https://reference.wolfram.com/language/ref/Round) |
+| `IntegerPart` | `IntegerPart[x]` for explicit integers, rationals, and reals | Truncates `x` toward zero. | [IntegerPart](https://reference.wolfram.com/language/ref/IntegerPart) |
+| `FractionalPart` | `FractionalPart[x]` for explicit integers, rationals, and reals | Returns `x - IntegerPart[x]`; the result keeps the sign of `x`. | [FractionalPart](https://reference.wolfram.com/language/ref/FractionalPart) |
+| `Sqrt` | `Sqrt[n]` for explicit integers, rationals, and reals | Returns an exact integer for perfect squares, the radical form `Power[n, 1/2]` for other exact non-negatives, a machine real for explicit reals, and `Sqrt[m] * I` for negative integers. Tungsten does not implement general algebraic simplification; non-perfect-square exact values stay in radical form. | [Sqrt](https://reference.wolfram.com/language/ref/Sqrt) |
+| `GCD` | `GCD[]`, `GCD[n1, ...]` for explicit integers | `GCD[]` is `0`; otherwise returns the greatest common divisor of the absolute values. | [GCD](https://reference.wolfram.com/language/ref/GCD) |
+| `LCM` | `LCM[]`, `LCM[n1, ...]` for explicit integers | `LCM[]` is `1`; an explicit zero argument forces the result to `0`. | [LCM](https://reference.wolfram.com/language/ref/LCM) |
+| `Divisors` | `Divisors[n]` for nonzero explicit integers | Returns the increasing list of positive divisors of `\|n\|`. | [Divisors](https://reference.wolfram.com/language/ref/Divisors) |
+| `PrimeQ` | `PrimeQ[n]` for explicit integers | Deterministic for all 64-bit values via Miller–Rabin with the standard witness set; an extended witness list is used for larger inputs. | [PrimeQ](https://reference.wolfram.com/language/ref/PrimeQ) |
+| `CompositeQ` | `CompositeQ[n]` for explicit integers | Returns `True` iff `n >= 4` and `n` is not prime. | [CompositeQ](https://reference.wolfram.com/language/ref/CompositeQ) |
+| `EulerPhi` | `EulerPhi[n]` for positive explicit integers | Returns the Euler totient of `n`. | [EulerPhi](https://reference.wolfram.com/language/ref/EulerPhi) |
+| `MoebiusMu` | `MoebiusMu[n]` for positive explicit integers | Returns `0`, `1`, or `-1` per the Möbius function. | [MoebiusMu](https://reference.wolfram.com/language/ref/MoebiusMu) |
+| `PrimePi` | `PrimePi[n]` for non-negative explicit integers | Counts primes `<= n`. Uses an explicit sieve for `n <= 5_000_000` and falls through to incremental primality otherwise. | [PrimePi](https://reference.wolfram.com/language/ref/PrimePi) |
+| `Prime` | `Prime[n]` for positive explicit integers | Returns the `n`-th prime via incremental search. | [Prime](https://reference.wolfram.com/language/ref/Prime) |
+| `NextPrime` | `NextPrime[n]`, `NextPrime[n, k]` for explicit integers | Returns the prime that is `k` positions away (default `1`) from `n` by incremental search. | [NextPrime](https://reference.wolfram.com/language/ref/NextPrime) |
+| `PowerMod` | `PowerMod[a, b, m]` for explicit integers | Modular exponentiation; supports negative `b` via the modular inverse. Returns the unevaluated form when no inverse exists. | [PowerMod](https://reference.wolfram.com/language/ref/PowerMod) |
+| `IntegerLength` | `IntegerLength[n]`, `IntegerLength[n, base]` for explicit integers | Returns the number of base-10 (or base-`base`) digits of `\|n\|`; `IntegerLength[0]` is `0`. | [IntegerLength](https://reference.wolfram.com/language/ref/IntegerLength) |
+| `IntegerDigits` | `IntegerDigits[n]`, `IntegerDigits[n, base]`, `IntegerDigits[n, base, length]` | Most-significant-first digit list of `\|n\|`. The three-argument form pads or trims to the requested length. | [IntegerDigits](https://reference.wolfram.com/language/ref/IntegerDigits) |
+| `FromDigits` | `FromDigits[digits]`, `FromDigits[digits, base]` | Inverse of `IntegerDigits`. Accepts a list of explicit integer digits or an explicit string of base-`base` characters. | [FromDigits](https://reference.wolfram.com/language/ref/FromDigits) |
+| `BitAnd`, `BitOr`, `BitXor` | `BitAnd[i1, ...]`, `BitOr[i1, ...]`, `BitXor[i1, ...]` for explicit integers | Variadic bitwise operations. Empty `BitAnd[]` is `-1`; empty `BitOr[]` and `BitXor[]` are `0`. | [BitAnd](https://reference.wolfram.com/language/ref/BitAnd), [BitOr](https://reference.wolfram.com/language/ref/BitOr), [BitXor](https://reference.wolfram.com/language/ref/BitXor) |
+| `BitShiftLeft`, `BitShiftRight` | `BitShiftLeft[n]`, `BitShiftLeft[n, k]`, `BitShiftRight[n]`, `BitShiftRight[n, k]` | Arithmetic shifts; negative shift amounts shift in the opposite direction. | [BitShiftLeft](https://reference.wolfram.com/language/ref/BitShiftLeft), [BitShiftRight](https://reference.wolfram.com/language/ref/BitShiftRight) |
 | `Clip` | `Clip[n]`, `Clip[n, {min, max}]`, `Clip[n, {min, max}, {vmin, vmax}]` with explicit real-valued numbers | Clips an explicit real-valued number into the specified range. For the three-argument form it returns `vmin` or `vmax` when clipping occurs. | [Clip](https://reference.wolfram.com/language/ref/Clip) |
 | `KroneckerDelta` | `KroneckerDelta[]`, `KroneckerDelta[i]`, `KroneckerDelta[i1, ...]` | Returns `1` when all supported explicit integer arguments are equal, otherwise `0`. The one-argument form tests whether the integer is `0`. | [KroneckerDelta](https://reference.wolfram.com/language/ref/KroneckerDelta) |
 | `DiscreteDelta` | `DiscreteDelta[]`, `DiscreteDelta[i1, ...]` | Returns `1` when every supported explicit integer argument is `0`, otherwise `0`. | [DiscreteDelta](https://reference.wolfram.com/language/ref/DiscreteDelta) |
@@ -541,6 +567,41 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `DeleteDuplicates` | `DeleteDuplicates[expr]`, `DeleteDuplicates[expr, test]` | Removes later duplicates while preserving the first occurrence of each retained element. Associations deduplicate by values while preserving the first surviving key for each retained value. | [DeleteDuplicates](https://reference.wolfram.com/language/ref/DeleteDuplicates) |
 | `DeleteDuplicatesBy` | `DeleteDuplicatesBy[expr, f]` | Removes later elements whose computed keys are structurally identical after Tungsten evaluates the supported key function. | [DeleteDuplicatesBy](https://reference.wolfram.com/language/ref/DeleteDuplicatesBy) |
 | `DuplicateFreeQ` | `DuplicateFreeQ[expr]`, `DuplicateFreeQ[expr, test]` | Returns `True` when no two retained first-level elements are duplicates under structural equality or the supplied binary test. | [DuplicateFreeQ](https://reference.wolfram.com/language/ref/DuplicateFreeQ) |
+| `Total` | `Total[list]`, `Total[matrix]`, `Total[assoc]` | Sums first-level elements; for nested same-length lists, sums column-wise. Multi-argument and explicit-levelspec forms (`Total[expr, n]`, `Total[expr, {n}]`) are not yet implemented. | [Total](https://reference.wolfram.com/language/ref/Total) |
+| `Mean` | `Mean[list]`, `Mean[assoc]` | Returns the arithmetic mean of explicit numeric or symbolic elements; the result is divided through Tungsten's existing arithmetic, so symbolic means stay structural (e.g., `Mean[{1, 2, x}]` is `(3 + x)/3`). Empty input is rejected. | [Mean](https://reference.wolfram.com/language/ref/Mean) |
+| `Median` | `Median[list]`, `Median[assoc]` | Returns the median of explicit real-valued numeric elements. Tungsten currently expects numeric values; symbolic medians and the variants over distributions are not implemented. | [Median](https://reference.wolfram.com/language/ref/Median) |
+| `Tally` | `Tally[list]`, `Tally[list, test]`, `Tally[assoc]` | Returns a list of `{value, count}` pairs in first-occurrence order. With a binary test, equality is determined by the test rather than structural identity. | [Tally](https://reference.wolfram.com/language/ref/Tally) |
+| `Counts` | `Counts[list]`, `Counts[assoc]` | Returns an `Association` mapping each distinct element to the number of occurrences, preserving first-occurrence order. | [Counts](https://reference.wolfram.com/language/ref/Counts) |
+| `Catenate` | `Catenate[list-of-lists]`, `Catenate[list-of-assocs]`, `Catenate[<\|...\|>]` | Concatenates the value sequences of the immediate elements; associations contribute their values. | [Catenate](https://reference.wolfram.com/language/ref/Catenate) |
+| `Differences` | `Differences[list]`, `Differences[assoc]` | Returns the first-difference list of consecutive elements. Returns `{}` for inputs of length `<= 1`. | [Differences](https://reference.wolfram.com/language/ref/Differences) |
+| `Accumulate` | `Accumulate[list]`, `Accumulate[assoc]` | Returns the running totals of consecutive elements. Associations preserve their keys. | [Accumulate](https://reference.wolfram.com/language/ref/Accumulate) |
+| `Riffle` | `Riffle[list, x]`, `Riffle[list, {x1, ..., xk}]` | Inserts the separator (or cycles through a list of separators) between adjacent elements. | [Riffle](https://reference.wolfram.com/language/ref/Riffle) |
+| `Count` | `Count[expr, patt]`, `Count[expr, patt, levelspec]` | Counts occurrences of pattern matches at the requested level (default `{1}`, matching the kernel). | [Count](https://reference.wolfram.com/language/ref/Count) |
+| `AllTrue` | `AllTrue[list, f]`, `AllTrue[assoc, f]` | Returns `True` when every element makes the test evaluate to explicit `True`. | [AllTrue](https://reference.wolfram.com/language/ref/AllTrue) |
+| `AnyTrue` | `AnyTrue[list, f]`, `AnyTrue[assoc, f]` | Returns `True` when at least one element makes the test evaluate to explicit `True`. | [AnyTrue](https://reference.wolfram.com/language/ref/AnyTrue) |
+| `NoneTrue` | `NoneTrue[list, f]`, `NoneTrue[assoc, f]` | Returns `True` when no element makes the test evaluate to explicit `True`. | [NoneTrue](https://reference.wolfram.com/language/ref/NoneTrue) |
+| `ContainsAll` | `ContainsAll[a, b]` for lists/associations | Returns `True` when every element of `b` appears in `a` under structural equality. | [ContainsAll](https://reference.wolfram.com/language/ref/ContainsAll) |
+| `ContainsAny` | `ContainsAny[a, b]` for lists/associations | Returns `True` when at least one element is shared between `a` and `b`. | [ContainsAny](https://reference.wolfram.com/language/ref/ContainsAny) |
+| `ContainsNone` | `ContainsNone[a, b]` for lists/associations | Returns `True` when no element is shared between `a` and `b`. | [ContainsNone](https://reference.wolfram.com/language/ref/ContainsNone) |
+| `ContainsExactly` | `ContainsExactly[a, b]` for lists/associations | Returns `True` when `a` and `b` have identical underlying value sets, ignoring duplicates and order. | [ContainsExactly](https://reference.wolfram.com/language/ref/ContainsExactly) |
+| `Subsets` | `Subsets[list]`, `Subsets[list, n]`, `Subsets[list, {n}]`, `Subsets[list, {min, max}]` | Returns the requested subsets in the kernel's canonical order. With no spec, returns subsets of every size up to the input length. | [Subsets](https://reference.wolfram.com/language/ref/Subsets) |
+| `Permutations` | `Permutations[list]`, `Permutations[list, n]`, `Permutations[list, {n}]`, `Permutations[list, {min, max}]` | Returns the requested permutations in lexicographic order. | [Permutations](https://reference.wolfram.com/language/ref/Permutations) |
+| `Union` | `Union[list1, ...]` | Returns the canonical-order list of unique elements pooled across all inputs. Tungsten's canonical order is its existing structural order, so the result matches the kernel for explicit numeric and string elements. | [Union](https://reference.wolfram.com/language/ref/Union) |
+| `Intersection` | `Intersection[list1, ...]` | Returns the canonical-order intersection of all inputs. | [Intersection](https://reference.wolfram.com/language/ref/Intersection) |
+| `Complement` | `Complement[full, list1, ...]` | Returns elements of `full` that are absent from every other argument, in canonical order. | [Complement](https://reference.wolfram.com/language/ref/Complement) |
+| `PadLeft` | `PadLeft[list, n]`, `PadLeft[list, n, fill]` | One-dimensional left padding to length `n`. Trims when `n` is smaller than the current length. The default fill is `0`. | [PadLeft](https://reference.wolfram.com/language/ref/PadLeft) |
+| `PadRight` | `PadRight[list, n]`, `PadRight[list, n, fill]` | One-dimensional right padding to length `n`. Trims when `n` is smaller than the current length. The default fill is `0`. | [PadRight](https://reference.wolfram.com/language/ref/PadRight) |
+| `KeySort` | `KeySort[assoc]`, `KeySort[assoc, p]` | Reorders the association by canonical key order, or by a supplied two-argument ordering predicate. | [KeySort](https://reference.wolfram.com/language/ref/KeySort) |
+| `ToUpperCase` | `ToUpperCase[s]`, `ToUpperCase[{s1, ...}]` | Threads over `List` inputs. Wraps Python's Unicode `str.upper`. | [ToUpperCase](https://reference.wolfram.com/language/ref/ToUpperCase) |
+| `ToLowerCase` | `ToLowerCase[s]`, `ToLowerCase[{s1, ...}]` | Threads over `List` inputs. Wraps Python's Unicode `str.lower`. | [ToLowerCase](https://reference.wolfram.com/language/ref/ToLowerCase) |
+| `Capitalize` | `Capitalize[s]`, `Capitalize[{s1, ...}]` | Capitalizes the first character; subsequent characters are unchanged. The kernel's word-list and dictionary modes are not implemented. | [Capitalize](https://reference.wolfram.com/language/ref/Capitalize) |
+| `StringSplit` | `StringSplit[s]`, `StringSplit[s, sep]`, `StringSplit[s, {sep1, ...}]` | Default form splits on whitespace runs. Explicit forms accept literal-string separators or lists of literal-string separators. Empty pieces are dropped. Threads over `List` inputs. | [StringSplit](https://reference.wolfram.com/language/ref/StringSplit) |
+| `StringRiffle` | `StringRiffle[list]`, `StringRiffle[list, sep]`, `StringRiffle[list, {l, sep, r}]` | Joins explicit strings with `sep` (default `" "`); the triple form adds left/right delimiters. Inner `List` rows of strings are joined with `sep` before the outer join. | [StringRiffle](https://reference.wolfram.com/language/ref/StringRiffle) |
+| `StringTrim` | `StringTrim[s]`, `StringTrim[s, "literal"]` | Default form strips leading and trailing whitespace. Explicit forms strip a literal string from both ends repeatedly. | [StringTrim](https://reference.wolfram.com/language/ref/StringTrim) |
+| `StringPadLeft` | `StringPadLeft[s, n]`, `StringPadLeft[s, n, "pad"]` | Pads on the left to length `n` (default pad `" "`). When `s` already has length `>= n`, returns the rightmost `n` characters. | [StringPadLeft](https://reference.wolfram.com/language/ref/StringPadLeft) |
+| `StringPadRight` | `StringPadRight[s, n]`, `StringPadRight[s, n, "pad"]` | Pads on the right to length `n` (default pad `" "`). When `s` already has length `>= n`, returns the leftmost `n` characters. | [StringPadRight](https://reference.wolfram.com/language/ref/StringPadRight) |
+| `StringRepeat` | `StringRepeat[s, n]`, `StringRepeat[s, n, target]` | Repeats `s` `n` times; the three-argument form repeats enough times to cover `target` characters and then truncates. | [StringRepeat](https://reference.wolfram.com/language/ref/StringRepeat) |
+| `StringCount` | `StringCount[s, "literal"]`, `StringCount[s, {"l1", "l2", ...}]` | Counts non-overlapping occurrences of literal-string patterns. The richer string-pattern surface (regex, character classes) is delegated to `StringPosition`. | [StringCount](https://reference.wolfram.com/language/ref/StringCount) |
 | `Keys` | `Keys[assoc]` | Returns the keys of an association as a list. | [Keys](https://reference.wolfram.com/language/ref/Keys) |
 | `Values` | `Values[assoc]` | Returns the values of an association as a list. | [Values](https://reference.wolfram.com/language/ref/Values) |
 | `Normal` | `Normal[assoc]` | Converts an association to a plain list of rules. | [Normal](https://reference.wolfram.com/language/ref/Normal) |
@@ -671,8 +732,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 Wolfram marks many common numeric and logical functions as `Listable`; Tungsten intentionally does
 not. These heads therefore stay inert on list arguments unless the support table says otherwise:
 `Plus`, `Times`, `Power`, `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`,
-`UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min`, `Max`,
-`Clip`, `KroneckerDelta`, `DiscreteDelta`, and `Ramp`.
+`UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min` (per-list-arg
+fold form is supported), `Max` (likewise), `Clip`, `KroneckerDelta`, `DiscreteDelta`, `Ramp`,
+`Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, `Sqrt`, `Boole`, `PrimeQ`,
+`CompositeQ`, `EulerPhi`, `MoebiusMu`, and `IntegerLength`. The per-element `Min`/`Max` over a
+single wrapping `List` is the one explicit exception — the docs spell it out as a supported form
+because it is the by-far-most-common Wolfram idiom for taking a list extremum.
 
 This does not apply to `Function[..., Listable]`: Tungsten honors `Listable` when it is explicitly
 supplied as a third-argument pure-function attribute.
