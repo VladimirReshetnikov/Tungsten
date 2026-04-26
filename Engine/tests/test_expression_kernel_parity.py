@@ -141,45 +141,53 @@ class InfinityRenderingTests(unittest.TestCase):
 
 
 class ParserNaryGroupingTests(unittest.TestCase):
-    """Finding B7: the parser produces left-associative binary trees for
-    chained infix operators, where Wolfram's parser produces flat n-ary calls.
+    """Finding B7: Wolfram performs selected n-ary normalization while parsing,
+    including inside held expressions. Tungsten mirrors the arithmetic and
+    comparison pieces now, while preserving explicit calls and parentheses as
+    barriers."""
 
-    Tungsten now special-cases same-head comparison chains because that affects
-    evaluation. Arithmetic n-ary flattening remains intentionally deferred to
-    preserve the documented no-Flat/no-Orderless arithmetic boundary.
-    """
-
-    def test_parser_plus_binary_current_behavior(self) -> None:
-        expr = parse_expression("a + b + c", form="input")
-        self.assertEqual(expr.to_full_form(), "Plus[Plus[a, b], c]")
-
-    def test_parser_times_binary_current_behavior(self) -> None:
-        expr = parse_expression("a * b * c", form="input")
-        self.assertEqual(expr.to_full_form(), "Times[Times[a, b], c]")
-
-    def test_parser_mixed_subtraction_current_behavior(self) -> None:
-        expr = parse_expression("a + b - c", form="input")
-        self.assertEqual(expr.to_full_form(), "Plus[Plus[a, b], Times[-1, c]]")
-
-    @unittest.expectedFailure
-    def test_parser_plus_nary_wolfram_target(self) -> None:
+    def test_parser_plus_nary(self) -> None:
         expr = parse_expression("a + b + c", form="input")
         self.assertEqual(expr.to_full_form(), "Plus[a, b, c]")
 
-    @unittest.expectedFailure
-    def test_parser_times_nary_wolfram_target(self) -> None:
+    def test_parser_times_nary(self) -> None:
         expr = parse_expression("a * b * c", form="input")
         self.assertEqual(expr.to_full_form(), "Times[a, b, c]")
+
+    def test_parser_mixed_multiply_divide_factor_grouping(self) -> None:
+        self.assertEqual(
+            parse_expression("Hold[a*b/c*d/e]", form="input").to_full_form(),
+            "Hold[Times[a, Times[b, Power[c, -1]], Times[d, Power[e, -1]]]]",
+        )
+
+    def test_parser_mixed_subtraction_nary(self) -> None:
+        expr = parse_expression("a + b - c", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[a, b, Times[-1, c]]")
+
+    def test_parser_parentheses_remain_barriers(self) -> None:
+        self.assertEqual(
+            parse_expression("Hold[a + (b + c)]", form="input").to_full_form(),
+            "Hold[Plus[a, Plus[b, c]]]",
+        )
+        self.assertEqual(
+            parse_expression("Hold[(a + b) + c]", form="input").to_full_form(),
+            "Hold[Plus[Plus[a, b], c]]",
+        )
+
+    def test_parser_mixed_comparison_inequality(self) -> None:
+        self.assertEqual(
+            parse_expression("Hold[a < b <= c]", form="input").to_full_form(),
+            "Hold[Inequality[a, Less, b, LessEqual, c]]",
+        )
 
 
 class ArithmeticPrefixFoldTests(unittest.TestCase):
     """Finding C6 (2026-04-26 deep parity review): mixed numeric/symbolic
     arguments to direct ``Plus[...]`` and ``Times[...]`` calls fold the
     numeric prefix into a single combined number that leads the result. This
-    matches Wolfram's canonical ``Plus[3, a]`` shape for the common case.
-    Tungsten still does not implement Orderless rearrangement of the
-    *symbolic* part, so symbolic order is preserved as it appeared in the
-    input, just after the combined numeric constant.
+    matches Wolfram's canonical ``Plus[3, a]`` shape. Attribute normalization
+    now runs before the fold, so ``Orderless`` heads also canonicalize the
+    symbolic remainder instead of preserving raw input order.
     """
 
     def test_plus_direct_call_mixed_folds_prefix(self) -> None:
@@ -191,11 +199,17 @@ class ArithmeticPrefixFoldTests(unittest.TestCase):
     def test_plus_direct_call_with_multiple_symbolic(self) -> None:
         self.assertEqual(_full("Plus[2, a, 3, b]"), "Plus[5, a, b]")
 
+    def test_plus_direct_call_canonicalizes_symbolic_remainder(self) -> None:
+        self.assertEqual(_full("Plus[2, b, 3, a]"), "Plus[5, a, b]")
+
     def test_plus_infix_mixed_simplifies_inner(self) -> None:
         self.assertEqual(_full("1 + 2 + a"), "Plus[3, a]")
 
     def test_times_direct_call_mixed_folds_prefix(self) -> None:
         self.assertEqual(_full("Times[2, 3, a, 4]"), "Times[24, a]")
+
+    def test_times_direct_call_canonicalizes_symbolic_remainder(self) -> None:
+        self.assertEqual(_full("Times[2, 3, b, a, 4]"), "Times[24, a, b]")
 
     def test_times_direct_zero_collapses_to_zero(self) -> None:
         # Times[0, a] is 0 because the numeric fold reaches an exact zero.
@@ -404,21 +418,19 @@ class HoldFamilySemanticsTests(unittest.TestCase):
 
 class ListableThreadingTests(unittest.TestCase):
     """Documented behavior: Wolfram gives many heads the ``Listable`` attribute,
-    which makes them auto-thread over lists. Tungsten doesn't implement
-    attributes, so these stay inert."""
+    which makes them auto-thread over lists. Tungsten now applies the registry
+    snapshot attributes before direct built-in evaluation."""
 
-    def test_sign_on_list_stays_inert(self) -> None:
-        # Wolfram: Sign[{-3, 0, 5}] = {-1, 0, 1}. Tungsten: inert.
-        self.assertEqual(_full("Sign[{-3, 0, 5}]"), "Sign[List[-3, 0, 5]]")
+    def test_sign_on_list_threads(self) -> None:
+        self.assertEqual(_full("Sign[{-3, 0, 5}]"), "List[-1, 0, 1]")
 
-    def test_abs_on_list_stays_inert(self) -> None:
-        self.assertEqual(_full("Abs[{-3, 4}]"), "Abs[List[-3, 4]]")
+    def test_abs_on_list_threads(self) -> None:
+        self.assertEqual(_full("Abs[{-3, 4}]"), "List[3, 4]")
 
-    def test_plus_two_lists_stays_inert(self) -> None:
-        # Docs: Plus doesn't flatten/thread. Left as Plus[List, List].
+    def test_plus_two_lists_threads(self) -> None:
         self.assertEqual(
             _full("Plus[{1, 2}, {3, 4}]"),
-            "Plus[List[1, 2], List[3, 4]]",
+            "List[4, 6]",
         )
 
 

@@ -349,6 +349,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "CirclePlus",
     "CircleTimes",
     "Clear",
+    "ClearAll",
+    "ClearAttributes",
     "Clip",
     "Comap",
     "ComapApply",
@@ -458,6 +460,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "InexactNumberQ",
     "Indeterminate",
     "Infinity",
+    "Inequality",
     "Inner",
     "Intersection",
     "Integer",
@@ -581,6 +584,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "PrecedesEqual",
     "Prepend",
     "Proportion",
+    "Protect",
     "Protected",
     "PunctuationCharacter",
     "Quotient",
@@ -621,6 +625,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Scan",
     "Select",
     "SelectFirst",
+    "SetAttributes",
     "SetAccuracy",
     "SetPrecision",
     "ShowSpecialCharacters",
@@ -694,6 +699,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "TimeConstrained",
     "TimeRemaining",
     "TensorProduct",
+    "Temporary",
     "Tilde",
     "TildeEqual",
     "TildeFullEqual",
@@ -721,6 +727,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "UpArrow",
     "UpTo",
     "Unique",
+    "Unprotect",
     "UnsameQ",
     "ValueQ",
     "Values",
@@ -758,6 +765,33 @@ _SPECIAL_SESSION_SETTING_MINIMUMS = {
     "$HistoryLength": 0,
     "$OutputSizeLimit": 0,
 }
+
+
+_KNOWN_ATTRIBUTE_NAMES = {
+    "Constant",
+    "Flat",
+    "HoldAll",
+    "HoldAllComplete",
+    "HoldFirst",
+    "HoldRest",
+    "Listable",
+    "Locked",
+    "NHoldAll",
+    "NHoldFirst",
+    "NHoldRest",
+    "NonThreadable",
+    "NumericFunction",
+    "OneIdentity",
+    "Orderless",
+    "Protected",
+    "ReadProtected",
+    "SequenceHold",
+    "Stub",
+    "Temporary",
+}
+
+
+_HOLD_ALL_ATTRIBUTE_NAMES = {"HoldAll", "HoldAllComplete"}
 
 
 def _load_system_symbol_snapshot() -> dict[str, tuple[str, ...]]:
@@ -969,8 +1003,30 @@ class SymbolRegistry:
             return ()
         return record.attributes
 
+    def replace_attributes(self, record: SymbolRecord, attributes: Iterable[str]) -> None:
+        record.attributes = _canonical_attribute_tuple(attributes)
+
+    def add_attributes(self, record: SymbolRecord, attributes: Iterable[str]) -> None:
+        record.attributes = _canonical_attribute_tuple((*record.attributes, *attributes))
+
+    def remove_attributes(self, record: SymbolRecord, attributes: Iterable[str]) -> None:
+        removed = set(attributes)
+        record.attributes = _canonical_attribute_tuple(
+            attribute for attribute in record.attributes if attribute not in removed
+        )
+
+    def clear_values(self, record: SymbolRecord) -> None:
+        record.own_value = None
+        record.down_values = ()
+        record.up_values = ()
+        record.sub_values = ()
+
     def display_symbol_for_record(self, record: SymbolRecord) -> Symbol:
         return self._display_symbol_for_record(record)
+
+
+def _canonical_attribute_tuple(attributes: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted(set(attributes)))
 
 
 def _split_symbol_full_name(name: str) -> tuple[str, str]:
@@ -3594,9 +3650,9 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
                     return None
                 result = added
             return result
-        # Mixed numeric/symbolic arguments: fold the numeric prefix the same way
-        # the kernel does for Plus[2, a, 3] -> Plus[5, a]. Stable order is
-        # preserved for the symbolic remainder; we do not implement Orderless.
+        # Mixed numeric/symbolic arguments: after attribute normalization has
+        # flattened and orderless-canonicalized Plus, fold the explicit numeric
+        # arguments into the single leading constant used by Wolfram output.
         return _fold_numeric_partition(expr.arguments, _add_numeric_expr, integer(0), "Plus")
 
     if expr.has_head("Times"):
@@ -3617,8 +3673,8 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
                 result = multiplied
             return result
         # Mixed numeric/symbolic arguments. If the numeric part folds to 0,
-        # the whole product is 0; otherwise return Times[combined, *symbolic]
-        # with the numeric prefix collapsed and the symbolic order preserved.
+        # the whole product is 0; otherwise keep the folded numeric factor in
+        # front of the already attribute-normalized symbolic remainder.
         return _fold_numeric_partition(expr.arguments, _mul_numeric_expr, integer(1), "Times")
 
     if expr.has_head("Power"):
@@ -3646,12 +3702,13 @@ def _fold_numeric_partition(
     identity: Expr,
     head_name: str,
 ) -> Expr | None:
-    """Fold numeric arguments and keep symbolic ones in original order.
+    """Fold explicit numeric arguments and keep the nonnumeric remainder order.
 
     Returns ``None`` when the numeric fold cannot be completed (e.g. an
     incompatible numeric pair). Used by ``Plus`` and ``Times`` to produce the
-    common ``Plus[2, a, 3] -> Plus[5, a]`` shape without implementing
-    Orderless rearrangement of the symbolic part.
+    common ``Plus[2, a, 3] -> Plus[5, a]`` shape. For Orderless heads, callers
+    run attribute normalization first, so "remainder order" is already the
+    canonical argument order rather than raw input order.
     """
     numeric_acc: Expr = identity
     saw_numeric = False
@@ -3763,6 +3820,36 @@ def _evaluate_numeric_relation(expr: Call) -> Expr | None:
     return None
 
 
+def _evaluate_inequality(expr: Call) -> Expr | None:
+    if not expr.has_head("Inequality"):
+        return None
+    if len(expr.arguments) < 3 or len(expr.arguments) % 2 == 0:
+        return None
+
+    for index in range(1, len(expr.arguments), 2):
+        relation = expr.arguments[index]
+        if not isinstance(relation, Symbol):
+            return None
+        left = expr.arguments[index - 1]
+        right = expr.arguments[index + 1]
+        if relation.name == "SameQ":
+            result: Expr | None = same_q(left, right)
+        elif relation.name == "UnsameQ":
+            result = unsame_q(left, right)
+        elif relation.name in {"Equal", "Unequal", "Less", "LessEqual", "Greater", "GreaterEqual"}:
+            relation_expr = call(relation.name, left, right)
+            result = _evaluate_numeric_relation(relation_expr) or _evaluate_integer_relation(relation_expr)
+        else:
+            return None
+
+        if result == symbol("False"):
+            return symbol("False")
+        if result != symbol("True"):
+            return None
+
+    return symbol("True")
+
+
 def _evaluate_boolean_logic(expr: Call) -> Expr | None:
     if expr.has_head("Not"):
         if len(expr.arguments) != 1:
@@ -3784,6 +3871,44 @@ def _evaluate_boolean_logic(expr: Call) -> Expr | None:
         return _bool_symbol(any(isinstance(argument, Symbol) and argument.name == "True" for argument in expr.arguments))
 
     return None
+
+
+def _evaluate_held_boolean_logic(head: Symbol, arguments: Sequence[Expr]) -> Expr:
+    prepared_arguments = _normalize_attribute_call(head, _prepare_symbol_call_arguments(head, arguments))
+    head_name = _system_dispatch_name(head)
+    if head_name == "And":
+        kept: list[Expr] = []
+        for argument in prepared_arguments:
+            evaluated = evaluate(argument)
+            truth = _truth_value(evaluated)
+            if truth is False:
+                return symbol("False")
+            if truth is True:
+                continue
+            kept.append(evaluated)
+        if not kept:
+            return symbol("True")
+        if len(kept) == 1:
+            return kept[0]
+        return Call(head_expr=head, arguments=tuple(kept))
+
+    if head_name == "Or":
+        kept = []
+        for argument in prepared_arguments:
+            evaluated = evaluate(argument)
+            truth = _truth_value(evaluated)
+            if truth is True:
+                return symbol("True")
+            if truth is False:
+                continue
+            kept.append(evaluated)
+        if not kept:
+            return symbol("False")
+        if len(kept) == 1:
+            return kept[0]
+        return Call(head_expr=head, arguments=tuple(kept))
+
+    raise AssertionError(f"Unsupported held Boolean head: {head_name}")
 
 
 def _evaluate_simple_predicates(expr: Call) -> Expr | None:
@@ -5668,19 +5793,33 @@ def name_q_expr(pattern: Expr) -> Symbol:
 
 
 def attributes_expr(expr: Expr) -> Call:
+    if _is_direct_evaluate_expr(expr):
+        assert isinstance(expr, Call)
+        return attributes_expr(evaluate(expr.arguments[0]))
     if isinstance(expr, Call) and expr.has_head("List"):
         return _evaluated_list_expr(*(attributes_expr(item) for item in expr.arguments))
     if isinstance(expr, Symbol):
         attributes = _SYMBOL_REGISTRY.attributes_for_symbol(expr)
         return _evaluated_list_expr(*(symbol(attribute) for attribute in attributes))
     if isinstance(expr, String):
-        attributes = _SYMBOL_REGISTRY.attributes_for_name(expr.value)
+        record = _SYMBOL_REGISTRY.resolve_existing(expr.value)
+        if record is None:
+            emit_message(
+                call("MessageName", symbol("Attributes"), string("notfound")),
+                f"Symbol {expr.value} not found.",
+            )
+            return call("Attributes", expr)
+        attributes = record.attributes
         return _evaluated_list_expr(*(symbol(attribute) for attribute in attributes))
     raise WolframEvaluationError("Attributes expects a symbol, string symbol name, or list of symbols/names.")
 
 
 def _record_is_protected(record: SymbolRecord) -> bool:
     return "Protected" in record.attributes
+
+
+def _record_is_locked(record: SymbolRecord) -> bool:
+    return "Locked" in record.attributes
 
 
 def _special_session_setting_name(record: SymbolRecord) -> str | None:
@@ -5708,6 +5847,14 @@ def _emit_protected_symbol_message(head_name: str, record: SymbolRecord) -> None
     )
 
 
+def _emit_locked_symbol_message(head_name: str, record: SymbolRecord) -> None:
+    display = _SYMBOL_REGISTRY.display_symbol_for_record(record)
+    emit_message(
+        call("MessageName", symbol(head_name), string("locked")),
+        f"Symbol {display.to_input_form()} is locked.",
+    )
+
+
 def _emit_special_symbol_message(head_name: str, record: SymbolRecord) -> None:
     display = _SYMBOL_REGISTRY.display_symbol_for_record(record)
     emit_message(
@@ -5731,6 +5878,179 @@ def _emit_setting_limit_message(record: SymbolRecord, value: Expr) -> None:
     )
 
 
+def _attribute_name_from_expr(expr: Expr) -> str | None:
+    if not isinstance(expr, Symbol):
+        return None
+    name = _system_dispatch_name(expr)
+    return name if name in _KNOWN_ATTRIBUTE_NAMES else None
+
+
+def _attribute_names_from_expr(expr: Expr, function_name: str) -> tuple[str, ...] | None:
+    if isinstance(expr, Call) and expr.has_head("List"):
+        names: list[str] = []
+        for argument in expr.arguments:
+            name = _attribute_name_from_expr(argument)
+            if name is None:
+                _emit_unknown_attribute_message(argument)
+                return None
+            names.append(name)
+        return _canonical_attribute_tuple(names)
+    name = _attribute_name_from_expr(expr)
+    if name is None:
+        _emit_unknown_attribute_message(expr)
+        return None
+    return (name,)
+
+
+def _emit_unknown_attribute_message(expr: Expr) -> None:
+    emit_message(
+        call("MessageName", symbol("Attributes"), string("attnf")),
+        f"{expr.to_input_form()} is not a known attribute.",
+    )
+
+
+def _symbol_record_from_attribute_target(expr: Expr, function_name: str) -> SymbolRecord | None:
+    if isinstance(expr, Symbol):
+        return _SYMBOL_REGISTRY.record_for_symbol(expr)
+    if isinstance(expr, String):
+        record = _SYMBOL_REGISTRY.resolve_existing(expr.value)
+        if record is not None:
+            return record
+    emit_message(
+        call("MessageName", symbol(function_name), string("sym")),
+        f"Argument {expr.to_input_form()} is expected to be a symbol.",
+    )
+    return None
+
+
+def _records_from_attribute_targets(expr: Expr, function_name: str) -> list[SymbolRecord] | None:
+    if isinstance(expr, Call) and expr.has_head("List"):
+        records: list[SymbolRecord] = []
+        for argument in expr.arguments:
+            child_records = _records_from_attribute_targets(argument, function_name)
+            if child_records is None:
+                return None
+            records.extend(child_records)
+        return records
+    record = _symbol_record_from_attribute_target(expr, function_name)
+    return None if record is None else [record]
+
+
+def _records_from_name_or_symbol_specs(
+    arguments: Sequence[Expr],
+    function_name: str,
+    *,
+    strings_are_patterns: bool,
+) -> list[SymbolRecord]:
+    records: list[SymbolRecord] = []
+
+    def add_from_spec(spec: Expr) -> None:
+        if isinstance(spec, Call) and spec.has_head("List"):
+            for item in spec.arguments:
+                add_from_spec(item)
+            return
+        if isinstance(spec, Symbol):
+            records.append(_SYMBOL_REGISTRY.record_for_symbol(spec))
+            return
+        if isinstance(spec, String):
+            if strings_are_patterns:
+                for name in _SYMBOL_REGISTRY.names(spec):
+                    record = _SYMBOL_REGISTRY.resolve_existing(name)
+                    if record is not None:
+                        records.append(record)
+                return
+            record = _SYMBOL_REGISTRY.resolve_existing(spec.value)
+            if record is not None:
+                records.append(record)
+                return
+        emit_message(
+            call("MessageName", symbol(function_name), string("ssym")),
+            f"{spec.to_input_form()} is not a symbol or a valid string pattern.",
+        )
+
+    for argument in arguments:
+        add_from_spec(argument)
+    return records
+
+
+def set_attributes_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 2:
+        raise WolframEvaluationError("SetAttributes expects a symbol or list of symbols and an attribute specification.")
+    records = _records_from_attribute_targets(arguments[0], "SetAttributes")
+    attributes = _attribute_names_from_expr(arguments[1], "SetAttributes")
+    if records is None or attributes is None:
+        return symbol("Null")
+    for record in records:
+        if _record_is_locked(record):
+            _emit_locked_symbol_message("Attributes", record)
+            continue
+        _SYMBOL_REGISTRY.add_attributes(record, attributes)
+    return symbol("Null")
+
+
+def clear_attributes_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 2:
+        raise WolframEvaluationError("ClearAttributes expects a symbol or list of symbols and an attribute specification.")
+    records = _records_from_attribute_targets(arguments[0], "ClearAttributes")
+    attributes = _attribute_names_from_expr(arguments[1], "ClearAttributes")
+    if records is None or attributes is None:
+        return symbol("Null")
+    for record in records:
+        if _record_is_locked(record):
+            _emit_locked_symbol_message("Attributes", record)
+            continue
+        _SYMBOL_REGISTRY.remove_attributes(record, attributes)
+    return symbol("Null")
+
+
+def set_attributes_assignment(lhs: Call, rhs_value: Expr) -> Expr:
+    if len(lhs.arguments) != 1:
+        raise WolframEvaluationError("Attributes assignment expects exactly one target symbol.")
+    record = _symbol_record_from_attribute_target(lhs.arguments[0], "Attributes")
+    attributes = _attribute_names_from_expr(rhs_value, "Attributes")
+    if record is not None and attributes is not None:
+        if _record_is_locked(record):
+            _emit_locked_symbol_message("Attributes", record)
+        else:
+            _SYMBOL_REGISTRY.replace_attributes(record, attributes)
+    return rhs_value
+
+
+def protect_expr(arguments: Sequence[Expr], *, protect: bool) -> Call:
+    function_name = "Protect" if protect else "Unprotect"
+    records = _records_from_name_or_symbol_specs(arguments, function_name, strings_are_patterns=True)
+    changed: list[String] = []
+    for record in records:
+        if _record_is_locked(record):
+            _emit_locked_symbol_message("Protect", record)
+            continue
+        had_protected = _record_is_protected(record)
+        if protect:
+            if not had_protected:
+                _SYMBOL_REGISTRY.add_attributes(record, ("Protected",))
+                changed.append(string(_SYMBOL_REGISTRY.display_symbol_for_record(record).to_input_form()))
+        elif had_protected:
+            _SYMBOL_REGISTRY.remove_attributes(record, ("Protected",))
+            changed.append(string(_SYMBOL_REGISTRY.display_symbol_for_record(record).to_input_form()))
+    return _evaluated_list_expr(*changed)
+
+
+def clear_all_expr(arguments: Sequence[Expr]) -> Expr:
+    for record in _records_from_name_or_symbol_specs(arguments, "ClearAll", strings_are_patterns=True):
+        if _special_session_setting_name(record) is not None:
+            _emit_special_symbol_message("ClearAll", record)
+            continue
+        if _record_is_locked(record):
+            _emit_locked_symbol_message("ClearAll", record)
+            continue
+        if _record_is_protected(record):
+            _emit_protected_symbol_message("ClearAll", record)
+            continue
+        _SYMBOL_REGISTRY.clear_values(record)
+        _SYMBOL_REGISTRY.replace_attributes(record, ())
+    return symbol("Null")
+
+
 def _own_value_rule(record: SymbolRecord) -> Expr | None:
     if record.own_value is None:
         return None
@@ -5743,6 +6063,8 @@ def set_expr(arguments: Sequence[Expr]) -> Expr:
         raise WolframEvaluationError("Set expects exactly two arguments.")
     lhs, rhs = arguments
     rhs_value = evaluate(rhs)
+    if isinstance(lhs, Call) and lhs.has_head("Attributes"):
+        return set_attributes_assignment(lhs, rhs_value)
     if not isinstance(lhs, Symbol):
         raise WolframEvaluationError("This Tungsten subset only supports Set when the left-hand side is a bare symbol.")
     record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
@@ -5781,10 +6103,7 @@ def _clear_record(record: SymbolRecord) -> None:
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Clear", record)
         return
-    record.own_value = None
-    record.down_values = ()
-    record.up_values = ()
-    record.sub_values = ()
+    _SYMBOL_REGISTRY.clear_values(record)
 
 
 def clear_expr(arguments: Sequence[Expr]) -> Expr:
@@ -8656,6 +8975,124 @@ def _match_call_arguments(
     return recurse(0, 0, dict(bindings))
 
 
+def _minimum_flat_argument_count(pattern_arguments: Sequence[Expr]) -> int:
+    count = 0
+    for pattern_argument in pattern_arguments:
+        if _is_sequence_argument_pattern(pattern_argument):
+            count += _sequence_pattern_min_length(pattern_argument)
+        else:
+            count += 1
+    return count
+
+
+def _flat_segment_expr(head: Expr, segment: Sequence[Expr], attribute_names: set[str]) -> Expr:
+    if len(segment) == 1 and "OneIdentity" in attribute_names:
+        return segment[0]
+    return Call(head_expr=head, arguments=tuple(segment))
+
+
+def _match_flat_call_arguments(
+    head: Expr,
+    expr_arguments: Sequence[Expr],
+    pattern_arguments: Sequence[Expr],
+    bindings: dict[str, Expr],
+    attribute_names: set[str],
+    *,
+    ignore_inactive: bool = False,
+) -> dict[str, Expr] | None:
+    def recurse(expr_index: int, pattern_index: int, current: dict[str, Expr]) -> dict[str, Expr] | None:
+        if pattern_index == len(pattern_arguments):
+            return current if expr_index == len(expr_arguments) else None
+        if expr_index > len(expr_arguments):
+            return None
+
+        pattern_argument = pattern_arguments[pattern_index]
+        remaining_minimum = _minimum_flat_argument_count(pattern_arguments[pattern_index + 1:])
+        max_length = len(expr_arguments) - expr_index - remaining_minimum
+
+        if _is_sequence_argument_pattern(pattern_argument):
+            min_length, pattern_max_length = _sequence_pattern_length_bounds(pattern_argument)
+            max_length = min(max_length, pattern_max_length)
+            for length in _sequence_length_order(pattern_argument, min_length, max_length):
+                segment = expr_arguments[expr_index:expr_index + length]
+                matched = _match_sequence_pattern_elements(
+                    segment,
+                    pattern_argument,
+                    current,
+                    ignore_inactive=ignore_inactive,
+                )
+                if matched is None:
+                    continue
+                final = recurse(expr_index + length, pattern_index + 1, matched)
+                if final is not None:
+                    return final
+            return None
+
+        if max_length < 1:
+            return None
+        for length in range(1, max_length + 1):
+            segment = expr_arguments[expr_index:expr_index + length]
+            matched = _match_pattern(
+                _flat_segment_expr(head, segment, attribute_names),
+                pattern_argument,
+                current,
+                ignore_inactive=ignore_inactive,
+            )
+            if matched is None:
+                continue
+            final = recurse(expr_index + length, pattern_index + 1, matched)
+            if final is not None:
+                return final
+        return None
+
+    return recurse(0, 0, dict(bindings))
+
+
+def _unique_argument_permutations(arguments: Sequence[Expr]) -> Iterable[tuple[Expr, ...]]:
+    seen: set[tuple[Expr, ...]] = set()
+    for permutation in itertools.permutations(arguments):
+        if permutation in seen:
+            continue
+        seen.add(permutation)
+        yield permutation
+
+
+def _match_call_arguments_with_attributes(
+    head: Expr,
+    expr_arguments: Sequence[Expr],
+    pattern_arguments: Sequence[Expr],
+    bindings: dict[str, Expr],
+    *,
+    ignore_inactive: bool = False,
+) -> dict[str, Expr] | None:
+    attribute_names = _attribute_names_for_symbol(head) if isinstance(head, Symbol) else set()
+    if "Orderless" in attribute_names:
+        argument_orders = _unique_argument_permutations(expr_arguments)
+    else:
+        argument_orders = (tuple(expr_arguments),)
+
+    for ordered_arguments in argument_orders:
+        if "Flat" in attribute_names:
+            matched = _match_flat_call_arguments(
+                head,
+                ordered_arguments,
+                pattern_arguments,
+                bindings,
+                attribute_names,
+                ignore_inactive=ignore_inactive,
+            )
+        else:
+            matched = _match_call_arguments(
+                ordered_arguments,
+                pattern_arguments,
+                bindings,
+                ignore_inactive=ignore_inactive,
+            )
+        if matched is not None:
+            return matched
+    return None
+
+
 def _key_value_pattern_elements(expr: Expr) -> tuple[Expr, ...] | None:
     entries = _association_entries(expr)
     if entries is not None:
@@ -8917,7 +9354,8 @@ def _match_pattern(
         if matched is None:
             return None
         assert isinstance(structural_expr, Call)
-        return _match_call_arguments(
+        return _match_call_arguments_with_attributes(
+            expr_head,
             _inactive_ignoring_argument_view(expr, structural_expr),
             structural_pattern.arguments,
             matched,
@@ -10146,6 +10584,47 @@ def _drop_nothing_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     return tuple(argument for argument in arguments if not _is_nothing_expr(argument))
 
 
+def _attributes_hold_argument(attribute_names: set[str], index: int) -> bool:
+    if attribute_names & _HOLD_ALL_ATTRIBUTE_NAMES:
+        return True
+    if "HoldFirst" in attribute_names and index == 0:
+        return True
+    if "HoldRest" in attribute_names and index > 0:
+        return True
+    return False
+
+
+def _attributes_suppress_sequence_splicing(attribute_names: set[str]) -> bool:
+    return "SequenceHold" in attribute_names or "HoldAllComplete" in attribute_names
+
+
+def _attribute_names_for_symbol(expr: Symbol) -> set[str]:
+    return set(_SYMBOL_REGISTRY.record_for_symbol(expr).attributes)
+
+
+def _evaluate_argument_with_attributes(argument: Expr, attribute_names: set[str], index: int) -> Expr:
+    if _attributes_hold_argument(attribute_names, index):
+        if "HoldAllComplete" in attribute_names:
+            return argument
+        if _is_direct_evaluate_expr(argument):
+            return _evaluate_direct_evaluate_argument(argument)
+        return argument
+    return evaluate(argument)
+
+
+def _prepare_symbol_call_arguments(head: Symbol, raw_arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    attribute_names = _attribute_names_for_symbol(head)
+    prepared = tuple(
+        _evaluate_argument_with_attributes(argument, attribute_names, index)
+        for index, argument in enumerate(raw_arguments)
+    )
+    if not _attributes_suppress_sequence_splicing(attribute_names):
+        prepared = _splice_sequence_arguments(prepared)
+    if _system_dispatch_name(head) in {"Association", "List"}:
+        prepared = _drop_nothing_arguments(prepared)
+    return prepared
+
+
 def _is_direct_evaluate_expr(expr: Expr) -> bool:
     return isinstance(expr, Call) and expr.has_head("Evaluate") and len(expr.arguments) == 1
 
@@ -10806,21 +11285,12 @@ def _replace_slots_in_expr(expr: Expr, arguments: Sequence[Expr], self_function:
     return Call(head_expr=replaced_head, arguments=tuple(replaced_arguments))
 
 
-_HOLD_ALL_ATTRIBUTE_NAMES = {"HoldAll", "HoldAllComplete"}
-
-
 def _function_holds_argument(attribute_names: set[str], index: int) -> bool:
-    if attribute_names & _HOLD_ALL_ATTRIBUTE_NAMES:
-        return True
-    if "HoldFirst" in attribute_names and index == 0:
-        return True
-    if "HoldRest" in attribute_names and index > 0:
-        return True
-    return False
+    return _attributes_hold_argument(attribute_names, index)
 
 
 def _function_suppresses_sequence_splicing(attribute_names: set[str]) -> bool:
-    return "SequenceHold" in attribute_names or "HoldAllComplete" in attribute_names
+    return _attributes_suppress_sequence_splicing(attribute_names)
 
 
 def _prepare_pure_function_arguments(function: Expr, raw_arguments: Sequence[Expr]) -> tuple[Expr, ...]:
@@ -10855,6 +11325,40 @@ def _listable_argument_rows(arguments: Sequence[Expr]) -> list[tuple[Expr, ...]]
                 row.append(argument)
         rows.append(tuple(row))
     return rows
+
+
+def _flatten_flat_arguments(head: Symbol, arguments: Sequence[Expr], attribute_names: set[str]) -> tuple[Expr, ...]:
+    if "Flat" not in attribute_names:
+        return tuple(arguments)
+    flattened: list[Expr] = []
+    for argument in arguments:
+        if isinstance(argument, Call) and argument.head_expr == head:
+            flattened.extend(argument.arguments)
+        else:
+            flattened.append(argument)
+    return tuple(flattened)
+
+
+def _order_orderless_arguments(arguments: Sequence[Expr], attribute_names: set[str]) -> tuple[Expr, ...]:
+    if "Orderless" not in attribute_names:
+        return tuple(arguments)
+    return tuple(sorted(arguments, key=cmp_to_key(_canonical_compare)))
+
+
+def _normalize_attribute_call(head: Symbol, arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    attribute_names = _attribute_names_for_symbol(head)
+    flattened = _flatten_flat_arguments(head, arguments, attribute_names)
+    return _order_orderless_arguments(flattened, attribute_names)
+
+
+def _thread_listable_symbol_call(head: Symbol, arguments: Sequence[Expr]) -> Expr | None:
+    attribute_names = _attribute_names_for_symbol(head)
+    if "Listable" not in attribute_names:
+        return None
+    rows = _listable_argument_rows(arguments)
+    if rows is None:
+        return None
+    return _evaluated_list_expr(*(evaluate(Call(head_expr=head, arguments=row)) for row in rows))
 
 
 def _apply_pure_function_without_listable(function: Expr, arguments: Sequence[Expr]) -> Expr:
@@ -13908,6 +14412,9 @@ def _evaluate(expr: Expr) -> Expr:
         if raw_head_name == "MessageList":
             return message_list_expr(expr.arguments)
 
+        if raw_head_name in {"And", "Or"}:
+            return _evaluate_held_boolean_logic(expr.head_expr, expr.arguments)
+
         if raw_head_name == "CompoundExpression":
             return compound_expression_expr(expr.arguments)
 
@@ -13919,6 +14426,21 @@ def _evaluate(expr: Expr) -> Expr:
 
         if raw_head_name == "Clear":
             return clear_expr(expr.arguments)
+
+        if raw_head_name == "ClearAll":
+            return clear_all_expr(expr.arguments)
+
+        if raw_head_name == "SetAttributes":
+            return set_attributes_expr(expr.arguments)
+
+        if raw_head_name == "ClearAttributes":
+            return clear_attributes_expr(expr.arguments)
+
+        if raw_head_name == "Protect":
+            return protect_expr(expr.arguments, protect=True)
+
+        if raw_head_name == "Unprotect":
+            return protect_expr(expr.arguments, protect=False)
 
         if raw_head_name in {"In", "InString", "Out"}:
             return history_expr(raw_head_name, expr.arguments)
@@ -14142,11 +14664,15 @@ def _evaluate(expr: Expr) -> Expr:
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     evaluated_head_name = _system_dispatch_name(evaluated_head)
-    evaluated_arguments = tuple(evaluate(argument) for argument in expr.arguments)
-    evaluated_arguments = _normalize_arguments_for_head(evaluated_head_name, evaluated_arguments, evaluated=True)
+    evaluated_arguments = _prepare_symbol_call_arguments(evaluated_head, expr.arguments)
+    evaluated_arguments = _normalize_attribute_call(evaluated_head, evaluated_arguments)
     if evaluated_head_name in _UNEVALUATED_TRANSPARENT_HEADS:
         evaluated_arguments = _strip_unevaluated_arguments(evaluated_arguments)
     evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+
+    listable_result = _thread_listable_symbol_call(evaluated_head, evaluated_arguments)
+    if listable_result is not None:
+        return listable_result
 
     constructor_result = _evaluate_numeric_constructor(evaluated_expr)
     if constructor_result is not None:
@@ -14167,6 +14693,10 @@ def _evaluate(expr: Expr) -> Expr:
     relation_result = _evaluate_integer_relation(evaluated_expr)
     if relation_result is not None:
         return relation_result
+
+    inequality_result = _evaluate_inequality(evaluated_expr)
+    if inequality_result is not None:
+        return inequality_result
 
     boolean_result = _evaluate_boolean_logic(evaluated_expr)
     if boolean_result is not None:
@@ -16172,6 +16702,8 @@ class _Parser:
         self.text = text
         self.tokens = _tokenize(text)
         self.index = 0
+        self._grouped_expr_ids: set[int] = set()
+        self._operator_expr_heads: dict[int, str] = {}
 
     def parse(self) -> Expr:
         if self._peek().kind == "eof":
@@ -16323,7 +16855,7 @@ class _Parser:
                 if self._TIMES_BP < min_bp:
                     break
                 right = self._parse_expression(self._TIMES_BP + 1, terminators)
-                left = call("Times", left, right)
+                left = self._make_flat_parser_operator_call("Times", left, right)
                 continue
 
             handled = self._parse_infix_operator(left, min_bp, terminators)
@@ -16356,6 +16888,7 @@ class _Parser:
         if token.text == "(":
             expr = self._parse_expression(0, terminators={")"})
             self._expect(")")
+            self._grouped_expr_ids.add(id(expr))
             return expr
 
         if token.text == "{":
@@ -16742,9 +17275,9 @@ class _Parser:
         )
 
         if text == "/":
-            return call("Times", left, call("Power", right, integer(-1)))
+            return self._make_division_operator_call(left, right)
         if text == "-":
-            return call("Plus", left, call("Times", integer(-1), right))
+            return self._make_flat_parser_operator_call("Plus", left, call("Times", integer(-1), right))
         if text == ":":
             if isinstance(left, Symbol):
                 return call("Pattern", left, right)
@@ -16758,13 +17291,73 @@ class _Parser:
         if head_name in {"Set", "SetDelayed"} and self._is_tag_set_prefix(left):
             tag_head = "TagSet" if head_name == "Set" else "TagSetDelayed"
             return call(tag_head, left.arguments[0], left.arguments[1], right)
+        if head_name in _CHAINABLE_COMPARISON_HEADS:
+            return self._make_comparison_operator_call(head_name, left, right)
+        if head_name in {"Plus", "Times"}:
+            return self._make_flat_parser_operator_call(head_name, left, right)
+        result = call(head_name, left, right)
+        self._operator_expr_heads[id(result)] = head_name
+        return result
+
+    def _is_ungrouped_operator_call(self, expr: Expr, head_name: str) -> TypeGuard[Call]:
+        return (
+            isinstance(expr, Call)
+            and expr.has_head(head_name)
+            and self._operator_expr_heads.get(id(expr)) == head_name
+            and id(expr) not in self._grouped_expr_ids
+        )
+
+    def _make_flat_parser_operator_call(self, head_name: str, left: Expr, right: Expr) -> Call:
+        arguments: list[Expr] = []
+        if self._is_ungrouped_operator_call(left, head_name):
+            arguments.extend(left.arguments)
+        else:
+            arguments.append(left)
+        if self._is_ungrouped_operator_call(right, head_name):
+            arguments.extend(right.arguments)
+        else:
+            arguments.append(right)
+        result = call(head_name, *arguments)
+        self._operator_expr_heads[id(result)] = head_name
+        return result
+
+    def _make_division_operator_call(self, left: Expr, right: Expr) -> Call:
+        reciprocal = call("Power", right, integer(-1))
+        if self._is_ungrouped_operator_call(left, "Times") and left.arguments:
+            prefix = left.arguments[:-1]
+            divided_factor = call("Times", left.arguments[-1], reciprocal)
+            result = call("Times", *prefix, divided_factor)
+            self._operator_expr_heads[id(result)] = "Times"
+            return result
+        return call("Times", left, reciprocal)
+
+    def _make_comparison_operator_call(self, head_name: str, left: Expr, right: Expr) -> Call:
+        if self._is_ungrouped_operator_call(right, head_name):
+            result = call(head_name, left, *right.arguments)
+            self._operator_expr_heads[id(result)] = head_name
+            return result
+
+        right_operator_head = self._operator_expr_heads.get(id(right))
         if (
-            head_name in _CHAINABLE_COMPARISON_HEADS
-            and isinstance(right, Call)
-            and right.has_head(head_name)
+            isinstance(right, Call)
+            and right_operator_head in _CHAINABLE_COMPARISON_HEADS
+            and id(right) not in self._grouped_expr_ids
         ):
-            return call(head_name, left, *right.arguments)
-        return call(head_name, left, right)
+            tail: list[Expr] = [right.arguments[0]]
+            for argument in right.arguments[1:]:
+                tail.extend((symbol(right_operator_head), argument))
+            result = call("Inequality", left, symbol(head_name), *tail)
+            self._operator_expr_heads[id(result)] = "Inequality"
+            return result
+
+        if self._is_ungrouped_operator_call(right, "Inequality"):
+            result = call("Inequality", left, symbol(head_name), *right.arguments)
+            self._operator_expr_heads[id(result)] = "Inequality"
+            return result
+
+        result = call(head_name, left, right)
+        self._operator_expr_heads[id(result)] = head_name
+        return result
 
 
 def _resolve_index(length_value: int, index: int) -> int:

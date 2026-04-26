@@ -37,10 +37,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   string-pattern operators. Callable operator forms such as `Map[f]`, `Cases[p]`, or
   `ReplaceAll[rules]` are not implemented unless explicitly listed in this document.
 - `Set` and `Unset` mutate only bare-symbol own values in Tungsten's process-local symbol
-  registry. `Clear` removes own/down/up/sub values for bare symbols and lists of bare symbols, but
-  only own values are currently created by the evaluator. Protected symbols reject these
-  mutations. Other assignment-like parser heads such as `SetDelayed`, `TagSet`, `TagSetDelayed`,
-  `TagUnset`, `UpSet`, `UpSetDelayed`, `AddTo`, `SubtractFrom`, `TimesBy`, and `DivideBy` remain
+  registry, except for the supported `Attributes[sym] = attrs` assignment form. `Clear` removes
+  value slots, `ClearAll` removes value slots and mutable attributes, and `SetAttributes` /
+  `ClearAttributes` / `Protect` / `Unprotect` mutate registry attributes. Protected symbols reject
+  value mutations, while `Locked` symbols reject attribute and protect/unprotect mutations. Other
+  assignment-like parser heads such as `SetDelayed`, `TagSet`, `TagSetDelayed`, `TagUnset`,
+  `UpSet`, `UpSetDelayed`, `AddTo`, `SubtractFrom`, `TimesBy`, and `DivideBy` remain
   syntax-compatible inert expressions.
 - `Take` and `Drop` currently support a single first-level specification only.
 - `If`, `Which`, `Switch`, `Piecewise`, and `Pick` currently support only the direct forms listed
@@ -104,14 +106,13 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   single rule or a flat list of rules rather than a nested list of rule lists.
 - `ReplaceRepeated` uses a Tungsten-side iteration safety cap to avoid non-terminating rewrite
   loops.
-- Arithmetic and Boolean evaluation are intentionally narrow: Tungsten does not honor general
-  `Flat`, `Orderless`, or short-circuit attributes here. The one explicit exception is the
-  `Plus` / `Times` numeric prefix fold: when every numeric argument can be combined into a single
-  number, `Plus[2, a, 3]` evaluates to `Plus[5, a]` and `Times[2, 3, a, 4]` evaluates to
-  `Times[24, a]`, with the symbolic remainder preserved in input order. The combined number leads
-  the result, matching the kernel's canonical `Plus[3, a]` shape; Tungsten still does not reorder
-  the symbolic part. Empty `Power[]` is `1`. Other heads (`And`, `Or`, etc.) and mixed symbolic
-  expressions outside the prefix-fold case still remain inert.
+- Attribute-driven call normalization is implemented for the common evaluator attributes:
+  `HoldFirst`, `HoldRest`, `HoldAll`, `HoldAllComplete`, `SequenceHold`, `Listable`, `Flat`,
+  `Orderless`, and `OneIdentity` where it affects Flat pattern segments. This means built-ins from
+  the Wolfram 14.3 attribute snapshot and user symbols modified with `SetAttributes` now affect
+  argument evaluation, sequence splicing, list threading, flattening, canonical argument ordering,
+  and supported ordinary pattern matching. Tungsten still does not implement all specialized
+  built-in evaluator rules attached to every System symbol.
 - `Sequence[...]` splices into evaluated call arguments, including lists and ordinary symbolic
   calls. It also splices structurally, without evaluating its payload, inside held-but-not-
   sequence-suppressing heads such as `Hold`, `HoldForm`, `HoldPattern`, and `Function`.
@@ -158,9 +159,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   custom notation, stylesheet-dependent box rules, or the Notation package.
 - Symbol and context functions use Tungsten's process-local registry. `$Context` and `$ContextPath`
   are fixed to <code>"Global`"</code> and <code>{"System`", "Global`"}</code> for now; user-defined
-  symbols have no own values, down values, up values, or sub values yet. The registry is seeded
-  from a Wolfram 14.3 snapshot of 7800 immediate <code>System`</code> symbols, including read-only
-  per-symbol attributes used by `Attributes`, `Names`, and `NameQ`.
+  symbols can have own values and mutable attributes, while down/up/sub values remain read-only or
+  reserved. The registry is seeded from a Wolfram 14.3 snapshot of 7800 immediate
+  <code>System`</code> symbols, including per-symbol attributes used by `Attributes`, `Names`,
+  `NameQ`, and the attribute-aware evaluator.
 - That string-pattern subset supports literal strings, `StringExpression` / `~~`, anonymous `_`,
   `__`, `___`, `Repeated[p]` / `p..`, `RepeatedNull[p]` / `p...`, named captures including
   `x : __` and `x : ___`, `Alternatives`, `Condition`, `PatternTest`, `HoldPattern`,
@@ -192,9 +194,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `x \[Function] body`, and the evaluation-impact subset of third-argument `Function` attributes.
 - Named pure functions use Tungsten's capture-avoiding renaming rule for nested named functions.
   The exact rule is documented in [named-pure-functions-spec.md](./named-pure-functions-spec.md).
-- `Function[params, body, attrs]` currently honors `HoldFirst`, `HoldRest`, `HoldAll`,
-  `HoldAllComplete`, `SequenceHold`, and `Listable`. Other attribute names are accepted
-  structurally but do not yet change evaluation.
+- `Function[params, body, attrs]` honors the same argument-evaluation subset as ordinary calls for
+  `HoldFirst`, `HoldRest`, `HoldAll`, `HoldAllComplete`, `SequenceHold`, and `Listable`. Attributes
+  that affect global symbol normalization, such as `Flat` and `Orderless`, are registry-level
+  symbol attributes and do not change the structure of a pure function body by themselves.
 - REPL-only session history heads `In`, `InString`, `Out`, `$Line`, and `DownValues` require an
   active `EvaluationSession`, normally created by `python -m tungsten repl` or `tungsten.exe`.
   Outside that context they remain inert or return empty read-only metadata.
@@ -277,7 +280,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Contexts` | `Contexts[]`, `Contexts["pattern"]` | Lists contexts known to the process-local registry, optionally filtered with Wolfram-style name wildcards. | [Contexts](https://reference.wolfram.com/language/ref/Contexts.html) |
 | `Names` | `Names[]`, `Names["pattern"]`, `Names[{"p1", ...}]` | Lists registered symbol names visible to the registry. Visible contexts render by short name; non-visible contexts render fully qualified. | [Names](https://reference.wolfram.com/language/ref/Names.html) |
 | `NameQ` | `NameQ["pattern"]` | Returns `True` when `Names["pattern"]` would produce at least one registered symbol. | [NameQ](https://reference.wolfram.com/language/ref/NameQ.html) |
-| `Attributes` | `Attributes[sym]`, `Attributes["name"]`, `Attributes[{s1, ...}]` | Returns read-only attribute metadata from the registry. The shipped snapshot mirrors immediate <code>System`</code> symbols from the installed Wolfram 14.3 kernel; user-defined symbols currently have empty attribute lists. Attribute metadata is discoverable even when Tungsten has no evaluator rule for that symbol. | [Attributes](https://reference.wolfram.com/language/ref/Attributes.html) |
+| `Attributes` | `Attributes[sym]`, `Attributes["name"]`, `Attributes[{s1, ...}]`, `Attributes[sym] = attrs` | Returns or replaces process-local attribute metadata. The shipped snapshot mirrors immediate <code>System`</code> symbols from the installed Wolfram 14.3 kernel; user-defined symbols start with empty attribute lists. Direct assignment supports a symbol or string-named symbol target. | [Attributes](https://reference.wolfram.com/language/ref/Attributes.html) |
+| `SetAttributes` | `SetAttributes[sym, attr]`, `SetAttributes[{s1, ...}, {attr1, ...}]` | Adds known Wolfram attributes to process-local symbol records. `Protected` does not block attribute mutation; `Locked` does. | [SetAttributes](https://reference.wolfram.com/language/ref/SetAttributes.html) |
+| `ClearAttributes` | `ClearAttributes[sym, attr]`, `ClearAttributes[{s1, ...}, {attr1, ...}]` | Removes known attributes from process-local symbol records unless the symbol is `Locked`. | [ClearAttributes](https://reference.wolfram.com/language/ref/ClearAttributes.html) |
 | `$Line` | `$Line` in a REPL session | Returns the current REPL input line number during evaluation. Outside an active session it remains inert. | [$Line](https://reference.wolfram.com/language/ref/%24Line.html) |
 | `In` | `In[n]`, `In[]`, `In[-k]` in a REPL session | Returns and evaluates stored input expressions from the current REPL session. | [In](https://reference.wolfram.com/language/ref/In.html) |
 | `InString` | `InString[n]`, `InString[]`, `InString[-k]` in a REPL session | Returns stored raw input text from the current REPL session. | [InString](https://reference.wolfram.com/language/ref/InString.html) |
@@ -327,6 +332,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Set` | `Set[sym, rhs]`, parser form `sym = rhs` | For a bare, unprotected symbol `sym`, immediately evaluates `rhs`, stores the resulting own value in the process-local registry, and returns that value. Other left-hand sides remain unsupported in this subset. | [Set](https://reference.wolfram.com/language/ref/Set.html) |
 | `Unset` | `Unset[sym]`, parser forms `sym =.` and `sym = .` | Removes the bare symbol's own value and returns `Null`. Protected symbols emit `Unset::wrsym` and return `$Failed`. Other left-hand sides remain unsupported in this subset. | [Unset](https://reference.wolfram.com/language/ref/Unset.html) |
 | `Clear` | `Clear[sym1, ...]`, `Clear[{sym1, ...}]`, string-pattern forms over registered names | Clears process-local value slots for matching unprotected symbols and returns `Null`. In the current evaluator this mainly removes own values, because down/up/sub values are read-only or not yet user-definable. Protected symbols emit `Clear::wrsym`. | [Clear](https://reference.wolfram.com/language/ref/Clear.html) |
+| `ClearAll` | `ClearAll[sym1, ...]`, `ClearAll[{sym1, ...}]`, string-pattern forms over registered names | Clears process-local value slots and mutable attributes for matching unprotected, unlocked symbols. Protected symbols emit `ClearAll::wrsym`; locked symbols emit `ClearAll::locked`. | [ClearAll](https://reference.wolfram.com/language/ref/ClearAll.html) |
+| `Protect` | `Protect[sym1, ...]`, `Protect[{sym1, ...}]`, string-pattern forms over registered names | Adds `Protected` to matching unlocked symbols and returns the names that changed as strings. | [Protect](https://reference.wolfram.com/language/ref/Protect.html) |
+| `Unprotect` | `Unprotect[sym1, ...]`, `Unprotect[{sym1, ...}]`, string-pattern forms over registered names | Removes `Protected` from matching unlocked symbols and returns the names that changed as strings. | [Unprotect](https://reference.wolfram.com/language/ref/Unprotect.html) |
 | `OwnValues` | `OwnValues[sym]`, `OwnValues["name"]` | Returns read-only own-value rules as `{HoldPattern[sym] :> value}`. String input must name an existing registered symbol. Assignment to `OwnValues` is not implemented. | [OwnValues](https://reference.wolfram.com/language/ref/OwnValues.html) |
 | `Unique` | `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, `Unique[{spec1, ...}]` | Generates fresh registered symbols using Tungsten's module counter or per-prefix string counters. | [Unique](https://reference.wolfram.com/language/ref/Unique.html) |
 | `ValueQ` | `ValueQ[expr]` | Holds `expr` while checking for values. Returns `True` for symbols with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally; returns `False` for ordinary atoms such as integers and strings and for unassigned user symbols. | [ValueQ](https://reference.wolfram.com/language/ref/ValueQ.html) |
@@ -335,9 +343,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Complex`, `I` | `Complex[re, im]`, `I`, and arithmetic forms such as `1 + 2 I` | Represents complex numeric atoms whose components are explicit real numbers. An exact zero imaginary part collapses to the real part; machine-real components coerce the complex value to machine components in the common Wolfram style. | [Complex](https://reference.wolfram.com/language/ref/Complex), [I](https://reference.wolfram.com/language/ref/I) |
 | `Overflow`, `Underflow` | `Overflow[]`, `Underflow[]` | Creates special atomic real values with head `Real`, not ordinary compound expressions. They participate in common numeric predicates and simple reciprocal/arithmetic cases. | [Overflow](https://reference.wolfram.com/language/ref/Overflow.html), [Underflow](https://reference.wolfram.com/language/ref/Underflow.html) |
 | `$MachinePrecision`, `$MaxMachineNumber`, `$MinMachineNumber`, `$MachineEpsilon` | symbol values | Returns Python-platform machine numeric constants using Wolfram-style real literals. | [$MachinePrecision](https://reference.wolfram.com/language/ref/%24MachinePrecision.html), [$MaxMachineNumber](https://reference.wolfram.com/language/ref/%24MaxMachineNumber.html), [$MinMachineNumber](https://reference.wolfram.com/language/ref/%24MinMachineNumber.html), [$MachineEpsilon](https://reference.wolfram.com/language/ref/%24MachineEpsilon.html) |
-| `Plus` | `Plus[n1, ...]` and infix `+` when nested evaluation reaches an all-numeric subexpression | Adds explicit integers, rationals, reals, and complex numbers. `Plus[]` yields `0`. Mixed symbolic expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
-| `Times` | `Times[n1, ...]`, infix `*`, and implicit multiplication when nested evaluation reaches an all-numeric subexpression | Multiplies explicit integers, rationals, reals, and complex numbers. `Times[]` yields `1`. Mixed symbolic expressions remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
-| `Power` | `Power[base, exponent]` and infix `^` for supported numeric bases and exponents | Supports integer powers of exact and inexact real or complex numbers, negative integer powers through reciprocals, and inexact real powers that Python can compute directly. Unsupported symbolic or branch-sensitive cases remain inert. | [Power](https://reference.wolfram.com/language/ref/Power) |
+| `Plus` | `Plus[n1, ...]` and infix `+` when numeric arguments can be folded | Adds explicit integers, rationals, reals, and complex numbers. `Plus[]` yields `0`. Mixed numeric/symbolic calls fold the explicit numeric arguments into a leading constant after `Flat` / `Orderless` normalization; unsupported symbolic-only calls remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
+| `Times` | `Times[n1, ...]`, infix `*`, and implicit multiplication when numeric arguments can be folded | Multiplies explicit integers, rationals, reals, and complex numbers. `Times[]` yields `1`. Mixed numeric/symbolic calls fold the explicit numeric arguments into a leading factor after `Flat` / `Orderless` normalization; exact zero collapses the whole product to `0`. Unsupported symbolic-only calls remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
+| `Power` | `Power[base, exponent]`, `Power[]`, unary `Power[x]`, and infix `^` for supported numeric bases and exponents | Supports integer powers of exact and inexact real or complex numbers, negative integer powers through reciprocals, and inexact real powers that Python can compute directly. `Power[]` yields `1`; unary `Power[x]` yields `x`. Unsupported symbolic or branch-sensitive cases remain inert. | [Power](https://reference.wolfram.com/language/ref/Power) |
 | `N` | `N[expr]`, `N[expr, p]` | Converts exact numeric atoms inside an expression to machine precision by default or to decimal arbitrary precision when `p` is an explicit integer precision. | [N](https://reference.wolfram.com/language/ref/N) |
 | `Precision` | `Precision[expr]` | Returns `Infinity` for exact numbers, `MachinePrecision` for machine reals/complexes, explicit precision for marked arbitrary-precision reals, `0.` for `Overflow[]` / `Underflow[]`, and the minimum visible numeric precision inside compound expressions. | [Precision](https://reference.wolfram.com/language/ref/Precision) |
 | `Accuracy` | `Accuracy[expr]` | Returns `Infinity` for exact numbers and estimates visible decimal accuracy for explicit reals. The implementation models Wolfram's precision/accuracy relationship but does not implement full uncertainty arithmetic. | [Accuracy](https://reference.wolfram.com/language/ref/Accuracy) |
@@ -349,6 +357,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `LessEqual` | `LessEqual[n1, ...]` and infix `<=` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are nondecreasing. Complex arguments remain inert for order comparisons. | [LessEqual](https://reference.wolfram.com/language/ref/LessEqual) |
 | `Greater` | `Greater[n1, ...]` and infix `>` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are strictly decreasing. Complex arguments remain inert for order comparisons. | [Greater](https://reference.wolfram.com/language/ref/Greater) |
 | `GreaterEqual` | `GreaterEqual[n1, ...]` and infix `>=` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are nonincreasing. Complex arguments remain inert for order comparisons. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
+| `Inequality` | Parser-generated mixed comparison chains such as `a < b <= c` | Evaluates adjacent comparisons when each relation can be resolved by Tungsten's explicit numeric relation rules or identity-comparison rules; otherwise remains inert. | [Inequality](https://reference.wolfram.com/language/ref/Inequality) |
 | `AtomQ` | `AtomQ[expr]` | Returns `True` for symbols, strings, byte arrays, and all explicit numeric atoms including `Rational`, `Complex`, `Overflow[]`, and `Underflow[]`. Although some of these render with brackets, Tungsten treats them as atoms, matching Wolfram's numeric model. | [AtomQ](https://reference.wolfram.com/language/ref/AtomQ.html) |
 | `IntegerQ` | `IntegerQ[expr]` | Returns `True` when the argument is an explicit integer in Tungsten's AST; otherwise returns `False`. | [IntegerQ](https://reference.wolfram.com/language/ref/IntegerQ) |
 | `MachineIntegerQ` | `MachineIntegerQ[expr]` | Tungsten convenience predicate that returns `True` for explicit integers in the signed 64-bit machine-integer range. Wolfram exposes this functionality as <code>Developer`MachineIntegerQ</code>; Tungsten also registers the short System-style spelling for scripting convenience. | [Developer MachineIntegerQ](https://reference.wolfram.com/language/Developer/ref/MachineIntegerQ.html) |
@@ -672,9 +681,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   [sequence-pattern-matching.md](./sequence-pattern-matching.md).
 - Advanced structural forms such as `PatternTest`, `Optional`, `Repeated`, `RepeatedNull`,
   `PatternSequence`, `OrderlessPatternSequence`, `Longest`, `Shortest`, and `OptionsPattern` use
-  the same matcher core. Remaining non-string limits are now about missing global evaluator state
-  or attributes, not unsupported pattern heads: no `Flat`, `Orderless`, or `OneIdentity`
-  matching; no user-defined `Default[...]` registry; and no `OptionValue`.
+  the same matcher core. Ordinary expression patterns now consult registry attributes for `Flat`,
+  `Orderless`, and `OneIdentity` segment matching. Remaining non-string limits are now about
+  missing global evaluator state rather than unsupported pattern heads: no user-defined
+  `Default[...]` registry and no `OptionValue`.
 
 ## Notes on pure functions
 
@@ -702,13 +712,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 ## Notes on Hold, Sequence, and Nothing
 
 - `Hold`, `HoldComplete`, `HoldForm`, `HoldPattern`, and `Unevaluated` keep their arguments
-  unevaluated. This is a hardcoded structural subset of Wolfram's attribute behavior, not a general
-  attribute system.
+  unevaluated through their registry attributes and the evaluator's special Hold-family handling.
 - `ReleaseHold` strips one outer Hold-family wrapper and evaluates the released payload.
 - `Sequence[...]` is spliced after its own arguments evaluate and before ordinary head dispatch for
-  ordinary calls. `Hold`, `HoldForm`, `HoldPattern`, and `Function` still splice direct
-  `Sequence[...]` arguments, but do so structurally without evaluating the payload. `HoldComplete`,
-  `Unevaluated`, `Rule`, and `RuleDelayed` suppress splicing.
+  ordinary calls. Held-but-not-sequence-suppressing heads still splice direct `Sequence[...]`
+  arguments structurally without evaluating the payload. Heads with `SequenceHold` or
+  `HoldAllComplete`, including `HoldComplete`, `Unevaluated`, and `RuleDelayed`, suppress splicing.
 - `Nothing` is removed only when Tungsten is constructing or rebuilding an evaluated list, or when
   `Association[...]` receives direct `Nothing` placeholders. Held lists keep direct `Nothing`;
   ordinary calls such as `f[Nothing, x]` keep it as a normal argument; association values such as
@@ -720,33 +729,31 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 
 - Tungsten parses infix arithmetic, relational, and Boolean operators into ordinary head-based AST
   calls such as `Plus[...]`, `Less[...]`, `And[...]`, and `Not[...]`.
-- Tungsten parses same-head chained comparisons such as `1 < 2 < 3` as n-ary relation calls so the
-  explicit-number relation evaluator can match Wolfram's ordinary chain behavior for supported
-  real-valued numbers.
-- In this pass, Tungsten does not flatten or reorder `Plus`, `Times`, `And`, or `Or` during
-  parsing or evaluation, and it does not implement `Orderless` canonicalization for any head.
-- That means nested operator forms can partially simplify one binary layer at a time. For example,
-  `1 + 2 + a` becomes `Plus[3, a]`, while `Plus[1, 2, a]` stays inert.
-- Boolean operator forms behave the same way: `True && False && x` becomes `And[False, x]`, while
-  `And[True, False, x]` stays inert in this pass.
+- Tungsten mirrors Wolfram's parse-stage normalization for unparenthesized `+` and `*` chains,
+  right-associative powers, same-head chained comparisons such as `1 < 2 < 3`, and mixed
+  comparison chains such as `1 < 2 <= 3`. Those shapes appear even inside held expressions:
+  `Hold[a + b + c]` parses as `Hold[Plus[a, b, c]]`, while `Hold[a < b <= c]` parses as
+  `Hold[Inequality[a, Less, b, LessEqual, c]]`.
+- Attribute-aware evaluation flattens `Flat` heads, canonicalizes `Orderless` heads, and threads
+  `Listable` heads before the direct built-in evaluator runs. For example, `Plus[a, 2, 1]`
+  normalizes through the same ordinary attribute path that user-defined `SetAttributes[f, Flat]`
+  uses.
+- `Inequality[...]` evaluates when every adjacent comparison can be resolved by Tungsten's
+  supported explicit numeric or identity-comparison rules; otherwise it remains inert.
+- `And` and `Or` keep Wolfram-style held arguments but have explicit short-circuit-like structural
+  rules for `True` and `False`: `And[True, False, x]` becomes `False`, while
+  `Or[False, False, x]` becomes `x`.
 - Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]`, `NumberQ[1/2]`,
   `MachineNumberQ[1.]`, `EvenQ[4]`, `DigitQ["123"]`, and `LetterQ["abc"]` evaluate, while broader
   symbolic numeric semantics remain out of scope.
 
-## Listable Heads Not Implemented
+## Attribute-Aware Listable Heads
 
-Wolfram marks many common numeric and logical functions as `Listable`; Tungsten intentionally does
-not. These heads therefore stay inert on list arguments unless the support table says otherwise:
-`Plus`, `Times`, `Power`, `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`,
-`UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min` (per-list-arg
-fold form is supported), `Max` (likewise), `Clip`, `KroneckerDelta`, `DiscreteDelta`, `Ramp`,
-`Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, `Sqrt`, `Boole`, `PrimeQ`,
-`CompositeQ`, `EulerPhi`, `MoebiusMu`, and `IntegerLength`. The per-element `Min`/`Max` over a
-single wrapping `List` is the one explicit exception — the docs spell it out as a supported form
-because it is the by-far-most-common Wolfram idiom for taking a list extremum.
-
-This does not apply to `Function[..., Listable]`: Tungsten honors `Listable` when it is explicitly
-supplied as a third-argument pure-function attribute.
+Tungsten now honors `Listable` for registry-backed symbols, including built-ins whose Wolfram 14.3
+snapshot attributes contain `Listable` and user symbols modified with `SetAttributes`. The
+threading is structural and recursive over same-length `List` arguments, with scalar arguments
+reused. It does not add missing evaluator rules for functions Tungsten otherwise does not
+implement; those threaded element calls can still remain inert.
 
 ## Notes on atoms and empty expressions
 

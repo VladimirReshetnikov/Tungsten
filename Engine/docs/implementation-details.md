@@ -4,7 +4,7 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T04:06:50Z
+- Updated (UTC): 2026-04-26T23:44:00Z
 - Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 
 ## Summary
@@ -619,11 +619,14 @@ that `Check` is not disabled merely because its output is quieted.
   the outermost session evaluation boundary, `repl.py` applies `$PrePrint` after `Out[n]` has been
   recorded, and message insertion rendering applies `$MessagePrePrint`. Hook evaluation uses a
   context flag that suppresses recursive main-loop hook application while hook bodies run.
-- The expression subsystem can report read-only Wolfram 14.3 <code>System`</code> attributes through the
-  symbol registry, but it intentionally does not implement evaluator-wide semantics for general
-  attributes such as `Flat`, `Orderless`, `Listable`, or short-circuit evaluation. A small
-  hardcoded Hold-family subset is implemented because it is required for predictable structural
-  manipulation.
+- The expression subsystem preloads Wolfram 14.3 <code>System`</code> symbol attributes into the symbol
+  registry and also supports process-local attribute mutation through `Attributes[sym] = attrs`,
+  `SetAttributes`, `ClearAttributes`, `Protect`, `Unprotect`, and `ClearAll`. The evaluator now
+  applies the common argument-shaping attributes (`HoldFirst`, `HoldRest`, `HoldAll`,
+  `HoldAllComplete`, `SequenceHold`, `Listable`, `Flat`, `Orderless`, and the supported
+  `OneIdentity` matching cases) before invoking direct built-in rules. Attributes remain metadata,
+  not a full definition system: Tungsten still does not implement general down-value dispatch,
+  package scoping, `Default[...]`, or every specialized kernel behavior implied by attributes.
 - Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, and `StandardForm`) are handled
   at the display boundary for one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`.
   Explicit textual conversion such as `ToString[InputForm[expr], InputForm]` still treats the

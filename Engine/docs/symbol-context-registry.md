@@ -15,14 +15,15 @@
 
 Tungsten now has a process-local symbol and context registry for kernel-free expression work. The
 registry gives the inert evaluator enough name awareness to support common Wolfram name-management
-functions without launching a kernel. It also carries a read-only Wolfram 14.3
-<code>System`</code> symbol catalog and per-symbol attribute metadata so discovery functions can
-see installed built-ins even when Tungsten has no evaluator rule for them.
+functions without launching a kernel. It also carries a Wolfram 14.3 <code>System`</code> symbol
+catalog and mutable per-symbol attribute metadata so discovery functions can see installed
+built-ins and the evaluator can honor common attributes even when Tungsten has no specialized
+evaluator rule for a symbol.
 
 The registry is not a package loader and does not attempt to mirror a complete mutable live kernel
 session. It is a structural service for parsing, rendering, name lookup, context lookup,
-generated-symbol allocation, and read-only built-in attribute lookup inside one Tungsten Python
-process.
+generated-symbol allocation, own-value storage, and attribute-aware evaluation inside one Tungsten
+Python process.
 
 ## Registry Model
 
@@ -36,8 +37,9 @@ Every registered symbol has a `SymbolRecord` containing:
   surface;
 - `attributes`: a tuple of Wolfram attribute names, such as `Protected`, `HoldAll`, `Flat`, or
   `Listable`;
-- `own_value`, `down_values`, `up_values`, and `sub_values`: reserved for future value and rule
-  support.
+- `own_value`, `down_values`, `up_values`, and `sub_values`: value/rule slots. Tungsten currently
+  creates own values and read-only REPL history down values; down/up/sub definition assignment is
+  still future work.
 
 The current registry is initialized with:
 
@@ -46,8 +48,8 @@ The current registry is initialized with:
 - a generated Wolfram 14.3 snapshot at
   `src/tungsten/data/system_symbols_wolfram_14_3.json`, currently containing 7800 immediate
   <code>System`</code> symbols from <code>Names["System`*"]</code>;
-- the exact read-only attribute list reported by the installed Wolfram 14.3 kernel for each of
-  those immediate <code>System`</code> symbols;
+- the exact startup attribute list reported by the installed Wolfram 14.3 kernel for each of those
+  immediate <code>System`</code> symbols;
 - a small explicit fallback seed for the evaluator's built-in heads, used only if the generated
   snapshot is absent in an unusual source layout.
 
@@ -98,24 +100,30 @@ The current kernel-free evaluator implements these symbol and context functions:
 - `Names[]` returns currently known visible names. `Names["pattern"]` or a list of string patterns
   filters registered symbol names.
 - `NameQ["pattern"]` returns `True` when `Names["pattern"]` would produce at least one result.
-- `Attributes[sym]`, `Attributes["name"]`, and `Attributes[{s1, s2, ...}]` return read-only
-  attribute metadata from the registry. Unknown user symbols return an empty list until Tungsten
-  grows mutable attributes.
+- `Attributes[sym]`, `Attributes["name"]`, and `Attributes[{s1, s2, ...}]` return attribute
+  metadata from the registry. `Attributes[sym] = attrs` replaces mutable attributes for a symbol
+  target.
+- `SetAttributes[sym, attrs]` and `ClearAttributes[sym, attrs]` add and remove known attributes
+  for symbols or symbol lists. `Protected` does not block attribute mutation, but `Locked` does.
+- `Protect` and `Unprotect` add or remove `Protected` and return the changed symbol names as
+  strings. String-pattern forms operate through `Names[pattern]`.
 - `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, and list forms generate fresh registered symbols.
 - `Set[sym, rhs]` / `sym = rhs` stores an immediate own value for a bare, unprotected symbol.
   The right-hand side is evaluated before storage, matching Wolfram's immediate-assignment model.
 - `Unset[sym]` / `sym =.` removes a bare symbol's own value.
 - `Clear[sym1, ...]` and `Clear[{sym1, ...}]` clear process-local value slots for bare symbols.
   String-pattern forms clear registered names that match `Names[pattern]`.
+- `ClearAll[sym1, ...]` clears process-local value slots and mutable attributes for unprotected,
+  unlocked symbols.
 - `OwnValues[sym]` and `OwnValues["name"]` return read-only own-value rules of the form
   `HoldPattern[sym] :> value`.
 - `ValueQ[expr]` holds `expr` while checking value availability. It returns `True` for symbols
   with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally.
   Ordinary atoms such as integers and strings return `False`, matching Wolfram's value-oriented
   interpretation more closely now that Tungsten has process-local own-value storage.
-- Symbols whose registry attributes include `Protected` reject `Set`, `Unset`, and `Clear`
-  mutations with `wrsym` messages. Tungsten does not currently implement `Unprotect`,
-  `Protect`, or mutable attributes.
+- Symbols whose registry attributes include `Protected` reject `Set`, `Unset`, `Clear`, and
+  `ClearAll` value mutations with `wrsym` messages. Symbols whose attributes include `Locked`
+  reject attribute mutation and protect/unprotect attempts with `locked` messages.
 
 Name-pattern matching supports the practical string-pattern subset used by Wolfram name functions:
 
@@ -130,18 +138,17 @@ The registry intentionally does not yet implement:
 - mutable `$Context` or `$ContextPath`;
 - `Begin`, `BeginPackage`, `End`, `Needs`, package loading, shadowing diagnostics, or context
   aliases;
-- `SetAttributes`, `ClearAttributes`, or mutation through assignment to `Attributes[s]`;
-- evaluator-wide semantics for arbitrary registered attributes such as `Flat`, `Orderless`,
-  `OneIdentity`, or `NHoldAll`;
 - non-bare-symbol assignment left-hand sides, delayed definitions, or assignment forms beyond
-  bare-symbol `Set` / `Unset` and `Clear`;
+  bare-symbol `Set` / `Unset`, `Attributes[sym] = attrs`, and the supported clear/protect
+  functions;
 - user-definable down values, up values, or sub values;
 - persistent registry state across separate Tungsten CLI processes.
 
-These boundaries are structural, not accidental. `Attributes` is currently a metadata lookup API:
-it tells callers what attributes Wolfram 14.3 reports for a symbol, while Tungsten's evaluator
-only gives operational meaning to the small number of attributes that earlier structural features
-already handle explicitly, such as selected third-argument `Function` attributes.
+These boundaries are structural, not accidental. Attributes are process-local metadata that the
+offline evaluator now consults for common argument handling (`HoldFirst`, `HoldRest`, `HoldAll`,
+`HoldAllComplete`, `SequenceHold`, `Listable`, `Flat`, `Orderless`, and Flat/OneIdentity pattern
+segments). Tungsten still does not implement package loading, general down-value dispatch, or every
+specialized built-in evaluator rule associated with the full Wolfram kernel.
 
 ## Examples
 
@@ -157,6 +164,9 @@ python -m tungsten expr evaluate --code 'NameQ["System`AASTriangle"]'
 python -m tungsten expr evaluate --code 'Length[Names["System`*"]]'
 python -m tungsten expr evaluate --code 'Attributes[Plus]'
 python -m tungsten expr evaluate --code 'Attributes[{Attributes, Plus, AASTriangle}]'
+python -m tungsten expr evaluate --code 'SetAttributes[f, {Flat, Orderless}]; f[b, f[a]]'
+python -m tungsten expr evaluate --code 'Attributes[g] = HoldAll; g[1 + 2, Evaluate[3 + 4]]'
+python -m tungsten expr evaluate --code 'Protect[x]; x = 1; Unprotect[x]; x = 1'
 python -m tungsten expr evaluate --code 'x = 1 + 2; {ValueQ[x], OwnValues[x], x}'
 python -m tungsten expr evaluate --code 'x = 1; x = .; ValueQ[x]'
 python -m tungsten expr evaluate --code 'Unique[temporarySymbol]'
@@ -185,10 +195,15 @@ Implementation choices were checked against the corresponding Wolfram documentat
 - [Set](https://reference.wolfram.com/language/ref/Set.html)
 - [Unset](https://reference.wolfram.com/language/ref/Unset.html)
 - [Clear](https://reference.wolfram.com/language/ref/Clear.html)
+- [ClearAll](https://reference.wolfram.com/language/ref/ClearAll.html)
 - [OwnValues](https://reference.wolfram.com/language/ref/OwnValues.html)
 - [Names](https://reference.wolfram.com/language/ref/Names.html)
 - [NameQ](https://reference.wolfram.com/language/ref/NameQ.html)
 - [Attributes](https://reference.wolfram.com/language/ref/Attributes.html)
+- [SetAttributes](https://reference.wolfram.com/language/ref/SetAttributes.html)
+- [ClearAttributes](https://reference.wolfram.com/language/ref/ClearAttributes.html)
+- [Protect](https://reference.wolfram.com/language/ref/Protect.html)
+- [Unprotect](https://reference.wolfram.com/language/ref/Unprotect.html)
 - [Contexts](https://reference.wolfram.com/language/ref/Contexts.html)
 - [Context](https://reference.wolfram.com/language/ref/Context.html)
 - [$Context](https://reference.wolfram.com/language/ref/%24Context.html)

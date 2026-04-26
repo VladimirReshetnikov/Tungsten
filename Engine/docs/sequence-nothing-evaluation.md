@@ -102,9 +102,11 @@ Tungsten treats `Sequence` as follows:
   such as `Length`, `Head`, `Part`, `Map`, pattern functions, and replacement functions. Tungsten
   deliberately does not strip `Unevaluated` from inert unknown heads or from list construction.
 
-Tungsten does not implement evaluator-wide attributes. User-defined or unknown symbols cannot
-acquire `SequenceHold` or `HoldAllComplete` behavior in the offline evaluator. The suppression list
-above is hardcoded and intentionally small.
+Tungsten now implements registry-backed evaluator attributes. User-defined symbols can acquire
+`SequenceHold` or `HoldAllComplete` behavior with `SetAttributes`, and Wolfram 14.3 System symbols
+use the attributes loaded from the startup snapshot. The explicit built-in list above remains the
+important reference for Tungsten's Hold-family heads, while ordinary calls also consult mutable
+symbol metadata.
 
 ## Nothing Rules
 
@@ -143,8 +145,6 @@ This gives the expected practical behavior:
 
 Tungsten does not implement:
 
-- mutable `Attributes` or evaluator-wide attribute semantics;
-- user-defined `SequenceHold` or `HoldAllComplete`;
 - side-effect fidelity for discarded arguments, beyond structurally evaluating arguments before
   `Nothing[...]` collapses to `Nothing`.
 

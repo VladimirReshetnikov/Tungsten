@@ -91,7 +91,8 @@ The parser currently handles:
   `patt:def`, `_.`, `patt /; test`, and `a | b`;
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
-- arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
+- arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`, including
+  Wolfram-style parse-stage flattening of unparenthesized `+` and `*` operator chains;
 - structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, `.`, `**`, `<->`,
   string concatenation `<>`, string-pattern concatenation `~~`, and repetition suffixes `..` /
   `...`;
@@ -110,7 +111,8 @@ The parser currently handles:
   `Factorial2`, `MessageName`, ordinary function application, `Get`, `Put`, `PutAppend`, and
   `Information`;
 - comparisons and boolean operators, with same-head chained comparisons parsed as n-ary relation
-  calls such as `Less[a, b, c]`;
+  calls such as `Less[a, b, c]` and mixed chained comparisons parsed as
+  `Inequality[a, Less, b, LessEqual, c]`;
 - prefix and postfix application such as `f @ x` and `x // f`, with `@` binding tighter than
   arithmetic but looser than direct function application;
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
@@ -161,6 +163,45 @@ arbitrary box constructs, custom notation definitions, stylesheet-dependent inte
 broader evaluation semantics. Assignment-like syntax is parsed to inert heads, but Tungsten does
 not yet attach own values, down values, up values, or other definition side effects to those heads.
 
+## Parse-Stage Operator Normalization
+
+Some Wolfram syntax is normalized by the parser before ordinary evaluation and therefore remains
+visible even inside `Hold`, `HoldComplete`, or other held heads. Tungsten models those parse-stage
+rules separately from evaluator attributes such as `Flat` and `Orderless`.
+
+The important parse-stage rules are:
+
+- Unparenthesized `+` chains become one `Plus[...]` call. For example `Hold[a + b + c]` parses as
+  `Hold[Plus[a, b, c]]`.
+- Unparenthesized `*` chains and implicit multiplication chains become one `Times[...]` call. For
+  example `Hold[a * b * c]` parses as `Hold[Times[a, b, c]]`, and `Hold[2 x^3 y]` parses as
+  `Hold[Times[2, Power[x, 3], y]]`.
+- Parser-added subtraction terms participate in the surrounding unparenthesized `Plus` chain. For
+  example `Hold[a + b - c]` parses as `Hold[Plus[a, b, Times[-1, c]]]`.
+- Parser-added division terms group with the immediately preceding unparenthesized multiplicative
+  factor, while parentheses can force a larger numerator or denominator. Tungsten follows the
+  Wolfram held parse tree for common operator forms such as `Hold[a*b/c]`, which parses as
+  `Hold[Times[a, Times[b, Power[c, -1]]]]`, `Hold[a*b*c/d]`, which parses as
+  `Hold[Times[a, b, Times[c, Power[d, -1]]]]`, `Hold[a/b*c/d]`, which parses as
+  `Hold[Times[Times[a, Power[b, -1]], Times[c, Power[d, -1]]]]`, and `Hold[a b/c d]`, which
+  parses as `Hold[Times[a, Times[b, Power[c, -1]], d]]`. Parenthesized forms stay
+  explicit: `Hold[(a*b*c)/d]` parses as `Hold[Times[Times[a, b, c], Power[d, -1]]]`.
+- Parentheses and explicit function calls are structural barriers. `Hold[a + (b + c)]` parses as
+  `Hold[Plus[a, Plus[b, c]]]`, `(a + b) + c` parses as `Plus[Plus[a, b], c]`, and
+  `Hold[Plus[a, b] + c]` parses as `Hold[Plus[Plus[a, b], c]]`.
+- Power is right-associative at parse time: `Hold[a^b^c]` parses as
+  `Hold[Power[a, Power[b, c]]]`.
+- Homogeneous comparison chains become n-ary relation heads: `Hold[a < b < c]` parses as
+  `Hold[Less[a, b, c]]`, and `Hold[a <= b <= c]` parses as `Hold[LessEqual[a, b, c]]`.
+- Mixed comparison chains become `Inequality`: `Hold[a < b <= c]` parses as
+  `Hold[Inequality[a, Less, b, LessEqual, c]]`. Parentheses remain a barrier, so
+  `Hold[a < (b <= c)]` parses as `Hold[Less[a, LessEqual[b, c]]]`.
+
+These rules are intentionally parser-local. Explicit call syntax such as `Plus[Plus[a, b], c]`
+stays nested until the evaluator later decides whether attributes or built-in rules apply. This
+distinction matters for tooling that inspects held code: parse trees should match Wolfram's
+syntactic normalization, while later evaluation still remains Tungsten's structural subset.
+
 The currently supported pattern subset is intentionally bounded:
 
 - supported: `Blank`, `BlankSequence`, and `BlankNullSequence` forms via `_`, `__`, `___`,
@@ -178,8 +219,9 @@ The currently supported pattern subset is intentionally bounded:
   shortest-first allocation rule with backtracking, while `Longest` switches the wrapped ambiguous
   sequence to greedy allocation; see
   [sequence-pattern-matching.md](./sequence-pattern-matching.md);
-- limitations: Tungsten still does not implement attributes such as `Flat`, `Orderless`, or
-  `OneIdentity`, user-defined `Default[...]` values for `Optional[patt]` / `_.`, or `OptionValue`
+- limitations: Tungsten implements registry-backed `Flat`, `Orderless`, and `OneIdentity` matching
+  for ordinary expression heads, but still does not implement user-defined `Default[...]` values
+  for `Optional[patt]` / `_.` or `OptionValue`
   lookup for `OptionsPattern`.
 
 The current string-pattern subset is also intentionally bounded:
@@ -637,19 +679,21 @@ The current subsystem does not aim to support:
 - full box language;
 - arbitrary StandardForm notebook surface syntax;
 - general evaluation;
-- definitions, mutable attributes, or user-created transformation rules;
+- definitions beyond own values, user-defined down/up/sub values, or package-scoped rules;
 - package loading or notebook-scoped semantics.
 
 ## Known kernel divergences
 
 These are intentional current boundaries, not hidden TODOs:
 
-- `Plus`, `Times`, `And`, and `Or` are not given `Flat`, `Orderless`, `OneIdentity`,
-  short-circuit, or `Listable` attributes. Direct mixed calls such as `Plus[1, 2, a]` stay inert,
-  while nested infix forms can still simplify one parsed layer at a time.
-- The parser now gives same-head comparison chains Wolfram-style n-ary shapes, but it still keeps
-  arithmetic and Boolean operator chains as ordinary nested calls. This preserves Tungsten's
-  explicit no-`Flat` evaluator contract.
+- `Plus`, `Times`, `And`, and `Or` now use the Wolfram 14.3 attribute snapshot for flattening,
+  canonicalization, list threading, and held Boolean argument handling, but Tungsten still only
+  implements the arithmetic and Boolean evaluator rules documented in
+  [expression-function-support.md](./expression-function-support.md).
+- The parser now mirrors Wolfram's held parse trees for unparenthesized arithmetic chains,
+  right-associative powers, homogeneous comparison chains, and mixed `Inequality[...]` chains.
+  Other operator families such as `And`, `Or`, `StringJoin`, and `StringExpression` still use
+  ordinary nested parse trees and rely on later evaluation where supported.
 - Empty `Min[]` and `Max[]` currently render as `Infinity` and `-Infinity` rather than Wolfram's
   `DirectedInfinity[1]` and `DirectedInfinity[-1]` FullForm spelling.
 - Real-number precision marks using backticks are parsed as part of the accepted real literal text,
@@ -661,11 +705,11 @@ These are intentional current boundaries, not hidden TODOs:
   associations, but they do not search keys or raw `Rule` wrappers. Use `KeyValuePattern` for
   entry-level matching that intentionally sees keys.
 
-Common Wolfram `Listable` heads that stay inert on list arguments include `Plus`, `Times`, `Power`,
-`Equal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`, `UnitStep`, `Unitize`, `Sign`, `Abs`,
-`RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min`, `Max`, `Clip`, `KroneckerDelta`,
-`DiscreteDelta`, and `Ramp`. Use `Map`, `MapThread`, or explicit structural code when you want
-that behavior offline.
+Common Wolfram `Listable` heads such as `Plus`, `Times`, `Power`, `Equal`, `Less`, `LessEqual`,
+`Greater`, `GreaterEqual`, `UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`,
+`Quotient`, `Min`, `Max`, `Clip`, `KroneckerDelta`, `DiscreteDelta`, and `Ramp` now thread through
+same-length list arguments before their direct Tungsten evaluator rule runs. If an element-level
+call still falls outside Tungsten's supported explicit-value subset, that element remains inert.
 
 Association pattern traversal deliberately does not expose keys to ordinary search. This matches the
 kernel's values-only association model and keeps `FreeQ[<|a -> 1|>, a]` true while still allowing
@@ -677,7 +721,8 @@ covered. Tungsten supports positional slots, `SlotSequence` / `##`, named-parame
 evaluation-impact subset of `Function[params, body, attrs]`. `Function[Null, body]` and
 `Function[Null, body, attrs]` are positional-slot functions with an explicit parameter placeholder.
 Supported attributes are `HoldFirst`, `HoldRest`, `HoldAll`, `HoldAllComplete`, `SequenceHold`,
-and `Listable`; other attribute names are preserved in the syntax but have no evaluator effect yet.
+and `Listable`; symbol-level attributes such as `Flat` and `Orderless` are meaningful when they
+are attached to a registry symbol and do not rewrite a pure function body by themselves.
 Tungsten keeps function bodies inert until application, so pure functions can safely contain
 patterns such as `MatchQ[#, _Integer] &`.
 

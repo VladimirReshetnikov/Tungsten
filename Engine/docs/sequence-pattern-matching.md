@@ -4,7 +4,7 @@
 - Audience: Tungsten maintainers and users who rely on `__` / `___` matching without a live kernel
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T02:03:31Z
-- Updated (UTC): 2026-04-25T20:58:10Z
+- Updated (UTC): 2026-04-26T23:44:00Z
 - Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related Wolfram docs:
   - [BlankSequence](https://reference.wolfram.com/language/ref/BlankSequence.html)
@@ -31,10 +31,11 @@ specifies the variable-length argument-list subset implemented for `BlankSequenc
 `PatternSequence` captures, and repeated occurrences of sequence patterns inside the same argument
 list.
 
-The goal is Wolfram-compatible behavior for ordinary non-`Flat`, non-`Orderless` expression heads.
-Tungsten can report read-only Wolfram 14.3 attributes through `Attributes`, but it still does not
-implement evaluator-wide attribute semantics, global `Flat` matching, global `Orderless` matching,
-`OneIdentity`, user-defined `Default[...]` values, or `OptionValue`.
+The goal is Wolfram-compatible behavior for ordinary expression heads, including the common
+attribute-sensitive cases needed by structural replacement. Tungsten now keeps mutable
+process-local symbol attributes, consults the Wolfram 14.3 System attribute snapshot, and uses
+`Flat`, `Orderless`, and `OneIdentity` when matching ordinary expression patterns. It still does
+not implement user-defined `Default[...]` values or `OptionValue`.
 
 ## Source Semantics
 
@@ -57,7 +58,7 @@ The Wolfram documentation defines:
 - `OptionsPattern[]` as a pattern for a sequence or nested list of option rules;
 - `Longest[p]` and `Shortest[p]` as match-priority wrappers for ambiguous sequence choices.
 
-Live Wolfram 14.3 probes confirmed the covered non-`Flat` behavior:
+Live Wolfram 14.3 probes confirmed the covered ordinary behavior:
 
 | Pattern | Candidate | First match |
 |---|---|---|
@@ -271,11 +272,10 @@ consult `Options[f]`, filter invalid option names, or evaluate `OptionValue`.
 
 Tungsten still does not implement:
 
-- matching under `Flat`, `Orderless`, or `OneIdentity` attributes;
 - user-defined `Default[...]` values for omitted `Optional[patt]` / `_.` arguments;
 - `OptionValue` and validation of option names against `Options[f]`;
-- global `Orderless` matching for the enclosing head. `OrderlessPatternSequence` is only a local
-  sequence-pattern form;
+- every obscure interaction between `Flat`, `Orderless`, `OneIdentity`, defaults, options, and
+  pattern priority that the full kernel can derive from definitions and attributes;
 - string-pattern sequence matching beyond the already documented string-pattern subset.
 
 These limits keep the offline evaluator deterministic and structural while covering ordinary

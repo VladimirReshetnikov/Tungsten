@@ -4,7 +4,7 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T19:29:11Z
+- Updated (UTC): 2026-04-26T23:44:00Z
 - Repository HEAD: a71088d55007ea86a1e13192cd8a437f53057c7c
 - Related code:
   - `src/Tungsten/src/tungsten/`
@@ -157,9 +157,12 @@ The current workspace is built around seven complementary capabilities:
    `TakeWhile`, `Take`, `Drop`, `Flatten`, `ReplaceAt`, `ReplacePart`, `MapAt`, `Association`,
    `Lookup`, `KeyTake`, `KeySort`, and symbol/context registry heads such as `Symbol`, `SymbolName`,
    `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`,
-   read-only `Attributes`, and `ValueQ`. The registry is pre-seeded with the immediate
+   mutable `Attributes`, `SetAttributes`, `ClearAttributes`, `Protect`, `Unprotect`,
+   `ClearAll`, and `ValueQ`. The registry is pre-seeded with the immediate
    <code>System`</code> symbol catalog and attributes from the installed Wolfram 14.3 kernel so
-   built-ins are discoverable even when Tungsten does not implement their evaluation rules.
+   built-ins are discoverable even when Tungsten does not implement their evaluation rules; the
+   evaluator consults those attributes plus process-local user mutations for common hold,
+   sequence, listable, flat, orderless, and one-identity matching behavior.
 5. A console-mode `tungsten.exe` / `python -m tungsten repl` interpreter with `wolfram.exe`-style
    `In[n]:=` / `Out[n]=` prompts, `$Line`, `In`, `InString`, `Out`, read-only history
    `DownValues`, `%` output-history shorthand, and `Exit` / `Quit`.

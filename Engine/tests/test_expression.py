@@ -70,15 +70,50 @@ class ExpressionParserTests(unittest.TestCase):
                 with self.assertRaises(WolframSyntaxError):
                     parse_input_form(source)
 
-    def test_arithmetic_and_boolean_operator_forms_do_not_flatten_during_parse(self) -> None:
+    def test_arithmetic_operator_chains_flatten_during_parse(self) -> None:
         plus_expr = parse_input_form("1 + 2 + 3")
         times_expr = parse_input_form("2 * 3 * 4")
+        implicit_times_expr = parse_input_form("Hold[2 x^3 y]")
+        grouped_plus = parse_input_form("Hold[1 + (2 + 3)]")
+        grouped_times = parse_input_form("Hold[2 * (3 * 4)]")
         and_expr = parse_input_form("a && b && c")
         or_expr = parse_input_form("a || b || c")
-        self.assertEqual(plus_expr.to_full_form(), "Plus[Plus[1, 2], 3]")
-        self.assertEqual(times_expr.to_full_form(), "Times[Times[2, 3], 4]")
+        self.assertEqual(plus_expr.to_full_form(), "Plus[1, 2, 3]")
+        self.assertEqual(times_expr.to_full_form(), "Times[2, 3, 4]")
+        self.assertEqual(implicit_times_expr.to_full_form(), "Hold[Times[2, Power[x, 3], y]]")
+        self.assertEqual(grouped_plus.to_full_form(), "Hold[Plus[1, Plus[2, 3]]]")
+        self.assertEqual(grouped_times.to_full_form(), "Hold[Times[2, Times[3, 4]]]")
         self.assertEqual(and_expr.to_full_form(), "And[And[a, b], c]")
         self.assertEqual(or_expr.to_full_form(), "Or[Or[a, b], c]")
+
+    def test_mixed_multiply_divide_chains_parse_like_wolfram(self) -> None:
+        examples = {
+            "Hold[a*b/c]": "Hold[Times[a, Times[b, Power[c, -1]]]]",
+            "Hold[a*b*c/d]": "Hold[Times[a, b, Times[c, Power[d, -1]]]]",
+            "Hold[a/b*c/d]": "Hold[Times[Times[a, Power[b, -1]], Times[c, Power[d, -1]]]]",
+            "Hold[a b/c d]": "Hold[Times[a, Times[b, Power[c, -1]], d]]",
+            "Hold[(a*b*c)/d]": "Hold[Times[Times[a, b, c], Power[d, -1]]]",
+            "Hold[a*b/(c*d)]": "Hold[Times[a, Times[b, Power[Times[c, d], -1]]]]",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(parse_input_form(source).to_full_form(), expected)
+
+    def test_power_and_mixed_comparison_parse_like_wolfram(self) -> None:
+        self.assertEqual(parse_input_form("Hold[a^b^c]").to_full_form(), "Hold[Power[a, Power[b, c]]]")
+        self.assertEqual(
+            parse_input_form("Hold[a < b <= c]").to_full_form(),
+            "Hold[Inequality[a, Less, b, LessEqual, c]]",
+        )
+        self.assertEqual(
+            parse_input_form("Hold[a <= b < c]").to_full_form(),
+            "Hold[Inequality[a, LessEqual, b, Less, c]]",
+        )
+        self.assertEqual(parse_input_form("Hold[a < b < c]").to_full_form(), "Hold[Less[a, b, c]]")
+        self.assertEqual(
+            parse_input_form("Hold[a < (b <= c)]").to_full_form(),
+            "Hold[Less[a, LessEqual[b, c]]]",
+        )
 
     def test_parse_standard_form_subset_with_prefix_and_postfix_application(self) -> None:
         expr = parse_standard_form("f @ x // g")
@@ -193,7 +228,7 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(map_apply.to_full_form(), "MapApply[f, xs]")
         self.assertEqual(dot_expr.to_full_form(), "Dot[List[a, b], List[c, d]]")
         self.assertEqual(string_join.to_full_form(), 'StringJoin[StringJoin["a", "b"], "c"]')
-        self.assertEqual(output_history.to_full_form(), "Plus[Plus[Out[-1], Out[-2]], Out[12]]")
+        self.assertEqual(output_history.to_full_form(), "Plus[Out[-1], Out[-2], Out[12]]")
         self.assertEqual(same_q.to_input_form(), "a === b")
         self.assertEqual(unsame_q.to_input_form(), "a =!= b")
         self.assertEqual(composition.to_input_form(), "f @* g")
@@ -575,9 +610,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(mixed_operator.to_full_form(), "Plus[3, a]")
         # Mixed numeric/symbolic arguments fold the numeric prefix into a
         # single combined number that leads the result, matching Wolfram's
-        # canonical Plus[3, a] shape. The symbolic remainder retains its
-        # input order; we still do not implement Orderless rearrangement
-        # of the symbolic part.
+        # canonical Plus[3, a] shape after Orderless normalization.
         self.assertEqual(mixed_head.to_full_form(), "Plus[3, a]")
         self.assertEqual(unary_minus.to_full_form(), "-3")
 
@@ -990,12 +1023,18 @@ class ExpressionEvaluationTests(unittest.TestCase):
         greater_false = evaluate(parse_input_form("Greater[3, 3, 1]"))
         mixed_direct = evaluate(parse_input_form("Less[1, 2, a]"))
         mixed_operator = evaluate(parse_input_form("1 < 2 < a"))
+        mixed_inequality_true = evaluate(parse_input_form("1 < 2 <= 2"))
+        mixed_inequality_false = evaluate(parse_input_form("1 < 2 > 3"))
+        mixed_inequality_inert = evaluate(parse_input_form("1 < 2 <= a"))
         self.assertEqual(equal_true.to_full_form(), "True")
         self.assertEqual(equal_false.to_full_form(), "False")
         self.assertEqual(less_true.to_full_form(), "True")
         self.assertEqual(greater_false.to_full_form(), "False")
         self.assertEqual(mixed_direct.to_full_form(), "Less[1, 2, a]")
         self.assertEqual(mixed_operator.to_full_form(), "Less[1, 2, a]")
+        self.assertEqual(mixed_inequality_true.to_full_form(), "True")
+        self.assertEqual(mixed_inequality_false.to_full_form(), "False")
+        self.assertEqual(mixed_inequality_inert.to_full_form(), "Inequality[1, Less, 2, LessEqual, a]")
 
     def test_boolean_functions_evaluate_on_explicit_booleans_only(self) -> None:
         not_result = evaluate(parse_input_form("!(True)"))
@@ -1004,9 +1043,9 @@ class ExpressionEvaluationTests(unittest.TestCase):
         or_direct = evaluate(parse_input_form("Or[False, False, x]"))
         or_operator = evaluate(parse_input_form("False || False || True"))
         self.assertEqual(not_result.to_full_form(), "False")
-        self.assertEqual(and_direct.to_full_form(), "And[True, False, x]")
-        self.assertEqual(and_operator.to_full_form(), "And[False, x]")
-        self.assertEqual(or_direct.to_full_form(), "Or[False, False, x]")
+        self.assertEqual(and_direct.to_full_form(), "False")
+        self.assertEqual(and_operator.to_full_form(), "False")
+        self.assertEqual(or_direct.to_full_form(), "x")
         self.assertEqual(or_operator.to_full_form(), "True")
 
     def test_length(self) -> None:
@@ -1390,15 +1429,15 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(fold_while_history.to_full_form(), "List[0, 1, 3, 6, 10]")
         self.assertEqual(
             fold_pair_list_result.to_full_form(),
-            "List[Plus[y0, a], Plus[Plus[y0, Times[-1, a]], b], Plus[Plus[Plus[y0, Times[-1, a]], Times[-1, b]], c]]",
+            "List[Plus[a, y0], Plus[b, y0, Times[-1, a]], Plus[c, y0, Times[-1, a], Times[-1, b]]]",
         )
         self.assertEqual(
             fold_pair_result.to_full_form(),
-            "Plus[Plus[Plus[y0, Times[-1, a]], Times[-1, b]], c]",
+            "Plus[c, y0, Times[-1, a], Times[-1, b]]",
         )
         self.assertEqual(
             fold_pair_last.to_full_form(),
-            "List[Plus[y0, Times[-1, a]], Plus[Plus[y0, Times[-1, a]], Times[-1, b]], Plus[Plus[Plus[y0, Times[-1, a]], Times[-1, b]], Times[-1, c]]]",
+            "List[Plus[y0, Times[-1, a]], Plus[y0, Times[-1, a], Times[-1, b]], Plus[y0, Times[-1, a], Times[-1, b], Times[-1, c]]]",
         )
 
     def test_association_constructor_and_depth(self) -> None:
@@ -1899,7 +1938,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         system_context = evaluate(parse_input_form("Context[Plus]"))
         qualified_system_context = evaluate(parse_input_form("Context[System`Plus]"))
         symbol_name = evaluate(parse_input_form('SymbolName[Symbol["TungstenRegistryTest`alpha"]]'))
-        symbol_context = evaluate(parse_input_form('Context[Symbol["TungstenRegistryTest`alpha"]]'))
+        symbol_context = evaluate(parse_input_form('Context[Evaluate[Symbol["TungstenRegistryTest`alpha"]]]'))
         another_symbol = evaluate(parse_input_form('Symbol["TungstenRegistryTest`beta"]'))
         global_symbol = evaluate(parse_input_form('Symbol["Global`tungstenGlobalSymbol"]'))
         qualified_constructor = evaluate(parse_input_form('System`Symbol["Global`tungstenQualifiedSymbol"]'))
@@ -2025,6 +2064,72 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(submit("tungstenSetSelf"), "tungstenSetSelf")
         self.assertEqual(submit("ValueQ[tungstenSetSelf]"), "True")
         self.assertEqual(submit("Clear[tungstenSetSelf]"), "Null")
+
+    def test_mutable_attributes_drive_evaluation_and_pattern_matching(self) -> None:
+        suffix = str(id(self)).replace("-", "")
+        locked_symbol = f"tungstenLockedAttributeSymbol{suffix}"
+
+        def submit(code: str, session: EvaluationSession | None = None) -> tuple[str, list[str]]:
+            active_session = session or EvaluationSession()
+            parsed = parse_input_form(code)
+            active_session.begin_input(code, parsed)
+            result = evaluate(parsed, session=active_session)
+            active_session.finish_output(result)
+            assert active_session.message_history is not None
+            messages = [message.name.to_input_form() for message in active_session.message_history[active_session.line]]
+            return result.to_full_form(), messages
+
+        try:
+            self.assertEqual(submit("ClearAll[tungstenAttrF, tungstenAttrG, tungstenAttrH, tungstenAttrP]")[0], "Null")
+            self.assertEqual(submit("SetAttributes[tungstenAttrF, {Flat, Orderless, OneIdentity}]")[0], "Null")
+            self.assertEqual(submit("Attributes[tungstenAttrF]")[0], "List[Flat, OneIdentity, Orderless]")
+            self.assertEqual(
+                submit("tungstenAttrF[b, tungstenAttrF[c, a], a]")[0],
+                "tungstenAttrF[a, a, b, c]",
+            )
+            self.assertEqual(
+                submit("Cases[{tungstenAttrF[c, b, a]}, tungstenAttrF[a, x__] :> HoldComplete[x]]")[0],
+                "List[HoldComplete[b, c]]",
+            )
+
+            self.assertEqual(submit("Attributes[tungstenAttrG] = HoldAll")[0], "HoldAll")
+            self.assertEqual(
+                submit("tungstenAttrG[1 + 2, Sequence[a, b], Evaluate[3 + 4]]")[0],
+                "tungstenAttrG[Plus[1, 2], a, b, 7]",
+            )
+            self.assertEqual(submit("ClearAttributes[tungstenAttrG, HoldAll]")[0], "Null")
+            self.assertEqual(submit("Attributes[tungstenAttrG]")[0], "List[]")
+
+            self.assertEqual(submit("SetAttributes[tungstenAttrH, {Listable, HoldAll}]")[0], "Null")
+            self.assertEqual(
+                submit("tungstenAttrH[{1 + 2, 3 + 4}]")[0],
+                "List[tungstenAttrH[Plus[1, 2]], tungstenAttrH[Plus[3, 4]]]",
+            )
+            self.assertEqual(submit("SetAttributes[tungstenAttrH, HoldAllComplete]")[0], "Null")
+            self.assertEqual(
+                submit("tungstenAttrH[1 + 2, Sequence[a, b], Evaluate[3 + 4]]")[0],
+                "tungstenAttrH[Plus[1, 2], Sequence[a, b], Evaluate[Plus[3, 4]]]",
+            )
+
+            self.assertEqual(submit("Protect[tungstenAttrP]")[0], 'List["tungstenAttrP"]')
+            protected_set, protected_messages = submit("tungstenAttrP = 5")
+            self.assertEqual(protected_set, "Set[tungstenAttrP, 5]")
+            self.assertEqual(protected_messages[0], "Set::wrsym")
+            self.assertEqual(submit("Unprotect[tungstenAttrP]")[0], 'List["tungstenAttrP"]')
+            self.assertEqual(submit("tungstenAttrP = 5")[0], "5")
+            self.assertEqual(submit("ClearAll[tungstenAttrP]")[0], "Null")
+            self.assertEqual(submit("ValueQ[tungstenAttrP]")[0], "False")
+            self.assertEqual(submit("Attributes[tungstenAttrP]")[0], "List[]")
+
+            self.assertEqual(submit(f"SetAttributes[{locked_symbol}, Locked]")[0], "Null")
+            _locked_result, locked_messages = submit(f"SetAttributes[{locked_symbol}, HoldAll]")
+            self.assertEqual(locked_messages[0], "Attributes::locked")
+            self.assertEqual(submit(f"Attributes[{locked_symbol}]")[0], "List[Locked]")
+        finally:
+            for code in (
+                "ClearAll[tungstenAttrF, tungstenAttrG, tungstenAttrH, tungstenAttrP]",
+            ):
+                evaluate(parse_input_form(code))
 
     def test_set_unset_and_clear_reject_protected_symbols(self) -> None:
         self.assert_evaluates_with_message("Plus = 5", "Set[Plus, 5]", "Set::wrsym")

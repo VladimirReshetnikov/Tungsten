@@ -60,8 +60,12 @@ numbers. Exact integer/rational arithmetic uses Python `Fraction`. Machine arith
 `float`. Arbitrary-precision decimal arithmetic uses Python `Decimal` with the minimum visible
 precision of the participating explicit arbitrary-precision real atoms.
 
-Tungsten intentionally does not honor Wolfram's `Flat` or `Orderless` attributes for these heads.
-It evaluates the already-built expression tree without flattening or reordering arguments.
+These heads run through the same registry-backed attribute pipeline as user symbols. Built-in
+snapshot attributes therefore flatten `Flat` expressions, canonicalize `Orderless` argument order,
+and thread `Listable` calls before the numeric evaluator attempts an explicit-number calculation.
+This is still structural normalization rather than algebraic simplification: Tungsten does not
+combine symbolic terms, reorder according to every undocumented kernel tie breaker, or infer
+numeric values for symbolic subexpressions.
 
 Supported power cases are deliberately bounded:
 

@@ -491,8 +491,9 @@ The implemented inert evaluator currently covers:
 - `Depth`
 - `Head`
 - symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
-  `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, `Set`, `Unset`, `Clear`,
-  `OwnValues`, and `ValueQ`
+  `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, `SetAttributes`,
+  `ClearAttributes`, `Protect`, `Unprotect`, `Set`, `Unset`, `Clear`, `ClearAll`, `OwnValues`,
+  and `ValueQ`
 - explicit-number arithmetic via `Rational`, `Complex`, `Plus`, `Times`, `Power`, `N`,
   `Precision`, `Accuracy`, `SetPrecision`, and `SetAccuracy` when all relevant arguments in the
   evaluated subexpression are explicit Tungsten numbers
@@ -583,10 +584,10 @@ parser also lowers `expr /. rules` and `expr //. rules` to `ReplaceAll[expr, rul
 matching with multiple occurrences in a containing argument list. The allocation rule is documented
 in [sequence-pattern-matching.md](./sequence-pattern-matching.md).
 Guards via `/;` are supported in patterns and delayed-rule right-hand sides when the substituted
-guard reduces to explicit `True` under Tungsten's shipped evaluator. The structural matcher still
-does not implement `Flat`, `Orderless`, or `OneIdentity` attribute matching, user-defined
-`Default[...]` values for omitted `Optional[patt]` arguments, or `OptionValue` lookup for
-`OptionsPattern`.
+guard reduces to explicit `True` under Tungsten's shipped evaluator. The structural matcher
+consults registry attributes for ordinary `Flat`, `Orderless`, and `OneIdentity` expression
+matching. It still does not implement user-defined `Default[...]` values for omitted
+`Optional[patt]` arguments or `OptionValue` lookup for `OptionsPattern`.
 
 The current string-pattern subset includes literal strings, `StringExpression` / `~~`, `_`, `__`,
 `___`, `Repeated` / `..`, `RepeatedNull` / `...`, named string captures including `x : __`,
@@ -604,17 +605,23 @@ Pure functions support positional slots plus named parameters: `#`, `#n`, `#0`, 
 `Function[{x, y}, body]`, `Function[params, body, attrs]`, `x |-> body`,
 `x \[Function] body`, and Wolfram's `#name` first-argument association/key shorthand.
 Tungsten keeps function bodies inert until application, which lets pure functions safely contain
-patterns such as `MatchQ[#, _Integer] &`. Third-argument attributes currently honored by the
-offline evaluator are `HoldFirst`, `HoldRest`, `HoldAll`, `HoldAllComplete`, `SequenceHold`, and
-`Listable`.
+patterns such as `MatchQ[#, _Integer] &`. Third-argument attributes currently honored by
+pure-function application are `HoldFirst`, `HoldRest`, `HoldAll`, `HoldAllComplete`,
+`SequenceHold`, and `Listable`; symbol-level attributes such as `Flat`, `Orderless`, and
+`OneIdentity` are honored when they are attached to the head that is actually being evaluated or
+matched.
 Nested named pure functions use capture-avoiding renaming when an outer application modifies the
 inner body. The exact rule is documented in
 [named-pure-functions-spec.md](./named-pure-functions-spec.md).
 
-Arithmetic, relational, and Boolean heads are also intentionally narrow in this pass: Tungsten
-does not flatten or reorder `Plus`, `Times`, `And`, `Or`, or the relational heads, and it does
-not apply short-circuit behavior. Operator forms still parse to those named heads, so nested
-operator syntax can partially simplify one binary layer at a time.
+Arithmetic, relational, and Boolean heads are still bounded to Tungsten's supported explicit-value
+rules, but syntax and evaluation are now separated the same way Wolfram exposes them. The parser
+normalizes unparenthesized `+` / `*` chains, right-associative powers, and chained comparisons even
+inside `Hold`; for example `Hold[a + b + c]` parses as `Hold[Plus[a, b, c]]`, `Hold[a^b^c]` parses
+as `Hold[Power[a, Power[b, c]]]`, and `Hold[a < b <= c]` parses as
+`Hold[Inequality[a, Less, b, LessEqual, c]]`. Later evaluation runs through the registry-backed
+attribute pipeline, so `Flat`, `Orderless`, `Listable`, and held Boolean argument behavior affect
+supported calls before the direct built-in evaluator runs.
 
 The new selection family follows the same explicit-`True` rule as Wolfram's own docs: `Select`,
 `Discard`, `SelectFirst`, and `TakeWhile` treat their criterion as a callable predicate, not as a
