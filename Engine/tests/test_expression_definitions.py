@@ -725,5 +725,161 @@ class ModuleEvaluationTests(unittest.TestCase):
         )
 
 
+class ModuleClosureTests(unittest.TestCase):
+    """End-to-end closure scenarios where a Module-allocated fresh symbol
+    is captured by an outer assignment and later called.
+
+    The shape is::
+
+        g = Module[{f}, f[...] := ...; ... (* more definitions *); f]
+        g[...]   (* dispatches into f's DownValues stored on f$N *)
+
+    The scenario depends on three independent pieces working together:
+
+    1. Module rewrites every reference to a local in the body — including
+       the LHS of nested ``Set`` / ``SetDelayed`` and any later occurrence
+       in the body — to the fresh ``f$N`` symbol.
+    2. The compound-LHS ``Set`` / ``SetDelayed`` dispatch installs the
+       rewritten rule on ``f$N``'s ``DownValues`` storage.
+    3. The Module returns the fresh ``f$N`` symbol; the outer ``Set[g, ...]``
+       stores it as ``g``'s own value; later ``g[args]`` resolves ``g``
+       to ``f$N`` and dispatches against ``f$N``'s ``DownValues``.
+
+    These tests use process-unique global names (``tungstenClosure*``)
+    rather than ``g`` / ``h`` so they don't bleed state across runs.
+    """
+
+    def setUp(self) -> None:
+        self.names_to_clear: list[str] = []
+
+    def tearDown(self) -> None:
+        for name in self.names_to_clear:
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
+
+    def _track(self, *names: str) -> None:
+        self.names_to_clear.extend(names)
+
+    def test_simple_closure_dispatches_one_definition(self) -> None:
+        # The canonical user scenario: define a function inside a Module,
+        # return it, call it through the outer assignment.
+        self._track("tungstenClosureG1")
+        evaluate(parse_input_form("tungstenClosureG1 = Module[{f}, f[x_] := x^2; f]"))
+        self.assertEqual(_full("tungstenClosureG1[3]"), "9")
+        self.assertEqual(
+            _full("tungstenClosureG1[a + b]"),
+            "Power[Plus[a, b], 2]",
+        )
+
+    def test_closure_with_multi_equation_definition_dispatches_each_branch(self) -> None:
+        # Two ``f[...] := ...`` bindings in the same Module body install
+        # two DownValues on the same ``f$N``. The literal-LHS (specific)
+        # one wins for ``h[0]`` and the pattern-LHS one wins for ``h[5]``.
+        self._track("tungstenClosureH1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureH1 = Module[{f}, f[0] := 1; f[n_] := n * f[n - 1]; f]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureH1[5]"), "120")
+        self.assertEqual(_full("tungstenClosureH1[10]"), "3628800")
+
+    def test_closure_mutual_recursion_through_two_module_locals(self) -> None:
+        # Both ``e`` and ``o`` are Module locals. Module's rewrite gives
+        # them ``e$N`` and ``o$N`` (same ``N``); references between them
+        # in the body resolve consistently. The mutual recursion bottoms
+        # out at the literal-LHS base cases.
+        self._track("tungstenClosureE1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureE1 = Module[{e, o}, "
+                "e[0] := True; e[n_] := o[n - 1]; "
+                "o[0] := False; o[n_] := e[n - 1]; "
+                "e]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureE1[10]"), "True")
+        self.assertEqual(_full("tungstenClosureE1[7]"), "False")
+
+    def test_closure_memoization_via_set_inside_set_delayed(self) -> None:
+        # Wolfram's standard memoization idiom:
+        #   fib[n_] := fib[n] = If[n < 2, n, fib[n-1] + fib[n-2]]
+        # Each ``fib$N[k]`` evaluates once via the pattern rule, then the
+        # inner ``fib$N[k] = ...`` Set installs a literal-LHS DownValue
+        # so subsequent calls hit the cached result directly.
+        self._track("tungstenClosureMemo1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureMemo1 = Module[{cache, fib}, "
+                "cache = <||>; "
+                "fib[n_] := fib[n] = If[n < 2, n, fib[n - 1] + fib[n - 2]]; "
+                "fib]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureMemo1[10]"), "55")
+        self.assertEqual(_full("tungstenClosureMemo1[20]"), "6765")
+
+    def test_closure_with_function_capturing_module_local(self) -> None:
+        # A ``Function`` returned from Module captures the local symbol;
+        # each call mutates the same ``n$N`` because ``n`` was a Module
+        # local, not a Function-bound parameter.
+        self._track("tungstenClosureCounter1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureCounter1 = Module[{n = 0}, "
+                "Function[{}, n = n + 1; n]]"
+            )
+        )
+        self.assertEqual(
+            _full(
+                "{tungstenClosureCounter1[], "
+                "tungstenClosureCounter1[], "
+                "tungstenClosureCounter1[]}"
+            ),
+            "List[1, 2, 3]",
+        )
+
+    def test_two_independent_closures_do_not_share_state(self) -> None:
+        # Each Module call gets its own fresh ``f$N`` so the two closures
+        # have completely separate DownValue tables.
+        self._track("tungstenClosureA1", "tungstenClosureA2")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureA1 = Module[{f}, f[x_] := x + 1; f]"
+            )
+        )
+        evaluate(
+            parse_input_form(
+                "tungstenClosureA2 = Module[{f}, f[x_] := x * 2; f]"
+            )
+        )
+        self.assertEqual(
+            _full("{tungstenClosureA1[5], tungstenClosureA2[5]}"),
+            "List[6, 10]",
+        )
+
+    def test_immediate_call_inside_module_body(self) -> None:
+        # The closure pattern still works when the function is called
+        # directly inside the Module body rather than escaping outward.
+        # ``f[0] := 1; f[n_] := n + f[n - 1]`` gives
+        # ``f[n] = 1 + Sum[k, {k, 1, n}] = 1 + n(n+1)/2`` -> 56 at n=10.
+        self.assertEqual(
+            _full("Module[{f}, f[0] := 1; f[n_] := n + f[n - 1]; f[10]]"),
+            "56",
+        )
+
+    def test_closure_with_multiple_arguments(self) -> None:
+        self._track("tungstenClosureBin1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureBin1 = Module[{f}, f[x_, y_] := x + y; f]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureBin1[3, 4]"), "7")
+        self.assertEqual(
+            _full("tungstenClosureBin1[a, b]"),
+            "Plus[a, b]",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
