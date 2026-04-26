@@ -115,6 +115,14 @@ def evaluate_once(expr: Expr) -> Expr:
             from .expression_scoping import block_expr
             return block_expr(expr.arguments)
 
+        if raw_head_name in {"InheritedBlock", "Internal`InheritedBlock"}:
+            # Wolfram puts ``InheritedBlock`` in the ``Internal``` context;
+            # accept both the qualified and unqualified spelling so the
+            # kernel-style ``Internal``InheritedBlock`` and the ergonomic
+            # short name dispatch identically.
+            from .expression_scoping import inherited_block_expr
+            return inherited_block_expr(expr.arguments)
+
         if raw_head_name == "TimeConstrained":
             return time_constrained_expr(expr.arguments)
 

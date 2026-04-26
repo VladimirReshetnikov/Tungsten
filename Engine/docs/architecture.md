@@ -1,8 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-26T22:42:06Z
-Repository HEAD: 1d874208085a4c06f78beff48200d67712831294
+Updated (UTC): 2026-04-26T23:28:55Z
+Repository HEAD: c91722a7020ff14889d7dee4c0151ff058f03e20
 
 ## Summary
 
@@ -95,7 +95,7 @@ The current Tungsten package is composed of the following modules.
 | `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, integer-number-theory functions, real-rounding heads, and the explicit-number subset of special functions. | `expression.py` |
 | `expression_patterns.py` | Match ordinary expression patterns and implement replacement/search helpers. | `expression.py` |
 | `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `remove_definitions`, `rules_for_kind`) and the routing seam for compound-LHS Set / SetDelayed plus tagged TagSet / TagSetDelayed support. | `expression.py` |
-| `expression_scoping.py` | Home for the lexical/dynamic scoping constructs. Owns ``With[bindings, body]`` (capture-avoiding substitution backed by `expression._substitute_named_symbols_in_expr`) and ``Module[{locals}, body]`` (fresh-symbol allocation through `SymbolRegistry.allocate_module_local_symbols` plus capture-avoiding rename of `body` through `expression._rename_bound_symbols_in_expr`). ``Block`` remains a stub that emits a clear ``Block::nyet`` message on call. | `expression.py` |
+| `expression_scoping.py` | Home for the lexical/dynamic scoping constructs. Owns ``With[bindings, body]`` (capture-avoiding substitution backed by `expression._substitute_named_symbols_in_expr`), ``Module[{locals}, body]`` (fresh-symbol allocation through `SymbolRegistry.allocate_module_local_symbols` plus capture-avoiding rename of `body` through `expression._rename_bound_symbols_in_expr`), and ``Block[locals, body]`` / ``Internal``InheritedBlock[locals, body]`` (snapshot-and-restore of the symbols' complete value state in a Python ``try`` / ``finally`` so the restore survives non-local control flow). | `expression.py` |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
 | `assistant.py` | Automate Notebook Assistant for a selected source cell and optionally insert code below it. | `kernel.py`, `notebook.py` |
@@ -238,8 +238,14 @@ The expression implementation is now split across a small facade plus family mod
   to its fresh symbol. The shared rewrite helpers now recognize ``Function``, ``With``,
   ``Module``, and ``Block`` as scoping calls so inner-bound names that would shadow the
   rewrite are filtered out, and inner-bound names that would *capture* a free variable
-  in a substituted value are alpha-renamed to a fresh ``name$`` symbol. ``Block``
-  remains a stub that emits ``Block::nyet`` rather than leave the call silently inert.
+  in a substituted value are alpha-renamed to a fresh ``name$`` symbol.
+  ``Block[locals, body]`` and ``Internal``InheritedBlock[locals, body]`` are
+  functionally identical in modern Wolfram and are implemented through a shared
+  ``_block_implementation`` helper: each binding's symbol is snapshotted (legacy
+  ``own_value`` plus all canonical value-list slots), the optional initializer sets
+  the OwnValue, the body evaluates, and the snapshot is restored in a Python
+  ``try`` / ``finally`` so non-local control flow (``Throw``, ``Abort``, time
+  constraints, confirmation failures) still reverts outer state.
 - `expression.py` remains the compatibility import surface and still hosts shared expression data
   types, session state, formatting, strings, associations, functional/list operations, and other
   built-in families awaiting future extraction.

@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T22:42:06Z
-- Repository HEAD: 1d874208085a4c06f78beff48200d67712831294
+- Updated (UTC): 2026-04-26T23:28:55Z
+- Repository HEAD: c91722a7020ff14889d7dee4c0151ff058f03e20
 
 ## Summary
 
@@ -318,11 +318,19 @@ The code is split by workstream where the seams are now stable enough:
   counter increment per Module call so the locals share the same ``$N``), evaluates
   each binding's RHS in the outer scope and installs it as the fresh symbol's own
   value, then rewrites ``body`` to refer to the fresh symbols via
-  ``expression._rename_bound_symbols_in_expr``. The shared substitute and rename
-  helpers both recognize ``With`` / ``Module`` / ``Block`` (in addition to
-  ``Function``) so inner-bound names are correctly shielded and capture-avoiding
-  alpha-renaming kicks in when needed. ``Block`` remains a stub that emits a clear
-  "not yet implemented" message until the dynamic-scoping pass lands.
+  ``expression._rename_bound_symbols_in_expr``. ``Block[locals, body]`` and
+  ``Internal``InheritedBlock[locals, body]`` go through a shared
+  ``_block_implementation`` helper that snapshots each named local's complete
+  value state at entry, applies optional initializers, evaluates the body, and
+  restores the snapshot on exit through Python ``try`` / ``finally`` so non-local
+  control flow (``Throw``, ``Abort``, ``Confirm`` failures, time-constraint
+  expirations) still reverts outer state. In modern Wolfram 14.x, ``Block`` and
+  ``InheritedBlock`` are functionally identical (no clearing at entry); Tungsten
+  preserves that identity rather than replicating older docs that distinguished
+  them by entry-time clearing. The shared substitute and rename helpers both
+  recognize ``With`` / ``Module`` / ``Block`` (in addition to ``Function``) so
+  inner-bound names are correctly shielded and capture-avoiding alpha-renaming
+  kicks in when needed.
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 

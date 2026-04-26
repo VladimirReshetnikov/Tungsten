@@ -524,16 +524,17 @@ class ValueGetterTests(unittest.TestCase):
 
 
 class ScopingStubTests(unittest.TestCase):
-    """``Block`` is still a stub that emits a clear not-yet-supported
-    message and returns the inert call. ``With`` and ``Module`` were
-    implemented in follow-up passes; see ``WithEvaluationTests`` and
-    ``ModuleEvaluationTests`` for their behavior."""
+    """``With``, ``Module``, and ``Block`` are all implemented; see
+    ``WithEvaluationTests``, ``ModuleEvaluationTests``, and
+    ``BlockEvaluationTests`` for their behavior. This class is kept as a
+    placeholder so any future scoping construct that lands as a stub
+    has an obvious home."""
 
-    def test_block_returns_inert_form(self) -> None:
-        self.assertEqual(
-            _full("Block[{x = 5}, x + 1]"),
-            "Block[List[Set[x, 5]], Plus[x, 1]]",
-        )
+    def test_no_active_stubs(self) -> None:
+        # Sanity check: With, Module, and Block are not stubs anymore.
+        self.assertEqual(_full("With[{x = 5}, x + 1]"), "6")
+        self.assertEqual(_full("Module[{x = 5}, x + 1]"), "6")
+        self.assertEqual(_full("Block[{x = 5}, x + 1]"), "6")
 
 
 class WithEvaluationTests(unittest.TestCase):
@@ -1025,6 +1026,305 @@ class ModuleClosureTests(unittest.TestCase):
             _full("tungstenClosureBin1[a, b]"),
             "Plus[a, b]",
         )
+
+
+class BlockEvaluationTests(unittest.TestCase):
+    """``Block[locals, body]`` is dynamic save-and-restore scoping.
+
+    For each named local Tungsten snapshots the symbol's complete value
+    state at entry, evaluates ``body``, and restores the snapshot on
+    exit. The optional initializer sets the symbol's own value during
+    the body. Modifications inside the body — to OwnValues, DownValues,
+    UpValues, SubValues, NValues — are reverted on exit, even when the
+    body raises (the restore happens in a Python ``try``/``finally``).
+
+    Kernel-confirmed semantics (modern Wolfram 14.x, distinct from
+    older docs that claimed Block cleared values at entry):
+
+    - Block does *not* clear values at entry; the body sees the outer
+      values until the optional initializer overrides the OwnValue.
+    - With an initializer, the OwnValue replaces the symbol's head
+      dispatch so existing DownValues are bypassed for the body.
+    - Modifications inside the body are reverted on exit; this is the
+      primary mechanism Block provides.
+
+    Tungsten reuses process-local global names (``tungstenBlock*``) so
+    the tests do not collide with each other or with ``Block`` /
+    ``InheritedBlock`` tests in other files.
+    """
+
+    def setUp(self) -> None:
+        self.names_to_clear: list[str] = []
+
+    def tearDown(self) -> None:
+        for name in self.names_to_clear:
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
+
+    def _track(self, *names: str) -> None:
+        self.names_to_clear.extend(names)
+
+    def test_basic_immediate_initializer(self) -> None:
+        self.assertEqual(_full("Block[{x = 5}, x + 1]"), "6")
+
+    def test_multiple_initializers(self) -> None:
+        self.assertEqual(_full("Block[{x = 5, y = 6}, x + y]"), "11")
+
+    def test_no_initializer_keeps_outer_value(self) -> None:
+        # Block without an initializer does NOT clear the symbol; the
+        # body sees the outer value (kernel-confirmed).
+        self._track("tungstenBlockA")
+        evaluate(parse_input_form("tungstenBlockA = 100"))
+        self.assertEqual(_full("Block[{tungstenBlockA}, tungstenBlockA]"), "100")
+
+    def test_initializer_replaces_outer_value(self) -> None:
+        self._track("tungstenBlockB")
+        evaluate(parse_input_form("tungstenBlockB = 100"))
+        self.assertEqual(
+            _full("Block[{tungstenBlockB = 5}, tungstenBlockB]"),
+            "5",
+        )
+
+    def test_outer_own_value_is_restored_on_exit(self) -> None:
+        self._track("tungstenBlockC")
+        evaluate(parse_input_form("tungstenBlockC = 100"))
+        evaluate(parse_input_form("Block[{tungstenBlockC = 5}, tungstenBlockC]"))
+        self.assertEqual(_full("tungstenBlockC"), "100")
+
+    def test_body_can_mutate_local_and_outer_is_restored(self) -> None:
+        self._track("tungstenBlockD")
+        evaluate(parse_input_form("tungstenBlockD = 100"))
+        result = _full(
+            "Block[{tungstenBlockD}, tungstenBlockD = 5; tungstenBlockD]"
+        )
+        self.assertEqual(result, "5")
+        self.assertEqual(_full("tungstenBlockD"), "100")
+
+    def test_outer_down_values_are_visible_inside_block(self) -> None:
+        # Block does not clear DownValues at entry; outer DV is visible.
+        self._track("tungstenBlockE")
+        evaluate(parse_input_form("tungstenBlockE[1] = 99"))
+        self.assertEqual(
+            _full("Block[{tungstenBlockE}, tungstenBlockE[1]]"),
+            "99",
+        )
+
+    def test_down_values_added_inside_block_revert_on_exit(self) -> None:
+        # The save/restore covers DownValues too; an addition inside the
+        # body is reverted on exit.
+        self._track("tungstenBlockF")
+        evaluate(parse_input_form("tungstenBlockF[1] = 99"))
+        # Inside the block both values are visible.
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockF}, "
+                "tungstenBlockF[2] = 88; "
+                "{tungstenBlockF[1], tungstenBlockF[2]}]"
+            ),
+            "List[99, 88]",
+        )
+        # After the block, the addition is reverted.
+        self.assertEqual(_full("tungstenBlockF[2]"), "tungstenBlockF[2]")
+        # And the original DownValue is still there.
+        self.assertEqual(_full("tungstenBlockF[1]"), "99")
+
+    def test_down_values_modified_inside_block_revert_on_exit(self) -> None:
+        # Modifying an existing DownValue inside the block reverts on exit.
+        self._track("tungstenBlockG")
+        evaluate(parse_input_form("tungstenBlockG[1] = 99"))
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockG}, "
+                "tungstenBlockG[1] = 100; tungstenBlockG[1]]"
+            ),
+            "100",
+        )
+        self.assertEqual(_full("tungstenBlockG[1]"), "99")
+
+    def test_initializer_replaces_head_for_dispatch_inside_block(self) -> None:
+        # When an initializer sets an OwnValue on a symbol that also has
+        # DownValues, the OwnValue replaces the head, bypassing DV
+        # dispatch. The kernel returns ``5[1]`` (inert) for ``f[1]`` when
+        # ``f`` has been bound to 5.
+        self._track("tungstenBlockH")
+        evaluate(parse_input_form("tungstenBlockH[x_] := x^2"))
+        # Without initializer the DV dispatches normally.
+        self.assertEqual(
+            _full("Block[{tungstenBlockH}, tungstenBlockH[3]]"),
+            "9",
+        )
+        # With initializer, the OwnValue overrides head dispatch.
+        self.assertEqual(
+            _full("Block[{tungstenBlockH = 7}, tungstenBlockH[3]]"),
+            "7[3]",
+        )
+        # Outer DV is restored.
+        self.assertEqual(_full("tungstenBlockH[3]"), "9")
+
+    def test_empty_bindings_returns_evaluated_body(self) -> None:
+        self.assertEqual(_full("Block[{}, 7]"), "7")
+
+    def test_nested_block_inner_shadows_outer(self) -> None:
+        self.assertEqual(
+            _full("Block[{x = 1}, Block[{x = 2}, x]]"),
+            "2",
+        )
+
+    def test_nested_block_outer_visible_in_inner(self) -> None:
+        # Block uses dynamic scoping, so the inner Block's body still
+        # has access to the outer Block's local while in scope (here
+        # via the second binding's RHS).
+        self.assertEqual(
+            _full("Block[{x = 5}, Block[{y = x + 1}, y * 2]]"),
+            "12",
+        )
+
+    def test_block_with_module_inside_body(self) -> None:
+        # Block sets x = 5; Module's binding RHS sees x = 5 (dynamic scope).
+        self._track("tungstenBlockI")
+        evaluate(parse_input_form("tungstenBlockI = 99"))
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockI = 5}, "
+                "Module[{y = tungstenBlockI + 1}, y]]"
+            ),
+            "6",
+        )
+        self.assertEqual(_full("tungstenBlockI"), "99")
+
+    def test_block_with_function_called_inside_body(self) -> None:
+        # Function captures via dynamic scope: the Function is just a
+        # body referring to the Block's local x, which has value 5
+        # during the body.
+        self.assertEqual(
+            _full("Block[{x = 5}, Function[y, x + y][3]]"),
+            "8",
+        )
+
+    def test_set_delayed_initializer_re_evaluates_each_lookup(self) -> None:
+        # ``Block[{f := body}, ...]`` stores the held ``body`` as f's
+        # OwnValue, so each lookup re-evaluates it.
+        self._track("tungstenBlockJ", "tungstenBlockJSeed")
+        evaluate(parse_input_form("tungstenBlockJSeed = 5"))
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockJ := tungstenBlockJSeed + 1}, "
+                "tungstenBlockJ + tungstenBlockJ]"
+            ),
+            "12",
+        )
+
+    def test_invalid_bindings_list_raises(self) -> None:
+        result = _full("Block[5, x]")
+        self.assertEqual(result, "Block[5, x]")
+
+    def test_duplicate_binding_name_raises(self) -> None:
+        result = _full("Block[{x = 1, x = 2}, x]")
+        self.assertEqual(
+            result,
+            "Block[List[Set[x, 1], Set[x, 2]], x]",
+        )
+
+    def test_state_restored_even_when_body_aborts(self) -> None:
+        # The save/restore is exception-safe via Python try/finally.
+        # Tungsten implements ``Throw`` / ``Catch`` as evaluator-level
+        # control flow; we verify that the inner Set is reverted even
+        # though Throw escapes the Block body.
+        self._track("tungstenBlockK")
+        evaluate(parse_input_form("tungstenBlockK = 100"))
+        self.assertEqual(
+            _full(
+                "Catch[Block[{tungstenBlockK = 5}, "
+                "tungstenBlockK = 99; Throw[escaped]]]"
+            ),
+            "escaped",
+        )
+        # After the Throw escaped through Block, the outer value is restored.
+        self.assertEqual(_full("tungstenBlockK"), "100")
+
+
+class InheritedBlockEvaluationTests(unittest.TestCase):
+    """``Internal`InheritedBlock`` is functionally identical to ``Block``
+    in modern Wolfram 14.x. Both save the symbols' complete value state,
+    optionally apply initializers, evaluate the body, and restore on
+    exit. The historical distinction (Block clearing values at entry)
+    is no longer present in the live kernel for either form.
+
+    Tungsten dispatches both ``InheritedBlock`` (unqualified) and
+    ``Internal`InheritedBlock`` (kernel-canonical qualified spelling)
+    through the same handler.
+    """
+
+    def setUp(self) -> None:
+        self.names_to_clear: list[str] = []
+
+    def tearDown(self) -> None:
+        for name in self.names_to_clear:
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
+
+    def _track(self, *names: str) -> None:
+        self.names_to_clear.extend(names)
+
+    def test_qualified_name_dispatches(self) -> None:
+        self.assertEqual(
+            _full("Internal`InheritedBlock[{x = 5}, x + 1]"),
+            "6",
+        )
+
+    def test_unqualified_name_dispatches(self) -> None:
+        self.assertEqual(
+            _full("InheritedBlock[{x = 5}, x + 1]"),
+            "6",
+        )
+
+    def test_inherits_outer_own_value_without_initializer(self) -> None:
+        self._track("tungstenIB1")
+        evaluate(parse_input_form("tungstenIB1 = 5"))
+        self.assertEqual(
+            _full("Internal`InheritedBlock[{tungstenIB1}, tungstenIB1]"),
+            "5",
+        )
+
+    def test_local_set_is_reverted_on_exit(self) -> None:
+        self._track("tungstenIB2")
+        evaluate(parse_input_form("tungstenIB2 = 5"))
+        self.assertEqual(
+            _full(
+                "Internal`InheritedBlock[{tungstenIB2}, "
+                "tungstenIB2 = 99; tungstenIB2]"
+            ),
+            "99",
+        )
+        self.assertEqual(_full("tungstenIB2"), "5")
+
+    def test_local_down_value_modification_is_reverted(self) -> None:
+        # The classic InheritedBlock idiom: locally extend a symbol's
+        # DownValues and have the additions reverted on exit.
+        self._track("tungstenIB3")
+        evaluate(parse_input_form("tungstenIB3[1] = 99"))
+        self.assertEqual(
+            _full(
+                "Internal`InheritedBlock[{tungstenIB3}, "
+                "tungstenIB3[1] = 100; tungstenIB3[1]]"
+            ),
+            "100",
+        )
+        self.assertEqual(_full("tungstenIB3[1]"), "99")
+
+    def test_locally_added_down_value_is_reverted(self) -> None:
+        # Inside the block we ADD a new DV; on exit the addition is gone.
+        self._track("tungstenIB4")
+        evaluate(parse_input_form("tungstenIB4[1] = 99"))
+        self.assertEqual(
+            _full(
+                "Internal`InheritedBlock[{tungstenIB4}, "
+                "tungstenIB4[2] = 88; "
+                "{tungstenIB4[1], tungstenIB4[2]}]"
+            ),
+            "List[99, 88]",
+        )
+        self.assertEqual(_full("tungstenIB4[2]"), "tungstenIB4[2]")
+        # And the original DV is still there.
+        self.assertEqual(_full("tungstenIB4[1]"), "99")
 
 
 if __name__ == "__main__":
