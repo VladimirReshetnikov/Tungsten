@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T23:28:55Z
-- Repository HEAD: c91722a7020ff14889d7dee4c0151ff058f03e20
+- Updated (UTC): 2026-04-26T23:50:53Z
+- Repository HEAD: 2f34abe35e9a08b321a37fabe87297d20f7698d5
 
 ## Summary
 
@@ -331,6 +331,17 @@ The code is split by workstream where the seams are now stable enough:
   recognize ``With`` / ``Module`` / ``Block`` (in addition to ``Function``) so
   inner-bound names are correctly shielded and capture-avoiding alpha-renaming
   kicks in when needed.
+- `expression_iteration.py` is the home for ``Table`` and ``Do``. Both share the
+  iter-spec vocabulary (``n`` / ``{n}`` / ``{i, n}`` / ``{i, imin, imax}`` /
+  ``{i, imin, imax, di}`` / ``{i, list}``) and use the snapshot/restore primitives
+  from ``expression_scoping`` to Block-scope each iteration variable; Tungsten
+  resolves later iter specs in the scope where earlier iterators are already
+  bound, so dependent forms (``{j, i}`` after ``{i, ...}``) work as in the kernel.
+  Iterator bounds and step accept Integer, Rational, and Real values and promote
+  per Tungsten's existing numeric tower; the value-list ``{i, list}`` form
+  iterates over the literal sequence without any conversion. An iteration safety
+  cap (``_ITERATION_SAFETY_LIMIT``) guards against pathological step / bound
+  combinations producing infinite loops.
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 

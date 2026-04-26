@@ -123,6 +123,17 @@ def evaluate_once(expr: Expr) -> Expr:
             from .expression_scoping import inherited_block_expr
             return inherited_block_expr(expr.arguments)
 
+        if raw_head_name == "Table":
+            # ``Table`` is HoldAll on its iterator specs and body; dispatch
+            # before argument evaluation so the iterator variable is not
+            # resolved to its outer value before Table can Block-scope it.
+            from .expression_iteration import table_expr
+            return table_expr(expr.arguments)
+
+        if raw_head_name == "Do":
+            from .expression_iteration import do_expr
+            return do_expr(expr.arguments)
+
         if raw_head_name == "TimeConstrained":
             return time_constrained_expr(expr.arguments)
 

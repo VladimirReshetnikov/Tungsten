@@ -1,8 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-26T23:28:55Z
-Repository HEAD: c91722a7020ff14889d7dee4c0151ff058f03e20
+Updated (UTC): 2026-04-26T23:50:53Z
+Repository HEAD: 2f34abe35e9a08b321a37fabe87297d20f7698d5
 
 ## Summary
 
@@ -95,7 +95,8 @@ The current Tungsten package is composed of the following modules.
 | `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, integer-number-theory functions, real-rounding heads, and the explicit-number subset of special functions. | `expression.py` |
 | `expression_patterns.py` | Match ordinary expression patterns and implement replacement/search helpers. | `expression.py` |
 | `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `remove_definitions`, `rules_for_kind`) and the routing seam for compound-LHS Set / SetDelayed plus tagged TagSet / TagSetDelayed support. | `expression.py` |
-| `expression_scoping.py` | Home for the lexical/dynamic scoping constructs. Owns ``With[bindings, body]`` (capture-avoiding substitution backed by `expression._substitute_named_symbols_in_expr`), ``Module[{locals}, body]`` (fresh-symbol allocation through `SymbolRegistry.allocate_module_local_symbols` plus capture-avoiding rename of `body` through `expression._rename_bound_symbols_in_expr`), and ``Block[locals, body]`` / ``Internal``InheritedBlock[locals, body]`` (snapshot-and-restore of the symbols' complete value state in a Python ``try`` / ``finally`` so the restore survives non-local control flow). | `expression.py` |
+| `expression_scoping.py` | Home for the lexical/dynamic scoping constructs. Owns ``With[bindings, body]`` (capture-avoiding substitution backed by `expression._substitute_named_symbols_in_expr`), ``Module[{locals}, body]`` (fresh-symbol allocation through `SymbolRegistry.allocate_module_local_symbols` plus capture-avoiding rename of `body` through `expression._rename_bound_symbols_in_expr`), and ``Block[locals, body]`` / ``Internal``InheritedBlock[locals, body]`` (snapshot-and-restore of the symbols' complete value state in a Python ``try`` / ``finally`` so the restore survives non-local control flow). Exports the snapshot/restore primitives that the iteration module reuses. | `expression.py` |
+| `expression_iteration.py` | Home for the iteration constructs. Owns ``Table[body, iter1, iter2, ...]`` (builds nested ``List`` results) and ``Do[body, iter1, iter2, ...]`` (runs the body for side effects, returns ``Null``). Each iteration variable is Block-scoped through the snapshot/restore primitives borrowed from ``expression_scoping``; later iter specs are resolved in the scope where earlier iterators are already bound, so dependent iter forms (``{j, i}`` after ``{i, ...}``) work as in the kernel. | `expression.py`, `expression_scoping.py` |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
 | `assistant.py` | Automate Notebook Assistant for a selected source cell and optionally insert code below it. | `kernel.py`, `notebook.py` |
@@ -246,6 +247,16 @@ The expression implementation is now split across a small facade plus family mod
   the OwnValue, the body evaluates, and the snapshot is restored in a Python
   ``try`` / ``finally`` so non-local control flow (``Throw``, ``Abort``, time
   constraints, confirmation failures) still reverts outer state.
+- `expression_iteration.py` owns the iteration constructs ``Table`` and ``Do``. Both
+  share the standard iter-spec vocabulary (``n`` / ``{n}`` for variable-less
+  iteration, ``{i, n}``, ``{i, imin, imax}``, ``{i, imin, imax, di}``, ``{i, list}``);
+  each iteration variable is Block-scoped through the snapshot/restore primitives
+  borrowed from ``expression_scoping``, so the iteration variable's outer state is
+  restored on exit and non-local control flow still reverts the binding. Multiple
+  iter specs nest with the leftmost outermost; later iter specs are resolved in the
+  scope where earlier iterators are already bound, so dependent iter forms work as
+  in the kernel. ``Table`` collects results into a nested ``List``; ``Do`` evaluates
+  the body for side effects only and returns ``Null``.
 - `expression.py` remains the compatibility import surface and still hosts shared expression data
   types, session state, formatting, strings, associations, functional/list operations, and other
   built-in families awaiting future extraction.
