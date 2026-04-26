@@ -421,7 +421,11 @@ def evaluate_once(expr: Expr) -> Expr:
 
     if not isinstance(evaluated_head, Symbol):
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
-        return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+        evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+        sub_value_result = _apply_sub_value_definitions(evaluated_expr)
+        if sub_value_result is not None:
+            return sub_value_result
+        return evaluated_expr
 
     evaluated_head_name = _system_dispatch_name(evaluated_head)
     evaluated_arguments = _prepare_symbol_call_arguments(evaluated_head, expr.arguments)
@@ -433,6 +437,10 @@ def evaluate_once(expr: Expr) -> Expr:
     listable_result = _thread_listable_symbol_call(evaluated_head, evaluated_arguments)
     if listable_result is not None:
         return listable_result
+
+    down_value_result = _apply_down_value_definitions(evaluated_head, evaluated_expr)
+    if down_value_result is not None:
+        return down_value_result
 
     constructor_result = _evaluate_numeric_constructor(evaluated_expr)
     if constructor_result is not None:
@@ -1842,5 +1850,4 @@ def evaluate_once(expr: Expr) -> Expr:
         return chinese_remainder(evaluated_arguments[0], evaluated_arguments[1])
 
     return evaluated_expr
-
 

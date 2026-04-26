@@ -1,6 +1,6 @@
-"""Tests for the symbol-definition scaffolding and the SetDelayed / value
-getter additions that prepare the field for the upcoming compound-LHS Set,
-SetDelayed, UpSet, TagSet, and With / Module / Block work.
+"""Tests for symbol-definition storage, compound-LHS Set / SetDelayed, and
+the value getter additions that prepare the field for UpSet, TagSet, and
+With / Module / Block work.
 
 These tests exercise:
 
@@ -10,16 +10,16 @@ These tests exercise:
   ``own_values_definitions`` list in addition to the legacy single-slot
   ``own_value`` field.
 - The ``OwnValues`` / ``DownValues`` / ``UpValues`` / ``SubValues`` /
-  ``NValues`` getters reading from the canonical storage.
+  ``NValues`` getters reading from the canonical storage, including
+  DownValues and SubValues populated by compound-LHS assignments.
 - The ``With`` / ``Module`` / ``Block`` stubs that emit a clear
   not-yet-supported message instead of leaving calls silently inert.
-- The compound-LHS classifier that surfaces ``f[x_] := ...`` as a
-  recognized but unimplemented case rather than as an opaque error.
+- The compound-LHS classifier and evaluator path for ``f[x_] := ...`` and
+  ``f[x_][y_] := ...``.
 
-Behavioral changes that the actual compound-LHS rewriter will introduce
-(pattern-matched DownValues, fresh Module symbols, dynamic Block scope)
-are out of scope here; this file's job is to lock down the *infrastructure
-surface* the upcoming pass will build on.
+Behavioral changes for fresh Module symbols and dynamic Block scope are out
+of scope here; this file's job is to lock down definition storage and the
+pattern-matched evaluator surface those later passes will use.
 """
 from __future__ import annotations
 
@@ -225,28 +225,124 @@ class ClassifyAssignmentLhsTests(unittest.TestCase):
 
 
 class CompoundLhsAssignmentTests(unittest.TestCase):
-    """Set / SetDelayed with a compound LHS routes through the classifier
-    and currently raises a clear "not yet supported" error rather than
-    silently leaving the call inert. The upcoming compound-LHS pass will
-    replace this error with actual rule storage."""
+    """Set / SetDelayed with a compound LHS now writes DownValues or
+    SubValues and the evaluator applies those rules through the ordinary
+    pattern matcher."""
 
-    def test_set_with_function_lhs_raises(self) -> None:
-        result = evaluate(parse_input_form("f[x_] = x + 1"))
-        rendered = result.to_full_form()
-        # The evaluator catches WolframEvaluationError and emits a
-        # Head::error message before returning the inert form.
-        self.assertEqual(rendered, "Set[f[Pattern[x, Blank[]]], Plus[x, 1]]")
+    def setUp(self) -> None:
+        suffix = abs(hash((id(self), self._testMethodName))) % 1000000
+        self.f = f"tungstenFn{suffix}"
+        self.g = f"tungstenG{suffix}"
+        self.x = f"tungstenX{suffix}"
+        self.y = f"tungstenY{suffix}"
+        for name in (self.f, self.g, self.x, self.y):
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
 
-    def test_set_delayed_with_function_lhs_raises(self) -> None:
-        result = evaluate(parse_input_form("g[y_] := y * 2"))
-        rendered = result.to_full_form()
-        self.assertEqual(rendered, "SetDelayed[g[Pattern[y, Blank[]]], Times[y, 2]]")
+    def tearDown(self) -> None:
+        for name in (self.f, self.g, self.x, self.y):
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
+
+    def test_set_with_pattern_lhs_assigns_downvalue(self) -> None:
+        self.assertEqual(_full(f"{self.f}[{self.x}_] = {self.x} + 1"), f"Plus[1, {self.x}]")
+        self.assertEqual(_full(f"{self.f}[3]"), "4")
+        self.assertEqual(
+            _full(f"DownValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], Plus[1, {self.x}]]]",
+        )
+
+    def test_set_evaluates_rhs_before_lhs_arguments(self) -> None:
+        evaluate(parse_input_form(f"{self.x} = 10"))
+        self.assertEqual(_full(f"{self.f}[{self.x}_] = {self.x} + 1"), "11")
+        self.assertEqual(_full(f"{self.f}[3]"), "11")
+        self.assertEqual(
+            _full(f"DownValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], 11]]",
+        )
+
+    def test_set_delayed_with_pattern_lhs_evaluates_rhs_each_time(self) -> None:
+        evaluate(parse_input_form(f"{self.y} = 5"))
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := {self.x} + {self.y}"))
+        self.assertEqual(_full(f"{self.f}[3]"), "8")
+        evaluate(parse_input_form(f"{self.y} = 10"))
+        self.assertEqual(_full(f"{self.f}[3]"), "13")
+        self.assertEqual(
+            _full(f"DownValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], Plus[{self.x}, {self.y}]]]",
+        )
+
+    def test_lhs_arguments_are_evaluated_unless_head_holds_them(self) -> None:
+        evaluate(parse_input_form(f"{self.x} = 1"))
+        evaluate(parse_input_form(f"{self.f}[{self.x}] = 99"))
+        self.assertEqual(_full(f"{self.f}[1]"), "99")
+        self.assertEqual(
+            _full(f"DownValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[1]], 99]]",
+        )
+
+        evaluate(parse_input_form(f"SetAttributes[{self.g}, HoldAll]"))
+        evaluate(parse_input_form(f"{self.g}[{self.x}] = 77"))
+        self.assertEqual(_full(f"{self.g}[1]"), f"{self.g}[1]")
+        self.assertEqual(_full(f"{self.g}[{self.x}]"), "77")
+        self.assertEqual(
+            _full(f"DownValues[{self.g}]"),
+            f"List[RuleDelayed[HoldPattern[{self.g}[{self.x}]], 77]]",
+        )
+
+    def test_lhs_head_own_value_is_used_for_assignment_tagging(self) -> None:
+        evaluate(parse_input_form(f"{self.f} = List"))
+        result = evaluate(parse_input_form(f"{self.f}[1] = 2"))
+        self.assertEqual(result.to_full_form(), "Set[List[1], 2]")
+        self.assertEqual(_full(f"DownValues[{self.f}]"), "List[]")
+
+    def test_exact_definitions_are_ordered_before_generic_patterns(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := {self.x} * {self.f}[{self.x} - 1]"))
+        evaluate(parse_input_form(f"{self.f}[1] = 1"))
+        self.assertEqual(_full(f"{self.f}[4]"), "24")
+        self.assertEqual(
+            _full(f"DownValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[1]], 1], RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], Times[{self.x}, {self.f}[Plus[{self.x}, Times[-1, 1]]]]]]",
+        )
+
+    def test_lhs_condition_and_rhs_condition_are_applied(self) -> None:
+        evaluate(parse_input_form(f"({self.f}[{self.x}_] /; {self.x} > 0) := {self.x}"))
+        evaluate(parse_input_form(f"{self.g}[{self.x}_] := {self.x} /; {self.x} > 0"))
+        self.assertEqual(_full(f"{{{self.f}[2], {self.f}[-1], {self.g}[2], {self.g}[-1]}}"), f"List[2, {self.f}[-1], 2, {self.g}[-1]]")
+
+    def test_curried_lhs_assigns_subvalue(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := {{{self.x}, {self.y}}}"))
+        self.assertEqual(_full(f"{self.f}[1][2]"), "List[1, 2]")
+        self.assertEqual(_full(f"DownValues[{self.f}]"), "List[]")
+        self.assertEqual(
+            _full(f"SubValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]], List[{self.x}, {self.y}]]]",
+        )
+
+    def test_curried_lhs_head_retargets_through_existing_downvalue(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := {self.g}[{self.x}]"))
+        evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := {{{self.x}, {self.y}}}"))
+        self.assertEqual(_full(f"{self.f}[1][2]"), "List[1, 2]")
+        self.assertEqual(_full(f"SubValues[{self.f}]"), "List[]")
+        self.assertEqual(
+            _full(f"SubValues[{self.g}]"),
+            f"List[RuleDelayed[HoldPattern[{self.g}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]], List[{self.x}, {self.y}]]]",
+        )
+
+    def test_compound_unset_removes_matching_definition(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[1] = 10"))
+        evaluate(parse_input_form(f"{self.f}[1] =."))
+        self.assertEqual(_full(f"{self.f}[1]"), f"{self.f}[1]")
+        self.assertEqual(_full(f"DownValues[{self.f}]"), "List[]")
+
+    def test_value_q_recognizes_compound_definitions(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := {self.x}"))
+        self.assertEqual(_full(f"ValueQ[{self.f}[2]]"), "True")
+        self.assertEqual(_full(f"ValueQ[{self.g}[2]]"), "False")
 
 
 class ValueGetterTests(unittest.TestCase):
     """OwnValues / DownValues / UpValues / SubValues / NValues read from
-    the canonical lists. Until compound-LHS Set lands they are empty for
-    user symbols, which matches the kernel's behavior for unset names."""
+    the canonical lists. Unset user symbols still return empty lists, which
+    matches the kernel's behavior for names without definitions."""
 
     def test_own_values_after_set_lists_one_rule(self) -> None:
         evaluate(parse_input_form("tungstenGet1 = 11"))

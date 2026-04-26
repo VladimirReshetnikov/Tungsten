@@ -414,6 +414,8 @@ python -m tungsten expr evaluate --code 'NameQ["System`AASTriangle"]'
 python -m tungsten expr evaluate --code 'Attributes[Plus]'
 python -m tungsten expr evaluate --code 'x = 1 + 2; {ValueQ[x], OwnValues[x], x}'
 python -m tungsten expr evaluate --code 'x = 1; Clear[x]; ValueQ[x]'
+python -m tungsten expr evaluate --code 'f[x_] := x + 1; {f[3], DownValues[f]}'
+python -m tungsten expr evaluate --code 'f[x_][y_] := {x, y}; {f[1][2], SubValues[f]}'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
@@ -493,7 +495,7 @@ The implemented inert evaluator currently covers:
 - symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
   `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, `SetAttributes`,
   `ClearAttributes`, `Protect`, `Unprotect`, `Set`, `Unset`, `Clear`, `ClearAll`, `OwnValues`,
-  and `ValueQ`
+  `DownValues`, `SubValues`, and `ValueQ`
 - explicit-number arithmetic via `Rational`, `Complex`, `Plus`, `Times`, `Power`, `N`,
   `Precision`, `Accuracy`, `SetPrecision`, and `SetAccuracy` when all relevant arguments in the
   evaluated subexpression are explicit Tungsten numbers

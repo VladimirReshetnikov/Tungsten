@@ -307,14 +307,17 @@ The code is split by workstream where the seams are now stable enough:
   Set / SetDelayed / Unset / Clear / OwnValues / DownValues / UpValues / SubValues / NValues
   surface. It exposes a uniform `Definition` record, a `definitions_for_kind(record, kind)`
   accessor for the live ordered list of rules, and the `assign_definition` /
-  `remove_definition` / `clear_definitions` write API that the upcoming compound-LHS pass
-  will plug into without touching call sites.
+  `remove_definition` / `clear_definitions` write API used by bare-symbol and compound-LHS
+  assignments.
 - `expression_scoping.py` is the home for the lexical/dynamic scoping constructs.
   ``With[bindings, body]`` is fully implemented: it parses each binding (``Set``
   pre-evaluates the RHS in the outer scope, ``SetDelayed`` holds it) and applies the
   shared capture-avoiding substitution helper (`expression._substitute_named_symbols_in_expr`)
-  to ``body``. ``Module`` and ``Block`` remain stubs that emit a clear
-  "not yet implemented" message until the corresponding scoping passes land.
+  to ``body``. The shared helper now recognizes ``With`` / ``Module`` / ``Block`` (in
+  addition to ``Function``) so inner-bound names are correctly shielded and capture-
+  avoiding alpha-renaming kicks in when needed. ``Module`` and ``Block`` themselves
+  remain stubs that emit a clear "not yet implemented" message until the corresponding
+  scoping passes land.
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 
@@ -332,17 +335,33 @@ happen in separate files.
 and an optional `condition` for top-level `/;` guards.
 
 The legacy single-slot `record.own_value` field is preserved for the bare-symbol Set /
-SetDelayed path that has shipped since 2026-04-23. Writes through Set, SetDelayed, Unset,
-and Clear update both the legacy slot and the canonical `own_values_definitions` list in
-lockstep through `_refresh_canonical_own_values`. `OwnValues[sym]` reads from the canonical
-list when populated and falls back to the legacy slot for registry-seeded values such as
-`$MessagePrePrint = Automatic`.
+SetDelayed path that has shipped since 2026-04-23. Writes through bare-symbol Set,
+SetDelayed, Unset, and Clear update both the legacy slot and the canonical
+`own_values_definitions` list in lockstep through `_refresh_canonical_own_values`.
+`OwnValues[sym]` reads from the canonical list when populated and falls back to the legacy
+slot for registry-seeded values such as `$MessagePrePrint = Automatic`.
 
-When the compound-LHS rewriter lands, it will call
+Compound left-hand sides now write directly through
 `tungsten.expression_definitions.assign_definition(record, kind=..., hold_pattern=...,
-rhs=..., delayed=..., condition=...)` directly without touching the legacy slot, and the
-`OwnValues` / `DownValues` / `UpValues` / `SubValues` getters will already be reading from
-the canonical lists with no further wiring required.
+rhs=..., delayed=..., condition=...)` without touching the legacy own-value slot:
+
+- `f[args] = rhs` and `f[args] := rhs` write `DownValues[f]`.
+- `f[args][more] = rhs` and `f[args][more] := rhs` write `SubValues[f]`.
+- `Set` evaluates the RHS before assignment, then normalizes/evaluates ordinary LHS arguments.
+- `SetDelayed` normalizes/evaluates ordinary LHS arguments while preserving the RHS unevaluated.
+- The defined head's attributes participate in LHS normalization: for example, a `HoldAll`
+  user function stores `f[a]`, while an ordinary user function stores `f[1]` if `a` evaluates to
+  `1`.
+- Head expressions participate in assignment tagging. If `f` has own value `List`, then
+  `f[1] = rhs` attempts to assign to `List[1]` and is rejected because `List` is protected.
+  For curried forms, the inner head expression is normalized and evaluated before choosing the
+  subvalue target, so an existing rule `f[x_] := q[x]` makes `f[x_][y_] := rhs` write
+  `SubValues[q]`.
+
+The evaluator applies these stored rules after ordinary argument evaluation, attribute
+normalization, and `Listable` threading. Definitions are tried in stored order. Tungsten keeps
+assignment order except for the common Wolfram specificity rule where an exact definition such as
+`f[1]` is inserted before an earlier generic pattern such as `f[x_]`.
 
 ### Why the evaluator is structural first
 
