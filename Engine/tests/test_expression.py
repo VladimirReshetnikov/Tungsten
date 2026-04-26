@@ -5,6 +5,7 @@ import unittest
 
 from tungsten.discovery import discover_installation
 from tungsten.expression import EvaluationSession
+from tungsten.expression import Real
 from tungsten.expression import TungstenExitRequested
 from tungsten.expression import evaluate
 from tungsten.expression import parse_full_form
@@ -633,6 +634,75 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Throw[x, tag, h]")).to_full_form(), "h[x, tag]")
         self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag, h], tag]")).to_full_form(), "x")
         self.assertEqual(evaluate(parse_input_form("Catch[Catch[Throw[x, tag, h], other], _]")).to_full_form(), "x")
+
+    def test_sow_reap_collect_nearest_matching_tags(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Sow[1]")).to_full_form(), "1")
+        self.assertEqual(
+            evaluate(parse_input_form("Reap[Sow[1]; Sow[2]; 3]")).to_full_form(),
+            "List[3, List[List[1, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Reap[Sow[1, a]; Sow[2, b]; 3]")).to_full_form(),
+            "List[3, List[List[1], List[2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Reap[Sow[1, a]; Sow[2, b]; 3, a]")).to_full_form(),
+            "List[3, List[List[1]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Reap[Sow[1, {a, b}]; 3, {a, b}]")).to_full_form(),
+            "List[3, List[List[List[1]], List[List[1]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Reap[Sow[1, a]; Sow[2, a]; 3, _, f]")).to_full_form(),
+            "List[3, List[f[a, List[1, 2]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Reap[Sow[1]; 3, _, f]")).to_full_form(),
+            "List[3, List[f[None, List[1]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Reap[Reap[Sow[1, a]; 2, a], _]")).to_full_form(),
+            "List[List[2, List[List[1]]], List[]]",
+        )
+
+    def test_check_abort_abort_protect_and_timing_control_flow(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("CheckAbort[Abort[], fail]")).to_full_form(), "fail")
+        self.assertEqual(
+            evaluate(parse_input_form('CheckAbort[AbortProtect[Abort[]; Print["after"]; 7], fail]')).to_full_form(),
+            "fail",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("CheckAbort[AbortProtect[CheckAbort[Abort[], inner]; 7], fail]")).to_full_form(),
+            "7",
+        )
+        self.assertEqual(evaluate(parse_input_form("AbortProtect[CheckAbort[Abort[], inner]]")).to_full_form(), "inner")
+        self.assertEqual(evaluate(parse_input_form("Pause[0]")).to_full_form(), "Null")
+        self.assertEqual(evaluate(parse_input_form("TimeRemaining[]")).to_full_form(), "Infinity")
+        self.assertEqual(evaluate(parse_input_form("TimeConstrained[Pause[0]; 7, 1, fail]")).to_full_form(), "7")
+        self.assertEqual(
+            evaluate(parse_input_form("TimeConstrained[Pause[0.02]; 7, 0.001, fail]")).to_full_form(),
+            "fail",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("TimeConstrained[Pause[0.02]; 7, 0.001]")).to_full_form(),
+            "$Aborted",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("CheckAbort[AbortProtect[TimeConstrained[Pause[.02]; 7, .001, inner]], fail]")
+            ).to_full_form(),
+            "inner",
+        )
+        time_remaining = evaluate(parse_input_form("TimeConstrained[TimeRemaining[], 1, fail]"))
+        self.assertIsInstance(time_remaining, Real)
+        self.assertGreaterEqual(float(time_remaining.text), 0.0)
+        self.assertLessEqual(float(time_remaining.text), 1.0)
+
+        timing = evaluate(parse_input_form("AbsoluteTiming[1 + 2]"))
+        self.assertEqual(timing.head().to_full_form(), "List")
+        self.assertIsInstance(timing.arguments[0], Real)
+        self.assertEqual(timing.arguments[1].to_full_form(), "3")
 
     def test_messages_check_quiet_off_on_print_and_message_history(self) -> None:
         session = EvaluationSession()

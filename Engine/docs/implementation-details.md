@@ -4,7 +4,7 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T02:30:55Z
+- Updated (UTC): 2026-04-26T03:46:41Z
 - Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 
 ## Summary
@@ -542,6 +542,28 @@ partially evaluated `Plus[...]` expression instead of unwinding the whole evalua
 intercepts signals only in its own body evaluation and preserves Wolfram's split between untagged
 `Throw[value]`, caught by `Catch[expr]`, and tagged `Throw[value, tag]`, caught by
 `Catch[expr, form]` when the tag matches the pattern form.
+
+## Why Sow/Reap, AbortProtect, and time constraints are evaluator scopes
+
+`Sow`, `Reap`, `CheckAbort`, `AbortProtect`, `TimeConstrained`, and `TimeRemaining` all depend on
+dynamic evaluation context. Modeling them as ordinary expression rewrites would lose the important
+"nearest enclosing scope" behavior:
+
+- `Sow[e, tag]` must find the nearest active `Reap` whose pattern matches `tag`, not every
+  syntactically surrounding or later-visited `Reap`.
+- `AbortProtect[expr]` must allow the protected body to keep evaluating after `Abort[]`, but must
+  re-raise the deferred abort once the protected body finishes.
+- `CheckAbort[expr, fail]` must distinguish aborts raised in its own dynamic abort-protection
+  depth from aborts deferred by an inner `AbortProtect`.
+- `TimeRemaining[]` must report the earliest active `TimeConstrained` deadline, which is a
+  dynamic property rather than a property of the expression tree.
+
+Tungsten therefore keeps these as `contextvars`-backed evaluator scopes. That keeps nested
+evaluation deterministic and makes the behavior safe for scripts that run multiple sessions in the
+same Python process. `TimeConstrained` is intentionally practical rather than preemptive: it checks
+deadlines at Tungsten evaluator boundaries and during `Pause`, then evaluates the fallback outside
+the expired constraint scope. This mirrors the user-visible Wolfram shape for supported Tungsten
+workloads while avoiding unsafe host-language asynchronous interruption.
 
 ## Why messages are non-fatal evaluator events
 

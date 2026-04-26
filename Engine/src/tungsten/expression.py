@@ -13,6 +13,7 @@ import itertools
 import json
 import math
 import re
+import time
 import unicodedata
 from typing import Callable, Iterable, Sequence, TypeGuard
 
@@ -50,6 +51,10 @@ class _TungstenThrowSignal(Exception):
         self.value = value
         self.tag = tag
         self.handler = handler
+
+
+class _TungstenTimeConstraintSignal(Exception):
+    """Internal signal raised when the innermost active time constraint expires."""
 
 
 class Expr:
@@ -196,6 +201,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "$MessageList",
     "Abs",
     "Abort",
+    "AbortProtect",
+    "AbsoluteTiming",
     "All",
     "Alternatives",
     "And",
@@ -223,6 +230,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "CharacterRange",
     "Characters",
     "Check",
+    "CheckAbort",
     "CenterDot",
     "CircleDot",
     "CircleMinus",
@@ -407,6 +415,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "OrderlessPatternSequence",
     "Part",
     "Partition",
+    "Pause",
     "Pattern",
     "PatternSequence",
     "PatternTest",
@@ -434,6 +443,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "RealAbs",
     "RealSign",
     "ReadProtected",
+    "Reap",
     "ReleaseHold",
     "RegularExpression",
     "Repeated",
@@ -465,6 +475,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Slot",
     "SlotSequence",
     "SmallCircle",
+    "Sow",
     "Span",
     "SquareIntersection",
     "SquareSubset",
@@ -516,6 +527,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "Thread",
     "Through",
     "Times",
+    "TimeConstrained",
+    "TimeRemaining",
     "TensorProduct",
     "Tilde",
     "TildeEqual",
@@ -838,6 +851,28 @@ class _MessageCollector:
 
 
 @dataclass
+class _AbortProtectScope:
+    pending_abort: bool = False
+
+
+@dataclass(frozen=True)
+class _CheckAbortScope:
+    abort_protect_depth: int
+
+
+@dataclass(frozen=True)
+class _TimeConstraintScope:
+    deadline: float | None
+
+
+@dataclass
+class _ReapScope:
+    patterns: tuple[Expr, ...]
+    pattern_list_mode: bool
+    buckets: list[dict[Expr, list[Expr]]]
+
+
+@dataclass
 class EvaluationSession:
     """Process-local evaluator state for Wolfram-console-style history."""
 
@@ -924,6 +959,22 @@ _ACTIVE_QUIET_SCOPES: ContextVar[tuple[_QuietScope, ...]] = ContextVar(
 )
 _ACTIVE_MESSAGE_COLLECTORS: ContextVar[tuple[_MessageCollector, ...]] = ContextVar(
     "tungsten_active_message_collectors",
+    default=(),
+)
+_ACTIVE_ABORT_PROTECT_SCOPES: ContextVar[tuple[_AbortProtectScope, ...]] = ContextVar(
+    "tungsten_active_abort_protect_scopes",
+    default=(),
+)
+_ACTIVE_CHECK_ABORT_SCOPES: ContextVar[tuple[_CheckAbortScope, ...]] = ContextVar(
+    "tungsten_active_check_abort_scopes",
+    default=(),
+)
+_ACTIVE_TIME_CONSTRAINTS: ContextVar[tuple[_TimeConstraintScope, ...]] = ContextVar(
+    "tungsten_active_time_constraints",
+    default=(),
+)
+_ACTIVE_REAP_SCOPES: ContextVar[tuple[_ReapScope, ...]] = ContextVar(
+    "tungsten_active_reap_scopes",
     default=(),
 )
 _GLOBAL_MESSAGES: list[EvaluationMessage] = []
@@ -1116,6 +1167,72 @@ def _set_message_enabled(spec: Expr, enabled: bool) -> None:
             disabled.add(key)
         return
     raise WolframEvaluationError("On and Off expect message names, symbols, or lists of message names.")
+
+
+def _current_abort_protect_depth() -> int:
+    return len(_ACTIVE_ABORT_PROTECT_SCOPES.get())
+
+
+def _active_check_abort_handles_current_abort() -> bool:
+    check_scopes = _ACTIVE_CHECK_ABORT_SCOPES.get()
+    if not check_scopes:
+        return False
+    return check_scopes[-1].abort_protect_depth == _current_abort_protect_depth()
+
+
+def _defer_abort_to_current_protect() -> bool:
+    scopes = _ACTIVE_ABORT_PROTECT_SCOPES.get()
+    if not scopes:
+        return False
+    scopes[-1].pending_abort = True
+    return True
+
+
+def _time_constraint_remaining_seconds() -> float | None:
+    deadlines = [scope.deadline for scope in _ACTIVE_TIME_CONSTRAINTS.get() if scope.deadline is not None]
+    if not deadlines:
+        return None
+    return min(deadline - time.monotonic() for deadline in deadlines)
+
+
+def _check_time_constraints() -> None:
+    remaining = _time_constraint_remaining_seconds()
+    if remaining is not None and remaining <= 0:
+        raise _TungstenTimeConstraintSignal()
+
+
+def _parse_real_seconds(expr: Real, function_name: str) -> float:
+    text = expr.text
+    if "*^" in text:
+        mantissa, exponent = text.split("*^", 1)
+        mantissa = mantissa.split("`", 1)[0]
+        normalized = f"{mantissa}e{exponent}"
+    else:
+        normalized = text.split("`", 1)[0]
+    try:
+        return float(normalized)
+    except ValueError as exc:
+        raise WolframEvaluationError(f"{function_name} expects a numeric time in seconds.") from exc
+
+
+def _seconds_value(expr: Expr, function_name: str, *, allow_infinity: bool = False) -> float:
+    if isinstance(expr, Integer):
+        return float(expr.value)
+    if isinstance(expr, Real):
+        return _parse_real_seconds(expr, function_name)
+    if allow_infinity and isinstance(expr, Symbol) and expr.name == "Infinity":
+        return math.inf
+    raise WolframEvaluationError(f"{function_name} expects a numeric time in seconds.")
+
+
+def _push_time_constraint(seconds: float) -> object:
+    scopes = _ACTIVE_TIME_CONSTRAINTS.get()
+    deadline = None if math.isinf(seconds) else time.monotonic() + seconds
+    return _ACTIVE_TIME_CONSTRAINTS.set(scopes + (_TimeConstraintScope(deadline=deadline),))
+
+
+def _all_pattern_expr() -> Expr:
+    return call("Blank")
 
 
 _SYMBOL_REGISTRY = SymbolRegistry()
@@ -3025,9 +3142,11 @@ def exit_expr(arguments: Sequence[Expr]) -> None:
     raise WolframEvaluationError("Exit and Quit expect zero or one argument.")
 
 
-def abort_expr(arguments: Sequence[Expr]) -> None:
+def abort_expr(arguments: Sequence[Expr]) -> Expr:
     if len(arguments) != 0:
         raise WolframEvaluationError("Abort expects no arguments.")
+    if not _active_check_abort_handles_current_abort() and _defer_abort_to_current_protect():
+        return symbol("Null")
     raise TungstenAbortRequested()
 
 
@@ -3150,8 +3269,181 @@ def print_expr(arguments: Sequence[Expr]) -> Expr:
 def compound_expression_expr(arguments: Sequence[Expr]) -> Expr:
     result: Expr = symbol("Null")
     for argument in arguments:
-        result = evaluate(argument)
+        try:
+            result = evaluate(argument)
+        except TungstenAbortRequested:
+            if not _defer_abort_to_current_protect():
+                raise
+            result = symbol("Null")
     return result
+
+
+def check_abort_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 2:
+        raise WolframEvaluationError("CheckAbort expects exactly two arguments.")
+    scopes = _ACTIVE_CHECK_ABORT_SCOPES.get()
+    scope = _CheckAbortScope(abort_protect_depth=_current_abort_protect_depth())
+    token = _ACTIVE_CHECK_ABORT_SCOPES.set(scopes + (scope,))
+    try:
+        try:
+            return evaluate(arguments[0])
+        except TungstenAbortRequested:
+            return evaluate(arguments[1])
+    finally:
+        _ACTIVE_CHECK_ABORT_SCOPES.reset(token)
+
+
+def abort_protect_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 1:
+        raise WolframEvaluationError("AbortProtect expects exactly one argument.")
+    scope = _AbortProtectScope()
+    scopes = _ACTIVE_ABORT_PROTECT_SCOPES.get()
+    token = _ACTIVE_ABORT_PROTECT_SCOPES.set(scopes + (scope,))
+    try:
+        try:
+            result = evaluate(arguments[0])
+        except TungstenAbortRequested:
+            scope.pending_abort = True
+            result = symbol("Null")
+    finally:
+        _ACTIVE_ABORT_PROTECT_SCOPES.reset(token)
+    if scope.pending_abort:
+        raise TungstenAbortRequested()
+    return result
+
+
+def pause_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Pause expects exactly one argument.")
+    seconds = _seconds_value(evaluate(arguments[0]), "Pause")
+    if not math.isfinite(seconds) or seconds < 0:
+        raise WolframEvaluationError("Pause expects a non-negative finite number of seconds.")
+    end_time = time.monotonic() + seconds
+    while True:
+        remaining_constraint = _time_constraint_remaining_seconds()
+        if remaining_constraint is not None and remaining_constraint <= 0:
+            raise _TungstenTimeConstraintSignal()
+        remaining_pause = end_time - time.monotonic()
+        if remaining_pause <= 0:
+            return symbol("Null")
+        sleep_for = remaining_pause
+        if remaining_constraint is not None:
+            sleep_for = min(sleep_for, max(remaining_constraint, 0.0))
+        time.sleep(min(sleep_for, 0.05))
+
+
+def absolute_timing_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 1:
+        raise WolframEvaluationError("AbsoluteTiming expects exactly one argument.")
+    start = time.perf_counter()
+    result = evaluate(arguments[0])
+    elapsed = time.perf_counter() - start
+    return _evaluated_list_expr(_real_from_float(elapsed, "AbsoluteTiming"), result)
+
+
+def time_constrained_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {2, 3}:
+        raise WolframEvaluationError("TimeConstrained expects two or three arguments.")
+    seconds = _seconds_value(evaluate(arguments[1]), "TimeConstrained", allow_infinity=True)
+    if seconds < 0:
+        seconds = 0.0
+    token = _push_time_constraint(seconds)
+    timed_out = False
+    try:
+        try:
+            result = evaluate(arguments[0])
+            if not math.isinf(seconds):
+                _check_time_constraints()
+            return result
+        except _TungstenTimeConstraintSignal:
+            timed_out = True
+    finally:
+        _ACTIVE_TIME_CONSTRAINTS.reset(token)
+    if timed_out and len(arguments) == 3:
+        return evaluate(arguments[2])
+    return symbol("$Aborted")
+
+
+def time_remaining_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 0:
+        raise WolframEvaluationError("TimeRemaining expects no arguments.")
+    remaining = _time_constraint_remaining_seconds()
+    if remaining is None:
+        return symbol("Infinity")
+    return _real_from_float(max(0.0, remaining), "TimeRemaining")
+
+
+def _normalize_sow_tags(arguments: Sequence[Expr]) -> tuple[Expr, tuple[Expr, ...]]:
+    if len(arguments) == 1:
+        return evaluate(arguments[0]), (symbol("None"),)
+    if len(arguments) == 2:
+        value = evaluate(arguments[0])
+        tag_expr = evaluate(arguments[1])
+        if isinstance(tag_expr, Call) and tag_expr.has_head("List"):
+            return value, tag_expr.arguments
+        return value, (tag_expr,)
+    raise WolframEvaluationError("Sow expects one or two arguments.")
+
+
+def _reap_pattern_matches(scope: _ReapScope, tag: Expr) -> list[int]:
+    return [
+        index
+        for index, pattern in enumerate(scope.patterns)
+        if _match_pattern(tag, pattern) is not None
+    ]
+
+
+def sow_expr(arguments: Sequence[Expr]) -> Expr:
+    value, tags = _normalize_sow_tags(arguments)
+    for tag in tags:
+        scopes = _ACTIVE_REAP_SCOPES.get()
+        for scope in reversed(scopes):
+            matching_indices = _reap_pattern_matches(scope, tag)
+            if not matching_indices:
+                continue
+            for index in matching_indices:
+                bucket = scope.buckets[index]
+                bucket.setdefault(tag, []).append(value)
+            break
+    return value
+
+
+def _reap_scope_result(scope: _ReapScope, handler: Expr | None) -> Expr:
+    pattern_results: list[Expr] = []
+    for bucket in scope.buckets:
+        groups: list[Expr] = []
+        for tag, values in bucket.items():
+            values_expr = _evaluated_list_expr(*values)
+            if handler is None:
+                groups.append(values_expr)
+            else:
+                groups.append(_apply_callable(handler, (tag, values_expr)))
+        if scope.pattern_list_mode:
+            pattern_results.append(_evaluated_list_expr(*groups))
+        else:
+            pattern_results.extend(groups)
+    return _evaluated_list_expr(*pattern_results)
+
+
+def reap_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("Reap expects one, two, or three arguments.")
+    pattern_spec = evaluate(arguments[1]) if len(arguments) >= 2 else _all_pattern_expr()
+    pattern_list_mode = isinstance(pattern_spec, Call) and pattern_spec.has_head("List")
+    patterns = pattern_spec.arguments if pattern_list_mode else (pattern_spec,)
+    handler = evaluate(arguments[2]) if len(arguments) == 3 else None
+    scope = _ReapScope(
+        patterns=tuple(patterns),
+        pattern_list_mode=pattern_list_mode,
+        buckets=[{} for _ in patterns],
+    )
+    scopes = _ACTIVE_REAP_SCOPES.get()
+    token = _ACTIVE_REAP_SCOPES.set(scopes + (scope,))
+    try:
+        result = evaluate(arguments[0])
+    finally:
+        _ACTIVE_REAP_SCOPES.reset(token)
+    return _evaluated_list_expr(result, _reap_scope_result(scope, handler))
 
 
 def unique_expr(spec: Expr | None = None) -> Expr:
@@ -9276,7 +9568,12 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
         session_token = _ACTIVE_EVALUATION_SESSION.set(session)
     try:
         try:
+            _check_time_constraints()
             return _evaluate(expr)
+        except _TungstenTimeConstraintSignal:
+            if previous_depth > 0:
+                raise
+            return symbol("$Aborted")
         except _TungstenThrowSignal as signal:
             if previous_depth > 0:
                 raise
@@ -9327,7 +9624,13 @@ def _evaluate(expr: Expr) -> Expr:
             exit_expr(expr.arguments)
 
         if raw_head_name == "Abort":
-            abort_expr(expr.arguments)
+            return abort_expr(expr.arguments)
+
+        if raw_head_name == "CheckAbort":
+            return check_abort_expr(expr.arguments)
+
+        if raw_head_name == "AbortProtect":
+            return abort_protect_expr(expr.arguments)
 
         if raw_head_name == "Throw":
             throw_expr(expr.arguments)
@@ -9337,6 +9640,24 @@ def _evaluate(expr: Expr) -> Expr:
 
         if raw_head_name == "Check":
             return check_expr(expr.arguments)
+
+        if raw_head_name == "TimeConstrained":
+            return time_constrained_expr(expr.arguments)
+
+        if raw_head_name == "TimeRemaining":
+            return time_remaining_expr(expr.arguments)
+
+        if raw_head_name == "AbsoluteTiming":
+            return absolute_timing_expr(expr.arguments)
+
+        if raw_head_name == "Pause":
+            return pause_expr(expr.arguments)
+
+        if raw_head_name == "Reap":
+            return reap_expr(expr.arguments)
+
+        if raw_head_name == "Sow":
+            return sow_expr(expr.arguments)
 
         if raw_head_name == "Quiet":
             return quiet_expr(expr.arguments)

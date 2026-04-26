@@ -4,7 +4,7 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-26T02:30:55Z
+- Updated (UTC): 2026-04-26T03:46:41Z
 - Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 - Related docs:
   - [Expression Parser](./expression-parser.md)
@@ -181,6 +181,17 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   evaluation boundary. `Catch[expr]` catches only untagged `Throw[value]`, while
   `Catch[expr, form]` and `Catch[expr, form, f]` catch only tagged throws whose evaluated tag
   matches `form` under Tungsten's supported pattern matcher.
+- `CheckAbort` and `AbortProtect` are implemented as scoped evaluator control-flow constructs.
+  `AbortProtect[expr]` lets protected body evaluation continue after `Abort[]`, then re-raises the
+  deferred abort at the end. A `CheckAbort` inside the same active `AbortProtect` catches the abort
+  immediately; a `CheckAbort` outside the protection catches the deferred abort after cleanup.
+- `Sow` and `Reap` are evaluator-scoped collection constructs. `Sow[e]` uses the Wolfram default
+  tag `None`; `Sow[e, {tag1, ...}]` sows once for each tag; and only the nearest enclosing `Reap`
+  whose pattern matches a tag receives that value.
+- Timing controls are practical Python-backed evaluator features. `Pause` sleeps in small chunks so
+  active `TimeConstrained` scopes can interrupt it; `AbsoluteTiming` measures wall-clock elapsed
+  seconds; `TimeRemaining[]` reports the earliest active Tungsten time constraint, or `Infinity`
+  when no such constraint exists.
 - Evaluation precondition failures are non-fatal when they occur through `evaluate(...)`. Tungsten
   emits a `Head::error` message using the head of the expression that failed, leaves that
   expression unevaluated, and lets enclosing expressions continue structurally. Direct helper APIs
@@ -236,8 +247,16 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `DownValues` | `DownValues[In]`, `DownValues[InString]`, `DownValues[Out]` in a REPL session | Returns read-only history downvalues for the active REPL session. Other symbols currently return `{}` in Tungsten's offline evaluator. | [DownValues](https://reference.wolfram.com/language/ref/DownValues.html) |
 | `Exit`, `Quit` | `Exit`, `Exit[]`, `Exit[code]`, `Quit`, `Quit[]`, `Quit[code]` in the REPL | Terminates the Tungsten REPL. Optional integer arguments become the process exit code. | [Exit](https://reference.wolfram.com/language/ref/Exit.html), [Quit](https://reference.wolfram.com/language/ref/Quit.html) |
 | `Abort` | `Abort[]` | Aborts the current Tungsten evaluation and returns `$Aborted` at the outermost evaluator boundary. `Abort` is not caught by `Catch`. | [Abort](https://reference.wolfram.com/language/ref/Abort.html) |
+| `CheckAbort` | `CheckAbort[expr, fail]` | Evaluates `expr` and returns `fail` if an abort escapes the body. A `CheckAbort` inside the same active `AbortProtect` catches the abort immediately; an outer `CheckAbort` catches the deferred abort after protected cleanup. | [CheckAbort](https://reference.wolfram.com/language/ref/CheckAbort.html) |
+| `AbortProtect` | `AbortProtect[expr]` | Evaluates `expr` while deferring aborts raised inside the protected body until that body finishes. This lets statement sequences complete cleanup before the abort is re-raised. | [AbortProtect](https://reference.wolfram.com/language/ref/AbortProtect.html) |
 | `Throw` | `Throw[value]`, `Throw[value, tag]`, `Throw[value, tag, f]` | Raises non-local evaluator control flow. Untagged throws are caught only by `Catch[expr]`; tagged throws are caught only by `Catch[expr, form]` / `Catch[expr, form, f]`. If a tagged throw with its own handler `f` reaches top level uncaught, Tungsten returns `f[value, tag]`. | [Throw](https://reference.wolfram.com/language/ref/Throw.html) |
 | `Catch` | `Catch[expr]`, `Catch[expr, form]`, `Catch[expr, form, f]` | Evaluates `expr` under a non-local throw handler. The one-argument form catches only untagged `Throw[value]`. Tagged forms re-evaluate the tag for matching and use Tungsten's supported pattern matcher for `form`; the three-argument form returns `f[value, tag]`. | [Catch](https://reference.wolfram.com/language/ref/Catch.html) |
+| `Sow` | `Sow[e]`, `Sow[e, tag]`, `Sow[e, {tag1, ...}]` | Evaluates and returns `e`, while recording it in the nearest enclosing matching `Reap`. The default tag is `None`; list tags sow the same value once per tag. | [Sow](https://reference.wolfram.com/language/ref/Sow.html) |
+| `Reap` | `Reap[expr]`, `Reap[expr, patt]`, `Reap[expr, {patt1, ...}]`, `Reap[expr, patt, f]` | Evaluates `expr` and returns `{result, collected}`. Tagged values are grouped by distinct tag; pattern-list mode keeps one outer group per pattern; the optional handler receives `f[tag, {values...}]`. | [Reap](https://reference.wolfram.com/language/ref/Reap.html) |
+| `Pause` | `Pause[n]` | Sleeps for at least `n` seconds for explicit integer or real `n`, then returns `Null`. `Pause` is interruptible by active Tungsten `TimeConstrained` scopes. | [Pause](https://reference.wolfram.com/language/ref/Pause.html) |
+| `AbsoluteTiming` | `AbsoluteTiming[expr]` | Evaluates `expr` and returns `{seconds, result}` using Python wall-clock timing. | [AbsoluteTiming](https://reference.wolfram.com/language/ref/AbsoluteTiming.html) |
+| `TimeConstrained` | `TimeConstrained[expr, t]`, `TimeConstrained[expr, t, fail]` | Evaluates `expr` under a Tungsten deadline. Expiration returns `fail` if supplied, otherwise `$Aborted`; `Infinity` imposes no deadline. The current implementation checks deadlines at evaluator boundaries and during `Pause`, not by asynchronously interrupting arbitrary Python code. | [TimeConstrained](https://reference.wolfram.com/language/ref/TimeConstrained.html) |
+| `TimeRemaining` | `TimeRemaining[]` | Returns the number of seconds remaining in the earliest enclosing Tungsten `TimeConstrained` scope, or `Infinity` outside a constraint. | [TimeRemaining](https://reference.wolfram.com/language/ref/TimeRemaining.html) |
 | `$MessageList` | `$MessageList` | Returns the current input's generated message names wrapped in `HoldForm`. Quieted messages remain visible to `$MessageList` during the same evaluation; messages disabled by `Off` are not generated. | [$MessageList](https://reference.wolfram.com/language/ref/%24MessageList.html) |
 | `MessageList` | `MessageList[n]` in a REPL/evaluation session | Returns the visible message names recorded for an earlier input line, wrapped in `HoldForm`. Quieted messages are not stored in `MessageList[n]`. | [MessageList](https://reference.wolfram.com/language/ref/MessageList.html) |
 | `Message` | `Message[sym::tag]`, `Message[sym::tag, e1, ...]` | Generates a non-fatal message unless disabled by `Off` or suppressed by `Quiet`. Tungsten records the message name and a practical diagnostic text; it does not resolve localized Wolfram message templates. | [Message](https://reference.wolfram.com/language/ref/Message.html) |

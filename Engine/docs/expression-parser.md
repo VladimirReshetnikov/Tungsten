@@ -1,7 +1,7 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-26T02:30:55Z
+Updated (UTC): 2026-04-26T03:46:41Z
 Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 
 ## Summary
@@ -19,7 +19,9 @@ Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
   heads such as `UnitStep`, `Mod`, `Clip`, and `KroneckerDelta`, Boolean heads such as `Not`,
   `And`, and `Or`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
   `ReplaceRepeated`, non-local control and message heads such as `Abort`, `Throw`, `Catch`,
-  `Check`, `Quiet`, `Message`, `Off`, `On`, and `Print`, `Function`,
+  `CheckAbort`, `AbortProtect`, `Check`, `Quiet`, `Message`, `Off`, `On`, and `Print`,
+  collection and timing heads such as `Sow`, `Reap`, `Pause`, `AbsoluteTiming`,
+  `TimeConstrained`, and `TimeRemaining`, `Function`,
   functional combinators such as `Composition`, `Nest`,
   `FixedPoint`, `Fold`, `MapApply`, `MapAll`, `MapIndexed`, `Through`, `Thread`, `Outer`,
   `Inner`, `Dot`, array and matrix builders such as `Array`, `Range`, `UnitVector`,
@@ -492,6 +494,13 @@ Tungsten currently implements a broader structural subset that includes:
 - evaluator-level non-local control for `Abort`, `Throw`, and `Catch`, including the Wolfram
   distinction between untagged throws caught by `Catch[expr]` and tagged throws caught by
   pattern-filtered `Catch[expr, form]` forms;
+- scoped abort control for `CheckAbort` and `AbortProtect`, including deferred aborts that let
+  protected statement sequences run cleanup before an outer `CheckAbort` observes the abort;
+- scoped collection with `Sow` and `Reap`, including tag patterns, pattern-list grouping, nearest
+  matching `Reap` behavior, and optional per-tag handler applications;
+- practical timing control with `Pause`, `AbsoluteTiming`, `TimeConstrained`, and `TimeRemaining`;
+  deadlines are checked at Tungsten evaluator boundaries and during `Pause`, rather than by
+  asynchronously interrupting arbitrary host-language code;
 - message-oriented evaluation for `Check`, `Quiet`, `Message`, `$MessageList`, `MessageList`,
   `Off`, `On`, and `Print`; precondition failures emit non-fatal `Head::error` diagnostics and
   leave the failing expression in structural form;
