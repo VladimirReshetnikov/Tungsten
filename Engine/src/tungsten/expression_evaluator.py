@@ -555,7 +555,7 @@ def evaluate_once(expr: Expr) -> Expr:
             return to_string_expr(evaluated_arguments[0])
         if len(evaluated_arguments) == 2:
             return to_string_expr(evaluated_arguments[0], evaluated_arguments[1])
-        raise WolframEvaluationError("ToString expects an expression and an optional InputForm or StandardForm specifier.")
+        raise WolframEvaluationError("ToString expects an expression and an optional supported form specifier.")
 
     if evaluated_head_name == "ToBoxes":
         if len(evaluated_arguments) == 1:
@@ -591,7 +591,7 @@ def evaluate_once(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 3:
             return to_expression_expr(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
         raise WolframEvaluationError(
-            "ToExpression expects input, an optional InputForm or StandardForm specifier, and an optional wrapper head."
+            "ToExpression expects input, an optional supported form specifier, and an optional wrapper head."
         )
 
     if evaluated_head.name == "SameQ":

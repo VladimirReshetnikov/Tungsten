@@ -477,6 +477,11 @@ python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}
 python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
 python -m tungsten expr evaluate --code "ToString[FullForm[{1, 2/3, a + b}]]"
 python -m tungsten expr evaluate --code "ToBoxes[InputForm[1 + x]]"
+python -m tungsten expr evaluate --code "ToString[1 + x, TeXForm]"
+python -m tungsten expr evaluate --code "ToString[1 + x, MathMLForm]"
+python -m tungsten expr evaluate --code "ToString[1 + x, TraditionalForm]"
+python -m tungsten expr evaluate --code "ToExpression[ToString[1 + x, TeXForm], TeXForm, HoldComplete]"
+python -m tungsten expr evaluate --code "ToBoxes[TraditionalForm[1 + x]]"
 python -m tungsten expr evaluate --code "Print[FullForm[{1, 2/3, a + b}]]"
 python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code 'ToExpression[RowBox[{"a", "\[CirclePlus]", "b"}], StandardForm, HoldComplete]'
@@ -544,7 +549,8 @@ The implemented inert evaluator currently covers:
   `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`, `ExportString`,
   `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
-  `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`
+  `MakeExpression`, `StripBoxes`, `SyntaxQ`, `SyntaxLength`, `TraditionalForm`, `TeXForm`, and
+  `MathMLForm`
 - `Pick`
 - `First`
 - `Last`

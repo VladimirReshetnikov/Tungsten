@@ -10,6 +10,7 @@ from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from functools import cmp_to_key
 import gzip
+import html
 from importlib import resources
 import io
 import itertools
@@ -20,8 +21,10 @@ import sys
 import time
 import unicodedata
 from typing import Callable, Iterable, Sequence, TypeGuard
+from xml.etree import ElementTree
 
 from .wolfram_strings import has_inline_boxes
+from .wolfram_strings import inline_box_escape
 from .wolfram_strings import inline_box_segments
 from .wolfram_strings import parse_wl_string_literal
 from .wolfram_strings import skip_wl_comment
@@ -507,6 +510,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "MapIndexed",
     "MapThread",
     "MatchQ",
+    "MathMLForm",
     "Max",
     "MaximalBy",
     "MemberQ",
@@ -700,6 +704,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "TimeRemaining",
     "TensorProduct",
     "Temporary",
+    "TeXForm",
     "Tilde",
     "TildeEqual",
     "TildeFullEqual",
@@ -708,6 +713,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "ToCharacterCode",
     "ToExpression",
     "ToString",
+    "TraditionalForm",
     "Throw",
     "True",
     "TrueQ",
@@ -4215,9 +4221,18 @@ def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> Stri
 _TEXTUAL_EXPRESSION_FORM_NAMES = {
     "input": "InputForm",
     "inputform": "InputForm",
+    "mathml": "MathMLForm",
+    "mathmlform": "MathMLForm",
     "standard": "StandardForm",
     "standardform": "StandardForm",
+    "tex": "TeXForm",
+    "texform": "TeXForm",
+    "traditional": "TraditionalForm",
+    "traditionalform": "TraditionalForm",
 }
+
+_PARSE_TEXTUAL_EXPRESSION_FORM_NAMES = {"InputForm", "StandardForm", "TraditionalForm", "TeXForm", "MathMLForm"}
+_BOX_EXPRESSION_FORM_NAMES = {"InputForm", "StandardForm", "TraditionalForm"}
 
 
 def _normalize_textual_expression_form(value: Expr | None, function_name: str) -> str:
@@ -4228,17 +4243,22 @@ def _normalize_textual_expression_form(value: Expr | None, function_name: str) -
     elif isinstance(value, String):
         key = value.value.strip().lower()
     else:
-        raise WolframEvaluationError(f"{function_name} expects InputForm or StandardForm as the form specification.")
+        raise WolframEvaluationError(f"{function_name} expects a supported expression form specification.")
     normalized = _TEXTUAL_EXPRESSION_FORM_NAMES.get(key)
-    if normalized is None:
-        raise WolframEvaluationError(f"{function_name} currently supports only InputForm and StandardForm.")
+    if normalized is None or normalized not in _PARSE_TEXTUAL_EXPRESSION_FORM_NAMES:
+        raise WolframEvaluationError(f"{function_name} does not support this expression form.")
     return normalized
 
 
 def _normalize_box_expression_form(value: Expr | None, function_name: str) -> str:
     if value is None:
         return "StandardForm"
-    return _normalize_textual_expression_form(value, function_name)
+    normalized = _normalize_textual_expression_form(value, function_name)
+    if normalized not in _BOX_EXPRESSION_FORM_NAMES:
+        raise WolframEvaluationError(
+            f"{function_name} supports InputForm, StandardForm, and TraditionalForm as box forms."
+        )
+    return normalized
 
 
 _STANDARD_FORM_BOX_HEADS = {
@@ -4266,7 +4286,17 @@ _STANDARD_FORM_BOX_HEADS = {
 }
 
 
-_DISPLAY_FORM_HEADS = {"FullForm", "InputForm", "OutputForm", "StandardForm"}
+_DISPLAY_FORM_HEADS = {
+    "FullForm",
+    "InputForm",
+    "MathMLForm",
+    "OutputForm",
+    "StandardForm",
+    "TeXForm",
+    "TraditionalForm",
+}
+
+_TEXT_RENDERING_DISPLAY_FORM_HEADS = {"MathMLForm", "TeXForm", "TraditionalForm"}
 
 
 def _display_form_wrapper(expr: Expr) -> tuple[str, Expr] | None:
@@ -4281,7 +4311,279 @@ def _display_form_wrapper(expr: Expr) -> tuple[str, Expr] | None:
 def _display_form_text(expr: Expr, form_name: str) -> str:
     if form_name == "FullForm":
         return expr.to_full_form()
+    if form_name == "TraditionalForm":
+        return _traditional_form_text(expr)
+    if form_name == "TeXForm":
+        return _tex_form_text(expr)
+    if form_name == "MathMLForm":
+        return _mathml_form_text(expr)
     return expr.to_input_form()
+
+
+def _traditional_form_text(expr: Expr) -> str:
+    return inline_box_escape(call("FormBox", _make_traditional_boxes(expr), symbol("TraditionalForm")).to_input_form())
+
+
+def _tex_form_text(expr: Expr) -> str:
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None:
+        form_name, payload = wrapper
+        if form_name == "StandardForm":
+            return _tex_format_expr(payload, traditional=False)
+        if form_name == "InputForm":
+            return _tex_escape_text(payload.to_input_form())
+        if form_name == "FullForm":
+            return _tex_escape_text(payload.to_full_form())
+        if form_name == "OutputForm":
+            return _tex_escape_text(payload.to_input_form())
+        if form_name == "TraditionalForm":
+            return _tex_format_expr(payload, traditional=True)
+    return _tex_format_expr(expr, traditional=True)
+
+
+def _mathml_form_text(expr: Expr) -> str:
+    wrapper = _display_form_wrapper(expr)
+    traditional = True
+    payload = expr
+    if wrapper is not None:
+        form_name, payload = wrapper
+        traditional = form_name != "StandardForm"
+    body = _mathml_format_expr(payload, traditional=traditional)
+    return "<math>\n" + _indent_xml(body, 1) + "\n</math>\n"
+
+
+def _traditional_plus_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    nonnumeric = [argument for argument in arguments if not _is_number_expr(argument)]
+    numeric = [argument for argument in arguments if _is_number_expr(argument)]
+    return tuple(nonnumeric + numeric)
+
+
+def _tex_format_expr(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, Symbol):
+        return _tex_symbol_name(expr.to_input_form())
+    if isinstance(expr, Integer):
+        return str(expr.value)
+    if isinstance(expr, RationalNumber):
+        return rf"\frac{{{expr.value.numerator}}}{{{expr.value.denominator}}}"
+    if isinstance(expr, Real):
+        return _tex_escape_text(expr.text)
+    if isinstance(expr, SpecialReal):
+        return _tex_escape_text(expr.name)
+    if isinstance(expr, ComplexNumber):
+        return _tex_format_expr(call("Complex", expr.real_part, expr.imaginary_part), traditional=traditional)
+    if isinstance(expr, String):
+        return r"\text{" + _tex_escape_text(wl_string(expr.value)) + "}"
+    if isinstance(expr, ByteArrayExpr):
+        return _tex_escape_text(expr.to_input_form())
+    if not isinstance(expr, Call):
+        return _tex_escape_text(expr.to_input_form())
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return r"\{" + ", ".join(_tex_format_expr(argument, traditional=traditional) for argument in arguments) + r"\}"
+        if head_name == "Association":
+            return r"\langle|" + ", ".join(_tex_format_expr(argument, traditional=traditional) for argument in arguments) + r"|\rangle"
+        if head_name == "Rule" and len(arguments) == 2:
+            return (
+                _tex_format_expr(arguments[0], traditional=traditional)
+                + r"\to "
+                + _tex_format_expr(arguments[1], traditional=traditional)
+            )
+        if head_name == "RuleDelayed" and len(arguments) == 2:
+            return (
+                _tex_format_expr(arguments[0], traditional=traditional)
+                + r"\mathrel{:}\joinrel\to "
+                + _tex_format_expr(arguments[1], traditional=traditional)
+            )
+        if head_name == "Plus" and arguments:
+            ordered = _traditional_plus_arguments(arguments) if traditional else arguments
+            return "+".join(_tex_format_expr(argument, traditional=traditional) for argument in ordered)
+        if head_name == "Times" and arguments:
+            return " ".join(_tex_factor_text(argument, traditional=traditional) for argument in arguments)
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            if isinstance(exponent, RationalNumber) and exponent.value == Fraction(1, 2):
+                return r"\sqrt{" + _tex_format_expr(base, traditional=traditional) + "}"
+            if (
+                isinstance(exponent, Call)
+                and exponent.has_head("Rational")
+                and len(exponent.arguments) == 2
+                and isinstance(exponent.arguments[0], Integer)
+                and isinstance(exponent.arguments[1], Integer)
+                and exponent.arguments[0].value == 1
+                and exponent.arguments[1].value == 2
+            ):
+                return r"\sqrt{" + _tex_format_expr(base, traditional=traditional) + "}"
+            return (
+                _tex_power_base_text(base, traditional=traditional)
+                + "^{"
+                + _tex_format_expr(exponent, traditional=traditional)
+                + "}"
+            )
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                r"\frac{"
+                + _tex_format_expr(arguments[0], traditional=traditional)
+                + "}{"
+                + _tex_format_expr(arguments[1], traditional=traditional)
+                + "}"
+            )
+        if head_name in {"Sin", "Cos", "Tan", "Log", "Exp"} and len(arguments) == 1:
+            name = "ln" if head_name == "Log" else head_name.lower()
+            return rf"\{name}\left(" + _tex_format_expr(arguments[0], traditional=traditional) + r"\right)"
+
+    head = _tex_format_expr(expr.head_expr, traditional=traditional)
+    arguments = ", ".join(_tex_format_expr(argument, traditional=traditional) for argument in expr.arguments)
+    head_context = None
+    if isinstance(expr.head_expr, Symbol):
+        try:
+            head_context = _SYMBOL_REGISTRY.record_for_symbol(expr.head_expr).context
+        except WolframEvaluationError:
+            head_context = None
+    if traditional and head_context == "Global`":
+        return head + r"\left(" + arguments + r"\right)"
+    return head + r"\left[" + arguments + r"\right]"
+
+
+def _tex_factor_text(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name in {"Plus", "Rule", "RuleDelayed"}:
+            return r"\left(" + _tex_format_expr(expr, traditional=traditional) + r"\right)"
+    return _tex_format_expr(expr, traditional=traditional)
+
+
+def _tex_power_base_text(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, (Symbol, Integer, Real, RationalNumber)):
+        return _tex_format_expr(expr, traditional=traditional)
+    return r"\left(" + _tex_format_expr(expr, traditional=traditional) + r"\right)"
+
+
+_TEX_SYMBOL_NAMES = {
+    "alpha": r"\alpha",
+    "beta": r"\beta",
+    "gamma": r"\gamma",
+    "delta": r"\delta",
+    "epsilon": r"\epsilon",
+    "theta": r"\theta",
+    "lambda": r"\lambda",
+    "mu": r"\mu",
+    "pi": r"\pi",
+    "sigma": r"\sigma",
+    "phi": r"\phi",
+    "omega": r"\omega",
+}
+
+
+def _tex_symbol_name(name: str) -> str:
+    lower = name.lower()
+    if lower in _TEX_SYMBOL_NAMES:
+        return _TEX_SYMBOL_NAMES[lower]
+    if len(name) == 1 and (name.isalpha() or name.isdigit()):
+        return _tex_escape_text(name)
+    return r"\text{" + _tex_escape_text(name) + "}"
+
+
+def _tex_escape_text(text: str) -> str:
+    replacements = {
+        "\\": r"\backslash{}",
+        "{": r"\{",
+        "}": r"\}",
+        "_": r"\_",
+        "%": r"\%",
+        "#": r"\#",
+        "&": r"\&",
+        "$": r"\$",
+    }
+    return "".join(replacements.get(char, char) for char in text)
+
+
+def _mathml_format_expr(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, Symbol):
+        return f"<mi>{html.escape(expr.to_input_form())}</mi>"
+    if isinstance(expr, Integer):
+        return f"<mn>{expr.value}</mn>"
+    if isinstance(expr, RationalNumber):
+        return f"<mfrac><mn>{expr.value.numerator}</mn><mn>{expr.value.denominator}</mn></mfrac>"
+    if isinstance(expr, Real):
+        return f"<mn>{html.escape(expr.text)}</mn>"
+    if isinstance(expr, SpecialReal):
+        return f"<mi>{html.escape(expr.name)}</mi>"
+    if isinstance(expr, ComplexNumber):
+        return _mathml_format_expr(call("Complex", expr.real_part, expr.imaginary_part), traditional=traditional)
+    if isinstance(expr, String):
+        return f"<mtext>{html.escape(wl_string(expr.value))}</mtext>"
+    if isinstance(expr, ByteArrayExpr):
+        return f"<mtext>{html.escape(expr.to_input_form())}</mtext>"
+    if not isinstance(expr, Call):
+        return f"<mtext>{html.escape(expr.to_input_form())}</mtext>"
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return _mathml_row([_mathml_operator("{"), *_mathml_join(arguments, ",", traditional=traditional), _mathml_operator("}")])
+        if head_name == "Rule" and len(arguments) == 2:
+            return _mathml_row([
+                _mathml_format_expr(arguments[0], traditional=traditional),
+                _mathml_operator("->"),
+                _mathml_format_expr(arguments[1], traditional=traditional),
+            ])
+        if head_name == "RuleDelayed" and len(arguments) == 2:
+            return _mathml_row([
+                _mathml_format_expr(arguments[0], traditional=traditional),
+                _mathml_operator(":>"),
+                _mathml_format_expr(arguments[1], traditional=traditional),
+            ])
+        if head_name == "Plus" and arguments:
+            ordered = _traditional_plus_arguments(arguments) if traditional else arguments
+            return _mathml_row(_mathml_join(ordered, "+", traditional=traditional))
+        if head_name == "Times" and arguments:
+            return _mathml_row(_mathml_join(arguments, "\u2062", traditional=traditional))
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            if isinstance(exponent, RationalNumber) and exponent.value == Fraction(1, 2):
+                return f"<msqrt>{_mathml_format_expr(base, traditional=traditional)}</msqrt>"
+            return (
+                "<msup>"
+                + _mathml_format_expr(base, traditional=traditional)
+                + _mathml_format_expr(exponent, traditional=traditional)
+                + "</msup>"
+            )
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                "<mfrac>"
+                + _mathml_format_expr(arguments[0], traditional=traditional)
+                + _mathml_format_expr(arguments[1], traditional=traditional)
+                + "</mfrac>"
+            )
+
+    head = _mathml_format_expr(expr.head_expr, traditional=traditional)
+    return _mathml_row([head, _mathml_operator("["), *_mathml_join(expr.arguments, ",", traditional=traditional), _mathml_operator("]")])
+
+
+def _mathml_join(arguments: Sequence[Expr], operator: str, *, traditional: bool) -> list[str]:
+    pieces: list[str] = []
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(_mathml_operator(operator))
+        pieces.append(_mathml_format_expr(argument, traditional=traditional))
+    return pieces
+
+
+def _mathml_operator(operator: str) -> str:
+    return f"<mo>{html.escape(operator)}</mo>"
+
+
+def _mathml_row(pieces: Sequence[str]) -> str:
+    return "<mrow>" + "".join(pieces) + "</mrow>"
+
+
+def _indent_xml(text: str, level: int) -> str:
+    indent = " " * level
+    return "\n".join(indent + line if line else line for line in text.splitlines())
 
 
 @dataclass(frozen=True)
@@ -4540,6 +4842,166 @@ def _looks_like_standard_form_boxes(expr: Expr) -> bool:
     )
 
 
+def _parse_textual_expression(text: str, form_name: str) -> Expr:
+    if form_name == "InputForm":
+        return parse_input_form(text)
+    if form_name == "StandardForm":
+        return parse_standard_form(text)
+    if form_name == "TraditionalForm":
+        parsed_box = _parse_single_inline_box_text(text)
+        if parsed_box is not None:
+            return _interpret_standard_form(parsed_box)
+        return parse_standard_form(text)
+    if form_name == "TeXForm":
+        return _parse_tex_form_text(text)
+    if form_name == "MathMLForm":
+        return _parse_mathml_form_text(text)
+    raise WolframSyntaxError(f"Unsupported textual expression form: {form_name}")
+
+
+def _parse_single_inline_box_text(text: str) -> Expr | None:
+    segments = inline_box_segments(text.strip())
+    if len(segments) != 1 or segments[0].source != text.strip():
+        return None
+    return parse_input_form(segments[0].box_expression)
+
+
+def _parse_tex_form_text(text: str) -> Expr:
+    normalized = _tex_to_wolfram_text(text.strip())
+    return parse_standard_form(normalized)
+
+
+def _tex_to_wolfram_text(text: str) -> str:
+    text = text.replace(r"\left", "").replace(r"\right", "")
+    text = _replace_tex_group_function(text, r"\frac", lambda first, second: f"(({_tex_to_wolfram_text(first)})/({_tex_to_wolfram_text(second)}))", arity=2)
+    text = _replace_tex_group_function(text, r"\sqrt", lambda first: f"(({_tex_to_wolfram_text(first)})^(1/2))", arity=1)
+    text = _replace_tex_group_function(text, r"\text", lambda first: _tex_to_wolfram_text(first), arity=1)
+    for name, tex_name in _TEX_SYMBOL_NAMES.items():
+        text = text.replace(tex_name, name)
+    text = text.replace(r"\mathrel{:}\joinrel\to", ":>")
+    text = text.replace(r"\{", "{").replace(r"\}", "}")
+    text = text.replace(r"\to", "->")
+    text = text.replace(r"\[", "[").replace(r"\]", "]")
+    text = text.replace(r"\(", "(").replace(r"\)", ")")
+    text = text.replace("^{", "^(")
+    text = _close_tex_superscript_groups(text)
+    return text
+
+
+def _replace_tex_group_function(text: str, marker: str, replacement: Callable[..., str], *, arity: int) -> str:
+    while True:
+        start = text.find(marker)
+        if start < 0:
+            return text
+        index = start + len(marker)
+        groups: list[str] = []
+        end = index
+        for _ in range(arity):
+            while end < len(text) and text[end].isspace():
+                end += 1
+            if end >= len(text) or text[end] != "{":
+                return text
+            group, end = _read_braced_tex_group(text, end)
+            groups.append(group)
+        text = text[:start] + replacement(*groups) + text[end:]
+
+
+def _read_braced_tex_group(text: str, start: int) -> tuple[str, int]:
+    depth = 0
+    content_start = start + 1
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[content_start:index], index + 1
+        index += 1
+    raise WolframSyntaxError("Unclosed TeX group.")
+
+
+def _close_tex_superscript_groups(text: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("^(", index):
+            result.append("^(")
+            index += 2
+            depth = 1
+            while index < len(text):
+                char = text[index]
+                if char == "{":
+                    depth += 1
+                    result.append("(")
+                elif char == "}":
+                    depth -= 1
+                    result.append(")" if depth == 0 else ")")
+                    index += 1
+                    break
+                else:
+                    result.append(char)
+                index += 1
+            continue
+        result.append(text[index])
+        index += 1
+    return "".join(result)
+
+
+def _parse_mathml_form_text(text: str) -> Expr:
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as exc:
+        raise WolframSyntaxError("Invalid MathML input.") from exc
+    wolfram_text = _mathml_element_to_wolfram_text(root)
+    return parse_standard_form(wolfram_text)
+
+
+def _mathml_element_to_wolfram_text(element: ElementTree.Element) -> str:
+    tag = _xml_local_name(element.tag)
+    children = list(element)
+    if tag == "math":
+        if len(children) == 1:
+            return _mathml_element_to_wolfram_text(children[0])
+        return _mathml_row_to_wolfram_text(children)
+    if tag == "mrow":
+        return _mathml_row_to_wolfram_text(children)
+    if tag in {"mi", "mn"}:
+        return (element.text or "").strip()
+    if tag == "mtext":
+        return wl_string(element.text or "")
+    if tag == "mo":
+        return _mathml_operator_text(element.text or "")
+    if tag == "mfrac" and len(children) >= 2:
+        return f"(({_mathml_element_to_wolfram_text(children[0])})/({_mathml_element_to_wolfram_text(children[1])}))"
+    if tag == "msup" and len(children) >= 2:
+        return f"(({_mathml_element_to_wolfram_text(children[0])})^({_mathml_element_to_wolfram_text(children[1])}))"
+    if tag == "msqrt" and children:
+        return f"(({_mathml_row_to_wolfram_text(children)})^(1/2))"
+    raise WolframSyntaxError(f"Unsupported MathML element: {tag}.")
+
+
+def _mathml_row_to_wolfram_text(children: Sequence[ElementTree.Element]) -> str:
+    pieces = [_mathml_element_to_wolfram_text(child) for child in children]
+    if pieces and pieces[0] in {"{", "[", "("} and pieces[-1] in {"}", "]", ")"}:
+        return pieces[0] + "".join(pieces[1:-1]) + pieces[-1]
+    return " ".join(piece for piece in pieces if piece != "\u2062")
+
+
+def _mathml_operator_text(text: str) -> str:
+    stripped = text.strip()
+    if stripped == "\u2062":
+        return "\u2062"
+    return stripped
+
+
+def _xml_local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1]
+    return tag
+
+
 def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
     if form_value is None:
         wrapper = _display_form_wrapper(expr)
@@ -4548,12 +5010,22 @@ def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
             return string(_display_form_text(payload, form_name))
 
     form_name = _normalize_textual_expression_form(form_value, "ToString")
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None and wrapper[0] in _TEXT_RENDERING_DISPLAY_FORM_HEADS:
+        wrapper_form, payload = wrapper
+        return string(_display_form_text(payload, wrapper_form))
     if form_name == "InputForm":
         return string(expr.to_input_form())
     if form_name == "StandardForm":
         # Tungsten's StandardForm string subset intentionally renders as parseable WL text,
         # not as FrontEnd box escapes. The parser accepts it through parse_standard_form.
         return string(expr.to_input_form())
+    if form_name == "TraditionalForm":
+        return string(_traditional_form_text(expr))
+    if form_name == "TeXForm":
+        return string(_tex_form_text(expr))
+    if form_name == "MathMLForm":
+        return string(_mathml_form_text(expr).rstrip("\n"))
     raise AssertionError(f"Unhandled textual expression form: {form_name}")
 
 
@@ -4570,11 +5042,13 @@ def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper
 
     try:
         if isinstance(input_expr, String):
-            parsed = parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+            parsed = _parse_textual_expression(input_expr.value, form_name)
         elif form_name == "StandardForm" and _looks_like_standard_form_boxes(input_expr):
             parsed = _interpret_standard_form(input_expr)
+        elif form_name == "TraditionalForm" and _looks_like_standard_form_boxes(input_expr):
+            parsed = _interpret_standard_form(input_expr)
         else:
-            raise WolframEvaluationError("ToExpression expects a string or a supported StandardForm box expression.")
+            raise WolframEvaluationError("ToExpression expects a string or a supported box expression.")
     except WolframSyntaxError as exc:
         raise WolframEvaluationError(f"ToExpression could not parse the input as {form_name}.") from exc
 
@@ -4594,14 +5068,14 @@ def make_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
 
 
 def make_expression_expr(box_expr: Expr, form_value: Expr | None = None) -> Expr:
-    form_name = _normalize_box_expression_form(form_value, "MakeExpression")
+    form_name = _normalize_textual_expression_form(form_value, "MakeExpression") if form_value is not None else "StandardForm"
     try:
         if isinstance(box_expr, String):
-            parsed = parse_input_form(box_expr.value) if form_name == "InputForm" else parse_standard_form(box_expr.value)
-        elif form_name == "StandardForm" and _looks_like_standard_form_boxes(box_expr):
+            parsed = _parse_textual_expression(box_expr.value, form_name)
+        elif form_name in {"StandardForm", "TraditionalForm"} and _looks_like_standard_form_boxes(box_expr):
             parsed = _interpret_standard_form(box_expr)
         else:
-            raise WolframEvaluationError("MakeExpression expects a string or a supported StandardForm box expression.")
+            raise WolframEvaluationError("MakeExpression expects a string or a supported box expression.")
     except WolframSyntaxError as exc:
         raise WolframEvaluationError(f"MakeExpression could not parse the input as {form_name}.") from exc
     return call("HoldComplete", parsed)
@@ -4626,11 +5100,13 @@ def syntax_length_expr(input_expr: Expr, form_value: Expr | None = None) -> Inte
 
 
 def _make_boxes(expr: Expr, form_name: str) -> Expr:
-    if form_name not in {"InputForm", "StandardForm"}:
-        raise WolframEvaluationError("Box conversion currently supports only InputForm and StandardForm.")
     if form_name == "InputForm":
         return string(expr.to_input_form())
-    return _make_standard_boxes(expr)
+    if form_name == "StandardForm":
+        return _make_standard_boxes(expr)
+    if form_name == "TraditionalForm":
+        return _make_traditional_boxes(expr)
+    raise WolframEvaluationError("Box conversion currently supports only InputForm, StandardForm, and TraditionalForm.")
 
 
 def _make_standard_boxes(expr: Expr) -> Expr:
@@ -4645,6 +5121,12 @@ def _make_standard_boxes(expr: Expr) -> Expr:
             return _output_form_display_boxes(payload)
         if form_name == "StandardForm":
             return _standard_form_display_boxes(payload)
+        if form_name == "TraditionalForm":
+            return _traditional_form_display_boxes(payload)
+        if form_name == "TeXForm":
+            return _tex_form_display_boxes(payload)
+        if form_name == "MathMLForm":
+            return _mathml_form_display_boxes(payload)
 
     if isinstance(expr, Symbol):
         return string(expr.to_input_form())
@@ -4710,6 +5192,60 @@ def _make_standard_boxes(expr: Expr) -> Expr:
     return _generic_call_boxes(expr)
 
 
+def _make_traditional_boxes(expr: Expr) -> Expr:
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None:
+        form_name, payload = wrapper
+        if form_name == "TraditionalForm":
+            return _make_traditional_boxes(payload)
+        if form_name == "StandardForm":
+            return _make_standard_boxes(payload)
+
+    if isinstance(expr, (Symbol, Integer, Real, SpecialReal, String, ByteArrayExpr)):
+        return _make_standard_boxes(expr)
+    if isinstance(expr, RationalNumber):
+        return call("FractionBox", _make_traditional_boxes(integer(expr.value.numerator)), _make_traditional_boxes(integer(expr.value.denominator)))
+    if isinstance(expr, ComplexNumber):
+        return _make_traditional_boxes(call("Complex", expr.real_part, expr.imaginary_part))
+    if not isinstance(expr, Call):
+        return string(expr.to_input_form())
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name == "List":
+            return _bracketed_traditional_row_box("{", expr.arguments, "}")
+        if head_name == "Association":
+            return _bracketed_traditional_row_box("<|", expr.arguments, "|>")
+        if head_name == "Rule" and len(expr.arguments) == 2:
+            return _infix_traditional_row_box(expr.arguments[0], "->", expr.arguments[1])
+        if head_name == "RuleDelayed" and len(expr.arguments) == 2:
+            return _infix_traditional_row_box(expr.arguments[0], ":>", expr.arguments[1])
+        if head_name == "Plus" and len(expr.arguments) >= 2:
+            return _separated_traditional_row_box(_traditional_plus_arguments(expr.arguments), "+")
+        if head_name == "Times" and len(expr.arguments) >= 2:
+            return _separated_traditional_row_box(expr.arguments, " ")
+        if head_name == "Power" and len(expr.arguments) == 2:
+            base, exponent = expr.arguments
+            if isinstance(exponent, Integer) and exponent.value == -1:
+                return call("FractionBox", string("1"), _make_traditional_boxes(base))
+            if isinstance(exponent, RationalNumber) and exponent.value == Fraction(1, 2):
+                return call("SqrtBox", _make_traditional_boxes(base))
+            return call("SuperscriptBox", _make_traditional_boxes(base), _make_traditional_boxes(exponent))
+        if head_name == "Rational" and len(expr.arguments) == 2:
+            return call("FractionBox", _make_traditional_boxes(expr.arguments[0]), _make_traditional_boxes(expr.arguments[1]))
+        if head_name == "Subscript" and len(expr.arguments) == 2:
+            return call("SubscriptBox", _make_traditional_boxes(expr.arguments[0]), _make_traditional_boxes(expr.arguments[1]))
+        if head_name == "Subsuperscript" and len(expr.arguments) == 3:
+            return call(
+                "SubsuperscriptBox",
+                _make_traditional_boxes(expr.arguments[0]),
+                _make_traditional_boxes(expr.arguments[1]),
+                _make_traditional_boxes(expr.arguments[2]),
+            )
+
+    return _generic_traditional_call_boxes(expr)
+
+
 def _rule_option(name: str, value: Expr) -> Expr:
     return call("Rule", symbol(name), value)
 
@@ -4765,6 +5301,35 @@ def _standard_form_display_boxes(expr: Expr) -> Expr:
     )
 
 
+def _traditional_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "TagBox",
+        call("FormBox", _make_traditional_boxes(expr), symbol("TraditionalForm")),
+        symbol("TraditionalForm"),
+        _rule_option("Editable", symbol("True")),
+    )
+
+
+def _tex_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "InterpretationBox",
+        string(wl_string(_tex_form_text(expr))),
+        expr,
+        _rule_option("Editable", symbol("True")),
+        _rule_option("AutoDelete", symbol("True")),
+    )
+
+
+def _mathml_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "InterpretationBox",
+        string(wl_string(_mathml_form_text(expr).rstrip("\n"))),
+        expr,
+        _rule_option("Editable", symbol("True")),
+        _rule_option("AutoDelete", symbol("True")),
+    )
+
+
 def _make_full_form_boxes(expr: Expr) -> Expr:
     if isinstance(expr, RationalNumber):
         return _make_full_form_boxes(
@@ -4804,6 +5369,14 @@ def _bracketed_row_box(open_token: str, arguments: Sequence[Expr], close_token: 
     return _row_box(string(open_token), middle, string(close_token))
 
 
+def _bracketed_traditional_row_box(open_token: str, arguments: Sequence[Expr], close_token: str) -> Expr:
+    if arguments:
+        middle = _separated_traditional_row_box(arguments, ",")
+    else:
+        middle = string("")
+    return _row_box(string(open_token), middle, string(close_token))
+
+
 def _generic_call_boxes(expr: Call) -> Expr:
     if expr.arguments:
         arguments = _separated_row_box(expr.arguments, ",")
@@ -4812,8 +5385,20 @@ def _generic_call_boxes(expr: Call) -> Expr:
     return _row_box(_make_standard_boxes(expr.head_expr), string("["), arguments, string("]"))
 
 
+def _generic_traditional_call_boxes(expr: Call) -> Expr:
+    if expr.arguments:
+        arguments = _separated_traditional_row_box(expr.arguments, ",")
+    else:
+        arguments = string("")
+    return _row_box(_make_traditional_boxes(expr.head_expr), string("["), arguments, string("]"))
+
+
 def _infix_row_box(left: Expr, operator: str, right: Expr) -> Expr:
     return _row_box(_make_standard_boxes(left), string(operator), _make_standard_boxes(right))
+
+
+def _infix_traditional_row_box(left: Expr, operator: str, right: Expr) -> Expr:
+    return _row_box(_make_traditional_boxes(left), string(operator), _make_traditional_boxes(right))
 
 
 def _separated_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
@@ -4822,6 +5407,15 @@ def _separated_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
         if index:
             pieces.append(string(separator))
         pieces.append(_make_standard_boxes(argument))
+    return _row_box(*pieces)
+
+
+def _separated_traditional_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
+    pieces: list[Expr] = []
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(string(separator))
+        pieces.append(_make_traditional_boxes(argument))
     return _row_box(*pieces)
 
 
@@ -4889,7 +5483,7 @@ def _syntax_q(input_expr: Expr, form_value: Expr | None) -> bool:
             return False
         form_name = _normalize_textual_expression_form(form_value, "SyntaxQ")
         try:
-            parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+            _parse_textual_expression(input_expr.value, form_name)
             return True
         except WolframSyntaxError:
             return False
@@ -4906,7 +5500,7 @@ def _syntax_length_text(text: str, form_name: str) -> int:
     if not text:
         return 0
     try:
-        parse_input_form(text) if form_name == "InputForm" else parse_standard_form(text)
+        _parse_textual_expression(text, form_name)
         return len(text)
     except WolframSyntaxError as exc:
         message = str(exc)

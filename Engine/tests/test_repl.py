@@ -29,8 +29,11 @@ class ReplTests(unittest.TestCase):
         stdin = io.StringIO(
             "InputForm[1 + x]\n"
             "FullForm[1 + x]\n"
+            "TeXForm[1 + x]\n"
+            "TraditionalForm[1 + x]\n"
             "Print[InputForm[1 + x]]\n"
             "Print[FullForm[1 + x]]\n"
+            "Print[TeXForm[1 + x]]\n"
             "Quit\n"
         )
         stdout = io.StringIO()
@@ -42,8 +45,11 @@ class ReplTests(unittest.TestCase):
         transcript = stdout.getvalue()
         self.assertIn("Out[1]//InputForm= 1 + x", transcript)
         self.assertIn("Out[2]//FullForm= Plus[1, x]", transcript)
-        self.assertIn("In[3]:= 1 + x", transcript)
-        self.assertIn("In[4]:= Plus[1, x]", transcript)
+        self.assertIn("Out[3]//TeXForm= x+1", transcript)
+        self.assertIn("Out[4]//TraditionalForm= \\!\\(\\*FormBox", transcript)
+        self.assertIn("In[5]:= 1 + x", transcript)
+        self.assertIn("In[6]:= Plus[1, x]", transcript)
+        self.assertIn("In[7]:= x+1", transcript)
         self.assertEqual(stderr.getvalue(), "")
 
     def test_run_repl_shortens_large_output_with_output_size_limit(self) -> None:
