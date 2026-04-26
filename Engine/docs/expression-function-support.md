@@ -4,7 +4,7 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-26T03:46:41Z
+- Updated (UTC): 2026-04-26T04:06:50Z
 - Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 - Related docs:
   - [Expression Parser](./expression-parser.md)
@@ -192,6 +192,14 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   active `TimeConstrained` scopes can interrupt it; `AbsoluteTiming` measures wall-clock elapsed
   seconds; `TimeRemaining[]` reports the earliest active Tungsten time constraint, or `Infinity`
   when no such constraint exists.
+- Failure and confirmation control is implemented for practical offline validation workflows:
+  `FailureQ`, `MissingQ`, `Enclose`, `Confirm`, `ConfirmBy`, `ConfirmMatch`, `ConfirmAssert`,
+  `Failsafe`, `Assert`, and `WithCleanup` cooperate with Tungsten's existing messages and
+  non-local evaluator signals. Untagged `Confirm*` handling is dynamic in Tungsten; the Wolfram
+  kernel's source-level lexical rewrite for untagged confirmations is intentionally out of scope
+  for this offline AST evaluator.
+- `Assert` is disabled by default and is enabled or disabled through `On[Assert]` and
+  `Off[Assert]`. Tungsten does not synthesize source-file or source-line assertion tags.
 - Evaluation precondition failures are non-fatal when they occur through `evaluate(...)`. Tungsten
   emits a `Head::error` message using the head of the expression that failed, leaves that
   expression unevaluated, and lets enclosing expressions continue structurally. Direct helper APIs
@@ -257,6 +265,16 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `AbsoluteTiming` | `AbsoluteTiming[expr]` | Evaluates `expr` and returns `{seconds, result}` using Python wall-clock timing. | [AbsoluteTiming](https://reference.wolfram.com/language/ref/AbsoluteTiming.html) |
 | `TimeConstrained` | `TimeConstrained[expr, t]`, `TimeConstrained[expr, t, fail]` | Evaluates `expr` under a Tungsten deadline. Expiration returns `fail` if supplied, otherwise `$Aborted`; `Infinity` imposes no deadline. The current implementation checks deadlines at evaluator boundaries and during `Pause`, not by asynchronously interrupting arbitrary Python code. | [TimeConstrained](https://reference.wolfram.com/language/ref/TimeConstrained.html) |
 | `TimeRemaining` | `TimeRemaining[]` | Returns the number of seconds remaining in the earliest enclosing Tungsten `TimeConstrained` scope, or `Infinity` outside a constraint. | [TimeRemaining](https://reference.wolfram.com/language/ref/TimeRemaining.html) |
+| `FailureQ` | `FailureQ[expr]` | Returns `True` for `Failure[...]`, `$Failed`, `$Canceled`, and `$Aborted`; returns `False` for `Missing[...]`. | [FailureQ](https://reference.wolfram.com/language/ref/FailureQ.html) |
+| `MissingQ` | `MissingQ[expr]` | Returns `True` when `expr` has head `Missing`; otherwise returns `False`. | [MissingQ](https://reference.wolfram.com/language/ref/MissingQ.html) |
+| `Enclose` | `Enclose[expr]`, `Enclose[expr, handler]`, `Enclose[expr, "prop"]`, `Enclose[expr, handler, form]` | Evaluates `expr` and catches matching Tungsten confirmation failures. The default handler returns the `Failure[...]`; string handlers return a failure property; callable handlers receive the failure. The three-argument form catches explicitly tagged confirmations whose tag matches `form`. | [Enclose](https://reference.wolfram.com/language/ref/Enclose.html) |
+| `Confirm` | `Confirm[expr]`, `Confirm[expr, info]`, `Confirm[expr, info, tag]` | Returns `expr` unless it is considered a failure (`Failure`, `Missing`, `$Failed`, `$Canceled`, `$Aborted`). On failure, lazily evaluates `info`, builds a `Failure[ConfirmationFailed, ...]`, and transfers to a matching `Enclose` or emits `Confirm::confirmnotag`. | [Confirm](https://reference.wolfram.com/language/ref/Confirm.html) |
+| `ConfirmBy` | `ConfirmBy[expr, f]`, `ConfirmBy[expr, f, info]`, `ConfirmBy[expr, f, info, tag]` | Returns `expr` if `f[expr]` evaluates to `True`; otherwise throws a confirmation failure with `"Expression"`, `"Information"`, and `"Function"` properties. | [ConfirmBy](https://reference.wolfram.com/language/ref/ConfirmBy.html) |
+| `ConfirmMatch` | `ConfirmMatch[expr, patt]`, `ConfirmMatch[expr, patt, info]`, `ConfirmMatch[expr, patt, info, tag]` | Returns `expr` if it matches Tungsten's supported pattern subset; otherwise throws a confirmation failure with a `"Pattern"` property. | [ConfirmMatch](https://reference.wolfram.com/language/ref/ConfirmMatch.html) |
+| `ConfirmAssert` | `ConfirmAssert[test]`, `ConfirmAssert[test, info]`, `ConfirmAssert[test, info, tag]` | Evaluates `test`; returns `Null` only when it is explicit `True`; otherwise throws a confirmation failure with `"Test"` and `"Information"` properties. | [ConfirmAssert](https://reference.wolfram.com/language/ref/ConfirmAssert.html) |
+| `Assert` | `Assert[test]`, `Assert[test, tag]`, plus `On[Assert]` and `Off[Assert]` | Assertions are disabled by default and remain held when disabled. When enabled, `Assert` evaluates `test`, returns `Null` on `True`, and emits `Assert::asrtfl` plus `Null` otherwise. Source-line tagging and `$AssertFunction` evaluation are not implemented. | [Assert](https://reference.wolfram.com/language/ref/Assert.html) |
+| `Failsafe` | `Failsafe[f][args...]`, `Failsafe[f, test][args...]`, `Failsafe[f, test, failf][args...]` | Builds a callable guard. The one-argument form returns the first failing argument (`Failure`, `Missing`, `$Failed`, `$Canceled`, `$Aborted`) or applies `f`; the test forms apply `test` to all arguments and either apply `f`, return `Failure[FailsafeFailed, ...]`, or apply `failf`. | [Failsafe](https://reference.wolfram.com/language/ref/Failsafe.html) |
+| `WithCleanup` | `WithCleanup[expr, cleanup]`, `WithCleanup[init, expr, cleanup]` | Ensures `cleanup` is evaluated when `expr` or `init` exits normally or through Tungsten control-flow signals such as aborts, throws, confirmation failures, exits, and time constraints. Init and cleanup run under abort protection and time-constraint suppression. | [WithCleanup](https://reference.wolfram.com/language/ref/WithCleanup.html) |
 | `$MessageList` | `$MessageList` | Returns the current input's generated message names wrapped in `HoldForm`. Quieted messages remain visible to `$MessageList` during the same evaluation; messages disabled by `Off` are not generated. | [$MessageList](https://reference.wolfram.com/language/ref/%24MessageList.html) |
 | `MessageList` | `MessageList[n]` in a REPL/evaluation session | Returns the visible message names recorded for an earlier input line, wrapped in `HoldForm`. Quieted messages are not stored in `MessageList[n]`. | [MessageList](https://reference.wolfram.com/language/ref/MessageList.html) |
 | `Message` | `Message[sym::tag]`, `Message[sym::tag, e1, ...]` | Generates a non-fatal message unless disabled by `Off` or suppressed by `Quiet`. Tungsten records the message name and a practical diagnostic text; it does not resolve localized Wolfram message templates. | [Message](https://reference.wolfram.com/language/ref/Message.html) |

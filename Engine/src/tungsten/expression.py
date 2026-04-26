@@ -57,6 +57,24 @@ class _TungstenTimeConstraintSignal(Exception):
     """Internal signal raised when the innermost active time constraint expires."""
 
 
+class _TungstenConfirmSignal(Exception):
+    """Internal signal raised by Confirm-family functions for Enclose to catch."""
+
+    def __init__(self, failure: Expr, tag: Expr | None = None) -> None:
+        super().__init__(failure, tag)
+        self.failure = failure
+        self.tag = tag
+
+
+_CONTROL_SIGNAL_TYPES = (
+    TungstenExitRequested,
+    TungstenAbortRequested,
+    _TungstenThrowSignal,
+    _TungstenTimeConstraintSignal,
+    _TungstenConfirmSignal,
+)
+
+
 class Expr:
     def head(self) -> Expr:
         raise NotImplementedError
@@ -195,8 +213,11 @@ class ByteArrayExpr(Expr):
 
 _SYSTEM_SYMBOL_NAMES = {
     "$Aborted",
+    "$AssertFunction",
+    "$Canceled",
     "$Context",
     "$ContextPath",
+    "$Failed",
     "$Line",
     "$MessageList",
     "Abs",
@@ -213,6 +234,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "AssociationMap",
     "AssociationQ",
     "AssociationThread",
+    "Assert",
     "Attributes",
     "BaseDecode",
     "BaseEncode",
@@ -242,6 +264,11 @@ _SYSTEM_SYMBOL_NAMES = {
     "ComplexInfinity",
     "ComposeList",
     "Composition",
+    "Confirm",
+    "ConfirmAssert",
+    "ConfirmBy",
+    "ConfirmMatch",
+    "ConfirmationFailed",
     "Condition",
     "Congruent",
     "Constant",
@@ -255,6 +282,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "DeleteCases",
     "DeleteDuplicates",
     "DeleteDuplicatesBy",
+    "Derivative",
     "Depth",
     "DiagonalMatrix",
     "Diamond",
@@ -287,7 +315,11 @@ _SYSTEM_SYMBOL_NAMES = {
     "ExportString",
     "Extract",
     "Exit",
+    "Failsafe",
+    "FailsafeFailed",
     "False",
+    "Failure",
+    "FailureQ",
     "First",
     "FirstCase",
     "FixedPoint",
@@ -375,6 +407,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "MessageName",
     "Min",
     "Missing",
+    "MissingQ",
     "MinusPlus",
     "Mod",
     "Most",
@@ -566,6 +599,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Whitespace",
     "WhitespaceCharacter",
     "Which",
+    "WithCleanup",
     "WordBoundary",
     "WordCharacter",
 }
@@ -872,6 +906,11 @@ class _ReapScope:
     buckets: list[dict[Expr, list[Expr]]]
 
 
+@dataclass(frozen=True)
+class _EncloseScope:
+    form: Expr | None
+
+
 @dataclass
 class EvaluationSession:
     """Process-local evaluator state for Wolfram-console-style history."""
@@ -887,6 +926,7 @@ class EvaluationSession:
     print_history: dict[int, tuple[str, ...]] | None = None
     current_prints: list[str] | None = None
     disabled_messages: set[str] | None = None
+    assert_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.inputs is None:
@@ -977,10 +1017,19 @@ _ACTIVE_REAP_SCOPES: ContextVar[tuple[_ReapScope, ...]] = ContextVar(
     "tungsten_active_reap_scopes",
     default=(),
 )
+_ACTIVE_ENCLOSE_SCOPES: ContextVar[tuple[_EncloseScope, ...]] = ContextVar(
+    "tungsten_active_enclose_scopes",
+    default=(),
+)
+_TIME_CONSTRAINT_SUPPRESSION_DEPTH: ContextVar[int] = ContextVar(
+    "tungsten_time_constraint_suppression_depth",
+    default=0,
+)
 _GLOBAL_MESSAGES: list[EvaluationMessage] = []
 _GLOBAL_VISIBLE_MESSAGES: list[EvaluationMessage] = []
 _GLOBAL_PRINTS: list[str] = []
 _GLOBAL_DISABLED_MESSAGES: set[str] = set()
+_GLOBAL_ASSERT_ENABLED = False
 
 
 def _active_evaluation_session() -> EvaluationSession | None:
@@ -1010,6 +1059,22 @@ def _current_prints() -> list[str]:
         assert session.current_prints is not None
         return session.current_prints
     return _GLOBAL_PRINTS
+
+
+def _assert_enabled() -> bool:
+    session = _active_evaluation_session()
+    if session is not None:
+        return session.assert_enabled
+    return _GLOBAL_ASSERT_ENABLED
+
+
+def _set_assert_enabled(enabled: bool) -> None:
+    global _GLOBAL_ASSERT_ENABLED
+    session = _active_evaluation_session()
+    if session is not None:
+        session.assert_enabled = enabled
+        return
+    _GLOBAL_ASSERT_ENABLED = enabled
 
 
 def _message_list_expr(messages: Sequence[EvaluationMessage]) -> Call:
@@ -1169,6 +1234,17 @@ def _set_message_enabled(spec: Expr, enabled: bool) -> None:
     raise WolframEvaluationError("On and Off expect message names, symbols, or lists of message names.")
 
 
+def _set_on_off_enabled(spec: Expr, *, enabled: bool) -> None:
+    if isinstance(spec, Call) and spec.has_head("List"):
+        for item in spec.arguments:
+            _set_on_off_enabled(item, enabled=enabled)
+        return
+    if isinstance(spec, Symbol) and _system_dispatch_name(spec) == "Assert":
+        _set_assert_enabled(enabled)
+        return
+    _set_message_enabled(spec, enabled)
+
+
 def _current_abort_protect_depth() -> int:
     return len(_ACTIVE_ABORT_PROTECT_SCOPES.get())
 
@@ -1189,6 +1265,8 @@ def _defer_abort_to_current_protect() -> bool:
 
 
 def _time_constraint_remaining_seconds() -> float | None:
+    if _TIME_CONSTRAINT_SUPPRESSION_DEPTH.get() > 0:
+        return None
     deadlines = [scope.deadline for scope in _ACTIVE_TIME_CONSTRAINTS.get() if scope.deadline is not None]
     if not deadlines:
         return None
@@ -1233,6 +1311,15 @@ def _push_time_constraint(seconds: float) -> object:
 
 def _all_pattern_expr() -> Expr:
     return call("Blank")
+
+
+def _abort_protected_time_suppressed(expr: Expr) -> Expr:
+    depth = _TIME_CONSTRAINT_SUPPRESSION_DEPTH.get()
+    token = _TIME_CONSTRAINT_SUPPRESSION_DEPTH.set(depth + 1)
+    try:
+        return abort_protect_expr((expr,))
+    finally:
+        _TIME_CONSTRAINT_SUPPRESSION_DEPTH.reset(token)
 
 
 _SYMBOL_REGISTRY = SymbolRegistry()
@@ -1364,6 +1451,10 @@ def _format_call_input(expr: Call) -> tuple[str, int]:
     if slot_name is not None:
         return slot_name, _PREC_ATOM
 
+    derivative = _format_derivative(expr)
+    if derivative is not None:
+        return derivative, _PREC_POSTFIX_UNARY
+
     if isinstance(expr.head_expr, Symbol):
         head_name = _system_dispatch_name(expr.head_expr)
         arguments = expr.arguments
@@ -1466,9 +1557,24 @@ def _format_call_input(expr: Call) -> tuple[str, int]:
             spec = ", ".join(_format_input(arg) for arg in arguments[1:])
             return f"{target}[[{spec}]]", _PREC_PART
 
-    head = _format_input(expr.head_expr, _PREC_CALL)
+    if isinstance(expr.head_expr, Call) and _format_derivative(expr.head_expr) is not None:
+        head = _format_input(expr.head_expr)
+    else:
+        head = _format_input(expr.head_expr, _PREC_CALL)
     args = ", ".join(_format_input(arg) for arg in expr.arguments)
     return f"{head}[{args}]", _PREC_CALL
+
+
+def _format_derivative(expr: Call) -> str | None:
+    if len(expr.arguments) != 1:
+        return None
+    if not isinstance(expr.head_expr, Call) or not expr.head_expr.has_head("Derivative"):
+        return None
+    orders = expr.head_expr.arguments
+    if len(orders) != 1 or not isinstance(orders[0], Integer) or orders[0].value <= 0:
+        return None
+    primes = "'" * orders[0].value
+    return f"{_format_input(expr.arguments[0], _PREC_POSTFIX_UNARY)}{primes}"
 
 
 def _format_infix(
@@ -1791,7 +1897,7 @@ def byte_array_expr(values: Iterable[int]) -> ByteArrayExpr:
     return ByteArrayExpr(normalized)
 
 
-_FLAT_HEADS = {"Alternatives"}
+_FLAT_HEADS = {"Alternatives", "CompoundExpression"}
 
 _LEVEL_INFINITY = 1_000_000_000
 _MISSING = object()
@@ -2197,6 +2303,67 @@ def _bool_symbol(value: bool) -> Symbol:
     return symbol("True" if value else "False")
 
 
+def _failure_details_expr(fields: Iterable[tuple[str, Expr]]) -> Call:
+    return _association_expr(_AssociationEntry("Rule", string(name), value) for name, value in fields)
+
+
+def _failure_expr(kind: str | Expr, fields: Iterable[tuple[str, Expr]]) -> Call:
+    kind_expr = symbol(kind) if isinstance(kind, str) else kind
+    return call("Failure", kind_expr, _failure_details_expr(fields))
+
+
+def _is_failure_expr(expr: Expr) -> bool:
+    return isinstance(expr, Call) and expr.has_head("Failure")
+
+
+def _is_missing_expr(expr: Expr) -> bool:
+    return isinstance(expr, Call) and expr.has_head("Missing")
+
+
+def _is_failure_symbol(expr: Expr) -> bool:
+    return isinstance(expr, Symbol) and expr.name in {"$Failed", "$Canceled", "$Aborted"}
+
+
+def _is_failure_q_expr(expr: Expr) -> bool:
+    return _is_failure_expr(expr) or _is_failure_symbol(expr)
+
+
+def _is_confirm_failure_expr(expr: Expr) -> bool:
+    return _is_failure_q_expr(expr) or _is_missing_expr(expr)
+
+
+def _is_failsafe_failure_expr(expr: Expr) -> bool:
+    return _is_confirm_failure_expr(expr)
+
+
+def _failure_entries(expr: Expr) -> tuple[_AssociationEntry, ...]:
+    if not _is_failure_expr(expr) or len(expr.arguments) < 2:
+        return ()
+    details = expr.arguments[1]
+    entries = _association_entries(details)
+    if entries is not None:
+        return entries
+    if isinstance(details, Call) and details.has_head("List"):
+        result: list[_AssociationEntry] = []
+        for item in details.arguments:
+            entry = _rule_entry(item)
+            if entry is not None:
+                result.append(entry)
+        return tuple(result)
+    return ()
+
+
+def failure_property(expr: Expr, key: Expr) -> Expr:
+    if not isinstance(key, String):
+        raise WolframEvaluationError("Failure property lookup expects a string key.")
+    if key.value in {"Type", "FailureType"} and _is_failure_expr(expr) and expr.arguments:
+        return expr.arguments[0]
+    for entry in _failure_entries(expr):
+        if entry.key == key:
+            return entry.value
+    return call("Missing", string("KeyAbsent"), key)
+
+
 def _is_boolean_symbol(expr: Expr) -> bool:
     return isinstance(expr, Symbol) and expr.name in {"True", "False"}
 
@@ -2421,6 +2588,12 @@ def _evaluate_simple_predicates(expr: Call) -> Expr | None:
 
     if expr.has_head("ByteArrayQ"):
         return _bool_symbol(isinstance(argument, ByteArrayExpr))
+
+    if expr.has_head("FailureQ"):
+        return _bool_symbol(_is_failure_q_expr(argument))
+
+    if expr.has_head("MissingQ"):
+        return _bool_symbol(_is_missing_expr(argument))
 
     if expr.has_head("EvenQ"):
         return _bool_symbol(isinstance(argument, Integer) and argument.value % 2 == 0)
@@ -3194,6 +3367,189 @@ def catch_expr(arguments: Sequence[Expr]) -> Expr:
         return _apply_callable(handler, (signal.value, tag))
 
 
+def _enclose_scope_matches(scope: _EncloseScope, tag: Expr | None) -> bool:
+    if scope.form is None:
+        return tag is None
+    if tag is None:
+        return False
+    return _match_pattern(tag, scope.form) is not None
+
+
+def _has_matching_enclose_scope(tag: Expr | None) -> bool:
+    return any(_enclose_scope_matches(scope, tag) for scope in _ACTIVE_ENCLOSE_SCOPES.get())
+
+
+def _confirmation_failure(
+    confirmation_type: str,
+    expression: Expr,
+    info: Expr,
+    extra_fields: Sequence[tuple[str, Expr]] = (),
+) -> Expr:
+    fields: list[tuple[str, Expr]] = [
+        ("ConfirmationType", symbol(confirmation_type)),
+        ("Expression", expression),
+        ("Information", info),
+    ]
+    fields.extend(extra_fields)
+    return _failure_expr("ConfirmationFailed", fields)
+
+
+def _confirm_or_return_failure(failure: Expr, tag: Expr | None) -> Expr:
+    if _has_matching_enclose_scope(tag):
+        raise _TungstenConfirmSignal(failure, tag)
+    emit_message(call("MessageName", symbol("Confirm"), string("confirmnotag")))
+    return failure
+
+
+def _confirm_info(arguments: Sequence[Expr], info_index: int) -> Expr:
+    if len(arguments) > info_index:
+        return evaluate(arguments[info_index])
+    return symbol("Null")
+
+
+def confirm_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("Confirm expects one, two, or three arguments.")
+    value = evaluate(arguments[0])
+    if not _is_confirm_failure_expr(value):
+        return value
+    info = _confirm_info(arguments, 1)
+    tag = evaluate(arguments[2]) if len(arguments) == 3 else None
+    if _is_failure_expr(value) and len(arguments) == 1:
+        failure = value
+    else:
+        failure = _confirmation_failure("Confirm", value, info)
+    return _confirm_or_return_failure(failure, tag)
+
+
+def confirm_by_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {2, 3, 4}:
+        raise WolframEvaluationError("ConfirmBy expects two, three, or four arguments.")
+    value = evaluate(arguments[0])
+    function = evaluate(arguments[1])
+    if _apply_callable(function, (value,)) == symbol("True"):
+        return value
+    info = _confirm_info(arguments, 2)
+    tag = evaluate(arguments[3]) if len(arguments) == 4 else None
+    failure = _confirmation_failure("ConfirmBy", value, info, (("Function", function),))
+    return _confirm_or_return_failure(failure, tag)
+
+
+def confirm_match_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {2, 3, 4}:
+        raise WolframEvaluationError("ConfirmMatch expects two, three, or four arguments.")
+    value = evaluate(arguments[0])
+    pattern = arguments[1]
+    if _match_pattern(value, pattern) is not None:
+        return value
+    info = _confirm_info(arguments, 2)
+    tag = evaluate(arguments[3]) if len(arguments) == 4 else None
+    failure = _confirmation_failure("ConfirmMatch", value, info, (("Pattern", pattern),))
+    return _confirm_or_return_failure(failure, tag)
+
+
+def confirm_assert_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("ConfirmAssert expects one, two, or three arguments.")
+    test = evaluate(arguments[0])
+    if test == symbol("True"):
+        return symbol("Null")
+    info = _confirm_info(arguments, 1)
+    tag = evaluate(arguments[2]) if len(arguments) == 3 else None
+    failure = _confirmation_failure("ConfirmAssert", test, info, (("Test", test),))
+    return _confirm_or_return_failure(failure, tag)
+
+
+def _handle_enclosed_failure(failure: Expr, handler: Expr | None) -> Expr:
+    if handler is None:
+        return failure
+    evaluated_handler = evaluate(handler)
+    if isinstance(evaluated_handler, String):
+        return failure_property(failure, evaluated_handler)
+    return _apply_callable(evaluated_handler, (failure,))
+
+
+def enclose_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("Enclose expects one, two, or three arguments.")
+    handler = arguments[1] if len(arguments) >= 2 else None
+    form = evaluate(arguments[2]) if len(arguments) == 3 else None
+    scope = _EncloseScope(form=form)
+    scopes = _ACTIVE_ENCLOSE_SCOPES.get()
+    token = _ACTIVE_ENCLOSE_SCOPES.set(scopes + (scope,))
+    try:
+        try:
+            return evaluate(arguments[0])
+        except _TungstenConfirmSignal as signal:
+            if not _enclose_scope_matches(scope, signal.tag):
+                raise
+            return _handle_enclosed_failure(signal.failure, handler)
+    finally:
+        _ACTIVE_ENCLOSE_SCOPES.reset(token)
+
+
+def assert_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2}:
+        raise WolframEvaluationError("Assert expects one or two arguments.")
+    if not _assert_enabled():
+        return call("Assert", *arguments)
+    test = evaluate(arguments[0])
+    if test == symbol("True"):
+        return symbol("Null")
+    tag = evaluate(arguments[1]) if len(arguments) == 2 else symbol("Null")
+    emit_message(call("MessageName", symbol("Assert"), string("asrtfl")), insertions=(test, tag))
+    return symbol("Null")
+
+
+def failsafe_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("Failsafe expects one, two, or three arguments.")
+    return call("Failsafe", *(evaluate(argument) for argument in arguments))
+
+
+def failsafe_apply(function: Expr, arguments: Sequence[Expr]) -> Expr:
+    assert isinstance(function, Call)
+    if len(function.arguments) == 1:
+        for argument in arguments:
+            if _is_failsafe_failure_expr(argument):
+                return argument
+        return _apply_callable(function.arguments[0], arguments)
+    if len(function.arguments) in {2, 3}:
+        test_result = _apply_callable(function.arguments[1], arguments)
+        if test_result == symbol("True"):
+            return _apply_callable(function.arguments[0], arguments)
+        if len(function.arguments) == 3:
+            return _apply_callable(function.arguments[2], arguments)
+        return _failure_expr("FailsafeFailed", (("Arguments", call("Hold", *arguments)),))
+    raise WolframEvaluationError("Failsafe expects one, two, or three arguments.")
+
+
+def with_cleanup_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {2, 3}:
+        raise WolframEvaluationError("WithCleanup expects two or three arguments.")
+    cleanup = arguments[-1]
+    pending: BaseException | None = None
+    result: Expr = symbol("Null")
+
+    if len(arguments) == 3:
+        try:
+            _abort_protected_time_suppressed(arguments[0])
+            _check_time_constraints()
+        except _CONTROL_SIGNAL_TYPES as signal:
+            pending = signal
+
+    if pending is None:
+        try:
+            result = evaluate(arguments[-2])
+        except _CONTROL_SIGNAL_TYPES as signal:
+            pending = signal
+
+    _abort_protected_time_suppressed(cleanup)
+    if pending is not None:
+        raise pending
+    return result
+
+
 def check_expr(arguments: Sequence[Expr]) -> Expr:
     if len(arguments) not in {2, 3}:
         raise WolframEvaluationError("Check expects two or three arguments.")
@@ -3242,7 +3598,7 @@ def off_expr(arguments: Sequence[Expr]) -> Expr:
     if not arguments:
         return symbol("Null")
     for argument in arguments:
-        _set_message_enabled(evaluate(argument), enabled=False)
+        _set_on_off_enabled(evaluate(argument), enabled=False)
     return symbol("Null")
 
 
@@ -3250,7 +3606,7 @@ def on_expr(arguments: Sequence[Expr]) -> Expr:
     if not arguments:
         return symbol("Null")
     for argument in arguments:
-        _set_message_enabled(evaluate(argument), enabled=True)
+        _set_on_off_enabled(evaluate(argument), enabled=True)
     return symbol("Null")
 
 
@@ -7761,6 +8117,8 @@ def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
                 "StringPosition[patt] expects exactly one argument when used as an operator."
             )
         return string_position(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("Failsafe") and len(function.arguments) in {1, 2, 3}:
+        return failsafe_apply(function, arguments)
     return evaluate(Call(head_expr=function, arguments=tuple(arguments)))
 
 
@@ -7800,6 +8158,8 @@ def _is_callable_expr(expr: Expr) -> bool:
     if expr.has_head("StringEndsQ") and len(expr.arguments) == 1:
         return True
     if expr.has_head("StringPosition") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("Failsafe") and len(expr.arguments) in {1, 2, 3}:
         return True
     return False
 
@@ -9578,6 +9938,11 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
             if previous_depth > 0:
                 raise
             return _uncaught_throw_result(signal)
+        except _TungstenConfirmSignal as signal:
+            if previous_depth > 0:
+                raise
+            emit_message(call("MessageName", symbol("Confirm"), string("confirmnotag")))
+            return signal.failure
         except TungstenAbortRequested:
             if previous_depth > 0:
                 raise
@@ -9641,6 +10006,27 @@ def _evaluate(expr: Expr) -> Expr:
         if raw_head_name == "Check":
             return check_expr(expr.arguments)
 
+        if raw_head_name == "Enclose":
+            return enclose_expr(expr.arguments)
+
+        if raw_head_name == "Confirm":
+            return confirm_expr(expr.arguments)
+
+        if raw_head_name == "ConfirmBy":
+            return confirm_by_expr(expr.arguments)
+
+        if raw_head_name == "ConfirmMatch":
+            return confirm_match_expr(expr.arguments)
+
+        if raw_head_name == "ConfirmAssert":
+            return confirm_assert_expr(expr.arguments)
+
+        if raw_head_name == "Assert":
+            return assert_expr(expr.arguments)
+
+        if raw_head_name == "WithCleanup":
+            return with_cleanup_expr(expr.arguments)
+
         if raw_head_name == "TimeConstrained":
             return time_constrained_expr(expr.arguments)
 
@@ -9658,6 +10044,9 @@ def _evaluate(expr: Expr) -> Expr:
 
         if raw_head_name == "Sow":
             return sow_expr(expr.arguments)
+
+        if raw_head_name == "Failsafe":
+            return failsafe_expr(expr.arguments)
 
         if raw_head_name == "Quiet":
             return quiet_expr(expr.arguments)
@@ -9884,6 +10273,12 @@ def _evaluate(expr: Expr) -> Expr:
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
         if len(evaluated_arguments) == 1:
             return lookup(evaluated_head, evaluated_arguments[0])
+        return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+
+    if _is_failure_expr(evaluated_head):
+        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        if len(evaluated_arguments) == 1:
+            return failure_property(evaluated_head, evaluated_arguments[0])
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     if not isinstance(evaluated_head, Symbol):
@@ -11464,6 +11859,11 @@ def _tokenize(text: str) -> list[_Token]:
         if text[index].isspace():
             index += 1
             continue
+        if text[index] == "\\":
+            continuation_end = _line_continuation_end(text, index)
+            if continuation_end is not None:
+                index = continuation_end
+                continue
         if text.startswith("(*", index):
             index = skip_wl_comment(text, index)
             continue
@@ -11504,7 +11904,7 @@ def _tokenize(text: str) -> list[_Token]:
             continue
 
         char = text[index]
-        if char in "[]{}(),.;:+-*/^!@<>_|&#=?~":
+        if char in "[]{}(),.;:+-*/^!@<>_|&#=?~'":
             tokens.append(_Token(kind="operator", text=char, start=index, end=index + 1, value=char))
             index += 1
             continue
@@ -11513,6 +11913,20 @@ def _tokenize(text: str) -> list[_Token]:
 
     tokens.append(_Token(kind="eof", text="", start=len(text), end=len(text)))
     return tokens
+
+
+def _line_continuation_end(text: str, start: int) -> int | None:
+    index = start + 1
+    while index < len(text) and text[index] in {" ", "\t"}:
+        index += 1
+    if index < len(text) and text[index] == "\r":
+        index += 1
+        if index < len(text) and text[index] == "\n":
+            index += 1
+        return index
+    if index < len(text) and text[index] == "\n":
+        return index + 1
+    return None
 
 
 class _Parser:
@@ -11555,6 +11969,8 @@ class _Parser:
         self.index = 0
 
     def parse(self) -> Expr:
+        if self._peek().kind == "eof":
+            return symbol("Null")
         expr = self._parse_expression(0, terminators={"eof"})
         self._expect("eof")
         return expr
@@ -11632,6 +12048,15 @@ class _Parser:
                     left = call("Factorial2", left)
                 else:
                     left = call("Factorial", left)
+                continue
+
+            if token.text == "'":
+                if self._POSTFIX_UNARY_BP < min_bp:
+                    break
+                prime_count = 0
+                while self._match("'") is not None:
+                    prime_count += 1
+                left = Call(head_expr=call("Derivative", integer(prime_count)), arguments=(left,))
                 continue
 
             if token.text in {"++", "--"}:
@@ -11794,15 +12219,29 @@ class _Parser:
         return items
 
     def _starts_primary(self, token: _Token) -> bool:
-        return token.kind in {"integer", "real", "string", "symbol", "percent"} or token.text in {"(", "{", "<|"}
+        return token.kind in {"integer", "real", "string", "symbol", "percent"} or token.text in {
+            "(",
+            "{",
+            "<|",
+            "#",
+            "##",
+            "_",
+            "__",
+            "___",
+            "<<",
+        }
 
     def _parse_prefix_blank(self) -> Expr:
-        if self._peek().kind == "symbol":
+        blank_token = self.tokens[self.index - 1]
+        next_token = self._peek()
+        if next_token.kind == "symbol" and blank_token.end == next_token.start:
             return call("Blank", symbol(str(self._consume().value)))
         return call("Blank")
 
     def _parse_prefix_sequence_blank(self, head_name: str) -> Expr:
-        if self._peek().kind == "symbol":
+        blank_token = self.tokens[self.index - 1]
+        next_token = self._peek()
+        if next_token.kind == "symbol" and blank_token.end == next_token.start:
             return call(head_name, symbol(str(self._consume().value)))
         return call(head_name)
 
@@ -11810,6 +12249,9 @@ class _Parser:
         next_token = self._peek()
         if next_token.kind == "integer":
             return call("Slot", integer(int(self._consume().value)))
+        split_slot = self._split_slot_index_before_dot(next_token)
+        if split_slot is not None:
+            return call("Slot", integer(split_slot))
         if next_token.kind == "symbol":
             key = string(str(self._consume().value))
             return Call(head_expr=call("Slot", integer(1)), arguments=(key,))
@@ -11819,7 +12261,23 @@ class _Parser:
         next_token = self._peek()
         if next_token.kind == "integer":
             return call("SlotSequence", integer(int(self._consume().value)))
+        split_slot = self._split_slot_index_before_dot(next_token)
+        if split_slot is not None:
+            return call("SlotSequence", integer(split_slot))
         return call("SlotSequence", integer(1))
+
+    def _split_slot_index_before_dot(self, token: _Token) -> int | None:
+        if token.kind != "real" or not re.fullmatch(r"\d+\.", token.text):
+            return None
+        digits = token.text[:-1]
+        self.tokens[self.index] = _Token(
+            kind="operator",
+            text=".",
+            start=token.end - 1,
+            end=token.end,
+            value=".",
+        )
+        return int(digits)
 
     def _parse_file_name_literal(self, context: str) -> String:
         token = self._peek()
@@ -11856,11 +12314,51 @@ class _Parser:
         return isinstance(expr, Call) and expr.has_head("TagSetPrefix") and len(expr.arguments) == 2
 
     def _is_postfix_optional_dot_context(self, terminators: set[str]) -> bool:
+        dot_token = self.tokens[self.index]
         next_token = self.tokens[self.index + 1]
         return (
             next_token.kind == "eof"
             or next_token.text in terminators
-            or next_token.text in {",", "]", "]]", "}", "|>", ")"}
+            or next_token.text in {
+                ",",
+                "]",
+                "]]",
+                "}",
+                "|>",
+                ")",
+                ";",
+                "+",
+                "-",
+                "*",
+                "/",
+                "**",
+                "^",
+                "&&",
+                "||",
+                "|",
+                "~~",
+                "/;",
+                "->",
+                ":>",
+                "<->",
+                "/.",
+                "//.",
+                "/@",
+                "//@",
+                "@@",
+                "@@@",
+                "==",
+                "!=",
+                "===",
+                "=!=",
+                "<",
+                "<=",
+                ">",
+                ">=",
+                "=",
+                ":=",
+            }
+            or (dot_token.end < next_token.start and self._starts_primary(next_token))
         )
 
     @staticmethod
@@ -11964,6 +12462,15 @@ class _Parser:
                 terminators=terminators | {"eof", ",", "]", "]]", "}", "|>", ")"},
             )
             return call("CompoundExpression", left, right)
+
+        if text == "=" and self.index + 1 < len(self.tokens) and self.tokens[self.index + 1].text == ".":
+            if self._ASSIGNMENT_BP < min_bp:
+                return None
+            self._consume()
+            self._consume()
+            if self._is_tag_set_prefix(left):
+                return call("TagUnset", left.arguments[0], left.arguments[1])
+            return call("Unset", left)
 
         binary_specs: dict[str, tuple[int, int, str | None]] = {
             "^": (self._POWER_BP, self._POWER_BP, "Power"),

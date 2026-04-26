@@ -212,11 +212,13 @@ class ExpressionParserTests(unittest.TestCase):
             "Hold[x *= 2]": "Hold[TimesBy[x, 2]]",
             "Hold[x /= 2]": "Hold[DivideBy[x, 2]]",
             "Hold[x =.]": "Hold[Unset[x]]",
+            "Hold[x = .]": "Hold[Unset[x]]",
             "Hold[lhs ^= rhs]": "Hold[UpSet[lhs, rhs]]",
             "Hold[lhs ^:= rhs]": "Hold[UpSetDelayed[lhs, rhs]]",
             "Hold[f /: lhs = rhs]": "Hold[TagSet[f, lhs, rhs]]",
             "Hold[f /: lhs := rhs]": "Hold[TagSetDelayed[f, lhs, rhs]]",
             "Hold[f /: lhs =.]": "Hold[TagUnset[f, lhs]]",
+            "Hold[f /: lhs = .]": "Hold[TagUnset[f, lhs]]",
         }
         for source, expected in examples.items():
             with self.subTest(source=source):
@@ -234,10 +236,18 @@ class ExpressionParserTests(unittest.TestCase):
             "Hold[--x]": "Hold[PreDecrement[x]]",
             "Hold[x!]": "Hold[Factorial[x]]",
             "Hold[x!!]": "Hold[Factorial2[x]]",
+            "Hold[fn'[x] + fn''[x]]": "Hold[Plus[Derivative[1][fn][x], Derivative[2][fn][x]]]",
+            "Hold[Int[a_.*x_, x_Symbol]]": "Hold[Int[Times[Optional[Pattern[a, Blank[]]], Pattern[x, Blank[]]], Pattern[x, Blank[Symbol]]]]",
+            "Hold[c_. pf_Foo]": "Hold[Times[Optional[Pattern[c, Blank[]]], Pattern[pf, Blank[Foo]]]]",
+            "Hold[x_ n_ /; DataType[n, FCVariable]]": "Hold[Condition[Times[Pattern[x, Blank[]], Pattern[n, Blank[]]], DataType[n, FCVariable]]]",
+            "Hold[x_ n_]": "Hold[Times[Pattern[x, Blank[]], Pattern[n, Blank[]]]]",
             "Hold[a::b]": 'Hold[MessageName[a, "b"]]',
             'Hold[a::"b"]': 'Hold[MessageName[a, "b"]]',
             "Hold[a::b::c]": 'Hold[MessageName[a, "b", "c"]]',
             "Hold[a ** b]": "Hold[NonCommutativeMultiply[a, b]]",
+            "Hold[Abs[#1.#2] >= 0.98 &]": "Hold[Function[GreaterEqual[Abs[Dot[Slot[1], Slot[2]]], 0.98]]]",
+            "Hold[f[#1] #2 &]": "Hold[Function[Times[f[Slot[1]], Slot[2]]]]",
+            "Hold[4 #[[1]] &]": "Hold[Function[Times[4, Part[Slot[1], 1]]]]",
             "Hold[a ~ f ~ b]": "Hold[f[a, b]]",
             "Hold[a~f~b*c]": "Hold[Times[f[a, b], c]]",
             "Hold[a <-> b]": "Hold[TwoWayRule[a, b]]",
@@ -257,6 +267,8 @@ class ExpressionParserTests(unittest.TestCase):
 
         self.assertEqual(parse_input_form("Hold[a::b::c]").to_input_form(), "Hold[a::b::c]")
         self.assertEqual(parse_input_form("Hold[x!!]").to_input_form(), "Hold[x!!]")
+        self.assertEqual(parse_input_form("Hold[fn''[x]]").to_input_form(), "Hold[fn''[x]]")
+        self.assertEqual(parse_input_form("Hold[#1.#2 &]").to_input_form(), "Hold[# . #2 &]")
         self.assertEqual(parse_input_form("Hold[<< foo]").to_input_form(), "Hold[<< foo]")
 
     def test_input_form_uses_operator_forms_without_unnecessary_parentheses(self) -> None:
@@ -286,6 +298,14 @@ class ExpressionParserTests(unittest.TestCase):
     def test_parser_skips_comments_inside_expression(self) -> None:
         expr = parse_input_form('f["alpha", (* ignored *) beta]')
         self.assertEqual(expr.to_full_form(), 'f["alpha", beta]')
+
+        self.assertEqual(parse_input_form("(* comment-only file *)").to_full_form(), "Null")
+
+        quote_in_comment = parse_input_form('Hold[a (* Message[f::\\"tag\\"], *) + b]')
+        self.assertEqual(quote_in_comment.to_full_form(), "Hold[Plus[a, b]]")
+
+        continued = parse_input_form("Hold[a + \\\r\n b]")
+        self.assertEqual(continued.to_full_form(), "Hold[Plus[a, b]]")
 
     def test_parser_preserves_inline_box_escapes_inside_strings(self) -> None:
         expr = parse_input_form(r'"hello \!\(\*GraphicsBox[{CircleBox[]}]\)"')
@@ -703,6 +723,105 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(timing.head().to_full_form(), "List")
         self.assertIsInstance(timing.arguments[0], Real)
         self.assertEqual(timing.arguments[1].to_full_form(), "3")
+
+    def test_failure_missing_confirm_enclose_assert_and_failsafe(self) -> None:
+        self.assertEqual(evaluate(parse_input_form('FailureQ[Failure["x", <||>]]')).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("FailureQ[$Failed]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("FailureQ[$Canceled]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("FailureQ[$Aborted]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form('FailureQ[Missing["x"]]')).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form('MissingQ[Missing["x"]]')).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("MissingQ[$Failed]")).to_full_form(), "False")
+
+        self.assertEqual(evaluate(parse_input_form("Enclose[1 + Confirm[2]]")).to_full_form(), "3")
+        self.assertEqual(
+            evaluate(parse_input_form('Enclose[Confirm[Missing["Nope"], "info"], "Expression"]')).to_full_form(),
+            'Missing["Nope"]',
+        )
+        self.assertEqual(
+            evaluate(parse_input_form('Enclose[Confirm[Missing["Nope"], "info"], "Information"]')).to_full_form(),
+            '"info"',
+        )
+        self.assertEqual(evaluate(parse_input_form("Enclose[ConfirmBy[3, IntegerQ]]")).to_full_form(), "3")
+        self.assertEqual(
+            evaluate(parse_input_form('Enclose[ConfirmBy[3, StringQ, "info"], "Function"]')).to_full_form(),
+            "StringQ",
+        )
+        self.assertEqual(evaluate(parse_input_form("Enclose[ConfirmMatch[3, _Integer]]")).to_full_form(), "3")
+        self.assertEqual(
+            evaluate(parse_input_form('Enclose[ConfirmMatch[3, _String, "info"], "Pattern"]')).to_full_form(),
+            "Blank[String]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Enclose[ConfirmAssert[True]]")).to_full_form(), "Null")
+        self.assertEqual(
+            evaluate(parse_input_form('Enclose[ConfirmAssert[1 + 1 == 3, "bad"], "Information"]')).to_full_form(),
+            '"bad"',
+        )
+        self.assertEqual(
+            evaluate(parse_input_form('Enclose[Confirm[$Failed, "info", tag], "Information", tag]')).to_full_form(),
+            '"info"',
+        )
+
+        self.assertEqual(evaluate(parse_input_form("Failsafe[f][1, 2]")).to_full_form(), "f[1, 2]")
+        self.assertEqual(
+            evaluate(parse_input_form('Failsafe[f][1, Missing["x"], Failure["bad", <||>]]')).to_full_form(),
+            'Missing["x"]',
+        )
+        self.assertEqual(evaluate(parse_input_form("Failsafe[f, SameQ][1, 1]")).to_full_form(), "f[1, 1]")
+        self.assertEqual(
+            evaluate(parse_input_form('Failsafe[f, SameQ][1, 2]["Type"]')).to_full_form(),
+            "FailsafeFailed",
+        )
+        self.assertEqual(evaluate(parse_input_form("Failsafe[f, SameQ, g][1, 2]")).to_full_form(), "g[1, 2]")
+
+    def test_assert_on_off_and_with_cleanup_control_flow(self) -> None:
+        session = EvaluationSession()
+
+        def submit(code: str) -> str:
+            parsed = parse_input_form(code)
+            session.begin_input(code, parsed)
+            result = evaluate(parsed, session=session)
+            session.finish_output(result)
+            return result.to_full_form()
+
+        self.assertEqual(submit('Assert[Print["x"]; False]'), 'Assert[CompoundExpression[Print["x"], False]]')
+        assert session.print_history is not None
+        self.assertEqual(session.print_history[1], ())
+        self.assertEqual(submit("On[Assert]"), "Null")
+        self.assertEqual(submit("Assert[True]"), "Null")
+        self.assertEqual(submit("Check[Assert[False, tag], msg]"), "msg")
+        assert session.message_history is not None
+        self.assertEqual([message.name.to_input_form() for message in session.message_history[4]], ["Assert::asrtfl"])
+        self.assertEqual(submit("Off[Assert]"), "Null")
+        self.assertEqual(submit('Assert[Print["x"]; False]'), 'Assert[CompoundExpression[Print["x"], False]]')
+        self.assertEqual(session.print_history[6], ())
+
+        self.assertEqual(submit('WithCleanup[1 + 2, Print["cleanup"]]'), "3")
+        self.assertEqual(session.print_history[7], ("cleanup",))
+        self.assertEqual(
+            submit('CheckAbort[WithCleanup[Print["expr1"]; Abort[]; Print["expr2"], Print["cleanup"]], caught]'),
+            "caught",
+        )
+        self.assertEqual(session.print_history[8], ("expr1", "cleanup"))
+        self.assertEqual(
+            submit(
+                'CheckAbort[WithCleanup[Print["init1"]; Abort[]; Print["init2"], Print["expr"], Print["cleanup"]], caught]'
+            ),
+            "caught",
+        )
+        self.assertEqual(session.print_history[9], ("init1", "init2", "cleanup"))
+        self.assertEqual(submit('Catch[WithCleanup[Throw[x], Print["cleanup"]]]'), "x")
+        self.assertEqual(session.print_history[10], ("cleanup",))
+        self.assertEqual(
+            submit('Enclose[WithCleanup[Confirm[$Failed, "bad"], Print["cleanup"]], "Information"]'),
+            '"bad"',
+        )
+        self.assertEqual(session.print_history[11], ("cleanup",))
+        self.assertEqual(
+            submit('TimeConstrained[WithCleanup[Pause[0.02]; 7, Print["cleanup"]], 0.001, timeout]'),
+            "timeout",
+        )
+        self.assertEqual(session.print_history[12], ("cleanup",))
 
     def test_messages_check_quiet_off_on_print_and_message_history(self) -> None:
         session = EvaluationSession()
@@ -1616,7 +1735,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(name_q_wildcard.to_full_form(), "True")
         self.assertEqual(name_q_false.to_full_form(), "False")
         self.assertEqual(visible_builtin.to_full_form(), "True")
-        self.assertEqual(system_symbol_count.to_full_form(), "7800")
+        self.assertEqual(system_symbol_count.to_full_form(), "7802")
         self.assertEqual(unimplemented_system_symbol.to_full_form(), "True")
         self.assertEqual(
             plus_attributes.to_full_form(),

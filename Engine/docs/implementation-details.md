@@ -4,7 +4,7 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T03:46:41Z
+- Updated (UTC): 2026-04-26T04:06:50Z
 - Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 
 ## Summary
@@ -564,6 +564,30 @@ same Python process. `TimeConstrained` is intentionally practical rather than pr
 deadlines at Tungsten evaluator boundaries and during `Pause`, then evaluates the fallback outside
 the expired constraint scope. This mirrors the user-visible Wolfram shape for supported Tungsten
 workloads while avoiding unsafe host-language asynchronous interruption.
+
+## Why confirmations and cleanup are signals, not rewrites
+
+The `Confirm*` family looks superficially like predicates returning either a value or a failure,
+but its useful behavior is non-local: a failing confirmation must stop the current evaluation and
+transfer to the nearest matching `Enclose`, while `WithCleanup` must still run cleanup before that
+transfer leaves the protected region. Tungsten models this with `_TungstenConfirmSignal`, parallel
+to the existing throw/abort/time signals.
+
+Generated confirmation failures are ordinary `Failure[ConfirmationFailed, Association[...]]`
+expressions. Tungsten currently records the properties needed by the implemented APIs, such as
+`"Expression"`, `"Information"`, `"Function"`, `"Pattern"`, and `"Test"`, and supports
+`failure["prop"]` lookup plus `Enclose[expr, "prop"]`. This is deliberately structural rather than
+a clone of the FrontEnd's pretty failure summary boxes.
+
+One important divergence is lexical scoping. The Wolfram kernel rewrites untagged `Confirm*`
+occurrences lexically inside `Enclose`. Tungsten does not have source-level definition rewriting,
+so untagged confirmations are handled dynamically by the active evaluator scope. Explicitly tagged
+confirmations still require a matching `Enclose[..., handler, form]` scope.
+
+`WithCleanup` catches Tungsten's evaluator control signals, runs cleanup, and then re-raises the
+original signal. Init and cleanup are evaluated under abort protection and with time-constraint
+checks suppressed, matching the practical guarantee that cleanup should complete even when the
+body is aborted or externally time-constrained.
 
 ## Why messages are non-fatal evaluator events
 

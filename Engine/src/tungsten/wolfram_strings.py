@@ -230,8 +230,5 @@ def skip_wl_comment(text: str, index: int) -> int:
             depth -= 1
             index += 2
             continue
-        if char == "\"":
-            index = skip_wl_string(text, index)
-            continue
         index += 1
     return index

@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-26T03:46:41Z
-Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
+Updated (UTC): 2026-04-26T04:49:30Z
+Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
 
 ## Summary
 
@@ -21,7 +21,9 @@ Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
   `ReplaceRepeated`, non-local control and message heads such as `Abort`, `Throw`, `Catch`,
   `CheckAbort`, `AbortProtect`, `Check`, `Quiet`, `Message`, `Off`, `On`, and `Print`,
   collection and timing heads such as `Sow`, `Reap`, `Pause`, `AbsoluteTiming`,
-  `TimeConstrained`, and `TimeRemaining`, `Function`,
+  `TimeConstrained`, and `TimeRemaining`, failure and cleanup heads such as `FailureQ`,
+  `MissingQ`, `Enclose`, `Confirm`, `ConfirmBy`, `ConfirmMatch`, `ConfirmAssert`, `Assert`,
+  `Failsafe`, and `WithCleanup`, `Function`,
   functional combinators such as `Composition`, `Nest`,
   `FixedPoint`, `Fold`, `MapApply`, `MapAll`, `MapIndexed`, `Through`, `Thread`, `Outer`,
   `Inner`, `Dot`, array and matrix builders such as `Array`, `Range`, `UnitVector`,
@@ -93,12 +95,15 @@ The parser currently handles:
 - structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, `.`, `**`, `<->`,
   string concatenation `<>`, string-pattern concatenation `~~`, and repetition suffixes `..` /
   `...`;
+- postfix derivative primes such as `f'`, `f''`, and `f'[x]`, lowered to
+  `Derivative[1][f]`, `Derivative[2][f]`, and `Derivative[1][f][x]`;
 - rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
   `x_ :> rhs /; test`;
 - assignment and update surface syntax, lowered inertly to the corresponding heads:
   `=`, `:=`, `=.`, `^=`, `^:=`, `+=`, `-=`, `*=`, `/=`, `/: ... =`, `/: ... :=`, and
   `/: ... =.` become `Set`, `SetDelayed`, `Unset`, `UpSet`, `UpSetDelayed`, `AddTo`,
-  `SubtractFrom`, `TimesBy`, `DivideBy`, `TagSet`, `TagSetDelayed`, and `TagUnset`;
+  `SubtractFrom`, `TimesBy`, `DivideBy`, `TagSet`, `TagSetDelayed`, and `TagUnset`.
+  Spaced Wolfram unset syntax such as `lhs = .` and `tag /: lhs = .` is also recognized;
 - other high-precedence syntactic operators, including `x++`, `++x`, `x--`, `--x`, `x!`,
   `x!!`, `a::tag`, `a ~ f ~ b`, `<< file`, `expr >> file`, `expr >>> file`, `?name`, and
   `??name`, lowered to `Increment`, `PreIncrement`, `Decrement`, `PreDecrement`, `Factorial`,
@@ -121,7 +126,12 @@ The parser currently handles:
 - span syntax `a ;; b ;; c`;
 - compound expressions with binary and trailing semicolons, including `expr;` lowering to
   `CompoundExpression[expr, Null]`;
-- nested Wolfram comments `(* ... *)`;
+- nested Wolfram comments `(* ... *)`. Quote characters inside comments are treated as comment
+  text rather than as string delimiters, matching the practical behavior needed for exported
+  package comments such as `\"tag\"`;
+- backslash-newline line continuations;
+- empty or comment-only input, which parses as `Null` to match the useful whole-file parser-corpus
+  behavior of `ToExpression[..., InputForm, HoldComplete]`;
 - common semantic notebook boxes when they appear as textual box expressions:
   `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`, `SubscriptBox`,
   `SubsuperscriptBox`, `OverscriptBox`, `UnderscriptBox`, and `UnderoverscriptBox`;
@@ -159,6 +169,10 @@ The currently supported pattern subset is intentionally bounded:
   global-default placeholders via `_.`, guarded patterns via `Condition` / `/;`, `Alternatives`,
   `Except`, `HoldPattern`, `Verbatim`, `Repeated`, `RepeatedNull`, `PatternSequence`,
   `OrderlessPatternSequence`, `Longest`, `Shortest`, `OptionsPattern`, and `KeyValuePattern`;
+- typed blank shorthand is adjacency-sensitive: `x_Foo` is `Pattern[x, Blank[Foo]]`, while
+  `x_ Foo_` is implicit multiplication between two patterns. Optional blank shorthand also
+  supports common package-source idioms such as `a_.*x_` and whitespace-implied multiplication
+  such as `c_. pf_Foo`;
 - sequence patterns support named bindings and multiple occurrences in the same argument list for
   ordinary non-`Flat`, non-`Orderless` heads. Tungsten follows Wolfram's left-to-right
   shortest-first allocation rule with backtracking, while `Longest` switches the wrapped ambiguous
@@ -501,6 +515,12 @@ Tungsten currently implements a broader structural subset that includes:
 - practical timing control with `Pause`, `AbsoluteTiming`, `TimeConstrained`, and `TimeRemaining`;
   deadlines are checked at Tungsten evaluator boundaries and during `Pause`, rather than by
   asynchronously interrupting arbitrary host-language code;
+- failure and confirmation control with `FailureQ`, `MissingQ`, `Enclose`, `Confirm`,
+  `ConfirmBy`, `ConfirmMatch`, `ConfirmAssert`, `Failsafe`, and `Assert`; generated failures are
+  ordinary `Failure[...]` expressions with property lookup support, while matching confirmations
+  use evaluator signals so cleanup and enclosing handlers can observe them;
+- cleanup-preserving evaluation with `WithCleanup`, including cleanup execution after Tungsten
+  abort, throw, confirmation, exit, and time-constraint signals;
 - message-oriented evaluation for `Check`, `Quiet`, `Message`, `$MessageList`, `MessageList`,
   `Off`, `On`, and `Print`; precondition failures emit non-fatal `Head::error` diagnostics and
   leave the failing expression in structural form;
