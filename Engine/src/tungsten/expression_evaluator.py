@@ -166,8 +166,17 @@ def evaluate_once(expr: Expr) -> Expr:
         if raw_head_name == "SetDelayed":
             return set_delayed_expr(expr.arguments)
 
+        if raw_head_name == "TagSet":
+            return tag_set_expr(expr.arguments, delayed=False)
+
+        if raw_head_name == "TagSetDelayed":
+            return tag_set_expr(expr.arguments, delayed=True)
+
         if raw_head_name == "Unset":
             return unset_expr(expr.arguments)
+
+        if raw_head_name == "TagUnset":
+            return tag_unset_expr(expr.arguments)
 
         if raw_head_name == "Clear":
             return clear_expr(expr.arguments)
@@ -422,6 +431,9 @@ def evaluate_once(expr: Expr) -> Expr:
     if not isinstance(evaluated_head, Symbol):
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
         evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+        up_value_result = _apply_up_value_definitions(evaluated_expr)
+        if up_value_result is not None:
+            return up_value_result
         sub_value_result = _apply_sub_value_definitions(evaluated_expr)
         if sub_value_result is not None:
             return sub_value_result
@@ -437,6 +449,11 @@ def evaluate_once(expr: Expr) -> Expr:
     listable_result = _thread_listable_symbol_call(evaluated_head, evaluated_arguments)
     if listable_result is not None:
         return listable_result
+
+    if "HoldAllComplete" not in _attribute_names_for_symbol(evaluated_head):
+        up_value_result = _apply_up_value_definitions(evaluated_expr)
+        if up_value_result is not None:
+            return up_value_result
 
     down_value_result = _apply_down_value_definitions(evaluated_head, evaluated_expr)
     if down_value_result is not None:
@@ -1850,4 +1867,3 @@ def evaluate_once(expr: Expr) -> Expr:
         return chinese_remainder(evaluated_arguments[0], evaluated_arguments[1])
 
     return evaluated_expr
-

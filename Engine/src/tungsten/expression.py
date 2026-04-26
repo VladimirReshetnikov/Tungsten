@@ -5290,10 +5290,10 @@ def _assignment_target_record(
     lhs: Expr,
     function_name: str,
 ) -> tuple[str, SymbolRecord] | None:
-    from .expression_definitions import VALUE_KIND_DOWN, VALUE_KIND_SUB, classify_assignment_lhs
+    from .expression_definitions import VALUE_KIND_DOWN, VALUE_KIND_OWN, VALUE_KIND_SUB, classify_assignment_lhs
 
     kind, target = classify_assignment_lhs(lhs)
-    if kind not in {VALUE_KIND_DOWN, VALUE_KIND_SUB} or target is None:
+    if kind not in {VALUE_KIND_OWN, VALUE_KIND_DOWN, VALUE_KIND_SUB} or target is None:
         raise WolframEvaluationError(
             f"{function_name} does not support this left-hand side in Tungsten yet."
         )
@@ -5302,6 +5302,17 @@ def _assignment_target_record(
         _emit_protected_symbol_message(function_name, record)
         return None
     return kind, record
+
+
+def _same_symbol(a: Expr, b: Expr) -> bool:
+    if not isinstance(a, Symbol) or not isinstance(b, Symbol):
+        return False
+    try:
+        a_name = _SYMBOL_REGISTRY.record_for_symbol(a).full_name
+        b_name = _SYMBOL_REGISTRY.record_for_symbol(b).full_name
+        return a_name == b_name
+    except WolframEvaluationError:
+        return False
 
 
 def _assign_compound_definition(
@@ -5315,7 +5326,14 @@ def _assign_compound_definition(
     if target is None:
         return call(function_name, lhs, rhs) if function_name == "Set" else symbol("Null")
     kind, record = target
-    from .expression_definitions import assign_definition
+    from .expression_definitions import VALUE_KIND_OWN, assign_definition
+
+    if kind == VALUE_KIND_OWN:
+        record.own_value = rhs
+        _refresh_canonical_own_values(record)
+        if record.own_values_definitions:
+            record.own_values_definitions[-1].delayed = delayed
+        return symbol("Null") if delayed else rhs
 
     assign_definition(
         record,
@@ -5325,6 +5343,96 @@ def _assign_compound_definition(
         delayed=delayed,
     )
     return symbol("Null") if delayed else rhs
+
+
+def _tag_reaches_head_chain(tag: Symbol, expr: Expr) -> bool:
+    current = expr
+    while isinstance(current, Call):
+        head = current.head_expr
+        if _same_symbol(head, tag):
+            return True
+        current = head
+    return _same_symbol(current, tag)
+
+
+def _tag_occurs_in_upvalue_position(tag: Symbol, lhs: Expr) -> bool:
+    if isinstance(lhs, Call) and lhs.has_head("Condition") and len(lhs.arguments) == 2:
+        return _tag_occurs_in_upvalue_position(tag, lhs.arguments[0])
+    if isinstance(lhs, Call) and lhs.has_head("HoldPattern") and len(lhs.arguments) == 1:
+        return _tag_occurs_in_upvalue_position(tag, lhs.arguments[0])
+    if not isinstance(lhs, Call):
+        return False
+    return any(
+        _same_symbol(argument, tag)
+        or (isinstance(argument, Call) and _tag_reaches_head_chain(tag, argument))
+        for argument in lhs.arguments
+    )
+
+
+def _emit_tag_position_message(function_name: str, tag: Symbol, lhs: Expr) -> None:
+    emit_message(
+        call("MessageName", symbol(function_name), string("tagpos")),
+        f"Tag {tag.to_input_form()} does not occur in a supported position in {lhs.to_input_form()}.",
+    )
+
+
+def _tag_assignment_target(
+    tag: Symbol,
+    lhs: Expr,
+    function_name: str,
+) -> tuple[str, SymbolRecord] | None:
+    tag_record = _SYMBOL_REGISTRY.record_for_symbol(tag)
+    from .expression_definitions import VALUE_KIND_UP, classify_assignment_lhs
+
+    natural_kind, natural_target = classify_assignment_lhs(lhs)
+    if natural_target is not None:
+        natural_record = _SYMBOL_REGISTRY.record_for_symbol(natural_target)
+        if natural_record.full_name == tag_record.full_name:
+            if not _record_allows_value_mutation(tag_record):
+                _emit_protected_symbol_message(function_name, tag_record)
+                return None
+            return natural_kind, tag_record
+
+    if _tag_occurs_in_upvalue_position(tag, lhs):
+        if not _record_allows_value_mutation(tag_record):
+            _emit_protected_symbol_message(function_name, tag_record)
+            return None
+        return VALUE_KIND_UP, tag_record
+
+    _emit_tag_position_message(function_name, tag, lhs)
+    return None
+
+
+def tag_set_expr(arguments: Sequence[Expr], *, delayed: bool) -> Expr:
+    function_name = "TagSetDelayed" if delayed else "TagSet"
+    if len(arguments) != 3:
+        raise WolframEvaluationError(f"{function_name} expects a tag, left-hand side, and right-hand side.")
+    tag, lhs, rhs = arguments
+    if not isinstance(tag, Symbol):
+        raise WolframEvaluationError(f"{function_name} expects a symbol tag.")
+    rhs_value = rhs if delayed else evaluate(rhs)
+    lhs = _normalize_assignment_lhs(lhs)
+    target = _tag_assignment_target(tag, lhs, function_name)
+    if target is None:
+        return symbol("Null") if delayed else call(function_name, tag, lhs, rhs_value)
+    kind, record = target
+    from .expression_definitions import VALUE_KIND_OWN, assign_definition
+
+    if kind == VALUE_KIND_OWN:
+        record.own_value = rhs_value
+        _refresh_canonical_own_values(record)
+        if record.own_values_definitions:
+            record.own_values_definitions[-1].delayed = delayed
+        return symbol("Null") if delayed else rhs_value
+
+    assign_definition(
+        record,
+        kind=kind,
+        hold_pattern=call("HoldPattern", lhs),
+        rhs=rhs_value,
+        delayed=delayed,
+    )
+    return symbol("Null") if delayed else rhs_value
 
 
 def set_delayed_expr(arguments: Sequence[Expr]) -> Expr:
@@ -5403,9 +5511,9 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
         if target is None:
             return symbol("$Failed")
         kind, record = target
-        from .expression_definitions import remove_definition
+        from .expression_definitions import remove_definitions
 
-        return symbol("Null") if remove_definition(record, kind, call("HoldPattern", lhs)) else symbol("$Failed")
+        return symbol("Null") if remove_definitions(record, kind, call("HoldPattern", lhs)) else symbol("$Failed")
     record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Unset", record)
@@ -5416,6 +5524,33 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
     record.own_value = None
     _refresh_canonical_own_values(record)
     return symbol("Null")
+
+
+def tag_unset_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 2:
+        raise WolframEvaluationError("TagUnset expects a tag and a left-hand side.")
+    tag, lhs = arguments
+    if not isinstance(tag, Symbol):
+        raise WolframEvaluationError("TagUnset expects a symbol tag.")
+    lhs = _normalize_assignment_lhs(lhs)
+    target = _tag_assignment_target(tag, lhs, "TagUnset")
+    if target is None:
+        return symbol("$Failed")
+    kind, record = target
+    from .expression_definitions import VALUE_KIND_OWN, coalesce_legacy_own_value, remove_definitions
+
+    if remove_definitions(record, kind, call("HoldPattern", lhs)):
+        if kind == VALUE_KIND_OWN:
+            if not record.own_values_definitions:
+                record.own_value = None
+            else:
+                coalesce_legacy_own_value(record)
+        return symbol("Null")
+    emit_message(
+        call("MessageName", symbol("TagUnset"), string("norep")),
+        f"Assignment on {tag.to_input_form()} for {lhs.to_input_form()} not found.",
+    )
+    return symbol("$Failed")
 
 
 def _clear_record(record: SymbolRecord) -> None:
@@ -5643,6 +5778,54 @@ def _apply_down_value_definitions(head: Symbol, expr: Expr) -> Expr | None:
     if not record.down_values_definitions:
         return None
     return _apply_definitions(expr, tuple(record.down_values_definitions))
+
+
+def _head_chain_symbols(expr: Expr) -> tuple[Symbol, ...]:
+    symbols: list[Symbol] = []
+    current = expr
+    while isinstance(current, Call):
+        head = current.head_expr
+        if isinstance(head, Symbol):
+            symbols.append(head)
+            break
+        current = head
+    return tuple(symbols)
+
+
+def _up_value_candidate_symbols(expr: Expr) -> tuple[Symbol, ...]:
+    if not isinstance(expr, Call):
+        return ()
+    candidates: list[Symbol] = []
+    seen: set[str] = set()
+
+    def add(candidate: Symbol) -> None:
+        try:
+            full_name = _SYMBOL_REGISTRY.record_for_symbol(candidate).full_name
+        except WolframEvaluationError:
+            return
+        if full_name in seen:
+            return
+        seen.add(full_name)
+        candidates.append(candidate)
+
+    for argument in expr.arguments:
+        if isinstance(argument, Symbol):
+            add(argument)
+        elif isinstance(argument, Call):
+            for candidate in _head_chain_symbols(argument):
+                add(candidate)
+    return tuple(candidates)
+
+
+def _apply_up_value_definitions(expr: Expr) -> Expr | None:
+    for candidate in _up_value_candidate_symbols(expr):
+        record = _SYMBOL_REGISTRY.record_for_symbol(candidate)
+        if not record.up_values_definitions:
+            continue
+        result = _apply_definitions(expr, tuple(record.up_values_definitions))
+        if result is not None:
+            return result
+    return None
 
 
 def _subvalue_target_symbol(expr: Expr) -> Symbol | None:

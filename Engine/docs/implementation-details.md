@@ -304,11 +304,11 @@ The code is split by workstream where the seams are now stable enough:
   integer-number-theory, and real-rounding family.
 - `expression_patterns.py` is ordinary expression pattern matching and rewrite/search helpers.
 - `expression_definitions.py` is the canonical home for symbol-definition storage and the
-  Set / SetDelayed / Unset / Clear / OwnValues / DownValues / UpValues / SubValues / NValues
-  surface. It exposes a uniform `Definition` record, a `definitions_for_kind(record, kind)`
-  accessor for the live ordered list of rules, and the `assign_definition` /
-  `remove_definition` / `clear_definitions` write API used by bare-symbol and compound-LHS
-  assignments.
+  Set / SetDelayed / TagSet / TagSetDelayed / Unset / TagUnset / Clear / OwnValues /
+  DownValues / UpValues / SubValues / NValues surface. It exposes a uniform `Definition`
+  record, a `definitions_for_kind(record, kind)` accessor for the live ordered list of rules,
+  and the `assign_definition` / `remove_definition` / `remove_definitions` /
+  `clear_definitions` write API used by bare-symbol, compound-LHS, and tagged assignments.
 - `expression_scoping.py` is the home for the lexical/dynamic scoping constructs.
   ``With[bindings, body]`` parses each binding (``Set`` pre-evaluates the RHS in the
   outer scope, ``SetDelayed`` holds it) and applies the shared capture-avoiding
@@ -363,10 +363,29 @@ rhs=..., delayed=..., condition=...)` without touching the legacy own-value slot
   subvalue target, so an existing rule `f[x_] := q[x]` makes `f[x_][y_] := rhs` write
   `SubValues[q]`.
 
+Tagged assignments reuse the same storage model:
+
+- `f /: f = rhs`, `f /: f[x_] = rhs`, and `f /: f[x_][y_] := rhs` are redundant tagged forms
+  that write `OwnValues[f]`, `DownValues[f]`, and `SubValues[f]` respectively.
+- `f /: h[f[x_]] := rhs` writes an up value to `UpValues[f]` when the tag appears as an
+  immediate argument of the outer LHS or in the head chain of an immediate argument, including
+  forms such as `h[f[x_][y_]]`.
+- Occurrences that are only nested inside an ordinary argument, such as `h[g[f[x_]]]`, are
+  rejected with a `TagSet::tagpos` / `TagSetDelayed::tagpos` message rather than silently creating
+  a too-broad deep rule.
+- `TagSet` evaluates the RHS before storing the definition; `TagSetDelayed` keeps the RHS held.
+  Both forms normalize the LHS through the same assignment path as `Set` / `SetDelayed`.
+- `TagUnset` removes every stored definition with the same normalized LHS for the selected value
+  list. This intentionally removes multiple same-LHS equations that differ only by RHS
+  `Condition` guards, matching observed Wolfram behavior for tagged definitions.
+
 The evaluator applies these stored rules after ordinary argument evaluation, attribute
-normalization, and `Listable` threading. Definitions are tried in stored order. Tungsten keeps
-assignment order except for the common Wolfram specificity rule where an exact definition such as
-`f[1]` is inserted before an earlier generic pattern such as `f[x_]`.
+normalization, and `Listable` threading. Up values are tried before down values and are suppressed
+when the evaluated head has `HoldAllComplete`; ordinary `HoldAll` does not suppress up values.
+Definitions are tried in stored order. Tungsten keeps assignment order except for the common
+Wolfram specificity rule where an exact definition such as `f[1]` is inserted before an earlier
+generic pattern such as `f[x_]`. Definitions with the same LHS but different RHS conditions are
+kept as separate equations, so guarded tagged definitions can model multi-equation dispatch.
 
 ### Why the evaluator is structural first
 

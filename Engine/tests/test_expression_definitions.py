@@ -233,13 +233,15 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
         suffix = abs(hash((id(self), self._testMethodName))) % 1000000
         self.f = f"tungstenFn{suffix}"
         self.g = f"tungstenG{suffix}"
+        self.h = f"tungstenH{suffix}"
+        self.q = f"tungstenQ{suffix}"
         self.x = f"tungstenX{suffix}"
         self.y = f"tungstenY{suffix}"
-        for name in (self.f, self.g, self.x, self.y):
+        for name in (self.f, self.g, self.h, self.q, self.x, self.y):
             evaluate(parse_input_form(f"ClearAll[{name}]"))
 
     def tearDown(self) -> None:
-        for name in (self.f, self.g, self.x, self.y):
+        for name in (self.f, self.g, self.h, self.q, self.x, self.y):
             evaluate(parse_input_form(f"ClearAll[{name}]"))
 
     def test_set_with_pattern_lhs_assigns_downvalue(self) -> None:
@@ -308,6 +310,31 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
         evaluate(parse_input_form(f"{self.g}[{self.x}_] := {self.x} /; {self.x} > 0"))
         self.assertEqual(_full(f"{{{self.f}[2], {self.f}[-1], {self.g}[2], {self.g}[-1]}}"), f"List[2, {self.f}[-1], 2, {self.g}[-1]]")
 
+    def test_downvalues_support_conditions_at_multiple_levels(self) -> None:
+        evaluate(parse_input_form(f"({self.f}[{self.x}_] /; {self.x} > 0) := lhsOuter[{self.x}]"))
+        evaluate(parse_input_form(f"{self.g}[{self.x}_ /; {self.x} < 0] := lhsInner[{self.x}]"))
+        evaluate(parse_input_form(f"{self.h}[{self.x}_] := rhsCondition[{self.x}] /; {self.x} > 10"))
+
+        self.assertEqual(_full(f"{self.f}[2]"), "lhsOuter[2]")
+        self.assertEqual(_full(f"{self.f}[-2]"), f"{self.f}[-2]")
+        self.assertEqual(_full(f"{self.g}[-2]"), "lhsInner[-2]")
+        self.assertEqual(_full(f"{self.g}[2]"), f"{self.g}[2]")
+        self.assertEqual(_full(f"{self.h}[11]"), "rhsCondition[11]")
+        self.assertEqual(_full(f"{self.h}[5]"), f"{self.h}[5]")
+
+    def test_downvalue_multiple_equations_and_unset(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := positive /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := negative /; {self.x} < 0"))
+        evaluate(parse_input_form(f"{self.f}[0] = zero"))
+
+        self.assertEqual(_full(f"{self.f}[2]"), "positive")
+        self.assertEqual(_full(f"{self.f}[-2]"), "negative")
+        self.assertEqual(_full(f"{self.f}[0]"), "zero")
+        self.assertEqual(_full(f"{self.f}[{self.x}_] =."), "Null")
+        self.assertEqual(_full(f"{self.f}[2]"), f"{self.f}[2]")
+        self.assertEqual(_full(f"{self.f}[-2]"), f"{self.f}[-2]")
+        self.assertEqual(_full(f"{self.f}[0]"), "zero")
+
     def test_curried_lhs_assigns_subvalue(self) -> None:
         evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := {{{self.x}, {self.y}}}"))
         self.assertEqual(_full(f"{self.f}[1][2]"), "List[1, 2]")
@@ -327,6 +354,16 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
             f"List[RuleDelayed[HoldPattern[{self.g}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]], List[{self.x}, {self.y}]]]",
         )
 
+    def test_subvalue_multiple_equations_and_unset(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := positive[{self.y}] /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := negative[{self.y}] /; {self.x} < 0"))
+
+        self.assertEqual(_full(f"{self.f}[2][9]"), "positive[9]")
+        self.assertEqual(_full(f"{self.f}[-2][9]"), "negative[9]")
+        self.assertEqual(_full(f"{self.f}[{self.x}_][{self.y}_] =."), "Null")
+        self.assertEqual(_full(f"{self.f}[2][9]"), f"{self.f}[2][9]")
+        self.assertEqual(_full(f"{self.f}[-2][9]"), f"{self.f}[-2][9]")
+
     def test_compound_unset_removes_matching_definition(self) -> None:
         evaluate(parse_input_form(f"{self.f}[1] = 10"))
         evaluate(parse_input_form(f"{self.f}[1] =."))
@@ -337,6 +374,115 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
         evaluate(parse_input_form(f"{self.f}[{self.x}_] := {self.x}"))
         self.assertEqual(_full(f"ValueQ[{self.f}[2]]"), "True")
         self.assertEqual(_full(f"ValueQ[{self.g}[2]]"), "False")
+
+    def test_tagset_redundant_own_down_and_sub_values(self) -> None:
+        self.assertEqual(_full(f"{self.f} /: {self.f} = 7"), "7")
+        self.assertEqual(_full(f"{self.f}"), "7")
+        self.assertEqual(
+            _full(f"OwnValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}], 7]]",
+        )
+        evaluate(parse_input_form(f"ClearAll[{self.f}]"))
+
+        evaluate(parse_input_form(f"{self.f} /: {self.f}[{self.x}_] := {self.x} + 1"))
+        self.assertEqual(_full(f"{self.f}[3]"), "4")
+        self.assertEqual(
+            _full(f"DownValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], Plus[{self.x}, 1]]]",
+        )
+        evaluate(parse_input_form(f"ClearAll[{self.f}]"))
+
+        evaluate(parse_input_form(f"{self.f} /: {self.f}[{self.x}_][{self.y}_] := {{{self.x}, {self.y}}}"))
+        self.assertEqual(_full(f"{self.f}[1][2]"), "List[1, 2]")
+        self.assertEqual(
+            _full(f"SubValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]], List[{self.x}, {self.y}]]]",
+        )
+
+    def test_tagset_and_tagsetdelayed_create_upvalues(self) -> None:
+        evaluate(parse_input_form(f"{self.y} = 5"))
+        self.assertEqual(_full(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] = {self.x} + {self.y}"), f"Plus[5, {self.x}]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[3]]"), "8")
+        evaluate(parse_input_form(f"{self.y} = 10"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[3]]"), "8")
+        self.assertEqual(_full(f"DownValues[{self.h}]"), "List[]")
+        self.assertEqual(
+            _full(f"UpValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]]]], Plus[5, {self.x}]]]",
+        )
+
+        evaluate(parse_input_form(f"{self.g} /: {self.h}[{self.g}[{self.x}_]] := {self.x} + {self.y}"))
+        self.assertEqual(_full(f"{self.h}[{self.g}[3]]"), "13")
+        evaluate(parse_input_form(f"{self.y} = 20"))
+        self.assertEqual(_full(f"{self.h}[{self.g}[3]]"), "23")
+
+    def test_upvalues_apply_before_downvalues_and_respect_hold_all_complete(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := up[{self.x}]"))
+        evaluate(parse_input_form(f"{self.h}[{self.x}_] := down[{self.x}]"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[1]]"), "up[1]")
+
+        evaluate(parse_input_form(f"SetAttributes[{self.q}, HoldAll]"))
+        evaluate(parse_input_form(f"{self.f} /: {self.q}[{self.f}[{self.x}_]] := heldUp[{self.x}]"))
+        self.assertEqual(_full(f"{self.q}[{self.f}[2]]"), "heldUp[2]")
+
+        evaluate(parse_input_form(f"SetAttributes[{self.g}, HoldAllComplete]"))
+        evaluate(parse_input_form(f"{self.f} /: {self.g}[{self.f}[{self.x}_]] := suppressed[{self.x}]"))
+        self.assertEqual(_full(f"{self.g}[{self.f}[2]]"), f"{self.g}[{self.f}[2]]")
+
+    def test_tagset_supports_conditions_at_multiple_levels(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: ({self.h}[{self.f}[{self.x}_]] /; {self.x} > 0) := lhsOuter[{self.x}]"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_ /; {self.x} < 0]] := lhsInner[{self.x}]"))
+        evaluate(parse_input_form(f"{self.f} /: condRhs[{self.f}[{self.x}_]] := rhsCondition[{self.x}] /; {self.x} > 10"))
+
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "lhsOuter[2]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), "lhsInner[-2]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[0]]"), f"{self.h}[{self.f}[0]]")
+        self.assertEqual(_full(f"condRhs[{self.f}[11]]"), "rhsCondition[11]")
+        self.assertEqual(_full(f"condRhs[{self.f}[5]]"), f"condRhs[{self.f}[5]]")
+
+    def test_tagset_multiple_equations_and_exact_priority(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := positive /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := negative /; {self.x} < 0"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[0]] = zero"))
+
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "positive")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), "negative")
+        self.assertEqual(_full(f"{self.h}[{self.f}[0]]"), "zero")
+        upvalues = _full(f"UpValues[{self.f}]")
+        self.assertIn(f"RuleDelayed[HoldPattern[{self.h}[{self.f}[0]]], zero]", upvalues)
+        self.assertIn(f"RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]]]], Condition[positive, Greater[{self.x}, 0]]]", upvalues)
+        self.assertIn(f"RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]]]], Condition[negative, Less[{self.x}, 0]]]", upvalues)
+
+    def test_tagset_head_chain_argument_and_deep_invalid_occurrence(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_][{self.y}_]] := {{{self.x}, {self.y}}}"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[1][2]]"), "List[1, 2]")
+        self.assertEqual(
+            _full(f"UpValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]]], List[{self.x}, {self.y}]]]",
+        )
+
+        evaluate(parse_input_form(f"{self.g} /: {self.h}[deep[{self.g}[{self.x}_]]] := {self.x}"))
+        self.assertEqual(_full(f"{self.h}[deep[{self.g}[1]]]"), f"{self.h}[deep[{self.g}[1]]]")
+        self.assertEqual(_full(f"UpValues[{self.g}]"), "List[]")
+
+    def test_tagunset_removes_tagged_values_only(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := {self.x}"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]] =."), "$Failed")
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "2")
+
+        self.assertEqual(_full(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] =."), "Null")
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), f"{self.h}[{self.f}[2]]")
+        self.assertEqual(_full(f"UpValues[{self.f}]"), "List[]")
+
+    def test_tagunset_removes_all_equations_for_same_lhs(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := positive /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := negative /; {self.x} < 0"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "positive")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), "negative")
+        self.assertEqual(_full(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] =."), "Null")
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), f"{self.h}[{self.f}[2]]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), f"{self.h}[{self.f}[-2]]")
+        self.assertEqual(_full(f"UpValues[{self.f}]"), "List[]")
 
 
 class ValueGetterTests(unittest.TestCase):

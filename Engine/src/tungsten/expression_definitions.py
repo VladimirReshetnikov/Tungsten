@@ -168,8 +168,12 @@ def assign_definition(
         delayed=delayed,
         condition=condition,
     )
+    new_condition_key = _definition_condition_key(new_definition)
     for index, existing in enumerate(definitions):
-        if existing.hold_pattern == hold_pattern:
+        if (
+            existing.hold_pattern == hold_pattern
+            and _definition_condition_key(existing) == new_condition_key
+        ):
             definitions[index] = new_definition
             return new_definition
     new_score = _definition_specificity_score(hold_pattern)
@@ -179,6 +183,17 @@ def assign_definition(
             return new_definition
     definitions.append(new_definition)
     return new_definition
+
+
+def _definition_condition_key(definition: Definition) -> "Expr | None":
+    if definition.condition is not None:
+        return definition.condition
+    rhs = definition.rhs
+    from .expression import Call
+
+    if isinstance(rhs, Call) and rhs.has_head("Condition") and len(rhs.arguments) == 2:
+        return rhs.arguments[1]
+    return None
 
 
 def _definition_specificity_score(expr: "Expr") -> int:
@@ -245,6 +260,27 @@ def remove_definition(
     return False
 
 
+def remove_definitions(
+    record: "SymbolRecord", kind: str, hold_pattern: "Expr"
+) -> bool:
+    """Remove all definitions with a structurally identical ``hold_pattern``.
+
+    ``Unset`` / ``TagUnset`` clear every equation associated with the LHS,
+    including the common case where several delayed definitions share a left
+    side but differ by RHS ``Condition`` tests.
+    """
+    if kind not in ALL_VALUE_KINDS:
+        raise ValueError(f"Unknown value kind: {kind!r}")
+    definitions = record.definitions_for_kind(kind)
+    original_count = len(definitions)
+    definitions[:] = [
+        definition
+        for definition in definitions
+        if definition.hold_pattern != hold_pattern
+    ]
+    return len(definitions) != original_count
+
+
 def classify_assignment_lhs(lhs: "Expr") -> tuple[str, "Expr | None"]:
     """Classify the left-hand side of a ``Set`` / ``SetDelayed`` assignment.
 
@@ -254,15 +290,17 @@ def classify_assignment_lhs(lhs: "Expr") -> tuple[str, "Expr | None"]:
     - ``target_symbol`` is the symbol whose value list will receive the
       rule, or ``None`` when the LHS is malformed for a definition.
 
-    The current implementation supports three value kinds:
+    The classifier handles the LHS shapes whose owner can be inferred from the
+    expression itself:
 
     - ``OwnValues`` — bare symbol LHS.
     - ``DownValues`` — LHS of the form ``f[args...]`` where ``f`` is a
       symbol.
     - ``SubValues`` — curried LHS of the form ``f[args...][more...]``.
 
-    Other LHS shapes (TagSet, UpSet, etc.) are surfaced through this same
-    classifier so future passes can extend routing in one place.
+    ``TagSet`` / ``TagSetDelayed`` reuse this result for redundant tagged
+    own/down/sub forms and add explicit ``UpValues`` routing when the tag is
+    found in an up-value position. ``UpSet`` can extend the same seam later.
     """
     from .expression import Call, Symbol
 
@@ -330,5 +368,6 @@ __all__ = [
     "coalesce_legacy_own_value",
     "definitions_for_kind",
     "remove_definition",
+    "remove_definitions",
     "rules_for_kind",
 ]
