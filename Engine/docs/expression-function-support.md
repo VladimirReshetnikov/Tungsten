@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-26T04:06:50Z
-- Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
+- Updated (UTC): 2026-04-26T05:21:30Z
+- Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -35,10 +35,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   syntax such as `::`, `<<`, `>>`, `>>>`, `?`, and `??`, and string concatenation /
   string-pattern operators. Callable operator forms such as `Map[f]`, `Cases[p]`, or
   `ReplaceAll[rules]` are not implemented unless explicitly listed in this document.
-- Assignment-like parser heads such as `Set`, `SetDelayed`, `Unset`, `TagSet`, `TagSetDelayed`,
-  `TagUnset`, `UpSet`, `UpSetDelayed`, `AddTo`, `SubtractFrom`, `TimesBy`, and `DivideBy` are
-  syntax-compatible inert expressions only. Tungsten currently does not mutate symbol values or
-  definition tables for them.
+- `Set` and `Unset` mutate only bare-symbol own values in Tungsten's process-local symbol
+  registry. `Clear` removes own/down/up/sub values for bare symbols and lists of bare symbols, but
+  only own values are currently created by the evaluator. Protected symbols reject these
+  mutations. Other assignment-like parser heads such as `SetDelayed`, `TagSet`, `TagSetDelayed`,
+  `TagUnset`, `UpSet`, `UpSetDelayed`, `AddTo`, `SubtractFrom`, `TimesBy`, and `DivideBy` remain
+  syntax-compatible inert expressions.
 - `Take` and `Drop` currently support a single first-level specification only.
 - `If`, `Which`, `Switch`, `Piecewise`, and `Pick` currently support only the direct forms listed
   below.
@@ -283,8 +285,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Off`, `On` | `Off[sym::tag]`, `On[sym::tag]`, list and multi-argument forms | Disables or re-enables message generation for explicit message names. `General::tag` also suppresses messages with the same tag. Message values/templates are not modeled. | [Off](https://reference.wolfram.com/language/ref/Off.html), [On](https://reference.wolfram.com/language/ref/On.html) |
 | `Print` | `Print[expr1, ...]` | Evaluates arguments, concatenates their textual forms, records the text in `EvaluationSession.print_history`, and returns `Null`. The Tungsten REPL writes recorded print lines to the console. | [Print](https://reference.wolfram.com/language/ref/Print.html) |
 | `CompoundExpression` | `expr1; expr2; ...` parser form | Evaluates arguments left to right and returns the final result. A trailing semicolon parses to a final `Null`, matching the common `Print[...];`/statement-style workflow. | [CompoundExpression](https://reference.wolfram.com/language/ref/CompoundExpression.html) |
+| `Set` | `Set[sym, rhs]`, parser form `sym = rhs` | For a bare, unprotected symbol `sym`, immediately evaluates `rhs`, stores the resulting own value in the process-local registry, and returns that value. Other left-hand sides remain unsupported in this subset. | [Set](https://reference.wolfram.com/language/ref/Set.html) |
+| `Unset` | `Unset[sym]`, parser forms `sym =.` and `sym = .` | Removes the bare symbol's own value and returns `Null`. Protected symbols emit `Unset::wrsym` and return `$Failed`. Other left-hand sides remain unsupported in this subset. | [Unset](https://reference.wolfram.com/language/ref/Unset.html) |
+| `Clear` | `Clear[sym1, ...]`, `Clear[{sym1, ...}]`, string-pattern forms over registered names | Clears process-local value slots for matching unprotected symbols and returns `Null`. In the current evaluator this mainly removes own values, because down/up/sub values are read-only or not yet user-definable. Protected symbols emit `Clear::wrsym`. | [Clear](https://reference.wolfram.com/language/ref/Clear.html) |
+| `OwnValues` | `OwnValues[sym]`, `OwnValues["name"]` | Returns read-only own-value rules as `{HoldPattern[sym] :> value}`. String input must name an existing registered symbol. Assignment to `OwnValues` is not implemented. | [OwnValues](https://reference.wolfram.com/language/ref/OwnValues.html) |
 | `Unique` | `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, `Unique[{spec1, ...}]` | Generates fresh registered symbols using Tungsten's module counter or per-prefix string counters. | [Unique](https://reference.wolfram.com/language/ref/Unique.html) |
-| `ValueQ` | `ValueQ[expr]` | Returns `True` for explicit numeric, string, and byte-array literals, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally. This is conservative for unreduced built-in calls until Tungsten has value/rule storage; user-defined symbols currently return `False`. | [ValueQ](https://reference.wolfram.com/language/ref/ValueQ.html) |
+| `ValueQ` | `ValueQ[expr]` | Holds `expr` while checking for values. Returns `True` for symbols with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally; returns `False` for ordinary atoms such as integers and strings and for unassigned user symbols. | [ValueQ](https://reference.wolfram.com/language/ref/ValueQ.html) |
 | `Plus` | `Plus[i1, ...]` and infix `+` when nested evaluation reaches an all-integer subexpression | Adds explicit integer arguments. `Plus[]` yields `0`. Mixed expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
 | `Times` | `Times[i1, ...]` and infix `*` when nested evaluation reaches an all-integer subexpression | Multiplies explicit integer arguments. `Times[]` yields `1`. Mixed expressions remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
 | `Power` | `Power[base, exponent]` and infix `^` when both arguments are integers and the exponent is non-negative, excluding `0^0` | Raises an integer base to a non-negative integer exponent when the result stays in the integer subset. Negative exponents remain inert in this pass. | [Power](https://reference.wolfram.com/language/ref/Power) |

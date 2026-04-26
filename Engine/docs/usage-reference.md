@@ -400,7 +400,8 @@ python -m tungsten expr evaluate --code '{Symbol["TungstenUsage`alpha"], Names["
 python -m tungsten expr evaluate --code 'Length[Names["System`*"]]'
 python -m tungsten expr evaluate --code 'NameQ["System`AASTriangle"]'
 python -m tungsten expr evaluate --code 'Attributes[Plus]'
-python -m tungsten expr evaluate --code 'ValueQ[userDefinedSymbol]'
+python -m tungsten expr evaluate --code 'x = 1 + 2; {ValueQ[x], OwnValues[x], x}'
+python -m tungsten expr evaluate --code 'x = 1; Clear[x]; ValueQ[x]'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
@@ -471,7 +472,8 @@ The implemented inert evaluator currently covers:
 - `Depth`
 - `Head`
 - symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
-  `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, and `ValueQ`
+  `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, `Set`, `Unset`, `Clear`,
+  `OwnValues`, and `ValueQ`
 - integer arithmetic via `Plus`, `Times`, and `Power` when all arguments in the evaluated
   subexpression are explicit integers
 - integer relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and

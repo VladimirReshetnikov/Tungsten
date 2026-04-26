@@ -547,7 +547,8 @@ Tungsten currently implements a broader structural subset that includes:
 - textual expression conversion through `ToString` and `ToExpression` for `InputForm` and the
   supported textual `StandardForm` subset;
 - process-local symbol/context registry behavior for `Symbol`, `SymbolName`, `Unique`, `Names`,
-  `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`, and `ValueQ`;
+  `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`, `Set`, `Unset`, `Clear`,
+  `OwnValues`, and `ValueQ`;
 - association-specific constructors and accessors such as `Association`, `AssociationQ`, `Keys`,
   `Values`, `Normal`, `Lookup`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`, `KeyMap`,
   `KeyValueMap`, `AssociationThread`, and `AssociationMap`.
@@ -602,7 +603,9 @@ Examples:
 - `ToExpression["f @ x // g", StandardForm, HoldComplete]` evaluates to `HoldComplete[g[f[x]]]`;
 - <code>{Symbol["TungstenParser`alpha"], Names["TungstenParser`*"]}</code> evaluates to
   <code>{TungstenParser`alpha, {"TungstenParser`alpha"}}</code>;
-- `ValueQ[userDefinedSymbol]` evaluates to `False`;
+- `x = 1 + 2; {ValueQ[x], OwnValues[x], x}` evaluates to
+  `{True, {HoldPattern[x] :> 3}, 3}`;
+- `x = 1; x = .; ValueQ[x]` evaluates to `False`;
 - `Select[{"ab", "cd", "ba"}, StringContainsQ["a"]]` evaluates to `{"ab", "ba"}`;
 - `Mod[-14, 5]` evaluates to `1`;
 - `Clip[-7, {-5, 5}, {100, 200}]` evaluates to `100`;

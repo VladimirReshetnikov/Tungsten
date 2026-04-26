@@ -258,6 +258,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "CircleMinus",
     "CirclePlus",
     "CircleTimes",
+    "Clear",
     "Clip",
     "Comap",
     "ComapApply",
@@ -440,6 +441,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Or",
     "Out",
     "Outer",
+    "OwnValues",
     "Overscript",
     "OverscriptBox",
     "OptionsPattern",
@@ -810,6 +812,9 @@ class SymbolRegistry:
             return ()
         return record.attributes
 
+    def display_symbol_for_record(self, record: SymbolRecord) -> Symbol:
+        return self._display_symbol_for_record(record)
+
 
 def _split_symbol_full_name(name: str) -> tuple[str, str]:
     index = name.rfind("`")
@@ -988,6 +993,10 @@ class EvaluationSession:
 _ACTIVE_EVALUATION_SESSION: ContextVar[EvaluationSession | None] = ContextVar(
     "tungsten_active_evaluation_session",
     default=None,
+)
+_ACTIVE_OWN_VALUE_SYMBOLS: ContextVar[tuple[str, ...]] = ContextVar(
+    "tungsten_active_own_value_symbols",
+    default=(),
 )
 _ACTIVE_EVALUATION_DEPTH: ContextVar[int] = ContextVar(
     "tungsten_active_evaluation_depth",
@@ -3241,6 +3250,103 @@ def attributes_expr(expr: Expr) -> Call:
     raise WolframEvaluationError("Attributes expects a symbol, string symbol name, or list of symbols/names.")
 
 
+def _record_is_protected(record: SymbolRecord) -> bool:
+    return "Protected" in record.attributes
+
+
+def _emit_protected_symbol_message(head_name: str, record: SymbolRecord) -> None:
+    display = _SYMBOL_REGISTRY.display_symbol_for_record(record)
+    emit_message(
+        call("MessageName", symbol(head_name), string("wrsym")),
+        f"Symbol {display.to_input_form()} is Protected.",
+    )
+
+
+def _own_value_rule(record: SymbolRecord) -> Expr | None:
+    if record.own_value is None:
+        return None
+    lhs = call("HoldPattern", _SYMBOL_REGISTRY.display_symbol_for_record(record))
+    return call("RuleDelayed", lhs, record.own_value)
+
+
+def set_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 2:
+        raise WolframEvaluationError("Set expects exactly two arguments.")
+    lhs, rhs = arguments
+    rhs_value = evaluate(rhs)
+    if not isinstance(lhs, Symbol):
+        raise WolframEvaluationError("This Tungsten subset only supports Set when the left-hand side is a bare symbol.")
+    record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
+    if _record_is_protected(record):
+        _emit_protected_symbol_message("Set", record)
+        return call("Set", lhs, rhs_value)
+    record.own_value = rhs_value
+    return rhs_value
+
+
+def unset_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Unset expects exactly one argument.")
+    lhs = arguments[0]
+    if not isinstance(lhs, Symbol):
+        raise WolframEvaluationError("This Tungsten subset only supports Unset when the left-hand side is a bare symbol.")
+    record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
+    if _record_is_protected(record):
+        _emit_protected_symbol_message("Unset", record)
+        return symbol("$Failed")
+    record.own_value = None
+    return symbol("Null")
+
+
+def _clear_record(record: SymbolRecord) -> None:
+    if _record_is_protected(record):
+        _emit_protected_symbol_message("Clear", record)
+        return
+    record.own_value = None
+    record.down_values = ()
+    record.up_values = ()
+    record.sub_values = ()
+
+
+def clear_expr(arguments: Sequence[Expr]) -> Expr:
+    for argument in arguments:
+        _clear_one(argument)
+    return symbol("Null")
+
+
+def _clear_one(argument: Expr) -> None:
+    if isinstance(argument, Call) and argument.has_head("List"):
+        for item in argument.arguments:
+            _clear_one(item)
+        return
+    if isinstance(argument, Symbol):
+        _clear_record(_SYMBOL_REGISTRY.record_for_symbol(argument))
+        return
+    if isinstance(argument, String):
+        for name in _SYMBOL_REGISTRY.names(argument):
+            record = _SYMBOL_REGISTRY.resolve_existing(name)
+            if record is not None:
+                _clear_record(record)
+        return
+    emit_message(
+        call("MessageName", symbol("Clear"), string("ssym")),
+        f"{argument.to_input_form()} is not a symbol or a valid string pattern.",
+    )
+
+
+def own_values_expr(expr: Expr) -> Call:
+    if isinstance(expr, Symbol):
+        record = _SYMBOL_REGISTRY.record_for_symbol(expr)
+    elif isinstance(expr, String):
+        record = _SYMBOL_REGISTRY.resolve_existing(expr.value)
+        if record is None:
+            raise WolframEvaluationError(f"OwnValues could not find a symbol named {expr.value!r}.")
+    else:
+        raise WolframEvaluationError("OwnValues expects a symbol or the name of an existing symbol.")
+    rule = _own_value_rule(record)
+    return _evaluated_list_expr() if rule is None else _evaluated_list_expr(rule)
+
+
 def history_expr(head_name: str, arguments: Sequence[Expr]) -> Expr:
     session = _active_evaluation_session()
     if session is None:
@@ -3816,8 +3922,6 @@ def value_q_expr(expr: Expr) -> Symbol:
         if record.full_name in {"System`$Context", "System`$ContextPath"}:
             return _bool_symbol(True)
         return _bool_symbol(record.own_value is not None)
-    if isinstance(expr, (Integer, Real, String, ByteArrayExpr)):
-        return _bool_symbol(True)
     try:
         return _bool_symbol(evaluate(expr) != expr)
     except WolframEvaluationError:
@@ -9974,6 +10078,15 @@ def _evaluate(expr: Expr) -> Expr:
             return current_message_list_expr()
         if record.full_name in {"System`Exit", "System`Quit"} and _active_evaluation_session() is not None:
             raise TungstenExitRequested(0)
+        if record.own_value is not None:
+            active_symbols = _ACTIVE_OWN_VALUE_SYMBOLS.get()
+            if record.full_name in active_symbols:
+                return expr
+            token = _ACTIVE_OWN_VALUE_SYMBOLS.set(active_symbols + (record.full_name,))
+            try:
+                return evaluate(record.own_value)
+            finally:
+                _ACTIVE_OWN_VALUE_SYMBOLS.reset(token)
         return expr
 
     if isinstance(expr, (Integer, Real, String)):
@@ -10069,6 +10182,15 @@ def _evaluate(expr: Expr) -> Expr:
         if raw_head_name == "CompoundExpression":
             return compound_expression_expr(expr.arguments)
 
+        if raw_head_name == "Set":
+            return set_expr(expr.arguments)
+
+        if raw_head_name == "Unset":
+            return unset_expr(expr.arguments)
+
+        if raw_head_name == "Clear":
+            return clear_expr(expr.arguments)
+
         if raw_head_name in {"In", "InString", "Out"}:
             return history_expr(raw_head_name, expr.arguments)
 
@@ -10076,6 +10198,11 @@ def _evaluate(expr: Expr) -> Expr:
             if len(expr.arguments) != 1:
                 raise WolframEvaluationError("DownValues expects exactly one symbol.")
             return down_values_expr(expr.arguments[0])
+
+        if raw_head_name == "OwnValues":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("OwnValues expects exactly one symbol or symbol-name string.")
+            return own_values_expr(expr.arguments[0])
 
         if raw_head_name == "Attributes":
             if len(expr.arguments) != 1:

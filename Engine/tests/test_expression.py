@@ -1763,6 +1763,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         value_context = evaluate(parse_input_form("ValueQ[$Context]"))
         value_qualified_context = evaluate(parse_input_form("ValueQ[System`$Context]"))
         value_literal = evaluate(parse_input_form("ValueQ[1]"))
+        value_string = evaluate(parse_input_form('ValueQ["abc"]'))
         value_evaluatable = evaluate(parse_input_form("ValueQ[1 + 2]"))
         value_inert_call = evaluate(parse_input_form("ValueQ[tungstenValueQHead[tungstenValueQSymbol]]"))
         self.assertRegex(unique_default.to_input_form(), r"^\$\d+$")
@@ -1776,9 +1777,55 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(value_user_symbol.to_full_form(), "False")
         self.assertEqual(value_context.to_full_form(), "True")
         self.assertEqual(value_qualified_context.to_full_form(), "True")
-        self.assertEqual(value_literal.to_full_form(), "True")
+        self.assertEqual(value_literal.to_full_form(), "False")
+        self.assertEqual(value_string.to_full_form(), "False")
         self.assertEqual(value_evaluatable.to_full_form(), "True")
         self.assertEqual(value_inert_call.to_full_form(), "False")
+
+    def test_set_unset_clear_valueq_and_ownvalues_for_bare_symbols(self) -> None:
+        def submit(code: str) -> str:
+            return evaluate(parse_input_form(code)).to_full_form()
+
+        self.assertEqual(submit("Clear[tungstenSetA, tungstenSetB, tungstenSetC]"), "Null")
+        self.assertEqual(submit("OwnValues[tungstenSetA]"), "List[]")
+        self.assertEqual(submit("ValueQ[tungstenSetA]"), "False")
+
+        self.assertEqual(submit("tungstenSetA = 1 + 2"), "3")
+        self.assertEqual(submit("tungstenSetA"), "3")
+        self.assertEqual(submit("tungstenSetA = tungstenSetA + 4"), "7")
+        self.assertEqual(submit("tungstenSetA"), "7")
+        self.assertEqual(submit("ValueQ[tungstenSetA]"), "True")
+        self.assertEqual(
+            submit("OwnValues[tungstenSetA]"),
+            "List[RuleDelayed[HoldPattern[tungstenSetA], 7]]",
+        )
+        self.assertEqual(
+            submit('OwnValues["tungstenSetA"]'),
+            "List[RuleDelayed[HoldPattern[tungstenSetA], 7]]",
+        )
+
+        self.assertEqual(submit("tungstenSetB = tungstenSetC"), "tungstenSetC")
+        self.assertEqual(submit("OwnValues[tungstenSetB]"), "List[RuleDelayed[HoldPattern[tungstenSetB], tungstenSetC]]")
+        self.assertEqual(submit("tungstenSetC = 9"), "9")
+        self.assertEqual(submit("tungstenSetB"), "9")
+
+        self.assertEqual(submit("tungstenSetA = ."), "Null")
+        self.assertEqual(submit("ValueQ[tungstenSetA]"), "False")
+        self.assertEqual(submit("OwnValues[tungstenSetA]"), "List[]")
+        self.assertEqual(submit("Clear[{tungstenSetB, tungstenSetC}]"), "Null")
+        self.assertEqual(submit("ValueQ[tungstenSetB]"), "False")
+        self.assertEqual(submit("ValueQ[tungstenSetC]"), "False")
+
+        self.assertEqual(submit("tungstenSetSelf = tungstenSetSelf"), "tungstenSetSelf")
+        self.assertEqual(submit("tungstenSetSelf"), "tungstenSetSelf")
+        self.assertEqual(submit("ValueQ[tungstenSetSelf]"), "True")
+        self.assertEqual(submit("Clear[tungstenSetSelf]"), "Null")
+
+    def test_set_unset_and_clear_reject_protected_symbols(self) -> None:
+        self.assert_evaluates_with_message("Plus = 5", "Set[Plus, 5]", "Set::wrsym")
+        self.assert_evaluates_with_message("Plus = .", "$Failed", "Unset::wrsym")
+        self.assert_evaluates_with_message("Clear[Plus]", "Null", "Clear::wrsym")
+        self.assertEqual(evaluate(parse_input_form("1 + 2")).to_full_form(), "3")
 
     def test_repl_history_symbols_and_downvalues_use_session_state(self) -> None:
         session = EvaluationSession()

@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, expression-subsystem users, automation authors, and reviewers
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T17:48:49Z
-- Updated (UTC): 2026-04-25T20:58:10Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-26T05:21:30Z
+- Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Structural Expression Function Support](./expression-function-support.md)
@@ -102,12 +102,20 @@ The current kernel-free evaluator implements these symbol and context functions:
   attribute metadata from the registry. Unknown user symbols return an empty list until Tungsten
   grows mutable attributes.
 - `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, and list forms generate fresh registered symbols.
-- `ValueQ[expr]` returns `True` for explicit numeric, string, and byte-array literals, for
-  `$Context` and `$ContextPath`, and
-  for expressions that Tungsten's evaluator can reduce to a different expression. This is a
-  conservative kernel-free subset: unreduced calls whose Wolfram kernel value depends on attributes
-  or other built-in definitions may still return `False` until Tungsten has real value/rule
-  storage. User-defined symbols currently have no values, so `ValueQ[userSymbol]` returns `False`.
+- `Set[sym, rhs]` / `sym = rhs` stores an immediate own value for a bare, unprotected symbol.
+  The right-hand side is evaluated before storage, matching Wolfram's immediate-assignment model.
+- `Unset[sym]` / `sym =.` removes a bare symbol's own value.
+- `Clear[sym1, ...]` and `Clear[{sym1, ...}]` clear process-local value slots for bare symbols.
+  String-pattern forms clear registered names that match `Names[pattern]`.
+- `OwnValues[sym]` and `OwnValues["name"]` return read-only own-value rules of the form
+  `HoldPattern[sym] :> value`.
+- `ValueQ[expr]` holds `expr` while checking value availability. It returns `True` for symbols
+  with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally.
+  Ordinary atoms such as integers and strings return `False`, matching Wolfram's value-oriented
+  interpretation more closely now that Tungsten has process-local own-value storage.
+- Symbols whose registry attributes include `Protected` reject `Set`, `Unset`, and `Clear`
+  mutations with `wrsym` messages. Tungsten does not currently implement `Unprotect`,
+  `Protect`, or mutable attributes.
 
 Name-pattern matching supports the practical string-pattern subset used by Wolfram name functions:
 
@@ -124,8 +132,10 @@ The registry intentionally does not yet implement:
   aliases;
 - `SetAttributes`, `ClearAttributes`, or mutation through assignment to `Attributes[s]`;
 - evaluator-wide semantics for arbitrary registered attributes such as `Flat`, `Orderless`,
-  `OneIdentity`, `NHoldAll`, or `Protected`;
-- own values, down values, up values, sub values, delayed definitions, or assignment forms;
+  `OneIdentity`, or `NHoldAll`;
+- non-bare-symbol assignment left-hand sides, delayed definitions, or assignment forms beyond
+  bare-symbol `Set` / `Unset` and `Clear`;
+- user-definable down values, up values, or sub values;
 - persistent registry state across separate Tungsten CLI processes.
 
 These boundaries are structural, not accidental. `Attributes` is currently a metadata lookup API:
@@ -147,7 +157,8 @@ python -m tungsten expr evaluate --code 'NameQ["System`AASTriangle"]'
 python -m tungsten expr evaluate --code 'Length[Names["System`*"]]'
 python -m tungsten expr evaluate --code 'Attributes[Plus]'
 python -m tungsten expr evaluate --code 'Attributes[{Attributes, Plus, AASTriangle}]'
-python -m tungsten expr evaluate --code 'ValueQ[userDefinedSymbol]'
+python -m tungsten expr evaluate --code 'x = 1 + 2; {ValueQ[x], OwnValues[x], x}'
+python -m tungsten expr evaluate --code 'x = 1; x = .; ValueQ[x]'
 python -m tungsten expr evaluate --code 'Unique[temporarySymbol]'
 ```
 
@@ -171,6 +182,10 @@ Implementation choices were checked against the corresponding Wolfram documentat
 - [Symbol](https://reference.wolfram.com/language/ref/Symbol.html)
 - [SymbolName](https://reference.wolfram.com/language/ref/SymbolName.html)
 - [Unique](https://reference.wolfram.com/language/ref/Unique.html)
+- [Set](https://reference.wolfram.com/language/ref/Set.html)
+- [Unset](https://reference.wolfram.com/language/ref/Unset.html)
+- [Clear](https://reference.wolfram.com/language/ref/Clear.html)
+- [OwnValues](https://reference.wolfram.com/language/ref/OwnValues.html)
 - [Names](https://reference.wolfram.com/language/ref/Names.html)
 - [NameQ](https://reference.wolfram.com/language/ref/NameQ.html)
 - [Attributes](https://reference.wolfram.com/language/ref/Attributes.html)
