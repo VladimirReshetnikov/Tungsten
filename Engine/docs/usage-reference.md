@@ -60,6 +60,8 @@ Purpose:
 - start the kernel-free Tungsten interpreter with `wolfram.exe`-style prompts;
 - maintain session history through `$Line`, `In`, `InString`, `Out`, `DownValues`, and `%`
   shorthand;
+- bound retained history with `$HistoryLength` and shorten very large console outputs with
+  Tungsten's heuristic `$OutputSizeLimit`;
 - exit through `Exit`, `Exit[code]`, `Quit`, or `Quit[code]`.
 
 Examples:
@@ -84,6 +86,11 @@ InString[1]
 Out[1]
 % + 10
 DownValues[In]
+$HistoryLength = 2
+$OutputSizeLimit = 80
+Range[100]
+Short[Range[100]]
+Shallow[Range[100], {Infinity, 5}]
 $PreRead = Function[s, StringReplace[s, "aa" -> "1+2"]]
 aa
 $PrePrint = FullForm

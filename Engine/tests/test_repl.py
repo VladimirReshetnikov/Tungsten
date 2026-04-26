@@ -46,6 +46,27 @@ class ReplTests(unittest.TestCase):
         self.assertIn("In[4]:= Plus[1, x]", transcript)
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_run_repl_shortens_large_output_with_output_size_limit(self) -> None:
+        stdin = io.StringIO(
+            "$OutputSizeLimit = 80\n"
+            "Range[100]\n"
+            "$OutputSizeLimit = Infinity\n"
+            "$OutputSizeLimit = 12000\n"
+            "Quit\n"
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        transcript = stdout.getvalue()
+        self.assertIn("Out[1]= 80", transcript)
+        self.assertIn("Out[2]= {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, <<85>>, 96, 97, 98, 99, 100}", transcript)
+        self.assertIn("Out[3]= Infinity", transcript)
+        self.assertIn("Out[4]= 12000", transcript)
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_run_repl_applies_main_loop_hooks(self) -> None:
         stdin = io.StringIO(
             '$PreRead = Function[s, StringReplace[s, "aa" -> "1+2"]]\n'
