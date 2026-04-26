@@ -427,6 +427,85 @@ Roughly in order of expected user-facing impact:
 5. **`Boole` Listable threading**, scoped narrowly to `List` arguments without trying to
    implement `Listable` in general.
 
+## Second-pass implementation (same-day follow-up)
+
+After landing the first pass, I drove the case files through the kernel again and
+implemented the next layer of work. Concretely:
+
+- **C1 — `Map[f, expr, levelspec]`**: implemented. Walks the expression tree postorder
+  using Tungsten's existing levelspec / depth machinery, applying `f` at every position
+  whose level matches the spec. Supports integer ``n``, ``{n}``, ``{m, n}``, and negative
+  levels.
+- **C2 — `Apply[f, expr, levelspec]`**: implemented with the same walker, replacing the
+  head at every matching position. ``Apply[f, expr, {0}]`` is `f[expr]`; ``{0, 1}`` walks
+  the outer head and one level deeper.
+- **C3 — multi-arg `Take` / `Drop`**: implemented as a left-fold of the existing
+  single-spec walker across consecutive levels. Adds `None` as a recognized spec
+  ("select / drop nothing"), which makes idioms like
+  `Drop[matrix, None, 1]` (drop the first column) work.
+- **C4 — `Partition` padding and alignment**: implemented `Partition[expr, n, d, k]`,
+  `Partition[expr, n, d, {kL, kR}]`, and the 5-arg padded form
+  `Partition[expr, n, d, kspec, x]`. Validated against a 19-case kernel ground-truth file:
+  all 19 match.
+- **`Reverse[expr, levelspec]`**: implemented. Note: integer `n` means *only* the
+  n-th level (as documented in Wolfram), not levels 1..n. The previous documentation
+  for the existing `Reverse[expr]` form was correct.
+- **`Range[{n1, n2, ...}]`** iterator-list form, **`Array[f, n, origin]`** /
+  **`Array[f, n, {b1, b2, ...}]`**, and **`DiagonalMatrix[list, k]`** /
+  **`DiagonalMatrix[list, k, n]`** — all implemented.
+- **`Fold[f, expr]` / `FoldList[f, expr]`** (no initial value): implemented; the kernel
+  semantics is to use ``First[expr]`` as the seed and fold over ``Rest[expr]``.
+- **`MapThread[f, lists, n]`** at any depth, including the trivial `n = 0` form which
+  is just `f` applied to the wrapped list.
+- **`NestWhile[..., m]`** with history size ``m``, including the ``m == All`` case and
+  the optional kernel-style `max` iteration limit.
+- **Association merge family**: `Merge`, `GroupBy` (default and arrow forms),
+  `GatherBy`, `Gather`, `KeyComplement`, `KeyUnion` (with `Missing["KeyAbsent", k]`
+  filling), and `KeyIntersection` are all implemented.
+- **Statistical extensions**: `Variance`, `StandardDeviation`, and `Norm` (default
+  Euclidean, p-norm, and L-infinity).
+- **Number-theory extensions**: `PrimePowerQ` and `ChineseRemainder`.
+- **OneIdentity for `Plus` / `Times`**: `Plus[x]` and `Times[x]` now reduce to ``x``
+  for any single argument, matching the kernel. The visible practical effect is that
+  `Plus[{1, 3}]` simplifies to `{1, 3}` (rather than staying inert), which closes a real
+  divergence shown by `Merge[..., Plus]` and similar patterns.
+- **`Boole` Listable threading**: `Boole[{True, False, True}]` now evaluates to
+  `{1, 0, 1}`. Other heads in the "Listable Heads Not Implemented" list are still
+  inert on `List` arguments.
+- **`Position[..., Heads -> True/False]` option**: honored on the trailing-rule form.
+  `Cases` and other pattern-search heads do not yet honor this option.
+- **`FractionalPart` of machine reals** now uses IEEE float semantics, so
+  `FractionalPart[3.7]` is `0.7000000000000002` like the kernel rather than the
+  Decimal-precise `0.7` Tungsten previously returned.
+
+### Final parity sweep (after second pass)
+
+| Suite | Round 0 | Round 1 (first pass) | Round 2 (this section) | Notes on remainder |
+|-------|---------|----------------------|------------------------|---------------------|
+| `cases_arity.json` (70 cases) | 45 | 31 | 6 | `Cases _Real` rendering (B9), `Flatten` multi-list levelspec, `Distribute` Times Orderless, `UnitVector[3]` error semantics. |
+| `cases_more.json` (71 cases) | 50 | 10 | 3 | Machine-real precision quirks, `Last[{}]`/`AssociationMap` error-vs-inert. |
+| `cases_extra.json` (65 cases) | 39 | 12 | 4 | `Plus[1, 2.0, 3]` Real FullForm, `Switch[a, _Symbol]` error semantics, two `##n` Sequence-in-FullForm corner cases. |
+| **Total** | **134/206** | **53/206** | **13/206** | **94 % parity on the probe set.** |
+
+The remaining 13 are all in already-documented divergence territory: B9 Real FullForm
+rendering (`6.` vs `6.``), `Times` Orderless reordering of symbolic terms (we still don't
+implement Orderless), and a couple of "kernel errors here, Tungsten leaves inert" edge
+cases where both sides bail differently.
+
+### Tests added in second pass
+
+`tests/test_expression.py` now includes three new test classes:
+
+- `ArityExtensionTests` — Map/Apply levelspec, multi-arg Take/Drop, Partition padding,
+  Reverse levelspec, Range iterator list, Array origin, DiagonalMatrix offset, Fold/FoldList
+  without init, NestWhile history, MapThread depth, OneIdentity for Plus/Times.
+- `AssociationMergeTests` — Merge, GroupBy (default + arrow), GatherBy, Gather,
+  KeyComplement, KeyUnion, KeyIntersection.
+- `StatisticalAndNumberTheoryExtensionsTests` — Variance, StandardDeviation, Norm,
+  PrimePowerQ, ChineseRemainder, Boole over List, Position with `Heads -> False`.
+
+Total test count: 315 (up from 285 after the first pass and 254 before the deep review).
+
 ## Appendix: case files
 
 All cases used to drive this report are in `C:/tmp/tungsten-review/`:

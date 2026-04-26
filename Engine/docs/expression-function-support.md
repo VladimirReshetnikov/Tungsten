@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-26T19:29:11Z
-- Repository HEAD: a71088d55007ea86a1e13192cd8a437f53057c7c
+- Updated (UTC): 2026-04-26T20:19:44Z
+- Repository HEAD: 335326350cc32d7b58a9a1859f652c068c106dda
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -42,7 +42,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   mutations. Other assignment-like parser heads such as `SetDelayed`, `TagSet`, `TagSetDelayed`,
   `TagUnset`, `UpSet`, `UpSetDelayed`, `AddTo`, `SubtractFrom`, `TimesBy`, and `DivideBy` remain
   syntax-compatible inert expressions.
-- `Take` and `Drop` currently support a single first-level specification only.
+- `Take` and `Drop` now support both the single first-level specification and the matrix-style
+  multi-spec form `Take[m, spec1, spec2, ...]` / `Drop[m, spec1, spec2, ...]`. Each spec uses
+  the full single-level vocabulary (`n`, `All`, `None`, `Span`, `{m, n, s}`, `{n}`, `UpTo[n]`)
+  and slices along consecutive levels.
 - `If`, `Which`, `Switch`, `Piecewise`, and `Pick` currently support only the direct forms listed
   below.
 - `Select`, `Discard`, and `SelectFirst` currently support their direct forms plus the one-argument
@@ -53,8 +56,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `Pick` currently supports selector expressions whose immediate structural shape is compatible
   with the data expression. Nested compatible selectors are supported, but Tungsten does not aim to
   replicate every scalar-selector corner case from the full kernel.
-- `Map` currently supports `Map[f, expr]` only.
-- `Apply` currently supports `Apply[f, expr]` only.
+- `Map` now supports `Map[f, expr]` and `Map[f, expr, levelspec]`. The level spec uses
+  Tungsten's existing `Position` traversal semantics: integer `n` means levels 1..n,
+  `{n}` means level `n` only, and `{m, n}` means the inclusive range. Negative levels
+  count from leaves toward the root.
+- `Apply` now supports `Apply[f, expr]` and `Apply[f, expr, levelspec]`. The level spec
+  selects which subexpressions have their head replaced.
 - `Scan` currently supports `Scan[f, expr]`, `Scan[f, expr, levelspec]`, and the one-argument
   operator form `Scan[f]`.
 - `MapApply` currently supports `MapApply[f, expr]` plus the one-argument operator form
@@ -65,17 +72,24 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `Flatten` currently supports `Flatten[expr]` and `Flatten[expr, n]` where `n` is a non-negative
   integer or `Infinity`.
 - `Through` currently supports only the single-argument direct form.
-- `MapThread` currently supports only level `1`, and currently expects a list of `List`
-  expressions.
+- `MapThread` now supports `MapThread[f, lists]`, `MapThread[f, lists, n]` (parallel-threading
+  depth), and the trivial `MapThread[f, lists, 0]` form that just applies `f` to the immediate
+  list. The parallel `List` structures must agree in shape down to depth `n`.
 - `Distribute` currently supports only the common direct forms
   `Distribute[expr]`, `Distribute[expr, g]`, and `Distribute[expr, g, f]`.
 - `Inner` currently supports first-level compounds of equal length only.
 - `Dot` currently supports `List` vectors and rectangular `List` matrices only.
-- `Array` and `ConstantArray` currently support only the two-argument direct forms without
-  explicit origins or padding specifications.
+- `Array` now supports `Array[f, n]`, `Array[f, n, origin]`, and the per-dimension origin
+  list `Array[f, n, {b1, b2, ...}]` for nested dimensions. The 1-D `Array[f, n, {lo, hi}]`
+  shorthand uses `lo` as the origin. `ConstantArray` is unchanged.
 - `UnitVector` currently supports only the two-argument integer form `UnitVector[n, k]`.
-- `Partition` and `BlockMap` currently support only one-dimensional direct forms with an optional
-  positive integer offset.
+- `Partition` now supports `Partition[expr, n]`, `Partition[expr, n, d]`, the alignment
+  forms `Partition[expr, n, d, k]` and `Partition[expr, n, d, {kL, kR}]` (integer `1` is
+  no-overhang, `-1` is full cyclic, `{kL, kR}` aligns ``list[[1]]`` at position ``kL`` of
+  the first block and ``list[[-1]]`` at position ``kR`` of the last block), and the
+  padded form `Partition[expr, n, d, kspec, x]` (out-of-range positions are filled with
+  ``x`` instead of cyclically wrapping). `BlockMap` still supports only the
+  one-dimensional offset form.
 - `FoldWhile` and `FoldWhileList` currently support the explicit-initial-value forms with optional
   positive history length or `All`, plus an optional trailing-count integer.
 - `FoldPair` and `FoldPairList` currently support the explicit-initial-value forms only. The fold
@@ -92,6 +106,14 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Association-aware exact positions currently apply only to real `Association[...]` expressions, not
   to arbitrary lists of rules.
 - `AssociationMap` currently supports the key-list form only: `AssociationMap[f, {k1, ...}]`.
+  Passing an `Association` directly is left inert; the kernel emits an error there.
+- `Position` accepts an optional trailing `Heads -> True/False` rule and honors it. The
+  `True` (default) value matches the kernel's default and includes head positions;
+  `Heads -> False` excludes them. `Cases` and other pattern-search heads do not yet
+  honor this option in this pass.
+- `Boole` is `Listable` in Tungsten for explicit `List` arguments: `Boole[{True, False, True}]`
+  evaluates to `{1, 0, 1}`. Other heads in the "Listable Heads Not Implemented" list below
+  remain inert on list arguments.
 - `Lookup`, `Keys`, `Values`, `Normal`, `KeyExistsQ`, `KeyMemberQ`, `KeyTake`, `KeyDrop`,
   `KeyMap`, and `KeyValueMap` currently expect an `Association`.
 - Associations in function position support the common single-key lookup form `assoc[key]`,
@@ -448,7 +470,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `ComposeList` | `ComposeList[{f1, ...}, expr]` | Returns the successive values produced by composing functions left to right over an initial expression. | [ComposeList](https://reference.wolfram.com/language/ref/ComposeList) |
 | `Nest` | `Nest[f, expr, n]` | Applies a function repeatedly a fixed number of times. | [Nest](https://reference.wolfram.com/language/ref/Nest) |
 | `NestList` | `NestList[f, expr, n]` | Returns the successive values produced by repeated function application. | [NestList](https://reference.wolfram.com/language/ref/NestList) |
-| `NestWhile` | `NestWhile[f, expr, test]` | Repeats function application while the current value satisfies the predicate. Tungsten currently supports the direct three-argument form only. | [NestWhile](https://reference.wolfram.com/language/ref/NestWhile) |
+| `NestWhile` | `NestWhile[f, expr, test]`, `NestWhile[f, expr, test, m]`, `NestWhile[f, expr, test, m, max]` | Repeats function application while the predicate succeeds. The history-size argument ``m`` controls how many recent values the test receives (default `1`); ``All`` passes the full history. The optional ``max`` is a kernel-style soft iteration limit. | [NestWhile](https://reference.wolfram.com/language/ref/NestWhile) |
 | `NestWhileList` | `NestWhileList[f, expr, test]` | Returns the successive values produced while the current value satisfies the predicate, including the first value that fails the test. Tungsten currently supports the direct three-argument form only. | [NestWhileList](https://reference.wolfram.com/language/ref/NestWhileList) |
 | `FixedPoint` | `FixedPoint[f, expr]`, `FixedPoint[f, expr, n]` | Repeats function application until a structural fixed point is reached. With an explicit `n`, Tungsten follows Wolfram's soft-limit behavior and returns the value after at most `n` iterations. | [FixedPoint](https://reference.wolfram.com/language/ref/FixedPoint) |
 | `FixedPointList` | `FixedPointList[f, expr]`, `FixedPointList[f, expr, n]` | Returns the successive values through the first structural fixed point or through the explicit soft iteration limit. | [FixedPointList](https://reference.wolfram.com/language/ref/FixedPointList) |
@@ -494,6 +516,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Divisors` | `Divisors[n]` for nonzero explicit integers | Returns the increasing list of positive divisors of `\|n\|`. | [Divisors](https://reference.wolfram.com/language/ref/Divisors) |
 | `PrimeQ` | `PrimeQ[n]` for explicit integers | Deterministic for all 64-bit values via Miller–Rabin with the standard witness set; an extended witness list is used for larger inputs. | [PrimeQ](https://reference.wolfram.com/language/ref/PrimeQ) |
 | `CompositeQ` | `CompositeQ[n]` for explicit integers | Returns `True` iff `n >= 4` and `n` is not prime. | [CompositeQ](https://reference.wolfram.com/language/ref/CompositeQ) |
+| `PrimePowerQ` | `PrimePowerQ[n]` for explicit integers | Returns `True` iff `n >= 2` factors as a single prime base. | [PrimePowerQ](https://reference.wolfram.com/language/ref/PrimePowerQ) |
+| `ChineseRemainder` | `ChineseRemainder[{r1, ...}, {m1, ...}]` for explicit-integer pairs | Returns the smallest non-negative integer ``x`` satisfying ``Mod[x, mi] == ri`` for every `i`. Inconsistent systems raise a Tungsten evaluation error. | [ChineseRemainder](https://reference.wolfram.com/language/ref/ChineseRemainder) |
 | `EulerPhi` | `EulerPhi[n]` for positive explicit integers | Returns the Euler totient of `n`. | [EulerPhi](https://reference.wolfram.com/language/ref/EulerPhi) |
 | `MoebiusMu` | `MoebiusMu[n]` for positive explicit integers | Returns `0`, `1`, or `-1` per the Möbius function. | [MoebiusMu](https://reference.wolfram.com/language/ref/MoebiusMu) |
 | `PrimePi` | `PrimePi[n]` for non-negative explicit integers | Counts primes `<= n`. Uses an explicit sieve for `n <= 5_000_000` and falls through to incremental primality otherwise. | [PrimePi](https://reference.wolfram.com/language/ref/PrimePi) |
@@ -509,12 +533,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `KroneckerDelta` | `KroneckerDelta[]`, `KroneckerDelta[i]`, `KroneckerDelta[i1, ...]` | Returns `1` when all supported explicit integer arguments are equal, otherwise `0`. The one-argument form tests whether the integer is `0`. | [KroneckerDelta](https://reference.wolfram.com/language/ref/KroneckerDelta) |
 | `DiscreteDelta` | `DiscreteDelta[]`, `DiscreteDelta[i1, ...]` | Returns `1` when every supported explicit integer argument is `0`, otherwise `0`. | [DiscreteDelta](https://reference.wolfram.com/language/ref/DiscreteDelta) |
 | `Ramp` | `Ramp[n]` | Returns `0` for negative explicit real-valued numbers and the argument itself for nonnegative explicit real-valued numbers. | [Ramp](https://reference.wolfram.com/language/ref/Ramp) |
-| `Take` | `Take[expr, n]`, `Take[expr, All]`, `Take[expr, span]`, `Take[expr, {n}]`, `Take[expr, {m, n}]`, `Take[expr, {m, n, s}]` | Selects a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Take](https://reference.wolfram.com/language/ref/Take) |
-| `Drop` | `Drop[expr, n]`, `Drop[expr, All]`, `Drop[expr, span]`, `Drop[expr, {n}]`, `Drop[expr, {m, n}]`, `Drop[expr, {m, n, s}]` | Removes a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Drop](https://reference.wolfram.com/language/ref/Drop) |
+| `Take` | `Take[expr, n]`, `Take[expr, All]`, `Take[expr, None]`, `Take[expr, span]`, `Take[expr, {n}]`, `Take[expr, {m, n}]`, `Take[expr, {m, n, s}]`, plus the multi-spec form `Take[expr, spec1, spec2, ...]` for matrix slicing | Selects a slice while preserving the original head. The multi-spec form slices along consecutive levels (`Take[matrix, 2, 3]` takes 2 rows then 3 columns from each row). `None` selects nothing. For associations, supported specifications are still numeric or span-style only. | [Take](https://reference.wolfram.com/language/ref/Take) |
+| `Drop` | `Drop[expr, n]`, `Drop[expr, All]`, `Drop[expr, None]`, `Drop[expr, span]`, `Drop[expr, {n}]`, `Drop[expr, {m, n}]`, `Drop[expr, {m, n, s}]`, plus the multi-spec form `Drop[expr, spec1, spec2, ...]` | Removes a slice while preserving the original head. The multi-spec form drops along consecutive levels. `None` drops nothing. For associations, supported specifications are still numeric or span-style only. | [Drop](https://reference.wolfram.com/language/ref/Drop) |
 | `Append` | `Append[expr, item]` | Adds an argument at the end of a nonatomic expression. For associations, Tungsten expects a rule and updates or appends the corresponding key. | [Append](https://reference.wolfram.com/language/ref/Append) |
 | `Prepend` | `Prepend[expr, item]` | Adds an argument at the beginning of a nonatomic expression. For associations, Tungsten expects a rule and updates or prepends the corresponding key. | [Prepend](https://reference.wolfram.com/language/ref/Prepend) |
 | `Join` | `Join[expr1, expr2, ...]` | Concatenates expressions that share the same head. For associations, Tungsten concatenates entries and reapplies last-occurrence-wins normalization. | [Join](https://reference.wolfram.com/language/ref/Join) |
-| `Reverse` | `Reverse[expr]` | Reverses the order of the immediate arguments of an expression. Associations reverse entry order. | [Reverse](https://reference.wolfram.com/language/ref/Reverse) |
+| `Reverse` | `Reverse[expr]`, `Reverse[expr, n]`, `Reverse[expr, {n}]`, `Reverse[expr, {min, max}]` | Reverses the immediate arguments at level 1 (default), at one specific level (integer `n` is shorthand for `{n}`), at the listed level, or across an inclusive range of levels. Associations reverse entry order. | [Reverse](https://reference.wolfram.com/language/ref/Reverse) |
 | `RotateLeft` | `RotateLeft[expr]`, `RotateLeft[expr, n]` | Rotates immediate arguments to the left. Associations rotate entry order. | [RotateLeft](https://reference.wolfram.com/language/ref/RotateLeft) |
 | `RotateRight` | `RotateRight[expr]`, `RotateRight[expr, n]` | Rotates immediate arguments to the right. Associations rotate entry order. | [RotateRight](https://reference.wolfram.com/language/ref/RotateRight) |
 | `Flatten` | `Flatten[expr]`, `Flatten[expr, n]`, `Flatten[expr, Infinity]` | Flattens nested subexpressions that have the same head as the outer expression. | [Flatten](https://reference.wolfram.com/language/ref/Flatten) |
@@ -522,32 +546,32 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `ReplaceAt` | `ReplaceAt[expr, rule, pos]`, `ReplaceAt[expr, {rule1, ...}, pos]` | Applies replacement rules only at explicitly targeted exact positions. If the target position exists but none of the supplied rules matches there, the result is left unchanged. Association positions reuse the same key-aware exact-path syntax as `Part`. | [ReplaceAt](https://reference.wolfram.com/language/ref/ReplaceAt) |
 | `ReplacePart` | `ReplacePart[expr, rule]`, `ReplacePart[expr, {rule1, ...}]` | Replaces exact-position parts using explicit rules. For associations, top-level selectors replace entry values, not entire rules. | [ReplacePart](https://reference.wolfram.com/language/ref/ReplacePart) |
 | `Scan` | `Scan[f, expr]`, `Scan[f, expr, levelspec]`, operator form `Scan[f]` | Applies a function for structural side effects and returns `Null`. Tungsten does not model side effects, but it still applies supported callables structurally over the visited levels. | [Scan](https://reference.wolfram.com/language/ref/Scan) |
-| `Apply` | `Apply[f, expr]` | Replaces the head of a nonatomic expression with another expression. For associations, Tungsten applies over values, producing `f[value1, ...]`. | [Apply](https://reference.wolfram.com/language/ref/Apply) |
+| `Apply` | `Apply[f, expr]`, `Apply[f, expr, levelspec]` | Replaces the head of a nonatomic expression with another expression. With a level spec, replaces heads at every position whose level matches. For associations, Tungsten applies over values, producing `f[value1, ...]`. | [Apply](https://reference.wolfram.com/language/ref/Apply) |
 | `MapApply` | `MapApply[f, expr]`, infix `@@@`, and operator form `MapApply[f]` | Replaces the heads of immediate nonatomic elements with `f` while preserving the outer head. | [MapApply](https://reference.wolfram.com/language/ref/MapApply) |
-| `Map` | `Map[f, expr]` | Applies a function structurally to each immediate argument. For associations, Tungsten maps over values and keeps keys unchanged. | [Map](https://reference.wolfram.com/language/ref/Map) |
+| `Map` | `Map[f, expr]`, `Map[f, expr, levelspec]` | Applies a function structurally to each immediate argument by default; with a level spec, applies at every subexpression whose level matches the spec. For associations, Tungsten maps over values and keeps keys unchanged. | [Map](https://reference.wolfram.com/language/ref/Map) |
 | `MapAll` | `MapAll[f, expr]`, operator form `MapAll[f]` | Applies a function at every visited node, including leaves and rebuilt compound expressions. Associations are traversed through values. | [MapAll](https://reference.wolfram.com/language/ref/MapAll) |
 | `MapIndexed` | `MapIndexed[f, expr]`, `MapIndexed[f, expr, 1]`, operator form `MapIndexed[f]` | Maps at the first level and supplies each immediate position as a one-based index list. Associations supply key-aware positions such as `{Key[k]}` while preserving the original keys. | [MapIndexed](https://reference.wolfram.com/language/ref/MapIndexed) |
 | `MapAt` | `MapAt[f, expr, pos]` | Applies a function structurally at one or more exact positions. Association positions target values using the same key-aware position syntax as `Part`. | [MapAt](https://reference.wolfram.com/language/ref/MapAt) |
 | `Through` | `Through[expr]` | Threads the arguments of a call through a nonatomic head expression. Associations are supported as function collections in the head position. | [Through](https://reference.wolfram.com/language/ref/Through) |
-| `MapThread` | `MapThread[f, {{...}, ...}]`, `MapThread[f, {{...}, ...}, 1]` | Threads parallel `List` expressions by position and applies a function to each tuple. | [MapThread](https://reference.wolfram.com/language/ref/MapThread) |
+| `MapThread` | `MapThread[f, {l1, l2, ...}]`, `MapThread[f, lists, n]` | Threads parallel `List` expressions by position and applies a function to each tuple. The depth ``n`` (default `1`) selects the level at which leaves are paired; the parallel structures must agree in shape down to that depth. | [MapThread](https://reference.wolfram.com/language/ref/MapThread) |
 | `Thread` | `Thread[expr]`, `Thread[expr, head]` | Threads immediate arguments that share a common head into a new outer expression with that head. | [Thread](https://reference.wolfram.com/language/ref/Thread) |
 | `Distribute` | `Distribute[expr]`, `Distribute[expr, g]`, `Distribute[expr, g, f]` | Distributes a nonatomic outer expression over immediate arguments with the chosen distributed head. Tungsten currently implements the common one-dimensional direct forms only. | [Distribute](https://reference.wolfram.com/language/ref/Distribute) |
 | `Outer` | `Outer[f, seq1, ...]` | Forms the outer combination of several nonatomic expressions while preserving each sequence's head nesting. | [Outer](https://reference.wolfram.com/language/ref/Outer) |
 | `Inner` | `Inner[f, left, right, g]` | Combines corresponding first-level elements with `f` and then combines the results with `g`. Tungsten currently supports only equal-length first-level compounds. | [Inner](https://reference.wolfram.com/language/ref/Inner) |
 | `Dot` | `Dot[a, b, ...]` and infix `.` | Supports `List` vector-vector, matrix-vector, vector-matrix, and matrix-matrix products, then re-evaluates the generated arithmetic so all-integer products simplify. | [Dot](https://reference.wolfram.com/language/ref/Dot) |
 | `Tuples` | `Tuples[{{...}, ...}]`, `Tuples[items, n]` | Returns Cartesian products either from an explicit list of sequences or by repeating one base sequence. | [Tuples](https://reference.wolfram.com/language/ref/Tuples) |
-| `Array` | `Array[f, dims]` | Builds nested `List` arrays by calling `f` on one-based integer index tuples. | [Array](https://reference.wolfram.com/language/ref/Array) |
+| `Array` | `Array[f, dims]`, `Array[f, dims, origin]`, `Array[f, dims, {b1, b2, ...}]` | Builds nested `List` arrays by calling `f` on integer index tuples starting at the requested origin. The 1-D `Array[f, n, {lo, hi}]` shorthand uses ``lo`` as the origin and ignores ``hi``. | [Array](https://reference.wolfram.com/language/ref/Array) |
 | `ConstantArray` | `ConstantArray[value, dims]` | Builds nested `List` arrays filled with a constant value. | [ConstantArray](https://reference.wolfram.com/language/ref/ConstantArray) |
-| `Range` | `Range[n]`, `Range[min, max]`, `Range[min, max, step]` with explicit integers | Builds explicit integer ranges using Wolfram's inclusive end behavior. | [Range](https://reference.wolfram.com/language/ref/Range) |
+| `Range` | `Range[n]`, `Range[min, max]`, `Range[min, max, step]`, plus the iterator-list form `Range[{n1, n2, ...}]` | Builds explicit integer ranges using Wolfram's inclusive end behavior. The iterator-list form returns a list of one-argument `Range` results. | [Range](https://reference.wolfram.com/language/ref/Range) |
 | `UnitVector` | `UnitVector[n, k]` with explicit integers | Builds a one-dimensional integer unit vector with a single `1` at the requested one-based position. | [UnitVector](https://reference.wolfram.com/language/ref/UnitVector) |
 | `IdentityMatrix` | `IdentityMatrix[n]` with explicit integer `n` | Builds a square integer identity matrix as nested `List` expressions. | [IdentityMatrix](https://reference.wolfram.com/language/ref/IdentityMatrix) |
-| `DiagonalMatrix` | `DiagonalMatrix[list]` | Builds a square matrix with the supplied diagonal values and explicit integer zeros elsewhere. | [DiagonalMatrix](https://reference.wolfram.com/language/ref/DiagonalMatrix) |
-| `Partition` | `Partition[expr, n]`, `Partition[expr, n, d]` | Splits a first-level sequence into overlapping or non-overlapping blocks while preserving the original head inside each block. | [Partition](https://reference.wolfram.com/language/ref/Partition) |
+| `DiagonalMatrix` | `DiagonalMatrix[list]`, `DiagonalMatrix[list, k]`, `DiagonalMatrix[list, k, n]` | Builds a square matrix (default size `len(list) + |k|`) with the supplied diagonal values placed at offset `k` (super-diagonal for `k > 0`, sub-diagonal for `k < 0`) and integer zeros elsewhere. The third argument explicitly sets the matrix size. | [DiagonalMatrix](https://reference.wolfram.com/language/ref/DiagonalMatrix) |
+| `Partition` | `Partition[expr, n]`, `Partition[expr, n, d]`, `Partition[expr, n, d, k]`, `Partition[expr, n, d, {kL, kR}]`, `Partition[expr, n, d, kspec, x]` | Splits a first-level sequence into blocks. The 4-arg alignment forms align ``list[[1]]`` at position ``kL`` of the first block and ``list[[-1]]`` at position ``kR`` of the last block; integer `k=1` is no-overhang, `k=-1` is fully cyclic. Out-of-range positions wrap cyclically by default; the 5-arg form fills them with the supplied padding value `x`. | [Partition](https://reference.wolfram.com/language/ref/Partition) |
 | `BlockMap` | `BlockMap[f, expr, n]`, `BlockMap[f, expr, n, d]` | Applies a function to first-level blocks of a sequence and returns the resulting blocks in a `List`. | [BlockMap](https://reference.wolfram.com/language/ref/BlockMap) |
 | `TakeList` | `TakeList[expr, specs]` | Repeatedly takes prefixes from a sequence according to a list of specifications and returns the collected pieces. | [TakeList](https://reference.wolfram.com/language/ref/TakeList) |
 | `TakeDrop` | `TakeDrop[expr, spec]` | Returns `{Take[expr, spec], Drop[expr, spec]}`. | [TakeDrop](https://reference.wolfram.com/language/ref/TakeDrop) |
-| `Fold` | `Fold[f, init, expr]` | Left-folds a function over the immediate elements of a sequence. | [Fold](https://reference.wolfram.com/language/ref/Fold) |
-| `FoldList` | `FoldList[f, init, expr]` | Returns the successive states produced by a left fold. | [FoldList](https://reference.wolfram.com/language/ref/FoldList) |
+| `Fold` | `Fold[f, init, expr]`, `Fold[f, expr]` | Left-folds a function over the immediate elements of a sequence. The two-argument form uses ``First[expr]`` as the initial value. | [Fold](https://reference.wolfram.com/language/ref/Fold) |
+| `FoldList` | `FoldList[f, init, expr]`, `FoldList[f, expr]` | Returns the successive states produced by a left fold. The two-argument form folds over ``Rest[expr]`` with ``First[expr]`` as the initial value, including that initial value as the leading entry. | [FoldList](https://reference.wolfram.com/language/ref/FoldList) |
 | `FoldWhile` | `FoldWhile[f, init, expr, test]`, plus optional history and trailing-count arguments | Left-folds until the predicate fails on the requested result history, returning the last retained result. | [FoldWhile](https://reference.wolfram.com/language/ref/FoldWhile) |
 | `FoldWhileList` | `FoldWhileList[f, init, expr, test]`, plus optional history and trailing-count arguments | Returns the retained result history for `FoldWhile`, including the first failing result when the default trailing count is used. | [FoldWhileList](https://reference.wolfram.com/language/ref/FoldWhileList) |
 | `FoldPair` | `FoldPair[f, init, expr]`, `FoldPair[f, init, expr, proj]` | Expects each fold step to return a two-element list `{x, y}` and returns the last projected value. Tungsten's default projection is the first element. | [FoldPair](https://reference.wolfram.com/language/ref/FoldPair) |
@@ -576,6 +600,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Total` | `Total[list]`, `Total[matrix]`, `Total[assoc]` | Sums first-level elements; for nested same-length lists, sums column-wise. Multi-argument and explicit-levelspec forms (`Total[expr, n]`, `Total[expr, {n}]`) are not yet implemented. | [Total](https://reference.wolfram.com/language/ref/Total) |
 | `Mean` | `Mean[list]`, `Mean[assoc]` | Returns the arithmetic mean of explicit numeric or symbolic elements; the result is divided through Tungsten's existing arithmetic, so symbolic means stay structural (e.g., `Mean[{1, 2, x}]` is `(3 + x)/3`). Empty input is rejected. | [Mean](https://reference.wolfram.com/language/ref/Mean) |
 | `Median` | `Median[list]`, `Median[assoc]` | Returns the median of explicit real-valued numeric elements. Tungsten currently expects numeric values; symbolic medians and the variants over distributions are not implemented. | [Median](https://reference.wolfram.com/language/ref/Median) |
+| `Variance` | `Variance[list]`, `Variance[assoc]` | Sample variance ``Sum[(x - Mean)^2] / (n - 1)`` over numeric or symbolic elements. Requires at least two elements. | [Variance](https://reference.wolfram.com/language/ref/Variance) |
+| `StandardDeviation` | `StandardDeviation[list]`, `StandardDeviation[assoc]` | `Sqrt` of `Variance`. | [StandardDeviation](https://reference.wolfram.com/language/ref/StandardDeviation) |
+| `Norm` | `Norm[v]`, `Norm[v, p]`, `Norm[v, Infinity]` | Vector norm of explicit numeric `List` arguments. The default is the Euclidean norm; positive integer ``p`` selects the p-norm; `Infinity` selects the supremum norm. | [Norm](https://reference.wolfram.com/language/ref/Norm) |
 | `Tally` | `Tally[list]`, `Tally[list, test]`, `Tally[assoc]` | Returns a list of `{value, count}` pairs in first-occurrence order. With a binary test, equality is determined by the test rather than structural identity. | [Tally](https://reference.wolfram.com/language/ref/Tally) |
 | `Counts` | `Counts[list]`, `Counts[assoc]` | Returns an `Association` mapping each distinct element to the number of occurrences, preserving first-occurrence order. | [Counts](https://reference.wolfram.com/language/ref/Counts) |
 | `Catenate` | `Catenate[list-of-lists]`, `Catenate[list-of-assocs]`, `Catenate[<\|...\|>]` | Concatenates the value sequences of the immediate elements; associations contribute their values. | [Catenate](https://reference.wolfram.com/language/ref/Catenate) |
@@ -598,6 +625,13 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `PadLeft` | `PadLeft[list, n]`, `PadLeft[list, n, fill]` | One-dimensional left padding to length `n`. Trims when `n` is smaller than the current length. The default fill is `0`. | [PadLeft](https://reference.wolfram.com/language/ref/PadLeft) |
 | `PadRight` | `PadRight[list, n]`, `PadRight[list, n, fill]` | One-dimensional right padding to length `n`. Trims when `n` is smaller than the current length. The default fill is `0`. | [PadRight](https://reference.wolfram.com/language/ref/PadRight) |
 | `KeySort` | `KeySort[assoc]`, `KeySort[assoc, p]` | Reorders the association by canonical key order, or by a supplied two-argument ordering predicate. | [KeySort](https://reference.wolfram.com/language/ref/KeySort) |
+| `Merge` | `Merge[{a1, a2, ...}, f]` | Combines a list of associations by collecting per-key values into a `List` and applying ``f`` to that list. Preserves first-seen key order. | [Merge](https://reference.wolfram.com/language/ref/Merge) |
+| `GroupBy` | `GroupBy[list, f]`, `GroupBy[list, f -> g]` | Groups elements by ``f``-key into an `Association` mapping each key to its `List` of grouped elements. The arrow form additionally applies ``g`` to each group's value list. | [GroupBy](https://reference.wolfram.com/language/ref/GroupBy) |
+| `GatherBy` | `GatherBy[list, f]` | Returns a list of lists, gathering elements that share the same ``f``-key (regardless of position). | [GatherBy](https://reference.wolfram.com/language/ref/GatherBy) |
+| `Gather` | `Gather[list]` | Like `GatherBy` with the identity key. Groups equal elements (structural identity) into sublists. | [Gather](https://reference.wolfram.com/language/ref/Gather) |
+| `KeyComplement` | `KeyComplement[{a1, a2, ...}]` | Returns the entries of ``a1`` whose keys appear in no later association in the list. | [KeyComplement](https://reference.wolfram.com/language/ref/KeyComplement) |
+| `KeyUnion` | `KeyUnion[{a1, a2, ...}]` | Returns a list of associations all sharing the union of keys; missing values are filled with `Missing["KeyAbsent", k]`. | [KeyUnion](https://reference.wolfram.com/language/ref/KeyUnion) |
+| `KeyIntersection` | `KeyIntersection[{a1, a2, ...}]` | Returns a list of associations all sharing the keys present in every input; each association keeps its own value for those keys. | [KeyIntersection](https://reference.wolfram.com/language/ref/KeyIntersection) |
 | `ToUpperCase` | `ToUpperCase[s]`, `ToUpperCase[{s1, ...}]` | Threads over `List` inputs. Wraps Python's Unicode `str.upper`. | [ToUpperCase](https://reference.wolfram.com/language/ref/ToUpperCase) |
 | `ToLowerCase` | `ToLowerCase[s]`, `ToLowerCase[{s1, ...}]` | Threads over `List` inputs. Wraps Python's Unicode `str.lower`. | [ToLowerCase](https://reference.wolfram.com/language/ref/ToLowerCase) |
 | `Capitalize` | `Capitalize[s]`, `Capitalize[{s1, ...}]` | Capitalizes the first character; subsequent characters are unchanged. The kernel's word-list and dictionary modes are not implemented. | [Capitalize](https://reference.wolfram.com/language/ref/Capitalize) |
@@ -740,10 +774,11 @@ not. These heads therefore stay inert on list arguments unless the support table
 `Plus`, `Times`, `Power`, `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, `GreaterEqual`,
 `UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`, `Quotient`, `Min` (per-list-arg
 fold form is supported), `Max` (likewise), `Clip`, `KroneckerDelta`, `DiscreteDelta`, `Ramp`,
-`Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, `Sqrt`, `Boole`, `PrimeQ`,
+`Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, `Sqrt`, `PrimeQ`,
 `CompositeQ`, `EulerPhi`, `MoebiusMu`, and `IntegerLength`. The per-element `Min`/`Max` over a
-single wrapping `List` is the one explicit exception — the docs spell it out as a supported form
-because it is the by-far-most-common Wolfram idiom for taking a list extremum.
+single wrapping `List`, plus `Boole[{...}]` over a `List` of Booleans, are the explicit
+exceptions where Tungsten honors the kernel's Listable threading because those are by far the
+most common Wolfram idioms.
 
 This does not apply to `Function[..., Listable]`: Tungsten honors `Listable` when it is explicitly
 supplied as a third-argument pure-function attribute.

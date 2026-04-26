@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T19:29:11Z
-- Repository HEAD: a71088d55007ea86a1e13192cd8a437f53057c7c
+- Updated (UTC): 2026-04-26T20:19:44Z
+- Repository HEAD: 335326350cc32d7b58a9a1859f652c068c106dda
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -128,19 +128,22 @@ The current workspace is built around seven complementary capabilities:
    `DigitQ`, `LetterQ`, and `EvenQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
    `Min`/`Max` (with single-list-argument fold), `Clip`, and `KroneckerDelta`, real-rounding heads
    `Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, and `Sqrt` over the explicit-number
-   subset, number-theory heads `GCD`, `LCM`, `Divisors`, `PrimeQ`, `CompositeQ`, `EulerPhi`,
-   `MoebiusMu`, `Prime`, `PrimePi`, `NextPrime`, `PowerMod`, `IntegerLength`, `IntegerDigits`,
-   `FromDigits`, and bitwise `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`,
+   subset, number-theory heads `GCD`, `LCM`, `Divisors`, `PrimeQ`, `CompositeQ`, `PrimePowerQ`,
+   `EulerPhi`, `MoebiusMu`, `Prime`, `PrimePi`, `NextPrime`, `PowerMod`, `ChineseRemainder`,
+   `IntegerLength`, `IntegerDigits`, `FromDigits`, and bitwise
+   `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`,
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
    `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot`, array and sequence builders
    such as `Array`, `Range`, `Partition`, and `BlockMap`, search and de-duplication heads such as
    `FirstCase`, `Position`, and `DeleteDuplicates`, statistical helpers `Mean`, `Median`,
-   `Tally`, `Counts`, `Catenate`, `Differences`, `Accumulate`, `Riffle`, `Total`, `Count`,
-   `AllTrue`/`AnyTrue`/`NoneTrue`, `ContainsAll`/`ContainsAny`/`ContainsExactly`/`ContainsNone`,
+   `Variance`, `StandardDeviation`, `Norm`, `Tally`, `Counts`, `Catenate`, `Differences`,
+   `Accumulate`, `Riffle`, `Total`, `Count`, `AllTrue`/`AnyTrue`/`NoneTrue`,
+   `ContainsAll`/`ContainsAny`/`ContainsExactly`/`ContainsNone`,
    combinatorial helpers `Subsets`, `Permutations`, `Union`, `Intersection`, `Complement`, and
-   one-dimensional `PadLeft` and `PadRight`, byte and character heads such as `ByteArray`,
+   one-dimensional `PadLeft` and `PadRight`, association-merge helpers `Merge`, `GroupBy`,
+   `GatherBy`, `Gather`, `KeyComplement`, `KeyUnion`, and `KeyIntersection`, byte and character heads such as `ByteArray`,
    `BaseEncode`, `BaseDecode`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`,
    `StringInsert`, `StringReverse`, `StringSplit`, `StringRiffle`, `StringTrim`,
    `StringPadLeft`/`StringPadRight`, `StringRepeat`, `StringCount`, `ToUpperCase`/`ToLowerCase`,
