@@ -94,7 +94,7 @@ The current Tungsten package is composed of the following modules.
 | `expression_evaluator.py` | Dispatch one evaluated expression to the appropriate built-in family. | `expression.py` |
 | `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, integer-number-theory functions, real-rounding heads, and the explicit-number subset of special functions. | `expression.py` |
 | `expression_patterns.py` | Match ordinary expression patterns and implement replacement/search helpers. | `expression.py` |
-| `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `rules_for_kind`) and the routing seam for compound-LHS Set / SetDelayed plus planned UpSet / TagSet support. | `expression.py` |
+| `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `remove_definitions`, `rules_for_kind`) and the routing seam for compound-LHS Set / SetDelayed plus tagged TagSet / TagSetDelayed support. | `expression.py` |
 | `expression_scoping.py` | Home for the lexical/dynamic scoping constructs. Owns ``With[bindings, body]`` (capture-avoiding substitution backed by `expression._substitute_named_symbols_in_expr`) and ``Module[{locals}, body]`` (fresh-symbol allocation through `SymbolRegistry.allocate_module_local_symbols` plus capture-avoiding rename of `body` through `expression._rename_bound_symbols_in_expr`). ``Block`` remains a stub that emits a clear ``Block::nyet`` message on call. | `expression.py` |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
@@ -222,9 +222,9 @@ The expression implementation is now split across a small facade plus family mod
   `Definition` dataclass and the ``OwnValues`` / ``DownValues`` / ``UpValues`` / ``SubValues`` /
   ``NValues`` ordered-list contract — plus the LHS classifier
   (``classify_assignment_lhs``) that routes Set / SetDelayed / UpSet / TagSet
-  assignments to the right value list. Bare-symbol Set / SetDelayed and ordinary compound-LHS
-  Set / SetDelayed both write through this surface today; UpSet / TagSet remain the next
-  assignment families to wire into the same seam.
+  assignments to the right value list. Bare-symbol Set / SetDelayed, ordinary compound-LHS
+  Set / SetDelayed, and TagSet / TagSetDelayed write through this surface today; UpSet remains
+  the next direct up-value assignment family to wire into the same seam.
 - `expression_scoping.py` owns the lexical/dynamic scoping constructs.
   ``With[bindings, body]`` parses each binding (``Set`` evaluates the RHS once in the
   outer scope; ``SetDelayed`` holds it), builds a substitution map, and applies the
