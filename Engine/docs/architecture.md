@@ -89,7 +89,11 @@ The current Tungsten package is composed of the following modules.
 | `wolfram_strings.py` | Own shared Wolfram string literal escaping, parsing, and inline-box segmentation. | Local text parsing only |
 | `notebook.py` | Parse, inspect, render, and patch notebook files without a kernel. | Local text parsing only |
 | `inline_boxes.py` | Extract box-bearing objects from saved notebook cells and compose inline-box string literals. | `notebook.py`, `wolfram_strings.py` |
-| `expression.py` | Parse Wolfram expressions and inertly evaluate a small structural built-in subset. | Local tokenizer/parser only |
+| `expression.py` | Own the expression AST facade, evaluation session state, public compatibility imports, and structural helpers not yet split out. | `expression_parser.py`, `expression_evaluator.py` through lazy wrappers |
+| `expression_parser.py` | Tokenize/parse Wolfram InputForm/FullForm text and lower the supported StandardForm box subset. | `expression.py`, `wolfram_strings.py` |
+| `expression_evaluator.py` | Dispatch one evaluated expression to the appropriate built-in family. | `expression.py` |
+| `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, and integer-number-theory functions. | `expression.py` |
+| `expression_patterns.py` | Match ordinary expression patterns and implement replacement/search helpers. | `expression.py` |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
 | `assistant.py` | Automate Notebook Assistant for a selected source cell and optionally insert code below it. | `kernel.py`, `notebook.py` |
@@ -112,7 +116,7 @@ The current Tungsten package is composed of the following modules.
          ┌────────────────────┼─────────────────────┐
          │                    │                     │
          ▼                    ▼                     ▼
-     kernel.py           notebook.py          expression.py
+     kernel.py           notebook.py          expression subsystem
          │                    │
          │                    ├───────┬──────┐
          ▼                    ▼       ▼      │
@@ -196,12 +200,25 @@ It supports:
 - appending/inserting/replacing cells;
 - round-tripping notebook text back to disk.
 
-### Expression AST nodes
+### Expression AST Nodes
 
 Defined in `expression.py`, these carry the general Wolfram expression model used by the inert
 parser/evaluator. The exact node types are owned by that module, but architecturally the important
 point is that they are separate from `NotebookDocument` and deliberately not reused for notebook
 structure.
+
+The expression implementation is now split across a small facade plus family modules:
+
+- `expression_parser.py` owns tokenization, Pratt parsing, and supported StandardForm box
+  interpretation.
+- `expression_evaluator.py` owns the large single-step built-in dispatch table.
+- `expression_arithmetic.py` owns explicit-number, relation, Boolean, predicate, and integer
+  number-theory evaluator rules.
+- `expression_patterns.py` owns ordinary expression pattern matching, replacements, and structural
+  search helpers.
+- `expression.py` remains the compatibility import surface and still hosts shared expression data
+  types, session state, formatting, strings, associations, functional/list operations, and other
+  built-in families awaiting future extraction.
 
 ## Workflow architecture
 
@@ -380,13 +397,17 @@ disk.
 The expression subsystem is separate from notebooks because the problem shape is different.
 
 1. The caller provides source text plus an explicit form: `input`, `fullform`, or `standard`.
-2. `expression.py` tokenizes the input.
-3. A parser with operator precedence and Wolfram-specific surface rules builds an AST.
+2. `expression_parser.py` tokenizes the input.
+3. The parser applies operator precedence and Wolfram-specific surface rules to build an AST.
 4. The AST is rendered back to canonical `InputForm` and `FullForm`.
-5. If requested, Tungsten applies a deliberately small inert evaluator for structural built-ins such
-   as `Length`, `Depth`, `Head`, `Part`, `Extract`, and `Level`.
+5. If requested, `expression.py` runs the outer evaluation loop and delegates single-step built-in
+   dispatch to `expression_evaluator.py`, which calls family modules such as
+   `expression_arithmetic.py` and `expression_patterns.py`.
 
-This module does not participate in the kernel-backed architecture and is intentionally self-contained.
+This subsystem does not participate in the kernel-backed architecture and is intentionally
+kernel-free. Some extracted modules still depend on `expression.py` as a shared runtime facade;
+that is a deliberate transitional shape that keeps imports stable while allowing parser,
+dispatch, arithmetic, and pattern-matching work to proceed in separate files.
 
 ## Failure model
 

@@ -236,7 +236,7 @@ The current workspace is built around seven complementary capabilities:
         ┌─────────────────────┼─────────────────────┐
         │                     │                     │
         ▼                     ▼                     ▼
-   kernel.py            notebook.py          expression.py
+   kernel.py            notebook.py          expression subsystem
    docs_index.py        frontend.py          assistant.py
                          inline_boxes.py     wolfram_strings.py
         │                     │                     │
@@ -402,7 +402,11 @@ The current documentation should state these boundaries plainly:
 | `src/Tungsten/src/tungsten/kernel.py` | Structured kernel execution wrapper |
 | `src/Tungsten/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
 | `src/Tungsten/src/tungsten/inline_boxes.py` | Inline-box string composition and notebook-cell object extraction |
-| `src/Tungsten/src/tungsten/expression.py` | Kernel-free Wolfram expression parser and inert evaluator |
+| `src/Tungsten/src/tungsten/expression.py` | Kernel-free expression model, public facade, session runtime, structural helpers, and built-in family implementations not yet split out |
+| `src/Tungsten/src/tungsten/expression_parser.py` | Wolfram text tokenizer/parser and StandardForm box-to-expression interpretation |
+| `src/Tungsten/src/tungsten/expression_evaluator.py` | Single-step evaluator dispatch table, separated from the outer evaluation loop |
+| `src/Tungsten/src/tungsten/expression_arithmetic.py` | Arithmetic, numeric-constructor, relation, Boolean, predicate, and integer-number-theory evaluator rules |
+| `src/Tungsten/src/tungsten/expression_patterns.py` | Ordinary expression pattern matching, replacement rules, `Cases`/`DeleteCases`, and pattern-backed control helpers |
 | `src/Tungsten/src/tungsten/parser_corpus.py` | Local parser corpus discovery and Wolfram held-parser comparison |
 | `src/Tungsten/src/tungsten/wolfram_strings.py` | Shared Wolfram string literal and inline-box escape handling |
 | `src/Tungsten/src/tungsten/docs_index.py` | Offline documentation indexing/search |
