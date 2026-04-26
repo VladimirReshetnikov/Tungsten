@@ -203,7 +203,9 @@ it is not a drop-in Wolfram kernel:
   Wolfram-style labels and text: `InputForm[expr]` prints as `Out[n]//InputForm= ...`,
   `FullForm[expr]` prints as `Out[n]//FullForm= ...`, and the same display selection is used
   for `Print[InputForm[expr]]`, `Print[FullForm[expr]]`, `OutputForm[expr]`, and
-  `StandardForm[expr]`.
+  `StandardForm[expr]`. `TraditionalForm[expr]`, `TeXForm[expr]`, and `MathMLForm[expr]` also
+  select display text: TraditionalForm uses inline boxes, TeXForm uses Tungsten's compact TeX
+  subset, and MathMLForm uses presentation MathML.
 - Syntax errors and evaluation errors are reported with Tungsten messages rather than exact Wolfram
   message names and formatting.
 - The REPL currently reads one input line at a time; full Wolfram multi-line input recovery is out

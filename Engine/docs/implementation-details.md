@@ -726,10 +726,18 @@ that `Check` is not disabled merely because its output is quieted.
   `OneIdentity` matching cases) before invoking direct built-in rules. Attributes remain metadata,
   not a full definition system: Tungsten still does not implement general down-value dispatch,
   package scoping, `Default[...]`, or every specialized kernel behavior implied by attributes.
-- Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, and `StandardForm`) are handled
-  at the display boundary for one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`.
-  Explicit textual conversion such as `ToString[InputForm[expr], InputForm]` still treats the
-  wrapper as ordinary expression structure.
+- Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, `StandardForm`,
+  `TraditionalForm`, `TeXForm`, and `MathMLForm`) are handled at the display boundary for
+  one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`. Explicit textual conversion
+  such as `ToString[InputForm[expr], InputForm]` still treats the classic wrapper forms as
+  ordinary expression structure; textual rendering wrappers (`TraditionalForm`, `TeXForm`, and
+  `MathMLForm`) keep their display meaning even when the requested string form is explicit.
+- `TraditionalForm` is implemented as a deterministic box/text subset over Tungsten's existing
+  StandardForm boxes: it emits `FormBox[..., TraditionalForm]`, returns inline-box strings from
+  `ToString`, and can parse back Tungsten-generated inline boxes through `ToExpression` /
+  `MakeExpression`. `TeXForm` and `MathMLForm` are textual renderers with generated-subset parsers
+  for ordinary arithmetic, powers, fractions, lists, rules, strings, and symbols; they intentionally
+  do not attempt to parse arbitrary TeX or MathML documents.
 - `$RecursionLimit` and `$IterationLimit` are implemented as evaluator guardrails, but their
   counters are Tungsten counters rather than Wolfram kernel internals. The implementation favors
   the Wolfram failure shape: limits generate messages and return the current expression unevaluated
