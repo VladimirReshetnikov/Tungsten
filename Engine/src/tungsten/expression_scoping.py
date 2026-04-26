@@ -159,14 +159,146 @@ def _parse_with_binding(binding: "Expr") -> tuple["Symbol", "Expr", bool]:
 
 
 def module_expr(arguments: Sequence["Expr"]) -> "Expr":
-    """Stub for the upcoming ``Module[locals, body]`` implementation.
+    """Evaluate ``Module[locals, body]`` with lexical scoping.
 
-    ``Module`` will use ``SymbolRegistry.unique_symbol`` (already shipped)
-    to allocate the per-invocation fresh symbols, and the same
-    capture-avoiding renaming pass already used for nested named pure
-    functions to rewrite ``body`` accordingly.
+    Each local is renamed to a fresh symbol ``name$N`` (where ``N`` is a
+    shared per-invocation counter taken from ``SymbolRegistry``); the
+    fresh symbols are real registry entries that participate normally in
+    ``OwnValues`` lookup so the body can mutate them via ``Set`` and
+    inspect them via ``OwnValues``. The body is rewritten through the
+    capture-avoiding rename helper so inner ``Function`` / ``With`` /
+    ``Module`` / ``Block`` constructs continue to shield names that
+    shadow Module's locals.
+
+    Initializer semantics match the kernel: each binding's RHS is
+    evaluated in the **outer scope** (without any of the Module's locals
+    in effect), and the resulting value (for ``Set``) or the held form
+    (for ``SetDelayed``) becomes the fresh symbol's own value. Bindings
+    are therefore *independent* — the second binding's RHS does not see
+    the first binding's value, mirroring Wolfram's
+    ``Module[{x = 1, y = x + 1}, ...]`` -> ``y = (outer) x + 1``
+    behavior.
+
+    The fresh symbols persist in the registry after Module returns so
+    closures over them keep working (``Module[{x = 5}, Function[y, x +
+    y]]`` returns a usable function), matching the kernel.
+
+    Allowed bindings:
+
+    - bare ``Symbol`` (no initializer);
+    - ``Set[name, value]`` (eager initializer);
+    - ``SetDelayed[name, value]`` (delayed initializer).
     """
-    return _emit_unsupported_scoping("Module", arguments, plural="locals")
+    from .expression import (
+        Call,
+        Symbol,
+        WolframEvaluationError,
+        _SYMBOL_REGISTRY,
+        _refresh_canonical_own_values,
+        _rename_bound_symbols_in_expr,
+        evaluate,
+    )
+
+    if len(arguments) != 2:
+        raise WolframEvaluationError(
+            "Module expects a list of locals and a body."
+        )
+    bindings_expr, body = arguments
+
+    if not (isinstance(bindings_expr, Call) and bindings_expr.has_head("List")):
+        raise WolframEvaluationError(
+            "Module expects a List of locals as its first argument."
+        )
+
+    if not bindings_expr.arguments:
+        # ``Module[{}, body]`` is just ``body``.
+        return evaluate(body)
+
+    # Parse bindings. Each entry yields (Symbol name, value | None, delayed flag).
+    parsed_bindings: list[tuple[Symbol, "Expr | None", bool]] = []
+    seen_names: set[str] = set()
+    for binding in bindings_expr.arguments:
+        name, value, delayed = _parse_module_binding(binding)
+        if name.name in seen_names:
+            raise WolframEvaluationError(
+                f"Module has duplicate binding for {name.name!r}."
+            )
+        seen_names.add(name.name)
+        parsed_bindings.append((name, value, delayed))
+
+    # Allocate the fresh per-invocation symbols with a shared counter
+    # suffix so {x, y, z} become {x$N, y$N, z$N} for the same N.
+    locals_in_order = tuple(name for name, _value, _delayed in parsed_bindings)
+    fresh_symbols, fresh_records = _SYMBOL_REGISTRY.allocate_module_local_symbols(locals_in_order)
+
+    # Build the rename map (original short name -> fresh display Symbol)
+    # used both to install initializers (which can refer to other locals
+    # from this Module's binding list — see the next paragraph) and to
+    # rewrite the body.
+    rename_map: dict[str, Symbol] = {
+        name.name: fresh
+        for (name, _value, _delayed), fresh in zip(parsed_bindings, fresh_symbols, strict=True)
+    }
+
+    # Install initializers. Each binding's RHS is evaluated in the
+    # **outer scope**, *not* in a scope where prior locals are bound.
+    # Wolfram's contract: ``Module[{x = 1, y = x + 1}, ...]`` ->
+    # ``y = (outer x) + 1`` because each RHS is independent. So we do
+    # NOT rename the RHS using the rename map.
+    for (_name, value, delayed), fresh_record in zip(
+        parsed_bindings, fresh_records, strict=True
+    ):
+        if value is None:
+            continue
+        if delayed:
+            stored_value = value
+        else:
+            stored_value = evaluate(value)
+        fresh_record.own_value = stored_value
+        _refresh_canonical_own_values(fresh_record)
+        if delayed and fresh_record.own_values_definitions:
+            fresh_record.own_values_definitions[-1].delayed = True
+
+    # Rewrite the body so every reference to a local name resolves to its
+    # fresh symbol; capture-avoidance through inner ``Function`` / ``With``
+    # / ``Module`` / ``Block`` is handled by the shared helper.
+    renamed_body = _rename_bound_symbols_in_expr(body, rename_map)
+    return evaluate(renamed_body)
+
+
+def _parse_module_binding(binding: "Expr") -> tuple["Symbol", "Expr | None", bool]:
+    """Validate and extract one Module binding.
+
+    Accepted shapes:
+
+    - bare ``Symbol`` — no initializer; the local is allocated with no
+      own value.
+    - ``Set[name, value]`` (parser form ``name = value``) — eager
+      initializer; the RHS is evaluated once in the outer scope and
+      becomes the fresh symbol's own value.
+    - ``SetDelayed[name, value]`` (parser form ``name := value``) —
+      delayed initializer; the RHS is stored unevaluated and re-evaluates
+      on each lookup.
+    """
+    from .expression import Call, Symbol, WolframEvaluationError
+
+    if isinstance(binding, Symbol):
+        return binding, None, False
+    if isinstance(binding, Call) and (binding.has_head("Set") or binding.has_head("SetDelayed")):
+        if len(binding.arguments) != 2:
+            raise WolframEvaluationError(
+                "Module binding requires exactly two arguments."
+            )
+        name = binding.arguments[0]
+        value = binding.arguments[1]
+        if not isinstance(name, Symbol):
+            raise WolframEvaluationError(
+                "Module binding names must be bare symbols."
+            )
+        return name, value, binding.has_head("SetDelayed")
+    raise WolframEvaluationError(
+        "Module bindings must be a bare symbol or name = value / name := value."
+    )
 
 
 def block_expr(arguments: Sequence["Expr"]) -> "Expr":

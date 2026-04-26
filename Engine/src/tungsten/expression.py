@@ -1001,6 +1001,34 @@ class SymbolRegistry:
         record = self.ensure_name(name)
         return self._display_symbol_for_record(record)
 
+    def allocate_module_local_symbols(
+        self, locals_in_order: Sequence[Symbol]
+    ) -> tuple[tuple[Symbol, ...], tuple[SymbolRecord, ...]]:
+        """Allocate a fresh symbol per local with a *shared* counter suffix.
+
+        ``Module[{x, y, ...}, body]`` allocates ``x$N``, ``y$N``, … all
+        with the same `N` (the new module-counter value). This helper
+        increments the counter once and returns the freshly-created
+        symbols and their records in the same order as the input. The
+        returned ``Symbol`` instances are display-symbol forms ready to
+        substitute into the body; the records are the live registry
+        entries so the caller can install own values on them.
+
+        Each local symbol's ``OwnValues`` slot is left empty; the caller
+        is responsible for installing initializer values.
+        """
+        self._module_number += 1
+        suffix = self._module_number
+        fresh_symbols: list[Symbol] = []
+        fresh_records: list[SymbolRecord] = []
+        for local in locals_in_order:
+            base_record = self.record_for_symbol(local)
+            fresh_full_name = f"{base_record.context}{base_record.short_name}${suffix}"
+            fresh_record = self.ensure_full_name(fresh_full_name)
+            fresh_symbols.append(self._display_symbol_for_record(fresh_record))
+            fresh_records.append(fresh_record)
+        return tuple(fresh_symbols), tuple(fresh_records)
+
     def unique_symbol(self, base: Expr | None = None) -> Symbol:
         if base is None:
             self._module_number += 1

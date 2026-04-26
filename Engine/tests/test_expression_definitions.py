@@ -378,16 +378,10 @@ class ValueGetterTests(unittest.TestCase):
 
 
 class ScopingStubTests(unittest.TestCase):
-    """``Module`` and ``Block`` are still stubs that emit a clear
-    not-yet-supported message and return the inert call. ``With`` was
-    implemented in a follow-up pass and now performs capture-avoiding
-    substitution; see ``WithEvaluationTests`` for its behavior."""
-
-    def test_module_returns_inert_form(self) -> None:
-        self.assertEqual(
-            _full("Module[{x = 5}, x + 1]"),
-            "Module[List[Set[x, 5]], Plus[x, 1]]",
-        )
+    """``Block`` is still a stub that emits a clear not-yet-supported
+    message and returns the inert call. ``With`` and ``Module`` were
+    implemented in follow-up passes; see ``WithEvaluationTests`` and
+    ``ModuleEvaluationTests`` for their behavior."""
 
     def test_block_returns_inert_form(self) -> None:
         self.assertEqual(
@@ -554,6 +548,181 @@ class WithEvaluationTests(unittest.TestCase):
         # error too. We assert on the inert fallback shape here.
         result = _full("With[{x = 1, x = 2}, x]")
         self.assertEqual(result, "With[List[Set[x, 1], Set[x, 2]], x]")
+
+
+class ModuleEvaluationTests(unittest.TestCase):
+    """``Module[{locals}, body]`` allocates a fresh per-invocation symbol
+    for every local, installs each binding's RHS as the fresh symbol's
+    own value (in the *outer* scope, so bindings are independent), and
+    rewrites ``body`` to refer to the fresh symbols.
+
+    The fresh symbol's exact suffix number is process-counter-dependent,
+    so tests that observe a fresh symbol's full form use a Tungsten-style
+    sentinel (``x$N`` with ``N`` from the registry's
+    ``allocate_module_local_symbols`` helper) and assert on shape rather
+    than literal equality. Tests that observe only the *value* of a
+    Module expression are unaffected by the suffix.
+    """
+
+    def test_basic_immediate_binding(self) -> None:
+        self.assertEqual(_full("Module[{x = 5}, x + 1]"), "6")
+
+    def test_multiple_independent_bindings(self) -> None:
+        self.assertEqual(_full("Module[{x = 5, y = 6}, x + y]"), "11")
+
+    def test_bindings_are_independent_so_second_does_not_see_first(self) -> None:
+        # Each binding's RHS is evaluated in the OUTER scope, so the
+        # second binding's ``x + 1`` sees the OUTER (free) ``x``, not
+        # the local. The local ``x`` separately gets value 5.
+        self.assertEqual(
+            _full("Module[{x = 5, y = x + 1}, {x, y}]"),
+            "List[5, Plus[1, x]]",
+        )
+
+    def test_set_delayed_binding_holds_rhs(self) -> None:
+        self.assertEqual(
+            _full("Module[{x := a + b}, {x, x}]"),
+            "List[Plus[a, b], Plus[a, b]]",
+        )
+
+    def test_no_init_binding_returns_fresh_symbol(self) -> None:
+        # The fresh symbol's exact name varies per session; assert on
+        # the shape and on the ``x$`` prefix instead.
+        rendered = _full("Module[{x}, x + 1]")
+        self.assertTrue(
+            rendered.startswith("Plus[1, x$") and rendered.endswith("]"),
+            f"unexpected fresh-symbol shape: {rendered!r}",
+        )
+
+    def test_no_init_with_init_mixed(self) -> None:
+        self.assertEqual(_full("Module[{x, y = 5}, y * 2]"), "10")
+
+    def test_empty_bindings_returns_evaluated_body(self) -> None:
+        self.assertEqual(_full("Module[{}, 7]"), "7")
+
+    def test_local_can_be_mutated_in_body(self) -> None:
+        # Module makes its locals real symbols, so the body can ``Set``
+        # them. This is what distinguishes Module from With (whose body
+        # would substitute the value directly).
+        self.assertEqual(_full("Module[{x = 5}, x = 99; x]"), "99")
+
+    def test_local_can_be_mutated_in_loop(self) -> None:
+        self.assertEqual(
+            _full(
+                "Module[{counter = 0}, "
+                "counter = counter + 1; counter = counter + 1; counter]"
+            ),
+            "2",
+        )
+
+    def test_nested_inner_module_shadows(self) -> None:
+        self.assertEqual(_full("Module[{x = 1}, Module[{x = 2}, x]]"), "2")
+
+    def test_nested_module_chains_through_outer_locals(self) -> None:
+        # Outer ``x`` is in scope for the inner Module's RHS evaluation
+        # because the inner RHS evaluates in the (outer-of-inner) scope,
+        # which has the outer Module's local in scope.
+        self.assertEqual(
+            _full("Module[{x = 1}, Module[{y = x + 1}, x + y]]"),
+            "3",
+        )
+
+    def test_function_with_shadowing_parameter_blocks_substitution(self) -> None:
+        self.assertEqual(
+            _full("Module[{x = 5}, Function[x, x + 1][7]]"),
+            "8",
+        )
+
+    def test_function_with_non_shadowed_parameter_picks_up_local(self) -> None:
+        self.assertEqual(
+            _full("Module[{x = 5}, Function[y, x + y][3]]"),
+            "8",
+        )
+
+    def test_with_evaluating_into_module_works(self) -> None:
+        # ``With``'s substitution flows through the inner Module's
+        # bindings RHS, then Module evaluates normally.
+        self.assertEqual(_full("With[{x = 5}, Module[{y = x + 1}, y]]"), "6")
+
+    def test_function_with_module_local_in_body(self) -> None:
+        self.assertEqual(
+            _full("Function[t, Module[{u = t + 1}, u * 2]][10]"),
+            "22",
+        )
+
+    def test_three_locals_share_same_counter_suffix(self) -> None:
+        self.assertEqual(
+            _full("Module[{x = 1, y = 2, z = 3}, x + y + z]"),
+            "6",
+        )
+
+    def test_set_delayed_function_uses_fresh_module_each_call(self) -> None:
+        # ``f := Module[{x = 5}, x + 1]; f`` evaluates the Module on
+        # every read of ``f``. Each read allocates a fresh ``x$N`` —
+        # both reads still produce ``6`` because the body is identical.
+        evaluate(parse_input_form("ClearAll[tungstenModuleF]"))
+        try:
+            evaluate(parse_input_form("tungstenModuleF := Module[{x = 5}, x + 1]"))
+            self.assertEqual(_full("tungstenModuleF"), "6")
+            self.assertEqual(_full("tungstenModuleF"), "6")
+        finally:
+            evaluate(parse_input_form("ClearAll[tungstenModuleF]"))
+
+    def test_local_appears_in_own_values_under_fresh_name(self) -> None:
+        # ``OwnValues[x]`` inside the Module body should report the
+        # fresh ``x$N`` symbol's own value, not the original ``x``.
+        rendered = _full("Module[{x = 5}, OwnValues[x]]")
+        self.assertTrue(
+            rendered.startswith("List[RuleDelayed[HoldPattern[x$"),
+            f"unexpected OwnValues shape: {rendered!r}",
+        )
+        self.assertIn("], 5]]", rendered)
+
+    def test_module_local_is_a_symbol(self) -> None:
+        # ``Head[x]`` inside the Module body is ``Symbol`` — the fresh
+        # ``x$N`` is a real registry symbol, not a special placeholder.
+        self.assertEqual(_full("Module[{x}, Head[x]]"), "Symbol")
+        self.assertEqual(_full("Module[{x}, x === x]"), "True")
+
+    def test_substitutes_through_hold(self) -> None:
+        # ``Module`` rewrites references to ``x`` even through ``Hold``;
+        # the held form retains the fresh symbol.
+        rendered = _full("Module[{x = 5}, Hold[x]]")
+        self.assertTrue(
+            rendered.startswith("Hold[x$") and rendered.endswith("]"),
+            f"unexpected Hold shape: {rendered!r}",
+        )
+
+    def test_function_with_slot_initializer(self) -> None:
+        self.assertEqual(_full("(Module[{x = #}, x + 1] &)[10]"), "11")
+
+    def test_length_of_module_result(self) -> None:
+        self.assertEqual(_full("Length[Module[{x = 5}, {x, x, x}]]"), "3")
+        self.assertEqual(
+            _full("Module[{x = 5}, {x, x, x}]"),
+            "List[5, 5, 5]",
+        )
+
+    def test_independent_bindings_chain_falls_through_to_outer(self) -> None:
+        # ``Module[{a = 1, b = a + 1, c = b + 1}, c]`` is independent
+        # like With: the second and third RHS see the OUTER ``a`` and
+        # ``b``, which are unbound, so ``c`` gets value ``b + 1``
+        # where ``b`` is the outer (free) ``b``.
+        self.assertEqual(
+            _full("Module[{a = 1, b = a + 1, c = b + 1}, c]"),
+            "Plus[1, b]",
+        )
+
+    def test_invalid_bindings_list_raises(self) -> None:
+        result = _full("Module[5, x]")
+        self.assertEqual(result, "Module[5, x]")
+
+    def test_duplicate_binding_name_raises(self) -> None:
+        result = _full("Module[{x = 1, x = 2}, x]")
+        self.assertEqual(
+            result,
+            "Module[List[Set[x, 1], Set[x, 2]], x]",
+        )
 
 
 if __name__ == "__main__":

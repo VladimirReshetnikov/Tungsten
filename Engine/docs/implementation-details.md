@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T22:15:47Z
-- Repository HEAD: 60e6aed0a17fcb29f09f07f9877b3445a9e662d1
+- Updated (UTC): 2026-04-26T22:42:06Z
+- Repository HEAD: 1d874208085a4c06f78beff48200d67712831294
 
 ## Summary
 
@@ -310,14 +310,19 @@ The code is split by workstream where the seams are now stable enough:
   `remove_definition` / `clear_definitions` write API used by bare-symbol and compound-LHS
   assignments.
 - `expression_scoping.py` is the home for the lexical/dynamic scoping constructs.
-  ``With[bindings, body]`` is fully implemented: it parses each binding (``Set``
-  pre-evaluates the RHS in the outer scope, ``SetDelayed`` holds it) and applies the
-  shared capture-avoiding substitution helper (`expression._substitute_named_symbols_in_expr`)
-  to ``body``. The shared helper now recognizes ``With`` / ``Module`` / ``Block`` (in
-  addition to ``Function``) so inner-bound names are correctly shielded and capture-
-  avoiding alpha-renaming kicks in when needed. ``Module`` and ``Block`` themselves
-  remain stubs that emit a clear "not yet implemented" message until the corresponding
-  scoping passes land.
+  ``With[bindings, body]`` parses each binding (``Set`` pre-evaluates the RHS in the
+  outer scope, ``SetDelayed`` holds it) and applies the shared capture-avoiding
+  substitution helper (`expression._substitute_named_symbols_in_expr`) to ``body``.
+  ``Module[{locals}, body]`` allocates a fresh per-invocation symbol ``name$N`` for
+  every local through ``SymbolRegistry.allocate_module_local_symbols`` (a single
+  counter increment per Module call so the locals share the same ``$N``), evaluates
+  each binding's RHS in the outer scope and installs it as the fresh symbol's own
+  value, then rewrites ``body`` to refer to the fresh symbols via
+  ``expression._rename_bound_symbols_in_expr``. The shared substitute and rename
+  helpers both recognize ``With`` / ``Module`` / ``Block`` (in addition to
+  ``Function``) so inner-bound names are correctly shielded and capture-avoiding
+  alpha-renaming kicks in when needed. ``Block`` remains a stub that emits a clear
+  "not yet implemented" message until the dynamic-scoping pass lands.
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 
