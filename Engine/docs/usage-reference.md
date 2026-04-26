@@ -480,8 +480,15 @@ python -m tungsten expr evaluate --code "ToBoxes[InputForm[1 + x]]"
 python -m tungsten expr evaluate --code "ToString[1 + x, TeXForm]"
 python -m tungsten expr evaluate --code "ToString[1 + x, MathMLForm]"
 python -m tungsten expr evaluate --code "ToString[1 + x, TraditionalForm]"
+python -m tungsten expr evaluate --code "ToString[x^2, CForm]"
+python -m tungsten expr evaluate --code "ToString[x^2, FortranForm]"
+python -m tungsten expr evaluate --code "NumberForm[1.2345, 3]"
+python -m tungsten expr evaluate --code "PercentForm[0.1234, 3]"
+python -m tungsten expr evaluate --code "TableForm[{{1, 22}, {333, 4}}]"
+python -m tungsten expr evaluate --code 'StringForm["a `` `1`", b]'
 python -m tungsten expr evaluate --code "ToExpression[ToString[1 + x, TeXForm], TeXForm, HoldComplete]"
 python -m tungsten expr evaluate --code "ToBoxes[TraditionalForm[1 + x]]"
+python -m tungsten expr evaluate --code "ToBoxes[CForm[x^2]]"
 python -m tungsten expr evaluate --code "Print[FullForm[{1, 2/3, a + b}]]"
 python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code 'ToExpression[RowBox[{"a", "\[CirclePlus]", "b"}], StandardForm, HoldComplete]'
@@ -549,8 +556,10 @@ The implemented inert evaluator currently covers:
   `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`, `ExportString`,
   `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
-  `MakeExpression`, `StripBoxes`, `SyntaxQ`, `SyntaxLength`, `TraditionalForm`, `TeXForm`, and
-  `MathMLForm`
+  `MakeExpression`, `StripBoxes`, `SyntaxQ`, `SyntaxLength`, `TraditionalForm`, `TeXForm`,
+  `MathMLForm`, `OutputForm`, `TextForm`, `CForm`, `FortranForm`, `NumberForm`, `ScientificForm`,
+  `EngineeringForm`, `AccountingForm`, `PaddedForm`, `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`,
+  `TreeForm`, `DisplayForm`, `StringForm`, and `SequenceForm`
 - `Pick`
 - `First`
 - `Last`

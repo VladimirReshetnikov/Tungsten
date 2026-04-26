@@ -1888,6 +1888,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         box_implicit_standard = evaluate(parse_input_form('ToExpression[RowBox[{"1", "+", "2"}]]'))
         listable = evaluate(parse_input_form('ToExpression[{"1 + 2", "f @ x // g"}, StandardForm, HoldComplete]'))
         traditional_input = evaluate(parse_input_form('ToExpression["x", TraditionalForm]'))
+        output_form_string = evaluate(parse_input_form("ToString[x, OutputForm]"))
+        c_form_string = evaluate(parse_input_form("ToString[x^2, CForm]"))
+        fortran_form_string = evaluate(parse_input_form("ToString[x^2, FortranForm]"))
+        text_form_string = evaluate(parse_input_form("ToString[x^2, TextForm]"))
         self.assertEqual(default_input.to_full_form(), "3")
         self.assertEqual(held_input.to_full_form(), "HoldComplete[Plus[1, 2]]")
         self.assertEqual(held_standard.to_full_form(), "HoldComplete[g[f[x]]]")
@@ -1897,8 +1901,45 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(box_implicit_standard.to_full_form(), "3")
         self.assertEqual(listable.to_full_form(), "List[HoldComplete[Plus[1, 2]], HoldComplete[g[f[x]]]]")
         self.assertEqual(traditional_input.to_full_form(), "x")
+        self.assertEqual(output_form_string.to_full_form(), '"x"')
+        self.assertEqual(c_form_string.to_full_form(), '"Power(x,2)"')
+        self.assertEqual(fortran_form_string.to_full_form(), '"x**2"')
+        self.assertEqual(text_form_string.to_full_form(), '"x^2"')
 
-        self.assert_evaluates_with_message("ToString[x, OutputForm]", "ToString[x, OutputForm]", "ToString::error")
+        self.assert_evaluates_with_message(
+            'ToExpression["x", OutputForm]',
+            'ToExpression["x", OutputForm]',
+            "ToExpression::error",
+        )
+
+    def test_additional_output_form_wrappers_render_without_kernel(self) -> None:
+        number_form = evaluate(parse_input_form("NumberForm[1.2345, 3]"))
+        scientific_form = evaluate(parse_input_form("ScientificForm[1234.5, 4]"))
+        engineering_form = evaluate(parse_input_form("EngineeringForm[12345.0, 4]"))
+        accounting_form = evaluate(parse_input_form("AccountingForm[-12.345, 4]"))
+        padded_form = evaluate(parse_input_form("PaddedForm[12.3, {6, 2}]"))
+        percent_form = evaluate(parse_input_form("PercentForm[0.1234, 3]"))
+        base_form = evaluate(parse_input_form("BaseForm[31, 16]"))
+        table_form = evaluate(parse_input_form("TableForm[{{1, 22}, {333, 4}}]"))
+        matrix_form = evaluate(parse_input_form("MatrixForm[{{1, 22}, {333, 4}}]"))
+        tree_form = evaluate(parse_input_form("TreeForm[f[a, b]]"))
+        string_form = evaluate(parse_input_form('StringForm["a `` `1`", b]'))
+        sequence_form = evaluate(parse_input_form("SequenceForm[a, b, 1 + x]"))
+        c_form_boxes = evaluate(parse_input_form("ToBoxes[CForm[x^2]]"))
+
+        self.assertEqual(display_output_parts(number_form), ("NumberForm", "1.23"))
+        self.assertEqual(display_output_parts(scientific_form), ("ScientificForm", "1.234*10^+03"))
+        self.assertEqual(display_output_parts(engineering_form), ("EngineeringForm", "12.3*10^3"))
+        self.assertEqual(display_output_parts(accounting_form), ("AccountingForm", "(12.35)"))
+        self.assertEqual(display_output_parts(padded_form), ("PaddedForm", " 12.30"))
+        self.assertEqual(display_output_parts(percent_form), ("PercentForm", "12.3%"))
+        self.assertEqual(display_output_parts(base_form), ("BaseForm", "16^^1f"))
+        self.assertEqual(display_output_parts(table_form), ("TableForm", "1     22\n333   4"))
+        self.assertEqual(display_output_parts(matrix_form), ("MatrixForm", "1     22\n333   4"))
+        self.assertEqual(display_output_parts(tree_form), ("TreeForm", "f[a, b]"))
+        self.assertEqual(display_output_parts(string_form), ("StringForm", "a b b"))
+        self.assertEqual(display_output_parts(sequence_form), ("SequenceForm", "ab1 + x"))
+        self.assertIn('InterpretationBox["Power(x,2)"', c_form_boxes.to_full_form())
 
     def test_box_conversion_and_syntax_builtins(self) -> None:
         make_expression = evaluate(parse_input_form('MakeExpression[RowBox[{"1", "+", "2"}], StandardForm]'))

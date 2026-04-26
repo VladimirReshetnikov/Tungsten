@@ -311,6 +311,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Abort",
     "AbortProtect",
     "AbsoluteTiming",
+    "AccountingForm",
     "Accuracy",
     "All",
     "Alternatives",
@@ -331,6 +332,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "BaselinePosition",
     "BaseDecode",
     "BaseEncode",
+    "BaseForm",
     "Blank",
     "BlankNullSequence",
     "BlankSequence",
@@ -340,6 +342,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "ByteArray",
     "ByteArrayQ",
     "ByteArrayToString",
+    "CForm",
     "Cases",
     "Catch",
     "CharacterRange",
@@ -382,6 +385,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "DeleteDuplicatesBy",
     "Derivative",
     "Depth",
+    "DecimalForm",
     "DiagonalMatrix",
     "Diamond",
     "DigitCharacter",
@@ -391,6 +395,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "DiscreteDelta",
     "DiscreteRatio",
     "DiscreteShift",
+    "DisplayForm",
     "Distribute",
     "Divide",
     "Dot",
@@ -405,6 +410,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Element",
     "EndOfLine",
     "EndOfString",
+    "EngineeringForm",
     "Equal",
     "Editable",
     "Equivalent",
@@ -434,6 +440,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "FoldWhileList",
     "FreeQ",
     "FromCharacterCode",
+    "FortranForm",
     "FullForm",
     "Function",
     "General",
@@ -511,6 +518,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "MapThread",
     "MatchQ",
     "MathMLForm",
+    "MatrixForm",
     "Max",
     "MaximalBy",
     "MemberQ",
@@ -545,6 +553,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "NotSupersetEqual",
     "Nothing",
     "Null",
+    "NumberForm",
     "NumberQ",
     "NumberString",
     "NumberMarks",
@@ -573,9 +582,11 @@ _SYSTEM_SYMBOL_NAMES = {
     "Part",
     "Partition",
     "Pause",
+    "PaddedForm",
     "Pattern",
     "PatternSequence",
     "PatternTest",
+    "PercentForm",
     "Piecewise",
     "Pick",
     "Plus",
@@ -584,6 +595,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Power",
     "Precision",
     "Print",
+    "PrintForm",
     "Precedes",
     "PrecedesEqual",
     "Prepend",
@@ -627,6 +639,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "SameAs",
     "SameQ",
     "Scan",
+    "ScientificForm",
     "Select",
     "SelectFirst",
     "SetAttributes",
@@ -640,6 +653,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Sequence",
     "SequenceFold",
     "SequenceFoldList",
+    "SequenceForm",
     "SequenceHold",
     "Sign",
     "Slot",
@@ -666,6 +680,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "StringEndsQ",
     "StringExpression",
     "StringFreeQ",
+    "StringForm",
     "StringInsert",
     "StringJoin",
     "StringLength",
@@ -693,6 +708,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Switch",
     "Symbol",
     "SymbolName",
+    "TableForm",
     "Take",
     "TakeDrop",
     "TakeList",
@@ -705,6 +721,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "TensorProduct",
     "Temporary",
     "TeXForm",
+    "TextForm",
     "Tilde",
     "TildeEqual",
     "TildeFullEqual",
@@ -714,6 +731,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "ToExpression",
     "ToString",
     "TraditionalForm",
+    "TreeForm",
     "Throw",
     "True",
     "TrueQ",
@@ -4219,12 +4237,20 @@ def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> Stri
 
 
 _TEXTUAL_EXPRESSION_FORM_NAMES = {
+    "c": "CForm",
+    "cform": "CForm",
     "input": "InputForm",
     "inputform": "InputForm",
+    "fortran": "FortranForm",
+    "fortranform": "FortranForm",
     "mathml": "MathMLForm",
     "mathmlform": "MathMLForm",
+    "output": "OutputForm",
+    "outputform": "OutputForm",
     "standard": "StandardForm",
     "standardform": "StandardForm",
+    "text": "TextForm",
+    "textform": "TextForm",
     "tex": "TeXForm",
     "texform": "TeXForm",
     "traditional": "TraditionalForm",
@@ -4232,10 +4258,26 @@ _TEXTUAL_EXPRESSION_FORM_NAMES = {
 }
 
 _PARSE_TEXTUAL_EXPRESSION_FORM_NAMES = {"InputForm", "StandardForm", "TraditionalForm", "TeXForm", "MathMLForm"}
+_RENDER_TEXTUAL_EXPRESSION_FORM_NAMES = {
+    "CForm",
+    "FortranForm",
+    "InputForm",
+    "MathMLForm",
+    "OutputForm",
+    "StandardForm",
+    "TextForm",
+    "TeXForm",
+    "TraditionalForm",
+}
 _BOX_EXPRESSION_FORM_NAMES = {"InputForm", "StandardForm", "TraditionalForm"}
 
 
-def _normalize_textual_expression_form(value: Expr | None, function_name: str) -> str:
+def _normalize_textual_expression_form(
+    value: Expr | None,
+    function_name: str,
+    *,
+    purpose: str = "parse",
+) -> str:
     if value is None:
         return "InputForm"
     if isinstance(value, Symbol):
@@ -4245,7 +4287,8 @@ def _normalize_textual_expression_form(value: Expr | None, function_name: str) -
     else:
         raise WolframEvaluationError(f"{function_name} expects a supported expression form specification.")
     normalized = _TEXTUAL_EXPRESSION_FORM_NAMES.get(key)
-    if normalized is None or normalized not in _PARSE_TEXTUAL_EXPRESSION_FORM_NAMES:
+    supported = _RENDER_TEXTUAL_EXPRESSION_FORM_NAMES if purpose == "render" else _PARSE_TEXTUAL_EXPRESSION_FORM_NAMES
+    if normalized is None or normalized not in supported:
         raise WolframEvaluationError(f"{function_name} does not support this expression form.")
     return normalized
 
@@ -4287,28 +4330,101 @@ _STANDARD_FORM_BOX_HEADS = {
 
 
 _DISPLAY_FORM_HEADS = {
+    "AccountingForm",
+    "BaseForm",
+    "CForm",
+    "DecimalForm",
+    "DisplayForm",
+    "EngineeringForm",
+    "FortranForm",
+    "FullForm",
+    "InputForm",
+    "MathMLForm",
+    "MatrixForm",
+    "NumberForm",
+    "OutputForm",
+    "PaddedForm",
+    "PercentForm",
+    "PrintForm",
+    "ScientificForm",
+    "SequenceForm",
+    "StandardForm",
+    "StringForm",
+    "TableForm",
+    "TextForm",
+    "TeXForm",
+    "TraditionalForm",
+    "TreeForm",
+}
+
+_VALUE_STRIPPING_DISPLAY_FORM_HEADS = {
+    "CForm",
+    "FortranForm",
     "FullForm",
     "InputForm",
     "MathMLForm",
     "OutputForm",
+    "PrintForm",
+    "SequenceForm",
     "StandardForm",
+    "TextForm",
     "TeXForm",
     "TraditionalForm",
 }
 
-_TEXT_RENDERING_DISPLAY_FORM_HEADS = {"MathMLForm", "TeXForm", "TraditionalForm"}
+_TEXT_RENDERING_DISPLAY_FORM_HEADS = {
+    "CForm",
+    "FortranForm",
+    "MathMLForm",
+    "OutputForm",
+    "PrintForm",
+    "SequenceForm",
+    "TextForm",
+    "TeXForm",
+    "TraditionalForm",
+}
+
+
+@dataclass(frozen=True)
+class _DisplayFormCall:
+    name: str
+    arguments: tuple[Expr, ...]
+
+    @property
+    def payload(self) -> Expr:
+        return self.arguments[0]
+
+    @property
+    def specs(self) -> tuple[Expr, ...]:
+        return self.arguments[1:]
+
+    def as_expr(self) -> Expr:
+        return call(self.name, *self.arguments)
 
 
 def _display_form_wrapper(expr: Expr) -> tuple[str, Expr] | None:
-    if not isinstance(expr, Call) or len(expr.arguments) != 1 or not isinstance(expr.head_expr, Symbol):
+    wrapper = _display_form_call(expr)
+    if wrapper is None:
+        return None
+    return wrapper.name, wrapper.payload
+
+
+def _display_form_call(expr: Expr) -> _DisplayFormCall | None:
+    if not isinstance(expr, Call) or not expr.arguments or not isinstance(expr.head_expr, Symbol):
         return None
     head_name = _system_dispatch_name(expr.head_expr)
     if head_name not in _DISPLAY_FORM_HEADS:
         return None
-    return head_name, expr.arguments[0]
+    return _DisplayFormCall(head_name, expr.arguments)
 
 
-def _display_form_text(expr: Expr, form_name: str) -> str:
+def _display_form_call_text(wrapper: _DisplayFormCall) -> str:
+    return _display_form_text(wrapper.payload, wrapper.name, wrapper.specs)
+
+
+def _display_form_text(expr: Expr, form_name: str, specs: Sequence[Expr] = ()) -> str:
+    if form_name in {"OutputForm", "TextForm", "PrintForm"}:
+        return _output_form_text(expr)
     if form_name == "FullForm":
         return expr.to_full_form()
     if form_name == "TraditionalForm":
@@ -4317,7 +4433,29 @@ def _display_form_text(expr: Expr, form_name: str) -> str:
         return _tex_form_text(expr)
     if form_name == "MathMLForm":
         return _mathml_form_text(expr)
+    if form_name == "CForm":
+        return _c_like_form_text(expr, target="c")
+    if form_name == "FortranForm":
+        return _c_like_form_text(expr, target="fortran")
+    if form_name in {"NumberForm", "DecimalForm", "ScientificForm", "EngineeringForm", "AccountingForm", "PaddedForm", "PercentForm"}:
+        return _number_display_form_text(expr, form_name, specs)
+    if form_name == "BaseForm":
+        return _base_form_text(expr, specs)
+    if form_name in {"TableForm", "MatrixForm"}:
+        return _table_form_text(expr)
+    if form_name == "TreeForm":
+        return _tree_form_text(expr)
+    if form_name == "DisplayForm":
+        return _display_form_boxes_text(expr)
+    if form_name == "SequenceForm":
+        return _sequence_form_text((expr, *specs))
+    if form_name == "StringForm":
+        return _string_form_text(expr, specs)
     return expr.to_input_form()
+
+
+def _output_form_text(expr: Expr) -> str:
+    return _format_structured_text(expr, _format_output_atom)
 
 
 def _traditional_form_text(expr: Expr) -> str:
@@ -4356,6 +4494,345 @@ def _traditional_plus_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     nonnumeric = [argument for argument in arguments if not _is_number_expr(argument)]
     numeric = [argument for argument in arguments if _is_number_expr(argument)]
     return tuple(nonnumeric + numeric)
+
+
+def _format_structured_text(expr: Expr, atom_formatter: Callable[[Expr], str]) -> str:
+    entries = _association_entries(expr)
+    if entries is not None:
+        pieces = [
+            f"{_format_structured_text(entry.key, atom_formatter)} {' :> ' if entry.rule_head == 'RuleDelayed' else ' -> '}{_format_structured_text(entry.value, atom_formatter)}"
+            for entry in entries
+        ]
+        return "<|" + ", ".join(pieces) + "|>"
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return "{" + ", ".join(_format_structured_text(argument, atom_formatter) for argument in arguments) + "}"
+        if head_name == "Rule" and len(arguments) == 2:
+            return (
+                _format_structured_text(arguments[0], atom_formatter)
+                + " -> "
+                + _format_structured_text(arguments[1], atom_formatter)
+            )
+        if head_name == "RuleDelayed" and len(arguments) == 2:
+            return (
+                _format_structured_text(arguments[0], atom_formatter)
+                + " :> "
+                + _format_structured_text(arguments[1], atom_formatter)
+            )
+        if head_name == "Plus" and arguments:
+            return " + ".join(_format_structured_text(argument, atom_formatter) for argument in arguments)
+        if head_name == "Times" and arguments:
+            return " ".join(_format_structured_text(argument, atom_formatter) for argument in arguments)
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            return (
+                _format_structured_text(base, atom_formatter)
+                + "^"
+                + _format_structured_text(exponent, atom_formatter)
+            )
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                _format_structured_text(arguments[0], atom_formatter)
+                + "/"
+                + _format_structured_text(arguments[1], atom_formatter)
+            )
+    if isinstance(expr, Call):
+        head = _format_structured_text(expr.head_expr, atom_formatter)
+        arguments = ", ".join(_format_structured_text(argument, atom_formatter) for argument in expr.arguments)
+        return f"{head}[{arguments}]"
+    return atom_formatter(expr)
+
+
+def _format_output_atom(expr: Expr) -> str:
+    if isinstance(expr, String):
+        return expr.value
+    return expr.to_input_form()
+
+
+def _c_like_form_text(expr: Expr, *, target: str) -> str:
+    if isinstance(expr, Symbol):
+        return expr.to_input_form()
+    if isinstance(expr, Integer):
+        return str(expr.value)
+    if isinstance(expr, Real):
+        return expr.text.replace("*^", "e")
+    if isinstance(expr, RationalNumber):
+        return _format_float_like(float(expr.value))
+    if isinstance(expr, SpecialReal):
+        return expr.name
+    if isinstance(expr, ComplexNumber):
+        return f"Complex({_c_like_form_text(expr.real_part, target=target)},{_c_like_form_text(expr.imaginary_part, target=target)})"
+    if isinstance(expr, String):
+        return wl_string(expr.value)
+    if isinstance(expr, ByteArrayExpr):
+        return _c_like_form_text(call("ByteArray", list_expr(*(integer(value) for value in expr.values))), target=target)
+    if not isinstance(expr, Call):
+        return expr.to_input_form()
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return "List(" + ",".join(_c_like_form_text(argument, target=target) for argument in arguments) + ")"
+        if head_name == "Association":
+            return "Association(" + ",".join(_c_like_form_text(argument, target=target) for argument in arguments) + ")"
+        if head_name in {"Rule", "RuleDelayed"} and len(arguments) == 2:
+            return (
+                "Rule("
+                + _c_like_form_text(arguments[0], target=target)
+                + ","
+                + _c_like_form_text(arguments[1], target=target)
+                + ")"
+            )
+        if head_name == "Plus" and arguments:
+            return " + ".join(_c_like_form_text(argument, target=target) for argument in arguments)
+        if head_name == "Times" and arguments:
+            return "*".join(_c_like_factor_text(argument, target=target) for argument in arguments)
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            if _is_half_power_exponent(exponent):
+                return "Sqrt(" + _c_like_form_text(base, target=target) + ")"
+            if target == "fortran":
+                return _c_like_factor_text(base, target=target) + "**" + _c_like_factor_text(exponent, target=target)
+            return "Power(" + _c_like_form_text(base, target=target) + "," + _c_like_form_text(exponent, target=target) + ")"
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                "("
+                + _c_like_form_text(arguments[0], target=target)
+                + ")/("
+                + _c_like_form_text(arguments[1], target=target)
+                + ")"
+            )
+
+    head = _c_like_form_text(expr.head_expr, target=target)
+    arguments = ",".join(_c_like_form_text(argument, target=target) for argument in expr.arguments)
+    return f"{head}({arguments})"
+
+
+def _c_like_factor_text(expr: Expr, *, target: str) -> str:
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name in {"Plus", "Rule", "RuleDelayed"}:
+            return "(" + _c_like_form_text(expr, target=target) + ")"
+    return _c_like_form_text(expr, target=target)
+
+
+def _is_half_power_exponent(expr: Expr) -> bool:
+    if isinstance(expr, RationalNumber):
+        return expr.value == Fraction(1, 2)
+    return (
+        isinstance(expr, Call)
+        and expr.has_head("Rational")
+        and len(expr.arguments) == 2
+        and isinstance(expr.arguments[0], Integer)
+        and isinstance(expr.arguments[1], Integer)
+        and expr.arguments[0].value == 1
+        and expr.arguments[1].value == 2
+    )
+
+
+def _format_float_like(value: float) -> str:
+    if math.isnan(value) or math.isinf(value):
+        return str(value)
+    return format(value, ".16g")
+
+
+def _number_display_form_text(expr: Expr, form_name: str, specs: Sequence[Expr]) -> str:
+    total_digits, fraction_digits = _number_form_digit_specs(specs)
+
+    def formatter(atom: Expr) -> str:
+        return _format_number_display_atom(
+            atom,
+            form_name,
+            total_digits=total_digits,
+            fraction_digits=fraction_digits,
+        )
+
+    return _format_structured_text(expr, formatter)
+
+
+def _number_form_digit_specs(specs: Sequence[Expr]) -> tuple[int | None, int | None]:
+    if not specs:
+        return None, None
+    spec = specs[0]
+    if isinstance(spec, Integer):
+        return max(0, spec.value), None
+    if isinstance(spec, Call) and spec.has_head("List") and spec.arguments:
+        total = spec.arguments[0]
+        fraction = spec.arguments[1] if len(spec.arguments) > 1 else None
+        return (
+            max(0, total.value) if isinstance(total, Integer) else None,
+            max(0, fraction.value) if isinstance(fraction, Integer) else None,
+        )
+    return None, None
+
+
+def _format_number_display_atom(
+    expr: Expr,
+    form_name: str,
+    *,
+    total_digits: int | None,
+    fraction_digits: int | None,
+) -> str:
+    if isinstance(expr, Real):
+        value = _real_to_float(expr)
+        if form_name == "PercentForm":
+            value *= 100
+        text = _format_decimal_text(value, total_digits=total_digits, fraction_digits=fraction_digits, form_name=form_name)
+    elif isinstance(expr, Integer):
+        text = str(expr.value * 100) if form_name == "PercentForm" else str(expr.value)
+    else:
+        return _format_output_atom(expr)
+
+    if form_name == "AccountingForm" and text.startswith("-"):
+        text = f"({text[1:]})"
+    if form_name == "PercentForm":
+        text += "%"
+    if form_name == "PaddedForm" and total_digits is not None:
+        text = text.rjust(total_digits)
+    return text
+
+
+def _real_to_float(expr: Real) -> float:
+    text = expr.text.replace("`", "").replace("*^", "e")
+    try:
+        return float(text)
+    except ValueError:
+        return math.nan
+
+
+def _format_decimal_text(
+    value: float,
+    *,
+    total_digits: int | None,
+    fraction_digits: int | None,
+    form_name: str,
+) -> str:
+    if math.isnan(value) or math.isinf(value):
+        return str(value)
+    if fraction_digits is not None:
+        base = f"{value:.{fraction_digits}f}"
+    elif total_digits is not None and total_digits > 0:
+        base = f"{value:.{total_digits}g}"
+    else:
+        base = _format_float_like(value)
+
+    if form_name == "DecimalForm":
+        return base
+    if form_name == "ScientificForm":
+        digits = max(1, total_digits or 6)
+        return f"{value:.{digits - 1}e}".replace("e", "*10^")
+    if form_name == "EngineeringForm":
+        return _format_engineering_text(value, total_digits or 6)
+    return base
+
+
+def _format_engineering_text(value: float, digits: int) -> str:
+    if value == 0:
+        return "0"
+    exponent = int(math.floor(math.log10(abs(value)) / 3) * 3)
+    mantissa = value / (10 ** exponent)
+    return f"{mantissa:.{max(0, digits - 1)}g}*10^{exponent}"
+
+
+def _base_form_text(expr: Expr, specs: Sequence[Expr]) -> str:
+    base = _base_form_base(specs)
+
+    def formatter(atom: Expr) -> str:
+        if isinstance(atom, Integer):
+            return _integer_base_text(atom.value, base)
+        if isinstance(atom, Real):
+            return atom.text + f"_{base}"
+        if isinstance(atom, RationalNumber):
+            return _integer_base_text(atom.value.numerator, base) + "/" + _integer_base_text(atom.value.denominator, base)
+        return _format_output_atom(atom)
+
+    return _format_structured_text(expr, formatter)
+
+
+def _base_form_base(specs: Sequence[Expr]) -> int:
+    if specs and isinstance(specs[0], Integer):
+        return min(36, max(2, specs[0].value))
+    return 10
+
+
+def _integer_base_text(value: int, base: int) -> str:
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    sign = "-" if value < 0 else ""
+    remaining = abs(value)
+    if remaining == 0:
+        body = "0"
+    else:
+        pieces: list[str] = []
+        while remaining:
+            remaining, digit = divmod(remaining, base)
+            pieces.append(digits[digit])
+        body = "".join(reversed(pieces))
+    return f"{base}^^{sign}{body}"
+
+
+def _table_form_text(expr: Expr) -> str:
+    rows = _table_rows(expr)
+    if rows is None:
+        return _output_form_text(expr)
+    if not rows:
+        return ""
+    widths = [0] * max(len(row) for row in rows)
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+    rendered_rows = [
+        "   ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip()
+        for row in rows
+    ]
+    return "\n".join(rendered_rows)
+
+
+def _table_rows(expr: Expr) -> list[list[str]] | None:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return None
+    if all(isinstance(row, Call) and row.has_head("List") for row in expr.arguments):
+        return [
+            [_output_form_text(cell) for cell in row.arguments]
+            for row in expr.arguments
+            if isinstance(row, Call)
+        ]
+    return [[_output_form_text(item)] for item in expr.arguments]
+
+
+def _tree_form_text(expr: Expr) -> str:
+    if not isinstance(expr, Call):
+        return _output_form_text(expr)
+    return expr.to_full_form()
+
+
+def _display_form_boxes_text(expr: Expr) -> str:
+    if _looks_like_standard_form_boxes(expr):
+        try:
+            return _box_item_to_standard_text(_strip_box_expression(expr))
+        except (WolframSyntaxError, WolframEvaluationError, ValueError):
+            return expr.to_input_form()
+    return _output_form_text(expr)
+
+
+def _sequence_form_text(arguments: Sequence[Expr]) -> str:
+    return "".join(_output_form_text(argument) for argument in arguments)
+
+
+def _string_form_text(template: Expr, arguments: Sequence[Expr]) -> str:
+    if not isinstance(template, String):
+        return _format_structured_text(call("StringForm", template, *arguments), _format_output_atom)
+    rendered_arguments = [_output_form_text(argument) for argument in arguments]
+    text = template.value
+    for index, value in enumerate(rendered_arguments, start=1):
+        text = text.replace(f"`{index}`", value)
+    for value in rendered_arguments:
+        if "``" not in text:
+            break
+        text = text.replace("``", value, 1)
+    return text
 
 
 def _tex_format_expr(expr: Expr, *, traditional: bool) -> str:
@@ -4594,10 +5071,11 @@ class _DisplayWrapper:
 
 
 def history_output_expr(expr: Expr) -> Expr:
-    wrapper = _display_form_wrapper(expr)
+    wrapper = _display_form_call(expr)
     if wrapper is not None:
-        _form_name, payload = wrapper
-        return payload
+        if wrapper.name in _VALUE_STRIPPING_DISPLAY_FORM_HEADS:
+            return wrapper.payload
+        return expr
     short_wrapper = _short_shallow_display_wrapper(expr)
     if short_wrapper is not None:
         return short_wrapper.payload
@@ -4822,10 +5300,9 @@ def apply_output_size_limit(expr: Expr, text: str) -> str:
 
 
 def display_output_parts(expr: Expr) -> tuple[str | None, str]:
-    wrapper = _display_form_wrapper(expr)
+    wrapper = _display_form_call(expr)
     if wrapper is not None:
-        form_name, payload = wrapper
-        return form_name, _display_form_text(payload, form_name)
+        return wrapper.name, _display_form_call_text(wrapper)
     short_wrapper = _short_shallow_display_wrapper(expr)
     if short_wrapper is not None:
         return short_wrapper.label, short_wrapper.text
@@ -5004,22 +5481,28 @@ def _xml_local_name(tag: str) -> str:
 
 def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
     if form_value is None:
-        wrapper = _display_form_wrapper(expr)
+        wrapper = _display_form_call(expr)
         if wrapper is not None:
-            form_name, payload = wrapper
-            return string(_display_form_text(payload, form_name))
+            return string(_display_form_call_text(wrapper))
 
-    form_name = _normalize_textual_expression_form(form_value, "ToString")
-    wrapper = _display_form_wrapper(expr)
-    if wrapper is not None and wrapper[0] in _TEXT_RENDERING_DISPLAY_FORM_HEADS:
-        wrapper_form, payload = wrapper
-        return string(_display_form_text(payload, wrapper_form))
+    form_name = _normalize_textual_expression_form(form_value, "ToString", purpose="render")
+    wrapper = _display_form_call(expr)
+    if wrapper is not None and wrapper.name in _TEXT_RENDERING_DISPLAY_FORM_HEADS:
+        return string(_display_form_call_text(wrapper))
     if form_name == "InputForm":
         return string(expr.to_input_form())
     if form_name == "StandardForm":
         # Tungsten's StandardForm string subset intentionally renders as parseable WL text,
         # not as FrontEnd box escapes. The parser accepts it through parse_standard_form.
         return string(expr.to_input_form())
+    if form_name == "OutputForm":
+        return string(_output_form_text(expr))
+    if form_name == "TextForm":
+        return string(_output_form_text(expr))
+    if form_name == "CForm":
+        return string(_c_like_form_text(expr, target="c"))
+    if form_name == "FortranForm":
+        return string(_c_like_form_text(expr, target="fortran"))
     if form_name == "TraditionalForm":
         return string(_traditional_form_text(expr))
     if form_name == "TeXForm":
@@ -5110,9 +5593,9 @@ def _make_boxes(expr: Expr, form_name: str) -> Expr:
 
 
 def _make_standard_boxes(expr: Expr) -> Expr:
-    wrapper = _display_form_wrapper(expr)
+    wrapper = _display_form_call(expr)
     if wrapper is not None:
-        form_name, payload = wrapper
+        form_name, payload = wrapper.name, wrapper.payload
         if form_name == "InputForm":
             return _input_form_display_boxes(payload)
         if form_name == "FullForm":
@@ -5127,6 +5610,27 @@ def _make_standard_boxes(expr: Expr) -> Expr:
             return _tex_form_display_boxes(payload)
         if form_name == "MathMLForm":
             return _mathml_form_display_boxes(payload)
+        if form_name in {
+            "AccountingForm",
+            "BaseForm",
+            "CForm",
+            "DecimalForm",
+            "DisplayForm",
+            "EngineeringForm",
+            "FortranForm",
+            "MatrixForm",
+            "NumberForm",
+            "PaddedForm",
+            "PercentForm",
+            "PrintForm",
+            "ScientificForm",
+            "SequenceForm",
+            "StringForm",
+            "TableForm",
+            "TextForm",
+            "TreeForm",
+        }:
+            return _textual_display_boxes(wrapper)
 
     if isinstance(expr, Symbol):
         return string(expr.to_input_form())
@@ -5330,6 +5834,16 @@ def _mathml_form_display_boxes(expr: Expr) -> Expr:
     )
 
 
+def _textual_display_boxes(wrapper: _DisplayFormCall) -> Expr:
+    return call(
+        "InterpretationBox",
+        string(_display_form_call_text(wrapper)),
+        wrapper.as_expr(),
+        _rule_option("Editable", symbol("True")),
+        _rule_option("AutoDelete", symbol("True")),
+    )
+
+
 def _make_full_form_boxes(expr: Expr) -> Expr:
     if isinstance(expr, RationalNumber):
         return _make_full_form_boxes(
@@ -5523,7 +6037,7 @@ def _box_expr_to_standard_text(expr: Expr) -> str:
     if isinstance(expr, Call) and expr.has_head("BoxData") and len(expr.arguments) == 1:
         return _box_expr_to_standard_text(expr.arguments[0])
     if isinstance(expr, Call) and expr.has_head("RowBox"):
-        return _row_box_to_standard_text(expr)
+        return _box_item_to_standard_text(expr)
     return _box_item_to_standard_text(expr)
 
 

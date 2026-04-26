@@ -738,11 +738,20 @@ that `Check` is not disabled merely because its output is quieted.
   not a full definition system: Tungsten still does not implement general down-value dispatch,
   package scoping, `Default[...]`, or every specialized kernel behavior implied by attributes.
 - Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, `StandardForm`,
-  `TraditionalForm`, `TeXForm`, and `MathMLForm`) are handled at the display boundary for
+  `TraditionalForm`, `TeXForm`, `MathMLForm`, `CForm`, `FortranForm`, `TextForm`, and the common
+  numeric/table/string wrappers such as `NumberForm`, `ScientificForm`, `EngineeringForm`,
+  `AccountingForm`, `PaddedForm`, `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`, `TreeForm`,
+  `DisplayForm`, `StringForm`, and `SequenceForm`) are handled at the display boundary for
   one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`. Explicit textual conversion
   such as `ToString[InputForm[expr], InputForm]` still treats the classic wrapper forms as
-  ordinary expression structure; textual rendering wrappers (`TraditionalForm`, `TeXForm`, and
-  `MathMLForm`) keep their display meaning even when the requested string form is explicit.
+  ordinary expression structure; textual rendering wrappers (`TraditionalForm`, `TeXForm`,
+  `MathMLForm`, `OutputForm`, `TextForm`, `CForm`, `FortranForm`, `PrintForm`, and
+  `SequenceForm`) keep their display meaning even when the requested string form is explicit.
+- Tungsten separates renderable output forms from parseable input forms. `ToExpression`,
+  `MakeExpression`, `SyntaxQ`, and `SyntaxLength` accept only `InputForm`, `StandardForm`,
+  `TraditionalForm`, `TeXForm`, and `MathMLForm` in the implemented subset. `ToString` additionally
+  accepts `OutputForm`, `TextForm`, `CForm`, and `FortranForm`, while wrappers such as
+  `NumberForm[expr, spec]` and `TableForm[list]` render through the one-argument display boundary.
 - `TraditionalForm` is implemented as a deterministic box/text subset over Tungsten's existing
   StandardForm boxes: it emits `FormBox[..., TraditionalForm]`, returns inline-box strings from
   `ToString`, and can parse back Tungsten-generated inline boxes through `ToExpression` /
