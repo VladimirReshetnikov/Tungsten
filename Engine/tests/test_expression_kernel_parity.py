@@ -342,19 +342,10 @@ class SequenceSplicingTests(unittest.TestCase):
 
 
 class DoubleUnaryMinusTests(unittest.TestCase):
-    """Finding B16: parser accepts ``--5`` where Wolfram rejects it as
-    illegal syntax. Low-priority permissiveness."""
+    """Prefix decrement syntax is now parsed as its Wolfram operator head."""
 
-    def test_double_unary_minus_current_behavior_accepts(self) -> None:
-        # Tungsten: --5 parses and evaluates to 5.
-        self.assertEqual(_full("--5"), "5")
-
-    @unittest.expectedFailure
-    def test_double_unary_minus_wolfram_target_rejects(self) -> None:
-        # Wolfram rejects --5 at parse time (it sees `--` as decrement, not
-        # a double unary negation). See finding B16.
-        with self.assertRaises((WolframSyntaxError, WolframEvaluationError)):
-            evaluate(parse_expression("--5", form="input"))
+    def test_prefix_decrement_is_not_double_unary_minus(self) -> None:
+        self.assertEqual(_full("--5"), "PreDecrement[5]")
 
 
 class HoldFamilySemanticsTests(unittest.TestCase):

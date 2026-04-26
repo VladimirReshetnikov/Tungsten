@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T20:58:10Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-26T00:10:04Z
+- Repository HEAD: 17d77caa0c29a9c40bbfd5e471ea468a146e578e
 
 ## Summary
 
@@ -533,8 +533,14 @@ them intentionally.
   attributes such as `Flat`, `Orderless`, `Listable`, or short-circuit evaluation. A small
   hardcoded Hold-family subset is implemented because it is required for predictable structural
   manipulation.
-- FullForm cosmetics such as `DirectedInfinity[1]` for `Infinity`, exact precision-bearing real
-  rendering, and Wolfram's rejection of textual `--5` are documented divergences for now.
+- FullForm cosmetics such as `DirectedInfinity[1]` for `Infinity` and exact precision-bearing real
+  rendering are documented divergences for now.
+- Numeric literal parsing follows Wolfram's lexical grammar for decimal, base, precision,
+  accuracy, and `*^` magnitude forms closely enough to preserve accepted spellings as inert
+  numeric atoms even when Tungsten cannot calculate with those exact literal forms.
+- Assignment, update, prefix increment/decrement, message, file, information, factorial, and
+  infix-function operator forms are parsed to their Wolfram heads, but side-effectful heads remain
+  inert unless a future evaluator milestone explicitly gives them definition or I/O semantics.
 - Notebook parsing is structural rather than fully semantic.
 - FrontEnd coverage is intentionally narrow.
 - The visible inline Notebook Assistant path remains experimental.

@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-25T21:57:56Z
-Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+Updated (UTC): 2026-04-26T00:10:04Z
+Repository HEAD: 17d77caa0c29a9c40bbfd5e471ea468a146e578e
 
 ## Summary
 
@@ -74,7 +74,10 @@ Use `kernel eval` instead when you need:
 
 The parser currently handles:
 
-- symbols, strings, integers, and reals;
+- symbols, strings, integers, and reals, including Wolfram numeric literal spellings such as
+  leading-dot and trailing-dot decimals (`.5`, `1.`), base literals (`16^^ff`, `16^^f.f`),
+  scientific notation (`1.2*^3`), precision marks such as <code>1.2`20</code> and
+  <code>1.2`</code>, and accuracy marks such as <code>1.2``20</code>;
 - function application `head[arg1, arg2]`;
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
@@ -83,10 +86,20 @@ The parser currently handles:
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`;
-- structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, `.`, string concatenation
-  `<>`, string-pattern concatenation `~~`, and repetition suffixes `..` / `...`;
+- structural operator forms such as `===`, `=!=`, `@@@`, `@*`, `/*`, `.`, `**`, `<->`,
+  string concatenation `<>`, string-pattern concatenation `~~`, and repetition suffixes `..` /
+  `...`;
 - rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
   `x_ :> rhs /; test`;
+- assignment and update surface syntax, lowered inertly to the corresponding heads:
+  `=`, `:=`, `=.`, `^=`, `^:=`, `+=`, `-=`, `*=`, `/=`, `/: ... =`, `/: ... :=`, and
+  `/: ... =.` become `Set`, `SetDelayed`, `Unset`, `UpSet`, `UpSetDelayed`, `AddTo`,
+  `SubtractFrom`, `TimesBy`, `DivideBy`, `TagSet`, `TagSetDelayed`, and `TagUnset`;
+- other high-precedence syntactic operators, including `x++`, `++x`, `x--`, `--x`, `x!`,
+  `x!!`, `a::tag`, `a ~ f ~ b`, `<< file`, `expr >> file`, `expr >>> file`, `?name`, and
+  `??name`, lowered to `Increment`, `PreIncrement`, `Decrement`, `PreDecrement`, `Factorial`,
+  `Factorial2`, `MessageName`, ordinary function application, `Get`, `Put`, `PutAppend`, and
+  `Information`;
 - comparisons and boolean operators, with same-head chained comparisons parsed as n-ary relation
   calls such as `Less[a, b, c]`;
 - prefix and postfix application such as `f @ x` and `x // f`, with `@` binding tighter than
@@ -102,6 +115,8 @@ The parser currently handles:
   `Function[Null, body, attrs]` and `Function[params, body, attrs]`;
 - part syntax `expr[[...]]`;
 - span syntax `a ;; b ;; c`;
+- compound expressions with binary and trailing semicolons, including `expr;` lowering to
+  `CompoundExpression[expr, Null]`;
 - nested Wolfram comments `(* ... *)`;
 - common semantic notebook boxes when they appear as textual box expressions:
   `FractionBox`, `SqrtBox`, `RadicalBox`, `SuperscriptBox`, `SubscriptBox`,
@@ -128,8 +143,9 @@ The parser currently handles:
 
 The parser does not attempt to cover full box language or every textual corner of Mathematica. In
 particular, it is intentionally conservative around attribute-driven pattern semantics,
-arbitrary box constructs, assignments, custom notation definitions, stylesheet-dependent
-interpretation, and broader evaluation semantics.
+arbitrary box constructs, custom notation definitions, stylesheet-dependent interpretation, and
+broader evaluation semantics. Assignment-like syntax is parsed to inert heads, but Tungsten does
+not yet attach own values, down values, up values, or other definition side effects to those heads.
 
 The currently supported pattern subset is intentionally bounded:
 
@@ -587,8 +603,8 @@ These are intentional current boundaries, not hidden TODOs:
   `DirectedInfinity[1]` and `DirectedInfinity[-1]` FullForm spelling.
 - Real-number precision marks using backticks are parsed as part of the accepted real literal text,
   but Tungsten does not reproduce every kernel `FullForm` nuance for precision-bearing reals.
-- The parser currently accepts `--5` as repeated unary minus. The Wolfram parser treats `--` as a
-  different token family and rejects that expression in this context.
+- Prefix `++` and `--` now parse as `PreIncrement` and `PreDecrement`, including literal operands
+  such as `--5`; Tungsten still leaves those side-effectful heads inert during evaluation.
 - Pattern search through associations follows Wolfram's values-only convention: `FreeQ`, `Cases`,
   `DeleteCases`, `Position`, `MemberQ`, and `FirstCase` descend into values and can match whole
   associations, but they do not search keys or raw `Rule` wrappers. Use `KeyValuePattern` for

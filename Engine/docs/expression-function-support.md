@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T21:57:56Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-25T23:58:34Z
+- Repository HEAD: 17d77caa0c29a9c40bbfd5e471ea468a146e578e
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -29,10 +29,16 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `expr //. rules` to `ReplaceRepeated[expr, rules]`, and callable compound forms such as
   `SameAs[q]`, `Composition[f, g]`, `RightComposition[f, g]`, `MapApply[f]`, `MapAll[f]`,
   `MapIndexed[f]`, `Scan[f]`, `Comap[fs]`, and `ComapApply[fs]`.
-- Parser-lowered operator syntax includes `@`, `//`, `/@`, `@@`, `@@@`, `@*`, `/*`, `.`, `/.`,
-  `//.`, `;;`, arithmetic operators, comparison operators, Boolean operators, and string
-  concatenation / string-pattern operators. Callable operator forms such as `Map[f]`, `Cases[p]`,
-  or `ReplaceAll[rules]` are not implemented unless explicitly listed in this document.
+- Parser-lowered operator syntax includes `@`, `//`, `/@`, `@@`, `@@@`, `@*`, `/*`, `.`, `**`,
+  `/.`, `//.`, `;;`, arithmetic operators, comparison operators, Boolean operators, assignment
+  and update syntax such as `=`, `:=`, `=.`, `+=`, `^=`, and `/:`, message/file/information
+  syntax such as `::`, `<<`, `>>`, `>>>`, `?`, and `??`, and string concatenation /
+  string-pattern operators. Callable operator forms such as `Map[f]`, `Cases[p]`, or
+  `ReplaceAll[rules]` are not implemented unless explicitly listed in this document.
+- Assignment-like parser heads such as `Set`, `SetDelayed`, `Unset`, `TagSet`, `TagSetDelayed`,
+  `TagUnset`, `UpSet`, `UpSetDelayed`, `AddTo`, `SubtractFrom`, `TimesBy`, and `DivideBy` are
+  syntax-compatible inert expressions only. Tungsten currently does not mutate symbol values or
+  definition tables for them.
 - `Take` and `Drop` currently support a single first-level specification only.
 - `If`, `Which`, `Switch`, `Piecewise`, and `Pick` currently support only the direct forms listed
   below.

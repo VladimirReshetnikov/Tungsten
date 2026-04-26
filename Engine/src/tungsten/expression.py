@@ -14,7 +14,7 @@ import json
 import math
 import re
 import unicodedata
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Sequence, TypeGuard
 
 from .wolfram_strings import has_inline_boxes
 from .wolfram_strings import inline_box_segments
@@ -879,8 +879,12 @@ _PREC_CALL = 190
 _PREC_PART = 190
 _PREC_PATTERN = 185
 _PREC_PATTERN_TEST = 184
+_PREC_MESSAGE_NAME = 183
+_PREC_POSTFIX_UNARY = 175
+_PREC_INFIX_FUNCTION = 165
 _PREC_POWER = 160
 _PREC_PREFIX = 150
+_PREC_NONCOMMUTATIVE_TIMES = 145
 _PREC_TIMES = 140
 _PREC_PLUS = 120
 _PREC_COMPARE = 100
@@ -891,10 +895,13 @@ _PREC_STRING_EXPRESSION = 64
 _PREC_NAMED_PATTERN = 63
 _PREC_CONDITION = 62
 _PREC_RULE = 60
+_PREC_TWO_WAY_RULE = 61
 _PREC_REPLACE = 50
 _PREC_MAP = 45
 _PREC_APPLY = 44
 _PREC_COMPOSITION = 43
+_PREC_ASSIGNMENT = 40
+_PREC_PUT = 35
 _PREC_POSTFIX = 30
 _PREC_SEMICOLON = 20
 _PREC_FUNCTION = 10
@@ -914,6 +921,7 @@ _INFIX_OPERATOR_HEADS: dict[str, tuple[str, int, bool, bool]] = {
     "Or": ("||", _PREC_OR, False, True),
     "Alternatives": ("|", _PREC_ALTERNATIVES, False, True),
     "StringExpression": ("~~", _PREC_STRING_EXPRESSION, False, False),
+    "TwoWayRule": ("<->", _PREC_TWO_WAY_RULE, True, True),
     "Rule": ("->", _PREC_RULE, True, True),
     "RuleDelayed": (":>", _PREC_RULE, True, True),
     "ReplaceAll": ("/.", _PREC_REPLACE, False, True),
@@ -924,6 +932,15 @@ _INFIX_OPERATOR_HEADS: dict[str, tuple[str, int, bool, bool]] = {
     "MapApply": ("@@@", _PREC_APPLY, False, True),
     "Composition": ("@*", _PREC_COMPOSITION, True, True),
     "RightComposition": ("/*", _PREC_COMPOSITION, True, True),
+    "Set": ("=", _PREC_ASSIGNMENT, True, True),
+    "SetDelayed": (":=", _PREC_ASSIGNMENT, True, True),
+    "UpSet": ("^=", _PREC_ASSIGNMENT, True, True),
+    "UpSetDelayed": ("^:=", _PREC_ASSIGNMENT, True, True),
+    "AddTo": ("+=", _PREC_ASSIGNMENT, True, True),
+    "SubtractFrom": ("-=", _PREC_ASSIGNMENT, True, True),
+    "TimesBy": ("*=", _PREC_ASSIGNMENT, True, True),
+    "DivideBy": ("/=", _PREC_ASSIGNMENT, True, True),
+    "NonCommutativeMultiply": ("**", _PREC_NONCOMMUTATIVE_TIMES, False, True),
     "Dot": (".", _PREC_TIMES, False, True),
     "StringJoin": ("<>", _PREC_PLUS, False, True),
 }
@@ -996,6 +1013,39 @@ def _format_call_input(expr: Call) -> tuple[str, int]:
             formatted_function = _format_function(arguments)
             if formatted_function is not None:
                 return formatted_function
+        if head_name == "Information" and len(arguments) == 2:
+            formatted_information = _format_information(arguments)
+            if formatted_information is not None:
+                return formatted_information, _PREC_PREFIX
+        if head_name == "Get" and len(arguments) == 1:
+            formatted_file_name = _format_file_name(arguments[0])
+            if formatted_file_name is not None:
+                return f"<< {formatted_file_name}", _PREC_PREFIX
+        if head_name == "MessageName" and len(arguments) >= 2:
+            formatted_message_name = _format_message_name(arguments)
+            if formatted_message_name is not None:
+                return formatted_message_name, _PREC_MESSAGE_NAME
+        if head_name in {"Put", "PutAppend"} and len(arguments) == 2:
+            formatted_put = _format_put(head_name, arguments)
+            if formatted_put is not None:
+                return formatted_put, _PREC_PUT
+        if head_name in {"TagSet", "TagSetDelayed", "TagUnset"}:
+            formatted_tag_set = _format_tag_set(head_name, arguments)
+            if formatted_tag_set is not None:
+                return formatted_tag_set, _PREC_ASSIGNMENT
+        if head_name in {"Increment", "Decrement", "Factorial", "Factorial2", "Unset"} and len(arguments) == 1:
+            operator = {
+                "Increment": "++",
+                "Decrement": "--",
+                "Factorial": "!",
+                "Factorial2": "!!",
+                "Unset": "=.",
+            }[head_name]
+            separator = " " if head_name == "Unset" else ""
+            return f"{_format_input(arguments[0], _PREC_POSTFIX_UNARY)}{separator}{operator}", _PREC_POSTFIX_UNARY
+        if head_name in {"PreIncrement", "PreDecrement"} and len(arguments) == 1:
+            operator = "++" if head_name == "PreIncrement" else "--"
+            return f"{operator}{_format_input(arguments[0], _PREC_POSTFIX_UNARY)}", _PREC_POSTFIX_UNARY
         if head_name in _INFIX_OPERATOR_HEADS and len(arguments) >= 2:
             operator, precedence, right_associative, spaced = _INFIX_OPERATOR_HEADS[head_name]
             return _format_infix(arguments, operator, precedence, right_associative=right_associative, spaced=spaced), precedence
@@ -1039,6 +1089,90 @@ def _format_infix(
             operand_precedence = precedence + 1
         pieces.append(_format_input(argument, operand_precedence))
     return separator.join(pieces)
+
+
+def _format_information(arguments: Sequence[Expr]) -> str | None:
+    name, option = arguments
+    if not isinstance(name, String):
+        return None
+    if not isinstance(option, Call) or not option.has_head("Rule") or len(option.arguments) != 2:
+        return None
+    option_name, option_value = option.arguments
+    if not isinstance(option_name, Symbol) or option_name.name != "LongForm":
+        return None
+    if isinstance(option_value, Symbol) and option_value.name == "False":
+        prefix = "?"
+    elif isinstance(option_value, Symbol) and option_value.name == "True":
+        prefix = "??"
+    else:
+        return None
+    formatted_name = _format_file_name(name)
+    if formatted_name is None:
+        return None
+    return prefix + formatted_name
+
+
+def _format_message_name(arguments: Sequence[Expr]) -> str | None:
+    base = _format_input(arguments[0], _PREC_MESSAGE_NAME)
+    tags: list[str] = []
+    for tag in arguments[1:]:
+        formatted_tag = _format_message_tag(tag)
+        if formatted_tag is None:
+            return None
+        tags.append(formatted_tag)
+    return base + "".join(f"::{tag}" for tag in tags)
+
+
+def _format_message_tag(expr: Expr) -> str | None:
+    if isinstance(expr, String):
+        if _is_simple_symbol_name(expr.value):
+            return expr.value
+        return expr.to_input_form()
+    if isinstance(expr, Symbol):
+        return expr.to_input_form()
+    return None
+
+
+def _format_file_name(expr: Expr) -> str | None:
+    if isinstance(expr, String):
+        if _is_simple_file_name(expr.value):
+            return expr.value
+        return expr.to_input_form()
+    if isinstance(expr, Symbol):
+        return expr.to_input_form()
+    return None
+
+
+def _format_put(head_name: str, arguments: Sequence[Expr]) -> str | None:
+    formatted_file_name = _format_file_name(arguments[1])
+    if formatted_file_name is None:
+        return None
+    operator = ">>>" if head_name == "PutAppend" else ">>"
+    return f"{_format_input(arguments[0], _PREC_PUT)} {operator} {formatted_file_name}"
+
+
+def _format_tag_set(head_name: str, arguments: Sequence[Expr]) -> str | None:
+    if head_name == "TagUnset" and len(arguments) == 2:
+        return (
+            f"{_format_input(arguments[0], _PREC_ASSIGNMENT + 1)} /: "
+            f"{_format_input(arguments[1], _PREC_ASSIGNMENT + 1)} =."
+        )
+    if head_name not in {"TagSet", "TagSetDelayed"} or len(arguments) != 3:
+        return None
+    operator = "=" if head_name == "TagSet" else ":="
+    return (
+        f"{_format_input(arguments[0], _PREC_ASSIGNMENT + 1)} /: "
+        f"{_format_input(arguments[1], _PREC_ASSIGNMENT + 1)} {operator} "
+        f"{_format_input(arguments[2], _PREC_ASSIGNMENT)}"
+    )
+
+
+def _is_simple_symbol_name(value: str) -> bool:
+    return re.fullmatch(r"[$A-Za-z][$A-Za-z0-9]*", value) is not None
+
+
+def _is_simple_file_name(value: str) -> bool:
+    return re.fullmatch(r"[$A-Za-z0-9_./\\-]+", value) is not None
 
 
 def _format_blank(head_name: str, arguments: Sequence[Expr]) -> str | None:
@@ -10281,45 +10415,144 @@ def _scan_string(text: str, start: int) -> tuple[_Token, int]:
 
 def _scan_number(text: str, start: int) -> tuple[_Token, int]:
     index = start
-    saw_digits = False
+    while index < len(text) and text[index].isdigit():
+        index += 1
 
+    saw_digits = index > start
+    if saw_digits and text.startswith("^^", index):
+        return _scan_based_number(text, start, index)
+
+    index, saw_decimal_dot, saw_digits = _scan_decimal_mantissa(text, start, allow_leading_dot=True)
+    index, saw_precision = _scan_precision_marker(text, index)
+    index, saw_magnitude = _scan_number_magnitude(text, index)
+
+    token_text = text[start:index]
+    if not token_text or token_text == "." or not saw_digits:
+        raise WolframSyntaxError(f"Malformed Wolfram number near {text[start:start + 8]!r}.")
+
+    if not saw_decimal_dot and not saw_precision and not saw_magnitude:
+        return _Token(kind="integer", text=token_text, start=start, end=index, value=int(token_text)), index
+    return _Token(kind="real", text=token_text, start=start, end=index, value=token_text), index
+
+
+def _scan_based_number(text: str, start: int, base_end: int) -> tuple[_Token, int]:
+    base = int(text[start:base_end])
+    if base < 2 or base > 36:
+        raise WolframSyntaxError("Wolfram base-number literals require a base between 2 and 36.")
+
+    index = base_end + 2
+    mantissa_start = index
+    index, saw_base_dot, saw_digits = _scan_base_mantissa(text, index, base)
+    if not saw_digits:
+        raise WolframSyntaxError("Malformed Wolfram base-number literal.")
+    if text.startswith("..", index):
+        raise WolframSyntaxError("Malformed Wolfram base-number literal.")
+
+    index, saw_precision = _scan_precision_marker(text, index)
+    index, saw_magnitude = _scan_number_magnitude(text, index)
+
+    token_text = text[start:index]
+    if not saw_base_dot and not saw_precision and not saw_magnitude:
+        digits = text[mantissa_start:index]
+        return _Token(kind="integer", text=token_text, start=start, end=index, value=int(digits, base)), index
+    return _Token(kind="real", text=token_text, start=start, end=index, value=token_text), index
+
+
+def _scan_decimal_mantissa(text: str, start: int, *, allow_leading_dot: bool) -> tuple[int, bool, bool]:
+    index = start
+    saw_digits = False
     while index < len(text) and text[index].isdigit():
         saw_digits = True
         index += 1
 
     saw_dot = False
-    if index < len(text) and text[index] == "." and index + 1 < len(text) and text[index + 1].isdigit():
-        saw_dot = True
-        index += 1
-        while index < len(text) and text[index].isdigit():
+    if index < len(text) and text[index] == ".":
+        if text.startswith("..", index):
+            return index, saw_dot, saw_digits
+        if index + 1 < len(text) and text[index + 1].isdigit():
+            saw_dot = True
             index += 1
-    elif index < len(text) and text[index] == "." and saw_digits:
-        saw_dot = True
-        index += 1
+            while index < len(text) and text[index].isdigit():
+                saw_digits = True
+                index += 1
+        elif saw_digits:
+            saw_dot = True
+            index += 1
+        elif allow_leading_dot:
+            raise WolframSyntaxError(f"Malformed Wolfram number near {text[start:start + 8]!r}.")
+
+    return index, saw_dot, saw_digits
+
+
+def _scan_precision_marker(text: str, index: int) -> tuple[int, bool]:
+    if text.startswith("``", index):
+        index += 2
+        spec_end, _, saw_digits = _scan_decimal_mantissa(text, index, allow_leading_dot=True)
+        if not saw_digits:
+            raise WolframSyntaxError("Malformed Wolfram accuracy mark.")
+        return spec_end, True
 
     if index < len(text) and text[index] == "`":
         index += 1
-        while index < len(text) and (text[index].isdigit() or text[index] == "."):
-            index += 1
+        spec_end, _, _ = _scan_decimal_mantissa(text, index, allow_leading_dot=True)
+        return spec_end, True
 
-    if text.startswith("*^", index):
+    return index, False
+
+
+def _scan_number_magnitude(text: str, index: int) -> tuple[int, bool]:
+    if not text.startswith("*^", index):
+        return index, False
+
+    index += 2
+    if index < len(text) and text[index] in "+-":
+        index += 1
+    exponent_start = index
+    while index < len(text) and text[index].isdigit():
+        index += 1
+    if exponent_start == index:
+        raise WolframSyntaxError("Malformed Wolfram numeric exponent.")
+    if index < len(text) and text[index] == "." and not text.startswith("..", index):
+        raise WolframSyntaxError("Malformed Wolfram numeric exponent.")
+    return index, True
+
+
+def _scan_base_mantissa(text: str, start: int, base: int) -> tuple[int, bool, bool]:
+    index = start
+    saw_dot = False
+    saw_digits = False
+
+    if index < len(text) and text[index] == ".":
+        if index + 1 >= len(text) or _base_digit_value(text[index + 1]) is None:
+            raise WolframSyntaxError("Malformed Wolfram base-number literal.")
         saw_dot = True
-        index += 2
-        if index < len(text) and text[index] in "+-":
-            index += 1
-        exponent_start = index
-        while index < len(text) and text[index].isdigit():
-            index += 1
-        if exponent_start == index:
-            raise WolframSyntaxError("Malformed Wolfram numeric exponent.")
+        index += 1
 
-    token_text = text[start:index]
-    if not token_text or token_text == ".":
-        raise WolframSyntaxError(f"Malformed Wolfram number near {text[start:start + 8]!r}.")
+    while index < len(text):
+        value = _base_digit_value(text[index])
+        if value is not None:
+            if value >= base:
+                raise WolframSyntaxError(f"Malformed Wolfram base-{base} literal.")
+            saw_digits = True
+            index += 1
+            continue
+        if text[index] == "." and not saw_dot and not text.startswith("..", index):
+            saw_dot = True
+            index += 1
+            continue
+        break
 
-    if not saw_dot and "`" not in token_text and "*^" not in token_text:
-        return _Token(kind="integer", text=token_text, start=start, end=index, value=int(token_text)), index
-    return _Token(kind="real", text=token_text, start=start, end=index, value=token_text), index
+    return index, saw_dot, saw_digits
+
+
+def _base_digit_value(char: str) -> int | None:
+    if "0" <= char <= "9":
+        return ord(char) - ord("0")
+    if "a" <= char <= "z":
+        return ord(char) - ord("a") + 10
+    if "A" <= char <= "Z":
+        return ord(char) - ord("A") + 10
+    return None
 
 
 def _scan_percent_history(text: str, start: int) -> tuple[_Token, int]:
@@ -10349,9 +10582,15 @@ _MULTI_TOKENS = (
     "===",
     "=!=",
     "___",
+    "^:=",
     "__",
     "##",
     "...",
+    "//.",
+    "//@",
+    "@@@",
+    ">>>",
+    "<->",
     "..",
     "[[",
     "~~",
@@ -10361,16 +10600,28 @@ _MULTI_TOKENS = (
     "|->",
     "@*",
     "/*",
+    ":=",
+    "::",
     ":>",
     "->",
+    "=.",
+    "^=",
+    "+=",
+    "-=",
+    "*=",
+    "/=",
+    "/:",
     "/;",
-    "//.",
-    "//@",
     "//",
     "/@",
     "/.",
-    "@@@",
     "@@",
+    "++",
+    "--",
+    "**",
+    "<<",
+    ">>",
+    "??",
     "<=",
     ">=",
     "==",
@@ -10463,7 +10714,7 @@ def _tokenize(text: str) -> list[_Token]:
             continue
 
         char = text[index]
-        if char in "[]{}(),.:+-*/^!@<>_|&#=?":
+        if char in "[]{}(),.;:+-*/^!@<>_|&#=?~":
             tokens.append(_Token(kind="operator", text=char, start=index, end=index + 1, value=char))
             index += 1
             continue
@@ -10479,8 +10730,12 @@ class _Parser:
     _CALL_BP = 190
     _PATTERN_BP = 185
     _PATTERN_TEST_BP = 184
+    _MESSAGE_NAME_BP = 183
+    _POSTFIX_UNARY_BP = 175
+    _INFIX_FUNCTION_BP = 165
     _POWER_BP = 160
     _TIMES_BP = 140
+    _NONCOMMUTATIVE_TIMES_BP = 145
     _PLUS_BP = 120
     _COMPARE_BP = 100
     _AND_BP = 80
@@ -10490,10 +10745,13 @@ class _Parser:
     _NAMED_PATTERN_BP = 63
     _CONDITION_BP = 62
     _RULE_BP = 60
+    _TWO_WAY_RULE_BP = 61
     _REPLACE_BP = 50
     _MAP_BP = 45
     _APPLY_BP = 44
     _COMPOSITION_BP = 43
+    _ASSIGNMENT_BP = 40
+    _PUT_BP = 35
     _AT_BP = 180
     _POSTFIX_BP = 30
     _SEMICOLON_BP = 20
@@ -10576,6 +10834,33 @@ class _Parser:
                 left = call("Optional", left)
                 continue
 
+            if token.text == "!":
+                if self._POSTFIX_UNARY_BP < min_bp:
+                    break
+                self._consume()
+                if self._match("!") is not None:
+                    left = call("Factorial2", left)
+                else:
+                    left = call("Factorial", left)
+                continue
+
+            if token.text in {"++", "--"}:
+                if self._POSTFIX_UNARY_BP < min_bp:
+                    break
+                self._consume()
+                left = call("Increment" if token.text == "++" else "Decrement", left)
+                continue
+
+            if token.text == "=.":
+                if self._POSTFIX_UNARY_BP < min_bp:
+                    break
+                self._consume()
+                if self._is_tag_set_prefix(left):
+                    left = call("TagUnset", left.arguments[0], left.arguments[1])
+                else:
+                    left = call("Unset", left)
+                continue
+
             if token.text == "[":
                 if self._CALL_BP < min_bp:
                     break
@@ -10608,6 +10893,12 @@ class _Parser:
                 left = call("Function", left)
                 continue
 
+            if token.text == "~":
+                if self._INFIX_FUNCTION_BP < min_bp:
+                    break
+                left = self._parse_infix_function_apply(left, terminators)
+                continue
+
             if self._starts_primary(token):
                 if self._TIMES_BP < min_bp:
                     break
@@ -10620,6 +10911,8 @@ class _Parser:
                 break
             left = handled
 
+        if self._is_tag_set_prefix(left):
+            raise WolframSyntaxError("Expected '=', ':=', or '=.' after '/:'.")
         return left
 
     def _parse_prefix(self, terminators: set[str]) -> Expr:
@@ -10666,6 +10959,17 @@ class _Parser:
 
         if token.text == "##":
             return self._parse_prefix_slot_sequence()
+
+        if token.text in {"?", "??"}:
+            name = self._parse_file_name_literal("information")
+            return call("Information", name, call("Rule", symbol("LongForm"), symbol("True" if token.text == "??" else "False")))
+
+        if token.text == "<<":
+            return call("Get", self._parse_file_name_literal("Get"))
+
+        if token.text in {"++", "--"}:
+            head_name = "PreIncrement" if token.text == "++" else "PreDecrement"
+            return call(head_name, self._parse_expression(self._POSTFIX_UNARY_BP, terminators))
 
         if token.text == "+":
             return self._parse_expression(self._PREFIX_BP, terminators)
@@ -10726,6 +11030,40 @@ class _Parser:
         if next_token.kind == "integer":
             return call("SlotSequence", integer(int(self._consume().value)))
         return call("SlotSequence", integer(1))
+
+    def _parse_file_name_literal(self, context: str) -> String:
+        token = self._peek()
+        if token.kind == "symbol":
+            self._consume()
+            return string(str(token.value))
+        if token.kind == "string":
+            self._consume()
+            return string(str(token.value))
+        raise WolframSyntaxError(f"Expected {context} name at offset {token.start}.")
+
+    def _parse_message_tag(self) -> String:
+        token = self._peek()
+        if token.kind == "symbol":
+            self._consume()
+            return string(str(token.value))
+        if token.kind == "string":
+            self._consume()
+            return string(str(token.value))
+        raise WolframSyntaxError(f"Expected message tag at offset {token.start}.")
+
+    def _parse_infix_function_apply(self, left: Expr, terminators: set[str]) -> Expr:
+        self._expect("~")
+        operator = self._parse_expression(0, terminators | {"~"})
+        self._expect("~")
+        right = self._parse_expression(
+            self._INFIX_FUNCTION_BP + 1,
+            terminators | {"eof", ",", "]", "]]", "}", "|>", ")"},
+        )
+        return Call(head_expr=operator, arguments=(left, right))
+
+    @staticmethod
+    def _is_tag_set_prefix(expr: Expr) -> TypeGuard[Call]:
+        return isinstance(expr, Call) and expr.has_head("TagSetPrefix") and len(expr.arguments) == 2
 
     def _is_postfix_optional_dot_context(self, terminators: set[str]) -> bool:
         next_token = self.tokens[self.index + 1]
@@ -10796,12 +11134,50 @@ class _Parser:
         return self._parse_expression(self._SPAN_BP, terminators | {",", "]", "]]", "}", "|>"})
 
     def _parse_infix_operator(self, left: Expr, min_bp: int, terminators: set[str]) -> Expr | None:
-        del terminators
         token = self._peek()
         text = token.text
 
+        if text == "::":
+            if self._MESSAGE_NAME_BP < min_bp:
+                return None
+            self._consume()
+            tag = self._parse_message_tag()
+            if isinstance(left, Call) and left.has_head("MessageName") and len(left.arguments) >= 2:
+                return call("MessageName", *left.arguments, tag)
+            return call("MessageName", left, tag)
+
+        if text in {">>", ">>>"}:
+            if self._PUT_BP < min_bp:
+                return None
+            self._consume()
+            file_name = self._parse_file_name_literal("Put")
+            return call("PutAppend" if text == ">>>" else "Put", left, file_name)
+
+        if text == "/:":
+            if self._ASSIGNMENT_BP < min_bp:
+                return None
+            self._consume()
+            tagged_lhs = self._parse_expression(
+                self._ASSIGNMENT_BP + 1,
+                terminators=terminators | {"eof", ",", "]", "]]", "}", "|>", ")", "=."},
+            )
+            return call("TagSetPrefix", left, tagged_lhs)
+
+        if text == ";":
+            if self._SEMICOLON_BP < min_bp:
+                return None
+            self._consume()
+            if self._peek().kind == "eof" or self._peek().text in terminators:
+                return call("CompoundExpression", left, symbol("Null"))
+            right = self._parse_expression(
+                self._SEMICOLON_BP + 1,
+                terminators=terminators | {"eof", ",", "]", "]]", "}", "|>", ")"},
+            )
+            return call("CompoundExpression", left, right)
+
         binary_specs: dict[str, tuple[int, int, str | None]] = {
             "^": (self._POWER_BP, self._POWER_BP, "Power"),
+            "**": (self._NONCOMMUTATIVE_TIMES_BP, self._NONCOMMUTATIVE_TIMES_BP + 1, "NonCommutativeMultiply"),
             "*": (self._TIMES_BP, self._TIMES_BP + 1, "Times"),
             "/": (self._TIMES_BP, self._TIMES_BP + 1, None),
             "+": (self._PLUS_BP, self._PLUS_BP + 1, "Plus"),
@@ -10821,6 +11197,7 @@ class _Parser:
             "~~": (self._STRING_EXPRESSION_BP, self._STRING_EXPRESSION_BP + 1, "StringExpression"),
             ":": (self._NAMED_PATTERN_BP, self._NAMED_PATTERN_BP, "Pattern"),
             "/;": (self._CONDITION_BP, self._CONDITION_BP + 1, "Condition"),
+            "<->": (self._TWO_WAY_RULE_BP, self._TWO_WAY_RULE_BP, "TwoWayRule"),
             "->": (self._RULE_BP, self._RULE_BP, "Rule"),
             ":>": (self._RULE_BP, self._RULE_BP, "RuleDelayed"),
             "/.": (self._REPLACE_BP, self._REPLACE_BP + 1, "ReplaceAll"),
@@ -10833,8 +11210,15 @@ class _Parser:
             "/*": (self._COMPOSITION_BP, self._COMPOSITION_BP, "RightComposition"),
             "@": (self._AT_BP, self._AT_BP, None),
             "//": (self._POSTFIX_BP, self._POSTFIX_BP + 1, None),
-            ";": (self._SEMICOLON_BP, self._SEMICOLON_BP + 1, "CompoundExpression"),
             ".": (self._TIMES_BP, self._TIMES_BP + 1, "Dot"),
+            "=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "Set"),
+            ":=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "SetDelayed"),
+            "^=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "UpSet"),
+            "^:=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "UpSetDelayed"),
+            "+=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "AddTo"),
+            "-=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "SubtractFrom"),
+            "*=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "TimesBy"),
+            "/=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "DivideBy"),
             "|->": (self._FUNCTION_BP, self._FUNCTION_BP, "Function"),
         }
 
@@ -10850,7 +11234,10 @@ class _Parser:
             return None
 
         self._consume()
-        right = self._parse_expression(right_bp, terminators={"eof", ",", "]", "]]", "}", "|>"})
+        right = self._parse_expression(
+            right_bp,
+            terminators=terminators | {"eof", ",", "]", "]]", "}", "|>", ")"},
+        )
 
         if text == "/":
             return call("Times", left, call("Power", right, integer(-1)))
@@ -10866,6 +11253,9 @@ class _Parser:
             return Call(head_expr=right, arguments=(left,))
         if head_name is None:
             raise WolframSyntaxError(f"Unhandled Wolfram operator {text!r}.")
+        if head_name in {"Set", "SetDelayed"} and self._is_tag_set_prefix(left):
+            tag_head = "TagSet" if head_name == "Set" else "TagSetDelayed"
+            return call(tag_head, left.arguments[0], left.arguments[1], right)
         if (
             head_name in _CHAINABLE_COMPARISON_HEADS
             and isinstance(right, Call)

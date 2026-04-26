@@ -42,7 +42,7 @@ class ParserCorpusTests(unittest.TestCase):
             bad_path = root / "bad.wl"
             source_path.write_text("1 + 2 x", encoding="utf-8")
             notebook_path.write_text('Notebook[{Cell["Hello", "Text"]}]', encoding="utf-8")
-            bad_path.write_text("x := 1", encoding="utf-8")
+            bad_path.write_text("x @= 1", encoding="utf-8")
             files = {file.relative_path: file for file in discover_corpus_files(root)}
 
             source_attempt = parse_file_with_tungsten(files["expr.wl"])
@@ -61,7 +61,7 @@ class ParserCorpusTests(unittest.TestCase):
             out_dir = Path(temp_dir_name) / "out"
             root.mkdir()
             (root / "good.wl").write_text("1 + 2", encoding="utf-8")
-            (root / "bad.wl").write_text("x := 1", encoding="utf-8")
+            (root / "bad.wl").write_text("x @= 1", encoding="utf-8")
 
             def fake_wolfram(batch):
                 return {

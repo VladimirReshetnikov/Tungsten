@@ -193,7 +193,7 @@ class CliTests(unittest.TestCase):
                     "expr",
                     "parse",
                     "--code",
-                    "x := 5",
+                    "x @= 5",
                     "--form",
                     "input",
                 ]

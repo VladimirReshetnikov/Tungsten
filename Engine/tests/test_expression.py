@@ -11,6 +11,7 @@ from tungsten.expression import parse_full_form
 from tungsten.expression import parse_input_form
 from tungsten.expression import parse_standard_form
 from tungsten.expression import WolframEvaluationError
+from tungsten.expression import WolframSyntaxError
 
 
 class ExpressionParserTests(unittest.TestCase):
@@ -21,6 +22,52 @@ class ExpressionParserTests(unittest.TestCase):
     def test_parse_input_form_with_implicit_times_and_power(self) -> None:
         expr = parse_input_form("1 + 2 x^3")
         self.assertEqual(expr.to_full_form(), "Plus[1, Times[2, Power[x, 3]]]")
+
+    def test_parse_wolfram_numeric_literal_surface_forms(self) -> None:
+        examples = {
+            "Hold[1.]": "Hold[1.]",
+            "Hold[.5]": "Hold[.5]",
+            "Hold[1`20]": "Hold[1`20]",
+            "Hold[1`]": "Hold[1`]",
+            "Hold[1``20]": "Hold[1``20]",
+            "Hold[1.2`.5]": "Hold[1.2`.5]",
+            "Hold[1.2``.5]": "Hold[1.2``.5]",
+            "Hold[1.2`20*^3]": "Hold[1.2`20*^3]",
+            "Hold[1.2``20*^-3]": "Hold[1.2``20*^-3]",
+            "Hold[1.2`*^3]": "Hold[1.2`*^3]",
+            "Hold[16^^ff]": "Hold[255]",
+            "Hold[16^^f.f]": "Hold[16^^f.f]",
+            "Hold[2^^1.01*^3]": "Hold[2^^1.01*^3]",
+            "Hold[16^^ff`20]": "Hold[16^^ff`20]",
+            "Hold[16^^f.f``20]": "Hold[16^^f.f``20]",
+            "Hold[16^^f`*^2]": "Hold[16^^f`*^2]",
+            "Hold[16^^f``2*^2]": "Hold[16^^f``2*^2]",
+            "Hold[36^^z.z]": "Hold[36^^z.z]",
+            "Hold[10^^.5]": "Hold[10^^.5]",
+            "Hold[10^^1.]": "Hold[10^^1.]",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(parse_input_form(source).to_full_form(), expected)
+
+        self.assertEqual(parse_input_form("Hold[1..]").to_full_form(), "Hold[Repeated[1]]")
+        self.assertEqual(parse_input_form("Hold[1...]").to_full_form(), "Hold[RepeatedNull[1]]")
+        self.assertEqual(parse_input_form("Hold[1.2`3..]").to_full_form(), "Hold[Repeated[1.2`3]]")
+        self.assertEqual(parse_input_form("Hold[1.2``3..]").to_full_form(), "Hold[Repeated[1.2``3]]")
+
+    def test_reject_malformed_wolfram_numeric_literal_forms(self) -> None:
+        examples = [
+            "Hold[1*^3.5]",
+            "Hold[1*^.5]",
+            "Hold[1.2``*^3]",
+            "Hold[37^^10]",
+            "Hold[2^^102]",
+            "Hold[16^^f..]",
+        ]
+        for source in examples:
+            with self.subTest(source=source):
+                with self.assertRaises(WolframSyntaxError):
+                    parse_input_form(source)
 
     def test_arithmetic_and_boolean_operator_forms_do_not_flatten_during_parse(self) -> None:
         plus_expr = parse_input_form("1 + 2 + 3")
@@ -154,6 +201,63 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(dot_expr.to_input_form(), "{a, b} . {c, d}")
         self.assertEqual(string_join.to_input_form(), '"a" <> "b" <> "c"')
         self.assertEqual(output_history.to_input_form(), "% + %% + Out[12]")
+
+    def test_parse_assignment_and_update_operator_forms_as_inert_heads(self) -> None:
+        examples = {
+            "Hold[a = 2]": "Hold[Set[a, 2]]",
+            "Hold[a := 2]": "Hold[SetDelayed[a, 2]]",
+            "Hold[a = b = c]": "Hold[Set[a, Set[b, c]]]",
+            "Hold[x += 2]": "Hold[AddTo[x, 2]]",
+            "Hold[x -= 2]": "Hold[SubtractFrom[x, 2]]",
+            "Hold[x *= 2]": "Hold[TimesBy[x, 2]]",
+            "Hold[x /= 2]": "Hold[DivideBy[x, 2]]",
+            "Hold[x =.]": "Hold[Unset[x]]",
+            "Hold[lhs ^= rhs]": "Hold[UpSet[lhs, rhs]]",
+            "Hold[lhs ^:= rhs]": "Hold[UpSetDelayed[lhs, rhs]]",
+            "Hold[f /: lhs = rhs]": "Hold[TagSet[f, lhs, rhs]]",
+            "Hold[f /: lhs := rhs]": "Hold[TagSetDelayed[f, lhs, rhs]]",
+            "Hold[f /: lhs =.]": "Hold[TagUnset[f, lhs]]",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                expr = parse_input_form(source)
+                self.assertEqual(expr.to_full_form(), expected)
+
+        self.assertEqual(parse_input_form("Hold[a = 2]").to_input_form(), "Hold[a = 2]")
+        self.assertEqual(parse_input_form("Hold[f /: lhs := rhs]").to_input_form(), "Hold[f /: lhs := rhs]")
+
+    def test_parse_remaining_ascii_operator_forms_as_inert_heads(self) -> None:
+        examples = {
+            "Hold[x++]": "Hold[Increment[x]]",
+            "Hold[++x]": "Hold[PreIncrement[x]]",
+            "Hold[x--]": "Hold[Decrement[x]]",
+            "Hold[--x]": "Hold[PreDecrement[x]]",
+            "Hold[x!]": "Hold[Factorial[x]]",
+            "Hold[x!!]": "Hold[Factorial2[x]]",
+            "Hold[a::b]": 'Hold[MessageName[a, "b"]]',
+            'Hold[a::"b"]': 'Hold[MessageName[a, "b"]]',
+            "Hold[a::b::c]": 'Hold[MessageName[a, "b", "c"]]',
+            "Hold[a ** b]": "Hold[NonCommutativeMultiply[a, b]]",
+            "Hold[a ~ f ~ b]": "Hold[f[a, b]]",
+            "Hold[a~f~b*c]": "Hold[Times[f[a, b], c]]",
+            "Hold[a <-> b]": "Hold[TwoWayRule[a, b]]",
+            "Hold[<< foo]": 'Hold[Get["foo"]]',
+            "Hold[x >> file]": 'Hold[Put[x, "file"]]',
+            "Hold[x >>> file]": 'Hold[PutAppend[x, "file"]]',
+            "Hold[?foo]": 'Hold[Information["foo", Rule[LongForm, False]]]',
+            "Hold[??foo]": 'Hold[Information["foo", Rule[LongForm, True]]]',
+            "Hold[x;]": "Hold[CompoundExpression[x, Null]]",
+            "Hold[16^^ff]": "Hold[255]",
+            "Hold[1.23``20]": "Hold[1.23``20]",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                expr = parse_input_form(source)
+                self.assertEqual(expr.to_full_form(), expected)
+
+        self.assertEqual(parse_input_form("Hold[a::b::c]").to_input_form(), "Hold[a::b::c]")
+        self.assertEqual(parse_input_form("Hold[x!!]").to_input_form(), "Hold[x!!]")
+        self.assertEqual(parse_input_form("Hold[<< foo]").to_input_form(), "Hold[<< foo]")
 
     def test_input_form_uses_operator_forms_without_unnecessary_parentheses(self) -> None:
         downvalue = parse_full_form("RuleDelayed[HoldPattern[In[1]], Range[10]]")
