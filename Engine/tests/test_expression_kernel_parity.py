@@ -408,10 +408,9 @@ class TungstenDivergenceSmokeTests(unittest.TestCase):
         self.assertEqual(_full("Plus[1, 2, 3]"), "6")
         self.assertEqual(_full("Times[2, 3, 4]"), "24")
 
-    def test_integer_division_stays_inert_per_docs(self) -> None:
-        # Docs: negative exponents remain inert -> division via Times*Power lowers
-        # but does not simplify.
-        self.assertEqual(_full("6 / 2"), "Times[6, Power[2, -1]]")
+    def test_exact_division_normalizes_to_rational_or_integer(self) -> None:
+        self.assertEqual(_full("6 / 2"), "3")
+        self.assertEqual(_full("1 / 2"), "Rational[1, 2]")
 
     def test_named_sequence_patterns_match_and_substitute(self) -> None:
         self.assertEqual(_full("MatchQ[f[a, b, c], f[x__]]"), "True")

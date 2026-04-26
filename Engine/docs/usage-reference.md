@@ -474,15 +474,17 @@ The implemented inert evaluator currently covers:
 - symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
   `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, `Set`, `Unset`, `Clear`,
   `OwnValues`, and `ValueQ`
-- integer arithmetic via `Plus`, `Times`, and `Power` when all arguments in the evaluated
-  subexpression are explicit integers
-- integer relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
-  `GreaterEqual` under the same explicit-integer rule
-- simple predicate heads such as `IntegerQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`
+- explicit-number arithmetic via `Rational`, `Complex`, `Plus`, `Times`, `Power`, `N`,
+  `Precision`, `Accuracy`, `SetPrecision`, and `SetAccuracy` when all relevant arguments in the
+  evaluated subexpression are explicit Tungsten numbers
+- numeric relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
+  `GreaterEqual` over explicit numbers, with order comparisons limited to real-valued numbers
+- simple predicate heads such as `AtomQ`, `IntegerQ`, `NumberQ`, `ExactNumberQ`,
+  `InexactNumberQ`, `RealValuedNumberQ`, `MachineNumberQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`
 - hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`
-- integer-only numeric heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`,
-  `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`, `KroneckerDelta`,
-  `DiscreteDelta`, and `Ramp`
+- bounded numeric heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`, `Re`, `Im`, `Conjugate`,
+  `RealSign`, `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`,
+  `KroneckerDelta`, `DiscreteDelta`, and `Ramp`
 - Boolean heads `Not`, `And`, and `Or` when all arguments in the evaluated subexpression are
   explicit `True`/`False`
 - `MatchQ`

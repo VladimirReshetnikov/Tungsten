@@ -9,6 +9,7 @@
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
+  - [Numeric Tower](./numeric-tower.md)
   - [Sequence and Nothing Evaluation](./sequence-nothing-evaluation.md)
   - [Sequence Pattern Matching](./sequence-pattern-matching.md)
   - [Usage Reference](./usage-reference.md)
@@ -98,8 +99,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `ReplaceRepeated` uses a Tungsten-side iteration safety cap to avoid non-terminating rewrite
   loops.
 - Arithmetic and Boolean evaluation are intentionally narrow: Tungsten does not honor `Flat`,
-  `Orderless`, or short-circuit attributes here, and only evaluates the covered heads when every
-  participating argument is already an explicit integer or Boolean value in the shipped subset.
+  `Orderless`, or short-circuit attributes here, and only evaluates the covered arithmetic and
+  relational heads when every participating argument is already an explicit Tungsten number in the
+  shipped numeric tower. Mixed symbolic expressions remain inert.
 - `Sequence[...]` splices into evaluated call arguments, including lists and ordinary symbolic
   calls. It also splices structurally, without evaluating its payload, inside held-but-not-
   sequence-suppressing heads such as `Hold`, `HoldForm`, `HoldPattern`, and `Function`.
@@ -110,9 +112,11 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Hold-family wrappers `Hold`, `HoldComplete`, `HoldForm`, `HoldPattern`, and `Unevaluated` keep
   their arguments unevaluated in Tungsten's structural evaluator. `ReleaseHold` strips one outer
   Hold-family wrapper and evaluates the released payload.
-- Simple predicate heads are intentionally narrow too: Tungsten currently implements only
-  `IntegerQ`, `StringQ`, `DigitQ`, `LetterQ`, `ByteArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only
-  over the explicit values described in the support table below.
+- Simple predicate heads are intentionally narrow too: Tungsten currently implements numeric
+  predicates such as `AtomQ`, `IntegerQ`, `NumberQ`, `ExactNumberQ`, `InexactNumberQ`,
+  `RealValuedNumberQ`, `MachineNumberQ`, and `MachineIntegerQ`, plus `StringQ`, `DigitQ`,
+  `LetterQ`, `ByteArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
+  described in the support table below.
 - String/byte conversion heads are also intentionally bounded: Tungsten currently supports the
   common encodings `"Unicode"`, `"UTF-8"`, `"UTF-16LE"`, `"UTF-16BE"`, `"UTF-32LE"`,
   `"UTF-32BE"`, `"ASCII"`, `"ISO8859-1"`, and `"ISO8859-15"` where they make sense, rather than
@@ -164,9 +168,12 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `Overlaps`, qualified blank shorthand such as `_DigitCharacter`, and multi-character
   `Except[...]` disallowed atoms such as `Except["ab"]` remain out of scope.
 - Base encodings are currently bounded to `"Base16"`, `"Base64"`, and `"Base85ASCII"`.
-- The integer-only numeric family below is also intentionally narrow: Tungsten evaluates these
-  heads only when the supported arguments are already explicit integers or integer lists in the
-  listed direct forms.
+- The numeric family below is intentionally structural rather than algebraic. Tungsten supports
+  explicit `Integer`, `Rational`, `Real`, `Complex`, `Overflow[]`, and `Underflow[]` values,
+  machine-precision arithmetic through Python floats, and arbitrary-precision decimal arithmetic
+  through Python `Decimal`. It does not implement general simplification, interval uncertainty
+  propagation, special mathematical constants, or full Wolfram precision tracking. See
+  [numeric-tower.md](./numeric-tower.md) for representation and divergence notes.
 - Pure functions currently support positional slot forms, `SlotSequence` / `##`, named-parameter
   forms such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and
   `x \[Function] body`, and the evaluation-impact subset of third-argument `Function` attributes.
@@ -291,16 +298,33 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `OwnValues` | `OwnValues[sym]`, `OwnValues["name"]` | Returns read-only own-value rules as `{HoldPattern[sym] :> value}`. String input must name an existing registered symbol. Assignment to `OwnValues` is not implemented. | [OwnValues](https://reference.wolfram.com/language/ref/OwnValues.html) |
 | `Unique` | `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, `Unique[{spec1, ...}]` | Generates fresh registered symbols using Tungsten's module counter or per-prefix string counters. | [Unique](https://reference.wolfram.com/language/ref/Unique.html) |
 | `ValueQ` | `ValueQ[expr]` | Holds `expr` while checking for values. Returns `True` for symbols with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally; returns `False` for ordinary atoms such as integers and strings and for unassigned user symbols. | [ValueQ](https://reference.wolfram.com/language/ref/ValueQ.html) |
-| `Plus` | `Plus[i1, ...]` and infix `+` when nested evaluation reaches an all-integer subexpression | Adds explicit integer arguments. `Plus[]` yields `0`. Mixed expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
-| `Times` | `Times[i1, ...]` and infix `*` when nested evaluation reaches an all-integer subexpression | Multiplies explicit integer arguments. `Times[]` yields `1`. Mixed expressions remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
-| `Power` | `Power[base, exponent]` and infix `^` when both arguments are integers and the exponent is non-negative, excluding `0^0` | Raises an integer base to a non-negative integer exponent when the result stays in the integer subset. Negative exponents remain inert in this pass. | [Power](https://reference.wolfram.com/language/ref/Power) |
-| `Equal` | `Equal[i1, ...]` and infix `==` when every argument is an explicit integer | Returns `True` when all explicit integer arguments are equal. Zero- and one-argument forms return `True`. | [Equal](https://reference.wolfram.com/language/ref/Equal) |
-| `Unequal` | `Unequal[i1, ...]` and infix `!=` when every argument is an explicit integer | Returns `True` when all explicit integer arguments are pairwise distinct. | [Unequal](https://reference.wolfram.com/language/ref/Unequal) |
-| `Less` | `Less[i1, ...]` and infix `<` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are strictly increasing. | [Less](https://reference.wolfram.com/language/ref/Less) |
-| `LessEqual` | `LessEqual[i1, ...]` and infix `<=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nondecreasing. | [LessEqual](https://reference.wolfram.com/language/ref/LessEqual) |
-| `Greater` | `Greater[i1, ...]` and infix `>` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are strictly decreasing. | [Greater](https://reference.wolfram.com/language/ref/Greater) |
-| `GreaterEqual` | `GreaterEqual[i1, ...]` and infix `>=` when every argument is an explicit integer | Returns `True` when adjacent explicit integer arguments are nonincreasing. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
+| `Rational` | `Rational[n, d]` and parser-produced exact divisions such as `1/2` | Normalizes explicit integer ratios to lowest terms, returns an `Integer` when the denominator becomes `1`, yields `Indeterminate` for `0/0`, and yields `ComplexInfinity` for nonzero division by zero. | [Rational](https://reference.wolfram.com/language/ref/Rational) |
+| `Real` | decimal literals, precision-marked literals such as <code>1.23`20</code>, and accuracy-marked literals such as <code>1.23``20</code> | Represents approximate real atoms. Machine reals have no explicit precision marker; arbitrary-precision reals preserve a precision or accuracy marker when Tungsten creates or parses one. | [Real](https://reference.wolfram.com/language/ref/Real) |
+| `Complex`, `I` | `Complex[re, im]`, `I`, and arithmetic forms such as `1 + 2 I` | Represents complex numeric atoms whose components are explicit real numbers. An exact zero imaginary part collapses to the real part; machine-real components coerce the complex value to machine components in the common Wolfram style. | [Complex](https://reference.wolfram.com/language/ref/Complex), [I](https://reference.wolfram.com/language/ref/I) |
+| `Overflow`, `Underflow` | `Overflow[]`, `Underflow[]` | Creates special atomic real values with head `Real`, not ordinary compound expressions. They participate in common numeric predicates and simple reciprocal/arithmetic cases. | [Overflow](https://reference.wolfram.com/language/ref/Overflow.html), [Underflow](https://reference.wolfram.com/language/ref/Underflow.html) |
+| `$MachinePrecision`, `$MaxMachineNumber`, `$MinMachineNumber`, `$MachineEpsilon` | symbol values | Returns Python-platform machine numeric constants using Wolfram-style real literals. | [$MachinePrecision](https://reference.wolfram.com/language/ref/%24MachinePrecision.html), [$MaxMachineNumber](https://reference.wolfram.com/language/ref/%24MaxMachineNumber.html), [$MinMachineNumber](https://reference.wolfram.com/language/ref/%24MinMachineNumber.html), [$MachineEpsilon](https://reference.wolfram.com/language/ref/%24MachineEpsilon.html) |
+| `Plus` | `Plus[n1, ...]` and infix `+` when nested evaluation reaches an all-numeric subexpression | Adds explicit integers, rationals, reals, and complex numbers. `Plus[]` yields `0`. Mixed symbolic expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
+| `Times` | `Times[n1, ...]`, infix `*`, and implicit multiplication when nested evaluation reaches an all-numeric subexpression | Multiplies explicit integers, rationals, reals, and complex numbers. `Times[]` yields `1`. Mixed symbolic expressions remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
+| `Power` | `Power[base, exponent]` and infix `^` for supported numeric bases and exponents | Supports integer powers of exact and inexact real or complex numbers, negative integer powers through reciprocals, and inexact real powers that Python can compute directly. Unsupported symbolic or branch-sensitive cases remain inert. | [Power](https://reference.wolfram.com/language/ref/Power) |
+| `N` | `N[expr]`, `N[expr, p]` | Converts exact numeric atoms inside an expression to machine precision by default or to decimal arbitrary precision when `p` is an explicit integer precision. | [N](https://reference.wolfram.com/language/ref/N) |
+| `Precision` | `Precision[expr]` | Returns `Infinity` for exact numbers, `MachinePrecision` for machine reals/complexes, explicit precision for marked arbitrary-precision reals, `0.` for `Overflow[]` / `Underflow[]`, and the minimum visible numeric precision inside compound expressions. | [Precision](https://reference.wolfram.com/language/ref/Precision) |
+| `Accuracy` | `Accuracy[expr]` | Returns `Infinity` for exact numbers and estimates visible decimal accuracy for explicit reals. The implementation models Wolfram's precision/accuracy relationship but does not implement full uncertainty arithmetic. | [Accuracy](https://reference.wolfram.com/language/ref/Accuracy) |
+| `SetPrecision` | `SetPrecision[expr, p]`, `SetPrecision[expr, MachinePrecision]`, `SetPrecision[expr, Infinity]` | Rewrites explicit numeric atoms to the requested precision. `Infinity` converts finite real literals to exact rationals using Tungsten's decimal-literal interpretation. | [SetPrecision](https://reference.wolfram.com/language/ref/SetPrecision) |
+| `SetAccuracy` | `SetAccuracy[expr, a]`, `SetAccuracy[expr, MachinePrecision]`, `SetAccuracy[expr, Infinity]` | Rewrites explicit numeric atoms to carry an accuracy marker where possible. This is metadata-oriented and does not reproduce all Wolfram guard-digit behavior. | [SetAccuracy](https://reference.wolfram.com/language/ref/SetAccuracy) |
+| `Equal` | `Equal[n1, ...]` and infix `==` when every argument is an explicit number | Returns `True` when all explicit numeric arguments compare equal. Complex equality compares real and imaginary components. Zero- and one-argument forms return `True`. | [Equal](https://reference.wolfram.com/language/ref/Equal) |
+| `Unequal` | `Unequal[n1, ...]` and infix `!=` when every argument is an explicit number | Returns `True` when all explicit numeric arguments are pairwise distinct. | [Unequal](https://reference.wolfram.com/language/ref/Unequal) |
+| `Less` | `Less[n1, ...]` and infix `<` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are strictly increasing. Complex arguments remain inert for order comparisons. | [Less](https://reference.wolfram.com/language/ref/Less) |
+| `LessEqual` | `LessEqual[n1, ...]` and infix `<=` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are nondecreasing. Complex arguments remain inert for order comparisons. | [LessEqual](https://reference.wolfram.com/language/ref/LessEqual) |
+| `Greater` | `Greater[n1, ...]` and infix `>` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are strictly decreasing. Complex arguments remain inert for order comparisons. | [Greater](https://reference.wolfram.com/language/ref/Greater) |
+| `GreaterEqual` | `GreaterEqual[n1, ...]` and infix `>=` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are nonincreasing. Complex arguments remain inert for order comparisons. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
+| `AtomQ` | `AtomQ[expr]` | Returns `True` for symbols, strings, byte arrays, and all explicit numeric atoms including `Rational`, `Complex`, `Overflow[]`, and `Underflow[]`. Although some of these render with brackets, Tungsten treats them as atoms, matching Wolfram's numeric model. | [AtomQ](https://reference.wolfram.com/language/ref/AtomQ.html) |
 | `IntegerQ` | `IntegerQ[expr]` | Returns `True` when the argument is an explicit integer in Tungsten's AST; otherwise returns `False`. | [IntegerQ](https://reference.wolfram.com/language/ref/IntegerQ) |
+| `MachineIntegerQ` | `MachineIntegerQ[expr]` | Tungsten convenience predicate that returns `True` for explicit integers in the signed 64-bit machine-integer range. Wolfram exposes this functionality as <code>Developer`MachineIntegerQ</code>; Tungsten also registers the short System-style spelling for scripting convenience. | [Developer MachineIntegerQ](https://reference.wolfram.com/language/Developer/ref/MachineIntegerQ.html) |
+| `NumberQ` | `NumberQ[expr]` | Returns `True` for explicit integer, rational, real, complex, `Overflow[]`, and `Underflow[]` values; returns `False` for `Infinity` and ordinary symbolic numeric constants such as `Pi`. | [NumberQ](https://reference.wolfram.com/language/ref/NumberQ) |
+| `ExactNumberQ` | `ExactNumberQ[expr]` | Returns `True` for explicit integers, rationals, and complex numbers with exact real and imaginary parts. | [ExactNumberQ](https://reference.wolfram.com/language/ref/ExactNumberQ.html) |
+| `InexactNumberQ` | `InexactNumberQ[expr]` | Returns `True` for explicit real numbers and for complex numbers with any inexact component. | [InexactNumberQ](https://reference.wolfram.com/language/ref/InexactNumberQ.html) |
+| `RealValuedNumberQ` | `RealValuedNumberQ[expr]` | Returns `True` for explicit real-valued numeric atoms, including integers, rationals, reals, `Overflow[]`, and `Underflow[]`. Exact complex numbers with zero imaginary part normally collapse before this predicate runs. | [RealValuedNumberQ](https://reference.wolfram.com/language/ref/RealValuedNumberQ.html) |
+| `MachineNumberQ` | `MachineNumberQ[expr]` | Returns `True` for explicit machine-real atoms and machine-complex atoms whose components are machine reals. `Overflow[]` and arbitrary-precision reals return `False`. | [MachineNumberQ](https://reference.wolfram.com/language/ref/MachineNumberQ.html) |
 | `StringQ` | `StringQ[expr]` | Returns `True` when the argument is an explicit string in Tungsten's AST; otherwise returns `False`. | [StringQ](https://reference.wolfram.com/language/ref/StringQ) |
 | `DigitQ` | `DigitQ["string"]` | Returns `True` when the argument is a non-empty explicit string whose characters all satisfy Tungsten's Unicode digit predicate. | [DigitQ](https://reference.wolfram.com/language/ref/DigitQ) |
 | `LetterQ` | `LetterQ["string"]` | Returns `True` when the argument is a non-empty explicit string whose characters all satisfy Tungsten's Unicode letter predicate. | [LetterQ](https://reference.wolfram.com/language/ref/LetterQ) |
@@ -413,21 +437,24 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Discard` | `Discard[expr, crit]`, `Discard[expr, crit, n]`, `Discard[expr, crit -> "Element"]`, `Discard[expr, crit -> "Index"]`, list-property forms built from those two properties, and operator form `Discard[crit]` | Removes immediate elements for which the criterion evaluates to explicit `True`. Tungsten preserves the original head for the default `"Element"` property, works on association values while preserving keys, and uses 1-based immediate positions for the `"Index"` property. | [Discard](https://reference.wolfram.com/language/ref/Discard) |
 | `SelectFirst` | `SelectFirst[expr, crit]`, `SelectFirst[expr, crit, default]`, `SelectFirst[expr, crit -> "Element"]`, `SelectFirst[expr, crit -> "Index"]`, list-property forms built from those two properties, and operator form `SelectFirst[crit]` | Returns the first immediate element whose criterion evaluates to explicit `True`. For the default `"Element"` property, Tungsten returns `Missing["NotFound"]` when no match exists unless an explicit default is supplied. For the `"Index"` property, Tungsten returns the first 1-based immediate position or `Missing["NotFound"]`. | [SelectFirst](https://reference.wolfram.com/language/ref/SelectFirst) |
 | `TakeWhile` | `TakeWhile[expr, crit]` | Keeps the longest immediate prefix for which the criterion evaluates to explicit `True`. Tungsten preserves the original head and works on association values while preserving keys. | [TakeWhile](https://reference.wolfram.com/language/ref/TakeWhile) |
-| `UnitStep` | `UnitStep[]`, `UnitStep[i1, ...]` | Returns `1` when no explicit integer argument is negative, otherwise `0`. In this pass, Tungsten supports only explicit integer arguments. | [UnitStep](https://reference.wolfram.com/language/ref/UnitStep) |
-| `Unitize` | `Unitize[i]` | Returns `0` for integer `0` and `1` for any other explicit integer. | [Unitize](https://reference.wolfram.com/language/ref/Unitize) |
-| `Sign` | `Sign[i]` | Returns `-1`, `0`, or `1` for an explicit integer. | [Sign](https://reference.wolfram.com/language/ref/Sign) |
-| `Abs` | `Abs[i]` | Returns the absolute value of an explicit integer. | [Abs](https://reference.wolfram.com/language/ref/Abs) |
-| `RealSign` | `RealSign[i]` | Returns `-1`, `0`, or `1` for an explicit integer, using Tungsten's integer-only real subset. | [RealSign](https://reference.wolfram.com/language/ref/RealSign) |
-| `RealAbs` | `RealAbs[i]` | Returns the absolute value of an explicit integer, using Tungsten's integer-only real subset. | [RealAbs](https://reference.wolfram.com/language/ref/RealAbs) |
+| `Re` | `Re[z]` | Returns the real component of an explicit complex number, or the argument itself for explicit real-valued numbers. | [Re](https://reference.wolfram.com/language/ref/Re) |
+| `Im` | `Im[z]` | Returns the imaginary component of an explicit complex number, or `0` for explicit real-valued numbers. | [Im](https://reference.wolfram.com/language/ref/Im) |
+| `Conjugate` | `Conjugate[z]` | Negates the imaginary component of an explicit complex number; explicit real-valued numbers are returned unchanged. | [Conjugate](https://reference.wolfram.com/language/ref/Conjugate) |
+| `UnitStep` | `UnitStep[]`, `UnitStep[n1, ...]` | Returns `1` when no explicit real-valued numeric argument is negative, otherwise `0`. | [UnitStep](https://reference.wolfram.com/language/ref/UnitStep) |
+| `Unitize` | `Unitize[n]` | Returns `0` for explicit numeric zero and `1` for any other explicit number. | [Unitize](https://reference.wolfram.com/language/ref/Unitize) |
+| `Sign` | `Sign[n]` | Returns `-1`, `0`, or `1` for an explicit real-valued number. Complex `Sign` is not implemented. | [Sign](https://reference.wolfram.com/language/ref/Sign) |
+| `Abs` | `Abs[n]` | Returns the absolute value of an explicit real-valued number. For explicit complex numbers, Tungsten computes the exact magnitude when it is a perfect square root and otherwise returns a structural square-root power such as `Power[2, Rational[1, 2]]`. | [Abs](https://reference.wolfram.com/language/ref/Abs) |
+| `RealSign` | `RealSign[n]` | Returns `-1`, `0`, or `1` for an explicit real-valued number. | [RealSign](https://reference.wolfram.com/language/ref/RealSign) |
+| `RealAbs` | `RealAbs[n]` | Returns the absolute value of an explicit real-valued number. | [RealAbs](https://reference.wolfram.com/language/ref/RealAbs) |
 | `Mod` | `Mod[m, n]`, `Mod[m, n, d]` with explicit integers | Returns the Wolfram-style remainder for explicit integer arguments, including the offset form `d`. `Mod[m, 0]` currently yields `Indeterminate`. | [Mod](https://reference.wolfram.com/language/ref/Mod) |
 | `Quotient` | `Quotient[m, n]`, `Quotient[m, n, d]` with explicit integers | Returns the Wolfram-style integer quotient corresponding to `Mod`, including the offset form `d`. `Quotient[0, 0]` currently yields `Indeterminate`, while nonzero divided by zero yields `ComplexInfinity`. | [Quotient](https://reference.wolfram.com/language/ref/Quotient) |
 | `QuotientRemainder` | `QuotientRemainder[m, n]` with explicit integers and nonzero `n` | Returns `{Quotient[m, n], Mod[m, n]}` for the supported integer subset. Division by zero currently remains inert in Tungsten. | [QuotientRemainder](https://reference.wolfram.com/language/ref/QuotientRemainder) |
-| `Min` | `Min[]`, `Min[i1, ...]` | Returns the minimum of explicit integer arguments. `Min[]` yields `Infinity`. | [Min](https://reference.wolfram.com/language/ref/Min) |
-| `Max` | `Max[]`, `Max[i1, ...]` | Returns the maximum of explicit integer arguments. `Max[]` yields `-Infinity`. | [Max](https://reference.wolfram.com/language/ref/Max) |
-| `Clip` | `Clip[i]`, `Clip[i, {min, max}]`, `Clip[i, {min, max}, {vmin, vmax}]` with explicit integers | Clips an explicit integer into the specified range. Tungsten currently requires explicit integer bounds, and for the three-argument form it returns `vmin` or `vmax` when clipping occurs. | [Clip](https://reference.wolfram.com/language/ref/Clip) |
+| `Min` | `Min[]`, `Min[n1, ...]` | Returns the minimum of explicit real-valued numeric arguments. `Min[]` yields `Infinity`. Complex arguments remain inert. | [Min](https://reference.wolfram.com/language/ref/Min) |
+| `Max` | `Max[]`, `Max[n1, ...]` | Returns the maximum of explicit real-valued numeric arguments. `Max[]` yields `-Infinity`. Complex arguments remain inert. | [Max](https://reference.wolfram.com/language/ref/Max) |
+| `Clip` | `Clip[n]`, `Clip[n, {min, max}]`, `Clip[n, {min, max}, {vmin, vmax}]` with explicit real-valued numbers | Clips an explicit real-valued number into the specified range. For the three-argument form it returns `vmin` or `vmax` when clipping occurs. | [Clip](https://reference.wolfram.com/language/ref/Clip) |
 | `KroneckerDelta` | `KroneckerDelta[]`, `KroneckerDelta[i]`, `KroneckerDelta[i1, ...]` | Returns `1` when all supported explicit integer arguments are equal, otherwise `0`. The one-argument form tests whether the integer is `0`. | [KroneckerDelta](https://reference.wolfram.com/language/ref/KroneckerDelta) |
 | `DiscreteDelta` | `DiscreteDelta[]`, `DiscreteDelta[i1, ...]` | Returns `1` when every supported explicit integer argument is `0`, otherwise `0`. | [DiscreteDelta](https://reference.wolfram.com/language/ref/DiscreteDelta) |
-| `Ramp` | `Ramp[i]` | Returns `0` for negative explicit integers and the argument itself for nonnegative explicit integers. | [Ramp](https://reference.wolfram.com/language/ref/Ramp) |
+| `Ramp` | `Ramp[n]` | Returns `0` for negative explicit real-valued numbers and the argument itself for nonnegative explicit real-valued numbers. | [Ramp](https://reference.wolfram.com/language/ref/Ramp) |
 | `Take` | `Take[expr, n]`, `Take[expr, All]`, `Take[expr, span]`, `Take[expr, {n}]`, `Take[expr, {m, n}]`, `Take[expr, {m, n, s}]` | Selects a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Take](https://reference.wolfram.com/language/ref/Take) |
 | `Drop` | `Drop[expr, n]`, `Drop[expr, All]`, `Drop[expr, span]`, `Drop[expr, {n}]`, `Drop[expr, {m, n}]`, `Drop[expr, {m, n, s}]` | Removes a first-level slice while preserving the original head. For associations, supported specifications are still numeric or span-style only. | [Drop](https://reference.wolfram.com/language/ref/Drop) |
 | `Append` | `Append[expr, item]` | Adds an argument at the end of a nonatomic expression. For associations, Tungsten expects a rule and updates or appends the corresponding key. | [Append](https://reference.wolfram.com/language/ref/Append) |
@@ -593,16 +620,17 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Tungsten parses infix arithmetic, relational, and Boolean operators into ordinary head-based AST
   calls such as `Plus[...]`, `Less[...]`, `And[...]`, and `Not[...]`.
 - Tungsten parses same-head chained comparisons such as `1 < 2 < 3` as n-ary relation calls so the
-  integer relation evaluator can match Wolfram's ordinary chain behavior.
+  explicit-number relation evaluator can match Wolfram's ordinary chain behavior for supported
+  real-valued numbers.
 - In this pass, Tungsten does not flatten or reorder `Plus`, `Times`, `And`, or `Or` during
   parsing or evaluation, and it does not implement `Orderless` canonicalization for any head.
 - That means nested operator forms can partially simplify one binary layer at a time. For example,
   `1 + 2 + a` becomes `Plus[3, a]`, while `Plus[1, 2, a]` stays inert.
 - Boolean operator forms behave the same way: `True && False && x` becomes `And[False, x]`, while
   `And[True, False, x]` stays inert in this pass.
-- Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]`, `EvenQ[4]`,
-  `DigitQ["123"]`, and `LetterQ["abc"]` evaluate, while broader numeric or symbolic semantics
-  remain out of scope.
+- Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]`, `NumberQ[1/2]`,
+  `MachineNumberQ[1.]`, `EvenQ[4]`, `DigitQ["123"]`, and `LetterQ["abc"]` evaluate, while broader
+  symbolic numeric semantics remain out of scope.
 
 ## Listable Heads Not Implemented
 

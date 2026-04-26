@@ -12,11 +12,11 @@ Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
 - parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
 - canonical `InputForm` and `FullForm` rendering;
 - an inert evaluator for structural built-ins such as `Length`, `Depth`, `Head`, `Part`,
-  `Extract`, `Level`, integer-only arithmetic and relational heads such as `Plus`, `Times`,
-  `Power`, `Equal`, and `Less`, simple predicates such as `IntegerQ`, `StringQ`, `DigitQ`,
-  `LetterQ`, and `EvenQ`,
-  hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, integer-only numeric
-  heads such as `UnitStep`, `Mod`, `Clip`, and `KroneckerDelta`, Boolean heads such as `Not`,
+  `Extract`, `Level`, explicit-number arithmetic and relational heads such as `Rational`,
+  `Complex`, `Plus`, `Times`, `Power`, `N`, `Precision`, `Accuracy`, `Equal`, and `Less`,
+  simple predicates such as `AtomQ`, `IntegerQ`, `NumberQ`, `StringQ`, `DigitQ`, `LetterQ`, and
+  `EvenQ`, hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, bounded
+  numeric heads such as `UnitStep`, `Mod`, `Clip`, and `KroneckerDelta`, Boolean heads such as `Not`,
   `And`, and `Or`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
   `ReplaceRepeated`, non-local control and message heads such as `Abort`, `Throw`, `Catch`,
   `CheckAbort`, `AbortProtect`, `Check`, `Quiet`, `Message`, `Off`, `On`, and `Print`,
@@ -500,9 +500,11 @@ Tungsten currently implements a broader structural subset that includes:
 - selection functions such as `Select`, `Discard`, `SelectFirst`, and `TakeWhile`, with
   association-aware value semantics and immediate-position `"Index"` properties for the supported
   property forms;
-- integer-only arithmetic and relational evaluation for heads such as `Plus`, `Times`, `Power`,
-  `Equal`, `Less`, and their operator forms, without flattening or orderless normalization;
-- simple predicate evaluation for heads such as `IntegerQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`;
+- explicit-number arithmetic and relational evaluation for heads such as `Rational`, `Complex`,
+  `Plus`, `Times`, `Power`, `N`, `Precision`, `Accuracy`, `Equal`, `Less`, and their operator
+  forms, without flattening or orderless normalization;
+- simple predicate evaluation for heads such as `AtomQ`, `IntegerQ`, `NumberQ`, `StringQ`,
+  `EvenQ`, `OddQ`, and `TrueQ`;
 - hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, where only the
   selected or retained branches are evaluated;
 - evaluator-level non-local control for `Abort`, `Throw`, and `Catch`, including the Wolfram
@@ -524,9 +526,9 @@ Tungsten currently implements a broader structural subset that includes:
 - message-oriented evaluation for `Check`, `Quiet`, `Message`, `$MessageList`, `MessageList`,
   `Off`, `On`, and `Print`; precondition failures emit non-fatal `Head::error` diagnostics and
   leave the failing expression in structural form;
-- integer-only numeric evaluation for heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`,
-  `RealSign`, `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`,
-  `KroneckerDelta`, `DiscreteDelta`, and `Ramp`;
+- bounded numeric evaluation for explicit integers, rationals, reals, and complex numbers,
+  including heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`, `Re`, `Im`, `Conjugate`,
+  `RealSign`, `RealAbs`, `Min`, `Max`, `Clip`, `KroneckerDelta`, `DiscreteDelta`, and `Ramp`;
 - explicit-Boolean evaluation for `Not`, `And`, and `Or`, again without flattening or
   short-circuit behavior in this pass;
 - positional pure-function applications such as `Function[body][arg]`, `body &[arg]`, and pure

@@ -621,7 +621,10 @@ that `Check` is not disabled merely because its output is quieted.
   rendering are documented divergences for now.
 - Numeric literal parsing follows Wolfram's lexical grammar for decimal, base, precision,
   accuracy, and `*^` magnitude forms closely enough to preserve accepted spellings as inert
-  numeric atoms even when Tungsten cannot calculate with those exact literal forms.
+  numeric atoms even when Tungsten cannot calculate with those exact literal forms. The shipped
+  numeric tower now evaluates explicit integers, rationals, reals, complex values, machine
+  constants, and special `Overflow[]` / `Underflow[]` real atoms for common structural arithmetic,
+  predicates, and precision/accuracy metadata; see `docs/numeric-tower.md`.
 - Assignment, update, prefix increment/decrement, message, file, information, factorial, and
   infix-function operator forms are parsed to their Wolfram heads, but side-effectful heads remain
   inert unless a future evaluator milestone explicitly gives them definition or I/O semantics.
