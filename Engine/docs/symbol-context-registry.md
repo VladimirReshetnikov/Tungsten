@@ -110,13 +110,25 @@ The current kernel-free evaluator implements these symbol and context functions:
 - `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, and list forms generate fresh registered symbols.
 - `Set[sym, rhs]` / `sym = rhs` stores an immediate own value for a bare, unprotected symbol.
   The right-hand side is evaluated before storage, matching Wolfram's immediate-assignment model.
+- `Set[f[args], rhs]` / `f[args] = rhs` stores an immediate down value for the symbol `f`.
+  Ordinary LHS arguments are evaluated after the RHS is evaluated, and the defined head's
+  attributes control whether those arguments are held. Head own values are used when choosing
+  the assignment tag, matching cases such as `f = List; f[1] = rhs`.
+- `SetDelayed[f[args], rhs]` / `f[args] := rhs` stores a delayed down value for `f`. The RHS is
+  stored unevaluated and evaluated afresh each time the definition is used.
+- Curried forms such as `f[x_][y_] := rhs` are stored as `SubValues[f]`; if the inner head
+  expression evaluates during assignment, the subvalue can be attached to the evaluated target.
 - `Unset[sym]` / `sym =.` removes a bare symbol's own value.
+- `Unset[f[args]]` / `f[args] =.` removes a matching down-value or sub-value definition.
 - `Clear[sym1, ...]` and `Clear[{sym1, ...}]` clear process-local value slots for bare symbols.
   String-pattern forms clear registered names that match `Names[pattern]`.
 - `ClearAll[sym1, ...]` clears process-local value slots and mutable attributes for unprotected,
   unlocked symbols.
 - `OwnValues[sym]` and `OwnValues["name"]` return read-only own-value rules of the form
   `HoldPattern[sym] :> value`.
+- `DownValues[sym]`, `SubValues[sym]`, `UpValues[sym]`, and `NValues[sym]` read the corresponding
+  canonical value lists. `DownValues` and `SubValues` are populated by supported compound-LHS
+  assignments; `UpValues` and `NValues` remain read-only storage surfaces for now.
 - `ValueQ[expr]` holds `expr` while checking value availability. It returns `True` for symbols
   with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally.
   Ordinary atoms such as integers and strings return `False`, matching Wolfram's value-oriented
@@ -138,10 +150,9 @@ The registry intentionally does not yet implement:
 - mutable `$Context` or `$ContextPath`;
 - `Begin`, `BeginPackage`, `End`, `Needs`, package loading, shadowing diagnostics, or context
   aliases;
-- non-bare-symbol assignment left-hand sides, delayed definitions, or assignment forms beyond
-  bare-symbol `Set` / `Unset`, `Attributes[sym] = attrs`, and the supported clear/protect
-  functions;
-- user-definable down values, up values, or sub values;
+- `UpSet`, `UpSetDelayed`, `TagSet`, and `TagSetDelayed`;
+- direct assignment to value lists such as `DownValues[f] = {...}`;
+- user-definable up values;
 - persistent registry state across separate Tungsten CLI processes.
 
 These boundaries are structural, not accidental. Attributes are process-local metadata that the

@@ -138,7 +138,8 @@ Hook bodies are evaluated with main-loop hooks suppressed to avoid recursive `$P
 
 ## DownValues
 
-`DownValues` is implemented only in read-only session-history form:
+`DownValues` is implemented in read-only form. For session-history symbols it is synthesized
+from the active REPL session:
 
 ```wolfram
 DownValues[In]
@@ -152,9 +153,20 @@ The returned shape mirrors Wolfram's ordinary structure:
 {HoldPattern[In[1]] :> 1 + 2, HoldPattern[In[2]] :> $Line}
 ```
 
-Tungsten does not implement mutable definitions here. `DownValues[userSymbol]` returns `{}` and
-there is no support yet for assigning to `DownValues`, defining functions with `:=`, or inspecting
-general built-in definitions.
+For user symbols, `DownValues[f]` returns the rules created by supported compound-LHS assignments:
+
+```wolfram
+In[1]:= f[x_] := x + 1
+
+Out[1]= Null
+
+In[2]:= {f[3], DownValues[f]}
+
+Out[2]= {4, {HoldPattern[f[x_]] :> x + 1}}
+```
+
+Tungsten still does not implement direct assignment to `DownValues`, `UpSet` / `TagSet`, or
+inspection of general built-in definitions.
 
 ## Exiting
 

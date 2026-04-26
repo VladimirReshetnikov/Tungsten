@@ -94,7 +94,7 @@ The current Tungsten package is composed of the following modules.
 | `expression_evaluator.py` | Dispatch one evaluated expression to the appropriate built-in family. | `expression.py` |
 | `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, integer-number-theory functions, real-rounding heads, and the explicit-number subset of special functions. | `expression.py` |
 | `expression_patterns.py` | Match ordinary expression patterns and implement replacement/search helpers. | `expression.py` |
-| `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `rules_for_kind`) and the planned routing seam for compound-LHS Set / SetDelayed / UpSet / TagSet. | `expression.py` |
+| `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `rules_for_kind`) and the routing seam for compound-LHS Set / SetDelayed plus planned UpSet / TagSet support. | `expression.py` |
 | `expression_scoping.py` | Stub home for `With` / `Module` / `Block`; emits a "not yet implemented" message on call until the upcoming scoping pass lands. | `expression.py` |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
@@ -222,9 +222,9 @@ The expression implementation is now split across a small facade plus family mod
   `Definition` dataclass and the ``OwnValues`` / ``DownValues`` / ``UpValues`` / ``SubValues`` /
   ``NValues`` ordered-list contract — plus the LHS classifier
   (``classify_assignment_lhs``) that routes Set / SetDelayed / UpSet / TagSet
-  assignments to the right value list. Bare-symbol Set and SetDelayed write through this
-  surface today; the upcoming compound-LHS pass plugs into the same seam without
-  restructuring callers.
+  assignments to the right value list. Bare-symbol Set / SetDelayed and ordinary compound-LHS
+  Set / SetDelayed write through this surface today; UpSet / TagSet remain the next assignment
+  families to wire into the same seam.
 - `expression_scoping.py` is the planned home for ``With`` / ``Module`` / ``Block``. Until
   the lexical-and-dynamic-scoping pass lands, the dispatch entry points emit a clear
   ``With::nyet`` / ``Module::nyet`` / ``Block::nyet`` message instead of leaving the call

@@ -1,4 +1,4 @@
-"""Symbol-definition storage and Set / SetDelayed / Unset / Clear scaffolding.
+"""Symbol-definition storage and Set / SetDelayed / Unset / Clear support.
 
 This module is the home for everything related to how ``SymbolRecord`` stores
 user-defined rules — own-values, down-values, up-values, sub-values — and the
@@ -6,18 +6,14 @@ public Set / SetDelayed / Unset / Clear / OwnValues / DownValues / UpValues /
 SubValues / Definition surface that consumes that storage.
 
 The current Tungsten subset keeps the *bare-symbol* own-value path that the
-2026-04-23 review pass already shipped. The work that this module is being
-prepared for is:
+2026-04-23 review pass already shipped and extends the same storage model to
+ordinary compound left-hand sides. The remaining nearby work is:
 
-1. ``Set[lhs, rhs]`` and ``SetDelayed[lhs, rhs]`` (``:=``) for compound
-   left-hand sides such as ``f[x_]``, ``g[1]``, ``h[x_, y_] /; condition``,
-   including multi-equation function definitions (multiple ``f[...] := ...``
-   statements that accumulate as DownValues entries).
-2. ``UpSet`` / ``UpSetDelayed`` / ``TagSet`` / ``TagSetDelayed`` writing to
+1. ``UpSet`` / ``UpSetDelayed`` / ``TagSet`` / ``TagSetDelayed`` writing to
    UpValues and SubValues respectively.
-3. Non-read-only ``OwnValues``, ``DownValues``, ``UpValues``, ``SubValues``
+2. Non-read-only ``OwnValues``, ``DownValues``, ``UpValues``, ``SubValues``
    getters and assignment forms (e.g., ``DownValues[f] = {...}``).
-4. ``Definition[sym]`` and the related introspection surface.
+3. ``Definition[sym]`` and the related introspection surface.
 
 The design contract this module commits to up front:
 
@@ -25,27 +21,27 @@ The design contract this module commits to up front:
   ``HoldPattern[...]`` wrapper around the LHS), ``rhs`` (the body), and
   ``delayed`` (a flag distinguishing ``Set`` from ``SetDelayed``).
 - ``SymbolRecord.own_values_definitions`` and the analogous ``down``,
-  ``up``, ``sub`` lists are *ordered* lists. The order is the order in which
-  rules were assigned; the kernel uses this same order to choose which rule
-  to apply.
-- The shape of each rule is independent of the eventual rewriter that
-  consumes it. The rewriter — when it lands — will iterate the list and
-  attempt to match each pattern using the existing
-  ``tungsten.expression_patterns`` machinery.
+  ``up``, ``sub`` lists are *ordered* lists. Tungsten preserves assignment
+  order except for the obvious Wolfram-style specificity case where a newly
+  assigned literal rule, such as ``f[1]``, must be tried before an existing
+  generic pattern rule such as ``f[x_]``.
+- The shape of each rule is independent of the evaluator code that consumes
+  it. The evaluator iterates the list and attempts to match each pattern
+  using the existing ``tungsten.expression_patterns`` machinery.
 
-Until the compound-LHS implementation lands, this module exposes the API
-seam (``assign_definition``, ``definitions_for_kind``, ``clear_definitions``)
-so that the dispatch in ``tungsten.expression_evaluator`` and the eventual
-pattern-matched evaluation step can talk to the storage through a single
-contract regardless of the value kind.
+This module exposes the API seam (``assign_definition``,
+``definitions_for_kind``, ``clear_definitions``) so that assignment dispatch,
+value-list readers, and pattern-matched evaluation all talk to the storage
+through a single contract regardless of the value kind.
 
 Importantly: this module re-exports the existing bare-symbol Set / Unset /
 Clear / OwnValues path verbatim from ``tungsten.expression`` so the
 established behavior is unchanged. The new ``Definition`` shape and routing
 helpers are *additive*: they sit alongside the existing
-``record.own_value`` slot and reflect into it for now. When the compound-LHS
-implementation lands, the legacy single-slot field can be retired and the
-routing helpers become the canonical write path.
+``record.own_value`` slot and reflect into it for now. Once the remaining
+scoping and value-list assignment work is complete, the legacy single-slot
+field can be retired and the routing helpers can become the canonical write
+path for own values too.
 """
 
 from __future__ import annotations
@@ -105,7 +101,7 @@ class Definition:
         ``SubValues`` always present stored rules in delayed form
         regardless of whether the original assignment was ``Set`` or
         ``SetDelayed``; the ``delayed`` flag on the ``Definition`` is kept
-        only as metadata so the upcoming pattern-matched evaluator can
+        as evaluator metadata so pattern-matched definition dispatch can
         decide whether to re-evaluate the RHS at application time.
         """
         from .expression import call
@@ -157,9 +153,11 @@ def assign_definition(
 
     The contract this commits to is "kernel-style first match wins": when a
     definition with a structurally identical ``hold_pattern`` already
-    exists, the new definition replaces it in place; otherwise the new
-    definition is appended to the end of the list. This matches Wolfram's
-    practical behavior for re-assigning the same rule.
+    exists, the new definition replaces it in place. Otherwise the new
+    definition is inserted before the first existing definition that is
+    clearly more general, and appended when the ordering is ambiguous. This
+    mirrors the Wolfram principle that exact special cases should not be
+    shadowed by earlier generic pattern definitions.
     """
     if kind not in ALL_VALUE_KINDS:
         raise ValueError(f"Unknown value kind: {kind!r}")
@@ -174,8 +172,52 @@ def assign_definition(
         if existing.hold_pattern == hold_pattern:
             definitions[index] = new_definition
             return new_definition
+    new_score = _definition_specificity_score(hold_pattern)
+    for index, existing in enumerate(definitions):
+        if new_score < _definition_specificity_score(existing.hold_pattern):
+            definitions.insert(index, new_definition)
+            return new_definition
     definitions.append(new_definition)
     return new_definition
+
+
+def _definition_specificity_score(expr: "Expr") -> int:
+    """Return a small heuristic score where lower means more specific.
+
+    The full Wolfram definition-ordering algorithm is intentionally not
+    replicated here. The evaluator only needs the common and important case:
+    literal definitions should precede definitions containing blanks or other
+    broad pattern constructs. Equal scores keep user assignment order.
+    """
+    from .expression import Call, Symbol
+
+    if not isinstance(expr, Call):
+        return 0
+    head_name = expr.head_expr.name if isinstance(expr.head_expr, Symbol) else None
+    if head_name == "HoldPattern" and len(expr.arguments) == 1:
+        return _definition_specificity_score(expr.arguments[0])
+    if head_name == "Pattern" and len(expr.arguments) == 2:
+        return _definition_specificity_score(expr.arguments[1])
+    if head_name == "Blank":
+        return 12 if expr.arguments else 20
+    if head_name == "BlankSequence":
+        return 30 + sum(_definition_specificity_score(argument) for argument in expr.arguments)
+    if head_name == "BlankNullSequence":
+        return 35 + sum(_definition_specificity_score(argument) for argument in expr.arguments)
+    if head_name == "Condition" and len(expr.arguments) == 2:
+        return 2 + _definition_specificity_score(expr.arguments[0])
+    if head_name == "PatternTest" and len(expr.arguments) == 2:
+        return 3 + _definition_specificity_score(expr.arguments[0])
+    if head_name == "Optional" and expr.arguments:
+        return 5 + _definition_specificity_score(expr.arguments[0])
+    if head_name == "Alternatives":
+        return 4 + min(
+            (_definition_specificity_score(argument) for argument in expr.arguments),
+            default=0,
+        )
+    if head_name in {"Repeated", "RepeatedNull"} and expr.arguments:
+        return 25 + _definition_specificity_score(expr.arguments[0])
+    return sum(_definition_specificity_score(argument) for argument in expr.arguments)
 
 
 def clear_definitions(record: "SymbolRecord", kinds: Iterable[str] | None = None) -> None:
@@ -212,21 +254,25 @@ def classify_assignment_lhs(lhs: "Expr") -> tuple[str, "Expr | None"]:
     - ``target_symbol`` is the symbol whose value list will receive the
       rule, or ``None`` when the LHS is malformed for a definition.
 
-    The current implementation supports two value kinds:
+    The current implementation supports three value kinds:
 
-    - ``OwnValues`` — bare symbol LHS. This is the only kind currently
-      written by the shipped Set / SetDelayed dispatch.
+    - ``OwnValues`` — bare symbol LHS.
     - ``DownValues`` — LHS of the form ``f[args...]`` where ``f`` is a
-      symbol and at least one argument is non-trivial; this case is
-      *recognized* for routing but the actual rule storage is still
-      handled out-of-band by the upcoming compound-LHS pass. Until then
-      the dispatch raises a clear "not yet supported" error.
+      symbol.
+    - ``SubValues`` — curried LHS of the form ``f[args...][more...]``.
 
-    Other LHS shapes (TagSet, UpSet, SubValues via ``f[x_][y_]``, etc.) are
-    surfaced through this same classifier so the upcoming pass can extend
-    routing in one place.
+    Other LHS shapes (TagSet, UpSet, etc.) are surfaced through this same
+    classifier so future passes can extend routing in one place.
     """
     from .expression import Call, Symbol
+
+    if (
+        isinstance(lhs, Call)
+        and isinstance(lhs.head_expr, Symbol)
+        and lhs.head_expr.name in {"Condition", "HoldPattern"}
+        and lhs.arguments
+    ):
+        return classify_assignment_lhs(lhs.arguments[0])
 
     if isinstance(lhs, Symbol):
         return VALUE_KIND_OWN, lhs
