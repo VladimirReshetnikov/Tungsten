@@ -282,18 +282,10 @@ class ValueGetterTests(unittest.TestCase):
 
 
 class ScopingStubTests(unittest.TestCase):
-    """With / Module / Block emit a clear not-yet-supported message and
-    return the inert call. This is the scaffolding for the upcoming
-    scoping pass; the messages let callers see exactly what they tried to
-    do."""
-
-    def test_with_returns_inert_form(self) -> None:
-        # The current stub leaves the call inert; the message is recorded
-        # but the test asserts on the structural shape only.
-        self.assertEqual(
-            _full("With[{x = 5}, x + 1]"),
-            "With[List[Set[x, 5]], Plus[x, 1]]",
-        )
+    """``Module`` and ``Block`` are still stubs that emit a clear
+    not-yet-supported message and return the inert call. ``With`` was
+    implemented in a follow-up pass and now performs capture-avoiding
+    substitution; see ``WithEvaluationTests`` for its behavior."""
 
     def test_module_returns_inert_form(self) -> None:
         self.assertEqual(
@@ -306,6 +298,166 @@ class ScopingStubTests(unittest.TestCase):
             _full("Block[{x = 5}, x + 1]"),
             "Block[List[Set[x, 5]], Plus[x, 1]]",
         )
+
+
+class WithEvaluationTests(unittest.TestCase):
+    """``With[bindings, body]`` performs capture-avoiding substitution.
+
+    The bindings list is a ``List`` whose entries are ``Set[name, value]``
+    or ``SetDelayed[name, value]``. ``Set`` evaluates the RHS once in the
+    outer scope and substitutes the resulting value; ``SetDelayed``
+    substitutes the *unevaluated* RHS so each in-body occurrence
+    re-evaluates where it lands.
+
+    Substitution is capture-avoiding through ``Function`` and through
+    nested ``With`` / ``Module`` / ``Block`` constructs.
+    """
+
+    def test_basic_immediate_binding(self) -> None:
+        self.assertEqual(_full("With[{x = 5}, x + 1]"), "6")
+
+    def test_multiple_independent_bindings(self) -> None:
+        self.assertEqual(_full("With[{x = 5, y = 6}, x + y]"), "11")
+
+    def test_symbolic_values_substitute(self) -> None:
+        self.assertEqual(_full("With[{x = a, y = b}, x + y]"), "Plus[a, b]")
+
+    def test_value_is_pre_evaluated_once(self) -> None:
+        self.assertEqual(_full("With[{x = 1 + 2}, x * x]"), "9")
+
+    def test_bindings_are_independent_so_second_does_not_see_first(self) -> None:
+        # ``With[{x = 1, y = x + 1}, {x, y}]`` evaluates each binding's
+        # RHS in the OUTER scope. The outer ``x`` is unbound, so ``y``
+        # binds to the symbolic ``x + 1`` rather than ``2``.
+        self.assertEqual(
+            _full("With[{x = 1, y = x + 1}, {x, y}]"),
+            "List[1, Plus[1, x]]",
+        )
+
+    def test_substitutes_through_hold_family(self) -> None:
+        self.assertEqual(_full("With[{x = 5}, Hold[x]]"), "Hold[5]")
+        self.assertEqual(_full("With[{x = 5}, HoldComplete[x]]"), "HoldComplete[5]")
+        self.assertEqual(_full("With[{x = 5}, HoldPattern[x]]"), "HoldPattern[5]")
+        # ``Unevaluated`` is substituted through too. The kernel strips
+        # ``Unevaluated[5]`` at the top level to ``5``; Tungsten leaves
+        # it as ``Unevaluated[5]`` (a pre-existing Unevaluated-handling
+        # gap that is independent of With's substitution semantics).
+        self.assertEqual(_full("With[{x = 5}, Unevaluated[x]]"), "Unevaluated[5]")
+
+    def test_substitutes_through_pattern_name(self) -> None:
+        # With substitutes into pattern-name positions; this is consistent
+        # with treating ``Pattern[...]`` as an ordinary Call rather than a
+        # binding form.
+        self.assertEqual(_full("With[{x = 5}, x_]"), "Pattern[5, Blank[]]")
+
+    def test_function_with_shadowing_parameter_blocks_substitution(self) -> None:
+        # The Function's ``x`` parameter shadows With's ``x``; no
+        # substitution flows in, and no rename happens either.
+        self.assertEqual(
+            _full("With[{x = 5}, Function[x, x + 1]]"),
+            "Function[x, Plus[x, 1]]",
+        )
+        self.assertEqual(_full("With[{x = 5}, Function[x, x + 1][7]]"), "8")
+
+    def test_function_with_non_shadowed_parameter_alpha_renames(self) -> None:
+        # Substitution flows in; the inner Function's parameter ``y`` is
+        # alpha-renamed to ``y$`` for kernel parity (the kernel always
+        # renames Function parameters when substitution flows into the
+        # body, even when no actual capture would occur).
+        self.assertEqual(
+            _full("With[{x = 5}, Function[y, x + y]]"),
+            "Function[y$, Plus[5, y$]]",
+        )
+        self.assertEqual(_full("With[{x = 5}, Function[y, x + y][3]]"), "8")
+
+    def test_capture_avoiding_rename_when_value_contains_inner_param_name(self) -> None:
+        # The inner Function's parameter ``y`` would capture the free
+        # ``y`` inside With's value ``y``; the rename is essential for
+        # correctness here, not just cosmetic.
+        self.assertEqual(
+            _full("With[{x = y}, Function[y, x]]"),
+            "Function[y$, y]",
+        )
+        # And the renamed function still passes its argument through
+        # correctly: applied to 7 it should return the OUTER y (which is
+        # the free symbol), not 7.
+        self.assertEqual(_full("With[{x = y}, Function[y, x][7]]"), "y")
+
+    def test_set_delayed_binding_holds_rhs(self) -> None:
+        # ``SetDelayed`` substitutes the unevaluated RHS so each in-body
+        # occurrence re-evaluates where it lands.
+        self.assertEqual(_full("With[{x := 5}, x + 1]"), "6")
+        self.assertEqual(
+            _full("With[{x := a + b}, {x, x}]"),
+            "List[Plus[a, b], Plus[a, b]]",
+        )
+
+    def test_nested_with_inner_shadows_outer(self) -> None:
+        self.assertEqual(_full("With[{x = 5}, With[{x = 99}, x]]"), "99")
+
+    def test_nested_with_chains_substitution(self) -> None:
+        # Outer x flows into inner With's binding RHS but not its body
+        # (which is shielded by the inner With's binding).
+        self.assertEqual(_full("With[{x = 5}, With[{y = x + 1}, y * 2]]"), "12")
+        self.assertEqual(_full("With[{x = 1}, With[{y = 2}, x + y]]"), "3")
+
+    def test_function_argument_flows_into_with(self) -> None:
+        # Function's positional slot is substituted at apply time; the
+        # resulting With then evaluates normally.
+        self.assertEqual(_full("(With[{x = #}, x + 1] &)[10]"), "11")
+
+    def test_function_named_argument_is_shielded_inside_inner_with(self) -> None:
+        # The outer Function's parameter ``t`` is substituted into the
+        # inner With's binding RHS (``t + 1``); the inner With's ``u``
+        # shadows the body but doesn't conflict with anything here.
+        self.assertEqual(
+            _full("Function[t, With[{u = t + 1}, u * 2]][10]"),
+            "22",
+        )
+
+    def test_function_with_shadowing_inner_with_blocks_outer_substitution(self) -> None:
+        # ``Function[x, With[{x = 5}, x + 1]][99]`` should evaluate to 6.
+        # Function substitutes ``x = 99`` into its body; the inner With
+        # rebinds ``x`` to ``5`` so the body becomes ``5 + 1 = 6``. If
+        # substitution were not scope-aware, the inner With's ``x`` would
+        # be clobbered to 99.
+        self.assertEqual(
+            _full("Function[x, With[{x = 5}, x + 1]][99]"),
+            "6",
+        )
+
+    def test_empty_bindings_returns_evaluated_body(self) -> None:
+        self.assertEqual(_full("With[{}, 7]"), "7")
+        self.assertEqual(_full("With[{}, 1 + 2 + 3]"), "6")
+
+    def test_substitution_preserves_held_function_inside_hold(self) -> None:
+        # ``Hold[Function[x, x + 1]]`` is fully held; substitution
+        # walks into ``Hold`` (Hold doesn't shadow With) but the inner
+        # Function still shadows ``x`` so no substitution occurs there.
+        self.assertEqual(
+            _full("With[{x = 5}, Hold[Function[x, x + 1]]]"),
+            "Hold[Function[x, Plus[x, 1]]]",
+        )
+
+    def test_set_with_substituted_lhs_emits_error(self) -> None:
+        # ``With[{x = 5}, x = 99]`` substitutes to ``Set[5, 99]``, which
+        # is not a valid bare-symbol Set. Tungsten's set_expr emits an
+        # error and leaves the call inert.
+        result = _full("With[{x = 5}, Set[x, 99]]")
+        self.assertEqual(result, "Set[5, 99]")
+
+    def test_invalid_bindings_list_raises(self) -> None:
+        # First argument must be a List of Set/SetDelayed expressions.
+        result = _full("With[5, x]")
+        # The error path leaves the call inert.
+        self.assertEqual(result, "With[5, x]")
+
+    def test_duplicate_binding_name_raises(self) -> None:
+        # Tungsten flags duplicate names rather than silently
+        # last-wins-ing, since the kernel emits a duplicate-binding
+        # error too. We assert on the inert fallback shape here.
+        result = _full("With[{x = 1, x = 2}, x]")
+        self.assertEqual(result, "With[List[Set[x, 1], Set[x, 2]], x]")
 
 
 if __name__ == "__main__":

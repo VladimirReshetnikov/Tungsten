@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T21:40:24Z
-- Repository HEAD: 9426a93f72f65c5ba47dac35f9bb51807e9bae86
+- Updated (UTC): 2026-04-26T22:15:47Z
+- Repository HEAD: 60e6aed0a17fcb29f09f07f9877b3445a9e662d1
 
 ## Summary
 
@@ -309,8 +309,12 @@ The code is split by workstream where the seams are now stable enough:
   accessor for the live ordered list of rules, and the `assign_definition` /
   `remove_definition` / `clear_definitions` write API that the upcoming compound-LHS pass
   will plug into without touching call sites.
-- `expression_scoping.py` is the planned home for `With` / `Module` / `Block`. The dispatch
-  entries emit a clear "not yet implemented" message until the upcoming scoping pass lands.
+- `expression_scoping.py` is the home for the lexical/dynamic scoping constructs.
+  ``With[bindings, body]`` is fully implemented: it parses each binding (``Set``
+  pre-evaluates the RHS in the outer scope, ``SetDelayed`` holds it) and applies the
+  shared capture-avoiding substitution helper (`expression._substitute_named_symbols_in_expr`)
+  to ``body``. ``Module`` and ``Block`` remain stubs that emit a clear
+  "not yet implemented" message until the corresponding scoping passes land.
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 

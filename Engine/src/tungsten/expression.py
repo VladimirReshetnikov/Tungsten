@@ -8865,6 +8865,37 @@ def _rename_bound_symbols_in_expr(expr: Expr, rename_map: dict[str, Symbol]) -> 
     if not isinstance(expr, Call):
         return expr
 
+    scoping_info = _local_scoping_call_info(expr)
+    if scoping_info is not None:
+        head_symbol, bound_symbols, binding_arguments, body = scoping_info
+        shadowed_names = {parameter.name for parameter in bound_symbols}
+        nested_rename_map = {
+            name: replacement
+            for name, replacement in rename_map.items()
+            if name not in shadowed_names
+        }
+        if not nested_rename_map and not (set(rename_map) & shadowed_names):
+            # Nothing the inner scope would observe.
+            return expr
+        # Binding RHS values are evaluated in the outer scope, so they get
+        # the unfiltered rename map. The body sees only the filtered map
+        # because inner bindings shadow.
+        renamed_binding_arguments: list[Expr] = []
+        for binding in binding_arguments:
+            if isinstance(binding, Symbol):
+                renamed_binding_arguments.append(binding)
+                continue
+            assert isinstance(binding, Call)
+            renamed_value = _rename_bound_symbols_in_expr(binding.arguments[1], rename_map)
+            renamed_binding_arguments.append(
+                Call(head_expr=binding.head_expr, arguments=(binding.arguments[0], renamed_value))
+            )
+        renamed_body = _rename_bound_symbols_in_expr(body, nested_rename_map)
+        renamed_bindings_list = Call(
+            head_expr=Symbol("List"), arguments=tuple(renamed_binding_arguments)
+        )
+        return Call(head_expr=expr.head_expr, arguments=(renamed_bindings_list, renamed_body))
+
     inner_parameters = _named_function_parameter_symbols(expr)
     if inner_parameters is not None:
         assert isinstance(expr, Call)
@@ -8887,6 +8918,56 @@ def _rename_bound_symbols_in_expr(expr: Expr, rename_map: dict[str, Symbol]) -> 
     return Call(head_expr=renamed_head, arguments=renamed_arguments)
 
 
+_LOCAL_SCOPING_HEAD_NAMES = frozenset({"With", "Module", "Block"})
+
+
+def _local_scoping_call_info(
+    expr: Expr,
+) -> tuple[Symbol, tuple[Symbol, ...], tuple[Expr, ...], Expr] | None:
+    """If ``expr`` is a recognized ``With`` / ``Module`` / ``Block`` call,
+    return ``(head_symbol, bound_symbols, binding_arguments, body)``.
+
+    ``bound_symbols`` is the ordered tuple of inner-bound parameter symbols
+    (one per binding). ``binding_arguments`` is the original list of binding
+    expressions exactly as they appeared in the call's first argument
+    (``Set[name, value]`` / ``SetDelayed[name, value]`` / bare ``Symbol``
+    for the Module/Block "no init" form). ``body`` is the second argument.
+
+    Returns ``None`` for any malformed shape so callers fall back to the
+    default substitute-everywhere recursion.
+    """
+    if not isinstance(expr, Call):
+        return None
+    if len(expr.arguments) != 2:
+        return None
+    head = expr.head_expr
+    if not isinstance(head, Symbol):
+        return None
+    if _system_dispatch_name(head) not in _LOCAL_SCOPING_HEAD_NAMES:
+        return None
+
+    bindings_expr = expr.arguments[0]
+    if not (isinstance(bindings_expr, Call) and bindings_expr.has_head("List")):
+        return None
+
+    bound_symbols: list[Symbol] = []
+    for binding in bindings_expr.arguments:
+        if isinstance(binding, Symbol):
+            bound_symbols.append(binding)
+            continue
+        if isinstance(binding, Call) and (binding.has_head("Set") or binding.has_head("SetDelayed")):
+            if len(binding.arguments) != 2:
+                return None
+            name = binding.arguments[0]
+            if not isinstance(name, Symbol):
+                return None
+            bound_symbols.append(name)
+            continue
+        return None
+
+    return head, tuple(bound_symbols), tuple(bindings_expr.arguments), expr.arguments[1]
+
+
 def _substitute_named_symbols_in_expr(
     expr: Expr,
     substitutions: dict[str, Expr],
@@ -8906,6 +8987,10 @@ def _substitute_named_symbols_in_expr(
 
     if not isinstance(expr, Call):
         return expr, False
+
+    scoping_info = _local_scoping_call_info(expr)
+    if scoping_info is not None:
+        return _substitute_through_local_scoping(expr, scoping_info, substitutions, unavailable_names)
 
     inner_parameters = _named_function_parameter_symbols(expr)
     if inner_parameters is not None:
@@ -8953,6 +9038,102 @@ def _substitute_named_symbols_in_expr(
     if not changed:
         return expr, False
     return Call(head_expr=substituted_head, arguments=tuple(substituted_arguments)), True
+
+
+def _substitute_through_local_scoping(
+    expr: Call,
+    scoping_info: tuple[Symbol, tuple[Symbol, ...], tuple[Expr, ...], Expr],
+    substitutions: dict[str, Expr],
+    unavailable_names: set[str],
+) -> tuple[Expr, bool]:
+    """Apply capture-avoiding substitution through a ``With`` / ``Module`` /
+    ``Block`` call. Inner-bound names shadow the substitution inside the
+    body; binding RHS values still see the full substitution because they
+    are evaluated in the outer scope. When an inner-bound name appears
+    free in any active substitution value, the inner name is alpha-renamed
+    to a fresh symbol throughout the bindings list and body.
+    """
+    head_symbol, bound_symbols, binding_arguments, body = scoping_info
+    bound_names = {parameter.name for parameter in bound_symbols}
+
+    new_binding_arguments: list[Expr] = []
+    bindings_changed = False
+    for binding in binding_arguments:
+        if isinstance(binding, Symbol):
+            new_binding_arguments.append(binding)
+            continue
+        assert isinstance(binding, Call)
+        old_value = binding.arguments[1]
+        new_value, value_changed = _substitute_named_symbols_in_expr(
+            old_value, substitutions, unavailable_names
+        )
+        bindings_changed = bindings_changed or value_changed
+        if value_changed:
+            new_binding_arguments.append(
+                Call(head_expr=binding.head_expr, arguments=(binding.arguments[0], new_value))
+            )
+        else:
+            new_binding_arguments.append(binding)
+
+    active_substitutions = {
+        name: replacement
+        for name, replacement in substitutions.items()
+        if name not in bound_names
+    }
+
+    if not active_substitutions:
+        if not bindings_changed:
+            return expr, False
+        new_bindings_list = Call(
+            head_expr=Symbol("List"), arguments=tuple(new_binding_arguments)
+        )
+        return Call(head_expr=expr.head_expr, arguments=(new_bindings_list, body)), True
+
+    # Decide whether the body would observe any substitution; if not, no
+    # alpha-renaming is required and the existing call shape can be reused.
+    _preview_body, body_changed = _substitute_named_symbols_in_expr(
+        body, active_substitutions, unavailable_names | bound_names
+    )
+
+    if not body_changed:
+        if not bindings_changed:
+            return expr, False
+        new_bindings_list = Call(
+            head_expr=Symbol("List"), arguments=tuple(new_binding_arguments)
+        )
+        return Call(head_expr=expr.head_expr, arguments=(new_bindings_list, body)), True
+
+    # Capture-avoiding alpha-rename of inner-bound names that would shadow
+    # free variables in the active substitution values.
+    rename_unavailable = set(unavailable_names) | bound_names
+    for binding in new_binding_arguments:
+        _collect_symbol_names(binding, rename_unavailable)
+    _collect_symbol_names(body, rename_unavailable)
+    for replacement in active_substitutions.values():
+        _collect_symbol_names(replacement, rename_unavailable)
+
+    fresh_parameters, rename_map = _fresh_parameter_symbols(bound_symbols, rename_unavailable)
+
+    renamed_binding_arguments: list[Expr] = []
+    for binding, fresh_symbol in zip(new_binding_arguments, fresh_parameters, strict=True):
+        if isinstance(binding, Symbol):
+            renamed_binding_arguments.append(fresh_symbol)
+            continue
+        assert isinstance(binding, Call)
+        renamed_binding_arguments.append(
+            Call(head_expr=binding.head_expr, arguments=(fresh_symbol, binding.arguments[1]))
+        )
+
+    renamed_body = _rename_bound_symbols_in_expr(body, rename_map)
+    substituted_body, _ = _substitute_named_symbols_in_expr(
+        renamed_body,
+        active_substitutions,
+        unavailable_names | {parameter.name for parameter in fresh_parameters},
+    )
+    new_bindings_list = Call(
+        head_expr=Symbol("List"), arguments=tuple(renamed_binding_arguments)
+    )
+    return Call(head_expr=expr.head_expr, arguments=(new_bindings_list, substituted_body)), True
 
 
 def _slot_index(expr: Expr) -> int | None:

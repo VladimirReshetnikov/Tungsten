@@ -56,14 +56,106 @@ if TYPE_CHECKING:
 
 
 def with_expr(arguments: Sequence["Expr"]) -> "Expr":
-    """Stub for the upcoming ``With[bindings, body]`` implementation.
+    """Evaluate ``With[bindings, body]``.
 
-    The dispatch entry point is wired so future work can fill in
-    ``_apply_with_substitution`` and the existing call sites — both the
-    standard ``With[...]`` form and any internal helpers that need
-    lexical substitution — won't need to change.
+    The bindings list is a ``List`` whose entries are ``Set[name, value]``
+    or ``SetDelayed[name, value]``. ``Set`` bindings evaluate their RHS
+    once in the outer scope and then substitute the resulting value
+    everywhere ``name`` appears free in ``body``; ``SetDelayed`` bindings
+    substitute the *unevaluated* RHS, so each in-body occurrence is
+    re-evaluated where it lands. Bindings are independent — the second
+    binding's RHS does not see the first binding's value.
+
+    Substitution is capture-avoiding through ``Function`` (named pure
+    functions) and through nested ``With`` / ``Module`` / ``Block``
+    constructs: inner-bound names that would shadow the substitution are
+    alpha-renamed to fresh names if they collide with a free variable in
+    the substituted value. The capture-avoidance is delegated to the
+    shared ``tungsten.expression._substitute_named_symbols_in_expr`` pass
+    so this implementation stays in lockstep with how ``Function``
+    application substitutes its arguments.
     """
-    return _emit_unsupported_scoping("With", arguments, plural="bindings")
+    from .expression import (
+        Call,
+        Symbol,
+        WolframEvaluationError,
+        _collect_symbol_names,
+        _substitute_named_symbols_in_expr,
+        evaluate,
+    )
+
+    if len(arguments) != 2:
+        raise WolframEvaluationError(
+            "With expects a list of bindings and a body."
+        )
+    bindings_expr, body = arguments
+
+    if not (isinstance(bindings_expr, Call) and bindings_expr.has_head("List")):
+        raise WolframEvaluationError(
+            "With expects a List of bindings as its first argument."
+        )
+
+    if not bindings_expr.arguments:
+        # ``With[{}, body]`` is just ``body``.
+        return evaluate(body)
+
+    substitutions: dict[str, "Expr"] = {}
+    unavailable_names: set[str] = set()
+    seen_names: set[str] = set()
+
+    for binding in bindings_expr.arguments:
+        name, value, delayed = _parse_with_binding(binding)
+        if name.name in seen_names:
+            raise WolframEvaluationError(
+                f"With has duplicate binding for {name.name!r}."
+            )
+        seen_names.add(name.name)
+
+        if delayed:
+            stored_value = value
+        else:
+            stored_value = evaluate(value)
+
+        substitutions[name.name] = stored_value
+        unavailable_names.add(name.name)
+        _collect_symbol_names(stored_value, unavailable_names)
+
+    substituted_body, _changed = _substitute_named_symbols_in_expr(
+        body, substitutions, unavailable_names
+    )
+    return evaluate(substituted_body)
+
+
+def _parse_with_binding(binding: "Expr") -> tuple["Symbol", "Expr", bool]:
+    """Validate and extract ``(name, value, delayed)`` from one With binding.
+
+    Accepted shapes:
+
+    - ``Set[name, value]`` (parser form ``name = value``) — eager.
+    - ``SetDelayed[name, value]`` (parser form ``name := value``) — delayed.
+
+    The bare-symbol "no init" shape that ``Module`` and ``Block`` accept
+    is intentionally rejected for ``With``: the kernel requires an
+    explicit initial value for every With binding.
+    """
+    from .expression import Call, Symbol, WolframEvaluationError
+
+    if isinstance(binding, Call) and (binding.has_head("Set") or binding.has_head("SetDelayed")):
+        if len(binding.arguments) != 2:
+            raise WolframEvaluationError(
+                "With binding requires exactly two arguments."
+            )
+        name = binding.arguments[0]
+        value = binding.arguments[1]
+        if not isinstance(name, Symbol):
+            raise WolframEvaluationError(
+                "With binding names must be bare symbols."
+            )
+        return name, value, binding.has_head("SetDelayed")
+
+    raise WolframEvaluationError(
+        "With expects bindings of the form name = value or name := value."
+    )
 
 
 def module_expr(arguments: Sequence["Expr"]) -> "Expr":

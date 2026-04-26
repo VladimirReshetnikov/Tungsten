@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-26T21:40:24Z
-- Repository HEAD: 9426a93f72f65c5ba47dac35f9bb51807e9bae86
+- Updated (UTC): 2026-04-26T22:15:47Z
+- Repository HEAD: 60e6aed0a17fcb29f09f07f9877b3445a9e662d1
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -363,7 +363,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `UpValues` | `UpValues[sym]` | Returns up-value rules from the canonical `up_values_definitions` list. The list is empty for every symbol until the upcoming `UpSet` / `UpSetDelayed` / `TagSet` pass populates it. | [UpValues](https://reference.wolfram.com/language/ref/UpValues.html) |
 | `SubValues` | `SubValues[sym]` | Returns sub-value rules from the canonical `sub_values_definitions` list. Empty until compound-LHS Set / SetDelayed lands and `f[x_][y_] := ...` starts writing entries here. | [SubValues](https://reference.wolfram.com/language/ref/SubValues.html) |
 | `NValues` | `NValues[sym]` | Returns N-value rules from the canonical `n_values_definitions` list. Reserved for the upcoming numeric-rule storage; currently always empty. | [NValues](https://reference.wolfram.com/language/ref/NValues.html) |
-| `With` | `With[bindings, body]` | Stub: emits `With::nyet` and returns the inert call. The lexical scoping pass will replace the stub with the standard substitution semantics. | [With](https://reference.wolfram.com/language/ref/With) |
+| `With` | `With[{name = value, ...}, body]`, `With[{name := value, ...}, body]`, mixed forms | Performs capture-avoiding substitution of every binding into `body`. `Set` (`name = value`) bindings evaluate their RHS once in the outer scope; `SetDelayed` (`name := value`) bindings substitute the *unevaluated* RHS so each in-body occurrence re-evaluates where it lands. Bindings are independent — the second binding's RHS does not see the first binding's value. The substitution is shielded inside any inner `Function`, `With`, `Module`, or `Block` whose bound names match a With binding; when an inner-bound name appears free in a substituted value, the inner name is alpha-renamed to a fresh symbol so capture is avoided. The empty form `With[{}, body]` is just `body`. Substitution flows through `Hold`, `HoldComplete`, `HoldPattern`, and `Unevaluated`. | [With](https://reference.wolfram.com/language/ref/With) |
 | `Module` | `Module[locals, body]` | Stub: emits `Module::nyet` and returns the inert call. The lexical scoping pass will replace the stub with fresh-symbol allocation through `SymbolRegistry.unique_symbol` and capture-avoiding renaming. | [Module](https://reference.wolfram.com/language/ref/Module) |
 | `Block` | `Block[locals, body]` | Stub: emits `Block::nyet` and returns the inert call. The dynamic scoping pass will replace the stub with save/restore of named symbols' values for the duration of the body. | [Block](https://reference.wolfram.com/language/ref/Block) |
 | `Unique` | `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, `Unique[{spec1, ...}]` | Generates fresh registered symbols using Tungsten's module counter or per-prefix string counters. | [Unique](https://reference.wolfram.com/language/ref/Unique.html) |
