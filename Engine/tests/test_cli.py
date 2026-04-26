@@ -224,7 +224,7 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["result"]["full_form"], "List[a, b, g[b]]")
 
-    def test_expr_evaluate_command_reports_json_error_payload(self) -> None:
+    def test_expr_evaluate_command_reports_nonfatal_message_payload(self) -> None:
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             exit_code = main(
@@ -238,13 +238,13 @@ class CliTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(exit_code, 1)
+        self.assertEqual(exit_code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertFalse(payload["success"])
         self.assertEqual(payload["command"], "evaluate")
-        self.assertEqual(payload["error_type"], "WolframEvaluationError")
         self.assertEqual(payload["parsed_full_form"], "Part[f[a], 2]")
-        self.assertIn("Part specifications are invalid", payload["error"])
+        self.assertEqual(payload["result"]["full_form"], "Part[f[a], 2]")
+        self.assertEqual(payload["messages"][0]["name"], "Part::error")
+        self.assertIn("Part specifications", payload["messages"][0]["text"])
 
     def test_expr_evaluate_command_with_structural_rewrite(self) -> None:
         stdout = io.StringIO()

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-25T23:58:34Z
-- Repository HEAD: 17d77caa0c29a9c40bbfd5e471ea468a146e578e
+- Updated (UTC): 2026-04-26T02:30:55Z
+- Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -176,6 +176,19 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - REPL-only session history heads `In`, `InString`, `Out`, `$Line`, and `DownValues` require an
   active `EvaluationSession`, normally created by `python -m tungsten repl` or `tungsten.exe`.
   Outside that context they remain inert or return empty read-only metadata.
+- `Abort[]`, `Throw[...]`, and `Catch[...]` are implemented as evaluator-level non-local control
+  flow. `Abort[]` aborts the current evaluation and yields `$Aborted` at the outermost Tungsten
+  evaluation boundary. `Catch[expr]` catches only untagged `Throw[value]`, while
+  `Catch[expr, form]` and `Catch[expr, form, f]` catch only tagged throws whose evaluated tag
+  matches `form` under Tungsten's supported pattern matcher.
+- Evaluation precondition failures are non-fatal when they occur through `evaluate(...)`. Tungsten
+  emits a `Head::error` message using the head of the expression that failed, leaves that
+  expression unevaluated, and lets enclosing expressions continue structurally. Direct helper APIs
+  can still raise Python `WolframEvaluationError` when called outside the evaluator.
+- Message control is intentionally practical rather than byte-for-byte kernel-compatible:
+  `Check`, `Quiet`, `Message`, `Off`, `On`, `$MessageList`, `MessageList`, and `Print` implement
+  the common evaluator-visible behavior needed by scripts and the Tungsten REPL. Message texts are
+  Tungsten diagnostic strings, not Wolfram's localized message templates.
 - The current structural pattern subset includes variable-length sequence patterns and the common
   advanced argument-pattern forms: anonymous and named `__`, `___`, `BlankSequence[...]`,
   `BlankNullSequence[...]`, `Repeated`, `RepeatedNull`, `PatternSequence`,
@@ -222,6 +235,17 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Out` | `Out[n]`, `Out[]`, `Out[-k]`, plus parser shorthand `%`, `%%`, `%n` | Returns stored output expressions from the current REPL session. | [Out](https://reference.wolfram.com/language/ref/Out.html) |
 | `DownValues` | `DownValues[In]`, `DownValues[InString]`, `DownValues[Out]` in a REPL session | Returns read-only history downvalues for the active REPL session. Other symbols currently return `{}` in Tungsten's offline evaluator. | [DownValues](https://reference.wolfram.com/language/ref/DownValues.html) |
 | `Exit`, `Quit` | `Exit`, `Exit[]`, `Exit[code]`, `Quit`, `Quit[]`, `Quit[code]` in the REPL | Terminates the Tungsten REPL. Optional integer arguments become the process exit code. | [Exit](https://reference.wolfram.com/language/ref/Exit.html), [Quit](https://reference.wolfram.com/language/ref/Quit.html) |
+| `Abort` | `Abort[]` | Aborts the current Tungsten evaluation and returns `$Aborted` at the outermost evaluator boundary. `Abort` is not caught by `Catch`. | [Abort](https://reference.wolfram.com/language/ref/Abort.html) |
+| `Throw` | `Throw[value]`, `Throw[value, tag]`, `Throw[value, tag, f]` | Raises non-local evaluator control flow. Untagged throws are caught only by `Catch[expr]`; tagged throws are caught only by `Catch[expr, form]` / `Catch[expr, form, f]`. If a tagged throw with its own handler `f` reaches top level uncaught, Tungsten returns `f[value, tag]`. | [Throw](https://reference.wolfram.com/language/ref/Throw.html) |
+| `Catch` | `Catch[expr]`, `Catch[expr, form]`, `Catch[expr, form, f]` | Evaluates `expr` under a non-local throw handler. The one-argument form catches only untagged `Throw[value]`. Tagged forms re-evaluate the tag for matching and use Tungsten's supported pattern matcher for `form`; the three-argument form returns `f[value, tag]`. | [Catch](https://reference.wolfram.com/language/ref/Catch.html) |
+| `$MessageList` | `$MessageList` | Returns the current input's generated message names wrapped in `HoldForm`. Quieted messages remain visible to `$MessageList` during the same evaluation; messages disabled by `Off` are not generated. | [$MessageList](https://reference.wolfram.com/language/ref/%24MessageList.html) |
+| `MessageList` | `MessageList[n]` in a REPL/evaluation session | Returns the visible message names recorded for an earlier input line, wrapped in `HoldForm`. Quieted messages are not stored in `MessageList[n]`. | [MessageList](https://reference.wolfram.com/language/ref/MessageList.html) |
+| `Message` | `Message[sym::tag]`, `Message[sym::tag, e1, ...]` | Generates a non-fatal message unless disabled by `Off` or suppressed by `Quiet`. Tungsten records the message name and a practical diagnostic text; it does not resolve localized Wolfram message templates. | [Message](https://reference.wolfram.com/language/ref/Message.html) |
+| `Check` | `Check[expr, fail]`, `Check[expr, fail, spec]` | Evaluates `expr` and returns `fail` if matching messages are generated. Supported specs are `All`, `None`, message names, lists of message names, and `General::tag` tag-wide matching. | [Check](https://reference.wolfram.com/language/ref/Check.html) |
+| `Quiet` | `Quiet[expr]`, `Quiet[expr, spec]`, `Quiet[expr, off, on]` | Evaluates `expr` while suppressing visible output and `MessageList[n]` recording for matching messages. Inner `Check` still sees messages generated inside the quieted evaluation; outer `Check` does not see messages suppressed by an inner `Quiet`. | [Quiet](https://reference.wolfram.com/language/ref/Quiet.html) |
+| `Off`, `On` | `Off[sym::tag]`, `On[sym::tag]`, list and multi-argument forms | Disables or re-enables message generation for explicit message names. `General::tag` also suppresses messages with the same tag. Message values/templates are not modeled. | [Off](https://reference.wolfram.com/language/ref/Off.html), [On](https://reference.wolfram.com/language/ref/On.html) |
+| `Print` | `Print[expr1, ...]` | Evaluates arguments, concatenates their textual forms, records the text in `EvaluationSession.print_history`, and returns `Null`. The Tungsten REPL writes recorded print lines to the console. | [Print](https://reference.wolfram.com/language/ref/Print.html) |
+| `CompoundExpression` | `expr1; expr2; ...` parser form | Evaluates arguments left to right and returns the final result. A trailing semicolon parses to a final `Null`, matching the common `Print[...];`/statement-style workflow. | [CompoundExpression](https://reference.wolfram.com/language/ref/CompoundExpression.html) |
 | `Unique` | `Unique[]`, `Unique[sym]`, `Unique["prefix"]`, `Unique[{spec1, ...}]` | Generates fresh registered symbols using Tungsten's module counter or per-prefix string counters. | [Unique](https://reference.wolfram.com/language/ref/Unique.html) |
 | `ValueQ` | `ValueQ[expr]` | Returns `True` for explicit numeric, string, and byte-array literals, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally. This is conservative for unreduced built-in calls until Tungsten has value/rule storage; user-defined symbols currently return `False`. | [ValueQ](https://reference.wolfram.com/language/ref/ValueQ.html) |
 | `Plus` | `Plus[i1, ...]` and infix `+` when nested evaluation reaches an all-integer subexpression | Adds explicit integer arguments. `Plus[]` yields `0`. Mixed expressions remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |

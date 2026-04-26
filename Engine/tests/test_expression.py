@@ -10,7 +10,6 @@ from tungsten.expression import evaluate
 from tungsten.expression import parse_full_form
 from tungsten.expression import parse_input_form
 from tungsten.expression import parse_standard_form
-from tungsten.expression import WolframEvaluationError
 from tungsten.expression import WolframSyntaxError
 
 
@@ -523,6 +522,24 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
 
 
 class ExpressionEvaluationTests(unittest.TestCase):
+    def assert_evaluates_with_message(
+        self,
+        source: str,
+        expected_full_form: str,
+        expected_message_name: str | None = None,
+    ) -> None:
+        session = EvaluationSession()
+        parsed = parse_input_form(source)
+        session.begin_input(source, parsed)
+        result = evaluate(parsed, session=session)
+        session.finish_output(result)
+        self.assertEqual(result.to_full_form(), expected_full_form)
+        assert session.message_history is not None
+        messages = session.message_history[session.line]
+        self.assertTrue(messages)
+        if expected_message_name is not None:
+            self.assertEqual(messages[0].name.to_input_form(), expected_message_name)
+
     def test_integer_arithmetic_evaluates_only_when_arguments_are_explicit_integers(self) -> None:
         nested_plus = evaluate(parse_input_form("1 + 2 + 3"))
         nested_times = evaluate(parse_input_form("2 * 3 * 4"))
@@ -587,6 +604,70 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(length_unevaluated.to_full_form(), "2")
         self.assertEqual(head_unevaluated.to_full_form(), "Plus")
         self.assertEqual(part_unevaluated.to_full_form(), "a")
+
+    def test_abort_throw_and_catch_follow_nonlocal_control_flow(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Abort[]")).to_full_form(), "$Aborted")
+        self.assertEqual(evaluate(parse_input_form("1 + Abort[]")).to_full_form(), "$Aborted")
+        self.assertEqual(evaluate(parse_input_form("Catch[Abort[]]")).to_full_form(), "$Aborted")
+
+        self.assertEqual(evaluate(parse_input_form("Catch[1 + Throw[x] + 3]")).to_full_form(), "x")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[1 + 2]]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag], tag]")).to_full_form(), "x")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag], _Symbol]")).to_full_form(), "x")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag], tag, h]")).to_full_form(), "h[x, tag]")
+        self.assertEqual(
+            evaluate(parse_input_form("Catch[Throw[x, tag], tag, Function[{v, t}, h[v, t]]]")).to_full_form(),
+            "h[x, tag]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag], tag, Hold]")).to_full_form(), "Hold[x, tag]")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, 1 + 2], 3]")).to_full_form(), "x")
+        self.assertEqual(
+            evaluate(parse_input_form("Catch[Catch[Throw[x, inner], outer], inner]")).to_full_form(),
+            "x",
+        )
+        self.assertEqual(evaluate(parse_input_form("Catch[Hold[Throw[x]]]")).to_full_form(), "Hold[Throw[x]]")
+
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag]]")).to_full_form(), "Throw[x, tag]")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag], other]")).to_full_form(), "Throw[x, tag]")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x], _]")).to_full_form(), "Throw[x]")
+        self.assertEqual(evaluate(parse_input_form("Throw[x, tag, h]")).to_full_form(), "h[x, tag]")
+        self.assertEqual(evaluate(parse_input_form("Catch[Throw[x, tag, h], tag]")).to_full_form(), "x")
+        self.assertEqual(evaluate(parse_input_form("Catch[Catch[Throw[x, tag, h], other], _]")).to_full_form(), "x")
+
+    def test_messages_check_quiet_off_on_print_and_message_history(self) -> None:
+        session = EvaluationSession()
+
+        def submit(code: str) -> str:
+            parsed = parse_input_form(code)
+            session.begin_input(code, parsed)
+            result = evaluate(parsed, session=session)
+            session.finish_output(result)
+            return result.to_full_form()
+
+        self.assertEqual(submit("Part[f[a], 2]"), "Part[f[a], 2]")
+        assert session.message_history is not None
+        self.assertEqual(session.message_history[1][0].name.to_input_form(), "Part::error")
+        self.assertEqual(submit("MessageList[1]"), 'List[HoldForm[MessageName[Part, "error"]]]')
+
+        self.assertEqual(submit("Check[Part[f[a], 2], fallback]"), "fallback")
+        self.assertEqual(submit("Check[Part[f[a], 2], fallback, Other::error]"), "Part[f[a], 2]")
+        self.assertEqual(submit("Check[Part[f[a], 2], $MessageList]"), 'List[HoldForm[MessageName[Part, "error"]]]')
+
+        self.assertEqual(submit("Quiet[Part[f[a], 2]]"), "Part[f[a], 2]")
+        self.assertEqual(session.message_history[6], ())
+        self.assertEqual(submit("Check[Quiet[Part[f[a], 2]], fallback]"), "Part[f[a], 2]")
+        self.assertEqual(submit("Quiet[Check[Part[f[a], 2], fallback]]"), "fallback")
+        self.assertEqual(session.message_history[8], ())
+
+        self.assertEqual(submit("Off[f::tag]"), "Null")
+        self.assertEqual(submit("Check[Message[f::tag], fallback]"), "Null")
+        self.assertEqual(session.message_history[10], ())
+        self.assertEqual(submit("On[f::tag]"), "Null")
+        self.assertEqual(submit("Check[Message[f::tag], fallback]"), "fallback")
+
+        self.assertEqual(submit('Print["a", 1 + 2, x]'), "Null")
+        assert session.print_history is not None
+        self.assertEqual(session.print_history[13], ("a3x",))
 
     def test_ignoring_inactive_patterns_match_active_and_inactive_forms(self) -> None:
         inactive_match = evaluate(parse_input_form("MatchQ[Inactive[f][1], IgnoringInactive[f[_]]]"))
@@ -801,10 +882,12 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(nested_slot_sequence.to_full_form(), "f[c, d]")
 
     def test_pure_function_slot_errors_surface_when_argument_is_missing(self) -> None:
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("(#2&)[a]"))
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("(f[##0]&)[a]"))
+        self.assert_evaluates_with_message("(#2&)[a]", "Function[Slot[2]][a]", "General::error")
+        self.assert_evaluates_with_message(
+            "(f[##0]&)[a]",
+            "Function[f[SlotSequence[0]]][a]",
+            "General::error",
+        )
 
     def test_pure_function_attributes_control_argument_evaluation_and_threading(self) -> None:
         default_eval = evaluate(parse_input_form("Function[Null, HoldComplete[#]][1 + 2]"))
@@ -841,8 +924,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
             "List[HoldComplete[Plus[1, 2]], HoldComplete[Plus[3, 4]]]",
         )
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("Function[Null, f[#1, #2], Listable][{a, b}, {c, d, e}]"))
+        self.assert_evaluates_with_message(
+            "Function[Null, f[#1, #2], Listable][{a, b}, {c, d, e}]",
+            "Function[Null, f[Slot[1], Slot[2]], Listable][List[a, b], List[c, d, e]]",
+            "General::error",
+        )
 
     def test_named_pure_functions_apply_with_capture_avoiding_renaming(self) -> None:
         direct = evaluate(parse_input_form("(Function[x, x + x])[a]"))
@@ -867,10 +953,12 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(positional_nested.to_full_form(), "Function[Plus[Slot[1], a]]")
 
     def test_named_pure_function_errors_when_arguments_or_parameters_are_invalid(self) -> None:
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("(Function[{x, y}, x + y])[a]"))
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("(Function[f[x], x])[a]"))
+        self.assert_evaluates_with_message(
+            "(Function[{x, y}, x + y])[a]",
+            "Function[List[x, y], Plus[x, y]][a]",
+            "General::error",
+        )
+        self.assert_evaluates_with_message("(Function[f[x], x])[a]", "Function[f[x], x][a]", "General::error")
 
     def test_identity_sameq_unsameq_sameas_and_composition_family(self) -> None:
         identity = evaluate(parse_input_form("Identity[x]"))
@@ -961,8 +1049,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(take_list_result.to_full_form(), "List[List[a, b], List[c]]")
         self.assertEqual(take_drop_result.to_full_form(), "List[List[a, b], List[c, d]]")
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("UnitVector[3]"))
+        self.assert_evaluates_with_message("UnitVector[3]", "UnitVector[3]", "UnitVector::error")
 
     def test_fold_search_and_duplicate_family(self) -> None:
         fold_result = evaluate(parse_input_form("Fold[f, x, {a, b, c}]"))
@@ -1271,8 +1358,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(invalid_utf8_fallback.to_full_form(), "List[97, 162, 98]")
         self.assertEqual(empty_byte_array_string.to_full_form(), '""')
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form('StringToByteArray[FromCharacterCode[{97, 233}], "ASCII"]'))
+        self.assert_evaluates_with_message(
+            'StringToByteArray[FromCharacterCode[{97, 233}], "ASCII"]',
+            'StringToByteArray[FromCharacterCode[List[97, 233]], "ASCII"]',
+            "StringToByteArray::error",
+        )
 
     def test_import_export_string_and_byte_array_formats(self) -> None:
         import_text = evaluate(parse_input_form('ImportString["abc", "Text"]'))
@@ -1325,8 +1415,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(gzip_csv_roundtrip.to_full_form(), "List[List[1, 2], List[3, 4]]")
         self.assertEqual(bzip_raw_json_roundtrip.to_full_form(), 'Association[Rule["a", 1]]')
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form('ExportString[{"a" -> 1}, "RawJSON"]'))
+        self.assert_evaluates_with_message(
+            'ExportString[{"a" -> 1}, "RawJSON"]',
+            'ExportString[List[Rule["a", 1]], "RawJSON"]',
+            "ExportString::error",
+        )
 
     def test_to_string_and_to_expression_round_trip_input_and_standard_forms(self) -> None:
         input_string = evaluate(parse_input_form("ToString[HoldComplete[1 + 2], InputForm]"))
@@ -1372,10 +1465,12 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(box_implicit_standard.to_full_form(), "3")
         self.assertEqual(listable.to_full_form(), "List[HoldComplete[Plus[1, 2]], HoldComplete[g[f[x]]]]")
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("ToString[x, OutputForm]"))
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form('ToExpression["x", TraditionalForm]'))
+        self.assert_evaluates_with_message("ToString[x, OutputForm]", "ToString[x, OutputForm]", "ToString::error")
+        self.assert_evaluates_with_message(
+            'ToExpression["x", TraditionalForm]',
+            'ToExpression["x", TraditionalForm]',
+            "ToExpression::error",
+        )
 
     def test_box_conversion_and_syntax_builtins(self) -> None:
         make_expression = evaluate(parse_input_form('MakeExpression[RowBox[{"1", "+", "2"}], StandardForm]'))
@@ -1466,11 +1561,8 @@ class ExpressionEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(user_symbol_attributes.to_full_form(), "List[]")
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form('Symbol["not a symbol"]'))
-
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("Attributes[1 + 1]"))
+        self.assert_evaluates_with_message('Symbol["not a symbol"]', 'Symbol["not a symbol"]', "Symbol::error")
+        self.assert_evaluates_with_message("Attributes[1 + 1]", "Attributes[Plus[1, 1]]", "Attributes::error")
 
     def test_unique_and_valueq_use_symbol_registry(self) -> None:
         unique_default = evaluate(parse_input_form("Unique[]"))
@@ -1697,12 +1789,21 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(letter_q.to_full_form(), "True")
 
     def test_string_pattern_subset_rejects_non_string_pattern_shapes(self) -> None:
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form('StringCases["abc", Except["ab"]]'))
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form('StringCases["abc", _LetterCharacter]'))
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form('StringCases["abc", Optional["a"] ~~ "b"]'))
+        self.assert_evaluates_with_message(
+            'StringCases["abc", Except["ab"]]',
+            'StringCases["abc", Except["ab"]]',
+            "StringCases::error",
+        )
+        self.assert_evaluates_with_message(
+            'StringCases["abc", _LetterCharacter]',
+            'StringCases["abc", Blank[LetterCharacter]]',
+            "StringCases::error",
+        )
+        self.assert_evaluates_with_message(
+            'StringCases["abc", Optional["a"] ~~ "b"]',
+            'StringCases["abc", StringExpression[Optional["a"], "b"]]',
+            "StringCases::error",
+        )
 
     def test_integer_division_extrema_clipping_and_delta_functions(self) -> None:
         mod_two = evaluate(parse_input_form("Mod[-14, 5]"))
@@ -1748,8 +1849,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(pattern_pick.to_full_form(), "List[b, d]")
         self.assertEqual(association_pick.to_full_form(), "Association[Rule[q, b], Rule[s, d]]")
 
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("Pick[{a, b, c, d}, {True, False}]"))
+        self.assert_evaluates_with_message(
+            "Pick[{a, b, c, d}, {True, False}]",
+            "Pick[List[a, b, c, d], List[True, False]]",
+            "Pick::error",
+        )
 
     def test_association_part_extract_delete_replacepart_and_mapat(self) -> None:
         part_key = evaluate(parse_input_form("Part[<|a -> x, b -> y, c -> z|>, Key[b]]"))
@@ -1778,8 +1882,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(map_at_nested.to_full_form(), "List[Association[Rule[a, 1], Rule[b, List[2, f[3]]]], 9]")
 
     def test_association_mixed_selector_lists_are_rejected(self) -> None:
-        with self.assertRaises(WolframEvaluationError):
-            evaluate(parse_input_form("Part[<|a -> 1, b -> 2, c -> 3, d -> 4|>, {2, Key[d]}]"))
+        self.assert_evaluates_with_message(
+            "Part[<|a -> 1, b -> 2, c -> 3, d -> 4|>, {2, Key[d]}]",
+            "Part[Association[Rule[a, 1], Rule[b, 2], Rule[c, 3], Rule[d, 4]], List[2, Key[d]]]",
+            "Part::error",
+        )
 
     def test_matchq_supports_pattern_subset(self) -> None:
         wildcard = evaluate(parse_input_form("MatchQ[f[1], _[1]]"))

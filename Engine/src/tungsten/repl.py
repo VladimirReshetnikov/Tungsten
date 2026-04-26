@@ -81,6 +81,16 @@ def run_repl(
             error_stream.flush()
             continue
 
+        assert session.current_visible_messages is not None
+        assert session.current_prints is not None
+        for message in session.current_visible_messages:
+            error_stream.write(message.text)
+            error_stream.write("\n")
+        error_stream.flush()
+        for text in session.current_prints:
+            output_stream.write(text)
+            output_stream.write("\n")
+
         session.finish_output(result)
         if _should_print_output(result):
             output_stream.write(f"\nOut[{line}]= {_format_output(result)}\n\n")

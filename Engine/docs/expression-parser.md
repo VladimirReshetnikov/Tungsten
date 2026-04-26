@@ -1,8 +1,8 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-26T00:10:04Z
-Repository HEAD: 17d77caa0c29a9c40bbfd5e471ea468a146e578e
+Updated (UTC): 2026-04-26T02:30:55Z
+Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 
 ## Summary
 
@@ -18,7 +18,9 @@ Repository HEAD: 17d77caa0c29a9c40bbfd5e471ea468a146e578e
   hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, integer-only numeric
   heads such as `UnitStep`, `Mod`, `Clip`, and `KroneckerDelta`, Boolean heads such as `Not`,
   `And`, and `Or`, `MatchQ`, `FreeQ`, `Cases`, `DeleteCases`, `Replace`, `ReplaceAll`,
-  `ReplaceRepeated`, `Function`, functional combinators such as `Composition`, `Nest`,
+  `ReplaceRepeated`, non-local control and message heads such as `Abort`, `Throw`, `Catch`,
+  `Check`, `Quiet`, `Message`, `Off`, `On`, and `Print`, `Function`,
+  functional combinators such as `Composition`, `Nest`,
   `FixedPoint`, `Fold`, `MapApply`, `MapAll`, `MapIndexed`, `Through`, `Thread`, `Outer`,
   `Inner`, `Dot`, array and matrix builders such as `Array`, `Range`, `UnitVector`,
   `IdentityMatrix`, and `DiagonalMatrix`, sequence transforms such as `Partition`, `BlockMap`,
@@ -487,6 +489,12 @@ Tungsten currently implements a broader structural subset that includes:
 - simple predicate evaluation for heads such as `IntegerQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`;
 - hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`, where only the
   selected or retained branches are evaluated;
+- evaluator-level non-local control for `Abort`, `Throw`, and `Catch`, including the Wolfram
+  distinction between untagged throws caught by `Catch[expr]` and tagged throws caught by
+  pattern-filtered `Catch[expr, form]` forms;
+- message-oriented evaluation for `Check`, `Quiet`, `Message`, `$MessageList`, `MessageList`,
+  `Off`, `On`, and `Print`; precondition failures emit non-fatal `Head::error` diagnostics and
+  leave the failing expression in structural form;
 - integer-only numeric evaluation for heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`,
   `RealSign`, `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`,
   `KroneckerDelta`, `DiscreteDelta`, and `Ramp`;

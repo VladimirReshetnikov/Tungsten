@@ -8,6 +8,7 @@ from pathlib import Path
 from .assistant import NotebookAssistantController
 from .discovery import discover_installation
 from .docs_index import DocumentationIndex
+from .expression import EvaluationSession
 from .expression import depth as expression_depth
 from .expression import evaluate as evaluate_expression
 from .expression import length as expression_length
@@ -550,8 +551,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.expr_command == "evaluate":
+            session = EvaluationSession()
+            line = session.begin_input(source_text, parsed)
             try:
-                result = evaluate_expression(parsed)
+                result = evaluate_expression(parsed, session=session)
+                session.finish_output(result)
             except WolframEvaluationError as exc:
                 _json_dump(
                     _expr_error_payload(
@@ -563,6 +567,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 1
+            assert session.message_history is not None
+            assert session.print_history is not None
             _json_dump(
                 {
                     "command": "evaluate",
@@ -577,6 +583,8 @@ def main(argv: list[str] | None = None) -> int:
                         "length": expression_length(result),
                         "tree": result.to_dict(),
                     },
+                    "messages": [message.to_dict() for message in session.message_history.get(line, ())],
+                    "prints": list(session.print_history.get(line, ())),
                 }
             )
             return 0

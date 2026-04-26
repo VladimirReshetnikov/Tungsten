@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T00:10:04Z
-- Repository HEAD: 17d77caa0c29a9c40bbfd5e471ea468a146e578e
+- Updated (UTC): 2026-04-26T02:30:55Z
+- Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
 
 ## Summary
 
@@ -528,6 +528,44 @@ them intentionally.
 - Tungsten is Windows-first.
 - Tungsten assumes a local Wolfram installation rather than a remote kernel.
 - The expression subsystem does not attempt full kernel semantics.
+
+## Why Abort, Throw, and Catch are evaluator signals
+
+`Abort`, `Throw`, and `Catch` cannot be implemented as ordinary symbolic rewrites because they
+must stop evaluating sibling arguments and unwind through arbitrary intermediate heads. Tungsten
+therefore models them with internal non-local evaluator signals.
+
+The outer public `evaluate(...)` boundary catches only signals that escaped the whole evaluation.
+That matters because Tungsten's evaluator recursively calls `evaluate(...)` while evaluating
+ordinary arguments; catching at every recursive call would incorrectly turn `1 + Throw[x]` into a
+partially evaluated `Plus[...]` expression instead of unwinding the whole evaluation. `Catch`
+intercepts signals only in its own body evaluation and preserves Wolfram's split between untagged
+`Throw[value]`, caught by `Catch[expr]`, and tagged `Throw[value, tag]`, caught by
+`Catch[expr, form]` when the tag matches the pattern form.
+
+## Why messages are non-fatal evaluator events
+
+The Wolfram kernel usually reports many failed preconditions as messages while returning the
+original expression unevaluated. Tungsten now follows that shape for expressions evaluated through
+the public evaluator: a `WolframEvaluationError` raised by a built-in implementation is converted
+at the nearest recursive `evaluate(...)` boundary into a generated `Head::error` message and the
+original expression is returned. This lets enclosing expressions continue, and it gives `Check`
+and `$MessageList` meaningful data without turning ordinary user mistakes into Python exceptions.
+
+The distinction is intentional:
+
+- direct helper APIs can still raise `WolframEvaluationError` when called as Python functions;
+- parser errors remain fatal syntax errors;
+- evaluator control-flow signals such as `Throw`, `Abort`, `Exit`, and `Quit` remain non-message
+  control flow;
+- message records are Tungsten diagnostics, not attempts to reproduce Wolfram's localized message
+  template database.
+
+`Quiet` is modeled as a scoped visibility filter. Quieted messages are still generated and can be
+seen by `$MessageList` during the same evaluation, but they are not saved into per-line
+`MessageList[n]` history and are not visible to an enclosing `Check`. A `Check` placed inside an
+outer `Quiet` still sees messages generated in its own body, matching the practical Wolfram rule
+that `Check` is not disabled merely because its output is quieted.
 - The expression subsystem can report read-only Wolfram 14.3 <code>System`</code> attributes through the
   symbol registry, but it intentionally does not implement evaluator-wide semantics for general
   attributes such as `Flat`, `Orderless`, `Listable`, or short-circuit evaluation. A small

@@ -40,6 +40,18 @@ class TungstenExitRequested(Exception):
         self.code = int(code)
 
 
+class TungstenAbortRequested(Exception):
+    """Internal non-local signal raised when evaluation reaches Abort[]."""
+
+
+class _TungstenThrowSignal(Exception):
+    def __init__(self, value: Expr, tag: Expr | None = None, handler: Expr | None = None) -> None:
+        super().__init__(value, tag, handler)
+        self.value = value
+        self.tag = tag
+        self.handler = handler
+
+
 class Expr:
     def head(self) -> Expr:
         raise NotImplementedError
@@ -177,10 +189,13 @@ class ByteArrayExpr(Expr):
 
 
 _SYSTEM_SYMBOL_NAMES = {
+    "$Aborted",
     "$Context",
     "$ContextPath",
     "$Line",
+    "$MessageList",
     "Abs",
+    "Abort",
     "All",
     "Alternatives",
     "And",
@@ -204,8 +219,10 @@ _SYSTEM_SYMBOL_NAMES = {
     "ByteArrayQ",
     "ByteArrayToString",
     "Cases",
+    "Catch",
     "CharacterRange",
     "Characters",
+    "Check",
     "CenterDot",
     "CircleDot",
     "CircleMinus",
@@ -278,6 +295,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "FreeQ",
     "FromCharacterCode",
     "Function",
+    "General",
     "Greater",
     "GreaterEqual",
     "Head",
@@ -344,6 +362,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "MatchQ",
     "Max",
     "MemberQ",
+    "Message",
+    "MessageList",
+    "MessageName",
     "Min",
     "Missing",
     "MinusPlus",
@@ -371,7 +392,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "NumberString",
     "NumericFunction",
     "OddQ",
+    "Off",
     "OneIdentity",
+    "On",
     "Operate",
     "Or",
     "Out",
@@ -393,6 +416,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "PlusMinus",
     "Position",
     "Power",
+    "Print",
     "Precedes",
     "PrecedesEqual",
     "Prepend",
@@ -402,6 +426,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Quotient",
     "QuotientRemainder",
     "Quit",
+    "Quiet",
     "Ramp",
     "Range",
     "Rational",
@@ -500,6 +525,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "ToCharacterCode",
     "ToExpression",
     "ToString",
+    "Throw",
     "True",
     "TrueQ",
     "Tuples",
@@ -780,6 +806,37 @@ def _wolfram_name_pattern_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(pieces))
 
 
+@dataclass(frozen=True)
+class EvaluationMessage:
+    """A message generated during kernel-free evaluation."""
+
+    name: Expr
+    text: str
+
+    def name_expr(self) -> Expr:
+        return call("HoldForm", self.name)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name.to_input_form(),
+            "full_name": self.name.to_full_form(),
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True)
+class _QuietScope:
+    off_spec: Expr
+    on_spec: Expr
+
+
+@dataclass
+class _MessageCollector:
+    spec: Expr
+    quiet_depth: int
+    messages: list[EvaluationMessage]
+
+
 @dataclass
 class EvaluationSession:
     """Process-local evaluator state for Wolfram-console-style history."""
@@ -789,6 +846,12 @@ class EvaluationSession:
     in_strings: dict[int, str] | None = None
     outputs: dict[int, Expr] | None = None
     expanding_inputs: set[int] | None = None
+    message_history: dict[int, tuple[EvaluationMessage, ...]] | None = None
+    current_messages: list[EvaluationMessage] | None = None
+    current_visible_messages: list[EvaluationMessage] | None = None
+    print_history: dict[int, tuple[str, ...]] | None = None
+    current_prints: list[str] | None = None
+    disabled_messages: set[str] | None = None
 
     def __post_init__(self) -> None:
         if self.inputs is None:
@@ -799,18 +862,42 @@ class EvaluationSession:
             self.outputs = {}
         if self.expanding_inputs is None:
             self.expanding_inputs = set()
+        if self.message_history is None:
+            self.message_history = {}
+        if self.current_messages is None:
+            self.current_messages = []
+        if self.current_visible_messages is None:
+            self.current_visible_messages = []
+        if self.print_history is None:
+            self.print_history = {}
+        if self.current_prints is None:
+            self.current_prints = []
+        if self.disabled_messages is None:
+            self.disabled_messages = set()
 
     def begin_input(self, source: str, expr: Expr) -> int:
         self.line += 1
         assert self.inputs is not None
         assert self.in_strings is not None
+        assert self.current_messages is not None
+        assert self.current_visible_messages is not None
+        assert self.current_prints is not None
         self.inputs[self.line] = expr
         self.in_strings[self.line] = source
+        self.current_messages.clear()
+        self.current_visible_messages.clear()
+        self.current_prints.clear()
         return self.line
 
     def finish_output(self, expr: Expr) -> None:
         assert self.outputs is not None
+        assert self.message_history is not None
+        assert self.current_visible_messages is not None
+        assert self.print_history is not None
+        assert self.current_prints is not None
         self.outputs[self.line] = expr
+        self.message_history[self.line] = tuple(self.current_visible_messages)
+        self.print_history[self.line] = tuple(self.current_prints)
 
     def resolve_index(self, argument: Expr | None) -> int:
         if argument is None:
@@ -827,10 +914,208 @@ _ACTIVE_EVALUATION_SESSION: ContextVar[EvaluationSession | None] = ContextVar(
     "tungsten_active_evaluation_session",
     default=None,
 )
+_ACTIVE_EVALUATION_DEPTH: ContextVar[int] = ContextVar(
+    "tungsten_active_evaluation_depth",
+    default=0,
+)
+_ACTIVE_QUIET_SCOPES: ContextVar[tuple[_QuietScope, ...]] = ContextVar(
+    "tungsten_active_quiet_scopes",
+    default=(),
+)
+_ACTIVE_MESSAGE_COLLECTORS: ContextVar[tuple[_MessageCollector, ...]] = ContextVar(
+    "tungsten_active_message_collectors",
+    default=(),
+)
+_GLOBAL_MESSAGES: list[EvaluationMessage] = []
+_GLOBAL_VISIBLE_MESSAGES: list[EvaluationMessage] = []
+_GLOBAL_PRINTS: list[str] = []
+_GLOBAL_DISABLED_MESSAGES: set[str] = set()
 
 
 def _active_evaluation_session() -> EvaluationSession | None:
     return _ACTIVE_EVALUATION_SESSION.get()
+
+
+def _current_disabled_messages() -> set[str]:
+    session = _active_evaluation_session()
+    if session is not None:
+        assert session.disabled_messages is not None
+        return session.disabled_messages
+    return _GLOBAL_DISABLED_MESSAGES
+
+
+def _current_message_lists() -> tuple[list[EvaluationMessage], list[EvaluationMessage]]:
+    session = _active_evaluation_session()
+    if session is not None:
+        assert session.current_messages is not None
+        assert session.current_visible_messages is not None
+        return session.current_messages, session.current_visible_messages
+    return _GLOBAL_MESSAGES, _GLOBAL_VISIBLE_MESSAGES
+
+
+def _current_prints() -> list[str]:
+    session = _active_evaluation_session()
+    if session is not None:
+        assert session.current_prints is not None
+        return session.current_prints
+    return _GLOBAL_PRINTS
+
+
+def _message_list_expr(messages: Sequence[EvaluationMessage]) -> Call:
+    return _evaluated_list_expr(*(message.name_expr() for message in messages))
+
+
+def current_message_list_expr() -> Call:
+    messages, _visible_messages = _current_message_lists()
+    return _message_list_expr(messages)
+
+
+def message_list_expr(arguments: Sequence[Expr]) -> Expr:
+    session = _active_evaluation_session()
+    if session is None:
+        return _evaluated_list_expr()
+    if len(arguments) != 1:
+        raise WolframEvaluationError("MessageList expects exactly one line specification.")
+    index = session.resolve_index(arguments[0])
+    assert session.message_history is not None
+    return _message_list_expr(session.message_history.get(index, ()))
+
+
+def _message_name_key(name: Expr) -> str:
+    return name.to_full_form()
+
+
+def _message_name_components(name: Expr) -> tuple[str, tuple[str, ...]] | None:
+    if not isinstance(name, Call) or not name.has_head("MessageName") or len(name.arguments) < 2:
+        return None
+    tags: list[str] = []
+    for tag in name.arguments[1:]:
+        if isinstance(tag, String):
+            tags.append(tag.value)
+        elif isinstance(tag, Symbol):
+            tags.append(tag.name)
+        else:
+            return None
+    return name.arguments[0].to_full_form(), tuple(tags)
+
+
+def _message_spec_matches(spec: Expr, name: Expr) -> bool:
+    if isinstance(spec, Symbol):
+        if spec.name == "All":
+            return True
+        if spec.name == "None":
+            return False
+        return _message_spec_matches(call("MessageName", spec, string("trace")), name)
+    if isinstance(spec, String):
+        return False
+    if isinstance(spec, Call):
+        if spec.has_head("List"):
+            return any(_message_spec_matches(item, name) for item in spec.arguments)
+        if spec.has_head("MessageName"):
+            if spec == name:
+                return True
+            spec_components = _message_name_components(spec)
+            name_components = _message_name_components(name)
+            if spec_components is None or name_components is None:
+                return False
+            spec_base, spec_tags = spec_components
+            name_base, name_tags = name_components
+            if spec_base == "General" and spec_tags and name_tags:
+                return spec_tags[-1] == name_tags[-1]
+            return spec_base == name_base and spec_tags == name_tags
+    return False
+
+
+def _quiet_suppression_depth(name: Expr) -> int | None:
+    scopes = _ACTIVE_QUIET_SCOPES.get()
+    for index in range(len(scopes) - 1, -1, -1):
+        scope = scopes[index]
+        if _message_spec_matches(scope.on_spec, name):
+            return None
+        if _message_spec_matches(scope.off_spec, name):
+            return index + 1
+    return None
+
+
+def _message_text(name: Expr, text: str | None = None, insertions: Sequence[Expr] = ()) -> str:
+    rendered_name = name.to_input_form()
+    if text is None:
+        if insertions:
+            rendered_args = ", ".join(item.to_input_form() for item in insertions)
+            return f"{rendered_name}: {rendered_args}"
+        return f"{rendered_name}: Message generated."
+    return f"{rendered_name}: {text}"
+
+
+def emit_message(name: Expr, text: str | None = None, insertions: Sequence[Expr] = ()) -> bool:
+    key = _message_name_key(name)
+    disabled_messages = _current_disabled_messages()
+    if key in disabled_messages:
+        return False
+    components = _message_name_components(name)
+    if components is not None and components[1]:
+        general_name = call("MessageName", symbol("General"), string(components[1][-1]))
+        if _message_name_key(general_name) in disabled_messages:
+            return False
+
+    message = EvaluationMessage(name=name, text=_message_text(name, text, insertions))
+    messages, visible_messages = _current_message_lists()
+    messages.append(message)
+
+    suppressed_depth = _quiet_suppression_depth(name)
+    for collector in _ACTIVE_MESSAGE_COLLECTORS.get():
+        if suppressed_depth is not None and collector.quiet_depth < suppressed_depth:
+            continue
+        if _message_spec_matches(collector.spec, name):
+            collector.messages.append(message)
+
+    if suppressed_depth is None:
+        visible_messages.append(message)
+        return True
+    return False
+
+
+def _message_name_for_expr(expr: Expr) -> Expr:
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
+        return call("MessageName", symbol(_system_dispatch_name(expr.head_expr)), string("error"))
+    if isinstance(expr, Symbol):
+        return call("MessageName", symbol(_system_dispatch_name(expr)), string("error"))
+    return call("MessageName", symbol("General"), string("error"))
+
+
+def emit_evaluation_error_message(expr: Expr, error: WolframEvaluationError) -> None:
+    emit_message(_message_name_for_expr(expr), str(error))
+
+
+def _push_quiet_scope(off_spec: Expr, on_spec: Expr) -> object:
+    scopes = _ACTIVE_QUIET_SCOPES.get()
+    return _ACTIVE_QUIET_SCOPES.set(scopes + (_QuietScope(off_spec=off_spec, on_spec=on_spec),))
+
+
+def _push_message_collector(spec: Expr) -> tuple[object, _MessageCollector]:
+    collectors = _ACTIVE_MESSAGE_COLLECTORS.get()
+    collector = _MessageCollector(spec=spec, quiet_depth=len(_ACTIVE_QUIET_SCOPES.get()), messages=[])
+    token = _ACTIVE_MESSAGE_COLLECTORS.set(collectors + (collector,))
+    return token, collector
+
+
+def _set_message_enabled(spec: Expr, enabled: bool) -> None:
+    disabled = _current_disabled_messages()
+    if isinstance(spec, Call) and spec.has_head("List"):
+        for item in spec.arguments:
+            _set_message_enabled(item, enabled)
+        return
+    if isinstance(spec, Symbol):
+        _set_message_enabled(call("MessageName", spec, string("trace")), enabled)
+        return
+    if isinstance(spec, Call) and spec.has_head("MessageName"):
+        key = _message_name_key(spec)
+        if enabled:
+            disabled.discard(key)
+        else:
+            disabled.add(key)
+        return
+    raise WolframEvaluationError("On and Off expect message names, symbols, or lists of message names.")
 
 
 _SYMBOL_REGISTRY = SymbolRegistry()
@@ -2738,6 +3023,135 @@ def exit_expr(arguments: Sequence[Expr]) -> None:
             raise WolframEvaluationError("Exit and Quit expect an optional integer exit code.")
         raise TungstenExitRequested(code.value)
     raise WolframEvaluationError("Exit and Quit expect zero or one argument.")
+
+
+def abort_expr(arguments: Sequence[Expr]) -> None:
+    if len(arguments) != 0:
+        raise WolframEvaluationError("Abort expects no arguments.")
+    raise TungstenAbortRequested()
+
+
+def throw_expr(arguments: Sequence[Expr]) -> None:
+    if len(arguments) == 1:
+        raise _TungstenThrowSignal(evaluate(arguments[0]))
+    if len(arguments) == 2:
+        raise _TungstenThrowSignal(evaluate(arguments[0]), evaluate(arguments[1]))
+    if len(arguments) == 3:
+        raise _TungstenThrowSignal(evaluate(arguments[0]), evaluate(arguments[1]), evaluate(arguments[2]))
+    raise WolframEvaluationError("Throw expects one, two, or three arguments.")
+
+
+def _uncaught_throw_result(signal: _TungstenThrowSignal) -> Expr:
+    if signal.tag is None:
+        return call("Throw", signal.value)
+    tag = evaluate(signal.tag)
+    if signal.handler is not None:
+        return _apply_callable(signal.handler, (signal.value, tag))
+    return call("Throw", signal.value, tag)
+
+
+def catch_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("Catch expects one, two, or three arguments.")
+
+    form = evaluate(arguments[1]) if len(arguments) >= 2 else None
+    handler = evaluate(arguments[2]) if len(arguments) == 3 else None
+    try:
+        return evaluate(arguments[0])
+    except _TungstenThrowSignal as signal:
+        if form is None:
+            if signal.tag is None:
+                return signal.value
+            raise
+
+        if signal.tag is None:
+            raise
+
+        tag = evaluate(signal.tag)
+        if _match_pattern(tag, form) is None:
+            raise
+        if handler is None:
+            return signal.value
+        return _apply_callable(handler, (signal.value, tag))
+
+
+def check_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) not in {2, 3}:
+        raise WolframEvaluationError("Check expects two or three arguments.")
+    spec = evaluate(arguments[2]) if len(arguments) == 3 else symbol("All")
+    token, collector = _push_message_collector(spec)
+    try:
+        result = evaluate(arguments[0])
+    finally:
+        _ACTIVE_MESSAGE_COLLECTORS.reset(token)
+    if collector.messages:
+        return evaluate(arguments[1])
+    return result
+
+
+def quiet_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) == 1:
+        off_spec = symbol("All")
+        on_spec = symbol("None")
+    elif len(arguments) == 2:
+        off_spec = evaluate(arguments[1])
+        on_spec = symbol("None")
+    elif len(arguments) == 3:
+        off_spec = evaluate(arguments[1])
+        on_spec = evaluate(arguments[2])
+    else:
+        raise WolframEvaluationError("Quiet expects one, two, or three arguments.")
+    token = _push_quiet_scope(off_spec, on_spec)
+    try:
+        return evaluate(arguments[0])
+    finally:
+        _ACTIVE_QUIET_SCOPES.reset(token)
+
+
+def message_expr(arguments: Sequence[Expr]) -> Expr:
+    if not arguments:
+        raise WolframEvaluationError("Message expects a message name.")
+    message_name = arguments[0]
+    if not (isinstance(message_name, Call) and message_name.has_head("MessageName")):
+        raise WolframEvaluationError("Message expects a message name of the form symbol::tag.")
+    insertions = tuple(evaluate(argument) for argument in arguments[1:])
+    emit_message(message_name, insertions=insertions)
+    return symbol("Null")
+
+
+def off_expr(arguments: Sequence[Expr]) -> Expr:
+    if not arguments:
+        return symbol("Null")
+    for argument in arguments:
+        _set_message_enabled(evaluate(argument), enabled=False)
+    return symbol("Null")
+
+
+def on_expr(arguments: Sequence[Expr]) -> Expr:
+    if not arguments:
+        return symbol("Null")
+    for argument in arguments:
+        _set_message_enabled(evaluate(argument), enabled=True)
+    return symbol("Null")
+
+
+def _format_print_argument(expr: Expr) -> str:
+    if isinstance(expr, String):
+        return expr.value
+    return expr.to_input_form()
+
+
+def print_expr(arguments: Sequence[Expr]) -> Expr:
+    evaluated_arguments = tuple(evaluate(argument) for argument in arguments)
+    _current_prints().append("".join(_format_print_argument(argument) for argument in evaluated_arguments))
+    return symbol("Null")
+
+
+def compound_expression_expr(arguments: Sequence[Expr]) -> Expr:
+    result: Expr = symbol("Null")
+    for argument in arguments:
+        result = evaluate(argument)
+    return result
 
 
 def unique_expr(spec: Expr | None = None) -> Expr:
@@ -8851,13 +9265,33 @@ def _rebuild_selected_parts(
 
 
 def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
-    if session is None:
-        return _evaluate(expr)
-    token = _ACTIVE_EVALUATION_SESSION.set(session)
+    previous_depth = _ACTIVE_EVALUATION_DEPTH.get()
+    if previous_depth == 0 and session is None:
+        _GLOBAL_MESSAGES.clear()
+        _GLOBAL_VISIBLE_MESSAGES.clear()
+        _GLOBAL_PRINTS.clear()
+    depth_token = _ACTIVE_EVALUATION_DEPTH.set(previous_depth + 1)
+    session_token = None
+    if session is not None:
+        session_token = _ACTIVE_EVALUATION_SESSION.set(session)
     try:
-        return _evaluate(expr)
+        try:
+            return _evaluate(expr)
+        except _TungstenThrowSignal as signal:
+            if previous_depth > 0:
+                raise
+            return _uncaught_throw_result(signal)
+        except TungstenAbortRequested:
+            if previous_depth > 0:
+                raise
+            return symbol("$Aborted")
+        except WolframEvaluationError as exc:
+            emit_evaluation_error_message(expr, exc)
+            return expr
     finally:
-        _ACTIVE_EVALUATION_SESSION.reset(token)
+        if session_token is not None:
+            _ACTIVE_EVALUATION_SESSION.reset(session_token)
+        _ACTIVE_EVALUATION_DEPTH.reset(depth_token)
 
 
 def _evaluate(expr: Expr) -> Expr:
@@ -8874,6 +9308,8 @@ def _evaluate(expr: Expr) -> Expr:
             session = _active_evaluation_session()
             if session is not None:
                 return integer(session.line)
+        if record.full_name == "System`$MessageList":
+            return current_message_list_expr()
         if record.full_name in {"System`Exit", "System`Quit"} and _active_evaluation_session() is not None:
             raise TungstenExitRequested(0)
         return expr
@@ -8889,6 +9325,39 @@ def _evaluate(expr: Expr) -> Expr:
 
         if raw_head_name in {"Exit", "Quit"} and _active_evaluation_session() is not None:
             exit_expr(expr.arguments)
+
+        if raw_head_name == "Abort":
+            abort_expr(expr.arguments)
+
+        if raw_head_name == "Throw":
+            throw_expr(expr.arguments)
+
+        if raw_head_name == "Catch":
+            return catch_expr(expr.arguments)
+
+        if raw_head_name == "Check":
+            return check_expr(expr.arguments)
+
+        if raw_head_name == "Quiet":
+            return quiet_expr(expr.arguments)
+
+        if raw_head_name == "Message":
+            return message_expr(expr.arguments)
+
+        if raw_head_name == "Off":
+            return off_expr(expr.arguments)
+
+        if raw_head_name == "On":
+            return on_expr(expr.arguments)
+
+        if raw_head_name == "Print":
+            return print_expr(expr.arguments)
+
+        if raw_head_name == "MessageList":
+            return message_list_expr(expr.arguments)
+
+        if raw_head_name == "CompoundExpression":
+            return compound_expression_expr(expr.arguments)
 
         if raw_head_name in {"In", "InString", "Out"}:
             return history_expr(raw_head_name, expr.arguments)
