@@ -223,9 +223,17 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   expression unevaluated, and lets enclosing expressions continue structurally. Direct helper APIs
   can still raise Python `WolframEvaluationError` when called outside the evaluator.
 - Message control is intentionally practical rather than byte-for-byte kernel-compatible:
-  `Check`, `Quiet`, `Message`, `Off`, `On`, `$MessageList`, `MessageList`, and `Print` implement
-  the common evaluator-visible behavior needed by scripts and the Tungsten REPL. Message texts are
-  Tungsten diagnostic strings, not Wolfram's localized message templates.
+  `Check`, `Quiet`, `Message`, `Off`, `On`, `$MessageList`, `MessageList`,
+  `$MessagePrePrint`, and `Print` implement the common evaluator-visible behavior needed by
+  scripts and the Tungsten REPL. Message texts are Tungsten diagnostic strings, not Wolfram's
+  localized message templates.
+- Session main-loop hooks are implemented for active `EvaluationSession` / REPL evaluation:
+  `$PreRead` transforms complete input strings before parsing and before `InString[n]` is stored;
+  `$Pre` transforms the stored input expression before ordinary evaluation; `$Post` transforms the
+  evaluation result before `Out[n]` is assigned; `$PrePrint` transforms only the display expression
+  after `Out[n]` is assigned; and `$MessagePrePrint` transforms evaluated message insertions before
+  Tungsten renders message text. Hook application itself is evaluated with main-loop hooks
+  suppressed, so hook functions do not recursively trigger `$Pre`, `$Post`, or `$PrePrint`.
 - The current structural pattern subset includes variable-length sequence patterns and the common
   advanced argument-pattern forms: anonymous and named `__`, `___`, `BlankSequence[...]`,
   `BlankNullSequence[...]`, `Repeated`, `RepeatedNull`, `PatternSequence`,
@@ -296,10 +304,15 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `$MessageList` | `$MessageList` | Returns the current input's generated message names wrapped in `HoldForm`. Quieted messages remain visible to `$MessageList` during the same evaluation; messages disabled by `Off` are not generated. | [$MessageList](https://reference.wolfram.com/language/ref/%24MessageList.html) |
 | `MessageList` | `MessageList[n]` in a REPL/evaluation session | Returns the visible message names recorded for an earlier input line, wrapped in `HoldForm`. Quieted messages are not stored in `MessageList[n]`. | [MessageList](https://reference.wolfram.com/language/ref/MessageList.html) |
 | `Message` | `Message[sym::tag]`, `Message[sym::tag, e1, ...]` | Generates a non-fatal message unless disabled by `Off` or suppressed by `Quiet`. Tungsten records the message name and a practical diagnostic text; it does not resolve localized Wolfram message templates. | [Message](https://reference.wolfram.com/language/ref/Message.html) |
+| `$MessagePrePrint` | `$MessagePrePrint`, assignment to a callable or `Automatic` | Applies to evaluated message insertions before Tungsten renders message text. The startup own value is `Automatic`; direct assignment and clearing are supported even though the Wolfram symbol is protected. Tungsten does not implement Wolfram's full message-template database, so this affects practical insertion text rather than localized templates. | [$MessagePrePrint](https://reference.wolfram.com/language/ref/%24MessagePrePrint.html) |
 | `Check` | `Check[expr, fail]`, `Check[expr, fail, spec]` | Evaluates `expr` and returns `fail` if matching messages are generated. Supported specs are `All`, `None`, message names, lists of message names, and `General::tag` tag-wide matching. | [Check](https://reference.wolfram.com/language/ref/Check.html) |
 | `Quiet` | `Quiet[expr]`, `Quiet[expr, spec]`, `Quiet[expr, off, on]` | Evaluates `expr` while suppressing visible output and `MessageList[n]` recording for matching messages. Inner `Check` still sees messages generated inside the quieted evaluation; outer `Check` does not see messages suppressed by an inner `Quiet`. | [Quiet](https://reference.wolfram.com/language/ref/Quiet.html) |
 | `Off`, `On` | `Off[sym::tag]`, `On[sym::tag]`, list and multi-argument forms | Disables or re-enables message generation for explicit message names. `General::tag` also suppresses messages with the same tag. Message values/templates are not modeled. | [Off](https://reference.wolfram.com/language/ref/Off.html), [On](https://reference.wolfram.com/language/ref/On.html) |
 | `Print` | `Print[expr1, ...]` | Evaluates arguments, concatenates their textual forms, records the text in `EvaluationSession.print_history`, and returns `Null`. Outermost `InputForm`, `FullForm`, `OutputForm`, and `StandardForm` wrappers select display text for their payloads, matching the console behavior of `Print[FullForm[expr]]` and similar forms. The Tungsten REPL writes recorded print lines to the console. | [Print](https://reference.wolfram.com/language/ref/Print.html) |
+| `$PreRead` | `$PreRead = f`, `$PreRead =.` in a REPL/session | If assigned, applies `f` to the complete input string before parsing. A string result becomes the stored `InString[n]` and parsed input; a non-string result emits `$PreRead::prstr` and leaves the original string in place. | [$PreRead](https://reference.wolfram.com/language/ref/%24PreRead.html) |
+| `$Pre` | `$Pre = f`, `$Pre =.` in a REPL/session | If assigned, applies `f` to the parsed input expression before ordinary evaluation. Tungsten applies the hook after recording `In[n]`, so history preserves the original parsed input. | [$Pre](https://reference.wolfram.com/language/ref/%24Pre.html) |
+| `$Post` | `$Post = f`, `$Post =.` in a REPL/session | If assigned, applies `f` to the evaluated result before `Out[n]` is stored. The transformed result is what `%`, `Out[n]`, and output history see. | [$Post](https://reference.wolfram.com/language/ref/%24Post.html) |
+| `$PrePrint` | `$PrePrint = f`, `$PrePrint =.` in the Tungsten REPL | If assigned, applies `f` to the expression selected for console display after `Out[n]` has already been stored. It changes the rendered `Out[n]= ...` text but not `Out[n]` itself. | [$PrePrint](https://reference.wolfram.com/language/ref/%24PrePrint.html) |
 | `CompoundExpression` | `expr1; expr2; ...` parser form | Evaluates arguments left to right and returns the final result. A trailing semicolon parses to a final `Null`, matching the common `Print[...];`/statement-style workflow. | [CompoundExpression](https://reference.wolfram.com/language/ref/CompoundExpression.html) |
 | `Set` | `Set[sym, rhs]`, parser form `sym = rhs` | For a bare, unprotected symbol `sym`, immediately evaluates `rhs`, stores the resulting own value in the process-local registry, and returns that value. Other left-hand sides remain unsupported in this subset. | [Set](https://reference.wolfram.com/language/ref/Set.html) |
 | `Unset` | `Unset[sym]`, parser forms `sym =.` and `sym = .` | Removes the bare symbol's own value and returns `Null`. Protected symbols emit `Unset::wrsym` and return `$Failed`. Other left-hand sides remain unsupported in this subset. | [Unset](https://reference.wolfram.com/language/ref/Unset.html) |

@@ -12,7 +12,6 @@ from .expression import WolframEvaluationError
 from .expression import WolframSyntaxError
 from .expression import display_output_parts
 from .expression import evaluate
-from .expression import parse_input_form
 
 
 def _banner() -> str:
@@ -69,13 +68,12 @@ def run_repl(
             continue
 
         try:
-            parsed = parse_input_form(source)
+            line, _prepared_source, parsed = session.prepare_input(source)
         except WolframSyntaxError as exc:
             error_stream.write(f"Syntax::sntxi: {exc}\n\n")
             error_stream.flush()
             continue
 
-        line = session.begin_input(source, parsed)
         try:
             result = evaluate(parsed, session=session)
         except TungstenExitRequested as exc:
@@ -97,7 +95,8 @@ def run_repl(
 
         session.finish_output(result)
         if _should_print_output(result):
-            output_stream.write(f"\n{_output_label(line, result)}= {_format_output(result)}\n\n")
+            print_result = session.preprint_output(result)
+            output_stream.write(f"\n{_output_label(line, result)}= {_format_output(print_result)}\n\n")
         else:
             output_stream.write("\n")
         output_stream.flush()

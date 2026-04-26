@@ -84,6 +84,11 @@ InString[1]
 Out[1]
 % + 10
 DownValues[In]
+$PreRead = Function[s, StringReplace[s, "aa" -> "1+2"]]
+aa
+$PrePrint = FullForm
+1 + x
+$PrePrint =.
 Quit
 ```
 

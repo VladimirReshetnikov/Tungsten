@@ -862,6 +862,77 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(submit("Print[FullForm[{1, 2/3, a + b}]]"), "Null")
         self.assertEqual(session.print_history[15], ("List[1, Rational[2, 3], Plus[a, b]]",))
 
+    def test_main_loop_hooks_follow_wolfram_session_order(self) -> None:
+        session = EvaluationSession()
+
+        def submit(code: str) -> tuple[int, str, str, str, str]:
+            line, prepared_source, parsed = session.prepare_input(code)
+            result = evaluate(parsed, session=session)
+            session.finish_output(result)
+            display_result = session.preprint_output(result)
+            return (
+                line,
+                prepared_source,
+                parsed.to_full_form(),
+                result.to_full_form(),
+                display_result.to_full_form(),
+            )
+
+        try:
+            self.assertEqual(evaluate(parse_input_form("ValueQ[$MessagePrePrint]")).to_full_form(), "True")
+            self.assertEqual(
+                evaluate(parse_input_form("OwnValues[$MessagePrePrint]")).to_full_form(),
+                "List[RuleDelayed[HoldPattern[$MessagePrePrint], Automatic]]",
+            )
+
+            _line, _prepared, _parsed, result, _display = submit(
+                '$PreRead = Function[s, StringReplace[s, "aa" -> "1+2"]]'
+            )
+            self.assertEqual(result, 'Function[s, StringReplace[s, Rule["aa", "1+2"]]]')
+            line, prepared, parsed, result, _display = submit("aa")
+            self.assertEqual(line, 2)
+            self.assertEqual(prepared, "1+2")
+            self.assertEqual(parsed, "Plus[1, 2]")
+            self.assertEqual(result, "3")
+            self.assertEqual(submit("InString[2]")[3], '"1+2"')
+            self.assertEqual(submit("$PreRead =.")[3], "Null")
+
+            self.assertEqual(submit("$Pre = Function[x, $Pre =.; HoldForm[x], HoldAll]")[3], "Function[x, CompoundExpression[Unset[$Pre], HoldForm[x]], HoldAll]")
+            pre_line, _prepared, parsed, result, _display = submit("1+2")
+            self.assertEqual(parsed, "Plus[1, 2]")
+            self.assertEqual(result, "HoldForm[Plus[1, 2]]")
+            assert session.inputs is not None
+            self.assertEqual(session.inputs[pre_line].to_full_form(), "Plus[1, 2]")
+
+            self.assertEqual(submit("$Post = Function[x, If[MatchQ[Unevaluated[x], _Function], x, ($Post =.; h[x])], HoldAll]")[3], "Function[x, If[MatchQ[Unevaluated[x], Blank[Function]], x, CompoundExpression[Unset[$Post], h[x]]], HoldAll]")
+            post_line, _prepared, _parsed, result, _display = submit("1+2")
+            self.assertEqual(result, "h[3]")
+            assert session.outputs is not None
+            self.assertEqual(session.outputs[post_line].to_full_form(), "h[3]")
+
+            self.assertEqual(submit("$PrePrint = FullForm")[3], "FullForm")
+            preprint_line, _prepared, _parsed, result, display = submit("1+x")
+            self.assertEqual(result, "Plus[1, x]")
+            self.assertEqual(display, "FullForm[Plus[1, x]]")
+            self.assertEqual(session.outputs[preprint_line].to_full_form(), "Plus[1, x]")
+            self.assertEqual(submit("$PrePrint =.")[3], "Null")
+
+            self.assertEqual(submit("$MessagePrePrint = FullForm")[3], "FullForm")
+            message_line, _prepared, _parsed, result, _display = submit("Message[f::tag, {1+2}]")
+            self.assertEqual(result, "Null")
+            assert session.message_history is not None
+            self.assertEqual(session.message_history[message_line][0].text, "f::tag: List[3]")
+            self.assertEqual(submit("$MessagePrePrint = Automatic")[3], "Automatic")
+
+            self.assertEqual(submit("$PreRead = Function[s, $PreRead =.; Hold[1+2]]")[3], "Function[s, CompoundExpression[Unset[$PreRead], Hold[Plus[1, 2]]]]")
+            bad_line, prepared, _parsed, result, _display = submit("1+2")
+            self.assertEqual(prepared, "1+2")
+            self.assertEqual(result, "3")
+            self.assertEqual(session.message_history[bad_line][0].name.to_input_form(), "$PreRead::prstr")
+        finally:
+            for cleanup in ("$PreRead =.", "$Pre =.", "$Post =.", "$PrePrint =.", "$MessagePrePrint = Automatic"):
+                evaluate(parse_input_form(cleanup))
+
     def test_ignoring_inactive_patterns_match_active_and_inactive_forms(self) -> None:
         inactive_match = evaluate(parse_input_form("MatchQ[Inactive[f][1], IgnoringInactive[f[_]]]"))
         active_pattern_match = evaluate(

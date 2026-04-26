@@ -294,7 +294,12 @@ _SYSTEM_SYMBOL_NAMES = {
     "$MachinePrecision",
     "$MaxMachineNumber",
     "$MessageList",
+    "$MessagePrePrint",
     "$MinMachineNumber",
+    "$Post",
+    "$Pre",
+    "$PrePrint",
+    "$PreRead",
     "Abs",
     "Abort",
     "AbortProtect",
@@ -313,6 +318,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Assert",
     "AtomQ",
     "Attributes",
+    "Automatic",
     "AutoDelete",
     "Baseline",
     "BaselinePosition",
@@ -778,6 +784,9 @@ class SymbolRegistry:
             self.ensure_full_name(f"System`{name}", built_in=True)
         for name, attributes in _load_system_symbol_snapshot().items():
             self.ensure_full_name(f"System`{name}", built_in=True, attributes=attributes, validate=False)
+        message_preprint = self.ensure_full_name("System`$MessagePrePrint", built_in=True)
+        if message_preprint.own_value is None:
+            message_preprint.own_value = Symbol("Automatic")
 
     @property
     def contexts(self) -> tuple[str, ...]:
@@ -1074,19 +1083,35 @@ class EvaluationSession:
         if self.disabled_messages is None:
             self.disabled_messages = set()
 
-    def begin_input(self, source: str, expr: Expr) -> int:
+    def _start_input_line(self) -> int:
         self.line += 1
-        assert self.inputs is not None
-        assert self.in_strings is not None
         assert self.current_messages is not None
         assert self.current_visible_messages is not None
         assert self.current_prints is not None
-        self.inputs[self.line] = expr
-        self.in_strings[self.line] = source
         self.current_messages.clear()
         self.current_visible_messages.clear()
         self.current_prints.clear()
         return self.line
+
+    def _record_input(self, source: str, expr: Expr) -> None:
+        assert self.inputs is not None
+        assert self.in_strings is not None
+        self.inputs[self.line] = expr
+        self.in_strings[self.line] = source
+
+    def begin_input(self, source: str, expr: Expr) -> int:
+        line = self._start_input_line()
+        self._record_input(source, expr)
+        return line
+
+    def prepare_input(self, source: str) -> tuple[int, str, Expr]:
+        """Apply $PreRead, parse, and store a Wolfram-console input line."""
+
+        line = self._start_input_line()
+        prepared_source = _apply_pre_read_hook(source, self)
+        expr = parse_input_form(prepared_source)
+        self._record_input(prepared_source, expr)
+        return line, prepared_source, expr
 
     def finish_output(self, expr: Expr) -> None:
         assert self.outputs is not None
@@ -1097,6 +1122,9 @@ class EvaluationSession:
         self.outputs[self.line] = expr
         self.message_history[self.line] = tuple(self.current_visible_messages)
         self.print_history[self.line] = tuple(self.current_prints)
+
+    def preprint_output(self, expr: Expr) -> Expr:
+        return _apply_pre_print_hook(expr, self)
 
     def resolve_index(self, argument: Expr | None) -> int:
         if argument is None:
@@ -1120,6 +1148,10 @@ _ACTIVE_OWN_VALUE_SYMBOLS: ContextVar[tuple[str, ...]] = ContextVar(
 _ACTIVE_EVALUATION_DEPTH: ContextVar[int] = ContextVar(
     "tungsten_active_evaluation_depth",
     default=0,
+)
+_MAIN_LOOP_HOOKS_SUPPRESSED: ContextVar[bool] = ContextVar(
+    "tungsten_main_loop_hooks_suppressed",
+    default=False,
 )
 _ACTIVE_QUIET_SCOPES: ContextVar[tuple[_QuietScope, ...]] = ContextVar(
     "tungsten_active_quiet_scopes",
@@ -1205,6 +1237,87 @@ def _set_assert_enabled(enabled: bool) -> None:
     _GLOBAL_ASSERT_ENABLED = enabled
 
 
+_SESSION_HOOK_NAMES = {"$PreRead", "$Pre", "$Post", "$PrePrint", "$MessagePrePrint"}
+
+
+def _hook_symbol_record(name: str) -> SymbolRecord | None:
+    return _SYMBOL_REGISTRY.resolve_existing(f"System`{name}")
+
+
+def _hook_value(name: str, session: EvaluationSession) -> Expr | None:
+    record = _hook_symbol_record(name)
+    if record is None or record.own_value is None:
+        return None
+    return _evaluate_with_main_loop_hooks_suppressed(
+        _SYMBOL_REGISTRY.display_symbol_for_record(record),
+        session,
+    )
+
+
+def _evaluate_with_main_loop_hooks_suppressed(expr: Expr, session: EvaluationSession) -> Expr:
+    hook_token = _MAIN_LOOP_HOOKS_SUPPRESSED.set(True)
+    session_token = _ACTIVE_EVALUATION_SESSION.set(session)
+    try:
+        return evaluate(expr, session=session)
+    finally:
+        _ACTIVE_EVALUATION_SESSION.reset(session_token)
+        _MAIN_LOOP_HOOKS_SUPPRESSED.reset(hook_token)
+
+
+def _apply_hook_function(function: Expr, argument: Expr, session: EvaluationSession) -> Expr:
+    return _evaluate_with_main_loop_hooks_suppressed(
+        Call(head_expr=function, arguments=(argument,)),
+        session,
+    )
+
+
+def _apply_optional_hook(name: str, argument: Expr, session: EvaluationSession) -> Expr:
+    function = _hook_value(name, session)
+    if function is None:
+        return argument
+    return _apply_hook_function(function, argument, session)
+
+
+def _apply_pre_read_hook(source: str, session: EvaluationSession) -> str:
+    session_token = _ACTIVE_EVALUATION_SESSION.set(session)
+    try:
+        function = _hook_value("$PreRead", session)
+        if function is None:
+            return source
+        result = _apply_hook_function(function, string(source), session)
+        if isinstance(result, String):
+            return result.value
+        emit_message(
+            call("MessageName", symbol("$PreRead"), string("prstr")),
+            f'$PreRead[{wl_string(source)}] returned {result.to_input_form()}, which is not a string.',
+        )
+        return source
+    finally:
+        _ACTIVE_EVALUATION_SESSION.reset(session_token)
+
+
+def _apply_pre_hook(expr: Expr, session: EvaluationSession) -> Expr:
+    return _apply_optional_hook("$Pre", expr, session)
+
+
+def _apply_post_hook(expr: Expr, session: EvaluationSession) -> Expr:
+    return _apply_optional_hook("$Post", expr, session)
+
+
+def _apply_pre_print_hook(expr: Expr, session: EvaluationSession) -> Expr:
+    return _apply_optional_hook("$PrePrint", expr, session)
+
+
+def _apply_message_pre_print_hook(expr: Expr) -> Expr:
+    session = _active_evaluation_session()
+    if session is None:
+        return expr
+    function = _hook_value("$MessagePrePrint", session)
+    if function is None or (isinstance(function, Symbol) and _system_dispatch_name(function) == "Automatic"):
+        return expr
+    return _apply_hook_function(function, expr, session)
+
+
 def _message_list_expr(messages: Sequence[EvaluationMessage]) -> Call:
     return _evaluated_list_expr(*(message.name_expr() for message in messages))
 
@@ -1281,11 +1394,17 @@ def _quiet_suppression_depth(name: Expr) -> int | None:
     return None
 
 
+def _format_message_insertion(expr: Expr) -> str:
+    transformed = _apply_message_pre_print_hook(expr)
+    _label, text = display_output_parts(transformed)
+    return text
+
+
 def _message_text(name: Expr, text: str | None = None, insertions: Sequence[Expr] = ()) -> str:
     rendered_name = name.to_input_form()
     if text is None:
         if insertions:
-            rendered_args = ", ".join(item.to_input_form() for item in insertions)
+            rendered_args = ", ".join(_format_message_insertion(item) for item in insertions)
             return f"{rendered_name}: {rendered_args}"
         return f"{rendered_name}: Message generated."
     return f"{rendered_name}: {text}"
@@ -4704,6 +4823,13 @@ def _record_is_protected(record: SymbolRecord) -> bool:
     return "Protected" in record.attributes
 
 
+def _record_allows_value_mutation(record: SymbolRecord) -> bool:
+    return not _record_is_protected(record) or record.full_name in {
+        f"System`{name}"
+        for name in _SESSION_HOOK_NAMES
+    }
+
+
 def _emit_protected_symbol_message(head_name: str, record: SymbolRecord) -> None:
     display = _SYMBOL_REGISTRY.display_symbol_for_record(record)
     emit_message(
@@ -4727,7 +4853,7 @@ def set_expr(arguments: Sequence[Expr]) -> Expr:
     if not isinstance(lhs, Symbol):
         raise WolframEvaluationError("This Tungsten subset only supports Set when the left-hand side is a bare symbol.")
     record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
-    if _record_is_protected(record):
+    if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Set", record)
         return call("Set", lhs, rhs_value)
     record.own_value = rhs_value
@@ -4741,7 +4867,7 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
     if not isinstance(lhs, Symbol):
         raise WolframEvaluationError("This Tungsten subset only supports Unset when the left-hand side is a bare symbol.")
     record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
-    if _record_is_protected(record):
+    if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Unset", record)
         return symbol("$Failed")
     record.own_value = None
@@ -4749,7 +4875,7 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
 
 
 def _clear_record(record: SymbolRecord) -> None:
-    if _record_is_protected(record):
+    if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Clear", record)
         return
     record.own_value = None
@@ -11968,6 +12094,11 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
         _GLOBAL_MESSAGES.clear()
         _GLOBAL_VISIBLE_MESSAGES.clear()
         _GLOBAL_PRINTS.clear()
+    apply_main_loop_hooks = (
+        previous_depth == 0
+        and session is not None
+        and not _MAIN_LOOP_HOOKS_SUPPRESSED.get()
+    )
     depth_token = _ACTIVE_EVALUATION_DEPTH.set(previous_depth + 1)
     session_token = None
     if session is not None:
@@ -11975,7 +12106,9 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
     try:
         try:
             _check_time_constraints()
-            return _evaluate(expr)
+            input_expr = _apply_pre_hook(expr, session) if apply_main_loop_hooks else expr
+            result = _evaluate(input_expr)
+            return _apply_post_hook(result, session) if apply_main_loop_hooks else result
         except _TungstenTimeConstraintSignal:
             if previous_depth > 0:
                 raise

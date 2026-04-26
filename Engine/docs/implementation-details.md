@@ -614,6 +614,11 @@ seen by `$MessageList` during the same evaluation, but they are not saved into p
 `MessageList[n]` history and are not visible to an enclosing `Check`. A `Check` placed inside an
 outer `Quiet` still sees messages generated in its own body, matching the practical Wolfram rule
 that `Check` is not disabled merely because its output is quieted.
+- REPL/session main-loop hooks are modeled outside the recursive evaluator. `EvaluationSession`
+  applies `$PreRead` before parsing, `evaluate(..., session=...)` applies `$Pre` and `$Post` only at
+  the outermost session evaluation boundary, `repl.py` applies `$PrePrint` after `Out[n]` has been
+  recorded, and message insertion rendering applies `$MessagePrePrint`. Hook evaluation uses a
+  context flag that suppresses recursive main-loop hook application while hook bodies run.
 - The expression subsystem can report read-only Wolfram 14.3 <code>System`</code> attributes through the
   symbol registry, but it intentionally does not implement evaluator-wide semantics for general
   attributes such as `Flat`, `Orderless`, `Listable`, or short-circuit evaluation. A small

@@ -46,6 +46,29 @@ class ReplTests(unittest.TestCase):
         self.assertIn("In[4]:= Plus[1, x]", transcript)
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_run_repl_applies_main_loop_hooks(self) -> None:
+        stdin = io.StringIO(
+            '$PreRead = Function[s, StringReplace[s, "aa" -> "1+2"]]\n'
+            "aa\n"
+            "InString[2]\n"
+            "$PreRead =.\n"
+            "$PrePrint = FullForm\n"
+            "1+x\n"
+            "$PrePrint =.\n"
+            "Quit\n"
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        transcript = stdout.getvalue()
+        self.assertIn("Out[2]= 3", transcript)
+        self.assertIn("Out[3]= 1+2", transcript)
+        self.assertIn("Out[6]= Plus[1, x]", transcript)
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_cli_repl_subcommand_uses_repl(self) -> None:
         stdin = io.StringIO("Exit[7]\n")
         stdout = io.StringIO()

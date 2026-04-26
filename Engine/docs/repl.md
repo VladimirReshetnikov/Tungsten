@@ -72,6 +72,33 @@ The REPL maintains these Wolfram-style session values:
 The line is recorded before evaluation begins, matching the important `wolfram.exe` behavior that
 `DownValues[In]` for the current line already includes that line's input.
 
+## Main-Loop Hooks
+
+The REPL supports Tungsten's session subset of Wolfram main-loop hooks:
+
+```wolfram
+$PreRead = Function[s, StringReplace[s, "sq" -> "Sqrt"]]
+$Pre = Function[x, HoldForm[x], HoldAll]
+$Post = FullForm
+$PrePrint = InputForm
+$MessagePrePrint = FullForm
+```
+
+Hook order follows the console model:
+
+- `$PreRead` is applied to the complete input string before parsing and before `InString[n]` is
+  stored. If it returns a non-string, Tungsten emits `$PreRead::prstr` and parses the original
+  string.
+- `In[n]` stores the parsed expression after `$PreRead`, but before `$Pre`.
+- `$Pre` is applied before ordinary evaluation.
+- `$Post` is applied after ordinary evaluation and before `Out[n]` is stored.
+- `$PrePrint` is applied only to the displayed expression after `Out[n]` is stored, so it does not
+  affect `%` or `Out[n]`.
+- `$MessagePrePrint` is applied to message insertions before Tungsten renders message text.
+
+Hook bodies are evaluated with main-loop hooks suppressed to avoid recursive `$Pre` / `$Post` /
+`$PrePrint` application while the hook itself is running.
+
 ## DownValues
 
 `DownValues` is implemented only in read-only session-history form:
