@@ -459,6 +459,9 @@ python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1,\\\"b\\\":[
 python -m tungsten expr evaluate --code "ImportString[ExportString[{{1, 2}, {3, 4}}, \"CSV\"], \"CSV\"]"
 python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
 python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
+python -m tungsten expr evaluate --code "ToString[FullForm[{1, 2/3, a + b}]]"
+python -m tungsten expr evaluate --code "ToBoxes[InputForm[1 + x]]"
+python -m tungsten expr evaluate --code "Print[FullForm[{1, 2/3, a + b}]]"
 python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code 'ToExpression[RowBox[{"a", "\[CirclePlus]", "b"}], StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code 'MakeExpression[SubscriptBox["x", "i"], StandardForm]'

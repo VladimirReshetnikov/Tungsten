@@ -115,7 +115,11 @@ it is not a drop-in Wolfram kernel:
 
 - Evaluation is limited to Tungsten's implemented structural subset.
 - Output rendering is Tungsten `InputForm`-like for most expressions, with top-level strings shown
-  without quotes to resemble the ordinary Wolfram console.
+  without quotes to resemble the ordinary Wolfram console. Outermost display wrappers use
+  Wolfram-style labels and text: `InputForm[expr]` prints as `Out[n]//InputForm= ...`,
+  `FullForm[expr]` prints as `Out[n]//FullForm= ...`, and the same display selection is used
+  for `Print[InputForm[expr]]`, `Print[FullForm[expr]]`, `OutputForm[expr]`, and
+  `StandardForm[expr]`.
 - Syntax errors and evaluation errors are reported with Tungsten messages rather than exact Wolfram
   message names and formatting.
 - The REPL currently reads one input line at a time; full Wolfram multi-line input recovery is out

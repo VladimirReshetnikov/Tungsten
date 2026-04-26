@@ -857,6 +857,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(submit('Print["a", 1 + 2, x]'), "Null")
         assert session.print_history is not None
         self.assertEqual(session.print_history[13], ("a3x",))
+        self.assertEqual(submit("Print[InputForm[{1, 2/3, a + b}]]"), "Null")
+        self.assertEqual(session.print_history[14], ("{1, 2/3, a + b}",))
+        self.assertEqual(submit("Print[FullForm[{1, 2/3, a + b}]]"), "Null")
+        self.assertEqual(session.print_history[15], ("List[1, Rational[2, 3], Plus[a, b]]",))
 
     def test_ignoring_inactive_patterns_match_active_and_inactive_forms(self) -> None:
         inactive_match = evaluate(parse_input_form("MatchQ[Inactive[f][1], IgnoringInactive[f[_]]]"))
@@ -1710,6 +1714,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         input_string = evaluate(parse_input_form("ToString[HoldComplete[1 + 2], InputForm]"))
         standard_string = evaluate(parse_input_form("ToString[HoldComplete[f @ x // g], StandardForm]"))
         default_string = evaluate(parse_input_form("ToString[HoldComplete[{a -> b, f[x]}]]"))
+        input_form_wrapper = evaluate(parse_input_form("ToString[InputForm[{1, 2/3, a + b}]]"))
+        full_form_wrapper = evaluate(parse_input_form("ToString[FullForm[{1, 2/3, a + b}]]"))
+        literal_input_form_wrapper = evaluate(parse_input_form("ToString[InputForm[1 + x], InputForm]"))
+        literal_full_form_wrapper = evaluate(parse_input_form("ToString[FullForm[1 + x], InputForm]"))
         input_round_trip = evaluate(
             parse_input_form(
                 "SameQ[ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm], HoldComplete[1 + 2]]"
@@ -1728,6 +1736,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(input_string.to_full_form(), '"HoldComplete[1 + 2]"')
         self.assertEqual(standard_string.to_full_form(), '"HoldComplete[g[f[x]]]"')
         self.assertEqual(default_string.to_full_form(), '"HoldComplete[{a -> b, f[x]}]"')
+        self.assertEqual(input_form_wrapper.to_full_form(), '"{1, 2/3, a + b}"')
+        self.assertEqual(full_form_wrapper.to_full_form(), '"List[1, Rational[2, 3], Plus[a, b]]"')
+        self.assertEqual(literal_input_form_wrapper.to_full_form(), '"InputForm[1 + x]"')
+        self.assertEqual(literal_full_form_wrapper.to_full_form(), '"FullForm[1 + x]"')
         self.assertEqual(input_round_trip.to_full_form(), "True")
         self.assertEqual(standard_round_trip.to_full_form(), "True")
         self.assertEqual(byte_array_round_trip.to_full_form(), "True")
@@ -1761,6 +1773,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         make_expression = evaluate(parse_input_form('MakeExpression[RowBox[{"1", "+", "2"}], StandardForm]'))
         make_boxes = evaluate(parse_input_form("MakeBoxes[1 + 2, StandardForm]"))
         to_boxes = evaluate(parse_input_form("ToBoxes[1 + 2, StandardForm]"))
+        input_form_boxes = evaluate(parse_input_form("ToBoxes[InputForm[1 + x]]"))
+        full_form_boxes = evaluate(parse_input_form("ToBoxes[FullForm[1 + x]]"))
+        output_form_boxes = evaluate(parse_input_form("ToBoxes[OutputForm[1 + x]]"))
+        standard_form_boxes = evaluate(parse_input_form("ToBoxes[StandardForm[1 + x]]"))
         box_to_expression = evaluate(
             parse_input_form("ToExpression[MakeBoxes[HoldComplete[1 + 2], StandardForm], StandardForm]")
         )
@@ -1774,6 +1790,22 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(make_expression.to_full_form(), "HoldComplete[Plus[1, 2]]")
         self.assertEqual(make_boxes.to_full_form(), 'RowBox[List["1", "+", "2"]]')
         self.assertEqual(to_boxes.to_full_form(), '"3"')
+        self.assertEqual(
+            input_form_boxes.to_full_form(),
+            'InterpretationBox[StyleBox["1 + x", Rule[ShowStringCharacters, True], Rule[NumberMarks, True]], InputForm[Plus[1, x]], Rule[Editable, True], Rule[AutoDelete, True]]',
+        )
+        self.assertEqual(
+            full_form_boxes.to_full_form(),
+            'TagBox[StyleBox[RowBox[List["Plus", "[", RowBox[List["1", ",", "x"]], "]"]], Rule[ShowSpecialCharacters, False], Rule[ShowStringCharacters, True], Rule[NumberMarks, True]], FullForm]',
+        )
+        self.assertEqual(
+            output_form_boxes.to_full_form(),
+            'InterpretationBox[PaneBox["1 + x", Rule[BaselinePosition, Baseline]], Plus[1, x], Rule[Editable, False]]',
+        )
+        self.assertEqual(
+            standard_form_boxes.to_full_form(),
+            'TagBox[FormBox[RowBox[List["1", "+", "x"]], StandardForm], StandardForm, Rule[Editable, True]]',
+        )
         self.assertEqual(box_to_expression.to_full_form(), "HoldComplete[Plus[1, 2]]")
         self.assertEqual(strip_boxes.to_full_form(), 'BoxData[RowBox[List["1", "+", "2"]]]')
         self.assertEqual(syntax_true.to_full_form(), "True")

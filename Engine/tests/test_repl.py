@@ -25,6 +25,27 @@ class ReplTests(unittest.TestCase):
         self.assertIn("Out[4]= 13", transcript)
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_run_repl_uses_display_form_labels_and_print_text(self) -> None:
+        stdin = io.StringIO(
+            "InputForm[1 + x]\n"
+            "FullForm[1 + x]\n"
+            "Print[InputForm[1 + x]]\n"
+            "Print[FullForm[1 + x]]\n"
+            "Quit\n"
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        transcript = stdout.getvalue()
+        self.assertIn("Out[1]//InputForm= 1 + x", transcript)
+        self.assertIn("Out[2]//FullForm= Plus[1, x]", transcript)
+        self.assertIn("In[3]:= 1 + x", transcript)
+        self.assertIn("In[4]:= Plus[1, x]", transcript)
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_cli_repl_subcommand_uses_repl(self) -> None:
         stdin = io.StringIO("Exit[7]\n")
         stdout = io.StringIO()

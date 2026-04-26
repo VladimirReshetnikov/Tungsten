@@ -266,6 +266,15 @@ approximations of the Wolfram functions: `MakeBoxes` is held, `ToBoxes` boxes ev
 `MakeExpression` returns `HoldComplete[...]`, and `ToExpression[boxes]` uses the same supported
 StandardForm box interpretation.
 
+At the outer display boundary, Tungsten treats `InputForm[expr]`, `FullForm[expr]`,
+`OutputForm[expr]`, and `StandardForm[expr]` as form wrappers rather than ordinary inert calls.
+This affects one-argument `ToString`, `ToBoxes`, REPL output, and `Print`, so
+`FullForm[1 + x]` in the REPL is shown as `Out[n]//FullForm= Plus[1, x]`, and
+`Print[InputForm[{1, 2/3}]]` writes `{1, 2/3}`. If a form is requested explicitly, for example
+`ToString[InputForm[1 + x], InputForm]`, the wrapper is serialized literally as
+`"InputForm[1 + x]"`, matching the Wolfram distinction between display wrappers and ordinary
+expression text.
+
 For pattern shorthand, Tungsten currently normalizes to explicit heads in canonical output. For
 example:
 

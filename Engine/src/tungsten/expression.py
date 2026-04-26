@@ -313,6 +313,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "Assert",
     "AtomQ",
     "Attributes",
+    "AutoDelete",
+    "Baseline",
+    "BaselinePosition",
     "BaseDecode",
     "BaseEncode",
     "Blank",
@@ -388,6 +391,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "EndOfLine",
     "EndOfString",
     "Equal",
+    "Editable",
     "Equivalent",
     "EvenQ",
     "Except",
@@ -415,6 +419,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "FoldWhileList",
     "FreeQ",
     "FromCharacterCode",
+    "FullForm",
     "Function",
     "General",
     "Greater",
@@ -436,6 +441,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Im",
     "In",
     "InString",
+    "InputForm",
     "ImportByteArray",
     "ImportString",
     "Implies",
@@ -524,6 +530,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Null",
     "NumberQ",
     "NumberString",
+    "NumberMarks",
     "NumericFunction",
     "OddQ",
     "Off",
@@ -536,6 +543,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Ordering",
     "OrderingBy",
     "Out",
+    "OutputForm",
     "Outer",
     "Overflow",
     "OwnValues",
@@ -605,6 +613,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "SelectFirst",
     "SetAccuracy",
     "SetPrecision",
+    "ShowSpecialCharacters",
+    "ShowStringCharacters",
     "Shortest",
     "Sequence",
     "SequenceFold",
@@ -627,6 +637,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Star",
     "StartOfLine",
     "StartOfString",
+    "StandardForm",
     "String",
     "StringCases",
     "StringContainsQ",
@@ -4204,6 +4215,34 @@ _STANDARD_FORM_BOX_HEADS = {
 }
 
 
+_DISPLAY_FORM_HEADS = {"FullForm", "InputForm", "OutputForm", "StandardForm"}
+
+
+def _display_form_wrapper(expr: Expr) -> tuple[str, Expr] | None:
+    if not isinstance(expr, Call) or len(expr.arguments) != 1 or not isinstance(expr.head_expr, Symbol):
+        return None
+    head_name = _system_dispatch_name(expr.head_expr)
+    if head_name not in _DISPLAY_FORM_HEADS:
+        return None
+    return head_name, expr.arguments[0]
+
+
+def _display_form_text(expr: Expr, form_name: str) -> str:
+    if form_name == "FullForm":
+        return expr.to_full_form()
+    return expr.to_input_form()
+
+
+def display_output_parts(expr: Expr) -> tuple[str | None, str]:
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None:
+        form_name, payload = wrapper
+        return form_name, _display_form_text(payload, form_name)
+    if isinstance(expr, String):
+        return None, expr.value
+    return None, expr.to_input_form()
+
+
 def _looks_like_standard_form_boxes(expr: Expr) -> bool:
     return (
         isinstance(expr, Call)
@@ -4213,6 +4252,12 @@ def _looks_like_standard_form_boxes(expr: Expr) -> bool:
 
 
 def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
+    if form_value is None:
+        wrapper = _display_form_wrapper(expr)
+        if wrapper is not None:
+            form_name, payload = wrapper
+            return string(_display_form_text(payload, form_name))
+
     form_name = _normalize_textual_expression_form(form_value, "ToString")
     if form_name == "InputForm":
         return string(expr.to_input_form())
@@ -4300,6 +4345,18 @@ def _make_boxes(expr: Expr, form_name: str) -> Expr:
 
 
 def _make_standard_boxes(expr: Expr) -> Expr:
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None:
+        form_name, payload = wrapper
+        if form_name == "InputForm":
+            return _input_form_display_boxes(payload)
+        if form_name == "FullForm":
+            return _full_form_display_boxes(payload)
+        if form_name == "OutputForm":
+            return _output_form_display_boxes(payload)
+        if form_name == "StandardForm":
+            return _standard_form_display_boxes(payload)
+
     if isinstance(expr, Symbol):
         return string(expr.to_input_form())
     if isinstance(expr, Integer):
@@ -4362,6 +4419,92 @@ def _make_standard_boxes(expr: Expr) -> Expr:
             )
 
     return _generic_call_boxes(expr)
+
+
+def _rule_option(name: str, value: Expr) -> Expr:
+    return call("Rule", symbol(name), value)
+
+
+def _input_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "InterpretationBox",
+        call(
+            "StyleBox",
+            string(expr.to_input_form()),
+            _rule_option("ShowStringCharacters", symbol("True")),
+            _rule_option("NumberMarks", symbol("True")),
+        ),
+        call("InputForm", expr),
+        _rule_option("Editable", symbol("True")),
+        _rule_option("AutoDelete", symbol("True")),
+    )
+
+
+def _full_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "TagBox",
+        call(
+            "StyleBox",
+            _make_full_form_boxes(expr),
+            _rule_option("ShowSpecialCharacters", symbol("False")),
+            _rule_option("ShowStringCharacters", symbol("True")),
+            _rule_option("NumberMarks", symbol("True")),
+        ),
+        symbol("FullForm"),
+    )
+
+
+def _output_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "InterpretationBox",
+        call(
+            "PaneBox",
+            string(expr.to_input_form()),
+            _rule_option("BaselinePosition", symbol("Baseline")),
+        ),
+        expr,
+        _rule_option("Editable", symbol("False")),
+    )
+
+
+def _standard_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "TagBox",
+        call("FormBox", _make_standard_boxes(expr), symbol("StandardForm")),
+        symbol("StandardForm"),
+        _rule_option("Editable", symbol("True")),
+    )
+
+
+def _make_full_form_boxes(expr: Expr) -> Expr:
+    if isinstance(expr, RationalNumber):
+        return _make_full_form_boxes(
+            call("Rational", integer(expr.value.numerator), integer(expr.value.denominator))
+        )
+    if isinstance(expr, ComplexNumber):
+        return _make_full_form_boxes(call("Complex", expr.real_part, expr.imaginary_part))
+    if isinstance(expr, SpecialReal):
+        return _make_full_form_boxes(call(expr.name))
+    if isinstance(expr, ByteArrayExpr):
+        encoded = base64.b64encode(bytes(expr.values)).decode("ascii")
+        return _make_full_form_boxes(call("ByteArray", string(encoded)))
+    if not isinstance(expr, Call):
+        return string(expr.to_full_form())
+
+    if expr.arguments:
+        arguments = _separated_full_form_boxes(expr.arguments, ",")
+    else:
+        arguments = string("")
+    return _row_box(_make_full_form_boxes(expr.head_expr), string("["), arguments, string("]"))
+
+
+def _separated_full_form_boxes(arguments: Sequence[Expr], separator: str) -> Expr:
+    pieces: list[Expr] = []
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(string(separator))
+        pieces.append(_make_full_form_boxes(argument))
+    return _row_box(*pieces)
 
 
 def _bracketed_row_box(open_token: str, arguments: Sequence[Expr], close_token: str) -> Expr:
@@ -5024,9 +5167,8 @@ def on_expr(arguments: Sequence[Expr]) -> Expr:
 
 
 def _format_print_argument(expr: Expr) -> str:
-    if isinstance(expr, String):
-        return expr.value
-    return expr.to_input_form()
+    _label, text = display_output_parts(expr)
+    return text
 
 
 def print_expr(arguments: Sequence[Expr]) -> Expr:

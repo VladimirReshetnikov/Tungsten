@@ -619,6 +619,10 @@ that `Check` is not disabled merely because its output is quieted.
   attributes such as `Flat`, `Orderless`, `Listable`, or short-circuit evaluation. A small
   hardcoded Hold-family subset is implemented because it is required for predictable structural
   manipulation.
+- Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, and `StandardForm`) are handled
+  at the display boundary for one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`.
+  Explicit textual conversion such as `ToString[InputForm[expr], InputForm]` still treats the
+  wrapper as ordinary expression structure.
 - FullForm cosmetics such as `DirectedInfinity[1]` for `Infinity` and exact precision-bearing real
   rendering are documented divergences for now.
 - Numeric literal parsing follows Wolfram's lexical grammar for decimal, base, precision,

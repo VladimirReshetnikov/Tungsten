@@ -6,11 +6,11 @@ from typing import TextIO
 from . import __version__
 from .expression import EvaluationSession
 from .expression import Expr
-from .expression import String
 from .expression import Symbol
 from .expression import TungstenExitRequested
 from .expression import WolframEvaluationError
 from .expression import WolframSyntaxError
+from .expression import display_output_parts
 from .expression import evaluate
 from .expression import parse_input_form
 
@@ -23,10 +23,14 @@ def _banner() -> str:
 
 
 def _format_output(expr: Expr) -> str:
-    # wolfram.exe prints ordinary strings without InputForm quotes at the main prompt.
-    if isinstance(expr, String):
-        return expr.value
-    return expr.to_input_form()
+    return display_output_parts(expr)[1]
+
+
+def _output_label(line: int, expr: Expr) -> str:
+    form_name, _text = display_output_parts(expr)
+    if form_name is None:
+        return f"Out[{line}]"
+    return f"Out[{line}]//{form_name}"
 
 
 def _should_print_output(expr: Expr) -> bool:
@@ -93,7 +97,7 @@ def run_repl(
 
         session.finish_output(result)
         if _should_print_output(result):
-            output_stream.write(f"\nOut[{line}]= {_format_output(result)}\n\n")
+            output_stream.write(f"\n{_output_label(line, result)}= {_format_output(result)}\n\n")
         else:
             output_stream.write("\n")
         output_stream.flush()
