@@ -3186,5 +3186,259 @@ class MemberQDefaultLevelTests(unittest.TestCase):
         )
 
 
+class ArityExtensionTests(unittest.TestCase):
+    """Coverage for the second-pass extensions: Map/Apply levelspec, multi-arg
+    Take/Drop, Partition padding, Reverse levelspec, Range iterators, Array
+    origin, DiagonalMatrix offset, Fold/FoldList without init, NestWhile
+    history, MapThread depth, OneIdentity for Plus/Times.
+    """
+
+    def test_fold_two_argument_form_uses_first_as_initial(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Fold[Plus, {1, 2, 3, 4}]")).to_full_form(), "10")
+        self.assertEqual(
+            evaluate(parse_input_form("Fold[f, {a, b, c}]")).to_full_form(),
+            "f[f[a, b], c]",
+        )
+
+    def test_foldlist_two_argument_form_includes_first(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("FoldList[Plus, {1, 2, 3, 4}]")).to_full_form(),
+            "List[1, 3, 6, 10]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FoldList[f, {a, b, c}]")).to_full_form(),
+            "List[a, f[a, b], f[f[a, b], c]]",
+        )
+
+    def test_range_iterator_list_threads(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Range[{2, 5}]")).to_full_form(),
+            "List[List[1, 2], List[1, 2, 3, 4, 5]]",
+        )
+
+    def test_array_with_origin(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Array[f, 3, 0]")).to_full_form(),
+            "List[f[0], f[1], f[2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Array[f, {2, 2}, {0, 0}]")).to_full_form(),
+            "List[List[f[0, 0], f[0, 1]], List[f[1, 0], f[1, 1]]]",
+        )
+
+    def test_diagonal_matrix_with_offset_and_size(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("DiagonalMatrix[{1, 2, 3}, 1]")).to_full_form(),
+            "List[List[0, 1, 0, 0], List[0, 0, 2, 0], List[0, 0, 0, 3], List[0, 0, 0, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("DiagonalMatrix[{1, 2, 3}, -1]")).to_full_form(),
+            "List[List[0, 0, 0, 0], List[1, 0, 0, 0], List[0, 2, 0, 0], List[0, 0, 3, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("DiagonalMatrix[{1, 2, 3}, 1, 5]")).to_full_form(),
+            "List[List[0, 1, 0, 0, 0], List[0, 0, 2, 0, 0], List[0, 0, 0, 3, 0], "
+            "List[0, 0, 0, 0, 0], List[0, 0, 0, 0, 0]]",
+        )
+
+    def test_reverse_levelspec_targets_one_level(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Reverse[{a, b, c, d}, 1]")).to_full_form(),
+            "List[d, c, b, a]",
+        )
+        # Integer n means {n}, the n-th level only.
+        self.assertEqual(
+            evaluate(parse_input_form("Reverse[{{a, b}, {c, d}}, 2]")).to_full_form(),
+            "List[List[b, a], List[d, c]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Reverse[{{a, b}, {c, d}}, {1, 2}]")).to_full_form(),
+            "List[List[d, c], List[b, a]]",
+        )
+
+    def test_map_with_levelspec(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Map[f, {{a, b}, {c, d}}, {2}]")).to_full_form(),
+            "List[List[f[a], f[b]], List[f[c], f[d]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Map[f, x[a, b, c], {0}]")).to_full_form(),
+            "f[x[a, b, c]]",
+        )
+
+    def test_apply_with_levelspec(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Apply[f, {{a, b}, {c, d}}, {1}]")).to_full_form(),
+            "List[f[a, b], f[c, d]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Apply[f, {{a, b}, {c, d}}, {0, 1}]")).to_full_form(),
+            "f[f[a, b], f[c, d]]",
+        )
+
+    def test_take_drop_multi_argument_matrix_slice(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Take[{{1, 2, 3}, {4, 5, 6}}, 2, 2]")).to_full_form(),
+            "List[List[1, 2], List[4, 5]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Drop[{{1, 2, 3}, {4, 5, 6}}, 1, 1]")).to_full_form(),
+            "List[List[5, 6]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Drop[{{1, 2, 3}, {4, 5, 6}}, None, 1]")).to_full_form(),
+            "List[List[2, 3], List[5, 6]]",
+        )
+
+    def test_partition_aligned_and_padded_forms(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Partition[{1, 2, 3, 4, 5}, 2, 1, {1, 1}]")).to_full_form(),
+            "List[List[1, 2], List[2, 3], List[3, 4], List[4, 5], List[5, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Partition[{1, 2, 3, 4, 5}, 2, 1, {1, 1}, x]")).to_full_form(),
+            "List[List[1, 2], List[2, 3], List[3, 4], List[4, 5], List[5, x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Partition[{1, 2, 3, 4, 5, 6}, 2, 2, -1]")).to_full_form(),
+            "List[List[6, 1], List[2, 3], List[4, 5]]",
+        )
+
+    def test_map_thread_with_depth(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("MapThread[f, {{{a, b}, {c, d}}, {{e, f}, {g, h}}}, 2]")).to_full_form(),
+            "List[List[f[a, e], f[b, f]], List[f[c, g], f[d, h]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MapThread[f, {a, b}, 0]")).to_full_form(),
+            "f[a, b]",
+        )
+
+    def test_nest_while_with_history_size(self) -> None:
+        # NestWhile[#/2 &, 100, # > 1 &, 2] runs until the predicate of
+        # (previous, current) fails after history grows to 2 elements.
+        self.assertEqual(
+            evaluate(parse_input_form("NestWhile[#/2 &, 100, # > 1 &, 2]")).to_full_form(),
+            "Rational[25, 64]",
+        )
+
+    def test_one_identity_collapses_single_argument_plus_and_times(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Plus[x]")).to_full_form(), "x")
+        self.assertEqual(evaluate(parse_input_form("Times[x]")).to_full_form(), "x")
+        # As a consequence, Plus[{1, 3}] simplifies to {1, 3}.
+        self.assertEqual(
+            evaluate(parse_input_form("Plus[{1, 3}]")).to_full_form(),
+            "List[1, 3]",
+        )
+
+
+class AssociationMergeTests(unittest.TestCase):
+    """Merge / GroupBy / GatherBy / Gather / KeyComplement / KeyUnion /
+    KeyIntersection — the association-merge family added in the second pass.
+    """
+
+    def test_merge_preserves_first_seen_key_order(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Merge[{<|a -> 1, b -> 2|>, <|a -> 3|>}, Identity]")).to_full_form(),
+            "Association[Rule[a, List[1, 3]], Rule[b, List[2]]]",
+        )
+
+    def test_group_by_default_groups_into_lists(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("GroupBy[{1, 2, 3, 4, 5, 6}, EvenQ]")).to_full_form(),
+            "Association[Rule[False, List[1, 3, 5]], Rule[True, List[2, 4, 6]]]",
+        )
+
+    def test_group_by_arrow_form_applies_value_function(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("GroupBy[{1, 2, 3, 4, 5, 6}, EvenQ -> Total]")).to_full_form(),
+            "Association[Rule[False, 9], Rule[True, 12]]",
+        )
+
+    def test_gather_by_groups_globally(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("GatherBy[{1, 2, 3, 4, 5, 6}, EvenQ]")).to_full_form(),
+            "List[List[1, 3, 5], List[2, 4, 6]]",
+        )
+
+    def test_gather_uses_structural_identity(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Gather[{1, 2, 3, 1, 2, 4}]")).to_full_form(),
+            "List[List[1, 1], List[2, 2], List[3], List[4]]",
+        )
+
+    def test_key_complement_returns_first_assoc_unique_keys(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("KeyComplement[{<|a -> 1, b -> 2|>, <|b -> 3|>}]")).to_full_form(),
+            "Association[Rule[a, 1]]",
+        )
+
+    def test_key_union_pads_missing_with_missing(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("KeyUnion[{<|a -> 1|>, <|b -> 2|>}]")).to_full_form(),
+            'List[Association[Rule[a, 1], Rule[b, Missing["KeyAbsent", b]]], '
+            'Association[Rule[a, Missing["KeyAbsent", a]], Rule[b, 2]]]',
+        )
+
+    def test_key_intersection_keeps_each_associations_value(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("KeyIntersection[{<|a -> 1, b -> 2|>, <|b -> 3, c -> 4|>}]")).to_full_form(),
+            "List[Association[Rule[b, 2]], Association[Rule[b, 3]]]",
+        )
+
+
+class StatisticalAndNumberTheoryExtensionsTests(unittest.TestCase):
+    """Variance, StandardDeviation, Norm, PrimePowerQ, ChineseRemainder, and
+    related extensions added in the second pass."""
+
+    def test_variance_and_standard_deviation(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Variance[{1, 2, 3, 4, 5}]")).to_full_form(),
+            "Rational[5, 2]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("StandardDeviation[{1, 2, 3, 4, 5}]")).to_full_form(),
+            "Power[Rational[5, 2], Rational[1, 2]]",
+        )
+
+    def test_norm_default_and_p_norm(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Norm[{3, 4}]")).to_full_form(), "5")
+        self.assertEqual(
+            evaluate(parse_input_form("Norm[{1, 2, 3}, 2]")).to_full_form(),
+            "Power[14, Rational[1, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Norm[{1, -2, 3}, Infinity]")).to_full_form(),
+            "3",
+        )
+
+    def test_prime_power_q(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("PrimePowerQ[8]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("PrimePowerQ[12]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("PrimePowerQ[1]")).to_full_form(), "False")
+
+    def test_chinese_remainder_basic(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("ChineseRemainder[{1, 2}, {3, 5}]")).to_full_form(),
+            "7",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ChineseRemainder[{2, 3, 2}, {3, 5, 7}]")).to_full_form(),
+            "23",
+        )
+
+    def test_boole_threads_over_lists(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Boole[{True, False, True}]")).to_full_form(),
+            "List[1, 0, 1]",
+        )
+
+    def test_position_with_heads_false_option(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Position[{a, b, c}, _, {1}, Heads -> False]")).to_full_form(),
+            "List[List[1], List[2], List[3]]",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

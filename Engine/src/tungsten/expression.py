@@ -3642,6 +3642,9 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
             return symbol("Indeterminate")
         if not expr.arguments:
             return integer(0)
+        if len(expr.arguments) == 1:
+            # OneIdentity: Plus[x] -> x for any single argument.
+            return expr.arguments[0]
         if all(_is_number_expr(argument) for argument in expr.arguments):
             result = expr.arguments[0]
             for argument in expr.arguments[1:]:
@@ -3660,6 +3663,9 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
             return symbol("Indeterminate")
         if not expr.arguments:
             return integer(1)
+        if len(expr.arguments) == 1:
+            # OneIdentity: Times[x] -> x for any single argument.
+            return expr.arguments[0]
         if any(_is_complex_infinity_expr(argument) for argument in expr.arguments):
             if any(_is_numeric_zero(argument) for argument in expr.arguments):
                 return symbol("Indeterminate")
@@ -4120,6 +4126,23 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
         if n < 4:
             return _bool_symbol(False)
         return _bool_symbol(not _is_prime_int(n))
+
+    if expr.has_head("PrimePowerQ"):
+        if len(values) != 1:
+            return None
+        n = values[0]
+        if n < 2:
+            return _bool_symbol(False)
+        # n is a prime power iff its factorization has a single prime base.
+        factors = _factor_int(n)
+        return _bool_symbol(len(factors) == 1)
+
+    if expr.has_head("ChineseRemainder"):
+        # ChineseRemainder[{r1, ...}, {m1, ...}] expects two integer-list
+        # arguments; the dispatch table sees the lists, not their flattened
+        # values, so this branch does not actually run from _integer_values.
+        # Falls through; handled in the post-normalized list dispatch below.
+        return None
 
     if expr.has_head("EulerPhi"):
         if len(values) != 1 or values[0] <= 0:
@@ -4599,6 +4622,12 @@ def _real_rounding_expr(head: Expr, argument: Expr) -> Expr | None:
         info = _real_info(argument)
         if info is None:
             return None
+        is_machine = info.precision is None and info.accuracy is None
+        if is_machine and head_name == "FractionalPart":
+            # Machine reals follow IEEE semantics for FractionalPart, so
+            # FractionalPart[3.7] is 0.7000000000000002 just like the kernel.
+            float_value = float(info.value)
+            return _machine_real(float_value - math.trunc(float_value))
         # Use Decimal arithmetic to preserve precision and to avoid float
         # rounding issues for round-half-to-even.
         value = info.value
@@ -4615,8 +4644,7 @@ def _real_rounding_expr(head: Expr, argument: Expr) -> Expr | None:
         if head_name == "FractionalPart":
             integer_part = int(value)
             remainder = value - integer_part
-            return _machine_real(float(remainder)) if info.precision is None and info.accuracy is None \
-                else _decimal_real(remainder, info.precision or 0)
+            return _decimal_real(remainder, info.precision or 0)
         return None
 
     return None
@@ -10779,17 +10807,35 @@ def most(expr: Expr) -> Expr:
 
 
 def take(expr: Expr, *specs: Expr | int) -> Expr:
-    compound = _require_compound(expr, "Take")
-    if len(specs) != 1:
-        raise WolframEvaluationError("Take currently supports exactly one specification.")
-    return _take_or_drop(compound, specs, drop=False)
+    """Take[expr, spec], or matrix-style Take[expr, spec1, spec2, ...].
+
+    Multiple specs slice along consecutive levels: ``Take[matrix, 2, 3]``
+    takes the first 2 rows, then takes 3 from each. Each spec uses the
+    full single-level vocabulary (``n``, ``All``, ``Span``, ``{m, n, s}``,
+    ``{n}``, ``UpTo[n]``).
+    """
+    return _multi_take_or_drop(expr, list(specs), drop=False)
 
 
 def drop(expr: Expr, *specs: Expr | int) -> Expr:
-    compound = _require_compound(expr, "Drop")
-    if len(specs) != 1:
-        raise WolframEvaluationError("Drop currently supports exactly one specification.")
-    return _take_or_drop(compound, specs, drop=True)
+    return _multi_take_or_drop(expr, list(specs), drop=True)
+
+
+def _multi_take_or_drop(expr: Expr, specs: list[Expr | int], *, drop: bool) -> Expr:
+    if not specs:
+        return expr
+    compound = _require_compound(expr, "Drop" if drop else "Take")
+    spec, *rest = specs
+    sliced = _take_or_drop(compound, (spec,), drop=drop)
+    if not rest:
+        return sliced
+    if not isinstance(sliced, Call):
+        return sliced
+    new_arguments = tuple(
+        _multi_take_or_drop(argument, list(rest), drop=drop)
+        for argument in sliced.arguments
+    )
+    return _rebuild(sliced, new_arguments)
 
 
 def select(expr: Expr, criterion: Expr, limit: Expr | int | None = None) -> Expr:
@@ -10891,13 +10937,79 @@ def join(*exprs: Expr) -> Expr:
     return Call(head_expr=head_expr, arguments=tuple(arguments))
 
 
-def reverse(expr: Expr) -> Expr:
+def reverse(expr: Expr, level_spec: Expr | None = None) -> Expr:
+    """Reverse[expr] (default: level 1) or Reverse[expr, levelspec].
+
+    The level spec follows Wolfram's ``Reverse`` contract: an integer ``n``
+    means "reverse the level-1..level-n axes", a ``{n}`` list means "reverse
+    only at level ``n``", and a ``{m, n}`` list means "reverse on every level
+    from ``m`` to ``n`` inclusive".
+    """
+    if level_spec is None:
+        levels: set[int] = {1}
+    else:
+        levels = _normalize_reverse_levels(level_spec)
+
+    return _reverse_at_levels(expr, levels, current_level=1)
+
+
+def _normalize_reverse_levels(level_spec: Expr) -> set[int]:
+    if isinstance(level_spec, Integer):
+        if level_spec.value < 1:
+            raise WolframEvaluationError(
+                "Reverse expects a positive integer level specification."
+            )
+        # Wolfram's Reverse[expr, n] reverses only the n-th level. Use
+        # {l1, l2, ...} or {min, max} for multi-level reversal.
+        return {level_spec.value}
+    if isinstance(level_spec, Call) and level_spec.has_head("List"):
+        if len(level_spec.arguments) == 1 and isinstance(level_spec.arguments[0], Integer):
+            target = level_spec.arguments[0].value
+            if target < 0:
+                raise WolframEvaluationError(
+                    "Reverse expects a non-negative level specification."
+                )
+            return {target} if target >= 1 else set()
+        if len(level_spec.arguments) == 2 and all(
+            isinstance(item, Integer) for item in level_spec.arguments
+        ):
+            low = level_spec.arguments[0].value  # type: ignore[union-attr]
+            high = level_spec.arguments[1].value  # type: ignore[union-attr]
+            if low < 1 or high < low:
+                raise WolframEvaluationError(
+                    "Reverse expects a positive {min, max} level range."
+                )
+            return set(range(low, high + 1))
+    raise WolframEvaluationError(
+        "Reverse currently supports an integer or {n}/{min, max} level spec."
+    )
+
+
+def _reverse_at_levels(expr: Expr, levels: set[int], current_level: int) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
-        return _association_expr(reversed(entries))
+        new_entries = [
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=_reverse_at_levels(entry.value, levels, current_level + 1),
+            )
+            for entry in entries
+        ]
+        if current_level in levels:
+            new_entries = list(reversed(new_entries))
+        return _association_expr(new_entries)
 
-    compound = _require_compound(expr, "Reverse")
-    return _rebuild(compound, tuple(reversed(compound.arguments)))
+    if isinstance(expr, Call):
+        new_arguments = tuple(
+            _reverse_at_levels(argument, levels, current_level + 1)
+            for argument in expr.arguments
+        )
+        if current_level in levels:
+            new_arguments = tuple(reversed(new_arguments))
+        return _rebuild(expr, new_arguments)
+
+    return expr
 
 
 def rotate_left(expr: Expr, amount: Expr | int = 1) -> Expr:
@@ -12144,24 +12256,113 @@ def nest_list(function: Expr, expr: Expr, count: Expr | int) -> Expr:
 _ITERATION_SAFETY_LIMIT = 65536
 
 
-def nest_while(function: Expr, expr: Expr, test: Expr) -> Expr:
-    current = expr
-    for _ in range(_ITERATION_SAFETY_LIMIT):
-        if not _predicate_succeeds(test, current):
-            return current
-        current = _apply_callable(function, (current,))
-    raise WolframEvaluationError("NestWhile exceeded the Tungsten iteration safety limit.")
+def nest_while(
+    function: Expr,
+    expr: Expr,
+    test: Expr,
+    history_spec: Expr | int | None = None,
+    extra_iterations: Expr | int | None = None,
+) -> Expr:
+    """NestWhile[f, expr, test] / NestWhile[..., m] / NestWhile[..., m, max] /
+    NestWhile[..., m, max, n].
+
+    The history-spec argument ``m`` controls how many recent values the test
+    receives: ``m = 1`` (default) is a unary predicate, ``m = 2`` makes the
+    test binary on the previous and current value, ``All`` passes the full
+    history, and other positive integers feed the last ``m`` values.
+    The optional ``max`` is the maximum number of iterations (matching
+    Wolfram's contract). Beyond Wolfram's contract, the safety cap still
+    applies as a final fallback. The trailing-count ``n`` argument runs
+    ``n`` extra iterations after the predicate first fails.
+    """
+    history_size = _normalize_nest_while_history(history_spec)
+    max_iterations = _normalize_nest_while_max(extra_iterations)
+
+    history: list[Expr] = [expr]
+    iterations = 0
+    while True:
+        if not _predicate_with_history(test, history, history_size):
+            break
+        if iterations >= _ITERATION_SAFETY_LIMIT:
+            raise WolframEvaluationError("NestWhile exceeded the Tungsten iteration safety limit.")
+        if max_iterations is not None and iterations >= max_iterations:
+            break
+        history.append(_apply_callable(function, (history[-1],)))
+        iterations += 1
+    return history[-1]
 
 
-def nest_while_list(function: Expr, expr: Expr, test: Expr) -> Expr:
-    current = expr
-    results = [expr]
-    for _ in range(_ITERATION_SAFETY_LIMIT):
-        if not _predicate_succeeds(test, current):
-            return _evaluated_list_expr(*results)
-        current = _apply_callable(function, (current,))
-        results.append(current)
-    raise WolframEvaluationError("NestWhileList exceeded the Tungsten iteration safety limit.")
+def nest_while_list(
+    function: Expr,
+    expr: Expr,
+    test: Expr,
+    history_spec: Expr | int | None = None,
+    extra_iterations: Expr | int | None = None,
+) -> Expr:
+    history_size = _normalize_nest_while_history(history_spec)
+    max_iterations = _normalize_nest_while_max(extra_iterations)
+
+    history: list[Expr] = [expr]
+    iterations = 0
+    while True:
+        if not _predicate_with_history(test, history, history_size):
+            return _evaluated_list_expr(*history)
+        if iterations >= _ITERATION_SAFETY_LIMIT:
+            raise WolframEvaluationError(
+                "NestWhileList exceeded the Tungsten iteration safety limit."
+            )
+        if max_iterations is not None and iterations >= max_iterations:
+            return _evaluated_list_expr(*history)
+        history.append(_apply_callable(function, (history[-1],)))
+        iterations += 1
+
+
+def _normalize_nest_while_history(spec: Expr | int | None) -> int | None:
+    """Convert NestWhile's ``m`` argument to a concrete history size or
+    ``None`` for ``All``.
+
+    Returns ``1`` when no spec is given (the default unary predicate).
+    """
+    if spec is None:
+        return 1
+    if isinstance(spec, int):
+        if spec < 1:
+            raise WolframEvaluationError("NestWhile history size must be a positive integer or All.")
+        return spec
+    if isinstance(spec, Integer):
+        return _normalize_nest_while_history(spec.value)
+    if isinstance(spec, Symbol) and spec.name == "All":
+        return None
+    raise WolframEvaluationError("NestWhile history size must be a positive integer or All.")
+
+
+def _normalize_nest_while_max(spec: Expr | int | None) -> int | None:
+    if spec is None:
+        return None
+    if isinstance(spec, int):
+        return max(0, spec)
+    if isinstance(spec, Integer):
+        return max(0, spec.value)
+    if isinstance(spec, Symbol) and spec.name == "Infinity":
+        return None
+    raise WolframEvaluationError(
+        "NestWhile max iterations must be a non-negative integer or Infinity."
+    )
+
+
+def _predicate_with_history(test: Expr, history: Sequence[Expr], history_size: int | None) -> bool:
+    if history_size is None:
+        arguments = tuple(history)
+    else:
+        arguments = tuple(history[-history_size:])
+    if len(arguments) < (history_size or len(arguments)):
+        # Not enough history yet; conventionally Wolfram returns True so
+        # iteration starts. We only reach here when history_size > 1 and the
+        # history hasn't grown enough, which means the predicate must succeed
+        # to permit further iterations.
+        return True
+    outcome = evaluate(_apply_callable(test, arguments))
+    return isinstance(outcome, Symbol) and outcome.name == "True"
 
 
 def fixed_point(function: Expr, expr: Expr, max_iterations: Expr | int | None = None) -> Expr:
@@ -12275,8 +12476,15 @@ def _sequence_values(expr: Expr, function_name: str) -> tuple[Expr, ...]:
 
 
 def map_thread(function: Expr, sequences_expr: Expr, level_value: Expr | int | None = None) -> Expr:
-    if level_value is not None and _normalize_integer_argument(level_value, "MapThread") != 1:
-        raise WolframEvaluationError("MapThread currently supports only level 1.")
+    """MapThread[f, {l1, l2, ...}] / MapThread[f, lists, n].
+
+    With ``n`` the threading depth, the parallel ``List`` structures must
+    agree in shape down to level ``n``; ``f`` is applied to each n-tuple of
+    leaves at that depth.
+    """
+    depth_value = 1 if level_value is None else _normalize_integer_argument(level_value, "MapThread")
+    if depth_value < 0:
+        raise WolframEvaluationError("MapThread expects a non-negative depth.")
     if not isinstance(sequences_expr, Call) or not sequences_expr.has_head("List"):
         raise WolframEvaluationError("MapThread expects a list of sequences.")
 
@@ -12284,20 +12492,30 @@ def map_thread(function: Expr, sequences_expr: Expr, level_value: Expr | int | N
     if not sequences:
         return _evaluated_list_expr()
 
-    if not all(isinstance(sequence, Call) and sequence.has_head("List") for sequence in sequences):
-        raise WolframEvaluationError("MapThread currently expects a list of List expressions.")
+    return _map_thread_recurse(function, sequences, depth_value)
 
+
+def _map_thread_recurse(function: Expr, sequences: Sequence[Expr], depth: int) -> Expr:
+    if depth == 0:
+        return _apply_callable(function, tuple(sequences))
+    if not all(isinstance(sequence, Call) and sequence.has_head("List") for sequence in sequences):
+        raise WolframEvaluationError(
+            "MapThread expects parallel List structures down to the requested depth."
+        )
     lengths = {len(sequence.arguments) for sequence in sequences if isinstance(sequence, Call)}
     if len(lengths) != 1:
         raise WolframEvaluationError("MapThread expects sequences of the same length.")
-
-    assert len(lengths) == 1
     length_value = lengths.pop()
     return _evaluated_list_expr(
         *(
-            _apply_callable(
+            _map_thread_recurse(
                 function,
-                tuple(sequence.arguments[index] for sequence in sequences if isinstance(sequence, Call)),
+                tuple(
+                    sequence.arguments[index]
+                    for sequence in sequences
+                    if isinstance(sequence, Call)
+                ),
+                depth - 1,
             )
             for index in range(length_value)
         )
@@ -12441,22 +12659,66 @@ def _normalize_dimensions(dimensions: Expr | int, function_name: str) -> list[in
 def _build_array_from_dimensions(
     dimensions: Sequence[int],
     builder,
+    origins: Sequence[int] | None = None,
     indices: tuple[int, ...] = (),
 ) -> Expr:
     if not dimensions:
         return builder(indices)
     size = dimensions[0]
+    base = origins[0] if origins is not None else 1
     return _evaluated_list_expr(*(
-        _build_array_from_dimensions(dimensions[1:], builder, (*indices, index))
-        for index in range(1, size + 1)
+        _build_array_from_dimensions(
+            dimensions[1:],
+            builder,
+            None if origins is None else origins[1:],
+            (*indices, index),
+        )
+        for index in range(base, base + size)
     ))
 
 
-def array(function: Expr, dimensions: Expr | int) -> Expr:
+def _normalize_array_origins(origin_expr: Expr | None, dimension_count: int) -> list[int] | None:
+    """Convert Array's optional origin argument to a per-dimension origin list.
+
+    Wolfram accepts ``Array[f, n, base]`` and ``Array[f, n, {b1, b2, ...}]``
+    plus the ``{lo, hi}`` shorthand that picks ``lo`` as the origin when
+    ``hi - lo + 1 == size``. This helper normalizes those forms; it
+    returns ``None`` when no explicit origin was supplied.
+    """
+    if origin_expr is None:
+        return None
+    if isinstance(origin_expr, Integer):
+        return [origin_expr.value] * dimension_count
+    if isinstance(origin_expr, Call) and origin_expr.has_head("List"):
+        # ``{lo, hi}`` for a 1-D array picks ``lo`` as the origin.
+        if dimension_count == 1 and len(origin_expr.arguments) == 2 and all(
+            isinstance(item, Integer) for item in origin_expr.arguments
+        ):
+            return [origin_expr.arguments[0].value]  # type: ignore[union-attr]
+        if len(origin_expr.arguments) != dimension_count:
+            raise WolframEvaluationError(
+                "Array origin list must have one entry per array dimension."
+            )
+        origins: list[int] = []
+        for item in origin_expr.arguments:
+            if not isinstance(item, Integer):
+                raise WolframEvaluationError(
+                    "Array origin entries must be explicit integers."
+                )
+            origins.append(item.value)
+        return origins
+    raise WolframEvaluationError(
+        "Array currently expects an integer origin or a list of integer origins."
+    )
+
+
+def array(function: Expr, dimensions: Expr | int, origin: Expr | None = None) -> Expr:
     normalized_dimensions = _normalize_dimensions(dimensions, "Array")
+    normalized_origins = _normalize_array_origins(origin, len(normalized_dimensions))
     return _build_array_from_dimensions(
         normalized_dimensions,
         lambda indices: _apply_callable(function, tuple(integer(index) for index in indices)),
+        normalized_origins,
     )
 
 
@@ -12466,6 +12728,21 @@ def constant_array(value: Expr, dimensions: Expr | int) -> Expr:
 
 
 def range_expr(arguments: Sequence[Expr]) -> Expr:
+    """Range[n], Range[m, n], Range[m, n, s], plus the iterator-list form
+    Range[{n1, n2, ...}].
+
+    The iterator-list form returns a list of one-argument ``Range`` results,
+    matching the kernel's ``Range[{2, 5}] -> {Range[2], Range[5]} -> {{1, 2},
+    {1, 2, 3, 4, 5}}`` chain.
+    """
+    if len(arguments) == 1 and isinstance(arguments[0], Call) and arguments[0].has_head("List"):
+        nested_arguments = arguments[0].arguments
+        if not all(isinstance(argument, Integer) for argument in nested_arguments):
+            raise WolframEvaluationError(
+                "Range currently supports only explicit integer arguments inside the iterator list."
+            )
+        return _evaluated_list_expr(*(range_expr((argument,)) for argument in nested_arguments))
+
     if len(arguments) not in {1, 2, 3}:
         raise WolframEvaluationError("Range expects one, two, or three integer arguments.")
     values = _integer_values(arguments)
@@ -12511,29 +12788,131 @@ def identity_matrix(size: Expr | int) -> Expr:
     ))
 
 
-def diagonal_matrix(values_expr: Expr) -> Expr:
+def diagonal_matrix(
+    values_expr: Expr,
+    offset_expr: Expr | int | None = None,
+    size_expr: Expr | int | None = None,
+) -> Expr:
+    """DiagonalMatrix[list], DiagonalMatrix[list, k], DiagonalMatrix[list, k, n].
+
+    With ``k > 0`` the diagonal moves up by ``k`` positions; with ``k < 0`` it
+    moves down. The optional third argument ``n`` overrides the resulting
+    matrix size; without it, the matrix is square and large enough to hold the
+    full diagonal (``len(values) + |k|`` per side).
+    """
     values = _sequence_values(values_expr, "DiagonalMatrix")
-    return _evaluated_list_expr(
-        *(
-            _evaluated_list_expr(
-                *(values[row - 1] if row == column else integer(0) for column in range(1, len(values) + 1))
-            )
-            for row in range(1, len(values) + 1)
-        )
-    )
+    offset = 0 if offset_expr is None else _normalize_integer_argument(offset_expr, "DiagonalMatrix")
+    if size_expr is None:
+        size = len(values) + abs(offset)
+    else:
+        size = _normalize_integer_argument(size_expr, "DiagonalMatrix")
+        if size < 0:
+            raise WolframEvaluationError("DiagonalMatrix size must be non-negative.")
+
+    # Place values along the diagonal at column - row == offset.
+    rows: list[Expr] = []
+    for row_index in range(size):
+        row_items: list[Expr] = []
+        for column_index in range(size):
+            on_diagonal = (column_index - row_index) == offset
+            value_index = row_index if offset >= 0 else row_index + offset
+            if on_diagonal and 0 <= value_index < len(values):
+                row_items.append(values[value_index])
+            else:
+                row_items.append(integer(0))
+        rows.append(_evaluated_list_expr(*row_items))
+    return _evaluated_list_expr(*rows)
 
 
-def partition(expr: Expr, size: Expr | int, offset: Expr | int | None = None) -> Expr:
+def partition(
+    expr: Expr,
+    size: Expr | int,
+    offset: Expr | int | None = None,
+    k_spec: Expr | int | None = None,
+    padding: Expr | None = None,
+) -> Expr:
+    """Partition[expr, n], Partition[expr, n, d], Partition[expr, n, d, k],
+    Partition[expr, n, d, {kL, kR}], Partition[expr, n, d, kspec, padding].
+
+    The 4- and 5-argument forms cover the cyclic / aligned variants. Without
+    the optional ``padding`` argument, out-of-range positions wrap cyclically
+    in the practical Wolfram style; with ``padding`` they are filled.
+    """
     window = _normalize_integer_argument(size, "Partition")
     step = window if offset is None else _normalize_integer_argument(offset, "Partition")
     if window <= 0 or step <= 0:
         raise WolframEvaluationError("Partition expects positive integer block sizes and offsets.")
     items = _selection_items(expr, "Partition")
+
+    if k_spec is None:
+        # Default 2/3-arg form: no overhang at either end (k = {1, n}).
+        kL, kR = 1, window
+    else:
+        kL, kR = _resolve_partition_k_spec(k_spec, window)
+
+    length = len(items)
+    start_first = 1 - (kL - 1)
+    start_last_target = length - (kR - 1)
+    if start_last_target < start_first:
+        return _evaluated_list_expr()
+
+    # Largest valid start ≤ target that is congruent to start_first mod step.
+    diff = start_last_target - start_first
+    num_offsets = diff // step + 1
+
     results: list[Expr] = []
-    for start in range(0, len(items) - window + 1, step):
-        chunk = items[start:start + window]
-        results.append(_selection_elements(expr, chunk, "Partition"))
+    for index in range(num_offsets):
+        block_start = start_first + index * step
+        block_items: list[_SelectionItem] = []
+        for offset_index in range(window):
+            position = block_start + offset_index
+            if 1 <= position <= length:
+                block_items.append(items[position - 1])
+            elif padding is not None:
+                block_items.append(_SelectionItem(index=0, value=padding))
+            elif length == 0:
+                # No elements to wrap to.
+                return _evaluated_list_expr()
+            else:
+                cyclic_position = ((position - 1) % length) + 1
+                block_items.append(items[cyclic_position - 1])
+        results.append(_selection_elements(expr, block_items, "Partition"))
     return _evaluated_list_expr(*results)
+
+
+def _resolve_partition_k_spec(k_spec: Expr | int, window: int) -> tuple[int, int]:
+    """Map Partition's k argument to a concrete ``(kL, kR)`` pair.
+
+    Integer ``1`` is ``{1, 1}``; integer ``-1`` is ``{n, n}`` (full cyclic).
+    Other integer ``k`` is currently treated as ``{k, k}``. For lists, ``-1``
+    in either slot resolves to ``n``.
+    """
+    if isinstance(k_spec, int):
+        spec_value = k_spec
+    elif isinstance(k_spec, Integer):
+        spec_value = k_spec.value
+    elif isinstance(k_spec, Call) and k_spec.has_head("List") and len(k_spec.arguments) == 2 \
+            and all(isinstance(item, Integer) for item in k_spec.arguments):
+        kL_raw = k_spec.arguments[0].value  # type: ignore[union-attr]
+        kR_raw = k_spec.arguments[1].value  # type: ignore[union-attr]
+        return _normalize_partition_alignment(kL_raw, window), _normalize_partition_alignment(kR_raw, window)
+    else:
+        raise WolframEvaluationError(
+            "Partition currently expects an integer or {kL, kR} alignment."
+        )
+    if spec_value == -1:
+        return window, window
+    return _normalize_partition_alignment(spec_value, window), _normalize_partition_alignment(spec_value, window)
+
+
+def _normalize_partition_alignment(value: int, window: int) -> int:
+    if value == -1:
+        return window
+    if 1 <= value <= window:
+        return value
+    raise WolframEvaluationError(
+        "Partition alignment must be -1 or an integer between 1 and the block size."
+    )
 
 
 def block_map(function: Expr, expr: Expr, size: Expr | int, offset: Expr | int | None = None) -> Expr:
@@ -12574,20 +12953,57 @@ def take_drop(expr: Expr, spec: Expr) -> Expr:
     return _evaluated_list_expr(take(expr, spec), drop(expr, spec))
 
 
-def fold(function: Expr, initial: Expr, expr: Expr) -> Expr:
-    current = initial
-    for item in _selection_items(expr, "Fold"):
-        current = _apply_callable(function, (current, item.value))
-    return current
+def fold(function: Expr, *rest: Expr) -> Expr:
+    """Fold[f, init, expr] or Fold[f, expr] (no initial value).
+
+    The two-argument form ``Fold[f, expr]`` uses ``First[expr]`` as the
+    initial value and folds over ``Rest[expr]``, matching the kernel's
+    contract. ``expr`` must be nonempty in this form.
+    """
+    if len(rest) == 1:
+        # Fold[f, expr] — drop into the first/rest split.
+        items = list(_selection_items(rest[0], "Fold"))
+        if not items:
+            raise WolframEvaluationError("Fold[f, expr] expects a nonempty sequence.")
+        current = items[0].value
+        for item in items[1:]:
+            current = _apply_callable(function, (current, item.value))
+        return current
+    if len(rest) == 2:
+        initial, expr = rest
+        current = initial
+        for item in _selection_items(expr, "Fold"):
+            current = _apply_callable(function, (current, item.value))
+        return current
+    raise WolframEvaluationError("Fold expects two or three arguments.")
 
 
-def fold_list(function: Expr, initial: Expr, expr: Expr) -> Expr:
-    current = initial
-    results = [initial]
-    for item in _selection_items(expr, "FoldList"):
-        current = _apply_callable(function, (current, item.value))
-        results.append(current)
-    return _evaluated_list_expr(*results)
+def fold_list(function: Expr, *rest: Expr) -> Expr:
+    """FoldList[f, init, expr] or FoldList[f, expr] (no initial value).
+
+    The two-argument form folds with ``First[expr]`` as the initial value
+    and over ``Rest[expr]``; the result includes that initial value as
+    the leading entry. Matches the kernel's contract.
+    """
+    if len(rest) == 1:
+        items = list(_selection_items(rest[0], "FoldList"))
+        if not items:
+            return _evaluated_list_expr()
+        current = items[0].value
+        results: list[Expr] = [current]
+        for item in items[1:]:
+            current = _apply_callable(function, (current, item.value))
+            results.append(current)
+        return _evaluated_list_expr(*results)
+    if len(rest) == 2:
+        initial, expr = rest
+        current = initial
+        results = [initial]
+        for item in _selection_items(expr, "FoldList"):
+            current = _apply_callable(function, (current, item.value))
+            results.append(current)
+        return _evaluated_list_expr(*results)
+    raise WolframEvaluationError("FoldList expects two or three arguments.")
 
 
 def sequence_fold(function: Expr, initial_expr: Expr, expr: Expr, arity: Expr | int | None = None) -> Expr:
@@ -12737,11 +13153,27 @@ def first_case(
     return _missing_not_found()
 
 
+def _is_heads_option_rule(expr: Expr) -> bool:
+    """True for ``Heads -> True/False`` and ``Heads :> True/False`` rules."""
+    if not isinstance(expr, Call):
+        return False
+    if not (expr.has_head("Rule") or expr.has_head("RuleDelayed")):
+        return False
+    if len(expr.arguments) != 2:
+        return False
+    key, value = expr.arguments
+    if not (isinstance(key, Symbol) and key.name == "Heads"):
+        return False
+    return isinstance(value, Symbol) and value.name in {"True", "False"}
+
+
 def position(
     expr: Expr,
     pattern: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
     limit: Expr | int | None = None,
+    *,
+    include_heads: bool = True,
 ) -> Expr:
     level_spec: Expr | int | tuple[int, int] = (0, _LEVEL_INFINITY) if spec is None else spec
     level_min, level_max = _normalize_level_spec(level_spec)
@@ -12761,9 +13193,10 @@ def position(
 
         entries = _association_entries(current)
         if entries is not None:
-            recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
-            if remaining == 0:
-                return
+            if include_heads:
+                recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
+                if remaining == 0:
+                    return
             for entry in entries:
                 recurse(entry.value, positive_level + 1, [*path, call("Key", entry.key)])
                 if remaining == 0:
@@ -12777,9 +13210,10 @@ def position(
             return
 
         if isinstance(current, Call):
-            recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
-            if remaining == 0:
-                return
+            if include_heads:
+                recurse(current.head_expr, positive_level + 1, [*path, integer(0)])
+                if remaining == 0:
+                    return
             for index, argument in enumerate(current.arguments, start=1):
                 recurse(argument, positive_level + 1, [*path, integer(index)])
                 if remaining == 0:
@@ -12926,29 +13360,136 @@ def dot(arguments: Sequence[Expr]) -> Expr:
     return current
 
 
-def apply_head(new_head: Expr, expr: Expr) -> Expr:
-    entries = _association_entries(expr)
-    if entries is not None:
-        return _apply_callable(new_head, tuple(entry.value for entry in entries))
-    if not isinstance(expr, Call):
-        return expr
-    return _apply_callable(new_head, expr.arguments)
+def apply_head(new_head: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr:
+    """Apply[f, expr] / Apply[f, expr, levelspec].
+
+    The default form replaces the head of ``expr`` with ``new_head``. With a
+    level spec, the head of every subexpression whose level matches the spec
+    is replaced.
+    """
+    if level_spec is None:
+        entries = _association_entries(expr)
+        if entries is not None:
+            return _apply_callable(new_head, tuple(entry.value for entry in entries))
+        if not isinstance(expr, Call):
+            return expr
+        return _apply_callable(new_head, expr.arguments)
+
+    level_min, level_max = _normalize_level_spec(level_spec)
+    return _walk_apply_levels(new_head, expr, level_min, level_max, current_level=0)
 
 
-def map_expr(function: Expr, expr: Expr) -> Expr:
+def _walk_apply_levels(
+    new_head: Expr, expr: Expr, level_min: int, level_max: int, current_level: int
+) -> Expr:
+    """Walk expr and replace heads at every position whose level matches."""
     entries = _association_entries(expr)
     if entries is not None:
-        return _association_expr(
+        new_entries = [
             _AssociationEntry(
                 rule_head=entry.rule_head,
                 key=entry.key,
-                value=_apply_callable(function, (entry.value,)),
+                value=_walk_apply_levels(
+                    new_head, entry.value, level_min, level_max, current_level + 1
+                ),
             )
             for entry in entries
+        ]
+        rebuilt = _association_expr(new_entries)
+        if _level_in_range(current_level, expr, level_min, level_max):
+            return _apply_callable(new_head, tuple(entry.value for entry in new_entries))
+        return rebuilt
+
+    if isinstance(expr, Call):
+        new_arguments = tuple(
+            _walk_apply_levels(new_head, argument, level_min, level_max, current_level + 1)
+            for argument in expr.arguments
         )
-    if not isinstance(expr, Call):
-        return expr
-    return _rebuild(expr, tuple(_apply_callable(function, (argument,)) for argument in expr.arguments))
+        rebuilt = _rebuild(expr, new_arguments)
+        if _level_in_range(current_level, expr, level_min, level_max):
+            return _apply_callable(new_head, new_arguments)
+        return rebuilt
+
+    # Atom: Apply at level 0 just returns the atom; per Wolfram semantics
+    # Apply on an atom is a no-op outside the level-0 case.
+    return expr
+
+
+def _level_in_range(
+    current_level: int, expr: Expr, level_min: int, level_max: int
+) -> bool:
+    """Decide whether ``current_level`` matches the requested levelspec.
+
+    A negative ``level_min`` / ``level_max`` follows Wolfram's convention of
+    counting from leaves toward the root: level ``-1`` is depth-1 (atoms),
+    level ``-n`` is the level whose subtrees have depth ``n``. We compare
+    using the depth of ``expr``.
+    """
+    negative_level = -depth(expr)
+    return _level_bounds_match(current_level, negative_level, level_min, level_max)
+
+
+def map_expr(function: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr:
+    """Map[f, expr] / Map[f, expr, levelspec].
+
+    The default form applies ``f`` to each immediate argument; with a level
+    spec, ``f`` is applied to every subexpression whose level matches the
+    spec, postorder. Atoms below the lowest matching level are left alone.
+    """
+    if level_spec is None:
+        entries = _association_entries(expr)
+        if entries is not None:
+            return _association_expr(
+                _AssociationEntry(
+                    rule_head=entry.rule_head,
+                    key=entry.key,
+                    value=_apply_callable(function, (entry.value,)),
+                )
+                for entry in entries
+            )
+        if not isinstance(expr, Call):
+            return expr
+        return _rebuild(
+            expr, tuple(_apply_callable(function, (argument,)) for argument in expr.arguments)
+        )
+
+    level_min, level_max = _normalize_level_spec(level_spec)
+    return _walk_map_levels(function, expr, level_min, level_max, current_level=0)
+
+
+def _walk_map_levels(
+    function: Expr, expr: Expr, level_min: int, level_max: int, current_level: int
+) -> Expr:
+    entries = _association_entries(expr)
+    if entries is not None:
+        new_entries = [
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=_walk_map_levels(
+                    function, entry.value, level_min, level_max, current_level + 1
+                ),
+            )
+            for entry in entries
+        ]
+        rebuilt = _association_expr(new_entries)
+        if _level_in_range(current_level, expr, level_min, level_max):
+            return _apply_callable(function, (rebuilt,))
+        return rebuilt
+
+    if isinstance(expr, Call):
+        new_arguments = tuple(
+            _walk_map_levels(function, argument, level_min, level_max, current_level + 1)
+            for argument in expr.arguments
+        )
+        rebuilt = _rebuild(expr, new_arguments)
+        if _level_in_range(current_level, expr, level_min, level_max):
+            return _apply_callable(function, (rebuilt,))
+        return rebuilt
+
+    if _level_in_range(current_level, expr, level_min, level_max):
+        return _apply_callable(function, (expr,))
+    return expr
 
 
 def map_at(function: Expr, expr: Expr, positions: Expr | int) -> Expr:
@@ -13080,6 +13621,223 @@ def association_map(function: Expr, keys: Expr) -> Expr:
     )
 
 
+def merge_associations(associations: Expr, combiner: Expr) -> Expr:
+    """Merge[{a1, a2, ...}, f] gathers values for each key into a list and
+    applies ``f`` to that list, returning a new association.
+
+    Tungsten currently expects a List of Associations as the first argument.
+    Lists of rule-lists are not normalized in this pass; pass ``Association``
+    explicitly when needed.
+    """
+    if not isinstance(associations, Call) or not associations.has_head("List"):
+        raise WolframEvaluationError("Merge currently expects a list of associations.")
+    grouped: dict[int, _AssociationEntry] = {}
+    keys_in_order: list[Expr] = []
+    grouped_values: list[list[Expr]] = []
+    rule_heads: list[str] = []
+    for member in associations.arguments:
+        entries = _association_entries(member)
+        if entries is None:
+            raise WolframEvaluationError(
+                "Merge currently expects every list element to be an Association."
+            )
+        for entry in entries:
+            existing_index: int | None = None
+            for index, existing_key in enumerate(keys_in_order):
+                if existing_key == entry.key:
+                    existing_index = index
+                    break
+            if existing_index is None:
+                keys_in_order.append(entry.key)
+                grouped_values.append([entry.value])
+                rule_heads.append(entry.rule_head)
+            else:
+                grouped_values[existing_index].append(entry.value)
+    new_entries = [
+        _AssociationEntry(
+            rule_head=rule_heads[index],
+            key=keys_in_order[index],
+            value=evaluate(_apply_callable(combiner, (list_expr(*values),))),
+        )
+        for index, values in enumerate(grouped_values)
+    ]
+    return _association_expr(new_entries)
+
+
+def group_by(data: Expr, spec: Expr) -> Expr:
+    """GroupBy[list, f] / GroupBy[list, f -> g].
+
+    The arrow-form spec ``f -> g`` first groups by ``f`` and then applies
+    ``g`` to each group's value list before storing it.
+    """
+    items = _list_or_association_values(data, "GroupBy")
+
+    if isinstance(spec, Call) and spec.has_head("Rule") and len(spec.arguments) == 2:
+        key_function, value_function = spec.arguments
+    else:
+        key_function = spec
+        value_function = None
+
+    keys_in_order: list[Expr] = []
+    grouped_values: list[list[Expr]] = []
+    for item in items:
+        key = evaluate(_apply_callable(key_function, (item,)))
+        existing_index: int | None = None
+        for index, existing_key in enumerate(keys_in_order):
+            if existing_key == key:
+                existing_index = index
+                break
+        if existing_index is None:
+            keys_in_order.append(key)
+            grouped_values.append([item])
+        else:
+            grouped_values[existing_index].append(item)
+
+    entries: list[_AssociationEntry] = []
+    for key, values in zip(keys_in_order, grouped_values):
+        if value_function is None:
+            payload = list_expr(*values)
+        else:
+            payload = evaluate(_apply_callable(value_function, (list_expr(*values),)))
+        entries.append(_AssociationEntry(rule_head="Rule", key=key, value=payload))
+    return _association_expr(entries)
+
+
+def gather_by(data: Expr, key_function: Expr) -> Expr:
+    """GatherBy[list, f] groups consecutive runs of equal keys, but in the
+    Wolfram contract elements are gathered globally regardless of position.
+    Returns a list of lists in first-occurrence order.
+    """
+    items = _list_or_association_values(data, "GatherBy")
+    keys_in_order: list[Expr] = []
+    grouped_values: list[list[Expr]] = []
+    for item in items:
+        key = evaluate(_apply_callable(key_function, (item,)))
+        existing_index: int | None = None
+        for index, existing_key in enumerate(keys_in_order):
+            if existing_key == key:
+                existing_index = index
+                break
+        if existing_index is None:
+            keys_in_order.append(key)
+            grouped_values.append([item])
+        else:
+            grouped_values[existing_index].append(item)
+    return list_expr(*(list_expr(*group) for group in grouped_values))
+
+
+def gather(data: Expr) -> Expr:
+    """Gather[list]: groups equal elements (using structural identity)."""
+    items = _list_or_association_values(data, "Gather")
+    keys_in_order: list[Expr] = []
+    grouped_values: list[list[Expr]] = []
+    for item in items:
+        existing_index: int | None = None
+        for index, existing_key in enumerate(keys_in_order):
+            if existing_key == item:
+                existing_index = index
+                break
+        if existing_index is None:
+            keys_in_order.append(item)
+            grouped_values.append([item])
+        else:
+            grouped_values[existing_index].append(item)
+    return list_expr(*(list_expr(*group) for group in grouped_values))
+
+
+def _associations_only(values: Sequence[Expr], function_name: str) -> list[tuple[_AssociationEntry, ...]]:
+    result: list[tuple[_AssociationEntry, ...]] = []
+    for member in values:
+        entries = _association_entries(member)
+        if entries is None:
+            raise WolframEvaluationError(
+                f"{function_name} currently expects every entry to be an Association."
+            )
+        result.append(entries)
+    return result
+
+
+def key_complement(associations: Expr) -> Expr:
+    """KeyComplement[{a1, a2, ...}] returns entries of ``a1`` whose keys
+    don't appear in any later association, preserving ``a1``'s entry order.
+    """
+    if not isinstance(associations, Call) or not associations.has_head("List") or not associations.arguments:
+        raise WolframEvaluationError("KeyComplement expects a non-empty list of associations.")
+    members = _associations_only(associations.arguments, "KeyComplement")
+    later_keys: list[Expr] = []
+    for member in members[1:]:
+        for entry in member:
+            if not any(entry.key == existing for existing in later_keys):
+                later_keys.append(entry.key)
+    return _association_expr(
+        entry for entry in members[0] if not any(entry.key == existing for existing in later_keys)
+    )
+
+
+def key_union(associations: Expr) -> Expr:
+    """KeyUnion[{a1, a2, ...}] returns a list of associations all sharing the
+    union of keys. Missing keys are filled with ``Missing["KeyAbsent", k]``.
+    """
+    if not isinstance(associations, Call) or not associations.has_head("List") or not associations.arguments:
+        raise WolframEvaluationError("KeyUnion expects a non-empty list of associations.")
+    members = _associations_only(associations.arguments, "KeyUnion")
+    all_keys: list[Expr] = []
+    for member in members:
+        for entry in member:
+            if not any(entry.key == existing for existing in all_keys):
+                all_keys.append(entry.key)
+
+    output: list[Expr] = []
+    for member in members:
+        entry_map = {id(entry.key): entry for entry in member}
+        # Use structural equality lookup; cannot rely on dict by Expr identity.
+        new_entries: list[_AssociationEntry] = []
+        for key in all_keys:
+            found: _AssociationEntry | None = None
+            for entry in member:
+                if entry.key == key:
+                    found = entry
+                    break
+            if found is not None:
+                new_entries.append(found)
+            else:
+                new_entries.append(
+                    _AssociationEntry(
+                        rule_head="Rule",
+                        key=key,
+                        value=call("Missing", string("KeyAbsent"), key),
+                    )
+                )
+        output.append(_association_expr(new_entries))
+    return list_expr(*output)
+
+
+def key_intersection(associations: Expr) -> Expr:
+    """KeyIntersection[{a1, a2, ...}] returns a list of associations all
+    sharing the keys present in every input, with each association keeping
+    its own value for those keys.
+    """
+    if not isinstance(associations, Call) or not associations.has_head("List") or not associations.arguments:
+        raise WolframEvaluationError("KeyIntersection expects a non-empty list of associations.")
+    members = _associations_only(associations.arguments, "KeyIntersection")
+    common_keys: list[Expr] = []
+    for entry in members[0]:
+        if all(any(entry.key == other_entry.key for other_entry in member) for member in members[1:]):
+            if not any(entry.key == existing for existing in common_keys):
+                common_keys.append(entry.key)
+
+    output: list[Expr] = []
+    for member in members:
+        new_entries: list[_AssociationEntry] = []
+        for key in common_keys:
+            for entry in member:
+                if entry.key == key:
+                    new_entries.append(entry)
+                    break
+        output.append(_association_expr(new_entries))
+    return list_expr(*output)
+
+
 def _require_compound(expr: Expr, function_name: str) -> Call:
     if isinstance(expr, Call):
         return expr
@@ -13109,6 +13867,61 @@ def mean_expr(expr: Expr) -> Expr:
     n = integer(len(items))
     summed = evaluate(call("Plus", *items))
     return evaluate(call("Times", summed, call("Power", n, integer(-1))))
+
+
+def variance_expr(expr: Expr) -> Expr:
+    """Variance[list] = sum((x - mean)^2) / (n - 1) for sample variance."""
+    items = _list_or_association_values(expr, "Variance")
+    if len(items) < 2:
+        raise WolframEvaluationError("Variance requires at least two elements.")
+    mean = mean_expr(expr)
+    deviations = [
+        evaluate(call("Plus", item, call("Times", integer(-1), mean))) for item in items
+    ]
+    squared = [evaluate(call("Power", deviation, integer(2))) for deviation in deviations]
+    summed = evaluate(call("Plus", *squared))
+    return evaluate(call("Times", summed, call("Power", integer(len(items) - 1), integer(-1))))
+
+
+def standard_deviation_expr(expr: Expr) -> Expr:
+    return evaluate(call("Sqrt", variance_expr(expr)))
+
+
+def norm_expr(expr: Expr, p_expr: Expr | None = None) -> Expr:
+    """Norm[v] for an explicit numeric vector; Norm[v, p] for the p-norm."""
+    compound = _require_compound(expr, "Norm")
+    if not compound.has_head("List"):
+        raise WolframEvaluationError("Norm currently expects a List of explicit numbers.")
+
+    def absolute_value(item: Expr) -> Expr:
+        return evaluate(call("Abs", item))
+
+    if p_expr is None:
+        # Default Euclidean norm.
+        squares = [
+            evaluate(call("Power", absolute_value(item), integer(2)))
+            for item in compound.arguments
+        ]
+        return evaluate(call("Sqrt", call("Plus", *squares)))
+
+    if isinstance(p_expr, Symbol) and p_expr.name == "Infinity":
+        # L-infinity = Max[Abs[v]].
+        if not compound.arguments:
+            return integer(0)
+        return evaluate(call("Max", *(absolute_value(item) for item in compound.arguments)))
+
+    if isinstance(p_expr, Integer) and p_expr.value > 0:
+        powered = [
+            evaluate(call("Power", absolute_value(item), p_expr))
+            for item in compound.arguments
+        ]
+        return evaluate(
+            call("Power", call("Plus", *powered), call("Power", p_expr, integer(-1)))
+        )
+
+    raise WolframEvaluationError(
+        "Norm currently expects a positive integer p or Infinity."
+    )
 
 
 def median_expr(expr: Expr) -> Expr:
@@ -13495,6 +14308,55 @@ def pad_right(expr: Expr, target_length_expr: Expr, fill_expr: Expr | None = Non
     return list_expr(*(items + [fill] * (target_length - len(items))))
 
 
+def chinese_remainder(residues_expr: Expr, moduli_expr: Expr) -> Expr:
+    """ChineseRemainder[{r1, r2, ...}, {m1, m2, ...}] for explicit-integer
+    pairwise-coprime moduli. Returns the smallest non-negative integer ``x``
+    such that ``Mod[x, mi] == ri`` for every ``i``.
+    """
+    if not isinstance(residues_expr, Call) or not residues_expr.has_head("List"):
+        raise WolframEvaluationError("ChineseRemainder expects a list of residues.")
+    if not isinstance(moduli_expr, Call) or not moduli_expr.has_head("List"):
+        raise WolframEvaluationError("ChineseRemainder expects a list of moduli.")
+    if len(residues_expr.arguments) != len(moduli_expr.arguments):
+        raise WolframEvaluationError(
+            "ChineseRemainder expects residues and moduli of the same length."
+        )
+
+    if not all(isinstance(item, Integer) for item in residues_expr.arguments):
+        raise WolframEvaluationError("ChineseRemainder currently expects explicit integer residues.")
+    if not all(isinstance(item, Integer) for item in moduli_expr.arguments):
+        raise WolframEvaluationError("ChineseRemainder currently expects explicit integer moduli.")
+
+    residues = [item.value for item in residues_expr.arguments]  # type: ignore[union-attr]
+    moduli = [item.value for item in moduli_expr.arguments]  # type: ignore[union-attr]
+
+    if any(modulus == 0 for modulus in moduli):
+        raise WolframEvaluationError("ChineseRemainder moduli must be nonzero.")
+
+    # Iterative CRT: combine pairs (r, m) into a single congruence modulo lcm.
+    current_residue = 0
+    current_modulus = 1
+    for residue, modulus in zip(residues, moduli):
+        modulus = abs(modulus)
+        gcd_value = math.gcd(current_modulus, modulus)
+        if (residue - current_residue) % gcd_value != 0:
+            raise WolframEvaluationError(
+                "ChineseRemainder system is inconsistent for the given residues and moduli."
+            )
+        # Solve current_modulus * t ≡ (residue - current_residue) (mod modulus / gcd)
+        reduced_modulus = modulus // gcd_value
+        try:
+            inverse = pow(current_modulus // gcd_value, -1, reduced_modulus)
+        except ValueError as exc:
+            raise WolframEvaluationError(
+                "ChineseRemainder requires invertible reduced moduli."
+            ) from exc
+        offset = ((residue - current_residue) // gcd_value * inverse) % reduced_modulus
+        current_residue = (current_residue + current_modulus * offset) % (current_modulus * reduced_modulus)
+        current_modulus = current_modulus * reduced_modulus
+    return integer(current_residue)
+
+
 def from_digits(digits_expr: Expr, base_expr: Expr | None = None) -> Expr:
     base = 10
     if base_expr is not None:
@@ -13614,6 +14476,13 @@ def _normalize_take_drop_selectors(expr: Expr, spec: Expr | int, function_name: 
 
     if isinstance(spec, Symbol) and spec.name == "All":
         return list(range(1, count + 1))
+
+    if isinstance(spec, Symbol) and spec.name == "None":
+        # Wolfram's Take[expr, None] / Drop[expr, None] selects nothing,
+        # which means Take returns an empty result and Drop returns expr
+        # untouched. The caller's drop/take branch interprets an empty
+        # selector list correctly without further work.
+        return []
 
     if isinstance(spec, Call) and spec.has_head("Span"):
         return _validate_selectors(expr, _expand_span_spec(expr, spec), function_name)
@@ -15119,13 +15988,13 @@ def _evaluate(expr: Expr) -> Expr:
         return _evaluated_list_expr(*level(subject, spec))
 
     if evaluated_head.name == "Take":
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("Take currently supports exactly one specification.")
+        if len(evaluated_arguments) < 2:
+            raise WolframEvaluationError("Take expects at least one specification.")
         return take(evaluated_arguments[0], *evaluated_arguments[1:])
 
     if evaluated_head.name == "Drop":
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("Drop currently supports exactly one specification.")
+        if len(evaluated_arguments) < 2:
+            raise WolframEvaluationError("Drop expects at least one specification.")
         return drop(evaluated_arguments[0], *evaluated_arguments[1:])
 
     if evaluated_head.name == "Select":
@@ -15163,7 +16032,8 @@ def _evaluate(expr: Expr) -> Expr:
     if evaluated_head.name == "Boole":
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Boole expects exactly one argument.")
-        truth = _truth_value(evaluated_arguments[0])
+        argument = evaluated_arguments[0]
+        truth = _truth_value(argument)
         if truth is None:
             return evaluated_expr
         return integer(1 if truth else 0)
@@ -15184,9 +16054,13 @@ def _evaluate(expr: Expr) -> Expr:
         return join(*evaluated_arguments)
 
     if evaluated_head.name == "Reverse":
-        if len(evaluated_arguments) != 1:
-            raise WolframEvaluationError("Reverse currently supports exactly one argument.")
-        return reverse(evaluated_arguments[0])
+        if len(evaluated_arguments) == 1:
+            return reverse(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return reverse(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError(
+            "Reverse expects an expression and an optional level specification."
+        )
 
     if evaluated_head.name == "RotateLeft":
         if len(evaluated_arguments) == 1:
@@ -15229,9 +16103,15 @@ def _evaluate(expr: Expr) -> Expr:
         raise WolframEvaluationError("Scan expects a function, an expression, and an optional level specification.")
 
     if evaluated_head.name == "Apply":
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("Apply currently supports exactly two arguments.")
-        return apply_head(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 2:
+            return apply_head(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return apply_head(
+                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+            )
+        raise WolframEvaluationError(
+            "Apply expects a head, an expression, and an optional level specification."
+        )
 
     if evaluated_head.name == "MapApply":
         if len(evaluated_arguments) == 1:
@@ -15241,9 +16121,15 @@ def _evaluate(expr: Expr) -> Expr:
         return map_apply(evaluated_arguments[0], evaluated_arguments[1])
 
     if evaluated_head.name == "Map":
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("Map currently supports exactly two arguments.")
-        return map_expr(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 2:
+            return map_expr(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return map_expr(
+                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+            )
+        raise WolframEvaluationError(
+            "Map expects a function, an expression, and an optional level specification."
+        )
 
     if evaluated_head.name == "MapAll":
         if len(evaluated_arguments) == 1:
@@ -15292,14 +16178,18 @@ def _evaluate(expr: Expr) -> Expr:
         return nest_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
 
     if evaluated_head.name == "NestWhile":
-        if len(evaluated_arguments) != 3:
-            raise WolframEvaluationError("NestWhile currently supports exactly three arguments.")
-        return nest_while(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if 3 <= len(evaluated_arguments) <= 5:
+            return nest_while(*evaluated_arguments)
+        raise WolframEvaluationError(
+            "NestWhile expects f, expr, test, optional m, optional max."
+        )
 
     if evaluated_head.name == "NestWhileList":
-        if len(evaluated_arguments) != 3:
-            raise WolframEvaluationError("NestWhileList currently supports exactly three arguments.")
-        return nest_while_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if 3 <= len(evaluated_arguments) <= 5:
+            return nest_while_list(*evaluated_arguments)
+        raise WolframEvaluationError(
+            "NestWhileList expects f, expr, test, optional m, optional max."
+        )
 
     if evaluated_head.name == "FixedPoint":
         if len(evaluated_arguments) == 2:
@@ -15389,9 +16279,11 @@ def _evaluate(expr: Expr) -> Expr:
         raise WolframEvaluationError("Tuples expects a list of sequences or a sequence with a repetition count.")
 
     if evaluated_head.name == "Array":
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("Array currently supports exactly two arguments.")
-        return array(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 2:
+            return array(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return array(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Array expects two or three arguments.")
 
     if evaluated_head.name == "ConstantArray":
         if len(evaluated_arguments) != 2:
@@ -15410,16 +16302,42 @@ def _evaluate(expr: Expr) -> Expr:
         return identity_matrix(evaluated_arguments[0])
 
     if evaluated_head.name == "DiagonalMatrix":
-        if len(evaluated_arguments) != 1:
-            raise WolframEvaluationError("DiagonalMatrix expects exactly one argument.")
-        return diagonal_matrix(evaluated_arguments[0])
+        if len(evaluated_arguments) == 1:
+            return diagonal_matrix(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return diagonal_matrix(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return diagonal_matrix(
+                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+            )
+        raise WolframEvaluationError(
+            "DiagonalMatrix expects a list, an optional offset, and an optional matrix size."
+        )
 
     if evaluated_head.name == "Partition":
         if len(evaluated_arguments) == 2:
             return partition(evaluated_arguments[0], evaluated_arguments[1])
         if len(evaluated_arguments) == 3:
             return partition(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
-        raise WolframEvaluationError("Partition currently supports an expression, a block size, and an optional offset.")
+        if len(evaluated_arguments) == 4:
+            return partition(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        if len(evaluated_arguments) == 5:
+            return partition(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+                evaluated_arguments[4],
+            )
+        raise WolframEvaluationError(
+            "Partition expects an expression, a block size, an optional offset, "
+            "an optional alignment k or {kL, kR}, and an optional padding value."
+        )
 
     if evaluated_head.name == "BlockMap":
         if len(evaluated_arguments) == 3:
@@ -15444,14 +16362,18 @@ def _evaluate(expr: Expr) -> Expr:
         return take_drop(evaluated_arguments[0], evaluated_arguments[1])
 
     if evaluated_head.name == "Fold":
-        if len(evaluated_arguments) != 3:
-            raise WolframEvaluationError("Fold expects exactly three arguments.")
-        return fold(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 2:
+            return fold(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return fold(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Fold expects two or three arguments.")
 
     if evaluated_head.name == "FoldList":
-        if len(evaluated_arguments) != 3:
-            raise WolframEvaluationError("FoldList expects exactly three arguments.")
-        return fold_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 2:
+            return fold_list(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return fold_list(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("FoldList expects two or three arguments.")
 
     if evaluated_head.name == "SequenceFold":
         if len(evaluated_arguments) == 3:
@@ -15584,12 +16506,37 @@ def _evaluate(expr: Expr) -> Expr:
         )
 
     if evaluated_head.name == "Position":
-        if len(evaluated_arguments) == 2:
-            return position(evaluated_arguments[0], expr.arguments[1])
-        if len(evaluated_arguments) == 3:
-            return position(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
-        if len(evaluated_arguments) == 4:
-            return position(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2], evaluated_arguments[3])
+        # Strip an optional ``Heads -> True/False`` rule so the kernel idiom
+        # ``Position[..., {1}, Heads -> False]`` works without surfacing the
+        # rule as an unrecognized argument.
+        position_args = list(evaluated_arguments)
+        position_raw = list(expr.arguments)
+        include_heads = True
+        if position_args and _is_heads_option_rule(position_args[-1]):
+            heads_rule = position_args.pop()
+            position_raw.pop()
+            assert isinstance(heads_rule, Call)
+            include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+
+        if len(position_args) == 2:
+            return position(
+                position_args[0], position_raw[1], include_heads=include_heads
+            )
+        if len(position_args) == 3:
+            return position(
+                position_args[0],
+                position_raw[1],
+                position_args[2],
+                include_heads=include_heads,
+            )
+        if len(position_args) == 4:
+            return position(
+                position_args[0],
+                position_raw[1],
+                position_args[2],
+                position_args[3],
+                include_heads=include_heads,
+            )
         raise WolframEvaluationError(
             "Position expects an expression, a pattern, and optional level and result limits."
         )
@@ -15806,6 +16753,41 @@ def _evaluate(expr: Expr) -> Expr:
             raise WolframEvaluationError("AssociationMap expects exactly two arguments.")
         return association_map(evaluated_arguments[0], evaluated_arguments[1])
 
+    if evaluated_head.name == "Merge":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Merge expects exactly two arguments.")
+        return merge_associations(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "GroupBy":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("GroupBy currently expects two arguments.")
+        return group_by(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "GatherBy":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("GatherBy currently expects two arguments.")
+        return gather_by(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Gather":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Gather expects exactly one argument.")
+        return gather(evaluated_arguments[0])
+
+    if evaluated_head.name == "KeyComplement":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("KeyComplement expects a list of associations.")
+        return key_complement(evaluated_arguments[0])
+
+    if evaluated_head.name == "KeyUnion":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("KeyUnion expects a list of associations.")
+        return key_union(evaluated_arguments[0])
+
+    if evaluated_head.name == "KeyIntersection":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("KeyIntersection expects a list of associations.")
+        return key_intersection(evaluated_arguments[0])
+
     if evaluated_head.name == "KeySort":
         if len(evaluated_arguments) == 1:
             return key_sort(evaluated_arguments[0])
@@ -15827,6 +16809,23 @@ def _evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Median currently expects exactly one argument.")
         return median_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "Variance":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Variance currently expects exactly one argument.")
+        return variance_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "StandardDeviation":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("StandardDeviation currently expects exactly one argument.")
+        return standard_deviation_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "Norm":
+        if len(evaluated_arguments) == 1:
+            return norm_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return norm_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Norm expects a vector and an optional p value.")
 
     if evaluated_head.name == "Tally":
         if len(evaluated_arguments) == 1:
@@ -15945,6 +16944,11 @@ def _evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 2:
             return from_digits(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("FromDigits expects digits and an optional base.")
+
+    if evaluated_head.name == "ChineseRemainder":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("ChineseRemainder expects two list arguments.")
+        return chinese_remainder(evaluated_arguments[0], evaluated_arguments[1])
 
     return evaluated_expr
 
