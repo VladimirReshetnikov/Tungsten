@@ -8,6 +8,7 @@ import csv
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
 from fractions import Fraction
+from functools import cmp_to_key
 import gzip
 from importlib import resources
 import io
@@ -465,6 +466,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "Less",
     "LessEqual",
     "LessEqualGreater",
+    "LexicographicOrder",
+    "LexicographicSort",
     "Level",
     "List",
     "Listable",
@@ -486,11 +489,13 @@ _SYSTEM_SYMBOL_NAMES = {
     "MapThread",
     "MatchQ",
     "Max",
+    "MaximalBy",
     "MemberQ",
     "Message",
     "MessageList",
     "MessageName",
     "Min",
+    "MinimalBy",
     "Missing",
     "MissingQ",
     "MinusPlus",
@@ -526,6 +531,10 @@ _SYSTEM_SYMBOL_NAMES = {
     "On",
     "Operate",
     "Or",
+    "Order",
+    "OrderedQ",
+    "Ordering",
+    "OrderingBy",
     "Out",
     "Outer",
     "Overflow",
@@ -581,6 +590,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "ReplaceRepeated",
     "Rest",
     "Reverse",
+    "ReverseSort",
+    "ReverseSortBy",
     "RightComposition",
     "RightArrow",
     "RotateLeft",
@@ -603,6 +614,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "Slot",
     "SlotSequence",
     "SmallCircle",
+    "Sort",
+    "SortBy",
     "Sow",
     "Span",
     "SquareIntersection",
@@ -683,6 +696,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Unitize",
     "Union",
     "UpArrow",
+    "UpTo",
     "Unique",
     "UnsameQ",
     "ValueQ",
@@ -8592,6 +8606,8 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "LengthWhile",
     "Less",
     "LessEqual",
+    "LexicographicOrder",
+    "LexicographicSort",
     "Level",
     "Lookup",
     "MachineIntegerQ",
@@ -8604,8 +8620,10 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "MapThread",
     "MatchQ",
     "Max",
+    "MaximalBy",
     "MemberQ",
     "Min",
+    "MinimalBy",
     "Mod",
     "Most",
     "N",
@@ -8617,6 +8635,10 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "NumberQ",
     "Operate",
     "Or",
+    "Order",
+    "OrderedQ",
+    "Ordering",
+    "OrderingBy",
     "Outer",
     "Part",
     "Partition",
@@ -8641,6 +8663,8 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "ReplaceRepeated",
     "Rest",
     "Reverse",
+    "ReverseSort",
+    "ReverseSortBy",
     "RightComposition",
     "RotateLeft",
     "RotateRight",
@@ -8653,6 +8677,8 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "SequenceFold",
     "SequenceFoldList",
     "Sign",
+    "Sort",
+    "SortBy",
     "Conjugate",
     "StringContainsQ",
     "StringDrop",
@@ -9516,6 +9542,32 @@ def _apply_callable(function: Expr, arguments: Sequence[Expr]) -> Expr:
                 "ComapApply[functions] expects exactly one argument when used as an operator."
             )
         return comap_apply(function.arguments[0], arguments[0])
+    if isinstance(function, Call) and function.has_head("SortBy") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("SortBy[f] expects exactly one argument when used as an operator.")
+        return sort_by(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("ReverseSortBy") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("ReverseSortBy[f] expects exactly one argument when used as an operator.")
+        return sort_by(arguments[0], function.arguments[0], reverse=True)
+    if isinstance(function, Call) and function.has_head("OrderingBy") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("OrderingBy[f] expects exactly one argument when used as an operator.")
+        return ordering_by(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("MinimalBy") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("MinimalBy[f] expects exactly one argument when used as an operator.")
+        return minimal_by(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("MaximalBy") and len(function.arguments) == 1:
+        if len(arguments) != 1:
+            raise WolframEvaluationError("MaximalBy[f] expects exactly one argument when used as an operator.")
+        return maximal_by(arguments[0], function.arguments[0])
+    if isinstance(function, Call) and function.has_head("LexicographicOrder") and len(function.arguments) == 1:
+        if len(arguments) != 2:
+            raise WolframEvaluationError(
+                "LexicographicOrder[p] expects exactly two arguments when used as an operator."
+            )
+        return lexicographic_order(arguments[0], arguments[1], function.arguments[0])
     if isinstance(function, Call) and function.has_head("StringContainsQ") and len(function.arguments) == 1:
         if len(arguments) != 1:
             raise WolframEvaluationError(
@@ -9574,6 +9626,18 @@ def _is_callable_expr(expr: Expr) -> bool:
         return True
     if expr.has_head("ComapApply") and len(expr.arguments) == 1:
         return True
+    if expr.has_head("SortBy") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("ReverseSortBy") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("OrderingBy") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("MinimalBy") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("MaximalBy") and len(expr.arguments) == 1:
+        return True
+    if expr.has_head("LexicographicOrder") and len(expr.arguments) == 1:
+        return True
     if expr.has_head("StringContainsQ") and len(expr.arguments) == 1:
         return True
     if expr.has_head("StringMatchQ") and len(expr.arguments) == 1:
@@ -9605,6 +9669,419 @@ def unsame_q(*arguments: Expr) -> Symbol:
             return _bool_symbol(False)
         seen.add(argument)
     return _bool_symbol(True)
+
+
+@dataclass(frozen=True)
+class _OrderingItem:
+    index: int
+    value: Expr
+    entry: _AssociationEntry | None = None
+    keys: tuple[Expr, ...] = ()
+
+
+def _integer_sign(value: int) -> int:
+    return (value > 0) - (value < 0)
+
+
+def _text_compare(left: str, right: str) -> int:
+    return (left > right) - (left < right)
+
+
+def _is_orderable_real_expr(expr: Expr) -> bool:
+    return (
+        _is_real_number_expr(expr)
+        or _is_positive_infinity_expr(expr)
+        or _is_negative_infinity_expr(expr)
+    )
+
+
+def _orderable_complex_parts(expr: Expr) -> tuple[Expr, Expr] | None:
+    if isinstance(expr, ComplexNumber):
+        return expr.real_part, expr.imaginary_part
+    if _is_orderable_real_expr(expr):
+        return expr, integer(0)
+    return None
+
+
+def _number_kind_rank(expr: Expr) -> int:
+    if _is_negative_infinity_expr(expr):
+        return 0
+    if isinstance(expr, Integer):
+        return 1
+    if isinstance(expr, RationalNumber):
+        return 2
+    if isinstance(expr, Real):
+        return 3
+    if isinstance(expr, SpecialReal):
+        return 4
+    if _is_positive_infinity_expr(expr):
+        return 5
+    if isinstance(expr, ComplexNumber):
+        return 6
+    return 7
+
+
+def _expr_kind_rank(expr: Expr) -> int:
+    if _orderable_complex_parts(expr) is not None:
+        return 0
+    if isinstance(expr, String):
+        return 1
+    if isinstance(expr, Symbol):
+        return 2
+    if isinstance(expr, ByteArrayExpr):
+        return 3
+    if isinstance(expr, Call):
+        return 4
+    return 5
+
+
+def _numeric_tie_compare(left: Expr, right: Expr) -> int:
+    rank_compare = _number_kind_rank(left) - _number_kind_rank(right)
+    if rank_compare != 0:
+        return _integer_sign(rank_compare)
+    return _text_compare(left.to_full_form(), right.to_full_form())
+
+
+def _canonical_compare(left: Expr, right: Expr) -> int:
+    """Return -1 when left is before right in Tungsten's canonical order."""
+
+    if left == right:
+        return 0
+
+    left_parts = _orderable_complex_parts(left)
+    right_parts = _orderable_complex_parts(right)
+    if left_parts is not None and right_parts is not None:
+        real_compare = _compare_real_expr(left_parts[0], right_parts[0])
+        if real_compare:
+            return _integer_sign(real_compare)
+        imaginary_compare = _compare_real_expr(left_parts[1], right_parts[1])
+        if imaginary_compare:
+            return _integer_sign(imaginary_compare)
+        return _numeric_tie_compare(left, right)
+
+    rank_compare = _expr_kind_rank(left) - _expr_kind_rank(right)
+    if rank_compare != 0:
+        return _integer_sign(rank_compare)
+
+    if isinstance(left, String) and isinstance(right, String):
+        return _text_compare(left.value, right.value)
+    if isinstance(left, Symbol) and isinstance(right, Symbol):
+        return _text_compare(left.name, right.name)
+    if isinstance(left, ByteArrayExpr) and isinstance(right, ByteArrayExpr):
+        return _integer_sign((left.values > right.values) - (left.values < right.values))
+    if isinstance(left, Call) and isinstance(right, Call):
+        head_compare = _canonical_compare(left.head_expr, right.head_expr)
+        if head_compare != 0:
+            return head_compare
+        return _lexicographic_sequence_compare(left.arguments, right.arguments)
+
+    return _text_compare(left.to_full_form(), right.to_full_form())
+
+
+def _lexicographic_sequence_compare(
+    left_items: Sequence[Expr],
+    right_items: Sequence[Expr],
+    ordering_function: Expr | None = None,
+) -> int:
+    for left_item, right_item in zip(left_items, right_items):
+        item_compare = (
+            _ordering_function_compare(ordering_function, left_item, right_item)
+            if ordering_function is not None
+            else _canonical_compare(left_item, right_item)
+        )
+        if item_compare != 0:
+            return item_compare
+    return _integer_sign(len(left_items) - len(right_items))
+
+
+def order_expr(left: Expr, right: Expr) -> Integer:
+    return integer(-_canonical_compare(left, right))
+
+
+def _ordering_function_compare(ordering_function: Expr, left: Expr, right: Expr) -> int:
+    result = evaluate(_apply_callable(ordering_function, (left, right)))
+    truth = _truth_value(result)
+    if truth is True:
+        return -1
+    if truth is False:
+        reverse = evaluate(_apply_callable(ordering_function, (right, left)))
+        reverse_truth = _truth_value(reverse)
+        if reverse_truth is True:
+            return 1
+        if reverse_truth is False:
+            return 0
+        if isinstance(reverse, Integer):
+            return _integer_sign(reverse.value)
+        return 0
+    if isinstance(result, Integer):
+        return -_integer_sign(result.value)
+    return _canonical_compare(left, right)
+
+
+def _sequence_ordering_items(expr: Expr, function_name: str) -> list[_OrderingItem]:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return [
+            _OrderingItem(index=index, value=entry.value, entry=entry)
+            for index, entry in enumerate(entries, start=1)
+        ]
+
+    compound = _require_compound(expr, function_name)
+    return [
+        _OrderingItem(index=index, value=argument)
+        for index, argument in enumerate(compound.arguments, start=1)
+    ]
+
+
+def _rebuild_ordered_expr(expr: Expr, items: Sequence[_OrderingItem]) -> Expr:
+    if _association_entries(expr) is not None:
+        return _association_expr(item.entry for item in items if item.entry is not None)
+    compound = _require_compound(expr, "ordering operation")
+    return _rebuild(compound, [item.value for item in items])
+
+
+def _sort_items_by_value(
+    items: Sequence[_OrderingItem],
+    ordering_function: Expr | None = None,
+    *,
+    reverse: bool = False,
+) -> list[_OrderingItem]:
+    def compare(left: _OrderingItem, right: _OrderingItem) -> int:
+        result = (
+            _ordering_function_compare(ordering_function, left.value, right.value)
+            if ordering_function is not None
+            else _canonical_compare(left.value, right.value)
+        )
+        return -result if reverse else result
+
+    return sorted(items, key=cmp_to_key(compare))
+
+
+def _sort_count_slice(
+    sorted_items: Sequence[_OrderingItem],
+    count: Expr | None,
+    function_name: str,
+) -> list[_OrderingItem]:
+    if count is None or (isinstance(count, Symbol) and count.name == "All"):
+        return list(sorted_items)
+    if not isinstance(count, Integer):
+        raise WolframEvaluationError(f"{function_name} expects an integer or All count.")
+    n = count.value
+    if n >= 0:
+        return list(sorted_items[:n])
+    return list(sorted_items[n:]) if abs(n) <= len(sorted_items) else list(sorted_items)
+
+
+def ordering(expr: Expr, count: Expr | None = None, ordering_function: Expr | None = None) -> Call:
+    sorted_items = _sort_items_by_value(_sequence_ordering_items(expr, "Ordering"), ordering_function)
+    selected = _sort_count_slice(sorted_items, count, "Ordering")
+    return _evaluated_list_expr(*(integer(item.index) for item in selected))
+
+
+def sort_expr(expr: Expr, ordering_function: Expr | None = None, *, reverse: bool = False) -> Expr:
+    items = _sequence_ordering_items(expr, "Sort")
+    sorted_items = _sort_items_by_value(items, ordering_function, reverse=reverse)
+    return _rebuild_ordered_expr(expr, sorted_items)
+
+
+def ordered_q(expr: Expr, ordering_function: Expr | None = None) -> Symbol:
+    items = _sequence_ordering_items(expr, "OrderedQ")
+    for left, right in zip(items, items[1:]):
+        compare = (
+            _ordering_function_compare(ordering_function, left.value, right.value)
+            if ordering_function is not None
+            else _canonical_compare(left.value, right.value)
+        )
+        if compare > 0:
+            return _bool_symbol(False)
+    return _bool_symbol(True)
+
+
+def _key_function_list(functions: Expr) -> tuple[tuple[Expr, ...], bool]:
+    if isinstance(functions, Call) and functions.has_head("List"):
+        return functions.arguments, True
+    return (functions,), False
+
+
+def _items_with_keys(expr: Expr, functions: Expr, function_name: str) -> tuple[list[_OrderingItem], bool]:
+    key_functions, key_spec_is_list = _key_function_list(functions)
+    items = []
+    for item in _sequence_ordering_items(expr, function_name):
+        keys = tuple(_apply_callable(function, (item.value,)) for function in key_functions)
+        items.append(_OrderingItem(index=item.index, value=item.value, entry=item.entry, keys=keys))
+    return items, key_spec_is_list
+
+
+def _compare_key_tuples(
+    left_keys: Sequence[Expr],
+    right_keys: Sequence[Expr],
+    ordering_function: Expr | None,
+) -> int:
+    for left_key, right_key in zip(left_keys, right_keys):
+        compare = (
+            _ordering_function_compare(ordering_function, left_key, right_key)
+            if ordering_function is not None
+            else _canonical_compare(left_key, right_key)
+        )
+        if compare != 0:
+            return compare
+    return _integer_sign(len(left_keys) - len(right_keys))
+
+
+def _sort_items_by_keys(
+    items: Sequence[_OrderingItem],
+    *,
+    key_spec_is_list: bool,
+    ordering_function: Expr | None = None,
+    reverse: bool = False,
+    stable_ties: bool = False,
+) -> list[_OrderingItem]:
+    def compare(left: _OrderingItem, right: _OrderingItem) -> int:
+        result = _compare_key_tuples(left.keys, right.keys, ordering_function)
+        if result == 0 and not key_spec_is_list and not stable_ties:
+            result = _canonical_compare(left.value, right.value)
+        return -result if reverse else result
+
+    return sorted(items, key=cmp_to_key(compare))
+
+
+def sort_by(
+    expr: Expr,
+    functions: Expr,
+    ordering_function: Expr | None = None,
+    *,
+    reverse: bool = False,
+) -> Expr:
+    items, key_spec_is_list = _items_with_keys(expr, functions, "SortBy")
+    sorted_items = _sort_items_by_keys(
+        items,
+        key_spec_is_list=key_spec_is_list,
+        ordering_function=ordering_function,
+        reverse=reverse,
+    )
+    return _rebuild_ordered_expr(expr, sorted_items)
+
+
+def ordering_by(
+    expr: Expr,
+    functions: Expr,
+    count: Expr | None = None,
+    ordering_function: Expr | None = None,
+) -> Call:
+    items, key_spec_is_list = _items_with_keys(expr, functions, "OrderingBy")
+    sorted_items = _sort_items_by_keys(
+        items,
+        key_spec_is_list=key_spec_is_list,
+        ordering_function=ordering_function,
+    )
+    selected = _sort_count_slice(sorted_items, count, "OrderingBy")
+    return _evaluated_list_expr(*(integer(item.index) for item in selected))
+
+
+def _by_count(count: Expr | None, total: int, function_name: str) -> int | None:
+    if count is None:
+        return None
+    if isinstance(count, Symbol) and count.name == "All":
+        return total
+    if isinstance(count, Call) and count.has_head("UpTo") and len(count.arguments) == 1:
+        argument = count.arguments[0]
+        if not isinstance(argument, Integer):
+            raise WolframEvaluationError(f"{function_name} expects UpTo[n] with an integer n.")
+        return max(0, min(total, argument.value))
+    if not isinstance(count, Integer):
+        raise WolframEvaluationError(f"{function_name} expects an integer, UpTo[n], or All count.")
+    if count.value < 0:
+        raise WolframEvaluationError(f"{function_name} expects a non-negative count.")
+    return min(total, count.value)
+
+
+def _extreme_by(
+    expr: Expr,
+    functions: Expr,
+    count: Expr | None,
+    ordering_function: Expr | None,
+    *,
+    maximal: bool,
+) -> Expr:
+    function_name = "MaximalBy" if maximal else "MinimalBy"
+    items, _ = _items_with_keys(expr, functions, function_name)
+    if not items:
+        return _rebuild_ordered_expr(expr, [])
+
+    if count is None:
+        best = items[0].keys
+        selected = [items[0]]
+        for item in items[1:]:
+            compare = _compare_key_tuples(item.keys, best, ordering_function)
+            if maximal:
+                compare = -compare
+            if compare < 0:
+                best = item.keys
+                selected = [item]
+            elif compare == 0:
+                selected.append(item)
+        return _rebuild_ordered_expr(expr, selected)
+
+    sorted_items = _sort_items_by_keys(
+        items,
+        key_spec_is_list=True,
+        ordering_function=ordering_function,
+        reverse=maximal,
+        stable_ties=True,
+    )
+    return _rebuild_ordered_expr(expr, sorted_items[:_by_count(count, len(sorted_items), function_name)])
+
+
+def minimal_by(
+    expr: Expr,
+    functions: Expr,
+    count: Expr | None = None,
+    ordering_function: Expr | None = None,
+) -> Expr:
+    return _extreme_by(expr, functions, count, ordering_function, maximal=False)
+
+
+def maximal_by(
+    expr: Expr,
+    functions: Expr,
+    count: Expr | None = None,
+    ordering_function: Expr | None = None,
+) -> Expr:
+    return _extreme_by(expr, functions, count, ordering_function, maximal=True)
+
+
+def _lexicographic_elements(expr: Expr) -> tuple[Expr, ...] | None:
+    if isinstance(expr, String):
+        return tuple(string(char) for char in expr.value)
+    if isinstance(expr, Call):
+        return expr.arguments
+    return None
+
+
+def _lexicographic_compare(left: Expr, right: Expr, ordering_function: Expr | None = None) -> int:
+    left_items = _lexicographic_elements(left)
+    right_items = _lexicographic_elements(right)
+    if left_items is None or right_items is None:
+        return (
+            _ordering_function_compare(ordering_function, left, right)
+            if ordering_function is not None
+            else _canonical_compare(left, right)
+        )
+    return _lexicographic_sequence_compare(left_items, right_items, ordering_function)
+
+
+def lexicographic_order(left: Expr, right: Expr, ordering_function: Expr | None = None) -> Integer:
+    return integer(-_lexicographic_compare(left, right, ordering_function))
+
+
+def lexicographic_sort(expr: Expr, ordering_function: Expr | None = None) -> Expr:
+    items = _sequence_ordering_items(expr, "LexicographicSort")
+
+    def compare(left: _OrderingItem, right: _OrderingItem) -> int:
+        return _lexicographic_compare(left.value, right.value, ordering_function)
+
+    sorted_items = sorted(items, key=cmp_to_key(compare))
+    return _rebuild_ordered_expr(expr, sorted_items)
 
 
 def scan(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Symbol:
@@ -12598,6 +13075,123 @@ def _evaluate(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 3:
             return member_q(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
         raise WolframEvaluationError("MemberQ expects an expression, a pattern, and an optional level specification.")
+
+    if evaluated_head.name == "Order":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Order expects exactly two arguments.")
+        return order_expr(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "OrderedQ":
+        if len(evaluated_arguments) == 1:
+            return ordered_q(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return ordered_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("OrderedQ expects an expression and an optional ordering function.")
+
+    if evaluated_head.name == "Ordering":
+        if len(evaluated_arguments) == 1:
+            return ordering(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return ordering(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return ordering(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Ordering expects an expression, optional count, and optional ordering function.")
+
+    if evaluated_head.name == "Sort":
+        if len(evaluated_arguments) == 1:
+            return sort_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return sort_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Sort expects an expression and an optional ordering function.")
+
+    if evaluated_head.name == "ReverseSort":
+        if len(evaluated_arguments) == 1:
+            return sort_expr(evaluated_arguments[0], reverse=True)
+        if len(evaluated_arguments) == 2:
+            return sort_expr(evaluated_arguments[0], evaluated_arguments[1], reverse=True)
+        raise WolframEvaluationError("ReverseSort expects an expression and an optional ordering function.")
+
+    if evaluated_head.name == "SortBy":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return sort_by(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return sort_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("SortBy expects an expression, functions, and an optional ordering function.")
+
+    if evaluated_head.name == "ReverseSortBy":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return sort_by(evaluated_arguments[0], evaluated_arguments[1], reverse=True)
+        if len(evaluated_arguments) == 3:
+            return sort_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2], reverse=True)
+        raise WolframEvaluationError("ReverseSortBy expects an expression, functions, and an optional ordering function.")
+
+    if evaluated_head.name == "OrderingBy":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return ordering_by(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return ordering_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return ordering_by(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError("OrderingBy expects an expression, functions, optional count, and optional ordering function.")
+
+    if evaluated_head.name == "MinimalBy":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return minimal_by(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return minimal_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return minimal_by(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError("MinimalBy expects data, a function specification, optional count, and optional ordering function.")
+
+    if evaluated_head.name == "MaximalBy":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return maximal_by(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return maximal_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 4:
+            return maximal_by(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError("MaximalBy expects data, a function specification, optional count, and optional ordering function.")
+
+    if evaluated_head.name == "LexicographicOrder":
+        if len(evaluated_arguments) == 1:
+            return evaluated_expr
+        if len(evaluated_arguments) == 2:
+            return lexicographic_order(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return lexicographic_order(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("LexicographicOrder expects two expressions and an optional ordering function.")
+
+    if evaluated_head.name == "LexicographicSort":
+        if len(evaluated_arguments) == 1:
+            return lexicographic_sort(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return lexicographic_sort(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("LexicographicSort expects an expression and an optional ordering function.")
 
     if evaluated_head.name == "DeleteDuplicates":
         if len(evaluated_arguments) == 1:

@@ -296,19 +296,21 @@ Wolfram semantics locally would have been a trap.
 - canonical rendering;
 - a small set of structural built-ins for inert evaluation.
 
-### Why the evaluator is deliberately small
+### Why the evaluator is structural first
 
-Only a small built-in subset is implemented:
+Tungsten's evaluator implements a broadening set of kernel-free, non-I/O structural operations:
+part extraction, traversal, mapping, replacement, patterns, associations, strings, selected
+control-flow forms, explicit numeric atoms, and first-level ordering operations. It still does not
+pretend to be a general Wolfram kernel. Built-ins are added when their behavior can be expressed
+over Tungsten's explicit expression tree and tested without hidden global state.
 
-- `Length`
-- `Depth`
-- `Head`
-- `Part`
-- `Extract`
-- `Level`
-
-Everything else remains inert. This is a feature, not a limitation accidentally left undocumented.
-It keeps behavior predictable and keeps Tungsten honest about what is and is not kernel evaluation.
+The ordering family uses one shared deterministic canonical order for explicit numbers, strings,
+symbols, byte arrays, and compound expressions. `Sort`, `Ordering`, `SortBy`, `OrderingBy`,
+`MinimalBy`, `MaximalBy`, `ReverseSort`, `ReverseSortBy`, `LexicographicOrder`, and
+`LexicographicSort` all delegate to that core, with association support implemented by ordering
+values and rebuilding the original key-value entries. This keeps comparator behavior consistent
+and makes deviations from undocumented Wolfram kernel tie breakers local rather than scattered
+through the evaluator.
 
 ### Why StandardForm support is only a subset
 

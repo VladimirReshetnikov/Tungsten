@@ -1989,6 +1989,88 @@ class ExpressionEvaluationTests(unittest.TestCase):
             evaluate(parse_input_form("Exit[5]"), session=session)
         self.assertEqual(exit_context.exception.code, 5)
 
+    def test_ordering_and_sorting_functions_follow_structural_order(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Order[1, 2]")).to_full_form(), "1")
+        self.assertEqual(evaluate(parse_input_form("Order[2, 1]")).to_full_form(), "-1")
+        self.assertEqual(evaluate(parse_input_form("Order[a, a]")).to_full_form(), "0")
+        self.assertEqual(evaluate(parse_input_form("Order[1, 1.]")).to_full_form(), "1")
+        self.assertEqual(evaluate(parse_input_form("OrderedQ[{1, 2, 2}]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("OrderedQ[{2, 1}]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("OrderedQ[{3, 2, 1}, Greater]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("Ordering[{3, 1, 2}]")).to_full_form(), "List[2, 3, 1]")
+        self.assertEqual(evaluate(parse_input_form("Ordering[{3, 1, 2}, 2]")).to_full_form(), "List[2, 3]")
+        self.assertEqual(evaluate(parse_input_form("Ordering[{3, 1, 2}, -2]")).to_full_form(), "List[3, 1]")
+        self.assertEqual(evaluate(parse_input_form("Ordering[{3, 1, 2}, All, Greater]")).to_full_form(), "List[1, 3, 2]")
+        self.assertEqual(evaluate(parse_input_form("Sort[f[3, 1, 2]]")).to_full_form(), "f[1, 2, 3]")
+        self.assertEqual(evaluate(parse_input_form("Sort[{3, 1, 2}, Greater]")).to_full_form(), "List[3, 2, 1]")
+        self.assertEqual(evaluate(parse_input_form("ReverseSort[{3, 1, 2}]")).to_full_form(), "List[3, 2, 1]")
+        self.assertEqual(evaluate(parse_input_form("ReverseSort[{3, 1, 2}, Greater]")).to_full_form(), "List[1, 2, 3]")
+        self.assertEqual(evaluate(parse_input_form("Sort[<|b -> 2, a -> 1|>]")).to_full_form(), "Association[Rule[a, 1], Rule[b, 2]]")
+
+    def test_by_key_ordering_and_extrema_functions(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("SortBy[{{c, 2}, {a, 2}, {b, 1}}, Last]")).to_full_form(),
+            "List[List[b, 1], List[a, 2], List[c, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("SortBy[{{c, 2}, {a, 2}, {b, 1}}, {Last}]")).to_full_form(),
+            "List[List[b, 1], List[c, 2], List[a, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("SortBy[Last][{{a, 2}, {b, 1}}]")).to_full_form(),
+            "List[List[b, 1], List[a, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ReverseSortBy[{{c, 2}, {a, 2}, {b, 1}}, Last]")).to_full_form(),
+            "List[List[c, 2], List[a, 2], List[b, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ReverseSortBy[{{c, 2}, {a, 2}, {b, 1}}, {Last}]")).to_full_form(),
+            "List[List[c, 2], List[a, 2], List[b, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("OrderingBy[{{a, 2}, {b, 1}, {c, 3}}, Last, -2]")).to_full_form(),
+            "List[1, 3]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("OrderingBy[Last][{{a, 2}, {b, 1}}]")).to_full_form(),
+            "List[2, 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MinimalBy[{{a, 1}, {b, 2}, {c, 1}}, Last]")).to_full_form(),
+            "List[List[a, 1], List[c, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MaximalBy[{{a, 1}, {b, 2}, {c, 2}}, Last, 2]")).to_full_form(),
+            "List[List[b, 2], List[c, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MinimalBy[<|a -> 2, b -> 1, c -> 1|>, Identity]")).to_full_form(),
+            "Association[Rule[b, 1], Rule[c, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ReverseSortBy[<|a -> 2, b -> 1, c -> 3|>, Identity]")).to_full_form(),
+            "Association[Rule[c, 3], Rule[a, 2], Rule[b, 1]]",
+        )
+
+    def test_lexicographic_ordering_functions(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("LexicographicOrder[{1, 2}, {1, 3}]")).to_full_form(), "1")
+        self.assertEqual(evaluate(parse_input_form("LexicographicOrder[{1, 2}, {1, 2}]")).to_full_form(), "0")
+        self.assertEqual(evaluate(parse_input_form("LexicographicOrder[{1, 3}, {1, 2}]")).to_full_form(), "-1")
+        self.assertEqual(evaluate(parse_input_form('LexicographicOrder["a", "aa"]')).to_full_form(), "1")
+        self.assertEqual(
+            evaluate(parse_input_form("LexicographicSort[{{1, 3}, {1, 2}, {0, 9}}]")).to_full_form(),
+            "List[List[0, 9], List[1, 2], List[1, 3]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form('LexicographicSort[{"ba", "aa", "ab"}]')).to_full_form(),
+            'List["aa", "ab", "ba"]',
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Sort[{{1, 3}, {1, 2}}, LexicographicOrder[Order]]")).to_full_form(),
+            "List[List[1, 2], List[1, 3]]",
+        )
+
     def test_string_structural_operations_follow_list_like_semantics(self) -> None:
         string_length = evaluate(parse_input_form('StringLength[{"ab", "c"}]'))
         string_take = evaluate(parse_input_form('StringTake["abcdef", {2, 5, 2}]'))

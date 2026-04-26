@@ -441,6 +441,10 @@ python -m tungsten expr evaluate --code "Thread[f[{a, b}, {c, d}]]"
 python -m tungsten expr evaluate --code "Fold[f, x, {a, b, c}]"
 python -m tungsten expr evaluate --code "BlockMap[f, {a, b, c, d, e}, 2]"
 python -m tungsten expr evaluate --code "DeleteDuplicatesBy[{{a}, {b, c}, {d}}, Length]"
+python -m tungsten expr evaluate --code "SortBy[{{c, 2}, {a, 2}, {b, 1}}, Last]"
+python -m tungsten expr evaluate --code "OrderingBy[{{a, 2}, {b, 1}, {c, 3}}, Last, -2]"
+python -m tungsten expr evaluate --code "MaximalBy[<|a -> 2, b -> 1, c -> 2|>, Identity]"
+python -m tungsten expr evaluate --code "LexicographicSort[{\"ba\", \"aa\", \"ab\"}]"
 python -m tungsten expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
 python -m tungsten expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
 python -m tungsten expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~~ \"g\"]"
@@ -510,6 +514,9 @@ The implemented inert evaluator currently covers:
   `FoldWhileList`, `FoldPair`, `FoldPairList`, `SequenceFold`, `SequenceFoldList`,
   `LengthWhile`, `FirstCase`, `Position`, `MemberQ`, `DeleteDuplicates`,
   `DeleteDuplicatesBy`, and `DuplicateFreeQ`
+- ordering and by-key selection heads such as `Order`, `OrderedQ`, `Ordering`, `OrderingBy`,
+  `Sort`, `SortBy`, `ReverseSort`, `ReverseSortBy`, `MinimalBy`, `MaximalBy`,
+  `LexicographicOrder`, and `LexicographicSort`
 - byte and character heads such as `ByteArray`, `ByteArrayQ`, `BaseEncode`, `BaseDecode`,
   `Characters`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`,
   `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
