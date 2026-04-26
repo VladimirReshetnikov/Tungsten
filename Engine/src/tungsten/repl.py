@@ -10,6 +10,7 @@ from .expression import Symbol
 from .expression import TungstenExitRequested
 from .expression import WolframEvaluationError
 from .expression import WolframSyntaxError
+from .expression import apply_output_size_limit
 from .expression import display_output_parts
 from .expression import evaluate
 
@@ -22,7 +23,7 @@ def _banner() -> str:
 
 
 def _format_output(expr: Expr) -> str:
-    return display_output_parts(expr)[1]
+    return apply_output_size_limit(expr, display_output_parts(expr)[1])
 
 
 def _output_label(line: int, expr: Expr) -> str:

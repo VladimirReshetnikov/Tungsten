@@ -68,9 +68,46 @@ The REPL maintains these Wolfram-style session values:
 - `Out[n]` returns the stored output expression for line `n`.
 - `Out[]` and `Out[-k]` use the same previous / relative addressing convention.
 - `%`, `%%`, and `%n` parse as `Out[-1]`, `Out[-2]`, and `Out[n]`, respectively.
+- `$HistoryLength` controls retention for `In`, `InString`, `Out`, `MessageList`, and printed-line
+  history. The default is `Infinity`; a finite value keeps the current input plus the most recent
+  preceding entries, so `$HistoryLength = 2` makes `DownValues[In]` on the current line show only
+  the current line and one previous line.
 
 The line is recorded before evaluation begins, matching the important `wolfram.exe` behavior that
 `DownValues[In]` for the current line already includes that line's input.
+
+## Evaluation and Output Limits
+
+Tungsten implements the console-facing limit symbols that matter for unattended agent sessions:
+
+```wolfram
+$RecursionLimit
+$IterationLimit
+$HistoryLength
+$OutputSizeLimit
+```
+
+`$RecursionLimit` defaults to `1024` and accepts `Infinity` or integers at least `20`.
+`$IterationLimit` defaults to `4096` and accepts the same value range. When either limit is
+exceeded, Tungsten emits a non-fatal message and leaves the expression at that evaluator boundary
+unevaluated; it does not terminate the REPL.
+
+`$OutputSizeLimit` is a Tungsten REPL setting with default `12000`. If the rendered `Out[n]` text is
+longer than the current finite limit, the REPL displays a `Short`-style abbreviation using
+`<<...>>` skeleton markers. `Infinity` disables this shortening. This is intentionally heuristic:
+the goal is to keep `tungsten.exe` transcripts navigable, not to reproduce Wolfram FrontEnd box
+elision byte-for-byte.
+
+`Short` and `Shallow` participate in output display:
+
+```wolfram
+Short[Range[100]]
+Shallow[Range[100], {Infinity, 5}]
+```
+
+At the top level they label output as `Out[n]//Short=` or `Out[n]//Shallow=` and render abbreviated
+text. The stored `Out[n]` value is the underlying expression, matching the useful console behavior
+where `FullForm[%]` sees the payload rather than the display wrapper.
 
 ## Main-Loop Hooks
 

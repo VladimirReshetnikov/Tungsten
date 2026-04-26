@@ -628,6 +628,18 @@ that `Check` is not disabled merely because its output is quieted.
   at the display boundary for one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`.
   Explicit textual conversion such as `ToString[InputForm[expr], InputForm]` still treats the
   wrapper as ordinary expression structure.
+- `$RecursionLimit` and `$IterationLimit` are implemented as evaluator guardrails, but their
+  counters are Tungsten counters rather than Wolfram kernel internals. The implementation favors
+  the Wolfram failure shape: limits generate messages and return the current expression unevaluated
+  instead of raising Python exceptions through user code.
+- `$HistoryLength` is enforced both when a line is recorded and when output is completed. That
+  gives `DownValues[In]` the current-line-inclusive finite-history shape seen in `wolfram.exe`
+  while keeping old `Out`, message, and print histories from growing without bound.
+- `Short`, `Shallow`, and `$OutputSizeLimit` are display-boundary features. `Short[expr]` and
+  `Shallow[expr]` label and abbreviate top-level output, but history stores `expr`. `$OutputSizeLimit`
+  is deliberately heuristic and Tungsten-specific in assignability: Wolfram exposes a protected
+  FrontEnd/package variable, while Tungsten exposes a simple console setting so unattended scripts
+  can cap transcripts.
 - FullForm cosmetics such as `DirectedInfinity[1]` for `Infinity` and exact precision-bearing real
   rendering are documented divergences for now.
 - Numeric literal parsing follows Wolfram's lexical grammar for decimal, base, precision,

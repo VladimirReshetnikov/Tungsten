@@ -289,6 +289,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "$Context",
     "$ContextPath",
     "$Failed",
+    "$HistoryLength",
+    "$IterationLimit",
     "$Line",
     "$MachineEpsilon",
     "$MachinePrecision",
@@ -296,10 +298,12 @@ _SYSTEM_SYMBOL_NAMES = {
     "$MessageList",
     "$MessagePrePrint",
     "$MinMachineNumber",
+    "$OutputSizeLimit",
     "$Post",
     "$Pre",
     "$PrePrint",
     "$PreRead",
+    "$RecursionLimit",
     "Abs",
     "Abort",
     "AbortProtect",
@@ -621,6 +625,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "SetPrecision",
     "ShowSpecialCharacters",
     "ShowStringCharacters",
+    "Shallow",
+    "Short",
     "Shortest",
     "Sequence",
     "SequenceFold",
@@ -735,6 +741,25 @@ _SYSTEM_SYMBOL_NAMES = {
 _SYSTEM_SYMBOL_SNAPSHOT_RESOURCE = "data/system_symbols_wolfram_14_3.json"
 
 
+_SPECIAL_SESSION_SETTING_DEFAULTS: dict[str, Expr] = {
+    "$RecursionLimit": Integer(1024),
+    "$IterationLimit": Integer(4096),
+    "$HistoryLength": Symbol("Infinity"),
+    # The Wolfram terminal front end owns this setting through OutputSizeLimit`.
+    # Tungsten keeps a small, explicit REPL setting instead so console output can
+    # remain usable without loading a front-end package.
+    "$OutputSizeLimit": Integer(12000),
+}
+
+
+_SPECIAL_SESSION_SETTING_MINIMUMS = {
+    "$RecursionLimit": 20,
+    "$IterationLimit": 20,
+    "$HistoryLength": 0,
+    "$OutputSizeLimit": 0,
+}
+
+
 def _load_system_symbol_snapshot() -> dict[str, tuple[str, ...]]:
     try:
         resource = resources.files(__package__).joinpath(_SYSTEM_SYMBOL_SNAPSHOT_RESOURCE)
@@ -784,6 +809,10 @@ class SymbolRegistry:
             self.ensure_full_name(f"System`{name}", built_in=True)
         for name, attributes in _load_system_symbol_snapshot().items():
             self.ensure_full_name(f"System`{name}", built_in=True, attributes=attributes, validate=False)
+        for name, default_value in _SPECIAL_SESSION_SETTING_DEFAULTS.items():
+            record = self.ensure_full_name(f"System`{name}", built_in=True)
+            if record.own_value is None:
+                record.own_value = default_value
         message_preprint = self.ensure_full_name("System`$MessagePrePrint", built_in=True)
         if message_preprint.own_value is None:
             message_preprint.own_value = Symbol("Automatic")
@@ -1098,6 +1127,7 @@ class EvaluationSession:
         assert self.in_strings is not None
         self.inputs[self.line] = expr
         self.in_strings[self.line] = source
+        self._prune_history()
 
     def begin_input(self, source: str, expr: Expr) -> int:
         line = self._start_input_line()
@@ -1119,12 +1149,24 @@ class EvaluationSession:
         assert self.current_visible_messages is not None
         assert self.print_history is not None
         assert self.current_prints is not None
-        self.outputs[self.line] = expr
+        self.outputs[self.line] = history_output_expr(expr)
         self.message_history[self.line] = tuple(self.current_visible_messages)
         self.print_history[self.line] = tuple(self.current_prints)
+        self._prune_history()
 
     def preprint_output(self, expr: Expr) -> Expr:
         return _apply_pre_print_hook(expr, self)
+
+    def _prune_history(self) -> None:
+        history_length = _history_length_limit()
+        if history_length is None:
+            return
+        cutoff = self.line - history_length + 1
+        for table in (self.inputs, self.in_strings, self.outputs, self.message_history, self.print_history):
+            assert table is not None
+            for key in tuple(table):
+                if key < cutoff:
+                    del table[key]
 
     def resolve_index(self, argument: Expr | None) -> int:
         if argument is None:
@@ -1147,6 +1189,10 @@ _ACTIVE_OWN_VALUE_SYMBOLS: ContextVar[tuple[str, ...]] = ContextVar(
 )
 _ACTIVE_EVALUATION_DEPTH: ContextVar[int] = ContextVar(
     "tungsten_active_evaluation_depth",
+    default=0,
+)
+_ACTIVE_EVALUATION_ITERATION_COUNT: ContextVar[int] = ContextVar(
+    "tungsten_active_evaluation_iteration_count",
     default=0,
 )
 _MAIN_LOOP_HOOKS_SUPPRESSED: ContextVar[bool] = ContextVar(
@@ -1577,6 +1623,43 @@ def _system_dispatch_name(expr: Symbol) -> str:
     if record is not None and record.context == "System`" and record.built_in:
         return record.short_name
     return expr.name
+
+
+def _is_system_symbol(expr: Expr, name: str) -> bool:
+    return isinstance(expr, Symbol) and _system_dispatch_name(expr) == name
+
+
+def _is_system_infinity(expr: Expr) -> bool:
+    return _is_system_symbol(expr, "Infinity")
+
+
+def _system_setting_record(name: str) -> SymbolRecord | None:
+    return _SYMBOL_REGISTRY.resolve_existing(f"System`{name}")
+
+
+def _system_setting_value(name: str) -> Expr:
+    record = _system_setting_record(name)
+    if record is not None and record.own_value is not None:
+        return record.own_value
+    return _SPECIAL_SESSION_SETTING_DEFAULTS[name]
+
+
+def _finite_system_limit_value(name: str) -> int | None:
+    value = _system_setting_value(name)
+    if _is_system_infinity(value):
+        return None
+    if isinstance(value, Integer):
+        return value.value
+    default_value = _SPECIAL_SESSION_SETTING_DEFAULTS[name]
+    return default_value.value if isinstance(default_value, Integer) else None
+
+
+def _history_length_limit() -> int | None:
+    return _finite_system_limit_value("$HistoryLength")
+
+
+def output_size_limit_value() -> int | None:
+    return _finite_system_limit_value("$OutputSizeLimit")
 
 
 @dataclass(frozen=True)
@@ -4352,11 +4435,249 @@ def _display_form_text(expr: Expr, form_name: str) -> str:
     return expr.to_input_form()
 
 
+@dataclass(frozen=True)
+class _DisplayWrapper:
+    label: str
+    payload: Expr
+    text: str
+
+
+def history_output_expr(expr: Expr) -> Expr:
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None:
+        _form_name, payload = wrapper
+        return payload
+    short_wrapper = _short_shallow_display_wrapper(expr)
+    if short_wrapper is not None:
+        return short_wrapper.payload
+    return expr
+
+
+def _short_shallow_display_wrapper(expr: Expr) -> _DisplayWrapper | None:
+    if not isinstance(expr, Call) or not expr.arguments or not isinstance(expr.head_expr, Symbol):
+        return None
+    head_name = _system_dispatch_name(expr.head_expr)
+    if head_name == "Short":
+        return _DisplayWrapper(
+            head_name,
+            expr.arguments[0],
+            _short_display_text(expr.arguments[0], expr.arguments[1:]),
+        )
+    if head_name == "Shallow":
+        return _DisplayWrapper(
+            head_name,
+            expr.arguments[0],
+            _shallow_display_text(expr.arguments[0], expr.arguments[1:]),
+        )
+    return None
+
+
+def _short_display_text(expr: Expr, specs: Sequence[Expr] = (), *, max_chars: int | None = None) -> str:
+    scale = 1
+    if specs and isinstance(specs[0], Integer):
+        scale = max(0, specs[0].value)
+    front = max(1, 10 * scale)
+    back = max(0, 5 * scale)
+    depth_limit = max(1, 3 + scale)
+    text = _format_short_expr(expr, depth_limit=depth_limit, front=front, back=back, top_level=True)
+    if max_chars is not None and len(text) > max_chars:
+        return _center_truncate_text(text, max_chars)
+    return text
+
+
+def _shallow_display_text(expr: Expr, specs: Sequence[Expr] = (), *, max_chars: int | None = None) -> str:
+    depth_limit, length_limit = _shallow_limits(specs)
+    text = _format_shallow_expr(expr, depth_limit=depth_limit, length_limit=length_limit, top_level=True)
+    if max_chars is not None and len(text) > max_chars:
+        return _center_truncate_text(text, max_chars)
+    return text
+
+
+def _shallow_limits(specs: Sequence[Expr]) -> tuple[int | None, int | None]:
+    depth_limit: int | None = 4
+    length_limit: int | None = 10
+    if not specs:
+        return depth_limit, length_limit
+    spec = specs[0]
+    if isinstance(spec, Integer):
+        return max(0, spec.value), length_limit
+    if _is_system_infinity(spec):
+        return None, length_limit
+    if isinstance(spec, Call) and spec.has_head("List") and len(spec.arguments) >= 1:
+        parsed_depth = _display_limit_component(spec.arguments[0], depth_limit)
+        parsed_length = (
+            _display_limit_component(spec.arguments[1], length_limit)
+            if len(spec.arguments) >= 2
+            else length_limit
+        )
+        return parsed_depth, parsed_length
+    return depth_limit, length_limit
+
+
+def _display_limit_component(expr: Expr, default: int | None) -> int | None:
+    if isinstance(expr, Integer):
+        return max(0, expr.value)
+    if _is_system_infinity(expr):
+        return None
+    return default
+
+
+def _format_short_expr(
+    expr: Expr,
+    *,
+    depth_limit: int,
+    front: int,
+    back: int,
+    top_level: bool = False,
+) -> str:
+    children = _display_children(expr)
+    if children is None:
+        return _format_display_atom(expr, top_level=top_level)
+    if depth_limit <= 0:
+        return _display_skeleton(len(children))
+
+    rendered = _format_short_children(children, depth_limit=depth_limit - 1, front=front, back=back)
+    return _wrap_display_children(expr, rendered)
+
+
+def _format_shallow_expr(
+    expr: Expr,
+    *,
+    depth_limit: int | None,
+    length_limit: int | None,
+    top_level: bool = False,
+) -> str:
+    children = _display_children(expr)
+    if children is None:
+        return _format_display_atom(expr, top_level=top_level)
+    if depth_limit is not None and depth_limit <= 0:
+        return _display_skeleton(len(children))
+
+    rendered = _format_shallow_children(children, depth_limit=depth_limit, length_limit=length_limit)
+    return _wrap_display_children(expr, rendered)
+
+
+def _format_short_children(
+    children: Sequence[tuple[str | None, Expr]],
+    *,
+    depth_limit: int,
+    front: int,
+    back: int,
+) -> list[str]:
+    if len(children) <= front + back + 1:
+        selected: list[tuple[str | None, Expr] | str] = list(children)
+    else:
+        omitted = len(children) - front - back
+        selected = [*children[:front], _display_skeleton(omitted)]
+        if back:
+            selected.extend(children[-back:])
+
+    rendered: list[str] = []
+    for item in selected:
+        if isinstance(item, str):
+            rendered.append(item)
+        else:
+            prefix, child = item
+            child_text = _format_short_expr(child, depth_limit=depth_limit, front=front, back=back)
+            rendered.append(_format_display_child(prefix, child_text))
+    return rendered
+
+
+def _format_shallow_children(
+    children: Sequence[tuple[str | None, Expr]],
+    *,
+    depth_limit: int | None,
+    length_limit: int | None,
+) -> list[str]:
+    child_depth = None if depth_limit is None else depth_limit - 1
+    if length_limit is not None and len(children) > length_limit:
+        selected: list[tuple[str | None, Expr] | str] = [*children[:length_limit], _display_skeleton(len(children) - length_limit)]
+    else:
+        selected = list(children)
+
+    rendered: list[str] = []
+    for item in selected:
+        if isinstance(item, str):
+            rendered.append(item)
+        else:
+            prefix, child = item
+            child_text = _format_shallow_expr(child, depth_limit=child_depth, length_limit=length_limit)
+            rendered.append(_format_display_child(prefix, child_text))
+    return rendered
+
+
+def _display_children(expr: Expr) -> tuple[tuple[str | None, Expr], ...] | None:
+    entries = _association_entries(expr)
+    if entries is not None:
+        return tuple((_format_association_entry_prefix(entry), entry.value) for entry in entries)
+    if isinstance(expr, Call):
+        return tuple((None, argument) for argument in expr.arguments)
+    return None
+
+
+def _format_association_entry_prefix(entry: _AssociationEntry) -> str:
+    operator = ":>" if entry.rule_head == "RuleDelayed" else "->"
+    return f"{_format_input(entry.key)} {operator} "
+
+
+def _format_display_child(prefix: str | None, child_text: str) -> str:
+    if prefix is None:
+        return child_text
+    return prefix + child_text
+
+
+def _wrap_display_children(expr: Expr, rendered: Sequence[str]) -> str:
+    if _association_entries(expr) is not None:
+        return "<|" + ", ".join(rendered) + "|>"
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return "{" + ", ".join(rendered) + "}"
+    if isinstance(expr, Call):
+        head = _format_input(expr.head_expr, _PREC_CALL)
+        return f"{head}[{', '.join(rendered)}]"
+    return _format_display_atom(expr)
+
+
+def _format_display_atom(expr: Expr, *, top_level: bool = False) -> str:
+    if top_level and isinstance(expr, String):
+        return expr.value
+    return expr.to_input_form()
+
+
+def _display_skeleton(count: int) -> str:
+    return f"<<{count}>>"
+
+
+def _center_truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return _display_skeleton(len(text)) + " chars"
+    if len(text) <= max_chars:
+        return text
+    marker = f" <<{len(text) - max_chars} chars>> "
+    if len(marker) >= max_chars:
+        return marker[:max_chars]
+    prefix = (max_chars - len(marker) + 1) // 2
+    suffix = max_chars - len(marker) - prefix
+    return text[:prefix] + marker + (text[-suffix:] if suffix > 0 else "")
+
+
+def apply_output_size_limit(expr: Expr, text: str) -> str:
+    limit = output_size_limit_value()
+    if limit is None or len(text) <= limit:
+        return text
+    shortened = _short_display_text(history_output_expr(expr), max_chars=limit)
+    if len(shortened) <= limit:
+        return shortened
+    return _center_truncate_text(shortened, limit)
+
+
 def display_output_parts(expr: Expr) -> tuple[str | None, str]:
     wrapper = _display_form_wrapper(expr)
     if wrapper is not None:
         form_name, payload = wrapper
         return form_name, _display_form_text(payload, form_name)
+    short_wrapper = _short_shallow_display_wrapper(expr)
+    if short_wrapper is not None:
+        return short_wrapper.label, short_wrapper.text
     if isinstance(expr, String):
         return None, expr.value
     return None, expr.to_input_form()
@@ -4823,7 +5144,17 @@ def _record_is_protected(record: SymbolRecord) -> bool:
     return "Protected" in record.attributes
 
 
+def _special_session_setting_name(record: SymbolRecord) -> str | None:
+    if record.context != "System`":
+        return None
+    if record.short_name not in _SPECIAL_SESSION_SETTING_DEFAULTS:
+        return None
+    return record.short_name
+
+
 def _record_allows_value_mutation(record: SymbolRecord) -> bool:
+    if _special_session_setting_name(record) is not None:
+        return True
     return not _record_is_protected(record) or record.full_name in {
         f"System`{name}"
         for name in _SESSION_HOOK_NAMES
@@ -4835,6 +5166,29 @@ def _emit_protected_symbol_message(head_name: str, record: SymbolRecord) -> None
     emit_message(
         call("MessageName", symbol(head_name), string("wrsym")),
         f"Symbol {display.to_input_form()} is Protected.",
+    )
+
+
+def _emit_special_symbol_message(head_name: str, record: SymbolRecord) -> None:
+    display = _SYMBOL_REGISTRY.display_symbol_for_record(record)
+    emit_message(
+        call("MessageName", symbol(head_name), string("spsym")),
+        f"Symbol {display.to_input_form()} is a special system symbol.",
+    )
+
+
+def _setting_value_is_valid(name: str, value: Expr) -> bool:
+    if _is_system_infinity(value):
+        return True
+    minimum = _SPECIAL_SESSION_SETTING_MINIMUMS[name]
+    return isinstance(value, Integer) and value.value >= minimum
+
+
+def _emit_setting_limit_message(record: SymbolRecord, value: Expr) -> None:
+    display = _SYMBOL_REGISTRY.display_symbol_for_record(record)
+    emit_message(
+        call("MessageName", display, string("limset")),
+        f"Cannot set {display.to_input_form()} to {value.to_input_form()}.",
     )
 
 
@@ -4856,6 +5210,10 @@ def set_expr(arguments: Sequence[Expr]) -> Expr:
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Set", record)
         return call("Set", lhs, rhs_value)
+    setting_name = _special_session_setting_name(record)
+    if setting_name is not None and not _setting_value_is_valid(setting_name, rhs_value):
+        _emit_setting_limit_message(record, rhs_value)
+        return record.own_value if record.own_value is not None else _SPECIAL_SESSION_SETTING_DEFAULTS[setting_name]
     record.own_value = rhs_value
     return rhs_value
 
@@ -4870,11 +5228,17 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Unset", record)
         return symbol("$Failed")
+    if _special_session_setting_name(record) is not None:
+        _emit_special_symbol_message("Unset", record)
+        return symbol("$Failed")
     record.own_value = None
     return symbol("Null")
 
 
 def _clear_record(record: SymbolRecord) -> None:
+    if _special_session_setting_name(record) is not None:
+        _emit_special_symbol_message("Clear", record)
+        return
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Clear", record)
         return
@@ -12094,15 +12458,42 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
         _GLOBAL_MESSAGES.clear()
         _GLOBAL_VISIBLE_MESSAGES.clear()
         _GLOBAL_PRINTS.clear()
+    root_iteration_token = None
+    if previous_depth == 0:
+        root_iteration_token = _ACTIVE_EVALUATION_ITERATION_COUNT.set(0)
     apply_main_loop_hooks = (
         previous_depth == 0
         and session is not None
         and not _MAIN_LOOP_HOOKS_SUPPRESSED.get()
     )
-    depth_token = _ACTIVE_EVALUATION_DEPTH.set(previous_depth + 1)
     session_token = None
     if session is not None:
         session_token = _ACTIVE_EVALUATION_SESSION.set(session)
+    recursion_limit = _finite_system_limit_value("$RecursionLimit")
+    if recursion_limit is not None and previous_depth + 1 > recursion_limit:
+        emit_message(
+            call("MessageName", symbol("$RecursionLimit"), string("reclim")),
+            f"Recursion depth exceeded {recursion_limit}.",
+        )
+        if session_token is not None:
+            _ACTIVE_EVALUATION_SESSION.reset(session_token)
+        if root_iteration_token is not None:
+            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(root_iteration_token)
+        return expr
+    iteration_count = _ACTIVE_EVALUATION_ITERATION_COUNT.get() + 1
+    _ACTIVE_EVALUATION_ITERATION_COUNT.set(iteration_count)
+    iteration_limit = _finite_system_limit_value("$IterationLimit")
+    if iteration_limit is not None and iteration_count > iteration_limit:
+        emit_message(
+            call("MessageName", symbol("$IterationLimit"), string("itlim")),
+            f"Iteration count exceeded {iteration_limit}.",
+        )
+        if session_token is not None:
+            _ACTIVE_EVALUATION_SESSION.reset(session_token)
+        if root_iteration_token is not None:
+            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(root_iteration_token)
+        return expr
+    depth_token = _ACTIVE_EVALUATION_DEPTH.set(previous_depth + 1)
     try:
         try:
             _check_time_constraints()
@@ -12133,6 +12524,8 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
         if session_token is not None:
             _ACTIVE_EVALUATION_SESSION.reset(session_token)
         _ACTIVE_EVALUATION_DEPTH.reset(depth_token)
+        if root_iteration_token is not None:
+            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(root_iteration_token)
 
 
 def _evaluate(expr: Expr) -> Expr:

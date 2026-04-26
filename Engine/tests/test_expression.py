@@ -7,6 +7,7 @@ from tungsten.discovery import discover_installation
 from tungsten.expression import EvaluationSession
 from tungsten.expression import Real
 from tungsten.expression import TungstenExitRequested
+from tungsten.expression import display_output_parts
 from tungsten.expression import evaluate
 from tungsten.expression import parse_full_form
 from tungsten.expression import parse_input_form
@@ -2079,6 +2080,93 @@ class ExpressionEvaluationTests(unittest.TestCase):
             "Hold[ReplaceAll[Range[10], Rule[5, 55]]]",
         )
         self.assertEqual(submit("Hold[x] /. x :> 1 + 2"), "Hold[Plus[1, 2]]")
+
+    def test_session_limits_history_length_and_output_display_wrappers(self) -> None:
+        session = EvaluationSession()
+
+        def submit(code: str):
+            parsed = parse_input_form(code)
+            session.begin_input(code, parsed)
+            result = evaluate(parsed, session=session)
+            session.finish_output(result)
+            return result
+
+        try:
+            self.assertEqual(submit("$RecursionLimit").to_full_form(), "1024")
+            self.assertEqual(submit("$IterationLimit").to_full_form(), "4096")
+            self.assertEqual(submit("$HistoryLength").to_full_form(), "Infinity")
+            self.assertEqual(submit("$OutputSizeLimit").to_full_form(), "12000")
+
+            self.assertEqual(submit("$RecursionLimit = 1").to_full_form(), "1024")
+            assert session.message_history is not None
+            self.assertEqual(session.message_history[session.line][0].name.to_input_form(), "$RecursionLimit::limset")
+
+            self.assertEqual(submit("$RecursionLimit = 20").to_full_form(), "20")
+            self.assertEqual(submit("$IterationLimit = 20").to_full_form(), "20")
+            self.assertEqual(submit("$HistoryLength = 2").to_full_form(), "2")
+            self.assertEqual(submit("10").to_full_form(), "10")
+            self.assertEqual(submit("20").to_full_form(), "20")
+            self.assertEqual(submit("30").to_full_form(), "30")
+            self.assertEqual(
+                submit("DownValues[In]").to_full_form(),
+                "List[RuleDelayed[HoldPattern[In[11]], 30], RuleDelayed[HoldPattern[In[12]], DownValues[In]]]",
+            )
+            assert session.inputs is not None
+            self.assertEqual(sorted(session.inputs), [11, 12])
+
+            short_result = submit("Short[Range[20]]")
+            self.assertEqual(display_output_parts(short_result)[0], "Short")
+            self.assertIn("<<5>>", display_output_parts(short_result)[1])
+            assert session.outputs is not None
+            self.assertEqual(
+                session.outputs[session.line].to_full_form(),
+                "List[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]",
+            )
+
+            shallow_result = submit("Shallow[Range[20], {Infinity, 5}]")
+            self.assertEqual(display_output_parts(shallow_result)[0], "Shallow")
+            self.assertIn("<<15>>", display_output_parts(shallow_result)[1])
+        finally:
+            for code in (
+                "$RecursionLimit = 1024",
+                "$IterationLimit = 4096",
+                "$HistoryLength = Infinity",
+                "$OutputSizeLimit = 12000",
+            ):
+                evaluate(parse_input_form(code))
+
+    def test_recursion_and_iteration_limits_generate_nonfatal_messages(self) -> None:
+        def submit_with_session(code: str) -> EvaluationSession:
+            session = EvaluationSession()
+            parsed = parse_input_form(code)
+            session.begin_input(code, parsed)
+            result = evaluate(parsed, session=session)
+            session.finish_output(result)
+            self.assertNotEqual(result.to_full_form(), "$Aborted")
+            return session
+
+        try:
+            evaluate(parse_input_form("$RecursionLimit = 20"))
+            nested = "1"
+            for _ in range(30):
+                nested = f"ReleaseHold[Hold[{nested}]]"
+            recursion_session = submit_with_session(nested)
+            assert recursion_session.message_history is not None
+            self.assertEqual(
+                recursion_session.message_history[recursion_session.line][0].name.to_input_form(),
+                "$RecursionLimit::reclim",
+            )
+
+            evaluate(parse_input_form("$IterationLimit = 20"))
+            iteration_session = submit_with_session("Map[Identity, Range[50]]")
+            assert iteration_session.message_history is not None
+            self.assertEqual(
+                iteration_session.message_history[iteration_session.line][0].name.to_input_form(),
+                "$IterationLimit::itlim",
+            )
+        finally:
+            evaluate(parse_input_form("$RecursionLimit = 1024"))
+            evaluate(parse_input_form("$IterationLimit = 4096"))
 
     def test_repl_exit_and_quit_raise_session_exit(self) -> None:
         session = EvaluationSession()
