@@ -1,8 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-24T20:06:49Z
-Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+Updated (UTC): 2026-04-26T21:40:24Z
+Repository HEAD: 9426a93f72f65c5ba47dac35f9bb51807e9bae86
 
 ## Summary
 
@@ -92,8 +92,10 @@ The current Tungsten package is composed of the following modules.
 | `expression.py` | Own the expression AST facade, evaluation session state, public compatibility imports, and structural helpers not yet split out. | `expression_parser.py`, `expression_evaluator.py` through lazy wrappers |
 | `expression_parser.py` | Tokenize/parse Wolfram InputForm/FullForm text and lower the supported StandardForm box subset. | `expression.py`, `wolfram_strings.py` |
 | `expression_evaluator.py` | Dispatch one evaluated expression to the appropriate built-in family. | `expression.py` |
-| `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, and integer-number-theory functions. | `expression.py` |
+| `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, integer-number-theory functions, real-rounding heads, and the explicit-number subset of special functions. | `expression.py` |
 | `expression_patterns.py` | Match ordinary expression patterns and implement replacement/search helpers. | `expression.py` |
+| `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `rules_for_kind`) and the planned routing seam for compound-LHS Set / SetDelayed / UpSet / TagSet. | `expression.py` |
+| `expression_scoping.py` | Stub home for `With` / `Module` / `Block`; emits a "not yet implemented" message on call until the upcoming scoping pass lands. | `expression.py` |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
 | `assistant.py` | Automate Notebook Assistant for a selected source cell and optionally insert code below it. | `kernel.py`, `notebook.py` |
@@ -212,10 +214,21 @@ The expression implementation is now split across a small facade plus family mod
 - `expression_parser.py` owns tokenization, Pratt parsing, and supported StandardForm box
   interpretation.
 - `expression_evaluator.py` owns the large single-step built-in dispatch table.
-- `expression_arithmetic.py` owns explicit-number, relation, Boolean, predicate, and integer
-  number-theory evaluator rules.
+- `expression_arithmetic.py` owns explicit-number, relation, Boolean, predicate, integer
+  number-theory, and real-rounding evaluator rules.
 - `expression_patterns.py` owns ordinary expression pattern matching, replacements, and structural
   search helpers.
+- `expression_definitions.py` owns the canonical symbol-definition storage shape — the
+  `Definition` dataclass and the ``OwnValues`` / ``DownValues`` / ``UpValues`` / ``SubValues`` /
+  ``NValues`` ordered-list contract — plus the LHS classifier
+  (``classify_assignment_lhs``) that routes Set / SetDelayed / UpSet / TagSet
+  assignments to the right value list. Bare-symbol Set and SetDelayed write through this
+  surface today; the upcoming compound-LHS pass plugs into the same seam without
+  restructuring callers.
+- `expression_scoping.py` is the planned home for ``With`` / ``Module`` / ``Block``. Until
+  the lexical-and-dynamic-scoping pass lands, the dispatch entry points emit a clear
+  ``With::nyet`` / ``Module::nyet`` / ``Block::nyet`` message instead of leaving the call
+  silently inert.
 - `expression.py` remains the compatibility import surface and still hosts shared expression data
   types, session state, formatting, strings, associations, functional/list operations, and other
   built-in families awaiting future extraction.

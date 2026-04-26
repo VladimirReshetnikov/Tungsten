@@ -5,7 +5,7 @@ import binascii
 import bz2
 from contextvars import ContextVar
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from functools import cmp_to_key
@@ -820,6 +820,22 @@ def _load_system_symbol_snapshot() -> dict[str, tuple[str, ...]]:
 
 @dataclass
 class SymbolRecord:
+    """Per-symbol storage owned by ``SymbolRegistry``.
+
+    The legacy single-slot ``own_value`` field continues to exist for the
+    bare-symbol Set / SetDelayed path that has shipped since 2026-04-23.
+    The four ``*_definitions`` lists are the canonical, ordered storage
+    for the upcoming compound-LHS Set / SetDelayed / UpSet / TagSet
+    implementation; they are populated and consulted through
+    ``tungsten.expression_definitions``.
+
+    For now the legacy slot remains the source of truth for the bare-symbol
+    case; the canonical list is *additive* and the two views are kept in
+    sync by ``coalesce_legacy_own_value``. Once the compound-LHS pass
+    lands, ``own_value`` retires and the canonical list becomes the only
+    write path.
+    """
+
     full_name: str
     context: str
     short_name: str
@@ -829,6 +845,34 @@ class SymbolRecord:
     down_values: tuple[Expr, ...] = ()
     up_values: tuple[Expr, ...] = ()
     sub_values: tuple[Expr, ...] = ()
+    # Canonical ordered lists for the upcoming compound-LHS storage. The
+    # element type is ``tungsten.expression_definitions.Definition``; using
+    # ``list`` here avoids an import cycle at module load time.
+    own_values_definitions: list = field(default_factory=list)
+    down_values_definitions: list = field(default_factory=list)
+    up_values_definitions: list = field(default_factory=list)
+    sub_values_definitions: list = field(default_factory=list)
+    n_values_definitions: list = field(default_factory=list)
+
+    def definitions_for_kind(self, kind: str) -> list:
+        """Return the live mutable list for the requested value kind.
+
+        ``kind`` is one of the ``VALUE_KIND_*`` constants exported by
+        ``tungsten.expression_definitions``. This indirection keeps the
+        canonical-vs-legacy storage details inside ``SymbolRecord`` so
+        callers don't depend on individual field names.
+        """
+        if kind == "OwnValues":
+            return self.own_values_definitions
+        if kind == "DownValues":
+            return self.down_values_definitions
+        if kind == "UpValues":
+            return self.up_values_definitions
+        if kind == "SubValues":
+            return self.sub_values_definitions
+        if kind == "NValues":
+            return self.n_values_definitions
+        raise ValueError(f"Unknown value kind: {kind!r}")
 
 
 class SymbolRegistry:
@@ -850,6 +894,33 @@ class SymbolRegistry:
         message_preprint = self.ensure_full_name("System`$MessagePrePrint", built_in=True)
         if message_preprint.own_value is None:
             message_preprint.own_value = Symbol("Automatic")
+
+    def _mirror_own_value_into_canonical(self, record: SymbolRecord) -> None:
+        """Reflect the legacy single-slot ``own_value`` into the canonical
+        ``own_values_definitions`` list.
+
+        Called whenever the legacy slot is updated through Set / Unset.
+        Once compound-LHS Set lands and writes go directly through
+        ``tungsten.expression_definitions.assign_definition``, this mirror
+        becomes redundant. ``own_values_expr`` falls back to the legacy
+        slot when the canonical list is empty so registry-seeded values
+        such as ``$MessagePrePrint = Automatic`` remain visible without a
+        canonical entry being created at module-load time.
+        """
+        from .expression_definitions import Definition
+
+        canonical = record.own_values_definitions
+        if record.own_value is None:
+            canonical.clear()
+            return
+        display = self._display_symbol_for_record(record)
+        canonical[:] = [
+            Definition(
+                hold_pattern=call("HoldPattern", display),
+                rhs=record.own_value,
+                delayed=False,
+            )
+        ]
 
     @property
     def contexts(self) -> tuple[str, ...]:
@@ -1020,6 +1091,11 @@ class SymbolRegistry:
         record.down_values = ()
         record.up_values = ()
         record.sub_values = ()
+        record.own_values_definitions.clear()
+        record.down_values_definitions.clear()
+        record.up_values_definitions.clear()
+        record.sub_values_definitions.clear()
+        record.n_values_definitions.clear()
 
     def display_symbol_for_record(self, record: SymbolRecord) -> Symbol:
         return self._display_symbol_for_record(record)
@@ -5139,6 +5215,53 @@ def _own_value_rule(record: SymbolRecord) -> Expr | None:
     return call("RuleDelayed", lhs, record.own_value)
 
 
+def set_delayed_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``SetDelayed[lhs, rhs]`` (``lhs := rhs``).
+
+    For the bare-symbol case, the RHS is stored *unevaluated* and gets
+    evaluated each time the symbol is read. This is the canonical Wolfram
+    contract for ``:=`` (delayed assignment). Compound LHS is routed
+    through the same classifier as ``Set`` and currently raises a clear
+    "not supported" error, which the upcoming compound-LHS pass will
+    fill in.
+    """
+    if len(arguments) != 2:
+        raise WolframEvaluationError("SetDelayed expects exactly two arguments.")
+    lhs, rhs = arguments
+    if not isinstance(lhs, Symbol):
+        from .expression_definitions import (
+            VALUE_KIND_DOWN,
+            VALUE_KIND_OWN,
+            VALUE_KIND_SUB,
+            classify_assignment_lhs,
+        )
+
+        kind, target = classify_assignment_lhs(lhs)
+        if kind in {VALUE_KIND_DOWN, VALUE_KIND_SUB}:
+            raise WolframEvaluationError(
+                f"SetDelayed with a compound left-hand side is not yet supported "
+                f"(would write {kind} on {target.to_input_form() if target else '?'})."
+            )
+        raise WolframEvaluationError(
+            "This Tungsten subset only supports SetDelayed when the left-hand side is a bare symbol."
+        )
+    record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
+    if not _record_allows_value_mutation(record):
+        _emit_protected_symbol_message("SetDelayed", record)
+        return symbol("Null")
+    setting_name = _special_session_setting_name(record)
+    if setting_name is not None and not _setting_value_is_valid(setting_name, rhs):
+        _emit_setting_limit_message(record, rhs)
+        return symbol("Null")
+    record.own_value = rhs
+    _refresh_canonical_own_values(record)
+    # Reflect the delayed flag on the canonical Definition so future
+    # consumers can distinguish the two forms.
+    if record.own_values_definitions:
+        record.own_values_definitions[-1].delayed = True
+    return symbol("Null")
+
+
 def set_expr(arguments: Sequence[Expr]) -> Expr:
     if len(arguments) != 2:
         raise WolframEvaluationError("Set expects exactly two arguments.")
@@ -5147,7 +5270,24 @@ def set_expr(arguments: Sequence[Expr]) -> Expr:
     if isinstance(lhs, Call) and lhs.has_head("Attributes"):
         return set_attributes_assignment(lhs, rhs_value)
     if not isinstance(lhs, Symbol):
-        raise WolframEvaluationError("This Tungsten subset only supports Set when the left-hand side is a bare symbol.")
+        # Compound LHS routing is owned by tungsten.expression_definitions;
+        # the upcoming pass will populate DownValues / SubValues from there.
+        from .expression_definitions import (
+            VALUE_KIND_DOWN,
+            VALUE_KIND_OWN,
+            VALUE_KIND_SUB,
+            classify_assignment_lhs,
+        )
+
+        kind, target = classify_assignment_lhs(lhs)
+        if kind in {VALUE_KIND_DOWN, VALUE_KIND_SUB}:
+            raise WolframEvaluationError(
+                f"Set with a compound left-hand side is not yet supported "
+                f"(would write {kind} on {target.to_input_form() if target else '?'})."
+            )
+        raise WolframEvaluationError(
+            "This Tungsten subset only supports Set when the left-hand side is a bare symbol."
+        )
     record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Set", record)
@@ -5157,7 +5297,20 @@ def set_expr(arguments: Sequence[Expr]) -> Expr:
         _emit_setting_limit_message(record, rhs_value)
         return record.own_value if record.own_value is not None else _SPECIAL_SESSION_SETTING_DEFAULTS[setting_name]
     record.own_value = rhs_value
+    _refresh_canonical_own_values(record)
     return rhs_value
+
+
+def _refresh_canonical_own_values(record: "SymbolRecord") -> None:
+    """Mirror the legacy ``own_value`` slot into the canonical own-values list.
+
+    Until the compound-LHS rewriter consumes the canonical list, the legacy
+    slot remains the source of truth for evaluation. This helper keeps
+    ``OwnValues[sym]`` and ``DownValues[sym]`` getters honest about what's
+    currently stored, so the new public surface in
+    ``expression_definitions`` can be exercised by callers and tests today.
+    """
+    _SYMBOL_REGISTRY._mirror_own_value_into_canonical(record)
 
 
 def unset_expr(arguments: Sequence[Expr]) -> Expr:
@@ -5165,7 +5318,10 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
         raise WolframEvaluationError("Unset expects exactly one argument.")
     lhs = arguments[0]
     if not isinstance(lhs, Symbol):
-        raise WolframEvaluationError("This Tungsten subset only supports Unset when the left-hand side is a bare symbol.")
+        # Compound-LHS Unset is part of the upcoming compound-LHS pass.
+        raise WolframEvaluationError(
+            "This Tungsten subset only supports Unset when the left-hand side is a bare symbol."
+        )
     record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Unset", record)
@@ -5174,6 +5330,7 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
         _emit_special_symbol_message("Unset", record)
         return symbol("$Failed")
     record.own_value = None
+    _refresh_canonical_own_values(record)
     return symbol("Null")
 
 
@@ -5214,6 +5371,17 @@ def _clear_one(argument: Expr) -> None:
 
 
 def own_values_expr(expr: Expr) -> Call:
+    """Returns the list of own-value rules for ``expr``.
+
+    Reads from the canonical ``own_values_definitions`` storage when
+    populated, and falls back to the legacy single-slot ``own_value``
+    field for symbols whose values were seeded directly during registry
+    initialization (e.g., ``$MessagePrePrint = Automatic``). When the
+    compound-LHS pass lands the canonical list becomes the only source
+    and this fallback can retire.
+    """
+    from .expression_definitions import VALUE_KIND_OWN, rules_for_kind
+
     if isinstance(expr, Symbol):
         record = _SYMBOL_REGISTRY.record_for_symbol(expr)
     elif isinstance(expr, String):
@@ -5222,8 +5390,27 @@ def own_values_expr(expr: Expr) -> Call:
             raise WolframEvaluationError(f"OwnValues could not find a symbol named {expr.value!r}.")
     else:
         raise WolframEvaluationError("OwnValues expects a symbol or the name of an existing symbol.")
-    rule = _own_value_rule(record)
-    return _evaluated_list_expr() if rule is None else _evaluated_list_expr(rule)
+    if record.own_values_definitions:
+        return _evaluated_list_expr(*rules_for_kind(record, VALUE_KIND_OWN))
+    if record.own_value is not None:
+        lhs = call("HoldPattern", _SYMBOL_REGISTRY.display_symbol_for_record(record))
+        return _evaluated_list_expr(call("RuleDelayed", lhs, record.own_value))
+    return _evaluated_list_expr()
+
+
+def _own_values_record(expr: Expr, function_name: str) -> SymbolRecord | None:
+    """Resolve the SymbolRecord for ``expr`` for a values getter.
+
+    Returns ``None`` when ``expr`` is a string naming a symbol that doesn't
+    exist (the kernel returns ``{}`` here rather than erroring).
+    """
+    if isinstance(expr, Symbol):
+        return _SYMBOL_REGISTRY.record_for_symbol(expr)
+    if isinstance(expr, String):
+        return _SYMBOL_REGISTRY.resolve_existing(expr.value)
+    raise WolframEvaluationError(
+        f"{function_name} expects a symbol or the name of an existing symbol."
+    )
 
 
 def history_expr(head_name: str, arguments: Sequence[Expr]) -> Expr:
@@ -5257,36 +5444,90 @@ def history_expr(head_name: str, arguments: Sequence[Expr]) -> Expr:
 
 
 def down_values_expr(expr: Expr) -> Call:
-    session = _active_evaluation_session()
-    if session is None or not isinstance(expr, Symbol):
-        return _evaluated_list_expr()
+    """Return the list of down-values for ``expr``.
 
-    name = _system_dispatch_name(expr)
-    if name == "In":
-        assert session.inputs is not None
-        return _evaluated_list_expr(
-            *(
-                call("RuleDelayed", call("HoldPattern", call("In", integer(index))), value)
-                for index, value in sorted(session.inputs.items())
+    For the session-history symbols ``In`` / ``InString`` / ``Out``, the
+    list is synthesized from the active ``EvaluationSession``'s recorded
+    history (read-only, current behavior). For any other symbol, the list
+    is read from the canonical
+    ``record.down_values_definitions`` storage. Until compound-LHS Set /
+    SetDelayed lands, that list will be empty for user symbols, which
+    matches Wolfram's behavior for an undefined symbol.
+    """
+    session = _active_evaluation_session()
+    if session is not None and isinstance(expr, Symbol):
+        name = _system_dispatch_name(expr)
+        if name == "In":
+            assert session.inputs is not None
+            return _evaluated_list_expr(
+                *(
+                    call("RuleDelayed", call("HoldPattern", call("In", integer(index))), value)
+                    for index, value in sorted(session.inputs.items())
+                )
             )
-        )
-    if name == "InString":
-        assert session.in_strings is not None
-        return _evaluated_list_expr(
-            *(
-                call("RuleDelayed", call("HoldPattern", call("InString", integer(index))), string(value))
-                for index, value in sorted(session.in_strings.items())
+        if name == "InString":
+            assert session.in_strings is not None
+            return _evaluated_list_expr(
+                *(
+                    call("RuleDelayed", call("HoldPattern", call("InString", integer(index))), string(value))
+                    for index, value in sorted(session.in_strings.items())
+                )
             )
-        )
-    if name == "Out":
-        assert session.outputs is not None
-        return _evaluated_list_expr(
-            *(
-                call("RuleDelayed", call("HoldPattern", call("Out", integer(index))), value)
-                for index, value in sorted(session.outputs.items())
+        if name == "Out":
+            assert session.outputs is not None
+            return _evaluated_list_expr(
+                *(
+                    call("RuleDelayed", call("HoldPattern", call("Out", integer(index))), value)
+                    for index, value in sorted(session.outputs.items())
+                )
             )
-        )
-    return _evaluated_list_expr()
+
+    record = _own_values_record(expr, "DownValues")
+    if record is None:
+        return _evaluated_list_expr()
+    from .expression_definitions import VALUE_KIND_DOWN, rules_for_kind
+    return _evaluated_list_expr(*rules_for_kind(record, VALUE_KIND_DOWN))
+
+
+def up_values_expr(expr: Expr) -> Call:
+    """Return the list of up-values for ``expr``.
+
+    Currently always empty for the bare-symbol Set / SetDelayed subset;
+    the upcoming UpSet / UpSetDelayed pass will populate the canonical
+    ``up_values_definitions`` storage and this getter immediately reflects
+    that.
+    """
+    record = _own_values_record(expr, "UpValues")
+    if record is None:
+        return _evaluated_list_expr()
+    from .expression_definitions import VALUE_KIND_UP, rules_for_kind
+    return _evaluated_list_expr(*rules_for_kind(record, VALUE_KIND_UP))
+
+
+def sub_values_expr(expr: Expr) -> Call:
+    """Return the list of sub-values for ``expr``.
+
+    Currently always empty for the bare-symbol Set / SetDelayed subset;
+    the upcoming compound-LHS pass will populate the canonical
+    ``sub_values_definitions`` storage when ``f[x_][y_] := ...`` lands.
+    """
+    record = _own_values_record(expr, "SubValues")
+    if record is None:
+        return _evaluated_list_expr()
+    from .expression_definitions import VALUE_KIND_SUB, rules_for_kind
+    return _evaluated_list_expr(*rules_for_kind(record, VALUE_KIND_SUB))
+
+
+def n_values_expr(expr: Expr) -> Call:
+    """Return the list of N-values for ``expr``.
+
+    Currently always empty; reserved for the upcoming NValues storage.
+    """
+    record = _own_values_record(expr, "NValues")
+    if record is None:
+        return _evaluated_list_expr()
+    from .expression_definitions import VALUE_KIND_N, rules_for_kind
+    return _evaluated_list_expr(*rules_for_kind(record, VALUE_KIND_N))
 
 
 def exit_expr(arguments: Sequence[Expr]) -> None:

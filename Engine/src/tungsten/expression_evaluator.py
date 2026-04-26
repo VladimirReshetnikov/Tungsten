@@ -103,6 +103,18 @@ def evaluate_once(expr: Expr) -> Expr:
         if raw_head_name == "WithCleanup":
             return with_cleanup_expr(expr.arguments)
 
+        if raw_head_name == "With":
+            from .expression_scoping import with_expr
+            return with_expr(expr.arguments)
+
+        if raw_head_name == "Module":
+            from .expression_scoping import module_expr
+            return module_expr(expr.arguments)
+
+        if raw_head_name == "Block":
+            from .expression_scoping import block_expr
+            return block_expr(expr.arguments)
+
         if raw_head_name == "TimeConstrained":
             return time_constrained_expr(expr.arguments)
 
@@ -151,6 +163,9 @@ def evaluate_once(expr: Expr) -> Expr:
         if raw_head_name == "Set":
             return set_expr(expr.arguments)
 
+        if raw_head_name == "SetDelayed":
+            return set_delayed_expr(expr.arguments)
+
         if raw_head_name == "Unset":
             return unset_expr(expr.arguments)
 
@@ -179,6 +194,21 @@ def evaluate_once(expr: Expr) -> Expr:
             if len(expr.arguments) != 1:
                 raise WolframEvaluationError("DownValues expects exactly one symbol.")
             return down_values_expr(expr.arguments[0])
+
+        if raw_head_name == "UpValues":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("UpValues expects exactly one symbol.")
+            return up_values_expr(expr.arguments[0])
+
+        if raw_head_name == "SubValues":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("SubValues expects exactly one symbol.")
+            return sub_values_expr(expr.arguments[0])
+
+        if raw_head_name == "NValues":
+            if len(expr.arguments) != 1:
+                raise WolframEvaluationError("NValues expects exactly one symbol.")
+            return n_values_expr(expr.arguments[0])
 
         if raw_head_name == "OwnValues":
             if len(expr.arguments) != 1:

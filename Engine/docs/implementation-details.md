@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T23:44:00Z
-- Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
+- Updated (UTC): 2026-04-26T21:40:24Z
+- Repository HEAD: 9426a93f72f65c5ba47dac35f9bb51807e9bae86
 
 ## Summary
 
@@ -300,15 +300,45 @@ The code is split by workstream where the seams are now stable enough:
 
 - `expression_parser.py` is the parser/StandardForm-box surface.
 - `expression_evaluator.py` is the one-step built-in dispatch table.
-- `expression_arithmetic.py` is the explicit-number, relation, Boolean, predicate, and
-  integer-number-theory family.
+- `expression_arithmetic.py` is the explicit-number, relation, Boolean, predicate,
+  integer-number-theory, and real-rounding family.
 - `expression_patterns.py` is ordinary expression pattern matching and rewrite/search helpers.
+- `expression_definitions.py` is the canonical home for symbol-definition storage and the
+  Set / SetDelayed / Unset / Clear / OwnValues / DownValues / UpValues / SubValues / NValues
+  surface. It exposes a uniform `Definition` record, a `definitions_for_kind(record, kind)`
+  accessor for the live ordered list of rules, and the `assign_definition` /
+  `remove_definition` / `clear_definitions` write API that the upcoming compound-LHS pass
+  will plug into without touching call sites.
+- `expression_scoping.py` is the planned home for `With` / `Module` / `Block`. The dispatch
+  entries emit a clear "not yet implemented" message until the upcoming scoping pass lands.
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 
 The extracted evaluator-family modules currently import `expression.py` as a runtime facade. That
 keeps this refactor behavior-preserving and avoids destabilizing all public imports at once, while
-still letting future parser, arithmetic, pattern, and built-in-family work happen in separate files.
+still letting future parser, arithmetic, pattern, definitions, scoping, and built-in-family work
+happen in separate files.
+
+### Symbol-definition storage shape
+
+`SymbolRecord` carries five ordered lists of `Definition` records:
+`own_values_definitions`, `down_values_definitions`, `up_values_definitions`,
+`sub_values_definitions`, and `n_values_definitions`. Each `Definition` records a
+`HoldPattern[lhs]`, an `rhs`, a `delayed` flag (distinguishing `Set` from `SetDelayed`),
+and an optional `condition` for top-level `/;` guards.
+
+The legacy single-slot `record.own_value` field is preserved for the bare-symbol Set /
+SetDelayed path that has shipped since 2026-04-23. Writes through Set, SetDelayed, Unset,
+and Clear update both the legacy slot and the canonical `own_values_definitions` list in
+lockstep through `_refresh_canonical_own_values`. `OwnValues[sym]` reads from the canonical
+list when populated and falls back to the legacy slot for registry-seeded values such as
+`$MessagePrePrint = Automatic`.
+
+When the compound-LHS rewriter lands, it will call
+`tungsten.expression_definitions.assign_definition(record, kind=..., hold_pattern=...,
+rhs=..., delayed=..., condition=...)` directly without touching the legacy slot, and the
+`OwnValues` / `DownValues` / `UpValues` / `SubValues` getters will already be reading from
+the canonical lists with no further wiring required.
 
 ### Why the evaluator is structural first
 
