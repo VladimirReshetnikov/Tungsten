@@ -88,7 +88,10 @@ The parser currently handles:
 - lists `{a, b, c}`;
 - associations `<|a -> b|>`;
 - common pattern shorthand such as `_`, `_Head`, `x_`, `x_Head`, `x : patt`, `patt?test`,
-  `patt:def`, `_.`, `patt /; test`, and `a | b`;
+  `patt:def`, `_.`, `patt /; test`, and `a | b`. Adjacent typed blanks like `_Eps _Pair`
+  (anonymous blanks separated by whitespace) parse as implicit `Times` to match the kernel.
+  Longer ``:``-chains such as `a:b:c:d` fold to ``Optional[Pattern[a, b], Pattern[c, d]]``,
+  matching Wolfram's interpretation;
 - association-aware exact selectors such as `Key[b]` and string-key shorthand `"name"` inside
   part and extract specifications;
 - arithmetic syntax such as `+`, unary `-`, implicit `Times`, `/`, and `^`, including
@@ -101,9 +104,9 @@ The parser currently handles:
 - rules `->` and `:>`, including guarded delayed-rule right-hand sides such as
   `x_ :> rhs /; test`;
 - assignment and update surface syntax, lowered inertly to the corresponding heads:
-  `=`, `:=`, `=.`, `^=`, `^:=`, `+=`, `-=`, `*=`, `/=`, `/: ... =`, `/: ... :=`, and
+  `=`, `:=`, `=.`, `^=`, `^:=`, `+=`, `-=`, `*=`, `/=`, `//=`, `/: ... =`, `/: ... :=`, and
   `/: ... =.` become `Set`, `SetDelayed`, `Unset`, `UpSet`, `UpSetDelayed`, `AddTo`,
-  `SubtractFrom`, `TimesBy`, `DivideBy`, `TagSet`, `TagSetDelayed`, and `TagUnset`.
+  `SubtractFrom`, `TimesBy`, `DivideBy`, `ApplyTo`, `TagSet`, `TagSetDelayed`, and `TagUnset`.
   Spaced Wolfram unset syntax such as `lhs = .` and `tag /: lhs = .` is also recognized;
 - other high-precedence syntactic operators, including `x++`, `++x`, `x--`, `--x`, `x!`,
   `x!!`, `a::tag`, `a ~ f ~ b`, `<< file`, `expr >> file`, `expr >>> file`, `?name`, and
@@ -119,8 +122,8 @@ The parser currently handles:
 - output-history shorthand `%`, `%%`, and `%n`, which lower to `Out[-1]`, `Out[-2]`, and
   `Out[n]`;
 - positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `##`, `##n`, `Slot[]`,
-  `Slot[n]`, `SlotSequence[]`, `SlotSequence[n]`, and Wolfram's `#name` shorthand for
-  `#["name"]` / `#1["name"]`;
+  `Slot[n]`, `SlotSequence[]`, `SlotSequence[n]`, and Wolfram's named-slot shorthand `#name`
+  and `#"name"` for `Slot["name"]` (the bare `#` followed by whitespace is implicit `Times`);
 - named pure-function syntax such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`,
   `{x, y} |-> body`, and `x \[Function] body`, plus explicit-attribute forms such as
   `Function[Null, body, attrs]` and `Function[params, body, attrs]`;
@@ -147,6 +150,16 @@ The parser currently handles:
   `\[Alpha]` remain symbols, while operator forms such as `a \[CirclePlus] b` lower to inert
   head calls such as `CirclePlus[a, b]` unless Tungsten has an explicit evaluator rule for that
   head;
+- Wolfram simple character escapes outside string literals: `\:XXXX` (4-hex-digit Unicode),
+  `\.XX` (2-hex-digit ISO Latin-1), `\OOO` (3-octal-digit), and `\|XXXXXX` (6-hex-digit
+  Unicode). The decoded character folds into the surrounding identifier or operator token,
+  so `Protect[\:ff0d]` is a single-character symbol, and `x\:00b2` is the symbol `x²`. The
+  same escapes also decode inside string literals (`"a\:00b2"` is the two-character string `"a²"`);
+- Wolfram inline-box escapes outside string literals: `\!\(...\)` and the bare `\(...\)`
+  raw box form. The construct is consumed as a single token and the contents are best-effort
+  parsed as a Wolfram expression after stripping a recognized form prefix such as
+  `TraditionalForm\``. Failed parses surface as the inert head `InlineBoxEscape[...]` (or
+  `BareBoxEscape[...]` for the bare form) so the surrounding parse continues;
 - `RowBox`-based association examples from the installed `Association.nb` reference page,
   including `\[Rule]`, `\[RuleDelayed]`, `\[LeftAssociation]`, and `\[RightAssociation]`
   tokens plus nested part syntax such as `<|a -> x|>[[Key[b]]]`.
@@ -698,6 +711,18 @@ These are intentional current boundaries, not hidden TODOs:
   `DirectedInfinity[1]` and `DirectedInfinity[-1]` FullForm spelling.
 - Real-number precision marks using backticks are parsed as part of the accepted real literal text,
   but Tungsten does not reproduce every kernel `FullForm` nuance for precision-bearing reals.
+- Wolfram scientific notation `mantissa*^exponent` is accepted by the tokenizer (so `2*^3` and
+  `1.5*^3` parse without error) but the numeric value is not folded: a literal like `2*^3` is
+  retained as a textual `Real("2*^3")` rather than the integer `2000` that the kernel would
+  produce. Magnitude-bearing reals round-trip as their original textual form. This is a parser
+  limit that does not affect downstream evaluation of explicit numeric calls.
+- `ToExpression["...", InputForm, HoldComplete]` returns `$Failed` in the kernel when the input
+  is unparseable; Tungsten emits a `ToExpression::sntx`-shaped Tungsten message and leaves the
+  call unevaluated rather than synthesizing `$Failed`. Code that branches on `$Failed` may need
+  to use `SyntaxQ`/`SyntaxLength` instead.
+- Wolfram's quirk that re-interprets `f[ [b] ]` and `f[ [[b]] ]` (single function-call brackets
+  enclosing a bracketed group) as `Part[f, b]` is not replicated. The few real-world packages
+  that rely on this idiom (such as `wljs-notebook/Kernel/Utils.wl`) are not parseable by Tungsten.
 - Prefix `++` and `--` now parse as `PreIncrement` and `PreDecrement`, including literal operands
   such as `--5`; Tungsten still leaves those side-effectful heads inert during evaluation.
 - Pattern search through associations follows Wolfram's values-only convention: `FreeQ`, `Cases`,

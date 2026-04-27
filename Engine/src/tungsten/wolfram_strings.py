@@ -57,6 +57,53 @@ def wl_string(value: str) -> str:
     return f"\"{escaped}\""
 
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_OCTAL_DIGITS = frozenset("01234567")
+
+
+def _decode_character_escape(text: str, index: int) -> tuple[str, int] | None:
+    """Decode a Wolfram character escape (``\\:XXXX``, ``\\.XX``, ``\\OOO``, ``\\|XXXXXX``).
+
+    Returns ``(character, new_index)`` on success or ``None`` if the escape at ``index``
+    is not one of these forms. ``index`` must point at the leading backslash.
+    """
+    if index >= len(text) or text[index] != "\\" or index + 1 >= len(text):
+        return None
+    marker = text[index + 1]
+    if marker == ":":
+        if index + 6 > len(text):
+            return None
+        hex_part = text[index + 2 : index + 6]
+        if len(hex_part) == 4 and all(c in _HEX_DIGITS for c in hex_part):
+            return chr(int(hex_part, 16)), index + 6
+        return None
+    if marker == ".":
+        if index + 4 > len(text):
+            return None
+        hex_part = text[index + 2 : index + 4]
+        if len(hex_part) == 2 and all(c in _HEX_DIGITS for c in hex_part):
+            return chr(int(hex_part, 16)), index + 4
+        return None
+    if marker == "|":
+        if index + 8 > len(text):
+            return None
+        hex_part = text[index + 2 : index + 8]
+        if len(hex_part) == 6 and all(c in _HEX_DIGITS for c in hex_part):
+            try:
+                return chr(int(hex_part, 16)), index + 8
+            except ValueError:
+                return None
+        return None
+    if marker in _OCTAL_DIGITS:
+        if index + 4 > len(text):
+            return None
+        oct_part = text[index + 1 : index + 4]
+        if len(oct_part) == 3 and all(c in _OCTAL_DIGITS for c in oct_part):
+            return chr(int(oct_part, 8)), index + 4
+        return None
+    return None
+
+
 def parse_wl_string_literal(value: str) -> str:
     text = value
     if len(text) >= 2 and text[0] == "\"" and text[-1] == "\"":
@@ -68,6 +115,12 @@ def parse_wl_string_literal(value: str) -> str:
         if text[index] != "\\" or index + 1 >= len(text):
             result.append(text[index])
             index += 1
+            continue
+
+        decoded = _decode_character_escape(text, index)
+        if decoded is not None:
+            result.append(decoded[0])
+            index = decoded[1]
             continue
 
         escape = text[index + 1]

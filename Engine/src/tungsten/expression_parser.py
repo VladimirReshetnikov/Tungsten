@@ -2,8 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import sys
 from typing import Iterable, Sequence, TypeGuard
 import unicodedata
+
+
+# The Pratt parser recurses deeply into nested expressions; CPython's default
+# 1000-frame limit trips on real-world packages such as
+# ``mathics-core/mathics/Packages/DiscreteMath/RSolve.m``. Raising the limit at
+# import time keeps the module side-effect minimal.
+_PARSER_RECURSION_FLOOR = 5000
+if sys.getrecursionlimit() < _PARSER_RECURSION_FLOOR:
+    sys.setrecursionlimit(_PARSER_RECURSION_FLOOR)
 
 from .wolfram_strings import parse_wl_string_literal
 from .wolfram_strings import skip_wl_comment
@@ -620,11 +630,56 @@ def _is_symbol_continue(char: str) -> bool:
     return char.isalnum() or char in {"$", "`"}
 
 
+def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | None:
+    """Scan a symbol that may include ``\\:XXXX`` and similar character escapes.
+
+    Wolfram folds simple character escapes outside string literals into the surrounding
+    identifier. ``\\:ff0d`` standing alone becomes a one-character symbol; ``x\\:00b2``
+    becomes the two-character symbol ``x²``. Returns ``None`` when the position does not
+    begin a symbol token (so the tokenizer can try later branches).
+    """
+    if start >= len(text):
+        return None
+    first = text[start]
+    chars: list[str] = []
+    index = start
+    if first == "\\":
+        decoded = _scan_simple_character_escape(text, index)
+        if decoded is None:
+            return None
+        chars.append(decoded[0])
+        index = decoded[1]
+    elif _is_symbol_start(first):
+        chars.append(first)
+        index += 1
+    else:
+        return None
+
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            decoded = _scan_simple_character_escape(text, index)
+            if decoded is not None:
+                chars.append(decoded[0])
+                index = decoded[1]
+                continue
+            break
+        if _is_symbol_continue(char):
+            chars.append(char)
+            index += 1
+            continue
+        break
+
+    name = "".join(chars)
+    return _Token(kind="symbol", text=name, start=start, end=index, value=name), index
+
+
 _MULTI_TOKENS = (
     "===",
     "=!=",
     "___",
     "^:=",
+    "//=",
     "__",
     "##",
     "...",
@@ -709,6 +764,183 @@ def _scan_escaped_token(text: str, start: int) -> tuple[_Token, int] | None:
     return _Token(kind="symbol", text=raw, start=start, end=end + 1, value=raw), end + 1
 
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_OCTAL_DIGITS = frozenset("01234567")
+
+
+def _scan_simple_character_escape(text: str, start: int) -> tuple[str, int] | None:
+    """Decode ``\\:XXXX`` / ``\\.XX`` / ``\\OOO`` / ``\\|XXXXXX`` to a Unicode character.
+
+    Returns the decoded character and the index past the escape, or ``None`` if no such
+    escape begins at ``start``. These four escape forms are recognized everywhere Wolfram
+    accepts them, including outside string literals where Wolfram folds them into the
+    surrounding identifier or operator.
+    """
+    if start >= len(text) or text[start] != "\\":
+        return None
+    if start + 1 >= len(text):
+        return None
+    marker = text[start + 1]
+    if marker == ":":
+        if start + 6 > len(text):
+            return None
+        hex_part = text[start + 2 : start + 6]
+        if len(hex_part) == 4 and all(c in _HEX_DIGITS for c in hex_part):
+            return chr(int(hex_part, 16)), start + 6
+        return None
+    if marker == ".":
+        if start + 4 > len(text):
+            return None
+        hex_part = text[start + 2 : start + 4]
+        if len(hex_part) == 2 and all(c in _HEX_DIGITS for c in hex_part):
+            return chr(int(hex_part, 16)), start + 4
+        return None
+    if marker == "|":
+        if start + 8 > len(text):
+            return None
+        hex_part = text[start + 2 : start + 8]
+        if len(hex_part) == 6 and all(c in _HEX_DIGITS for c in hex_part):
+            try:
+                return chr(int(hex_part, 16)), start + 8
+            except ValueError:
+                return None
+        return None
+    if marker in _OCTAL_DIGITS:
+        if start + 4 > len(text):
+            return None
+        oct_part = text[start + 1 : start + 4]
+        if len(oct_part) == 3 and all(c in _OCTAL_DIGITS for c in oct_part):
+            return chr(int(oct_part, 8)), start + 4
+        return None
+    return None
+
+
+_INLINE_BOX_OPEN = "\\!\\("
+_INLINE_BOX_BARE_OPEN = "\\("
+_INLINE_BOX_CLOSE = "\\)"
+
+
+_INLINE_BOX_FORM_PREFIXES = (
+    "TraditionalForm",
+    "StandardForm",
+    "DisplayForm",
+    "InputForm",
+    "OutputForm",
+    "FullForm",
+    "MathMLForm",
+    "TeXForm",
+)
+
+
+def _interpret_inline_box_content(inner: str) -> Expr:
+    """Best-effort interpretation of the contents of a ``\\!\\(...\\)`` escape.
+
+    Wolfram folds the typeset content back into the surrounding parse tree. Tungsten
+    does not implement full box-language interpretation, but for the common shapes seen
+    in real packages the inner text is a normal Wolfram expression — sometimes preceded
+    by a form selector such as ``TraditionalForm\\``. This helper strips a recognized
+    form prefix and tries to parse the remainder as an ordinary expression. On failure
+    the construct surfaces as the inert head ``InlineBoxEscape[...]`` so the surrounding
+    parse keeps going.
+    """
+    body = inner
+    if body.startswith("\\*"):
+        body = body[2:]
+    body = body.strip()
+    for form_name in _INLINE_BOX_FORM_PREFIXES:
+        for separator in ("\\`", "`"):
+            prefix = form_name + separator
+            if body.startswith(prefix):
+                body = body[len(prefix):]
+                break
+        else:
+            continue
+        break
+    body = body.strip()
+    if not body:
+        return symbol("Null")
+    try:
+        return _Parser(body).parse()
+    except WolframSyntaxError:
+        return call("InlineBoxEscape", string(inner))
+
+
+def _find_bare_box_end(text: str, start: int) -> int | None:
+    """Return the index just past the matching ``\\)`` for a bare ``\\(`` at ``start``.
+
+    Wolfram allows raw box syntax inline as ``\\(...\\)`` (without the leading ``\\!``),
+    typically inside ``InputAliases`` and similar option specs. Returns ``None`` if no
+    such construct begins at ``start``. Raises ``WolframSyntaxError`` if the construct
+    is unterminated.
+    """
+    if not text.startswith(_INLINE_BOX_BARE_OPEN, start):
+        return None
+    index = start + len(_INLINE_BOX_BARE_OPEN)
+    depth = 1
+    n = len(text)
+    while index < n:
+        if text[index] == '"':
+            index = skip_wl_string(text, index)
+            continue
+        if text.startswith("(*", index):
+            index = skip_wl_comment(text, index)
+            continue
+        if text.startswith(_INLINE_BOX_BARE_OPEN, index):
+            depth += 1
+            index += len(_INLINE_BOX_BARE_OPEN)
+            continue
+        if text.startswith(_INLINE_BOX_CLOSE, index):
+            depth -= 1
+            index += len(_INLINE_BOX_CLOSE)
+            if depth == 0:
+                return index
+            continue
+        index += 1
+    raise WolframSyntaxError(f"Unterminated bare box escape at offset {start}.")
+
+
+def _interpret_bare_box_content(inner: str) -> Expr:
+    """Best-effort interpretation of ``\\(...\\)`` raw box content.
+
+    The Wolfram kernel turns this into a ``RowBox`` of textual tokens. Tungsten just
+    surfaces the raw inner text via the inert head ``BareBoxEscape[...]`` so the
+    surrounding parse can continue without trying to interpret the box language.
+    """
+    return call("BareBoxEscape", string(inner))
+
+
+def _find_inline_box_end(text: str, start: int) -> int | None:
+    """Return the index just past the matching ``\\)`` for the ``\\!\\(`` at ``start``.
+
+    Returns ``None`` if no inline-box escape begins at ``start``. Raises
+    ``WolframSyntaxError`` for an unterminated construct.
+    """
+    if not text.startswith(_INLINE_BOX_OPEN, start):
+        return None
+    index = start + len(_INLINE_BOX_OPEN)
+    depth = 1
+    n = len(text)
+    while index < n:
+        if text[index] == '"':
+            index = skip_wl_string(text, index)
+            continue
+        if text.startswith("(*", index):
+            index = skip_wl_comment(text, index)
+            continue
+        if text.startswith(_INLINE_BOX_BARE_OPEN, index):
+            depth += 1
+            index += len(_INLINE_BOX_BARE_OPEN)
+            continue
+        if text.startswith(_INLINE_BOX_CLOSE, index):
+            depth -= 1
+            index += len(_INLINE_BOX_CLOSE)
+            if depth == 0:
+                return index
+            continue
+        index += 1
+    raise WolframSyntaxError(f"Unterminated Wolfram inline box escape at offset {start}.")
+
+
 def _tokenize(text: str) -> list[_Token]:
     tokens: list[_Token] = []
     index = 0
@@ -720,6 +952,32 @@ def _tokenize(text: str) -> list[_Token]:
             continuation_end = _line_continuation_end(text, index)
             if continuation_end is not None:
                 index = continuation_end
+                continue
+            inline_box_end = _find_inline_box_end(text, index)
+            if inline_box_end is not None:
+                inner = text[index + len(_INLINE_BOX_OPEN) : inline_box_end - len(_INLINE_BOX_CLOSE)]
+                expr = _interpret_inline_box_content(inner)
+                tokens.append(_Token(
+                    kind="inline_box",
+                    text=text[index:inline_box_end],
+                    start=index,
+                    end=inline_box_end,
+                    value=expr,
+                ))
+                index = inline_box_end
+                continue
+            bare_box_end = _find_bare_box_end(text, index)
+            if bare_box_end is not None:
+                inner = text[index + len(_INLINE_BOX_BARE_OPEN) : bare_box_end - len(_INLINE_BOX_CLOSE)]
+                expr = _interpret_bare_box_content(inner)
+                tokens.append(_Token(
+                    kind="inline_box",
+                    text=text[index:bare_box_end],
+                    start=index,
+                    end=bare_box_end,
+                    value=expr,
+                ))
+                index = bare_box_end
                 continue
         if text.startswith("(*", index):
             index = skip_wl_comment(text, index)
@@ -733,6 +991,11 @@ def _tokenize(text: str) -> list[_Token]:
             token, index = escaped_token
             tokens.append(token)
             continue
+        symbol_token = _scan_symbol_with_escapes(text, index)
+        if symbol_token is not None:
+            token, index = symbol_token
+            tokens.append(token)
+            continue
         if text[index].isdigit() or (text[index] == "." and index + 1 < len(text) and text[index + 1].isdigit()):
             token, index = _scan_number(text, index)
             tokens.append(token)
@@ -740,14 +1003,6 @@ def _tokenize(text: str) -> list[_Token]:
         if text[index] == "%":
             token, index = _scan_percent_history(text, index)
             tokens.append(token)
-            continue
-        if _is_symbol_start(text[index]):
-            start = index
-            index += 1
-            while index < len(text) and _is_symbol_continue(text[index]):
-                index += 1
-            token_text = text[start:index]
-            tokens.append(_Token(kind="symbol", text=token_text, start=start, end=index, value=token_text))
             continue
 
         matched = False
@@ -817,7 +1072,7 @@ class _Parser:
     _POSTFIX_BP = 30
     _SEMICOLON_BP = 20
     _FUNCTION_BP = 10
-    _SPAN_BP = 170
+    _SPAN_BP = 110
     _PREFIX_BP = 150
 
     def __init__(self, text: str) -> None:
@@ -826,6 +1081,7 @@ class _Parser:
         self.index = 0
         self._grouped_expr_ids: set[int] = set()
         self._operator_expr_heads: dict[int, str] = {}
+        self._completed_span_ids: set[int] = set()
 
     def parse(self) -> Expr:
         if self._peek().kind == "eof":
@@ -836,6 +1092,15 @@ class _Parser:
 
     def _peek(self) -> _Token:
         return self.tokens[self.index]
+
+    def _token_terminates(self, token: _Token, terminators: set[str]) -> bool:
+        if token.kind == "eof":
+            return True
+        if token.kind in terminators:
+            return True
+        # Only operator tokens terminate by text. Symbol tokens that happen to share
+        # a name with a kind sentinel (notably ``eof``) must remain ordinary symbols.
+        return token.kind == "operator" and token.text in terminators
 
     def _consume(self) -> _Token:
         token = self.tokens[self.index]
@@ -858,19 +1123,38 @@ class _Parser:
 
     def _parse_expression(self, min_bp: int, terminators: set[str]) -> Expr:
         token = self._peek()
-        if token.text in terminators or token.kind in terminators:
+        if self._token_terminates(token, terminators):
             raise WolframSyntaxError(f"Unexpected {token.text!r} at offset {token.start}.")
 
         left = self._parse_prefix(terminators)
 
         while True:
             token = self._peek()
-            if token.text in terminators or token.kind in terminators or token.kind == "eof":
+            if self._token_terminates(token, terminators):
                 break
 
             if token.text in {"_", "__", "___"}:
                 if self._PATTERN_BP < min_bp:
                     break
+                if not self._can_attach_named_blank(left, token):
+                    # Wolfram requires the symbol and underscore to be adjacent. With
+                    # whitespace between them, the underscore introduces a fresh blank
+                    # that combines via implicit Times.
+                    if self._TIMES_BP < min_bp:
+                        break
+                    blank = self._parse_prefix_blank_at_pattern_position(token)
+                    # Eagerly absorb a trailing optional-dot so ``_?P _.`` parses to
+                    # ``Times[PatternTest[Blank[], P], Optional[Blank[]]]`` instead of
+                    # leaving a stray Dot fragment.
+                    if (
+                        self._peek().text == "."
+                        and self._is_optional_dot_candidate(blank)
+                        and self._is_postfix_optional_dot_context(terminators)
+                    ):
+                        self._consume()
+                        blank = call("Optional", blank)
+                    left = self._make_implicit_times(left, blank)
+                    continue
                 left = self._parse_postfix_pattern(left)
                 continue
 
@@ -957,6 +1241,16 @@ class _Parser:
             if token.text == ";;":
                 if self._SPAN_BP < min_bp:
                     break
+                if id(left) in self._completed_span_ids and id(left) not in self._grouped_expr_ids:
+                    # ``a ;; b ;; c`` is a single 3-part Span. Once that Span is
+                    # complete, any further ``;;`` starts a fresh prefix-Span and
+                    # combines via implicit Times, matching Wolfram's parse tree.
+                    if self._TIMES_BP < min_bp:
+                        break
+                    self._consume()
+                    next_span = self._finish_span(integer(1), terminators)
+                    left = self._make_implicit_times(left, next_span)
+                    continue
                 left = self._parse_infix_span(left, min_bp, terminators)
                 continue
 
@@ -1000,6 +1294,9 @@ class _Parser:
 
         if token.kind == "string":
             return string(str(token.value))
+
+        if token.kind == "inline_box":
+            return token.value if isinstance(token.value, Expr) else symbol("Null")
 
         if token.kind == "percent":
             return call("Out", integer(int(token.value)))
@@ -1047,7 +1344,10 @@ class _Parser:
             return call(head_name, self._parse_expression(self._POSTFIX_UNARY_BP, terminators))
 
         if token.text == "+":
-            return self._parse_expression(self._PREFIX_BP, terminators)
+            operand = self._parse_expression(self._PREFIX_BP, terminators)
+            result = call("Plus", operand)
+            self._operator_expr_heads[id(result)] = "Plus"
+            return result
 
         if token.text == "-":
             operand = self._parse_expression(self._PREFIX_BP, terminators)
@@ -1073,13 +1373,20 @@ class _Parser:
             return items
 
         while True:
-            items.append(self._parse_expression(0, terminators={",", end_token}))
+            token = self._peek()
+            # Wolfram emits a Syntax::com warning and substitutes Null for an absent
+            # comma-separated argument (``f[a,,b]``, ``f[a, b,]``). Tungsten matches the
+            # resulting parse tree without re-emitting the warning.
+            if token.text in {",", end_token}:
+                items.append(symbol("Null"))
+            else:
+                items.append(self._parse_expression(0, terminators={",", end_token}))
             if self._match(",") is None:
                 break
         return items
 
     def _starts_primary(self, token: _Token) -> bool:
-        return token.kind in {"integer", "real", "string", "symbol", "percent"} or token.text in {
+        return token.kind in {"integer", "real", "string", "symbol", "percent", "inline_box"} or token.text in {
             "(",
             "{",
             "<|",
@@ -1090,6 +1397,12 @@ class _Parser:
             "___",
             "<<",
         }
+
+    def _can_start_expression(self, token: _Token) -> bool:
+        # Tokens that ``_parse_prefix`` knows how to consume as the head of an expression.
+        if self._starts_primary(token):
+            return True
+        return token.text in {"?", "??", "++", "--", "+", "-", "!", ";;"}
 
     def _parse_prefix_blank(self) -> Expr:
         blank_token = self.tokens[self.index - 1]
@@ -1105,16 +1418,102 @@ class _Parser:
             return call(head_name, symbol(str(self._consume().value)))
         return call(head_name)
 
+    def _can_attach_named_blank(self, left: Expr, blank_token: _Token) -> bool:
+        if not isinstance(left, Symbol):
+            return False
+        if self.index == 0:
+            return False
+        previous_token = self.tokens[self.index - 1]
+        return previous_token.end == blank_token.start
+
+    def _parse_prefix_blank_at_pattern_position(self, blank_token: _Token) -> Expr:
+        # The underscore-family token has not yet been consumed when this is called.
+        consumed = self._consume()
+        assert consumed is blank_token
+        if blank_token.text == "_":
+            return self._parse_prefix_blank()
+        head_name = "BlankSequence" if blank_token.text == "__" else "BlankNullSequence"
+        return self._parse_prefix_sequence_blank(head_name)
+
+    def _make_implicit_times(self, left: Expr, right: Expr) -> Expr:
+        return self._make_flat_parser_operator_call("Times", left, right)
+
+    def _combine_colon(self, left: Expr, right: Expr) -> Expr:
+        # Wolfram's ``:`` is right-associative when parsed naively but interprets each
+        # contiguous chain ``a : b : c : d : ...`` as ``Optional[Pattern[a, b], <recurse on
+        # rest>]`` with the leftmost two elements pairing into a ``Pattern`` if the very
+        # first element is a symbol. ``right`` here is the already-parsed right-associative
+        # tail produced by Pratt parsing, so we walk it and re-fold.
+        chain = self._flatten_colon_chain(left) + self._flatten_colon_chain(right)
+        return self._fold_colon_chain(chain)
+
+    def _flatten_colon_chain(self, expr: Expr) -> list[Expr]:
+        if (
+            isinstance(expr, Call)
+            and (expr.has_head("Pattern") or expr.has_head("Optional"))
+            and len(expr.arguments) == 2
+            and self._operator_expr_heads.get(id(expr)) == "Colon"
+            and id(expr) not in self._grouped_expr_ids
+        ):
+            return [*self._flatten_colon_chain(expr.arguments[0]), *self._flatten_colon_chain(expr.arguments[1])]
+        return [expr]
+
+    def _fold_colon_chain(self, chain: list[Expr]) -> Expr:
+        assert len(chain) >= 1
+        if len(chain) == 1:
+            return chain[0]
+        head, second, *rest = chain
+        if isinstance(head, Symbol):
+            paired: Expr = call("Pattern", head, second)
+        else:
+            paired = call("Optional", head, second)
+        self._operator_expr_heads[id(paired)] = "Colon"
+        if not rest:
+            return paired
+        tail = self._fold_colon_chain([second_or_more for second_or_more in rest])
+        wrapper = call("Optional", paired, tail) if isinstance(head, Symbol) else paired
+        if not isinstance(head, Symbol):
+            wrapper = call("Optional", paired, tail)
+        self._operator_expr_heads[id(wrapper)] = "Colon"
+        return wrapper
+
+    def _make_compound_expression(self, left: Expr, right: Expr) -> Call:
+        # ``CompoundExpression`` is normally parse-stage flat, but parentheses must act
+        # as a structural barrier. A grouped right-hand-side stays nested.
+        arguments: list[Expr] = []
+        if (
+            isinstance(left, Call)
+            and left.has_head("CompoundExpression")
+            and id(left) not in self._grouped_expr_ids
+        ):
+            arguments.extend(left.arguments)
+        else:
+            arguments.append(left)
+        if (
+            isinstance(right, Call)
+            and right.has_head("CompoundExpression")
+            and id(right) not in self._grouped_expr_ids
+        ):
+            arguments.extend(right.arguments)
+        else:
+            arguments.append(right)
+        result = Call(head_expr=symbol("CompoundExpression"), arguments=tuple(arguments))
+        self._operator_expr_heads[id(result)] = "CompoundExpression"
+        return result
+
     def _parse_prefix_slot(self) -> Expr:
+        slot_token = self.tokens[self.index - 1]
         next_token = self._peek()
+        adjacent = slot_token.end == next_token.start
         if next_token.kind == "integer":
             return call("Slot", integer(int(self._consume().value)))
         split_slot = self._split_slot_index_before_dot(next_token)
         if split_slot is not None:
             return call("Slot", integer(split_slot))
-        if next_token.kind == "symbol":
-            key = string(str(self._consume().value))
-            return Call(head_expr=call("Slot", integer(1)), arguments=(key,))
+        if adjacent and next_token.kind == "symbol":
+            return call("Slot", string(str(self._consume().value)))
+        if adjacent and next_token.kind == "string":
+            return call("Slot", string(str(self._consume().value)))
         return call("Slot", integer(1))
 
     def _parse_prefix_slot_sequence(self) -> Expr:
@@ -1177,8 +1576,7 @@ class _Parser:
         dot_token = self.tokens[self.index]
         next_token = self.tokens[self.index + 1]
         return (
-            next_token.kind == "eof"
-            or next_token.text in terminators
+            self._token_terminates(next_token, terminators)
             or next_token.text in {
                 ",",
                 "]",
@@ -1258,28 +1656,43 @@ class _Parser:
     def _parse_infix_span(self, left: Expr, min_bp: int, terminators: set[str]) -> Expr:
         del min_bp
         self._expect(";;")
-        end = self._parse_span_argument(default=symbol("All"), terminators=terminators)
-        if isinstance(end, Call) and end.has_head("Span") and len(end.arguments) == 2:
-            return call("Span", left, end.arguments[0], end.arguments[1])
-        if self._match(";;") is not None:
-            step = self._parse_span_argument(default=integer(1), terminators=terminators)
-            return call("Span", left, end, step)
-        return call("Span", left, end)
+        return self._finish_span(left, terminators)
 
     def _parse_prefix_span(self, terminators: set[str]) -> Expr:
+        return self._finish_span(integer(1), terminators)
+
+    def _finish_span(self, start: Expr, terminators: set[str]) -> Expr:
+        # The first ``;;`` has already been consumed. The grammar accepts ``a ;; b``,
+        # ``a ;; b ;; c``, ``a ;; ;; c`` (``All`` middle), ``a ;;`` (``All`` end), and
+        # ``a ;; ;;`` (which Wolfram parses as two spans multiplied: only consume a
+        # second ``;;`` as the step separator if there is an actual step operand to parse
+        # after it).
         end = self._parse_span_argument(default=symbol("All"), terminators=terminators)
-        if isinstance(end, Call) and end.has_head("Span") and len(end.arguments) == 2:
-            return call("Span", integer(1), end.arguments[0], end.arguments[1])
-        if self._match(";;") is not None:
+        if self._peek().text == ";;" and self._step_separator_followed_by_operand():
+            self._consume()
             step = self._parse_span_argument(default=integer(1), terminators=terminators)
-            return call("Span", integer(1), end, step)
-        return call("Span", integer(1), end)
+            result = call("Span", start, end, step)
+        else:
+            result = call("Span", start, end)
+        self._completed_span_ids.add(id(result))
+        return result
+
+    def _step_separator_followed_by_operand(self) -> bool:
+        if self.index + 1 >= len(self.tokens):
+            return False
+        following = self.tokens[self.index + 1]
+        if following.kind == "eof":
+            return False
+        return self._can_start_expression(following)
 
     def _parse_span_argument(self, *, default: Expr, terminators: set[str]) -> Expr:
         token = self._peek()
-        if token.kind == "eof" or token.text in terminators or token.text in {",", "]", "]]", "}", "|>"}:
+        if (
+            self._token_terminates(token, terminators)
+            or (token.kind == "operator" and token.text in {",", "]", "]]", "}", "|>", ";;", ";"})
+        ):
             return default
-        return self._parse_expression(self._SPAN_BP, terminators | {",", "]", "]]", "}", "|>"})
+        return self._parse_expression(self._SPAN_BP + 1, terminators | {",", "]", "]]", "}", "|>"})
 
     def _parse_infix_operator(self, left: Expr, min_bp: int, terminators: set[str]) -> Expr | None:
         token = self._peek()
@@ -1315,13 +1728,17 @@ class _Parser:
             if self._SEMICOLON_BP < min_bp:
                 return None
             self._consume()
-            if self._peek().kind == "eof" or self._peek().text in terminators:
-                return call("CompoundExpression", left, symbol("Null"))
+            next_token = self._peek()
+            if (
+                self._token_terminates(next_token, terminators)
+                or not self._can_start_expression(next_token)
+            ):
+                return self._make_compound_expression(left, symbol("Null"))
             right = self._parse_expression(
                 self._SEMICOLON_BP + 1,
                 terminators=terminators | {"eof", ",", "]", "]]", "}", "|>", ")"},
             )
-            return call("CompoundExpression", left, right)
+            return self._make_compound_expression(left, right)
 
         if text == "=" and self.index + 1 < len(self.tokens) and self.tokens[self.index + 1].text == ".":
             if self._ASSIGNMENT_BP < min_bp:
@@ -1376,6 +1793,7 @@ class _Parser:
             "-=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "SubtractFrom"),
             "*=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "TimesBy"),
             "/=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "DivideBy"),
+            "//=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "ApplyTo"),
             "|->": (self._FUNCTION_BP, self._FUNCTION_BP, "Function"),
         }
 
@@ -1401,9 +1819,7 @@ class _Parser:
         if text == "-":
             return self._make_flat_parser_operator_call("Plus", left, call("Times", integer(-1), right))
         if text == ":":
-            if isinstance(left, Symbol):
-                return call("Pattern", left, right)
-            return call("Optional", left, right)
+            return self._combine_colon(left, right)
         if text == "@":
             return Call(head_expr=left, arguments=(right,))
         if text == "//":

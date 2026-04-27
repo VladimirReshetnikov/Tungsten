@@ -195,7 +195,7 @@ class ExpressionParserTests(unittest.TestCase):
         nested_named = parse_input_form("x |-> y |-> x[y]")
         self.assertEqual(postfix.to_full_form(), "Function[f[Slot[1]]]")
         self.assertEqual(self_ref.to_full_form(), "Function[Slot[0][x]]")
-        self.assertEqual(named.to_full_form(), 'Function[Slot[1]["name"]]')
+        self.assertEqual(named.to_full_form(), 'Function[Slot["name"]]')
         self.assertEqual(slot_sequence.to_full_form(), "Function[SlotSequence[1]]")
         self.assertEqual(slot_sequence_from_second.to_full_form(), "Function[SlotSequence[2]]")
         self.assertEqual(named_symbol.to_full_form(), "Function[x, Plus[x, x]]")

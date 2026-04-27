@@ -281,6 +281,207 @@ class SpanParserTests(unittest.TestCase):
             "List[a, c, e]",
         )
 
+    def test_span_with_unary_minus_in_step(self) -> None:
+        # ``1 ;; -1 ;; 2`` must bind unary minus tighter than ``;;`` so the step
+        # is the literal ``-1`` rather than ``-Span[1, 2]``.
+        expr = parse_expression("1 ;; -1 ;; 2", form="input")
+        self.assertEqual(expr.to_full_form(), "Span[1, -1, 2]")
+
+    def test_span_lower_precedence_than_plus(self) -> None:
+        # ``;;`` is lower precedence than ``+``, so ``1 + 2 ;; 3`` is
+        # ``Span[Plus[1, 2], 3]``, not ``Plus[1, Span[2, 3]]``.
+        expr = parse_expression("1 + 2 ;; 3", form="input")
+        self.assertEqual(expr.to_full_form(), "Span[Plus[1, 2], 3]")
+        expr = parse_expression("1 ;; 2 + 3", form="input")
+        self.assertEqual(expr.to_full_form(), "Span[1, Plus[2, 3]]")
+
+    def test_span_all_middle_default(self) -> None:
+        # ``a ;; ;; c`` is a single span with the missing middle defaulting to ``All``.
+        expr = parse_expression("a ;; ;; c", form="input")
+        self.assertEqual(expr.to_full_form(), "Span[a, All, c]")
+
+    def test_span_complete_then_implicit_times(self) -> None:
+        # Once a 3-part span is complete, a further ``;;`` starts a fresh span
+        # that combines with the previous one via implicit Times.
+        expr = parse_expression("a ;; b ;; c ;; d", form="input")
+        self.assertEqual(expr.to_full_form(), "Times[Span[a, b, c], Span[1, d]]")
+
+
+class CharacterEscapeParserTests(unittest.TestCase):
+    """Wolfram character escape forms that work outside string literals."""
+
+    def test_unicode_hex_escape(self) -> None:
+        # ``\:XXXX`` decodes to a single Unicode character usable as a symbol.
+        expr = parse_expression(r"\:ff0d", form="input")
+        self.assertEqual(expr.to_full_form(), "－")
+
+    def test_two_hex_escape(self) -> None:
+        # ``\.XX`` decodes a 2-hex-digit ISO-Latin-1 character.
+        expr = parse_expression(r"\.41", form="input")
+        self.assertEqual(expr.to_full_form(), "A")
+
+    def test_octal_escape(self) -> None:
+        # ``\OOO`` decodes a 3-octal-digit character.
+        expr = parse_expression(r"\041", form="input")
+        self.assertEqual(expr.to_full_form(), "!")
+
+    def test_long_hex_escape(self) -> None:
+        # ``\|XXXXXX`` decodes a 6-hex-digit character (covers astral plane).
+        expr = parse_expression(r"\|01F600", form="input")
+        self.assertEqual(expr.to_full_form(), "\U0001f600")
+
+    def test_escape_inside_string_literal(self) -> None:
+        # The same escape forms decode inside string literals.
+        expr = parse_expression(r'"a\:00b2"', form="input")
+        self.assertEqual(expr.to_full_form(), '"a²"')
+
+
+class InlineBoxParserTests(unittest.TestCase):
+    """Wolfram inline-box constructs ``\\!\\(...\\)`` and bare ``\\(...\\)`` outside strings."""
+
+    def test_inline_box_with_arithmetic_inner(self) -> None:
+        expr = parse_expression(r"a + \!\(b + c\)", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[a, Plus[b, c]]")
+
+    def test_inline_box_strips_traditional_form_prefix(self) -> None:
+        expr = parse_expression(r"\!\(TraditionalForm\`{a, b}\)", form="input")
+        self.assertEqual(expr.to_full_form(), "List[a, b]")
+
+    def test_bare_box_escape_surfaces_as_inert_head(self) -> None:
+        # Bare ``\(...\)`` is real notebook box syntax. Tungsten consumes it as an
+        # opaque head so the surrounding parse can continue.
+        expr = parse_expression(r'"intt" -> \(\[Integral] x\)', form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            'Rule["intt", BareBoxEscape["\\\\[Integral] x"]]',
+        )
+
+
+class AdjacentTypedBlankParserTests(unittest.TestCase):
+    """``_Eps _Pair`` (anonymous typed blanks) must parse as implicit Times."""
+
+    def test_anonymous_typed_blanks_with_space(self) -> None:
+        expr = parse_expression("_Eps _Pair", form="input")
+        self.assertEqual(expr.to_full_form(), "Times[Blank[Eps], Blank[Pair]]")
+
+    def test_named_blank_requires_adjacency(self) -> None:
+        # ``x _Integer`` (with space) is implicit Times, not ``Pattern[x, Blank[Integer]]``.
+        expr = parse_expression("x _Integer", form="input")
+        self.assertEqual(expr.to_full_form(), "Times[x, Blank[Integer]]")
+        expr = parse_expression("x_Integer", form="input")
+        self.assertEqual(expr.to_full_form(), "Pattern[x, Blank[Integer]]")
+
+    def test_implicit_times_optional_dot_is_absorbed(self) -> None:
+        # ``_?Negative _.`` parses as Times of PatternTest and Optional, not as
+        # a stray Dot operator after the second Blank.
+        expr = parse_expression("_?Negative _.", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Times[PatternTest[Blank[], Negative], Optional[Blank[]]]",
+        )
+
+
+class TrailingFunctionAfterSemicolonTests(unittest.TestCase):
+    """``a; &`` parses as ``Function[CompoundExpression[a, Null]]``."""
+
+    def test_trailing_function_after_compound_expression(self) -> None:
+        expr = parse_expression("a; &", form="input")
+        self.assertEqual(expr.to_full_form(), "Function[CompoundExpression[a, Null]]")
+
+    def test_grouping_preserves_compound_expression_nesting(self) -> None:
+        expr = parse_expression("a; (b;)", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "CompoundExpression[a, CompoundExpression[b, Null]]",
+        )
+
+
+class NamedSlotParserTests(unittest.TestCase):
+    """``#name`` and ``#"name"`` parse as ``Slot["name"]``."""
+
+    def test_named_slot_shorthand(self) -> None:
+        expr = parse_expression("#name", form="input")
+        self.assertEqual(expr.to_full_form(), 'Slot["name"]')
+
+    def test_named_slot_string(self) -> None:
+        expr = parse_expression('#"name"', form="input")
+        self.assertEqual(expr.to_full_form(), 'Slot["name"]')
+
+    def test_named_slot_with_space_is_implicit_times(self) -> None:
+        expr = parse_expression("# name", form="input")
+        self.assertEqual(expr.to_full_form(), "Times[Slot[1], name]")
+
+
+class ColonChainParserTests(unittest.TestCase):
+    """``:``-chains fold into ``Optional[Pattern[a, b], ...]`` like the kernel does."""
+
+    def test_three_element_colon_chain(self) -> None:
+        expr = parse_expression("a:b:c", form="input")
+        self.assertEqual(expr.to_full_form(), "Optional[Pattern[a, b], c]")
+
+    def test_four_element_colon_chain(self) -> None:
+        expr = parse_expression("a:b:c:d", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Optional[Pattern[a, b], Pattern[c, d]]",
+        )
+
+    def test_six_element_colon_chain(self) -> None:
+        expr = parse_expression("a:b:c:d:e:f", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Optional[Pattern[a, b], Optional[Pattern[c, d], Pattern[e, f]]]",
+        )
+
+
+class EofKindCollisionParserTests(unittest.TestCase):
+    """A symbol literally named ``eof`` must not collide with the EOF kind sentinel."""
+
+    def test_eof_symbol_in_compound_expression(self) -> None:
+        expr = parse_expression(
+            "Module[{eof}, eof = init; If[eof, x]]", form="input"
+        )
+        self.assertIn("Module", expr.to_full_form())
+        self.assertIn("Set[eof, init]", expr.to_full_form())
+        self.assertIn("If[eof, x]", expr.to_full_form())
+
+
+class TrailingCommaSequenceParserTests(unittest.TestCase):
+    """Wolfram emits a Syntax::com warning and treats absent comma operands as ``Null``."""
+
+    def test_trailing_comma_in_call(self) -> None:
+        expr = parse_expression("f[a, b,]", form="input")
+        self.assertEqual(expr.to_full_form(), "f[a, b, Null]")
+
+    def test_internal_empty_comma_in_list(self) -> None:
+        expr = parse_expression("{a,,b}", form="input")
+        self.assertEqual(expr.to_full_form(), "List[a, Null, b]")
+
+
+class UnaryPlusParserTests(unittest.TestCase):
+    """Unary ``+`` produces ``Plus[x]`` and folds into surrounding ``Plus`` chains."""
+
+    def test_unary_plus_on_atom(self) -> None:
+        expr = parse_expression("+x", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[x]")
+
+    def test_unary_plus_inside_plus_chain_folds(self) -> None:
+        expr = parse_expression("1 + +2", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[1, 2]")
+
+
+class ApplyToParserTests(unittest.TestCase):
+    """``//=`` parses as ``ApplyTo[lhs, rhs]``."""
+
+    def test_apply_to_basic(self) -> None:
+        expr = parse_expression("a //= f", form="input")
+        self.assertEqual(expr.to_full_form(), "ApplyTo[a, f]")
+
+    def test_apply_to_right_associative(self) -> None:
+        expr = parse_expression("a //= b //= c", form="input")
+        self.assertEqual(expr.to_full_form(), "ApplyTo[a, ApplyTo[b, c]]")
+
+
 class KeyMapEvaluationTests(unittest.TestCase):
     """Finding B12: ``KeyMap[f, assoc]`` evaluates the mapped key expression."""
 

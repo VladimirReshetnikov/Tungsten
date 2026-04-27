@@ -9247,9 +9247,25 @@ def _slot_index(expr: Expr) -> int | None:
         return None
     if len(expr.arguments) == 0:
         return 1
-    if len(expr.arguments) != 1 or not isinstance(expr.arguments[0], Integer):
-        raise WolframEvaluationError("Slot expects zero arguments or a single integer index.")
-    return expr.arguments[0].value
+    if len(expr.arguments) != 1:
+        raise WolframEvaluationError("Slot expects zero arguments or a single index.")
+    argument = expr.arguments[0]
+    if isinstance(argument, Integer):
+        return argument.value
+    if isinstance(argument, String):
+        return None
+    raise WolframEvaluationError("Slot expects an integer index or a string name.")
+
+
+def _named_slot_key(expr: Expr) -> str | None:
+    if not isinstance(expr, Call) or not expr.has_head("Slot"):
+        return None
+    if len(expr.arguments) != 1:
+        return None
+    argument = expr.arguments[0]
+    if isinstance(argument, String):
+        return argument.value
+    return None
 
 
 def _slot_sequence_index(expr: Expr) -> int | None:
@@ -9287,6 +9303,19 @@ def _replace_slots_in_expr(expr: Expr, arguments: Sequence[Expr], self_function:
                 f"Slot {slot_index} cannot be filled from {len(arguments)} argument(s)."
             )
         return arguments[slot_index - 1]
+
+    named_key = _named_slot_key(expr)
+    if named_key is not None:
+        if not arguments:
+            raise WolframEvaluationError(
+                f"Named Slot {named_key!r} cannot be filled from zero argument(s)."
+            )
+        first = arguments[0]
+        if _is_association(first):
+            return lookup(first, string(named_key))
+        # For non-Association arguments, named slots fall back to function-call form
+        # ``firstArg["name"]``, mirroring how the kernel surfaces the slot.
+        return Call(head_expr=first, arguments=(string(named_key),))
 
     slot_sequence_values = _slot_sequence_values(expr, arguments)
     if slot_sequence_values is not None:
