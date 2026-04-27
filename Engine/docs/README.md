@@ -87,6 +87,7 @@ The docs are split so readers can choose the right depth:
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
+| [wolfram-string-literal-spec.md](wolfram-string-literal-spec.md) | Normative specification for Wolfram-Language string literals, escape sequences, and named-character handling, with parity rules against the Wolfram 14.3 kernel. |
 | [symbol-context-registry.md](symbol-context-registry.md) | Normative design note for Tungsten's process-local symbol registry, fixed context state, name queries, `Unique`, and `ValueQ` boundaries. |
 | [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
 | [sequence-pattern-matching.md](sequence-pattern-matching.md) | Normative specification for structural sequence-pattern allocation, named sequence bindings, repetition, optional arguments, options patterns, and match-priority wrappers. |
