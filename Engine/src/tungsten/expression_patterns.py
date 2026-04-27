@@ -1718,6 +1718,8 @@ def cases(
     pattern_spec: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
     limit: Expr | int | None = None,
+    *,
+    include_heads: bool = False,
 ) -> Call:
     level_spec = integer(1) if spec is None else spec
     level_min, level_max = _normalize_level_spec(level_spec)
@@ -1725,7 +1727,7 @@ def cases(
     pattern, template, delayed = _cases_pattern_spec(pattern_spec)
 
     records: list[_PatternRecord] = []
-    _collect_pattern_records(expr, 0, records, heads=False)
+    _collect_pattern_records(expr, 0, records, heads=include_heads)
 
     results: list[Expr] = []
     for record in records:
@@ -1835,9 +1837,10 @@ def delete_cases(
         remaining=remaining,
     )
     if transformed is _DELETE_SENTINEL:
-        raise WolframEvaluationError(
-            "DeleteCases does not currently support deleting the whole expression."
-        )
+        # Whole-expression deletion at level 0: the kernel returns a
+        # bare ``Sequence[]`` (which splices into an enclosing call as
+        # nothing), so Tungsten reproduces that contract here.
+        return call("Sequence")
     assert isinstance(transformed, Expr)
     return transformed
 

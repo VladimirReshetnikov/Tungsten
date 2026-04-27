@@ -379,16 +379,35 @@ def evaluate_once(expr: Expr) -> Expr:
             raise WolframEvaluationError("FreeQ expects an expression, a pattern, and an optional level specification.")
 
         if raw_head_name == "Cases":
-            if len(expr.arguments) == 2:
-                return cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
-            if len(expr.arguments) == 3:
-                return cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
-            if len(expr.arguments) == 4:
+            # Strip an optional ``Heads -> True/False`` rule from the
+            # tail so ``Cases[expr, patt, level, Heads -> True]`` works.
+            cases_args = list(expr.arguments)
+            cases_include_heads = False
+            if cases_args and _is_heads_option_rule(cases_args[-1]):
+                heads_rule = cases_args[-1]
+                cases_args = cases_args[:-1]
+                assert isinstance(heads_rule, Call)
+                cases_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+            if len(cases_args) == 2:
                 return cases(
-                    _evaluate_transparent_argument(expr.arguments[0]),
-                    expr.arguments[1],
-                    evaluate(expr.arguments[2]),
-                    evaluate(expr.arguments[3]),
+                    _evaluate_transparent_argument(cases_args[0]),
+                    cases_args[1],
+                    include_heads=cases_include_heads,
+                )
+            if len(cases_args) == 3:
+                return cases(
+                    _evaluate_transparent_argument(cases_args[0]),
+                    cases_args[1],
+                    evaluate(cases_args[2]),
+                    include_heads=cases_include_heads,
+                )
+            if len(cases_args) == 4:
+                return cases(
+                    _evaluate_transparent_argument(cases_args[0]),
+                    cases_args[1],
+                    evaluate(cases_args[2]),
+                    evaluate(cases_args[3]),
+                    include_heads=cases_include_heads,
                 )
             raise WolframEvaluationError(
                 "Cases expects an expression, a pattern or transformation rule, and optional level and match limits."
@@ -1282,9 +1301,11 @@ def evaluate_once(expr: Expr) -> Expr:
         return comap_apply(evaluated_arguments[0], evaluated_arguments[1])
 
     if evaluated_head.name == "Through":
-        if len(evaluated_arguments) != 1:
-            raise WolframEvaluationError("Through currently supports exactly one argument.")
-        return through(evaluated_arguments[0])
+        if len(evaluated_arguments) == 1:
+            return through(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return through(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Through expects an expression and an optional restricting head.")
 
     if evaluated_head.name == "MapThread":
         if len(evaluated_arguments) == 2:
@@ -1334,7 +1355,9 @@ def evaluate_once(expr: Expr) -> Expr:
             return tr(evaluated_arguments[0])
         if len(evaluated_arguments) == 2:
             return tr(evaluated_arguments[0], evaluated_arguments[1])
-        raise WolframEvaluationError("Tr expects an array and an optional combiner.")
+        if len(evaluated_arguments) == 3:
+            return tr(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Tr expects an array, an optional combiner, and an optional rank-restriction integer.")
 
     if evaluated_head.name == "Transpose":
         if len(evaluated_arguments) == 1:
@@ -1655,10 +1678,20 @@ def evaluate_once(expr: Expr) -> Expr:
         )
 
     if evaluated_head.name == "MemberQ":
-        if len(evaluated_arguments) == 2:
-            return member_q(evaluated_arguments[0], expr.arguments[1])
-        if len(evaluated_arguments) == 3:
-            return member_q(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
+        # Strip an optional trailing ``Heads -> True/False`` rule so
+        # ``MemberQ[..., level, Heads -> False]`` works.
+        member_args = list(evaluated_arguments)
+        member_raw = list(expr.arguments)
+        member_include_heads = False
+        if member_args and _is_heads_option_rule(member_args[-1]):
+            heads_rule = member_args.pop()
+            member_raw.pop()
+            assert isinstance(heads_rule, Call)
+            member_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+        if len(member_args) == 2:
+            return member_q(member_args[0], member_raw[1], include_heads=member_include_heads)
+        if len(member_args) == 3:
+            return member_q(member_args[0], member_raw[1], member_args[2], include_heads=member_include_heads)
         raise WolframEvaluationError("MemberQ expects an expression, a pattern, and an optional level specification.")
 
     if evaluated_head.name == "Order":
@@ -1803,9 +1836,15 @@ def evaluate_once(expr: Expr) -> Expr:
         raise WolframEvaluationError("DeleteDuplicates expects an expression and an optional binary test.")
 
     if evaluated_head.name == "DeleteDuplicatesBy":
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("DeleteDuplicatesBy expects exactly two arguments.")
-        return delete_duplicates_by(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 2:
+            return delete_duplicates_by(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return delete_duplicates_by(
+                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+            )
+        raise WolframEvaluationError(
+            "DeleteDuplicatesBy expects an expression, a key function, and an optional binary test."
+        )
 
     if evaluated_head.name == "DeleteAdjacentDuplicates":
         if len(evaluated_arguments) == 1:
@@ -1947,7 +1986,9 @@ def evaluate_once(expr: Expr) -> Expr:
     if evaluated_head.name == "Total":
         if len(evaluated_arguments) == 1:
             return total(evaluated_arguments[0])
-        raise WolframEvaluationError("Total currently supports only the one-argument form.")
+        if len(evaluated_arguments) == 2:
+            return total(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Total expects a list/association and an optional levelspec.")
 
     if evaluated_head.name == "Mean":
         if len(evaluated_arguments) != 1:
@@ -1988,31 +2029,136 @@ def evaluate_once(expr: Expr) -> Expr:
             raise WolframEvaluationError("Counts expects exactly one argument.")
         return counts(evaluated_arguments[0])
 
+    if evaluated_head.name == "MinMax":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("MinMax expects exactly one argument.")
+        return min_max_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "RankedMin":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("RankedMin expects a list and an integer rank.")
+        return ranked_min_expr(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "RankedMax":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("RankedMax expects a list and an integer rank.")
+        return ranked_max_expr(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Mode":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Mode expects exactly one argument.")
+        return mode_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "Quantile":
+        if len(evaluated_arguments) == 2:
+            return quantile_expr(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return quantile_expr(
+                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+            )
+        raise WolframEvaluationError(
+            "Quantile expects a list, a quantile (or list of quantiles), and an optional ``{{a, b}, {c, d}}`` parameter list."
+        )
+
+    if evaluated_head.name == "Quartiles":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Quartiles expects exactly one argument.")
+        return quartiles_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "BinCounts":
+        if len(evaluated_arguments) == 1:
+            return bin_counts_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return bin_counts_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("BinCounts expects a list and an optional bin spec.")
+
+    if evaluated_head.name == "BinLists":
+        if len(evaluated_arguments) == 1:
+            return bin_lists_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return bin_lists_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("BinLists expects a list and an optional bin spec.")
+
+    if evaluated_head.name == "Permute":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Permute expects a list and a permutation specification.")
+        return permute_expr(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "PermutationCycles":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("PermutationCycles expects exactly one positional permutation.")
+        return permutation_cycles_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "PermutationList":
+        if len(evaluated_arguments) == 1:
+            return permutation_list_expr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return permutation_list_expr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError(
+            "PermutationList expects ``Cycles[{{…}}]`` and an optional non-negative integer length."
+        )
+
+    if evaluated_head.name == "PermutationOrder":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("PermutationOrder expects exactly one ``Cycles`` argument.")
+        return permutation_order_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "SequenceCases":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("SequenceCases expects a list and a List pattern.")
+        return sequence_cases_expr(evaluated_arguments[0], expr.arguments[1])
+
+    if evaluated_head.name == "SequencePosition":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("SequencePosition expects a list and a List pattern.")
+        return sequence_position_expr(evaluated_arguments[0], expr.arguments[1])
+
+    if evaluated_head.name == "SequenceCount":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("SequenceCount expects a list and a List pattern.")
+        return sequence_count_expr(evaluated_arguments[0], expr.arguments[1])
+
     if evaluated_head.name == "Catenate":
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Catenate expects exactly one argument.")
         return catenate(evaluated_arguments[0])
 
     if evaluated_head.name == "Differences":
-        if len(evaluated_arguments) != 1:
-            raise WolframEvaluationError("Differences currently supports only the one-argument form.")
-        return differences(evaluated_arguments[0])
+        if len(evaluated_arguments) == 1:
+            return differences(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return differences(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Differences expects a list and an optional non-negative integer order.")
 
     if evaluated_head.name == "Accumulate":
-        if len(evaluated_arguments) != 1:
-            raise WolframEvaluationError("Accumulate expects exactly one argument.")
-        return accumulate(evaluated_arguments[0])
+        if len(evaluated_arguments) == 1:
+            return accumulate(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return accumulate(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Accumulate expects a list and an optional binary combiner.")
 
     if evaluated_head.name == "Riffle":
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("Riffle currently supports the two-argument form only.")
-        return riffle(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 2:
+            return riffle(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return riffle(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("Riffle expects a list, a separator, and an optional ``{a, b, s}`` span.")
 
     if evaluated_head.name == "Count":
-        if len(evaluated_arguments) == 2:
-            return count_items(evaluated_arguments[0], expr.arguments[1])
-        if len(evaluated_arguments) == 3:
-            return count_items(evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2])
+        # Strip an optional trailing ``Heads -> True/False`` rule so
+        # ``Count[..., level, Heads -> True]`` works.
+        count_args = list(evaluated_arguments)
+        count_raw = list(expr.arguments)
+        count_include_heads = False
+        if count_args and _is_heads_option_rule(count_args[-1]):
+            heads_rule = count_args.pop()
+            count_raw.pop()
+            assert isinstance(heads_rule, Call)
+            count_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+        if len(count_args) == 2:
+            return count_items(count_args[0], count_raw[1], include_heads=count_include_heads)
+        if len(count_args) == 3:
+            return count_items(count_args[0], count_raw[1], count_args[2], include_heads=count_include_heads)
         raise WolframEvaluationError("Count expects an expression, a pattern, and an optional levelspec.")
 
     if evaluated_head.name == "AllTrue":

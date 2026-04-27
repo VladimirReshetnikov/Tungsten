@@ -1,9 +1,9 @@
 # Tungsten Function-Surface Gap Report
 
 - Created (UTC): 2026-04-27T02:13:19Z
-- Updated (UTC): 2026-04-27T02:40:49Z
+- Updated (UTC): 2026-04-27T02:55:00Z
 - Repository HEAD: fef68fe7c4ff341cf5e62f4f20a8765192e63a38
-- Status: Research-and-plan with Bucket B implemented
+- Status: Research-and-plan with Buckets B (number theory) and D (Lists, arrays, tensors, structural) implemented in follow-up commits. The bullets for landed buckets are kept here as historical context — the support matrix is the authoritative current-state record.
 - Audience: Tungsten maintainers planning the next implementation passes
 - Scope: Functions/heads in `src/Tungsten/src/tungsten/expression*.py`
 

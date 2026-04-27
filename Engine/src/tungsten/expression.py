@@ -10695,8 +10695,12 @@ def cases(
     pattern_spec: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
     limit: Expr | int | None = None,
+    *,
+    include_heads: bool = False,
 ) -> Expr:
-    return _expression_patterns_module().cases(expr, pattern_spec, spec, limit)
+    return _expression_patterns_module().cases(
+        expr, pattern_spec, spec, limit, include_heads=include_heads
+    )
 
 
 def delete_cases(
@@ -11428,6 +11432,21 @@ def _reverse_at_levels(expr: Expr, levels: set[int], current_level: int) -> Expr
 
 
 def rotate_left(expr: Expr, amount: Expr | int = 1) -> Expr:
+    """``RotateLeft[expr]`` / ``RotateLeft[expr, n]`` /
+    ``RotateLeft[expr, {n1, n2, …}]``.
+
+    The list-of-amounts form rotates each level in turn: ``n1``
+    positions left at the outermost level, then ``n2`` positions left
+    at every immediate child, and so on. Levels not listed are left
+    untouched. Each level must be a ``List`` with at least one
+    element to rotate.
+    """
+    if isinstance(amount, Call) and amount.has_head("List"):
+        amounts: list[int] = []
+        for argument in amount.arguments:
+            amounts.append(_normalize_integer_argument(argument, "RotateLeft"))
+        return _rotate_per_axis(expr, amounts, "RotateLeft")
+
     entries = _association_entries(expr)
     if entries is not None:
         if not entries:
@@ -11450,7 +11469,50 @@ def rotate_left(expr: Expr, amount: Expr | int = 1) -> Expr:
 
 
 def rotate_right(expr: Expr, amount: Expr | int = 1) -> Expr:
+    if isinstance(amount, Call) and amount.has_head("List"):
+        amounts: list[int] = []
+        for argument in amount.arguments:
+            amounts.append(-_normalize_integer_argument(argument, "RotateRight"))
+        return _rotate_per_axis(expr, amounts, "RotateRight")
     return rotate_left(expr, -_normalize_integer_argument(amount, "RotateRight"))
+
+
+def _rotate_per_axis(expr: Expr, amounts: Sequence[int], function_name: str) -> Expr:
+    """Apply per-axis left rotations recursively.
+
+    The first amount rotates the outer ``List`` (or association) left
+    by that many positions. Remaining amounts apply to every child of
+    the resulting outer expression. Tungsten requires every level
+    consumed by ``amounts`` to be a list-shaped expression — empty
+    levels are returned unchanged.
+    """
+    if not amounts:
+        return expr
+    head_amount = amounts[0]
+    rest = amounts[1:]
+    entries = _association_entries(expr)
+    if entries is not None:
+        rotated = rotate_left(expr, head_amount)
+        if not rest:
+            return rotated
+        rotated_entries = _association_entries(rotated) or ()
+        new_entries = [
+            _AssociationEntry(
+                rule_head=entry.rule_head,
+                key=entry.key,
+                value=_rotate_per_axis(entry.value, rest, function_name),
+            )
+            for entry in rotated_entries
+        ]
+        return _association_expr(new_entries)
+    compound = _require_compound(expr, function_name)
+    rotated = rotate_left(expr, head_amount)
+    if not rest:
+        return rotated
+    if not (isinstance(rotated, Call) and rotated.has_head(compound.head_expr.name if isinstance(compound.head_expr, Symbol) else "List")):
+        return rotated
+    new_children = [_rotate_per_axis(child, rest, function_name) for child in rotated.arguments]
+    return _rebuild(rotated, new_children)
 
 
 def flatten(expr: Expr, level_spec: Expr | int | None = None) -> Expr:
@@ -13402,28 +13464,61 @@ def map_all(function: Expr, expr: Expr) -> Expr:
 
 
 def map_indexed(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Expr:
-    if spec is not None and spec != integer(1) and spec != 1:
-        raise WolframEvaluationError("MapIndexed currently supports only the default level specification.")
+    """``MapIndexed[f, expr]`` / ``MapIndexed[f, expr, levelspec]``.
 
-    entries = _association_entries(expr)
-    if entries is not None:
-        return _association_expr(
-            _AssociationEntry(
-                rule_head=entry.rule_head,
-                key=entry.key,
-                value=_apply_callable(function, (entry.value, list_expr(call("Key", entry.key)))),
-            )
-            for entry in entries
-        )
+    The default level is 1, applying ``f`` to each immediate child
+    along with that child's one-element index list. With a level spec,
+    ``MapIndexed`` walks the tree per the kernel's contract:
+    integer ``n`` means levels ``1..n``; ``{n}`` means level ``n`` only;
+    integers may be negative to count from the leaves toward the root.
+    Each call receives the structural position as a list of integers
+    (or ``Key[k]`` components for association traversal).
+    """
+    level_spec: Expr | int | tuple[int, int] = (1, 1) if spec is None else spec
+    level_min, level_max = _normalize_level_spec(level_spec)
 
-    compound = _require_compound(expr, "MapIndexed")
-    return _rebuild(
-        compound,
-        tuple(
-            _apply_callable(function, (argument, list_expr(integer(index))))
-            for index, argument in enumerate(compound.arguments, start=1)
-        ),
-    )
+    def recurse(current: Expr, path: tuple[Expr, ...]) -> Expr:
+        positive_level = len(path)
+        entries = _association_entries(current)
+        if entries is not None:
+            new_entries = []
+            for entry in entries:
+                child_path = path + (call("Key", entry.key),)
+                new_entries.append(
+                    _AssociationEntry(
+                        rule_head=entry.rule_head,
+                        key=entry.key,
+                        value=recurse(entry.value, child_path),
+                    )
+                )
+            mapped: Expr = _association_expr(new_entries)
+        elif isinstance(current, Call) and not _is_atom_like_call(current):
+            new_args = []
+            for index, argument in enumerate(current.arguments, start=1):
+                child_path = path + (integer(index),)
+                new_args.append(recurse(argument, child_path))
+            mapped = _rebuild(current, tuple(new_args))
+        else:
+            mapped = current
+        # Apply ``f`` at this level if it falls within the requested
+        # bounds — note ``MapIndexed`` *replaces* the visited subexpression
+        # with ``f[subexpr, position]``, unlike ``Map`` which always
+        # rewrites the immediate slot.
+        negative_level = -depth(mapped)
+        if positive_level >= 1 and _level_bounds_match(positive_level, negative_level, level_min, level_max):
+            return _apply_callable(function, (mapped, list_expr(*path)))
+        return mapped
+
+    return recurse(expr, ())
+
+
+def _is_atom_like_call(expr: Expr) -> bool:
+    """Tungsten treats numeric atoms with bracketed FullForm
+    (``Rational``, ``Complex``, ``Overflow[]``, ``SparseArray``,
+    etc.) as atoms for traversal. Pattern heads should still be
+    recursed; only structural-atom heads are excluded.
+    """
+    return False  # ordinary structural traversal includes everything for now
 
 
 def construct(function: Expr, *arguments: Expr) -> Expr:
@@ -13685,9 +13780,24 @@ def comap_apply(functions_expr: Expr, expr: Expr) -> Expr:
     )
 
 
-def through(expr: Expr) -> Expr:
+def through(expr: Expr, target_head: Expr | None = None) -> Expr:
+    """``Through[f[a, b]]`` / ``Through[f[a, b], head]``.
+
+    The single-argument form distributes the arguments through every
+    function held by the head of ``expr``: ``Through[(f + g)[x]]``
+    becomes ``f[x] + g[x]``. The two-argument form only threads when
+    the head of ``expr`` matches ``head`` (by name); otherwise the
+    expression is returned unchanged, matching the kernel's
+    ``Through[(f + g)[x, y], List]`` -> ``(f + g)[x, y]`` behavior.
+    """
     if not isinstance(expr, Call):
         return expr
+    if target_head is not None:
+        if not isinstance(target_head, Symbol):
+            raise WolframEvaluationError("Through's second argument must be a Symbol head.")
+        outer_head = expr.head_expr
+        if not (isinstance(outer_head, Call) and isinstance(outer_head.head_expr, Symbol) and outer_head.head_expr.name == target_head.name):
+            return expr
     head_entries = _association_entries(expr.head_expr)
     if head_entries is not None:
         return _association_expr(
@@ -13858,17 +13968,39 @@ def inner(function: Expr, left: Expr, right: Expr, combiner: Expr) -> Expr:
 
 
 def tuples_expr(items: Expr, count: Expr | int | None = None) -> Expr:
+    """``Tuples[{seq1, seq2, …}]`` / ``Tuples[seq, n]`` /
+    ``Tuples[seq, {n1, n2, …}]``.
+
+    The list-of-sequences form takes the Cartesian product. The
+    ``Tuples[seq, n]`` form repeats ``seq`` ``n`` times. The
+    multi-shape ``Tuples[seq, {n1, n2, …}]`` returns nested tuples
+    whose i-th level has length ``ni`` — equivalent to wrapping each
+    element in a ``Tuples[seq, n_inner]`` recursively.
+    """
     if count is None:
         if not isinstance(items, Call) or not items.has_head("List"):
             raise WolframEvaluationError("Tuples expects a list of sequences or a sequence with a repetition count.")
         sequences = [_sequence_values(item, "Tuples") for item in items.arguments]
-    else:
-        repetitions = _normalize_integer_argument(count, "Tuples")
-        if repetitions < 0:
-            raise WolframEvaluationError("Tuples expects a non-negative repetition count.")
-        base_items = _sequence_values(items, "Tuples")
-        sequences = [base_items] * repetitions
+        return _flat_tuples_product(sequences)
 
+    if isinstance(count, Call) and count.has_head("List"):
+        shape: list[int] = []
+        for argument in count.arguments:
+            shape.append(_normalize_integer_argument(argument, "Tuples"))
+        if any(value < 0 for value in shape):
+            raise WolframEvaluationError("Tuples shape components must be non-negative integers.")
+        base_items = _sequence_values(items, "Tuples")
+        return _shaped_tuples(base_items, shape)
+
+    repetitions = _normalize_integer_argument(count, "Tuples")
+    if repetitions < 0:
+        raise WolframEvaluationError("Tuples expects a non-negative repetition count.")
+    base_items = _sequence_values(items, "Tuples")
+    sequences = [base_items] * repetitions
+    return _flat_tuples_product(sequences)
+
+
+def _flat_tuples_product(sequences: Sequence[Sequence[Expr]]) -> Expr:
     results: list[Expr] = [_evaluated_list_expr()]
     for sequence in sequences:
         next_results: list[Expr] = []
@@ -13878,6 +14010,27 @@ def tuples_expr(items: Expr, count: Expr | int | None = None) -> Expr:
                 next_results.append(_evaluated_list_expr(*prefix.arguments, item))
         results = next_results
     return _evaluated_list_expr(*results)
+
+
+def _shaped_tuples(base_items: Sequence[Expr], shape: Sequence[int]) -> Expr:
+    """Recursive constructor for ``Tuples[seq, {n1, n2, …}]``.
+
+    Equivalent to ``Tuples[Tuples[seq, n2, …], n1]``, i.e. the outermost
+    level cycles through every length-``n1`` choice of inner tuples.
+    Empty shape returns the trivial single-element nested-list Tuples
+    output (``{}`` when shape is empty: matches the kernel).
+    """
+    if not shape:
+        return _evaluated_list_expr()
+    if len(shape) == 1:
+        return _flat_tuples_product([base_items] * shape[0])
+    inner_results: Call = _shaped_tuples(base_items, shape[1:])  # type: ignore[assignment]
+    inner_choices = inner_results.arguments
+    # Outer level: every length-shape[0] choice of inner_choices.
+    outer = _flat_tuples_product([inner_choices] * shape[0])
+    return outer
+
+
 
 
 def _normalize_dimensions(dimensions: Expr | int, function_name: str) -> list[int]:
@@ -14473,9 +14626,19 @@ def member_q(
     expr: Expr,
     pattern: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
+    *,
+    include_heads: bool = False,
 ) -> Symbol:
+    """``MemberQ[expr, patt]`` / ``MemberQ[expr, patt, levelspec]`` /
+    ``MemberQ[expr, patt, levelspec, Heads -> True/False]``.
+
+    The Wolfram default for ``MemberQ`` is level ``{1}`` and
+    ``Heads -> False`` — i.e. immediate non-head members. Tungsten's
+    structural traversal matches that contract and also honors the
+    explicit ``Heads`` option when supplied.
+    """
     effective_spec: Expr | int | tuple[int, int] = (1, 1) if spec is None else spec
-    positions = position(expr, pattern, spec=effective_spec, limit=1)
+    positions = position(expr, pattern, spec=effective_spec, limit=1, include_heads=include_heads)
     assert isinstance(positions, Call) and positions.has_head("List")
     return _bool_symbol(bool(positions.arguments))
 
@@ -14508,14 +14671,33 @@ def delete_duplicates(expr: Expr, test: Expr | None = None) -> Expr:
     return _rebuild(compound, kept_arguments)
 
 
-def delete_duplicates_by(expr: Expr, function: Expr) -> Expr:
+def delete_duplicates_by(expr: Expr, function: Expr, test: Expr | None = None) -> Expr:
+    """``DeleteDuplicatesBy[expr, f]`` /
+    ``DeleteDuplicatesBy[expr, f, test]``.
+
+    Each element's key is computed via ``f`` and tested against
+    previously kept keys. With no test, structural equality decides
+    duplication. With a binary test, the element is dropped when
+    ``test[earlier_key, current_key]`` evaluates to explicit ``True``
+    for any previously kept key.
+    """
+
+    def is_duplicate_key(seen_keys: Sequence[Expr], key: Expr) -> bool:
+        if test is None:
+            return any(key == prior for prior in seen_keys)
+        for prior in seen_keys:
+            outcome = evaluate(_apply_callable(test, (prior, key)))
+            if isinstance(outcome, Symbol) and outcome.name == "True":
+                return True
+        return False
+
     entries = _association_entries(expr)
     if entries is not None:
         kept: list[_AssociationEntry] = []
         seen_keys: list[Expr] = []
         for entry in entries:
             key = _apply_callable(function, (entry.value,))
-            if any(key == prior for prior in seen_keys):
+            if is_duplicate_key(seen_keys, key):
                 continue
             kept.append(entry)
             seen_keys.append(key)
@@ -14526,7 +14708,7 @@ def delete_duplicates_by(expr: Expr, function: Expr) -> Expr:
     seen_keys: list[Expr] = []
     for argument in compound.arguments:
         key = _apply_callable(function, (argument,))
-        if any(key == prior for prior in seen_keys):
+        if is_duplicate_key(seen_keys, key):
             continue
         kept_arguments.append(argument)
         seen_keys.append(key)
@@ -15041,23 +15223,74 @@ def _combine_terms(terms: Sequence[Expr], combiner: Expr | None) -> Expr:
     return evaluate(_apply_callable(combiner, tuple(terms)))
 
 
-def tr(expr: Expr, combiner: Expr | None = None) -> Expr:
-    dimensions = _array_dimensions(expr, "Tr")
-    if len(dimensions) == 1:
-        terms = [_array_value_at(expr, (index,)) for index in range(1, dimensions[0] + 1)]
+def tr(expr: Expr, combiner: Expr | None = None, level_expr: Expr | None = None) -> Expr:
+    """``Tr[array]`` / ``Tr[array, f]`` / ``Tr[array, f, n]``.
+
+    The two-argument form folds the diagonal of a vector or matrix
+    through ``f``. The three-argument form is a rank-restricted
+    contraction: it folds along the first ``n`` axes (always combining
+    using ``f``), so ``Tr[m, Plus, 1]`` of a matrix is the column-wise
+    sum (equivalent to ``Total[m]`` here, which folds level 1).
+    """
+    if level_expr is None:
+        dimensions = _array_dimensions(expr, "Tr")
+        if len(dimensions) == 1:
+            terms = [_array_value_at(expr, (index,)) for index in range(1, dimensions[0] + 1)]
+            return _combine_terms(terms, combiner)
+        if len(dimensions) != 2:
+            raise WolframEvaluationError("Tr currently supports vectors and matrices.")
+        diagonal_count = min(dimensions)
+        if isinstance(expr, SparseArrayExpr) and expr.fill_value == integer(0):
+            terms = [
+                entry.value
+                for entry in expr.entries
+                if entry.indices[0] == entry.indices[1] and entry.indices[0] <= diagonal_count
+            ]
+            return _combine_terms(terms, combiner)
+        terms = [_array_value_at(expr, (index, index)) for index in range(1, diagonal_count + 1)]
         return _combine_terms(terms, combiner)
-    if len(dimensions) != 2:
-        raise WolframEvaluationError("Tr currently supports vectors and matrices.")
-    diagonal_count = min(dimensions)
-    if isinstance(expr, SparseArrayExpr) and expr.fill_value == integer(0):
-        terms = [
-            entry.value
-            for entry in expr.entries
-            if entry.indices[0] == entry.indices[1] and entry.indices[0] <= diagonal_count
-        ]
-        return _combine_terms(terms, combiner)
-    terms = [_array_value_at(expr, (index, index)) for index in range(1, diagonal_count + 1)]
-    return _combine_terms(terms, combiner)
+
+    if not isinstance(level_expr, Integer) or level_expr.value < 1:
+        raise WolframEvaluationError("Tr level must be a positive integer.")
+    level = level_expr.value
+    if combiner is None:
+        combiner = symbol("Plus")
+    return _tr_at_level(expr, combiner, level)
+
+
+def _tr_at_level(expr: Expr, combiner: Expr, level: int) -> Expr:
+    """Fold the first ``level`` axes of an array through ``combiner``.
+
+    ``Tr[m, Plus, 1]`` is column-wise sum; ``Tr[t, Times, 2]`` for a
+    rank-3 tensor multiplies entries along the first two axes
+    pairwise. Tungsten requires the array to actually have ``level``
+    immediate-list axes so each combine has consistent arity.
+    """
+    if level == 0:
+        return expr
+    if level == 1:
+        compound = _require_compound(expr, "Tr")
+        if not compound.has_head("List"):
+            raise WolframEvaluationError("Tr expects a List at every contracted level.")
+        # When the inner items are themselves lists of equal width, contract
+        # column-wise; otherwise contract scalar arguments.
+        if all(isinstance(arg, Call) and arg.has_head("List") for arg in compound.arguments):
+            row_lengths = {len(arg.arguments) for arg in compound.arguments}
+            if len(row_lengths) == 1:
+                width = row_lengths.pop()
+                columns = [
+                    [arg.arguments[index] for arg in compound.arguments]
+                    for index in range(width)
+                ]
+                return _evaluated_list_expr(*(_combine_terms(col, combiner) for col in columns))
+        return _combine_terms(compound.arguments, combiner)
+    # Recurse into each child first so Tr[t, f, k] for k > 1 walks the
+    # tensor depth-first, then fold the resulting contracted siblings.
+    compound = _require_compound(expr, "Tr")
+    if not compound.has_head("List"):
+        raise WolframEvaluationError("Tr expects a List at every contracted level.")
+    contracted_children = [_tr_at_level(child, combiner, level - 1) for child in compound.arguments]
+    return _tr_at_level(list_expr(*contracted_children), combiner, 1)
 
 
 def levi_civita_tensor(dimension_expr: Expr, head_expr: Expr | None = None) -> Expr:
@@ -15669,15 +15902,723 @@ def median_expr(expr: Expr) -> Expr:
     return evaluate(call("Times", summed, rational_number(1, 2)))
 
 
-def total(expr: Expr) -> Expr:
-    """Total[expr] sums first-level elements; for nested Lists, sums element-wise.
+def _sort_real_values_ascending(items: Sequence[Expr], function_name: str) -> list[Expr]:
+    """Sort an iterable of explicit real-valued numbers ascending.
 
-    The current implementation only honors the default level-1 sum, which
-    folds a list of numbers into a single number, a list of equal-length
-    lists into a list of column sums, and an association into the sum of
-    its values. Multi-level and explicit-levelspec ``Total[expr, n]`` /
-    ``Total[expr, {n}]`` is documented as not yet implemented.
+    Mirrors the ad-hoc comparator ``median_expr`` uses; the helper exists
+    so the family of statistics heads (``MinMax``, ``RankedMin`` /
+    ``RankedMax``, ``Quantile``, ``Quartiles``, ``BinCounts`` /
+    ``BinLists``) can share a single rejection path for non-numeric
+    inputs.
     """
+    if not all(_is_real_number_expr(item) for item in items):
+        raise WolframEvaluationError(
+            f"{function_name} currently expects explicit real-valued numbers."
+        )
+    return sorted(
+        items,
+        key=lambda item: (
+            float(_exact_fraction(item))  # type: ignore[arg-type]
+            if _is_exact_real_number(item)
+            else float(_real_info(item).value)  # type: ignore[union-attr]
+        ),
+    )
+
+
+def min_max_expr(expr: Expr) -> Expr:
+    """``MinMax[list]`` returns ``{Min[list], Max[list]}`` in one pass.
+
+    The empty list yields ``{Infinity, -Infinity}`` per the kernel
+    (i.e., the identities of ``Min`` and ``Max``), so that
+    ``MinMax[{}]`` is the unit element of ``Min``/``Max`` over all
+    real numbers.
+    """
+    items = _list_or_association_values(expr, "MinMax")
+    if not items:
+        return list_expr(symbol("Infinity"), call("Times", integer(-1), symbol("Infinity")))
+    return _evaluated_list_expr(
+        evaluate(call("Min", *items)),
+        evaluate(call("Max", *items)),
+    )
+
+
+def _ranked_pick(items: Sequence[Expr], k_expr: Expr, function_name: str, *, descending: bool) -> Expr:
+    """Return the ``k``-th smallest (``descending=False``) or largest
+    (``descending=True``) element of ``items``.
+
+    Tungsten preserves duplicates the way the kernel does: ``RankedMin``
+    is the inverse-CDF-style "pick from sorted list at index k" rather
+    than "k-th distinct value." Indices are 1-based; negative indices
+    count from the opposite end, matching the kernel.
+    """
+    if not isinstance(k_expr, Integer):
+        raise WolframEvaluationError(
+            f"{function_name} expects an explicit integer rank."
+        )
+    if not items:
+        raise WolframEvaluationError(f"{function_name} requires a nonempty list.")
+    sorted_items = _sort_real_values_ascending(items, function_name)
+    if descending:
+        sorted_items = list(reversed(sorted_items))
+    n = len(sorted_items)
+    rank = k_expr.value
+    if rank == 0 or rank > n or rank < -n:
+        raise WolframEvaluationError(
+            f"{function_name} rank {rank} is out of range for a list of length {n}."
+        )
+    if rank > 0:
+        return sorted_items[rank - 1]
+    return sorted_items[n + rank]
+
+
+def ranked_min_expr(expr: Expr, k_expr: Expr) -> Expr:
+    """``RankedMin[list, k]`` — the ``k``-th smallest element."""
+    items = _list_or_association_values(expr, "RankedMin")
+    return _ranked_pick(items, k_expr, "RankedMin", descending=False)
+
+
+def ranked_max_expr(expr: Expr, k_expr: Expr) -> Expr:
+    """``RankedMax[list, k]`` — the ``k``-th largest element."""
+    items = _list_or_association_values(expr, "RankedMax")
+    return _ranked_pick(items, k_expr, "RankedMax", descending=True)
+
+
+def mode_expr(expr: Expr) -> Expr:
+    """``Mode[list]`` — the most common element.
+
+    Matches the kernel's tie-breaking: when several elements share the
+    maximum count, return the canonical-order minimum among them. For
+    an empty list, return the inert ``Mode[{}]`` form (matching the
+    kernel's response).
+    """
+    items = _list_or_association_values(expr, "Mode")
+    if not items:
+        return call("Mode", expr)
+    counts_dict: dict[int, int] = {}
+    keys: list[Expr] = []
+    for item in items:
+        for index, existing in enumerate(keys):
+            if existing == item:
+                counts_dict[index] += 1
+                break
+        else:
+            counts_dict[len(keys)] = 1
+            keys.append(item)
+    max_count = max(counts_dict.values())
+    candidates = [keys[index] for index, count in counts_dict.items() if count == max_count]
+    sorted_candidates = sort_expr(list_expr(*candidates))
+    assert isinstance(sorted_candidates, Call) and sorted_candidates.has_head("List")
+    return sorted_candidates.arguments[0]
+
+
+def _default_quantile_parameters() -> tuple[Expr, Expr, Expr, Expr]:
+    """Return ``{{0, 0}, {1, 0}}`` parameters used by ``Quantile`` by
+    default — Wolfram's documented type-1 inverse-CDF form.
+    """
+    return integer(0), integer(0), integer(1), integer(0)
+
+
+def _quartiles_parameters() -> tuple[Expr, Expr, Expr, Expr]:
+    """Return ``{{1/2, 0}, {0, 1}}`` (the kernel's Quartiles default,
+    type 7 in the Hyndman-Fan classification).
+    """
+    return rational_number(1, 2), integer(0), integer(0), integer(1)
+
+
+def _parse_quantile_parameters(spec: Expr) -> tuple[Expr, Expr, Expr, Expr]:
+    """Validate and return ``(a, b, c, d)`` from a ``{{a, b}, {c, d}}``
+    nested-list specification.
+    """
+    if not (isinstance(spec, Call) and spec.has_head("List") and len(spec.arguments) == 2):
+        raise WolframEvaluationError(
+            "Quantile parameters must be a list ``{{a, b}, {c, d}}``."
+        )
+    first, second = spec.arguments
+    if not (isinstance(first, Call) and first.has_head("List") and len(first.arguments) == 2):
+        raise WolframEvaluationError(
+            "Quantile parameters must be a list ``{{a, b}, {c, d}}``."
+        )
+    if not (isinstance(second, Call) and second.has_head("List") and len(second.arguments) == 2):
+        raise WolframEvaluationError(
+            "Quantile parameters must be a list ``{{a, b}, {c, d}}``."
+        )
+    a, b = first.arguments
+    c, d = second.arguments
+    return a, b, c, d
+
+
+def _quantile_one(
+    sorted_items: Sequence[Expr],
+    q_expr: Expr,
+    parameters: tuple[Expr, Expr, Expr, Expr],
+) -> Expr:
+    """Compute one quantile against an already-sorted list of explicit
+    real-valued numbers.
+
+    Implements the Hyndman-Fan parameterization (Wolfram's
+    ``Quantile[list, q, {{a, b}, {c, d}}]``):
+    ``p = a + (n + b)*q``; ``i = Floor[p]``; ``f = p - i``. When ``f``
+    is exactly zero the result is ``s[[i]]`` with no interpolation;
+    otherwise it is ``s[[i]] + (c + d*f) * (s[[i+1]] - s[[i]])``.
+    Out-of-range ``i`` clamp to the first or last element. Inputs are
+    kept as exact ``Integer`` / ``Rational`` when possible so the
+    canonical-rational kernel default ``{{0, 0}, {1, 0}}`` produces
+    integer results for integer inputs.
+    """
+    a, b, c, d = parameters
+    n = len(sorted_items)
+    n_expr = integer(n)
+    p_expr = evaluate(call("Plus", a, call("Times", call("Plus", n_expr, b), q_expr)))
+    i_expr = evaluate(call("Floor", p_expr))
+    f_expr = evaluate(call("Plus", p_expr, call("Times", integer(-1), i_expr)))
+    if not (isinstance(i_expr, Integer) and _is_real_number_expr(f_expr)):
+        raise WolframEvaluationError(
+            "Quantile could not reduce its position calculation to an explicit number."
+        )
+    i = i_expr.value
+    if i < 1:
+        return sorted_items[0]
+    if i >= n:
+        return sorted_items[-1]
+    base = sorted_items[i - 1]
+    next_value = sorted_items[i]
+    sign = _compare_real_expr(f_expr, integer(0))
+    if sign is not None and sign == 0:
+        return base
+    weight = evaluate(call("Plus", c, call("Times", d, f_expr)))
+    return evaluate(
+        call(
+            "Plus",
+            base,
+            call("Times", weight, call("Plus", next_value, call("Times", integer(-1), base))),
+        )
+    )
+
+
+def quantile_expr(expr: Expr, q_expr: Expr, parameters_expr: Expr | None = None) -> Expr:
+    """``Quantile[list, q]`` / ``Quantile[list, {q1, …}]`` /
+    ``Quantile[list, q, {{a, b}, {c, d}}]``.
+
+    The default parameters are ``{{0, 0}, {1, 0}}`` (type 1, inverse
+    CDF). Lists of quantile probabilities thread the computation
+    elementwise. Inputs must be explicit real-valued numbers.
+    """
+    items = _list_or_association_values(expr, "Quantile")
+    if not items:
+        raise WolframEvaluationError("Quantile of an empty list is undefined.")
+    sorted_items = _sort_real_values_ascending(items, "Quantile")
+    parameters = (
+        _parse_quantile_parameters(parameters_expr)
+        if parameters_expr is not None
+        else _default_quantile_parameters()
+    )
+    if isinstance(q_expr, Call) and q_expr.has_head("List"):
+        return _evaluated_list_expr(
+            *(_quantile_one(sorted_items, q, parameters) for q in q_expr.arguments)
+        )
+    return _quantile_one(sorted_items, q_expr, parameters)
+
+
+def quartiles_expr(expr: Expr) -> Expr:
+    """``Quartiles[list]`` returns ``{Q1, Median, Q3}`` using
+    ``{{1/2, 0}, {0, 1}}`` (type 7) — Wolfram's documented
+    ``Quartiles`` parameterization, distinct from the default
+    ``Quantile`` parameterization.
+    """
+    items = _list_or_association_values(expr, "Quartiles")
+    if not items:
+        raise WolframEvaluationError("Quartiles of an empty list is undefined.")
+    sorted_items = _sort_real_values_ascending(items, "Quartiles")
+    parameters = _quartiles_parameters()
+    return _evaluated_list_expr(
+        _quantile_one(sorted_items, rational_number(1, 4), parameters),
+        _quantile_one(sorted_items, rational_number(1, 2), parameters),
+        _quantile_one(sorted_items, rational_number(3, 4), parameters),
+    )
+
+
+def _bin_spec_bounds(
+    items: Sequence[Expr],
+    spec: Expr,
+    function_name: str,
+) -> tuple[Expr, Expr, Expr]:
+    """Resolve a bin specification to an ``(xmin, xmax, dx)`` triple of
+    explicit real numbers.
+
+    The kernel accepts a bare ``dx`` (use the data's min / max snapped
+    to an aligned bin) or an explicit ``{xmin, xmax, dx}`` list. The
+    aligned-bin form for the bare ``dx`` snaps ``xmin`` to
+    ``Floor[Min[items]/dx]*dx`` and ``xmax`` to
+    ``Ceiling[Max[items]/dx]*dx``, which matches
+    ``BinCounts[Range[10], 2]`` → ``{1, 2, 2, 2, 2, 1}``.
+    """
+    if isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) != 3:
+            raise WolframEvaluationError(
+                f"{function_name} expects a bin spec ``dx`` or ``{{xmin, xmax, dx}}``."
+            )
+        xmin_expr, xmax_expr, dx_expr = spec.arguments
+        for value, role in (
+            (xmin_expr, "xmin"),
+            (xmax_expr, "xmax"),
+            (dx_expr, "dx"),
+        ):
+            if not _is_real_number_expr(value):
+                raise WolframEvaluationError(
+                    f"{function_name} {role} must be an explicit real-valued number."
+                )
+        return xmin_expr, xmax_expr, dx_expr
+
+    if not _is_real_number_expr(spec):
+        raise WolframEvaluationError(
+            f"{function_name} expects a bin spec ``dx`` or ``{{xmin, xmax, dx}}``."
+        )
+    if not items:
+        raise WolframEvaluationError(
+            f"{function_name} cannot infer auto bin bounds from an empty list."
+        )
+    if not all(_is_real_number_expr(item) for item in items):
+        raise WolframEvaluationError(
+            f"{function_name} currently expects explicit real-valued numbers."
+        )
+    min_value = evaluate(call("Min", *items))
+    max_value = evaluate(call("Max", *items))
+    xmin = evaluate(call("Times", call("Floor", call("Times", min_value, call("Power", spec, integer(-1)))), spec))
+    # Auto-binning extends one bin past the data so the maximum data
+    # point lands in a half-open bin ``[k*dx, (k+1)*dx)`` rather than
+    # being dropped at the right edge. This matches the kernel:
+    # ``BinCounts[Range[10], 2]`` -> ``{1, 2, 2, 2, 2, 1}`` (six bins).
+    xmax = evaluate(
+        call(
+            "Times",
+            call(
+                "Plus",
+                call("Floor", call("Times", max_value, call("Power", spec, integer(-1)))),
+                integer(1),
+            ),
+            spec,
+        )
+    )
+    return xmin, xmax, spec
+
+
+def _bin_index(item: Expr, xmin: Expr, dx: Expr) -> int | None:
+    """Return the zero-based bin index for ``item`` given lower bound
+    ``xmin`` and bin width ``dx``, or ``None`` if it falls below the
+    range.
+    """
+    diff = evaluate(call("Plus", item, call("Times", integer(-1), xmin)))
+    sign = _compare_real_expr(diff, integer(0))
+    if sign is None or sign < 0:
+        return None
+    quotient = evaluate(call("Times", diff, call("Power", dx, integer(-1))))
+    floored = evaluate(call("Floor", quotient))
+    if isinstance(floored, Integer):
+        return floored.value
+    raise WolframEvaluationError("BinCounts could not reduce a position to an explicit integer.")
+
+
+def _bin_count(xmin: Expr, xmax: Expr, dx: Expr, function_name: str) -> int:
+    span = evaluate(call("Plus", xmax, call("Times", integer(-1), xmin)))
+    quotient = evaluate(call("Times", span, call("Power", dx, integer(-1))))
+    floored = evaluate(call("Floor", quotient))
+    if not isinstance(floored, Integer):
+        raise WolframEvaluationError(
+            f"{function_name} could not determine an integer bin count from the spec."
+        )
+    if floored.value <= 0:
+        raise WolframEvaluationError(
+            f"{function_name} requires xmax > xmin and a positive bin width."
+        )
+    return floored.value
+
+
+def bin_counts_expr(expr: Expr, spec: Expr | None = None) -> Expr:
+    """``BinCounts[list]`` / ``BinCounts[list, dx]`` /
+    ``BinCounts[list, {xmin, xmax, dx}]``.
+
+    Each bin covers ``[lo, hi)`` so the right edge of the last bin is
+    *not* counted (matching the kernel). The auto-binning ``BinCounts[
+    list, dx]`` form snaps ``xmin``/``xmax`` to multiples of ``dx``
+    using ``Floor`` / ``Ceiling`` — also matching the kernel's
+    documented contract.
+    """
+    items = _list_or_association_values(expr, "BinCounts")
+    if spec is None:
+        spec = integer(1)
+    xmin, xmax, dx = _bin_spec_bounds(items, spec, "BinCounts")
+    bin_count = _bin_count(xmin, xmax, dx, "BinCounts")
+    counts = [0] * bin_count
+    for item in items:
+        if not _is_real_number_expr(item):
+            raise WolframEvaluationError(
+                "BinCounts currently expects explicit real-valued numbers."
+            )
+        index = _bin_index(item, xmin, dx)
+        if index is None or index >= bin_count:
+            continue
+        counts[index] += 1
+    return _evaluated_list_expr(*(integer(c) for c in counts))
+
+
+def bin_lists_expr(expr: Expr, spec: Expr | None = None) -> Expr:
+    """``BinLists[list]`` / ``BinLists[list, dx]`` /
+    ``BinLists[list, {xmin, xmax, dx}]``.
+
+    Same bin partition as ``BinCounts`` but returns the actual binned
+    elements rather than per-bin counts. Items below ``xmin`` and at
+    or above ``xmax`` are dropped; per-bin element order matches the
+    input list order.
+    """
+    items = _list_or_association_values(expr, "BinLists")
+    if spec is None:
+        spec = integer(1)
+    xmin, xmax, dx = _bin_spec_bounds(items, spec, "BinLists")
+    bin_count = _bin_count(xmin, xmax, dx, "BinLists")
+    bins: list[list[Expr]] = [[] for _ in range(bin_count)]
+    for item in items:
+        if not _is_real_number_expr(item):
+            raise WolframEvaluationError(
+                "BinLists currently expects explicit real-valued numbers."
+            )
+        index = _bin_index(item, xmin, dx)
+        if index is None or index >= bin_count:
+            continue
+        bins[index].append(item)
+    return list_expr(*(list_expr(*b) for b in bins))
+
+
+def _parse_cycles_argument(expr: Expr, function_name: str) -> list[list[int]]:
+    """Validate a ``Cycles[{{...}, …}]`` argument and return the cycles
+    as a list of integer lists.
+    """
+    if not (isinstance(expr, Call) and expr.has_head("Cycles")):
+        raise WolframEvaluationError(
+            f"{function_name} expects a ``Cycles[{{...}}]`` argument."
+        )
+    if len(expr.arguments) != 1:
+        raise WolframEvaluationError(
+            f"{function_name} expects ``Cycles`` with exactly one cycle-list argument."
+        )
+    cycles_arg = expr.arguments[0]
+    if not (isinstance(cycles_arg, Call) and cycles_arg.has_head("List")):
+        raise WolframEvaluationError(
+            f"{function_name} expects ``Cycles[{{cycle1, cycle2, …}}]``."
+        )
+    cycles: list[list[int]] = []
+    seen: set[int] = set()
+    for cycle in cycles_arg.arguments:
+        if not (isinstance(cycle, Call) and cycle.has_head("List")):
+            raise WolframEvaluationError(
+                f"{function_name}: every cycle must be a List of positive integers."
+            )
+        if not cycle.arguments:
+            continue
+        positions: list[int] = []
+        for index_expr in cycle.arguments:
+            if not (isinstance(index_expr, Integer) and index_expr.value > 0):
+                raise WolframEvaluationError(
+                    f"{function_name}: cycle entries must be positive integers."
+                )
+            if index_expr.value in seen:
+                raise WolframEvaluationError(
+                    f"{function_name}: cycle entries must be disjoint."
+                )
+            seen.add(index_expr.value)
+            positions.append(index_expr.value)
+        cycles.append(positions)
+    return cycles
+
+
+def _cycles_to_permutation_list(cycles: Sequence[Sequence[int]], length: int) -> list[int]:
+    """Convert a disjoint-cycle decomposition to a 1-based permutation
+    list of length ``length``.
+
+    Each entry of the returned list answers "where does position i go
+    under the permutation?" — ``permutation_list[i-1]`` is the image
+    of position ``i``.
+    """
+    permutation = list(range(1, length + 1))
+    for cycle in cycles:
+        if len(cycle) < 2:
+            continue
+        # Cycle (a b c) means a -> b, b -> c, c -> a.
+        for i, src in enumerate(cycle):
+            destination = cycle[(i + 1) % len(cycle)]
+            if src - 1 >= length:
+                raise WolframEvaluationError(
+                    "Cycles refer to a position beyond the requested permutation length."
+                )
+            permutation[src - 1] = destination
+    return permutation
+
+
+def _permutation_list_to_cycles(permutation: Sequence[int]) -> list[list[int]]:
+    """Convert a 1-based permutation list to its disjoint-cycle
+    decomposition, dropping fixed points (single-element cycles), and
+    rotating each cycle to start at its minimum element so the result
+    is canonical.
+    """
+    n = len(permutation)
+    visited = [False] * n
+    cycles: list[list[int]] = []
+    for start in range(1, n + 1):
+        if visited[start - 1]:
+            continue
+        cycle: list[int] = []
+        current = start
+        while not visited[current - 1]:
+            visited[current - 1] = True
+            cycle.append(current)
+            current = permutation[current - 1]
+        if len(cycle) > 1:
+            # Canonicalize: rotate so the cycle starts at its minimum.
+            min_index = cycle.index(min(cycle))
+            cycle = cycle[min_index:] + cycle[:min_index]
+            cycles.append(cycle)
+    return cycles
+
+
+def permutation_list_expr(perm_expr: Expr, length_expr: Expr | None = None) -> Expr:
+    """``PermutationList[Cycles[{{…}}]]`` /
+    ``PermutationList[Cycles[{{…}}], n]``.
+
+    Convert disjoint cycles into the equivalent positional list. The
+    optional ``n`` extends the result with fixed points up to length
+    ``n``; without it, the list runs through the largest cycle entry.
+    """
+    cycles = _parse_cycles_argument(perm_expr, "PermutationList")
+    inferred_length = max((max(cycle) for cycle in cycles if cycle), default=0)
+    if length_expr is None:
+        target_length = inferred_length
+    elif isinstance(length_expr, Integer) and length_expr.value >= 0:
+        target_length = length_expr.value
+    else:
+        raise WolframEvaluationError(
+            "PermutationList expects a non-negative integer length."
+        )
+    if inferred_length > target_length:
+        raise WolframEvaluationError(
+            "PermutationList length is shorter than the largest cycle entry."
+        )
+    permutation = _cycles_to_permutation_list(cycles, target_length)
+    return _evaluated_list_expr(*(integer(value) for value in permutation))
+
+
+def permutation_cycles_expr(list_expr_input: Expr) -> Expr:
+    """``PermutationCycles[{p1, p2, …}]``.
+
+    Convert a 1-based permutation list to its canonical disjoint-cycle
+    representation as ``Cycles[{{…}, …}]``. The input must be a
+    permutation of ``Range[Length[input]]`` — otherwise the call falls
+    through to its inert form.
+    """
+    if not (isinstance(list_expr_input, Call) and list_expr_input.has_head("List")):
+        raise WolframEvaluationError(
+            "PermutationCycles expects a List of positive integers."
+        )
+    n = len(list_expr_input.arguments)
+    permutation: list[int] = []
+    for argument in list_expr_input.arguments:
+        if not isinstance(argument, Integer) or argument.value < 1 or argument.value > n:
+            raise WolframEvaluationError(
+                "PermutationCycles expects a permutation of {1, …, n}."
+            )
+        permutation.append(argument.value)
+    if len(set(permutation)) != n:
+        raise WolframEvaluationError(
+            "PermutationCycles expects a permutation of {1, …, n}."
+        )
+    cycles = _permutation_list_to_cycles(permutation)
+    return call(
+        "Cycles",
+        list_expr(*(list_expr(*(integer(p) for p in cycle)) for cycle in cycles)),
+    )
+
+
+def permutation_order_expr(perm_expr: Expr) -> Expr:
+    """``PermutationOrder[Cycles[{{…}}]]`` — the LCM of the cycle
+    lengths, i.e. the smallest ``k`` for which ``perm^k`` is the
+    identity. Trivial cycles (length 1) are dropped before computing
+    the LCM.
+    """
+    cycles = _parse_cycles_argument(perm_expr, "PermutationOrder")
+    lengths = [len(cycle) for cycle in cycles if len(cycle) > 1]
+    if not lengths:
+        return integer(1)
+    from math import lcm
+
+    result = lengths[0]
+    for length in lengths[1:]:
+        result = lcm(result, length)
+    return integer(result)
+
+
+def permute_expr(list_expr_input: Expr, perm_expr: Expr) -> Expr:
+    """``Permute[list, perm]`` / ``Permute[list, Cycles[{{…}}]]``.
+
+    Apply a permutation to a list. The kernel's contract is that
+    ``Permute[list, perm][[perm[[i]]]] == list[[i]]``, i.e. the
+    element at original position ``i`` ends up at the position named
+    by ``perm[[i]]``.
+    """
+    if not (isinstance(list_expr_input, Call) and list_expr_input.has_head("List")):
+        raise WolframEvaluationError("Permute expects a List as its first argument.")
+    n = len(list_expr_input.arguments)
+    if isinstance(perm_expr, Call) and perm_expr.has_head("Cycles"):
+        cycles = _parse_cycles_argument(perm_expr, "Permute")
+        max_index = max((max(cycle) for cycle in cycles if cycle), default=0)
+        if max_index > n:
+            raise WolframEvaluationError(
+                "Permute: cycle indexes a position beyond the list length."
+            )
+        permutation = _cycles_to_permutation_list(cycles, n)
+    elif isinstance(perm_expr, Call) and perm_expr.has_head("List"):
+        if len(perm_expr.arguments) != n:
+            raise WolframEvaluationError(
+                "Permute: positional permutation length must equal the list length."
+            )
+        permutation = []
+        for argument in perm_expr.arguments:
+            if not isinstance(argument, Integer) or argument.value < 1 or argument.value > n:
+                raise WolframEvaluationError(
+                    "Permute: positional permutation must be a permutation of {1, …, n}."
+                )
+            permutation.append(argument.value)
+        if len(set(permutation)) != n:
+            raise WolframEvaluationError(
+                "Permute: positional permutation must be a permutation of {1, …, n}."
+            )
+    else:
+        raise WolframEvaluationError(
+            "Permute expects a permutation as a positional list or ``Cycles[{{…}}]``."
+        )
+    output: list[Expr | None] = [None] * n
+    for source_index in range(n):
+        destination = permutation[source_index] - 1
+        output[destination] = list_expr_input.arguments[source_index]
+    # All destinations should be filled because the permutation is bijective.
+    assert all(item is not None for item in output)
+    return list_expr(*output)  # type: ignore[arg-type]
+
+
+def _peek_sequence_list_pattern(pattern: Expr) -> Call | None:
+    """Return the inner ``List[…]`` pattern of a sequence-search
+    pattern, peeking through ``Condition`` and ``HoldPattern`` wrappers.
+
+    Returns ``None`` when the pattern's structural shape isn't a fixed
+    ``List`` — Tungsten currently only supports fixed-arity sequence
+    patterns; variable-length sequences (``{a_, b__, c_}``) would
+    require enumerating slice widths and are out of scope here.
+    """
+    current = pattern
+    while isinstance(current, Call) and current.head_expr is not None:
+        if isinstance(current.head_expr, Symbol) and current.head_expr.name in {"Condition", "HoldPattern"} and current.arguments:
+            current = current.arguments[0]
+            continue
+        break
+    if isinstance(current, Call) and current.has_head("List"):
+        return current
+    return None
+
+
+def _sequence_pattern_match_first(items: Sequence[Expr], pattern: Expr, start_index: int) -> int | None:
+    """Return the inclusive end index of the first match of ``pattern``
+    against a contiguous slice of ``items`` starting at ``start_index``,
+    or ``None`` if no match is found at that position.
+
+    The supported pattern shape is a fixed-arity ``List[…]``, optionally
+    wrapped in ``Condition`` or ``HoldPattern``. Tungsten's ordinary
+    pattern matcher does the actual matching, so guards via
+    ``Condition`` reduce through the same evaluator path used by
+    ``Cases`` / ``MatchQ``.
+    """
+    inner_list = _peek_sequence_list_pattern(pattern)
+    if inner_list is None:
+        raise WolframEvaluationError(
+            "SequenceCases / SequencePosition / SequenceCount expect a fixed-arity "
+            "List pattern, optionally wrapped in Condition or HoldPattern."
+        )
+    pattern_arity = len(inner_list.arguments)
+    end = start_index + pattern_arity
+    if end > len(items):
+        return None
+    slice_call = list_expr(*items[start_index:end])
+    if _match_pattern(slice_call, pattern) is None:
+        return None
+    return end
+
+
+def _sequence_match_spans(items: Sequence[Expr], pattern: Expr) -> list[tuple[int, int]]:
+    """Return ``[(start, end_inclusive), …]`` 1-based spans of every
+    non-overlapping match of ``pattern`` against contiguous slices of
+    ``items``.
+    """
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(items):
+        end = _sequence_pattern_match_first(items, pattern, index)
+        if end is None:
+            index += 1
+            continue
+        spans.append((index + 1, end))
+        index = end
+    return spans
+
+
+def sequence_cases_expr(list_expr_input: Expr, pattern: Expr) -> Expr:
+    """``SequenceCases[list, patt]`` — collect every matching contiguous
+    sublist of ``list`` against the ``List`` pattern (with optional
+    ``Condition`` guard at the top level).
+    """
+    if not (isinstance(list_expr_input, Call) and list_expr_input.has_head("List")):
+        raise WolframEvaluationError("SequenceCases expects a List as its first argument.")
+    items = list_expr_input.arguments
+    spans = _sequence_match_spans(items, pattern)
+    return list_expr(
+        *(list_expr(*items[start - 1:end]) for start, end in spans)
+    )
+
+
+def sequence_position_expr(list_expr_input: Expr, pattern: Expr) -> Expr:
+    """``SequencePosition[list, patt]`` — return ``{start, end}`` 1-based
+    inclusive spans of every non-overlapping match.
+    """
+    if not (isinstance(list_expr_input, Call) and list_expr_input.has_head("List")):
+        raise WolframEvaluationError("SequencePosition expects a List as its first argument.")
+    spans = _sequence_match_spans(list_expr_input.arguments, pattern)
+    return list_expr(*(list_expr(integer(start), integer(end)) for start, end in spans))
+
+
+def sequence_count_expr(list_expr_input: Expr, pattern: Expr) -> Expr:
+    """``SequenceCount[list, patt]`` — count of non-overlapping matches."""
+    if not (isinstance(list_expr_input, Call) and list_expr_input.has_head("List")):
+        raise WolframEvaluationError("SequenceCount expects a List as its first argument.")
+    spans = _sequence_match_spans(list_expr_input.arguments, pattern)
+    return integer(len(spans))
+
+
+def total(expr: Expr, levelspec: Expr | None = None) -> Expr:
+    """``Total[expr]`` / ``Total[expr, n]`` / ``Total[expr, {n}]``.
+
+    Without a level spec, ``Total`` sums first-level elements: a list of
+    numbers folds into a single number, a list of same-length lists
+    folds into the column-wise list of sums, and an association folds
+    over its values.
+
+    With a level spec ``Total`` follows the kernel's contract:
+    integer ``n`` means levels ``1..n`` (so ``Total[m, 2]`` of a matrix
+    is the scalar sum of every entry; ``Total[t, Infinity]`` of a
+    tensor is the scalar sum of every leaf), and ``{n}`` means level
+    ``n`` only (``Total[m, {1}]`` is the column-wise sum;
+    ``Total[m, {2}]`` is the row-wise sum).
+    """
+    if levelspec is None:
+        return _total_default(expr)
+    return _total_with_levelspec(expr, levelspec)
+
+
+def _total_default(expr: Expr) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
         if not entries:
@@ -15700,6 +16641,76 @@ def total(expr: Expr) -> Expr:
                 return _evaluated_list_expr(*columns)
         return evaluate(call("Plus", *expr.arguments))
     raise WolframEvaluationError("Total expects a list or association.")
+
+
+def _total_with_levelspec(expr: Expr, levelspec: Expr) -> Expr:
+    """Apply ``Total[..., levelspec]`` semantics.
+
+    The level spec is interpreted in the kernel-compatible way:
+    integer ``n`` (or ``{1, n}``) means "sum over levels 1 through
+    ``n`` inclusive", which collapses ``n`` outer dimensions into the
+    accumulator and leaves the inner shape intact. ``{n}`` (the
+    single-element list) selects exactly one level. ``Infinity`` is
+    equivalent to ``ArrayDepth[expr]``.
+    """
+    if isinstance(levelspec, Call) and levelspec.has_head("List"):
+        if len(levelspec.arguments) == 1:
+            level_arg = levelspec.arguments[0]
+            single_level = _resolve_total_level(level_arg)
+            return _total_at_single_level(expr, single_level)
+    upper = _resolve_total_level(levelspec)
+    # Sum across levels 1..upper by applying the default Total upper
+    # times, but stop early once the result is no longer a list /
+    # association so ``Total[..., Infinity]`` collapses to a scalar
+    # without raising on the scalar layer.
+    result = expr
+    for _ in range(upper):
+        if not (
+            (isinstance(result, Call) and result.has_head("List"))
+            or _association_entries(result) is not None
+        ):
+            break
+        result = _total_default(result)
+    return result
+
+
+def _resolve_total_level(level_arg: Expr) -> int:
+    if isinstance(level_arg, Integer):
+        if level_arg.value < 0:
+            raise WolframEvaluationError("Total levelspec must be a non-negative integer or Infinity.")
+        return level_arg.value
+    if isinstance(level_arg, Symbol) and level_arg.name == "Infinity":
+        # ``Infinity`` collapses every level — Tungsten uses the array
+        # depth as the practical upper bound.
+        return _LEVEL_INFINITY
+    raise WolframEvaluationError("Total levelspec must be a non-negative integer or Infinity.")
+
+
+def _total_at_single_level(expr: Expr, level: int) -> Expr:
+    """``Total[expr, {level}]`` — sum exactly at the requested
+    1-based level. Implemented by recursing into the expression to
+    depth ``level - 1`` and collapsing only that level's siblings.
+    """
+    if level <= 0:
+        raise WolframEvaluationError("Total[..., {n}] requires n >= 1.")
+    if level == 1:
+        return _total_default(expr)
+
+    def descend(current: Expr, remaining: int) -> Expr:
+        if remaining == 1:
+            return _total_default(current)
+        if isinstance(current, Call) and current.has_head("List"):
+            return list_expr(*(descend(child, remaining - 1) for child in current.arguments))
+        entries = _association_entries(current)
+        if entries is not None:
+            new_entries = [
+                _AssociationEntry(rule_head=entry.rule_head, key=entry.key, value=descend(entry.value, remaining - 1))
+                for entry in entries
+            ]
+            return _association_expr(new_entries)
+        raise WolframEvaluationError("Total[..., {n}] expects nested lists matching the requested level.")
+
+    return descend(expr, level)
 
 
 def tally(expr: Expr, test: Expr | None = None) -> Expr:
@@ -15780,16 +16791,52 @@ def catenate(expr: Expr) -> Expr:
     return list_expr(*flat)
 
 
-def differences(expr: Expr) -> Expr:
-    items = _list_or_association_values(expr, "Differences")
-    if len(items) <= 1:
-        return list_expr()
-    return _evaluated_list_expr(
-        *(evaluate(call("Plus", items[index + 1], call("Times", integer(-1), items[index]))) for index in range(len(items) - 1))
-    )
+def differences(expr: Expr, order_expr: Expr | None = None) -> Expr:
+    """``Differences[list]`` / ``Differences[list, n]`` — successive
+    first-order differences applied ``n`` times (default 1).
+
+    The result of one pass over a list of length ``k`` is a list of
+    length ``k - 1``; applying ``n`` passes yields a list of length
+    ``k - n`` (or empty when ``k <= n``). For inputs of length ≤ 1
+    the result is the empty list, matching the kernel.
+    """
+    if order_expr is None:
+        order = 1
+    elif isinstance(order_expr, Integer) and order_expr.value >= 0:
+        order = order_expr.value
+    else:
+        raise WolframEvaluationError("Differences expects a non-negative integer order.")
+
+    def one_pass(items: Sequence[Expr]) -> list[Expr]:
+        if len(items) <= 1:
+            return []
+        return [
+            evaluate(call("Plus", items[index + 1], call("Times", integer(-1), items[index])))
+            for index in range(len(items) - 1)
+        ]
+
+    items_seq = list(_list_or_association_values(expr, "Differences"))
+    for _ in range(order):
+        items_seq = one_pass(items_seq)
+        if not items_seq:
+            break
+    return _evaluated_list_expr(*items_seq)
 
 
-def accumulate(expr: Expr) -> Expr:
+def accumulate(expr: Expr, function: Expr | None = None) -> Expr:
+    """``Accumulate[list]`` / ``Accumulate[list, f]``.
+
+    Without ``f`` it computes running totals (``Plus``-folded prefixes).
+    With ``f`` it computes ``FoldList[f, First[list], Rest[list]]``-style
+    running results, applying the supplied callable to ``(running,
+    next)`` pairs.
+    """
+    combiner: callable[[Expr, Expr], Expr]
+    if function is None:
+        combiner = lambda running, item: evaluate(call("Plus", running, item))
+    else:
+        combiner = lambda running, item: evaluate(_apply_callable(function, (running, item)))
+
     entries = _association_entries(expr)
     if entries is not None:
         if not entries:
@@ -15797,7 +16844,7 @@ def accumulate(expr: Expr) -> Expr:
         running: Expr | None = None
         new_entries: list[_AssociationEntry] = []
         for entry in entries:
-            running = entry.value if running is None else evaluate(call("Plus", running, entry.value))
+            running = entry.value if running is None else combiner(running, entry.value)
             new_entries.append(
                 _AssociationEntry(rule_head=entry.rule_head, key=entry.key, value=running)
             )
@@ -15808,36 +16855,112 @@ def accumulate(expr: Expr) -> Expr:
     running: Expr | None = None
     output: list[Expr] = []
     for item in items:
-        running = item if running is None else evaluate(call("Plus", running, item))
+        running = item if running is None else combiner(running, item)
         output.append(running)
     return _evaluated_list_expr(*output)
 
 
-def riffle(expr: Expr, separator: Expr) -> Expr:
+def riffle(expr: Expr, separator: Expr, span: Expr | None = None) -> Expr:
+    """``Riffle[list, x]`` / ``Riffle[list, {x1, …, xk}]`` /
+    ``Riffle[list, x, {a, b, s}]``.
+
+    Without a span, the separator is inserted between every adjacent
+    pair (or cycled through a list of separators). With ``{a, b, s}``
+    Tungsten inserts the separator into the *output* at positions
+    ``a, a + s, a + 2 s, …`` up to and including ``b`` (where ``b``
+    can be a negative offset from the end of the output, matching the
+    kernel's ``Riffle[list, x, {2, -1, 2}]`` style).
+    """
     compound = _require_compound(expr, "Riffle")
     if not compound.has_head("List"):
         raise WolframEvaluationError("Riffle currently expects a List as the first argument.")
     items = compound.arguments
     if not items:
         return list_expr()
-    separators: tuple[Expr, ...]
-    if isinstance(separator, Call) and separator.has_head("List"):
-        separators = tuple(separator.arguments)
-        if not separators:
-            return list_expr(*items)
-    else:
-        separators = (separator,)
-    output: list[Expr] = [items[0]]
-    for index, item in enumerate(items[1:], start=1):
-        output.append(separators[(index - 1) % len(separators)])
-        output.append(item)
-    return list_expr(*output)
+
+    if span is None:
+        separators: tuple[Expr, ...]
+        if isinstance(separator, Call) and separator.has_head("List"):
+            separators = tuple(separator.arguments)
+            if not separators:
+                return list_expr(*items)
+        else:
+            separators = (separator,)
+        output: list[Expr] = [items[0]]
+        for index, item in enumerate(items[1:], start=1):
+            output.append(separators[(index - 1) % len(separators)])
+            output.append(item)
+        return list_expr(*output)
+
+    if not (isinstance(span, Call) and span.has_head("List") and len(span.arguments) == 3):
+        raise WolframEvaluationError("Riffle span spec must be a ``{a, b, s}`` list.")
+    a_expr, b_expr, s_expr = span.arguments
+    if not all(isinstance(part, Integer) for part in (a_expr, b_expr, s_expr)):
+        raise WolframEvaluationError("Riffle span spec components must be explicit integers.")
+    a = a_expr.value
+    b_raw = b_expr.value
+    s = s_expr.value
+    if s <= 0:
+        raise WolframEvaluationError("Riffle span step must be a positive integer.")
+    if a < 1:
+        raise WolframEvaluationError("Riffle span start position must be a positive integer.")
+
+    # Simulate the kernel's interleaving rule: walk the output positions
+    # 1, 2, 3, ... — at each output position emit the separator when the
+    # position equals the next AP step (a, a+s, a+2s, …); otherwise emit
+    # the next item from ``items`` if any remain. When ``b`` is positive,
+    # cap the AP at ``b``. When ``b`` is non-positive (Wolfram convention:
+    # negative offset from the end of the resulting list), Tungsten
+    # treats it as "until the items are exhausted, then place one
+    # trailing separator at the next AP step." This matches the
+    # kernel's ``{2, -1, s}`` style.
+    n = len(items)
+    use_natural_end = b_raw <= 0
+    max_ap_position = b_raw if not use_natural_end else None
+
+    result: list[Expr] = []
+    current_ap = a
+    item_index = 0
+    output_position = 1
+    while True:
+        if max_ap_position is not None and current_ap > max_ap_position:
+            if item_index < n:
+                result.append(items[item_index])
+                item_index += 1
+                output_position += 1
+                continue
+            break
+        if output_position == current_ap:
+            result.append(separator)
+            current_ap += s
+            output_position += 1
+            continue
+        if item_index < n:
+            result.append(items[item_index])
+            item_index += 1
+            output_position += 1
+            continue
+        break
+    return list_expr(*result)
 
 
-def count_items(expr: Expr, pattern: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Expr:
-    """Count[expr, patt] / Count[expr, patt, levelspec]: number of matching parts."""
+def count_items(
+    expr: Expr,
+    pattern: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+    *,
+    include_heads: bool = False,
+) -> Expr:
+    """``Count[expr, patt]`` / ``Count[expr, patt, levelspec]`` /
+    ``Count[expr, patt, levelspec, Heads -> True/False]``.
+
+    Tungsten implements ``Count`` over the same traversal as
+    ``Position``: with the default level spec ``{1}`` and ``Heads ->
+    False`` it counts immediate-argument matches; with deeper
+    levelspecs and ``Heads -> True`` it walks heads as well.
+    """
     effective_spec: Expr | int | tuple[int, int] = (1, 1) if spec is None else spec
-    positions = position(expr, pattern, spec=effective_spec)
+    positions = position(expr, pattern, spec=effective_spec, include_heads=include_heads)
     assert isinstance(positions, Call) and positions.has_head("List")
     return integer(len(positions.arguments))
 
@@ -15900,28 +17023,85 @@ def contains_exactly(left: Expr, right: Expr) -> Expr:
     )
 
 
+def _resolve_size_range(
+    spec: Expr | None,
+    function_name: str,
+    *,
+    default_lower: int,
+    default_upper: int,
+) -> tuple[int, int, int]:
+    """Resolve a kernel-style length spec ``n``, ``{n}``, ``{min, max}``,
+    or ``{min, max, step}`` into a ``(lower, upper, step)`` triple.
+
+    Used by ``Subsets`` and ``Permutations`` so both heads share the
+    full step-aware vocabulary.
+    """
+    if spec is None:
+        return default_lower, default_upper, 1
+    if isinstance(spec, Integer):
+        return default_lower, spec.value, 1
+    if isinstance(spec, Symbol) and spec.name == "All":
+        return default_lower, default_upper, 1
+    if isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
+            target = spec.arguments[0].value
+            return target, target, 1
+        if (
+            len(spec.arguments) == 2
+            and isinstance(spec.arguments[0], Integer)
+            and isinstance(spec.arguments[1], Integer)
+        ):
+            return spec.arguments[0].value, spec.arguments[1].value, 1
+        if (
+            len(spec.arguments) == 3
+            and all(isinstance(arg, Integer) for arg in spec.arguments)
+        ):
+            lower = spec.arguments[0].value  # type: ignore[union-attr]
+            upper = spec.arguments[1].value  # type: ignore[union-attr]
+            step = spec.arguments[2].value  # type: ignore[union-attr]
+            if step == 0:
+                raise WolframEvaluationError(
+                    f"{function_name} length spec step must be nonzero."
+                )
+            return lower, upper, step
+    raise WolframEvaluationError(
+        f"{function_name} expects ``n``, ``{{n}}``, ``{{min, max}}``, or ``{{min, max, step}}``."
+    )
+
+
+def _stepped_range(lower: int, upper: int, step: int) -> list[int]:
+    """Return the integer range used by ``Subsets`` / ``Permutations``
+    for a stepped-length spec. Negative steps walk downward; positive
+    steps walk upward, both inclusive of both endpoints when they
+    align with the step.
+    """
+    sizes: list[int] = []
+    if step > 0:
+        size = lower
+        while size <= upper:
+            sizes.append(size)
+            size += step
+    else:
+        size = lower
+        while size >= upper:
+            sizes.append(size)
+            size += step
+    return sizes
+
+
 def subsets(expr: Expr, spec: Expr | None = None) -> Expr:
     items = _list_or_association_values(expr, "Subsets")
     n = len(items)
-    if spec is None:
-        bounds = (0, n)
-    elif isinstance(spec, Integer):
-        bounds = (0, spec.value)
-    elif isinstance(spec, Call) and spec.has_head("List"):
-        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
-            target = spec.arguments[0].value
-            bounds = (target, target)
-        elif len(spec.arguments) == 2 and isinstance(spec.arguments[0], Integer) and isinstance(spec.arguments[1], Integer):
-            bounds = (spec.arguments[0].value, spec.arguments[1].value)
-        else:
-            raise WolframEvaluationError("Subsets currently supports {n} or {min, max} length specs.")
-    else:
-        raise WolframEvaluationError("Subsets expects an integer count or a length specification list.")
+    lower, upper, step = _resolve_size_range(
+        spec, "Subsets", default_lower=0, default_upper=n
+    )
 
     from itertools import combinations
 
     output: list[Expr] = []
-    for size in range(bounds[0], bounds[1] + 1):
+    for size in _stepped_range(lower, upper, step):
+        if size < 0 or size > n:
+            continue
         for combination in combinations(items, size):
             output.append(list_expr(*combination))
     return list_expr(*output)
@@ -15932,30 +17112,22 @@ def permutations(expr: Expr, spec: Expr | None = None) -> Expr:
     n = len(items)
     if spec is None:
         bounds = (n, n)
-    elif isinstance(spec, Integer):
-        bounds = (1, spec.value) if n > 0 else (0, 0)
-    elif isinstance(spec, Call) and spec.has_head("List"):
-        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
-            target = spec.arguments[0].value
-            bounds = (target, target)
-        elif len(spec.arguments) == 2 and isinstance(spec.arguments[0], Integer) and isinstance(spec.arguments[1], Integer):
-            bounds = (spec.arguments[0].value, spec.arguments[1].value)
-        else:
-            raise WolframEvaluationError("Permutations currently supports {n} or {min, max} length specs.")
+        step = 1
     else:
-        raise WolframEvaluationError("Permutations expects an integer count or a length specification list.")
+        bounds_lower, bounds_upper, step = _resolve_size_range(
+            spec, "Permutations", default_lower=1 if n > 0 else 0, default_upper=n
+        )
+        bounds = (bounds_lower, bounds_upper)
 
     from itertools import permutations as _itertools_permutations
 
     output: list[Expr] = []
-    upper = max(bounds[1], 0)
-    lower = max(bounds[0], 0)
-    for size in range(lower, upper + 1):
+    sizes = _stepped_range(bounds[0], bounds[1], step) if spec is not None else [n]
+    for size in sizes:
+        if size < 0 or size > n:
+            continue
         for permutation in _itertools_permutations(items, size):
             output.append(list_expr(*permutation))
-    if spec is None:
-        # Wolfram's default returns size-n permutations only.
-        return list_expr(*[entry for entry in output if isinstance(entry, Call) and len(entry.arguments) == n])
     return list_expr(*output)
 
 
