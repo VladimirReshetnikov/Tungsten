@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from .named_characters import decode_named_character_escape
+
 
 INLINE_BOX_PREFIX = r"\!\(\*"
 INLINE_BOX_OPEN = r"\("
@@ -62,13 +64,17 @@ _OCTAL_DIGITS = frozenset("01234567")
 
 
 def _decode_character_escape(text: str, index: int) -> tuple[str, int] | None:
-    """Decode a Wolfram character escape (``\\:XXXX``, ``\\.XX``, ``\\OOO``, ``\\|XXXXXX``).
+    """Decode a Wolfram character escape.
 
-    Returns ``(character, new_index)`` on success or ``None`` if the escape at ``index``
-    is not one of these forms. ``index`` must point at the leading backslash.
+    This includes named characters (``\\[Alpha]``), ``\\:XXXX``, ``\\.XX``, ``\\OOO``,
+    and ``\\|XXXXXX``. Returns ``(character, new_index)`` on success or ``None`` if the
+    escape at ``index`` is not one of these forms. ``index`` must point at the leading
+    backslash.
     """
     if index >= len(text) or text[index] != "\\" or index + 1 >= len(text):
         return None
+    if text.startswith("\\[", index):
+        return decode_named_character_escape(text, index)
     marker = text[index + 1]
     if marker == ":":
         if index + 6 > len(text):
@@ -124,7 +130,11 @@ def parse_wl_string_literal(value: str) -> str:
             continue
 
         escape = text[index + 1]
-        if escape == "r":
+        if escape == "b":
+            result.append("\b")
+        elif escape == "f":
+            result.append("\f")
+        elif escape == "r":
             result.append("\r")
         elif escape == "n":
             result.append("\n")

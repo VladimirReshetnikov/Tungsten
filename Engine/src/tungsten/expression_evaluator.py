@@ -673,11 +673,12 @@ def evaluate_once(expr: Expr) -> Expr:
         raise WolframEvaluationError("Context expects zero arguments or one symbol/name argument.")
 
     if evaluated_head_name == "ToString":
-        if len(evaluated_arguments) == 1:
-            return to_string_expr(evaluated_arguments[0])
-        if len(evaluated_arguments) == 2:
-            return to_string_expr(evaluated_arguments[0], evaluated_arguments[1])
-        raise WolframEvaluationError("ToString expects an expression and an optional supported form specifier.")
+        to_string_arguments, to_string_options = _split_trailing_option_rules(evaluated_arguments)
+        if len(to_string_arguments) == 1:
+            return to_string_expr(to_string_arguments[0], options=to_string_options)
+        if len(to_string_arguments) == 2:
+            return to_string_expr(to_string_arguments[0], to_string_arguments[1], options=to_string_options)
+        raise WolframEvaluationError("ToString expects an expression, an optional supported form specifier, and options.")
 
     if evaluated_head_name == "ToBoxes":
         if len(evaluated_arguments) == 1:

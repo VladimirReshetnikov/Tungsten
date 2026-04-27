@@ -24,6 +24,7 @@ import unicodedata
 from typing import Callable, Iterable, Sequence, TypeGuard
 from xml.etree import ElementTree
 
+from .named_characters import encode_printable_ascii
 from .wolfram_strings import has_inline_boxes
 from .wolfram_strings import inline_box_escape
 from .wolfram_strings import inline_box_segments
@@ -177,7 +178,7 @@ class Symbol(Expr):
         return Symbol("Symbol")
 
     def to_full_form(self) -> str:
-        return self.name
+        return encode_printable_ascii(self.name)
 
     def to_input_form(self) -> str:
         return self.name
@@ -2762,6 +2763,7 @@ _ESCAPED_TOKEN_MAP = {
 
 
 _ESCAPED_SYMBOL_ALIASES = {
+    r"\[Degree]": "Degree",
     r"\[ExponentialE]": "E",
     r"\[ImaginaryI]": "I",
     r"\[ImaginaryJ]": "I",
@@ -4454,6 +4456,10 @@ _SINGLE_BYTE_ENCODINGS = {
     "latin-1": "latin-1",
     "iso8859-15": "iso8859_15",
     "iso-8859-15": "iso8859_15",
+    "windowsansi": "cp1252",
+    "windows-ansi": "cp1252",
+    "windows-1252": "cp1252",
+    "cp1252": "cp1252",
 }
 
 _MULTIBYTE_ENCODINGS = {
@@ -4484,6 +4490,8 @@ def _normalize_character_encoding_name(
     normalized = raw.lower()
     if normalized == "unicode":
         return "Unicode", "Unicode"
+    if normalized in {"printableascii", "printable-ascii"}:
+        return "PrintableASCII", raw
     single = _SINGLE_BYTE_ENCODINGS.get(normalized)
     if single is not None:
         return single, raw
@@ -4491,14 +4499,16 @@ def _normalize_character_encoding_name(
     if multi is not None:
         return multi, raw
     raise WolframEvaluationError(
-        f'{function_name} currently supports "Unicode", "UTF-8", "UTF-16LE", "UTF-16BE", '
-        '"UTF-32LE", "UTF-32BE", "ASCII", "ISO8859-1", and "ISO8859-15".'
+        f'{function_name} currently supports "Unicode", "PrintableASCII", "UTF-8", "UTF-16LE", '
+        '"UTF-16BE", "UTF-32LE", "UTF-32BE", "ASCII", "WindowsANSI", "ISO8859-1", and "ISO8859-15".'
     )
 
 
 def _decode_bytes_to_string(data: bytes, codec_name: str) -> str:
     if codec_name == "Unicode":
         return "".join(chr(byte) for byte in data)
+    if codec_name in {"PrintableASCII", "ascii"}:
+        return "".join(chr(byte) if byte < 128 else chr(0xF200 + byte) for byte in data)
     decoded = data.decode(codec_name, errors="surrogateescape")
     return "".join(chr(ord(char) - 0xDC00) if 0xDC80 <= ord(char) <= 0xDCFF else char for char in decoded)
 
@@ -4506,6 +4516,8 @@ def _decode_bytes_to_string(data: bytes, codec_name: str) -> str:
 def _string_to_character_codes(value: str, encoding_name: str) -> list[Expr]:
     if encoding_name == "Unicode":
         return [integer(ord(char)) for char in value]
+    if encoding_name == "PrintableASCII":
+        encoding_name = "ascii"
     if encoding_name in _SINGLE_BYTE_ENCODINGS.values():
         codes: list[Expr] = []
         for char in value:
@@ -5428,9 +5440,27 @@ def from_character_code(expr: Expr, encoding_value: Expr | None = None) -> Strin
             return string("".join(chr(value) for value in values))
         except ValueError as exc:
             raise WolframEvaluationError("FromCharacterCode Unicode input must contain valid code points.") from exc
-    if any(value < 0 or value > 255 for value in values):
-        raise WolframEvaluationError("FromCharacterCode encoded input must contain integers between 0 and 255.")
-    return string(_decode_bytes_to_string(bytes(values), encoding_name))
+    if any(value < 0 or value > 0x10FFFF for value in values):
+        raise WolframEvaluationError("FromCharacterCode input must contain valid non-negative Unicode code points.")
+    pieces: list[str] = []
+    pending_bytes: list[int] = []
+
+    def flush_pending_bytes() -> None:
+        if pending_bytes:
+            pieces.append(_decode_bytes_to_string(bytes(pending_bytes), encoding_name))
+            pending_bytes.clear()
+
+    for value in values:
+        if value <= 255:
+            pending_bytes.append(value)
+        else:
+            flush_pending_bytes()
+            try:
+                pieces.append(chr(value))
+            except ValueError as exc:
+                raise WolframEvaluationError("FromCharacterCode input must contain valid Unicode code points.") from exc
+    flush_pending_bytes()
+    return string("".join(pieces))
 
 
 def string_to_byte_array(expr: Expr, encoding_value: Expr | None = None) -> ByteArrayExpr:
@@ -5443,9 +5473,11 @@ def string_to_byte_array(expr: Expr, encoding_value: Expr | None = None) -> Byte
     )
     if encoding_name == "Unicode":
         raise WolframEvaluationError('StringToByteArray does not currently support the "Unicode" pseudo-encoding.')
+    if encoding_name == "PrintableASCII":
+        encoding_name = "ascii"
     try:
         return byte_array_expr(expr.value.encode(encoding_name))
-    except UnicodeEncodeError as exc:
+    except (LookupError, UnicodeEncodeError) as exc:
         raise WolframEvaluationError(
             f'StringToByteArray could not represent the string in encoding {encoding_value.to_input_form() if encoding_value is not None else "\"UTF-8\""}.'
         ) from exc
@@ -5754,11 +5786,14 @@ def _format_structured_text(expr: Expr, atom_formatter: Callable[[Expr], str]) -
             return " ".join(_format_structured_text(argument, atom_formatter) for argument in arguments)
         if head_name == "Power" and len(arguments) == 2:
             base, exponent = arguments
-            return (
-                _format_structured_text(base, atom_formatter)
-                + "^"
-                + _format_structured_text(exponent, atom_formatter)
-            )
+            exponent_text = _format_structured_text(exponent, atom_formatter)
+            if isinstance(exponent, RationalNumber) or (
+                isinstance(exponent, Call)
+                and isinstance(exponent.head_expr, Symbol)
+                and _system_dispatch_name(exponent.head_expr) in {"Plus", "Times", "Rational"}
+            ):
+                exponent_text = f"({exponent_text})"
+            return _format_structured_text(base, atom_formatter) + "^" + exponent_text
         if head_name == "Rational" and len(arguments) == 2:
             return (
                 _format_structured_text(arguments[0], atom_formatter)
@@ -6742,37 +6777,89 @@ def _xml_local_name(tag: str) -> str:
     return tag
 
 
-def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
+def to_string_expr(expr: Expr, form_value: Expr | None = None, options: Sequence[Expr] = ()) -> String:
+    format_type = _option_value(options, "FormatType")
+    if form_value is None and format_type is not None:
+        form_value = format_type
+
     if form_value is None:
         wrapper = _display_form_call(expr)
         if wrapper is not None:
-            return string(_display_form_call_text(wrapper))
+            return string(_encode_to_string_text(_display_form_call_text(wrapper), options))
+        form_value = symbol("OutputForm")
 
     form_name = _normalize_textual_expression_form(form_value, "ToString", purpose="render")
     wrapper = _display_form_call(expr)
     if wrapper is not None and wrapper.name in _TEXT_RENDERING_DISPLAY_FORM_HEADS:
-        return string(_display_form_call_text(wrapper))
+        return string(_encode_to_string_text(_display_form_call_text(wrapper), options))
     if form_name == "InputForm":
-        return string(expr.to_input_form())
-    if form_name == "StandardForm":
+        text = expr.to_input_form()
+    elif form_name == "StandardForm":
         # Tungsten's StandardForm string subset intentionally renders as parseable WL text,
         # not as FrontEnd box escapes. The parser accepts it through parse_standard_form.
-        return string(expr.to_input_form())
-    if form_name == "OutputForm":
-        return string(_output_form_text(expr))
-    if form_name == "TextForm":
-        return string(_output_form_text(expr))
-    if form_name == "CForm":
-        return string(_c_like_form_text(expr, target="c"))
-    if form_name == "FortranForm":
-        return string(_c_like_form_text(expr, target="fortran"))
-    if form_name == "TraditionalForm":
-        return string(_traditional_form_text(expr))
-    if form_name == "TeXForm":
-        return string(_tex_form_text(expr))
-    if form_name == "MathMLForm":
-        return string(_mathml_form_text(expr).rstrip("\n"))
-    raise AssertionError(f"Unhandled textual expression form: {form_name}")
+        text = expr.to_input_form()
+    elif form_name == "OutputForm":
+        text = _output_form_text(expr)
+    elif form_name == "TextForm":
+        text = _output_form_text(expr)
+    elif form_name == "CForm":
+        text = _c_like_form_text(expr, target="c")
+    elif form_name == "FortranForm":
+        text = _c_like_form_text(expr, target="fortran")
+    elif form_name == "TraditionalForm":
+        text = _traditional_form_text(expr)
+    elif form_name == "TeXForm":
+        text = _tex_form_text(expr)
+    elif form_name == "MathMLForm":
+        text = _mathml_form_text(expr).rstrip("\n")
+    else:
+        raise AssertionError(f"Unhandled textual expression form: {form_name}")
+    if _to_string_number_marks(options) is False:
+        text = _strip_number_marks_text(text)
+    return string(_encode_to_string_text(text, options))
+
+
+def _to_string_number_marks(options: Sequence[Expr]) -> bool | None:
+    value = _option_value(options, "NumberMarks")
+    if isinstance(value, Symbol):
+        if _system_dispatch_name(value) == "True":
+            return True
+        if _system_dispatch_name(value) == "False":
+            return False
+    return None
+
+
+def _strip_number_marks_text(text: str) -> str:
+    return re.sub(r"(?<=[0-9.])``?[0-9.]*", "", text)
+
+
+def _to_string_character_encoding(options: Sequence[Expr]) -> str:
+    value = _option_value(options, "CharacterEncoding")
+    encoding_name, _display_name = _normalize_character_encoding_name(
+        value,
+        "ToString",
+        default_unicode=True,
+    )
+    return encoding_name
+
+
+def _encode_to_string_text(text: str, options: Sequence[Expr]) -> str:
+    encoding_name = _to_string_character_encoding(options)
+    if encoding_name == "Unicode":
+        return text
+    if encoding_name in {"PrintableASCII", "ascii"}:
+        return encode_printable_ascii(text)
+    if encoding_name in _SINGLE_BYTE_ENCODINGS.values():
+        encoded: list[str] = []
+        for char in text:
+            try:
+                char.encode(encoding_name)
+            except UnicodeEncodeError:
+                encoded.append(encode_printable_ascii(char))
+            else:
+                encoded.append(char)
+        return "".join(encoded)
+    return "".join(chr(byte) for byte in text.encode(encoding_name))
 
 
 def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper_head: Expr | None = None) -> Expr:

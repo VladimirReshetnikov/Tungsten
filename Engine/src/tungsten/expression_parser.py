@@ -15,6 +15,8 @@ _PARSER_RECURSION_FLOOR = 5000
 if sys.getrecursionlimit() < _PARSER_RECURSION_FLOOR:
     sys.setrecursionlimit(_PARSER_RECURSION_FLOOR)
 
+from .named_characters import decode_named_character_escape
+from .named_characters import named_character
 from .wolfram_strings import parse_wl_string_literal
 from .wolfram_strings import skip_wl_comment
 from .wolfram_strings import skip_wl_string
@@ -497,7 +499,11 @@ def _scan_string(text: str, start: int) -> tuple[_Token, int]:
     if end == len(text) and (not text or text[end - 1] != "\""):
         raise WolframSyntaxError("Unterminated Wolfram string literal.")
     raw = text[start:end]
-    return _Token(kind="string", text=raw, start=start, end=end, value=parse_wl_string_literal(raw)), end
+    try:
+        value = parse_wl_string_literal(raw)
+    except ValueError as exc:
+        raise WolframSyntaxError(str(exc)) from exc
+    return _Token(kind="string", text=raw, start=start, end=end, value=value), end
 
 
 def _scan_number(text: str, start: int) -> tuple[_Token, int]:
@@ -689,7 +695,7 @@ def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | Non
     chars: list[str] = []
     index = start
     if first == "\\":
-        decoded = _scan_simple_character_escape(text, index)
+        decoded = _scan_symbol_character_escape(text, index)
         if decoded is None:
             return None
         chars.append(decoded[0])
@@ -703,7 +709,7 @@ def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | Non
     while index < len(text):
         char = text[index]
         if char == "\\":
-            decoded = _scan_simple_character_escape(text, index)
+            decoded = _scan_symbol_character_escape(text, index)
             if decoded is not None:
                 chars.append(decoded[0])
                 index = decoded[1]
@@ -717,6 +723,23 @@ def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | Non
 
     name = "".join(chars)
     return _Token(kind="symbol", text=name, start=start, end=index, value=name), index
+
+
+def _scan_symbol_character_escape(text: str, start: int) -> tuple[str, int] | None:
+    if text.startswith(r"\[", start):
+        raw_end = text.find("]", start + 2)
+        raw = text[start:raw_end + 1] if raw_end >= 0 else ""
+        if raw in _ESCAPED_TOKEN_MAP or raw in _ESCAPED_SYMBOL_ALIASES or raw in _ESCAPED_INFIX_OPERATOR_HEADS:
+            return None
+        try:
+            decoded = decode_named_character_escape(text, start)
+        except ValueError as exc:
+            raise WolframSyntaxError(str(exc)) from exc
+        character, _end = decoded
+        if ord(character) < 128 and not _is_symbol_start(character):
+            return None
+        return decoded
+    return _scan_simple_character_escape(text, start)
 
 
 _MULTI_TOKENS = (
@@ -827,7 +850,50 @@ def _scan_escaped_token(text: str, start: int) -> tuple[_Token, int] | None:
     if raw in _ESCAPED_INFIX_OPERATOR_HEADS:
         return _Token(kind="operator", text=raw, start=start, end=end + 1, value=raw), end + 1
 
+    name = raw[2:-1]
+    character = named_character(name)
+    if character is not None:
+        if character.isspace():
+            return _Token(kind="operator", text=" ", start=start, end=end + 1, value=" "), end + 1
+        if len(character) == 1 and character in "[]{}(),.;:+-*/^!@<>_|&#=?~'":
+            return _Token(kind="operator", text=character, start=start, end=end + 1, value=character), end + 1
+        return _Token(kind="symbol", text=character, start=start, end=end + 1, value=character), end + 1
+
+    if raw.startswith(r"\["):
+        raise WolframSyntaxError(f"Unknown Wolfram named character escape {raw}.")
+
     return _Token(kind="symbol", text=raw, start=start, end=end + 1, value=raw), end + 1
+
+
+def _named_character_token_map(mapping: dict[str, str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for raw, value in mapping.items():
+        if raw.startswith(r"\[") and raw.endswith("]"):
+            character = named_character(raw[2:-1])
+            if character is not None:
+                result[character] = value
+    return result
+
+
+_NAMED_CHARACTER_TOKEN_MAP = _named_character_token_map(_ESCAPED_TOKEN_MAP)
+_NAMED_CHARACTER_SYMBOL_ALIASES = _named_character_token_map(_ESCAPED_SYMBOL_ALIASES)
+_NAMED_CHARACTER_INFIX_OPERATOR_HEADS = _named_character_token_map(_ESCAPED_INFIX_OPERATOR_HEADS)
+
+
+def _scan_named_character_token(text: str, start: int) -> tuple[_Token, int] | None:
+    character = text[start]
+    normalized = _NAMED_CHARACTER_TOKEN_MAP.get(character)
+    if normalized is not None:
+        return _Token(kind="operator", text=normalized, start=start, end=start + 1, value=normalized), start + 1
+
+    alias = _NAMED_CHARACTER_SYMBOL_ALIASES.get(character)
+    if alias is not None:
+        return _Token(kind="symbol", text=character, start=start, end=start + 1, value=alias), start + 1
+
+    if character in _NAMED_CHARACTER_INFIX_OPERATOR_HEADS:
+        return _Token(kind="operator", text=character, start=start, end=start + 1, value=character), start + 1
+
+    return None
 
 
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
@@ -1052,14 +1118,21 @@ def _tokenize(text: str) -> list[_Token]:
             token, index = _scan_string(text, index)
             tokens.append(token)
             continue
-        escaped_token = _scan_escaped_token(text, index)
-        if escaped_token is not None:
-            token, index = escaped_token
+        named_character_token = _scan_named_character_token(text, index)
+        if named_character_token is not None:
+            token, index = named_character_token
             tokens.append(token)
             continue
         symbol_token = _scan_symbol_with_escapes(text, index)
         if symbol_token is not None:
             token, index = symbol_token
+            tokens.append(token)
+            continue
+        escaped_token = _scan_escaped_token(text, index)
+        if escaped_token is not None:
+            token, index = escaped_token
+            if token.text.isspace():
+                continue
             tokens.append(token)
             continue
         if text[index].isdigit() or (text[index] == "." and index + 1 < len(text) and text[index + 1].isdigit()):
@@ -1904,7 +1977,7 @@ class _Parser:
         }
 
         spec = binary_specs.get(text)
-        escaped_operator_head = _ESCAPED_INFIX_OPERATOR_HEADS.get(text)
+        escaped_operator_head = _ESCAPED_INFIX_OPERATOR_HEADS.get(text) or _NAMED_CHARACTER_INFIX_OPERATOR_HEADS.get(text)
         if spec is None and escaped_operator_head is not None:
             escaped_bp = self._ESCAPED_INFIX_BINDING_POWERS.get(
                 escaped_operator_head,

@@ -360,7 +360,7 @@ class CharacterEscapeParserTests(unittest.TestCase):
     def test_unicode_hex_escape(self) -> None:
         # ``\:XXXX`` decodes to a single Unicode character usable as a symbol.
         expr = parse_expression(r"\:ff0d", form="input")
-        self.assertEqual(expr.to_full_form(), "－")
+        self.assertEqual(expr.to_full_form(), r"\:ff0d")
 
     def test_two_hex_escape(self) -> None:
         # ``\.XX`` decodes a 2-hex-digit ISO-Latin-1 character.
@@ -375,7 +375,7 @@ class CharacterEscapeParserTests(unittest.TestCase):
     def test_long_hex_escape(self) -> None:
         # ``\|XXXXXX`` decodes a 6-hex-digit character (covers astral plane).
         expr = parse_expression(r"\|01F600", form="input")
-        self.assertEqual(expr.to_full_form(), "\U0001f600")
+        self.assertEqual(expr.to_full_form(), r"\|01f600")
 
     def test_escape_inside_string_literal(self) -> None:
         # The same escape forms decode inside string literals.

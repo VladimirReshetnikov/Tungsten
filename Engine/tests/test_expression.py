@@ -13,6 +13,7 @@ from tungsten.expression import parse_full_form
 from tungsten.expression import parse_input_form
 from tungsten.expression import parse_standard_form
 from tungsten.expression import WolframSyntaxError
+from tungsten.named_characters import named_character_codepoints
 
 
 class ExpressionParserTests(unittest.TestCase):
@@ -561,9 +562,15 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         escaped_operator = parse_standard_form(r"a \[CirclePlus] b")
         escaped_operator_chain = parse_standard_form(r"a \[CirclePlus] b \[CirclePlus] c")
         greek_symbols = parse_standard_form(r"\[Alpha] + \[Beta]")
+        greek_identifier = parse_standard_form(r"\[Alpha]coh")
+        formal_symbol = parse_standard_form(r"\[FormalA]")
         self.assertEqual(escaped_operator.to_full_form(), "CirclePlus[a, b]")
         self.assertEqual(escaped_operator_chain.to_full_form(), "CirclePlus[a, b, c]")
         self.assertEqual(greek_symbols.to_full_form(), r"Plus[\[Alpha], \[Beta]]")
+        self.assertEqual(greek_identifier.to_input_form(), "αcoh")
+        self.assertEqual(greek_identifier.to_full_form(), r"\[Alpha]coh")
+        self.assertEqual(formal_symbol.to_input_form(), "\uf800")
+        self.assertEqual(formal_symbol.to_full_form(), r"\[FormalA]")
 
         for escaped, head in {
             r"\[CircleTimes]": "CircleTimes",
@@ -578,6 +585,22 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
             with self.subTest(escaped=escaped):
                 expr = parse_standard_form(f"a {escaped} b {escaped} c")
                 self.assertEqual(expr.to_full_form(), f"{head}[a, b, c]")
+
+    def test_wolfram_named_character_table_decodes_string_literals(self) -> None:
+        for name, codepoint in named_character_codepoints().items():
+            with self.subTest(name=name):
+                expr = parse_input_form(f'"\\[{name}]"')
+                self.assertEqual(expr.value, chr(codepoint))
+
+        self.assertEqual(parse_input_form(r'"\:03b1"').value, "α")
+        self.assertEqual(parse_input_form(r'"\.41"').value, "A")
+        self.assertEqual(parse_input_form(r'"\|01f600"').value, "\U0001f600")
+        self.assertEqual(parse_input_form(r'"\b\f"').value, "\b\f")
+
+        with self.assertRaises(WolframSyntaxError):
+            parse_input_form(r'"\[NotACharacter]"')
+        with self.assertRaises(WolframSyntaxError):
+            parse_input_form(r"\[NotACharacter]")
 
     def test_row_box_named_character_operator_parses_in_standard_form(self) -> None:
         expr = parse_standard_form(r'RowBox[{"a", "\\[CirclePlus]", "b"}]')
@@ -1876,6 +1899,8 @@ class ExpressionEvaluationTests(unittest.TestCase):
         input_string = evaluate(parse_input_form("ToString[HoldComplete[1 + 2], InputForm]"))
         standard_string = evaluate(parse_input_form("ToString[HoldComplete[f @ x // g], StandardForm]"))
         default_string = evaluate(parse_input_form("ToString[HoldComplete[{a -> b, f[x]}]]"))
+        format_type_string = evaluate(parse_input_form("ToString[1 + x, FormatType -> TraditionalForm]"))
+        explicit_form_wins = evaluate(parse_input_form("ToString[1 + x, InputForm, FormatType -> OutputForm]"))
         input_form_wrapper = evaluate(parse_input_form("ToString[InputForm[{1, 2/3, a + b}]]"))
         full_form_wrapper = evaluate(parse_input_form("ToString[FullForm[{1, 2/3, a + b}]]"))
         tex_string = evaluate(parse_input_form("ToString[1 + x, TeXForm]"))
@@ -1905,6 +1930,8 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(input_string.to_full_form(), '"HoldComplete[1 + 2]"')
         self.assertEqual(standard_string.to_full_form(), '"HoldComplete[g[f[x]]]"')
         self.assertEqual(default_string.to_full_form(), '"HoldComplete[{a -> b, f[x]}]"')
+        self.assertIn("TraditionalForm", format_type_string.value)
+        self.assertEqual(explicit_form_wins.to_full_form(), '"1 + x"')
         self.assertEqual(input_form_wrapper.to_full_form(), '"{1, 2/3, a + b}"')
         self.assertEqual(full_form_wrapper.to_full_form(), '"List[1, Rational[2, 3], Plus[a, b]]"')
         self.assertEqual(tex_string.to_full_form(), '"x+1"')
@@ -1984,6 +2011,49 @@ class ExpressionEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(grouped_round_trip.to_full_form(), "HoldComplete[CirclePlus[CirclePlus[a, b], c]]")
         self.assertEqual(nary_round_trip.to_full_form(), "HoldComplete[CirclePlus[a, b, c]]")
+
+    def test_to_string_character_encoding_matches_wolfram_named_character_surface(self) -> None:
+        alpha_printable = evaluate(
+            parse_input_form(r'ToString["\[Alpha]", InputForm, CharacterEncoding -> "PrintableASCII"]')
+        )
+        formal_printable = evaluate(
+            parse_input_form(r'ToString["\[FormalA]", InputForm, CharacterEncoding -> "PrintableASCII"]')
+        )
+        raw_controls_printable = evaluate(
+            parse_input_form(
+                'ToString[FromCharacterCode[{0, 7, 8, 9, 10, 11, 12, 13, 27, 31, 127}], '
+                'InputForm, CharacterEncoding -> "PrintableASCII"]'
+            )
+        )
+        alpha_ascii_codes = evaluate(parse_input_form(r'ToCharacterCode["\[Alpha]", "PrintableASCII"]'))
+        ascii_invalid_byte = evaluate(
+            parse_input_form(
+                'ToString[FromCharacterCode[{162}, "ASCII"], InputForm, '
+                'CharacterEncoding -> "PrintableASCII"]'
+            )
+        )
+        utf8_mixed_codes = evaluate(
+            parse_input_form(
+                'ToString[FromCharacterCode[{195, 169, 945}, "UTF-8"], InputForm, '
+                'CharacterEncoding -> "PrintableASCII"]'
+            )
+        )
+        printable_ascii_byte_round_trip = evaluate(
+            parse_input_form(
+                'ToCharacterCode[ByteArrayToString[StringToByteArray["A+", "PrintableASCII"], "PrintableASCII"]]'
+            )
+        )
+
+        self.assertEqual(alpha_printable.value, r'"\[Alpha]"')
+        self.assertEqual(formal_printable.value, r'"\[FormalA]"')
+        self.assertEqual(
+            raw_controls_printable.value,
+            r'"\000\007\b\t\n\013\f\r\[RawEscape]\037\177"',
+        )
+        self.assertEqual(alpha_ascii_codes.to_full_form(), "List[None]")
+        self.assertEqual(ascii_invalid_byte.value, r'"\:f2a2"')
+        self.assertEqual(utf8_mixed_codes.value, r'"\[EAcute]\[Alpha]"')
+        self.assertEqual(printable_ascii_byte_round_trip.to_full_form(), "List[65, 43]")
 
     def test_to_expression_evaluates_after_optional_wrapper(self) -> None:
         default_input = evaluate(parse_input_form('ToExpression["1 + 2"]'))
