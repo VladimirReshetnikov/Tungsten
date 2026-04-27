@@ -1,6 +1,8 @@
 # Tungsten Expression Parser/Evaluator vs Live Wolfram Kernel: Parity Review
 
-- Status: Report (differential review of `expression.py` against the local Wolfram 14.3 kernel)
+- Status: **Archived — superseded.** Active gap inventory: `../2026-04-27-tungsten-gap-and-shape-review.md`. All B1–B9 findings have been resolved (n-ary infix flattening, `Position` default `{0, Infinity}`, postorder `Level` traversal with sign-aware spec, `Dot` re-evaluation, association duplicate-key first-occurrence position, `DirectedInfinity` rendering, `@` precedence, etc.) and the relevant `*_wolfram_target` test classes have flipped to passing. **Do not treat this document as current state.**
+
+  Original status line: Report (differential review of `expression.py` against the local Wolfram 14.3 kernel).
 - Audience: Vladimir Reshetnikov, Tungsten maintainers
 - Scope: `src/Tungsten/src/tungsten/expression.py`, documented support matrix in `docs/expression-function-support.md` and `docs/expression-parser.md`
 - Created (UTC): 2026-04-24T19:38:47Z

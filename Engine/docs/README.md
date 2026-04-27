@@ -98,7 +98,7 @@ The docs are split so readers can choose the right depth:
 | [reports/2026-04-25-parser-speed-experiments.md](reports/2026-04-25-parser-speed-experiments.md) | Notebook parser profiling, landed parser-speed improvements, parser-corpus throughput measurements, and next optimization proposals. |
 | [reports/2026-04-25-parser-corpus-speed.md](reports/2026-04-25-parser-corpus-speed.md) | Parser corpus throughput measurements, bottleneck analysis, implemented optimizations, and full-corpus runtime estimates. |
 | [reports/2026-04-24-license-seat-investigation.md](reports/2026-04-24-license-seat-investigation.md) | Investigation report for intermittent license-seat failures, ghost/orphaned Wolfram processes, and Tungsten's launch-gate mitigation. |
-| [reports/2026-04-26-function-surface-gap-report.md](reports/2026-04-26-function-surface-gap-report.md) | Planning inventory of remaining Tungsten expression-function family holes, incomplete Wolfram argument shapes, unsupported options, and implementation buckets. |
+| [reports/2026-04-27-tungsten-gap-and-shape-review.md](reports/2026-04-27-tungsten-gap-and-shape-review.md) | Planning inventory of remaining Tungsten expression-function family holes, incomplete Wolfram argument shapes, unsupported options, and implementation buckets. Supersedes the earlier `2026-04-26-function-surface-gap-report.md`, the `2026-04-26-expression-parity-deep-review.md`, the `2026-04-24-parser-evaluator-kernel-parity*.md` pair, and the `2026-04-23-external-review.md` (all archived). |
 
 ## Suggested learning path by task
 

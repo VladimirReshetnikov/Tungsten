@@ -1,6 +1,8 @@
 # Tungsten Expression Subsystem: Deep Parity Review
 
-- Status: Report (focused parity review of `src/Tungsten/src/tungsten/expression.py` against the local Wolfram 14.3 kernel)
+- Status: **Archived — superseded.** Active gap inventory: `../2026-04-27-tungsten-gap-and-shape-review.md`. The C1–C9 findings landed across the second-pass implementation captured at the bottom of this document; remaining open items have been folded into the successor report. The historical post-merge note below is correct: the current authoritative description of behavior is `docs/expression-function-support.md`, not this document. **Do not treat this document as current state.**
+
+  Original status line: Report (focused parity review of `src/Tungsten/src/tungsten/expression.py` against the local Wolfram 14.3 kernel).
 - Audience: Vladimir Reshetnikov, Tungsten maintainers
 - Scope: `src/Tungsten/src/tungsten/expression.py` (the kernel-free expression subsystem)
 - Created (UTC): 2026-04-26T19:04:46Z

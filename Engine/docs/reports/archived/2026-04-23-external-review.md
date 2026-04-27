@@ -1,6 +1,8 @@
 # Tungsten External Consultant Review
 
-- Status: Report (external-consultant review of `src/Tungsten` as of the date below)
+- Status: **Archived — no longer current.** This was a broad external-consultant pass at HEAD `d21a3a9c…`. Findings F-1 (kernel `result_head` HoldAll bug) through F-15 (observability hooks) have been addressed or explicitly accepted in the time since; the `expr` CLI now returns structured JSON on parse/eval errors, docs-root sprawl is filtered, the Wolfram helper prelude has been deduplicated, etc. For the *current* function-surface gap inventory see `../2026-04-27-tungsten-gap-and-shape-review.md`. **Do not treat this document as current state.**
+
+  Original status line: Report (external-consultant review of `src/Tungsten` as of the date below).
 - Audience: Vladimir Reshetnikov (project owner), Tungsten maintainers, future reviewers
 - Scope: `src/Tungsten` — Python package, PowerShell module, typed .NET client, tests, docs, and scripts
 - Created (UTC): 2026-04-23T19:56:30Z

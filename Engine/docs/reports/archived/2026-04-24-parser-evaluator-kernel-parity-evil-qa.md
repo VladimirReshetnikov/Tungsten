@@ -1,6 +1,8 @@
 # Tungsten Expression Evaluator: Evil-QA Follow-Up Findings
 
-- Status: Report (adversarial parity addendum to `2026-04-24-parser-evaluator-kernel-parity.md`)
+- Status: **Archived — superseded.** Active gap inventory: `../2026-04-27-tungsten-gap-and-shape-review.md`. All B10–B18 findings — `@` precedence, n-ary `;;` parsing, `KeyMap` re-evaluation, association-as-function `assoc[key]`, `FixedPoint[f, x, n]` soft cap, `Sequence[…]` splicing, double unary minus, the Hold family (`Hold` / `HoldComplete` / `HoldForm` / `Unevaluated`), and `ReleaseHold` — have been resolved at HEAD and the corresponding `*_wolfram_target` tests now pass. **Do not treat this document as current state.**
+
+  Original status line: Report (adversarial parity addendum to `2026-04-24-parser-evaluator-kernel-parity.md`).
 - Audience: Vladimir Reshetnikov, Tungsten maintainers
 - Scope: `src/Tungsten/src/tungsten/expression.py`, documented support matrix
 - Created (UTC): 2026-04-24T20:37:12Z
