@@ -2256,6 +2256,10 @@ def _format_call_input(expr: Call) -> tuple[str, int]:
         if head_name in _INFIX_OPERATOR_HEADS and len(arguments) >= 2:
             operator, precedence, right_associative, spaced = _INFIX_OPERATOR_HEADS[head_name]
             return _format_infix(arguments, operator, precedence, right_associative=right_associative, spaced=spaced), precedence
+        escaped_operator = _ESCAPED_INFIX_OPERATOR_TOKENS_BY_HEAD.get(head_name)
+        if escaped_operator is not None and len(arguments) >= 2:
+            precedence = _escaped_infix_operator_precedence(head_name)
+            return _format_escaped_infix(arguments, escaped_operator, precedence), precedence
         if head_name == "Plus" and arguments:
             return _format_plus(arguments), _PREC_PLUS
         if head_name == "Times" and arguments:
@@ -2311,6 +2315,41 @@ def _format_infix(
             operand_precedence = precedence + 1
         pieces.append(_format_input(argument, operand_precedence))
     return separator.join(pieces)
+
+
+def _format_escaped_infix(
+    arguments: Sequence[Expr],
+    operator: str,
+    precedence: int,
+) -> str:
+    pieces: list[str] = []
+    for argument in arguments:
+        operand = _format_input(argument)
+        if _infix_argument_needs_parentheses(argument, precedence):
+            operand = f"({operand})"
+        pieces.append(operand)
+    return f" {operator} ".join(pieces)
+
+
+def _input_form_precedence(expr: Expr) -> int:
+    if isinstance(expr, Call):
+        return _format_call_input(expr)[1]
+    if isinstance(expr, RationalNumber):
+        return _PREC_TIMES
+    if isinstance(expr, ComplexNumber):
+        return _PREC_PLUS
+    return _PREC_ATOM
+
+
+def _escaped_infix_operator_precedence(head_name: str) -> int:
+    return _ESCAPED_INFIX_OPERATOR_PRECEDENCES.get(head_name, _PREC_COMPARE)
+
+
+def _infix_argument_needs_parentheses(argument: Expr, precedence: int) -> bool:
+    argument_precedence = _input_form_precedence(argument)
+    if argument_precedence < precedence:
+        return True
+    return argument_precedence == precedence and isinstance(argument, Call)
 
 
 def _format_information(arguments: Sequence[Expr]) -> str | None:
@@ -2917,6 +2956,43 @@ _ADDITIONAL_ESCAPED_INFIX_OPERATOR_HEAD_NAMES = {
 _ESCAPED_INFIX_OPERATOR_HEADS.update(
     {f"\\[{name}]": name for name in _ADDITIONAL_ESCAPED_INFIX_OPERATOR_HEAD_NAMES}
 )
+
+_ESCAPED_INFIX_OPERATOR_TOKENS_BY_HEAD = {
+    head_name: escaped_token
+    for escaped_token, head_name in _ESCAPED_INFIX_OPERATOR_HEADS.items()
+}
+
+_ESCAPED_INFIX_OPERATOR_PRECEDENCES = {
+    "CirclePlus": 125,
+    "CircleTimes": 142,
+    "Diamond": 144,
+}
+
+_ESCAPED_INFIX_TEX_OPERATORS = {
+    "CirclePlus": r"\oplus",
+    "CircleTimes": r"\otimes",
+    "Diamond": r"\diamond",
+}
+
+_TEX_INFIX_OPERATOR_TOKENS = {
+    tex_operator: _ESCAPED_INFIX_OPERATOR_TOKENS_BY_HEAD[head_name]
+    for head_name, tex_operator in _ESCAPED_INFIX_TEX_OPERATORS.items()
+}
+
+_ESCAPED_INFIX_MATHML_OPERATOR_ENTITIES = {
+    "CirclePlus": "&#8853;",
+    "CircleTimes": "&#8855;",
+    "Diamond": "&#8900;",
+}
+
+_MATHML_OPERATOR_TEXT_TOKENS = {
+    "\u2295": r"\[CirclePlus]",
+    "\u2297": r"\[CircleTimes]",
+    "\u22c4": r"\[Diamond]",
+    "&#8853;": r"\[CirclePlus]",
+    "&#8855;": r"\[CircleTimes]",
+    "&#8900;": r"\[Diamond]",
+}
 
 for _escaped_operator_head in set(_ESCAPED_INFIX_OPERATOR_HEADS.values()):
     try:
@@ -5999,6 +6075,14 @@ def _tex_format_expr(expr: Expr, *, traditional: bool) -> str:
                 + r"\mathrel{:}\joinrel\to "
                 + _tex_format_expr(arguments[1], traditional=traditional)
             )
+        escaped_tex_operator = _ESCAPED_INFIX_TEX_OPERATORS.get(head_name)
+        if escaped_tex_operator is not None and len(arguments) >= 2:
+            return _tex_escaped_infix(
+                arguments,
+                escaped_tex_operator,
+                _escaped_infix_operator_precedence(head_name),
+                traditional=traditional,
+            )
         if head_name == "Plus" and arguments:
             ordered = _traditional_plus_arguments(arguments) if traditional else arguments
             return "+".join(_tex_format_expr(argument, traditional=traditional) for argument in ordered)
@@ -6061,6 +6145,22 @@ def _tex_power_base_text(expr: Expr, *, traditional: bool) -> str:
     if isinstance(expr, (Symbol, Integer, Real, RationalNumber)):
         return _tex_format_expr(expr, traditional=traditional)
     return r"\left(" + _tex_format_expr(expr, traditional=traditional) + r"\right)"
+
+
+def _tex_escaped_infix(
+    arguments: Sequence[Expr],
+    operator: str,
+    precedence: int,
+    *,
+    traditional: bool,
+) -> str:
+    pieces: list[str] = []
+    for argument in arguments:
+        text = _tex_format_expr(argument, traditional=traditional)
+        if _infix_argument_needs_parentheses(argument, precedence):
+            text = r"\left(" + text + r"\right)"
+        pieces.append(text)
+    return (operator + " ").join(pieces)
 
 
 _TEX_SYMBOL_NAMES = {
@@ -6139,6 +6239,11 @@ def _mathml_format_expr(expr: Expr, *, traditional: bool) -> str:
                 _mathml_operator(":>"),
                 _mathml_format_expr(arguments[1], traditional=traditional),
             ])
+        escaped_mathml_operator = _ESCAPED_INFIX_MATHML_OPERATOR_ENTITIES.get(head_name)
+        if escaped_mathml_operator is not None and len(arguments) >= 2:
+            return _mathml_row(
+                _mathml_join(arguments, escaped_mathml_operator, traditional=traditional)
+            )
         if head_name == "Plus" and arguments:
             ordered = _traditional_plus_arguments(arguments) if traditional else arguments
             return _mathml_row(_mathml_join(ordered, "+", traditional=traditional))
@@ -6176,6 +6281,8 @@ def _mathml_join(arguments: Sequence[Expr], operator: str, *, traditional: bool)
 
 
 def _mathml_operator(operator: str) -> str:
+    if operator.startswith("&#") and operator.endswith(";"):
+        return f"<mo>{operator}</mo>"
     return f"<mo>{html.escape(operator)}</mo>"
 
 
@@ -6485,6 +6592,8 @@ def _tex_to_wolfram_text(text: str) -> str:
     text = text.replace(r"\to", "->")
     text = text.replace(r"\[", "[").replace(r"\]", "]")
     text = text.replace(r"\(", "(").replace(r"\)", ")")
+    for tex_operator, escaped_operator in _TEX_INFIX_OPERATOR_TOKENS.items():
+        text = text.replace(tex_operator, escaped_operator)
     text = text.replace("^{", "^(")
     text = _close_tex_superscript_groups(text)
     return text
@@ -6595,6 +6704,9 @@ def _mathml_operator_text(text: str) -> str:
     stripped = text.strip()
     if stripped == "\u2062":
         return "\u2062"
+    operator_token = _MATHML_OPERATOR_TEXT_TOKENS.get(stripped)
+    if operator_token is not None:
+        return operator_token
     return stripped
 
 
@@ -6667,7 +6779,10 @@ def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper
 
 def to_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
     form_name = _normalize_box_expression_form(form_value, "ToBoxes")
-    return _make_boxes(expr, form_name)
+    boxes = _make_boxes(expr, form_name)
+    if form_name == "TraditionalForm":
+        return call("FormBox", boxes, symbol("TraditionalForm"))
+    return boxes
 
 
 def make_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
@@ -6786,6 +6901,14 @@ def _make_standard_boxes(expr: Expr) -> Expr:
             return _infix_row_box(expr.arguments[0], "->", expr.arguments[1])
         if head_name == "RuleDelayed" and len(expr.arguments) == 2:
             return _infix_row_box(expr.arguments[0], ":>", expr.arguments[1])
+        escaped_operator = _ESCAPED_INFIX_OPERATOR_TOKENS_BY_HEAD.get(head_name)
+        if escaped_operator is not None and len(expr.arguments) >= 2:
+            return _escaped_infix_row_box(
+                expr.arguments,
+                escaped_operator,
+                _escaped_infix_operator_precedence(head_name),
+                traditional=False,
+            )
         if head_name == "Plus" and len(expr.arguments) >= 2:
             return _separated_row_box(expr.arguments, "+")
         if head_name == "Times" and len(expr.arguments) >= 2:
@@ -6849,6 +6972,14 @@ def _make_traditional_boxes(expr: Expr) -> Expr:
             return _infix_traditional_row_box(expr.arguments[0], "->", expr.arguments[1])
         if head_name == "RuleDelayed" and len(expr.arguments) == 2:
             return _infix_traditional_row_box(expr.arguments[0], ":>", expr.arguments[1])
+        escaped_operator = _ESCAPED_INFIX_OPERATOR_TOKENS_BY_HEAD.get(head_name)
+        if escaped_operator is not None and len(expr.arguments) >= 2:
+            return _escaped_infix_row_box(
+                expr.arguments,
+                escaped_operator,
+                _escaped_infix_operator_precedence(head_name),
+                traditional=True,
+            )
         if head_name == "Plus" and len(expr.arguments) >= 2:
             return _separated_traditional_row_box(_traditional_plus_arguments(expr.arguments), "+")
         if head_name == "Times" and len(expr.arguments) >= 2:
@@ -7038,6 +7169,25 @@ def _infix_row_box(left: Expr, operator: str, right: Expr) -> Expr:
 
 def _infix_traditional_row_box(left: Expr, operator: str, right: Expr) -> Expr:
     return _row_box(_make_traditional_boxes(left), string(operator), _make_traditional_boxes(right))
+
+
+def _escaped_infix_row_box(
+    arguments: Sequence[Expr],
+    operator: str,
+    precedence: int,
+    *,
+    traditional: bool,
+) -> Expr:
+    pieces: list[Expr] = []
+    box_maker = _make_traditional_boxes if traditional else _make_standard_boxes
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(string(operator))
+        argument_boxes = box_maker(argument)
+        if _infix_argument_needs_parentheses(argument, precedence):
+            argument_boxes = _row_box(string("("), argument_boxes, string(")"))
+        pieces.append(argument_boxes)
+    return _row_box(*pieces)
 
 
 def _separated_row_box(arguments: Sequence[Expr], separator: str) -> Expr:

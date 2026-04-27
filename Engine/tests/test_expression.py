@@ -559,13 +559,35 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
 
     def test_named_character_symbols_and_inert_operators_parse_in_standard_form(self) -> None:
         escaped_operator = parse_standard_form(r"a \[CirclePlus] b")
+        escaped_operator_chain = parse_standard_form(r"a \[CirclePlus] b \[CirclePlus] c")
         greek_symbols = parse_standard_form(r"\[Alpha] + \[Beta]")
         self.assertEqual(escaped_operator.to_full_form(), "CirclePlus[a, b]")
+        self.assertEqual(escaped_operator_chain.to_full_form(), "CirclePlus[a, b, c]")
         self.assertEqual(greek_symbols.to_full_form(), r"Plus[\[Alpha], \[Beta]]")
+
+        for escaped, head in {
+            r"\[CircleTimes]": "CircleTimes",
+            r"\[Diamond]": "Diamond",
+            r"\[Precedes]": "Precedes",
+            r"\[Union]": "Union",
+            r"\[Intersection]": "Intersection",
+            r"\[SubsetEqual]": "SubsetEqual",
+            r"\[RightArrow]": "RightArrow",
+            r"\[Wedge]": "Wedge",
+        }.items():
+            with self.subTest(escaped=escaped):
+                expr = parse_standard_form(f"a {escaped} b {escaped} c")
+                self.assertEqual(expr.to_full_form(), f"{head}[a, b, c]")
 
     def test_row_box_named_character_operator_parses_in_standard_form(self) -> None:
         expr = parse_standard_form(r'RowBox[{"a", "\\[CirclePlus]", "b"}]')
+        chain = parse_standard_form(r'RowBox[{"a", "\\[CirclePlus]", "b", "\\[CirclePlus]", "c"}]')
+        grouped = parse_standard_form(
+            r'RowBox[{RowBox[{"(", RowBox[{"a", "+", "b"}], ")"}], "\\[CirclePlus]", "c"}]'
+        )
         self.assertEqual(expr.to_full_form(), "CirclePlus[a, b]")
+        self.assertEqual(chain.to_full_form(), "CirclePlus[a, b, c]")
+        self.assertEqual(grouped.to_full_form(), "CirclePlus[Plus[a, b], c]")
 
     def test_common_script_boxes_parse_in_standard_form(self) -> None:
         subscript = parse_standard_form('SubscriptBox["x", "i"]')
@@ -1901,6 +1923,67 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(tex_round_trip.to_full_form(), "HoldComplete[Plus[x, 1]]")
         self.assertEqual(mathml_round_trip.to_full_form(), "HoldComplete[Plus[x, 1]]")
         self.assertEqual(traditional_round_trip.to_full_form(), "HoldComplete[Plus[x, 1]]")
+
+    def test_named_operator_forms_match_wolfram_round_trip_surface(self) -> None:
+        cases = {
+            "CirclePlus": (r"\[CirclePlus]", r"\oplus", "&#8853;"),
+            "CircleTimes": (r"\[CircleTimes]", r"\otimes", "&#8855;"),
+            "Diamond": (r"\[Diamond]", r"\diamond", "&#8900;"),
+        }
+        for head, (escaped, tex_operator, mathml_entity) in cases.items():
+            with self.subTest(head=head):
+                expr = f"{head}[a, b]"
+                escaped_box = escaped.replace("\\", "\\\\")
+                input_string = evaluate(parse_input_form(f"ToString[{expr}, InputForm]"))
+                tex_string = evaluate(parse_input_form(f"ToString[{expr}, TeXForm]"))
+                mathml_string = evaluate(parse_input_form(f"ToString[{expr}, MathMLForm]"))
+                traditional_string = evaluate(parse_input_form(f"ToString[{expr}, TraditionalForm]"))
+                standard_boxes = evaluate(parse_input_form(f"ToBoxes[{expr}, StandardForm]"))
+                make_traditional_boxes = evaluate(parse_input_form(f"MakeBoxes[{expr}, TraditionalForm]"))
+                to_traditional_boxes = evaluate(parse_input_form(f"ToBoxes[{expr}, TraditionalForm]"))
+                tex_round_trip = evaluate(parse_input_form(f"ToExpression[ToString[{expr}, TeXForm], TeXForm, HoldComplete]"))
+                direct_tex_round_trip = evaluate(
+                    parse_input_form(f'ToExpression["a\\\\{tex_operator[1:]} b", TeXForm, HoldComplete]')
+                )
+                mathml_round_trip = evaluate(
+                    parse_input_form(f"ToExpression[ToString[{expr}, MathMLForm], MathMLForm, HoldComplete]")
+                )
+                traditional_string_round_trip = evaluate(
+                    parse_input_form(f"ToExpression[ToString[{expr}, TraditionalForm], TraditionalForm, HoldComplete]")
+                )
+                traditional_boxes_round_trip = evaluate(
+                    parse_input_form(f"ToExpression[ToBoxes[{expr}, TraditionalForm], TraditionalForm, HoldComplete]")
+                )
+
+                self.assertEqual(input_string.to_full_form(), f'"a {escaped_box} b"')
+                self.assertEqual(tex_string.to_full_form(), f'"a\\\\{tex_operator[1:]} b"')
+                self.assertIn(mathml_entity, mathml_string.value)
+                self.assertIn(rf"\\[{head}]", traditional_string.value)
+                self.assertEqual(
+                    standard_boxes.to_full_form(),
+                    f'RowBox[List["a", "{escaped_box}", "b"]]',
+                )
+                self.assertEqual(make_traditional_boxes.to_full_form(), standard_boxes.to_full_form())
+                self.assertEqual(
+                    to_traditional_boxes.to_full_form(),
+                    f'FormBox[RowBox[List["a", "{escaped_box}", "b"]], TraditionalForm]',
+                )
+                self.assertEqual(tex_round_trip.to_full_form(), f"HoldComplete[{head}[a, b]]")
+                self.assertEqual(direct_tex_round_trip.to_full_form(), f"HoldComplete[{head}[a, b]]")
+                self.assertEqual(mathml_round_trip.to_full_form(), f"HoldComplete[{head}[a, b]]")
+                self.assertEqual(traditional_string_round_trip.to_full_form(), f"HoldComplete[{head}[a, b]]")
+                self.assertEqual(traditional_boxes_round_trip.to_full_form(), f"HoldComplete[{head}[a, b]]")
+
+        grouped_round_trip = evaluate(
+            parse_input_form(
+                "ToExpression[ToBoxes[CirclePlus[CirclePlus[a, b], c], StandardForm], StandardForm, HoldComplete]"
+            )
+        )
+        nary_round_trip = evaluate(
+            parse_input_form("ToExpression[ToBoxes[CirclePlus[a, b, c], TraditionalForm], TraditionalForm, HoldComplete]")
+        )
+        self.assertEqual(grouped_round_trip.to_full_form(), "HoldComplete[CirclePlus[CirclePlus[a, b], c]]")
+        self.assertEqual(nary_round_trip.to_full_form(), "HoldComplete[CirclePlus[a, b, c]]")
 
     def test_to_expression_evaluates_after_optional_wrapper(self) -> None:
         default_input = evaluate(parse_input_form('ToExpression["1 + 2"]'))

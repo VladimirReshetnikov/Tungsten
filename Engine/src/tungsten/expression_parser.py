@@ -337,6 +337,8 @@ def _box_item_to_standard_text(expr: Expr) -> str:
             return _box_item_to_standard_text(expr.arguments[0])
 
         if expr.has_head("RowBox"):
+            if _row_box_has_explicit_grouping(expr):
+                return _row_box_to_standard_text(expr)
             try:
                 interpreted = _interpret_row_box(expr)
             except WolframSyntaxError:
@@ -396,6 +398,22 @@ def _box_item_to_standard_text(expr: Expr) -> str:
             return f"Underoverscript[{base}, {underscript}, {overscript}]"
 
     return _interpret_standard_form(expr).to_input_form()
+
+
+def _row_box_has_explicit_grouping(expr: Call) -> bool:
+    if len(expr.arguments) != 1:
+        return False
+    items = expr.arguments[0]
+    if not isinstance(items, Call) or not items.has_head("List") or len(items.arguments) < 2:
+        return False
+    first, last = items.arguments[0], items.arguments[-1]
+    if not isinstance(first, String) or not isinstance(last, String):
+        return False
+    return (first.value, last.value) in {
+        ("(", ")"),
+        ("[", "]"),
+        ("{", "}"),
+    }
 
 
 def _normalize_row_box_token(value: str) -> str:
@@ -1850,7 +1868,7 @@ class _Parser:
             return call(tag_head, left.arguments[0], left.arguments[1], right)
         if head_name in _CHAINABLE_COMPARISON_HEADS:
             return self._make_comparison_operator_call(head_name, left, right)
-        if head_name in {"Plus", "Times"}:
+        if head_name in {"Plus", "Times"} or escaped_operator_head is not None:
             return self._make_flat_parser_operator_call(head_name, left, right)
         result = call(head_name, left, right)
         self._operator_expr_heads[id(result)] = head_name
@@ -1915,4 +1933,3 @@ class _Parser:
         result = call(head_name, left, right)
         self._operator_expr_heads[id(result)] = head_name
         return result
-
