@@ -84,9 +84,9 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
                 result = added
             return result
         # Mixed numeric/symbolic arguments: after attribute normalization has
-        # flattened and orderless-canonicalized Plus, fold the explicit numeric
-        # arguments into the single leading constant used by Wolfram output.
-        return _fold_numeric_partition(expr.arguments, _add_numeric_expr, integer(0), "Plus")
+        # flattened and orderless-canonicalized Plus, fold explicit numeric
+        # constants and collect identical symbolic terms.
+        return _simplify_plus_arguments(expr.arguments)
 
     if expr.has_head("Times"):
         if any(_is_indeterminate_expr(argument) for argument in expr.arguments):
@@ -109,9 +109,9 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
                 result = multiplied
             return result
         # Mixed numeric/symbolic arguments. If the numeric part folds to 0,
-        # the whole product is 0; otherwise keep the folded numeric factor in
-        # front of the already attribute-normalized symbolic remainder.
-        return _fold_numeric_partition(expr.arguments, _mul_numeric_expr, integer(1), "Times")
+        # the whole product is 0; otherwise collect identical bases into
+        # powers and keep the folded numeric factor in front.
+        return _simplify_times_arguments(expr.arguments)
 
     if expr.has_head("Power"):
         if not expr.arguments:
@@ -125,6 +125,9 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
             return symbol("Indeterminate")
         if _is_complex_infinity_expr(base):
             return symbol("ComplexInfinity")
+        simplified_power = _simplify_power_expr(base, exponent)
+        if simplified_power is not None:
+            return simplified_power
         if not _is_number_expr(base) or not _is_number_expr(exponent):
             return None
         return _numeric_power_expr(base, exponent)
@@ -132,53 +135,185 @@ def _evaluate_numeric_arithmetic(expr: Call) -> Expr | None:
     return None
 
 
-def _fold_numeric_partition(
-    arguments: Sequence[Expr],
-    combine: "Callable[[Expr, Expr], Expr | None]",
-    identity: Expr,
-    head_name: str,
-) -> Expr | None:
-    """Fold explicit numeric arguments and keep the nonnumeric remainder order.
+def _simplify_plus_arguments(arguments: Sequence[Expr]) -> Expr | None:
+    """Fold constants and collect equal terms in a Plus argument list."""
 
-    Returns ``None`` when the numeric fold cannot be completed (e.g. an
-    incompatible numeric pair). Used by ``Plus`` and ``Times`` to produce the
-    common ``Plus[2, a, 3] -> Plus[5, a]`` shape. For Orderless heads, callers
-    run attribute normalization first, so "remainder order" is already the
-    canonical argument order rather than raw input order.
-    """
-    numeric_acc: Expr = identity
-    saw_numeric = False
-    symbolic: list[Expr] = []
+    constant: Expr = integer(0)
+    saw_constant = False
+    terms: list[tuple[Expr, Expr]] = []
+
     for argument in arguments:
-        if _is_number_expr(argument):
-            combined = combine(numeric_acc, argument)
+        coefficient, base = _split_additive_term(argument)
+        if base is None:
+            combined = _add_numeric_expr(constant, coefficient)
             if combined is None:
                 return None
-            numeric_acc = combined
-            saw_numeric = True
-        else:
-            symbolic.append(argument)
+            constant = combined
+            saw_constant = True
+            continue
 
-    if head_name == "Times" and _is_exact_zero(numeric_acc):
+        for index, (existing_base, existing_coefficient) in enumerate(terms):
+            if existing_base == base:
+                combined = _add_numeric_expr(existing_coefficient, coefficient)
+                if combined is None:
+                    return None
+                terms[index] = (existing_base, combined)
+                break
+        else:
+            terms.append((base, coefficient))
+
+    result_arguments: list[Expr] = []
+    if saw_constant and not _is_numeric_zero(constant):
+        result_arguments.append(constant)
+    for base, coefficient in terms:
+        term = _build_additive_term(coefficient, base)
+        if term is not None:
+            result_arguments.append(term)
+
+    if not result_arguments:
+        return integer(0)
+    if len(result_arguments) == 1:
+        return result_arguments[0]
+    result = Call(head_expr=symbol("Plus"), arguments=tuple(result_arguments))
+    if result.arguments == tuple(arguments):
+        return None
+    return result
+
+
+def _split_additive_term(argument: Expr) -> tuple[Expr, Expr | None]:
+    if _is_number_expr(argument):
+        return argument, None
+    if isinstance(argument, Call) and argument.has_head("Times"):
+        coefficient: Expr = integer(1)
+        symbolic_factors: list[Expr] = []
+        for factor in argument.arguments:
+            if _is_number_expr(factor):
+                multiplied = _mul_numeric_expr(coefficient, factor)
+                if multiplied is None:
+                    return integer(1), argument
+                coefficient = multiplied
+            else:
+                symbolic_factors.append(factor)
+        if not symbolic_factors:
+            return coefficient, None
+        return coefficient, _times_expr_from_factors(symbolic_factors)
+    return integer(1), argument
+
+
+def _build_additive_term(coefficient: Expr, base: Expr) -> Expr | None:
+    if _is_numeric_zero(coefficient):
+        return None
+    if _is_one_expr(coefficient):
+        return base
+    return _times_expr_from_factors((coefficient, base))
+
+
+def _simplify_times_arguments(arguments: Sequence[Expr]) -> Expr | None:
+    """Fold constants and collect equal bases in a Times argument list."""
+
+    coefficient: Expr = integer(1)
+    saw_numeric_factor = False
+    factors: list[tuple[Expr, Expr]] = []
+
+    for argument in arguments:
+        if _is_number_expr(argument):
+            multiplied = _mul_numeric_expr(coefficient, argument)
+            if multiplied is None:
+                return None
+            coefficient = multiplied
+            saw_numeric_factor = True
+            continue
+
+        base, exponent = _split_multiplicative_factor(argument)
+        for index, (existing_base, existing_exponent) in enumerate(factors):
+            if existing_base == base:
+                factors[index] = (existing_base, _add_exponents(existing_exponent, exponent))
+                break
+        else:
+            factors.append((base, exponent))
+
+    if _is_numeric_zero(coefficient):
         return integer(0)
 
-    is_identity = saw_numeric and (
-        (head_name == "Plus" and _is_exact_zero(numeric_acc))
-        or (head_name == "Times" and _is_one_expr(numeric_acc))
-    )
+    result_arguments: list[Expr] = []
+    if saw_numeric_factor and not _is_one_expr(coefficient):
+        result_arguments.append(coefficient)
+    for base, exponent in factors:
+        factor = _build_power_factor(base, exponent)
+        if factor is not None:
+            result_arguments.append(factor)
 
-    if not saw_numeric:
+    if not result_arguments:
+        return integer(1)
+    if len(result_arguments) == 1:
+        return result_arguments[0]
+    result = Call(head_expr=symbol("Times"), arguments=tuple(result_arguments))
+    if result.arguments == tuple(arguments):
         return None
-    if not symbolic:
-        return numeric_acc
-    if is_identity:
-        if len(symbolic) == 1:
-            return symbolic[0]
-        return Call(head_expr=symbol(head_name), arguments=tuple(symbolic))
-    return Call(
-        head_expr=symbol(head_name),
-        arguments=(numeric_acc, *symbolic),
-    )
+    return result
+
+
+def _split_multiplicative_factor(argument: Expr) -> tuple[Expr, Expr]:
+    if isinstance(argument, Call) and argument.has_head("Power") and len(argument.arguments) == 2:
+        return argument.arguments[0], argument.arguments[1]
+    return argument, integer(1)
+
+
+def _add_exponents(left: Expr, right: Expr) -> Expr:
+    added = _add_numeric_expr(left, right) if _is_number_expr(left) and _is_number_expr(right) else None
+    if added is not None:
+        return added
+    return evaluate(call("Plus", left, right))
+
+
+def _build_power_factor(base: Expr, exponent: Expr) -> Expr | None:
+    if _is_numeric_zero(exponent):
+        return None
+    if _is_one_expr(exponent):
+        return base
+    return call("Power", base, exponent)
+
+
+def _times_expr_from_factors(factors: Sequence[Expr]) -> Expr:
+    flattened: list[Expr] = []
+    for factor in factors:
+        if isinstance(factor, Call) and factor.has_head("Times"):
+            flattened.extend(factor.arguments)
+        else:
+            flattened.append(factor)
+    if not flattened:
+        return integer(1)
+    if len(flattened) == 1:
+        return flattened[0]
+    return Call(head_expr=symbol("Times"), arguments=tuple(flattened))
+
+
+def _simplify_power_expr(base: Expr, exponent: Expr) -> Expr | None:
+    if _is_exact_zero(exponent):
+        if _is_numeric_zero(base):
+            return None
+        return integer(1)
+    if _is_one_expr(exponent):
+        return base
+    if _is_one_expr(base):
+        return integer(1)
+
+    integer_exponent = _exact_integer_value(exponent)
+    if integer_exponent is not None:
+        if isinstance(base, Call) and base.has_head("Power") and len(base.arguments) == 2:
+            inner_base, inner_exponent = base.arguments
+            combined_exponent = evaluate(call("Times", exponent, inner_exponent))
+            return call("Power", inner_base, combined_exponent)
+        if isinstance(base, Call) and base.has_head("Times"):
+            return evaluate(call("Times", *(call("Power", factor, exponent) for factor in base.arguments)))
+    return None
+
+
+def _exact_integer_value(expr: Expr) -> int | None:
+    exact = _exact_fraction(expr)
+    if exact is None or exact.denominator != 1:
+        return None
+    return exact.numerator
 
 
 def _is_one_expr(expr: Expr) -> bool:

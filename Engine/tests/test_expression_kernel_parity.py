@@ -232,6 +232,48 @@ class ArithmeticPrefixFoldTests(unittest.TestCase):
         self.assertEqual(_full("Power[x]"), "x")
 
 
+class ArithmeticAutomaticSimplificationTests(unittest.TestCase):
+    """Common Wolfram arithmetic canonicalization beyond numeric folding."""
+
+    def test_plus_collects_identical_symbolic_terms(self) -> None:
+        self.assertEqual(_full("x + x"), "Times[2, x]")
+        self.assertEqual(_full("x + x + x"), "Times[3, x]")
+        self.assertEqual(_full("x + 2 x"), "Times[3, x]")
+        self.assertEqual(_full("2 x + 3 x"), "Times[5, x]")
+        self.assertEqual(_full("a x + a x"), "Times[2, a, x]")
+        self.assertEqual(_full("x y + x y"), "Times[2, x, y]")
+
+    def test_plus_cancels_opposite_terms(self) -> None:
+        self.assertEqual(_full("x - x"), "0")
+        self.assertEqual(_full("-x + x"), "0")
+        self.assertEqual(_full("x - y + x"), "Plus[Times[2, x], Times[-1, y]]")
+        self.assertEqual(_full("a x + (-a) x"), "0")
+
+    def test_times_collects_identical_bases(self) -> None:
+        self.assertEqual(_full("x*x"), "Power[x, 2]")
+        self.assertEqual(_full("x*x*x"), "Power[x, 3]")
+        self.assertEqual(_full("2*x*x"), "Times[2, Power[x, 2]]")
+        self.assertEqual(_full("x^2*x"), "Power[x, 3]")
+        self.assertEqual(_full("x^2*x^3"), "Power[x, 5]")
+        self.assertEqual(_full("x^a*x^b"), "Power[x, Plus[a, b]]")
+        self.assertEqual(_full("x^a*x^a"), "Power[x, Times[2, a]]")
+
+    def test_times_cancels_reciprocal_powers(self) -> None:
+        self.assertEqual(_full("1/x*x"), "1")
+        self.assertEqual(_full("x/x"), "1")
+        self.assertEqual(_full("x^-1*x"), "1")
+        self.assertEqual(_full("x^-2*x^3"), "x")
+
+    def test_power_identity_and_integer_exponent_rules(self) -> None:
+        self.assertEqual(_full("x^0"), "1")
+        self.assertEqual(_full("x^1"), "x")
+        self.assertEqual(_full("1^x"), "1")
+        self.assertEqual(_full("(x^2)^3"), "Power[x, 6]")
+        self.assertEqual(_full("(x^a)^b"), "Power[Power[x, a], b]")
+        self.assertEqual(_full("(a*b)^2"), "Times[Power[a, 2], Power[b, 2]]")
+        self.assertEqual(_full("(-x)^3"), "Times[-1, Power[x, 3]]")
+
+
 class AtPrefixPrecedenceTests(unittest.TestCase):
     """Finding B10: the ``@`` prefix operator binds tighter than arithmetic.
 

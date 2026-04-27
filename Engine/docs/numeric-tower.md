@@ -55,17 +55,21 @@ Wolfram-compatible way. Approximate zero imaginary parts are not exact zero, so 
 
 ## Arithmetic
 
-`Plus`, `Times`, and `Power` evaluate only when all participating values are explicit Tungsten
-numbers. Exact integer/rational arithmetic uses Python `Fraction`. Machine arithmetic uses Python
-`float`. Arbitrary-precision decimal arithmetic uses Python `Decimal` with the minimum visible
-precision of the participating explicit arbitrary-precision real atoms.
+`Plus`, `Times`, and `Power` evaluate exact numeric combinations and perform a small set of
+Wolfram-style structural arithmetic simplifications. Exact integer/rational arithmetic uses Python
+`Fraction`. Machine arithmetic uses Python `float`. Arbitrary-precision decimal arithmetic uses
+Python `Decimal` with the minimum visible precision of the participating explicit
+arbitrary-precision real atoms.
 
 These heads run through the same registry-backed attribute pipeline as user symbols. Built-in
 snapshot attributes therefore flatten `Flat` expressions, canonicalize `Orderless` argument order,
 and thread `Listable` calls before the numeric evaluator attempts an explicit-number calculation.
-This is still structural normalization rather than algebraic simplification: Tungsten does not
-combine symbolic terms, reorder according to every undocumented kernel tie breaker, or infer
-numeric values for symbolic subexpressions.
+This is still bounded structural normalization rather than general algebraic simplification.
+Tungsten folds numeric constants, combines identical additive terms (`x + x` -> `2*x`), combines
+identical multiplicative bases (`x*x` -> `x^2`, `x^a*x^b` -> `x^(a+b)`), applies identity powers
+such as `x^1 -> x` and `1^x -> 1`, and distributes explicit integer powers over products. It does
+not factor unrelated terms such as `a*x + b*x`, solve assumptions, reorder according to every
+undocumented kernel tie breaker, or infer numeric values for symbolic subexpressions.
 
 Supported power cases are deliberately bounded:
 
@@ -73,6 +77,8 @@ Supported power cases are deliberately bounded:
 - negative integer powers through reciprocals;
 - machine real powers that Python can compute directly;
 - complex integer powers by repeated multiplication.
+- symbolic identity powers such as `x^0`, `x^1`, and `1^x`;
+- integer powers of symbolic powers/products where the transformation is structurally safe.
 
 Unsupported branch-sensitive cases remain inert.
 

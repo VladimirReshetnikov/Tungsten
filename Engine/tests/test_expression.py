@@ -625,7 +625,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
             evaluate(parse_input_form("HoldComplete[Sequence[1 + 1, 2 + 2]]")).to_full_form(),
             "HoldComplete[Sequence[Plus[1, 1], Plus[2, 2]]]",
         )
-        self.assertEqual(evaluate(parse_input_form("Function[Sequence[x, x + x]][a]")).to_full_form(), "Plus[a, a]")
+        self.assertEqual(evaluate(parse_input_form("Function[Sequence[x, x + x]][a]")).to_full_form(), "Times[2, a]")
         self.assertEqual(evaluate(parse_input_form("{Sequence[Nothing, 1], 2}")).to_full_form(), "List[1, 2]")
         self.assertEqual(evaluate(parse_input_form("f[Sequence[Nothing, 1], 2]")).to_full_form(), "f[Nothing, 1, 2]")
         self.assertEqual(evaluate(parse_input_form("{Nothing[1 + 1], 2}")).to_full_form(), "List[2]")
@@ -1250,9 +1250,9 @@ class ExpressionEvaluationTests(unittest.TestCase):
         shadowed = evaluate(parse_input_form("(x |-> x |-> x[y])[y]"))
         recursive = evaluate(parse_input_form("(x |-> y |-> z |-> {x, y, z})[y]"))
         positional_nested = evaluate(parse_input_form("(Function[x, # + x &])[a]"))
-        self.assertEqual(direct.to_full_form(), "Plus[a, a]")
+        self.assertEqual(direct.to_full_form(), "Times[2, a]")
         self.assertEqual(list_syntax.to_full_form(), "Plus[a, b]")
-        self.assertEqual(escaped.to_full_form(), "Plus[a, a]")
+        self.assertEqual(escaped.to_full_form(), "Times[2, a]")
         self.assertEqual(nested_capture.to_full_form(), "Function[y$, y[y$]]")
         self.assertEqual(nested_no_capture.to_full_form(), "Function[y$, z[y$]]")
         self.assertEqual(liberal_rename.to_full_form(), "Function[y$, f[a]]")
