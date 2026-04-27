@@ -3766,6 +3766,77 @@ class PolynomialAlgebraTests(unittest.TestCase):
         )
         self.assertEqual(evaluate(parse_input_form("FactorList[0]")).to_full_form(), "List[List[0, 1]]")
 
+    def test_gaussian_rational_polynomial_coefficients(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[x^2 + I x + 1, x]")).to_full_form(), "True")
+        self.assertEqual(
+            evaluate(parse_input_form("Variables[x^2 + I y + 1]")).to_full_form(),
+            "List[x, y]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MonomialList[x^2 + I x + 1, x]")).to_full_form(),
+            "List[Power[x, 2], Times[Complex[0, 1], x], 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Collect[x^2 + I x + 1 + y x, x]")).to_full_form(),
+            "Plus[1, Power[x, 2], Times[x, Plus[Complex[0, 1], y]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Coefficient[x^2 + I x + 1, x]")).to_full_form(),
+            "Complex[0, 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("CoefficientList[x^2 + I x + 1, x]")).to_full_form(),
+            "List[1, Complex[0, 1], 1]",
+        )
+
+    def test_gaussian_factor_options(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, GaussianIntegers -> True]")).to_full_form(),
+            "Times[Plus[Complex[0, -1], x], Plus[Complex[0, 1], x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, Extension -> {I}]")).to_full_form(),
+            "Times[Plus[Complex[0, -1], x], Plus[Complex[0, 1], x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, Extension -> I]")).to_full_form(),
+            "Times[Plus[Complex[0, -1], x], Plus[Complex[0, 1], x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FactorList[x^2 + 1, Extension -> {I}]")).to_full_form(),
+            "List[List[1, 1], List[Plus[Complex[0, -1], x], 1], List[Plus[Complex[0, 1], x], 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, Extension -> {Sqrt[2]}]")).to_full_form(),
+            "Factor[Plus[1, Power[x, 2]], Rule[Extension, List[Power[2, Rational[1, 2]]]]]",
+        )
+
+    def test_decompose_polynomials(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[(x^2 + 1)^3 + 2, x]")).to_full_form(),
+            "List[Plus[3, Power[x, 3], Times[3, x], Times[3, Power[x, 2]]], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[x^2 + 1, x]")).to_full_form(),
+            "List[Plus[1, x], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[x^2 + I, x]")).to_full_form(),
+            "List[Plus[Complex[0, 1], x], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[x^4 + x^2, x]")).to_full_form(),
+            "List[Plus[x, Power[x, 2]], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[3 x^2, x]")).to_full_form(),
+            "List[Times[3, Power[x, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[(x^2 + I x + 1)^2, x]")).to_full_form(),
+            "List[Plus[1, Power[x, 2], Times[2, x]], Plus[Power[x, 2], Times[Complex[0, 1], x]]]",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

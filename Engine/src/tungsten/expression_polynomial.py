@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import cmp_to_key
+from math import gcd
 from typing import Any, Sequence
 
 import sympy as _sp
@@ -49,6 +50,8 @@ class _SympyBridge:
             return _sp.Integer(expr.value)
         if isinstance(expr, RationalNumber):
             return _sp.Rational(expr.value.numerator, expr.value.denominator)
+        if isinstance(expr, ComplexNumber):
+            return self.to_sympy(expr.real_part) + _sp.I * self.to_sympy(expr.imaginary_part)
         if isinstance(expr, Symbol):
             return self._symbol_for_name(expr.name)
         if isinstance(expr, Call):
@@ -66,10 +69,11 @@ class _SympyBridge:
             return symbol("Infinity")
         if expr is _sp.S.NegativeInfinity:
             return symbol("-Infinity")
-        if expr.is_Integer:
-            return integer(int(expr))
-        if expr.is_Rational:
-            return rational_number(int(expr.p), int(expr.q))
+        number_expr = self._from_sympy_number(expr)
+        if number_expr is not None:
+            return number_expr
+        if expr.is_number:
+            raise _PolynomialConversionError(str(expr))
         if expr.is_Symbol:
             return self.symbol_to_expr.get(expr, symbol(str(expr)))
         if expr.is_Add:
@@ -81,6 +85,28 @@ class _SympyBridge:
         if expr.is_Pow:
             return evaluate(call("Power", self.from_sympy(expr.base), self.from_sympy(expr.exp)))
         raise _PolynomialConversionError(str(expr))
+
+    def _from_sympy_number(self, expr: Any) -> Expr | None:
+        if expr.is_Integer:
+            return integer(int(expr))
+        if expr.is_Rational:
+            return rational_number(int(expr.p), int(expr.q))
+        if not expr.is_number:
+            return None
+        real_part, imaginary_part = expr.as_real_imag()
+        real_expr = self._from_sympy_rational(real_part)
+        imaginary_expr = self._from_sympy_rational(imaginary_part)
+        if real_expr is None or imaginary_expr is None:
+            return None
+        return complex_number(real_expr, imaginary_expr)
+
+    def _from_sympy_rational(self, expr: Any) -> Expr | None:
+        expr = _sp.sympify(expr)
+        if expr.is_Integer:
+            return integer(int(expr))
+        if expr.is_Rational:
+            return rational_number(int(expr.p), int(expr.q))
+        return None
 
 
 def _evaluate_polynomial_functions(expr: Call) -> Expr | None:
@@ -104,6 +130,8 @@ def _evaluate_polynomial_functions(expr: Call) -> Expr | None:
         return _factor_expr(expr.arguments)
     if expr.has_head("FactorList"):
         return _factor_list_expr(expr.arguments)
+    if expr.has_head("Decompose"):
+        return _decompose_expr(expr.arguments)
     return None
 
 
@@ -247,27 +275,134 @@ def _coefficient_list_expr(arguments: Sequence[Expr]) -> Expr | None:
 
 
 def _factor_expr(arguments: Sequence[Expr]) -> Expr | None:
-    if len(arguments) != 1:
+    if not arguments:
+        return None
+    options = _factor_options(arguments[1:])
+    if options is None:
         return None
     try:
         sym_expr, bridge = _to_sympy_expr(arguments[0])
-        return bridge.from_sympy(_sp.factor(sym_expr))
+        return bridge.from_sympy(_sp.factor(sym_expr, **options))
     except (_PolynomialConversionError, _sp.PolynomialError):
         return None
 
 
 def _factor_list_expr(arguments: Sequence[Expr]) -> Expr | None:
-    if len(arguments) != 1:
+    if not arguments:
+        return None
+    options = _factor_options(arguments[1:])
+    if options is None:
         return None
     try:
         sym_expr, bridge = _to_sympy_expr(arguments[0])
-        coefficient, factors = _sp.factor_list(sym_expr)
+        coefficient, factors = _sp.factor_list(sym_expr, **options)
         entries = [_evaluated_list_expr(bridge.from_sympy(coefficient), integer(1))]
         for factor, exponent in factors:
             entries.append(_evaluated_list_expr(bridge.from_sympy(factor), integer(int(exponent))))
         return _evaluated_list_expr(*entries)
     except (_PolynomialConversionError, _sp.PolynomialError):
         return None
+
+
+def _decompose_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 2:
+        return None
+    variables = _variable_exprs(arguments[1])
+    if variables is None or len(variables) != 1:
+        return None
+    try:
+        sym_expr, bridge = _to_sympy_expr(arguments[0], variables)
+        sym_var = bridge.to_sympy(variables[0])
+        decomposition = [_sp.expand(part) for part in _sp.decompose(_sp.expand(sym_expr), sym_var)]
+        decomposition = _wolframize_decomposition(sym_expr, sym_var, decomposition)
+        return _evaluated_list_expr(*(bridge.from_sympy(part) for part in decomposition))
+    except (_PolynomialConversionError, _sp.PolynomialError, ValueError):
+        return None
+
+
+def _factor_options(option_exprs: Sequence[Expr]) -> dict[str, Any] | None:
+    use_gaussian_extension = False
+    for option in option_exprs:
+        if not isinstance(option, Call) or not option.has_head("Rule") or len(option.arguments) != 2:
+            return None
+        key, value = option.arguments
+        if _is_option_symbol(key, "GaussianIntegers"):
+            truth = _truth_value(value)
+            if truth is None:
+                return None
+            use_gaussian_extension = use_gaussian_extension or truth
+            continue
+        if _is_option_symbol(key, "Extension"):
+            extension = _extension_option_value(value)
+            if extension is None:
+                return None
+            use_gaussian_extension = use_gaussian_extension or extension
+            continue
+        return None
+    return {"extension": _sp.I} if use_gaussian_extension else {}
+
+
+def _is_option_symbol(expr: Expr, name: str) -> bool:
+    return isinstance(expr, Symbol) and _system_dispatch_name(expr) == name
+
+
+def _extension_option_value(value: Expr) -> bool | None:
+    if _is_option_symbol(value, "None"):
+        return False
+    if _is_gaussian_extension_generator(value):
+        return True
+    if isinstance(value, Call) and value.has_head("List"):
+        if not value.arguments:
+            return False
+        if all(_is_gaussian_extension_generator(argument) for argument in value.arguments):
+            return True
+        return None
+    return None
+
+
+def _is_gaussian_extension_generator(expr: Expr) -> bool:
+    if isinstance(expr, ComplexNumber):
+        return _is_exact_zero(expr.real_part) and _is_exact_one(expr.imaginary_part)
+    return False
+
+
+def _is_exact_one(expr: Expr) -> bool:
+    if isinstance(expr, Integer):
+        return expr.value == 1
+    if isinstance(expr, RationalNumber):
+        return expr.value == 1
+    return False
+
+
+def _wolframize_decomposition(sym_expr: Any, sym_var: Any, decomposition: Sequence[Any]) -> list[Any]:
+    if len(decomposition) != 1:
+        return list(decomposition)
+    fallback = _exponent_gcd_decomposition(sym_expr, sym_var)
+    if fallback is not None:
+        return fallback
+    return list(decomposition)
+
+
+def _exponent_gcd_decomposition(sym_expr: Any, sym_var: Any) -> list[Any] | None:
+    poly = _sp.Poly(_sp.expand(sym_expr), sym_var)
+    terms = poly.terms()
+    nonzero_exponents = [int(powers[0]) for powers, coefficient in terms if powers[0] and coefficient != 0]
+    if len(nonzero_exponents) < 2 and poly.as_dict().get((0,), _sp.Integer(0)) == 0:
+        return None
+    exponent_gcd = 0
+    for exponent in nonzero_exponents:
+        exponent_gcd = exponent if exponent_gcd == 0 else gcd(exponent_gcd, exponent)
+    if exponent_gcd <= 1:
+        return None
+    outer = _sp.Integer(0)
+    for (exponent,), coefficient in terms:
+        if exponent % exponent_gcd != 0:
+            return None
+        outer += coefficient * sym_var ** (exponent // exponent_gcd)
+    inner = sym_var ** exponent_gcd
+    if _sp.expand(outer - sym_var) == 0:
+        return None
+    return [_sp.expand(outer), inner]
 
 
 def _to_sympy_expr(expr: Expr, variables: Sequence[Expr] = ()) -> tuple[Any, _SympyBridge]:

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-27T01:09:34Z
-- Repository HEAD: 7703c0dbf110e4f115cfd6f2e6c91f11e6eb2eb9
+- Updated (UTC): 2026-04-27T01:28:35Z
+- Repository HEAD: 502487b1fc8db259c932906795308ae341e4bcd3
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -94,7 +94,7 @@ Even in that broader future direction, Tungsten is not intended to implement:
 - real- or complex-valued elementary or special mathematical functions;
 - expression simplification algorithms;
 - equation solving;
-- broad polynomial algebra beyond Tungsten's exact integer/rational coefficient subset;
+- broad polynomial algebra beyond Tungsten's exact Gaussian-rational coefficient subset;
 - derivatives or integrals;
 - optimization problems;
 - anything that requires specialized mathematical algorithms.
@@ -133,8 +133,8 @@ The current workspace is built around seven complementary capabilities:
    `IntegerLength`, `IntegerDigits`, `FromDigits`, and bitwise
    `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`, exact polynomial heads
    `Expand`, `PolynomialQ`, `Variables`, `MonomialList`, `Collect`, `Coefficient`, `Exponent`,
-   `CoefficientList`, `Factor`, `FactorList`, plus number-theory heads `FactorInteger` and
-   `IntegerExponent`,
+   `CoefficientList`, `Factor`, `FactorList`, `Decompose`, plus number-theory heads
+   `FactorInteger` and `IntegerExponent`,
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
