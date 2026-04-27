@@ -4,8 +4,8 @@
 - Audience: Vladimir, Tungsten maintainers planning the next implementation passes
 - Scope: `src/Tungsten/src/tungsten/` Python package — only the kernel-free expression subsystem. The Wolfram kernel interop layer is out of scope here.
 - Created (UTC): 2026-04-27T16:48:25Z
-- Updated (UTC): 2026-04-27T18:10:00Z
-- Repository HEAD: 9a4ceae3c (in-tree changes pending commit)
+- Updated (UTC): 2026-04-27T20:38:45Z
+- Repository HEAD: e2ff91fdff0e3300d0f2e927bdb3829d0178bc0f
 - Predecessors (now archived): `2026-04-23-external-review.md`, `2026-04-24-parser-evaluator-kernel-parity.md`, `2026-04-24-parser-evaluator-kernel-parity-evil-qa.md`, `2026-04-26-expression-parity-deep-review.md`, `2026-04-26-function-surface-gap-report.md`. Each archived header carries a notice; this document is the active gap inventory.
 
 ## Purpose and method
@@ -26,26 +26,13 @@ The README scope statement is honored throughout: this report does not push for 
 
 **Missing family members.**
 
-- **Symbolic constants beyond inert.** `Pi`, `E`, `EulerGamma`, `GoldenRatio`, `Catalan`, `Khinchin`, `Glaisher`, `Degree` are accepted as inert symbols and `N[Pi, p]` / `N[E, p]` / `N[EulerGamma, p]` work via the SymPy bridge. They have no associated `Re` / `Im` / `Sign` / `Abs` rules and no participation in arithmetic identities (e.g. `2 Pi - Pi` does not simplify to `Pi`). All of `Re[Pi]`, `Im[I*Pi]`, and `Re[I*Pi]` stay inert. **Add per-constant rules for the deterministic-real cases**: `Re[const] -> const`, `Im[const] -> 0` for the real-valued constants; `Sign[Pi] -> 1`, `Abs[Pi] -> Pi`, etc. The same hooks unblock most of the items below once the value heads are in place.
+- **Symbolic constants residual rules.** The basic constants `Pi`, `E`, `EulerGamma`, `GoldenRatio`, `Catalan`, `Degree` now have `N[]` and `Sign[]` rules and participate in `Sin`/`Log`/etc. through the SymPy bridge. The remaining gaps are: direct `Re[const]` / `Im[const]` / `Abs[const]` rules (today users have to wrap in `ComplexExpand`); and the `Khinchin` / `Glaisher` constants which still have no `N[]` or `Sign[]` rule.
 
-- **Transcendental and elementary functions.** None of these have evaluator rules today. Adding even a small subset of exact rules over the explicit-numeric / `Pi` / `E` / `I` subset would dramatically expand what ordinary Wolfram code Tungsten can run.
+- **Logarithm head aliases.** `Log[b, x]` is implemented; the dedicated `Log2[x]` and `Log10[x]` heads still stay inert. Trivial wrappers (rewrite to `Log[2, x]` and `Log[10, x]`).
 
-  | Family | Heads |
-  |--------|-------|
-  | Logarithms | `Log[x]`, `Log[b, x]`, `Log2[x]`, `Log10[x]` |
-  | Exponential | `Exp[x]` |
-  | Trig | `Sin`, `Cos`, `Tan`, `Sec`, `Csc`, `Cot` |
-  | Inverse trig | `ArcSin`, `ArcCos`, `ArcTan` (1-arg and 2-arg `ArcTan[x, y]`), `ArcSec`, `ArcCsc`, `ArcCot` |
-  | Hyperbolic | `Sinh`, `Cosh`, `Tanh`, `Sech`, `Csch`, `Coth` |
-  | Inverse hyperbolic | `ArcSinh`, `ArcCosh`, `ArcTanh`, `ArcSech`, `ArcCsch`, `ArcCoth` |
+- **Special functions over integers.** `Gamma[n]` for non-negative integers (= `(n-1)!`), `LogGamma[n]`, `Factorial[n]`, `Factorial2[n]`, `Pochhammer[a, n]`, `Beta[a, b]`, `Subfactorial[n]`, `StirlingS1[n, k]`, `StirlingS2[n, k]`, `BellB[n]`, `CatalanNumber[n]`. All inert today, including under `N[]`. Each is a small wrapper.
 
-  The README explicitly excludes "real- or complex-valued elementary or special mathematical functions" and "expression simplification." If staying out-of-scope, keep the heads inert and document the Wolfram-vs-Tungsten divergence so users do not chase silent inertness. If moving in-scope even narrowly, the smallest defensible subset is exact rules for explicit-numeric and `Pi`/`E`/`I` arguments — `Sin[Pi/6] -> 1/2`, `Log[E] -> 1`, `Exp[0] -> 1`, `ArcTan[1] -> Pi/4`, `Tan[Pi/4] -> 1` — plus inert pass-through for everything else.
-
-- **Special functions over integers.** `Gamma[n]` for non-negative integers (= `(n-1)!`), `LogGamma[n]`, `Factorial[n]`, `Factorial2[n]`, `Pochhammer[a, n]`, `Beta[a, b]`, `Subfactorial[n]`, `StirlingS1[n, k]`, `StirlingS2[n, k]`, `BellB[n]`, `CatalanNumber[n]`. All inert today. Each is a small wrapper.
-
-- **Complex-number helpers.** `Arg[z]`, `AbsArg[z]`, `ComplexExpand[expr]`. All inert. Tungsten already has `Re`, `Im`, `Conjugate`, `Abs`, so a small `Arg` for explicit real and pure-imaginary `z` plus a structural `ComplexExpand` over the `(a + I b)^n` template is feasible without crossing into broad simplification.
-
-- **Rational structure.** `Numerator[expr]`, `Denominator[expr]`. Glaring hole — Tungsten has full exact `Rational`, but `Numerator[3/4]` and `Denominator[3/4]` are inert. **Add.** Once the head dispatches, threading over rational expressions through SymPy is a five-line wrapper.
+- **`AbsArg`.** `Arg[z]` and `ComplexExpand[expr]` now work; the paired `AbsArg[z]` head still stays inert.
 
 - **Numeric helpers.** `Rationalize[x]`, `Rationalize[x, dx]`, `RealDigits[x]`, `MantissaExponent[x]`, `Hash[expr]`, `Hash[expr, "MD5"|"SHA"|...]`, `Hash[expr, type, "Format"]`. None implemented.
 
@@ -55,19 +42,11 @@ The README scope statement is honored throughout: this report does not push for 
 
 **Missing family members.** `Divisible[n, m]`, `CoprimeQ[a, b, …]`, `NumberDigit[n, k]` / `NumberDigit[n, k, base]`, `Factorial[n]`, `Factorial2[n]`, `Pochhammer[a, n]`, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber`, `Subfactorial` (the last six also bucket A). All inert. These nine plug into the existing `expression_arithmetic.py` `_evaluate_integer_special_functions` chain and look like ~60–120 LOC.
 
-### C. Polynomial algebra and rational simplification
+### C. Polynomial algebra and rational simplification (residual)
 
-The SymPy bridge already underpins `Expand`, `Factor`, `Collect`, `Coefficient`, `MonomialList`, `CoefficientList`, `Decompose`, `PolynomialQ`, `Variables`, and `Exponent`. The natural follow-on layer is missing entirely.
+The rational-function and polynomial-extension family is now closed (`Numerator`, `Denominator`, `Together`, `Apart`, `Cancel`, `PolynomialGCD`, `PolynomialLCM`, `PolynomialMod`, `PolynomialQuotient`, `PolynomialRemainder`, `PolynomialReduce`, `Resultant`, `Discriminant`, `Subresultants`, `GroebnerBasis`, `ToRadicals`). What remains is restricted-form coverage:
 
-**Missing family members.**
-
-- `Numerator`, `Denominator` (also bucket A; these unblock everything below).
-- `Together[expr]`, `Apart[expr]`, `Apart[expr, x]`, `Cancel[expr]`. All thin SymPy wrappers; confirmed inert.
-- `PolynomialGCD`, `PolynomialLCM`, `PolynomialMod[poly, m]`, `PolynomialQuotient[a, b, x]`, `PolynomialRemainder[a, b, x]`, `PolynomialReduce[poly, polys, vars]`. All thin SymPy wrappers.
-- `Resultant[p, q, x]`, `Discriminant[p, x]`, `Subresultants`. SymPy bridge for the first two; `Subresultants` is more involved.
-- `GroebnerBasis[polys, vars]`. SymPy has it; the bridge is mostly type-marshalling.
-
-**Out of scope per current README direction:** `Simplify`, `FullSimplify`, `Roots`, `Solve`, `Reduce`, `NSolve`, `FindRoot`, `RootSum`, `ToRadicals`, `D`, `Derivative`, `Integrate`, `Series`, `Limit`, closed-form `Sum`/`Product`. Listed only so the long-tail picture is visible.
+**Out of scope per current README direction:** `Simplify`, `FullSimplify`, `Roots`, `Solve`, `Reduce`, `NSolve`, `FindRoot`, `RootSum`, `D`, `Derivative`, `Integrate`, `Series`, `Limit`, closed-form `Sum`/`Product`. Listed only so the long-tail picture is visible.
 
 **Missing argument shapes.**
 
@@ -308,17 +287,15 @@ These items hit multiple buckets and are worth flagging once at the top of any p
 2. **`Default[h, n]` registry.** `Optional[patt]` / `_.` shorthand cannot synthesize defaults for user-defined heads. (Bucket I.)
 3. **Compound LHS for mutations.** `Set[m[[i, j]], v]`, `Increment[parts[i]]`, `AppendTo[parts[i], x]`, `Unset[parts[i]]`. (Bucket L.)
 4. **Direct value-list assignment.** `OwnValues[sym] = …`, `DownValues[sym] = …`, `UpValues[sym] = …`, `SubValues[sym] = …`, `NValues[sym] = …`. (Bucket K.)
-5. **Symbolic constants beyond inert.** `Pi`, `E`, `EulerGamma`, `GoldenRatio`, `Catalan`, `Khinchin`, `Glaisher`, `Degree`. Need at least `Re` / `Im` / `Sign` / `Abs` rules. (Bucket A.)
-6. **Transcendentals.** `Log`, `Exp`, `Sin`/`Cos`/`Tan`/inverse, `Sinh`/`Cosh`/`Tanh`/inverse, `Gamma`, `Beta`. README still lists these as out-of-scope; if that holds, document the divergence explicitly so users do not chase silent inertness. (Bucket A.)
+5. **Direct `Re`/`Im`/`Abs` rules for symbolic constants.** Today users have to wrap in `ComplexExpand[...]` to get `Re[Pi] -> Pi`, `Im[Pi] -> 0`, `Abs[Pi] -> Pi`, etc. The constants `Khinchin` and `Glaisher` also still lack `N[]` rules. (Bucket A.)
+6. **Special functions over integers.** `Gamma`, `LogGamma`, `Factorial`, `Factorial2`, `Pochhammer`, `Beta`, `Subfactorial`, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber`. Inert under both direct evaluation and `N[]`. (Bucket A.)
 7. **Random number generation.** Entire `Random*` family. (Bucket F.)
-8. **Numerator / Denominator and rational simplification.** `Numerator`, `Denominator`, `Together`, `Apart`, `Cancel`. SymPy bridge already exists. (Buckets A, C.)
-9. **Polynomial algebra extensions.** `PolynomialGCD`, `PolynomialQuotient`, `PolynomialMod`, `PolynomialReduce`, `Resultant`, `Discriminant`. SymPy bridge wrappers. (Bucket C.)
-10. **`Echo` family.** Tiny, high-leverage ergonomics for the REPL. (Bucket M.)
-11. **String-pattern arguments.** `StringSplit[s, patt]`, `StringTrim[s, patt]`, `StringCount[s, patt]` — restricted to literal-string forms today. The string-pattern engine already exists; this is plumbing. (Bucket H.)
-12. **String-search options.** `IgnoreCase`, `Overlaps`, `MetaCharacters` across the string-pattern family. (Bucket H.)
-13. **`AddTo` / `SubtractFrom` / `TimesBy` / `DivideBy` / `PrependTo`.** Companion mutators to `AppendTo` / `Increment`. (Bucket L.)
-14. **Statistics and integer helpers.** `Skewness`, `Kurtosis`, `RootMeanSquare`, `Correlation`, `Covariance`, `Divisible`, `CoprimeQ`, `NumberDigit`, `Factorial`, `Factorial2`, `Pochhammer`, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber`. Small wrappers, high data-science value. (Buckets A, B, F.)
-15. **Operator forms.** `Map[f][expr]`, `Cases[patt][expr]`, `Replace[rules][expr]`, `MatchQ[patt][expr]`, `Position[patt][expr]`, `DeleteCases[patt][expr]`. The asymmetry with the dozen-plus heads that *do* support operator forms is confusing.
+8. **`Echo` family.** Tiny, high-leverage ergonomics for the REPL. (Bucket M.)
+9. **String-pattern arguments.** `StringSplit[s, patt]`, `StringTrim[s, patt]`, `StringCount[s, patt]` — restricted to literal-string forms today. The string-pattern engine already exists; this is plumbing. (Bucket H.)
+10. **String-search options.** `IgnoreCase`, `Overlaps`, `MetaCharacters` across the string-pattern family. (Bucket H.)
+11. **`AddTo` / `SubtractFrom` / `TimesBy` / `DivideBy` / `PrependTo`.** Companion mutators to `AppendTo` / `Increment`. (Bucket L.)
+12. **Statistics and integer helpers.** `Skewness`, `Kurtosis`, `RootMeanSquare`, `Correlation`, `Covariance`, `Divisible`, `CoprimeQ`, `NumberDigit`. Small wrappers, high data-science value. (Buckets B, F.)
+13. **Operator forms.** `Map[f][expr]`, `Cases[patt][expr]`, `Replace[rules][expr]`, `MatchQ[patt][expr]`, `Position[patt][expr]`, `DeleteCases[patt][expr]`. The asymmetry with the dozen-plus heads that *do* support operator forms is confusing.
 
 ## Suggested next-pass priorities
 
@@ -326,19 +303,20 @@ These are opinion, not a roadmap, ordered by leverage per implementation complex
 
 | Tier | Work | Why |
 |------|------|-----|
-| 1 | `Numerator`, `Denominator`, `Together`, `Apart`, `Cancel` | Wraps SymPy bridge; unblocks rational simplification. |
 | 1 | `AddTo`, `SubtractFrom`, `TimesBy`, `DivideBy`, `PrependTo`, `AssociateTo`, `KeyDropFrom` | Companion mutators; make `For[i = 0, i < n, i += 2, …]` work. |
 | 1 | Compound LHS for `Set` / `Increment` (`m[[i, j]] = v`, `Increment[parts[i]]`, `AppendTo[parts[i], x]`) | One cross-cutting change that removes a long-standing limitation. |
 | 1 | `Divisible`, `CoprimeQ`, `NumberDigit`, `Factorial`, `Factorial2` | Trivial wrappers; close out bucket B residuals. |
 | 1 | `KeyFreeQ`, `KeySortBy` | Small association helpers; close out bucket J residuals. |
+| 1 | `Log2`, `Log10` aliases for `Log[2, x]` / `Log[10, x]` | One-line rewrites. |
+| 1 | `AbsArg[z]` paired with the existing `Abs` and `Arg` | One-line wrapper. |
 | 1 | String helpers backed by existing Python: `StringDelete`, `StringExtract`, `StringPart`, `StringPartition`, `StringRotateLeft`, `StringRotateRight`, `StringTakeDrop`, `ToTitleCase`, `StringReplaceList`, `StringReplacePart` | Pure plumbing on existing string-pattern compiler. |
 | 2 | Random number generation (`RandomInteger`, `RandomReal`, `RandomComplex`, `RandomChoice`, `SeedRandom`, `BlockRandom`) | High-impact for scripting / sampling workloads. |
 | 2 | `Echo`, `EchoFunction`, `EchoTiming` | Lightweight debugging surface for the REPL. |
-| 2 | Symbolic constants `Re`/`Im`/`Sign`/`Abs` rules for `Pi`, `E`, `EulerGamma`, `Degree` | Required scaffold for any later transcendental work; small. |
+| 2 | Direct `Re`/`Im`/`Abs` rules for `Pi`, `E`, `EulerGamma`, `GoldenRatio`, `Catalan`, `Degree`; `N[]` and `Sign[]` for `Khinchin` / `Glaisher` | Removes the `ComplexExpand[...]` workaround for trivial real-constant cases. |
+| 2 | Special functions over integers: `Gamma`, `LogGamma`, `Factorial`, `Factorial2`, `Pochhammer`, `Beta`, `Subfactorial`, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber` | SymPy bridge wrappers. |
 | 2 | Options system: `Options[f]`, `OptionValue`, `SetOptions`, `FilterRules`, `OptionsPattern` validation | Cross-cutting unblocker; many heads silently drop options. |
 | 2 | `Default[h, n]` registry | Unlocks `_.` shorthand for user heads. |
 | 2 | String-pattern arguments to `StringSplit`, `StringTrim`, `StringCount` | The pattern compiler exists; route the existing call sites through it. |
-| 2 | Polynomial extensions `PolynomialGCD`, `PolynomialQuotient`, `PolynomialMod`, `PolynomialReduce`, `Resultant`, `Discriminant` | SymPy wrappers; close out bucket C. |
 | 2 | Statistics: `Skewness`, `Kurtosis`, `RootMeanSquare`, `Correlation`, `Covariance` | Small numeric helpers; pair with random. |
 | 3 | Operator forms for `Map`, `Cases`, `DeleteCases`, `Replace`, `Position`, `MatchQ` | Closes the asymmetry. |
 | 3 | `Information[sym]`, `Definition[sym]`, `?sym`, `??sym` | REPL introspection. |
@@ -349,7 +327,7 @@ These are opinion, not a roadmap, ordered by leverage per implementation complex
 | 4 | `BeginPackage`, `Begin`, `End`, `EndPackage`, `Needs`, `Get`, `Put` | Real context system; large. |
 | 5 | Linear algebra (`LinearSolve`, `RowReduce`, `MatrixRank`, `NullSpace`, `Eigenvalues` …) | Out-of-scope per current README direction; revisit. |
 | 5 | Calculus (`D`, `Integrate`, `Series`, `Limit`, closed-form `Sum`/`Product`) | Out-of-scope per README. |
-| 5 | Solvers (`Solve`, `Reduce`, `NSolve`, `FindRoot`, `Roots`, `RootSum`, `ToRadicals`) | Out-of-scope. |
+| 5 | Solvers (`Solve`, `Reduce`, `NSolve`, `FindRoot`, `Roots`, `RootSum`) | Out-of-scope. |
 | 5 | Simplification (`Simplify`, `FullSimplify`, `TrigExpand`, `TrigReduce`, `PowerExpand`) | Out-of-scope. |
 
 ## Validation plan for implementation passes
