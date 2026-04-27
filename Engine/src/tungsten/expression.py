@@ -285,6 +285,51 @@ class ByteArrayExpr(Expr):
         }
 
 
+@dataclass(frozen=True)
+class _SparseArrayEntry:
+    indices: tuple[int, ...]
+    value: Expr
+
+
+@dataclass(frozen=True)
+class SparseArrayExpr(Expr):
+    dimensions: tuple[int, ...]
+    entries: tuple[_SparseArrayEntry, ...]
+    fill_value: Expr = field(default_factory=lambda: Integer(0))
+    _backend: object | None = field(default=None, init=False, compare=False, repr=False, hash=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_backend", _build_sparse_backend(self.dimensions, self.entries, self.fill_value))
+
+    def head(self) -> Expr:
+        return Symbol("SparseArray")
+
+    def to_full_form(self) -> str:
+        return _sparse_array_constructor_call(self).to_full_form()
+
+    def to_input_form(self) -> str:
+        return _sparse_array_constructor_call(self).to_input_form()
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "type": "sparse_array",
+            "dimensions": list(self.dimensions),
+            "fill_value": self.fill_value.to_dict(),
+            "entries": [
+                {
+                    "indices": list(entry.indices),
+                    "value": entry.value.to_dict(),
+                }
+                for entry in self.entries
+            ],
+            "explicit_length": len(self.entries),
+        }
+        if self._backend is not None:
+            backend_type = type(self._backend)
+            payload["backend"] = f"{backend_type.__module__}.{backend_type.__name__}"
+        return payload
+
+
 _SYSTEM_SYMBOL_NAMES = {
     "$Aborted",
     "$AssertFunction",
@@ -319,6 +364,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Append",
     "Apply",
     "Array",
+    "ArrayRules",
     "Association",
     "AssociationMap",
     "AssociationQ",
@@ -392,6 +438,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "DigitQ",
     "Discard",
     "DirectedEdge",
+    "Dimensions",
     "DiscreteDelta",
     "DiscreteRatio",
     "DiscreteShift",
@@ -673,6 +720,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "StartOfLine",
     "StartOfString",
     "StandardForm",
+    "SparseArray",
+    "SparseArrayQ",
     "String",
     "StringCases",
     "StringContainsQ",
@@ -2851,6 +2900,444 @@ def _association_from_arguments(arguments: Sequence[Expr]) -> Call | None:
     return _association_expr(entries)
 
 
+def _build_sparse_backend(
+    dimensions: Sequence[int],
+    entries: Sequence[_SparseArrayEntry],
+    fill_value: Expr,
+) -> object | None:
+    try:
+        import numpy as np
+        import sparse as sparse_module
+    except Exception:
+        return None
+
+    try:
+        rank = len(dimensions)
+        coords = np.empty((rank, len(entries)), dtype=np.int64)
+        data = np.empty((len(entries),), dtype=object)
+        for column, entry in enumerate(entries):
+            for axis, index in enumerate(entry.indices):
+                coords[axis, column] = index - 1
+            data[column] = entry.value
+        return sparse_module.COO(
+            coords,
+            data,
+            shape=tuple(dimensions),
+            fill_value=fill_value,
+            has_duplicates=False,
+            sorted=True,
+            prune=False,
+        )
+    except Exception:
+        return None
+
+
+def _sparse_array_constructor_call(array: SparseArrayExpr) -> Call:
+    rules = list_expr(*(
+        call("Rule", list_expr(*(integer(index) for index in entry.indices)), entry.value)
+        for entry in array.entries
+    ))
+    dimensions = list_expr(*(integer(dimension) for dimension in array.dimensions))
+    if array.fill_value == integer(0):
+        return call("SparseArray", rules, dimensions)
+    return call("SparseArray", rules, dimensions, array.fill_value)
+
+
+def _sparse_array_expr(
+    dimensions: Sequence[int],
+    entries: Iterable[_SparseArrayEntry],
+    fill_value: Expr | None = None,
+) -> SparseArrayExpr:
+    normalized_dimensions = tuple(int(dimension) for dimension in dimensions)
+    if not normalized_dimensions:
+        raise WolframEvaluationError("SparseArray expects at least one dimension.")
+    if any(dimension < 0 for dimension in normalized_dimensions):
+        raise WolframEvaluationError("SparseArray dimensions must be non-negative.")
+
+    fill = integer(0) if fill_value is None else fill_value
+    rank = len(normalized_dimensions)
+    seen: set[tuple[int, ...]] = set()
+    normalized_entries: list[_SparseArrayEntry] = []
+    for entry in entries:
+        indices = tuple(entry.indices)
+        if len(indices) != rank:
+            raise WolframEvaluationError("SparseArray rule positions must match the array rank.")
+        if indices in seen:
+            # Wolfram keeps the first repeated position in SparseArray rules.
+            continue
+        seen.add(indices)
+        for axis, index in enumerate(indices):
+            if index < 1 or index > normalized_dimensions[axis]:
+                raise WolframEvaluationError("SparseArray rule positions must be inside the array dimensions.")
+        if entry.value == fill:
+            continue
+        normalized_entries.append(_SparseArrayEntry(indices, entry.value))
+
+    normalized_entries.sort(key=lambda entry: entry.indices)
+    return SparseArrayExpr(
+        dimensions=normalized_dimensions,
+        entries=tuple(normalized_entries),
+        fill_value=fill,
+    )
+
+
+def _sparse_array_entry_map(array: SparseArrayExpr) -> dict[tuple[int, ...], Expr]:
+    return {entry.indices: entry.value for entry in array.entries}
+
+
+def _sparse_array_value_at(array: SparseArrayExpr, indices: Sequence[int]) -> Expr:
+    return _sparse_array_entry_map(array).get(tuple(indices), array.fill_value)
+
+
+def _sparse_position_from_expr(position: Expr, rank_hint: int | None = None) -> tuple[int, ...] | None:
+    if isinstance(position, Integer):
+        if rank_hint not in {None, 1}:
+            return None
+        return (position.value,)
+    if isinstance(position, Call) and position.has_head("List"):
+        if not all(isinstance(item, Integer) for item in position.arguments):
+            return None
+        indices = tuple(item.value for item in position.arguments if isinstance(item, Integer))
+        if rank_hint is not None and len(indices) != rank_hint:
+            return None
+        return indices
+    return None
+
+
+def _sparse_position_sequence_from_expr(
+    positions: Expr,
+    values: Expr,
+    rank_hint: int | None,
+) -> list[tuple[tuple[int, ...], Expr]] | None:
+    if not isinstance(positions, Call) or not positions.has_head("List"):
+        return None
+    if not isinstance(values, Call) or not values.has_head("List"):
+        return None
+    if len(positions.arguments) != len(values.arguments):
+        raise WolframEvaluationError("SparseArray position and value lists must have the same length.")
+
+    if rank_hint in {None, 1} and all(isinstance(item, Integer) for item in positions.arguments):
+        return [
+            ((position.value,), value)
+            for position, value in zip(positions.arguments, values.arguments, strict=True)
+            if isinstance(position, Integer)
+        ]
+
+    expanded: list[tuple[tuple[int, ...], Expr]] = []
+    for position, value in zip(positions.arguments, values.arguments, strict=True):
+        indices = _sparse_position_from_expr(position, rank_hint)
+        if indices is None:
+            return None
+        expanded.append((indices, value))
+    return expanded
+
+
+def _sparse_rule_pairs(rule: Expr, rank_hint: int | None) -> list[tuple[tuple[int, ...], Expr]]:
+    entry = _rule_entry(rule)
+    if entry is None:
+        raise WolframEvaluationError("SparseArray expects rules or a dense list.")
+
+    vectorized = _sparse_position_sequence_from_expr(entry.key, entry.value, rank_hint)
+    if vectorized is not None:
+        return vectorized
+
+    indices = _sparse_position_from_expr(entry.key, rank_hint)
+    if indices is None:
+        raise WolframEvaluationError("SparseArray currently supports explicit integer positions, not patterns or Band.")
+    return [(indices, entry.value)]
+
+
+def _sparse_rule_exprs(data: Expr) -> tuple[Expr, ...] | None:
+    if _rule_entry(data) is not None:
+        return (data,)
+    if isinstance(data, Call) and data.has_head("List") and all(_rule_entry(item) is not None for item in data.arguments):
+        return data.arguments
+    return None
+
+
+def _infer_sparse_dimensions(pairs: Sequence[tuple[tuple[int, ...], Expr]]) -> tuple[int, ...]:
+    if not pairs:
+        raise WolframEvaluationError("SparseArray dimensions cannot be inferred from an empty rule set.")
+    rank = len(pairs[0][0])
+    if rank == 0 or any(len(indices) != rank for indices, _value in pairs):
+        raise WolframEvaluationError("SparseArray rule positions must have a consistent rank.")
+    return tuple(max(indices[axis] for indices, _value in pairs) for axis in range(rank))
+
+
+def _strict_dense_dimensions(expr: Expr) -> tuple[int, ...]:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return ()
+    if not expr.arguments:
+        return (0,)
+    child_dimensions = [_strict_dense_dimensions(argument) for argument in expr.arguments]
+    first = child_dimensions[0]
+    if any(dimensions != first for dimensions in child_dimensions):
+        raise WolframEvaluationError("SparseArray dense input must be rectangular.")
+    return (len(expr.arguments), *first)
+
+
+def _dense_dimensions(expr: Expr) -> tuple[int, ...]:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return ()
+    if not expr.arguments:
+        return (0,)
+    child_dimensions = [_dense_dimensions(argument) for argument in expr.arguments]
+    common: list[int] = []
+    for values in zip(*child_dimensions):
+        if len(set(values)) != 1:
+            break
+        common.append(values[0])
+    return (len(expr.arguments), *common)
+
+
+def _dense_sparse_entries(
+    expr: Expr,
+    dimensions: Sequence[int],
+    fill_value: Expr,
+    indices: tuple[int, ...] = (),
+) -> list[_SparseArrayEntry]:
+    if not dimensions:
+        return [] if expr == fill_value else [_SparseArrayEntry(indices, expr)]
+    if not isinstance(expr, Call) or not expr.has_head("List") or len(expr.arguments) != dimensions[0]:
+        raise WolframEvaluationError("SparseArray dense input must match the requested dimensions.")
+    entries: list[_SparseArrayEntry] = []
+    for offset, item in enumerate(expr.arguments, start=1):
+        entries.extend(_dense_sparse_entries(item, dimensions[1:], fill_value, (*indices, offset)))
+    return entries
+
+
+def sparse_array(*arguments: Expr) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("SparseArray expects data, optional dimensions, and an optional implicit value.")
+
+    data = arguments[0]
+    fill_value = arguments[2] if len(arguments) == 3 else integer(0)
+    dimensions: tuple[int, ...] | None = None
+    if len(arguments) >= 2:
+        dimensions = tuple(_normalize_dimensions(arguments[1], "SparseArray"))
+
+    if isinstance(data, SparseArrayExpr):
+        if dimensions is not None and dimensions != data.dimensions:
+            raise WolframEvaluationError("SparseArray cannot reinterpret an existing sparse array with different dimensions.")
+        if fill_value == data.fill_value:
+            return data
+        dense = sparse_array_normal(data)
+        assert isinstance(dense, Call)
+        return _sparse_array_expr(data.dimensions, _dense_sparse_entries(dense, data.dimensions, fill_value), fill_value)
+
+    if isinstance(data, Symbol) and data.name == "Automatic" and dimensions is not None:
+        return _sparse_array_expr(dimensions, (), fill_value)
+
+    rank_hint = len(dimensions) if dimensions is not None else None
+    rule_exprs = _sparse_rule_exprs(data)
+    if rule_exprs is not None:
+        pairs: list[tuple[tuple[int, ...], Expr]] = []
+        for rule in rule_exprs:
+            pairs.extend(_sparse_rule_pairs(rule, rank_hint))
+        final_dimensions = dimensions if dimensions is not None else _infer_sparse_dimensions(pairs)
+        return _sparse_array_expr(
+            final_dimensions,
+            (_SparseArrayEntry(indices, value) for indices, value in pairs),
+            fill_value,
+        )
+
+    dense_dimensions = _strict_dense_dimensions(data)
+    if not dense_dimensions:
+        raise WolframEvaluationError("SparseArray expects a rule specification or a rectangular dense list.")
+    final_dimensions = dimensions if dimensions is not None else dense_dimensions
+    if final_dimensions != dense_dimensions:
+        raise WolframEvaluationError("SparseArray dense input dimensions do not match the explicit dimensions.")
+    return _sparse_array_expr(final_dimensions, _dense_sparse_entries(data, final_dimensions, fill_value), fill_value)
+
+
+def sparse_array_q(expr: Expr) -> Symbol:
+    return _bool_symbol(isinstance(expr, SparseArrayExpr))
+
+
+def sparse_array_normal(array: SparseArrayExpr) -> Expr:
+    entry_map = _sparse_array_entry_map(array)
+
+    def build(prefix: tuple[int, ...]) -> Expr:
+        axis = len(prefix)
+        if axis == len(array.dimensions):
+            return entry_map.get(prefix, array.fill_value)
+        return _evaluated_list_expr(*(
+            build((*prefix, index))
+            for index in range(1, array.dimensions[axis] + 1)
+        ))
+
+    return build(())
+
+
+def dimensions_expr(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _evaluated_list_expr(*(integer(dimension) for dimension in expr.dimensions))
+    return _evaluated_list_expr(*(integer(dimension) for dimension in _dense_dimensions(expr)))
+
+
+def array_rules(expr: Expr) -> Expr:
+    if not isinstance(expr, SparseArrayExpr):
+        raise WolframEvaluationError("ArrayRules currently expects a SparseArray.")
+    default_position = list_expr(*(call("Blank") for _axis in expr.dimensions))
+    return _evaluated_list_expr(
+        *(
+            call("Rule", list_expr(*(integer(index) for index in entry.indices)), entry.value)
+            for entry in expr.entries
+        ),
+        call("Rule", default_position, expr.fill_value),
+    )
+
+
+def sparse_array_property(array: SparseArrayExpr, property_expr: Expr) -> Expr:
+    if not isinstance(property_expr, String):
+        raise WolframEvaluationError("SparseArray properties must be requested by string name.")
+    name = property_expr.value
+    if name == "ImplicitValue":
+        return array.fill_value
+    if name == "ExplicitLength":
+        return integer(len(array.entries))
+    if name == "ExplicitValues":
+        return _evaluated_list_expr(*(entry.value for entry in array.entries))
+    if name == "ExplicitPositions":
+        return _evaluated_list_expr(
+            *(list_expr(*(integer(index) for index in entry.indices)) for entry in array.entries)
+        )
+    if name == "Density":
+        total_size = math.prod(array.dimensions)
+        if total_size == 0:
+            return integer(0)
+        return rational_number(len(array.entries), total_size)
+    raise WolframEvaluationError(f"Unsupported SparseArray property: {name}.")
+
+
+def _sparse_selector_indices(size: int, spec: Expr, function_name: str) -> tuple[list[int], bool]:
+    if isinstance(spec, Integer):
+        resolved = _try_resolve_index(size, spec.value)
+        if resolved is None:
+            raise WolframEvaluationError(f"{function_name} specifications are invalid for SparseArray.")
+        return ([resolved + 1], False)
+    if isinstance(spec, Symbol) and spec.name == "All":
+        return (list(range(1, size + 1)), True)
+    if isinstance(spec, Call) and spec.has_head("Span"):
+        selectors: list[int] = []
+        for index in _expand_span_spec_from_count(size, spec):
+            resolved = _try_resolve_index(size, index)
+            if resolved is None:
+                raise WolframEvaluationError(f"{function_name} specifications are invalid for SparseArray.")
+            selectors.append(resolved + 1)
+        return (selectors, True)
+    if isinstance(spec, Call) and spec.has_head("List"):
+        selectors: list[int] = []
+        for item in spec.arguments:
+            nested, _preserve = _sparse_selector_indices(size, item, function_name)
+            selectors.extend(nested)
+        return (selectors, True)
+    raise WolframEvaluationError(f"Unsupported {function_name} specification for SparseArray: {spec.to_input_form()}.")
+
+
+def sparse_array_part(array: SparseArrayExpr, specs: Sequence[Expr]) -> Expr:
+    if len(specs) > len(array.dimensions):
+        raise WolframEvaluationError("Part received too many specifications for SparseArray.")
+
+    selections: list[tuple[list[int], bool]] = []
+    for axis, dimension in enumerate(array.dimensions):
+        if axis < len(specs):
+            selections.append(_sparse_selector_indices(dimension, specs[axis], "Part"))
+        else:
+            selections.append((list(range(1, dimension + 1)), True))
+
+    if not any(preserve for _indices, preserve in selections):
+        return _sparse_array_value_at(array, tuple(indices[0] for indices, _preserve in selections))
+
+    output_dimensions = tuple(len(indices) for indices, preserve in selections if preserve)
+    output_maps: list[dict[int, list[int]]] = []
+    for indices, preserve in selections:
+        if not preserve:
+            output_maps.append({})
+            continue
+        mapping: dict[int, list[int]] = {}
+        for output_index, source_index in enumerate(indices, start=1):
+            mapping.setdefault(source_index, []).append(output_index)
+        output_maps.append(mapping)
+
+    output_entries: list[_SparseArrayEntry] = []
+    for entry in array.entries:
+        output_index_options: list[list[int]] = []
+        include = True
+        for axis, source_index in enumerate(entry.indices):
+            selected_indices, preserve = selections[axis]
+            if preserve:
+                mapped = output_maps[axis].get(source_index)
+                if not mapped:
+                    include = False
+                    break
+                output_index_options.append(mapped)
+            elif source_index != selected_indices[0]:
+                include = False
+                break
+        if not include:
+            continue
+        for output_indices in itertools.product(*output_index_options):
+            output_entries.append(_SparseArrayEntry(tuple(output_indices), entry.value))
+
+    return _sparse_array_expr(output_dimensions, output_entries, array.fill_value)
+
+
+def _sparse_binary_elementwise(function_name: str, left: Expr, right: Expr) -> Expr:
+    if isinstance(left, Call) and left.has_head("List"):
+        return evaluate(call(function_name, left, sparse_array_normal(right) if isinstance(right, SparseArrayExpr) else right))
+    if isinstance(right, Call) and right.has_head("List"):
+        return evaluate(call(function_name, sparse_array_normal(left) if isinstance(left, SparseArrayExpr) else left, right))
+
+    if isinstance(left, SparseArrayExpr) and isinstance(right, SparseArrayExpr):
+        if left.dimensions != right.dimensions:
+            raise WolframEvaluationError(f"{function_name} expects SparseArray dimensions to agree.")
+        fill = evaluate(call(function_name, left.fill_value, right.fill_value))
+        left_entries = _sparse_array_entry_map(left)
+        right_entries = _sparse_array_entry_map(right)
+        entries: list[_SparseArrayEntry] = []
+        for indices in sorted(set(left_entries) | set(right_entries)):
+            value = evaluate(call(
+                function_name,
+                left_entries.get(indices, left.fill_value),
+                right_entries.get(indices, right.fill_value),
+            ))
+            entries.append(_SparseArrayEntry(indices, value))
+        return _sparse_array_expr(left.dimensions, entries, fill)
+
+    if isinstance(left, SparseArrayExpr):
+        fill = evaluate(call(function_name, left.fill_value, right))
+        return _sparse_array_expr(
+            left.dimensions,
+            (_SparseArrayEntry(entry.indices, evaluate(call(function_name, entry.value, right))) for entry in left.entries),
+            fill,
+        )
+
+    if isinstance(right, SparseArrayExpr):
+        fill = evaluate(call(function_name, left, right.fill_value))
+        return _sparse_array_expr(
+            right.dimensions,
+            (_SparseArrayEntry(entry.indices, evaluate(call(function_name, left, entry.value))) for entry in right.entries),
+            fill,
+        )
+
+    return evaluate(call(function_name, left, right))
+
+
+def evaluate_sparse_array_arithmetic(expr: Call) -> Expr | None:
+    if not expr.has_head("Plus") and not expr.has_head("Times"):
+        return None
+    if not any(isinstance(argument, SparseArrayExpr) for argument in expr.arguments):
+        return None
+    if not expr.arguments:
+        return integer(0) if expr.has_head("Plus") else integer(1)
+    function_name = "Plus" if expr.has_head("Plus") else "Times"
+    current = expr.arguments[0]
+    for argument in expr.arguments[1:]:
+        current = _sparse_binary_elementwise(function_name, current, argument)
+    return current
+
+
 def _bool_symbol(value: bool) -> Symbol:
     return symbol("True" if value else "False")
 
@@ -2997,7 +3484,7 @@ def _is_number_expr(expr: Expr) -> bool:
 
 
 def _is_atom_expr(expr: Expr) -> bool:
-    return isinstance(expr, (Symbol, Integer, Real, RationalNumber, ComplexNumber, SpecialReal, String, ByteArrayExpr))
+    return isinstance(expr, (Symbol, Integer, Real, RationalNumber, ComplexNumber, SpecialReal, String, ByteArrayExpr, SparseArrayExpr))
 
 
 def _is_exact_zero(expr: Expr) -> bool:
@@ -9386,6 +9873,8 @@ def head_of(expr: Expr) -> Expr:
 
 
 def length(expr: Expr) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        return expr.dimensions[0] if expr.dimensions else 0
     byte_values = _byte_array_values(expr)
     if byte_values is not None:
         return len(byte_values)
@@ -9393,6 +9882,8 @@ def length(expr: Expr) -> int:
 
 
 def depth(expr: Expr) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        return len(expr.dimensions) + 1
     entries = _association_entries(expr)
     if entries is not None:
         if not entries:
@@ -9411,6 +9902,8 @@ def part(expr: Expr, *specs: int | Expr) -> Expr:
     normalized = tuple(integer(spec) if isinstance(spec, int) else spec for spec in specs)
     if not normalized:
         return expr
+    if isinstance(expr, SparseArrayExpr):
+        return sparse_array_part(expr, normalized)
     return _part_recursive(expr, normalized)
 
 
@@ -9485,6 +9978,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Append",
     "Apply",
     "Array",
+    "ArrayRules",
     "AtomQ",
     "BaseDecode",
     "BaseEncode",
@@ -9507,6 +10001,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "DeleteDuplicates",
     "DeleteDuplicatesBy",
     "Depth",
+    "Dimensions",
     "Discard",
     "DiscreteDelta",
     "Dot",
@@ -9569,6 +10064,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "NestWhile",
     "NestWhileList",
     "Not",
+    "Normal",
     "NumberQ",
     "Operate",
     "Or",
@@ -9616,6 +10112,8 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Sign",
     "Sort",
     "SortBy",
+    "SparseArray",
+    "SparseArrayQ",
     "Conjugate",
     "StringContainsQ",
     "StringDrop",
@@ -10998,9 +11496,11 @@ def _expr_kind_rank(expr: Expr) -> int:
         return 2
     if isinstance(expr, ByteArrayExpr):
         return 3
-    if isinstance(expr, Call):
+    if isinstance(expr, SparseArrayExpr):
         return 4
-    return 5
+    if isinstance(expr, Call):
+        return 5
+    return 6
 
 
 def _numeric_tie_compare(left: Expr, right: Expr) -> int:
@@ -11037,6 +11537,8 @@ def _canonical_compare(left: Expr, right: Expr) -> int:
         return _text_compare(left.name, right.name)
     if isinstance(left, ByteArrayExpr) and isinstance(right, ByteArrayExpr):
         return _integer_sign((left.values > right.values) - (left.values < right.values))
+    if isinstance(left, SparseArrayExpr) and isinstance(right, SparseArrayExpr):
+        return _text_compare(left.to_full_form(), right.to_full_form())
     if isinstance(left, Call) and isinstance(right, Call):
         head_compare = _canonical_compare(left.head_expr, right.head_expr)
         if head_compare != 0:
@@ -12556,6 +13058,13 @@ def dot(arguments: Sequence[Expr]) -> Expr:
         raise WolframEvaluationError("Dot expects at least two arguments.")
 
     def dot_two(left: Expr, right: Expr) -> Expr:
+        if isinstance(left, SparseArrayExpr) and isinstance(right, SparseArrayExpr):
+            return _sparse_dot(left, right)
+        if isinstance(left, SparseArrayExpr):
+            return dot_two(sparse_array_normal(left), right)
+        if isinstance(right, SparseArrayExpr):
+            return dot_two(left, sparse_array_normal(right))
+
         left_rows = _list_rows(left, "Dot")
         right_rows = _list_rows(right, "Dot")
 
@@ -12594,6 +13103,84 @@ def dot(arguments: Sequence[Expr]) -> Expr:
     for argument in arguments[1:]:
         current = evaluate(dot_two(current, argument))
     return current
+
+
+def _sparse_dot(left: SparseArrayExpr, right: SparseArrayExpr) -> Expr:
+    if left.fill_value != integer(0) or right.fill_value != integer(0):
+        return dot((sparse_array_normal(left), sparse_array_normal(right)))
+
+    left_rank = len(left.dimensions)
+    right_rank = len(right.dimensions)
+    if left_rank not in {1, 2} or right_rank not in {1, 2}:
+        raise WolframEvaluationError("Dot currently supports sparse vectors and matrices only.")
+
+    left_entries = _sparse_array_entry_map(left)
+    right_entries = _sparse_array_entry_map(right)
+
+    def add_to(target: dict[tuple[int, ...], Expr], indices: tuple[int, ...], contribution: Expr) -> None:
+        if contribution == integer(0):
+            return
+        previous = target.get(indices)
+        target[indices] = contribution if previous is None else evaluate(call("Plus", previous, contribution))
+
+    if left_rank == 1 and right_rank == 1:
+        if left.dimensions[0] != right.dimensions[0]:
+            raise WolframEvaluationError("Dot expects vectors of the same length.")
+        total_terms = [
+            evaluate(call("Times", left_value, right_entries[indices]))
+            for indices, left_value in left_entries.items()
+            if indices in right_entries
+        ]
+        return evaluate(call("Plus", *total_terms)) if total_terms else integer(0)
+
+    if left_rank == 2 and right_rank == 1:
+        rows, width = left.dimensions
+        if width != right.dimensions[0]:
+            raise WolframEvaluationError("Dot expects compatible sparse matrix/vector dimensions.")
+        output: dict[tuple[int, ...], Expr] = {}
+        for (row, column), left_value in left_entries.items():
+            right_value = right_entries.get((column,))
+            if right_value is not None:
+                add_to(output, (row,), evaluate(call("Times", left_value, right_value)))
+        return _sparse_array_expr(
+            (rows,),
+            (_SparseArrayEntry(indices, value) for indices, value in output.items()),
+            integer(0),
+        )
+
+    if left_rank == 1 and right_rank == 2:
+        width = left.dimensions[0]
+        right_rows, columns = right.dimensions
+        if width != right_rows:
+            raise WolframEvaluationError("Dot expects compatible sparse vector/matrix dimensions.")
+        output: dict[tuple[int, ...], Expr] = {}
+        for (row, column), right_value in right_entries.items():
+            left_value = left_entries.get((row,))
+            if left_value is not None:
+                add_to(output, (column,), evaluate(call("Times", left_value, right_value)))
+        return _sparse_array_expr(
+            (columns,),
+            (_SparseArrayEntry(indices, value) for indices, value in output.items()),
+            integer(0),
+        )
+
+    rows, width = left.dimensions
+    right_rows, columns = right.dimensions
+    if width != right_rows:
+        raise WolframEvaluationError("Dot expects compatible sparse matrix dimensions.")
+    right_by_row: dict[int, list[tuple[int, Expr]]] = {}
+    for (row, column), value in right_entries.items():
+        right_by_row.setdefault(row, []).append((column, value))
+
+    output: dict[tuple[int, ...], Expr] = {}
+    for (row, shared), left_value in left_entries.items():
+        for column, right_value in right_by_row.get(shared, ()):
+            add_to(output, (row, column), evaluate(call("Times", left_value, right_value)))
+    return _sparse_array_expr(
+        (rows, columns),
+        (_SparseArrayEntry(indices, value) for indices, value in output.items()),
+        integer(0),
+    )
 
 
 def apply_head(new_head: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr:
@@ -12763,6 +13350,8 @@ def values_expr(expr: Expr) -> Expr:
 
 
 def normal(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return sparse_array_normal(expr)
     byte_values = _byte_array_values(expr)
     if byte_values is not None:
         return list_expr(*(integer(value) for value in byte_values))

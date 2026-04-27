@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T20:43:33Z
-- Repository HEAD: merge resolution of `85801b9d98e660fc86c829204432406cb03129e5` and `61c0498f5a07f64aadee0b53e7d726c576cc2640`
+- Updated (UTC): 2026-04-27T00:34:28Z
+- Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -125,7 +125,7 @@ The current workspace is built around seven complementary capabilities:
    subset for hold, sequence, and listable behavior, then evaluates a broader inert
    structural built-in set such as hold-like conditionals (`If`, `Which`, `Switch`, `Piecewise`),
    integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `StringQ`,
-   `DigitQ`, `LetterQ`, and `EvenQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
+   `DigitQ`, `LetterQ`, `EvenQ`, and `SparseArrayQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
    `Min`/`Max` (with single-list-argument fold), `Clip`, and `KroneckerDelta`, real-rounding heads
    `Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, and `Sqrt` over the explicit-number
    subset, number-theory heads `GCD`, `LCM`, `Divisors`, `PrimeQ`, `CompositeQ`, `PrimePowerQ`,
@@ -135,8 +135,9 @@ The current workspace is built around seven complementary capabilities:
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
-   `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot`, array and sequence builders
-   such as `Array`, `Range`, `Partition`, and `BlockMap`, search and de-duplication heads such as
+   `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot` including sparse vector/matrix
+   products, sparse-array heads such as `SparseArray`, `Dimensions`, `ArrayRules`, and `Normal`,
+   array and sequence builders such as `Array`, `Range`, `Partition`, and `BlockMap`, search and de-duplication heads such as
    `FirstCase`, `Position`, and `DeleteDuplicates`, statistical helpers `Mean`, `Median`,
    `Variance`, `StandardDeviation`, `Norm`, `Tally`, `Counts`, `Catenate`, `Differences`,
    `Accumulate`, `Riffle`, `Total`, `Count`, `AllTrue`/`AnyTrue`/`NoneTrue`,
@@ -218,6 +219,7 @@ The current workspace is built around seven complementary capabilities:
 | Documentation index | SQLite FTS5 |
 | Notebook representation | Tungsten-owned structural parser for notebook expressions |
 | Expression representation | Tungsten-owned AST and Pratt-style parser |
+| Sparse array backend | PyData Sparse `sparse.COO` when available, with a Tungsten structural fallback |
 | Platform expectation | Windows-first local machine with a real Wolfram installation |
 | Optional desktop automation helper | WinDesk for visible-window testing and the experimental inline assistant path |
 

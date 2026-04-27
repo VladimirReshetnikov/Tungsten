@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T21:57:56Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-27T00:34:28Z
+- Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -499,6 +499,8 @@ python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, String
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
 python -m tungsten expr evaluate --code "ToCharacterCode[ByteArrayToString[ByteArray[{97, 195, 169}], \"UTF-8\"]]"
+python -m tungsten expr evaluate --code "Normal[SparseArray[{{1, 2} -> a, {2, 3} -> b}, {2, 3}]]"
+python -m tungsten expr evaluate --code "ArrayRules[SparseArray[{{1, 2} -> a}, {2, 3}]]"
 ```
 
 The implemented inert evaluator currently covers:
@@ -506,6 +508,8 @@ The implemented inert evaluator currently covers:
 - `Length`
 - `Depth`
 - `Head`
+- `Dimensions`
+- `ArrayRules`
 - symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
   `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, `SetAttributes`,
   `ClearAttributes`, `Protect`, `Unprotect`, `Set`, `SetDelayed`, `TagSet`, `TagSetDelayed`,
@@ -517,7 +521,8 @@ The implemented inert evaluator currently covers:
 - numeric relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
   `GreaterEqual` over explicit numbers, with order comparisons limited to real-valued numbers
 - simple predicate heads such as `AtomQ`, `IntegerQ`, `NumberQ`, `ExactNumberQ`,
-  `InexactNumberQ`, `RealValuedNumberQ`, `MachineNumberQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`
+  `InexactNumberQ`, `RealValuedNumberQ`, `MachineNumberQ`, `StringQ`, `SparseArrayQ`, `EvenQ`,
+  `OddQ`, and `TrueQ`
 - hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`
 - bounded numeric heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`, `Re`, `Im`, `Conjugate`,
   `RealSign`, `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`,
@@ -539,10 +544,11 @@ The implemented inert evaluator currently covers:
   `NestWhile`, `NestWhileList`, `FixedPoint`, `FixedPointList`, `Operate`, `Comap`, and
   `ComapApply`
 - higher-order structural traversal heads such as `Scan`, `MapApply`, `MapAll`, `MapIndexed`,
-  `Through`, `MapThread`, `Thread`, `Distribute`, `Outer`, `Inner`, and `Dot`
+  `Through`, `MapThread`, `Thread`, `Distribute`, `Outer`, `Inner`, and `Dot`, including
+  zero-fill sparse vector/matrix dot products
 - array, matrix, and sequence-construction heads such as `Tuples`, `Array`, `ConstantArray`,
-  `Range`, `UnitVector`, `IdentityMatrix`, `DiagonalMatrix`, `Partition`, `BlockMap`,
-  `TakeList`, and `TakeDrop`
+  `Range`, `UnitVector`, `IdentityMatrix`, `DiagonalMatrix`, `SparseArray`, `Partition`,
+  `BlockMap`, `TakeList`, and `TakeDrop`
 - fold, search, and de-duplication heads such as `Fold`, `FoldList`, `FoldWhile`,
   `FoldWhileList`, `FoldPair`, `FoldPairList`, `SequenceFold`, `SequenceFoldList`,
   `LengthWhile`, `FirstCase`, `Position`, `MemberQ`, `DeleteDuplicates`,
@@ -569,6 +575,7 @@ The implemented inert evaluator currently covers:
 - `Discard`
 - `SelectFirst`
 - `TakeWhile`
+- `Normal`
 - `Part`
 - `Extract`
 - `Level`

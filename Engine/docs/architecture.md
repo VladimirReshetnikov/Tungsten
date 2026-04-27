@@ -1,8 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-26T23:50:53Z
-Repository HEAD: 2f34abe35e9a08b321a37fabe87297d20f7698d5
+Updated (UTC): 2026-04-27T00:34:28Z
+Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
 
 ## Summary
 
@@ -89,7 +89,7 @@ The current Tungsten package is composed of the following modules.
 | `wolfram_strings.py` | Own shared Wolfram string literal escaping, parsing, and inline-box segmentation. | Local text parsing only |
 | `notebook.py` | Parse, inspect, render, and patch notebook files without a kernel. | Local text parsing only |
 | `inline_boxes.py` | Extract box-bearing objects from saved notebook cells and compose inline-box string literals. | `notebook.py`, `wolfram_strings.py` |
-| `expression.py` | Own the expression AST facade, evaluation session state, public compatibility imports, and structural helpers not yet split out. | `expression_parser.py`, `expression_evaluator.py` through lazy wrappers |
+| `expression.py` | Own the expression AST facade, sparse-array value representation, evaluation session state, public compatibility imports, and structural helpers not yet split out. | `expression_parser.py`, `expression_evaluator.py` through lazy wrappers |
 | `expression_parser.py` | Tokenize/parse Wolfram InputForm/FullForm text and lower the supported StandardForm box subset. | `expression.py`, `wolfram_strings.py` |
 | `expression_evaluator.py` | Dispatch one evaluated expression to the appropriate built-in family. | `expression.py` |
 | `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, integer-number-theory functions, real-rounding heads, and the explicit-number subset of special functions. | `expression.py` |
@@ -209,6 +209,12 @@ Defined in `expression.py`, these carry the general Wolfram expression model use
 parser/evaluator. The exact node types are owned by that module, but architecturally the important
 point is that they are separate from `NotebookDocument` and deliberately not reused for notebook
 structure.
+
+`SparseArrayExpr` is one specialized atomic node in that model. It stores dimensions, an implicit
+value, and explicit coordinate/value entries in Tungsten-owned structural form, and lazily attaches
+a PyData Sparse `sparse.COO` backend when the package is importable and can represent the payload.
+Evaluator behavior remains defined by the Tungsten structure so fallback behavior and symbolic
+values do not depend on the external package's arithmetic semantics.
 
 The expression implementation is now split across a small facade plus family modules:
 

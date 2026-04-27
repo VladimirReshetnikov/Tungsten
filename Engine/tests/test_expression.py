@@ -3187,6 +3187,96 @@ class StructuralListTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Median[{1, 2, 3, 4}]")).to_full_form(), "Rational[5, 2]")
 
 
+class SparseArrayTests(unittest.TestCase):
+    def test_sparse_array_constructs_from_rules_and_dense_lists(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[SparseArray[{{1, 2} -> a, {2, 3} -> b}, {2, 3}]]")).to_full_form(),
+            "List[List[0, a, 0], List[0, 0, b]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[SparseArray[{{0, 1}, {2, 0}}]]")).to_full_form(),
+            "List[Rule[List[1, 2], 1], Rule[List[2, 1], 2], Rule[List[Blank[], Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[SparseArray[{1, 3} -> {a, b}]]")).to_full_form(),
+            "List[a, 0, b]",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("Normal[SparseArray[{{1, 1} -> a, {1, 1} -> b}, {1, 1}]]")
+            ).to_full_form(),
+            "List[List[a]]",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("Normal[SparseArray[{{1, 1} -> a}, {2, 2}, z]]")
+            ).to_full_form(),
+            "List[List[a, z], List[z, z]]",
+        )
+
+    def test_sparse_array_dimensions_atom_and_properties(self) -> None:
+        result = evaluate(
+            parse_input_form(
+                '{Dimensions[SparseArray[{{1, 2} -> a}, {2, 3}]], '
+                'SparseArrayQ[SparseArray[{{1} -> a}]], '
+                'AtomQ[SparseArray[{{1} -> a}]], '
+                'Head[SparseArray[{{1} -> a}]], '
+                'SparseArray[{{1, 2} -> a}, {2, 3}]["ExplicitPositions"], '
+                'SparseArray[{{1, 2} -> a}, {2, 3}]["Density"]}'
+            )
+        )
+        self.assertEqual(
+            result.to_full_form(),
+            "List[List[2, 3], True, True, SparseArray, List[List[1, 2]], Rational[1, 6]]",
+        )
+
+    def test_sparse_array_part_and_array_rules_preserve_sparse_slices(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("SparseArray[{{1, 2} -> a}, {2, 3}][[1]]")).to_full_form(),
+            "SparseArray[List[Rule[List[2], a]], List[3]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("SparseArray[{{1, 2} -> a}, {2, 3}][[1, 2]]")).to_full_form(),
+            "a",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("Normal[SparseArray[{{1, 2} -> a, {2, 3} -> b}, {2, 3}][[All, {2, 3}]]]")
+            ).to_full_form(),
+            "List[List[a, 0], List[0, b]]",
+        )
+
+    def test_sparse_array_dot_and_elementwise_arithmetic(self) -> None:
+        self.assertEqual(
+            evaluate(
+                parse_input_form(
+                    "Normal[SparseArray[{{1, 2} -> a}, {2, 3}] . SparseArray[{{2, 1} -> b}, {3, 2}]]"
+                )
+            ).to_full_form(),
+            "List[List[Times[a, b], 0], List[0, 0]]",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form(
+                    "Normal[SparseArray[{{1, 2} -> a}, {2, 3}] + SparseArray[{{2, 3} -> b}, {2, 3}]]"
+                )
+            ).to_full_form(),
+            "List[List[0, a, 0], List[0, 0, b]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[2 SparseArray[{{1} -> a}, {3}] + 1]")).to_full_form(),
+            "List[Plus[1, Times[2, a]], 1, 1]",
+        )
+
+    def test_sparse_array_uses_pydata_sparse_backend_when_available(self) -> None:
+        import importlib.util
+
+        result = evaluate(parse_input_form("SparseArray[{{1, 2} -> a}, {2, 3}]"))
+        payload = result.to_dict()
+        if importlib.util.find_spec("sparse") is not None:
+            self.assertIn("COO", str(payload.get("backend")))
+
+
 class StringHelperTests(unittest.TestCase):
     def test_upper_lower_capitalize(self) -> None:
         self.assertEqual(evaluate(parse_input_form('ToUpperCase["hello"]')).to_full_form(), '"HELLO"')

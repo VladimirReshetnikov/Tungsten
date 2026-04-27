@@ -405,6 +405,9 @@ def _evaluate_simple_predicates(expr: Call) -> Expr | None:
     if expr.has_head("ByteArrayQ"):
         return _bool_symbol(isinstance(argument, ByteArrayExpr))
 
+    if expr.has_head("SparseArrayQ"):
+        return _bool_symbol(isinstance(argument, SparseArrayExpr))
+
     if expr.has_head("FailureQ"):
         return _bool_symbol(_is_failure_q_expr(argument))
 
@@ -1005,5 +1008,4 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
         return _sqrt_expr(expr.arguments[0])
 
     return None
-
 

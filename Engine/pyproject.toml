@@ -12,6 +12,9 @@ license = { text = "MIT-0" }
 authors = [
   { name = "OpenAI Codex" }
 ]
+dependencies = [
+  "sparse>=0.18.0"
+]
 
 [project.scripts]
 tungsten = "tungsten.cli:main"

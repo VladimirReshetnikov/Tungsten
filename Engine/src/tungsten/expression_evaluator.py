@@ -458,6 +458,12 @@ def evaluate_once(expr: Expr) -> Expr:
             return failure_property(evaluated_head, evaluated_arguments[0])
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
+    if isinstance(evaluated_head, SparseArrayExpr):
+        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        if len(evaluated_arguments) == 1:
+            return sparse_array_property(evaluated_head, evaluated_arguments[0])
+        return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+
     if not isinstance(evaluated_head, Symbol):
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
         evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
@@ -488,6 +494,10 @@ def evaluate_once(expr: Expr) -> Expr:
     down_value_result = _apply_down_value_definitions(evaluated_head, evaluated_expr)
     if down_value_result is not None:
         return down_value_result
+
+    sparse_arithmetic_result = evaluate_sparse_array_arithmetic(evaluated_expr)
+    if sparse_arithmetic_result is not None:
+        return sparse_arithmetic_result
 
     constructor_result = _evaluate_numeric_constructor(evaluated_expr)
     if constructor_result is not None:
@@ -531,6 +541,9 @@ def evaluate_once(expr: Expr) -> Expr:
 
     if evaluated_head.name == "ByteArray":
         return byte_array(evaluated_arguments)
+
+    if evaluated_head.name == "SparseArray":
+        return sparse_array(*evaluated_arguments)
 
     if evaluated_head.name == "Identity":
         if len(evaluated_arguments) != 1:
@@ -877,6 +890,11 @@ def evaluate_once(expr: Expr) -> Expr:
             raise WolframEvaluationError("Depth expects exactly one argument.")
         return integer(depth(evaluated_arguments[0]))
 
+    if evaluated_head.name == "Dimensions":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Dimensions expects exactly one argument.")
+        return dimensions_expr(evaluated_arguments[0])
+
     if evaluated_head.name == "Head":
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Head expects exactly one argument.")
@@ -919,6 +937,11 @@ def evaluate_once(expr: Expr) -> Expr:
         subject = evaluated_arguments[0]
         positions = evaluated_arguments[1]
         return extract(subject, positions)
+
+    if evaluated_head.name == "ArrayRules":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("ArrayRules expects exactly one argument.")
+        return array_rules(evaluated_arguments[0])
 
     if evaluated_head.name == "Level":
         if len(evaluated_arguments) not in {2, 3}:

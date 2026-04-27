@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-26T23:50:53Z
-- Repository HEAD: 2f34abe35e9a08b321a37fabe87297d20f7698d5
+- Updated (UTC): 2026-04-27T00:34:28Z
+- Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -83,7 +83,14 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - `Distribute` currently supports only the common direct forms
   `Distribute[expr]`, `Distribute[expr, g]`, and `Distribute[expr, g, f]`.
 - `Inner` currently supports first-level compounds of equal length only.
-- `Dot` currently supports `List` vectors and rectangular `List` matrices only.
+- `Dot` currently supports `List` vectors and rectangular `List` matrices, plus zero-fill
+  `SparseArray` vector/matrix products. Mixed sparse/dense products intentionally densify the
+  sparse operand before using the list implementation.
+- `SparseArray` support is structural. Tungsten supports explicit integer-position rules, dense
+  rectangular lists, vectorized position/value rules, explicit dimensions, custom implicit values,
+  `Normal`, `Dimensions`, `ArrayRules`, string properties such as `"ExplicitValues"`, and `Part`
+  selectors with integers, `All`, spans, and selector lists. General pattern rules, `Band`, and
+  Wolfram's internal compressed `SparseArray` FullForm are not implemented.
 - `Array` now supports `Array[f, n]`, `Array[f, n, origin]`, and the per-dimension origin
   list `Array[f, n, {b1, b2, ...}]` for nested dimensions. The 1-D `Array[f, n, {lo, hi}]`
   shorthand uses `lo` as the origin. `ConstantArray` is unchanged.
@@ -152,7 +159,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 - Simple predicate heads are intentionally narrow too: Tungsten currently implements numeric
   predicates such as `AtomQ`, `IntegerQ`, `NumberQ`, `ExactNumberQ`, `InexactNumberQ`,
   `RealValuedNumberQ`, `MachineNumberQ`, and `MachineIntegerQ`, plus `StringQ`, `DigitQ`,
-  `LetterQ`, `ByteArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
+  `LetterQ`, `ByteArrayQ`, `SparseArrayQ`, `EvenQ`, `OddQ`, and `TrueQ`, and only over the explicit values
   described in the support table below.
 - String/byte conversion heads are also intentionally bounded: Tungsten currently supports the
   common encodings `"Unicode"`, `"UTF-8"`, `"UTF-16LE"`, `"UTF-16BE"`, `"UTF-32LE"`,
@@ -303,9 +310,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 
 | Function | Tungsten-supported forms | Brief description | Official Wolfram docs |
 |------|------|------|------|
-| `Length` | `Length[expr]` | Returns the number of immediate arguments in an expression. | [Length](https://reference.wolfram.com/language/ref/Length) |
-| `Depth` | `Depth[expr]` | Returns the structural depth of an expression tree. For associations, Tungsten measures depth through values rather than keys or raw `Rule` wrappers. | [Depth](https://reference.wolfram.com/language/ref/Depth) |
+| `Length` | `Length[expr]` | Returns the number of immediate arguments in an expression. For `SparseArray`, returns the first dimension. | [Length](https://reference.wolfram.com/language/ref/Length) |
+| `Depth` | `Depth[expr]` | Returns the structural depth of an expression tree. For associations, Tungsten measures depth through values rather than keys or raw `Rule` wrappers. For `SparseArray`, returns rank plus one. | [Depth](https://reference.wolfram.com/language/ref/Depth) |
 | `Head` | `Head[expr]` | Returns the head of an expression. | [Head](https://reference.wolfram.com/language/ref/Head) |
+| `Dimensions` | `Dimensions[expr]` | Returns rectangular list dimensions or the stored dimensions of a `SparseArray`. | [Dimensions](https://reference.wolfram.com/language/ref/Dimensions) |
 | `$Context` | `$Context` and <code>System`$Context</code> | Returns Tungsten's fixed current context string <code>"Global`"</code>. Assignment is not implemented. | [$Context](https://reference.wolfram.com/language/ref/%24Context.html) |
 | `$ContextPath` | `$ContextPath` and <code>System`$ContextPath</code> | Returns Tungsten's fixed visible context list <code>{"System`", "Global`"}</code>. Assignment is not implemented. | [$ContextPath](https://reference.wolfram.com/language/ref/%24ContextPath.html) |
 | `Symbol` | `Symbol["name"]` | Validates and registers a symbol name, then returns the symbol using visible-context rendering. Names in <code>System`</code> or <code>Global`</code> display by short name; names in other contexts display fully qualified. | [Symbol](https://reference.wolfram.com/language/ref/Symbol.html) |
@@ -392,8 +400,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Complex`, `I` | `Complex[re, im]`, `I`, and arithmetic forms such as `1 + 2 I` | Represents complex numeric atoms whose components are explicit real numbers. An exact zero imaginary part collapses to the real part; machine-real components coerce the complex value to machine components in the common Wolfram style. | [Complex](https://reference.wolfram.com/language/ref/Complex), [I](https://reference.wolfram.com/language/ref/I) |
 | `Overflow`, `Underflow` | `Overflow[]`, `Underflow[]` | Creates special atomic real values with head `Real`, not ordinary compound expressions. They participate in common numeric predicates and simple reciprocal/arithmetic cases. | [Overflow](https://reference.wolfram.com/language/ref/Overflow.html), [Underflow](https://reference.wolfram.com/language/ref/Underflow.html) |
 | `$MachinePrecision`, `$MaxMachineNumber`, `$MinMachineNumber`, `$MachineEpsilon` | symbol values | Returns Python-platform machine numeric constants using Wolfram-style real literals. | [$MachinePrecision](https://reference.wolfram.com/language/ref/%24MachinePrecision.html), [$MaxMachineNumber](https://reference.wolfram.com/language/ref/%24MaxMachineNumber.html), [$MinMachineNumber](https://reference.wolfram.com/language/ref/%24MinMachineNumber.html), [$MachineEpsilon](https://reference.wolfram.com/language/ref/%24MachineEpsilon.html) |
-| `Plus` | `Plus[n1, ...]` and infix `+` when numeric arguments can be folded | Adds explicit integers, rationals, reals, and complex numbers. `Plus[]` yields `0`. Mixed numeric/symbolic calls fold the explicit numeric arguments into a leading constant after `Flat` / `Orderless` normalization; unsupported symbolic-only calls remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
-| `Times` | `Times[n1, ...]`, infix `*`, and implicit multiplication when numeric arguments can be folded | Multiplies explicit integers, rationals, reals, and complex numbers. `Times[]` yields `1`. Mixed numeric/symbolic calls fold the explicit numeric arguments into a leading factor after `Flat` / `Orderless` normalization; exact zero collapses the whole product to `0`. Unsupported symbolic-only calls remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
+| `Plus` | `Plus[n1, ...]` and infix `+` when numeric arguments can be folded; sparse/sparse and sparse/scalar forms | Adds explicit integers, rationals, reals, and complex numbers. `Plus[]` yields `0`. Mixed numeric/symbolic calls fold the explicit numeric arguments into a leading constant after `Flat` / `Orderless` normalization. `SparseArray` arguments are combined elementwise when their dimensions agree, preserving a sparse result and evaluating the implicit value separately. Unsupported symbolic-only calls remain inert. | [Plus](https://reference.wolfram.com/language/ref/Plus) |
+| `Times` | `Times[n1, ...]`, infix `*`, and implicit multiplication when numeric arguments can be folded; sparse/sparse and sparse/scalar forms | Multiplies explicit integers, rationals, reals, and complex numbers. `Times[]` yields `1`. Mixed numeric/symbolic calls fold the explicit numeric arguments into a leading factor after `Flat` / `Orderless` normalization; exact zero collapses the whole product to `0`. `SparseArray` arguments are combined elementwise when their dimensions agree, preserving a sparse result and evaluating the implicit value separately. Unsupported symbolic-only calls remain inert. | [Times](https://reference.wolfram.com/language/ref/Times) |
 | `Power` | `Power[base, exponent]`, `Power[]`, unary `Power[x]`, and infix `^` for supported numeric bases and exponents | Supports integer powers of exact and inexact real or complex numbers, negative integer powers through reciprocals, and inexact real powers that Python can compute directly. `Power[]` yields `1`; unary `Power[x]` yields `x`. Unsupported symbolic or branch-sensitive cases remain inert. | [Power](https://reference.wolfram.com/language/ref/Power) |
 | `N` | `N[expr]`, `N[expr, p]` | Converts exact numeric atoms inside an expression to machine precision by default or to decimal arbitrary precision when `p` is an explicit integer precision. | [N](https://reference.wolfram.com/language/ref/N) |
 | `Precision` | `Precision[expr]` | Returns `Infinity` for exact numbers, `MachinePrecision` for machine reals/complexes, explicit precision for marked arbitrary-precision reals, `0.` for `Overflow[]` / `Underflow[]`, and the minimum visible numeric precision inside compound expressions. | [Precision](https://reference.wolfram.com/language/ref/Precision) |
@@ -407,7 +415,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Greater` | `Greater[n1, ...]` and infix `>` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are strictly decreasing. Complex arguments remain inert for order comparisons. | [Greater](https://reference.wolfram.com/language/ref/Greater) |
 | `GreaterEqual` | `GreaterEqual[n1, ...]` and infix `>=` when every argument is an explicit real number or supported infinity marker | Returns `True` when adjacent explicit real arguments are nonincreasing. Complex arguments remain inert for order comparisons. | [GreaterEqual](https://reference.wolfram.com/language/ref/GreaterEqual) |
 | `Inequality` | Parser-generated mixed comparison chains such as `a < b <= c` | Evaluates adjacent comparisons when each relation can be resolved by Tungsten's explicit numeric relation rules or identity-comparison rules; otherwise remains inert. | [Inequality](https://reference.wolfram.com/language/ref/Inequality) |
-| `AtomQ` | `AtomQ[expr]` | Returns `True` for symbols, strings, byte arrays, and all explicit numeric atoms including `Rational`, `Complex`, `Overflow[]`, and `Underflow[]`. Although some of these render with brackets, Tungsten treats them as atoms, matching Wolfram's numeric model. | [AtomQ](https://reference.wolfram.com/language/ref/AtomQ.html) |
+| `AtomQ` | `AtomQ[expr]` | Returns `True` for symbols, strings, byte arrays, sparse arrays, and all explicit numeric atoms including `Rational`, `Complex`, `Overflow[]`, and `Underflow[]`. Although some of these render with brackets, Tungsten treats them as atoms, matching Wolfram's numeric model. | [AtomQ](https://reference.wolfram.com/language/ref/AtomQ.html) |
 | `IntegerQ` | `IntegerQ[expr]` | Returns `True` when the argument is an explicit integer in Tungsten's AST; otherwise returns `False`. | [IntegerQ](https://reference.wolfram.com/language/ref/IntegerQ) |
 | `MachineIntegerQ` | `MachineIntegerQ[expr]` | Tungsten convenience predicate that returns `True` for explicit integers in the signed 64-bit machine-integer range. Wolfram exposes this functionality as <code>Developer`MachineIntegerQ</code>; Tungsten also registers the short System-style spelling for scripting convenience. | [Developer MachineIntegerQ](https://reference.wolfram.com/language/Developer/ref/MachineIntegerQ.html) |
 | `NumberQ` | `NumberQ[expr]` | Returns `True` for explicit integer, rational, real, complex, `Overflow[]`, and `Underflow[]` values; returns `False` for `Infinity` and ordinary symbolic numeric constants such as `Pi`. | [NumberQ](https://reference.wolfram.com/language/ref/NumberQ) |
@@ -420,6 +428,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `LetterQ` | `LetterQ["string"]` | Returns `True` when the argument is a non-empty explicit string whose characters all satisfy Tungsten's Unicode letter predicate. | [LetterQ](https://reference.wolfram.com/language/ref/LetterQ) |
 | `ByteArray` | `ByteArray[{b1, ...}]`, `ByteArray["base64"]`, `ByteArray[ba]` | Constructs Tungsten byte-array values from explicit byte lists, Base64 strings, or existing byte arrays. Tungsten renders these values in Wolfram-style `ByteArray["..."]` InputForm using Base64. | [ByteArray](https://reference.wolfram.com/language/ref/ByteArray) |
 | `ByteArrayQ` | `ByteArrayQ[expr]` | Returns `True` when the argument is a Tungsten byte-array value. | [ByteArrayQ](https://reference.wolfram.com/language/ref/ByteArrayQ) |
+| `SparseArrayQ` | `SparseArrayQ[expr]` | Returns `True` when the argument is a Tungsten sparse-array value. | [SparseArrayQ](https://reference.wolfram.com/language/ref/SparseArrayQ) |
 | `EvenQ` | `EvenQ[expr]` | Returns `True` when the argument is an explicit even integer in Tungsten's AST; otherwise returns `False`. | [EvenQ](https://reference.wolfram.com/language/ref/EvenQ) |
 | `OddQ` | `OddQ[expr]` | Returns `True` when the argument is an explicit odd integer in Tungsten's AST; otherwise returns `False`. | [OddQ](https://reference.wolfram.com/language/ref/OddQ) |
 | `TrueQ` | `TrueQ[expr]` | Returns `True` only when the argument is explicit `True`; otherwise returns `False`. | [TrueQ](https://reference.wolfram.com/language/ref/TrueQ) |
@@ -516,7 +525,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `ComapApply` | `ComapApply[functions, expr]` and callable operator form `ComapApply[functions]` | Applies the arguments of a nonatomic expression to every function in a function collection while preserving the collection's outer structure. | [ComapApply](https://reference.wolfram.com/language/ref/ComapApply) |
 | `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]`, and single-key function-position lookup `assoc[key]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics while preserving the first occurrence position of a duplicate key. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
 | `AssociationQ` | `AssociationQ[expr]` | Returns `True` when Tungsten recognizes a structural association value. | [AssociationQ](https://reference.wolfram.com/language/ref/AssociationQ) |
-| `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. | [Part](https://reference.wolfram.com/language/ref/Part) |
+| `Part` | `Part[expr, spec1, ...]` | Extracts parts by exact structural position, including spans, `All`, and selector lists. On associations, Tungsten supports numeric positions, `Key[key]`, and string-key shorthand for string keys. On `SparseArray`, scalar parts return the stored value or implicit value, and slice selectors preserve a sparse result. | [Part](https://reference.wolfram.com/language/ref/Part) |
 | `Extract` | `Extract[expr, pos]` | Extracts one or more parts using explicit position lists. Association positions support numeric components, `Key[key]`, and string-key shorthand. | [Extract](https://reference.wolfram.com/language/ref/Extract) |
 | `Level` | `Level[expr, spec]`, `Level[expr, spec, False]` | Returns subexpressions at requested positive or negative levels in postorder. Negative integer shorthand such as `-1` follows Wolfram's `{1, -1}` meaning. Associations are traversed through values rather than keys. | [Level](https://reference.wolfram.com/language/ref/Level) |
 | `First` | `First[expr]`, `First[expr, default]` | Returns the first argument of an expression, with optional default for empty expressions. For associations, this is the first value. | [First](https://reference.wolfram.com/language/ref/First) |
@@ -595,7 +604,9 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Distribute` | `Distribute[expr]`, `Distribute[expr, g]`, `Distribute[expr, g, f]` | Distributes a nonatomic outer expression over immediate arguments with the chosen distributed head. Tungsten currently implements the common one-dimensional direct forms only. | [Distribute](https://reference.wolfram.com/language/ref/Distribute) |
 | `Outer` | `Outer[f, seq1, ...]` | Forms the outer combination of several nonatomic expressions while preserving each sequence's head nesting. | [Outer](https://reference.wolfram.com/language/ref/Outer) |
 | `Inner` | `Inner[f, left, right, g]` | Combines corresponding first-level elements with `f` and then combines the results with `g`. Tungsten currently supports only equal-length first-level compounds. | [Inner](https://reference.wolfram.com/language/ref/Inner) |
-| `Dot` | `Dot[a, b, ...]` and infix `.` | Supports `List` vector-vector, matrix-vector, vector-matrix, and matrix-matrix products, then re-evaluates the generated arithmetic so all-integer products simplify. | [Dot](https://reference.wolfram.com/language/ref/Dot) |
+| `Dot` | `Dot[a, b, ...]` and infix `.` | Supports `List` vector-vector, matrix-vector, vector-matrix, and matrix-matrix products, then re-evaluates the generated arithmetic so all-integer products simplify. Zero-fill `SparseArray` vector/matrix products use stored explicit positions and preserve a sparse result for sparse-sparse products; mixed sparse/dense products densify the sparse operand. | [Dot](https://reference.wolfram.com/language/ref/Dot) |
+| `SparseArray` | `SparseArray[rules]`, `SparseArray[rules, dims]`, `SparseArray[rules, dims, fill]`, vectorized position/value rules, dense rectangular lists, and `SparseArray[Automatic, dims]` | Constructs an atomic sparse-array value. Stored coordinates are backed by PyData Sparse `sparse.COO` when that package is available, while Tungsten keeps its own structural coordinate/value representation for equality, formatting, and fallback behavior. Repeated positions keep the first value. | [SparseArray](https://reference.wolfram.com/language/ref/SparseArray) |
+| `ArrayRules` | `ArrayRules[sparse]` | Returns explicit sparse entries followed by the default blank-position rule. | [ArrayRules](https://reference.wolfram.com/language/ref/ArrayRules) |
 | `Tuples` | `Tuples[{{...}, ...}]`, `Tuples[items, n]` | Returns Cartesian products either from an explicit list of sequences or by repeating one base sequence. | [Tuples](https://reference.wolfram.com/language/ref/Tuples) |
 | `Array` | `Array[f, dims]`, `Array[f, dims, origin]`, `Array[f, dims, {b1, b2, ...}]` | Builds nested `List` arrays by calling `f` on integer index tuples starting at the requested origin. The 1-D `Array[f, n, {lo, hi}]` shorthand uses ``lo`` as the origin and ignores ``hi``. | [Array](https://reference.wolfram.com/language/ref/Array) |
 | `ConstantArray` | `ConstantArray[value, dims]` | Builds nested `List` arrays filled with a constant value. | [ConstantArray](https://reference.wolfram.com/language/ref/ConstantArray) |
@@ -681,7 +692,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `StringCount` | `StringCount[s, "literal"]`, `StringCount[s, {"l1", "l2", ...}]` | Counts non-overlapping occurrences of literal-string patterns. The richer string-pattern surface (regex, character classes) is delegated to `StringPosition`. | [StringCount](https://reference.wolfram.com/language/ref/StringCount) |
 | `Keys` | `Keys[assoc]` | Returns the keys of an association as a list. | [Keys](https://reference.wolfram.com/language/ref/Keys) |
 | `Values` | `Values[assoc]` | Returns the values of an association as a list. | [Values](https://reference.wolfram.com/language/ref/Values) |
-| `Normal` | `Normal[assoc]` | Converts an association to a plain list of rules. | [Normal](https://reference.wolfram.com/language/ref/Normal) |
+| `Normal` | `Normal[assoc]`, `Normal[sparse]` | Converts an association to a plain list of rules, or expands a sparse array to nested `List` form. Sparse expansion can allocate the full dense shape. | [Normal](https://reference.wolfram.com/language/ref/Normal) |
 | `Lookup` | `Lookup[assoc, key]`, `Lookup[assoc, key, default]`, `Lookup[assoc, {key1, ...}]`, `Lookup[assoc, {key1, ...}, default]` | Looks up one or more keys, returning `Missing["KeyAbsent", key]` when no default is provided. | [Lookup](https://reference.wolfram.com/language/ref/Lookup) |
 | `KeyExistsQ` | `KeyExistsQ[assoc, key]` | Tests whether an association contains a key. | [KeyExistsQ](https://reference.wolfram.com/language/ref/KeyExistsQ) |
 | `KeyMemberQ` | `KeyMemberQ[assoc, key]` | Synonym-style key-membership test supported for associations. | [KeyMemberQ](https://reference.wolfram.com/language/ref/KeyMemberQ) |
@@ -806,7 +817,8 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   rules for `True` and `False`: `And[True, False, x]` becomes `False`, while
   `Or[False, False, x]` becomes `x`.
 - Simple predicate heads follow the same explicit-value rule: `IntegerQ[2]`, `NumberQ[1/2]`,
-  `MachineNumberQ[1.]`, `EvenQ[4]`, `DigitQ["123"]`, and `LetterQ["abc"]` evaluate, while broader
+  `MachineNumberQ[1.]`, `EvenQ[4]`, `DigitQ["123"]`, `LetterQ["abc"]`, and
+  `SparseArrayQ[SparseArray[{{1} -> x}]]` evaluate, while broader
   symbolic numeric semantics remain out of scope.
 
 ## Attribute-Aware Listable Heads
