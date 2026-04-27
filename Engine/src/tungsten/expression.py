@@ -16397,6 +16397,13 @@ def values_expr(expr: Expr) -> Expr:
 
 
 def normal(expr: Expr) -> Expr:
+    if isinstance(expr, Call) and expr.has_head("RootSum"):
+        try:
+            expanded_root_sum = _expression_algebraic_module()._normal_root_sum_expr(expr.arguments)
+        except Exception:
+            expanded_root_sum = None
+        if expanded_root_sum is not None:
+            return expanded_root_sum
     if isinstance(expr, SparseArrayExpr):
         return sparse_array_normal(expr)
     byte_values = _byte_array_values(expr)

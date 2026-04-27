@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fractions import Fraction
+import math
 from typing import Any, Sequence
 
 import sympy as _sp
@@ -25,8 +25,16 @@ class _AlgebraicConversionError(ValueError):
 
 def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
     try:
+        if expr.has_head("CountRoots"):
+            return _count_roots_expr(expr.arguments)
         if expr.has_head("Root"):
             return _root_expr(expr.arguments)
+        if expr.has_head("RootIntervals"):
+            return _root_intervals_expr(expr.arguments)
+        if expr.has_head("IsolatingInterval"):
+            return _isolating_interval_expr(expr.arguments)
+        if expr.has_head("RootSum"):
+            return _root_sum_expr(expr.arguments)
         if expr.has_head("RootReduce"):
             return _root_reduce_expr(expr.arguments)
         if expr.has_head("MinimalPolynomial"):
@@ -37,11 +45,100 @@ def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
             return _re_im_expr(expr.arguments)
         if expr.has_head("ComplexExpand"):
             return _complex_expand_expr(expr.arguments)
+        if expr.has_head("ToRadicals"):
+            return _to_radicals_expr(expr.arguments)
     except Exception:
         # Algebraic-number conversion is intentionally best-effort. Unsupported or
         # unexpectedly hard cases must leave the expression inert, not crash the REPL.
         return None
     return None
+
+
+def _count_roots_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 2:
+        return None
+    polynomial, spec = arguments
+    if isinstance(spec, Call) and spec.has_head("List") and len(spec.arguments) == 3:
+        variable, lower, upper = spec.arguments
+        poly = _sympy_poly_in_variable(polynomial, variable)
+        lower_sym = _to_sympy_endpoint(lower)
+        upper_sym = _to_sympy_endpoint(upper)
+        if lower_sym is None or upper_sym is None:
+            return None
+        return integer(_count_roots_with_multiplicity(poly, lower_sym, upper_sym))
+    poly = _sympy_poly_in_variable(polynomial, spec)
+    return integer(_count_roots_with_multiplicity(poly, -_sp.oo, _sp.oo))
+
+
+def _root_intervals_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    poly = _single_variable_sympy_poly(arguments[0])
+    intervals = poly.intervals()
+    interval_exprs: list[Expr] = []
+    multiplicity_exprs: list[Expr] = []
+    for (lower, upper), multiplicity in intervals:
+        interval_exprs.append(_evaluated_list_expr(_expr_from_sympy_exact(lower), _expr_from_sympy_exact(upper)))
+        multiplicity_exprs.append(_evaluated_list_expr(integer(int(multiplicity))))
+    return _evaluated_list_expr(_evaluated_list_expr(*interval_exprs), _evaluated_list_expr(*multiplicity_exprs))
+
+
+def _isolating_interval_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) not in {1, 2}:
+        return None
+    target = arguments[0]
+    if isinstance(target, Integer | RationalNumber):
+        return _evaluated_list_expr(target, target)
+    if not isinstance(target, RootNumber):
+        return None
+    root = _root_to_sympy(target)
+    exponent = _isolating_interval_exponent(arguments[1]) if len(arguments) == 2 else 6
+    approximation = complex(_sp.N(root, max(30, exponent + 10)))
+    if bool(root.is_real):
+        lower, upper = _dyadic_bounds(approximation.real, exponent)
+        return _evaluated_list_expr(_expr_from_sympy_exact(lower), _expr_from_sympy_exact(upper))
+    lower_real, upper_real = _dyadic_bounds(approximation.real, exponent)
+    lower_imag, upper_imag = _dyadic_bounds(approximation.imag, exponent)
+    lower = complex_number(_expr_from_sympy_exact(lower_real), _expr_from_sympy_exact(lower_imag))
+    upper = complex_number(_expr_from_sympy_exact(upper_real), _expr_from_sympy_exact(upper_imag))
+    return _evaluated_list_expr(lower, upper)
+
+
+def _root_sum_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 2:
+        return None
+    function = arguments[1]
+    if not _is_callable_expr(function):
+        return None
+    expanded = _normal_root_sum_expr(arguments)
+    if expanded is None:
+        return None
+    return _root_reduce_expr((expanded,)) or expanded
+
+
+def _to_radicals_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    return _to_radicals(arguments[0])
+
+
+def _normal_root_sum_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 2:
+        return None
+    poly_expr = _polynomial_function_to_sympy(arguments[0], _X)
+    poly = _sp.Poly(poly_expr, _X, domain=_sp.QQ)
+    roots = [_expr_from_sympy_root_or_number(_sp.CRootOf(poly.as_expr(), index)) for index in range(poly.degree())]
+    if any(root is None for root in roots):
+        return None
+    terms: list[Expr] = []
+    for root in roots:
+        assert root is not None
+        radical_root = _to_radicals(root)
+        if _is_callable_expr(arguments[1]):
+            terms.append(_apply_callable(arguments[1], (radical_root,)))
+        else:
+            terms.append(evaluate(call(arguments[1], radical_root)))
+    return evaluate(call("Plus", *terms)) if terms else integer(0)
 
 
 def _root_expr(arguments: Sequence[Expr]) -> Expr | None:
@@ -656,6 +753,146 @@ def _root_reduce_sympy(sym_expr: Any) -> Expr:
     poly_expr = _primitive_integer_poly_expr(_sp.minpoly(sym_expr, _X), _X)
     approx = complex(_sp.N(sym_expr, 100))
     return _root_from_polynomial_and_approx(poly_expr, approx)
+
+
+def _sympy_poly_in_variable(polynomial: Expr, variable: Expr) -> Any:
+    from . import expression_polynomial as _polynomial
+
+    bridge = _polynomial._SympyBridge((variable,))
+    sym_var = bridge.expr_to_symbol[variable]
+    sym_expr = bridge.to_sympy(polynomial)
+    if sym_expr.free_symbols - {sym_var}:
+        raise _AlgebraicConversionError(polynomial.to_full_form())
+    try:
+        poly = _sp.Poly(sym_expr, sym_var, domain=_sp.QQ)
+    except Exception:
+        poly = _sp.Poly(sym_expr, sym_var, extension=_sp.I)
+    if poly.degree() <= 0:
+        raise _AlgebraicConversionError(polynomial.to_full_form())
+    return poly
+
+
+def _single_variable_sympy_poly(polynomial: Expr) -> Any:
+    from . import expression_polynomial as _polynomial
+
+    sym_expr, _bridge = _polynomial._to_sympy_expr(polynomial)
+    free_symbols = sorted(sym_expr.free_symbols, key=lambda item: item.name)
+    if len(free_symbols) != 1:
+        raise _AlgebraicConversionError(polynomial.to_full_form())
+    variable = free_symbols[0]
+    poly = _sp.Poly(sym_expr, variable, domain=_sp.QQ)
+    if poly.degree() <= 0:
+        raise _AlgebraicConversionError(polynomial.to_full_form())
+    return poly
+
+
+def _to_sympy_endpoint(expr: Expr) -> Any | None:
+    if _is_positive_infinity_expr(expr):
+        return _sp.oo
+    if _is_negative_infinity_expr(expr):
+        return -_sp.oo
+    if (
+        isinstance(expr, Call)
+        and expr.has_head("Times")
+        and len(expr.arguments) == 2
+        and expr.arguments[0] == integer(-1)
+        and _is_positive_infinity_expr(expr.arguments[1])
+    ):
+        return -_sp.oo
+    try:
+        return _to_sympy_algebraic(expr)
+    except _AlgebraicConversionError:
+        return None
+
+
+def _count_roots_with_multiplicity(poly: Any, lower: Any, upper: Any) -> int:
+    variable = poly.gens[0]
+    total = 0
+    for factor_expr, multiplicity in poly.factor_list()[1]:
+        if isinstance(factor_expr, _sp.Poly):
+            factor_poly = factor_expr
+        else:
+            try:
+                factor_poly = _sp.Poly(factor_expr, variable, domain=_sp.QQ)
+            except Exception:
+                factor_poly = _sp.Poly(factor_expr, variable, extension=_sp.I)
+        total += int(multiplicity) * int(factor_poly.count_roots(lower, upper))
+    return total
+
+
+def _isolating_interval_exponent(expr: Expr) -> int:
+    if isinstance(expr, Integer) and expr.value > 0:
+        return min(max(expr.value, 6), 30)
+    return 6
+
+
+def _dyadic_bounds(value: float, exponent: int) -> tuple[Any, Any]:
+    denominator = 2 ** exponent
+    scaled = value * denominator
+    nearest = round(scaled)
+    if abs(scaled - nearest) < 1e-12:
+        doubled_denominator = denominator * 2
+        return (
+            _sp.Rational(2 * nearest - 1, doubled_denominator),
+            _sp.Rational(2 * nearest + 1, doubled_denominator),
+        )
+    lower_numerator = math.floor(scaled)
+    return (
+        _sp.Rational(lower_numerator, denominator),
+        _sp.Rational(lower_numerator + 1, denominator),
+    )
+
+
+def _to_radicals(expr: Expr) -> Expr:
+    if isinstance(expr, RootNumber):
+        return _root_to_radicals(expr)
+    if isinstance(expr, Call):
+        converted_arguments = tuple(_to_radicals(argument) for argument in expr.arguments)
+        if converted_arguments != expr.arguments:
+            return evaluate(call(expr.head_expr, *converted_arguments))
+    return expr
+
+
+def _root_to_radicals(root: RootNumber) -> Expr:
+    poly_expr = _poly_expr_from_coefficients(root.coefficients, _X)
+    poly = _sp.Poly(poly_expr, _X, domain=_sp.QQ)
+    degree = poly.degree()
+    if degree < 1 or degree > 4:
+        return root
+    candidates: list[Any] = []
+    for candidate, multiplicity in _sp.roots(poly.as_expr(), _X).items():
+        candidates.extend([candidate] * int(multiplicity))
+    if len(candidates) != degree:
+        candidates = list(_sp.solve(poly.as_expr(), _X))
+    if len(candidates) != degree:
+        return root
+    target = _root_to_sympy(root)
+    chosen = _choose_root_by_approximation(candidates, complex(_sp.N(target, 80)))
+    try:
+        return evaluate(_expr_from_sympy_radical(chosen))
+    except _AlgebraicConversionError:
+        return root
+
+
+def _expr_from_sympy_radical(expr: Any) -> Expr:
+    expr = _sp.sympify(expr)
+    direct = _expr_from_sympy_root_or_number(expr)
+    if direct is not None:
+        return direct
+    if expr.is_Add:
+        return evaluate(call("Plus", *(_expr_from_sympy_radical(term) for term in expr.as_ordered_terms())))
+    if expr.is_Mul:
+        return evaluate(call("Times", *(_expr_from_sympy_radical(factor) for factor in expr.as_ordered_factors())))
+    if expr.is_Pow:
+        return evaluate(call("Power", _expr_from_sympy_radical(expr.base), _expr_from_sympy_radical(expr.exp)))
+    raise _AlgebraicConversionError(str(expr))
+
+
+def _expr_from_sympy_exact(expr: Any) -> Expr:
+    converted = _expr_from_sympy_root_or_number(expr)
+    if converted is None:
+        raise _AlgebraicConversionError(str(expr))
+    return converted
 
 
 def _algebraic_coefficient_root_expr(function: Expr, index: int, method: int) -> Expr:

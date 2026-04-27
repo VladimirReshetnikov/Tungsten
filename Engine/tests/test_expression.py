@@ -4666,6 +4666,75 @@ class AlgebraicRootTests(unittest.TestCase):
             "Root[Function[Plus[1, Times[-12, Slot[1]], Times[16, Power[Slot[1], 2]]]], 1, 0]",
         )
 
+    def test_count_roots_counts_real_and_rectangular_roots_with_multiplicity(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("CountRoots[x^3 - x, x]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("CountRoots[x^2 + 1, x]")).to_full_form(), "0")
+        self.assertEqual(
+            evaluate(parse_input_form("CountRoots[(x - 1)^2 (x + 1), {x, -2, 2}]")).to_full_form(),
+            "3",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("CountRoots[(x - 1)^2, {x, 1, 1}]")).to_full_form(),
+            "2",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("CountRoots[x^2 + 1, {x, -1 - I, 1 + I}]")).to_full_form(),
+            "2",
+        )
+
+    def test_root_intervals_and_isolating_interval(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("RootIntervals[(x - 1)^2 (x + 1)]")).to_full_form(),
+            "List[List[List[-1, -1], List[1, 1]], List[List[1], List[2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootIntervals[x^2 + 1]")).to_full_form(),
+            "List[List[], List[]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IsolatingInterval[Root[#^2 - 2 &, 1]]")).to_full_form(),
+            "List[Rational[-91, 64], Rational[-45, 32]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IsolatingInterval[Root[#^2 + 1 &, 1]]")).to_full_form(),
+            "List[Complex[Rational[-1, 128], Rational[-129, 128]], Complex[Rational[1, 128], Rational[-127, 128]]]",
+        )
+
+    def test_root_sum_expands_under_normal_and_reduces_callable_sums(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("RootSum[#^2 - 2 &, f]")).to_full_form(),
+            "RootSum[Function[Plus[Power[Slot[1], 2], -2]], f]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[RootSum[(# - 1)^2 &, f]]")).to_full_form(),
+            "Times[2, f[1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("RootSum[#^2 - 2 &, (#^2 &)]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("RootSum[#^3 - 2 &, (#^3 &)]")).to_full_form(), "6")
+        self.assertEqual(evaluate(parse_input_form("RootSum[(# - 1)^2 &, (# &)]")).to_full_form(), "2")
+
+    def test_to_radicals_rewrites_roots_through_quartics(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("ToRadicals[Root[#^2 - 2 &, 2]]")).to_full_form(),
+            "Power[2, Rational[1, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ToRadicals[Root[#^2 + 1 &, 1]]")).to_full_form(),
+            "Complex[0, -1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ToRadicals[Root[#^3 - 2 &, 1]]")).to_full_form(),
+            "Power[2, Rational[1, 3]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ToRadicals[Root[#^4 - 2 &, 1]]")).to_full_form(),
+            "Times[-1, Power[2, Rational[1, 4]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ToRadicals[Root[#^5 - # - 1 &, 1]]")).to_full_form(),
+            "Root[Function[Plus[-1, Times[-1, Slot[1]], Power[Slot[1], 5]]], 1, 0]",
+        )
+
     def test_root_reduce_components_and_conjugates(self) -> None:
         self.assertEqual(
             evaluate(parse_input_form("RootReduce[Re[Root[#^2 + 1 &, 1]]]")).to_full_form(),
