@@ -271,6 +271,43 @@ class ComplexNumber(Expr):
 
 
 @dataclass(frozen=True)
+class RootNumber(Expr):
+    coefficients: tuple[int, ...]
+    index: int
+    method: int = 0
+
+    def head(self) -> Expr:
+        return Symbol("Root")
+
+    def args(self) -> tuple[Expr, ...]:
+        return (self._function_expr(), integer(self.index + 1), integer(self.method))
+
+    def is_atom(self) -> bool:
+        return False
+
+    def has_head(self, name: str) -> bool:
+        return name == "Root"
+
+    def to_full_form(self) -> str:
+        return f"Root[{self._function_expr().to_full_form()}, {self.index + 1}, {self.method}]"
+
+    def to_input_form(self) -> str:
+        return f"Root[{self._function_expr().to_input_form()}, {self.index + 1}, {self.method}]"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "type": "root",
+            "coefficients": list(self.coefficients),
+            "index": self.index + 1,
+            "method": self.method,
+        }
+
+    def _function_expr(self) -> Expr:
+        body = _polynomial_expr_from_coefficients(self.coefficients, call("Slot", integer(1)))
+        return call("Function", body)
+
+
+@dataclass(frozen=True)
 class SpecialReal(Expr):
     name: str
 
@@ -653,6 +690,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Message",
     "MessageList",
     "MessageName",
+    "MinimalPolynomial",
     "Min",
     "MinimalBy",
     "Missing",
@@ -764,6 +802,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "ReverseSortBy",
     "RightComposition",
     "RightArrow",
+    "Root",
+    "RootReduce",
     "RotateLeft",
     "RotateRight",
     "Rule",
@@ -2566,6 +2606,36 @@ def complex_number(real_part: Expr, imaginary_part: Expr) -> Expr:
     return ComplexNumber(real_part, imaginary_part)
 
 
+def root_number(coefficients: Sequence[int], index: int, method: int = 0) -> RootNumber:
+    normalized = tuple(int(coefficient) for coefficient in coefficients)
+    if len(normalized) < 2 or normalized[-1] == 0:
+        raise WolframEvaluationError("Root expects a nonconstant polynomial with nonzero leading coefficient.")
+    if index < 0:
+        raise WolframEvaluationError("Root index must be positive.")
+    return RootNumber(normalized, int(index), int(method))
+
+
+def _polynomial_expr_from_coefficients(coefficients: Sequence[int], variable: Expr) -> Expr:
+    terms: list[Expr] = []
+    for exponent, coefficient in enumerate(coefficients):
+        if coefficient == 0:
+            continue
+        coefficient_expr = integer(coefficient)
+        if exponent == 0:
+            terms.append(coefficient_expr)
+            continue
+        power_expr = variable if exponent == 1 else call("Power", variable, integer(exponent))
+        if coefficient == 1:
+            terms.append(power_expr)
+        elif coefficient == -1:
+            terms.append(call("Times", integer(-1), power_expr))
+        else:
+            terms.append(call("Times", coefficient_expr, power_expr))
+    if not terms:
+        return integer(0)
+    return call("Plus", *terms)
+
+
 def special_real(name: str) -> SpecialReal:
     if name not in {"Overflow", "Underflow"}:
         raise WolframEvaluationError(f"Unsupported special real atom: {name}.")
@@ -4076,6 +4146,10 @@ def _numeric_power_expr(base: Expr, exponent: Expr) -> Expr | None:
 
 
 def _compare_real_expr(left: Expr, right: Expr) -> int | None:
+    algebraic_compare = _compare_algebraic_real_expr(left, right)
+    if algebraic_compare is not None:
+        return algebraic_compare
+
     if isinstance(left, SpecialReal) or isinstance(right, SpecialReal):
         if left == right:
             return 0
@@ -4166,6 +4240,9 @@ def _numeric_abs_expr(expr: Expr) -> Expr | None:
     if _is_real_number_expr(expr):
         return _real_abs_expr(expr)
     if not isinstance(expr, ComplexNumber):
+        symbolic_abs = _symbolic_abs_expr(expr)
+        if symbolic_abs is not None:
+            return symbolic_abs
         return None
     real_square = _mul_real_expr(expr.real_part, expr.real_part)
     imaginary_square = _mul_real_expr(expr.imaginary_part, expr.imaginary_part)
@@ -4184,6 +4261,45 @@ def _numeric_abs_expr(expr: Expr) -> Expr | None:
     if square_sum_float is None:
         return None
     return _machine_real(math.sqrt(square_sum_float))
+
+
+def _symbolic_abs_expr(expr: Expr) -> Expr | None:
+    if isinstance(expr, Call) and expr.has_head("Times"):
+        numeric_factor: Expr = integer(1)
+        symbolic_factors: list[Expr] = []
+        saw_numeric = False
+        for factor in expr.arguments:
+            if _is_number_expr(factor):
+                multiplied = _mul_numeric_expr(numeric_factor, factor)
+                if multiplied is None:
+                    return None
+                numeric_factor = multiplied
+                saw_numeric = True
+            else:
+                symbolic_factors.append(factor)
+        if not saw_numeric:
+            return None
+        numeric_abs = _numeric_abs_expr(numeric_factor)
+        if numeric_abs is None:
+            return None
+        if not symbolic_factors:
+            return numeric_abs
+        symbolic_part = symbolic_factors[0] if len(symbolic_factors) == 1 else Call(
+            head_expr=symbol("Times"),
+            arguments=tuple(symbolic_factors),
+        )
+        symbolic_abs = call("Abs", symbolic_part)
+        if _numeric_same_value(numeric_abs, integer(1)) is True:
+            return symbolic_abs
+        return evaluate(call("Times", numeric_abs, symbolic_abs))
+
+    if isinstance(expr, Call) and expr.has_head("Power") and len(expr.arguments) == 2:
+        base, exponent = expr.arguments
+        exact_exponent = _exact_fraction(exponent)
+        if exact_exponent is not None and exact_exponent.denominator == 1 and exact_exponent.numerator >= 0:
+            return evaluate(call("Power", call("Abs", base), exponent))
+
+    return None
 
 
 def _byte_array_values(expr: Expr) -> tuple[int, ...] | None:
@@ -4341,6 +4457,32 @@ def _evaluate_polynomial_functions(expr: Call) -> Expr | None:
     return _expression_polynomial_module()._evaluate_polynomial_functions(expr)
 
 
+def _expression_algebraic_module():
+    from . import expression_algebraic as _algebraic
+
+    return _algebraic
+
+
+def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
+    return _expression_algebraic_module()._evaluate_algebraic_functions(expr)
+
+
+def _numericize_algebraic_expr(expr: Expr, precision: int | None) -> Expr | None:
+    return _expression_algebraic_module()._numericize_algebraic_expr(expr, precision)
+
+
+def _is_real_algebraic_expr(expr: Expr) -> bool:
+    return _expression_algebraic_module()._is_real_algebraic_expr(expr)
+
+
+def _compare_algebraic_real_expr(left: Expr, right: Expr) -> int | None:
+    return _expression_algebraic_module()._compare_algebraic_real_expr(left, right)
+
+
+def _conjugate_algebraic_expr(expr: Expr) -> Expr | None:
+    return _expression_algebraic_module()._conjugate_algebraic_expr(expr)
+
+
 def _flatten_list_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     """If ``arguments`` is a single ``List[...]`` wrapper, unwrap once.
 
@@ -4352,12 +4494,119 @@ def _flatten_list_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     return tuple(arguments)
 
 
+def _option_rule_parts(option: Expr) -> tuple[str, Expr] | None:
+    if not isinstance(option, Call) or len(option.arguments) != 2:
+        return None
+    if not option.has_head("Rule") and not option.has_head("RuleDelayed"):
+        return None
+    name, value = option.arguments
+    if not isinstance(name, Symbol):
+        return None
+    return name.name, value
+
+
+def _split_trailing_option_rules(arguments: Sequence[Expr]) -> tuple[tuple[Expr, ...], tuple[Expr, ...]]:
+    split_index = len(arguments)
+    while split_index > 0 and _option_rule_parts(arguments[split_index - 1]) is not None:
+        split_index -= 1
+    return tuple(arguments[:split_index]), tuple(arguments[split_index:])
+
+
+def _option_value(options: Sequence[Expr], name: str) -> Expr | None:
+    for option in reversed(options):
+        parts = _option_rule_parts(option)
+        if parts is None:
+            continue
+        option_name, option_value = parts
+        if option_name == name:
+            return option_value
+    return None
+
+
+def _flatten_min_max_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    flattened: list[Expr] = []
+
+    def visit(argument: Expr) -> None:
+        if isinstance(argument, Call) and argument.has_head("List"):
+            for item in argument.arguments:
+                visit(item)
+            return
+        flattened.append(argument)
+
+    for argument in arguments:
+        visit(argument)
+    return tuple(flattened)
+
+
+def _min_max_expr(head: Expr, arguments: Sequence[Expr]) -> Expr | None:
+    head_name = head.name if isinstance(head, Symbol) else None
+    if head_name not in {"Min", "Max"}:
+        return None
+
+    flattened = _flatten_min_max_arguments(arguments)
+    identity = symbol("Infinity") if head_name == "Min" else symbol("-Infinity")
+    absorbing = symbol("-Infinity") if head_name == "Min" else symbol("Infinity")
+    if not flattened:
+        return identity
+
+    numeric_arguments: list[Expr] = []
+    symbolic_arguments: list[Expr] = []
+    for argument in flattened:
+        if _is_positive_infinity_expr(argument) or _is_negative_infinity_expr(argument):
+            if argument == absorbing:
+                return absorbing
+            numeric_arguments.append(argument)
+        elif _is_real_number_expr(argument) or _is_real_algebraic_expr(argument):
+            numeric_arguments.append(argument)
+        else:
+            symbolic_arguments.append(argument)
+
+    best: Expr | None = None
+    if numeric_arguments:
+        best = numeric_arguments[0]
+        for argument in numeric_arguments[1:]:
+            comparison = _compare_real_expr(argument, best)
+            if comparison is None:
+                return None
+            if (head_name == "Min" and comparison < 0) or (head_name == "Max" and comparison > 0):
+                best = argument
+
+    result_arguments: list[Expr] = []
+    if best is not None and best != identity:
+        result_arguments.append(best)
+    result_arguments.extend(symbolic_arguments)
+
+    if not result_arguments:
+        return identity
+    if len(result_arguments) == 1:
+        return result_arguments[0]
+
+    result_arguments = list(dict.fromkeys(result_arguments))
+    normalized = (
+        _normalize_attribute_call(head, result_arguments)
+        if isinstance(head, Symbol)
+        else tuple(result_arguments)
+    )
+    result = Call(head_expr=head, arguments=normalized)
+    if result.arguments == tuple(arguments):
+        return None
+    return result
+
+
 def _real_rounding_expr(head: Expr, argument: Expr) -> Expr | None:
     """Floor / Ceiling / Round / IntegerPart / FractionalPart on real numbers."""
-    if not _is_real_number_expr(argument):
-        return None
     head_name = head.name if isinstance(head, Symbol) else None
     if head_name not in {"Floor", "Ceiling", "Round", "IntegerPart", "FractionalPart"}:
+        return None
+
+    if isinstance(argument, ComplexNumber):
+        real_part = _real_rounding_expr(head, argument.real_part)
+        imaginary_part = _real_rounding_expr(head, argument.imaginary_part)
+        if real_part is None or imaginary_part is None:
+            return None
+        return complex_number(real_part, imaginary_part)
+
+    if not _is_real_number_expr(argument):
         return None
 
     fraction = _exact_fraction(argument)
@@ -4414,13 +4663,60 @@ def _real_rounding_expr(head: Expr, argument: Expr) -> Expr | None:
     return None
 
 
+def _rounding_multiple_expr(head: Expr, argument: Expr, multiple: Expr) -> Expr | None:
+    head_name = head.name if isinstance(head, Symbol) else None
+    if head_name not in {"Floor", "Ceiling", "Round"}:
+        return None
+    if not _is_number_expr(argument) or not _is_number_expr(multiple):
+        return None
+    if _is_numeric_zero(multiple):
+        return symbol("Indeterminate")
+    quotient = _div_numeric_expr(argument, multiple)
+    if quotient is None:
+        return None
+    if _is_indeterminate_expr(quotient) or _is_complex_infinity_expr(quotient):
+        return symbol("Indeterminate")
+    rounded = _real_rounding_expr(head, quotient)
+    if rounded is None:
+        return None
+    return _mul_numeric_expr(multiple, rounded)
+
+
+def _numeric_mod_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) not in {2, 3}:
+        return None
+    if not all(_is_real_number_expr(argument) for argument in arguments):
+        return None
+
+    dividend, divisor = arguments[0], arguments[1]
+    offset = arguments[2] if len(arguments) == 3 else integer(0)
+    if _is_numeric_zero(divisor):
+        return symbol("Indeterminate")
+
+    shifted = _add_real_expr(dividend, offset, negate_right=True)
+    if shifted is None:
+        return None
+    quotient = _div_real_expr(shifted, divisor)
+    if quotient is None or _is_indeterminate_expr(quotient) or _is_complex_infinity_expr(quotient):
+        return None
+    quotient_floor = _real_rounding_expr(symbol("Floor"), quotient)
+    if quotient_floor is None:
+        return None
+    product = _mul_real_expr(divisor, quotient_floor)
+    if product is None:
+        return None
+    remainder = _add_real_expr(shifted, product, negate_right=True)
+    if remainder is None:
+        return None
+    return _add_real_expr(offset, remainder)
+
+
 def _sqrt_expr(argument: Expr) -> Expr | None:
     """Sqrt for the explicit-number subset.
 
     Falls through to ``Power[arg, 1/2]`` for everything else, matching the
-    common Wolfram lowering. We do not implement general algebraic
-    simplification, so non-perfect-square integers remain in the radical
-    form ``Power[n, 1/2]``.
+    common Wolfram lowering. Exact powers are routed through ``Power`` so the
+    arithmetic evaluator can extract perfect factors from non-perfect roots.
     """
     if isinstance(argument, Integer):
         if argument.value < 0:
@@ -4437,7 +4733,7 @@ def _sqrt_expr(argument: Expr) -> Expr | None:
         root = math.isqrt(argument.value)
         if root * root == argument.value:
             return integer(root)
-        return call("Power", argument, rational_number(1, 2))
+        return evaluate(call("Power", argument, rational_number(1, 2)))
     if isinstance(argument, RationalNumber):
         numerator_root = _sqrt_expr(integer(argument.value.numerator))
         denominator_root = _sqrt_expr(integer(argument.value.denominator))
@@ -4445,7 +4741,7 @@ def _sqrt_expr(argument: Expr) -> Expr | None:
             return None
         if isinstance(numerator_root, Integer) and isinstance(denominator_root, Integer):
             return rational_number(numerator_root.value, denominator_root.value)
-        return call("Power", argument, rational_number(1, 2))
+        return evaluate(call("Power", argument, rational_number(1, 2)))
     if isinstance(argument, Real):
         info = _real_info(argument)
         if info is None or info.value < 0:
@@ -4468,6 +4764,36 @@ def _n_precision_argument(expr: Expr | None) -> int | None:
     return None
 
 
+def _n_expr_from_arguments(arguments: Sequence[Expr]) -> Expr | None:
+    if not arguments:
+        return None
+    expr = arguments[0]
+    tail = list(arguments[1:])
+    precision_expr: Expr | None = None
+    if tail and _option_rule_parts(tail[0]) is None:
+        precision_expr = tail.pop(0)
+    if any(_option_rule_parts(option) is None for option in tail):
+        return None
+    return _n_expr(expr, precision_expr, tuple(tail))
+
+
+def _n_option_precision(options: Sequence[Expr]) -> int | None:
+    precision: int | None = None
+    for option in options:
+        parts = _option_rule_parts(option)
+        if parts is None:
+            continue
+        name, value = parts
+        if name not in {"WorkingPrecision", "AccuracyGoal", "PrecisionGoal"}:
+            continue
+        if isinstance(value, Symbol) and value.name == "Automatic":
+            continue
+        option_precision = _n_precision_argument(value)
+        if option_precision is not None:
+            precision = option_precision if precision is None else max(precision, option_precision)
+    return precision
+
+
 def _precision_like_argument(expr: Expr) -> str | int | None:
     if isinstance(expr, Symbol):
         if expr.name == "MachinePrecision":
@@ -4483,12 +4809,182 @@ def _precision_like_argument(expr: Expr) -> str | int | None:
     return "unsupported"
 
 
-def _n_expr(expr: Expr, precision_expr: Expr | None = None) -> Expr:
+def _n_expr(expr: Expr, precision_expr: Expr | None = None, options: Sequence[Expr] = ()) -> Expr:
     precision = _n_precision_argument(precision_expr)
+    option_precision = _n_option_precision(options)
+    if option_precision is not None:
+        precision = option_precision if precision is None else max(precision, option_precision)
     return _numericize_expr(expr, precision)
 
 
+class _SympyNumericConversionError(ValueError):
+    pass
+
+
+def _sympy_module():
+    import sympy as _sp
+
+    return _sp
+
+
+def _sympy_constant(name: str):
+    _sp = _sympy_module()
+    constants = {
+        "Pi": _sp.pi,
+        "E": _sp.E,
+        "EulerGamma": _sp.EulerGamma,
+        "GoldenRatio": _sp.GoldenRatio,
+        "Catalan": _sp.Catalan,
+        "Degree": _sp.pi / _sp.Integer(180),
+        "I": _sp.I,
+    }
+    return constants.get(name)
+
+
+def _expr_to_sympy_numeric(expr: Expr):
+    _sp = _sympy_module()
+    if isinstance(expr, Integer):
+        return _sp.Integer(expr.value)
+    if isinstance(expr, RationalNumber):
+        return _sp.Rational(expr.value.numerator, expr.value.denominator)
+    if isinstance(expr, Real):
+        info = _real_info(expr)
+        if info is None:
+            raise _SympyNumericConversionError(expr.to_full_form())
+        return _sp.Float(str(info.value), info.precision or 17)
+    if isinstance(expr, ComplexNumber):
+        return _expr_to_sympy_numeric(expr.real_part) + _sp.I * _expr_to_sympy_numeric(expr.imaginary_part)
+    if isinstance(expr, Symbol):
+        constant = _sympy_constant(expr.name)
+        if constant is None:
+            raise _SympyNumericConversionError(expr.name)
+        return constant
+    if isinstance(expr, Call):
+        head_name = expr.head_expr.name if isinstance(expr.head_expr, Symbol) else None
+        if head_name == "Plus":
+            return _sp.Add(*(_expr_to_sympy_numeric(argument) for argument in expr.arguments))
+        if head_name == "Times":
+            return _sp.Mul(*(_expr_to_sympy_numeric(argument) for argument in expr.arguments))
+        if head_name == "Power" and len(expr.arguments) == 2:
+            return _sp.Pow(_expr_to_sympy_numeric(expr.arguments[0]), _expr_to_sympy_numeric(expr.arguments[1]))
+        if head_name == "Sqrt" and len(expr.arguments) == 1:
+            return _sp.sqrt(_expr_to_sympy_numeric(expr.arguments[0]))
+        if head_name == "Abs" and len(expr.arguments) == 1:
+            return _sp.Abs(_expr_to_sympy_numeric(expr.arguments[0]))
+        if head_name == "Log":
+            if len(expr.arguments) == 1:
+                return _sp.log(_expr_to_sympy_numeric(expr.arguments[0]))
+            if len(expr.arguments) == 2:
+                return _sp.log(_expr_to_sympy_numeric(expr.arguments[1]), _expr_to_sympy_numeric(expr.arguments[0]))
+        unary_functions = {
+            "Sin": _sp.sin,
+            "Cos": _sp.cos,
+            "Tan": _sp.tan,
+            "Cot": _sp.cot,
+            "Sec": _sp.sec,
+            "Csc": _sp.csc,
+            "ArcSin": _sp.asin,
+            "ArcCos": _sp.acos,
+            "ArcTan": _sp.atan,
+            "Sinh": _sp.sinh,
+            "Cosh": _sp.cosh,
+            "Tanh": _sp.tanh,
+            "Exp": _sp.exp,
+        }
+        function = unary_functions.get(head_name or "")
+        if function is not None and len(expr.arguments) == 1:
+            return function(_expr_to_sympy_numeric(expr.arguments[0]))
+    raise _SympyNumericConversionError(expr.to_full_form())
+
+
+def _sympy_number_to_expr(value, precision: int | None) -> Expr | None:
+    _sp = _sympy_module()
+    try:
+        numeric = _sp.N(value, precision or 17)
+    except (TypeError, ValueError):
+        return None
+    if numeric == _sp.oo or numeric == _sp.zoo:
+        return symbol("ComplexInfinity")
+    if numeric == -_sp.oo:
+        return symbol("-Infinity")
+    if numeric is _sp.nan or numeric == _sp.nan:
+        return symbol("Indeterminate")
+    if not getattr(numeric, "is_number", False):
+        return None
+    real_part, imaginary_part = numeric.as_real_imag()
+    if precision is None:
+        try:
+            real_expr = _machine_real(float(real_part))
+            imaginary_float = float(imaginary_part)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if imaginary_float == 0.0:
+            return real_expr
+        return complex_number(real_expr, _machine_real(imaginary_float))
+
+    real_expr = _decimal_from_sympy_real(real_part, precision)
+    imaginary_is_zero = bool(imaginary_part == 0)
+    if real_expr is None:
+        return None
+    if imaginary_is_zero:
+        return real_expr
+    imaginary_expr = _decimal_from_sympy_real(imaginary_part, precision)
+    if imaginary_expr is None:
+        return None
+    return complex_number(real_expr, imaginary_expr)
+
+
+def _decimal_from_sympy_real(value, precision: int) -> Expr | None:
+    _sp = _sympy_module()
+    try:
+        numeric = _sp.N(value, precision)
+        return _decimal_real(Decimal(str(numeric).replace("e", "E")), precision)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _try_numericize_via_sympy(expr: Expr, precision: int | None) -> Expr | None:
+    try:
+        sympy_expr = _expr_to_sympy_numeric(expr)
+    except _SympyNumericConversionError:
+        return None
+    if getattr(sympy_expr, "free_symbols", None):
+        return None
+    return _sympy_number_to_expr(sympy_expr, precision)
+
+
+def _numericize_evaluable_call(expr: Call, precision: int | None) -> Expr | None:
+    head_name = expr.head_expr.name if isinstance(expr.head_expr, Symbol) else None
+    if head_name in {"Plus", "Times", "Power", "Sqrt", "Abs"} and all(
+        _is_number_expr(argument) for argument in expr.arguments
+    ):
+        evaluated = evaluate(expr)
+        if evaluated != expr:
+            return _numericize_expr(evaluated, precision)
+    if head_name in {
+        "Sin",
+        "Cos",
+        "Tan",
+        "Cot",
+        "Sec",
+        "Csc",
+        "ArcSin",
+        "ArcCos",
+        "ArcTan",
+        "Sinh",
+        "Cosh",
+        "Tanh",
+        "Exp",
+        "Log",
+    } and all(_is_number_expr(argument) for argument in expr.arguments):
+        return _try_numericize_via_sympy(expr, precision)
+    return None
+
+
 def _numericize_expr(expr: Expr, precision: int | None) -> Expr:
+    algebraic = _numericize_algebraic_expr(expr, precision)
+    if algebraic is not None:
+        return algebraic
     if isinstance(expr, Integer | RationalNumber):
         return _exact_to_real(expr, precision)
     if isinstance(expr, ComplexNumber):
@@ -4496,13 +4992,27 @@ def _numericize_expr(expr: Expr, precision: int | None) -> Expr:
             _numericize_expr(expr.real_part, precision),
             _numericize_expr(expr.imaginary_part, precision),
         )
-    if isinstance(expr, Real | SpecialReal | String | ByteArrayExpr | Symbol):
+    if isinstance(expr, Symbol):
+        constant = _sympy_constant(expr.name)
+        if constant is not None:
+            numeric_constant = _sympy_number_to_expr(constant, precision)
+            if numeric_constant is not None:
+                return numeric_constant
+        return expr
+    if isinstance(expr, Real | SpecialReal | String | ByteArrayExpr):
         return expr
     if isinstance(expr, Call):
-        return Call(
+        sympy_numeric = _try_numericize_via_sympy(expr, precision)
+        if sympy_numeric is not None:
+            return sympy_numeric
+        numericized = Call(
             head_expr=expr.head_expr,
             arguments=tuple(_numericize_expr(argument, precision) for argument in expr.arguments),
         )
+        evaluated = _numericize_evaluable_call(numericized, precision)
+        if evaluated is not None:
+            return evaluated
+        return numericized
     return expr
 
 
@@ -4609,6 +5119,8 @@ def _precision_expr(expr: Expr) -> Expr:
 def _precision_value(expr: Expr) -> float | str | None:
     if _is_exact_real_number(expr):
         return None
+    if isinstance(expr, RootNumber):
+        return None
     if isinstance(expr, SpecialReal):
         return 0.0
     if isinstance(expr, Real):
@@ -4646,6 +5158,8 @@ def _accuracy_expr(expr: Expr) -> Expr:
 
 def _accuracy_value(expr: Expr) -> float | None:
     if _is_exact_real_number(expr):
+        return None
+    if isinstance(expr, RootNumber):
         return None
     if isinstance(expr, SpecialReal):
         return float("-inf") if expr.name == "Overflow" else float("inf")

@@ -1026,6 +1026,12 @@ class ExpressionEvaluationTests(unittest.TestCase):
         mixed_inequality_true = evaluate(parse_input_form("1 < 2 <= 2"))
         mixed_inequality_false = evaluate(parse_input_form("1 < 2 > 3"))
         mixed_inequality_inert = evaluate(parse_input_form("1 < 2 <= a"))
+        same_test_true = evaluate(
+            parse_input_form("Equal[1, 2, SameTest -> (Abs[#1 - #2] < 2 &)]")
+        )
+        same_test_false = evaluate(
+            parse_input_form("Equal[1, 4, SameTest -> (Abs[#1 - #2] < 2 &)]")
+        )
         self.assertEqual(equal_true.to_full_form(), "True")
         self.assertEqual(equal_false.to_full_form(), "False")
         self.assertEqual(less_true.to_full_form(), "True")
@@ -1035,6 +1041,8 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(mixed_inequality_true.to_full_form(), "True")
         self.assertEqual(mixed_inequality_false.to_full_form(), "False")
         self.assertEqual(mixed_inequality_inert.to_full_form(), "Inequality[1, Less, 2, LessEqual, a]")
+        self.assertEqual(same_test_true.to_full_form(), "True")
+        self.assertEqual(same_test_false.to_full_form(), "False")
 
     def test_boolean_functions_evaluate_on_explicit_booleans_only(self) -> None:
         not_result = evaluate(parse_input_form("!(True)"))
@@ -1666,6 +1674,9 @@ class ExpressionEvaluationTests(unittest.TestCase):
         arbitrary_sum = evaluate(parse_input_form("1.25`20 + 2.5`20"))
         machine_approximation = evaluate(parse_input_form("N[1/3]"))
         arbitrary_approximation = evaluate(parse_input_form("N[1/3, 20]"))
+        pi_approximation = evaluate(parse_input_form("N[Pi, 20]"))
+        sine_approximation = evaluate(parse_input_form("N[Sin[Pi/6], 20]"))
+        working_precision_option = evaluate(parse_input_form("N[Pi, WorkingPrecision -> 30]"))
 
         self.assertEqual(rational_sum.to_full_form(), "Rational[5, 6]")
         self.assertEqual(rational_product.to_full_form(), "Rational[3, 2]")
@@ -1676,6 +1687,9 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(arbitrary_sum.to_full_form(), "3.75`20.")
         self.assertEqual(machine_approximation.to_full_form(), "0.3333333333333333")
         self.assertEqual(arbitrary_approximation.to_full_form(), "0.33333333333333333333`20.")
+        self.assertEqual(pi_approximation.to_full_form(), "3.1415926535897932385`20.")
+        self.assertEqual(sine_approximation.to_full_form(), "0.50000000000000000000`20.")
+        self.assertEqual(working_precision_option.to_full_form(), "3.14159265358979323846264338328`30.")
 
         self.assertEqual(evaluate(parse_input_form("Precision[1]")).to_full_form(), "Infinity")
         self.assertEqual(evaluate(parse_input_form("Precision[1.]")).to_full_form(), "MachinePrecision")
@@ -1706,6 +1720,16 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Conjugate[1 + 2 I]")).to_full_form(), "Complex[1, -2]")
         self.assertEqual(evaluate(parse_input_form("Abs[3 + 4 I]")).to_full_form(), "5")
         self.assertEqual(evaluate(parse_input_form("Abs[1 + I]")).to_full_form(), "Power[2, Rational[1, 2]]")
+        self.assertEqual(evaluate(parse_input_form("Abs[-x]")).to_full_form(), "Abs[x]")
+        self.assertEqual(evaluate(parse_input_form("Abs[x^2]")).to_full_form(), "Power[Abs[x], 2]")
+        self.assertEqual(
+            evaluate(parse_input_form("Sign[3 + 4 I]")).to_full_form(),
+            "Complex[Rational[3, 5], Rational[4, 5]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Sign[1 + I]")).to_full_form(),
+            "Times[Complex[1, 1], Power[2, Rational[-1, 2]]]",
+        )
         self.assertEqual(evaluate(parse_input_form("ToString[Abs[1 + I]]")).to_full_form(), '"2^(1/2)"')
 
         self.assertEqual(evaluate(parse_input_form("Max[1/2, .75]")).to_full_form(), ".75")
@@ -2598,6 +2622,8 @@ class ExpressionEvaluationTests(unittest.TestCase):
     def test_integer_division_extrema_clipping_and_delta_functions(self) -> None:
         mod_two = evaluate(parse_input_form("Mod[-14, 5]"))
         mod_three = evaluate(parse_input_form("Mod[14, 5, -1]"))
+        mod_rational = evaluate(parse_input_form("Mod[7/2, 1]"))
+        mod_real = evaluate(parse_input_form("Mod[7.5, 2]"))
         quotient_two = evaluate(parse_input_form("Quotient[-14, 5]"))
         quotient_three = evaluate(parse_input_form("Quotient[14, 5, -1]"))
         quotient_remainder = evaluate(parse_input_form("QuotientRemainder[-14, 5]"))
@@ -2614,6 +2640,8 @@ class ExpressionEvaluationTests(unittest.TestCase):
         discrete_false = evaluate(parse_input_form("DiscreteDelta[0, 1]"))
         self.assertEqual(mod_two.to_full_form(), "1")
         self.assertEqual(mod_three.to_full_form(), "-1")
+        self.assertEqual(mod_rational.to_full_form(), "Rational[1, 2]")
+        self.assertEqual(mod_real.to_full_form(), "1.5")
         self.assertEqual(quotient_two.to_full_form(), "-3")
         self.assertEqual(quotient_three.to_full_form(), "3")
         self.assertEqual(quotient_remainder.to_full_form(), "List[-3, 1]")
@@ -3028,33 +3056,59 @@ class NumericRoundingTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Floor[-3.7]")).to_full_form(), "-4")
         self.assertEqual(evaluate(parse_input_form("Ceiling[3.2]")).to_full_form(), "4")
         self.assertEqual(evaluate(parse_input_form("Ceiling[-3.2]")).to_full_form(), "-3")
+        self.assertEqual(evaluate(parse_input_form("Floor[7, 3]")).to_full_form(), "6")
+        self.assertEqual(evaluate(parse_input_form("Floor[7, -3]")).to_full_form(), "9")
+        self.assertEqual(evaluate(parse_input_form("Ceiling[7, 3]")).to_full_form(), "9")
 
     def test_floor_on_rational(self) -> None:
         self.assertEqual(evaluate(parse_input_form("Floor[7/2]")).to_full_form(), "3")
         self.assertEqual(evaluate(parse_input_form("Ceiling[7/2]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("Floor[7/2, 2/3]")).to_full_form(), "Rational[10, 3]")
 
     def test_round_uses_banker_rounding(self) -> None:
         self.assertEqual(evaluate(parse_input_form("Round[3.5]")).to_full_form(), "4")
         self.assertEqual(evaluate(parse_input_form("Round[2.5]")).to_full_form(), "2")
         self.assertEqual(evaluate(parse_input_form("Round[7/2]")).to_full_form(), "4")
         self.assertEqual(evaluate(parse_input_form("Round[5/2]")).to_full_form(), "2")
+        self.assertEqual(evaluate(parse_input_form("Round[5, 2]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("Round[7, 3]")).to_full_form(), "6")
 
     def test_integer_and_fractional_part(self) -> None:
         self.assertEqual(evaluate(parse_input_form("IntegerPart[3.7]")).to_full_form(), "3")
         self.assertEqual(evaluate(parse_input_form("IntegerPart[-3.7]")).to_full_form(), "-3")
         self.assertEqual(evaluate(parse_input_form("IntegerPart[5/3]")).to_full_form(), "1")
+        self.assertEqual(
+            evaluate(parse_input_form("IntegerPart[-3.7 + 4.2 I]")).to_full_form(),
+            "Complex[-3, 4]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FractionalPart[-3.7 + 4.2 I]")).to_full_form(),
+            "Complex[-0.7000000000000002, 0.20000000000000018]",
+        )
 
     def test_sqrt_perfect_square_and_radical(self) -> None:
         self.assertEqual(evaluate(parse_input_form("Sqrt[16]")).to_full_form(), "4")
         self.assertEqual(evaluate(parse_input_form("Sqrt[2]")).to_full_form(), "Power[2, Rational[1, 2]]")
         self.assertEqual(evaluate(parse_input_form("Sqrt[1/4]")).to_full_form(), "Rational[1, 2]")
         self.assertEqual(evaluate(parse_input_form("Sqrt[-4]")).to_full_form(), "Times[2, I]")
+        self.assertEqual(
+            evaluate(parse_input_form("Sqrt[12]")).to_full_form(),
+            "Times[2, Power[3, Rational[1, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("54^(1/3)")).to_full_form(),
+            "Times[3, Power[2, Rational[1, 3]]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("8^(2/3)")).to_full_form(), "4")
 
     def test_min_max_fold_through_single_list(self) -> None:
         # Wolfram's Min/Max fold a single wrapping List the same as direct
         # n-ary call form.
         self.assertEqual(evaluate(parse_input_form("Min[{1, 2, 3}]")).to_full_form(), "1")
         self.assertEqual(evaluate(parse_input_form("Max[{1, 2, 3}]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("Min[{1, 4}, {2, 3}]")).to_full_form(), "1")
+        self.assertEqual(evaluate(parse_input_form("Max[{1, 4}, {2, 3}]")).to_full_form(), "4")
+        self.assertEqual(evaluate(parse_input_form("Min[{1, x, 2}]")).to_full_form(), "Min[1, x]")
 
 
 class NumberTheoryTests(unittest.TestCase):
@@ -3931,6 +3985,82 @@ class PolynomialAlgebraTests(unittest.TestCase):
             evaluate(parse_input_form("Decompose[(x^2 + I x + 1)^2, x]")).to_full_form(),
             "List[Plus[1, Power[x, 2], Times[2, x]], Plus[Power[x, 2], Times[Complex[0, 1], x]]]",
         )
+
+
+class AlgebraicRootTests(unittest.TestCase):
+    """Kernel-free algebraic-number support for indexed polynomial roots."""
+
+    def test_root_canonicalizes_polynomial_and_rational_roots(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Root[2 #^3 - 4 &, 2]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 3]]], 2, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[(#^2 - 2)^2 &, 4]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 2]]], 2, 0]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Root[#^2 - 4 &, 2]")).to_full_form(), "2")
+        self.assertEqual(evaluate(parse_input_form("Root[2 # - 4 &, 1]")).to_full_form(), "2")
+
+    def test_minimal_polynomial_and_root_reduce(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("MinimalPolynomial[Root[#^3 - 2 &, 1]^2, x]")).to_full_form(),
+            "Plus[-4, Power[x, 3]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MinimalPolynomial[Root[#^2 - 2 &, 2] + Root[#^2 - 3 &, 2], x]")).to_full_form(),
+            "Plus[1, Power[x, 4], Times[-10, Power[x, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Root[#^3 - 2 &, 1]^3]")).to_full_form(),
+            "2",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[1/Root[#^3 - 2 &, 1]]")).to_full_form(),
+            "Root[Function[Plus[-1, Times[2, Power[Slot[1], 3]]]], 1, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Root[#^2 - 2 &, 2] + Root[#^2 - 3 &, 2]]")).to_full_form(),
+            "Root[Function[Plus[1, Times[-10, Power[Slot[1], 2]], Power[Slot[1], 4]]], 4, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Root[#^2 - 2 &, 2]^(1/2)]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 4]]], 2, 0]",
+        )
+
+    def test_root_reduce_components_and_conjugates(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Re[Root[#^2 + 1 &, 1]]]")).to_full_form(),
+            "0",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Im[Root[#^2 + 1 &, 1]]]")).to_full_form(),
+            "-1",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Abs[Root[#^2 + 1 &, 1]]]")).to_full_form(),
+            "1",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Conjugate[Root[#^3 - 2 &, 2]]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 3]]], 3, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Re[Root[#^3 - 2 &, 2]]]")).to_full_form(),
+            "Root[Function[Plus[1, Times[4, Power[Slot[1], 3]]]], 1, 0]",
+        )
+
+    def test_real_roots_compare_exactly_and_numericize_at_requested_precision(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Root[#^3 - 3 # + 1 &, 1] < Root[#^3 - 3 # + 1 &, 2]")).to_full_form(),
+            "True",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Max[Root[#^3 - 3 # + 1 &, 1], Root[#^3 - 3 # + 1 &, 3]]")).to_full_form(),
+            "Root[Function[Plus[1, Times[-3, Slot[1]], Power[Slot[1], 3]]], 3, 0]",
+        )
+        numeric = evaluate(parse_input_form("N[Root[#^3 - 2 &, 1], 30]")).to_input_form()
+        self.assertRegex(numeric, r"^1\.25992104989487316476721060728`30\.$")
 
 
 if __name__ == "__main__":
