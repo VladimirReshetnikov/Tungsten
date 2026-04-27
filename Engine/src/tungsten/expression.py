@@ -510,6 +510,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "ComapApply",
     "Complex",
     "ComplexInfinity",
+    "Complement",
     "ComposeList",
     "Composition",
     "Confirm",
@@ -525,7 +526,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "Construct",
     "Context",
     "Contexts",
+    "Counts",
     "Cross",
+    "Cycles",
     "DatePattern",
     "Delete",
     "DeleteAdjacentDuplicates",
@@ -755,6 +758,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "PatternSequence",
     "PatternTest",
     "PercentForm",
+    "Permutations",
+    "Permute",
     "Piecewise",
     "Pick",
     "Plus",
@@ -777,6 +782,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Quit",
     "Quiet",
     "Ramp",
+    "RandomPermutation",
     "RandomSample",
     "Range",
     "Rational",
@@ -810,6 +816,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "RuleDelayed",
     "SameAs",
     "SameQ",
+    "SameTest",
     "Scan",
     "ScientificForm",
     "Select",
@@ -867,6 +874,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "StringTake",
     "StringToByteArray",
     "StripBoxes",
+    "Subsets",
     "Subset",
     "SubsetEqual",
     "Subscript",
@@ -883,6 +891,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Symbol",
     "SymbolName",
     "TableForm",
+    "Tally",
     "Take",
     "TakeDrop",
     "TakeList",
@@ -4521,6 +4530,13 @@ def _option_value(options: Sequence[Expr], name: str) -> Expr | None:
         if option_name == name:
             return option_value
     return None
+
+
+def _same_test_from_options(options: Sequence[Expr]) -> Expr | None:
+    same_test = _option_value(options, "SameTest")
+    if isinstance(same_test, Symbol) and same_test.name == "Automatic":
+        return None
+    return same_test
 
 
 def _flatten_min_max_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
@@ -13126,8 +13142,11 @@ def _sort_items_by_value(
     ordering_function: Expr | None = None,
     *,
     reverse: bool = False,
+    same_test: Expr | None = None,
 ) -> list[_OrderingItem]:
     def compare(left: _OrderingItem, right: _OrderingItem) -> int:
+        if same_test is not None and _duplicate_test_succeeds(same_test, left.value, right.value):
+            return 0
         result = (
             _ordering_function_compare(ordering_function, left.value, right.value)
             if ordering_function is not None
@@ -13153,15 +13172,38 @@ def _sort_count_slice(
     return list(sorted_items[n:]) if abs(n) <= len(sorted_items) else list(sorted_items)
 
 
-def ordering(expr: Expr, count: Expr | None = None, ordering_function: Expr | None = None) -> Call:
-    sorted_items = _sort_items_by_value(_sequence_ordering_items(expr, "Ordering"), ordering_function)
+def ordering(
+    expr: Expr,
+    count: Expr | None = None,
+    ordering_function: Expr | None = None,
+    *,
+    same_test: Expr | None = None,
+) -> Call:
+    sorted_items = _sort_items_by_value(
+        _sequence_ordering_items(expr, "Ordering"),
+        ordering_function,
+        same_test=same_test,
+    )
     selected = _sort_count_slice(sorted_items, count, "Ordering")
     return _evaluated_list_expr(*(integer(item.index) for item in selected))
 
 
-def sort_expr(expr: Expr, ordering_function: Expr | None = None, *, reverse: bool = False) -> Expr:
+def sort_expr(
+    expr: Expr,
+    ordering_function: Expr | None = None,
+    count: Expr | None = None,
+    *,
+    reverse: bool = False,
+    same_test: Expr | None = None,
+) -> Expr:
     items = _sequence_ordering_items(expr, "Sort")
-    sorted_items = _sort_items_by_value(items, ordering_function, reverse=reverse)
+    sorted_items = _sort_items_by_value(
+        items,
+        ordering_function,
+        reverse=reverse,
+        same_test=same_test,
+    )
+    sorted_items = _sort_count_slice(sorted_items, count, "Sort")
     return _rebuild_ordered_expr(expr, sorted_items)
 
 
@@ -13245,8 +13287,11 @@ def _compare_key_tuples(
     left_keys: Sequence[Expr],
     right_keys: Sequence[Expr],
     ordering_function: Expr | None,
+    same_test: Expr | None = None,
 ) -> int:
     for left_key, right_key in zip(left_keys, right_keys):
+        if same_test is not None and _duplicate_test_succeeds(same_test, left_key, right_key):
+            continue
         compare = (
             _ordering_function_compare(ordering_function, left_key, right_key)
             if ordering_function is not None
@@ -13264,10 +13309,11 @@ def _sort_items_by_keys(
     ordering_function: Expr | None = None,
     reverse: bool = False,
     stable_ties: bool = False,
+    same_test: Expr | None = None,
 ) -> list[_OrderingItem]:
     def compare(left: _OrderingItem, right: _OrderingItem) -> int:
-        result = _compare_key_tuples(left.keys, right.keys, ordering_function)
-        if result == 0 and not key_spec_is_list and not stable_ties:
+        result = _compare_key_tuples(left.keys, right.keys, ordering_function, same_test)
+        if result == 0 and same_test is None and not key_spec_is_list and not stable_ties:
             result = _canonical_compare(left.value, right.value)
         return -result if reverse else result
 
@@ -13280,6 +13326,7 @@ def sort_by(
     ordering_function: Expr | None = None,
     *,
     reverse: bool = False,
+    same_test: Expr | None = None,
 ) -> Expr:
     items, key_spec_is_list = _items_with_keys(expr, functions, "SortBy")
     sorted_items = _sort_items_by_keys(
@@ -13287,6 +13334,7 @@ def sort_by(
         key_spec_is_list=key_spec_is_list,
         ordering_function=ordering_function,
         reverse=reverse,
+        same_test=same_test,
     )
     return _rebuild_ordered_expr(expr, sorted_items)
 
@@ -13296,12 +13344,15 @@ def ordering_by(
     functions: Expr,
     count: Expr | None = None,
     ordering_function: Expr | None = None,
+    *,
+    same_test: Expr | None = None,
 ) -> Call:
     items, key_spec_is_list = _items_with_keys(expr, functions, "OrderingBy")
     sorted_items = _sort_items_by_keys(
         items,
         key_spec_is_list=key_spec_is_list,
         ordering_function=ordering_function,
+        same_test=same_test,
     )
     selected = _sort_count_slice(sorted_items, count, "OrderingBy")
     return _evaluated_list_expr(*(integer(item.index) for item in selected))
@@ -14648,6 +14699,14 @@ def _duplicate_test_succeeds(test: Expr | None, left: Expr, right: Expr) -> bool
         return left == right
     evaluated = evaluate(_apply_callable(test, (left, right)))
     return isinstance(evaluated, Symbol) and evaluated.name == "True"
+
+
+def _same_test_succeeds(test: Expr | None, left: Expr, right: Expr) -> bool:
+    return _duplicate_test_succeeds(test, left, right)
+
+
+def _contains_by_same_test(items: Sequence[Expr], candidate: Expr, test: Expr | None) -> bool:
+    return any(_same_test_succeeds(test, candidate, item) for item in items)
 
 
 def delete_duplicates(expr: Expr, test: Expr | None = None) -> Expr:
@@ -16455,15 +16514,18 @@ def permutation_order_expr(perm_expr: Expr) -> Expr:
 
 
 def permute_expr(list_expr_input: Expr, perm_expr: Expr) -> Expr:
-    """``Permute[list, perm]`` / ``Permute[list, Cycles[{{…}}]]``.
+    """``Permute[expr, perm]`` / ``Permute[expr, Cycles[{{…}}]]``.
 
-    Apply a permutation to a list. The kernel's contract is that
-    ``Permute[list, perm][[perm[[i]]]] == list[[i]]``, i.e. the
+    Apply a permutation to the first-level elements of a non-association
+    compound expression. The kernel's contract is that
+    ``Permute[expr, perm][[perm[[i]]]] == expr[[i]]``, i.e. the
     element at original position ``i`` ends up at the position named
     by ``perm[[i]]``.
     """
-    if not (isinstance(list_expr_input, Call) and list_expr_input.has_head("List")):
-        raise WolframEvaluationError("Permute expects a List as its first argument.")
+    if _association_entries(list_expr_input) is not None:
+        raise WolframEvaluationError("Permute expects a non-association expression.")
+    if not isinstance(list_expr_input, Call):
+        raise WolframEvaluationError("Permute expects a compound expression.")
     n = len(list_expr_input.arguments)
     if isinstance(perm_expr, Call) and perm_expr.has_head("Cycles"):
         cycles = _parse_cycles_argument(perm_expr, "Permute")
@@ -16499,7 +16561,7 @@ def permute_expr(list_expr_input: Expr, perm_expr: Expr) -> Expr:
         output[destination] = list_expr_input.arguments[source_index]
     # All destinations should be filled because the permutation is bijective.
     assert all(item is not None for item in output)
-    return list_expr(*output)  # type: ignore[arg-type]
+    return _rebuild(list_expr_input, output)  # type: ignore[arg-type]
 
 
 def _peek_sequence_list_pattern(pattern: Expr) -> Call | None:
@@ -16737,14 +16799,14 @@ def tally(expr: Expr, test: Expr | None = None) -> Expr:
     return list_expr(*(list_expr(key, integer(count)) for key, count in zip(keys, counts)))
 
 
-def counts(expr: Expr) -> Expr:
+def counts(expr: Expr, test: Expr | None = None) -> Expr:
     items = _list_or_association_values(expr, "Counts")
     keys: list[Expr] = []
     occurrences: dict[int, int] = {}
     for item in items:
         position: int | None = None
         for existing_index, existing_key in enumerate(keys):
-            if existing_key == item:
+            if _same_test_succeeds(test, existing_key, item):
                 position = existing_index
                 break
         if position is None:
@@ -17131,49 +17193,98 @@ def permutations(expr: Expr, spec: Expr | None = None) -> Expr:
     return list_expr(*output)
 
 
+def _cycles_expr_from_permutation(permutation: Sequence[int]) -> Expr:
+    seen: set[int] = set()
+    cycles: list[Expr] = []
+    for start in range(1, len(permutation) + 1):
+        if start in seen or permutation[start - 1] == start:
+            seen.add(start)
+            continue
+        cycle: list[int] = []
+        current = start
+        while current not in seen:
+            seen.add(current)
+            cycle.append(current)
+            current = permutation[current - 1]
+        if len(cycle) > 1:
+            cycles.append(list_expr(*(integer(index) for index in cycle)))
+    return call("Cycles", list_expr(*cycles))
+
+
+def random_permutation(expr: Expr) -> Expr:
+    if isinstance(expr, Integer):
+        if expr.value < 0:
+            raise WolframEvaluationError("RandomPermutation expects a non-negative integer.")
+        values = list(range(1, expr.value + 1))
+        random.shuffle(values)
+        return _cycles_expr_from_permutation(values)
+    raise WolframEvaluationError("RandomPermutation currently expects an integer length.")
+
+
+def _canonical_sorted_items(items: Sequence[Expr]) -> list[Expr]:
+    return sorted(items, key=cmp_to_key(_canonical_compare))
+
+
+def _unique_by_same_test(items: Sequence[Expr], test: Expr | None) -> list[Expr]:
+    unique: list[Expr] = []
+    for item in items:
+        if not _contains_by_same_test(unique, item, test):
+            unique.append(item)
+    return unique
+
+
+def _split_same_test_option_arguments(
+    arguments: Sequence[Expr],
+    function_name: str,
+) -> tuple[tuple[Expr, ...], Expr | None]:
+    data_arguments, options = _split_trailing_option_rules(arguments)
+    unsupported = [
+        option
+        for option in options
+        if (parts := _option_rule_parts(option)) is not None and parts[0] != "SameTest"
+    ]
+    if unsupported:
+        raise WolframEvaluationError(f"{function_name} currently supports only the SameTest option.")
+    return data_arguments, _same_test_from_options(options)
+
+
 def union(arguments: Sequence[Expr]) -> Expr:
     """Union[list1, list2, ...] returns sorted unique elements."""
+    arguments, same_test = _split_same_test_option_arguments(arguments, "Union")
     if not arguments:
         return list_expr()
-    seen: list[Expr] = []
+    items: list[Expr] = []
     for argument in arguments:
-        items = _list_or_association_values(argument, "Union")
-        for item in items:
-            if not any(item == existing for existing in seen):
-                seen.append(item)
-    return sort_expr(list_expr(*seen))
+        items.extend(_list_or_association_values(argument, "Union"))
+    return list_expr(*_unique_by_same_test(_canonical_sorted_items(items), same_test))
 
 
 def intersection(arguments: Sequence[Expr]) -> Expr:
+    arguments, same_test = _split_same_test_option_arguments(arguments, "Intersection")
     if not arguments:
         return list_expr()
     initial = list(_list_or_association_values(arguments[0], "Intersection"))
     for argument in arguments[1:]:
         other = _list_or_association_values(argument, "Intersection")
-        initial = [item for item in initial if any(item == other_item for other_item in other)]
-    seen: list[Expr] = []
-    for item in initial:
-        if not any(item == existing for existing in seen):
-            seen.append(item)
-    return sort_expr(list_expr(*seen))
+        initial = [item for item in initial if any(_same_test_succeeds(same_test, item, other_item) for other_item in other)]
+    return list_expr(*_canonical_sorted_items(_unique_by_same_test(initial, same_test)))
 
 
 def complement(arguments: Sequence[Expr]) -> Expr:
+    arguments, same_test = _split_same_test_option_arguments(arguments, "Complement")
     if not arguments:
         return list_expr()
     base = list(_list_or_association_values(arguments[0], "Complement"))
     excluded: list[Expr] = []
     for argument in arguments[1:]:
         for item in _list_or_association_values(argument, "Complement"):
-            if not any(item == existing for existing in excluded):
+            if not _contains_by_same_test(excluded, item, same_test):
                 excluded.append(item)
     survivors: list[Expr] = []
     for item in base:
-        if any(item == existing for existing in excluded):
-            continue
-        if not any(item == existing for existing in survivors):
+        if not _contains_by_same_test(excluded, item, same_test):
             survivors.append(item)
-    return sort_expr(list_expr(*survivors))
+    return list_expr(*_unique_by_same_test(_canonical_sorted_items(survivors), same_test))
 
 
 def pad_left(expr: Expr, target_length_expr: Expr, fill_expr: Expr | None = None) -> Expr:

@@ -2401,10 +2401,20 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Ordering[{3, 1, 2}, 2]")).to_full_form(), "List[2, 3]")
         self.assertEqual(evaluate(parse_input_form("Ordering[{3, 1, 2}, -2]")).to_full_form(), "List[3, 1]")
         self.assertEqual(evaluate(parse_input_form("Ordering[{3, 1, 2}, All, Greater]")).to_full_form(), "List[1, 3, 2]")
+        self.assertEqual(
+            evaluate(parse_input_form("Ordering[{1., 1, 2}, All, Less, SameTest -> Equal]")).to_full_form(),
+            "List[1, 2, 3]",
+        )
         self.assertEqual(evaluate(parse_input_form("Sort[f[3, 1, 2]]")).to_full_form(), "f[1, 2, 3]")
         self.assertEqual(evaluate(parse_input_form("Sort[{3, 1, 2}, Greater]")).to_full_form(), "List[3, 2, 1]")
+        self.assertEqual(evaluate(parse_input_form("Sort[{3, 1, 2, 4}, Less, 2]")).to_full_form(), "List[1, 2]")
+        self.assertEqual(
+            evaluate(parse_input_form("Sort[{1., 1, 2}, SameTest -> Equal]")).to_full_form(),
+            "List[1., 1, 2]",
+        )
         self.assertEqual(evaluate(parse_input_form("ReverseSort[{3, 1, 2}]")).to_full_form(), "List[3, 2, 1]")
         self.assertEqual(evaluate(parse_input_form("ReverseSort[{3, 1, 2}, Greater]")).to_full_form(), "List[1, 2, 3]")
+        self.assertEqual(evaluate(parse_input_form("ReverseSort[{3, 1, 2, 4}, Less, 2]")).to_full_form(), "List[4, 3]")
         self.assertEqual(evaluate(parse_input_form("Sort[<|b -> 2, a -> 1|>]")).to_full_form(), "Association[Rule[a, 1], Rule[b, 2]]")
 
     def test_by_key_ordering_and_extrema_functions(self) -> None:
@@ -2421,6 +2431,14 @@ class ExpressionEvaluationTests(unittest.TestCase):
             "List[List[b, 1], List[a, 2]]",
         )
         self.assertEqual(
+            evaluate(parse_input_form("SortBy[{-3, 1, -2, 4}, Abs, Greater]")).to_full_form(),
+            "List[4, -3, -2, 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("SortBy[{1, -2, -1, 2}, Abs, Less, SameTest -> Equal]")).to_full_form(),
+            "List[1, -1, -2, 2]",
+        )
+        self.assertEqual(
             evaluate(parse_input_form("ReverseSortBy[{{c, 2}, {a, 2}, {b, 1}}, Last]")).to_full_form(),
             "List[List[c, 2], List[a, 2], List[b, 1]]",
         )
@@ -2431,6 +2449,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(
             evaluate(parse_input_form("OrderingBy[{{a, 2}, {b, 1}, {c, 3}}, Last, -2]")).to_full_form(),
             "List[1, 3]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("OrderingBy[{1, -2, -1, 2}, Abs, All, Less, SameTest -> Equal]")).to_full_form(),
+            "List[1, 3, 2, 4]",
         )
         self.assertEqual(
             evaluate(parse_input_form("OrderingBy[Last][{{a, 2}, {b, 1}}]")).to_full_form(),
@@ -3173,6 +3195,10 @@ class StructuralListTests(unittest.TestCase):
             evaluate(parse_input_form("Counts[{a, b, a, c, a, b}]")).to_full_form(),
             "Association[Rule[a, 3], Rule[b, 2], Rule[c, 1]]",
         )
+        self.assertEqual(
+            evaluate(parse_input_form("Counts[{-1, 1, -2, 2, 3}, Abs[#1] == Abs[#2] &]")).to_full_form(),
+            "Association[Rule[-1, 2], Rule[-2, 2], Rule[3, 1]]",
+        )
 
     def test_catenate_handles_lists_and_associations(self) -> None:
         self.assertEqual(evaluate(parse_input_form("Catenate[{{a, b}, {c, d}}]")).to_full_form(), "List[a, b, c, d]")
@@ -3220,11 +3246,37 @@ class StructuralListTests(unittest.TestCase):
             evaluate(parse_input_form("Permutations[{a, b, c}]")).to_full_form(),
             "List[List[a, b, c], List[a, c, b], List[b, a, c], List[b, c, a], List[c, a, b], List[c, b, a]]",
         )
+        self.assertEqual(evaluate(parse_input_form("Permute[{a, b, c}, {2, 3, 1}]")).to_full_form(), "List[c, a, b]")
+        self.assertEqual(
+            evaluate(parse_input_form("Permute[f[a, b, c], Cycles[{{1, 2, 3}}]]")).to_full_form(),
+            "f[c, a, b]",
+        )
+        self.assertEqual(evaluate(parse_input_form("RandomPermutation[0]")).to_full_form(), "Cycles[List[]]")
 
     def test_set_operations_match_kernel(self) -> None:
         self.assertEqual(evaluate(parse_input_form("Union[{1, 2, 3}, {2, 3, 4}]")).to_full_form(), "List[1, 2, 3, 4]")
         self.assertEqual(evaluate(parse_input_form("Intersection[{1, 2, 3}, {2, 3, 4}]")).to_full_form(), "List[2, 3]")
         self.assertEqual(evaluate(parse_input_form("Complement[{1, 2, 3, 4}, {2, 4}]")).to_full_form(), "List[1, 3]")
+        self.assertEqual(
+            evaluate(parse_input_form("Union[{-1, 1, -2, 2}, SameTest -> (Abs[#1] == Abs[#2] &)]")).to_full_form(),
+            "List[-2, -1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Intersection[{-1, -2}, {1, 2}, SameTest -> (Abs[#1] == Abs[#2] &)]")).to_full_form(),
+            "List[-2, -1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Intersection[{1, -1}, {1}, SameTest -> (Abs[#1] == Abs[#2] &)]")).to_full_form(),
+            "List[1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Complement[{-1, 1, -2, 2}, {1}, SameTest -> (Abs[#1] == Abs[#2] &)]")).to_full_form(),
+            "List[-2]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Complement[{1, -1, 2, -2}, {}, SameTest -> (Abs[#1] == Abs[#2] &)]")).to_full_form(),
+            "List[-2, -1]",
+        )
 
     def test_pad_left_right_and_key_sort(self) -> None:
         self.assertEqual(evaluate(parse_input_form("PadLeft[{1, 2, 3}, 5]")).to_full_form(), "List[0, 0, 1, 2, 3]")

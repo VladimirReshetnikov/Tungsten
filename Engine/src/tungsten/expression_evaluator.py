@@ -1707,20 +1707,28 @@ def evaluate_once(expr: Expr) -> Expr:
         raise WolframEvaluationError("OrderedQ expects an expression and an optional ordering function.")
 
     if evaluated_head.name == "Ordering":
-        if len(evaluated_arguments) == 1:
-            return ordering(evaluated_arguments[0])
-        if len(evaluated_arguments) == 2:
-            return ordering(evaluated_arguments[0], evaluated_arguments[1])
-        if len(evaluated_arguments) == 3:
-            return ordering(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
-        raise WolframEvaluationError("Ordering expects an expression, optional count, and optional ordering function.")
+        ordering_args, same_test = _split_same_test_option_arguments(evaluated_arguments, "Ordering")
+        if len(ordering_args) == 1:
+            return ordering(ordering_args[0], same_test=same_test)
+        if len(ordering_args) == 2:
+            return ordering(ordering_args[0], ordering_args[1], same_test=same_test)
+        if len(ordering_args) == 3:
+            return ordering(ordering_args[0], ordering_args[1], ordering_args[2], same_test=same_test)
+        raise WolframEvaluationError(
+            "Ordering expects an expression, optional count, optional ordering function, and optional SameTest rule."
+        )
 
     if evaluated_head.name == "Sort":
-        if len(evaluated_arguments) == 1:
-            return sort_expr(evaluated_arguments[0])
-        if len(evaluated_arguments) == 2:
-            return sort_expr(evaluated_arguments[0], evaluated_arguments[1])
-        raise WolframEvaluationError("Sort expects an expression and an optional ordering function.")
+        sort_args, same_test = _split_same_test_option_arguments(evaluated_arguments, "Sort")
+        if len(sort_args) == 1:
+            return sort_expr(sort_args[0], same_test=same_test)
+        if len(sort_args) == 2:
+            return sort_expr(sort_args[0], sort_args[1], same_test=same_test)
+        if len(sort_args) == 3:
+            return sort_expr(sort_args[0], sort_args[1], sort_args[2], same_test=same_test)
+        raise WolframEvaluationError(
+            "Sort expects an expression, optional ordering function, optional count, and optional SameTest rule."
+        )
 
     if evaluated_head.name == "AlphabeticSort":
         if len(evaluated_arguments) != 1:
@@ -1740,45 +1748,60 @@ def evaluate_once(expr: Expr) -> Expr:
         raise WolframEvaluationError("RandomSample expects an expression and an optional count.")
 
     if evaluated_head.name == "ReverseSort":
-        if len(evaluated_arguments) == 1:
-            return sort_expr(evaluated_arguments[0], reverse=True)
-        if len(evaluated_arguments) == 2:
-            return sort_expr(evaluated_arguments[0], evaluated_arguments[1], reverse=True)
-        raise WolframEvaluationError("ReverseSort expects an expression and an optional ordering function.")
+        sort_args, same_test = _split_same_test_option_arguments(evaluated_arguments, "ReverseSort")
+        if len(sort_args) == 1:
+            return sort_expr(sort_args[0], reverse=True, same_test=same_test)
+        if len(sort_args) == 2:
+            return sort_expr(sort_args[0], sort_args[1], reverse=True, same_test=same_test)
+        if len(sort_args) == 3:
+            return sort_expr(sort_args[0], sort_args[1], sort_args[2], reverse=True, same_test=same_test)
+        raise WolframEvaluationError(
+            "ReverseSort expects an expression, optional ordering function, optional count, and optional SameTest rule."
+        )
 
     if evaluated_head.name == "SortBy":
-        if len(evaluated_arguments) == 1:
+        sort_args, same_test = _split_same_test_option_arguments(evaluated_arguments, "SortBy")
+        if len(sort_args) == 1 and same_test is None:
             return evaluated_expr
-        if len(evaluated_arguments) == 2:
-            return sort_by(evaluated_arguments[0], evaluated_arguments[1])
-        if len(evaluated_arguments) == 3:
-            return sort_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
-        raise WolframEvaluationError("SortBy expects an expression, functions, and an optional ordering function.")
+        if len(sort_args) == 2:
+            return sort_by(sort_args[0], sort_args[1], same_test=same_test)
+        if len(sort_args) == 3:
+            return sort_by(sort_args[0], sort_args[1], sort_args[2], same_test=same_test)
+        raise WolframEvaluationError(
+            "SortBy expects an expression, functions, optional ordering function, and optional SameTest rule."
+        )
 
     if evaluated_head.name == "ReverseSortBy":
-        if len(evaluated_arguments) == 1:
+        sort_args, same_test = _split_same_test_option_arguments(evaluated_arguments, "ReverseSortBy")
+        if len(sort_args) == 1 and same_test is None:
             return evaluated_expr
-        if len(evaluated_arguments) == 2:
-            return sort_by(evaluated_arguments[0], evaluated_arguments[1], reverse=True)
-        if len(evaluated_arguments) == 3:
-            return sort_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2], reverse=True)
-        raise WolframEvaluationError("ReverseSortBy expects an expression, functions, and an optional ordering function.")
+        if len(sort_args) == 2:
+            return sort_by(sort_args[0], sort_args[1], reverse=True, same_test=same_test)
+        if len(sort_args) == 3:
+            return sort_by(sort_args[0], sort_args[1], sort_args[2], reverse=True, same_test=same_test)
+        raise WolframEvaluationError(
+            "ReverseSortBy expects an expression, functions, optional ordering function, and optional SameTest rule."
+        )
 
     if evaluated_head.name == "OrderingBy":
-        if len(evaluated_arguments) == 1:
+        ordering_args, same_test = _split_same_test_option_arguments(evaluated_arguments, "OrderingBy")
+        if len(ordering_args) == 1 and same_test is None:
             return evaluated_expr
-        if len(evaluated_arguments) == 2:
-            return ordering_by(evaluated_arguments[0], evaluated_arguments[1])
-        if len(evaluated_arguments) == 3:
-            return ordering_by(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
-        if len(evaluated_arguments) == 4:
+        if len(ordering_args) == 2:
+            return ordering_by(ordering_args[0], ordering_args[1], same_test=same_test)
+        if len(ordering_args) == 3:
+            return ordering_by(ordering_args[0], ordering_args[1], ordering_args[2], same_test=same_test)
+        if len(ordering_args) == 4:
             return ordering_by(
-                evaluated_arguments[0],
-                evaluated_arguments[1],
-                evaluated_arguments[2],
-                evaluated_arguments[3],
+                ordering_args[0],
+                ordering_args[1],
+                ordering_args[2],
+                ordering_args[3],
+                same_test=same_test,
             )
-        raise WolframEvaluationError("OrderingBy expects an expression, functions, optional count, and optional ordering function.")
+        raise WolframEvaluationError(
+            "OrderingBy expects an expression, functions, optional count, optional ordering function, and optional SameTest rule."
+        )
 
     if evaluated_head.name == "MinimalBy":
         if len(evaluated_arguments) == 1:
@@ -2025,9 +2048,11 @@ def evaluate_once(expr: Expr) -> Expr:
         raise WolframEvaluationError("Tally expects a list and an optional binary test.")
 
     if evaluated_head.name == "Counts":
-        if len(evaluated_arguments) != 1:
-            raise WolframEvaluationError("Counts expects exactly one argument.")
-        return counts(evaluated_arguments[0])
+        if len(evaluated_arguments) == 1:
+            return counts(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return counts(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Counts expects a list or association and an optional binary test.")
 
     if evaluated_head.name == "MinMax":
         if len(evaluated_arguments) != 1:
@@ -2216,6 +2241,11 @@ def evaluate_once(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 2:
             return permutations(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("Permutations expects a list and an optional length spec.")
+
+    if evaluated_head.name == "RandomPermutation":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("RandomPermutation expects an integer length.")
+        return random_permutation(evaluated_arguments[0])
 
     if evaluated_head.name == "Union":
         return union(evaluated_arguments)
