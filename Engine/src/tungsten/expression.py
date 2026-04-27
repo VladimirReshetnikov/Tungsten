@@ -5065,6 +5065,8 @@ def _expr_to_sympy_numeric(expr: Expr):
         return _sp.Float(str(info.value), info.precision or 17)
     if isinstance(expr, ComplexNumber):
         return _expr_to_sympy_numeric(expr.real_part) + _sp.I * _expr_to_sympy_numeric(expr.imaginary_part)
+    if isinstance(expr, RootNumber):
+        return _expression_algebraic_module()._root_to_sympy(expr)
     if isinstance(expr, Symbol):
         constant = _sympy_constant(expr.name)
         if constant is None:
@@ -5368,6 +5370,73 @@ def _is_numeric_transcendental_expr(expr: Expr) -> bool:
     if getattr(sympy_expr, "free_symbols", None):
         return False
     return bool(getattr(sympy_expr, "is_number", False))
+
+
+def _numeric_q_value(expr: Expr) -> bool:
+    if _is_indeterminate_expr(expr) or _is_complex_infinity_expr(expr):
+        return False
+    if _is_positive_infinity_expr(expr) or _is_negative_infinity_expr(expr):
+        return False
+    if _is_number_expr(expr) or isinstance(expr, RootNumber):
+        return True
+    return _is_numeric_transcendental_expr(expr)
+
+
+def simplify_expr(expr: Expr) -> Expr:
+    if not _numeric_q_value(expr):
+        return expr
+    candidates = [expr]
+    root_reduced = _root_reduce_numeric_candidate(expr)
+    if root_reduced is not None:
+        candidates.append(root_reduced)
+    sympy_simplified = _simplify_numeric_via_sympy(expr)
+    if sympy_simplified is not None:
+        candidates.append(sympy_simplified)
+    return min(candidates, key=_simplification_cost)
+
+
+def _root_reduce_numeric_candidate(expr: Expr) -> Expr | None:
+    try:
+        reduced = _expression_algebraic_module()._root_reduce_expr((expr,))
+    except Exception:
+        return None
+    if reduced is None:
+        return None
+    return evaluate(reduced)
+
+
+def _simplify_numeric_via_sympy(expr: Expr) -> Expr | None:
+    _sp = _sympy_module()
+    try:
+        sympy_expr = _expr_to_sympy_numeric(expr)
+    except _SympyNumericConversionError:
+        return None
+    if getattr(sympy_expr, "free_symbols", None):
+        return None
+    try:
+        simplified = _low_risk_sympy_simplify(sympy_expr)
+    except Exception:
+        return None
+    if _expr_contains_inexact_real(expr):
+        return _sympy_number_to_expr(simplified, _combined_inexact_precision((expr,)))
+    converted = _sympy_exact_expr_to_tungsten(simplified)
+    if converted is None:
+        return None
+    return evaluate(converted)
+
+
+def _low_risk_sympy_simplify(expr):
+    _sp = _sympy_module()
+    current = _sp.powsimp(expr, combine="all", force=False)
+    current = _sp.trigsimp(current, method="matching")
+    current = _sp.cancel(current)
+    current = _sp.factor_terms(current)
+    return current
+
+
+def _simplification_cost(expr: Expr) -> tuple[int, str]:
+    full_form = expr.to_full_form()
+    return len(full_form), full_form
 
 
 def _expr_contains_inexact_real(expr: Expr) -> bool:

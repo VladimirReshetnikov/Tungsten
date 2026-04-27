@@ -1700,7 +1700,13 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Length[Rational[1, 2]]")).to_full_form(), "0")
 
         self.assertEqual(evaluate(parse_input_form("NumberQ[1 + 2 I]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("NumericQ[1 + 2 I]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("NumericQ[Sin[1]]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("NumericQ[Sin[x]]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("NumericQ[Root[#^2 - 2 &, 1] + 1]")).to_full_form(), "True")
         self.assertEqual(evaluate(parse_input_form("NumberQ[Infinity]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("NumericQ[Infinity]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("NumericQ[Indeterminate]")).to_full_form(), "False")
         self.assertEqual(evaluate(parse_input_form("NumberQ[Overflow[]]")).to_full_form(), "True")
         self.assertEqual(evaluate(parse_input_form("ExactNumberQ[1 + 2 I]")).to_full_form(), "True")
         self.assertEqual(evaluate(parse_input_form("ExactNumberQ[1. + 2 I]")).to_full_form(), "False")
@@ -1836,6 +1842,21 @@ class ExpressionEvaluationTests(unittest.TestCase):
             evaluate(parse_input_form("ComplexExpand[x + I]")).to_full_form(),
             "ComplexExpand[Plus[Complex[0, 1], x]]",
         )
+
+    def test_numeric_simplify_and_full_simplify_are_variable_free_only(self) -> None:
+        simplify_cases = {
+            "Simplify[Sin[1]^2 + Cos[1]^2]": "1",
+            "FullSimplify[Sin[1]^2 + Cos[1]^2]": "1",
+            "Simplify[Sqrt[2]^2]": "2",
+            "Simplify[E^Log[2]]": "2",
+            "Simplify[Root[#^2 - 2 &, 2]^2]": "2",
+            "Simplify[Sin[1]]": "Sin[1]",
+            "Simplify[x + 1]": "Plus[1, x]",
+            "Simplify[Sin[x]^2 + Cos[x]^2]": "Plus[Power[Cos[x], 2], Power[Sin[x], 2]]",
+        }
+        for source, expected in simplify_cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
 
     def test_transcendental_constants_exact_numeric_and_degree_functions(self) -> None:
         exact_cases = {

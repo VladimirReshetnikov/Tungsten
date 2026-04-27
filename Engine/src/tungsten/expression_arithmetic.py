@@ -714,6 +714,9 @@ def _evaluate_simple_predicates(expr: Call) -> Expr | None:
     if expr.has_head("NumberQ"):
         return _bool_symbol(_is_number_expr(argument) or _is_numeric_transcendental_expr(argument))
 
+    if expr.has_head("NumericQ"):
+        return _bool_symbol(_numeric_q_value(argument))
+
     if expr.has_head("ExactNumberQ"):
         if _is_exact_real_number(argument):
             return _bool_symbol(True)

@@ -2,9 +2,11 @@
 
 - Status: Implementation notes for Tungsten's kernel-free numeric evaluator
 - Scope: `src/Tungsten/src/tungsten/expression.py`
-- Updated (UTC): 2026-04-26
+- Updated (UTC): 2026-04-27T20:51:45Z
+- Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7
 - Related docs:
   - [Expression Function Support](./expression-function-support.md)
+  - [Numeric Simplification](./numeric-simplification.md)
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
   - [Wolfram Numbers tutorial](https://reference.wolfram.com/language/tutorial/Numbers.html)
@@ -89,11 +91,21 @@ Unsupported branch-sensitive cases remain inert.
 infinity markers; complex ordering remains inert.
 
 Implemented numeric predicates include `AtomQ`, `IntegerQ`, `MachineIntegerQ`, `NumberQ`,
-`ExactNumberQ`, `InexactNumberQ`, `RealValuedNumberQ`, and `MachineNumberQ`. `Infinity` is not a
-number for `NumberQ`, but `Overflow[]` and `Underflow[]` are explicit real numbers.
+`NumericQ`, `ExactNumberQ`, `InexactNumberQ`, `RealValuedNumberQ`, and `MachineNumberQ`.
+`Infinity` is not a number for `NumberQ` or `NumericQ`, but `Overflow[]` and `Underflow[]` are
+explicit real numbers. `NumericQ` additionally recognizes variable-free supported elementary
+numeric expressions and exact algebraic `Root` expressions.
 
 `MachineIntegerQ` is a Tungsten convenience spelling for the signed 64-bit range check that Wolfram
 exposes as <code>Developer`MachineIntegerQ</code>.
+
+## Numeric Simplification
+
+`Simplify` and `FullSimplify` are intentionally bounded. They run only for evaluated expressions
+where `NumericQ` returns `True`; variable-bearing expressions are returned in their evaluated form.
+The current transformation set is documented in [Numeric Simplification](./numeric-simplification.md)
+and consists of ordinary evaluation, supported `RootReduce`, and one low-risk SymPy pass over a
+variable-free numeric expression.
 
 ## Precision And Accuracy
 

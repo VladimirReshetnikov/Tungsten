@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-27T02:40:49Z
-- Repository HEAD: merge resolution of `ac0038e51` and `c5b62c552`
+- Updated (UTC): 2026-04-27T20:51:45Z
+- Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -92,7 +92,7 @@ kernel-free Tungsten expression stack is intended to:
 Even in that broader future direction, Tungsten is not intended to implement:
 
 - real- or complex-valued elementary or special mathematical functions;
-- expression simplification algorithms;
+- general expression simplification algorithms beyond the bounded variable-free numeric simplifier;
 - equation solving;
 - broad polynomial algebra beyond Tungsten's exact Gaussian-rational coefficient subset;
 - derivatives or integrals;
@@ -124,7 +124,7 @@ The current workspace is built around seven complementary capabilities:
    `x \[Function] body` with capture-avoiding parameter renaming and the pure-function attribute
    subset for hold, sequence, and listable behavior, then evaluates a broader inert
    structural built-in set such as hold-like conditionals (`If`, `Which`, `Switch`, `Piecewise`),
-   integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `StringQ`,
+   integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `NumericQ`, `StringQ`,
    `DigitQ`, `LetterQ`, `EvenQ`, and `SparseArrayQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
    `Min`/`Max` (with single-list-argument fold), `Clip`, and `KroneckerDelta`, real-rounding heads
    `Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, and `Sqrt` over the explicit-number
@@ -145,8 +145,9 @@ The current workspace is built around seven complementary capabilities:
    `Root`, `MinimalPolynomial`, and `RootReduce` for indexed polynomial roots over primitive
    integer polynomials, rational algebraic expressions, rational powers, and direct
    `Re`/`Im`/`Conjugate`/`Abs` forms, with exact comparisons for real-valued roots and
-   arbitrary-precision numeric approximation through `N`, bounded by the mutable
-   `$MaxRootDegree` safety setting,
+   arbitrary-precision numeric approximation through `N`, plus variable-free numeric
+   `Simplify`/`FullSimplify` backed by ordinary evaluation, `RootReduce`, and a bounded SymPy pass,
+   bounded by the mutable `$MaxRootDegree` safety setting,
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,

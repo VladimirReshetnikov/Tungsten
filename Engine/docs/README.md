@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-27T18:05:43Z
-- Repository HEAD: 9a4ceae3c5a6853c00025aab42893fc5a5274b3e
+- Updated (UTC): 2026-04-27T20:51:45Z
+- Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7
 
 ## What this docs tree is for
 
@@ -66,13 +66,14 @@ The docs are split so readers can choose the right depth:
 8. [import-export-formats.md](./import-export-formats.md)
 9. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
 10. [expression-function-support.md](./expression-function-support.md)
-11. [pattern-matching-plan.md](./pattern-matching-plan.md)
-12. [parser-corpus.md](./parser-corpus.md)
-13. [inline-box-strings.md](./inline-box-strings.md)
-14. [notebook-assistant.md](./notebook-assistant.md)
-15. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+11. [numeric-simplification.md](./numeric-simplification.md)
+12. [pattern-matching-plan.md](./pattern-matching-plan.md)
+13. [parser-corpus.md](./parser-corpus.md)
+14. [inline-box-strings.md](./inline-box-strings.md)
+15. [notebook-assistant.md](./notebook-assistant.md)
+16. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
     if you are planning a GUI notebook FrontEnd or StandardForm renderer
-16. [troubleshooting.md](./troubleshooting.md)
+17. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -87,6 +88,8 @@ The docs are split so readers can choose the right depth:
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
+| [numeric-tower.md](numeric-tower.md) | Implementation notes for explicit numeric atoms, arithmetic, precision, numeric predicates, and bounded numeric evaluation. |
+| [numeric-simplification.md](numeric-simplification.md) | Focused note describing `NumericQ`, variable-free `Simplify` / `FullSimplify`, and the exact transformations the offline simplifier applies. |
 | [wolfram-string-literal-spec.md](wolfram-string-literal-spec.md) | Normative specification for Wolfram-Language string literals, escape sequences, and named-character handling, with parity rules against the Wolfram 14.3 kernel. |
 | [symbol-context-registry.md](symbol-context-registry.md) | Normative design note for Tungsten's process-local symbol registry, fixed context state, name queries, `Unique`, and `ValueQ` boundaries. |
 | [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
@@ -141,6 +144,8 @@ The docs are split so readers can choose the right depth:
 - Read [repl.md](./repl.md) if you want the console-mode `tungsten.exe` interpreter and its
   `wolfram.exe`-style history behavior.
 - Read [expression-parser.md](./expression-parser.md).
+- Read [numeric-tower.md](./numeric-tower.md) and [numeric-simplification.md](./numeric-simplification.md)
+  if your work touches numeric predicates, `N`, `Simplify`, or exact/inexact conversion.
 - Read [symbol-context-registry.md](./symbol-context-registry.md) if you need precise
   `$Context`, `$ContextPath`, `Names`, `NameQ`, `Attributes`, `Symbol`, `Unique`, or `ValueQ`
   behavior, including the Wolfram 14.3 <code>System`</code> symbol snapshot.

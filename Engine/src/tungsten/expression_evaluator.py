@@ -1997,6 +1997,11 @@ def evaluate_once(expr: Expr) -> Expr:
             raise WolframEvaluationError("SplitBy expects exactly two arguments.")
         return split_by(evaluated_arguments[0], evaluated_arguments[1])
 
+    if evaluated_head_name in {"Simplify", "FullSimplify"}:
+        if len(evaluated_arguments) == 1:
+            return simplify_expr(evaluated_arguments[0])
+        return evaluated_expr
+
     if evaluated_head.name == "DuplicateFreeQ":
         if len(evaluated_arguments) == 1:
             return duplicate_free_q(evaluated_arguments[0])
