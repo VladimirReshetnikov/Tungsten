@@ -19,11 +19,14 @@ Cell["prefix \!\(\*StyleBox[\"Hello\", FontWeight->Bold]\) suffix", "Text", Cell
 
 
 class InlineBoxStringTests(unittest.TestCase):
-    def test_parse_wl_string_literal_preserves_inline_box_escape(self) -> None:
+    def test_parse_wl_string_literal_decodes_inline_box_escape(self) -> None:
+        # ``\!\(\*...\)`` inside a string literal decodes to PUA codepoints,
+        # matching the kernel's linear-syntax string lexis. Inline-box
+        # detection then operates on the decoded markers.
         literal = r'"hello \!\(\*GraphicsBox[{CircleBox[]}]\)"'
         decoded = parse_wl_string_literal(literal)
 
-        self.assertEqual(decoded, r"hello \!\(\*GraphicsBox[{CircleBox[]}]\)")
+        self.assertEqual(decoded, "hello GraphicsBox[{CircleBox[]}]")
         segments = inline_box_segments(decoded)
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0].box_expression, "GraphicsBox[{CircleBox[]}]")

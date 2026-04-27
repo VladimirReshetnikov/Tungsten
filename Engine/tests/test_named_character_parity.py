@@ -162,14 +162,9 @@ class StringLiteralUnicode6EscapeTests(unittest.TestCase):
         self.assertEqual(_parse_string(r'"\|10FFFF"').value, "\U0010ffff")
 
 
-@unittest.expectedFailure
-class StringLiteralLineContinuationFails(unittest.TestCase):
-    """A backslash followed by a newline is deleted from the decoded string in
-    the kernel. Tungsten currently preserves the literal backslash and the
-    newline. Both of these tests are expected-failure pending implementation.
-
-    Outside string literals, Tungsten already implements line continuation.
-    The gap is specifically inside string literals.
+class StringLiteralLineContinuationTests(unittest.TestCase):
+    """A backslash followed by a newline is deleted from the decoded string,
+    matching the kernel's behavior. Both LF and CRLF line endings are stripped.
     """
 
     def test_backslash_lf_deleted_in_string(self) -> None:
@@ -340,35 +335,65 @@ class IdentifierNamedCharCanonicalizationTests(unittest.TestCase):
         self.assertEqual(sym.name, "Α")  # U+0391, distinct from ASCII 'A'
 
 
-@unittest.expectedFailure
-class IdentifierHexCanonicalizationFails(unittest.TestCase):
-    """``\\:03C0`` outside a string canonicalizes to Symbol ``Pi`` in the kernel
-    (because U+03C0 has the alias ``Pi``); Tungsten currently produces a
-    one-character Symbol named ``"π"`` instead.
+class IdentifierHexCanonicalizationTests(unittest.TestCase):
+    """``\\:03C0`` outside a string canonicalizes to Symbol ``Pi`` because
+    ``U+03C0`` has the alias ``Pi``. The same alias rule applies to
+    ``\\:221E`` -> ``Infinity`` and ``\\:00B0`` -> ``Degree``.
+
+    Mid-identifier the alias does NOT apply: ``x\\:03C0`` is the
+    two-character identifier ``xπ``, matching the kernel.
     """
 
     def test_pi_via_hex_aliases_to_Pi(self) -> None:
         sym = _parse_symbol(r"\:03C0")
         self.assertEqual(sym.name, "Pi")
 
+    def test_infinity_via_hex_aliases(self) -> None:
+        sym = _parse_symbol(r"\:221E")
+        self.assertEqual(sym.name, "Infinity")
+
+    def test_degree_via_hex_aliases(self) -> None:
+        sym = _parse_symbol(r"\:00B0")
+        self.assertEqual(sym.name, "Degree")
+
+    def test_mid_identifier_hex_does_not_alias(self) -> None:
+        sym = _parse_symbol(r"x\:03C0")
+        self.assertEqual(sym.name, "xπ")
+
 
 class IdentifierKernelRejectsTests(unittest.TestCase):
-    """Several escape forms are valid inside strings but rejected by the kernel
-    in identifier position. Tungsten currently accepts them.
+    """Identifier-position escapes that decode to non-letter codepoints are
+    rejected, matching the kernel's behavior.
+
+    The kernel decodes the escape and parses the result; ``\\041`` -> ``!`` is
+    a postfix operator and not a valid identifier-start, so standalone
+    ``\\041`` is a parse error. Tungsten short-circuits this by refusing to
+    treat the escape as the beginning of an identifier when the decoded
+    codepoint is not letter-class.
+
+    PUA codepoints in ``U+E000..U+F8FF`` are accepted only when they are not
+    already classified as Wolfram operator or named-token glyphs. So
+    ``\\:E000`` and ``\\:F8FF`` (generic PUA, no operator binding) parse as
+    one-character identifiers, while ``\\:F4A1`` (the ``\\[Function]``
+    operator) is rejected.
     """
 
-    @unittest.expectedFailure
-    def test_octal_outside_string_should_reject(self) -> None:
-        # Kernel rejects \041 outside strings.
+    def test_octal_outside_string_rejected(self) -> None:
         with self.assertRaises(WolframSyntaxError):
             parse_expression(r"\041", form="input")
 
-    @unittest.expectedFailure
-    def test_pua_hex_outside_string_should_reject(self) -> None:
-        # Kernel rejects \:F4A1 (PUA) outside strings -- not a valid identifier
-        # character.
+    def test_pua_operator_codepoint_rejected(self) -> None:
         with self.assertRaises(WolframSyntaxError):
             parse_expression(r"\:F4A1", form="input")
+
+    def test_generic_pua_codepoint_accepted(self) -> None:
+        # \:E000 is a generic PUA character with no Wolfram operator meaning.
+        sym = _parse_symbol(r"\:E000")
+        self.assertEqual(sym.name, "")
+
+    def test_pua_end_of_range_accepted(self) -> None:
+        sym = _parse_symbol(r"\:F8FF")
+        self.assertEqual(sym.name, "")
 
 
 # ----------------------------------------------------------------------
@@ -376,25 +401,27 @@ class IdentifierKernelRejectsTests(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
-@unittest.expectedFailure
-class UnknownNamedCharStringFallbackFails(unittest.TestCase):
+class UnknownNamedCharStringFallbackTests(unittest.TestCase):
     """When a string contains ``"\\[Unknown]"`` for a name that is not in the
     table, Wolfram preserves the literal source text as the string's content.
-    Tungsten currently raises a parse error.
+    Tungsten matches this behavior in string-literal context (while still
+    rejecting unknown names in identifier-position parsing).
     """
 
     def test_unknown_name_preserves_literal(self) -> None:
         s = _parse_string(r'"\[NotARealName]"')
-        # Kernel result: the literal 16-char source `\[NotARealName]`
         self.assertEqual(s.value, r"\[NotARealName]")
 
     def test_empty_named_char_preserves_literal(self) -> None:
         s = _parse_string(r'"\[]"')
         self.assertEqual(s.value, r"\[]")
 
+    def test_unknown_name_combined_with_text(self) -> None:
+        s = _parse_string(r'"a\[Foo]b"')
+        self.assertEqual(s.value, r"a\[Foo]b")
 
-@unittest.expectedFailure
-class LinearSyntaxStringEscapeFails(unittest.TestCase):
+
+class LinearSyntaxStringEscapeTests(unittest.TestCase):
     """Wolfram has special semantics for ``\\!``, ``\\(``, ``\\)``, ``\\*``,
     ``\\<``, and ``\\>`` inside string literals (linear-syntax markers). They
     decode to PUA codepoints or are deleted. Tungsten currently preserves the

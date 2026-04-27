@@ -367,10 +367,13 @@ class CharacterEscapeParserTests(unittest.TestCase):
         expr = parse_expression(r"\.41", form="input")
         self.assertEqual(expr.to_full_form(), "A")
 
-    def test_octal_escape(self) -> None:
-        # ``\OOO`` decodes a 3-octal-digit character.
-        expr = parse_expression(r"\041", form="input")
-        self.assertEqual(expr.to_full_form(), "!")
+    def test_octal_escape_in_identifier_position_is_rejected(self) -> None:
+        # ``\OOO`` outside a string literal decodes to its codepoint, but the
+        # decoded codepoint must be a valid identifier character. ``\041`` is
+        # ``!`` -- a postfix operator and not an identifier-start, so the
+        # kernel rejects this. Tungsten matches.
+        with self.assertRaises(WolframSyntaxError):
+            parse_expression(r"\041", form="input")
 
     def test_long_hex_escape(self) -> None:
         # ``\|XXXXXX`` decodes a 6-hex-digit character (covers astral plane).

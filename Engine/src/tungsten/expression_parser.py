@@ -15,7 +15,7 @@ _PARSER_RECURSION_FLOOR = 5000
 if sys.getrecursionlimit() < _PARSER_RECURSION_FLOOR:
     sys.setrecursionlimit(_PARSER_RECURSION_FLOOR)
 
-from .named_characters import decode_named_character_escape
+from .named_characters import decode_named_character_escape_strict
 from .named_characters import named_character
 from .wolfram_strings import parse_wl_string_literal
 from .wolfram_strings import skip_wl_comment
@@ -674,11 +674,45 @@ def _scan_percent_history(text: str, start: int) -> tuple[_Token, int]:
 
 
 def _is_symbol_start(char: str) -> bool:
-    return char.isalpha() or char in {"$", "`"}
+    if char.isalpha() or char in {"$", "`"}:
+        return True
+    return _is_non_ascii_identifier_codepoint(char)
 
 
 def _is_symbol_continue(char: str) -> bool:
-    return char.isalnum() or char in {"$", "`"}
+    if char.isalnum() or char in {"$", "`"}:
+        return True
+    return _is_non_ascii_identifier_codepoint(char)
+
+
+def _is_non_ascii_identifier_codepoint(char: str) -> bool:
+    """Non-ASCII codepoints that the Wolfram kernel accepts as identifier
+    characters.
+
+    The kernel is permissive about non-ASCII identifier content: any codepoint
+    above ``U+007F`` is fair game except for codepoints that already have a
+    specific Wolfram-operator or named-token meaning (these are filtered out
+    via ``_NAMED_CHARACTER_TOKEN_MAP`` and ``_NAMED_CHARACTER_INFIX_OPERATOR_HEADS``).
+    Surrogate codepoints are also rejected as they cannot legally appear in a
+    Wolfram identifier.
+
+    This matches the kernel's observed behavior for hex-decoded escapes such as
+    ``\\:F4A1`` (the ``\\[Function]`` operator -- rejected as identifier),
+    ``\\:E000`` (a generic PUA codepoint -- accepted), ``\\:FF0D`` (fullwidth
+    hyphen-minus -- accepted), and ``\\|01F600`` (😀 -- accepted).
+    """
+    if len(char) != 1:
+        return False
+    cp = ord(char)
+    if cp < 0x80:
+        return False
+    if 0xD800 <= cp <= 0xDFFF:
+        return False
+    if char in _NAMED_CHARACTER_TOKEN_MAP:
+        return False
+    if char in _NAMED_CHARACTER_INFIX_OPERATOR_HEADS:
+        return False
+    return True
 
 
 def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | None:
@@ -688,6 +722,11 @@ def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | Non
     identifier. ``\\:ff0d`` standing alone becomes a one-character symbol; ``x\\:00b2``
     becomes the two-character symbol ``x²``. Returns ``None`` when the position does not
     begin a symbol token (so the tokenizer can try later branches).
+
+    Decoded escape codepoints are screened: only Unicode letters (and digits / ``$`` /
+    `````` for continuation positions) compose an identifier. ``\\041`` (= ASCII ``!``)
+    therefore does not start an identifier; the main tokenizer falls through to other
+    branches and lets the operator tokenizer handle it.
     """
     if start >= len(text):
         return None
@@ -698,7 +737,10 @@ def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | Non
         decoded = _scan_symbol_character_escape(text, index)
         if decoded is None:
             return None
-        chars.append(decoded[0])
+        character = decoded[0]
+        if not _is_symbol_start(character):
+            return None
+        chars.append(character)
         index = decoded[1]
     elif _is_symbol_start(first):
         chars.append(first)
@@ -711,7 +753,10 @@ def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | Non
         if char == "\\":
             decoded = _scan_symbol_character_escape(text, index)
             if decoded is not None:
-                chars.append(decoded[0])
+                character = decoded[0]
+                if not _is_symbol_continue(character):
+                    break
+                chars.append(character)
                 index = decoded[1]
                 continue
             break
@@ -722,19 +767,48 @@ def _scan_symbol_with_escapes(text: str, start: int) -> tuple[_Token, int] | Non
         break
 
     name = "".join(chars)
+    # Single-codepoint identifiers whose codepoint maps to a Wolfram alias
+    # (``π`` -> ``Pi``, ``∞`` -> ``Infinity``, etc.) canonicalize to the alias
+    # name. This is what the kernel does: ``\\:03C0`` standalone parses as
+    # Symbol "Pi", but ``x\\:03C0`` is the two-character identifier ``xπ``.
+    if len(name) == 1:
+        alias = _NAMED_CHARACTER_SYMBOL_ALIASES.get(name)
+        if alias is not None:
+            return _Token(kind="symbol", text=alias, start=start, end=index, value=alias), index
     return _Token(kind="symbol", text=name, start=start, end=index, value=name), index
 
 
 def _scan_symbol_character_escape(text: str, start: int) -> tuple[str, int] | None:
+    """Decode a character escape inside an identifier and return its single
+    Unicode codepoint plus the index just past the escape.
+
+    Returns ``None`` when the position is not a character escape, when the
+    escape decodes to text rather than a single codepoint (e.g. an unknown
+    ``\\[Foo]`` form, which is preserved verbatim only inside string literals),
+    or when the decoded codepoint cannot extend an identifier (operators,
+    punctuation, control characters).
+
+    Aliasing is intentionally NOT applied here: ``\\[Pi]`` decodes to
+    ``\\u03c0`` (π) and ``x\\[Pi]`` is therefore the two-character identifier
+    ``xπ``. The scanner handing the entire symbol resolves the alias only when
+    the whole identifier is a single Unicode codepoint with a registered
+    alias, matching the kernel's rule that ``\\[Pi]`` is ``Pi`` standalone but
+    ``xπ`` mid-identifier.
+    """
     if text.startswith(r"\[", start):
         raw_end = text.find("]", start + 2)
         raw = text[start:raw_end + 1] if raw_end >= 0 else ""
-        if raw in _ESCAPED_TOKEN_MAP or raw in _ESCAPED_SYMBOL_ALIASES or raw in _ESCAPED_INFIX_OPERATOR_HEADS:
+        # ``\[And]`` etc. are operator tokens (mapped to ``&&``, ``->``, ...);
+        # they cannot extend an identifier. Returning ``None`` lets the main
+        # tokenizer pick them up via ``_scan_escaped_token``.
+        if raw in _ESCAPED_TOKEN_MAP or raw in _ESCAPED_INFIX_OPERATOR_HEADS:
             return None
         try:
-            decoded = decode_named_character_escape(text, start)
+            decoded = decode_named_character_escape_strict(text, start)
         except ValueError as exc:
             raise WolframSyntaxError(str(exc)) from exc
+        if decoded is None:
+            return None
         character, _end = decoded
         if ord(character) < 128 and not _is_symbol_start(character):
             return None

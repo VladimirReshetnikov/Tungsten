@@ -80,5 +80,28 @@ def decode_named_character_escape(text: str, index: int) -> tuple[str, int] | No
     name = text[index + 2 : end]
     character = named_character(name)
     if character is None:
+        # Unknown / empty named character escapes inside string literals are
+        # preserved verbatim by the kernel rather than rejected. Let callers
+        # decide whether to fall through (string-literal path) or hard-fail
+        # (identifier path); see decode_named_character_escape_strict below.
+        return None
+    return character, end + 1
+
+
+def decode_named_character_escape_strict(text: str, index: int) -> tuple[str, int] | None:
+    """Strict variant of ``decode_named_character_escape``.
+
+    Used in identifier-position parsing where the kernel rejects unknown
+    named-character escapes outright. Raises ``ValueError`` for unrecognized
+    or empty names; otherwise returns ``(character, new_index)``.
+    """
+    if not text.startswith("\\[", index):
+        return None
+    end = text.find("]", index + 2)
+    if end < 0:
+        raise ValueError(f"Unterminated Wolfram named character escape at offset {index}.")
+    name = text[index + 2 : end]
+    character = named_character(name)
+    if character is None:
         raise ValueError(f"Unknown Wolfram named character escape \\[{name}].")
     return character, end + 1

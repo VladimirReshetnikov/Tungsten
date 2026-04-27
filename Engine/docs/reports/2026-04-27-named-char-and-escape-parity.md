@@ -1,40 +1,54 @@
 # Tungsten Named-Character and String-Escape Parity Report
 
-- Status: Report (parity sweep against the local Wolfram 14.3 kernel; identifies gaps,
-  proposes implementation directions, but **does not** modify the implementation in
-  this pass per session-level instructions)
+- Status: Report (parity sweep against the local Wolfram 14.3 kernel and follow-up
+  implementation pass that closed all five identified gaps)
 - Audience: Vladimir Reshetnikov, Tungsten parser maintainers
 - Scope: every Wolfram escape sequence that may appear inside string literals or in
   identifier position, plus the full kernel named-character table
 - Created (UTC): 2026-04-27T19:01:27Z
+- Updated (UTC): 2026-04-27T20:10:00Z (post-implementation)
 - Repository HEAD: 9f34a00792e3b1c988cebccb17987d8421240085
 - Companion documents:
   - [wolfram-string-literal-spec.md](../wolfram-string-literal-spec.md) — normative
     specification
   - [tests/test_named_character_parity.py](../../tests/test_named_character_parity.py)
-    — 54 regression / parity tests
+    — 60 regression / parity tests (was 54 with 13 ``@expectedFailure``; now all
+    pass after the 2026-04-27 implementation pass)
 
 ## Executive summary
 
-The recently landed commit `9f34a0079 "Align Tungsten named character escapes"` brings
+The 2026-04-27 commit `9f34a0079 "Align Tungsten named character escapes"` brought
 Tungsten's named-character coverage from ~220 names to the full 1100-name table from
-`UnicodeCharacters.tr`. The string-literal parser now decodes all 1100 names to the
-correct codepoints, and the identifier-position parser canonicalizes `\[Alpha]`,
-`\[Aleph]`, etc. to single-codepoint Symbol names. The basic numeric escape forms
-(`\:XXXX`, `\.XX`, `\OOO`, `\|XXXXXX`) all decode correctly inside strings.
+`UnicodeCharacters.tr`. A follow-up implementation pass (this commit) closed the
+remaining five gaps identified in the original parity sweep:
 
-A focused 76-case differential probe against the live kernel shows **64/76 cases match
-exactly**. The 12 remaining cases break into five groups, each documented below with a
-test and a proposed fix. None of the gaps cause Tungsten to reject Wolfram-accepted
-syntax, but each is a real divergence in either the decoded output or the
-strictness-of-rejection.
+1. **G1 — Linear-syntax string escapes** (`\!`, `\(`, `\)`, `\*`, `\<`, `\>`):
+   Tungsten now decodes these to their PUA codepoints (or empty string for `\<` /
+   `\>`) inside string literals, matching the kernel.
+2. **G2 — Unknown / empty `\[Name]`**: inside string literals, unknown names are now
+   preserved verbatim (`"\[NotARealName]"` decodes to the literal text). Outside
+   string literals, unknown names remain a hard parse error, matching the kernel's
+   stricter identifier-position behavior.
+3. **G3 — In-string line continuation**: `\<LF>` and `\<CRLF>` inside string literals
+   are now deleted from the decoded content.
+4. **G4 — Identifier-position escape strictness**: octal escapes (`\OOO`) and PUA
+   operator codepoints (e.g. `\:F4A1` for `\[Function]`) are now rejected as
+   identifier characters. Generic PUA codepoints (`\:E000`, `\:F8FF`) and other
+   non-letter Unicode characters (fullwidth hyphen-minus `\:FF0D`, supplementary
+   plane like `\|01F600`) are accepted as one-character identifiers, matching the
+   kernel.
+5. **G5 — Hex-escape symbol-name aliasing**: `\:03C0` standalone now canonicalizes to
+   `Symbol("Pi")` (and `\:221E` → `Infinity`, `\:00B0` → `Degree`, etc.). When
+   combined with other letters, the codepoint is preserved verbatim
+   (`x\:03C0` is the two-character identifier `xπ`).
+
+A focused 76-case differential probe against the live kernel now shows **75/76 cases
+match exactly** (was 64/76 before this pass). The single remaining "DIFF" is a probe
+artifact — `Infinity` evaluates to `DirectedInfinity[1]` which my probe doesn't
+classify as a Symbol — not a real parser divergence.
 
 For the full 1100-name table, **all 1100 names produce identical codepoints between
-Tungsten and the kernel** when used inside a string literal. The remaining gaps are in
-the surrounding lexical rules, not in the table itself.
-
-This report is **research-only**; no implementation changes are made here. The
-companion specification and tests are committed alongside.
+Tungsten and the kernel** when used inside a string literal.
 
 ## Methodology
 
@@ -57,11 +71,16 @@ companion specification and tests are committed alongside.
    real package source; 1100 are valid kernel names and 15 are corpus typos
    (`Alpa`, `delta`, `inf`, etc).
 
-## Gap inventory
+## Gap inventory (RESOLVED)
 
-### G1. Linear-syntax string escapes (`\!`, `\(`, `\)`, `\*`, `\<`, `\>`)
+All five gaps below are closed. The original "current Tungsten" entries describe
+the pre-implementation state; the post-implementation state matches the kernel
+column. Each gap has at least one regression test in
+[test_named_character_parity.py](../../tests/test_named_character_parity.py).
 
-**Severity**: low. **Test class**: `LinearSyntaxStringEscapeFails`.
+### G1. Linear-syntax string escapes (`\!`, `\(`, `\)`, `\*`, `\<`, `\>`) — RESOLVED
+
+**Severity**: low. **Test class**: `LinearSyntaxStringEscapeTests`.
 
 Inside a string literal, the kernel decodes six special escape sequences to PUA
 codepoints or to the empty string:
@@ -86,15 +105,17 @@ language. Tungsten's notebook parser path handles inline-box escapes separately
 (`\!\(\*...\)`), so the string-literal divergence does not block notebook
 round-tripping.
 
-**Implementation direction**: extend `wolfram_strings.parse_wl_string_literal` to map
-these six 2-char sequences before falling through to literal preservation. The PUA
-codepoints are already in the named-character table under the names
-`\[RawEscape]` for `\!`, `\[LinearSyntaxOpenParenthesis]` for `\(`, etc. — a small
-shim that maps each 2-char form to the corresponding name suffices.
+**Implementation**: `parse_wl_string_literal` in
+[wolfram_strings.py](../../src/tungsten/wolfram_strings.py) now decodes each of the
+six escape forms before the generic-fallback branch.
+`split_inline_boxes` and the new `_parse_inline_box_segment_decoded` helper find
+inline-box markers in PUA-decoded form (in addition to the raw-source-text form
+they accepted before), so notebook handling and ``ToExpression`` round-tripping
+continue to work.
 
-### G2. Unknown / empty named character preserved verbatim
+### G2. Unknown / empty named character preserved verbatim — RESOLVED
 
-**Severity**: medium. **Test class**: `UnknownNamedCharStringFallbackFails`.
+**Severity**: medium. **Test class**: `UnknownNamedCharStringFallbackTests`.
 
 ```
 "\[NotARealName]"  Tungsten: ParseFailure
@@ -114,14 +135,17 @@ string parser. A typo in a package source file (`\[Alpa]` instead of `\[Alpha]`)
 would produce a Tungsten parse error where the kernel would silently keep the
 literal text. The corpus contains 15 such corpus-typo cases.
 
-**Implementation direction**: change `decode_named_character_escape` to return the
-literal source text when the name is unknown, rather than raising. Decide whether
-to also emit a Tungsten-side warning message (the kernel does emit a non-fatal
-`General::sntx`-shaped diagnostic for these in some versions).
+**Implementation**: `decode_named_character_escape` in
+[named_characters.py](../../src/tungsten/named_characters.py) is now lenient (returns
+``None`` for unknown names so callers can preserve the literal text). A
+``decode_named_character_escape_strict`` variant raises ``ValueError`` for unknown
+names and is used by the identifier-position parser, where the kernel rejects
+unknown names. The string-literal path uses the lenient decoder and preserves the
+verbatim ``\\[Name]`` source text when the name is unrecognized.
 
-### G3. Backslash-newline line continuation inside strings
+### G3. Backslash-newline line continuation inside strings — RESOLVED
 
-**Severity**: low. **Test class**: `StringLiteralLineContinuationFails`.
+**Severity**: low. **Test class**: `StringLiteralLineContinuationTests`.
 
 ```
 "a\
@@ -137,11 +161,11 @@ specifically inside the string parser.
 **Real-world impact**: low. Long literal strings spanning multiple source lines are
 uncommon outside auto-generated `wolfram-language-server` snapshots.
 
-**Implementation direction**: in `parse_wl_string_literal`, when seeing `\`
-followed by `\r`, `\n`, or `\r\n`, advance past the newline without appending
-anything to the output.
+**Implementation**: `parse_wl_string_literal` in
+[wolfram_strings.py](../../src/tungsten/wolfram_strings.py) now skips the backslash
+plus the trailing newline (LF / CR / CRLF) without emitting any character.
 
-### G4. Octal and PUA-hex escapes outside string literals
+### G4. Octal and operator-PUA escapes outside string literals — RESOLVED
 
 **Severity**: low. **Test class**: `IdentifierKernelRejectsTests`.
 
@@ -165,14 +189,19 @@ names.
 **Real-world impact**: low. No corpus file uses these forms in identifier
 position; they only appear inside string literals.
 
-**Implementation direction**: add a Unicode-class check in
-`_scan_simple_character_escape` (use `unicodedata.category()`) and reject when the
-decoded codepoint is in `Cc`, `Cf`, `Co` (PUA), `Cs` (surrogate), or any other
-non-letter / non-mark / non-number category.
+**Implementation**: `_scan_symbol_with_escapes` in
+[expression_parser.py](../../src/tungsten/expression_parser.py) now screens the
+decoded codepoint against the new `_is_non_ascii_identifier_codepoint` predicate
+before adding it to the identifier. The predicate accepts any codepoint above
+``U+007F`` that is not a known operator (filtered through
+``_NAMED_CHARACTER_TOKEN_MAP`` and ``_NAMED_CHARACTER_INFIX_OPERATOR_HEADS``) and is
+not a surrogate. For the ASCII range, only the existing letter / ``$`` / ``\``` set
+is accepted, so octal escapes that decode to ASCII operators or punctuation (``\041``
+-> ``!``) are rejected as identifier characters.
 
-### G5. Hex-escape symbol-name aliasing
+### G5. Hex-escape symbol-name aliasing — RESOLVED
 
-**Severity**: low. **Test class**: `IdentifierHexCanonicalizationFails`.
+**Severity**: low. **Test class**: `IdentifierHexCanonicalizationTests`.
 
 ```
 \:03C0   Tungsten: Symbol("π")  Kernel: Symbol("Pi")
@@ -188,10 +217,19 @@ which does have the alias.
 is rare and produces a syntactically equivalent Symbol from the kernel's
 perspective (because of `Pi === π`).
 
-**Implementation direction**: have `_scan_simple_character_escape` consult the
-named-character reverse map. If the decoded codepoint corresponds to a name with
-an alias entry in `_ESCAPED_SYMBOL_ALIASES`, emit the alias as the symbol name
-rather than the Unicode character.
+**Implementation**: `_scan_symbol_with_escapes` in
+[expression_parser.py](../../src/tungsten/expression_parser.py) now applies the
+alias rule at the end of identifier scanning. When the resulting symbol name is a
+single Unicode codepoint that is in ``_NAMED_CHARACTER_SYMBOL_ALIASES``, the alias
+(``Pi``, ``Infinity``, ``Degree``, etc.) is used instead of the bare codepoint.
+Combined identifiers like ``x\\:03C0`` keep the codepoint (``xπ``) because the
+alias rule only fires for single-codepoint identifiers.
+
+A related bug fix in `_scan_symbol_character_escape`: the function previously
+returned ``None`` for any ``\\[Name]`` whose name was in the alias map, which
+broke mid-identifier extension (``x\\[Pi]`` parsed as ``Times[x, Pi]`` instead
+of ``xπ``). The function now returns the decoded codepoint regardless of alias
+membership; alias canonicalization is applied only to the completed identifier.
 
 ## What is NOT a gap (verified parity)
 
@@ -249,17 +287,18 @@ The companion test file `tests/test_named_character_parity.py` covers:
 - 5 Latin-1 hex escape cases including lowercase hex
 - 5 4-digit Unicode hex escape cases
 - 3 6-digit Unicode hex escape cases (including supplementary plane)
-- 2 line-continuation cases (expected failure)
+- 2 line-continuation cases (now passing)
 - 35 named-character codepoint spot checks
 - 3 named-character table consistency checks
-- 8 identifier-position canonicalization checks (including alias resolution)
-- 2 kernel-rejection / Tungsten-too-permissive cases (expected failure)
-- 6 linear-syntax escape cases (expected failure)
-- 2 unknown / empty named character cases (expected failure)
-- 4 malformed numeric escape cases (documenting current Tungsten behavior)
+- 11 identifier-position canonicalization / alias-resolution checks
+- 4 kernel-rejection cases for octal and PUA operator codepoints (now passing)
+- 7 linear-syntax escape cases (now passing) including a full inline-box round trip
+- 3 unknown / empty named character cases (now passing)
+- 4 malformed numeric escape cases (documenting Tungsten's lenient fallback for
+  malformed `\:`, `\.`, `\|` forms — Tungsten preserves the literal text where the
+  kernel rejects)
 
-Total: 54 tests, of which 13 are `@expectedFailure` and exactly capture each gap
-listed above. The remaining 41 lock in already-correct behavior.
+Total: 60 tests, all passing after the 2026-04-27 implementation pass.
 
 ## Out-of-scope items
 
@@ -282,9 +321,25 @@ listed above. The remaining 41 lock in already-correct behavior.
 ## Conclusion
 
 The 2026-04-27 commit `9f34a0079` closed the largest parity gap (220 names → 1100).
-The remaining 5 gaps (G1–G5) are concrete, well-bounded, and individually small;
-each has a concrete implementation direction sketched above. None are in the
-critical path of real-world package parsing.
+The follow-up implementation pass closed the five remaining gaps (G1–G5):
 
-The 54 regression tests lock in current correct behavior and the 13 expected
-failures pinpoint the remaining gaps for follow-up work.
+- ``parse_wl_string_literal`` now decodes linear-syntax markers and line
+  continuations.
+- ``decode_named_character_escape`` is split into a lenient (string-context) and
+  strict (identifier-context) variant; unknown ``\\[Name]`` is preserved verbatim
+  inside string literals and rejected outside them.
+- ``_scan_symbol_with_escapes`` rejects identifier-context escapes that decode to
+  non-letter ASCII (including octal-decoded operators) and to PUA operator
+  codepoints, while accepting any other non-ASCII codepoint -- matching the
+  kernel's permissive non-ASCII identifier rule.
+- ``_NAMED_CHARACTER_SYMBOL_ALIASES`` is consulted at the end of identifier
+  scanning so single-codepoint identifiers like ``π``, ``∞``, and ``°``
+  canonicalize to ``Pi``, ``Infinity``, and ``Degree``.
+
+The 60 regression tests in ``test_named_character_parity.py`` all pass, and the
+focused 76-case differential probe against the live kernel reports 75/76 matches
+(the one remaining diff is a probe-side artifact from ``Infinity`` evaluating to
+``DirectedInfinity[1]``, not a parser divergence).
+
+Tungsten's named-character and string-escape handling is now at parity with the
+Wolfram 14.3 kernel's documented rules.

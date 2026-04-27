@@ -100,24 +100,19 @@ forms is a syntax error.
 These escapes carry box-language and linear-syntax meaning. Inside a string literal
 their decoded codepoints are PUA characters that the FrontEnd interprets specially:
 
-| Source | Result codepoint | Wolfram name | Notes |
-|--------|------------------|--------------|-------|
-| `\!` | `U+F7C1` | `\[RawEscape]`-like inline-box prefix opener | Begins a `\!\(...\)` inline-box escape when followed by `\(`. Inside a string, it decodes to U+F7C1. |
-| `\(` | `U+F7C9` | `\[LinearSyntaxOpenParenthesis]` | Linear-syntax box open. |
-| `\)` | `U+F7C0` | `\[LinearSyntaxCloseParenthesis]` | Linear-syntax box close. |
-| `\*` | `U+F7C8` | `\[LinearSyntaxStar]` | Linear-syntax marker. |
-| `\<` | empty | (none) | Linear-syntax delimiter; **deleted** from the decoded string. |
-| `\>` | empty | (none) | Linear-syntax delimiter; **deleted** from the decoded string. |
-| `\^` | (TBD)   | (none) | Linear-syntax marker; behavior TBD. |
-| `\_` | (TBD)   | (none) | Linear-syntax marker; behavior TBD. |
-| `\&` | (TBD)   | (none) | Linear-syntax marker; behavior TBD. |
-| `\@` | (TBD)   | (none) | Linear-syntax marker; behavior TBD. |
-| `\/` | (TBD)   | (none) | Linear-syntax marker; behavior TBD. |
-| `\%` | (TBD)   | (none) | Linear-syntax marker; behavior TBD. |
-| `\!` | as above | (none) | Inline-box prefix. |
+| Source | Result codepoint | Notes |
+|--------|------------------|-------|
+| `\!` | `U+F7C1` | Begins a `\!\(...\)` inline-box escape when followed by `\(`. Inside a string, it decodes to U+F7C1. |
+| `\(` | `U+F7C9` | Linear-syntax box open. |
+| `\)` | `U+F7C0` | Linear-syntax box close. |
+| `\*` | `U+F7C8` | Linear-syntax marker (the ``\*`` after ``\!\(`` for typeset content). |
+| `\<` | empty | Linear-syntax delimiter; **deleted** from the decoded string. |
+| `\>` | empty | Linear-syntax delimiter; **deleted** from the decoded string. |
 
-The TBD entries are documented in the kernel but not yet probed in this specification
-pass; they should be added once tested.
+Other one-character backslash sequences (`\^`, `\_`, `\&`, `\@`, `\/`, `\%`, `\g`,
+etc.) are not part of the documented escape set. The kernel rejects them; Tungsten
+currently preserves them as ``\<char>`` two-character literals (a documented lenient
+behavior, see the malformed-escape tests).
 
 #### 3. Octal escape `\OOO`
 

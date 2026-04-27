@@ -11,6 +11,22 @@ INLINE_BOX_OPEN = r"\("
 INLINE_BOX_CLOSE = r"\)"
 
 
+# PUA-decoded forms of the linear-syntax markers. ``parse_wl_string_literal``
+# decodes ``\!``, ``\(``, ``\)``, ``\*`` to these codepoints to match the kernel's
+# string-literal lexer; ``split_inline_boxes`` looks for the decoded markers in
+# already-parsed string content (in addition to the raw ``\!\(\*`` form, which still
+# appears in unprocessed source text such as ``ToExpression`` arguments).
+_LINEAR_SYNTAX_BANG = ""   # decoded \!
+_LINEAR_SYNTAX_OPEN = ""   # decoded \(
+_LINEAR_SYNTAX_CLOSE = ""  # decoded \)
+_LINEAR_SYNTAX_STAR = ""   # decoded \*
+
+INLINE_BOX_PREFIX_DECODED = _LINEAR_SYNTAX_BANG + _LINEAR_SYNTAX_OPEN + _LINEAR_SYNTAX_STAR
+INLINE_BOX_OPEN_DECODED = _LINEAR_SYNTAX_BANG + _LINEAR_SYNTAX_OPEN
+INLINE_BOX_BARE_OPEN_DECODED = _LINEAR_SYNTAX_OPEN
+INLINE_BOX_CLOSE_DECODED = _LINEAR_SYNTAX_CLOSE
+
+
 @dataclass(frozen=True)
 class StringTextSegment:
     text: str
@@ -70,11 +86,27 @@ def _decode_character_escape(text: str, index: int) -> tuple[str, int] | None:
     and ``\\|XXXXXX``. Returns ``(character, new_index)`` on success or ``None`` if the
     escape at ``index`` is not one of these forms. ``index`` must point at the leading
     backslash.
+
+    For unknown or empty named-character escapes inside string literals, the kernel
+    preserves the literal source text. ``decode_named_character_escape`` returns
+    ``None`` for those cases so the caller can fall through; this helper translates
+    that into "preserve the verbatim ``\\[Name]`` text" by returning the source slice
+    paired with the index just past the closing bracket.
     """
     if index >= len(text) or text[index] != "\\" or index + 1 >= len(text):
         return None
     if text.startswith("\\[", index):
-        return decode_named_character_escape(text, index)
+        decoded_named = decode_named_character_escape(text, index)
+        if decoded_named is not None:
+            return decoded_named
+        end = text.find("]", index + 2)
+        if end < 0:
+            # Unterminated bracket -- bail out so the outer parser can preserve
+            # the leading backslash literally.
+            return None
+        # Preserve the unknown / empty named-char escape as literal source text.
+        # ``"\\[Foo]"`` decodes to the 5-character string "\[Foo]".
+        return text[index : end + 1], end + 1
     marker = text[index + 1]
     if marker == ":":
         if index + 6 > len(text):
@@ -123,13 +155,28 @@ def parse_wl_string_literal(value: str) -> str:
             index += 1
             continue
 
+        # ``\<LF>`` and ``\<CRLF>`` are line-continuation markers inside a string
+        # literal: the backslash and the newline are deleted from the decoded
+        # content. Matches the kernel's behavior; ``"a\<newline>b"`` decodes to
+        # ``"ab"``.
+        nxt = text[index + 1]
+        if nxt == "\n":
+            index += 2
+            continue
+        if nxt == "\r":
+            if index + 2 < len(text) and text[index + 2] == "\n":
+                index += 3
+            else:
+                index += 2
+            continue
+
         decoded = _decode_character_escape(text, index)
         if decoded is not None:
             result.append(decoded[0])
             index = decoded[1]
             continue
 
-        escape = text[index + 1]
+        escape = nxt
         if escape == "b":
             result.append("\b")
         elif escape == "f":
@@ -144,9 +191,28 @@ def parse_wl_string_literal(value: str) -> str:
             result.append("\\")
         elif escape == "\"":
             result.append("\"")
+        elif escape == "!":
+            # Linear-syntax inline-box prefix marker. Decodes to U+F7C1.
+            result.append(_LINEAR_SYNTAX_BANG)
+        elif escape == "(":
+            # Linear-syntax inline-box open marker. Decodes to U+F7C9.
+            result.append(_LINEAR_SYNTAX_OPEN)
+        elif escape == ")":
+            # Linear-syntax inline-box close marker. Decodes to U+F7C0.
+            result.append(_LINEAR_SYNTAX_CLOSE)
+        elif escape == "*":
+            # Linear-syntax structural marker (used after \!\( in inline-box
+            # prefixes). Decodes to U+F7C8.
+            result.append(_LINEAR_SYNTAX_STAR)
+        elif escape == "<" or escape == ">":
+            # Linear-syntax delimiters that the kernel's string lexer deletes
+            # entirely. They have no codepoint in the decoded content.
+            pass
         else:
-            # Preserve unknown escapes exactly so Tungsten can round-trip things like
-            # embedded box syntax \!\(\*GraphicsBox[...]\).
+            # Preserve unknown escapes exactly. Wolfram itself rejects most
+            # unrecognized one-character escapes, but Tungsten keeps the
+            # historical lenient behavior here so notebook round-tripping does
+            # not regress for niche notebook escapes that have not been probed.
             result.append("\\" + escape)
         index += 2
 
@@ -185,6 +251,15 @@ def compose_inline_box_string_literal(
 
 
 def split_inline_boxes(value: str) -> tuple[WolframStringSegment, ...]:
+    """Split a string into ordinary text and inline-box segments.
+
+    Recognizes both representations of the inline-box markers:
+
+    - Raw source-text form ``\\!\\(\\*...\\)`` -- appears in unprocessed source
+      (notebook cell text, ``ToExpression`` arguments).
+    - PUA-decoded form ``<U+F7C1><U+F7C9><U+F7C8>...<U+F7C0>`` -- appears in
+      ``String.value`` content after ``parse_wl_string_literal`` decoding.
+    """
     segments: list[WolframStringSegment] = []
     text_parts: list[str] = []
     index = 0
@@ -192,6 +267,16 @@ def split_inline_boxes(value: str) -> tuple[WolframStringSegment, ...]:
     while index < len(value):
         if value.startswith(INLINE_BOX_PREFIX, index):
             parsed = _parse_inline_box_segment(value, index)
+            if parsed is not None:
+                segment, index = parsed
+                if text_parts:
+                    segments.append(StringTextSegment("".join(text_parts)))
+                    text_parts = []
+                segments.append(segment)
+                continue
+
+        if value.startswith(INLINE_BOX_PREFIX_DECODED, index):
+            parsed = _parse_inline_box_segment_decoded(value, index)
             if parsed is not None:
                 segment, index = parsed
                 if text_parts:
@@ -249,6 +334,47 @@ def _parse_inline_box_segment(value: str, start: int) -> tuple[StringInlineBoxSe
             if depth == 0:
                 raw = value[start:index]
                 box_expression = raw[len(INLINE_BOX_PREFIX) : -len(INLINE_BOX_CLOSE)]
+                return StringInlineBoxSegment(box_expression=box_expression, source=raw), index
+            continue
+
+        if value[index] == "\"":
+            index = skip_wl_string(value, index)
+            continue
+
+        if value.startswith("(*", index):
+            index = skip_wl_comment(value, index)
+            continue
+
+        index += 1
+
+    return None
+
+
+def _parse_inline_box_segment_decoded(value: str, start: int) -> tuple[StringInlineBoxSegment, int] | None:
+    """Parse an inline-box segment encoded in PUA-decoded form.
+
+    The decoded form is the result of ``parse_wl_string_literal`` decoding
+    ``\\!\\(\\*...\\)`` source text: U+F7C1 + U+F7C9 + U+F7C8 + ... + U+F7C0.
+    Returns the box expression in its source-text-equivalent form so callers
+    can treat the segment uniformly with raw-form segments.
+    """
+    if not value.startswith(INLINE_BOX_PREFIX_DECODED, start):
+        return None
+
+    index = start + len(INLINE_BOX_PREFIX_DECODED)
+    depth = 1
+    while index < len(value):
+        if value.startswith(INLINE_BOX_OPEN_DECODED, index):
+            depth += 1
+            index += len(INLINE_BOX_OPEN_DECODED)
+            continue
+
+        if value.startswith(INLINE_BOX_CLOSE_DECODED, index):
+            depth -= 1
+            index += len(INLINE_BOX_CLOSE_DECODED)
+            if depth == 0:
+                raw = value[start:index]
+                box_expression = raw[len(INLINE_BOX_PREFIX_DECODED) : -len(INLINE_BOX_CLOSE_DECODED)]
                 return StringInlineBoxSegment(box_expression=box_expression, source=raw), index
             continue
 

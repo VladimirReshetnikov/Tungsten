@@ -344,10 +344,20 @@ class ExpressionParserTests(unittest.TestCase):
         continued = parse_input_form("Hold[a + \\\r\n b]")
         self.assertEqual(continued.to_full_form(), "Hold[Plus[a, b]]")
 
-    def test_parser_preserves_inline_box_escapes_inside_strings(self) -> None:
+    def test_parser_decodes_inline_box_escapes_inside_strings(self) -> None:
+        # ``\!\(\*...\)`` inside a string literal decodes to PUA codepoints
+        # (U+F7C1 + U+F7C9 + U+F7C8 + ... + U+F7C0), matching the kernel's
+        # linear-syntax handling. The inline-box detection still recognizes
+        # these markers and exposes the box expression via ``inline_boxes``.
         expr = parse_input_form(r'"hello \!\(\*GraphicsBox[{CircleBox[]}]\)"')
-        self.assertEqual(expr.to_input_form(), r'"hello \\!\\(\\*GraphicsBox[{CircleBox[]}]\\)"')
-        self.assertEqual(expr.to_dict()["inline_boxes"][0]["box_expression"], "GraphicsBox[{CircleBox[]}]")
+        self.assertEqual(
+            expr.value,
+            "hello GraphicsBox[{CircleBox[]}]",
+        )
+        self.assertEqual(
+            expr.to_dict()["inline_boxes"][0]["box_expression"],
+            "GraphicsBox[{CircleBox[]}]",
+        )
 
 
 class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
@@ -597,8 +607,14 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         self.assertEqual(parse_input_form(r'"\|01f600"').value, "\U0001f600")
         self.assertEqual(parse_input_form(r'"\b\f"').value, "\b\f")
 
-        with self.assertRaises(WolframSyntaxError):
-            parse_input_form(r'"\[NotACharacter]"')
+        # Unknown named characters inside a string literal preserve the
+        # literal source text, matching the kernel's lenient string lexis.
+        self.assertEqual(
+            parse_input_form(r'"\[NotACharacter]"').value,
+            r"\[NotACharacter]",
+        )
+        # Outside a string literal, however, an unknown named-character
+        # escape is a hard parse error.
         with self.assertRaises(WolframSyntaxError):
             parse_input_form(r"\[NotACharacter]")
 
