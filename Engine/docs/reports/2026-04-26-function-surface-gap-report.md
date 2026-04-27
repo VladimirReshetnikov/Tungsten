@@ -1,6 +1,7 @@
 # Tungsten Function-Surface Gap Report
 
 - Created (UTC): 2026-04-27T02:13:19Z
+- Updated (UTC): 2026-04-27T02:23:41Z
 - Repository HEAD: 4404922a8b0feac6f727c008a861f214f3f1ffd6
 - Status: Research-and-plan (no implementation)
 - Audience: Tungsten maintainers planning the next implementation passes
@@ -18,10 +19,43 @@ The baseline is `docs/expression-function-support.md` plus a sweep of the dispat
 
 ## Methodology
 
-- The implemented surface was extracted from `expression-function-support.md` (438 documented entries) and reconciled with `expression_evaluator.py` dispatch (no extra heads dispatched outside the matrix). Items the matrix already calls out as out-of-scope or partially supported are pulled forward into the bucket they belong to instead of being repeated in a separate "known limitations" section.
+- The implemented surface was extracted from `expression-function-support.md` (438 documented rows, or 451 declared symbols after splitting combined rows such as `BitAnd` / `BitOr` / `BitXor`) and reconciled with `expression_evaluator.py` dispatch. Items the matrix already calls out as out-of-scope or partially supported are pulled forward into the bucket they belong to instead of being repeated in a separate "known limitations" section.
 - "Missing argument shape" is interpreted strictly: a Wolfram-documented signature for the head that produces a different evaluation path than the implemented signatures (not just a different syntactic surface for the same evaluator).
 - "Missing option" includes both options that are silently ignored and options that the matrix explicitly lists as out-of-scope.
+- A second guide-family pass compared the support matrix against the Wolfram guide pages for list manipulation, list elements, rearranging/restructuring lists, applying functions to lists, functional programming, associations, tensors, string operations, integer functions, polynomial algebra, scoping, procedural programming, and messages.
+- The local Wolfram 14.3 kernel was also queried for `Options[...]` on every documented Tungsten head. The cross-cutting option gaps below are grounded in that option inventory, not only in the prose support matrix.
 - The report is current-state. When work lands, fold the relevant bullet into the support matrix and remove it here.
+
+## Guide-family cross-check
+
+The guide-family pass is useful because it shows which natural neighborhoods Tungsten has already
+entered, even when the support matrix does not mention every sibling. The exact counts should not be
+treated as a roadmap, because many guide entries are graphics, datasets, streams, solvers, or other
+families outside Tungsten's kernel-free structural evaluator. They do identify small holes that are
+easy to miss when reading only the dispatch table.
+
+| Guide family | Implemented symbols from the sampled guide list | Notable missing structural candidates |
+|--------------|--------------------------------------------------|---------------------------------------|
+| List manipulation | 51 of 69 | `ContainsOnly`, `CountDistinct`, `PositionIndex`, `SequenceCount`, `Subdivide`, `Splice`, `UpTo` |
+| Elements of lists | 47 of 63 | `FirstPosition`, `MatrixQ`, `VectorQ`, `PositionLargest`, `PositionSmallest`, `PrependTo`, `SequenceCases`, `SequencePosition` |
+| Rearranging and restructuring | 45 of 52 | `ArrayFilter`, `ArrayReduce`, `Groupings`, `SequenceReplace`, `SequenceSplit`, `Splice` |
+| Applying functions to lists | 15 of 21 | `ArrayFilter`, `ArrayReduce`, `Ratios`, `SubsetMap` |
+| Functional programming | 41 of 48 | `CountsBy`, `KeySortBy`, `OperatorApplied`, `CurryApplied`, `ReverseApplied`, `SubsetMap` |
+| Associations | 29 of 40 | `AssociateTo`, `CountsBy`, `KeyDropFrom`, `KeyFreeQ`, `KeySortBy`, `Missing`, `PositionIndex` |
+| Tensors | 19 of 22 | `ArrayReduce`, `Band`, `MatrixForm` |
+| String operations | 28 of 50 | `CharacterCounts`, `StringPart`, `StringTakeDrop`, `StringExtract`, `StringPartition`, `StringReplaceList`, `StringReplacePart`, `StringRotateLeft`, `StringRotateRight` |
+| Integer functions | 21 of 52 | `Divisible`, `CoprimeQ`, `BitLength`, `BitSet`, `DigitCount`, `NumberDigit`, `IntegerReverse`, `ModularInverse`, `Factorial`, `Binomial`, `Multinomial`, `Fibonacci`, `LucasL` |
+| Polynomial algebra | 10 of 44 | `CoefficientRules`, `PolynomialGCD`, `PolynomialMod`, `PolynomialQuotient`, `PolynomialReduce`, `Discriminant`, `Resultant`, `IrreduciblePolynomialQ` |
+| Messages | 9 of 20 | `Failure`, `Missing`, `MessageName`, `Messages`, `CheckArguments`, `DeleteMissing`, `TerminatedEvaluation` |
+| Scoping and procedural programming | 40 of 53 across both guides | `Until`, `ApplyTo`, `Begin`, `End`, `BlockRandom`, `Input`, `OpenRead` |
+
+The most implementation-friendly missing symbols from this table are the ones that reuse existing
+machinery: predicates (`VectorQ`, `MatrixQ`, `KeyFreeQ`), selector/search helpers
+(`FirstPosition`, `PositionIndex`, `PositionLargest`, `PositionSmallest`), counters
+(`CountDistinct`, `CountsBy`, `CharacterCounts`, `DigitCount`), mutators (`PrependTo`,
+`AssociateTo`, `KeyDropFrom`, `ApplyTo`), small integer helpers (`Divisible`, `CoprimeQ`,
+`BitLength`, `BitSet`, `ModularInverse`), and string slicing helpers (`StringPart`,
+`StringTakeDrop`, `StringPartition`, `StringRotateLeft`, `StringRotateRight`).
 
 ## Buckets
 
@@ -530,6 +564,90 @@ These hit multiple buckets and are worth flagging once at the top of any plannin
 14. **`AddTo` / `SubtractFrom` / `TimesBy` / `DivideBy` / `PrependTo`.** Companion mutators to `AppendTo` / `Increment`. Small, high-value. (Bucket M.)
 15. **`MinMax`, `Quantile`, `Quartiles`, `Mode`.** Trivial-to-medium statistics primitives. (Bucket G.)
 
+## Merged structural work buckets
+
+The second guide-family pass groups the remaining work slightly differently from the topic buckets
+above. These work buckets are not a competing roadmap; they are a practical way to slice follow-up
+implementation so each pass exercises one shared mechanism at a time.
+
+### 1. Small structural parity holes
+
+Patch helpers that fit existing infrastructure and do not require new symbolic math:
+
+- `VectorQ`, `MatrixQ`, `FirstPosition`, `PositionSmallest`, `PositionLargest`
+- `ContainsOnly`, `CountDistinct`, `CountsBy`, `PositionIndex`
+- `PrependTo`, `DeleteElements`, `KeyFreeQ`, `KeySortBy`
+- `StringPart`, `StringTakeDrop`, `StringPartition`, `StringRotateLeft`, `StringRotateRight`
+- `Divisible`, `CoprimeQ`, `BitLength`, `DigitCount`, `NumberDigit`, `IntegerReverse`
+- `Until`
+
+### 2. Shared option plumbing
+
+Build a reusable option parser before widening individual heads:
+
+- `Heads` across traversal and pattern-search functions
+- `SameTest` across set, list, association, and membership families
+- string options `IgnoreCase`, `MetaCharacters`, `Overlaps`, and `SpellingCorrection`
+- definition ordering option `Sort`
+- structural matrix options `TargetStructure`, `AllowedHeads`, `Modulus`, and `ZeroTest`
+
+This bucket should also make unsupported options fail predictably instead of being silently ignored.
+
+### 3. Sparse and tensor completion
+
+Concentrate on structural tensor work before heavier matrix algorithms:
+
+- `Band` in `SparseArray`
+- richer `SparseArray` constructors and compressed-form parsing
+- multidimensional `ArrayPad`, `PadLeft`, and `PadRight`
+- `ArrayReduce`
+- richer `Transpose`, `Tr`, `Inner`, `Outer`, and `Dot` shape handling
+- `Det[mat, Modulus -> p]`, `Inverse[..., Modulus -> p]`, and integer `MatrixPower` option
+  parsing where the algorithms stay exact and bounded
+
+### 4. Sequence and subset operations
+
+The existing pattern matcher is strong enough to justify a dedicated pass over:
+
+- `SequenceCases`, `SequenceCount`, `SequencePosition`
+- `SequenceReplace`, `SequenceSplit`
+- `SubsetCases`, `SubsetCount`, `SubsetPosition`
+- `SubsetMap`
+- `Splice` and `UpTo` interaction with constructors and selectors
+
+### 5. String pattern parity
+
+Use the existing string-pattern compiler as the center:
+
+- route `StringCount`, `StringSplit`, and `StringTrim` through the pattern compiler;
+- add `StringReplaceList`, `StringReplacePart`, and `StringExtract`;
+- implement common string options;
+- decide whether `CharacterCounts`, `AlphabeticOrder`, and `PalindromeQ` belong in the same pass.
+
+### 6. Exact integer and polynomial expansion
+
+Keep this explicitly bounded:
+
+- integer helpers: `ModularInverse`, `Factorial`, `Binomial`, `Multinomial`, `Fibonacci`, `LucasL`;
+- digit helpers: `BitSet`, plus full `FromDigits` / `IntegerDigits` / `IntegerLength` forms;
+- exact-polynomial helpers backed by SymPy: `CoefficientRules`, `PolynomialGCD`,
+  `PolynomialQuotient`, `PolynomialMod`, `PolynomialReduce`, `Discriminant`, `Resultant`.
+
+Do not let this bucket drift into solvers, broad simplification, or broad symbolic algebra.
+
+### 7. Options and defaults registry
+
+This is cross-cutting and should happen after the smaller structural work has stabilized:
+
+- `Options`
+- `OptionValue`
+- validated `OptionsPattern`
+- `Default`
+- message-template values through `MessageName`
+
+This unlocks many shapes, but it also changes evaluator semantics in more places than any single
+list/tensor helper.
+
 ## Suggested prioritization
 
 This is opinion, not a roadmap. The first pass picks small, high-leverage items that unblock common scripting patterns:
@@ -555,6 +673,31 @@ This is opinion, not a roadmap. The first pass picks small, high-leverage items 
 | 4 | `Trace`, `TracePrint`, `Stack` | Heavier debugging primitives. |
 | 5 | Linear algebra: `LinearSolve`, `RowReduce`, `MatrixRank`, `NullSpace` | Out-of-scope per matrix; revisit when polynomial-algebra coverage is solid. |
 | 5 | `Solve`, `Reduce`, `D`, `Integrate`, `Limit`, `Series`, `Simplify` | Out-of-scope today; would need a full computer-algebra layer. |
+
+## Validation plan for implementation passes
+
+Each implementation bucket should add tests in three layers:
+
+- direct Wolfram-compatible examples for each new function or new argument shape;
+- cross-head consistency tests, especially for `Heads`, `SameTest`, sparse array behavior, and
+  association value-vs-key traversal;
+- kernel parity spot checks for ambiguous behavior when the local Wolfram installation is
+  available.
+
+Sparse-aware functions should always include:
+
+- dense/sparse result equivalence for small explicit arrays;
+- implicit value behavior;
+- shape preservation after slicing, padding, transposition, dot products, and normalization;
+- tests that avoid forcing dense materialization unless the function is explicitly dense, such as
+  `Normal`.
+
+For option work, tests should cover:
+
+- accepted and honored options;
+- unsupported options rejected with a Tungsten diagnostic;
+- option order and duplicate-option behavior if Tungsten decides to match Wolfram's last-option
+  convention.
 
 ## Notes
 
