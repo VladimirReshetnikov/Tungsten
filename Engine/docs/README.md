@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-25T21:57:56Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-27T18:05:43Z
+- Repository HEAD: 9a4ceae3c5a6853c00025aab42893fc5a5274b3e
 
 ## What this docs tree is for
 
@@ -27,7 +27,7 @@ The docs are split so readers can choose the right depth:
 - the .NET API guide is integration-oriented for C# callers;
 - the architecture and implementation documents are maintainer-oriented;
 - focused guides cover specific subsystems such as Notebook Assistant, inline-box strings, parser
-  corpus validation, and the expression parser.
+  corpus validation, the expression parser, and notebook FrontEnd planning.
 
 ## Recommended reading order
 
@@ -70,7 +70,9 @@ The docs are split so readers can choose the right depth:
 12. [parser-corpus.md](./parser-corpus.md)
 13. [inline-box-strings.md](./inline-box-strings.md)
 14. [notebook-assistant.md](./notebook-assistant.md)
-15. [troubleshooting.md](./troubleshooting.md)
+15. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+    if you are planning a GUI notebook FrontEnd or StandardForm renderer
+16. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -99,6 +101,7 @@ The docs are split so readers can choose the right depth:
 | [reports/2026-04-25-parser-corpus-speed.md](reports/2026-04-25-parser-corpus-speed.md) | Parser corpus throughput measurements, bottleneck analysis, implemented optimizations, and full-corpus runtime estimates. |
 | [reports/2026-04-24-license-seat-investigation.md](reports/2026-04-24-license-seat-investigation.md) | Investigation report for intermittent license-seat failures, ghost/orphaned Wolfram processes, and Tungsten's launch-gate mitigation. |
 | [reports/2026-04-27-tungsten-gap-and-shape-review.md](reports/2026-04-27-tungsten-gap-and-shape-review.md) | Planning inventory of remaining Tungsten expression-function family holes, incomplete Wolfram argument shapes, unsupported options, and implementation buckets. Supersedes the earlier `2026-04-26-function-surface-gap-report.md`, the `2026-04-26-expression-parity-deep-review.md`, the `2026-04-24-parser-evaluator-kernel-parity*.md` pair, and the `2026-04-23-external-review.md` (all archived). |
+| [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md) | Recommendation report for a simple Tungsten notebook FrontEnd, including WebView2, browser-hosted, VS Code, Jupyter, native UI, direct StandardForm boxes, and TeX/MathJax alternatives. |
 
 ## Suggested learning path by task
 
@@ -113,6 +116,8 @@ The docs are split so readers can choose the right depth:
 - Read [user-guide.md](./user-guide.md) sections on notebook creation, inspection, and patching.
 - Read [inline-box-strings.md](./inline-box-strings.md) when you need to lift objects out of
   notebook cells and embed them into string literals.
+- Read [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+  when planning a graphical `.nb` editor, StandardForm renderer, or TeX/MathJax output path.
 - Use [notebook-assistant.md](./notebook-assistant.md) for assistant-specific flows.
 - Use [usage-reference.md](./usage-reference.md) for selector syntax and command options.
 
