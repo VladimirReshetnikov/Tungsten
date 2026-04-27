@@ -1795,6 +1795,14 @@ def evaluate_once(expr: Expr) -> Expr:
             return member_q(member_args[0], member_raw[1], member_args[2], include_heads=member_include_heads)
         raise WolframEvaluationError("MemberQ expects an expression, a pattern, and an optional level specification.")
 
+    if evaluated_head.name == "Interval":
+        return interval_expr(evaluated_arguments)
+
+    if evaluated_head.name == "IntervalMemberQ":
+        if len(evaluated_arguments) == 2:
+            return interval_member_q(evaluated_arguments[0], evaluated_arguments[1])
+        return evaluated_expr
+
     if evaluated_head.name == "Order":
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("Order expects exactly two arguments.")
@@ -2426,6 +2434,12 @@ def evaluate_once(expr: Expr) -> Expr:
 
     if evaluated_head.name == "Intersection":
         return intersection(evaluated_arguments)
+
+    if evaluated_head.name == "IntervalUnion":
+        return interval_union(evaluated_arguments)
+
+    if evaluated_head.name == "IntervalIntersection":
+        return interval_intersection(evaluated_arguments)
 
     if evaluated_head.name == "Complement":
         return complement(evaluated_arguments)

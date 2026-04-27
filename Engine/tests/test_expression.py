@@ -3446,6 +3446,80 @@ class StructuralListTests(unittest.TestCase):
             "List[-2, -1]",
         )
 
+    def test_interval_normalization_and_set_operations_match_kernel(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Interval[]")).to_full_form(), "Interval[]")
+        self.assertEqual(evaluate(parse_input_form("Interval[3]")).to_full_form(), "Interval[List[3, 3]]")
+        self.assertEqual(evaluate(parse_input_form("Interval[{3, 1}]")).to_full_form(), "Interval[List[1, 3]]")
+        self.assertEqual(
+            evaluate(parse_input_form("Interval[{1, 3}, {2, 5}]")).to_full_form(),
+            "Interval[List[1, 5]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Interval[{3, 4}, {1, 2}]")).to_full_form(),
+            "Interval[List[1, 2], List[3, 4]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Interval[{a, b}]")).to_full_form(),
+            "Interval[List[a, b]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("IntervalUnion[]")).to_full_form(), "Interval[]")
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalUnion[Interval[{1, 2}], Interval[{2, 4}]]")).to_full_form(),
+            "Interval[List[1, 4]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalUnion[Interval[{3, 4}], Interval[{1, 2}]]")).to_full_form(),
+            "Interval[List[1, 2], List[3, 4]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalUnion[Interval[{1, 3}], Interval[]]")).to_full_form(),
+            "Interval[List[1, 3]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("IntervalIntersection[]")).to_full_form(), "Interval[]")
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalIntersection[Interval[{1, 3}], Interval[{2, 5}]]")).to_full_form(),
+            "Interval[List[2, 3]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalIntersection[Interval[{1, 2}], Interval[{3, 4}]]")).to_full_form(),
+            "Interval[]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalIntersection[Interval[{1, 2}, {4, 5}], Interval[{2, 4}]]")).to_full_form(),
+            "Interval[List[2, 2], List[4, 4]]",
+        )
+
+    def test_interval_member_q_matches_kernel(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], 2]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], 1]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], 4]")).to_full_form(), "False")
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], {1, 4}]")).to_full_form(),
+            "List[True, False]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], Interval[{2, 3}]]")).to_full_form(),
+            "True",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], Interval[{0, 2}]]")).to_full_form(),
+            "False",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 2}, {4, 5}], Interval[{2, 2}, {4, 4}]]")).to_full_form(),
+            "True",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], Interval[]]")).to_full_form(),
+            "True",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("IntervalMemberQ[Interval[], Interval[]]")).to_full_form(),
+            "True",
+        )
+        self.assertEqual(evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], x]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("IntervalMemberQ[Interval[{1, 3}], 2 + I]")).to_full_form(), "False")
+
     def test_pad_left_right_and_key_sort(self) -> None:
         self.assertEqual(evaluate(parse_input_form("PadLeft[{1, 2, 3}, 5]")).to_full_form(), "List[0, 0, 1, 2, 3]")
         self.assertEqual(evaluate(parse_input_form("PadRight[{1, 2}, 5, x]")).to_full_form(), "List[1, 2, x, x, x]")

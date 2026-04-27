@@ -18138,6 +18138,214 @@ def _canonical_sorted_items(items: Sequence[Expr]) -> list[Expr]:
     return sorted(items, key=cmp_to_key(_canonical_compare))
 
 
+@dataclass(frozen=True)
+class _IntervalSegment:
+    left: Expr
+    right: Expr
+
+
+def _is_negative_one_expr(expr: Expr) -> bool:
+    if isinstance(expr, Integer):
+        return expr.value == -1
+    if isinstance(expr, RationalNumber):
+        return expr.value == -1
+    return False
+
+
+def _is_positive_one_expr(expr: Expr) -> bool:
+    if isinstance(expr, Integer):
+        return expr.value == 1
+    if isinstance(expr, RationalNumber):
+        return expr.value == 1
+    return False
+
+
+def _interval_comparison_endpoint(expr: Expr) -> Expr:
+    if _is_positive_infinity_expr(expr) or _is_negative_infinity_expr(expr):
+        return expr
+    if (
+        isinstance(expr, Call)
+        and expr.has_head("Times")
+        and len(expr.arguments) == 2
+        and any(_is_negative_one_expr(argument) for argument in expr.arguments)
+        and any(_is_positive_infinity_expr(argument) for argument in expr.arguments)
+    ):
+        return symbol("-Infinity")
+    if isinstance(expr, Call) and expr.has_head("DirectedInfinity") and len(expr.arguments) == 1:
+        direction = expr.arguments[0]
+        if _is_positive_one_expr(direction):
+            return symbol("Infinity")
+        if _is_negative_one_expr(direction):
+            return symbol("-Infinity")
+    return expr
+
+
+def _interval_endpoint_compare(left: Expr, right: Expr) -> int | None:
+    return _compare_real_expr(
+        _interval_comparison_endpoint(left),
+        _interval_comparison_endpoint(right),
+    )
+
+
+def _interval_segment_from_argument(argument: Expr) -> _IntervalSegment | None:
+    if isinstance(argument, Call) and argument.has_head("List"):
+        if len(argument.arguments) != 2:
+            return None
+        left, right = argument.arguments
+    else:
+        left = argument
+        right = argument
+    comparison = _interval_endpoint_compare(left, right)
+    if comparison is None:
+        return None
+    if comparison <= 0:
+        return _IntervalSegment(left, right)
+    return _IntervalSegment(right, left)
+
+
+def _interval_segment_compare(left: _IntervalSegment, right: _IntervalSegment) -> int:
+    left_compare = _interval_endpoint_compare(left.left, right.left)
+    if left_compare is not None and left_compare != 0:
+        return _integer_sign(left_compare)
+    right_compare = _interval_endpoint_compare(left.right, right.right)
+    if right_compare is not None and right_compare != 0:
+        return _integer_sign(right_compare)
+    return 0
+
+
+def _normalize_interval_segments(segments: Sequence[_IntervalSegment]) -> list[_IntervalSegment] | None:
+    if not segments:
+        return []
+    sorted_segments = sorted(segments, key=cmp_to_key(_interval_segment_compare))
+    merged: list[_IntervalSegment] = []
+    for segment in sorted_segments:
+        if not merged:
+            merged.append(segment)
+            continue
+        last = merged[-1]
+        overlap_compare = _interval_endpoint_compare(segment.left, last.right)
+        if overlap_compare is None:
+            return None
+        if overlap_compare <= 0:
+            right_compare = _interval_endpoint_compare(segment.right, last.right)
+            if right_compare is None:
+                return None
+            if right_compare > 0:
+                merged[-1] = _IntervalSegment(last.left, segment.right)
+            continue
+        merged.append(segment)
+    return merged
+
+
+def _interval_segments_from_arguments(arguments: Sequence[Expr]) -> list[_IntervalSegment] | None:
+    segments: list[_IntervalSegment] = []
+    for argument in arguments:
+        segment = _interval_segment_from_argument(argument)
+        if segment is None:
+            return None
+        segments.append(segment)
+    return _normalize_interval_segments(segments)
+
+
+def _interval_segments_from_interval(expr: Expr) -> list[_IntervalSegment] | None:
+    if not isinstance(expr, Call) or not expr.has_head("Interval"):
+        return None
+    return _interval_segments_from_arguments(expr.arguments)
+
+
+def _interval_segment_expr(segment: _IntervalSegment) -> Expr:
+    return list_expr(segment.left, segment.right)
+
+
+def _interval_expr_from_segments(segments: Sequence[_IntervalSegment]) -> Expr:
+    return call("Interval", *(_interval_segment_expr(segment) for segment in segments))
+
+
+def interval_expr(arguments: Sequence[Expr]) -> Expr:
+    segments = _interval_segments_from_arguments(arguments)
+    if segments is None:
+        return call("Interval", *arguments)
+    return _interval_expr_from_segments(segments)
+
+
+def interval_union(arguments: Sequence[Expr]) -> Expr:
+    segments: list[_IntervalSegment] = []
+    for argument in arguments:
+        argument_segments = _interval_segments_from_interval(argument)
+        if argument_segments is None:
+            return call("IntervalUnion", *arguments)
+        segments.extend(argument_segments)
+    normalized = _normalize_interval_segments(segments)
+    if normalized is None:
+        return call("IntervalUnion", *arguments)
+    return _interval_expr_from_segments(normalized)
+
+
+def _intersect_interval_segment(left: _IntervalSegment, right: _IntervalSegment) -> _IntervalSegment | None:
+    start_compare = _interval_endpoint_compare(left.left, right.left)
+    end_compare = _interval_endpoint_compare(left.right, right.right)
+    if start_compare is None or end_compare is None:
+        return None
+    start = left.left if start_compare >= 0 else right.left
+    end = left.right if end_compare <= 0 else right.right
+    containment_compare = _interval_endpoint_compare(start, end)
+    if containment_compare is not None and containment_compare <= 0:
+        return _IntervalSegment(start, end)
+    return None
+
+
+def interval_intersection(arguments: Sequence[Expr]) -> Expr:
+    if not arguments:
+        return call("Interval")
+    initial = _interval_segments_from_interval(arguments[0])
+    if initial is None:
+        return call("IntervalIntersection", *arguments)
+    current = initial
+    for argument in arguments[1:]:
+        argument_segments = _interval_segments_from_interval(argument)
+        if argument_segments is None:
+            return call("IntervalIntersection", *arguments)
+        intersections: list[_IntervalSegment] = []
+        for left in current:
+            for right in argument_segments:
+                segment = _intersect_interval_segment(left, right)
+                if segment is not None:
+                    intersections.append(segment)
+        normalized = _normalize_interval_segments(intersections)
+        if normalized is None:
+            return call("IntervalIntersection", *arguments)
+        current = normalized
+        if not current:
+            break
+    return _interval_expr_from_segments(current)
+
+
+def _interval_contains_segment(container: Sequence[_IntervalSegment], candidate: _IntervalSegment) -> bool:
+    for segment in container:
+        left_compare = _interval_endpoint_compare(segment.left, candidate.left)
+        right_compare = _interval_endpoint_compare(candidate.right, segment.right)
+        if left_compare is None or right_compare is None:
+            continue
+        if left_compare <= 0 and right_compare <= 0:
+            return True
+    return False
+
+
+def interval_member_q(interval: Expr, item: Expr) -> Expr:
+    segments = _interval_segments_from_interval(interval)
+    if segments is None:
+        return symbol("False")
+    if isinstance(item, Call) and item.has_head("List"):
+        return _evaluated_list_expr(*(interval_member_q(interval, element) for element in item.arguments))
+    item_segments = _interval_segments_from_interval(item)
+    if item_segments is not None:
+        return _bool_symbol(all(_interval_contains_segment(segments, segment) for segment in item_segments))
+    item_segment = _interval_segment_from_argument(item)
+    if item_segment is None:
+        return symbol("False")
+    return _bool_symbol(_interval_contains_segment(segments, item_segment))
+
+
 def _unique_by_same_test(items: Sequence[Expr], test: Expr | None) -> list[Expr]:
     unique: list[Expr] = []
     for item in items:
