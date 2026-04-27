@@ -831,5 +831,268 @@ class TungstenDivergenceSmokeTests(unittest.TestCase):
         )
 
 
+class PercentOutputHistoryParserTests(unittest.TestCase):
+    """Bare ``%`` parses as ``Out[]`` (no argument), matching the kernel.
+
+    Wolfram's parse rules: a single ``%`` lowers to ``Out[]``, ``%%`` to
+    ``Out[-2]``, ``%n`` (digits glued onto a single percent) to ``Out[n]``.
+    Multi-percent runs followed by digits leave the digits as a separate token,
+    so ``%%5`` is ``Times[Out[-2], 5]`` rather than ``Out[5]``.
+    """
+
+    def test_single_percent_is_empty_out(self) -> None:
+        expr = parse_expression("%", form="input")
+        self.assertEqual(expr.to_full_form(), "Out[]")
+
+    def test_single_percent_round_trips_as_percent(self) -> None:
+        expr = parse_expression("%", form="input")
+        self.assertEqual(expr.to_input_form(), "%")
+
+    def test_double_percent_is_out_minus_two(self) -> None:
+        expr = parse_expression("%%", form="input")
+        self.assertEqual(expr.to_full_form(), "Out[-2]")
+
+    def test_percent_with_digits(self) -> None:
+        expr = parse_expression("%5", form="input")
+        self.assertEqual(expr.to_full_form(), "Out[5]")
+
+    def test_multi_percent_does_not_consume_digits(self) -> None:
+        expr = parse_expression("%%5", form="input")
+        self.assertEqual(expr.to_full_form(), "Times[Out[-2], 5]")
+
+    def test_multi_percent_then_minus_literal(self) -> None:
+        expr = parse_expression("%-5", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[Out[], -5]")
+
+
+class BinaryMinusLiteralFoldingTests(unittest.TestCase):
+    """Binary ``-`` folds non-negative integer/real literal right operands.
+
+    The kernel's parse tree for ``a - 3`` is ``Plus[a, -3]``, not
+    ``Plus[a, Times[-1, 3]]``. The wrapping ``Times[-1, ...]`` is preserved when
+    the right operand is symbolic or already negative, matching the kernel's
+    held parse tree for ``a - x`` and ``a - -3``.
+    """
+
+    def test_minus_int_literal_folds(self) -> None:
+        expr = parse_expression("a - 3", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[a, -3]")
+
+    def test_minus_int_literal_folds_in_chain(self) -> None:
+        expr = parse_expression("2 - 3 + x", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[2, -3, x]")
+
+    def test_minus_real_literal_folds(self) -> None:
+        expr = parse_expression("a - 3.5", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[a, -3.5]")
+
+    def test_minus_zero_folds(self) -> None:
+        expr = parse_expression("a - 0", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[a, 0]")
+
+    def test_minus_symbolic_keeps_times_wrapper(self) -> None:
+        expr = parse_expression("a - x", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[a, Times[-1, x]]")
+
+    def test_minus_already_negative_keeps_times_wrapper(self) -> None:
+        expr = parse_expression("a - -3", form="input")
+        self.assertEqual(expr.to_full_form(), "Plus[a, Times[-1, -3]]")
+
+    def test_minus_rational_keeps_times_wrapper(self) -> None:
+        expr = parse_expression("a - 3/4", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Plus[a, Times[-1, Times[3, Power[4, -1]]]]",
+        )
+
+
+class UnderscoreDotPostfixRepeatedParserTests(unittest.TestCase):
+    """Wolfram tokenizes ``_.`` greedily, so ``_...`` parses as ``_.`` + ``..``.
+
+    The shape change happened in WL 12.2: prior versions parsed ``_...`` as
+    ``RepeatedNull[_]`` (``(_)...``), but 12.2 onward treats it as
+    ``Repeated[Optional[_]]`` (``(_.)..``). Tungsten matches the post-12.2
+    behavior. Typed and sequence blanks (``_Integer``, ``__``, ``___``) keep
+    ``RepeatedNull`` because ``_Integer.``, ``__.``, and ``___.`` are not
+    Optional shorthand and the kernel rejects them.
+    """
+
+    def test_underscore_triple_dot_is_repeated_optional(self) -> None:
+        expr = parse_expression("_...", form="input")
+        self.assertEqual(expr.to_full_form(), "Repeated[Optional[Blank[]]]")
+
+    def test_named_underscore_triple_dot_is_repeated_optional(self) -> None:
+        expr = parse_expression("x_...", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Repeated[Optional[Pattern[x, Blank[]]]]",
+        )
+
+    def test_typed_blank_triple_dot_keeps_repeated_null(self) -> None:
+        expr = parse_expression("_Integer...", form="input")
+        self.assertEqual(expr.to_full_form(), "RepeatedNull[Blank[Integer]]")
+
+    def test_named_typed_blank_triple_dot_keeps_repeated_null(self) -> None:
+        expr = parse_expression("x_Integer...", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "RepeatedNull[Pattern[x, Blank[Integer]]]",
+        )
+
+    def test_double_underscore_triple_dot_keeps_repeated_null(self) -> None:
+        expr = parse_expression("x__...", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "RepeatedNull[Pattern[x, BlankSequence[]]]",
+        )
+
+    def test_triple_underscore_triple_dot_keeps_repeated_null(self) -> None:
+        expr = parse_expression("x___...", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "RepeatedNull[Pattern[x, BlankNullSequence[]]]",
+        )
+
+
+class FlatStructuralOperatorParserTests(unittest.TestCase):
+    """``Dot`` / ``NonCommutativeMultiply`` / ``Composition`` / ``RightComposition``
+    chains parse as n-ary calls, matching the kernel.
+
+    Wolfram's parser produces ``Dot[a, b, c]``, not ``Dot[Dot[a, b], c]``, for
+    unparenthesized chains, and similarly for ``a ** b ** c``,
+    ``f @* g @* h``, and ``f /* g /* h``. Mixed ``@*``/``/*`` chains are
+    left-associative: ``f @* g /* h`` is ``RightComposition[Composition[f, g], h]``.
+    Parentheses remain a structural barrier so ``(a.b).c`` keeps the nested form.
+    """
+
+    def test_dot_chain_is_nary(self) -> None:
+        expr = parse_expression("a.b.c.d", form="input")
+        self.assertEqual(expr.to_full_form(), "Dot[a, b, c, d]")
+
+    def test_dot_chain_respects_parens(self) -> None:
+        expr = parse_expression("(a.b).c", form="input")
+        self.assertEqual(expr.to_full_form(), "Dot[Dot[a, b], c]")
+
+    def test_noncommutative_multiply_chain_is_nary(self) -> None:
+        expr = parse_expression("a ** b ** c ** d", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "NonCommutativeMultiply[a, b, c, d]",
+        )
+
+    def test_composition_chain_is_nary(self) -> None:
+        expr = parse_expression("f @* g @* h @* k", form="input")
+        self.assertEqual(expr.to_full_form(), "Composition[f, g, h, k]")
+
+    def test_right_composition_chain_is_nary(self) -> None:
+        expr = parse_expression("f /* g /* h /* k", form="input")
+        self.assertEqual(expr.to_full_form(), "RightComposition[f, g, h, k]")
+
+    def test_mixed_composition_is_left_associative(self) -> None:
+        expr = parse_expression("f @* g /* h", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "RightComposition[Composition[f, g], h]",
+        )
+
+
+class PostfixFunctionPrecedenceTests(unittest.TestCase):
+    """Postfix ``&`` (Function) binds tighter than ``=``, ``:=``, and ``;``,
+    but looser than ``->``, ``/.``, and ``@*``.
+
+    The kernel produces ``Set[a, Function[b]]`` for ``a = b &`` and
+    ``CompoundExpression[a, Function[b]]`` for ``a; b &``. Tungsten previously
+    placed ``&`` at the very lowest precedence, which inverted those parses.
+    Higher-precedence operators like ``->`` and ``/.`` still wrap the entire
+    expression: ``a -> b &`` is ``Function[Rule[a, b]]``.
+    """
+
+    def test_function_higher_than_set(self) -> None:
+        expr = parse_expression("a = b &", form="input")
+        self.assertEqual(expr.to_full_form(), "Set[a, Function[b]]")
+
+    def test_function_higher_than_setdelayed(self) -> None:
+        expr = parse_expression("f := # &", form="input")
+        self.assertEqual(expr.to_full_form(), "SetDelayed[f, Function[Slot[1]]]")
+
+    def test_function_higher_than_compound_expression(self) -> None:
+        expr = parse_expression("a; b &", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "CompoundExpression[a, Function[b]]",
+        )
+
+    def test_function_lower_than_rule(self) -> None:
+        expr = parse_expression("a -> b &", form="input")
+        self.assertEqual(expr.to_full_form(), "Function[Rule[a, b]]")
+
+    def test_function_lower_than_replace_all(self) -> None:
+        expr = parse_expression("a /. b &", form="input")
+        self.assertEqual(expr.to_full_form(), "Function[ReplaceAll[a, b]]")
+
+    def test_function_lower_than_composition(self) -> None:
+        expr = parse_expression("a @* b &", form="input")
+        self.assertEqual(expr.to_full_form(), "Function[Composition[a, b]]")
+
+    def test_function_self_chained(self) -> None:
+        # Right-associative when chained with itself: ``f & &`` is
+        # ``Function[Function[f]]``.
+        expr = parse_expression("f & &", form="input")
+        self.assertEqual(expr.to_full_form(), "Function[Function[f]]")
+
+
+class ColonChainAssociativityTests(unittest.TestCase):
+    """``:`` is right-associative when the leading element is not a symbol.
+
+    For symbol-led chains the kernel pairs the first two elements as
+    ``Pattern[symbol, second]`` and recurses on the rest, so ``a:b:c:d`` is
+    ``Optional[Pattern[a, b], Pattern[c, d]]`` and ``a:b:c:d:e`` is
+    ``Optional[Pattern[a, b], Optional[Pattern[c, d], e]]``. For non-symbol
+    leading elements (such as ``x_``, ``_Integer``, or ``PatternTest[...]``)
+    the chain is purely right-associative ``Optional`` nesting:
+    ``x_:y_:z_`` is
+    ``Optional[Pattern[x, _], Optional[Pattern[y, _], Pattern[z, _]]]``.
+    """
+
+    def test_two_symbol_chain(self) -> None:
+        expr = parse_expression("a:b", form="input")
+        self.assertEqual(expr.to_full_form(), "Pattern[a, b]")
+
+    def test_three_symbol_chain(self) -> None:
+        expr = parse_expression("a:b:c", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Optional[Pattern[a, b], c]",
+        )
+
+    def test_four_symbol_chain(self) -> None:
+        expr = parse_expression("a:b:c:d", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Optional[Pattern[a, b], Pattern[c, d]]",
+        )
+
+    def test_five_symbol_chain(self) -> None:
+        expr = parse_expression("a:b:c:d:e", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Optional[Pattern[a, b], Optional[Pattern[c, d], e]]",
+        )
+
+    def test_named_blank_three_chain_right_associative(self) -> None:
+        expr = parse_expression("x_:y_:z_", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Optional[Pattern[x, Blank[]], Optional[Pattern[y, Blank[]], Pattern[z, Blank[]]]]",
+        )
+
+    def test_named_blank_three_chain_with_default(self) -> None:
+        expr = parse_expression("a_:b_:1", form="input")
+        self.assertEqual(
+            expr.to_full_form(),
+            "Optional[Pattern[a, Blank[]], Optional[Pattern[b, Blank[]], 1]]",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2519,6 +2519,10 @@ def _is_simple_slot_name(value: str) -> bool:
 
 
 def _format_out(arguments: Sequence[Expr]) -> str | None:
+    if len(arguments) == 0:
+        # Bare ``Out[]`` round-trips through the ``%`` shorthand so explicit
+        # ``Out[]`` and the parsed form share the same input-form rendering.
+        return "%"
     if len(arguments) != 1 or not isinstance(arguments[0], Integer):
         return None
     line = arguments[0].value

@@ -439,6 +439,23 @@ def _normalize_row_box_token(value: str) -> str:
     return value
 
 
+def _negate_for_subtraction(expr: Expr) -> Expr:
+    """Return ``-expr`` as the kernel-style folded literal when ``expr`` is a positive
+    integer or real literal.
+
+    Wolfram's parser stores ``a - 3`` as ``Plus[a, -3]`` (a literal negative integer),
+    not ``Plus[a, Times[-1, 3]]``. We fold non-negative numeric right operands so the
+    Tungsten parse tree matches the kernel's held parse tree. Already-negative literals
+    keep the explicit ``Times[-1, expr]`` wrapping because the kernel does the same:
+    ``a - -3`` parses as ``Plus[a, Times[-1, -3]]``.
+    """
+    if isinstance(expr, Integer) and expr.value >= 0:
+        return integer(-expr.value)
+    if isinstance(expr, Real) and not expr.text.startswith("-"):
+        return real(f"-{expr.text}")
+    return call("Times", integer(-1), expr)
+
+
 def _make_division(numerator: Expr, denominator: Expr) -> Expr:
     if isinstance(numerator, Integer) and isinstance(denominator, Integer):
         return call("Rational", numerator, denominator)
@@ -630,14 +647,24 @@ def _scan_percent_history(text: str, start: int) -> tuple[_Token, int]:
     while index < len(text) and text[index] == "%":
         index += 1
 
-    digits_start = index
-    while index < len(text) and text[index].isdigit():
-        index += 1
+    percent_count = index - start
+
+    # Wolfram only attaches trailing digits to a single ``%`` (so ``%5`` is ``Out[5]``);
+    # ``%%5`` is the two-token sequence ``%%`` and ``5`` because only the first ``%`` in
+    # a run can take an explicit index. Multi-``%`` runs always evaluate to ``Out[-k]``.
+    if percent_count == 1 and index < len(text) and text[index].isdigit():
+        digits_start = index
+        while index < len(text) and text[index].isdigit():
+            index += 1
+        token_text = text[start:index]
+        return _Token(kind="percent", text=token_text, start=start, end=index, value=int(text[digits_start:index])), index
 
     token_text = text[start:index]
-    if digits_start < index:
-        return _Token(kind="percent", text=token_text, start=start, end=index, value=int(text[digits_start:index])), index
-    return _Token(kind="percent", text=token_text, start=start, end=index, value=-(index - start)), index
+    if percent_count == 1:
+        # A bare ``%`` lowers to ``Out[]`` (no argument), matching the kernel's parse
+        # tree; the empty-arg ``Out[]`` evaluates to the most recent output.
+        return _Token(kind="percent", text=token_text, start=start, end=index, value=None), index
+    return _Token(kind="percent", text=token_text, start=start, end=index, value=-percent_count), index
 
 
 def _is_symbol_start(char: str) -> bool:
@@ -757,6 +784,27 @@ _CHAINABLE_COMPARISON_HEADS = {
     "Unequal",
     "UnsameQ",
 }
+
+
+# Heads that should produce n-ary flat parse trees for unparenthesized chains, so
+# Tungsten matches the Wolfram parser's held parse trees. The list mirrors the kernel:
+# ``a.b.c`` parses as ``Dot[a, b, c]`` (not ``Dot[Dot[a, b], c]``), and likewise for
+# ``**``, ``@*``, and ``/*``. Parenthesization remains a structural barrier because
+# ``_make_flat_parser_operator_call`` only flattens through ``_is_ungrouped_operator_call``
+# matches. ``Plus`` and ``Times`` were already in this group; the others were producing
+# left-associative nested trees against the kernel's flat tree.
+#
+# ``And``, ``Or``, ``StringJoin``, and ``StringExpression`` are deliberately not included
+# here -- they are documented in expression-parser.md as nested-at-parse-time, with
+# evaluator-time flattening providing the user-visible flat semantics.
+_PARSER_FLAT_OPERATOR_HEADS = frozenset({
+    "Plus",
+    "Times",
+    "Dot",
+    "NonCommutativeMultiply",
+    "Composition",
+    "RightComposition",
+})
 
 
 def _scan_escaped_token(text: str, start: int) -> tuple[_Token, int] | None:
@@ -1088,6 +1136,11 @@ class _Parser:
     _MAP_BP = 45
     _APPLY_BP = 44
     _COMPOSITION_BP = 43
+    # Postfix ``&`` (Function) sits above the assignment family but below ``@*``,
+    # ``/.``, and the right-side of ``->`` -- matching the kernel's precedence so
+    # ``a = b &`` parses as ``Set[a, Function[b]]`` and ``a; b &`` as
+    # ``CompoundExpression[a, Function[b]]``.
+    _POSTFIX_FUNCTION_BP = 42
     _ASSIGNMENT_BP = 40
     _PUT_BP = 35
     _AT_BP = 180
@@ -1188,6 +1241,15 @@ class _Parser:
             if token.text in {"..", "..."}:
                 if self._PATTERN_BP < min_bp:
                     break
+                # Wolfram's tokenizer prefers ``_.`` (Optional shorthand) over leaving
+                # ``_`` adjacent to ``..``/``...``. ``_...`` is therefore ``_.`` followed
+                # by ``..`` and parses as ``Repeated[Optional[Blank[]]]`` (similarly for
+                # ``x_...``). The shape change happened in WL 12.2; before that, ``_...``
+                # was ``RepeatedNull[_]``. Tungsten matches the post-12.2 behavior.
+                if token.text == "..." and self._is_optional_dot_candidate(left):
+                    self._consume()
+                    left = call("Repeated", call("Optional", left))
+                    continue
                 self._consume()
                 left = call("RepeatedNull" if token.text == "..." else "Repeated", left)
                 continue
@@ -1282,7 +1344,7 @@ class _Parser:
                 continue
 
             if token.text == "&":
-                if self._FUNCTION_BP < min_bp:
+                if self._POSTFIX_FUNCTION_BP < min_bp:
                     break
                 self._consume()
                 left = call("Function", left)
@@ -1326,6 +1388,8 @@ class _Parser:
             return token.value if isinstance(token.value, Expr) else symbol("Null")
 
         if token.kind == "percent":
+            if token.value is None:
+                return call("Out")
             return call("Out", integer(int(token.value)))
 
         if token.kind == "symbol":
@@ -1486,21 +1550,28 @@ class _Parser:
         return [expr]
 
     def _fold_colon_chain(self, chain: list[Expr]) -> Expr:
+        # ``:`` is right-associative in Wolfram, with the additional rule that a leading
+        # symbol triggers ``Pattern[symbol, second]`` for the first pair. So ``a:b:c:d``
+        # folds as ``Optional[Pattern[a, b], Pattern[c, d]]`` (when the chain has an even
+        # number of elements led by a symbol), ``a:b:c`` as ``Optional[Pattern[a, b], c]``,
+        # and ``x_:y_:z_`` (non-symbol head) as right-associative
+        # ``Optional[Pattern[x, _], Optional[Pattern[y, _], Pattern[z, _]]]``.
         assert len(chain) >= 1
         if len(chain) == 1:
             return chain[0]
         head, second, *rest = chain
         if isinstance(head, Symbol):
             paired: Expr = call("Pattern", head, second)
-        else:
-            paired = call("Optional", head, second)
-        self._operator_expr_heads[id(paired)] = "Colon"
-        if not rest:
-            return paired
-        tail = self._fold_colon_chain([second_or_more for second_or_more in rest])
-        wrapper = call("Optional", paired, tail) if isinstance(head, Symbol) else paired
-        if not isinstance(head, Symbol):
+            self._operator_expr_heads[id(paired)] = "Colon"
+            if not rest:
+                return paired
+            tail = self._fold_colon_chain(rest)
             wrapper = call("Optional", paired, tail)
+            self._operator_expr_heads[id(wrapper)] = "Colon"
+            return wrapper
+        # Non-symbol head: right-associative ``Optional`` chain matching the kernel.
+        tail = self._fold_colon_chain([second, *rest])
+        wrapper = call("Optional", head, tail)
         self._operator_expr_heads[id(wrapper)] = "Colon"
         return wrapper
 
@@ -1813,8 +1884,10 @@ class _Parser:
             "//@": (self._MAP_BP, self._MAP_BP + 1, "MapAll"),
             "@@": (self._APPLY_BP, self._APPLY_BP + 1, "Apply"),
             "@@@": (self._APPLY_BP, self._APPLY_BP + 1, "MapApply"),
-            "@*": (self._COMPOSITION_BP, self._COMPOSITION_BP, "Composition"),
-            "/*": (self._COMPOSITION_BP, self._COMPOSITION_BP, "RightComposition"),
+            # Left-associative so mixed ``f @* g /* h`` parses as
+            # ``RightComposition[Composition[f, g], h]`` to match the kernel.
+            "@*": (self._COMPOSITION_BP, self._COMPOSITION_BP + 1, "Composition"),
+            "/*": (self._COMPOSITION_BP, self._COMPOSITION_BP + 1, "RightComposition"),
             "@": (self._AT_BP, self._AT_BP, None),
             "//": (self._POSTFIX_BP, self._POSTFIX_BP + 1, None),
             ".": (self._TIMES_BP, self._TIMES_BP + 1, "Dot"),
@@ -1854,7 +1927,7 @@ class _Parser:
         if text == "/":
             return self._make_division_operator_call(left, right)
         if text == "-":
-            return self._make_flat_parser_operator_call("Plus", left, call("Times", integer(-1), right))
+            return self._make_flat_parser_operator_call("Plus", left, _negate_for_subtraction(right))
         if text == ":":
             return self._combine_colon(left, right)
         if text == "@":
@@ -1868,7 +1941,7 @@ class _Parser:
             return call(tag_head, left.arguments[0], left.arguments[1], right)
         if head_name in _CHAINABLE_COMPARISON_HEADS:
             return self._make_comparison_operator_call(head_name, left, right)
-        if head_name in {"Plus", "Times"} or escaped_operator_head is not None:
+        if head_name in _PARSER_FLAT_OPERATOR_HEADS or escaped_operator_head is not None:
             return self._make_flat_parser_operator_call(head_name, left, right)
         result = call(head_name, left, right)
         self._operator_expr_heads[id(result)] = head_name

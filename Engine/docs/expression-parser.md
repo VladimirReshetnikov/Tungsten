@@ -119,8 +119,9 @@ The parser currently handles:
 - prefix and postfix application such as `f @ x` and `x // f`, with `@` binding tighter than
   arithmetic but looser than direct function application;
 - mapping and replacement operators such as `/@`, `/.`, and `//.`;
-- output-history shorthand `%`, `%%`, and `%n`, which lower to `Out[-1]`, `Out[-2]`, and
-  `Out[n]`;
+- output-history shorthand `%`, `%%`, and `%n`, which lower to `Out[]`, `Out[-2]`, and
+  `Out[n]`. Tungsten matches Wolfram's tokenization rule that only a single `%` accepts
+  trailing digits, so `%%5` is `Times[Out[-2], 5]`, not `Out[5]`;
 - positional pure-function syntax such as `body &`, `#`, `#n`, `#0`, `##`, `##n`, `Slot[]`,
   `Slot[n]`, `SlotSequence[]`, `SlotSequence[n]`, and Wolfram's named-slot shorthand `#name`
   and `#"name"` for `Slot["name"]` (the bare `#` followed by whitespace is implicit `Times`);
@@ -209,6 +210,22 @@ The important parse-stage rules are:
 - Mixed comparison chains become `Inequality`: `Hold[a < b <= c]` parses as
   `Hold[Inequality[a, Less, b, LessEqual, c]]`. Parentheses remain a barrier, so
   `Hold[a < (b <= c)]` parses as `Hold[Less[a, LessEqual[b, c]]]`.
+- `Dot` (`.`), `NonCommutativeMultiply` (`**`), `Composition` (`@*`), and
+  `RightComposition` (`/*`) chains parse n-ary flat: `Hold[a.b.c]` is `Hold[Dot[a, b, c]]`,
+  `Hold[a ** b ** c]` is `Hold[NonCommutativeMultiply[a, b, c]]`, and so on. Mixed
+  `Hold[f @* g /* h]` is left-associative at the same precedence,
+  `Hold[RightComposition[Composition[f, g], h]]`. Parentheses still create barriers:
+  `Hold[(a.b).c]` is `Hold[Dot[Dot[a, b], c]]`. `And` (`&&`), `Or` (`||`), `StringJoin`
+  (`<>`), and `StringExpression` (`~~`) chains intentionally remain nested at parse time
+  and rely on the evaluator's flattening attributes to produce the flat call later.
+- Postfix `&` (Function) precedence sits between assignment and composition: `a = b &`
+  parses as `Set[a, Function[b]]` and `a; b &` as `CompoundExpression[a, Function[b]]`,
+  but `a -> b &` is `Function[Rule[a, b]]` and `a @* b &` is `Function[Composition[a, b]]`.
+- `:` is right-associative when the leading element is not a symbol, so `x_:y_:z_` parses
+  as `Optional[Pattern[x, _], Optional[Pattern[y, _], Pattern[z, _]]]`. Symbol-led chains
+  follow the kernel's special rule: `a:b:c:d` is `Optional[Pattern[a, b], Pattern[c, d]]`,
+  `a:b:c` is `Optional[Pattern[a, b], c]`, and `a:b:c:d:e` is
+  `Optional[Pattern[a, b], Optional[Pattern[c, d], e]]`.
 
 These rules are intentionally parser-local. Explicit call syntax such as `Plus[Plus[a, b], c]`
 stays nested until the evaluator later decides whether attributes or built-in rules apply. This
@@ -227,6 +244,11 @@ The currently supported pattern subset is intentionally bounded:
   `x_ Foo_` is implicit multiplication between two patterns. Optional blank shorthand also
   supports common package-source idioms such as `a_.*x_` and whitespace-implied multiplication
   such as `c_. pf_Foo`;
+- the postfix `...` operator combines with `_.` greedily, matching Wolfram 12.2+ tokenization:
+  `_...` parses as `Repeated[Optional[Blank[]]]` (the `_.` shorthand followed by `..`), and
+  `x_...` parses as `Repeated[Optional[Pattern[x, Blank[]]]]`. Typed and sequence blanks
+  (`_Integer...`, `x__...`, `x___...`) keep `RepeatedNull[...]` because their underlying tokens
+  are not Optional shorthand;
 - sequence patterns support named bindings and multiple occurrences in the same argument list for
   ordinary non-`Flat`, non-`Orderless` heads. Tungsten follows Wolfram's left-to-right
   shortest-first allocation rule with backtracking, while `Longest` switches the wrapped ambiguous

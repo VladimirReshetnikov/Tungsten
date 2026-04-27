@@ -228,7 +228,7 @@ class ExpressionParserTests(unittest.TestCase):
         self.assertEqual(map_apply.to_full_form(), "MapApply[f, xs]")
         self.assertEqual(dot_expr.to_full_form(), "Dot[List[a, b], List[c, d]]")
         self.assertEqual(string_join.to_full_form(), 'StringJoin[StringJoin["a", "b"], "c"]')
-        self.assertEqual(output_history.to_full_form(), "Plus[Out[-1], Out[-2], Out[12]]")
+        self.assertEqual(output_history.to_full_form(), "Plus[Out[], Out[-2], Out[12]]")
         self.assertEqual(same_q.to_input_form(), "a === b")
         self.assertEqual(unsame_q.to_input_form(), "a =!= b")
         self.assertEqual(composition.to_input_form(), "f @* g")
@@ -4198,7 +4198,7 @@ class AlgebraicRootTests(unittest.TestCase):
             )
             self.assertEqual(
                 evaluate(parse_input_form("Root[#^4 - 2 &, 1]")).to_full_form(),
-                "Root[Function[Plus[Power[Slot[1], 4], Times[-1, 2]]], 1]",
+                "Root[Function[Plus[Power[Slot[1], 4], -2]], 1]",
             )
             self.assertEqual(
                 evaluate(parse_input_form("Root[#^2 - 2^(1/3) &, 2]")).to_full_form(),

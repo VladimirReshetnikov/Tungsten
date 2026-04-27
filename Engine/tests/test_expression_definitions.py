@@ -302,7 +302,7 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
         self.assertEqual(_full(f"{self.f}[4]"), "24")
         self.assertEqual(
             _full(f"DownValues[{self.f}]"),
-            f"List[RuleDelayed[HoldPattern[{self.f}[1]], 1], RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], Times[{self.x}, {self.f}[Plus[{self.x}, Times[-1, 1]]]]]]",
+            f"List[RuleDelayed[HoldPattern[{self.f}[1]], 1], RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], Times[{self.x}, {self.f}[Plus[{self.x}, -1]]]]]",
         )
 
     def test_lhs_condition_and_rhs_condition_are_applied(self) -> None:
