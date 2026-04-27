@@ -425,6 +425,9 @@ def _to_sympy_algebraic(expr: Expr) -> Any:
     if isinstance(expr, RootNumber):
         return _root_to_sympy(expr)
     if isinstance(expr, Call):
+        trig_value = _to_sympy_trig_algebraic(expr)
+        if trig_value is not None:
+            return trig_value
         if expr.has_head("Plus"):
             return _sp.Add(*(_to_sympy_algebraic(argument) for argument in expr.arguments))
         if expr.has_head("Times"):
@@ -444,6 +447,74 @@ def _to_sympy_algebraic(expr: Expr) -> Any:
             conjugate = _to_sympy_conjugate(expr.arguments[0])
             return _sp.sqrt(value * conjugate)
     raise _AlgebraicConversionError(expr.to_full_form())
+
+
+def _to_sympy_trig_algebraic(expr: Call) -> Any | None:
+    if len(expr.arguments) != 1:
+        return None
+    head_name = _system_dispatch_name(expr.head_expr) if isinstance(expr.head_expr, Symbol) else None
+    direct_functions = {
+        "Sin": _sp.sin,
+        "Cos": _sp.cos,
+        "Tan": _sp.tan,
+        "Cot": _sp.cot,
+        "Sec": _sp.sec,
+        "Csc": _sp.csc,
+    }
+    if head_name in direct_functions:
+        argument = _to_sympy_rational_pi_multiple(expr.arguments[0])
+        if argument is None:
+            return None
+        return direct_functions[head_name](argument)
+    degree_base = _degree_transcendental_base_name(head_name or "")
+    if degree_base in direct_functions:
+        degree_value = _exact_fraction(expr.arguments[0])
+        if degree_value is None:
+            return None
+        return direct_functions[degree_base](_sp.Rational(degree_value.numerator, degree_value.denominator) * _sp.pi / 180)
+    if head_name == "Haversine":
+        argument = _to_sympy_rational_pi_multiple(expr.arguments[0])
+        if argument is None:
+            return None
+        return (1 - _sp.cos(argument)) / 2
+    return None
+
+
+def _to_sympy_rational_pi_multiple(expr: Expr) -> Any | None:
+    exact = _exact_fraction(expr)
+    if exact is not None:
+        if exact == 0:
+            return _sp.Integer(0)
+        return None
+    if isinstance(expr, Symbol):
+        name = _system_dispatch_name(expr)
+        if name == "Pi":
+            return _sp.pi
+        if name == "Degree":
+            return _sp.pi / 180
+        return None
+    if not isinstance(expr, Call) or not expr.has_head("Times"):
+        return None
+    coefficient = Fraction(1, 1)
+    pi_factor: Fraction | None = None
+    for factor in expr.arguments:
+        factor_fraction = _exact_fraction(factor)
+        if factor_fraction is not None:
+            coefficient *= factor_fraction
+            continue
+        if isinstance(factor, Symbol):
+            name = _system_dispatch_name(factor)
+            if name == "Pi" and pi_factor is None:
+                pi_factor = Fraction(1, 1)
+                continue
+            if name == "Degree" and pi_factor is None:
+                pi_factor = Fraction(1, 180)
+                continue
+        return None
+    if pi_factor is None:
+        return None
+    multiple = coefficient * pi_factor
+    return _sp.Rational(multiple.numerator, multiple.denominator) * _sp.pi
 
 
 def _to_sympy_conjugate(expr: Expr) -> Any:

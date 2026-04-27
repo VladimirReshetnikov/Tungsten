@@ -1733,7 +1733,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(machine_approximation.to_full_form(), "0.3333333333333333")
         self.assertEqual(arbitrary_approximation.to_full_form(), "0.33333333333333333333`20.")
         self.assertEqual(pi_approximation.to_full_form(), "3.1415926535897932385`20.")
-        self.assertEqual(sine_approximation.to_full_form(), "0.50000000000000000000`20.")
+        self.assertEqual(sine_approximation.to_full_form(), "0.5`20.")
         self.assertEqual(working_precision_option.to_full_form(), "3.14159265358979323846264338328`30.")
 
         self.assertEqual(evaluate(parse_input_form("Precision[1]")).to_full_form(), "Infinity")
@@ -1783,6 +1783,117 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Overflow[] > 10^100")).to_full_form(), "True")
         self.assertEqual(evaluate(parse_input_form("1/Overflow[]")).to_full_form(), "Underflow[]")
         self.assertEqual(evaluate(parse_input_form("1/Underflow[]")).to_full_form(), "Overflow[]")
+
+    def test_transcendental_constants_exact_numeric_and_degree_functions(self) -> None:
+        exact_cases = {
+            "Exp[1]": "E",
+            "Exp[2]": "Power[E, 2]",
+            "Exp[I Pi]": "-1",
+            "Log[E]": "1",
+            "Log[10, 100]": "2",
+            "Log[0]": "-Infinity",
+            "Log[-1]": "Times[Complex[0, 1], Pi]",
+            "Sin[0]": "0",
+            "Sin[Pi/6]": "Rational[1, 2]",
+            "Cos[Pi/3]": "Rational[1, 2]",
+            "Tan[Pi/4]": "1",
+            "Cot[Pi/4]": "1",
+            "Sec[0]": "1",
+            "Csc[Pi/2]": "1",
+            "Tan[Pi/2]": "ComplexInfinity",
+            "ArcSin[1/2]": "Times[Rational[1, 6], Pi]",
+            "ArcCos[1/2]": "Times[Rational[1, 3], Pi]",
+            "ArcTan[1, 1]": "Times[Rational[1, 4], Pi]",
+            "ArcTan[-1, 1]": "Times[Rational[3, 4], Pi]",
+            "ArcTan[1, -1]": "Times[Rational[-1, 4], Pi]",
+            "ArcTan[0, 0]": "Indeterminate",
+            "ArcCot[-1]": "Times[Rational[3, 4], Pi]",
+            "ArcSec[2]": "Times[Rational[1, 3], Pi]",
+            "ArcCsc[2]": "Times[Rational[1, 6], Pi]",
+            "ArcSin[2]": "ArcSin[2]",
+            "ArcCosh[2]": "ArcCosh[2]",
+            "Sinh[0]": "0",
+            "Cosh[0]": "1",
+            "Tanh[0]": "0",
+            "Coth[0]": "ComplexInfinity",
+            "Sech[0]": "1",
+            "Csch[0]": "ComplexInfinity",
+            "ArcCoth[0]": "Times[Complex[0, Rational[1, 2]], Pi]",
+            "ArcSech[2]": "Times[Complex[0, Rational[1, 3]], Pi]",
+            "30 Degree": "Times[30, Degree]",
+            "Sin[30 Degree]": "Rational[1, 2]",
+            "SinDegrees[30]": "Rational[1, 2]",
+            "CosDegrees[60]": "Rational[1, 2]",
+            "TanDegrees[45]": "1",
+            "CotDegrees[45]": "1",
+            "SecDegrees[60]": "2",
+            "CscDegrees[30]": "2",
+            "ArcSinDegrees[1/2]": "30",
+            "ArcCosDegrees[1/2]": "60",
+            "ArcTanDegrees[1]": "45",
+            "ArcCotDegrees[1]": "45",
+            "ArcCotDegrees[-1]": "135",
+            "ArcSecDegrees[2]": "60",
+            "ArcCscDegrees[2]": "30",
+            "Haversine[0]": "0",
+            "Haversine[Pi]": "1",
+            "Haversine[Pi/5]": "Plus[Rational[3, 8], Times[Rational[-1, 8], Power[5, Rational[1, 2]]]]",
+            "Haversine[1]": "Haversine[1]",
+            "InverseHaversine[1]": "Pi",
+            "InverseHaversine[2]": "InverseHaversine[2]",
+            "Gudermannian[0]": "0",
+            "Gudermannian[1]": "Gudermannian[1]",
+            "InverseGudermannian[0]": "0",
+            "InverseGudermannian[1]": "InverseGudermannian[1]",
+            "NumberQ[Pi]": "True",
+            "NumberQ[I Pi]": "True",
+            "ExactNumberQ[I Pi]": "True",
+            "RealValuedNumberQ[Sin[1]]": "True",
+        }
+        for source, expected in exact_cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+        inexact_cases = {
+            "Sin[1.]": "0.8414709848078965",
+            "Cos[1.]": "0.5403023058681398",
+            "Exp[1.]": "2.718281828459045",
+            "Log[2.]": "0.6931471805599453",
+            "ArcTan[1.]": "0.7853981633974483",
+            "Sin[1`20]": "0.84147098480789650665`20.",
+        }
+        for source, expected in inexact_cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+        numeric_cases = {
+            "N[Degree, 20]": "0.017453292519943295769`20.",
+            "N[Gudermannian[1], 30]": "0.865769483239658624289601846192`30.",
+            "N[ArcCoth[2], 30]": "0.549306144334054845697622618461`30.",
+            "N[Log[-1], 20]": "Complex[0.`20., 3.1415926535897932385`20.]",
+        }
+        for source, expected in numeric_cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+        comparison_cases = {
+            "Pi > 3": "True",
+            "E < 3": "True",
+            "Sin[1] > 0": "True",
+            "UnitStep[Sin[1] - 1/2]": "1",
+            "Max[Pi, E, 3]": "Pi",
+            "Min[Sin[1], Cos[1]]": "Cos[1]",
+        }
+        for source, expected in comparison_cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+        try:
+            self.assertEqual(evaluate(parse_input_form("$MaxExtraPrecision")).to_full_form(), "50")
+            self.assertEqual(evaluate(parse_input_form("$MaxExtraPrecision = 12")).to_full_form(), "12")
+            self.assertEqual(evaluate(parse_input_form("$MaxExtraPrecision = -1")).to_full_form(), "12")
+        finally:
+            evaluate(parse_input_form("$MaxExtraPrecision = 50"))
 
     def test_byte_array_and_string_encoding_family(self) -> None:
         byte_array_result = evaluate(parse_input_form("ByteArray[{65, 66, 67}]"))
@@ -4484,6 +4595,22 @@ class AlgebraicRootTests(unittest.TestCase):
         self.assertEqual(
             evaluate(parse_input_form("RootReduce[Root[#^2 - 2 &, 2]^(1/2)]")).to_full_form(),
             "Root[Function[Plus[-2, Power[Slot[1], 4]]], 2, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Sin[Pi/5]]")).to_full_form(),
+            "Root[Function[Plus[5, Times[-20, Power[Slot[1], 2]], Times[16, Power[Slot[1], 4]]]], 3, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Cos[2 Pi/7]]")).to_full_form(),
+            "Root[Function[Plus[-1, Times[-4, Slot[1]], Times[4, Power[Slot[1], 2]], Times[8, Power[Slot[1], 3]]]], 3, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[SinDegrees[20]]")).to_full_form(),
+            "Root[Function[Plus[-3, Times[36, Power[Slot[1], 2]], Times[-96, Power[Slot[1], 4]], Times[64, Power[Slot[1], 6]]]], 4, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Haversine[Pi/5]]")).to_full_form(),
+            "Root[Function[Plus[1, Times[-12, Slot[1]], Times[16, Power[Slot[1], 2]]]], 1, 0]",
         )
 
     def test_root_reduce_components_and_conjugates(self) -> None:

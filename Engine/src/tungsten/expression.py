@@ -993,6 +993,7 @@ _SPECIAL_SESSION_SETTING_DEFAULTS: dict[str, Expr] = {
     "$RecursionLimit": Integer(1024),
     "$IterationLimit": Integer(4096),
     "$HistoryLength": Symbol("Infinity"),
+    "$MaxExtraPrecision": Integer(50),
     "$MaxRootDegree": Integer(1000),
     # The Wolfram terminal front end owns this setting through OutputSizeLimit`.
     # Tungsten keeps a small, explicit REPL setting instead so console output can
@@ -1005,6 +1006,7 @@ _SPECIAL_SESSION_SETTING_MINIMUMS = {
     "$RecursionLimit": 20,
     "$IterationLimit": 20,
     "$HistoryLength": 0,
+    "$MaxExtraPrecision": 0,
     "$MaxRootDegree": 1,
     "$OutputSizeLimit": 0,
 }
@@ -4274,6 +4276,9 @@ def _compare_real_expr(left: Expr, right: Expr) -> int | None:
     algebraic_compare = _compare_algebraic_real_expr(left, right)
     if algebraic_compare is not None:
         return algebraic_compare
+    transcendental_compare = _compare_transcendental_real_expr(left, right)
+    if transcendental_compare is not None:
+        return transcendental_compare
 
     if isinstance(left, SpecialReal) or isinstance(right, SpecialReal):
         if left == right:
@@ -4698,7 +4703,7 @@ def _min_max_expr(head: Expr, arguments: Sequence[Expr]) -> Expr | None:
             if argument == absorbing:
                 return absorbing
             numeric_arguments.append(argument)
-        elif _is_real_number_expr(argument) or _is_real_algebraic_expr(argument):
+        elif _is_real_number_expr(argument) or _is_real_algebraic_expr(argument) or _is_real_transcendental_expr(argument):
             numeric_arguments.append(argument)
         else:
             symbolic_arguments.append(argument)
@@ -4983,6 +4988,70 @@ def _sympy_constant(name: str):
     return constants.get(name)
 
 
+def _sympy_unary_transcendental_function(name: str):
+    _sp = _sympy_module()
+
+    def wolfram_acot(value):
+        if value.is_real is True:
+            return _sp.pi / 2 - _sp.atan(value)
+        return _sp.acot(value)
+
+    functions = {
+        "Sin": _sp.sin,
+        "Cos": _sp.cos,
+        "Tan": _sp.tan,
+        "Cot": _sp.cot,
+        "Sec": _sp.sec,
+        "Csc": _sp.csc,
+        "ArcSin": _sp.asin,
+        "ArcCos": _sp.acos,
+        "ArcTan": _sp.atan,
+        "ArcCot": wolfram_acot,
+        "ArcSec": _sp.asec,
+        "ArcCsc": _sp.acsc,
+        "Sinh": _sp.sinh,
+        "Cosh": _sp.cosh,
+        "Tanh": _sp.tanh,
+        "Coth": _sp.coth,
+        "Sech": _sp.sech,
+        "Csch": _sp.csch,
+        "ArcSinh": _sp.asinh,
+        "ArcCosh": _sp.acosh,
+        "ArcTanh": _sp.atanh,
+        "ArcCoth": _sp.acoth,
+        "ArcSech": _sp.asech,
+        "ArcCsch": _sp.acsch,
+        "Haversine": lambda value: (1 - _sp.cos(value)) / 2,
+        "InverseHaversine": lambda value: 2 * _sp.asin(_sp.sqrt(value)),
+        "Gudermannian": lambda value: 2 * _sp.atan(_sp.tanh(value / 2)),
+        "InverseGudermannian": lambda value: _sp.log(_sp.tan(_sp.pi / 4 + value / 2)),
+    }
+    return functions.get(name)
+
+
+def _degree_transcendental_base_name(name: str) -> str | None:
+    if not name.endswith("Degrees"):
+        return None
+    base = name[:-7]
+    return base if base in _DEGREE_TRANSCENDENTAL_BASE_NAMES else None
+
+
+_DEGREE_TRANSCENDENTAL_BASE_NAMES = {
+    "Sin",
+    "Cos",
+    "Tan",
+    "Cot",
+    "Sec",
+    "Csc",
+    "ArcSin",
+    "ArcCos",
+    "ArcTan",
+    "ArcCot",
+    "ArcSec",
+    "ArcCsc",
+}
+
+
 def _expr_to_sympy_numeric(expr: Expr):
     _sp = _sympy_module()
     if isinstance(expr, Integer):
@@ -5013,27 +5082,23 @@ def _expr_to_sympy_numeric(expr: Expr):
             return _sp.sqrt(_expr_to_sympy_numeric(expr.arguments[0]))
         if head_name == "Abs" and len(expr.arguments) == 1:
             return _sp.Abs(_expr_to_sympy_numeric(expr.arguments[0]))
+        if head_name == "Exp" and len(expr.arguments) == 1:
+            return _sp.exp(_expr_to_sympy_numeric(expr.arguments[0]))
         if head_name == "Log":
             if len(expr.arguments) == 1:
                 return _sp.log(_expr_to_sympy_numeric(expr.arguments[0]))
             if len(expr.arguments) == 2:
                 return _sp.log(_expr_to_sympy_numeric(expr.arguments[1]), _expr_to_sympy_numeric(expr.arguments[0]))
-        unary_functions = {
-            "Sin": _sp.sin,
-            "Cos": _sp.cos,
-            "Tan": _sp.tan,
-            "Cot": _sp.cot,
-            "Sec": _sp.sec,
-            "Csc": _sp.csc,
-            "ArcSin": _sp.asin,
-            "ArcCos": _sp.acos,
-            "ArcTan": _sp.atan,
-            "Sinh": _sp.sinh,
-            "Cosh": _sp.cosh,
-            "Tanh": _sp.tanh,
-            "Exp": _sp.exp,
-        }
-        function = unary_functions.get(head_name or "")
+        if head_name == "ArcTan" and len(expr.arguments) == 2:
+            return _sp.atan2(_expr_to_sympy_numeric(expr.arguments[1]), _expr_to_sympy_numeric(expr.arguments[0]))
+        degree_base = _degree_transcendental_base_name(head_name or "")
+        if degree_base is not None and len(expr.arguments) == 1:
+            function = _sympy_unary_transcendental_function(degree_base)
+            argument = _expr_to_sympy_numeric(expr.arguments[0])
+            if degree_base.startswith("Arc"):
+                return function(argument) / (_sp.pi / 180)
+            return function(argument * _sp.pi / 180)
+        function = _sympy_unary_transcendental_function(head_name or "")
         if function is not None and len(expr.arguments) == 1:
             return function(_expr_to_sympy_numeric(expr.arguments[0]))
     raise _SympyNumericConversionError(expr.to_full_form())
@@ -5095,6 +5160,281 @@ def _try_numericize_via_sympy(expr: Expr, precision: int | None) -> Expr | None:
     return _sympy_number_to_expr(sympy_expr, precision)
 
 
+def _sympy_exact_expr_to_tungsten(expr) -> Expr | None:
+    _sp = _sympy_module()
+    expr = _sp.sympify(expr)
+    if expr is _sp.S.NaN or expr == _sp.nan:
+        return symbol("Indeterminate")
+    if expr is _sp.S.ComplexInfinity or expr == _sp.zoo:
+        return symbol("ComplexInfinity")
+    if expr is _sp.S.Infinity or expr == _sp.oo:
+        return symbol("Infinity")
+    if expr is _sp.S.NegativeInfinity or expr == -_sp.oo:
+        return symbol("-Infinity")
+    if expr == _sp.I:
+        return symbol("I")
+    if expr == -_sp.I:
+        return complex_number(integer(0), integer(-1))
+    if expr == _sp.pi:
+        return symbol("Pi")
+    if expr == _sp.E:
+        return symbol("E")
+    if expr.is_Integer:
+        return integer(int(expr))
+    if expr.is_Rational:
+        return rational_number(int(expr.p), int(expr.q))
+    if expr.is_number:
+        real_part, imaginary_part = expr.as_real_imag()
+        if imaginary_part != 0:
+            real_expr = _sympy_exact_expr_to_tungsten(real_part)
+            imaginary_expr = _sympy_exact_expr_to_tungsten(imaginary_part)
+            if real_expr is None or imaginary_expr is None:
+                return None
+            if _is_real_number_expr(real_expr) and _is_real_number_expr(imaginary_expr):
+                return complex_number(real_expr, imaginary_expr)
+            imaginary_term = evaluate(call("Times", imaginary_expr, symbol("I")))
+            if _is_exact_zero(real_expr):
+                return imaginary_term
+            return evaluate(call("Plus", real_expr, imaginary_term))
+    if expr.is_Add:
+        terms = tuple(_sympy_exact_expr_to_tungsten(term) for term in expr.as_ordered_terms())
+        if any(term is None for term in terms):
+            return None
+        return evaluate(call("Plus", *(term for term in terms if term is not None)))
+    if expr.is_Mul:
+        factors = tuple(_sympy_exact_expr_to_tungsten(factor) for factor in expr.as_ordered_factors())
+        if any(factor is None for factor in factors):
+            return None
+        return evaluate(call("Times", *(factor for factor in factors if factor is not None)))
+    if expr.is_Pow:
+        base = _sympy_exact_expr_to_tungsten(expr.base)
+        exponent = _sympy_exact_expr_to_tungsten(expr.exp)
+        if base is None or exponent is None:
+            return None
+        return evaluate(call("Power", base, exponent))
+    if expr.func == _sp.exp and len(expr.args) == 1:
+        exponent = _sympy_exact_expr_to_tungsten(expr.args[0])
+        return None if exponent is None else evaluate(call("Power", symbol("E"), exponent))
+    if expr.func == _sp.log and len(expr.args) == 1:
+        argument = _sympy_exact_expr_to_tungsten(expr.args[0])
+        return None if argument is None else call("Log", argument)
+    function_name = _sympy_function_name(expr)
+    if function_name is not None:
+        arguments = tuple(_sympy_exact_expr_to_tungsten(argument) for argument in expr.args)
+        if any(argument is None for argument in arguments):
+            return None
+        return call(function_name, *(argument for argument in arguments if argument is not None))
+    return None
+
+
+def _sympy_function_name(expr) -> str | None:
+    name_by_function = {
+        "sin": "Sin",
+        "cos": "Cos",
+        "tan": "Tan",
+        "cot": "Cot",
+        "sec": "Sec",
+        "csc": "Csc",
+        "asin": "ArcSin",
+        "acos": "ArcCos",
+        "atan": "ArcTan",
+        "acot": "ArcCot",
+        "asec": "ArcSec",
+        "acsc": "ArcCsc",
+        "sinh": "Sinh",
+        "cosh": "Cosh",
+        "tanh": "Tanh",
+        "coth": "Coth",
+        "sech": "Sech",
+        "csch": "Csch",
+        "asinh": "ArcSinh",
+        "acosh": "ArcCosh",
+        "atanh": "ArcTanh",
+        "acoth": "ArcCoth",
+        "asech": "ArcSech",
+        "acsch": "ArcCsch",
+    }
+    return name_by_function.get(expr.func.__name__)
+
+
+def _evaluate_transcendental_function_expr(expr: Call) -> Expr | None:
+    head_name = expr.head_expr.name if isinstance(expr.head_expr, Symbol) else None
+    if head_name == "Log" and len(expr.arguments) in {1, 2} and _is_numeric_zero(expr.arguments[-1]):
+        return symbol("-Infinity")
+    if head_name == "Exp":
+        if len(expr.arguments) != 1:
+            return None
+        try:
+            sympy_result = _transcendental_call_to_sympy(expr)
+            numeric_result = _inexact_transcendental_result(expr, sympy_result)
+            if numeric_result is not None:
+                return numeric_result
+            result = _sympy_exact_expr_to_tungsten(sympy_result)
+            if result is not None and result != expr:
+                return result
+        except _SympyNumericConversionError:
+            pass
+        return evaluate(call("Power", symbol("E"), expr.arguments[0]))
+    if head_name == "Log" and len(expr.arguments) == 2:
+        try:
+            sympy_result = _transcendental_call_to_sympy(expr)
+            numeric_result = _inexact_transcendental_result(expr, sympy_result)
+            if numeric_result is not None:
+                return numeric_result
+            result = _sympy_exact_expr_to_tungsten(sympy_result)
+            if result is not None and result != expr:
+                return result
+        except _SympyNumericConversionError:
+            pass
+        return evaluate(call("Times", call("Log", expr.arguments[1]), call("Power", call("Log", expr.arguments[0]), integer(-1))))
+    try:
+        sympy_result = _transcendental_call_to_sympy(expr)
+    except _SympyNumericConversionError:
+        return None
+    numeric_result = _inexact_transcendental_result(expr, sympy_result)
+    if numeric_result is not None:
+        return numeric_result
+    if _transcendental_result_should_remain_inert(head_name or "", sympy_result):
+        return None
+    result = _sympy_exact_expr_to_tungsten(sympy_result)
+    if result is None or result == expr:
+        return None
+    return result
+
+
+def _inexact_transcendental_result(expr: Call, sympy_result) -> Expr | None:
+    if not any(_expr_contains_inexact_real(argument) for argument in expr.arguments):
+        return None
+    precision = _combined_inexact_precision(expr.arguments)
+    return _sympy_number_to_expr(sympy_result, precision)
+
+
+def _transcendental_call_to_sympy(expr: Call):
+    _sp = _sympy_module()
+    head_name = expr.head_expr.name if isinstance(expr.head_expr, Symbol) else None
+    if head_name == "Exp" and len(expr.arguments) == 1:
+        return _sp.exp(_expr_to_sympy_numeric(expr.arguments[0]))
+    if head_name == "Log" and len(expr.arguments) == 1:
+        return _sp.log(_expr_to_sympy_numeric(expr.arguments[0]))
+    if head_name == "Log" and len(expr.arguments) == 2:
+        return _sp.log(_expr_to_sympy_numeric(expr.arguments[1]), _expr_to_sympy_numeric(expr.arguments[0]))
+    if head_name == "ArcTan" and len(expr.arguments) == 2:
+        return _sp.atan2(_expr_to_sympy_numeric(expr.arguments[1]), _expr_to_sympy_numeric(expr.arguments[0]))
+    degree_base = _degree_transcendental_base_name(head_name or "")
+    if degree_base is not None and len(expr.arguments) == 1:
+        function = _sympy_unary_transcendental_function(degree_base)
+        argument = _expr_to_sympy_numeric(expr.arguments[0])
+        if degree_base.startswith("Arc"):
+            return function(argument) / (_sp.pi / 180)
+        return function(argument * _sp.pi / 180)
+    function = _sympy_unary_transcendental_function(head_name or "")
+    if function is not None and len(expr.arguments) == 1:
+        return function(_expr_to_sympy_numeric(expr.arguments[0]))
+    raise _SympyNumericConversionError(expr.to_full_form())
+
+
+def _transcendental_result_should_remain_inert(head_name: str, sympy_result) -> bool:
+    _sp = _sympy_module()
+    result = _sp.sympify(sympy_result)
+    if head_name in {"Haversine", "InverseHaversine", "Gudermannian", "InverseGudermannian"}:
+        return bool(result.atoms(_sp.Function))
+    degree_base = _degree_transcendental_base_name(head_name)
+    if degree_base is not None and degree_base.startswith("Arc") and result.atoms(_sp.Function):
+        return True
+    if result.has(_sp.log) and head_name != "Log":
+        return True
+    if head_name.startswith("Arc") and result.atoms(_sp.Function):
+        return True
+    return False
+
+
+def _is_real_transcendental_expr(expr: Expr) -> bool:
+    if _is_number_expr(expr):
+        return False
+    if not _is_numeric_transcendental_expr(expr):
+        return False
+    try:
+        sympy_expr = _expr_to_sympy_numeric(expr)
+    except _SympyNumericConversionError:
+        return False
+    return bool(sympy_expr.is_real)
+
+
+def _is_numeric_transcendental_expr(expr: Expr) -> bool:
+    try:
+        sympy_expr = _expr_to_sympy_numeric(expr)
+    except _SympyNumericConversionError:
+        return False
+    if getattr(sympy_expr, "free_symbols", None):
+        return False
+    return bool(getattr(sympy_expr, "is_number", False))
+
+
+def _expr_contains_inexact_real(expr: Expr) -> bool:
+    if _contains_inexact_real(expr):
+        return True
+    if isinstance(expr, Call):
+        return any(_expr_contains_inexact_real(argument) for argument in expr.arguments)
+    return False
+
+
+def _compare_transcendental_real_expr(left: Expr, right: Expr) -> int | None:
+    try:
+        left_sym = _expr_to_sympy_numeric(left)
+        right_sym = _expr_to_sympy_numeric(right)
+    except _SympyNumericConversionError:
+        return None
+    if getattr(left_sym, "free_symbols", None) or getattr(right_sym, "free_symbols", None):
+        return None
+    if left_sym.is_real is not True or right_sym.is_real is not True:
+        return None
+    difference = left_sym - right_sym
+    if difference == 0:
+        return 0
+    sign = _sympy_proved_sign(difference)
+    if sign is not None:
+        return sign
+    return _sympy_numeric_sign_with_extra_precision(difference)
+
+
+def _sympy_proved_sign(expr) -> int | None:
+    _sp = _sympy_module()
+    sign = _sp.sign(expr)
+    if sign in {_sp.Integer(-1), _sp.Integer(0), _sp.Integer(1)}:
+        return int(sign)
+    if expr.is_positive is True:
+        return 1
+    if expr.is_negative is True:
+        return -1
+    if expr.is_zero is True:
+        return 0
+    return None
+
+
+def _sympy_numeric_sign_with_extra_precision(expr) -> int | None:
+    _sp = _sympy_module()
+    extra = _finite_system_limit_value("$MaxExtraPrecision")
+    max_digits = 80 if extra is None else max(20, 30 + extra)
+    digits = 30
+    while digits <= max_digits:
+        try:
+            numeric = _sp.N(expr, digits)
+        except (TypeError, ValueError, _sp.PrecisionExhausted):
+            return None
+        if numeric == 0:
+            return 0
+        if numeric.is_real is not True:
+            return None
+        try:
+            absolute = abs(numeric)
+            if absolute > _sp.Float(10) ** (-(digits - 8)):
+                return 1 if numeric > 0 else -1
+        except (TypeError, ValueError):
+            return None
+        digits *= 2
+    return None
+
+
 def _numericize_evaluable_call(expr: Call, precision: int | None) -> Expr | None:
     head_name = expr.head_expr.name if isinstance(expr.head_expr, Symbol) else None
     if head_name in {"Plus", "Times", "Power", "Sqrt", "Abs"} and all(
@@ -5103,22 +5443,12 @@ def _numericize_evaluable_call(expr: Call, precision: int | None) -> Expr | None
         evaluated = evaluate(expr)
         if evaluated != expr:
             return _numericize_expr(evaluated, precision)
-    if head_name in {
-        "Sin",
-        "Cos",
-        "Tan",
-        "Cot",
-        "Sec",
-        "Csc",
-        "ArcSin",
-        "ArcCos",
-        "ArcTan",
-        "Sinh",
-        "Cosh",
-        "Tanh",
-        "Exp",
-        "Log",
-    } and all(_is_number_expr(argument) for argument in expr.arguments):
+    degree_base = _degree_transcendental_base_name(head_name or "")
+    if (
+        head_name in {"Exp", "Log", "ArcTan"}
+        or degree_base is not None
+        or _sympy_unary_transcendental_function(head_name or "") is not None
+    ) and all(_is_number_expr(argument) for argument in expr.arguments):
         return _try_numericize_via_sympy(expr, precision)
     return None
 

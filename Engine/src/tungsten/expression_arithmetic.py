@@ -539,18 +539,27 @@ def _evaluate_numeric_relation(expr: Call) -> Expr | None:
                 if test_result != symbol("True"):
                     return None
             return symbol("True")
-        if not all(_is_number_expr(argument) for argument in expr.arguments):
+        if all(_is_number_expr(argument) for argument in expr.arguments):
+            comparisons = [_numeric_same_value(left, right) for left, right in zip(expr.arguments, expr.arguments[1:])]
+        elif all(_is_real_comparable_expr(argument) for argument in expr.arguments):
+            comparisons = [_real_same_value(left, right) for left, right in zip(expr.arguments, expr.arguments[1:])]
+        else:
             return None
-        comparisons = [_numeric_same_value(left, right) for left, right in zip(expr.arguments, expr.arguments[1:])]
         if any(comparison is None for comparison in comparisons):
             return None
         return _bool_symbol(all(bool(comparison) for comparison in comparisons))
 
     if expr.has_head("Unequal"):
-        if not all(_is_number_expr(argument) for argument in expr.arguments):
+        if not all(_is_number_expr(argument) for argument in expr.arguments) and not all(
+            _is_real_comparable_expr(argument) for argument in expr.arguments
+        ):
             return None
         for left, right in itertools.combinations(expr.arguments, 2):
-            comparison = _numeric_same_value(left, right)
+            comparison = (
+                _numeric_same_value(left, right)
+                if _is_number_expr(left) and _is_number_expr(right)
+                else _real_same_value(left, right)
+            )
             if comparison is None:
                 return None
             if comparison:
@@ -558,10 +567,7 @@ def _evaluate_numeric_relation(expr: Call) -> Expr | None:
         return _bool_symbol(True)
 
     if not all(
-        _is_real_number_expr(argument)
-        or _is_real_algebraic_expr(argument)
-        or _is_positive_infinity_expr(argument)
-        or _is_negative_infinity_expr(argument)
+        _is_real_comparable_expr(argument)
         for argument in expr.arguments
     ):
         return None
@@ -579,6 +585,21 @@ def _evaluate_numeric_relation(expr: Call) -> Expr | None:
     if expr.has_head("GreaterEqual"):
         return _bool_symbol(all(comparison >= 0 for comparison in comparisons))
     return None
+
+
+def _is_real_comparable_expr(expr: Expr) -> bool:
+    return (
+        _is_real_number_expr(expr)
+        or _is_real_algebraic_expr(expr)
+        or _is_real_transcendental_expr(expr)
+        or _is_positive_infinity_expr(expr)
+        or _is_negative_infinity_expr(expr)
+    )
+
+
+def _real_same_value(left: Expr, right: Expr) -> bool | None:
+    comparison = _compare_real_expr(left, right)
+    return None if comparison is None else comparison == 0
 
 
 def _evaluate_inequality(expr: Call) -> Expr | None:
@@ -691,14 +712,14 @@ def _evaluate_simple_predicates(expr: Call) -> Expr | None:
         return _bool_symbol(_is_machine_number_expr(argument))
 
     if expr.has_head("NumberQ"):
-        return _bool_symbol(_is_number_expr(argument))
+        return _bool_symbol(_is_number_expr(argument) or _is_numeric_transcendental_expr(argument))
 
     if expr.has_head("ExactNumberQ"):
         if _is_exact_real_number(argument):
             return _bool_symbol(True)
         if isinstance(argument, ComplexNumber):
             return _bool_symbol(_is_exact_real_number(argument.real_part) and _is_exact_real_number(argument.imaginary_part))
-        return _bool_symbol(False)
+        return _bool_symbol(_is_numeric_transcendental_expr(argument) and not _expr_contains_inexact_real(argument))
 
     if expr.has_head("InexactNumberQ"):
         if _is_inexact_real_number(argument):
@@ -708,7 +729,7 @@ def _evaluate_simple_predicates(expr: Call) -> Expr | None:
         return _bool_symbol(False)
 
     if expr.has_head("RealValuedNumberQ"):
-        return _bool_symbol(_is_real_number_expr(argument))
+        return _bool_symbol(_is_real_number_expr(argument) or _is_real_transcendental_expr(argument))
 
     if expr.has_head("StringQ"):
         return _bool_symbol(isinstance(argument, String))
@@ -1821,6 +1842,10 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
             return None
         return _set_accuracy_expr(expr.arguments[0], expr.arguments[1])
 
+    transcendental = _evaluate_transcendental_function_expr(expr)
+    if transcendental is not None:
+        return transcendental
+
     if expr.has_head("Re"):
         if len(expr.arguments) != 1:
             return None
@@ -1870,7 +1895,7 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
         if len(expr.arguments) != 1:
             return None
         argument = expr.arguments[0]
-        if _is_real_number_expr(argument):
+        if _is_real_number_expr(argument) or _is_real_transcendental_expr(argument):
             zero_compare = _compare_real_expr(argument, integer(0))
             if zero_compare is None:
                 return None
@@ -1888,7 +1913,7 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
         return evaluate(call("Times", argument, call("Power", magnitude, integer(-1))))
 
     if expr.has_head("RealSign"):
-        if len(expr.arguments) != 1 or not _is_real_number_expr(expr.arguments[0]):
+        if len(expr.arguments) != 1 or not (_is_real_number_expr(expr.arguments[0]) or _is_real_transcendental_expr(expr.arguments[0])):
             return None
         zero_compare = _compare_real_expr(expr.arguments[0], integer(0))
         if zero_compare is None:
@@ -1896,12 +1921,17 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
         return integer((zero_compare > 0) - (zero_compare < 0))
 
     if expr.has_head("Unitize"):
-        if len(expr.arguments) != 1 or not _is_number_expr(expr.arguments[0]):
+        if len(expr.arguments) != 1 or not (_is_number_expr(expr.arguments[0]) or _is_real_transcendental_expr(expr.arguments[0])):
             return None
+        if _is_real_transcendental_expr(expr.arguments[0]):
+            zero_compare = _compare_real_expr(expr.arguments[0], integer(0))
+            if zero_compare is None:
+                return None
+            return integer(0 if zero_compare == 0 else 1)
         return integer(0 if _is_numeric_zero(expr.arguments[0]) else 1)
 
     if expr.has_head("UnitStep"):
-        if not all(_is_real_number_expr(argument) for argument in expr.arguments):
+        if not all(_is_real_number_expr(argument) or _is_real_transcendental_expr(argument) for argument in expr.arguments):
             return None
         comparisons = [_compare_real_expr(argument, integer(0)) for argument in expr.arguments]
         if any(comparison is None for comparison in comparisons):
@@ -1910,7 +1940,7 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
         return integer(1 if all(comparison >= 0 for comparison in comparisons) else 0)
 
     if expr.has_head("Ramp"):
-        if len(expr.arguments) != 1 or not _is_real_number_expr(expr.arguments[0]):
+        if len(expr.arguments) != 1 or not (_is_real_number_expr(expr.arguments[0]) or _is_real_transcendental_expr(expr.arguments[0])):
             return None
         comparison = _compare_real_expr(expr.arguments[0], integer(0))
         if comparison is None:
