@@ -475,6 +475,49 @@ class ColonChainParserTests(unittest.TestCase):
             "Optional[Pattern[a, b], Optional[Pattern[c, d], Pattern[e, f]]]",
         )
 
+    def test_pattern_binds_through_arithmetic(self) -> None:
+        # ``:`` has high left binding so the right operand of an arithmetic chain
+        # is consumed by ``:`` first: ``a + z : b`` parses as ``Plus[a, Pattern[z, b]]``.
+        self.assertEqual(
+            parse_expression("a + z : b", form="input").to_full_form(),
+            "Plus[a, Pattern[z, b]]",
+        )
+        self.assertEqual(
+            parse_expression("a CirclePlus z : b", form="input").to_full_form(),
+            "Times[a, CirclePlus, Pattern[z, b]]",
+        )
+        self.assertEqual(
+            parse_expression("a ^ z : b", form="input").to_full_form(),
+            "Power[a, Pattern[z, b]]",
+        )
+
+    def test_pattern_right_side_absorbs_arithmetic(self) -> None:
+        # ``:`` has low right binding so the right operand absorbs the rest:
+        # ``z : a + b`` parses as ``Pattern[z, Plus[a, b]]``.
+        self.assertEqual(
+            parse_expression("z : a + b", form="input").to_full_form(),
+            "Pattern[z, Plus[a, b]]",
+        )
+        self.assertEqual(
+            parse_expression("z : a == b", form="input").to_full_form(),
+            "Pattern[z, Equal[a, b]]",
+        )
+
+    def test_named_pattern_inside_named_character_infix(self) -> None:
+        # Real-world idiom from OEIS A199812: a named-character infix operator
+        # combined with a Pattern[z, {...}] right operand.
+        expr = parse_expression(
+            r"{x___, a_ \[Diamond] m_} \[CirclePlus] z : {b_ \[Diamond] n_, y___}",
+            form="input",
+        )
+        self.assertEqual(
+            expr.to_full_form(),
+            "CirclePlus[List[Pattern[x, BlankNullSequence[]], "
+            "Diamond[Pattern[a, Blank[]], Pattern[m, Blank[]]]], "
+            "Pattern[z, List[Diamond[Pattern[b, Blank[]], Pattern[n, Blank[]]], "
+            "Pattern[y, BlankNullSequence[]]]]]",
+        )
+
 
 class EofKindCollisionParserTests(unittest.TestCase):
     """A symbol literally named ``eof`` must not collide with the EOF kind sentinel."""

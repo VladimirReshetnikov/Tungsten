@@ -1059,6 +1059,7 @@ class _Parser:
     _ALTERNATIVES_BP = 65
     _STRING_EXPRESSION_BP = 64
     _NAMED_PATTERN_BP = 63
+    _NAMED_PATTERN_LEFT_BP = 180
     _CONDITION_BP = 62
     _RULE_BP = 60
     _TWO_WAY_RULE_BP = 61
@@ -1769,7 +1770,13 @@ class _Parser:
             "||": (self._OR_BP, self._OR_BP + 1, "Or"),
             "|": (self._ALTERNATIVES_BP, self._ALTERNATIVES_BP + 1, "Alternatives"),
             "~~": (self._STRING_EXPRESSION_BP, self._STRING_EXPRESSION_BP + 1, "StringExpression"),
-            ":": (self._NAMED_PATTERN_BP, self._NAMED_PATTERN_BP, "Pattern"),
+            # Wolfram's ``:`` (Pattern / Optional) has a high left binding power so it
+            # consumes the right operand inside arithmetic chains (``a + z : b`` parses
+            # as ``Plus[a, Pattern[z, b]]``), but a low right binding power so the right
+            # operand absorbs everything down to commas/semicolons (``z : a + b`` parses
+            # as ``Pattern[z, Plus[a, b]]``). Right-associative folding for chains is
+            # handled in ``_combine_colon``.
+            ":": (self._NAMED_PATTERN_LEFT_BP, self._NAMED_PATTERN_BP, "Pattern"),
             "/;": (self._CONDITION_BP, self._CONDITION_BP + 1, "Condition"),
             "<->": (self._TWO_WAY_RULE_BP, self._TWO_WAY_RULE_BP, "TwoWayRule"),
             "->": (self._RULE_BP, self._RULE_BP, "Rule"),
