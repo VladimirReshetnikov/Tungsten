@@ -331,17 +331,25 @@ The code is split by workstream where the seams are now stable enough:
   recognize ``With`` / ``Module`` / ``Block`` (in addition to ``Function``) so
   inner-bound names are correctly shielded and capture-avoiding alpha-renaming
   kicks in when needed.
-- `expression_iteration.py` is the home for ``Table`` and ``Do``. Both share the
-  iter-spec vocabulary (``n`` / ``{n}`` / ``{i, n}`` / ``{i, imin, imax}`` /
-  ``{i, imin, imax, di}`` / ``{i, list}``) and use the snapshot/restore primitives
-  from ``expression_scoping`` to Block-scope each iteration variable; Tungsten
-  resolves later iter specs in the scope where earlier iterators are already
-  bound, so dependent forms (``{j, i}`` after ``{i, ...}``) work as in the kernel.
-  Iterator bounds and step accept Integer, Rational, and Real values and promote
-  per Tungsten's existing numeric tower; the value-list ``{i, list}`` form
-  iterates over the literal sequence without any conversion. An iteration safety
-  cap (``_ITERATION_SAFETY_LIMIT``) guards against pathological step / bound
-  combinations producing infinite loops.
+- `expression_iteration.py` is the home for ``Table``, ``Do``, ``Sum``, and
+  ``Product``. All four share the iter-spec vocabulary (``n`` / ``{n}`` / ``{i,
+  n}`` / ``{i, imin, imax}`` / ``{i, imin, imax, di}`` / ``{i, list}``) and use
+  the snapshot/restore primitives from ``expression_scoping`` to Block-scope each
+  iteration variable; Tungsten resolves later iter specs in the scope where
+  earlier iterators are already bound, so dependent forms (``{j, i}`` after
+  ``{i, ...}``) work as in the kernel. Iterator bounds and step accept Integer,
+  Rational, and Real values and promote per Tungsten's existing numeric tower;
+  the value-list ``{i, list}`` form iterates over the literal sequence without
+  any conversion. An iteration safety cap (``_ITERATION_SAFETY_LIMIT``) guards
+  against pathological step / bound combinations producing infinite loops.
+  ``Sum`` and ``Product`` reuse ``_resolve_iter_spec`` and
+  ``_iterate_with_block_scope`` through a shared ``_accumulate_loop`` helper that
+  builds a flat list of per-iteration body values; the helper is parameterized
+  by the fold head (``Plus`` for Sum, ``Times`` for Product) so the empty
+  iteration range yields ``0`` / ``1`` without special-casing. Both reject the
+  bare-integer ``n`` iter spec — only the List-form spec is allowed, matching
+  the kernel's convention that ``Sum[a, 3]`` stays inert while
+  ``Sum[a, {3}]`` evaluates.
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 

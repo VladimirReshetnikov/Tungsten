@@ -134,6 +134,17 @@ def evaluate_once(expr: Expr) -> Expr:
             from .expression_iteration import do_expr
             return do_expr(expr.arguments)
 
+        if raw_head_name == "Sum":
+            # ``Sum`` is HoldAll on its iter specs and body so the iter
+            # variable is not looked up before Block-scoping installs
+            # the per-iteration value, matching the kernel's behavior.
+            from .expression_iteration import sum_expr
+            return sum_expr(expr.arguments)
+
+        if raw_head_name == "Product":
+            from .expression_iteration import product_expr
+            return product_expr(expr.arguments)
+
         if raw_head_name == "TimeConstrained":
             return time_constrained_expr(expr.arguments)
 

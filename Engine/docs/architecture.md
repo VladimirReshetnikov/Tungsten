@@ -247,16 +247,21 @@ The expression implementation is now split across a small facade plus family mod
   the OwnValue, the body evaluates, and the snapshot is restored in a Python
   ``try`` / ``finally`` so non-local control flow (``Throw``, ``Abort``, time
   constraints, confirmation failures) still reverts outer state.
-- `expression_iteration.py` owns the iteration constructs ``Table`` and ``Do``. Both
-  share the standard iter-spec vocabulary (``n`` / ``{n}`` for variable-less
-  iteration, ``{i, n}``, ``{i, imin, imax}``, ``{i, imin, imax, di}``, ``{i, list}``);
-  each iteration variable is Block-scoped through the snapshot/restore primitives
-  borrowed from ``expression_scoping``, so the iteration variable's outer state is
-  restored on exit and non-local control flow still reverts the binding. Multiple
-  iter specs nest with the leftmost outermost; later iter specs are resolved in the
-  scope where earlier iterators are already bound, so dependent iter forms work as
-  in the kernel. ``Table`` collects results into a nested ``List``; ``Do`` evaluates
-  the body for side effects only and returns ``Null``.
+- `expression_iteration.py` owns the iteration constructs ``Table``, ``Do``,
+  ``Sum``, and ``Product``. All four share the standard iter-spec vocabulary
+  (``n`` / ``{n}`` for variable-less iteration, ``{i, n}``, ``{i, imin, imax}``,
+  ``{i, imin, imax, di}``, ``{i, list}``); each iteration variable is Block-scoped
+  through the snapshot/restore primitives borrowed from ``expression_scoping``, so
+  the iteration variable's outer state is restored on exit and non-local control
+  flow still reverts the binding. Multiple iter specs nest with the leftmost
+  outermost; later iter specs are resolved in the scope where earlier iterators
+  are already bound, so dependent iter forms work as in the kernel. ``Table``
+  collects results into a nested ``List``; ``Do`` evaluates the body for side
+  effects only and returns ``Null``. ``Sum`` and ``Product`` walk the iteration
+  in flat fashion and fold the collected per-iteration body values through
+  ``Plus`` (Sum, identity ``0``) or ``Times`` (Product, identity ``1``); both
+  reject the bare-integer ``n`` form to match the kernel, which keeps
+  ``Sum[a, 3]`` inert while accepting ``Sum[a, {3}]``.
 - `expression.py` remains the compatibility import surface and still hosts shared expression data
   types, session state, formatting, strings, associations, functional/list operations, and other
   built-in families awaiting future extraction.

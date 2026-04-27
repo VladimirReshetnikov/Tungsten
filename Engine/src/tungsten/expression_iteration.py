@@ -1,6 +1,6 @@
-"""Iteration constructs ``Table`` and ``Do``.
+"""Iteration constructs ``Table``, ``Do``, ``Sum``, and ``Product``.
 
-Both heads use Wolfram's standard iterator-spec vocabulary:
+All four heads use Wolfram's standard iterator-spec vocabulary:
 
 - ``n`` (or ``{n}``) — iterate ``n`` times with no iteration variable;
 - ``{i, n}`` — ``i`` takes integer values ``1, 2, …, n``;
@@ -8,6 +8,10 @@ Both heads use Wolfram's standard iterator-spec vocabulary:
   ``imin`` to ``imax`` inclusive in steps of ``1``;
 - ``{i, imin, imax, di}`` — same with explicit step ``di``;
 - ``{i, list}`` — ``i`` takes the values from the explicit list.
+
+``Sum`` and ``Product`` reject the bare-integer ``n`` form; the kernel
+keeps ``Sum[a, 3]`` inert and only accepts the List-form
+specifications, so Tungsten enforces the same discipline.
 
 Multiple iterators nest; later iterators can depend on earlier
 iteration variables (``Table[expr, {i, 3}, {j, i}]`` evaluates ``j`` 's
@@ -20,7 +24,12 @@ each iteration, and restores the snapshot on exit through Python
 (``Throw`` / ``Abort`` / ``Confirm`` / time-constraint expirations).
 
 ``Table`` collects the iteration values into nested ``List`` results;
-``Do`` evaluates the body for side effects only and returns ``Null``.
+``Do`` evaluates the body for side effects only and returns ``Null``;
+``Sum`` and ``Product`` evaluate the body once per (Block-scoped)
+binding combination, collect each evaluated body in a flat list, and
+fold the list with ``Plus`` (Sum, identity ``0``) or ``Times``
+(Product, identity ``1``) so symbolic bodies like ``Sum[a, {3}]`` reduce
+to ``Times[3, a]`` and rational/real bounds promote naturally.
 
 The iterator-spec evaluation reuses Tungsten's existing numeric helpers
 (``_compare_real_expr``, ``_add_numeric_expr``) so Integer, Rational,
@@ -73,6 +82,94 @@ def do_expr(arguments: Sequence["Expr"]) -> "Expr":
     iter_specs = arguments[1:]
     _do_loop(body, iter_specs)
     return symbol("Null")
+
+
+def sum_expr(arguments: Sequence["Expr"]) -> "Expr":
+    """Evaluate ``Sum[body, iter1, iter2, …]``.
+
+    Walks the iterator nesting in Block-scoped fashion (each iterator
+    variable is snapshotted/restored exactly like ``Table``/``Do``),
+    collects every evaluated body into a flat list, and folds the list
+    through ``Plus`` once at the end. ``Plus[]`` is ``0`` so an empty
+    iteration range yields ``0``, matching the kernel.
+    """
+    return _accumulate_expr("Sum", "Plus", arguments)
+
+
+def product_expr(arguments: Sequence["Expr"]) -> "Expr":
+    """Evaluate ``Product[body, iter1, iter2, …]``.
+
+    Same Block-scoped iteration walk as ``Sum`` but folds the collected
+    bodies through ``Times`` so ``Product[a, {3}]`` reduces to
+    ``Power[a, 3]``. ``Times[]`` is ``1`` so an empty iteration range
+    yields ``1``, matching the kernel.
+    """
+    return _accumulate_expr("Product", "Times", arguments)
+
+
+def _accumulate_expr(
+    head_name: str,
+    accumulator_head: str,
+    arguments: Sequence["Expr"],
+) -> "Expr":
+    """Shared driver for ``Sum`` and ``Product``.
+
+    The kernel rejects the bare-integer ``n`` form for these heads
+    (``Sum[a, 3]`` stays inert while ``Sum[a, {3}]`` evaluates), so
+    every iter spec must be a ``List`` call. When the spec or body
+    cannot be reduced (symbolic bounds, non-numeric step), the
+    ``WolframEvaluationError`` propagates and the top-level evaluator
+    catches it and returns the original expression unchanged.
+    """
+    from .expression import Call, WolframEvaluationError, call, evaluate
+
+    if len(arguments) < 2:
+        raise WolframEvaluationError(
+            f"{head_name} expects a body and at least one iterator specification."
+        )
+    body = arguments[0]
+    iter_specs = arguments[1:]
+    for spec in iter_specs:
+        if not (isinstance(spec, Call) and spec.has_head("List")):
+            raise WolframEvaluationError(
+                f"{head_name} iterator specification must be a List."
+            )
+    terms: list["Expr"] = []
+    _accumulate_loop(body, iter_specs, terms)
+    return evaluate(call(accumulator_head, *terms))
+
+
+def _accumulate_loop(
+    body: "Expr",
+    iter_specs: Sequence["Expr"],
+    terms: list["Expr"],
+) -> None:
+    """Walk iterator nesting, evaluating ``body`` once per (Block-scoped)
+    binding combination and appending the result to ``terms``.
+
+    ``Sum`` and ``Product`` differ only in how the collected term list
+    is folded at the end, so they share this walk verbatim.
+    """
+    from .expression import evaluate
+
+    if not iter_specs:
+        terms.append(evaluate(body))
+        return
+
+    spec = iter_specs[0]
+    rest_specs = iter_specs[1:]
+    var_symbol, values = _resolve_iter_spec(spec)
+
+    if var_symbol is None:
+        for _ in range(len(values)):
+            _accumulate_loop(body, rest_specs, terms)
+        return
+
+    _iterate_with_block_scope(
+        var_symbol,
+        values,
+        lambda: _accumulate_loop(body, rest_specs, terms),
+    )
 
 
 def _table_loop(body: "Expr", iter_specs: Sequence["Expr"]) -> "Expr":
@@ -298,5 +395,7 @@ def _generate_numeric_iter_values(
 
 __all__ = [
     "do_expr",
+    "product_expr",
+    "sum_expr",
     "table_expr",
 ]
