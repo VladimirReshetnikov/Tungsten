@@ -16,6 +16,7 @@ import io
 import itertools
 import json
 import math
+import random
 import re
 import sys
 import time
@@ -413,11 +414,18 @@ _SYSTEM_SYMBOL_NAMES = {
     "AccountingForm",
     "Accuracy",
     "All",
+    "AlphabeticSort",
     "Alternatives",
     "And",
     "Append",
+    "AppendTo",
     "Apply",
     "Array",
+    "ArrayDepth",
+    "ArrayFlatten",
+    "ArrayPad",
+    "ArrayQ",
+    "ArrayReshape",
     "ArrayRules",
     "Association",
     "AssociationMap",
@@ -483,10 +491,12 @@ _SYSTEM_SYMBOL_NAMES = {
     "Cross",
     "DatePattern",
     "Delete",
+    "DeleteAdjacentDuplicates",
     "DeleteCases",
     "DeleteDuplicates",
     "DeleteDuplicatesBy",
     "Derivative",
+    "Det",
     "Depth",
     "DecimalForm",
     "DiagonalMatrix",
@@ -541,6 +551,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "FixedPointList",
     "Flat",
     "Flatten",
+    "FlattenAt",
     "Fold",
     "FoldList",
     "FoldPair",
@@ -581,7 +592,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "Infinity",
     "Inequality",
     "Inner",
+    "Insert",
     "Intersection",
+    "Inverse",
     "Integer",
     "IntegerExponent",
     "IntegerQ",
@@ -601,6 +614,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Length",
     "LetterCharacter",
     "LetterQ",
+    "LeviCivitaTensor",
     "LengthWhile",
     "Less",
     "LessEqual",
@@ -629,6 +643,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "MatchQ",
     "MathMLForm",
     "MatrixForm",
+    "MatrixPower",
     "Max",
     "MaximalBy",
     "MemberQ",
@@ -668,6 +683,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "NumberQ",
     "NumberString",
     "NumberMarks",
+    "NumericalSort",
     "NumericFunction",
     "OddQ",
     "Off",
@@ -720,6 +736,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Quit",
     "Quiet",
     "Ramp",
+    "RandomSample",
     "Range",
     "Rational",
     "Re",
@@ -10281,9 +10298,16 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Abs",
     "Accuracy",
     "And",
+    "AlphabeticSort",
     "Append",
+    "AppendTo",
     "Apply",
     "Array",
+    "ArrayDepth",
+    "ArrayFlatten",
+    "ArrayPad",
+    "ArrayQ",
+    "ArrayReshape",
     "ArrayRules",
     "AtomQ",
     "BaseDecode",
@@ -10302,10 +10326,13 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Composition",
     "ConstantArray",
     "Construct",
+    "Cross",
     "Delete",
+    "DeleteAdjacentDuplicates",
     "DeleteCases",
     "DeleteDuplicates",
     "DeleteDuplicatesBy",
+    "Det",
     "Depth",
     "Dimensions",
     "Discard",
@@ -10321,6 +10348,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "FixedPoint",
     "FixedPointList",
     "Flatten",
+    "FlattenAt",
     "Fold",
     "FoldList",
     "FoldPair",
@@ -10337,9 +10365,12 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Im",
     "IntegerQ",
     "InexactNumberQ",
+    "Insert",
+    "Inverse",
     "Join",
     "KroneckerDelta",
     "Last",
+    "LeviCivitaTensor",
     "Length",
     "LengthWhile",
     "Less",
@@ -10357,6 +10388,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "MapIndexed",
     "MapThread",
     "MatchQ",
+    "MatrixPower",
     "Max",
     "MaximalBy",
     "MemberQ",
@@ -10372,6 +10404,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Not",
     "Normal",
     "NumberQ",
+    "NumericalSort",
     "Operate",
     "Or",
     "Order",
@@ -10390,6 +10423,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Quotient",
     "QuotientRemainder",
     "Ramp",
+    "RandomSample",
     "Range",
     "Re",
     "RealAbs",
@@ -10420,6 +10454,9 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "SortBy",
     "SparseArray",
     "SparseArrayQ",
+    "Split",
+    "SplitBy",
+    "Subsequences",
     "Conjugate",
     "StringContainsQ",
     "StringDrop",
@@ -10443,6 +10480,8 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Thread",
     "Through",
     "Times",
+    "Tr",
+    "Transpose",
     "ToCharacterCode",
     "Tuples",
     "UnitStep",
@@ -10898,11 +10937,374 @@ def rotate_right(expr: Expr, amount: Expr | int = 1) -> Expr:
 
 
 def flatten(expr: Expr, level_spec: Expr | int | None = None) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_flatten(expr, level_spec)
     compound = _require_compound(expr, "Flatten")
     max_depth = _normalize_flatten_level(level_spec)
     if max_depth == 0:
         return compound
     return _flatten_same_head(compound, max_depth)
+
+
+def array_depth(expr: Expr) -> Expr:
+    return integer(_array_depth_value(expr))
+
+
+def _array_depth_value(expr: Expr) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        return len(expr.dimensions)
+    if isinstance(expr, Call) and expr.has_head("List"):
+        if not expr.arguments:
+            return 1
+        return 1 + max(_array_depth_value(argument) for argument in expr.arguments)
+    return 0
+
+
+def array_q(expr: Expr, depth_expr: Expr | None = None, test: Expr | None = None) -> Expr:
+    try:
+        dimensions = expr.dimensions if isinstance(expr, SparseArrayExpr) else _strict_dense_dimensions(expr)
+    except WolframEvaluationError:
+        return _bool_symbol(False)
+
+    if not dimensions:
+        return _bool_symbol(False)
+
+    if depth_expr is not None:
+        if not isinstance(depth_expr, Integer):
+            raise WolframEvaluationError("ArrayQ currently expects an explicit integer depth.")
+        if len(dimensions) != depth_expr.value:
+            return _bool_symbol(False)
+
+    if test is None:
+        return _bool_symbol(True)
+
+    if isinstance(expr, SparseArrayExpr):
+        total_size = math.prod(dimensions)
+        if len(expr.entries) < total_size and not _predicate_succeeds(test, expr.fill_value):
+            return _bool_symbol(False)
+        return _bool_symbol(all(_predicate_succeeds(test, entry.value) for entry in expr.entries))
+
+    return _bool_symbol(all(_predicate_succeeds(test, value) for value in _dense_leaf_values(expr)))
+
+
+def _dense_leaf_values(expr: Expr) -> tuple[Expr, ...]:
+    if isinstance(expr, Call) and expr.has_head("List"):
+        values: list[Expr] = []
+        for argument in expr.arguments:
+            values.extend(_dense_leaf_values(argument))
+        return tuple(values)
+    return (expr,)
+
+
+def _array_dimensions(expr: Expr, function_name: str) -> tuple[int, ...]:
+    if isinstance(expr, SparseArrayExpr):
+        return expr.dimensions
+    dimensions = _strict_dense_dimensions(expr)
+    if not dimensions:
+        raise WolframEvaluationError(f"{function_name} expects a rectangular array.")
+    return dimensions
+
+
+def _array_indices(dimensions: Sequence[int]) -> Iterable[tuple[int, ...]]:
+    return itertools.product(*(range(1, dimension + 1) for dimension in dimensions))
+
+
+def _array_linear_index(indices: Sequence[int], dimensions: Sequence[int]) -> int:
+    linear = 0
+    for index, dimension in zip(indices, dimensions, strict=True):
+        linear = linear * dimension + (index - 1)
+    return linear
+
+
+def _array_indices_from_linear(linear: int, dimensions: Sequence[int]) -> tuple[int, ...]:
+    if not dimensions:
+        return ()
+    result = [1] * len(dimensions)
+    remaining = linear
+    for axis in range(len(dimensions) - 1, -1, -1):
+        dimension = dimensions[axis]
+        remaining, offset = divmod(remaining, dimension)
+        result[axis] = offset + 1
+    return tuple(result)
+
+
+def _array_value_at(expr: Expr, indices: Sequence[int]) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_value_at(expr, indices)
+    current = expr
+    for index in indices:
+        if not isinstance(current, Call) or not current.has_head("List"):
+            raise WolframEvaluationError("Expected a rectangular List array.")
+        current = current.arguments[index - 1]
+    return current
+
+
+def _build_dense_array(dimensions: Sequence[int], builder: Callable[[tuple[int, ...]], Expr]) -> Expr:
+    return _build_array_from_dimensions(dimensions, builder)
+
+
+def _sparse_array_flatten(array: SparseArrayExpr, level_spec: Expr | int | None = None) -> Expr:
+    level = _normalize_flatten_level(level_spec)
+    rank = len(array.dimensions)
+    if level == 0 or rank <= 1:
+        return array
+
+    if level is None:
+        collapse_count = rank
+    else:
+        collapse_count = min(rank, level + 1)
+    new_dimensions = (math.prod(array.dimensions[:collapse_count]), *array.dimensions[collapse_count:])
+
+    entries: list[_SparseArrayEntry] = []
+    collapsed_dimensions = array.dimensions[:collapse_count]
+    for entry in array.entries:
+        collapsed_index = _array_linear_index(entry.indices[:collapse_count], collapsed_dimensions) + 1
+        entries.append(_SparseArrayEntry((collapsed_index, *entry.indices[collapse_count:]), entry.value))
+    return _sparse_array_expr(new_dimensions, entries, array.fill_value)
+
+
+def array_reshape(expr: Expr, dimensions_expr: Expr | int, padding: Expr | None = None) -> Expr:
+    dimensions = tuple(_normalize_dimensions(dimensions_expr, "ArrayReshape"))
+    fill = integer(0) if padding is None else padding
+
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_reshape(expr, dimensions, fill)
+
+    values = _dense_leaf_values(expr)
+    total_size = math.prod(dimensions) if dimensions else 1
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        linear = _array_linear_index(indices, dimensions) if dimensions else 0
+        return values[linear] if linear < len(values) else fill
+
+    if not dimensions:
+        return values[0] if values else fill
+    return _build_dense_array(dimensions, value_at)
+
+
+def _sparse_array_reshape(array: SparseArrayExpr, dimensions: Sequence[int], fill: Expr) -> Expr:
+    old_total = math.prod(array.dimensions)
+    new_total = math.prod(dimensions) if dimensions else 1
+    if not dimensions:
+        if old_total == 0:
+            return fill
+        return _sparse_array_value_at(array, _array_indices_from_linear(0, array.dimensions))
+
+    can_preserve_sparse = new_total <= old_total or array.fill_value == fill
+    if not can_preserve_sparse:
+        return array_reshape(sparse_array_normal(array), list_expr(*(integer(dimension) for dimension in dimensions)), fill)
+
+    output_fill = array.fill_value if new_total <= old_total else fill
+    entries: list[_SparseArrayEntry] = []
+    for entry in array.entries:
+        linear = _array_linear_index(entry.indices, array.dimensions)
+        if linear >= new_total:
+            continue
+        entries.append(_SparseArrayEntry(_array_indices_from_linear(linear, dimensions), entry.value))
+    return _sparse_array_expr(dimensions, entries, output_fill)
+
+
+def _normalize_array_padding(padding_expr: Expr | int, rank: int) -> list[tuple[int, int]]:
+    if isinstance(padding_expr, int):
+        if padding_expr < 0:
+            raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+        return [(padding_expr, padding_expr)] * rank
+    if isinstance(padding_expr, Integer):
+        return _normalize_array_padding(padding_expr.value, rank)
+    if isinstance(padding_expr, Call) and padding_expr.has_head("List"):
+        if rank == 1 and len(padding_expr.arguments) == 2 and all(isinstance(item, Integer) for item in padding_expr.arguments):
+            left = padding_expr.arguments[0].value  # type: ignore[union-attr]
+            right = padding_expr.arguments[1].value  # type: ignore[union-attr]
+            if left < 0 or right < 0:
+                raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+            return [(left, right)]
+        if len(padding_expr.arguments) == rank and all(isinstance(item, Integer) for item in padding_expr.arguments):
+            widths = [item.value for item in padding_expr.arguments if isinstance(item, Integer)]
+            if any(width < 0 for width in widths):
+                raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+            return [(width, width) for width in widths]
+        if len(padding_expr.arguments) == rank:
+            pairs: list[tuple[int, int]] = []
+            for item in padding_expr.arguments:
+                if not isinstance(item, Call) or not item.has_head("List") or len(item.arguments) != 2:
+                    raise WolframEvaluationError("ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}.")
+                if not all(isinstance(part, Integer) for part in item.arguments):
+                    raise WolframEvaluationError("ArrayPad padding widths must be explicit integers.")
+                left = item.arguments[0].value  # type: ignore[union-attr]
+                right = item.arguments[1].value  # type: ignore[union-attr]
+                if left < 0 or right < 0:
+                    raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+                pairs.append((left, right))
+            return pairs
+    raise WolframEvaluationError("ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}.")
+
+
+def array_pad(expr: Expr, padding_expr: Expr | int, padding_value: Expr | None = None) -> Expr:
+    dimensions = _array_dimensions(expr, "ArrayPad")
+    widths = _normalize_array_padding(padding_expr, len(dimensions))
+    fill = integer(0) if padding_value is None else padding_value
+    new_dimensions = tuple(dimension + left + right for dimension, (left, right) in zip(dimensions, widths, strict=True))
+    left_offsets = tuple(left for left, _right in widths)
+
+    if isinstance(expr, SparseArrayExpr):
+        if fill == expr.fill_value:
+            return _sparse_array_expr(
+                new_dimensions,
+                (
+                    _SparseArrayEntry(
+                        tuple(index + offset for index, offset in zip(entry.indices, left_offsets, strict=True)),
+                        entry.value,
+                    )
+                    for entry in expr.entries
+                ),
+                expr.fill_value,
+            )
+        return array_pad(sparse_array_normal(expr), padding_expr, fill)
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        source_indices: list[int] = []
+        for index, dimension, (left, _right) in zip(indices, dimensions, widths, strict=True):
+            source_index = index - left
+            if source_index < 1 or source_index > dimension:
+                return fill
+            source_indices.append(source_index)
+        return _array_value_at(expr, source_indices)
+
+    return _build_dense_array(new_dimensions, value_at)
+
+
+def array_flatten(expr: Expr) -> Expr:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        raise WolframEvaluationError("ArrayFlatten expects a rectangular list of array blocks.")
+    block_rows: list[tuple[Expr, ...]] = []
+    for row in expr.arguments:
+        if not isinstance(row, Call) or not row.has_head("List"):
+            raise WolframEvaluationError("ArrayFlatten expects a rectangular list of array blocks.")
+        block_rows.append(row.arguments)
+    if not block_rows:
+        return _evaluated_list_expr()
+    column_count = len(block_rows[0])
+    if column_count == 0 or any(len(row) != column_count for row in block_rows):
+        raise WolframEvaluationError("ArrayFlatten expects a rectangular block matrix.")
+
+    block_shapes: list[list[tuple[int, int]]] = []
+    any_sparse = False
+    for row in block_rows:
+        shape_row: list[tuple[int, int]] = []
+        for block in row:
+            if isinstance(block, SparseArrayExpr):
+                if len(block.dimensions) != 2:
+                    raise WolframEvaluationError("ArrayFlatten currently expects rank-2 SparseArray blocks.")
+                if block.fill_value != integer(0):
+                    return array_flatten(_blocks_to_dense_expr(block_rows))
+                any_sparse = True
+                shape_row.append((block.dimensions[0], block.dimensions[1]))
+                continue
+            dimensions = _strict_dense_dimensions(block)
+            if len(dimensions) != 2:
+                raise WolframEvaluationError("ArrayFlatten currently expects rank-2 array blocks.")
+            shape_row.append((dimensions[0], dimensions[1]))
+        block_shapes.append(shape_row)
+
+    row_heights: list[int] = []
+    for row_index, shape_row in enumerate(block_shapes):
+        height = shape_row[0][0]
+        if any(shape[0] != height for shape in shape_row):
+            raise WolframEvaluationError(f"ArrayFlatten block row {row_index + 1} has inconsistent heights.")
+        row_heights.append(height)
+
+    column_widths: list[int] = []
+    for column_index in range(column_count):
+        width = block_shapes[0][column_index][1]
+        if any(shape_row[column_index][1] != width for shape_row in block_shapes):
+            raise WolframEvaluationError(f"ArrayFlatten block column {column_index + 1} has inconsistent widths.")
+        column_widths.append(width)
+
+    output_dimensions = (sum(row_heights), sum(column_widths))
+    if any_sparse:
+        entries: list[_SparseArrayEntry] = []
+        row_offset = 0
+        for block_row, height in zip(block_rows, row_heights, strict=True):
+            column_offset = 0
+            for block, width in zip(block_row, column_widths, strict=True):
+                entries.extend(_array_flatten_block_entries(block, row_offset, column_offset))
+                column_offset += width
+            row_offset += height
+        return _sparse_array_expr(output_dimensions, entries, integer(0))
+
+    rows: list[Expr] = []
+    for block_row, height in zip(block_rows, row_heights, strict=True):
+        for local_row in range(1, height + 1):
+            row_values: list[Expr] = []
+            for block in block_row:
+                assert isinstance(block, Call)
+                block_row_expr = block.arguments[local_row - 1]
+                assert isinstance(block_row_expr, Call)
+                row_values.extend(block_row_expr.arguments)
+            rows.append(_evaluated_list_expr(*row_values))
+    return _evaluated_list_expr(*rows)
+
+
+def _blocks_to_dense_expr(block_rows: Sequence[Sequence[Expr]]) -> Expr:
+    return _evaluated_list_expr(*(
+        _evaluated_list_expr(*(sparse_array_normal(block) if isinstance(block, SparseArrayExpr) else block for block in row))
+        for row in block_rows
+    ))
+
+
+def _array_flatten_block_entries(block: Expr, row_offset: int, column_offset: int) -> list[_SparseArrayEntry]:
+    entries: list[_SparseArrayEntry] = []
+    if isinstance(block, SparseArrayExpr):
+        for entry in block.entries:
+            entries.append(_SparseArrayEntry((row_offset + entry.indices[0], column_offset + entry.indices[1]), entry.value))
+        return entries
+    dimensions = _strict_dense_dimensions(block)
+    for row, column in _array_indices(dimensions):
+        value = _array_value_at(block, (row, column))
+        if value != integer(0):
+            entries.append(_SparseArrayEntry((row_offset + row, column_offset + column), value))
+    return entries
+
+
+def _normalize_transpose_permutation(rank: int, permutation_expr: Expr | None) -> tuple[int, ...]:
+    if rank < 2 and permutation_expr is None:
+        return tuple(range(rank))
+    if permutation_expr is None:
+        return (1, 0, *range(2, rank))
+    if not isinstance(permutation_expr, Call) or not permutation_expr.has_head("List"):
+        raise WolframEvaluationError("Transpose expects a permutation list as its second argument.")
+    if len(permutation_expr.arguments) != rank or not all(isinstance(item, Integer) for item in permutation_expr.arguments):
+        raise WolframEvaluationError("Transpose permutation length must match the array rank.")
+    permutation = tuple(item.value - 1 for item in permutation_expr.arguments if isinstance(item, Integer))
+    if sorted(permutation) != list(range(rank)):
+        raise WolframEvaluationError("Transpose expects a permutation of array axes.")
+    return permutation
+
+
+def transpose(expr: Expr, permutation_expr: Expr | None = None) -> Expr:
+    dimensions = _array_dimensions(expr, "Transpose")
+    permutation = _normalize_transpose_permutation(len(dimensions), permutation_expr)
+    if permutation == tuple(range(len(dimensions))):
+        return expr
+    new_dimensions = tuple(dimensions[axis] for axis in permutation)
+
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_expr(
+            new_dimensions,
+            (
+                _SparseArrayEntry(tuple(entry.indices[axis] for axis in permutation), entry.value)
+                for entry in expr.entries
+            ),
+            expr.fill_value,
+        )
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        source_indices = [0] * len(dimensions)
+        for output_axis, source_axis in enumerate(permutation):
+            source_indices[source_axis] = indices[output_axis]
+        return _array_value_at(expr, source_indices)
+
+    return _build_dense_array(new_dimensions, value_at)
 
 
 def delete(expr: Expr, positions: Expr | int) -> Expr:
@@ -10937,6 +11339,201 @@ def replace_part(expr: Expr, replacements: Expr) -> Expr:
     for path, replacement in _sort_path_items(planned):
         result, _changed = _try_replace_at_path(result, path, replacement)
     return result
+
+
+def insert(expr: Expr, item: Expr, positions: Expr | int) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) == 1 and isinstance(positions, (Integer, int)):
+            return _sparse_vector_insert(expr, item, _normalize_integer_argument(positions, "Insert"))
+        return insert(sparse_array_normal(expr), item, positions)
+
+    paths = _insert_paths(positions)
+    result = expr
+    for path in _sort_paths(paths):
+        result, changed = _try_insert_at_path(result, path, item)
+        if not changed:
+            raise WolframEvaluationError(f"Insert positions are invalid for {expr.to_input_form()}.")
+    return result
+
+
+def _insert_paths(positions: Expr | int) -> list[list[_IndexSelector]]:
+    if isinstance(positions, int):
+        return [[_IndexSelector(positions)]]
+    if isinstance(positions, Integer):
+        return [[_IndexSelector(positions.value)]]
+    if isinstance(positions, Call) and positions.has_head("List"):
+        if all(isinstance(item, Integer) for item in positions.arguments):
+            return [[_IndexSelector(item.value) for item in positions.arguments if isinstance(item, Integer)]]
+        paths: list[list[_IndexSelector]] = []
+        for item in positions.arguments:
+            if not isinstance(item, Call) or not item.has_head("List") or not all(isinstance(part, Integer) for part in item.arguments):
+                raise WolframEvaluationError("Insert expects an integer position, a position list, or a list of position lists.")
+            paths.append([_IndexSelector(part.value) for part in item.arguments if isinstance(part, Integer)])
+        return paths
+    raise WolframEvaluationError("Insert expects an integer position, a position list, or a list of position lists.")
+
+
+def _insert_offset(length_value: int, index: int) -> int | None:
+    if index == 0:
+        return 0
+    if index > 0:
+        offset = index - 1
+    else:
+        offset = length_value + index + 1
+    if 0 <= offset <= length_value:
+        return offset
+    return None
+
+
+def _try_insert_at_path(expr: Expr, path: Sequence[_IndexSelector], item: Expr) -> tuple[Expr, bool]:
+    if not path:
+        return (expr, False)
+    if not isinstance(expr, Call):
+        return (expr, False)
+
+    selector = path[0]
+    if len(path) == 1:
+        offset = _insert_offset(len(expr.arguments), selector.index)
+        if offset is None:
+            return (expr, False)
+        arguments = list(expr.arguments)
+        arguments.insert(offset, item)
+        return (_rebuild(expr, arguments), True)
+
+    resolved = _try_resolve_index(len(expr.arguments), selector.index)
+    if resolved is None:
+        return (expr, False)
+    arguments = list(expr.arguments)
+    updated_child, changed = _try_insert_at_path(arguments[resolved], path[1:], item)
+    if not changed:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
+def _sparse_vector_insert(array: SparseArrayExpr, item: Expr, index: int) -> Expr:
+    length_value = array.dimensions[0]
+    offset = _insert_offset(length_value, index)
+    if offset is None:
+        raise WolframEvaluationError("Insert position is invalid for SparseArray.")
+    inserted_index = offset + 1
+    entries: list[_SparseArrayEntry] = []
+    for entry in array.entries:
+        source_index = entry.indices[0]
+        target_index = source_index + 1 if source_index >= inserted_index else source_index
+        entries.append(_SparseArrayEntry((target_index,), entry.value))
+    if item != array.fill_value:
+        entries.append(_SparseArrayEntry((inserted_index,), item))
+    return _sparse_array_expr((length_value + 1,), entries, array.fill_value)
+
+
+def flatten_at(expr: Expr, positions: Expr | int) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return flatten_at(sparse_array_normal(expr), positions)
+    paths, invalid = _expand_operation_paths(expr, integer(positions) if isinstance(positions, int) else positions)
+    unique_paths = _dedupe_paths(paths)
+    if invalid or any(not path for path in unique_paths):
+        raise WolframEvaluationError(f"FlattenAt positions are invalid for {expr.to_input_form()}.")
+
+    result = expr
+    for path in _sort_paths(unique_paths):
+        result, changed = _try_flatten_at_path(result, path)
+        if not changed:
+            raise WolframEvaluationError(f"FlattenAt positions are invalid for {expr.to_input_form()}.")
+    return result
+
+
+def _try_flatten_at_path(expr: Expr, path: Sequence[_IndexSelector | _KeySelector]) -> tuple[Expr, bool]:
+    if not path or not isinstance(expr, Call):
+        return (expr, False)
+    selector = path[0]
+    if not isinstance(selector, _IndexSelector):
+        return (expr, False)
+    resolved = selector.index - 1
+    if not 0 <= resolved < len(expr.arguments):
+        return (expr, False)
+    arguments = list(expr.arguments)
+    if len(path) == 1:
+        target = arguments[resolved]
+        if not isinstance(target, Call):
+            return (expr, False)
+        arguments[resolved:resolved + 1] = list(target.arguments)
+        return (_rebuild(expr, arguments), True)
+    updated_child, changed = _try_flatten_at_path(arguments[resolved], path[1:])
+    if not changed:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
+def split(expr: Expr, test: Expr | None = None) -> Expr:
+    values = _sequence_values(expr, "Split")
+    if not values:
+        return _evaluated_list_expr()
+    groups: list[list[Expr]] = [[values[0]]]
+    for value in values[1:]:
+        if _duplicate_test_succeeds(test, groups[-1][-1], value):
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+    return _evaluated_list_expr(*(_evaluated_list_expr(*group) for group in groups))
+
+
+def split_by(expr: Expr, function: Expr) -> Expr:
+    values = _sequence_values(expr, "SplitBy")
+    if not values:
+        return _evaluated_list_expr()
+    groups: list[list[Expr]] = [[values[0]]]
+    previous_key = evaluate(_apply_callable(function, (values[0],)))
+    for value in values[1:]:
+        key = evaluate(_apply_callable(function, (value,)))
+        if key == previous_key:
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+            previous_key = key
+    return _evaluated_list_expr(*(_evaluated_list_expr(*group) for group in groups))
+
+
+def delete_adjacent_duplicates(expr: Expr, test: Expr | None = None) -> Expr:
+    values = _sequence_values(expr, "DeleteAdjacentDuplicates")
+    if not values:
+        return _evaluated_list_expr()
+    kept = [values[0]]
+    for value in values[1:]:
+        if not _duplicate_test_succeeds(test, kept[-1], value):
+            kept.append(value)
+    return _evaluated_list_expr(*kept)
+
+
+def subsequences(expr: Expr, spec: Expr | None = None) -> Expr:
+    values = _sequence_values(expr, "Subsequences")
+    count = len(values)
+    if spec is None:
+        bounds = (1, count)
+    elif isinstance(spec, Integer):
+        bounds = (1, spec.value)
+    elif isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
+            target = spec.arguments[0].value
+            bounds = (target, target)
+        elif len(spec.arguments) == 2 and isinstance(spec.arguments[0], Integer) and isinstance(spec.arguments[1], Integer):
+            bounds = (spec.arguments[0].value, spec.arguments[1].value)
+        else:
+            raise WolframEvaluationError("Subsequences currently supports n, {n}, or {min, max} length specs.")
+    else:
+        raise WolframEvaluationError("Subsequences expects an integer count or a length specification list.")
+
+    lower = max(bounds[0], 0)
+    upper = min(max(bounds[1], -1), count)
+    output: list[Expr] = []
+    for length_value in range(lower, upper + 1):
+        if length_value == 0:
+            output.append(_evaluated_list_expr())
+            continue
+        for start in range(0, count - length_value + 1):
+            output.append(_evaluated_list_expr(*values[start:start + length_value]))
+    return _evaluated_list_expr(*output)
 
 
 def _is_function_expr(expr: Expr) -> bool:
@@ -11960,6 +12557,54 @@ def sort_expr(expr: Expr, ordering_function: Expr | None = None, *, reverse: boo
     return _rebuild_ordered_expr(expr, sorted_items)
 
 
+def alphabetic_sort(expr: Expr) -> Expr:
+    items = _sequence_ordering_items(expr, "AlphabeticSort")
+
+    def key(item: _OrderingItem) -> str:
+        value = item.value
+        return value.value.casefold() if isinstance(value, String) else value.to_input_form().casefold()
+
+    return _rebuild_ordered_expr(expr, sorted(items, key=key))
+
+
+def _numerical_sort_key_text(value: str) -> tuple[tuple[int, str | int], ...]:
+    parts: list[tuple[int, str | int]] = []
+    for part in re.split(r"(\d+)", value.casefold()):
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((1, int(part)))
+        else:
+            parts.append((0, part))
+    return tuple(parts)
+
+
+def numerical_sort(expr: Expr) -> Expr:
+    items = _sequence_ordering_items(expr, "NumericalSort")
+
+    def key(item: _OrderingItem) -> tuple[tuple[int, str | int], ...]:
+        value = item.value
+        text = value.value if isinstance(value, String) else value.to_input_form()
+        return _numerical_sort_key_text(text)
+
+    return _rebuild_ordered_expr(expr, sorted(items, key=key))
+
+
+def random_sample(expr: Expr, count: Expr | None = None) -> Expr:
+    items = list(_sequence_ordering_items(expr, "RandomSample"))
+    if count is None or (isinstance(count, Symbol) and count.name == "All"):
+        sample_count = len(items)
+    elif isinstance(count, Call) and count.has_head("UpTo") and len(count.arguments) == 1 and isinstance(count.arguments[0], Integer):
+        sample_count = min(len(items), count.arguments[0].value)
+    elif isinstance(count, Integer):
+        sample_count = count.value
+    else:
+        raise WolframEvaluationError("RandomSample expects an integer, UpTo[n], All, or no count.")
+    if sample_count < 0 or sample_count > len(items):
+        raise WolframEvaluationError("RandomSample count must be between 0 and the sequence length.")
+    return _rebuild_ordered_expr(expr, random.sample(items, sample_count))
+
+
 def ordered_q(expr: Expr, ordering_function: Expr | None = None) -> Symbol:
     items = _sequence_ordering_items(expr, "OrderedQ")
     for left, right in zip(items, items[1:]):
@@ -12516,6 +13161,10 @@ def through(expr: Expr) -> Expr:
 
 
 def _sequence_values(expr: Expr, function_name: str) -> tuple[Expr, ...]:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 1:
+            raise WolframEvaluationError(f"{function_name} expects a one-dimensional SparseArray sequence.")
+        return tuple(_sparse_array_value_at(expr, (index,)) for index in range(1, expr.dimensions[0] + 1))
     return tuple(item.value for item in _selection_items(expr, function_name))
 
 
@@ -13386,20 +14035,23 @@ def dot(arguments: Sequence[Expr]) -> Expr:
             return list_expr(*(dot_two(list_expr(*row), right) for row in left_rows))
 
         if left_rows is None and isinstance(left, Call) and left.has_head("List") and right_rows is not None:
-            width = len(right_rows[0]) if right_rows else 0
-            if any(len(row) != width for row in right_rows):
+            if len(left.arguments) != len(right_rows):
+                raise WolframEvaluationError("Dot expects compatible vector/matrix dimensions.")
+            right_width = len(right_rows[0]) if right_rows else 0
+            if any(len(row) != right_width for row in right_rows):
                 raise WolframEvaluationError("Dot currently expects rectangular matrices.")
             columns = [
                 list_expr(*(row[column_index] for row in right_rows))
-                for column_index in range(width)
+                for column_index in range(right_width)
             ]
             return list_expr(*(dot_two(left, column) for column in columns))
 
         if left_rows is not None and right_rows is not None:
-            width = len(left_rows[0]) if left_rows else 0
-            if any(len(row) != width for row in left_rows):
+            left_width = len(left_rows[0]) if left_rows else 0
+            if any(len(row) != left_width for row in left_rows):
                 raise WolframEvaluationError("Dot currently expects rectangular matrices.")
-            if any(len(row) != width for row in right_rows):
+            right_width = len(right_rows[0]) if right_rows else 0
+            if any(len(row) != right_width for row in right_rows) or left_width != len(right_rows):
                 raise WolframEvaluationError("Dot currently expects compatible matrix dimensions.")
             return list_expr(*(dot_two(list_expr(*row), right) for row in left_rows))
 
@@ -13487,6 +14139,405 @@ def _sparse_dot(left: SparseArrayExpr, right: SparseArrayExpr) -> Expr:
         (_SparseArrayEntry(indices, value) for indices, value in output.items()),
         integer(0),
     )
+
+
+def _is_one_expr_value(expr: Expr) -> bool:
+    if isinstance(expr, Integer):
+        return expr.value == 1
+    if isinstance(expr, RationalNumber):
+        return expr.value == 1
+    return False
+
+
+def _expr_sum(terms: Sequence[Expr]) -> Expr:
+    return evaluate(call("Plus", *terms)) if terms else integer(0)
+
+
+def _expr_product(factors: Sequence[Expr]) -> Expr:
+    return evaluate(call("Times", *factors)) if factors else integer(1)
+
+
+def _expr_negate(expr: Expr) -> Expr:
+    if _is_exact_zero(expr):
+        return integer(0)
+    return evaluate(call("Times", integer(-1), expr))
+
+
+def _expr_subtract(left: Expr, right: Expr) -> Expr:
+    if _is_exact_zero(right):
+        return left
+    return evaluate(call("Plus", left, _expr_negate(right)))
+
+
+def _expr_inverse(expr: Expr) -> Expr:
+    if _is_one_expr_value(expr):
+        return integer(1)
+    return evaluate(call("Power", expr, integer(-1)))
+
+
+def _expr_divide(numerator: Expr, denominator: Expr) -> Expr:
+    if _is_exact_zero(numerator):
+        return integer(0)
+    if _is_one_expr_value(denominator):
+        return numerator
+    return evaluate(call("Times", numerator, _expr_inverse(denominator)))
+
+
+def _matrix_rows(expr: Expr, function_name: str) -> list[list[Expr]]:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 2:
+            raise WolframEvaluationError(f"{function_name} expects a matrix.")
+        rows, columns = expr.dimensions
+        return [
+            [_sparse_array_value_at(expr, (row, column)) for column in range(1, columns + 1)]
+            for row in range(1, rows + 1)
+        ]
+    rows = _list_rows(expr, function_name)
+    if rows is None:
+        raise WolframEvaluationError(f"{function_name} expects a matrix.")
+    width = len(rows[0]) if rows else 0
+    if any(len(row) != width for row in rows):
+        raise WolframEvaluationError(f"{function_name} expects a rectangular matrix.")
+    return [list(row) for row in rows]
+
+
+def _require_square_matrix_rows(expr: Expr, function_name: str) -> list[list[Expr]]:
+    rows = _matrix_rows(expr, function_name)
+    width = len(rows[0]) if rows else 0
+    if len(rows) != width:
+        raise WolframEvaluationError(f"{function_name} expects a square matrix.")
+    return rows
+
+
+def _require_square_matrix_size(expr: Expr, function_name: str) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 2 or expr.dimensions[0] != expr.dimensions[1]:
+            raise WolframEvaluationError(f"{function_name} expects a square matrix.")
+        return expr.dimensions[0]
+    return len(_require_square_matrix_rows(expr, function_name))
+
+
+def _fraction_matrix(rows: Sequence[Sequence[Expr]]) -> list[list[Fraction]] | None:
+    matrix: list[list[Fraction]] = []
+    for row in rows:
+        fraction_row: list[Fraction] = []
+        for value in row:
+            fraction = _exact_fraction(value)
+            if fraction is None:
+                return None
+            fraction_row.append(fraction)
+        matrix.append(fraction_row)
+    return matrix
+
+
+def _fraction_to_expr(value: Fraction) -> Expr:
+    return rational_number(value.numerator, value.denominator)
+
+
+def _determinant_exact_numeric(rows: Sequence[Sequence[Expr]]) -> Expr | None:
+    matrix = _fraction_matrix(rows)
+    if matrix is None:
+        return None
+    n = len(matrix)
+    if n == 0:
+        return integer(1)
+
+    sign = 1
+    for column in range(n):
+        pivot_row = next((row for row in range(column, n) if matrix[row][column] != 0), None)
+        if pivot_row is None:
+            return integer(0)
+        if pivot_row != column:
+            matrix[column], matrix[pivot_row] = matrix[pivot_row], matrix[column]
+            sign *= -1
+        pivot = matrix[column][column]
+        for row in range(column + 1, n):
+            if matrix[row][column] == 0:
+                continue
+            factor = matrix[row][column] / pivot
+            for target_column in range(column, n):
+                matrix[row][target_column] -= factor * matrix[column][target_column]
+
+    determinant = Fraction(sign, 1)
+    for index in range(n):
+        determinant *= matrix[index][index]
+    return _fraction_to_expr(determinant)
+
+
+def _permutation_sign(values: Sequence[int]) -> int:
+    inversions = 0
+    for left_index, left in enumerate(values):
+        for right in values[left_index + 1:]:
+            if left > right:
+                inversions += 1
+    return -1 if inversions % 2 else 1
+
+
+def _determinant_from_candidates(row_candidates: Sequence[Sequence[tuple[int, Expr]]]) -> Expr:
+    n = len(row_candidates)
+    if n == 0:
+        return integer(1)
+    if any(not candidates for candidates in row_candidates):
+        return integer(0)
+
+    terms: list[Expr] = []
+
+    def recurse(row_index: int, used_columns: set[int], columns: list[int], factors: list[Expr]) -> None:
+        if row_index == n:
+            sign = _permutation_sign(columns)
+            term_factors = ([integer(-1)] if sign < 0 else []) + factors
+            terms.append(_expr_product(term_factors))
+            return
+        for column, value in row_candidates[row_index]:
+            if column in used_columns or _is_exact_zero(value):
+                continue
+            used_columns.add(column)
+            columns.append(column)
+            factors.append(value)
+            recurse(row_index + 1, used_columns, columns, factors)
+            factors.pop()
+            columns.pop()
+            used_columns.remove(column)
+
+    recurse(0, set(), [], [])
+    return _expr_sum(terms)
+
+
+def _determinant_symbolic(rows: Sequence[Sequence[Expr]]) -> Expr:
+    candidates = [
+        [(column_index, value) for column_index, value in enumerate(row) if not _is_exact_zero(value)]
+        for row in rows
+    ]
+    return _determinant_from_candidates(candidates)
+
+
+def _determinant_from_rows(rows: Sequence[Sequence[Expr]]) -> Expr:
+    numeric = _determinant_exact_numeric(rows)
+    if numeric is not None:
+        return numeric
+    return _determinant_symbolic(rows)
+
+
+def _determinant_sparse(array: SparseArrayExpr) -> Expr:
+    if len(array.dimensions) != 2 or array.dimensions[0] != array.dimensions[1]:
+        raise WolframEvaluationError("Det expects a square matrix.")
+    if array.fill_value != integer(0):
+        return _determinant_from_rows(_matrix_rows(array, "Det"))
+    n = array.dimensions[0]
+    rows: list[list[tuple[int, Expr]]] = [[] for _ in range(n)]
+    for entry in array.entries:
+        row, column = entry.indices
+        if not _is_exact_zero(entry.value):
+            rows[row - 1].append((column - 1, entry.value))
+    return _determinant_from_candidates(rows)
+
+
+def det(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _determinant_sparse(expr)
+    rows = _require_square_matrix_rows(expr, "Det")
+    return _determinant_from_rows(rows)
+
+
+def _inverse_exact_numeric(rows: Sequence[Sequence[Expr]]) -> Expr | None:
+    matrix = _fraction_matrix(rows)
+    if matrix is None:
+        return None
+    n = len(matrix)
+    augmented = [
+        [*matrix[row], *(Fraction(1 if row == column else 0, 1) for column in range(n))]
+        for row in range(n)
+    ]
+
+    for column in range(n):
+        pivot_row = next((row for row in range(column, n) if augmented[row][column] != 0), None)
+        if pivot_row is None:
+            raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+        if pivot_row != column:
+            augmented[column], augmented[pivot_row] = augmented[pivot_row], augmented[column]
+        pivot = augmented[column][column]
+        augmented[column] = [value / pivot for value in augmented[column]]
+        for row in range(n):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor == 0:
+                continue
+            augmented[row] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(augmented[row], augmented[column], strict=True)
+            ]
+
+    return _evaluated_list_expr(*(
+        _evaluated_list_expr(*(_fraction_to_expr(value) for value in augmented[row][n:]))
+        for row in range(n)
+    ))
+
+
+def _minor_rows(rows: Sequence[Sequence[Expr]], remove_row: int, remove_column: int) -> list[list[Expr]]:
+    return [
+        [value for column, value in enumerate(row) if column != remove_column]
+        for row_index, row in enumerate(rows)
+        if row_index != remove_row
+    ]
+
+
+def _sparse_diagonal_inverse(array: SparseArrayExpr) -> Expr | None:
+    if len(array.dimensions) != 2 or array.dimensions[0] != array.dimensions[1] or array.fill_value != integer(0):
+        return None
+    size = array.dimensions[0]
+    diagonal: dict[int, Expr] = {}
+    for entry in array.entries:
+        row, column = entry.indices
+        if row != column:
+            return None
+        diagonal[row] = entry.value
+    if len(diagonal) != size:
+        raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+    entries: list[_SparseArrayEntry] = []
+    for index in range(1, size + 1):
+        value = diagonal[index]
+        if _is_exact_zero(value):
+            raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+        entries.append(_SparseArrayEntry((index, index), _expr_inverse(value)))
+    return _sparse_array_expr(array.dimensions, entries, integer(0))
+
+
+def inverse(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        sparse_diagonal = _sparse_diagonal_inverse(expr)
+        if sparse_diagonal is not None:
+            return sparse_diagonal
+    rows = _require_square_matrix_rows(expr, "Inverse")
+    numeric = _inverse_exact_numeric(rows)
+    if numeric is not None:
+        return numeric
+
+    determinant = _determinant_from_rows(rows)
+    if _is_exact_zero(determinant):
+        raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+    size = len(rows)
+    inverse_rows: list[Expr] = []
+    for output_row in range(size):
+        values: list[Expr] = []
+        for output_column in range(size):
+            cofactor = _determinant_from_rows(_minor_rows(rows, output_column, output_row))
+            if (output_row + output_column) % 2:
+                cofactor = _expr_negate(cofactor)
+            values.append(_expr_divide(cofactor, determinant))
+        inverse_rows.append(_evaluated_list_expr(*values))
+    return _evaluated_list_expr(*inverse_rows)
+
+
+def _sparse_identity_matrix(size: int) -> SparseArrayExpr:
+    return _sparse_array_expr(
+        (size, size),
+        (_SparseArrayEntry((index, index), integer(1)) for index in range(1, size + 1)),
+        integer(0),
+    )
+
+
+def matrix_power(expr: Expr, exponent_expr: Expr | int) -> Expr:
+    exponent = _normalize_integer_argument(exponent_expr, "MatrixPower")
+    size = _require_square_matrix_size(expr, "MatrixPower")
+    if exponent == 0:
+        return _sparse_identity_matrix(size) if isinstance(expr, SparseArrayExpr) else identity_matrix(size)
+
+    base = inverse(expr) if exponent < 0 else expr
+    remaining = abs(exponent)
+    result: Expr = _sparse_identity_matrix(size) if isinstance(base, SparseArrayExpr) else identity_matrix(size)
+    while remaining:
+        if remaining & 1:
+            result = evaluate(dot((result, base)))
+        remaining >>= 1
+        if remaining:
+            base = evaluate(dot((base, base)))
+    return result
+
+
+def _vector_values(expr: Expr, function_name: str) -> tuple[Expr, ...]:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 1:
+            raise WolframEvaluationError(f"{function_name} expects vectors.")
+        return tuple(_sparse_array_value_at(expr, (index,)) for index in range(1, expr.dimensions[0] + 1))
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return expr.arguments
+    raise WolframEvaluationError(f"{function_name} expects vectors.")
+
+
+def cross(left: Expr, right: Expr) -> Expr:
+    left_values = _vector_values(left, "Cross")
+    right_values = _vector_values(right, "Cross")
+    if len(left_values) != len(right_values) or len(left_values) not in {2, 3}:
+        raise WolframEvaluationError("Cross currently supports pairs of 2D or 3D vectors.")
+    if len(left_values) == 2:
+        return _expr_subtract(
+            _expr_product((left_values[0], right_values[1])),
+            _expr_product((left_values[1], right_values[0])),
+        )
+    result_values = (
+        _expr_subtract(_expr_product((left_values[1], right_values[2])), _expr_product((left_values[2], right_values[1]))),
+        _expr_subtract(_expr_product((left_values[2], right_values[0])), _expr_product((left_values[0], right_values[2]))),
+        _expr_subtract(_expr_product((left_values[0], right_values[1])), _expr_product((left_values[1], right_values[0]))),
+    )
+    if isinstance(left, SparseArrayExpr) or isinstance(right, SparseArrayExpr):
+        return _sparse_array_expr(
+            (3,),
+            (_SparseArrayEntry((index,), value) for index, value in enumerate(result_values, start=1)),
+            integer(0),
+        )
+    return _evaluated_list_expr(*result_values)
+
+
+def _combine_terms(terms: Sequence[Expr], combiner: Expr | None) -> Expr:
+    if combiner is None or (isinstance(combiner, Symbol) and _system_dispatch_name(combiner) == "Plus"):
+        return _expr_sum(terms)
+    return evaluate(_apply_callable(combiner, tuple(terms)))
+
+
+def tr(expr: Expr, combiner: Expr | None = None) -> Expr:
+    dimensions = _array_dimensions(expr, "Tr")
+    if len(dimensions) == 1:
+        terms = [_array_value_at(expr, (index,)) for index in range(1, dimensions[0] + 1)]
+        return _combine_terms(terms, combiner)
+    if len(dimensions) != 2:
+        raise WolframEvaluationError("Tr currently supports vectors and matrices.")
+    diagonal_count = min(dimensions)
+    if isinstance(expr, SparseArrayExpr) and expr.fill_value == integer(0):
+        terms = [
+            entry.value
+            for entry in expr.entries
+            if entry.indices[0] == entry.indices[1] and entry.indices[0] <= diagonal_count
+        ]
+        return _combine_terms(terms, combiner)
+    terms = [_array_value_at(expr, (index, index)) for index in range(1, diagonal_count + 1)]
+    return _combine_terms(terms, combiner)
+
+
+def levi_civita_tensor(dimension_expr: Expr, head_expr: Expr | None = None) -> Expr:
+    dimension = _normalize_integer_argument(dimension_expr, "LeviCivitaTensor")
+    if dimension < 0:
+        raise WolframEvaluationError("LeviCivitaTensor expects a non-negative dimension.")
+    dimensions = (dimension,) * dimension
+    sparse_requested = isinstance(head_expr, Symbol) and _system_dispatch_name(head_expr) == "SparseArray"
+    if sparse_requested:
+        return _sparse_array_expr(
+            dimensions if dimensions else (1,),
+            (
+                _SparseArrayEntry(tuple(permutation), integer(_permutation_sign(tuple(index - 1 for index in permutation))))
+                for permutation in itertools.permutations(range(1, dimension + 1), dimension)
+            ),
+            integer(0),
+        )
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        if len(set(indices)) != len(indices):
+            return integer(0)
+        return integer(_permutation_sign(tuple(index - 1 for index in indices)))
+
+    if not dimensions:
+        return integer(1)
+    return _build_dense_array(dimensions, value_at)
 
 
 def apply_head(new_head: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr:

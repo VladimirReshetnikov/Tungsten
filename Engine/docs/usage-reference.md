@@ -544,18 +544,22 @@ The implemented inert evaluator currently covers:
   `NestWhile`, `NestWhileList`, `FixedPoint`, `FixedPointList`, `Operate`, `Comap`, and
   `ComapApply`
 - higher-order structural traversal heads such as `Scan`, `MapApply`, `MapAll`, `MapIndexed`,
-  `Through`, `MapThread`, `Thread`, `Distribute`, `Outer`, `Inner`, and `Dot`, including
-  zero-fill sparse vector/matrix dot products
+  `Through`, `MapThread`, `Thread`, `Distribute`, `Outer`, `Inner`, `Dot`, `Cross`, `Tr`,
+  `Transpose`, `Det`, `Inverse`, and integer `MatrixPower`, including sparse-preserving paths
+  where a zero-fill sparse representation still matches the result
 - array, matrix, and sequence-construction heads such as `Tuples`, `Array`, `ConstantArray`,
-  `Range`, `UnitVector`, `IdentityMatrix`, `DiagonalMatrix`, `SparseArray`, `Partition`,
-  `BlockMap`, `TakeList`, and `TakeDrop`
+  `ArrayDepth`, `ArrayQ`, `ArrayFlatten`, `ArrayPad`, `ArrayReshape`, `Range`, `UnitVector`,
+  `IdentityMatrix`, `DiagonalMatrix`, `LeviCivitaTensor`, `SparseArray`, `Partition`, `BlockMap`,
+  `TakeList`, and `TakeDrop`
 - fold, search, and de-duplication heads such as `Fold`, `FoldList`, `FoldWhile`,
   `FoldWhileList`, `FoldPair`, `FoldPairList`, `SequenceFold`, `SequenceFoldList`,
   `LengthWhile`, `FirstCase`, `Position`, `MemberQ`, `DeleteDuplicates`,
-  `DeleteDuplicatesBy`, and `DuplicateFreeQ`
+  `DeleteDuplicatesBy`, `DeleteAdjacentDuplicates`, `Split`, `SplitBy`, `Subsequences`, and
+  `DuplicateFreeQ`
 - ordering and by-key selection heads such as `Order`, `OrderedQ`, `Ordering`, `OrderingBy`,
   `Sort`, `SortBy`, `ReverseSort`, `ReverseSortBy`, `MinimalBy`, `MaximalBy`,
-  `LexicographicOrder`, and `LexicographicSort`
+  `LexicographicOrder`, `LexicographicSort`, `AlphabeticSort`, `NumericalSort`, and
+  `RandomSample`
 - byte and character heads such as `ByteArray`, `ByteArrayQ`, `BaseEncode`, `BaseDecode`,
   `Characters`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`,
   `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,

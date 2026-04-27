@@ -3188,6 +3188,60 @@ class StructuralListTests(unittest.TestCase):
 
 
 class SparseArrayTests(unittest.TestCase):
+    def test_array_shape_and_restructuring_helpers(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("ArrayDepth[{{1, 2}, {3, 4}}]")).to_full_form(), "2")
+        self.assertEqual(evaluate(parse_input_form("ArrayQ[{{1, 2}, {3, 4}}, 2, IntegerQ]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("ArrayQ[{{1}, {2, 3}}]")).to_full_form(), "False")
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayReshape[{1, 2, 3, 4, 5}, {2, 3}]")).to_full_form(),
+            "List[List[1, 2, 3], List[4, 5, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayPad[{{1, 2}, {3, 4}}, 1]")).to_full_form(),
+            "List[List[0, 0, 0, 0], List[0, 1, 2, 0], List[0, 3, 4, 0], List[0, 0, 0, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayFlatten[{{{{1, 2}, {3, 4}}, {{5}, {6}}}, {{{7, 8}}, {{9}}}}]")).to_full_form(),
+            "List[List[1, 2, 5], List[3, 4, 6], List[7, 8, 9]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Transpose[{{1, 2, 3}, {4, 5, 6}}]")).to_full_form(),
+            "List[List[1, 4], List[2, 5], List[3, 6]]",
+        )
+
+    def test_insert_flattenat_split_and_subsequences(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Insert[{a, b, c}, x, 2]")).to_full_form(), "List[a, x, b, c]")
+        self.assertEqual(evaluate(parse_input_form("FlattenAt[{a, {b, c}, d}, 2]")).to_full_form(), "List[a, b, c, d]")
+        self.assertEqual(evaluate(parse_input_form("Split[{a, a, b, b, a}]")).to_full_form(), "List[List[a, a], List[b, b], List[a]]")
+        self.assertEqual(evaluate(parse_input_form("SplitBy[{1, 3, 2, 4, 5}, EvenQ]")).to_full_form(), "List[List[1, 3], List[2, 4], List[5]]")
+        self.assertEqual(evaluate(parse_input_form("DeleteAdjacentDuplicates[{a, a, b, a, a}]")).to_full_form(), "List[a, b, a]")
+        self.assertEqual(evaluate(parse_input_form("Subsequences[{a, b, c}, {2}]")).to_full_form(), "List[List[a, b], List[b, c]]")
+        self.assertEqual(evaluate(parse_input_form('AlphabeticSort[{"beta", "Alpha", "gamma"}]')).to_full_form(), 'List["Alpha", "beta", "gamma"]')
+        self.assertEqual(evaluate(parse_input_form('NumericalSort[{"x10", "x2", "x1"}]')).to_full_form(), 'List["x1", "x2", "x10"]')
+
+    def test_tensor_helpers_and_small_matrix_operations(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Tr[{{a, b}, {c, d}}]")).to_full_form(), "Plus[a, d]")
+        self.assertEqual(
+            evaluate(parse_input_form("Det[{{a, b}, {c, d}}]")).to_full_form(),
+            "Plus[Times[-1, b, c], Times[a, d]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Inverse[{{1, 2}, {3, 4}}]")).to_full_form(),
+            "List[List[-2, 1], List[Rational[3, 2], Rational[-1, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MatrixPower[{{1, 1}, {1, 0}}, 3]")).to_full_form(),
+            "List[List[3, 2], List[2, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Cross[{a, b, c}, {d, e, f}]")).to_full_form(),
+            "List[Plus[Times[-1, c, e], Times[b, f]], Plus[Times[-1, a, f], Times[c, d]], Plus[Times[-1, b, d], Times[a, e]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("LeviCivitaTensor[2]")).to_full_form(),
+            "List[List[0, 1], List[-1, 0]]",
+        )
+
     def test_sparse_array_constructs_from_rules_and_dense_lists(self) -> None:
         self.assertEqual(
             evaluate(parse_input_form("Normal[SparseArray[{{1, 2} -> a, {2, 3} -> b}, {2, 3}]]")).to_full_form(),
@@ -3275,6 +3329,39 @@ class SparseArrayTests(unittest.TestCase):
         payload = result.to_dict()
         if importlib.util.find_spec("sparse") is not None:
             self.assertIn("COO", str(payload.get("backend")))
+
+    def test_sparse_array_restructuring_and_matrix_helpers_preserve_sparse_results(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("ArrayQ[SparseArray[{{1, 2} -> a}, {2, 3}], 2]")).to_full_form(), "True")
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[ArrayReshape[SparseArray[{{2} -> a, {5} -> b}, {6}], {2, 3}]]")).to_full_form(),
+            "List[List[0, a, 0], List[0, b, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[ArrayPad[SparseArray[{{2} -> a}, {3}], 1]]")).to_full_form(),
+            "List[Rule[List[3], a], Rule[List[Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[Transpose[SparseArray[{{1, 2} -> a, {2, 1} -> b}, {2, 3}]]]")).to_full_form(),
+            "List[Rule[List[1, 2], b], Rule[List[2, 1], a], Rule[List[Blank[], Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[Flatten[SparseArray[{{1, 2} -> a, {2, 1} -> b}, {2, 3}]]]")).to_full_form(),
+            "List[Rule[List[2], a], Rule[List[4], b], Rule[List[Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Tr[SparseArray[{{1, 1} -> a, {2, 2} -> b, {2, 3} -> c}, {3, 3}]]")).to_full_form(),
+            "Plus[a, b]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Det[SparseArray[{{1, 1} -> 2, {2, 2} -> 3}, {2, 2}]]")).to_full_form(), "6")
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[Inverse[SparseArray[{{1, 1} -> 2, {2, 2} -> 4}, {2, 2}]]]")).to_full_form(),
+            "List[Rule[List[1, 1], Rational[1, 2]], Rule[List[2, 2], Rational[1, 4]], Rule[List[Blank[], Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[MatrixPower[SparseArray[{{1, 2} -> 1, {2, 1} -> 1}, {2, 2}], 2]]")).to_full_form(),
+            "List[Rule[List[1, 1], 1], Rule[List[2, 2], 1], Rule[List[Blank[], Blank[]], 0]]",
+        )
+
 
 
 class StringHelperTests(unittest.TestCase):
