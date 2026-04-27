@@ -2161,7 +2161,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(name_q_wildcard.to_full_form(), "True")
         self.assertEqual(name_q_false.to_full_form(), "False")
         self.assertEqual(visible_builtin.to_full_form(), "True")
-        self.assertEqual(system_symbol_count.to_full_form(), "7803")
+        self.assertEqual(system_symbol_count.to_full_form(), "7806")
         self.assertEqual(unimplemented_system_symbol.to_full_form(), "True")
         self.assertEqual(
             plus_attributes.to_full_form(),
@@ -4064,6 +4064,113 @@ class PolynomialAlgebraTests(unittest.TestCase):
             "List[List[2, 1], List[Plus[-1, x], 1], List[Plus[1, x], 1]]",
         )
         self.assertEqual(evaluate(parse_input_form("FactorList[0]")).to_full_form(), "List[List[0, 1]]")
+
+    def test_rational_polynomial_simplification_functions(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Numerator[(x^2 - 1)/(x + 1)]")).to_full_form(),
+            "Plus[-1, Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Denominator[(x^2 - 1)/(x + 1)]")).to_full_form(),
+            "Plus[1, x]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Numerator[{1/2, x/y}]")).to_full_form(),
+            "List[1, x]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Denominator[{1/2, x/y}]")).to_full_form(),
+            "List[2, y]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Together[1/x + 1/y]")).to_full_form(),
+            "Times[Plus[x, y], Power[x, -1], Power[y, -1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Apart[(x + 1)/(x^2 - 1)]")).to_full_form(),
+            "Power[Plus[-1, x], -1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Apart[1/(x y + x), x]")).to_full_form(),
+            "Times[Power[x, -1], Power[Plus[1, y], -1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Cancel[(x^2 - 1)/(x - 1)]")).to_full_form(),
+            "Plus[1, x]",
+        )
+
+    def test_polynomial_gcd_lcm_mod_division_and_reduction(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("PolynomialGCD[x^2 - 1, x^2 - x]")).to_full_form(),
+            "Plus[-1, x]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("PolynomialLCM[x - 1, x + 1]")).to_full_form(),
+            "Times[Plus[-1, x], Plus[1, x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("PolynomialMod[x^2 + 2 x + 3, 5]")).to_full_form(),
+            "Plus[3, Power[x, 2], Times[2, x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("PolynomialQuotient[x^3 - 1, x - 1, x]")).to_full_form(),
+            "Plus[1, x, Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("PolynomialRemainder[x^3 - 1, x - 1, x]")).to_full_form(),
+            "0",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("PolynomialReduce[x^2 + y^2, {x + y}, {x, y}]")).to_full_form(),
+            "List[List[Plus[x, Times[-1, y]]], Times[2, Power[y, 2]]]",
+        )
+
+    def test_resultants_subresultants_and_groebner_basis(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Resultant[x^2 - y, x - y, x]")).to_full_form(),
+            "Plus[Power[y, 2], Times[-1, y]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Discriminant[x^3 + x + 1, x]")).to_full_form(), "-31")
+        self.assertEqual(
+            evaluate(parse_input_form("Subresultants[x^3 + a x + b, x^2 + c, x]")).to_full_form(),
+            "List[Plus[Power[b, 2], Power[c, 3], Times[-2, a, Power[c, 2]], Times[c, Power[a, 2]]], Plus[a, Times[-1, c]], 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("GroebnerBasis[{x^2 - y, x y - 1}, {x, y}]")).to_full_form(),
+            "List[Plus[-1, Power[y, 3]], Plus[x, Times[-1, Power[y, 2]]]]",
+        )
+
+    def test_polynomial_argument_shapes_and_modular_factoring(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Expand[(x + 1)^2 (y + 1)^2, x]")).to_full_form(),
+            "Plus[Power[Plus[1, y], 2], Times[2, x, Power[Plus[1, y], 2]], Times[Power[x, 2], Power[Plus[1, y], 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Expand[(x + 1)^2 (y + 1)^2, _Plus]")).to_full_form(),
+            "Plus[1, Power[x, 2], Power[y, 2], Times[2, x], Times[2, x, Power[y, 2]], Times[2, y], Times[2, y, Power[x, 2]], Times[4, x, y], Times[Power[x, 2], Power[y, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, Modulus -> 2]")).to_full_form(),
+            "Power[Plus[1, x], 2]",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("MonomialList[x^2 + x y + y^2 + x + y + 1, {x, y}, DegreeLexicographic]")
+            ).to_full_form(),
+            "List[Power[x, 2], Times[x, y], Power[y, 2], x, y, 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MonomialList[x^2 + x y + y^2 + x + y + 1, NegativeLexicographic]")).to_full_form(),
+            "List[1, y, Power[y, 2], x, Times[x, y], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Collect[a x^2 + b x + c, x, f]")).to_full_form(),
+            "Plus[Times[x, f[b]], Times[Power[x, 2], f[a]], f[c]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Coefficient[x^2 y^3 + 2 x y + 1, {x, y}, {2, 3}]")).to_full_form(),
+            "List[Power[y, 3], Power[x, 2]]",
+        )
 
     def test_gaussian_rational_polynomial_coefficients(self) -> None:
         self.assertEqual(evaluate(parse_input_form("PolynomialQ[x^2 + I x + 1, x]")).to_full_form(), "True")

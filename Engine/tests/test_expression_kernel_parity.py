@@ -572,8 +572,9 @@ class OuterLevelspecTests(unittest.TestCase):
         # in its memoized recursion and relies on Wolfram precedence for
         # ``\[CircleTimes]`` binding tighter than ``\[CirclePlus]``.
         evaluate(parse_expression("ClearAll[Precedes, CirclePlus, CircleTimes, f]", form="input"))
-        evaluate(parse_expression(
-            r"""_ \[Precedes] {} = False;
+        try:
+            evaluate(parse_expression(
+                r"""_ \[Precedes] {} = False;
 {} \[Precedes] {__} = True;
 {a_ \[Diamond] _, ___} \[Precedes] {b_ \[Diamond] _, ___} := a \[Precedes] b /; a =!= b;
 {a_ \[Diamond] m_, ___} \[Precedes] {a_ \[Diamond] n_, ___} := m < n /; m != n;
@@ -588,9 +589,11 @@ _ \[CircleTimes] {} = {};
 x_ \[CircleTimes] {y_, z__} := x \[CircleTimes] {y} \[CirclePlus] x \[CircleTimes] {z};
 f[1] = {{{} \[Diamond] 1}};
 f[n_] := f[n] = Union[Flatten[Table[Outer[#1 \[CircleTimes] {#2 \[Diamond] 1} &, f[k], f[n - k], 1], {k, n - 1}], 2]];""",
-            form="input",
-        ))
-        self.assertEqual(_full("Table[Length[f[n]], {n, 1, 6}]"), "List[1, 1, 2, 5, 13, 32]")
+                form="input",
+            ))
+            self.assertEqual(_full("Table[Length[f[n]], {n, 1, 6}]"), "List[1, 1, 2, 5, 13, 32]")
+        finally:
+            evaluate(parse_expression("ClearAll[Precedes, CirclePlus, CircleTimes, f]", form="input"))
 
 
 class EofKindCollisionParserTests(unittest.TestCase):
