@@ -434,6 +434,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "$Line",
     "$MachineEpsilon",
     "$MachinePrecision",
+    "$MaxRootDegree",
     "$MaxMachineNumber",
     "$MessageList",
     "$MessagePrePrint",
@@ -960,6 +961,7 @@ _SPECIAL_SESSION_SETTING_DEFAULTS: dict[str, Expr] = {
     "$RecursionLimit": Integer(1024),
     "$IterationLimit": Integer(4096),
     "$HistoryLength": Symbol("Infinity"),
+    "$MaxRootDegree": Integer(1000),
     # The Wolfram terminal front end owns this setting through OutputSizeLimit`.
     # Tungsten keeps a small, explicit REPL setting instead so console output can
     # remain usable without loading a front-end package.
@@ -971,6 +973,7 @@ _SPECIAL_SESSION_SETTING_MINIMUMS = {
     "$RecursionLimit": 20,
     "$IterationLimit": 20,
     "$HistoryLength": 0,
+    "$MaxRootDegree": 1,
     "$OutputSizeLimit": 0,
 }
 
@@ -7270,6 +7273,8 @@ def _emit_special_symbol_message(head_name: str, record: SymbolRecord) -> None:
 
 
 def _setting_value_is_valid(name: str, value: Expr) -> bool:
+    if name == "$MaxRootDegree":
+        return isinstance(value, Integer) and 1 <= value.value <= 2**63 - 1
     if _is_system_infinity(value):
         return True
     minimum = _SPECIAL_SESSION_SETTING_MINIMUMS[name]

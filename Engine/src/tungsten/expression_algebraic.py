@@ -15,6 +15,8 @@ globals().update(
 _X = _sp.Symbol("x")
 _Y = _sp.Symbol("y")
 _T = _sp.Symbol("t")
+_ALGEBRAIC_ROOT_VARIABLE = _sp.Symbol("w")
+_ROOT_COEFFICIENT_SYMBOL = _sp.Symbol("z")
 
 
 class _AlgebraicConversionError(ValueError):
@@ -22,12 +24,17 @@ class _AlgebraicConversionError(ValueError):
 
 
 def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
-    if expr.has_head("Root"):
-        return _root_expr(expr.arguments)
-    if expr.has_head("RootReduce"):
-        return _root_reduce_expr(expr.arguments)
-    if expr.has_head("MinimalPolynomial"):
-        return _minimal_polynomial_expr(expr.arguments)
+    try:
+        if expr.has_head("Root"):
+            return _root_expr(expr.arguments)
+        if expr.has_head("RootReduce"):
+            return _root_reduce_expr(expr.arguments)
+        if expr.has_head("MinimalPolynomial"):
+            return _minimal_polynomial_expr(expr.arguments)
+    except Exception:
+        # Algebraic-number conversion is intentionally best-effort. Unsupported or
+        # unexpectedly hard cases must leave the expression inert, not crash the REPL.
+        return None
     return None
 
 
@@ -48,9 +55,14 @@ def _root_expr(arguments: Sequence[Expr]) -> Expr | None:
         index = arguments[1].value - 1
         if index < 0:
             return None
+        _ensure_root_degree_allowed(_sp.Poly(poly_expr, _X).degree())
         root = _sp.CRootOf(poly_expr, index)
         return _expr_from_sympy_root_or_number(root, method=method)
-    except (IndexError, _sp.PolynomialError, _AlgebraicConversionError, ValueError):
+    except Exception:
+        pass
+    try:
+        return _algebraic_coefficient_root_expr(arguments[0], arguments[1].value - 1, method)
+    except Exception:
         return None
 
 
@@ -258,11 +270,62 @@ def _root_reduce_sympy(sym_expr: Any) -> Expr:
     return _root_from_polynomial_and_approx(poly_expr, approx)
 
 
-def _root_from_polynomial_and_approx(poly_expr: Any, approx: complex | float, *, require_real: bool = False) -> Expr:
+def _algebraic_coefficient_root_expr(function: Expr, index: int, method: int) -> Expr:
+    if index < 0:
+        raise _AlgebraicConversionError(function.to_full_form())
+    variable = _ALGEBRAIC_ROOT_VARIABLE
+    poly_expr = _polynomial_function_to_sympy(function, variable, algebraic_coefficients=True)
+    poly = _sp.Poly(poly_expr, variable, extension=True)
+    degree = poly.degree()
+    _ensure_root_degree_allowed(degree)
+    if index >= degree:
+        raise _AlgebraicConversionError(function.to_full_form())
+    roots = _numeric_roots_for_indexing(poly.as_expr(), variable, degree)
+    target = roots[index]
+    norm = _norm_poly(poly, poly_expr, variable)
+    norm_expr = _primitive_integer_poly_expr(norm.as_expr(), variable)
+    return _root_from_polynomial_and_approx(norm_expr, target, method=method)
+
+
+def _numeric_roots_for_indexing(poly_expr: Any, variable: Any, degree: int) -> list[complex]:
+    roots = _sp.nroots(poly_expr, n=50, maxsteps=200)
+    if len(roots) != degree:
+        raise _AlgebraicConversionError(str(poly_expr))
+    return [complex(root) for root in roots]
+
+
+def _norm_poly(poly: Any, poly_expr: Any, variable: Any) -> Any:
+    try:
+        return poly.norm()
+    except Exception:
+        # SymPy's ``extension=True`` uses Gaussian integer/rational domains for
+        # pure I coefficients; retry as the algebraic field Q(I) so ``norm`` is
+        # available and yields an ordinary rational polynomial.
+        gaussian_poly = _sp.Poly(poly_expr, variable, extension=[_sp.I])
+        return gaussian_poly.norm()
+
+
+def _root_from_polynomial_and_approx(
+    poly_expr: Any,
+    approx: complex | float,
+    *,
+    require_real: bool = False,
+    method: int = 0,
+) -> Expr:
     free_symbols = sorted(_sp.sympify(poly_expr).free_symbols, key=lambda symbol: symbol.name)
     variable = free_symbols[0] if free_symbols else _X
     poly_expr = _primitive_integer_poly_expr(poly_expr, variable)
     poly = _sp.Poly(poly_expr, variable)
+    square_free_expr = _primitive_integer_poly_expr(poly.sqf_part().as_expr(), variable)
+    poly = _sp.Poly(square_free_expr, variable)
+    degree = poly.degree()
+    _ensure_root_degree_allowed(degree)
+    if degree <= 0:
+        raise _AlgebraicConversionError(str(poly_expr))
+    target = complex(approx)
+    fast_candidate = _root_by_numeric_index(poly.as_expr(), variable, degree, target, require_real=require_real)
+    if fast_candidate is not None:
+        return _expr_from_sympy_root_or_number(fast_candidate, method=method)
     factors = _sp.factor_list(poly.as_expr(), gens=(variable,))[1]
     candidates: list[tuple[Any, int]] = []
     for factor_expr, _multiplicity in factors:
@@ -279,9 +342,39 @@ def _root_from_polynomial_and_approx(poly_expr: Any, approx: complex | float, *,
             candidates.append((candidate, index))
     if not candidates:
         raise _AlgebraicConversionError(str(poly_expr))
-    target = complex(approx)
     chosen = _choose_root_by_approximation([candidate for candidate, _ in candidates], target)
-    return _expr_from_sympy_root_or_number(chosen)
+    return _expr_from_sympy_root_or_number(chosen, method=method)
+
+
+def _root_by_numeric_index(
+    poly_expr: Any,
+    variable: Any,
+    degree: int,
+    target: complex,
+    *,
+    require_real: bool,
+) -> Any | None:
+    try:
+        roots = _numeric_roots_for_indexing(poly_expr, variable, degree)
+    except Exception:
+        return None
+    indexed_roots = list(enumerate(roots))
+    if require_real:
+        indexed_roots = [(index, root) for index, root in indexed_roots if abs(root.imag) < 1e-30]
+    if not indexed_roots:
+        return None
+    chosen_index, _chosen_root = _choose_indexed_root_by_approximation(indexed_roots, target)
+    try:
+        return _sp.CRootOf(poly_expr, chosen_index)
+    except Exception:
+        return None
+
+
+def _choose_indexed_root_by_approximation(candidates: Sequence[tuple[int, complex]], target: complex) -> tuple[int, complex]:
+    distances = sorted(((abs(value - target), index, value) for index, value in candidates), key=lambda item: item[0])
+    if not distances:
+        raise _AlgebraicConversionError(str(target))
+    return distances[0][1], distances[0][2]
 
 
 def _choose_root_by_approximation(candidates: Sequence[Any], target: complex) -> Any:
@@ -372,7 +465,7 @@ def _to_sympy_conjugate(expr: Expr) -> Any:
     raise _AlgebraicConversionError(expr.to_full_form())
 
 
-def _polynomial_function_to_sympy(function: Expr, variable: Any) -> Any:
+def _polynomial_function_to_sympy(function: Expr, variable: Any, *, algebraic_coefficients: bool = False) -> Any:
     if isinstance(function, Call) and function.has_head("Function"):
         if len(function.arguments) == 1:
             body = function.arguments[0]
@@ -388,20 +481,50 @@ def _polynomial_function_to_sympy(function: Expr, variable: Any) -> Any:
                 raise _AlgebraicConversionError(function.to_full_form())
         else:
             raise _AlgebraicConversionError(function.to_full_form())
-        poly_expr = _to_sympy_polynomial_body(body, variable, parameter)
+        poly_expr = _to_sympy_polynomial_body(
+            body,
+            variable,
+            parameter,
+            algebraic_coefficients=algebraic_coefficients,
+        )
     else:
-        poly_expr = _to_sympy_polynomial_body(function, variable, None)
+        poly_expr = _to_sympy_polynomial_body(
+            function,
+            variable,
+            None,
+            algebraic_coefficients=algebraic_coefficients,
+        )
+    if algebraic_coefficients:
+        poly = _sp.Poly(poly_expr, variable, extension=True)
+        if poly.degree() <= 0:
+            raise _AlgebraicConversionError(function.to_full_form())
+        return poly.as_expr()
     poly = _sp.Poly(poly_expr, variable, domain=_sp.QQ)
     if poly.degree() <= 0:
         raise _AlgebraicConversionError(function.to_full_form())
     return _primitive_integer_poly_expr(poly.as_expr(), variable)
 
 
-def _to_sympy_polynomial_body(expr: Expr, variable: Any, parameter: Expr | None) -> Any:
+def _to_sympy_polynomial_body(
+    expr: Expr,
+    variable: Any,
+    parameter: Expr | None,
+    *,
+    algebraic_coefficients: bool = False,
+) -> Any:
+    if algebraic_coefficients and not _contains_polynomial_variable(expr, parameter):
+        try:
+            return _to_sympy_algebraic(evaluate(expr))
+        except _AlgebraicConversionError:
+            pass
     if isinstance(expr, Integer):
         return _sp.Integer(expr.value)
     if isinstance(expr, RationalNumber):
         return _sp.Rational(expr.value.numerator, expr.value.denominator)
+    if isinstance(expr, ComplexNumber):
+        return _to_sympy_algebraic(expr)
+    if isinstance(expr, RootNumber):
+        return _root_to_sympy(expr, _ROOT_COEFFICIENT_SYMBOL)
     if isinstance(expr, Symbol):
         if expr.name == "I":
             return _sp.I
@@ -409,21 +532,74 @@ def _to_sympy_polynomial_body(expr: Expr, variable: Any, parameter: Expr | None)
             return variable
         raise _AlgebraicConversionError(expr.to_full_form())
     if isinstance(expr, Call):
+        if expr.has_head("Root") and algebraic_coefficients:
+            root = _root_expr(expr.arguments)
+            if root is None:
+                raise _AlgebraicConversionError(expr.to_full_form())
+            return _to_sympy_algebraic(root)
         if expr.has_head("Slot") and (not expr.arguments or expr.arguments == (integer(1),)):
             return variable
         if expr.has_head("Plus"):
-            return _sp.Add(*(_to_sympy_polynomial_body(argument, variable, parameter) for argument in expr.arguments))
+            return _sp.Add(
+                *(
+                    _to_sympy_polynomial_body(
+                        argument,
+                        variable,
+                        parameter,
+                        algebraic_coefficients=algebraic_coefficients,
+                    )
+                    for argument in expr.arguments
+                )
+            )
         if expr.has_head("Times"):
-            return _sp.Mul(*(_to_sympy_polynomial_body(argument, variable, parameter) for argument in expr.arguments))
+            return _sp.Mul(
+                *(
+                    _to_sympy_polynomial_body(
+                        argument,
+                        variable,
+                        parameter,
+                        algebraic_coefficients=algebraic_coefficients,
+                    )
+                    for argument in expr.arguments
+                )
+            )
         if expr.has_head("Power") and len(expr.arguments) == 2:
-            base = _to_sympy_polynomial_body(expr.arguments[0], variable, parameter)
-            exponent = _to_sympy_polynomial_body(expr.arguments[1], variable, parameter)
+            base = _to_sympy_polynomial_body(
+                expr.arguments[0],
+                variable,
+                parameter,
+                algebraic_coefficients=algebraic_coefficients,
+            )
+            exponent = _to_sympy_polynomial_body(
+                expr.arguments[1],
+                variable,
+                parameter,
+                algebraic_coefficients=algebraic_coefficients,
+            )
             return _sp.Pow(base, exponent)
+        if expr.has_head("Sqrt") and len(expr.arguments) == 1:
+            base = _to_sympy_polynomial_body(
+                expr.arguments[0],
+                variable,
+                parameter,
+                algebraic_coefficients=algebraic_coefficients,
+            )
+            return _sp.sqrt(base)
     raise _AlgebraicConversionError(expr.to_full_form())
 
 
-def _root_to_sympy(root: RootNumber) -> Any:
-    return _sp.CRootOf(_poly_expr_from_coefficients(root.coefficients, _X), root.index)
+def _contains_polynomial_variable(expr: Expr, parameter: Expr | None) -> bool:
+    if parameter is not None and expr == parameter:
+        return True
+    if isinstance(expr, Call):
+        if expr.has_head("Slot") and (not expr.arguments or expr.arguments == (integer(1),)):
+            return True
+        return any(_contains_polynomial_variable(argument, parameter) for argument in expr.arguments)
+    return False
+
+
+def _root_to_sympy(root: RootNumber, variable: Any = _ROOT_COEFFICIENT_SYMBOL) -> Any:
+    return _sp.CRootOf(_poly_expr_from_coefficients(root.coefficients, variable), root.index)
 
 
 def _poly_expr_from_coefficients(coefficients: Sequence[int], variable: Any) -> Any:
@@ -437,6 +613,16 @@ def _primitive_integer_poly_expr(poly_expr: Any, variable: Any) -> Any:
     if primitive_poly.LC() < 0:
         primitive_poly = -primitive_poly
     return primitive_poly.as_expr()
+
+
+def _max_root_degree() -> int:
+    value = _finite_system_limit_value("$MaxRootDegree")
+    return 1000 if value is None else value
+
+
+def _ensure_root_degree_allowed(degree: int) -> None:
+    if degree < 1 or degree > _max_root_degree():
+        raise _AlgebraicConversionError(f"Root degree {degree} exceeds $MaxRootDegree.")
 
 
 def _primitive_rational_poly_expr(poly_expr: Any, variable: Any) -> Any:
@@ -489,6 +675,8 @@ def _expr_from_sympy_root_or_number(expr: Any, *, method: int = 0) -> Expr | Non
         return rational_number(int(expr.p), int(expr.q))
     if isinstance(expr, _ComplexRootOf):
         poly = expr.poly
+        if poly.degree() > _max_root_degree():
+            return None
         coefficients = tuple(int(coefficient) for coefficient in reversed(poly.all_coeffs()))
         return root_number(coefficients, int(expr.index), method=method)
     if expr.is_number:

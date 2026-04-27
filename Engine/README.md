@@ -141,10 +141,12 @@ The current workspace is built around seven complementary capabilities:
    `BitGet`/`BitLength`, exact polynomial heads
    `Expand`, `PolynomialQ`, `Variables`, `MonomialList`, `Collect`, `Coefficient`, `Exponent`,
    `CoefficientList`, `Factor`, `FactorList`, and `Decompose`, SymPy-backed exact
-   algebraic-number heads `Root`, `MinimalPolynomial`, and `RootReduce` for indexed
-   polynomial roots over primitive integer polynomials, rational algebraic expressions,
-   rational powers, and direct `Re`/`Im`/`Conjugate`/`Abs` forms, with exact comparisons
-   for real-valued roots and arbitrary-precision numeric approximation through `N`,
+   algebraic-number heads
+   `Root`, `MinimalPolynomial`, and `RootReduce` for indexed polynomial roots over primitive
+   integer polynomials, rational algebraic expressions, rational powers, and direct
+   `Re`/`Im`/`Conjugate`/`Abs` forms, with exact comparisons for real-valued roots and
+   arbitrary-precision numeric approximation through `N`, bounded by the mutable
+   `$MaxRootDegree` safety setting,
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,

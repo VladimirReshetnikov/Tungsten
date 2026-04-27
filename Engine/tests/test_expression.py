@@ -2304,6 +2304,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
             self.assertEqual(submit("$RecursionLimit").to_full_form(), "1024")
             self.assertEqual(submit("$IterationLimit").to_full_form(), "4096")
             self.assertEqual(submit("$HistoryLength").to_full_form(), "Infinity")
+            self.assertEqual(submit("$MaxRootDegree").to_full_form(), "1000")
             self.assertEqual(submit("$OutputSizeLimit").to_full_form(), "12000")
 
             self.assertEqual(submit("$RecursionLimit = 1").to_full_form(), "1024")
@@ -2313,15 +2314,16 @@ class ExpressionEvaluationTests(unittest.TestCase):
             self.assertEqual(submit("$RecursionLimit = 20").to_full_form(), "20")
             self.assertEqual(submit("$IterationLimit = 20").to_full_form(), "20")
             self.assertEqual(submit("$HistoryLength = 2").to_full_form(), "2")
+            self.assertEqual(submit("$MaxRootDegree = 3").to_full_form(), "3")
             self.assertEqual(submit("10").to_full_form(), "10")
             self.assertEqual(submit("20").to_full_form(), "20")
             self.assertEqual(submit("30").to_full_form(), "30")
             self.assertEqual(
                 submit("DownValues[In]").to_full_form(),
-                "List[RuleDelayed[HoldPattern[In[11]], 30], RuleDelayed[HoldPattern[In[12]], DownValues[In]]]",
+                "List[RuleDelayed[HoldPattern[In[13]], 30], RuleDelayed[HoldPattern[In[14]], DownValues[In]]]",
             )
             assert session.inputs is not None
-            self.assertEqual(sorted(session.inputs), [11, 12])
+            self.assertEqual(sorted(session.inputs), [13, 14])
 
             short_result = submit("Short[Range[20]]")
             self.assertEqual(display_output_parts(short_result)[0], "Short")
@@ -2340,6 +2342,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
                 "$RecursionLimit = 1024",
                 "$IterationLimit = 4096",
                 "$HistoryLength = Infinity",
+                "$MaxRootDegree = 1000",
                 "$OutputSizeLimit = 12000",
             ):
                 evaluate(parse_input_form(code))
@@ -4053,6 +4056,63 @@ class AlgebraicRootTests(unittest.TestCase):
         )
         self.assertEqual(evaluate(parse_input_form("Root[#^2 - 4 &, 2]")).to_full_form(), "2")
         self.assertEqual(evaluate(parse_input_form("Root[2 # - 4 &, 1]")).to_full_form(), "2")
+
+    def test_root_canonicalizes_algebraic_polynomial_coefficients(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Root[I # + 1 &, 1]")).to_full_form(),
+            "Root[Function[Plus[1, Power[Slot[1], 2]]], 2, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[((1 + I)/2) #^2 + 1 &, 1]")).to_full_form(),
+            "Root[Function[Plus[2, Times[2, Power[Slot[1], 2]], Power[Slot[1], 4]]], 1, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[#^2 - 2^(1/3) &, 2]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 6]]], 2, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[#^2 - Root[#^3 - 2 &, 1] &, 1]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 6]]], 1, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[(Root[#^2 - 2 &, 2] + I) #^2 + 1 &, 1]")).to_full_form(),
+            "Root[Function[Plus[1, Times[-2, Power[Slot[1], 4]], Times[9, Power[Slot[1], 8]]]], 3, 0]",
+        )
+
+    def test_unsupported_root_forms_remain_inert_instead_of_crashing(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Root[Sin[#] &, 1]")).to_full_form(),
+            "Root[Function[Sin[Slot[1]]], 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[(a + I) # + 1 &, 1]")).to_full_form(),
+            "Root[Function[Plus[Times[Plus[a, I], Slot[1]], 1]], 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[#^2 - 2^(1/3) &, 99]")).to_full_form(),
+            "Root[Function[Plus[Power[Slot[1], 2], Times[-1, Power[2, Times[1, Power[3, -1]]]]]], 99]",
+        )
+
+    def test_max_root_degree_limits_new_root_objects(self) -> None:
+        try:
+            self.assertEqual(evaluate(parse_input_form("$MaxRootDegree")).to_full_form(), "1000")
+            self.assertEqual(evaluate(parse_input_form("$MaxRootDegree = 3")).to_full_form(), "3")
+            self.assertEqual(
+                evaluate(parse_input_form("Root[#^3 - 2 &, 1]")).to_full_form(),
+                "Root[Function[Plus[-2, Power[Slot[1], 3]]], 1, 0]",
+            )
+            self.assertEqual(
+                evaluate(parse_input_form("Root[#^4 - 2 &, 1]")).to_full_form(),
+                "Root[Function[Plus[Power[Slot[1], 4], Times[-1, 2]]], 1]",
+            )
+            self.assertEqual(
+                evaluate(parse_input_form("Root[#^2 - 2^(1/3) &, 2]")).to_full_form(),
+                "Root[Function[Plus[Power[Slot[1], 2], Times[-1, Power[2, Times[1, Power[3, -1]]]]]], 2]",
+            )
+            self.assertEqual(evaluate(parse_input_form("$MaxRootDegree = Infinity")).to_full_form(), "3")
+            self.assertEqual(evaluate(parse_input_form("$MaxRootDegree")).to_full_form(), "3")
+        finally:
+            evaluate(parse_input_form("$MaxRootDegree = 1000"))
 
     def test_minimal_polynomial_and_root_reduce(self) -> None:
         self.assertEqual(
