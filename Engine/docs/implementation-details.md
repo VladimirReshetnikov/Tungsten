@@ -331,25 +331,68 @@ The code is split by workstream where the seams are now stable enough:
   recognize ``With`` / ``Module`` / ``Block`` (in addition to ``Function``) so
   inner-bound names are correctly shielded and capture-avoiding alpha-renaming
   kicks in when needed.
-- `expression_iteration.py` is the home for ``Table``, ``Do``, ``Sum``, and
-  ``Product``. All four share the iter-spec vocabulary (``n`` / ``{n}`` / ``{i,
-  n}`` / ``{i, imin, imax}`` / ``{i, imin, imax, di}`` / ``{i, list}``) and use
-  the snapshot/restore primitives from ``expression_scoping`` to Block-scope each
-  iteration variable; Tungsten resolves later iter specs in the scope where
-  earlier iterators are already bound, so dependent forms (``{j, i}`` after
-  ``{i, ...}``) work as in the kernel. Iterator bounds and step accept Integer,
-  Rational, and Real values and promote per Tungsten's existing numeric tower;
-  the value-list ``{i, list}`` form iterates over the literal sequence without
-  any conversion. An iteration safety cap (``_ITERATION_SAFETY_LIMIT``) guards
-  against pathological step / bound combinations producing infinite loops.
-  ``Sum`` and ``Product`` reuse ``_resolve_iter_spec`` and
-  ``_iterate_with_block_scope`` through a shared ``_accumulate_loop`` helper that
-  builds a flat list of per-iteration body values; the helper is parameterized
-  by the fold head (``Plus`` for Sum, ``Times`` for Product) so the empty
-  iteration range yields ``0`` / ``1`` without special-casing. Both reject the
-  bare-integer ``n`` iter spec — only the List-form spec is allowed, matching
-  the kernel's convention that ``Sum[a, 3]`` stays inert while
-  ``Sum[a, {3}]`` evaluates.
+- `expression_iteration.py` is the home for ``Table``, ``Do``, ``Sum``,
+  ``Product``, ``For``, and ``While``. The iter-spec heads (``Table``,
+  ``Do``, ``Sum``, ``Product``) share the iter-spec vocabulary (``n`` /
+  ``{n}`` / ``{i, n}`` / ``{i, imin, imax}`` / ``{i, imin, imax, di}`` /
+  ``{i, list}``) and use the snapshot/restore primitives from
+  ``expression_scoping`` to Block-scope each iteration variable;
+  Tungsten resolves later iter specs in the scope where earlier
+  iterators are already bound, so dependent forms (``{j, i}`` after
+  ``{i, ...}``) work as in the kernel. Iterator bounds and step accept
+  Integer, Rational, and Real values and promote per Tungsten's existing
+  numeric tower; the value-list ``{i, list}`` form iterates over the
+  literal sequence without any conversion. An iteration safety cap
+  (``_ITERATION_SAFETY_LIMIT``) guards against pathological step / bound
+  combinations producing infinite loops. ``Sum`` and ``Product`` reuse
+  ``_resolve_iter_spec`` and ``_iterate_with_block_scope`` through a
+  shared ``_accumulate_loop`` helper that builds a flat list of
+  per-iteration body values; the helper is parameterized by the fold
+  head (``Plus`` for Sum, ``Times`` for Product) so the empty iteration
+  range yields ``0`` / ``1`` without special-casing. Both reject the
+  bare-integer ``n`` iter spec — only the List-form spec is allowed,
+  matching the kernel's convention that ``Sum[a, 3]`` stays inert while
+  ``Sum[a, {3}]`` evaluates. The predicate-driven loops ``For[init,
+  test, incr, body]`` and ``While[test, body]`` / ``While[test]`` walk
+  their condition each iteration and run their body for side effects;
+  both honor the same ``_ITERATION_SAFETY_LIMIT`` so a misconfigured
+  test that never becomes ``False`` is bounded.
+
+  Non-local control flow inside loops is modeled by dedicated Python
+  exception classes living in ``expression.py``:
+  ``_TungstenBreakSignal`` (``Break[]``), ``_TungstenContinueSignal``
+  (``Continue[]``), ``_TungstenReturnSignal`` (``Return[expr]`` and
+  ``Return[expr, head]``), and ``_TungstenGotoSignal`` (``Goto[name]``).
+  All four are listed in ``_CONTROL_SIGNAL_TYPES`` so existing
+  ``WithCleanup`` / cleanup machinery treats them as control flow and
+  passes them through correctly. The catch sites:
+
+  - ``Break`` / ``Continue`` are caught at the ``Do`` / ``For`` /
+    ``While`` boundary; per the Wolfram docs they do *not* propagate
+    through ``Table`` / ``Sum`` / ``Product``, so those heads do not
+    install catches and an in-body ``Break[]`` ultimately reaches
+    the top-level evaluator's fallback (which converts the signal
+    back to the inert ``Break[]`` form).
+  - ``Return[expr]`` (no head) is caught at the
+    ``_apply_definitions`` boundary, so a SetDelayed-defined
+    ``f[x_] := ...; Return[v]; ...`` returns ``v`` from ``f[...]``.
+    ``Return[expr, head]`` is caught in the body evaluation of the
+    matching head's evaluator: ``Module`` / ``Block`` /
+    ``InheritedBlock`` / ``For`` / ``While`` / ``Do``.
+  - ``Goto[name]`` is caught by ``CompoundExpression``, which scans
+    its argument list for a structurally matching ``Label[name]`` and
+    resumes from the position after the matched ``Label``. ``Label``
+    itself stays inert (matching the kernel) because the marker
+    semantics happen entirely in the CompoundExpression handler.
+
+  The bare ``Increment`` / ``Decrement`` / ``PreIncrement`` /
+  ``PreDecrement`` family lives in ``expression.py`` next to ``Set`` so
+  the canonical ``For[i = 1, i <= n, i++, ...]`` idiom works without
+  having to spell out ``i = i + 1``. The shared
+  ``_apply_inplace_arithmetic_to_symbol`` helper performs the read /
+  add / write on the symbol's own value and returns either the old
+  value (for the post- variants) or the new value (for the pre-
+  variants).
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 

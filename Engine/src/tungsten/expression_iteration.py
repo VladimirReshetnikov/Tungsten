@@ -1,6 +1,8 @@
-"""Iteration constructs ``Table``, ``Do``, ``Sum``, and ``Product``.
+"""Iteration constructs ``Table``, ``Do``, ``Sum``, ``Product``,
+``For``, and ``While``.
 
-All four heads use Wolfram's standard iterator-spec vocabulary:
+The iter-spec heads (``Table``, ``Do``, ``Sum``, ``Product``) use
+Wolfram's standard iterator-spec vocabulary:
 
 - ``n`` (or ``{n}``) — iterate ``n`` times with no iteration variable;
 - ``{i, n}`` — ``i`` takes integer values ``1, 2, …, n``;
@@ -36,6 +38,28 @@ The iterator-spec evaluation reuses Tungsten's existing numeric helpers
 and Real bounds and steps all promote correctly. An iteration safety
 cap (``_ITERATION_SAFETY_LIMIT``) guards against accidental infinite
 loops from incompatible bounds and steps.
+
+``For[init, test, incr, body]`` and ``While[test, body]`` are the
+predicate-driven looping constructs. They share an iteration safety
+cap with the iter-spec loops so a malformed test that never becomes
+``False`` is still bounded. Both return ``Null``.
+
+Non-local control flow inside the body of any loop is handled
+through dedicated Python signal classes:
+
+- ``Break[]`` raises ``_TungstenBreakSignal``, caught at the
+  ``Do`` / ``For`` / ``While`` boundary so the loop exits cleanly.
+  Per the kernel's documented semantics, ``Break`` does *not*
+  propagate through ``Table``, ``Sum``, or ``Product``.
+- ``Continue[]`` raises ``_TungstenContinueSignal``, caught at the
+  same loops so the rest of the body is skipped and the next
+  iteration starts (the ``incr`` step still runs in ``For`` so the
+  loop progresses).
+- ``Return[expr, head]`` raises a head-tagged
+  ``_TungstenReturnSignal``; the matching loop head catches it and
+  returns ``expr`` as the loop's value. Bare ``Return[expr]``
+  (no head) propagates outward to the nearest function-definition
+  boundary instead of being caught here.
 """
 
 from __future__ import annotations
@@ -71,8 +95,19 @@ def do_expr(arguments: Sequence["Expr"]) -> "Expr":
     Returns ``Null`` after every iteration completes. ``Throw`` and
     other non-local control flow propagate through Do (the variable
     save/restore happens in a ``try`` / ``finally``).
+
+    ``Break[]`` inside the body exits all of Do's iteration nesting
+    and yields ``Null``; ``Continue[]`` skips the remainder of the
+    current innermost-iteration body and resumes with the next
+    iteration; ``Return[expr, Do]`` exits Do's iteration and yields
+    ``expr``.
     """
-    from .expression import WolframEvaluationError, symbol
+    from .expression import (
+        WolframEvaluationError,
+        _TungstenBreakSignal,
+        _TungstenReturnSignal,
+        symbol,
+    )
 
     if len(arguments) < 2:
         raise WolframEvaluationError(
@@ -80,7 +115,14 @@ def do_expr(arguments: Sequence["Expr"]) -> "Expr":
         )
     body = arguments[0]
     iter_specs = arguments[1:]
-    _do_loop(body, iter_specs)
+    try:
+        _do_loop(body, iter_specs)
+    except _TungstenBreakSignal:
+        pass
+    except _TungstenReturnSignal as signal:
+        if signal.head_name == "Do":
+            return signal.value
+        raise
     return symbol("Null")
 
 
@@ -197,10 +239,18 @@ def _table_loop(body: "Expr", iter_specs: Sequence["Expr"]) -> "Expr":
 
 
 def _do_loop(body: "Expr", iter_specs: Sequence["Expr"]) -> None:
-    from .expression import evaluate
+    from .expression import _TungstenContinueSignal, evaluate
 
     if not iter_specs:
-        evaluate(body)
+        # Innermost-body level: catch ``Continue[]`` so it skips the
+        # rest of this body iteration and lets the outer loop walker
+        # advance the inner-most iterator. ``Break[]`` keeps
+        # propagating so the outer ``do_expr`` boundary catches it
+        # and exits *every* iteration nesting at once.
+        try:
+            evaluate(body)
+        except _TungstenContinueSignal:
+            pass
         return
 
     spec = iter_specs[0]
@@ -393,9 +443,135 @@ def _generate_numeric_iter_values(
     return values
 
 
+def for_expr(arguments: Sequence["Expr"]) -> "Expr":
+    """Evaluate ``For[init, test, incr, body]``.
+
+    The four-argument form is the only one Wolfram supports: ``init``
+    is evaluated once, then while ``test`` evaluates to literal
+    ``True``, ``body`` runs followed by ``incr``. ``For`` always
+    returns ``Null``.
+
+    Non-local control flow inside the body:
+
+    - ``Break[]`` exits the loop with ``Null``.
+    - ``Continue[]`` skips the rest of the current ``body`` and
+      proceeds to ``incr`` (so iteration progresses; without this
+      contract ``For[i = 1, i <= n, i++, If[..., Continue[]]; ...]``
+      would loop forever).
+    - ``Return[expr, For]`` exits the loop and yields ``expr``.
+
+    The Tungsten iteration safety cap (``_ITERATION_SAFETY_LIMIT``)
+    bounds runaway loops where ``test`` never becomes ``False``.
+    """
+    from .expression import (
+        WolframEvaluationError,
+        _ITERATION_SAFETY_LIMIT,
+        _TungstenBreakSignal,
+        _TungstenContinueSignal,
+        _TungstenReturnSignal,
+        evaluate,
+        symbol,
+    )
+
+    if len(arguments) != 4:
+        raise WolframEvaluationError(
+            "For expects four arguments: init, test, incr, and body."
+        )
+    init, test, incr, body = arguments
+    try:
+        evaluate(init)
+        iteration = 0
+        while True:
+            if iteration > _ITERATION_SAFETY_LIMIT:
+                raise WolframEvaluationError(
+                    "For exceeded the Tungsten iteration safety limit."
+                )
+            test_result = evaluate(test)
+            if test_result != symbol("True"):
+                break
+            try:
+                evaluate(body)
+            except _TungstenContinueSignal:
+                pass
+            evaluate(incr)
+            iteration += 1
+    except _TungstenBreakSignal:
+        pass
+    except _TungstenReturnSignal as signal:
+        if signal.head_name == "For":
+            return signal.value
+        raise
+    return symbol("Null")
+
+
+def while_expr(arguments: Sequence["Expr"]) -> "Expr":
+    """Evaluate ``While[test, body]`` (or ``While[test]``).
+
+    While ``test`` evaluates to literal ``True``, ``body`` runs.
+    The single-argument form is shorthand for ``While[test, Null]``
+    and is normally used to iterate ``test`` for its side effects
+    until it stops being ``True``. ``While`` always returns ``Null``.
+
+    Non-local control flow inside the body matches ``For``:
+
+    - ``Break[]`` exits the loop with ``Null``.
+    - ``Continue[]`` skips the rest of the current iteration and
+      re-evaluates ``test``.
+    - ``Return[expr, While]`` exits the loop and yields ``expr``.
+
+    The Tungsten iteration safety cap (``_ITERATION_SAFETY_LIMIT``)
+    bounds runaway loops.
+    """
+    from .expression import (
+        WolframEvaluationError,
+        _ITERATION_SAFETY_LIMIT,
+        _TungstenBreakSignal,
+        _TungstenContinueSignal,
+        _TungstenReturnSignal,
+        evaluate,
+        symbol,
+    )
+
+    if len(arguments) == 1:
+        test = arguments[0]
+        body: "Expr | None" = None
+    elif len(arguments) == 2:
+        test, body = arguments
+    else:
+        raise WolframEvaluationError(
+            "While expects one or two arguments: test (and optional body)."
+        )
+
+    try:
+        iteration = 0
+        while True:
+            if iteration > _ITERATION_SAFETY_LIMIT:
+                raise WolframEvaluationError(
+                    "While exceeded the Tungsten iteration safety limit."
+                )
+            test_result = evaluate(test)
+            if test_result != symbol("True"):
+                break
+            if body is not None:
+                try:
+                    evaluate(body)
+                except _TungstenContinueSignal:
+                    pass
+            iteration += 1
+    except _TungstenBreakSignal:
+        pass
+    except _TungstenReturnSignal as signal:
+        if signal.head_name == "While":
+            return signal.value
+        raise
+    return symbol("Null")
+
+
 __all__ = [
     "do_expr",
+    "for_expr",
     "product_expr",
     "sum_expr",
     "table_expr",
+    "while_expr",
 ]

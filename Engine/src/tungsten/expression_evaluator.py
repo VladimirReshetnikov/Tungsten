@@ -145,6 +145,51 @@ def evaluate_once(expr: Expr) -> Expr:
             from .expression_iteration import product_expr
             return product_expr(expr.arguments)
 
+        if raw_head_name == "For":
+            # ``For`` is HoldAll: init / test / incr / body all need
+            # to be re-evaluated each iteration, so we dispatch with
+            # the raw arguments before the standard arg-eval pass.
+            from .expression_iteration import for_expr
+            return for_expr(expr.arguments)
+
+        if raw_head_name == "While":
+            from .expression_iteration import while_expr
+            return while_expr(expr.arguments)
+
+        if raw_head_name == "Break":
+            return break_expr(expr.arguments)
+
+        if raw_head_name == "Continue":
+            return continue_expr(expr.arguments)
+
+        if raw_head_name == "Return":
+            return return_expr(expr.arguments)
+
+        if raw_head_name == "Label":
+            # ``Label`` is HoldAll: its argument is a tag, not an
+            # expression to be evaluated. Dispatch before the
+            # standard arg-eval pass so the original tag expression
+            # is preserved for the goto-scan in CompoundExpression.
+            return label_expr(expr.arguments)
+
+        if raw_head_name == "Goto":
+            return goto_expr(expr.arguments)
+
+        if raw_head_name == "Increment":
+            # ``Increment`` / ``Decrement`` / ``PreIncrement`` /
+            # ``PreDecrement`` are HoldFirst — the target symbol must
+            # not be looked up as a value before we can mutate it.
+            return increment_expr(expr.arguments)
+
+        if raw_head_name == "Decrement":
+            return decrement_expr(expr.arguments)
+
+        if raw_head_name == "PreIncrement":
+            return pre_increment_expr(expr.arguments)
+
+        if raw_head_name == "PreDecrement":
+            return pre_decrement_expr(expr.arguments)
+
         if raw_head_name == "TimeConstrained":
             return time_constrained_expr(expr.arguments)
 

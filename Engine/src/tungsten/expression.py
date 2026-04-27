@@ -73,12 +73,66 @@ class _TungstenConfirmSignal(Exception):
         self.tag = tag
 
 
+class _TungstenBreakSignal(Exception):
+    """Internal signal raised by ``Break[]``.
+
+    Propagates outward until the nearest enclosing ``Do`` / ``While`` /
+    ``For`` loop catches it and exits with ``Null``. Per the Wolfram
+    docs, ``Break`` does *not* propagate through ``Table`` / ``Sum`` /
+    ``Product``, so those heads do not catch this signal.
+    """
+
+
+class _TungstenContinueSignal(Exception):
+    """Internal signal raised by ``Continue[]``.
+
+    Same propagation rules as ``_TungstenBreakSignal``: caught by the
+    next ``Do`` / ``While`` / ``For`` loop, which skips the rest of
+    the body and resumes with the next iteration.
+    """
+
+
+class _TungstenReturnSignal(Exception):
+    """Internal signal raised by ``Return[expr]`` and
+    ``Return[expr, head]``.
+
+    The one-argument form (``head_name`` is ``None``) is caught at
+    the boundary of a function-definition rule application — i.e.,
+    when a matched ``DownValues`` / ``SubValues`` / ``UpValues`` rule's
+    RHS is evaluated. The two-argument form (``head_name`` is the
+    string name of the targeted head, e.g. ``"Module"`` or
+    ``"For"``) is caught by the corresponding head's evaluator.
+    """
+
+    def __init__(self, value: Expr, head_name: str | None = None) -> None:
+        super().__init__(value, head_name)
+        self.value = value
+        self.head_name = head_name
+
+
+class _TungstenGotoSignal(Exception):
+    """Internal signal raised by ``Goto[label]``.
+
+    Caught by the nearest enclosing ``CompoundExpression`` whose
+    arguments contain a matching ``Label[label]`` marker. Evaluation
+    resumes from the position after the matched ``Label``.
+    """
+
+    def __init__(self, label: Expr) -> None:
+        super().__init__(label)
+        self.label = label
+
+
 _CONTROL_SIGNAL_TYPES = (
     TungstenExitRequested,
     TungstenAbortRequested,
     _TungstenThrowSignal,
     _TungstenTimeConstraintSignal,
     _TungstenConfirmSignal,
+    _TungstenBreakSignal,
+    _TungstenContinueSignal,
+    _TungstenReturnSignal,
+    _TungstenGotoSignal,
 )
 
 
@@ -7085,6 +7139,89 @@ def set_delayed_expr(arguments: Sequence[Expr]) -> Expr:
     return symbol("Null")
 
 
+def _apply_inplace_arithmetic_to_symbol(
+    head_name: str,
+    target: Expr,
+    delta: int,
+    *,
+    return_old: bool,
+) -> Expr:
+    """Mutate a Symbol's own value by ``delta`` and return the old or
+    new value.
+
+    Used by ``Increment`` / ``PreIncrement`` / ``Decrement`` /
+    ``PreDecrement``. ``head_name`` is only used for error messages.
+    Currently only bare-symbol targets are supported; compound targets
+    such as ``parts[i]`` fall through to the inert form.
+    """
+    if not isinstance(target, Symbol):
+        raise WolframEvaluationError(
+            f"{head_name} currently expects a bare-symbol target."
+        )
+    record = _SYMBOL_REGISTRY.record_for_symbol(target)
+    if not _record_allows_value_mutation(record):
+        _emit_protected_symbol_message(head_name, record)
+        raise WolframEvaluationError(
+            f"{head_name}: cannot modify protected symbol."
+        )
+    old_value = evaluate(target)
+    new_value = evaluate(call("Plus", old_value, integer(delta)))
+    record.own_value = new_value
+    _refresh_canonical_own_values(record)
+    return old_value if return_old else new_value
+
+
+def increment_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``Increment[x]`` (parser form ``x++``).
+
+    Returns the value of ``x`` *before* the increment, then sets
+    ``x`` to ``x + 1``. Tungsten currently supports only bare-symbol
+    targets; compound targets such as ``parts[i]`` fall through to
+    the inert form.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Increment expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "Increment", arguments[0], +1, return_old=True
+    )
+
+
+def decrement_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``Decrement[x]`` (parser form ``x--``).
+
+    Returns the old value of ``x`` and sets ``x`` to ``x - 1``.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Decrement expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "Decrement", arguments[0], -1, return_old=True
+    )
+
+
+def pre_increment_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``PreIncrement[x]`` (parser form ``++x``).
+
+    Sets ``x`` to ``x + 1`` and returns the new value.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("PreIncrement expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "PreIncrement", arguments[0], +1, return_old=False
+    )
+
+
+def pre_decrement_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``PreDecrement[x]`` (parser form ``--x``).
+
+    Sets ``x`` to ``x - 1`` and returns the new value.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("PreDecrement expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "PreDecrement", arguments[0], -1, return_old=False
+    )
+
+
 def set_expr(arguments: Sequence[Expr]) -> Expr:
     if len(arguments) != 2:
         raise WolframEvaluationError("Set expects exactly two arguments.")
@@ -7370,6 +7507,15 @@ def _definition_pattern_expr(hold_pattern: Expr) -> Expr:
 
 
 def _apply_definitions(expr: Expr, definitions: Sequence[object]) -> Expr | None:
+    """Apply the first matching definition rule to ``expr``.
+
+    Each rule is evaluated as a function-application boundary: a bare
+    ``Return[value]`` raised inside the rule's RHS is caught here and
+    unwraps to ``value``, matching the kernel's "Return exits the
+    nearest enclosing function definition" semantics. Headed
+    ``Return[value, head]`` signals propagate through unchanged so
+    the targeted handler upstream can catch them.
+    """
     for definition in definitions:
         pattern = _definition_pattern_expr(definition.hold_pattern)
         bindings = _match_pattern(expr, pattern)
@@ -7378,12 +7524,17 @@ def _apply_definitions(expr: Expr, definitions: Sequence[object]) -> Expr | None
         condition = getattr(definition, "condition", None)
         if condition is not None and not _condition_test_succeeds(condition, bindings):
             continue
-        replacement, applied = _instantiate_replacement_template(
-            definition.rhs,
-            bindings,
-            delayed=definition.delayed,
-            evaluate_result=True,
-        )
+        try:
+            replacement, applied = _instantiate_replacement_template(
+                definition.rhs,
+                bindings,
+                delayed=definition.delayed,
+                evaluate_result=True,
+            )
+        except _TungstenReturnSignal as signal:
+            if signal.head_name is None:
+                return signal.value
+            raise
         if applied:
             assert replacement is not None
             return replacement
@@ -7491,6 +7642,91 @@ def throw_expr(arguments: Sequence[Expr]) -> None:
     if len(arguments) == 3:
         raise _TungstenThrowSignal(evaluate(arguments[0]), evaluate(arguments[1]), evaluate(arguments[2]))
     raise WolframEvaluationError("Throw expects one, two, or three arguments.")
+
+
+def break_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenBreakSignal`` so the nearest enclosing
+    ``Do`` / ``While`` / ``For`` exits cleanly.
+
+    ``Break`` takes no arguments. If any are supplied, Tungsten falls
+    through to the inert form (matching the kernel's ``Break::argx``
+    error and inert return).
+    """
+    if len(arguments) != 0:
+        raise WolframEvaluationError("Break expects no arguments.")
+    raise _TungstenBreakSignal()
+
+
+def continue_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenContinueSignal`` so the nearest enclosing
+    ``Do`` / ``While`` / ``For`` skips to its next iteration.
+
+    Like ``Break``, ``Continue`` takes no arguments; extra arguments
+    fall through to the inert form via ``WolframEvaluationError``.
+    """
+    if len(arguments) != 0:
+        raise WolframEvaluationError("Continue expects no arguments.")
+    raise _TungstenContinueSignal()
+
+
+def return_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenReturnSignal`` for ``Return[expr]`` or
+    ``Return[expr, head]``.
+
+    The single-argument form propagates through the evaluator until a
+    function-definition rule application catches it (so an ordinary
+    SetDelayed-defined ``f[x_] := ...; Return[v]; ...`` returns ``v``
+    from ``f[...]``). The two-argument form names the enclosing head
+    that should catch the signal — the head must evaluate to a
+    ``Symbol`` (e.g. ``Module``, ``Block``, ``For``, ``While``,
+    ``Do``).
+
+    A bare ``Return[]`` is treated as ``Return[Null]`` to match the
+    kernel; arities outside ``{0, 1, 2}`` fall through to the inert
+    form.
+    """
+    if len(arguments) == 0:
+        raise _TungstenReturnSignal(symbol("Null"))
+    if len(arguments) == 1:
+        raise _TungstenReturnSignal(evaluate(arguments[0]))
+    if len(arguments) == 2:
+        head_expr = evaluate(arguments[1])
+        if not isinstance(head_expr, Symbol):
+            raise WolframEvaluationError(
+                "Return's second argument must evaluate to a Symbol."
+            )
+        raise _TungstenReturnSignal(evaluate(arguments[0]), head_expr.name)
+    raise WolframEvaluationError("Return expects zero, one, or two arguments.")
+
+
+def label_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``Label[name]``.
+
+    ``Label`` is a marker for ``Goto``: by itself it has no
+    side effect and stays inert (``Label[name]`` evaluates to
+    ``Label[name]``), matching the kernel. The marker semantics
+    happen entirely inside ``CompoundExpression`` — when a ``Goto``
+    signal is raised, that handler scans its argument list for a
+    structurally matching ``Label[...]`` and resumes from after it.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Label expects exactly one argument.")
+    return call("Label", arguments[0])
+
+
+def goto_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenGotoSignal`` so the nearest enclosing
+    ``CompoundExpression`` resumes at a matching ``Label``.
+
+    The label argument is evaluated before the signal is raised so that
+    forms like ``Goto[Symbol[\"end\"]]`` work the same as the literal
+    ``Goto[end]``. If no enclosing ``CompoundExpression`` carries a
+    matching ``Label``, the signal propagates to ``evaluate`` and is
+    converted back to the inert ``Goto[label]`` form.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Goto expects exactly one argument.")
+    raise _TungstenGotoSignal(evaluate(arguments[0]))
 
 
 def _uncaught_throw_result(signal: _TungstenThrowSignal) -> Expr:
@@ -7782,15 +8018,63 @@ def print_expr(arguments: Sequence[Expr]) -> Expr:
 
 
 def compound_expression_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``expr1; expr2; ...`` left to right and return the
+    final value (or ``Null`` for a trailing semicolon).
+
+    ``Goto[label]`` raised inside any ``arg`` is caught here: Tungsten
+    scans the argument list for the first ``Label[label]`` whose label
+    is structurally equal to the goto target and resumes evaluation
+    from the position immediately after that ``Label``. A goto whose
+    target does not match any ``Label`` in this CompoundExpression
+    propagates outward so an enclosing CompoundExpression (or the
+    top-level evaluator's inert-fallback) can handle it.
+
+    ``Label[name]`` itself is handled inline by ``label_expr`` and
+    just returns ``Null``; the marker behavior happens entirely in
+    this loop. The Label scan is structural: ``Label[a]`` matches
+    ``Goto[a]`` because Tungsten compares the label expressions for
+    equality after evaluating the goto argument.
+    """
     result: Expr = symbol("Null")
-    for argument in arguments:
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
         try:
             result = evaluate(argument)
         except TungstenAbortRequested:
             if not _defer_abort_to_current_protect():
                 raise
             result = symbol("Null")
+        except _TungstenGotoSignal as signal:
+            target_index = _find_label_index(arguments, signal.label)
+            if target_index is None:
+                raise
+            index = target_index + 1
+            result = symbol("Null")
+            continue
+        index += 1
     return result
+
+
+def _find_label_index(arguments: Sequence[Expr], label: Expr) -> int | None:
+    """Return the index of the first ``Label[label]`` argument matching
+    ``label``, or ``None`` if no marker matches.
+
+    Labels can be evaluated lazily — ``Label[end]`` parses with ``end``
+    as a symbol that may have an own value at goto-time. Tungsten
+    compares the *unevaluated* label argument inside ``Label[...]``
+    against the goto target so a label slot whose name evaluates
+    differently from the goto's argument still matches when the
+    surface text is identical (the kernel's behavior in practice).
+    """
+    for index, argument in enumerate(arguments):
+        if not (isinstance(argument, Call) and argument.has_head("Label")):
+            continue
+        if len(argument.arguments) != 1:
+            continue
+        if argument.arguments[0] == label:
+            return index
+    return None
 
 
 def check_abort_expr(arguments: Sequence[Expr]) -> Expr:
@@ -14984,6 +15268,33 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
                 raise
             emit_message(call("MessageName", symbol("Confirm"), string("confirmnotag")))
             return signal.failure
+        except _TungstenBreakSignal:
+            if previous_depth > 0:
+                raise
+            # Bare ``Break[]`` outside a loop emits ``Break::nofwd`` and
+            # stays inert. Tungsten reproduces the inert fallback (the
+            # message is currently not emitted).
+            return call("Break")
+        except _TungstenContinueSignal:
+            if previous_depth > 0:
+                raise
+            return call("Continue")
+        except _TungstenReturnSignal as signal:
+            if previous_depth > 0:
+                raise
+            # Uncaught ``Return[expr]`` / ``Return[expr, head]`` becomes
+            # the inert ``Return[evaluated_expr]`` / ``Return[..., head]``
+            # form, matching the kernel's "Return outside a function
+            # definition" behavior.
+            if signal.head_name is None:
+                return call("Return", signal.value)
+            return call("Return", signal.value, symbol(signal.head_name))
+        except _TungstenGotoSignal as signal:
+            if previous_depth > 0:
+                raise
+            # ``Goto`` whose target ``Label`` is not present in any
+            # enclosing CompoundExpression becomes inert ``Goto[label]``.
+            return call("Goto", signal.label)
         except TungstenAbortRequested:
             if previous_depth > 0:
                 raise

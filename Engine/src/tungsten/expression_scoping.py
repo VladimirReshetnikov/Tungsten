@@ -211,8 +211,16 @@ def module_expr(arguments: Sequence["Expr"]) -> "Expr":
         )
 
     if not bindings_expr.arguments:
-        # ``Module[{}, body]`` is just ``body``.
-        return evaluate(body)
+        # ``Module[{}, body]`` is just ``body``, but the empty-Module
+        # call still defines a Return[expr, Module] catch boundary.
+        from .expression import _TungstenReturnSignal
+
+        try:
+            return evaluate(body)
+        except _TungstenReturnSignal as signal:
+            if signal.head_name == "Module":
+                return signal.value
+            raise
 
     # Parse bindings. Each entry yields (Symbol name, value | None, delayed flag).
     parsed_bindings: list[tuple[Symbol, "Expr | None", bool]] = []
@@ -263,7 +271,18 @@ def module_expr(arguments: Sequence["Expr"]) -> "Expr":
     # fresh symbol; capture-avoidance through inner ``Function`` / ``With``
     # / ``Module`` / ``Block`` is handled by the shared helper.
     renamed_body = _rename_bound_symbols_in_expr(body, rename_map)
-    return evaluate(renamed_body)
+    from .expression import _TungstenReturnSignal
+
+    try:
+        return evaluate(renamed_body)
+    except _TungstenReturnSignal as signal:
+        # ``Return[expr, Module]`` exits the nearest enclosing Module
+        # call. Headed Returns targeting other heads, or bare
+        # ``Return[expr]`` (which is caught at the function-definition
+        # boundary instead), continue propagating outward.
+        if signal.head_name == "Module":
+            return signal.value
+        raise
 
 
 def _parse_module_binding(binding: "Expr") -> tuple["Symbol", "Expr | None", bool]:
@@ -383,7 +402,16 @@ def _block_implementation(
         )
 
     if not bindings_expr.arguments:
-        return evaluate(body)
+        # Empty ``Block[{}, body]`` / ``InheritedBlock[{}, body]``
+        # still defines a Return[expr, head_name] catch boundary.
+        from .expression import _TungstenReturnSignal
+
+        try:
+            return evaluate(body)
+        except _TungstenReturnSignal as signal:
+            if signal.head_name == head_name:
+                return signal.value
+            raise
 
     # Parse bindings: bare Symbol | Set[name, value] | SetDelayed[name, value].
     parsed_bindings: list[tuple["Symbol", "Expr | None", bool]] = []
@@ -402,6 +430,8 @@ def _block_implementation(
     for name, _value, _delayed in parsed_bindings:
         record = _SYMBOL_REGISTRY.record_for_symbol(name)
         snapshots.append((record, _snapshot_record_values(record)))
+
+    from .expression import _TungstenReturnSignal
 
     try:
         # Apply initializers. We bypass ``set_expr`` here because Block
@@ -424,7 +454,16 @@ def _block_implementation(
             if delayed and record.own_values_definitions:
                 record.own_values_definitions[-1].delayed = True
 
-        return evaluate(body)
+        try:
+            return evaluate(body)
+        except _TungstenReturnSignal as signal:
+            # ``Return[expr, Block]`` / ``Return[expr, InheritedBlock]``
+            # exits the nearest enclosing Block-family call. Other
+            # Returns continue propagating so the targeted head
+            # upstream can catch them.
+            if signal.head_name == head_name:
+                return signal.value
+            raise
     finally:
         for record, snapshot in snapshots:
             _restore_record_values(record, snapshot)
