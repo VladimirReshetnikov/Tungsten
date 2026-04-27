@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-27T01:28:35Z
-- Repository HEAD: 502487b1fc8db259c932906795308ae341e4bcd3
+- Updated (UTC): 2026-04-27T02:26:02Z
+- Repository HEAD: 4404922a8b0feac6f727c008a861f214f3f1ffd6
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -134,7 +134,11 @@ The current workspace is built around seven complementary capabilities:
    `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`, exact polynomial heads
    `Expand`, `PolynomialQ`, `Variables`, `MonomialList`, `Collect`, `Coefficient`, `Exponent`,
    `CoefficientList`, `Factor`, `FactorList`, `Decompose`, plus number-theory heads
-   `FactorInteger` and `IntegerExponent`,
+   `FactorInteger` and `IntegerExponent`, SymPy-backed exact algebraic-number heads
+   `Root`, `MinimalPolynomial`, and `RootReduce` for indexed polynomial roots over primitive
+   integer polynomials, rational algebraic expressions, rational powers, and direct
+   `Re`/`Im`/`Conjugate`/`Abs` forms, with exact comparisons for real-valued roots and
+   arbitrary-precision numeric approximation through `N`,
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,

@@ -3838,5 +3838,81 @@ class PolynomialAlgebraTests(unittest.TestCase):
         )
 
 
+class AlgebraicRootTests(unittest.TestCase):
+    """Kernel-free algebraic-number support for indexed polynomial roots."""
+
+    def test_root_canonicalizes_polynomial_and_rational_roots(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Root[2 #^3 - 4 &, 2]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 3]]], 2, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Root[(#^2 - 2)^2 &, 4]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 2]]], 2, 0]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Root[#^2 - 4 &, 2]")).to_full_form(), "2")
+        self.assertEqual(evaluate(parse_input_form("Root[2 # - 4 &, 1]")).to_full_form(), "2")
+
+    def test_minimal_polynomial_and_root_reduce(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("MinimalPolynomial[Root[#^3 - 2 &, 1]^2, x]")).to_full_form(),
+            "Plus[-4, Power[x, 3]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MinimalPolynomial[Root[#^2 - 2 &, 2] + Root[#^2 - 3 &, 2], x]")).to_full_form(),
+            "Plus[1, Power[x, 4], Times[-10, Power[x, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Root[#^3 - 2 &, 1]^3]")).to_full_form(),
+            "2",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[1/Root[#^3 - 2 &, 1]]")).to_full_form(),
+            "Root[Function[Plus[-1, Times[2, Power[Slot[1], 3]]]], 1, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Root[#^2 - 2 &, 2] + Root[#^2 - 3 &, 2]]")).to_full_form(),
+            "Root[Function[Plus[1, Times[-10, Power[Slot[1], 2]], Power[Slot[1], 4]]], 4, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Root[#^2 - 2 &, 2]^(1/2)]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 4]]], 2, 0]",
+        )
+
+    def test_root_reduce_components_and_conjugates(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Re[Root[#^2 + 1 &, 1]]]")).to_full_form(),
+            "0",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Im[Root[#^2 + 1 &, 1]]]")).to_full_form(),
+            "-1",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Abs[Root[#^2 + 1 &, 1]]]")).to_full_form(),
+            "1",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Conjugate[Root[#^3 - 2 &, 2]]")).to_full_form(),
+            "Root[Function[Plus[-2, Power[Slot[1], 3]]], 3, 0]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("RootReduce[Re[Root[#^3 - 2 &, 2]]]")).to_full_form(),
+            "Root[Function[Plus[1, Times[4, Power[Slot[1], 3]]]], 1, 0]",
+        )
+
+    def test_real_roots_compare_exactly_and_numericize_at_requested_precision(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Root[#^3 - 3 # + 1 &, 1] < Root[#^3 - 3 # + 1 &, 2]")).to_full_form(),
+            "True",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Max[Root[#^3 - 3 # + 1 &, 1], Root[#^3 - 3 # + 1 &, 3]]")).to_full_form(),
+            "Root[Function[Plus[1, Times[-3, Slot[1]], Power[Slot[1], 3]]], 3, 0]",
+        )
+        numeric = evaluate(parse_input_form("N[Root[#^3 - 2 &, 1], 30]")).to_input_form()
+        self.assertRegex(numeric, r"^1\.25992104989487316476721060728`30\.$")
+
+
 if __name__ == "__main__":
     unittest.main()

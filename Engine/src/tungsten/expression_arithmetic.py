@@ -373,7 +373,13 @@ def _evaluate_numeric_relation(expr: Call) -> Expr | None:
                 return _bool_symbol(False)
         return _bool_symbol(True)
 
-    if not all(_is_real_number_expr(argument) or _is_positive_infinity_expr(argument) or _is_negative_infinity_expr(argument) for argument in expr.arguments):
+    if not all(
+        _is_real_number_expr(argument)
+        or _is_real_algebraic_expr(argument)
+        or _is_positive_infinity_expr(argument)
+        or _is_negative_infinity_expr(argument)
+        for argument in expr.arguments
+    ):
         return None
 
     comparisons = [_compare_real_expr(left, right) for left, right in zip(expr.arguments, expr.arguments[1:])]
@@ -1122,6 +1128,9 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
             return complex_number(argument.real_part, _negate_real_expr(argument.imaginary_part))
         if _is_real_number_expr(argument):
             return argument
+        conjugate = _conjugate_algebraic_expr(argument)
+        if conjugate is not None:
+            return conjugate
         return None
 
     if expr.has_head("Abs"):
@@ -1174,7 +1183,13 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
         unwrapped = _flatten_list_arguments(expr.arguments)
         if not unwrapped:
             return symbol("Infinity") if expr.has_head("Min") else symbol("-Infinity")
-        if not all(_is_real_number_expr(argument) or _is_positive_infinity_expr(argument) or _is_negative_infinity_expr(argument) for argument in unwrapped):
+        if not all(
+            _is_real_number_expr(argument)
+            or _is_real_algebraic_expr(argument)
+            or _is_positive_infinity_expr(argument)
+            or _is_negative_infinity_expr(argument)
+            for argument in unwrapped
+        ):
             return None
         best = unwrapped[0]
         for argument in unwrapped[1:]:

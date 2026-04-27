@@ -271,6 +271,43 @@ class ComplexNumber(Expr):
 
 
 @dataclass(frozen=True)
+class RootNumber(Expr):
+    coefficients: tuple[int, ...]
+    index: int
+    method: int = 0
+
+    def head(self) -> Expr:
+        return Symbol("Root")
+
+    def args(self) -> tuple[Expr, ...]:
+        return (self._function_expr(), integer(self.index + 1), integer(self.method))
+
+    def is_atom(self) -> bool:
+        return False
+
+    def has_head(self, name: str) -> bool:
+        return name == "Root"
+
+    def to_full_form(self) -> str:
+        return f"Root[{self._function_expr().to_full_form()}, {self.index + 1}, {self.method}]"
+
+    def to_input_form(self) -> str:
+        return f"Root[{self._function_expr().to_input_form()}, {self.index + 1}, {self.method}]"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "type": "root",
+            "coefficients": list(self.coefficients),
+            "index": self.index + 1,
+            "method": self.method,
+        }
+
+    def _function_expr(self) -> Expr:
+        body = _polynomial_expr_from_coefficients(self.coefficients, call("Slot", integer(1)))
+        return call("Function", body)
+
+
+@dataclass(frozen=True)
 class SpecialReal(Expr):
     name: str
 
@@ -653,6 +690,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Message",
     "MessageList",
     "MessageName",
+    "MinimalPolynomial",
     "Min",
     "MinimalBy",
     "Missing",
@@ -764,6 +802,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "ReverseSortBy",
     "RightComposition",
     "RightArrow",
+    "Root",
+    "RootReduce",
     "RotateLeft",
     "RotateRight",
     "Rule",
@@ -2566,6 +2606,36 @@ def complex_number(real_part: Expr, imaginary_part: Expr) -> Expr:
     return ComplexNumber(real_part, imaginary_part)
 
 
+def root_number(coefficients: Sequence[int], index: int, method: int = 0) -> RootNumber:
+    normalized = tuple(int(coefficient) for coefficient in coefficients)
+    if len(normalized) < 2 or normalized[-1] == 0:
+        raise WolframEvaluationError("Root expects a nonconstant polynomial with nonzero leading coefficient.")
+    if index < 0:
+        raise WolframEvaluationError("Root index must be positive.")
+    return RootNumber(normalized, int(index), int(method))
+
+
+def _polynomial_expr_from_coefficients(coefficients: Sequence[int], variable: Expr) -> Expr:
+    terms: list[Expr] = []
+    for exponent, coefficient in enumerate(coefficients):
+        if coefficient == 0:
+            continue
+        coefficient_expr = integer(coefficient)
+        if exponent == 0:
+            terms.append(coefficient_expr)
+            continue
+        power_expr = variable if exponent == 1 else call("Power", variable, integer(exponent))
+        if coefficient == 1:
+            terms.append(power_expr)
+        elif coefficient == -1:
+            terms.append(call("Times", integer(-1), power_expr))
+        else:
+            terms.append(call("Times", coefficient_expr, power_expr))
+    if not terms:
+        return integer(0)
+    return call("Plus", *terms)
+
+
 def special_real(name: str) -> SpecialReal:
     if name not in {"Overflow", "Underflow"}:
         raise WolframEvaluationError(f"Unsupported special real atom: {name}.")
@@ -4076,6 +4146,10 @@ def _numeric_power_expr(base: Expr, exponent: Expr) -> Expr | None:
 
 
 def _compare_real_expr(left: Expr, right: Expr) -> int | None:
+    algebraic_compare = _compare_algebraic_real_expr(left, right)
+    if algebraic_compare is not None:
+        return algebraic_compare
+
     if isinstance(left, SpecialReal) or isinstance(right, SpecialReal):
         if left == right:
             return 0
@@ -4341,6 +4415,32 @@ def _evaluate_polynomial_functions(expr: Call) -> Expr | None:
     return _expression_polynomial_module()._evaluate_polynomial_functions(expr)
 
 
+def _expression_algebraic_module():
+    from . import expression_algebraic as _algebraic
+
+    return _algebraic
+
+
+def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
+    return _expression_algebraic_module()._evaluate_algebraic_functions(expr)
+
+
+def _numericize_algebraic_expr(expr: Expr, precision: int | None) -> Expr | None:
+    return _expression_algebraic_module()._numericize_algebraic_expr(expr, precision)
+
+
+def _is_real_algebraic_expr(expr: Expr) -> bool:
+    return _expression_algebraic_module()._is_real_algebraic_expr(expr)
+
+
+def _compare_algebraic_real_expr(left: Expr, right: Expr) -> int | None:
+    return _expression_algebraic_module()._compare_algebraic_real_expr(left, right)
+
+
+def _conjugate_algebraic_expr(expr: Expr) -> Expr | None:
+    return _expression_algebraic_module()._conjugate_algebraic_expr(expr)
+
+
 def _flatten_list_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     """If ``arguments`` is a single ``List[...]`` wrapper, unwrap once.
 
@@ -4489,6 +4589,9 @@ def _n_expr(expr: Expr, precision_expr: Expr | None = None) -> Expr:
 
 
 def _numericize_expr(expr: Expr, precision: int | None) -> Expr:
+    algebraic = _numericize_algebraic_expr(expr, precision)
+    if algebraic is not None:
+        return algebraic
     if isinstance(expr, Integer | RationalNumber):
         return _exact_to_real(expr, precision)
     if isinstance(expr, ComplexNumber):
@@ -4609,6 +4712,8 @@ def _precision_expr(expr: Expr) -> Expr:
 def _precision_value(expr: Expr) -> float | str | None:
     if _is_exact_real_number(expr):
         return None
+    if isinstance(expr, RootNumber):
+        return None
     if isinstance(expr, SpecialReal):
         return 0.0
     if isinstance(expr, Real):
@@ -4646,6 +4751,8 @@ def _accuracy_expr(expr: Expr) -> Expr:
 
 def _accuracy_value(expr: Expr) -> float | None:
     if _is_exact_real_number(expr):
+        return None
+    if isinstance(expr, RootNumber):
         return None
     if isinstance(expr, SpecialReal):
         return float("-inf") if expr.name == "Overflow" else float("inf")

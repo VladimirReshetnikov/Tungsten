@@ -555,6 +555,10 @@ def evaluate_once(expr: Expr) -> Expr:
     if constructor_result is not None:
         return constructor_result
 
+    algebraic_result = _evaluate_algebraic_functions(evaluated_expr)
+    if algebraic_result is not None:
+        return algebraic_result
+
     arithmetic_result = _evaluate_numeric_arithmetic(evaluated_expr)
     if arithmetic_result is not None:
         return arithmetic_result
