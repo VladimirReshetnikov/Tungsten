@@ -4806,6 +4806,67 @@ class AlgebraicRootTests(unittest.TestCase):
         numeric = evaluate(parse_input_form("N[Root[#^3 - 2 &, 1], 30]")).to_input_form()
         self.assertRegex(numeric, r"^1\.25992104989487316476721060728`30\.$")
 
+    def test_solve_univariate_polynomial_equations(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[x^2 == 1, x]")).to_full_form(),
+            "List[List[Rule[x, -1]], List[Rule[x, 1]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[x^2 + 1 == 0, x]")).to_full_form(),
+            "List[List[Rule[x, Root[Function[Plus[1, Power[Slot[1], 2]]], 1, 0]]], List[Rule[x, Root[Function[Plus[1, Power[Slot[1], 2]]], 2, 0]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[x^3 - 2 == 0, {x}]")).to_full_form(),
+            "List[List[Rule[x, Root[Function[Plus[-2, Power[Slot[1], 3]]], 1, 0]]], List[Rule[x, Root[Function[Plus[-2, Power[Slot[1], 3]]], 2, 0]]], List[Rule[x, Root[Function[Plus[-2, Power[Slot[1], 3]]], 3, 0]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[{x^2 == 1, x + 1 == 0}, x]")).to_full_form(),
+            "List[List[Rule[x, -1]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[(x - 1)^2 == 0, x]")).to_full_form(),
+            "List[List[Rule[x, 1]]]",
+        )
+
+    def test_solve_square_linear_systems_exactly(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[{x + y == 3, x - y == 1}, {x, y}]")).to_full_form(),
+            "List[List[Rule[x, 2], Rule[y, 1]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[{2 x + y == 5, x - 3 y == -4}, {x, y}]")).to_full_form(),
+            "List[List[Rule[x, Rational[11, 7]], Rule[y, Rational[13, 7]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[Sqrt[2] x == 1, x]")).to_full_form(),
+            "List[List[Rule[x, Times[Rational[1, 2], Power[2, Rational[1, 2]]]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[Pi x == 1, x]")).to_full_form(),
+            "List[List[Rule[x, Power[Pi, -1]]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[1. x == 2., x]")).to_full_form(),
+            "List[List[Rule[x, 2.]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[{x + y == Pi, x - y == 1}, {x, y}]")).to_full_form(),
+            "List[List[Rule[x, Plus[Rational[1, 2], Times[Rational[1, 2], Pi]]], Rule[y, Plus[Rational[-1, 2], Times[Rational[1, 2], Pi]]]]]",
+        )
+
+    def test_solve_rejects_parameters_and_unsupported_shapes(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Solve[False, x]")).to_full_form(), "List[]")
+        self.assertEqual(evaluate(parse_input_form("Solve[True, x]")).to_full_form(), "List[List[]]")
+        self.assertEqual(evaluate(parse_input_form("Solve[True, {x, y}]")).to_full_form(), "List[List[]]")
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[x^2 == a, x]")).to_full_form(),
+            "Solve[Equal[Power[x, 2], a], x]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Solve[{x + y == 3}, {x, y}]")).to_full_form(),
+            "Solve[List[Equal[Plus[x, y], 3]], List[x, y]]",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

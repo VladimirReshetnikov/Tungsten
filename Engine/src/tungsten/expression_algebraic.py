@@ -25,6 +25,8 @@ class _AlgebraicConversionError(ValueError):
 
 def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
     try:
+        if expr.has_head("Solve"):
+            return _solve_expr(expr.arguments)
         if expr.has_head("CountRoots"):
             return _count_roots_expr(expr.arguments)
         if expr.has_head("Root"):
@@ -52,6 +54,243 @@ def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
         # unexpectedly hard cases must leave the expression inert, not crash the REPL.
         return None
     return None
+
+
+def _solve_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 2:
+        return None
+    variables = _solve_variables(arguments[1])
+    if variables is None or not variables:
+        return None
+    from . import expression_polynomial as _polynomial
+
+    bridge = _polynomial._SympyBridge(variables)
+    variable_symbols = tuple(bridge.expr_to_symbol[variable] for variable in variables)
+    variable_map = dict(zip(variables, variable_symbols))
+    try:
+        equations = _solve_equation_exprs(arguments[0])
+        if equations is None:
+            return None
+        if equations is False:
+            return _evaluated_list_expr()
+        polynomials = [_solve_polynomial_expr(equation, variable_map, set(variable_symbols)) for equation in equations]
+        if not polynomials:
+            return _evaluated_list_expr(_evaluated_list_expr())
+        if len(variables) == 1:
+            return _solve_univariate_polynomials(polynomials, variables[0], bridge, variable_symbols[0])
+        return _solve_square_linear_system(polynomials, variables, bridge, variable_symbols)
+    except (_AlgebraicConversionError, _sp.PolynomialError, ValueError, TypeError, NotImplementedError):
+        return None
+
+
+def _solve_variables(spec: Expr) -> tuple[Expr, ...] | None:
+    if isinstance(spec, Call) and spec.has_head("List"):
+        variables = tuple(spec.arguments)
+    else:
+        variables = (spec,)
+    if len(set(variables)) != len(variables):
+        return None
+    return variables
+
+
+def _solve_equation_exprs(spec: Expr) -> tuple[Expr, ...] | bool | None:
+    if isinstance(spec, Symbol):
+        truth = _truth_value(spec)
+        if truth is True:
+            return ()
+        if truth is False:
+            return False
+    raw_equations = spec.arguments if isinstance(spec, Call) and spec.has_head("List") else (spec,)
+    equations: list[Expr] = []
+    for equation in raw_equations:
+        if isinstance(equation, Symbol):
+            truth = _truth_value(equation)
+            if truth is True:
+                continue
+            if truth is False:
+                return False
+        if isinstance(equation, Call) and equation.has_head("Equal"):
+            if len(equation.arguments) <= 1:
+                continue
+            for left, right in zip(equation.arguments, equation.arguments[1:]):
+                equations.append(evaluate(call("Plus", left, call("Times", integer(-1), right))))
+            continue
+        equations.append(equation)
+    return tuple(equations)
+
+
+def _solve_polynomial_expr(expr: Expr, variable_map: dict[Expr, Any], variable_symbols: set[Any]) -> Any:
+    sym_expr = _sp.expand(_solve_to_sympy(expr, variable_map))
+    if sym_expr.free_symbols - variable_symbols:
+        raise _AlgebraicConversionError(expr.to_full_form())
+    return sym_expr
+
+
+def _solve_to_sympy(expr: Expr, variable_map: dict[Expr, Any]) -> Any:
+    explicit = variable_map.get(expr)
+    if explicit is not None:
+        return explicit
+    if isinstance(expr, Integer):
+        return _sp.Integer(expr.value)
+    if isinstance(expr, RationalNumber):
+        return _sp.Rational(expr.value.numerator, expr.value.denominator)
+    if isinstance(expr, Real):
+        return _expr_to_sympy_numeric(expr)
+    if isinstance(expr, ComplexNumber):
+        return _solve_to_sympy(expr.real_part, variable_map) + _sp.I * _solve_to_sympy(
+            expr.imaginary_part,
+            variable_map,
+        )
+    if isinstance(expr, RootNumber):
+        return _root_to_sympy(expr)
+    if isinstance(expr, Symbol):
+        constant = _sympy_constant(_system_dispatch_name(expr))
+        if constant is None:
+            raise _AlgebraicConversionError(expr.to_full_form())
+        return constant
+    if isinstance(expr, Call):
+        if not _solve_contains_variable(expr, variable_map):
+            try:
+                return _expr_to_sympy_numeric(expr)
+            except _SympyNumericConversionError:
+                pass
+        head_name = _system_dispatch_name(expr.head_expr) if isinstance(expr.head_expr, Symbol) else None
+        if head_name == "Plus":
+            return _sp.Add(*(_solve_to_sympy(argument, variable_map) for argument in expr.arguments))
+        if head_name == "Times":
+            return _sp.Mul(*(_solve_to_sympy(argument, variable_map) for argument in expr.arguments))
+        if head_name == "Power" and len(expr.arguments) == 2:
+            return _sp.Pow(
+                _solve_to_sympy(expr.arguments[0], variable_map),
+                _solve_to_sympy(expr.arguments[1], variable_map),
+            )
+        if head_name == "Sqrt" and len(expr.arguments) == 1:
+            return _sp.sqrt(_solve_to_sympy(expr.arguments[0], variable_map))
+    raise _AlgebraicConversionError(expr.to_full_form())
+
+
+def _solve_contains_variable(expr: Expr, variable_map: dict[Expr, Any]) -> bool:
+    if expr in variable_map:
+        return True
+    if isinstance(expr, Call):
+        return any(_solve_contains_variable(argument, variable_map) for argument in expr.arguments)
+    return False
+
+
+def _solve_univariate_polynomials(polynomials: Sequence[Any], variable: Expr, bridge: Any, sym_var: Any) -> Expr | None:
+    nonzero_polys: list[Any] = []
+    for polynomial in polynomials:
+        if _sp.expand(polynomial) == 0:
+            continue
+        poly = _sp.Poly(polynomial, sym_var, extension=True)
+        if poly.degree() <= 0:
+            return _evaluated_list_expr()
+        nonzero_polys.append(poly)
+    if not nonzero_polys:
+        return _evaluated_list_expr(_evaluated_list_expr())
+    common_poly = nonzero_polys[0]
+    for polynomial in nonzero_polys[1:]:
+        common_poly = _sp.gcd(common_poly, polynomial)
+        if common_poly.degree() <= 0:
+            return _evaluated_list_expr()
+    roots = _solve_polynomial_roots(common_poly, bridge, sym_var)
+    if roots is None:
+        return None
+    return _evaluated_list_expr(*(_evaluated_list_expr(call("Rule", variable, root)) for root in roots))
+
+
+def _solve_polynomial_roots(poly: Any, bridge: Any, sym_var: Any) -> list[Expr] | None:
+    if poly.degree() == 1:
+        root = -poly.nth(0) / poly.nth(1)
+        converted = _solve_value_from_sympy(root, bridge)
+        return None if converted is None else [converted]
+    try:
+        rational_poly = _sp.Poly(poly.as_expr(), sym_var, domain=_sp.QQ)
+        primitive_expr = _primitive_integer_poly_expr(rational_poly.as_expr(), sym_var)
+        square_free_poly = _sp.Poly(primitive_expr, sym_var, domain=_sp.QQ).sqf_part()
+        square_free_expr = _primitive_integer_poly_expr(square_free_poly.as_expr(), sym_var)
+        degree = _sp.Poly(square_free_expr, sym_var, domain=_sp.QQ).degree()
+        if degree > _max_root_degree():
+            return None
+        roots = [_expr_from_sympy_root_or_number(_sp.CRootOf(square_free_expr, index)) for index in range(degree)]
+        if any(root is None for root in roots):
+            return None
+        return [root for root in roots if root is not None]
+    except Exception:
+        pass
+    candidates: list[Any] = []
+    for candidate, multiplicity in _sp.roots(poly.as_expr(), sym_var).items():
+        candidates.extend([candidate] * int(multiplicity))
+    if not candidates:
+        candidates = list(_sp.solve(poly.as_expr(), sym_var))
+    if not candidates:
+        return None
+    converted_roots: list[Expr] = []
+    seen: set[Expr] = set()
+    for candidate in candidates:
+        try:
+            converted = _root_reduce_sympy(candidate)
+        except Exception:
+            converted = _solve_value_from_sympy(candidate, bridge)
+        if converted is None:
+            return None
+        if converted not in seen:
+            seen.add(converted)
+            converted_roots.append(converted)
+    return converted_roots
+
+
+def _solve_square_linear_system(
+    polynomials: Sequence[Any],
+    variables: Sequence[Expr],
+    bridge: Any,
+    variable_symbols: Sequence[Any],
+) -> Expr | None:
+    if len(polynomials) != len(variables):
+        return None
+    rows: list[list[Any]] = []
+    rhs: list[Any] = []
+    for polynomial in polynomials:
+        poly = _sp.Poly(polynomial, *variable_symbols, extension=True)
+        if poly.total_degree() > 1:
+            return None
+        rows.append([poly.coeff_monomial(variable) for variable in variable_symbols])
+        rhs.append(-poly.coeff_monomial(1))
+    matrix = _sp.Matrix(rows)
+    if matrix.rows != matrix.cols:
+        return None
+    try:
+        solution = matrix.LUsolve(_sp.Matrix(rhs))
+    except Exception:
+        return None
+    rules: list[Expr] = []
+    for variable, value in zip(variables, solution):
+        if getattr(value, "free_symbols", set()):
+            return None
+        converted = _solve_value_from_sympy(value, bridge)
+        if converted is None:
+            return None
+        rules.append(call("Rule", variable, converted))
+    return _evaluated_list_expr(_evaluated_list_expr(*rules))
+
+
+def _solve_value_from_sympy(expr: Any, bridge: Any) -> Expr | None:
+    converted = _expr_from_sympy_root_or_number(expr)
+    if converted is not None:
+        return converted
+    converted = _sympy_exact_expr_to_tungsten(expr)
+    if converted is not None:
+        return converted
+    try:
+        converted = _sympy_number_to_expr(expr, None)
+    except Exception:
+        converted = None
+    if converted is not None:
+        return converted
+    try:
+        return bridge.from_sympy(expr)
+    except Exception:
+        return None
 
 
 def _count_roots_expr(arguments: Sequence[Expr]) -> Expr | None:
