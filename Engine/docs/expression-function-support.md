@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py` and satellite evaluator modules such as `expression_algebraic.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-27T02:40:49Z
-- Repository HEAD: merge resolution of `ac0038e51` and `c5b62c552`
+- Updated (UTC): 2026-04-27T17:19:00Z
+- Repository HEAD: f4a230578d18a99e678d1c62a908b230ac46f7f4
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -88,10 +88,14 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   `MapApply[f]`.
 - `MapAll` currently supports `MapAll[f, expr]` plus the one-argument operator form `MapAll[f]`.
 - `MapIndexed` currently supports `MapIndexed[f, expr]`, `MapIndexed[f, expr, levelspec]`, and
-  the one-argument operator form `MapIndexed[f]`. Only the default level `1` is implemented.
+  the one-argument operator form `MapIndexed[f]`. The level spec uses Tungsten's existing
+  `Position` traversal semantics: integer `n` means levels 1..n, `{n}` means level `n` only,
+  `{m, n}` means the inclusive range, and negative levels count from leaves toward the root.
 - `Flatten` currently supports `Flatten[expr]` and `Flatten[expr, n]` where `n` is a non-negative
   integer or `Infinity`.
-- `Through` currently supports only the single-argument direct form.
+- `Through` currently supports both `Through[expr]` and `Through[expr, head]`. The two-argument
+  form only threads when the head of `expr` matches `head` by name; otherwise the expression is
+  returned unchanged.
 - `MapThread` now supports `MapThread[f, lists]`, `MapThread[f, lists, n]` (parallel-threading
   depth), and the trivial `MapThread[f, lists, 0]` form that just applies `f` to the immediate
   list. The parallel `List` structures must agree in shape down to depth `n`.
@@ -134,10 +138,10 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   to arbitrary lists of rules.
 - `AssociationMap` currently supports the key-list form only: `AssociationMap[f, {k1, ...}]`.
   Passing an `Association` directly is left inert; the kernel emits an error there.
-- `Position` accepts an optional trailing `Heads -> True/False` rule and honors it. The
-  `True` (default) value matches the kernel's default and includes head positions;
-  `Heads -> False` excludes them. `Cases` and other pattern-search heads do not yet
-  honor this option in this pass.
+- `Position`, `Cases`, `Count`, and `MemberQ` accept an optional trailing `Heads -> True/False`
+  rule and honor it. The `True` (default) value includes head positions; `Heads -> False`
+  excludes them. `DeleteCases`, `FreeQ`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Map`,
+  `MapAll`, and `Scan` do not yet honor the `Heads` option in this pass.
 - Registry-backed `Listable` threading is implemented for built-ins whose Wolfram 14.3 attribute
   snapshot contains `Listable` and for user symbols modified with `SetAttributes`. For example,
   `Boole[{True, False, True}]` evaluates to `{1, 0, 1}` through the same attribute path as
