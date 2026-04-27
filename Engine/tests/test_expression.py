@@ -3692,6 +3692,101 @@ class StatisticalAndNumberTheoryExtensionsTests(unittest.TestCase):
         )
 
 
+class ExactIntegerNumberTheoryBucketTests(unittest.TestCase):
+    """Bucket B from the 2026-04-26 function-surface report: exact integer
+    combinatorics, arithmetic functions, partitions, digit helpers, and
+    bitwise helpers."""
+
+    def test_combinatorics_symbols_and_special_sequences(self) -> None:
+        examples = {
+            "Binomial[-3, 2]": "6",
+            "Binomial[3, -2]": "0",
+            "Multinomial[2, 3, 4]": "1260",
+            "JacobiSymbol[1001, 9907]": "-1",
+            "KroneckerSymbol[-1, 2]": "1",
+            "Fibonacci[-6]": "-8",
+            "LucasL[-6]": "18",
+            "BernoulliB[1]": "Rational[-1, 2]",
+            "BernoulliB[10]": "Rational[5, 66]",
+            "EulerE[6]": "-61",
+            "HarmonicNumber[5]": "Rational[137, 60]",
+            "HarmonicNumber[5, 2]": "Rational[5269, 3600]",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+    def test_continued_fraction_and_partition_family(self) -> None:
+        examples = {
+            "ContinuedFraction[415/93]": "List[4, 2, 6, 7]",
+            "ContinuedFraction[415/93, 2]": "List[4, 2]",
+            "ContinuedFraction[-415/93]": "List[-4, -2, -6, -7]",
+            "FromContinuedFraction[{4, 2, 6, 7}]": "Rational[415, 93]",
+            "FromContinuedFraction[{}]": "Infinity",
+            "IntegerPartitions[4]": (
+                "List[List[4], List[3, 1], List[2, 2], List[2, 1, 1], "
+                "List[1, 1, 1, 1]]"
+            ),
+            "IntegerPartitions[4, 2]": "List[List[4], List[3, 1], List[2, 2]]",
+            "IntegerPartitions[4, {2}]": "List[List[3, 1], List[2, 2]]",
+            "PartitionsP[10]": "42",
+            "PartitionsQ[10]": "10",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+    def test_multiplicative_and_divisor_functions(self) -> None:
+        examples = {
+            "MultiplicativeOrder[2, 7]": "3",
+            "PrimitiveRoot[7]": "3",
+            "CarmichaelLambda[12]": "2",
+            "LiouvilleLambda[18]": "-1",
+            "JordanTotient[2, 10]": "72",
+            "RamanujanTau[5]": "4830",
+            "DivisorSigma[2, 6]": "50",
+            "DivisorSigma[-1, 6]": "2",
+            "ModularInverse[3, 7]": "5",
+            "PowerMod[2, -1, 4]": "PowerMod[2, -1, 4]",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+    def test_digit_and_bit_helpers(self) -> None:
+        examples = {
+            "IntegerReverse[1234]": "4321",
+            "IntegerReverse[-1234]": "4321",
+            "IntegerReverse[16, 2]": "1",
+            "DigitCount[1122]": "List[2, 2, 0, 0, 0, 0, 0, 0, 0, 0]",
+            "DigitCount[16, 2]": "List[1, 4]",
+            "DigitCount[16, 2, 0]": "4",
+            "BitNot[0]": "-1",
+            "BitClear[15, 2]": "11",
+            "BitSet[8, 1]": "10",
+            "BitGet[-2, 1]": "1",
+            "BitLength[-8]": "3",
+            "BitLength[0]": "0",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+    def test_factor_integer_gaussian_and_bounded_forms(self) -> None:
+        examples = {
+            "FactorInteger[5, GaussianIntegers -> True]": (
+                "List[List[Complex[0, -1], 1], List[Complex[1, 2], 1], "
+                "List[Complex[2, 1], 1]]"
+            ),
+            "FactorInteger[3 + 4 I, GaussianIntegers -> True]": "List[List[Complex[2, 1], 2]]",
+            "FactorInteger[210, 2]": "List[List[2, 1], List[105, 1]]",
+            "FactorInteger[210, 5]": "List[List[2, 1], List[3, 1], List[5, 1], List[7, 1]]",
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+
 class PolynomialAlgebraTests(unittest.TestCase):
     """Exact rational/integer polynomial algebra backed by Tungsten's
     kernel-free expression evaluator."""

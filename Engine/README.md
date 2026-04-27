@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-27T01:28:35Z
-- Repository HEAD: 502487b1fc8db259c932906795308ae341e4bcd3
+- Updated (UTC): 2026-04-27T02:40:49Z
+- Repository HEAD: fef68fe7c4ff341cf5e62f4f20a8765192e63a38
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -128,13 +128,19 @@ The current workspace is built around seven complementary capabilities:
    `DigitQ`, `LetterQ`, `EvenQ`, and `SparseArrayQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
    `Min`/`Max` (with single-list-argument fold), `Clip`, and `KroneckerDelta`, real-rounding heads
    `Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, and `Sqrt` over the explicit-number
-   subset, number-theory heads `GCD`, `LCM`, `Divisors`, `PrimeQ`, `CompositeQ`, `PrimePowerQ`,
-   `EulerPhi`, `MoebiusMu`, `Prime`, `PrimePi`, `NextPrime`, `PowerMod`, `ChineseRemainder`,
-   `IntegerLength`, `IntegerDigits`, `FromDigits`, and bitwise
-   `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`, exact polynomial heads
+   subset, combinatorial and number-theory heads `Binomial`, `Multinomial`, `GCD`, `LCM`,
+   `Divisors`, `FactorInteger`, `IntegerExponent`, `JacobiSymbol`, `KroneckerSymbol`,
+   `Fibonacci`, `LucasL`, `BernoulliB`, `EulerE`, `HarmonicNumber`, `ContinuedFraction`,
+   `FromContinuedFraction`, `PrimeQ`, `CompositeQ`, `PrimePowerQ`, `EulerPhi`,
+   `CarmichaelLambda`, `MoebiusMu`, `LiouvilleLambda`, `JordanTotient`, `RamanujanTau`,
+   `DivisorSigma`, `Prime`, `PrimePi`, `NextPrime`, `PowerMod`, `ModularInverse`,
+   `MultiplicativeOrder`, `PrimitiveRoot`, `ChineseRemainder`, `IntegerLength`,
+   `IntegerDigits`, `IntegerReverse`, `DigitCount`, `FromDigits`, `IntegerPartitions`,
+   `PartitionsP`, `PartitionsQ`, and bitwise
+   `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`/`BitNot`/`BitClear`/`BitSet`/
+   `BitGet`/`BitLength`, exact polynomial heads
    `Expand`, `PolynomialQ`, `Variables`, `MonomialList`, `Collect`, `Coefficient`, `Exponent`,
-   `CoefficientList`, `Factor`, `FactorList`, `Decompose`, plus number-theory heads
-   `FactorInteger` and `IntegerExponent`,
+   `CoefficientList`, `Factor`, `FactorList`, and `Decompose`,
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,

@@ -4,6 +4,8 @@ from __future__ import annotations
 # dispatch helpers extracted from tungsten.expression. Low-level numeric atoms
 # and constructors still live in tungsten.expression while this module owns the
 # built-in evaluator entry points for this family.
+import sympy as _sp
+
 from . import expression as _runtime
 
 globals().update(
@@ -568,8 +570,71 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
     if expr.has_head("IntegerExponent"):
         return _integer_exponent_expr(expr.arguments)
 
+    if expr.has_head("ContinuedFraction"):
+        return _continued_fraction_expr(expr.arguments)
+
+    if expr.has_head("FromContinuedFraction"):
+        return _from_continued_fraction_expr(expr.arguments)
+
+    if expr.has_head("IntegerPartitions"):
+        return _integer_partitions_expr(expr.arguments)
+
     values = _integer_values(expr.arguments)
     if values is None:
+        return None
+
+    if expr.has_head("Binomial"):
+        if len(values) != 2:
+            return None
+        return integer(_binomial_int(values[0], values[1]))
+
+    if expr.has_head("Multinomial"):
+        if any(value < 0 for value in values):
+            return None
+        total = sum(values)
+        result = math.factorial(total)
+        for value in values:
+            result //= math.factorial(value)
+        return integer(result)
+
+    if expr.has_head("JacobiSymbol"):
+        if len(values) != 2:
+            return None
+        try:
+            return integer(int(_sp.jacobi_symbol(values[0], values[1])))
+        except ValueError:
+            return None
+
+    if expr.has_head("KroneckerSymbol"):
+        if len(values) != 2:
+            return None
+        return integer(int(_sp.kronecker_symbol(values[0], values[1])))
+
+    if expr.has_head("Fibonacci"):
+        if len(values) != 1:
+            return None
+        return integer(int(_sp.fibonacci(values[0])))
+
+    if expr.has_head("LucasL"):
+        if len(values) != 1:
+            return None
+        return integer(int(_sp.lucas(values[0])))
+
+    if expr.has_head("BernoulliB"):
+        if len(values) != 1 or values[0] < 0:
+            return None
+        return _sympy_rational_to_expr(_wolfram_bernoulli(values[0]))
+
+    if expr.has_head("EulerE"):
+        if len(values) != 1 or values[0] < 0:
+            return None
+        return _sympy_rational_to_expr(_sp.euler(values[0]))
+
+    if expr.has_head("HarmonicNumber"):
+        if len(values) == 1 and values[0] >= 0:
+            return _fraction_expr(_harmonic_number_fraction(values[0], 1))
+        if len(values) == 2 and values[0] >= 0:
+            return _fraction_expr(_harmonic_number_fraction(values[0], values[1]))
         return None
 
     if expr.has_head("UnitStep"):
@@ -723,10 +788,39 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
             return None
         return integer(_euler_phi_int(values[0]))
 
+    if expr.has_head("CarmichaelLambda"):
+        if len(values) != 1 or values[0] <= 0:
+            return None
+        return integer(int(_sp.reduced_totient(values[0])))
+
     if expr.has_head("MoebiusMu"):
         if len(values) != 1 or values[0] <= 0:
             return None
         return integer(_moebius_mu_int(values[0]))
+
+    if expr.has_head("LiouvilleLambda"):
+        if len(values) != 1 or values[0] <= 0:
+            return None
+        exponent_sum = sum(exponent for _prime, exponent in _factor_int(values[0]))
+        return integer(-1 if exponent_sum % 2 else 1)
+
+    if expr.has_head("JordanTotient"):
+        if len(values) != 2:
+            return None
+        order, n = values
+        if order < 0 or n <= 0:
+            return None
+        return integer(_jordan_totient_int(order, n))
+
+    if expr.has_head("RamanujanTau"):
+        if len(values) != 1 or values[0] < 1:
+            return None
+        return integer(_ramanujan_tau_int(values[0]))
+
+    if expr.has_head("DivisorSigma"):
+        if len(values) != 2 or values[1] == 0:
+            return None
+        return _fraction_expr(_divisor_sigma_fraction(values[0], abs(values[1])))
 
     if expr.has_head("PrimePi"):
         if len(values) != 1 or values[0] < 0:
@@ -759,6 +853,28 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
             return integer(pow(base_inverse, -exponent, modulus))
         return integer(pow(base, exponent, modulus))
 
+    if expr.has_head("ModularInverse"):
+        if len(values) != 2 or values[1] == 0:
+            return None
+        try:
+            return integer(pow(values[0], -1, abs(values[1])))
+        except ValueError:
+            return None
+
+    if expr.has_head("MultiplicativeOrder"):
+        if len(values) != 2 or values[1] <= 0 or math.gcd(values[0], values[1]) != 1:
+            return None
+        try:
+            return integer(int(_sp.n_order(values[0], values[1])))
+        except ValueError:
+            return None
+
+    if expr.has_head("PrimitiveRoot"):
+        if len(values) != 1 or values[0] <= 0:
+            return None
+        root = _sp.primitive_root(values[0])
+        return integer(int(root)) if root is not None else None
+
     if expr.has_head("IntegerLength"):
         if len(values) == 1:
             return integer(_integer_length_int(values[0], 10))
@@ -778,6 +894,22 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
             else:
                 digits = [0] * (values[2] - len(digits)) + digits
             return list_expr(*(integer(digit) for digit in digits))
+        return None
+
+    if expr.has_head("IntegerReverse"):
+        if len(values) == 1:
+            return integer(_integer_reverse_int(values[0], 10))
+        if len(values) == 2 and values[1] >= 2:
+            return integer(_integer_reverse_int(values[0], values[1]))
+        return None
+
+    if expr.has_head("DigitCount"):
+        if len(values) == 1:
+            return _digit_count_list_expr(values[0], 10)
+        if len(values) == 2 and values[1] >= 2:
+            return _digit_count_list_expr(values[0], values[1])
+        if len(values) == 3 and values[1] >= 2 and 0 <= values[2] < values[1]:
+            return integer(_digit_count_int(values[0], values[1], values[2]))
         return None
 
     if expr.has_head("FromDigits"):
@@ -830,13 +962,67 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
             return integer(values[0] << -shift)
         return None
 
+    if expr.has_head("BitNot"):
+        if len(values) != 1:
+            return None
+        return integer(~values[0])
+
+    if expr.has_head("BitClear"):
+        if len(values) != 2 or values[1] < 0:
+            return None
+        return integer(values[0] & ~(1 << values[1]))
+
+    if expr.has_head("BitSet"):
+        if len(values) != 2 or values[1] < 0:
+            return None
+        return integer(values[0] | (1 << values[1]))
+
+    if expr.has_head("BitGet"):
+        if len(values) != 2 or values[1] < 0:
+            return None
+        return integer((values[0] >> values[1]) & 1)
+
+    if expr.has_head("BitLength"):
+        if len(values) != 1:
+            return None
+        value = values[0] if values[0] >= 0 else ~values[0]
+        return integer(value.bit_length())
+
+    if expr.has_head("PartitionsP"):
+        if len(values) != 1:
+            return None
+        return integer(_partition_count_int(values[0], distinct=False))
+
+    if expr.has_head("PartitionsQ"):
+        if len(values) != 1:
+            return None
+        return integer(_partition_count_int(values[0], distinct=True))
+
     return None
 
 
 def _factor_integer_expr(arguments: Sequence[Expr]) -> Expr | None:
-    if len(arguments) != 1:
+    if not arguments:
         return None
     value = _exact_fraction(arguments[0])
+    gaussian = False
+    partial_limit: int | None = None
+    for option in arguments[1:]:
+        if isinstance(option, Integer):
+            if option.value <= 0:
+                return None
+            partial_limit = option.value
+            continue
+        parsed_option = _factor_integer_option(option)
+        if parsed_option is None:
+            return None
+        option_name, option_value = parsed_option
+        if option_name == "GaussianIntegers":
+            gaussian = option_value
+            continue
+        return None
+    if gaussian:
+        return _gaussian_factor_integer_expr(arguments[0], partial_limit)
     if value is None:
         return None
     if value == 0:
@@ -852,8 +1038,9 @@ def _factor_integer_expr(arguments: Sequence[Expr]) -> Expr | None:
     if numerator < 0:
         factors.append((-1, 1))
         numerator = -numerator
-    factors.extend(_factor_int(numerator))
-    factors.extend((prime, -exponent) for prime, exponent in _factor_int(denominator))
+    factorer = _factor_int if partial_limit is None else lambda n: _partial_factor_int(n, partial_limit)
+    factors.extend(factorer(numerator))
+    factors.extend((prime, -exponent) for prime, exponent in factorer(denominator))
     return _evaluated_list_expr(
         *(_evaluated_list_expr(integer(prime), integer(exponent)) for prime, exponent in factors)
     )
@@ -1064,6 +1251,362 @@ def _integer_digits_int(n: int, base: int) -> list[int]:
         n //= base
     digits.reverse()
     return digits
+
+
+def _binomial_int(n: int, k: int) -> int:
+    if k < 0:
+        return 0
+    if n >= 0:
+        return 0 if k > n else math.comb(n, k)
+    # Generalized integer binomial:
+    # Binomial[-n, k] == (-1)^k Binomial[n + k - 1, k].
+    value = math.comb(k - n - 1, k)
+    return -value if k % 2 else value
+
+
+def _sympy_rational_to_expr(value: object) -> Expr:
+    rational = _sp.Rational(value)
+    return rational_number(int(rational.p), int(rational.q))
+
+
+def _wolfram_bernoulli(n: int) -> object:
+    if n == 1:
+        return _sp.Rational(-1, 2)
+    return _sp.bernoulli(n)
+
+
+def _harmonic_number_fraction(n: int, order: int) -> Fraction:
+    total = Fraction(0, 1)
+    for index in range(1, n + 1):
+        if order >= 0:
+            total += Fraction(1, index ** order)
+        else:
+            total += Fraction(index ** (-order), 1)
+    return total
+
+
+def _continued_fraction_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) not in {1, 2}:
+        return None
+    value = _exact_fraction(arguments[0])
+    if value is None:
+        return None
+    limit: int | None = None
+    if len(arguments) == 2:
+        if not isinstance(arguments[1], Integer) or arguments[1].value <= 0:
+            return None
+        limit = arguments[1].value
+    terms = _continued_fraction_terms(value)
+    if limit is not None:
+        terms = terms[:limit]
+    return _evaluated_list_expr(*(integer(term) for term in terms))
+
+
+def _continued_fraction_terms(value: Fraction) -> list[int]:
+    if value == 0:
+        return [0]
+    sign = -1 if value < 0 else 1
+    value = abs(value)
+    numerator = value.numerator
+    denominator = value.denominator
+    terms: list[int] = []
+    while denominator:
+        quotient, remainder = divmod(numerator, denominator)
+        terms.append(sign * quotient)
+        if remainder == 0:
+            break
+        numerator, denominator = denominator, remainder
+    return terms
+
+
+def _from_continued_fraction_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    terms_expr = arguments[0]
+    if not isinstance(terms_expr, Call) or not terms_expr.has_head("List"):
+        return None
+    if not terms_expr.arguments:
+        return symbol("Infinity")
+    if not all(isinstance(term, Integer) for term in terms_expr.arguments):
+        return None
+    terms = [term.value for term in terms_expr.arguments if isinstance(term, Integer)]
+    value = Fraction(terms[-1], 1)
+    for term in reversed(terms[:-1]):
+        if value == 0:
+            return symbol("ComplexInfinity")
+        value = Fraction(term, 1) + Fraction(1, 1) / value
+    return _fraction_expr(value)
+
+
+def _jordan_totient_int(order: int, n: int) -> int:
+    if order == 0:
+        return 1 if n == 1 else 0
+    result = n ** order
+    for prime, _exponent in _factor_int(n):
+        result = result // (prime ** order) * (prime ** order - 1)
+    return result
+
+
+def _ramanujan_tau_int(n: int) -> int:
+    # Delta(q) = q Product[(1 - q^m)^24, {m, 1, Infinity}].
+    # The q^n coefficient is therefore the q^(n-1) coefficient of the product.
+    degree = n - 1
+    coefficients = [0] * (degree + 1)
+    coefficients[0] = 1
+    for part in range(1, degree + 1):
+        next_coefficients = [0] * (degree + 1)
+        binomial_terms = [
+            ((-1) ** exponent) * math.comb(24, exponent)
+            for exponent in range(0, 25)
+            if part * exponent <= degree
+        ]
+        for index, coefficient in enumerate(coefficients):
+            if coefficient == 0:
+                continue
+            for exponent, multiplier in enumerate(binomial_terms):
+                target = index + part * exponent
+                if target > degree:
+                    break
+                next_coefficients[target] += coefficient * multiplier
+        coefficients = next_coefficients
+    return coefficients[degree]
+
+
+def _divisor_sigma_fraction(order: int, n: int) -> Fraction:
+    total = Fraction(0, 1)
+    for divisor in _positive_divisors_int(n):
+        if order >= 0:
+            total += Fraction(divisor ** order, 1)
+        else:
+            total += Fraction(1, divisor ** (-order))
+    return total
+
+
+def _positive_divisors_int(n: int) -> list[int]:
+    small_divisors: list[int] = []
+    large_divisors: list[int] = []
+    index = 1
+    while index * index <= n:
+        if n % index == 0:
+            small_divisors.append(index)
+            if index != n // index:
+                large_divisors.append(n // index)
+        index += 1
+    large_divisors.reverse()
+    return small_divisors + large_divisors
+
+
+def _integer_reverse_int(n: int, base: int) -> int:
+    result = 0
+    for digit in reversed(_integer_digits_int(n, base)):
+        result = result * base + digit
+    return result
+
+
+def _digit_count_int(n: int, base: int, digit: int) -> int:
+    return sum(1 for current in _integer_digits_int(n, base) if current == digit)
+
+
+def _digit_count_list_expr(n: int, base: int) -> Expr:
+    ordered_digits = list(range(1, base)) + [0]
+    return _evaluated_list_expr(*(integer(_digit_count_int(n, base, digit)) for digit in ordered_digits))
+
+
+def _partition_count_int(n: int, *, distinct: bool) -> int:
+    if n < 0:
+        return 0
+    counts = [0] * (n + 1)
+    counts[0] = 1
+    if distinct:
+        for part in range(1, n + 1):
+            for total in range(n, part - 1, -1):
+                counts[total] += counts[total - part]
+    else:
+        for part in range(1, n + 1):
+            for total in range(part, n + 1):
+                counts[total] += counts[total - part]
+    return counts[n]
+
+
+def _integer_partitions_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) not in {1, 2} or not isinstance(arguments[0], Integer):
+        return None
+    n = arguments[0].value
+    if n < 0:
+        return _evaluated_list_expr()
+    min_parts = 0
+    max_parts = n
+    if len(arguments) == 2:
+        spec = arguments[1]
+        if isinstance(spec, Integer):
+            if spec.value < 0:
+                return None
+            max_parts = spec.value
+        elif isinstance(spec, Call) and spec.has_head("List"):
+            if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
+                if spec.arguments[0].value < 0:
+                    return None
+                min_parts = max_parts = spec.arguments[0].value
+            elif (
+                len(spec.arguments) == 2
+                and isinstance(spec.arguments[0], Integer)
+                and isinstance(spec.arguments[1], Integer)
+            ):
+                min_parts = spec.arguments[0].value
+                max_parts = spec.arguments[1].value
+                if min_parts < 0 or max_parts < min_parts:
+                    return None
+            else:
+                return None
+        else:
+            return None
+    partitions = []
+    for partition in _integer_partitions(n, n, max_parts):
+        if len(partition) >= min_parts:
+            partitions.append(_evaluated_list_expr(*(integer(part) for part in partition)))
+    return _evaluated_list_expr(*partitions)
+
+
+def _integer_partitions(remaining: int, max_part: int, max_length: int) -> Iterable[list[int]]:
+    if remaining == 0:
+        yield []
+        return
+    if max_length <= 0:
+        return
+    for first in range(min(max_part, remaining), 0, -1):
+        for rest in _integer_partitions(remaining - first, first, max_length - 1):
+            yield [first] + rest
+
+
+def _factor_integer_option(expr: Expr) -> tuple[str, bool] | None:
+    if not isinstance(expr, Call) or not expr.has_head("Rule") or len(expr.arguments) != 2:
+        return None
+    key, value = expr.arguments
+    if not isinstance(key, Symbol):
+        return None
+    truth = _truth_value(value)
+    if truth is None:
+        return None
+    return _system_dispatch_name(key), truth
+
+
+def _partial_factor_int(n: int, limit: int) -> list[tuple[int, int]]:
+    if n <= 1:
+        return []
+    factors = _sp.factorint(n, limit=limit)
+    return sorted((int(factor), int(exponent)) for factor, exponent in factors.items())
+
+
+def _gaussian_factor_integer_expr(expr: Expr, partial_limit: int | None) -> Expr | None:
+    if partial_limit is not None:
+        return None
+    value = _exact_gaussian_integer(expr)
+    if value is None:
+        fraction = _exact_fraction(expr)
+        if fraction is None:
+            return None
+        numerator_factors = _gaussian_factor_integer(fraction.numerator, 0)
+        denominator_factors = [
+            (factor, -exponent)
+            for factor, exponent in _gaussian_factor_integer(fraction.denominator, 0)
+        ]
+        return _evaluated_list_expr(
+            *(
+                _evaluated_list_expr(_gaussian_integer_expr(*factor), integer(exponent))
+                for factor, exponent in numerator_factors + denominator_factors
+            )
+        )
+    factors = _gaussian_factor_integer(*value)
+    return _evaluated_list_expr(
+        *(_evaluated_list_expr(_gaussian_integer_expr(*factor), integer(exponent)) for factor, exponent in factors)
+    )
+
+
+def _exact_gaussian_integer(expr: Expr) -> tuple[int, int] | None:
+    if isinstance(expr, Integer):
+        return expr.value, 0
+    if isinstance(expr, ComplexNumber):
+        real_part = _exact_fraction(expr.real_part)
+        imaginary_part = _exact_fraction(expr.imaginary_part)
+        if (
+            real_part is None
+            or imaginary_part is None
+            or real_part.denominator != 1
+            or imaginary_part.denominator != 1
+        ):
+            return None
+        return real_part.numerator, imaginary_part.numerator
+    return None
+
+
+def _gaussian_integer_expr(real_part: int, imaginary_part: int) -> Expr:
+    if imaginary_part == 0:
+        return integer(real_part)
+    return complex_number(integer(real_part), integer(imaginary_part))
+
+
+def _gaussian_factor_integer(real_part: int, imaginary_part: int) -> list[tuple[tuple[int, int], int]]:
+    if real_part == 0 and imaginary_part == 0:
+        return [((0, 0), 1)]
+    norm = real_part * real_part + imaginary_part * imaginary_part
+    if norm == 1:
+        return [((real_part, imaginary_part), 1)]
+
+    remaining = (real_part, imaginary_part)
+    factors: list[tuple[tuple[int, int], int]] = []
+    for prime, _exponent in _factor_int(norm):
+        for candidate in _gaussian_prime_candidates(prime):
+            count = 0
+            while True:
+                quotient = _divide_gaussian_integer(remaining, candidate)
+                if quotient is None:
+                    break
+                remaining = quotient
+                count += 1
+            if count:
+                factors.append((candidate, count))
+
+    if remaining != (1, 0):
+        factors.insert(0, (remaining, 1))
+    return factors
+
+
+def _gaussian_prime_candidates(prime: int) -> list[tuple[int, int]]:
+    if prime == 2:
+        return [(1, 1)]
+    if prime % 4 == 3:
+        return [(prime, 0)]
+    pair = _sum_of_two_squares_prime(prime)
+    if pair is None:
+        return [(prime, 0)]
+    small, large = pair
+    if small == large:
+        return [(small, large)]
+    return [(small, large), (large, small)]
+
+
+def _sum_of_two_squares_prime(prime: int) -> tuple[int, int] | None:
+    limit = math.isqrt(prime)
+    for first in range(1, limit + 1):
+        second_squared = prime - first * first
+        second = math.isqrt(second_squared)
+        if second >= first and second * second == second_squared:
+            return first, second
+    return None
+
+
+def _divide_gaussian_integer(
+    value: tuple[int, int],
+    divisor: tuple[int, int],
+) -> tuple[int, int] | None:
+    real_part, imaginary_part = value
+    divisor_real, divisor_imaginary = divisor
+    norm = divisor_real * divisor_real + divisor_imaginary * divisor_imaginary
+    real_numerator = real_part * divisor_real + imaginary_part * divisor_imaginary
+    imaginary_numerator = imaginary_part * divisor_real - real_part * divisor_imaginary
+    if real_numerator % norm != 0 or imaginary_numerator % norm != 0:
+        return None
+    return real_numerator // norm, imaginary_numerator // norm
 
 
 def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:

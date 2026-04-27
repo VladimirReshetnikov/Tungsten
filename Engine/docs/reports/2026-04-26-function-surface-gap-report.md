@@ -1,9 +1,9 @@
 # Tungsten Function-Surface Gap Report
 
 - Created (UTC): 2026-04-27T02:13:19Z
-- Updated (UTC): 2026-04-27T02:23:41Z
-- Repository HEAD: 4404922a8b0feac6f727c008a861f214f3f1ffd6
-- Status: Research-and-plan (no implementation)
+- Updated (UTC): 2026-04-27T02:40:49Z
+- Repository HEAD: fef68fe7c4ff341cf5e62f4f20a8765192e63a38
+- Status: Research-and-plan with Bucket B implemented
 - Audience: Tungsten maintainers planning the next implementation passes
 - Scope: Functions/heads in `src/Tungsten/src/tungsten/expression*.py`
 
@@ -44,7 +44,7 @@ easy to miss when reading only the dispatch table.
 | Associations | 29 of 40 | `AssociateTo`, `CountsBy`, `KeyDropFrom`, `KeyFreeQ`, `KeySortBy`, `Missing`, `PositionIndex` |
 | Tensors | 19 of 22 | `ArrayReduce`, `Band`, `MatrixForm` |
 | String operations | 28 of 50 | `CharacterCounts`, `StringPart`, `StringTakeDrop`, `StringExtract`, `StringPartition`, `StringReplaceList`, `StringReplacePart`, `StringRotateLeft`, `StringRotateRight` |
-| Integer functions | 21 of 52 | `Divisible`, `CoprimeQ`, `BitLength`, `BitSet`, `DigitCount`, `NumberDigit`, `IntegerReverse`, `ModularInverse`, `Factorial`, `Binomial`, `Multinomial`, `Fibonacci`, `LucasL` |
+| Integer functions | 34 of 52 | `Divisible`, `CoprimeQ`, `NumberDigit`, `Factorial` |
 | Polynomial algebra | 10 of 44 | `CoefficientRules`, `PolynomialGCD`, `PolynomialMod`, `PolynomialQuotient`, `PolynomialReduce`, `Discriminant`, `Resultant`, `IrreduciblePolynomialQ` |
 | Messages | 9 of 20 | `Failure`, `Missing`, `MessageName`, `Messages`, `CheckArguments`, `DeleteMissing`, `TerminatedEvaluation` |
 | Scoping and procedural programming | 40 of 53 across both guides | `Until`, `ApplyTo`, `Begin`, `End`, `BlockRandom`, `Input`, `OpenRead` |
@@ -52,10 +52,10 @@ easy to miss when reading only the dispatch table.
 The most implementation-friendly missing symbols from this table are the ones that reuse existing
 machinery: predicates (`VectorQ`, `MatrixQ`, `KeyFreeQ`), selector/search helpers
 (`FirstPosition`, `PositionIndex`, `PositionLargest`, `PositionSmallest`), counters
-(`CountDistinct`, `CountsBy`, `CharacterCounts`, `DigitCount`), mutators (`PrependTo`,
+(`CountDistinct`, `CountsBy`, `CharacterCounts`), mutators (`PrependTo`,
 `AssociateTo`, `KeyDropFrom`, `ApplyTo`), small integer helpers (`Divisible`, `CoprimeQ`,
-`BitLength`, `BitSet`, `ModularInverse`), and string slicing helpers (`StringPart`,
-`StringTakeDrop`, `StringPartition`, `StringRotateLeft`, `StringRotateRight`).
+`NumberDigit`), and string slicing helpers (`StringPart`, `StringTakeDrop`, `StringPartition`,
+`StringRotateLeft`, `StringRotateRight`).
 
 ## Buckets
 
@@ -66,7 +66,7 @@ machinery: predicates (`VectorQ`, `MatrixQ`, `KeyFreeQ`), selector/search helper
 - **Symbolic mathematical constants:** `Pi`, `E`, `EulerGamma`, `GoldenRatio`, `Catalan`, `Khinchin`, `Glaisher`, `Degree`. Only `I` is special-cased; no other constant has an own value or a `Re`/`Im`/`N` rule.
 - **Transcendental functions:** `Log` (1-arg natural and 2-arg base), `Exp`, `Log2`, `Log10`. None implemented.
 - **Trigonometric / hyperbolic:** `Sin`, `Cos`, `Tan`, `Sec`, `Csc`, `Cot`, `ArcSin`, `ArcCos`, `ArcTan` (1-arg and 2-arg `ArcTan[x, y]`), `ArcSec`, `ArcCsc`, `ArcCot`, `Sinh`, `Cosh`, `Tanh`, `Sech`, `Csch`, `Coth`, plus the `ArcSinh`/`ArcCosh`/`ArcTanh` family. None implemented.
-- **Special functions** (where exact / rational evaluation is meaningful): `Gamma[n]` for non-negative integers, `LogGamma`, `Factorial[n]`/`Factorial2[n]`, `Pochhammer`, `Subfactorial`, `Beta[a, b]` for explicit positive integers, `BernoulliB`, `EulerE`, `HarmonicNumber`, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber`, `Fibonacci`, `LucasL`. None implemented; many have closed-form rules over explicit integers that fit Tungsten's structural model.
+- **Special functions** (where exact / rational evaluation is meaningful): `Gamma[n]` for non-negative integers, `LogGamma`, `Factorial[n]`/`Factorial2[n]`, `Pochhammer`, `Subfactorial`, `Beta[a, b]` for explicit positive integers, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber`. `BernoulliB`, `EulerE`, `HarmonicNumber`, `Fibonacci`, and `LucasL` moved to the implemented number-theory bucket.
 - **Complex helpers:** `Arg[z]`, `AbsArg[z]`, `ComplexExpand[expr]`. Only `Re`, `Im`, `Conjugate` exist.
 - **Rational structure:** `Numerator[expr]`, `Denominator[expr]`. **Glaring hole** — Tungsten has full exact `Rational` support and a polynomial algebra subsystem, but no numerator/denominator extraction. Many polynomial workflows (Together / Apart / partial fractions / rational simplification) build on these.
 - **Numeric helpers:** `Rationalize[x]`, `Rationalize[x, dx]` (rational approximation), `RealDigits[x]`, `MantissaExponent`, `MachineNumberQ` (already in), `Hash[expr]`, `Hash[expr, type]`.
@@ -93,28 +93,25 @@ machinery: predicates (`VectorQ`, `MatrixQ`, `KeyFreeQ`), selector/search helper
 
 ### B. Number theory and integer operations
 
-**Missing family members**
+Implemented in the 2026-04-27 exact-integer pass:
 
-- `Binomial`, `Multinomial`. Glaring combinatorial hole.
+- `Binomial`, `Multinomial`.
 - `JacobiSymbol[n, m]`, `KroneckerSymbol[n, m]`.
-- `Fibonacci[n]`, `LucasL[n]`, `BernoulliB[n]`, `EulerE[n]`, `HarmonicNumber[n]`, `HarmonicNumber[n, r]`. Listed under bucket A but really number-theoretic.
-- `ContinuedFraction[x]`, `ContinuedFraction[x, n]`, `FromContinuedFraction`.
-- `MultiplicativeOrder[a, n]`, `PrimitiveRoot[n]`, `CarmichaelLambda[n]`, `LiouvilleLambda[n]`, `JordanTotient`, `RamanujanTau`, `DivisorSigma[k, n]`.
-- `IntegerPartitions[n]`, `IntegerPartitions[n, k]`, `PartitionsP[n]`, `PartitionsQ[n]`.
+- `Fibonacci[n]`, `LucasL[n]`, `BernoulliB[n]`, `EulerE[n]`, `HarmonicNumber[n]`, `HarmonicNumber[n, r]`.
+- `ContinuedFraction[x]`, `ContinuedFraction[x, n]`, `FromContinuedFraction[{...}]`.
+- `MultiplicativeOrder[a, n]`, `PrimitiveRoot[n]`, `CarmichaelLambda[n]`, `LiouvilleLambda[n]`,
+  `JordanTotient[k, n]`, `RamanujanTau[n]`, `DivisorSigma[k, n]`, `ModularInverse[a, m]`.
+- `IntegerPartitions[n]`, `IntegerPartitions[n, k]`, `IntegerPartitions[n, {k}]`,
+  `IntegerPartitions[n, {kmin, kmax}]`, `PartitionsP[n]`, `PartitionsQ[n]`.
 - `IntegerReverse[n]`, `IntegerReverse[n, base]`.
 - `DigitCount[n]`, `DigitCount[n, base]`, `DigitCount[n, base, d]`.
-- `BitNot`, `BitClear`, `BitSet`, `BitGet`, `BitLength` (only `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight` are present).
+- `BitNot`, `BitClear`, `BitSet`, `BitGet`, `BitLength`.
+- `FactorInteger[n, GaussianIntegers -> True|False]` and `FactorInteger[n, limit]`.
 
-**Missing argument shapes**
+**Remaining notes**
 
-- `FactorInteger[n, GaussianIntegers -> True]` and partial-factorization forms — matrix lists Gaussian and partial as unsupported.
-- `IntegerLength[n, base]` — supported per matrix; double-check edge cases.
-- `Prime[n]` for very large `n` (current incremental search is fine for moderate `n` but degrades; not a functional gap, just a perf note).
-- `PowerMod[a, -1, m]` returns inert when no inverse exists; consider returning `$Failed` per kernel for consistency, or implementing `ModularInverse[a, m]`.
-
-**Missing options**
-
-- None of the number-theoretic heads currently take Wolfram options that Tungsten silently drops. The gaps are head- and signature-level.
+- `Prime[n]` for very large `n` still uses incremental search; this remains a performance note, not a functional gap.
+- `PowerMod[a, -1, m]` remains inert when no inverse exists, which matches the observed Wolfram 14.3 result after emitting `PowerMod::ninv`.
 
 ### C. Polynomial algebra and symbolic structure
 
@@ -578,7 +575,7 @@ Patch helpers that fit existing infrastructure and do not require new symbolic m
 - `ContainsOnly`, `CountDistinct`, `CountsBy`, `PositionIndex`
 - `PrependTo`, `DeleteElements`, `KeyFreeQ`, `KeySortBy`
 - `StringPart`, `StringTakeDrop`, `StringPartition`, `StringRotateLeft`, `StringRotateRight`
-- `Divisible`, `CoprimeQ`, `BitLength`, `DigitCount`, `NumberDigit`, `IntegerReverse`
+- `Divisible`, `CoprimeQ`, `NumberDigit`
 - `Until`
 
 ### 2. Shared option plumbing
@@ -628,8 +625,8 @@ Use the existing string-pattern compiler as the center:
 
 Keep this explicitly bounded:
 
-- integer helpers: `ModularInverse`, `Factorial`, `Binomial`, `Multinomial`, `Fibonacci`, `LucasL`;
-- digit helpers: `BitSet`, plus full `FromDigits` / `IntegerDigits` / `IntegerLength` forms;
+- integer helper still remaining here: `Factorial`;
+- digit helper still remaining here: `NumberDigit`;
 - exact-polynomial helpers backed by SymPy: `CoefficientRules`, `PolynomialGCD`,
   `PolynomialQuotient`, `PolynomialMod`, `PolynomialReduce`, `Discriminant`, `Resultant`.
 
