@@ -370,9 +370,8 @@ class SumErrorAndShapeTests(unittest.TestCase):
 
     def test_count_only_form_repeats_body(self) -> None:
         # ``{3}`` form repeats body without binding any variable; the
-        # resulting Plus[a, a, a] is mathematically equal to Times[3, a]
-        # but Tungsten's Plus does not yet collapse like terms.
-        self.assertEqual(_full("Sum[a, {3}]"), "Plus[a, a, a]")
+        # resulting Plus[a, a, a] is simplified by the arithmetic evaluator.
+        self.assertEqual(_full("Sum[a, {3}]"), "Times[3, a]")
 
     def test_zero_step_falls_through_to_inert(self) -> None:
         result = _full("Sum[i, {i, 1, 5, 0}]")
@@ -489,10 +488,9 @@ class ProductErrorAndShapeTests(unittest.TestCase):
         self.assertEqual(_full("Product[]"), "Product[]")
 
     def test_count_only_form_repeats_body(self) -> None:
-        # ``{3}`` form repeats body 3 times; Tungsten's Times does not
-        # yet collapse like factors into Power so the result is the
-        # flat product list.
-        self.assertEqual(_full("Product[a, {3}]"), "Times[a, a, a]")
+        # ``{3}`` form repeats body 3 times; the resulting Times[a, a, a]
+        # is simplified by the arithmetic evaluator.
+        self.assertEqual(_full("Product[a, {3}]"), "Power[a, 3]")
 
     def test_zero_step_falls_through_to_inert(self) -> None:
         result = _full("Product[i, {i, 1, 5, 0}]")
