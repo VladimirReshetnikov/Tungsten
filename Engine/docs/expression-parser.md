@@ -322,13 +322,18 @@ approximations of the Wolfram functions: `MakeBoxes` is held, `ToBoxes` boxes ev
 StandardForm box interpretation.
 
 At the outer display boundary, Tungsten treats `InputForm[expr]`, `FullForm[expr]`,
-`OutputForm[expr]`, and `StandardForm[expr]` as form wrappers rather than ordinary inert calls.
-This affects one-argument `ToString`, `ToBoxes`, REPL output, and `Print`, so
-`FullForm[1 + x]` in the REPL is shown as `Out[n]//FullForm= Plus[1, x]`, and
-`Print[InputForm[{1, 2/3}]]` writes `{1, 2/3}`. If a form is requested explicitly, for example
-`ToString[InputForm[1 + x], InputForm]`, the wrapper is serialized literally as
-`"InputForm[1 + x]"`, matching the Wolfram distinction between display wrappers and ordinary
-expression text.
+`OutputForm[expr]`, `StandardForm[expr]`, `TraditionalForm[expr]`, `TeXForm[expr]`,
+`MathMLForm[expr]`, `CForm[expr]`, `FortranForm[expr]`, `TextForm[expr]`, and common
+output-format wrappers such as `NumberForm`, `ScientificForm`, `EngineeringForm`,
+`AccountingForm`, `PaddedForm`, `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`,
+`TreeForm`, `DisplayForm`, `StringForm`, and `SequenceForm` as display selectors rather than ordinary inert calls. This
+affects one-argument `ToString`, `ToBoxes`, REPL output, and `Print`, so `FullForm[1 + x]` in the
+REPL is shown as `Out[n]//FullForm= Plus[1, x]`, `CForm[x^2]` is shown as
+`Out[n]//CForm= Power(x,2)`, and `Print[InputForm[{1, 2/3}]]` writes `{1, 2/3}`. If a form is
+requested explicitly, for example `ToString[InputForm[1 + x], InputForm]`, the wrapper is
+serialized literally as `"InputForm[1 + x]"`, matching the Wolfram distinction between display
+wrappers and ordinary expression text. Output/export-only forms remain renderers, not general
+input syntaxes: `ToExpression["x", OutputForm]` is intentionally unsupported.
 
 For pattern shorthand, Tungsten currently normalizes to explicit heads in canonical output. For
 example:

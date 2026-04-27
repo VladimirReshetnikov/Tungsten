@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T22:15:47Z
-- Repository HEAD: 60e6aed0a17fcb29f09f07f9877b3445a9e662d1
+- Updated (UTC): 2026-04-26T23:50:53Z
+- Repository HEAD: 2f34abe35e9a08b321a37fabe87297d20f7698d5
 
 ## Summary
 
@@ -304,20 +304,95 @@ The code is split by workstream where the seams are now stable enough:
   integer-number-theory, and real-rounding family.
 - `expression_patterns.py` is ordinary expression pattern matching and rewrite/search helpers.
 - `expression_definitions.py` is the canonical home for symbol-definition storage and the
-  Set / SetDelayed / Unset / Clear / OwnValues / DownValues / UpValues / SubValues / NValues
-  surface. It exposes a uniform `Definition` record, a `definitions_for_kind(record, kind)`
-  accessor for the live ordered list of rules, and the `assign_definition` /
-  `remove_definition` / `clear_definitions` write API used by bare-symbol and compound-LHS
-  assignments.
+  Set / SetDelayed / TagSet / TagSetDelayed / Unset / TagUnset / Clear / OwnValues /
+  DownValues / UpValues / SubValues / NValues surface. It exposes a uniform `Definition`
+  record, a `definitions_for_kind(record, kind)` accessor for the live ordered list of rules,
+  and the `assign_definition` / `remove_definition` / `remove_definitions` /
+  `clear_definitions` write API used by bare-symbol, compound-LHS, and tagged assignments.
 - `expression_scoping.py` is the home for the lexical/dynamic scoping constructs.
-  ``With[bindings, body]`` is fully implemented: it parses each binding (``Set``
-  pre-evaluates the RHS in the outer scope, ``SetDelayed`` holds it) and applies the
-  shared capture-avoiding substitution helper (`expression._substitute_named_symbols_in_expr`)
-  to ``body``. The shared helper now recognizes ``With`` / ``Module`` / ``Block`` (in
-  addition to ``Function``) so inner-bound names are correctly shielded and capture-
-  avoiding alpha-renaming kicks in when needed. ``Module`` and ``Block`` themselves
-  remain stubs that emit a clear "not yet implemented" message until the corresponding
-  scoping passes land.
+  ``With[bindings, body]`` parses each binding (``Set`` pre-evaluates the RHS in the
+  outer scope, ``SetDelayed`` holds it) and applies the shared capture-avoiding
+  substitution helper (`expression._substitute_named_symbols_in_expr`) to ``body``.
+  ``Module[{locals}, body]`` allocates a fresh per-invocation symbol ``name$N`` for
+  every local through ``SymbolRegistry.allocate_module_local_symbols`` (a single
+  counter increment per Module call so the locals share the same ``$N``), evaluates
+  each binding's RHS in the outer scope and installs it as the fresh symbol's own
+  value, then rewrites ``body`` to refer to the fresh symbols via
+  ``expression._rename_bound_symbols_in_expr``. ``Block[locals, body]`` and
+  ``Internal``InheritedBlock[locals, body]`` go through a shared
+  ``_block_implementation`` helper that snapshots each named local's complete
+  value state at entry, applies optional initializers, evaluates the body, and
+  restores the snapshot on exit through Python ``try`` / ``finally`` so non-local
+  control flow (``Throw``, ``Abort``, ``Confirm`` failures, time-constraint
+  expirations) still reverts outer state. In modern Wolfram 14.x, ``Block`` and
+  ``InheritedBlock`` are functionally identical (no clearing at entry); Tungsten
+  preserves that identity rather than replicating older docs that distinguished
+  them by entry-time clearing. The shared substitute and rename helpers both
+  recognize ``With`` / ``Module`` / ``Block`` (in addition to ``Function``) so
+  inner-bound names are correctly shielded and capture-avoiding alpha-renaming
+  kicks in when needed.
+- `expression_iteration.py` is the home for ``Table``, ``Do``, ``Sum``,
+  ``Product``, ``For``, and ``While``. The iter-spec heads (``Table``,
+  ``Do``, ``Sum``, ``Product``) share the iter-spec vocabulary (``n`` /
+  ``{n}`` / ``{i, n}`` / ``{i, imin, imax}`` / ``{i, imin, imax, di}`` /
+  ``{i, list}``) and use the snapshot/restore primitives from
+  ``expression_scoping`` to Block-scope each iteration variable;
+  Tungsten resolves later iter specs in the scope where earlier
+  iterators are already bound, so dependent forms (``{j, i}`` after
+  ``{i, ...}``) work as in the kernel. Iterator bounds and step accept
+  Integer, Rational, and Real values and promote per Tungsten's existing
+  numeric tower; the value-list ``{i, list}`` form iterates over the
+  literal sequence without any conversion. An iteration safety cap
+  (``_ITERATION_SAFETY_LIMIT``) guards against pathological step / bound
+  combinations producing infinite loops. ``Sum`` and ``Product`` reuse
+  ``_resolve_iter_spec`` and ``_iterate_with_block_scope`` through a
+  shared ``_accumulate_loop`` helper that builds a flat list of
+  per-iteration body values; the helper is parameterized by the fold
+  head (``Plus`` for Sum, ``Times`` for Product) so the empty iteration
+  range yields ``0`` / ``1`` without special-casing. Both reject the
+  bare-integer ``n`` iter spec — only the List-form spec is allowed,
+  matching the kernel's convention that ``Sum[a, 3]`` stays inert while
+  ``Sum[a, {3}]`` evaluates. The predicate-driven loops ``For[init,
+  test, incr, body]`` and ``While[test, body]`` / ``While[test]`` walk
+  their condition each iteration and run their body for side effects;
+  both honor the same ``_ITERATION_SAFETY_LIMIT`` so a misconfigured
+  test that never becomes ``False`` is bounded.
+
+  Non-local control flow inside loops is modeled by dedicated Python
+  exception classes living in ``expression.py``:
+  ``_TungstenBreakSignal`` (``Break[]``), ``_TungstenContinueSignal``
+  (``Continue[]``), ``_TungstenReturnSignal`` (``Return[expr]`` and
+  ``Return[expr, head]``), and ``_TungstenGotoSignal`` (``Goto[name]``).
+  All four are listed in ``_CONTROL_SIGNAL_TYPES`` so existing
+  ``WithCleanup`` / cleanup machinery treats them as control flow and
+  passes them through correctly. The catch sites:
+
+  - ``Break`` / ``Continue`` are caught at the ``Do`` / ``For`` /
+    ``While`` boundary; per the Wolfram docs they do *not* propagate
+    through ``Table`` / ``Sum`` / ``Product``, so those heads do not
+    install catches and an in-body ``Break[]`` ultimately reaches
+    the top-level evaluator's fallback (which converts the signal
+    back to the inert ``Break[]`` form).
+  - ``Return[expr]`` (no head) is caught at the
+    ``_apply_definitions`` boundary, so a SetDelayed-defined
+    ``f[x_] := ...; Return[v]; ...`` returns ``v`` from ``f[...]``.
+    ``Return[expr, head]`` is caught in the body evaluation of the
+    matching head's evaluator: ``Module`` / ``Block`` /
+    ``InheritedBlock`` / ``For`` / ``While`` / ``Do``.
+  - ``Goto[name]`` is caught by ``CompoundExpression``, which scans
+    its argument list for a structurally matching ``Label[name]`` and
+    resumes from the position after the matched ``Label``. ``Label``
+    itself stays inert (matching the kernel) because the marker
+    semantics happen entirely in the CompoundExpression handler.
+
+  The bare ``Increment`` / ``Decrement`` / ``PreIncrement`` /
+  ``PreDecrement`` family lives in ``expression.py`` next to ``Set`` so
+  the canonical ``For[i = 1, i <= n, i++, ...]`` idiom works without
+  having to spell out ``i = i + 1``. The shared
+  ``_apply_inplace_arithmetic_to_symbol`` helper performs the read /
+  add / write on the symbol's own value and returns either the old
+  value (for the post- variants) or the new value (for the pre-
+  variants).
 - `expression.py` stays as the public compatibility facade and shared runtime module while
   remaining built-in families are split out incrementally.
 
@@ -358,10 +433,29 @@ rhs=..., delayed=..., condition=...)` without touching the legacy own-value slot
   subvalue target, so an existing rule `f[x_] := q[x]` makes `f[x_][y_] := rhs` write
   `SubValues[q]`.
 
+Tagged assignments reuse the same storage model:
+
+- `f /: f = rhs`, `f /: f[x_] = rhs`, and `f /: f[x_][y_] := rhs` are redundant tagged forms
+  that write `OwnValues[f]`, `DownValues[f]`, and `SubValues[f]` respectively.
+- `f /: h[f[x_]] := rhs` writes an up value to `UpValues[f]` when the tag appears as an
+  immediate argument of the outer LHS or in the head chain of an immediate argument, including
+  forms such as `h[f[x_][y_]]`.
+- Occurrences that are only nested inside an ordinary argument, such as `h[g[f[x_]]]`, are
+  rejected with a `TagSet::tagpos` / `TagSetDelayed::tagpos` message rather than silently creating
+  a too-broad deep rule.
+- `TagSet` evaluates the RHS before storing the definition; `TagSetDelayed` keeps the RHS held.
+  Both forms normalize the LHS through the same assignment path as `Set` / `SetDelayed`.
+- `TagUnset` removes every stored definition with the same normalized LHS for the selected value
+  list. This intentionally removes multiple same-LHS equations that differ only by RHS
+  `Condition` guards, matching observed Wolfram behavior for tagged definitions.
+
 The evaluator applies these stored rules after ordinary argument evaluation, attribute
-normalization, and `Listable` threading. Definitions are tried in stored order. Tungsten keeps
-assignment order except for the common Wolfram specificity rule where an exact definition such as
-`f[1]` is inserted before an earlier generic pattern such as `f[x_]`.
+normalization, and `Listable` threading. Up values are tried before down values and are suppressed
+when the evaluated head has `HoldAllComplete`; ordinary `HoldAll` does not suppress up values.
+Definitions are tried in stored order. Tungsten keeps assignment order except for the common
+Wolfram specificity rule where an exact definition such as `f[1]` is inserted before an earlier
+generic pattern such as `f[x_]`. Definitions with the same LHS but different RHS conditions are
+kept as separate equations, so guarded tagged definitions can model multi-equation dispatch.
 
 ### Why the evaluator is structural first
 
@@ -694,10 +788,27 @@ that `Check` is not disabled merely because its output is quieted.
   `OneIdentity` matching cases) before invoking direct built-in rules. Attributes remain metadata,
   not a full definition system: Tungsten still does not implement general down-value dispatch,
   package scoping, `Default[...]`, or every specialized kernel behavior implied by attributes.
-- Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, and `StandardForm`) are handled
-  at the display boundary for one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`.
-  Explicit textual conversion such as `ToString[InputForm[expr], InputForm]` still treats the
-  wrapper as ordinary expression structure.
+- Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, `StandardForm`,
+  `TraditionalForm`, `TeXForm`, `MathMLForm`, `CForm`, `FortranForm`, `TextForm`, and the common
+  numeric/table/string wrappers such as `NumberForm`, `ScientificForm`, `EngineeringForm`,
+  `AccountingForm`, `PaddedForm`, `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`, `TreeForm`,
+  `DisplayForm`, `StringForm`, and `SequenceForm`) are handled at the display boundary for
+  one-argument `ToString`, `ToBoxes`, REPL output labels, and `Print`. Explicit textual conversion
+  such as `ToString[InputForm[expr], InputForm]` still treats the classic wrapper forms as
+  ordinary expression structure; textual rendering wrappers (`TraditionalForm`, `TeXForm`,
+  `MathMLForm`, `OutputForm`, `TextForm`, `CForm`, `FortranForm`, `PrintForm`, and
+  `SequenceForm`) keep their display meaning even when the requested string form is explicit.
+- Tungsten separates renderable output forms from parseable input forms. `ToExpression`,
+  `MakeExpression`, `SyntaxQ`, and `SyntaxLength` accept only `InputForm`, `StandardForm`,
+  `TraditionalForm`, `TeXForm`, and `MathMLForm` in the implemented subset. `ToString` additionally
+  accepts `OutputForm`, `TextForm`, `CForm`, and `FortranForm`, while wrappers such as
+  `NumberForm[expr, spec]` and `TableForm[list]` render through the one-argument display boundary.
+- `TraditionalForm` is implemented as a deterministic box/text subset over Tungsten's existing
+  StandardForm boxes: it emits `FormBox[..., TraditionalForm]`, returns inline-box strings from
+  `ToString`, and can parse back Tungsten-generated inline boxes through `ToExpression` /
+  `MakeExpression`. `TeXForm` and `MathMLForm` are textual renderers with generated-subset parsers
+  for ordinary arithmetic, powers, fractions, lists, rules, strings, and symbols; they intentionally
+  do not attempt to parse arbitrary TeX or MathML documents.
 - `$RecursionLimit` and `$IterationLimit` are implemented as evaluator guardrails, but their
   counters are Tungsten counters rather than Wolfram kernel internals. The implementation favors
   the Wolfram failure shape: limits generate messages and return the current expression unevaluated

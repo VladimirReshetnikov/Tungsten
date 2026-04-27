@@ -625,7 +625,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
             evaluate(parse_input_form("HoldComplete[Sequence[1 + 1, 2 + 2]]")).to_full_form(),
             "HoldComplete[Sequence[Plus[1, 1], Plus[2, 2]]]",
         )
-        self.assertEqual(evaluate(parse_input_form("Function[Sequence[x, x + x]][a]")).to_full_form(), "Plus[a, a]")
+        self.assertEqual(evaluate(parse_input_form("Function[Sequence[x, x + x]][a]")).to_full_form(), "Times[2, a]")
         self.assertEqual(evaluate(parse_input_form("{Sequence[Nothing, 1], 2}")).to_full_form(), "List[1, 2]")
         self.assertEqual(evaluate(parse_input_form("f[Sequence[Nothing, 1], 2]")).to_full_form(), "f[Nothing, 1, 2]")
         self.assertEqual(evaluate(parse_input_form("{Nothing[1 + 1], 2}")).to_full_form(), "List[2]")
@@ -1250,9 +1250,9 @@ class ExpressionEvaluationTests(unittest.TestCase):
         shadowed = evaluate(parse_input_form("(x |-> x |-> x[y])[y]"))
         recursive = evaluate(parse_input_form("(x |-> y |-> z |-> {x, y, z})[y]"))
         positional_nested = evaluate(parse_input_form("(Function[x, # + x &])[a]"))
-        self.assertEqual(direct.to_full_form(), "Plus[a, a]")
+        self.assertEqual(direct.to_full_form(), "Times[2, a]")
         self.assertEqual(list_syntax.to_full_form(), "Plus[a, b]")
-        self.assertEqual(escaped.to_full_form(), "Plus[a, a]")
+        self.assertEqual(escaped.to_full_form(), "Times[2, a]")
         self.assertEqual(nested_capture.to_full_form(), "Function[y$, y[y$]]")
         self.assertEqual(nested_no_capture.to_full_form(), "Function[y$, z[y$]]")
         self.assertEqual(liberal_rename.to_full_form(), "Function[y$, f[a]]")
@@ -1832,6 +1832,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         default_string = evaluate(parse_input_form("ToString[HoldComplete[{a -> b, f[x]}]]"))
         input_form_wrapper = evaluate(parse_input_form("ToString[InputForm[{1, 2/3, a + b}]]"))
         full_form_wrapper = evaluate(parse_input_form("ToString[FullForm[{1, 2/3, a + b}]]"))
+        tex_string = evaluate(parse_input_form("ToString[1 + x, TeXForm]"))
+        tex_standard_wrapper = evaluate(parse_input_form("ToString[TeXForm[StandardForm[1 + x]]]"))
+        mathml_string = evaluate(parse_input_form("ToString[1 + x, MathMLForm]"))
+        traditional_string = evaluate(parse_input_form("ToString[1 + x, TraditionalForm]"))
         literal_input_form_wrapper = evaluate(parse_input_form("ToString[InputForm[1 + x], InputForm]"))
         literal_full_form_wrapper = evaluate(parse_input_form("ToString[FullForm[1 + x], InputForm]"))
         input_round_trip = evaluate(
@@ -1849,16 +1853,30 @@ class ExpressionEvaluationTests(unittest.TestCase):
                 "SameQ[ToExpression[ToString[ByteArray[{1, 2, 255}], InputForm], InputForm], ByteArray[{1, 2, 255}]]"
             )
         )
+        tex_round_trip = evaluate(parse_input_form("ToExpression[ToString[1 + x, TeXForm], TeXForm, HoldComplete]"))
+        mathml_round_trip = evaluate(parse_input_form("ToExpression[ToString[1 + x, MathMLForm], MathMLForm, HoldComplete]"))
+        traditional_round_trip = evaluate(parse_input_form("ToExpression[ToString[1 + x, TraditionalForm], TraditionalForm, HoldComplete]"))
         self.assertEqual(input_string.to_full_form(), '"HoldComplete[1 + 2]"')
         self.assertEqual(standard_string.to_full_form(), '"HoldComplete[g[f[x]]]"')
         self.assertEqual(default_string.to_full_form(), '"HoldComplete[{a -> b, f[x]}]"')
         self.assertEqual(input_form_wrapper.to_full_form(), '"{1, 2/3, a + b}"')
         self.assertEqual(full_form_wrapper.to_full_form(), '"List[1, Rational[2, 3], Plus[a, b]]"')
+        self.assertEqual(tex_string.to_full_form(), '"x+1"')
+        self.assertEqual(tex_standard_wrapper.to_full_form(), '"1+x"')
+        self.assertIn("<math>", mathml_string.value)
+        self.assertIn("<mi>x</mi>", mathml_string.value)
+        self.assertEqual(
+            traditional_string.to_full_form(),
+            r'"\\!\\(\\*FormBox[RowBox[{\"x\", \"+\", \"1\"}], TraditionalForm]\\)"',
+        )
         self.assertEqual(literal_input_form_wrapper.to_full_form(), '"InputForm[1 + x]"')
         self.assertEqual(literal_full_form_wrapper.to_full_form(), '"FullForm[1 + x]"')
         self.assertEqual(input_round_trip.to_full_form(), "True")
         self.assertEqual(standard_round_trip.to_full_form(), "True")
         self.assertEqual(byte_array_round_trip.to_full_form(), "True")
+        self.assertEqual(tex_round_trip.to_full_form(), "HoldComplete[Plus[x, 1]]")
+        self.assertEqual(mathml_round_trip.to_full_form(), "HoldComplete[Plus[x, 1]]")
+        self.assertEqual(traditional_round_trip.to_full_form(), "HoldComplete[Plus[x, 1]]")
 
     def test_to_expression_evaluates_after_optional_wrapper(self) -> None:
         default_input = evaluate(parse_input_form('ToExpression["1 + 2"]'))
@@ -1869,6 +1887,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
         box_default = evaluate(parse_input_form('ToExpression[RowBox[{"1", "+", "2"}], StandardForm, HoldComplete]'))
         box_implicit_standard = evaluate(parse_input_form('ToExpression[RowBox[{"1", "+", "2"}]]'))
         listable = evaluate(parse_input_form('ToExpression[{"1 + 2", "f @ x // g"}, StandardForm, HoldComplete]'))
+        traditional_input = evaluate(parse_input_form('ToExpression["x", TraditionalForm]'))
+        output_form_string = evaluate(parse_input_form("ToString[x, OutputForm]"))
+        c_form_string = evaluate(parse_input_form("ToString[x^2, CForm]"))
+        fortran_form_string = evaluate(parse_input_form("ToString[x^2, FortranForm]"))
+        text_form_string = evaluate(parse_input_form("ToString[x^2, TextForm]"))
         self.assertEqual(default_input.to_full_form(), "3")
         self.assertEqual(held_input.to_full_form(), "HoldComplete[Plus[1, 2]]")
         self.assertEqual(held_standard.to_full_form(), "HoldComplete[g[f[x]]]")
@@ -1877,13 +1900,46 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(box_default.to_full_form(), "HoldComplete[Plus[1, 2]]")
         self.assertEqual(box_implicit_standard.to_full_form(), "3")
         self.assertEqual(listable.to_full_form(), "List[HoldComplete[Plus[1, 2]], HoldComplete[g[f[x]]]]")
+        self.assertEqual(traditional_input.to_full_form(), "x")
+        self.assertEqual(output_form_string.to_full_form(), '"x"')
+        self.assertEqual(c_form_string.to_full_form(), '"Power(x,2)"')
+        self.assertEqual(fortran_form_string.to_full_form(), '"x**2"')
+        self.assertEqual(text_form_string.to_full_form(), '"x^2"')
 
-        self.assert_evaluates_with_message("ToString[x, OutputForm]", "ToString[x, OutputForm]", "ToString::error")
         self.assert_evaluates_with_message(
-            'ToExpression["x", TraditionalForm]',
-            'ToExpression["x", TraditionalForm]',
+            'ToExpression["x", OutputForm]',
+            'ToExpression["x", OutputForm]',
             "ToExpression::error",
         )
+
+    def test_additional_output_form_wrappers_render_without_kernel(self) -> None:
+        number_form = evaluate(parse_input_form("NumberForm[1.2345, 3]"))
+        scientific_form = evaluate(parse_input_form("ScientificForm[1234.5, 4]"))
+        engineering_form = evaluate(parse_input_form("EngineeringForm[12345.0, 4]"))
+        accounting_form = evaluate(parse_input_form("AccountingForm[-12.345, 4]"))
+        padded_form = evaluate(parse_input_form("PaddedForm[12.3, {6, 2}]"))
+        percent_form = evaluate(parse_input_form("PercentForm[0.1234, 3]"))
+        base_form = evaluate(parse_input_form("BaseForm[31, 16]"))
+        table_form = evaluate(parse_input_form("TableForm[{{1, 22}, {333, 4}}]"))
+        matrix_form = evaluate(parse_input_form("MatrixForm[{{1, 22}, {333, 4}}]"))
+        tree_form = evaluate(parse_input_form("TreeForm[f[a, b]]"))
+        string_form = evaluate(parse_input_form('StringForm["a `` `1`", b]'))
+        sequence_form = evaluate(parse_input_form("SequenceForm[a, b, 1 + x]"))
+        c_form_boxes = evaluate(parse_input_form("ToBoxes[CForm[x^2]]"))
+
+        self.assertEqual(display_output_parts(number_form), ("NumberForm", "1.23"))
+        self.assertEqual(display_output_parts(scientific_form), ("ScientificForm", "1.234*10^+03"))
+        self.assertEqual(display_output_parts(engineering_form), ("EngineeringForm", "12.3*10^3"))
+        self.assertEqual(display_output_parts(accounting_form), ("AccountingForm", "(12.35)"))
+        self.assertEqual(display_output_parts(padded_form), ("PaddedForm", " 12.30"))
+        self.assertEqual(display_output_parts(percent_form), ("PercentForm", "12.3%"))
+        self.assertEqual(display_output_parts(base_form), ("BaseForm", "16^^1f"))
+        self.assertEqual(display_output_parts(table_form), ("TableForm", "1     22\n333   4"))
+        self.assertEqual(display_output_parts(matrix_form), ("MatrixForm", "1     22\n333   4"))
+        self.assertEqual(display_output_parts(tree_form), ("TreeForm", "f[a, b]"))
+        self.assertEqual(display_output_parts(string_form), ("StringForm", "a b b"))
+        self.assertEqual(display_output_parts(sequence_form), ("SequenceForm", "ab1 + x"))
+        self.assertIn('InterpretationBox["Power(x,2)"', c_form_boxes.to_full_form())
 
     def test_box_conversion_and_syntax_builtins(self) -> None:
         make_expression = evaluate(parse_input_form('MakeExpression[RowBox[{"1", "+", "2"}], StandardForm]'))
@@ -1893,6 +1949,10 @@ class ExpressionEvaluationTests(unittest.TestCase):
         full_form_boxes = evaluate(parse_input_form("ToBoxes[FullForm[1 + x]]"))
         output_form_boxes = evaluate(parse_input_form("ToBoxes[OutputForm[1 + x]]"))
         standard_form_boxes = evaluate(parse_input_form("ToBoxes[StandardForm[1 + x]]"))
+        traditional_form_boxes = evaluate(parse_input_form("ToBoxes[TraditionalForm[1 + x]]"))
+        tex_form_boxes = evaluate(parse_input_form("ToBoxes[TeXForm[1 + x]]"))
+        mathml_form_boxes = evaluate(parse_input_form("ToBoxes[MathMLForm[1 + x]]"))
+        explicit_traditional_boxes = evaluate(parse_input_form("MakeBoxes[1 + x, TraditionalForm]"))
         box_to_expression = evaluate(
             parse_input_form("ToExpression[MakeBoxes[HoldComplete[1 + 2], StandardForm], StandardForm]")
         )
@@ -1921,6 +1981,21 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(
             standard_form_boxes.to_full_form(),
             'TagBox[FormBox[RowBox[List["1", "+", "x"]], StandardForm], StandardForm, Rule[Editable, True]]',
+        )
+        self.assertEqual(
+            traditional_form_boxes.to_full_form(),
+            'TagBox[FormBox[RowBox[List["x", "+", "1"]], TraditionalForm], TraditionalForm, Rule[Editable, True]]',
+        )
+        self.assertEqual(
+            tex_form_boxes.to_full_form(),
+            'InterpretationBox["\\"x+1\\"", Plus[1, x], Rule[Editable, True], Rule[AutoDelete, True]]',
+        )
+        self.assertIn("<math>", mathml_form_boxes.to_full_form())
+        self.assertEqual(explicit_traditional_boxes.to_full_form(), 'RowBox[List["x", "+", "1"]]')
+        self.assert_evaluates_with_message(
+            "ToBoxes[1 + x, TeXForm]",
+            "ToBoxes[Plus[1, x], TeXForm]",
+            "ToBoxes::error",
         )
         self.assertEqual(box_to_expression.to_full_form(), "HoldComplete[Plus[1, 2]]")
         self.assertEqual(strip_boxes.to_full_form(), 'BoxData[RowBox[List["1", "+", "2"]]]')
@@ -3112,6 +3187,183 @@ class StructuralListTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("Median[{1, 2, 3, 4}]")).to_full_form(), "Rational[5, 2]")
 
 
+class SparseArrayTests(unittest.TestCase):
+    def test_array_shape_and_restructuring_helpers(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("ArrayDepth[{{1, 2}, {3, 4}}]")).to_full_form(), "2")
+        self.assertEqual(evaluate(parse_input_form("ArrayQ[{{1, 2}, {3, 4}}, 2, IntegerQ]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("ArrayQ[{{1}, {2, 3}}]")).to_full_form(), "False")
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayReshape[{1, 2, 3, 4, 5}, {2, 3}]")).to_full_form(),
+            "List[List[1, 2, 3], List[4, 5, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayPad[{{1, 2}, {3, 4}}, 1]")).to_full_form(),
+            "List[List[0, 0, 0, 0], List[0, 1, 2, 0], List[0, 3, 4, 0], List[0, 0, 0, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayFlatten[{{{{1, 2}, {3, 4}}, {{5}, {6}}}, {{{7, 8}}, {{9}}}}]")).to_full_form(),
+            "List[List[1, 2, 5], List[3, 4, 6], List[7, 8, 9]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Transpose[{{1, 2, 3}, {4, 5, 6}}]")).to_full_form(),
+            "List[List[1, 4], List[2, 5], List[3, 6]]",
+        )
+
+    def test_insert_flattenat_split_and_subsequences(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Insert[{a, b, c}, x, 2]")).to_full_form(), "List[a, x, b, c]")
+        self.assertEqual(evaluate(parse_input_form("FlattenAt[{a, {b, c}, d}, 2]")).to_full_form(), "List[a, b, c, d]")
+        self.assertEqual(evaluate(parse_input_form("Split[{a, a, b, b, a}]")).to_full_form(), "List[List[a, a], List[b, b], List[a]]")
+        self.assertEqual(evaluate(parse_input_form("SplitBy[{1, 3, 2, 4, 5}, EvenQ]")).to_full_form(), "List[List[1, 3], List[2, 4], List[5]]")
+        self.assertEqual(evaluate(parse_input_form("DeleteAdjacentDuplicates[{a, a, b, a, a}]")).to_full_form(), "List[a, b, a]")
+        self.assertEqual(evaluate(parse_input_form("Subsequences[{a, b, c}, {2}]")).to_full_form(), "List[List[a, b], List[b, c]]")
+        self.assertEqual(evaluate(parse_input_form('AlphabeticSort[{"beta", "Alpha", "gamma"}]')).to_full_form(), 'List["Alpha", "beta", "gamma"]')
+        self.assertEqual(evaluate(parse_input_form('NumericalSort[{"x10", "x2", "x1"}]')).to_full_form(), 'List["x1", "x2", "x10"]')
+
+    def test_tensor_helpers_and_small_matrix_operations(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("Tr[{{a, b}, {c, d}}]")).to_full_form(), "Plus[a, d]")
+        self.assertEqual(
+            evaluate(parse_input_form("Det[{{a, b}, {c, d}}]")).to_full_form(),
+            "Plus[Times[-1, b, c], Times[a, d]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Inverse[{{1, 2}, {3, 4}}]")).to_full_form(),
+            "List[List[-2, 1], List[Rational[3, 2], Rational[-1, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MatrixPower[{{1, 1}, {1, 0}}, 3]")).to_full_form(),
+            "List[List[3, 2], List[2, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Cross[{a, b, c}, {d, e, f}]")).to_full_form(),
+            "List[Plus[Times[-1, c, e], Times[b, f]], Plus[Times[-1, a, f], Times[c, d]], Plus[Times[-1, b, d], Times[a, e]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("LeviCivitaTensor[2]")).to_full_form(),
+            "List[List[0, 1], List[-1, 0]]",
+        )
+
+    def test_sparse_array_constructs_from_rules_and_dense_lists(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[SparseArray[{{1, 2} -> a, {2, 3} -> b}, {2, 3}]]")).to_full_form(),
+            "List[List[0, a, 0], List[0, 0, b]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[SparseArray[{{0, 1}, {2, 0}}]]")).to_full_form(),
+            "List[Rule[List[1, 2], 1], Rule[List[2, 1], 2], Rule[List[Blank[], Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[SparseArray[{1, 3} -> {a, b}]]")).to_full_form(),
+            "List[a, 0, b]",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("Normal[SparseArray[{{1, 1} -> a, {1, 1} -> b}, {1, 1}]]")
+            ).to_full_form(),
+            "List[List[a]]",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("Normal[SparseArray[{{1, 1} -> a}, {2, 2}, z]]")
+            ).to_full_form(),
+            "List[List[a, z], List[z, z]]",
+        )
+
+    def test_sparse_array_dimensions_atom_and_properties(self) -> None:
+        result = evaluate(
+            parse_input_form(
+                '{Dimensions[SparseArray[{{1, 2} -> a}, {2, 3}]], '
+                'SparseArrayQ[SparseArray[{{1} -> a}]], '
+                'AtomQ[SparseArray[{{1} -> a}]], '
+                'Head[SparseArray[{{1} -> a}]], '
+                'SparseArray[{{1, 2} -> a}, {2, 3}]["ExplicitPositions"], '
+                'SparseArray[{{1, 2} -> a}, {2, 3}]["Density"]}'
+            )
+        )
+        self.assertEqual(
+            result.to_full_form(),
+            "List[List[2, 3], True, True, SparseArray, List[List[1, 2]], Rational[1, 6]]",
+        )
+
+    def test_sparse_array_part_and_array_rules_preserve_sparse_slices(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("SparseArray[{{1, 2} -> a}, {2, 3}][[1]]")).to_full_form(),
+            "SparseArray[List[Rule[List[2], a]], List[3]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("SparseArray[{{1, 2} -> a}, {2, 3}][[1, 2]]")).to_full_form(),
+            "a",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form("Normal[SparseArray[{{1, 2} -> a, {2, 3} -> b}, {2, 3}][[All, {2, 3}]]]")
+            ).to_full_form(),
+            "List[List[a, 0], List[0, b]]",
+        )
+
+    def test_sparse_array_dot_and_elementwise_arithmetic(self) -> None:
+        self.assertEqual(
+            evaluate(
+                parse_input_form(
+                    "Normal[SparseArray[{{1, 2} -> a}, {2, 3}] . SparseArray[{{2, 1} -> b}, {3, 2}]]"
+                )
+            ).to_full_form(),
+            "List[List[Times[a, b], 0], List[0, 0]]",
+        )
+        self.assertEqual(
+            evaluate(
+                parse_input_form(
+                    "Normal[SparseArray[{{1, 2} -> a}, {2, 3}] + SparseArray[{{2, 3} -> b}, {2, 3}]]"
+                )
+            ).to_full_form(),
+            "List[List[0, a, 0], List[0, 0, b]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[2 SparseArray[{{1} -> a}, {3}] + 1]")).to_full_form(),
+            "List[Plus[1, Times[2, a]], 1, 1]",
+        )
+
+    def test_sparse_array_uses_pydata_sparse_backend_when_available(self) -> None:
+        import importlib.util
+
+        result = evaluate(parse_input_form("SparseArray[{{1, 2} -> a}, {2, 3}]"))
+        payload = result.to_dict()
+        if importlib.util.find_spec("sparse") is not None:
+            self.assertIn("COO", str(payload.get("backend")))
+
+    def test_sparse_array_restructuring_and_matrix_helpers_preserve_sparse_results(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("ArrayQ[SparseArray[{{1, 2} -> a}, {2, 3}], 2]")).to_full_form(), "True")
+        self.assertEqual(
+            evaluate(parse_input_form("Normal[ArrayReshape[SparseArray[{{2} -> a, {5} -> b}, {6}], {2, 3}]]")).to_full_form(),
+            "List[List[0, a, 0], List[0, b, 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[ArrayPad[SparseArray[{{2} -> a}, {3}], 1]]")).to_full_form(),
+            "List[Rule[List[3], a], Rule[List[Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[Transpose[SparseArray[{{1, 2} -> a, {2, 1} -> b}, {2, 3}]]]")).to_full_form(),
+            "List[Rule[List[1, 2], b], Rule[List[2, 1], a], Rule[List[Blank[], Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[Flatten[SparseArray[{{1, 2} -> a, {2, 1} -> b}, {2, 3}]]]")).to_full_form(),
+            "List[Rule[List[2], a], Rule[List[4], b], Rule[List[Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Tr[SparseArray[{{1, 1} -> a, {2, 2} -> b, {2, 3} -> c}, {3, 3}]]")).to_full_form(),
+            "Plus[a, b]",
+        )
+        self.assertEqual(evaluate(parse_input_form("Det[SparseArray[{{1, 1} -> 2, {2, 2} -> 3}, {2, 2}]]")).to_full_form(), "6")
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[Inverse[SparseArray[{{1, 1} -> 2, {2, 2} -> 4}, {2, 2}]]]")).to_full_form(),
+            "List[Rule[List[1, 1], Rational[1, 2]], Rule[List[2, 2], Rational[1, 4]], Rule[List[Blank[], Blank[]], 0]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("ArrayRules[MatrixPower[SparseArray[{{1, 2} -> 1, {2, 1} -> 1}, {2, 2}], 2]]")).to_full_form(),
+            "List[Rule[List[1, 1], 1], Rule[List[2, 2], 1], Rule[List[Blank[], Blank[]], 0]]",
+        )
+
+
+
 class StringHelperTests(unittest.TestCase):
     def test_upper_lower_capitalize(self) -> None:
         self.assertEqual(evaluate(parse_input_form('ToUpperCase["hello"]')).to_full_form(), '"HELLO"')
@@ -3437,6 +3689,152 @@ class StatisticalAndNumberTheoryExtensionsTests(unittest.TestCase):
         self.assertEqual(
             evaluate(parse_input_form("Position[{a, b, c}, _, {1}, Heads -> False]")).to_full_form(),
             "List[List[1], List[2], List[3]]",
+        )
+
+
+class PolynomialAlgebraTests(unittest.TestCase):
+    """Exact rational/integer polynomial algebra backed by Tungsten's
+    kernel-free expression evaluator."""
+
+    def test_factor_integer_and_integer_exponent(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("FactorInteger[-12]")).to_full_form(),
+            "List[List[-1, 1], List[2, 2], List[3, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FactorInteger[18/35]")).to_full_form(),
+            "List[List[2, 1], List[3, 2], List[5, -1], List[7, -1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("FactorInteger[0]")).to_full_form(), "List[List[0, 1]]")
+        self.assertEqual(evaluate(parse_input_form("IntegerExponent[1000]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("IntegerExponent[0, 10]")).to_full_form(), "Infinity")
+
+    def test_expand_polynomial_q_variables_and_monomial_list(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Expand[(x + 1)^3]")).to_full_form(),
+            "Plus[1, Power[x, 3], Times[3, x], Times[3, Power[x, 2]]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[(x + 1)^2, x]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[1/x, x]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[f[a]+f[a]^2, f[a]]")).to_full_form(), "True")
+        self.assertEqual(
+            evaluate(parse_input_form("Variables[(x + y)^2 + 3 z]")).to_full_form(),
+            "List[x, y, z]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MonomialList[x y + x^2 + 3, {x, y}]")).to_full_form(),
+            "List[Power[x, 2], Times[x, y], 3]",
+        )
+
+    def test_coefficient_exponent_and_coefficient_list(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Coefficient[2 x^2 y + 3 x y + y, x, 1]")).to_full_form(),
+            "Times[3, y]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Coefficient[x^2 y^2 + 3 x y + 1, x y, 2]")).to_full_form(),
+            "1",
+        )
+        self.assertEqual(evaluate(parse_input_form("Exponent[0, x]")).to_full_form(), "-Infinity")
+        self.assertEqual(evaluate(parse_input_form("Exponent[x^2 y^2 + x y + 1, x y]")).to_full_form(), "2")
+        self.assertEqual(
+            evaluate(parse_input_form("CoefficientList[x^2 + 3 x + 2, x]")).to_full_form(),
+            "List[2, 3, 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("CoefficientList[x y + 2 y + 3, {x, y}]")).to_full_form(),
+            "List[List[3, 2], List[0, 1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("CoefficientList[0, x]")).to_full_form(), "List[]")
+
+    def test_collect_factor_and_factor_list(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Collect[x y + x + 2 y, x]")).to_full_form(),
+            "Plus[Times[2, y], Times[x, Plus[1, y]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 - 1]")).to_full_form(),
+            "Times[Plus[-1, x], Plus[1, x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[2 x y + 2 y]")).to_full_form(),
+            "Times[2, y, Plus[1, x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FactorList[2 x^2 - 2]")).to_full_form(),
+            "List[List[2, 1], List[Plus[-1, x], 1], List[Plus[1, x], 1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("FactorList[0]")).to_full_form(), "List[List[0, 1]]")
+
+    def test_gaussian_rational_polynomial_coefficients(self) -> None:
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[x^2 + I x + 1, x]")).to_full_form(), "True")
+        self.assertEqual(
+            evaluate(parse_input_form("Variables[x^2 + I y + 1]")).to_full_form(),
+            "List[x, y]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MonomialList[x^2 + I x + 1, x]")).to_full_form(),
+            "List[Power[x, 2], Times[Complex[0, 1], x], 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Collect[x^2 + I x + 1 + y x, x]")).to_full_form(),
+            "Plus[1, Power[x, 2], Times[x, Plus[Complex[0, 1], y]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Coefficient[x^2 + I x + 1, x]")).to_full_form(),
+            "Complex[0, 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("CoefficientList[x^2 + I x + 1, x]")).to_full_form(),
+            "List[1, Complex[0, 1], 1]",
+        )
+
+    def test_gaussian_factor_options(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, GaussianIntegers -> True]")).to_full_form(),
+            "Times[Plus[Complex[0, -1], x], Plus[Complex[0, 1], x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, Extension -> {I}]")).to_full_form(),
+            "Times[Plus[Complex[0, -1], x], Plus[Complex[0, 1], x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, Extension -> I]")).to_full_form(),
+            "Times[Plus[Complex[0, -1], x], Plus[Complex[0, 1], x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FactorList[x^2 + 1, Extension -> {I}]")).to_full_form(),
+            "List[List[1, 1], List[Plus[Complex[0, -1], x], 1], List[Plus[Complex[0, 1], x], 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 + 1, Extension -> {Sqrt[2]}]")).to_full_form(),
+            "Factor[Plus[1, Power[x, 2]], Rule[Extension, List[Power[2, Rational[1, 2]]]]]",
+        )
+
+    def test_decompose_polynomials(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[(x^2 + 1)^3 + 2, x]")).to_full_form(),
+            "List[Plus[3, Power[x, 3], Times[3, x], Times[3, Power[x, 2]]], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[x^2 + 1, x]")).to_full_form(),
+            "List[Plus[1, x], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[x^2 + I, x]")).to_full_form(),
+            "List[Plus[Complex[0, 1], x], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[x^4 + x^2, x]")).to_full_form(),
+            "List[Plus[x, Power[x, 2]], Power[x, 2]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[3 x^2, x]")).to_full_form(),
+            "List[Times[3, Power[x, 2]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Decompose[(x^2 + I x + 1)^2, x]")).to_full_form(),
+            "List[Plus[1, Power[x, 2], Times[2, x]], Plus[Power[x, 2], Times[Complex[0, 1], x]]]",
         )
 
 

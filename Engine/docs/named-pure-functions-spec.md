@@ -266,7 +266,7 @@ These examples should be locked in as Tungsten tests:
   - `x \[Function] x + x` -> `Function[x, Plus[x, x]]`
   - `##2 &` -> `Function[SlotSequence[2]]`
 - evaluate:
-  - `(Function[x, x + x])[a]` -> `Plus[a, a]`
+  - `(Function[x, x + x])[a]` -> `Times[2, a]`
   - `(f[##2] &)[a, b, c]` -> `f[b, c]`
   - `Function[Null, HoldComplete[#], HoldAll][1 + 2]` -> `HoldComplete[Plus[1, 2]]`
   - `Function[Null, f[#], Listable][{a, b}]` -> `List[f[a], f[b]]`

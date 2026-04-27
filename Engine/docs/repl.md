@@ -163,10 +163,18 @@ Out[1]= Null
 In[2]:= {f[3], DownValues[f]}
 
 Out[2]= {4, {HoldPattern[f[x_]] :> x + 1}}
+
+In[3]:= f /: h[f[x_]] := x + 10
+
+Out[3]= Null
+
+In[4]:= {h[f[2]], UpValues[f]}
+
+Out[4]= {12, {HoldPattern[h[f[x_]]] :> x + 10}}
 ```
 
-Tungsten still does not implement direct assignment to `DownValues`, `UpSet` / `TagSet`, or
-inspection of general built-in definitions.
+Tungsten still does not implement direct assignment to value lists such as `DownValues[f] = ...`,
+direct `UpSet` / `UpSetDelayed`, or inspection of general built-in definitions.
 
 ## Exiting
 
@@ -195,7 +203,13 @@ it is not a drop-in Wolfram kernel:
   Wolfram-style labels and text: `InputForm[expr]` prints as `Out[n]//InputForm= ...`,
   `FullForm[expr]` prints as `Out[n]//FullForm= ...`, and the same display selection is used
   for `Print[InputForm[expr]]`, `Print[FullForm[expr]]`, `OutputForm[expr]`, and
-  `StandardForm[expr]`.
+  `StandardForm[expr]`. `TraditionalForm[expr]`, `TeXForm[expr]`, `MathMLForm[expr]`,
+  `CForm[expr]`, `FortranForm[expr]`, `TextForm[expr]`, and common output-format wrappers such as
+  `NumberForm`, `ScientificForm`, `EngineeringForm`, `AccountingForm`, `PaddedForm`,
+  `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`, `TreeForm`, `DisplayForm`, `StringForm`, and `SequenceForm` also
+  select display text. TraditionalForm uses inline boxes, TeXForm uses Tungsten's compact TeX
+  subset, MathMLForm uses presentation MathML, and the additional wrappers use deterministic
+  keyboard-text approximations rather than FrontEnd layout.
 - Syntax errors and evaluation errors are reported with Tungsten messages rather than exact Wolfram
   message names and formatting.
 - The REPL currently reads one input line at a time; full Wolfram multi-line input recovery is out

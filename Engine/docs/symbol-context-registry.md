@@ -128,11 +128,16 @@ The current kernel-free evaluator implements these symbol and context functions:
   `HoldPattern[sym] :> value`.
 - `DownValues[sym]`, `SubValues[sym]`, `UpValues[sym]`, and `NValues[sym]` read the corresponding
   canonical value lists. `DownValues` and `SubValues` are populated by supported compound-LHS
-  assignments; `UpValues` and `NValues` remain read-only storage surfaces for now.
+  assignments; `UpValues` is populated by `TagSet` / `TagSetDelayed`; `NValues` remains a
+  read-only storage surface for now.
+- `TagSet`, `TagSetDelayed`, and `TagUnset` support tagged own/down/sub definitions plus
+  practical up-value definitions where the tag appears as an immediate argument or in the head
+  chain of an immediate argument of the left-hand side.
 - `ValueQ[expr]` holds `expr` while checking value availability. It returns `True` for symbols
-  with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally.
-  Ordinary atoms such as integers and strings return `False`, matching Wolfram's value-oriented
-  interpretation more closely now that Tungsten has process-local own-value storage.
+  with own values, `$Context`, `$ContextPath`, and expressions Tungsten can reduce structurally
+  through own, down, sub, or up values. Ordinary atoms such as integers and strings return
+  `False`, matching Wolfram's value-oriented interpretation more closely now that Tungsten has
+  process-local own-value storage.
 - Symbols whose registry attributes include `Protected` reject `Set`, `Unset`, `Clear`, and
   `ClearAll` value mutations with `wrsym` messages. Symbols whose attributes include `Locked`
   reject attribute mutation and protect/unprotect attempts with `locked` messages.
@@ -150,16 +155,16 @@ The registry intentionally does not yet implement:
 - mutable `$Context` or `$ContextPath`;
 - `Begin`, `BeginPackage`, `End`, `Needs`, package loading, shadowing diagnostics, or context
   aliases;
-- `UpSet`, `UpSetDelayed`, `TagSet`, and `TagSetDelayed`;
+- `UpSet` and `UpSetDelayed`;
 - direct assignment to value lists such as `DownValues[f] = {...}`;
-- user-definable up values;
+- remaining kernel corner cases for user-definable up values;
 - persistent registry state across separate Tungsten CLI processes.
 
 These boundaries are structural, not accidental. Attributes are process-local metadata that the
 offline evaluator now consults for common argument handling (`HoldFirst`, `HoldRest`, `HoldAll`,
 `HoldAllComplete`, `SequenceHold`, `Listable`, `Flat`, `Orderless`, and Flat/OneIdentity pattern
-segments). Tungsten still does not implement package loading, general down-value dispatch, or every
-specialized built-in evaluator rule associated with the full Wolfram kernel.
+segments). Tungsten still does not implement package loading, direct value-list assignment, or
+every specialized built-in evaluator rule associated with the full Wolfram kernel.
 
 ## Examples
 

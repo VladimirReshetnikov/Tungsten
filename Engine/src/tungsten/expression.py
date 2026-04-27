@@ -10,18 +10,22 @@ from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from functools import cmp_to_key
 import gzip
+import html
 from importlib import resources
 import io
 import itertools
 import json
 import math
+import random
 import re
 import sys
 import time
 import unicodedata
 from typing import Callable, Iterable, Sequence, TypeGuard
+from xml.etree import ElementTree
 
 from .wolfram_strings import has_inline_boxes
+from .wolfram_strings import inline_box_escape
 from .wolfram_strings import inline_box_segments
 from .wolfram_strings import parse_wl_string_literal
 from .wolfram_strings import skip_wl_comment
@@ -70,12 +74,66 @@ class _TungstenConfirmSignal(Exception):
         self.tag = tag
 
 
+class _TungstenBreakSignal(Exception):
+    """Internal signal raised by ``Break[]``.
+
+    Propagates outward until the nearest enclosing ``Do`` / ``While`` /
+    ``For`` loop catches it and exits with ``Null``. Per the Wolfram
+    docs, ``Break`` does *not* propagate through ``Table`` / ``Sum`` /
+    ``Product``, so those heads do not catch this signal.
+    """
+
+
+class _TungstenContinueSignal(Exception):
+    """Internal signal raised by ``Continue[]``.
+
+    Same propagation rules as ``_TungstenBreakSignal``: caught by the
+    next ``Do`` / ``While`` / ``For`` loop, which skips the rest of
+    the body and resumes with the next iteration.
+    """
+
+
+class _TungstenReturnSignal(Exception):
+    """Internal signal raised by ``Return[expr]`` and
+    ``Return[expr, head]``.
+
+    The one-argument form (``head_name`` is ``None``) is caught at
+    the boundary of a function-definition rule application — i.e.,
+    when a matched ``DownValues`` / ``SubValues`` / ``UpValues`` rule's
+    RHS is evaluated. The two-argument form (``head_name`` is the
+    string name of the targeted head, e.g. ``"Module"`` or
+    ``"For"``) is caught by the corresponding head's evaluator.
+    """
+
+    def __init__(self, value: Expr, head_name: str | None = None) -> None:
+        super().__init__(value, head_name)
+        self.value = value
+        self.head_name = head_name
+
+
+class _TungstenGotoSignal(Exception):
+    """Internal signal raised by ``Goto[label]``.
+
+    Caught by the nearest enclosing ``CompoundExpression`` whose
+    arguments contain a matching ``Label[label]`` marker. Evaluation
+    resumes from the position after the matched ``Label``.
+    """
+
+    def __init__(self, label: Expr) -> None:
+        super().__init__(label)
+        self.label = label
+
+
 _CONTROL_SIGNAL_TYPES = (
     TungstenExitRequested,
     TungstenAbortRequested,
     _TungstenThrowSignal,
     _TungstenTimeConstraintSignal,
     _TungstenConfirmSignal,
+    _TungstenBreakSignal,
+    _TungstenContinueSignal,
+    _TungstenReturnSignal,
+    _TungstenGotoSignal,
 )
 
 
@@ -282,6 +340,51 @@ class ByteArrayExpr(Expr):
         }
 
 
+@dataclass(frozen=True)
+class _SparseArrayEntry:
+    indices: tuple[int, ...]
+    value: Expr
+
+
+@dataclass(frozen=True)
+class SparseArrayExpr(Expr):
+    dimensions: tuple[int, ...]
+    entries: tuple[_SparseArrayEntry, ...]
+    fill_value: Expr = field(default_factory=lambda: Integer(0))
+    _backend: object | None = field(default=None, init=False, compare=False, repr=False, hash=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_backend", _build_sparse_backend(self.dimensions, self.entries, self.fill_value))
+
+    def head(self) -> Expr:
+        return Symbol("SparseArray")
+
+    def to_full_form(self) -> str:
+        return _sparse_array_constructor_call(self).to_full_form()
+
+    def to_input_form(self) -> str:
+        return _sparse_array_constructor_call(self).to_input_form()
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "type": "sparse_array",
+            "dimensions": list(self.dimensions),
+            "fill_value": self.fill_value.to_dict(),
+            "entries": [
+                {
+                    "indices": list(entry.indices),
+                    "value": entry.value.to_dict(),
+                }
+                for entry in self.entries
+            ],
+            "explicit_length": len(self.entries),
+        }
+        if self._backend is not None:
+            backend_type = type(self._backend)
+            payload["backend"] = f"{backend_type.__module__}.{backend_type.__name__}"
+        return payload
+
+
 _SYSTEM_SYMBOL_NAMES = {
     "$Aborted",
     "$AssertFunction",
@@ -308,13 +411,22 @@ _SYSTEM_SYMBOL_NAMES = {
     "Abort",
     "AbortProtect",
     "AbsoluteTiming",
+    "AccountingForm",
     "Accuracy",
     "All",
+    "AlphabeticSort",
     "Alternatives",
     "And",
     "Append",
+    "AppendTo",
     "Apply",
     "Array",
+    "ArrayDepth",
+    "ArrayFlatten",
+    "ArrayPad",
+    "ArrayQ",
+    "ArrayReshape",
+    "ArrayRules",
     "Association",
     "AssociationMap",
     "AssociationQ",
@@ -328,6 +440,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "BaselinePosition",
     "BaseDecode",
     "BaseEncode",
+    "BaseForm",
     "Blank",
     "BlankNullSequence",
     "BlankSequence",
@@ -337,6 +450,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "ByteArray",
     "ByteArrayQ",
     "ByteArrayToString",
+    "CForm",
     "Cases",
     "Catch",
     "CharacterRange",
@@ -352,6 +466,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "ClearAll",
     "ClearAttributes",
     "Clip",
+    "Coefficient",
+    "CoefficientList",
+    "Collect",
     "Comap",
     "ComapApply",
     "Complex",
@@ -374,20 +491,26 @@ _SYSTEM_SYMBOL_NAMES = {
     "Cross",
     "DatePattern",
     "Delete",
+    "DeleteAdjacentDuplicates",
     "DeleteCases",
     "DeleteDuplicates",
     "DeleteDuplicatesBy",
+    "Decompose",
     "Derivative",
+    "Det",
     "Depth",
+    "DecimalForm",
     "DiagonalMatrix",
     "Diamond",
     "DigitCharacter",
     "DigitQ",
     "Discard",
     "DirectedEdge",
+    "Dimensions",
     "DiscreteDelta",
     "DiscreteRatio",
     "DiscreteShift",
+    "DisplayForm",
     "Distribute",
     "Divide",
     "Dot",
@@ -402,11 +525,14 @@ _SYSTEM_SYMBOL_NAMES = {
     "Element",
     "EndOfLine",
     "EndOfString",
+    "EngineeringForm",
     "Equal",
     "Editable",
     "Equivalent",
     "EvenQ",
     "Except",
+    "Expand",
+    "Exponent",
     "ExportByteArray",
     "ExportString",
     "Extract",
@@ -414,15 +540,20 @@ _SYSTEM_SYMBOL_NAMES = {
     "Failsafe",
     "FailsafeFailed",
     "False",
+    "Factor",
+    "FactorInteger",
+    "FactorList",
     "Failure",
     "FailureQ",
     "ExactNumberQ",
+    "Extension",
     "First",
     "FirstCase",
     "FixedPoint",
     "FixedPointList",
     "Flat",
     "Flatten",
+    "FlattenAt",
     "Fold",
     "FoldList",
     "FoldPair",
@@ -431,8 +562,10 @@ _SYSTEM_SYMBOL_NAMES = {
     "FoldWhileList",
     "FreeQ",
     "FromCharacterCode",
+    "FortranForm",
     "FullForm",
     "Function",
+    "GaussianIntegers",
     "General",
     "Greater",
     "GreaterEqual",
@@ -462,8 +595,11 @@ _SYSTEM_SYMBOL_NAMES = {
     "Infinity",
     "Inequality",
     "Inner",
+    "Insert",
     "Intersection",
+    "Inverse",
     "Integer",
+    "IntegerExponent",
     "IntegerQ",
     "Join",
     "Key",
@@ -481,6 +617,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Length",
     "LetterCharacter",
     "LetterQ",
+    "LeviCivitaTensor",
     "LengthWhile",
     "Less",
     "LessEqual",
@@ -507,6 +644,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "MapIndexed",
     "MapThread",
     "MatchQ",
+    "MathMLForm",
+    "MatrixForm",
+    "MatrixPower",
     "Max",
     "MaximalBy",
     "MemberQ",
@@ -519,6 +659,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "MissingQ",
     "MinusPlus",
     "Mod",
+    "MonomialList",
     "Most",
     "MachinePrecision",
     "Names",
@@ -541,9 +682,11 @@ _SYSTEM_SYMBOL_NAMES = {
     "NotSupersetEqual",
     "Nothing",
     "Null",
+    "NumberForm",
     "NumberQ",
     "NumberString",
     "NumberMarks",
+    "NumericalSort",
     "NumericFunction",
     "OddQ",
     "Off",
@@ -569,17 +712,21 @@ _SYSTEM_SYMBOL_NAMES = {
     "Part",
     "Partition",
     "Pause",
+    "PaddedForm",
     "Pattern",
     "PatternSequence",
     "PatternTest",
+    "PercentForm",
     "Piecewise",
     "Pick",
     "Plus",
     "PlusMinus",
+    "PolynomialQ",
     "Position",
     "Power",
     "Precision",
     "Print",
+    "PrintForm",
     "Precedes",
     "PrecedesEqual",
     "Prepend",
@@ -592,6 +739,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Quit",
     "Quiet",
     "Ramp",
+    "RandomSample",
     "Range",
     "Rational",
     "Re",
@@ -623,6 +771,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "SameAs",
     "SameQ",
     "Scan",
+    "ScientificForm",
     "Select",
     "SelectFirst",
     "SetAttributes",
@@ -636,6 +785,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Sequence",
     "SequenceFold",
     "SequenceFoldList",
+    "SequenceForm",
     "SequenceHold",
     "Sign",
     "Slot",
@@ -655,6 +805,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "StartOfLine",
     "StartOfString",
     "StandardForm",
+    "SparseArray",
+    "SparseArrayQ",
     "String",
     "StringCases",
     "StringContainsQ",
@@ -662,6 +814,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "StringEndsQ",
     "StringExpression",
     "StringFreeQ",
+    "StringForm",
     "StringInsert",
     "StringJoin",
     "StringLength",
@@ -689,6 +842,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Switch",
     "Symbol",
     "SymbolName",
+    "TableForm",
     "Take",
     "TakeDrop",
     "TakeList",
@@ -700,6 +854,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "TimeRemaining",
     "TensorProduct",
     "Temporary",
+    "TeXForm",
+    "TextForm",
     "Tilde",
     "TildeEqual",
     "TildeFullEqual",
@@ -708,6 +864,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "ToCharacterCode",
     "ToExpression",
     "ToString",
+    "TraditionalForm",
+    "TreeForm",
     "Throw",
     "True",
     "TrueQ",
@@ -731,6 +889,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "UnsameQ",
     "ValueQ",
     "Values",
+    "Variables",
     "Verbatim",
     "VerticalBar",
     "VerticalSeparator",
@@ -1000,6 +1159,34 @@ class SymbolRegistry:
     def symbol_from_name(self, name: str) -> Symbol:
         record = self.ensure_name(name)
         return self._display_symbol_for_record(record)
+
+    def allocate_module_local_symbols(
+        self, locals_in_order: Sequence[Symbol]
+    ) -> tuple[tuple[Symbol, ...], tuple[SymbolRecord, ...]]:
+        """Allocate a fresh symbol per local with a *shared* counter suffix.
+
+        ``Module[{x, y, ...}, body]`` allocates ``x$N``, ``y$N``, … all
+        with the same `N` (the new module-counter value). This helper
+        increments the counter once and returns the freshly-created
+        symbols and their records in the same order as the input. The
+        returned ``Symbol`` instances are display-symbol forms ready to
+        substitute into the body; the records are the live registry
+        entries so the caller can install own values on them.
+
+        Each local symbol's ``OwnValues`` slot is left empty; the caller
+        is responsible for installing initializer values.
+        """
+        self._module_number += 1
+        suffix = self._module_number
+        fresh_symbols: list[Symbol] = []
+        fresh_records: list[SymbolRecord] = []
+        for local in locals_in_order:
+            base_record = self.record_for_symbol(local)
+            fresh_full_name = f"{base_record.context}{base_record.short_name}${suffix}"
+            fresh_record = self.ensure_full_name(fresh_full_name)
+            fresh_symbols.append(self._display_symbol_for_record(fresh_record))
+            fresh_records.append(fresh_record)
+        return tuple(fresh_symbols), tuple(fresh_records)
 
     def unique_symbol(self, base: Expr | None = None) -> Symbol:
         if base is None:
@@ -2799,6 +2986,444 @@ def _association_from_arguments(arguments: Sequence[Expr]) -> Call | None:
     return _association_expr(entries)
 
 
+def _build_sparse_backend(
+    dimensions: Sequence[int],
+    entries: Sequence[_SparseArrayEntry],
+    fill_value: Expr,
+) -> object | None:
+    try:
+        import numpy as np
+        import sparse as sparse_module
+    except Exception:
+        return None
+
+    try:
+        rank = len(dimensions)
+        coords = np.empty((rank, len(entries)), dtype=np.int64)
+        data = np.empty((len(entries),), dtype=object)
+        for column, entry in enumerate(entries):
+            for axis, index in enumerate(entry.indices):
+                coords[axis, column] = index - 1
+            data[column] = entry.value
+        return sparse_module.COO(
+            coords,
+            data,
+            shape=tuple(dimensions),
+            fill_value=fill_value,
+            has_duplicates=False,
+            sorted=True,
+            prune=False,
+        )
+    except Exception:
+        return None
+
+
+def _sparse_array_constructor_call(array: SparseArrayExpr) -> Call:
+    rules = list_expr(*(
+        call("Rule", list_expr(*(integer(index) for index in entry.indices)), entry.value)
+        for entry in array.entries
+    ))
+    dimensions = list_expr(*(integer(dimension) for dimension in array.dimensions))
+    if array.fill_value == integer(0):
+        return call("SparseArray", rules, dimensions)
+    return call("SparseArray", rules, dimensions, array.fill_value)
+
+
+def _sparse_array_expr(
+    dimensions: Sequence[int],
+    entries: Iterable[_SparseArrayEntry],
+    fill_value: Expr | None = None,
+) -> SparseArrayExpr:
+    normalized_dimensions = tuple(int(dimension) for dimension in dimensions)
+    if not normalized_dimensions:
+        raise WolframEvaluationError("SparseArray expects at least one dimension.")
+    if any(dimension < 0 for dimension in normalized_dimensions):
+        raise WolframEvaluationError("SparseArray dimensions must be non-negative.")
+
+    fill = integer(0) if fill_value is None else fill_value
+    rank = len(normalized_dimensions)
+    seen: set[tuple[int, ...]] = set()
+    normalized_entries: list[_SparseArrayEntry] = []
+    for entry in entries:
+        indices = tuple(entry.indices)
+        if len(indices) != rank:
+            raise WolframEvaluationError("SparseArray rule positions must match the array rank.")
+        if indices in seen:
+            # Wolfram keeps the first repeated position in SparseArray rules.
+            continue
+        seen.add(indices)
+        for axis, index in enumerate(indices):
+            if index < 1 or index > normalized_dimensions[axis]:
+                raise WolframEvaluationError("SparseArray rule positions must be inside the array dimensions.")
+        if entry.value == fill:
+            continue
+        normalized_entries.append(_SparseArrayEntry(indices, entry.value))
+
+    normalized_entries.sort(key=lambda entry: entry.indices)
+    return SparseArrayExpr(
+        dimensions=normalized_dimensions,
+        entries=tuple(normalized_entries),
+        fill_value=fill,
+    )
+
+
+def _sparse_array_entry_map(array: SparseArrayExpr) -> dict[tuple[int, ...], Expr]:
+    return {entry.indices: entry.value for entry in array.entries}
+
+
+def _sparse_array_value_at(array: SparseArrayExpr, indices: Sequence[int]) -> Expr:
+    return _sparse_array_entry_map(array).get(tuple(indices), array.fill_value)
+
+
+def _sparse_position_from_expr(position: Expr, rank_hint: int | None = None) -> tuple[int, ...] | None:
+    if isinstance(position, Integer):
+        if rank_hint not in {None, 1}:
+            return None
+        return (position.value,)
+    if isinstance(position, Call) and position.has_head("List"):
+        if not all(isinstance(item, Integer) for item in position.arguments):
+            return None
+        indices = tuple(item.value for item in position.arguments if isinstance(item, Integer))
+        if rank_hint is not None and len(indices) != rank_hint:
+            return None
+        return indices
+    return None
+
+
+def _sparse_position_sequence_from_expr(
+    positions: Expr,
+    values: Expr,
+    rank_hint: int | None,
+) -> list[tuple[tuple[int, ...], Expr]] | None:
+    if not isinstance(positions, Call) or not positions.has_head("List"):
+        return None
+    if not isinstance(values, Call) or not values.has_head("List"):
+        return None
+    if len(positions.arguments) != len(values.arguments):
+        raise WolframEvaluationError("SparseArray position and value lists must have the same length.")
+
+    if rank_hint in {None, 1} and all(isinstance(item, Integer) for item in positions.arguments):
+        return [
+            ((position.value,), value)
+            for position, value in zip(positions.arguments, values.arguments, strict=True)
+            if isinstance(position, Integer)
+        ]
+
+    expanded: list[tuple[tuple[int, ...], Expr]] = []
+    for position, value in zip(positions.arguments, values.arguments, strict=True):
+        indices = _sparse_position_from_expr(position, rank_hint)
+        if indices is None:
+            return None
+        expanded.append((indices, value))
+    return expanded
+
+
+def _sparse_rule_pairs(rule: Expr, rank_hint: int | None) -> list[tuple[tuple[int, ...], Expr]]:
+    entry = _rule_entry(rule)
+    if entry is None:
+        raise WolframEvaluationError("SparseArray expects rules or a dense list.")
+
+    vectorized = _sparse_position_sequence_from_expr(entry.key, entry.value, rank_hint)
+    if vectorized is not None:
+        return vectorized
+
+    indices = _sparse_position_from_expr(entry.key, rank_hint)
+    if indices is None:
+        raise WolframEvaluationError("SparseArray currently supports explicit integer positions, not patterns or Band.")
+    return [(indices, entry.value)]
+
+
+def _sparse_rule_exprs(data: Expr) -> tuple[Expr, ...] | None:
+    if _rule_entry(data) is not None:
+        return (data,)
+    if isinstance(data, Call) and data.has_head("List") and all(_rule_entry(item) is not None for item in data.arguments):
+        return data.arguments
+    return None
+
+
+def _infer_sparse_dimensions(pairs: Sequence[tuple[tuple[int, ...], Expr]]) -> tuple[int, ...]:
+    if not pairs:
+        raise WolframEvaluationError("SparseArray dimensions cannot be inferred from an empty rule set.")
+    rank = len(pairs[0][0])
+    if rank == 0 or any(len(indices) != rank for indices, _value in pairs):
+        raise WolframEvaluationError("SparseArray rule positions must have a consistent rank.")
+    return tuple(max(indices[axis] for indices, _value in pairs) for axis in range(rank))
+
+
+def _strict_dense_dimensions(expr: Expr) -> tuple[int, ...]:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return ()
+    if not expr.arguments:
+        return (0,)
+    child_dimensions = [_strict_dense_dimensions(argument) for argument in expr.arguments]
+    first = child_dimensions[0]
+    if any(dimensions != first for dimensions in child_dimensions):
+        raise WolframEvaluationError("SparseArray dense input must be rectangular.")
+    return (len(expr.arguments), *first)
+
+
+def _dense_dimensions(expr: Expr) -> tuple[int, ...]:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return ()
+    if not expr.arguments:
+        return (0,)
+    child_dimensions = [_dense_dimensions(argument) for argument in expr.arguments]
+    common: list[int] = []
+    for values in zip(*child_dimensions):
+        if len(set(values)) != 1:
+            break
+        common.append(values[0])
+    return (len(expr.arguments), *common)
+
+
+def _dense_sparse_entries(
+    expr: Expr,
+    dimensions: Sequence[int],
+    fill_value: Expr,
+    indices: tuple[int, ...] = (),
+) -> list[_SparseArrayEntry]:
+    if not dimensions:
+        return [] if expr == fill_value else [_SparseArrayEntry(indices, expr)]
+    if not isinstance(expr, Call) or not expr.has_head("List") or len(expr.arguments) != dimensions[0]:
+        raise WolframEvaluationError("SparseArray dense input must match the requested dimensions.")
+    entries: list[_SparseArrayEntry] = []
+    for offset, item in enumerate(expr.arguments, start=1):
+        entries.extend(_dense_sparse_entries(item, dimensions[1:], fill_value, (*indices, offset)))
+    return entries
+
+
+def sparse_array(*arguments: Expr) -> Expr:
+    if len(arguments) not in {1, 2, 3}:
+        raise WolframEvaluationError("SparseArray expects data, optional dimensions, and an optional implicit value.")
+
+    data = arguments[0]
+    fill_value = arguments[2] if len(arguments) == 3 else integer(0)
+    dimensions: tuple[int, ...] | None = None
+    if len(arguments) >= 2:
+        dimensions = tuple(_normalize_dimensions(arguments[1], "SparseArray"))
+
+    if isinstance(data, SparseArrayExpr):
+        if dimensions is not None and dimensions != data.dimensions:
+            raise WolframEvaluationError("SparseArray cannot reinterpret an existing sparse array with different dimensions.")
+        if fill_value == data.fill_value:
+            return data
+        dense = sparse_array_normal(data)
+        assert isinstance(dense, Call)
+        return _sparse_array_expr(data.dimensions, _dense_sparse_entries(dense, data.dimensions, fill_value), fill_value)
+
+    if isinstance(data, Symbol) and data.name == "Automatic" and dimensions is not None:
+        return _sparse_array_expr(dimensions, (), fill_value)
+
+    rank_hint = len(dimensions) if dimensions is not None else None
+    rule_exprs = _sparse_rule_exprs(data)
+    if rule_exprs is not None:
+        pairs: list[tuple[tuple[int, ...], Expr]] = []
+        for rule in rule_exprs:
+            pairs.extend(_sparse_rule_pairs(rule, rank_hint))
+        final_dimensions = dimensions if dimensions is not None else _infer_sparse_dimensions(pairs)
+        return _sparse_array_expr(
+            final_dimensions,
+            (_SparseArrayEntry(indices, value) for indices, value in pairs),
+            fill_value,
+        )
+
+    dense_dimensions = _strict_dense_dimensions(data)
+    if not dense_dimensions:
+        raise WolframEvaluationError("SparseArray expects a rule specification or a rectangular dense list.")
+    final_dimensions = dimensions if dimensions is not None else dense_dimensions
+    if final_dimensions != dense_dimensions:
+        raise WolframEvaluationError("SparseArray dense input dimensions do not match the explicit dimensions.")
+    return _sparse_array_expr(final_dimensions, _dense_sparse_entries(data, final_dimensions, fill_value), fill_value)
+
+
+def sparse_array_q(expr: Expr) -> Symbol:
+    return _bool_symbol(isinstance(expr, SparseArrayExpr))
+
+
+def sparse_array_normal(array: SparseArrayExpr) -> Expr:
+    entry_map = _sparse_array_entry_map(array)
+
+    def build(prefix: tuple[int, ...]) -> Expr:
+        axis = len(prefix)
+        if axis == len(array.dimensions):
+            return entry_map.get(prefix, array.fill_value)
+        return _evaluated_list_expr(*(
+            build((*prefix, index))
+            for index in range(1, array.dimensions[axis] + 1)
+        ))
+
+    return build(())
+
+
+def dimensions_expr(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _evaluated_list_expr(*(integer(dimension) for dimension in expr.dimensions))
+    return _evaluated_list_expr(*(integer(dimension) for dimension in _dense_dimensions(expr)))
+
+
+def array_rules(expr: Expr) -> Expr:
+    if not isinstance(expr, SparseArrayExpr):
+        raise WolframEvaluationError("ArrayRules currently expects a SparseArray.")
+    default_position = list_expr(*(call("Blank") for _axis in expr.dimensions))
+    return _evaluated_list_expr(
+        *(
+            call("Rule", list_expr(*(integer(index) for index in entry.indices)), entry.value)
+            for entry in expr.entries
+        ),
+        call("Rule", default_position, expr.fill_value),
+    )
+
+
+def sparse_array_property(array: SparseArrayExpr, property_expr: Expr) -> Expr:
+    if not isinstance(property_expr, String):
+        raise WolframEvaluationError("SparseArray properties must be requested by string name.")
+    name = property_expr.value
+    if name == "ImplicitValue":
+        return array.fill_value
+    if name == "ExplicitLength":
+        return integer(len(array.entries))
+    if name == "ExplicitValues":
+        return _evaluated_list_expr(*(entry.value for entry in array.entries))
+    if name == "ExplicitPositions":
+        return _evaluated_list_expr(
+            *(list_expr(*(integer(index) for index in entry.indices)) for entry in array.entries)
+        )
+    if name == "Density":
+        total_size = math.prod(array.dimensions)
+        if total_size == 0:
+            return integer(0)
+        return rational_number(len(array.entries), total_size)
+    raise WolframEvaluationError(f"Unsupported SparseArray property: {name}.")
+
+
+def _sparse_selector_indices(size: int, spec: Expr, function_name: str) -> tuple[list[int], bool]:
+    if isinstance(spec, Integer):
+        resolved = _try_resolve_index(size, spec.value)
+        if resolved is None:
+            raise WolframEvaluationError(f"{function_name} specifications are invalid for SparseArray.")
+        return ([resolved + 1], False)
+    if isinstance(spec, Symbol) and spec.name == "All":
+        return (list(range(1, size + 1)), True)
+    if isinstance(spec, Call) and spec.has_head("Span"):
+        selectors: list[int] = []
+        for index in _expand_span_spec_from_count(size, spec):
+            resolved = _try_resolve_index(size, index)
+            if resolved is None:
+                raise WolframEvaluationError(f"{function_name} specifications are invalid for SparseArray.")
+            selectors.append(resolved + 1)
+        return (selectors, True)
+    if isinstance(spec, Call) and spec.has_head("List"):
+        selectors: list[int] = []
+        for item in spec.arguments:
+            nested, _preserve = _sparse_selector_indices(size, item, function_name)
+            selectors.extend(nested)
+        return (selectors, True)
+    raise WolframEvaluationError(f"Unsupported {function_name} specification for SparseArray: {spec.to_input_form()}.")
+
+
+def sparse_array_part(array: SparseArrayExpr, specs: Sequence[Expr]) -> Expr:
+    if len(specs) > len(array.dimensions):
+        raise WolframEvaluationError("Part received too many specifications for SparseArray.")
+
+    selections: list[tuple[list[int], bool]] = []
+    for axis, dimension in enumerate(array.dimensions):
+        if axis < len(specs):
+            selections.append(_sparse_selector_indices(dimension, specs[axis], "Part"))
+        else:
+            selections.append((list(range(1, dimension + 1)), True))
+
+    if not any(preserve for _indices, preserve in selections):
+        return _sparse_array_value_at(array, tuple(indices[0] for indices, _preserve in selections))
+
+    output_dimensions = tuple(len(indices) for indices, preserve in selections if preserve)
+    output_maps: list[dict[int, list[int]]] = []
+    for indices, preserve in selections:
+        if not preserve:
+            output_maps.append({})
+            continue
+        mapping: dict[int, list[int]] = {}
+        for output_index, source_index in enumerate(indices, start=1):
+            mapping.setdefault(source_index, []).append(output_index)
+        output_maps.append(mapping)
+
+    output_entries: list[_SparseArrayEntry] = []
+    for entry in array.entries:
+        output_index_options: list[list[int]] = []
+        include = True
+        for axis, source_index in enumerate(entry.indices):
+            selected_indices, preserve = selections[axis]
+            if preserve:
+                mapped = output_maps[axis].get(source_index)
+                if not mapped:
+                    include = False
+                    break
+                output_index_options.append(mapped)
+            elif source_index != selected_indices[0]:
+                include = False
+                break
+        if not include:
+            continue
+        for output_indices in itertools.product(*output_index_options):
+            output_entries.append(_SparseArrayEntry(tuple(output_indices), entry.value))
+
+    return _sparse_array_expr(output_dimensions, output_entries, array.fill_value)
+
+
+def _sparse_binary_elementwise(function_name: str, left: Expr, right: Expr) -> Expr:
+    if isinstance(left, Call) and left.has_head("List"):
+        return evaluate(call(function_name, left, sparse_array_normal(right) if isinstance(right, SparseArrayExpr) else right))
+    if isinstance(right, Call) and right.has_head("List"):
+        return evaluate(call(function_name, sparse_array_normal(left) if isinstance(left, SparseArrayExpr) else left, right))
+
+    if isinstance(left, SparseArrayExpr) and isinstance(right, SparseArrayExpr):
+        if left.dimensions != right.dimensions:
+            raise WolframEvaluationError(f"{function_name} expects SparseArray dimensions to agree.")
+        fill = evaluate(call(function_name, left.fill_value, right.fill_value))
+        left_entries = _sparse_array_entry_map(left)
+        right_entries = _sparse_array_entry_map(right)
+        entries: list[_SparseArrayEntry] = []
+        for indices in sorted(set(left_entries) | set(right_entries)):
+            value = evaluate(call(
+                function_name,
+                left_entries.get(indices, left.fill_value),
+                right_entries.get(indices, right.fill_value),
+            ))
+            entries.append(_SparseArrayEntry(indices, value))
+        return _sparse_array_expr(left.dimensions, entries, fill)
+
+    if isinstance(left, SparseArrayExpr):
+        fill = evaluate(call(function_name, left.fill_value, right))
+        return _sparse_array_expr(
+            left.dimensions,
+            (_SparseArrayEntry(entry.indices, evaluate(call(function_name, entry.value, right))) for entry in left.entries),
+            fill,
+        )
+
+    if isinstance(right, SparseArrayExpr):
+        fill = evaluate(call(function_name, left, right.fill_value))
+        return _sparse_array_expr(
+            right.dimensions,
+            (_SparseArrayEntry(entry.indices, evaluate(call(function_name, left, entry.value))) for entry in right.entries),
+            fill,
+        )
+
+    return evaluate(call(function_name, left, right))
+
+
+def evaluate_sparse_array_arithmetic(expr: Call) -> Expr | None:
+    if not expr.has_head("Plus") and not expr.has_head("Times"):
+        return None
+    if not any(isinstance(argument, SparseArrayExpr) for argument in expr.arguments):
+        return None
+    if not expr.arguments:
+        return integer(0) if expr.has_head("Plus") else integer(1)
+    function_name = "Plus" if expr.has_head("Plus") else "Times"
+    current = expr.arguments[0]
+    for argument in expr.arguments[1:]:
+        current = _sparse_binary_elementwise(function_name, current, argument)
+    return current
+
+
 def _bool_symbol(value: bool) -> Symbol:
     return symbol("True" if value else "False")
 
@@ -2945,7 +3570,7 @@ def _is_number_expr(expr: Expr) -> bool:
 
 
 def _is_atom_expr(expr: Expr) -> bool:
-    return isinstance(expr, (Symbol, Integer, Real, RationalNumber, ComplexNumber, SpecialReal, String, ByteArrayExpr))
+    return isinstance(expr, (Symbol, Integer, Real, RationalNumber, ComplexNumber, SpecialReal, String, ByteArrayExpr, SparseArrayExpr))
 
 
 def _is_exact_zero(expr: Expr) -> bool:
@@ -3706,6 +4331,16 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
     return _expression_arithmetic_module()._evaluate_numeric_special_functions(expr)
 
 
+def _expression_polynomial_module():
+    from . import expression_polynomial as _polynomial
+
+    return _polynomial
+
+
+def _evaluate_polynomial_functions(expr: Call) -> Expr | None:
+    return _expression_polynomial_module()._evaluate_polynomial_functions(expr)
+
+
 def _flatten_list_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
     """If ``arguments`` is a single ``List[...]`` wrapper, unwrap once.
 
@@ -4185,14 +4820,47 @@ def byte_array_to_string(expr: Expr, encoding_value: Expr | None = None) -> Stri
 
 
 _TEXTUAL_EXPRESSION_FORM_NAMES = {
+    "c": "CForm",
+    "cform": "CForm",
     "input": "InputForm",
     "inputform": "InputForm",
+    "fortran": "FortranForm",
+    "fortranform": "FortranForm",
+    "mathml": "MathMLForm",
+    "mathmlform": "MathMLForm",
+    "output": "OutputForm",
+    "outputform": "OutputForm",
     "standard": "StandardForm",
     "standardform": "StandardForm",
+    "text": "TextForm",
+    "textform": "TextForm",
+    "tex": "TeXForm",
+    "texform": "TeXForm",
+    "traditional": "TraditionalForm",
+    "traditionalform": "TraditionalForm",
 }
 
+_PARSE_TEXTUAL_EXPRESSION_FORM_NAMES = {"InputForm", "StandardForm", "TraditionalForm", "TeXForm", "MathMLForm"}
+_RENDER_TEXTUAL_EXPRESSION_FORM_NAMES = {
+    "CForm",
+    "FortranForm",
+    "InputForm",
+    "MathMLForm",
+    "OutputForm",
+    "StandardForm",
+    "TextForm",
+    "TeXForm",
+    "TraditionalForm",
+}
+_BOX_EXPRESSION_FORM_NAMES = {"InputForm", "StandardForm", "TraditionalForm"}
 
-def _normalize_textual_expression_form(value: Expr | None, function_name: str) -> str:
+
+def _normalize_textual_expression_form(
+    value: Expr | None,
+    function_name: str,
+    *,
+    purpose: str = "parse",
+) -> str:
     if value is None:
         return "InputForm"
     if isinstance(value, Symbol):
@@ -4200,17 +4868,23 @@ def _normalize_textual_expression_form(value: Expr | None, function_name: str) -
     elif isinstance(value, String):
         key = value.value.strip().lower()
     else:
-        raise WolframEvaluationError(f"{function_name} expects InputForm or StandardForm as the form specification.")
+        raise WolframEvaluationError(f"{function_name} expects a supported expression form specification.")
     normalized = _TEXTUAL_EXPRESSION_FORM_NAMES.get(key)
-    if normalized is None:
-        raise WolframEvaluationError(f"{function_name} currently supports only InputForm and StandardForm.")
+    supported = _RENDER_TEXTUAL_EXPRESSION_FORM_NAMES if purpose == "render" else _PARSE_TEXTUAL_EXPRESSION_FORM_NAMES
+    if normalized is None or normalized not in supported:
+        raise WolframEvaluationError(f"{function_name} does not support this expression form.")
     return normalized
 
 
 def _normalize_box_expression_form(value: Expr | None, function_name: str) -> str:
     if value is None:
         return "StandardForm"
-    return _normalize_textual_expression_form(value, function_name)
+    normalized = _normalize_textual_expression_form(value, function_name)
+    if normalized not in _BOX_EXPRESSION_FORM_NAMES:
+        raise WolframEvaluationError(
+            f"{function_name} supports InputForm, StandardForm, and TraditionalForm as box forms."
+        )
+    return normalized
 
 
 _STANDARD_FORM_BOX_HEADS = {
@@ -4238,22 +4912,738 @@ _STANDARD_FORM_BOX_HEADS = {
 }
 
 
-_DISPLAY_FORM_HEADS = {"FullForm", "InputForm", "OutputForm", "StandardForm"}
+_DISPLAY_FORM_HEADS = {
+    "AccountingForm",
+    "BaseForm",
+    "CForm",
+    "DecimalForm",
+    "DisplayForm",
+    "EngineeringForm",
+    "FortranForm",
+    "FullForm",
+    "InputForm",
+    "MathMLForm",
+    "MatrixForm",
+    "NumberForm",
+    "OutputForm",
+    "PaddedForm",
+    "PercentForm",
+    "PrintForm",
+    "ScientificForm",
+    "SequenceForm",
+    "StandardForm",
+    "StringForm",
+    "TableForm",
+    "TextForm",
+    "TeXForm",
+    "TraditionalForm",
+    "TreeForm",
+}
+
+_VALUE_STRIPPING_DISPLAY_FORM_HEADS = {
+    "CForm",
+    "FortranForm",
+    "FullForm",
+    "InputForm",
+    "MathMLForm",
+    "OutputForm",
+    "PrintForm",
+    "SequenceForm",
+    "StandardForm",
+    "TextForm",
+    "TeXForm",
+    "TraditionalForm",
+}
+
+_TEXT_RENDERING_DISPLAY_FORM_HEADS = {
+    "CForm",
+    "FortranForm",
+    "MathMLForm",
+    "OutputForm",
+    "PrintForm",
+    "SequenceForm",
+    "TextForm",
+    "TeXForm",
+    "TraditionalForm",
+}
+
+
+@dataclass(frozen=True)
+class _DisplayFormCall:
+    name: str
+    arguments: tuple[Expr, ...]
+
+    @property
+    def payload(self) -> Expr:
+        return self.arguments[0]
+
+    @property
+    def specs(self) -> tuple[Expr, ...]:
+        return self.arguments[1:]
+
+    def as_expr(self) -> Expr:
+        return call(self.name, *self.arguments)
 
 
 def _display_form_wrapper(expr: Expr) -> tuple[str, Expr] | None:
-    if not isinstance(expr, Call) or len(expr.arguments) != 1 or not isinstance(expr.head_expr, Symbol):
+    wrapper = _display_form_call(expr)
+    if wrapper is None:
+        return None
+    return wrapper.name, wrapper.payload
+
+
+def _display_form_call(expr: Expr) -> _DisplayFormCall | None:
+    if not isinstance(expr, Call) or not expr.arguments or not isinstance(expr.head_expr, Symbol):
         return None
     head_name = _system_dispatch_name(expr.head_expr)
     if head_name not in _DISPLAY_FORM_HEADS:
         return None
-    return head_name, expr.arguments[0]
+    return _DisplayFormCall(head_name, expr.arguments)
 
 
-def _display_form_text(expr: Expr, form_name: str) -> str:
+def _display_form_call_text(wrapper: _DisplayFormCall) -> str:
+    return _display_form_text(wrapper.payload, wrapper.name, wrapper.specs)
+
+
+def _display_form_text(expr: Expr, form_name: str, specs: Sequence[Expr] = ()) -> str:
+    if form_name in {"OutputForm", "TextForm", "PrintForm"}:
+        return _output_form_text(expr)
     if form_name == "FullForm":
         return expr.to_full_form()
+    if form_name == "TraditionalForm":
+        return _traditional_form_text(expr)
+    if form_name == "TeXForm":
+        return _tex_form_text(expr)
+    if form_name == "MathMLForm":
+        return _mathml_form_text(expr)
+    if form_name == "CForm":
+        return _c_like_form_text(expr, target="c")
+    if form_name == "FortranForm":
+        return _c_like_form_text(expr, target="fortran")
+    if form_name in {"NumberForm", "DecimalForm", "ScientificForm", "EngineeringForm", "AccountingForm", "PaddedForm", "PercentForm"}:
+        return _number_display_form_text(expr, form_name, specs)
+    if form_name == "BaseForm":
+        return _base_form_text(expr, specs)
+    if form_name in {"TableForm", "MatrixForm"}:
+        return _table_form_text(expr)
+    if form_name == "TreeForm":
+        return _tree_form_text(expr)
+    if form_name == "DisplayForm":
+        return _display_form_boxes_text(expr)
+    if form_name == "SequenceForm":
+        return _sequence_form_text((expr, *specs))
+    if form_name == "StringForm":
+        return _string_form_text(expr, specs)
     return expr.to_input_form()
+
+
+def _output_form_text(expr: Expr) -> str:
+    return _format_structured_text(expr, _format_output_atom)
+
+
+def _traditional_form_text(expr: Expr) -> str:
+    return inline_box_escape(call("FormBox", _make_traditional_boxes(expr), symbol("TraditionalForm")).to_input_form())
+
+
+def _tex_form_text(expr: Expr) -> str:
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None:
+        form_name, payload = wrapper
+        if form_name == "StandardForm":
+            return _tex_format_expr(payload, traditional=False)
+        if form_name == "InputForm":
+            return _tex_escape_text(payload.to_input_form())
+        if form_name == "FullForm":
+            return _tex_escape_text(payload.to_full_form())
+        if form_name == "OutputForm":
+            return _tex_escape_text(payload.to_input_form())
+        if form_name == "TraditionalForm":
+            return _tex_format_expr(payload, traditional=True)
+    return _tex_format_expr(expr, traditional=True)
+
+
+def _mathml_form_text(expr: Expr) -> str:
+    wrapper = _display_form_wrapper(expr)
+    traditional = True
+    payload = expr
+    if wrapper is not None:
+        form_name, payload = wrapper
+        traditional = form_name != "StandardForm"
+    body = _mathml_format_expr(payload, traditional=traditional)
+    return "<math>\n" + _indent_xml(body, 1) + "\n</math>\n"
+
+
+def _traditional_plus_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+    nonnumeric = [argument for argument in arguments if not _is_number_expr(argument)]
+    numeric = [argument for argument in arguments if _is_number_expr(argument)]
+    return tuple(nonnumeric + numeric)
+
+
+def _format_structured_text(expr: Expr, atom_formatter: Callable[[Expr], str]) -> str:
+    entries = _association_entries(expr)
+    if entries is not None:
+        pieces = [
+            f"{_format_structured_text(entry.key, atom_formatter)} {' :> ' if entry.rule_head == 'RuleDelayed' else ' -> '}{_format_structured_text(entry.value, atom_formatter)}"
+            for entry in entries
+        ]
+        return "<|" + ", ".join(pieces) + "|>"
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return "{" + ", ".join(_format_structured_text(argument, atom_formatter) for argument in arguments) + "}"
+        if head_name == "Rule" and len(arguments) == 2:
+            return (
+                _format_structured_text(arguments[0], atom_formatter)
+                + " -> "
+                + _format_structured_text(arguments[1], atom_formatter)
+            )
+        if head_name == "RuleDelayed" and len(arguments) == 2:
+            return (
+                _format_structured_text(arguments[0], atom_formatter)
+                + " :> "
+                + _format_structured_text(arguments[1], atom_formatter)
+            )
+        if head_name == "Plus" and arguments:
+            return " + ".join(_format_structured_text(argument, atom_formatter) for argument in arguments)
+        if head_name == "Times" and arguments:
+            return " ".join(_format_structured_text(argument, atom_formatter) for argument in arguments)
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            return (
+                _format_structured_text(base, atom_formatter)
+                + "^"
+                + _format_structured_text(exponent, atom_formatter)
+            )
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                _format_structured_text(arguments[0], atom_formatter)
+                + "/"
+                + _format_structured_text(arguments[1], atom_formatter)
+            )
+    if isinstance(expr, Call):
+        head = _format_structured_text(expr.head_expr, atom_formatter)
+        arguments = ", ".join(_format_structured_text(argument, atom_formatter) for argument in expr.arguments)
+        return f"{head}[{arguments}]"
+    return atom_formatter(expr)
+
+
+def _format_output_atom(expr: Expr) -> str:
+    if isinstance(expr, String):
+        return expr.value
+    return expr.to_input_form()
+
+
+def _c_like_form_text(expr: Expr, *, target: str) -> str:
+    if isinstance(expr, Symbol):
+        return expr.to_input_form()
+    if isinstance(expr, Integer):
+        return str(expr.value)
+    if isinstance(expr, Real):
+        return expr.text.replace("*^", "e")
+    if isinstance(expr, RationalNumber):
+        return _format_float_like(float(expr.value))
+    if isinstance(expr, SpecialReal):
+        return expr.name
+    if isinstance(expr, ComplexNumber):
+        return f"Complex({_c_like_form_text(expr.real_part, target=target)},{_c_like_form_text(expr.imaginary_part, target=target)})"
+    if isinstance(expr, String):
+        return wl_string(expr.value)
+    if isinstance(expr, ByteArrayExpr):
+        return _c_like_form_text(call("ByteArray", list_expr(*(integer(value) for value in expr.values))), target=target)
+    if not isinstance(expr, Call):
+        return expr.to_input_form()
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return "List(" + ",".join(_c_like_form_text(argument, target=target) for argument in arguments) + ")"
+        if head_name == "Association":
+            return "Association(" + ",".join(_c_like_form_text(argument, target=target) for argument in arguments) + ")"
+        if head_name in {"Rule", "RuleDelayed"} and len(arguments) == 2:
+            return (
+                "Rule("
+                + _c_like_form_text(arguments[0], target=target)
+                + ","
+                + _c_like_form_text(arguments[1], target=target)
+                + ")"
+            )
+        if head_name == "Plus" and arguments:
+            return " + ".join(_c_like_form_text(argument, target=target) for argument in arguments)
+        if head_name == "Times" and arguments:
+            return "*".join(_c_like_factor_text(argument, target=target) for argument in arguments)
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            if _is_half_power_exponent(exponent):
+                return "Sqrt(" + _c_like_form_text(base, target=target) + ")"
+            if target == "fortran":
+                return _c_like_factor_text(base, target=target) + "**" + _c_like_factor_text(exponent, target=target)
+            return "Power(" + _c_like_form_text(base, target=target) + "," + _c_like_form_text(exponent, target=target) + ")"
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                "("
+                + _c_like_form_text(arguments[0], target=target)
+                + ")/("
+                + _c_like_form_text(arguments[1], target=target)
+                + ")"
+            )
+
+    head = _c_like_form_text(expr.head_expr, target=target)
+    arguments = ",".join(_c_like_form_text(argument, target=target) for argument in expr.arguments)
+    return f"{head}({arguments})"
+
+
+def _c_like_factor_text(expr: Expr, *, target: str) -> str:
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name in {"Plus", "Rule", "RuleDelayed"}:
+            return "(" + _c_like_form_text(expr, target=target) + ")"
+    return _c_like_form_text(expr, target=target)
+
+
+def _is_half_power_exponent(expr: Expr) -> bool:
+    if isinstance(expr, RationalNumber):
+        return expr.value == Fraction(1, 2)
+    return (
+        isinstance(expr, Call)
+        and expr.has_head("Rational")
+        and len(expr.arguments) == 2
+        and isinstance(expr.arguments[0], Integer)
+        and isinstance(expr.arguments[1], Integer)
+        and expr.arguments[0].value == 1
+        and expr.arguments[1].value == 2
+    )
+
+
+def _format_float_like(value: float) -> str:
+    if math.isnan(value) or math.isinf(value):
+        return str(value)
+    return format(value, ".16g")
+
+
+def _number_display_form_text(expr: Expr, form_name: str, specs: Sequence[Expr]) -> str:
+    total_digits, fraction_digits = _number_form_digit_specs(specs)
+
+    def formatter(atom: Expr) -> str:
+        return _format_number_display_atom(
+            atom,
+            form_name,
+            total_digits=total_digits,
+            fraction_digits=fraction_digits,
+        )
+
+    return _format_structured_text(expr, formatter)
+
+
+def _number_form_digit_specs(specs: Sequence[Expr]) -> tuple[int | None, int | None]:
+    if not specs:
+        return None, None
+    spec = specs[0]
+    if isinstance(spec, Integer):
+        return max(0, spec.value), None
+    if isinstance(spec, Call) and spec.has_head("List") and spec.arguments:
+        total = spec.arguments[0]
+        fraction = spec.arguments[1] if len(spec.arguments) > 1 else None
+        return (
+            max(0, total.value) if isinstance(total, Integer) else None,
+            max(0, fraction.value) if isinstance(fraction, Integer) else None,
+        )
+    return None, None
+
+
+def _format_number_display_atom(
+    expr: Expr,
+    form_name: str,
+    *,
+    total_digits: int | None,
+    fraction_digits: int | None,
+) -> str:
+    if isinstance(expr, Real):
+        value = _real_to_float(expr)
+        if form_name == "PercentForm":
+            value *= 100
+        text = _format_decimal_text(value, total_digits=total_digits, fraction_digits=fraction_digits, form_name=form_name)
+    elif isinstance(expr, Integer):
+        text = str(expr.value * 100) if form_name == "PercentForm" else str(expr.value)
+    else:
+        return _format_output_atom(expr)
+
+    if form_name == "AccountingForm" and text.startswith("-"):
+        text = f"({text[1:]})"
+    if form_name == "PercentForm":
+        text += "%"
+    if form_name == "PaddedForm" and total_digits is not None:
+        text = text.rjust(total_digits)
+    return text
+
+
+def _real_to_float(expr: Real) -> float:
+    text = expr.text.replace("`", "").replace("*^", "e")
+    try:
+        return float(text)
+    except ValueError:
+        return math.nan
+
+
+def _format_decimal_text(
+    value: float,
+    *,
+    total_digits: int | None,
+    fraction_digits: int | None,
+    form_name: str,
+) -> str:
+    if math.isnan(value) or math.isinf(value):
+        return str(value)
+    if fraction_digits is not None:
+        base = f"{value:.{fraction_digits}f}"
+    elif total_digits is not None and total_digits > 0:
+        base = f"{value:.{total_digits}g}"
+    else:
+        base = _format_float_like(value)
+
+    if form_name == "DecimalForm":
+        return base
+    if form_name == "ScientificForm":
+        digits = max(1, total_digits or 6)
+        return f"{value:.{digits - 1}e}".replace("e", "*10^")
+    if form_name == "EngineeringForm":
+        return _format_engineering_text(value, total_digits or 6)
+    return base
+
+
+def _format_engineering_text(value: float, digits: int) -> str:
+    if value == 0:
+        return "0"
+    exponent = int(math.floor(math.log10(abs(value)) / 3) * 3)
+    mantissa = value / (10 ** exponent)
+    return f"{mantissa:.{max(0, digits - 1)}g}*10^{exponent}"
+
+
+def _base_form_text(expr: Expr, specs: Sequence[Expr]) -> str:
+    base = _base_form_base(specs)
+
+    def formatter(atom: Expr) -> str:
+        if isinstance(atom, Integer):
+            return _integer_base_text(atom.value, base)
+        if isinstance(atom, Real):
+            return atom.text + f"_{base}"
+        if isinstance(atom, RationalNumber):
+            return _integer_base_text(atom.value.numerator, base) + "/" + _integer_base_text(atom.value.denominator, base)
+        return _format_output_atom(atom)
+
+    return _format_structured_text(expr, formatter)
+
+
+def _base_form_base(specs: Sequence[Expr]) -> int:
+    if specs and isinstance(specs[0], Integer):
+        return min(36, max(2, specs[0].value))
+    return 10
+
+
+def _integer_base_text(value: int, base: int) -> str:
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    sign = "-" if value < 0 else ""
+    remaining = abs(value)
+    if remaining == 0:
+        body = "0"
+    else:
+        pieces: list[str] = []
+        while remaining:
+            remaining, digit = divmod(remaining, base)
+            pieces.append(digits[digit])
+        body = "".join(reversed(pieces))
+    return f"{base}^^{sign}{body}"
+
+
+def _table_form_text(expr: Expr) -> str:
+    rows = _table_rows(expr)
+    if rows is None:
+        return _output_form_text(expr)
+    if not rows:
+        return ""
+    widths = [0] * max(len(row) for row in rows)
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+    rendered_rows = [
+        "   ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip()
+        for row in rows
+    ]
+    return "\n".join(rendered_rows)
+
+
+def _table_rows(expr: Expr) -> list[list[str]] | None:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        return None
+    if all(isinstance(row, Call) and row.has_head("List") for row in expr.arguments):
+        return [
+            [_output_form_text(cell) for cell in row.arguments]
+            for row in expr.arguments
+            if isinstance(row, Call)
+        ]
+    return [[_output_form_text(item)] for item in expr.arguments]
+
+
+def _tree_form_text(expr: Expr) -> str:
+    if not isinstance(expr, Call):
+        return _output_form_text(expr)
+    return expr.to_full_form()
+
+
+def _display_form_boxes_text(expr: Expr) -> str:
+    if _looks_like_standard_form_boxes(expr):
+        try:
+            return _box_item_to_standard_text(_strip_box_expression(expr))
+        except (WolframSyntaxError, WolframEvaluationError, ValueError):
+            return expr.to_input_form()
+    return _output_form_text(expr)
+
+
+def _sequence_form_text(arguments: Sequence[Expr]) -> str:
+    return "".join(_output_form_text(argument) for argument in arguments)
+
+
+def _string_form_text(template: Expr, arguments: Sequence[Expr]) -> str:
+    if not isinstance(template, String):
+        return _format_structured_text(call("StringForm", template, *arguments), _format_output_atom)
+    rendered_arguments = [_output_form_text(argument) for argument in arguments]
+    text = template.value
+    for index, value in enumerate(rendered_arguments, start=1):
+        text = text.replace(f"`{index}`", value)
+    for value in rendered_arguments:
+        if "``" not in text:
+            break
+        text = text.replace("``", value, 1)
+    return text
+
+
+def _tex_format_expr(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, Symbol):
+        return _tex_symbol_name(expr.to_input_form())
+    if isinstance(expr, Integer):
+        return str(expr.value)
+    if isinstance(expr, RationalNumber):
+        return rf"\frac{{{expr.value.numerator}}}{{{expr.value.denominator}}}"
+    if isinstance(expr, Real):
+        return _tex_escape_text(expr.text)
+    if isinstance(expr, SpecialReal):
+        return _tex_escape_text(expr.name)
+    if isinstance(expr, ComplexNumber):
+        return _tex_format_expr(call("Complex", expr.real_part, expr.imaginary_part), traditional=traditional)
+    if isinstance(expr, String):
+        return r"\text{" + _tex_escape_text(wl_string(expr.value)) + "}"
+    if isinstance(expr, ByteArrayExpr):
+        return _tex_escape_text(expr.to_input_form())
+    if not isinstance(expr, Call):
+        return _tex_escape_text(expr.to_input_form())
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return r"\{" + ", ".join(_tex_format_expr(argument, traditional=traditional) for argument in arguments) + r"\}"
+        if head_name == "Association":
+            return r"\langle|" + ", ".join(_tex_format_expr(argument, traditional=traditional) for argument in arguments) + r"|\rangle"
+        if head_name == "Rule" and len(arguments) == 2:
+            return (
+                _tex_format_expr(arguments[0], traditional=traditional)
+                + r"\to "
+                + _tex_format_expr(arguments[1], traditional=traditional)
+            )
+        if head_name == "RuleDelayed" and len(arguments) == 2:
+            return (
+                _tex_format_expr(arguments[0], traditional=traditional)
+                + r"\mathrel{:}\joinrel\to "
+                + _tex_format_expr(arguments[1], traditional=traditional)
+            )
+        if head_name == "Plus" and arguments:
+            ordered = _traditional_plus_arguments(arguments) if traditional else arguments
+            return "+".join(_tex_format_expr(argument, traditional=traditional) for argument in ordered)
+        if head_name == "Times" and arguments:
+            return " ".join(_tex_factor_text(argument, traditional=traditional) for argument in arguments)
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            if isinstance(exponent, RationalNumber) and exponent.value == Fraction(1, 2):
+                return r"\sqrt{" + _tex_format_expr(base, traditional=traditional) + "}"
+            if (
+                isinstance(exponent, Call)
+                and exponent.has_head("Rational")
+                and len(exponent.arguments) == 2
+                and isinstance(exponent.arguments[0], Integer)
+                and isinstance(exponent.arguments[1], Integer)
+                and exponent.arguments[0].value == 1
+                and exponent.arguments[1].value == 2
+            ):
+                return r"\sqrt{" + _tex_format_expr(base, traditional=traditional) + "}"
+            return (
+                _tex_power_base_text(base, traditional=traditional)
+                + "^{"
+                + _tex_format_expr(exponent, traditional=traditional)
+                + "}"
+            )
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                r"\frac{"
+                + _tex_format_expr(arguments[0], traditional=traditional)
+                + "}{"
+                + _tex_format_expr(arguments[1], traditional=traditional)
+                + "}"
+            )
+        if head_name in {"Sin", "Cos", "Tan", "Log", "Exp"} and len(arguments) == 1:
+            name = "ln" if head_name == "Log" else head_name.lower()
+            return rf"\{name}\left(" + _tex_format_expr(arguments[0], traditional=traditional) + r"\right)"
+
+    head = _tex_format_expr(expr.head_expr, traditional=traditional)
+    arguments = ", ".join(_tex_format_expr(argument, traditional=traditional) for argument in expr.arguments)
+    head_context = None
+    if isinstance(expr.head_expr, Symbol):
+        try:
+            head_context = _SYMBOL_REGISTRY.record_for_symbol(expr.head_expr).context
+        except WolframEvaluationError:
+            head_context = None
+    if traditional and head_context == "Global`":
+        return head + r"\left(" + arguments + r"\right)"
+    return head + r"\left[" + arguments + r"\right]"
+
+
+def _tex_factor_text(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, Call) and isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name in {"Plus", "Rule", "RuleDelayed"}:
+            return r"\left(" + _tex_format_expr(expr, traditional=traditional) + r"\right)"
+    return _tex_format_expr(expr, traditional=traditional)
+
+
+def _tex_power_base_text(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, (Symbol, Integer, Real, RationalNumber)):
+        return _tex_format_expr(expr, traditional=traditional)
+    return r"\left(" + _tex_format_expr(expr, traditional=traditional) + r"\right)"
+
+
+_TEX_SYMBOL_NAMES = {
+    "alpha": r"\alpha",
+    "beta": r"\beta",
+    "gamma": r"\gamma",
+    "delta": r"\delta",
+    "epsilon": r"\epsilon",
+    "theta": r"\theta",
+    "lambda": r"\lambda",
+    "mu": r"\mu",
+    "pi": r"\pi",
+    "sigma": r"\sigma",
+    "phi": r"\phi",
+    "omega": r"\omega",
+}
+
+
+def _tex_symbol_name(name: str) -> str:
+    lower = name.lower()
+    if lower in _TEX_SYMBOL_NAMES:
+        return _TEX_SYMBOL_NAMES[lower]
+    if len(name) == 1 and (name.isalpha() or name.isdigit()):
+        return _tex_escape_text(name)
+    return r"\text{" + _tex_escape_text(name) + "}"
+
+
+def _tex_escape_text(text: str) -> str:
+    replacements = {
+        "\\": r"\backslash{}",
+        "{": r"\{",
+        "}": r"\}",
+        "_": r"\_",
+        "%": r"\%",
+        "#": r"\#",
+        "&": r"\&",
+        "$": r"\$",
+    }
+    return "".join(replacements.get(char, char) for char in text)
+
+
+def _mathml_format_expr(expr: Expr, *, traditional: bool) -> str:
+    if isinstance(expr, Symbol):
+        return f"<mi>{html.escape(expr.to_input_form())}</mi>"
+    if isinstance(expr, Integer):
+        return f"<mn>{expr.value}</mn>"
+    if isinstance(expr, RationalNumber):
+        return f"<mfrac><mn>{expr.value.numerator}</mn><mn>{expr.value.denominator}</mn></mfrac>"
+    if isinstance(expr, Real):
+        return f"<mn>{html.escape(expr.text)}</mn>"
+    if isinstance(expr, SpecialReal):
+        return f"<mi>{html.escape(expr.name)}</mi>"
+    if isinstance(expr, ComplexNumber):
+        return _mathml_format_expr(call("Complex", expr.real_part, expr.imaginary_part), traditional=traditional)
+    if isinstance(expr, String):
+        return f"<mtext>{html.escape(wl_string(expr.value))}</mtext>"
+    if isinstance(expr, ByteArrayExpr):
+        return f"<mtext>{html.escape(expr.to_input_form())}</mtext>"
+    if not isinstance(expr, Call):
+        return f"<mtext>{html.escape(expr.to_input_form())}</mtext>"
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        arguments = expr.arguments
+        if head_name == "List":
+            return _mathml_row([_mathml_operator("{"), *_mathml_join(arguments, ",", traditional=traditional), _mathml_operator("}")])
+        if head_name == "Rule" and len(arguments) == 2:
+            return _mathml_row([
+                _mathml_format_expr(arguments[0], traditional=traditional),
+                _mathml_operator("->"),
+                _mathml_format_expr(arguments[1], traditional=traditional),
+            ])
+        if head_name == "RuleDelayed" and len(arguments) == 2:
+            return _mathml_row([
+                _mathml_format_expr(arguments[0], traditional=traditional),
+                _mathml_operator(":>"),
+                _mathml_format_expr(arguments[1], traditional=traditional),
+            ])
+        if head_name == "Plus" and arguments:
+            ordered = _traditional_plus_arguments(arguments) if traditional else arguments
+            return _mathml_row(_mathml_join(ordered, "+", traditional=traditional))
+        if head_name == "Times" and arguments:
+            return _mathml_row(_mathml_join(arguments, "\u2062", traditional=traditional))
+        if head_name == "Power" and len(arguments) == 2:
+            base, exponent = arguments
+            if isinstance(exponent, RationalNumber) and exponent.value == Fraction(1, 2):
+                return f"<msqrt>{_mathml_format_expr(base, traditional=traditional)}</msqrt>"
+            return (
+                "<msup>"
+                + _mathml_format_expr(base, traditional=traditional)
+                + _mathml_format_expr(exponent, traditional=traditional)
+                + "</msup>"
+            )
+        if head_name == "Rational" and len(arguments) == 2:
+            return (
+                "<mfrac>"
+                + _mathml_format_expr(arguments[0], traditional=traditional)
+                + _mathml_format_expr(arguments[1], traditional=traditional)
+                + "</mfrac>"
+            )
+
+    head = _mathml_format_expr(expr.head_expr, traditional=traditional)
+    return _mathml_row([head, _mathml_operator("["), *_mathml_join(expr.arguments, ",", traditional=traditional), _mathml_operator("]")])
+
+
+def _mathml_join(arguments: Sequence[Expr], operator: str, *, traditional: bool) -> list[str]:
+    pieces: list[str] = []
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(_mathml_operator(operator))
+        pieces.append(_mathml_format_expr(argument, traditional=traditional))
+    return pieces
+
+
+def _mathml_operator(operator: str) -> str:
+    return f"<mo>{html.escape(operator)}</mo>"
+
+
+def _mathml_row(pieces: Sequence[str]) -> str:
+    return "<mrow>" + "".join(pieces) + "</mrow>"
+
+
+def _indent_xml(text: str, level: int) -> str:
+    indent = " " * level
+    return "\n".join(indent + line if line else line for line in text.splitlines())
 
 
 @dataclass(frozen=True)
@@ -4264,10 +5654,11 @@ class _DisplayWrapper:
 
 
 def history_output_expr(expr: Expr) -> Expr:
-    wrapper = _display_form_wrapper(expr)
+    wrapper = _display_form_call(expr)
     if wrapper is not None:
-        _form_name, payload = wrapper
-        return payload
+        if wrapper.name in _VALUE_STRIPPING_DISPLAY_FORM_HEADS:
+            return wrapper.payload
+        return expr
     short_wrapper = _short_shallow_display_wrapper(expr)
     if short_wrapper is not None:
         return short_wrapper.payload
@@ -4492,10 +5883,9 @@ def apply_output_size_limit(expr: Expr, text: str) -> str:
 
 
 def display_output_parts(expr: Expr) -> tuple[str | None, str]:
-    wrapper = _display_form_wrapper(expr)
+    wrapper = _display_form_call(expr)
     if wrapper is not None:
-        form_name, payload = wrapper
-        return form_name, _display_form_text(payload, form_name)
+        return wrapper.name, _display_form_call_text(wrapper)
     short_wrapper = _short_shallow_display_wrapper(expr)
     if short_wrapper is not None:
         return short_wrapper.label, short_wrapper.text
@@ -4512,20 +5902,196 @@ def _looks_like_standard_form_boxes(expr: Expr) -> bool:
     )
 
 
+def _parse_textual_expression(text: str, form_name: str) -> Expr:
+    if form_name == "InputForm":
+        return parse_input_form(text)
+    if form_name == "StandardForm":
+        return parse_standard_form(text)
+    if form_name == "TraditionalForm":
+        parsed_box = _parse_single_inline_box_text(text)
+        if parsed_box is not None:
+            return _interpret_standard_form(parsed_box)
+        return parse_standard_form(text)
+    if form_name == "TeXForm":
+        return _parse_tex_form_text(text)
+    if form_name == "MathMLForm":
+        return _parse_mathml_form_text(text)
+    raise WolframSyntaxError(f"Unsupported textual expression form: {form_name}")
+
+
+def _parse_single_inline_box_text(text: str) -> Expr | None:
+    segments = inline_box_segments(text.strip())
+    if len(segments) != 1 or segments[0].source != text.strip():
+        return None
+    return parse_input_form(segments[0].box_expression)
+
+
+def _parse_tex_form_text(text: str) -> Expr:
+    normalized = _tex_to_wolfram_text(text.strip())
+    return parse_standard_form(normalized)
+
+
+def _tex_to_wolfram_text(text: str) -> str:
+    text = text.replace(r"\left", "").replace(r"\right", "")
+    text = _replace_tex_group_function(text, r"\frac", lambda first, second: f"(({_tex_to_wolfram_text(first)})/({_tex_to_wolfram_text(second)}))", arity=2)
+    text = _replace_tex_group_function(text, r"\sqrt", lambda first: f"(({_tex_to_wolfram_text(first)})^(1/2))", arity=1)
+    text = _replace_tex_group_function(text, r"\text", lambda first: _tex_to_wolfram_text(first), arity=1)
+    for name, tex_name in _TEX_SYMBOL_NAMES.items():
+        text = text.replace(tex_name, name)
+    text = text.replace(r"\mathrel{:}\joinrel\to", ":>")
+    text = text.replace(r"\{", "{").replace(r"\}", "}")
+    text = text.replace(r"\to", "->")
+    text = text.replace(r"\[", "[").replace(r"\]", "]")
+    text = text.replace(r"\(", "(").replace(r"\)", ")")
+    text = text.replace("^{", "^(")
+    text = _close_tex_superscript_groups(text)
+    return text
+
+
+def _replace_tex_group_function(text: str, marker: str, replacement: Callable[..., str], *, arity: int) -> str:
+    while True:
+        start = text.find(marker)
+        if start < 0:
+            return text
+        index = start + len(marker)
+        groups: list[str] = []
+        end = index
+        for _ in range(arity):
+            while end < len(text) and text[end].isspace():
+                end += 1
+            if end >= len(text) or text[end] != "{":
+                return text
+            group, end = _read_braced_tex_group(text, end)
+            groups.append(group)
+        text = text[:start] + replacement(*groups) + text[end:]
+
+
+def _read_braced_tex_group(text: str, start: int) -> tuple[str, int]:
+    depth = 0
+    content_start = start + 1
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[content_start:index], index + 1
+        index += 1
+    raise WolframSyntaxError("Unclosed TeX group.")
+
+
+def _close_tex_superscript_groups(text: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("^(", index):
+            result.append("^(")
+            index += 2
+            depth = 1
+            while index < len(text):
+                char = text[index]
+                if char == "{":
+                    depth += 1
+                    result.append("(")
+                elif char == "}":
+                    depth -= 1
+                    result.append(")" if depth == 0 else ")")
+                    index += 1
+                    break
+                else:
+                    result.append(char)
+                index += 1
+            continue
+        result.append(text[index])
+        index += 1
+    return "".join(result)
+
+
+def _parse_mathml_form_text(text: str) -> Expr:
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as exc:
+        raise WolframSyntaxError("Invalid MathML input.") from exc
+    wolfram_text = _mathml_element_to_wolfram_text(root)
+    return parse_standard_form(wolfram_text)
+
+
+def _mathml_element_to_wolfram_text(element: ElementTree.Element) -> str:
+    tag = _xml_local_name(element.tag)
+    children = list(element)
+    if tag == "math":
+        if len(children) == 1:
+            return _mathml_element_to_wolfram_text(children[0])
+        return _mathml_row_to_wolfram_text(children)
+    if tag == "mrow":
+        return _mathml_row_to_wolfram_text(children)
+    if tag in {"mi", "mn"}:
+        return (element.text or "").strip()
+    if tag == "mtext":
+        return wl_string(element.text or "")
+    if tag == "mo":
+        return _mathml_operator_text(element.text or "")
+    if tag == "mfrac" and len(children) >= 2:
+        return f"(({_mathml_element_to_wolfram_text(children[0])})/({_mathml_element_to_wolfram_text(children[1])}))"
+    if tag == "msup" and len(children) >= 2:
+        return f"(({_mathml_element_to_wolfram_text(children[0])})^({_mathml_element_to_wolfram_text(children[1])}))"
+    if tag == "msqrt" and children:
+        return f"(({_mathml_row_to_wolfram_text(children)})^(1/2))"
+    raise WolframSyntaxError(f"Unsupported MathML element: {tag}.")
+
+
+def _mathml_row_to_wolfram_text(children: Sequence[ElementTree.Element]) -> str:
+    pieces = [_mathml_element_to_wolfram_text(child) for child in children]
+    if pieces and pieces[0] in {"{", "[", "("} and pieces[-1] in {"}", "]", ")"}:
+        return pieces[0] + "".join(pieces[1:-1]) + pieces[-1]
+    return " ".join(piece for piece in pieces if piece != "\u2062")
+
+
+def _mathml_operator_text(text: str) -> str:
+    stripped = text.strip()
+    if stripped == "\u2062":
+        return "\u2062"
+    return stripped
+
+
+def _xml_local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1]
+    return tag
+
+
 def to_string_expr(expr: Expr, form_value: Expr | None = None) -> String:
     if form_value is None:
-        wrapper = _display_form_wrapper(expr)
+        wrapper = _display_form_call(expr)
         if wrapper is not None:
-            form_name, payload = wrapper
-            return string(_display_form_text(payload, form_name))
+            return string(_display_form_call_text(wrapper))
 
-    form_name = _normalize_textual_expression_form(form_value, "ToString")
+    form_name = _normalize_textual_expression_form(form_value, "ToString", purpose="render")
+    wrapper = _display_form_call(expr)
+    if wrapper is not None and wrapper.name in _TEXT_RENDERING_DISPLAY_FORM_HEADS:
+        return string(_display_form_call_text(wrapper))
     if form_name == "InputForm":
         return string(expr.to_input_form())
     if form_name == "StandardForm":
         # Tungsten's StandardForm string subset intentionally renders as parseable WL text,
         # not as FrontEnd box escapes. The parser accepts it through parse_standard_form.
         return string(expr.to_input_form())
+    if form_name == "OutputForm":
+        return string(_output_form_text(expr))
+    if form_name == "TextForm":
+        return string(_output_form_text(expr))
+    if form_name == "CForm":
+        return string(_c_like_form_text(expr, target="c"))
+    if form_name == "FortranForm":
+        return string(_c_like_form_text(expr, target="fortran"))
+    if form_name == "TraditionalForm":
+        return string(_traditional_form_text(expr))
+    if form_name == "TeXForm":
+        return string(_tex_form_text(expr))
+    if form_name == "MathMLForm":
+        return string(_mathml_form_text(expr).rstrip("\n"))
     raise AssertionError(f"Unhandled textual expression form: {form_name}")
 
 
@@ -4542,11 +6108,13 @@ def to_expression_expr(input_expr: Expr, form_value: Expr | None = None, wrapper
 
     try:
         if isinstance(input_expr, String):
-            parsed = parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+            parsed = _parse_textual_expression(input_expr.value, form_name)
         elif form_name == "StandardForm" and _looks_like_standard_form_boxes(input_expr):
             parsed = _interpret_standard_form(input_expr)
+        elif form_name == "TraditionalForm" and _looks_like_standard_form_boxes(input_expr):
+            parsed = _interpret_standard_form(input_expr)
         else:
-            raise WolframEvaluationError("ToExpression expects a string or a supported StandardForm box expression.")
+            raise WolframEvaluationError("ToExpression expects a string or a supported box expression.")
     except WolframSyntaxError as exc:
         raise WolframEvaluationError(f"ToExpression could not parse the input as {form_name}.") from exc
 
@@ -4566,14 +6134,14 @@ def make_boxes_expr(expr: Expr, form_value: Expr | None = None) -> Expr:
 
 
 def make_expression_expr(box_expr: Expr, form_value: Expr | None = None) -> Expr:
-    form_name = _normalize_box_expression_form(form_value, "MakeExpression")
+    form_name = _normalize_textual_expression_form(form_value, "MakeExpression") if form_value is not None else "StandardForm"
     try:
         if isinstance(box_expr, String):
-            parsed = parse_input_form(box_expr.value) if form_name == "InputForm" else parse_standard_form(box_expr.value)
-        elif form_name == "StandardForm" and _looks_like_standard_form_boxes(box_expr):
+            parsed = _parse_textual_expression(box_expr.value, form_name)
+        elif form_name in {"StandardForm", "TraditionalForm"} and _looks_like_standard_form_boxes(box_expr):
             parsed = _interpret_standard_form(box_expr)
         else:
-            raise WolframEvaluationError("MakeExpression expects a string or a supported StandardForm box expression.")
+            raise WolframEvaluationError("MakeExpression expects a string or a supported box expression.")
     except WolframSyntaxError as exc:
         raise WolframEvaluationError(f"MakeExpression could not parse the input as {form_name}.") from exc
     return call("HoldComplete", parsed)
@@ -4598,17 +6166,19 @@ def syntax_length_expr(input_expr: Expr, form_value: Expr | None = None) -> Inte
 
 
 def _make_boxes(expr: Expr, form_name: str) -> Expr:
-    if form_name not in {"InputForm", "StandardForm"}:
-        raise WolframEvaluationError("Box conversion currently supports only InputForm and StandardForm.")
     if form_name == "InputForm":
         return string(expr.to_input_form())
-    return _make_standard_boxes(expr)
+    if form_name == "StandardForm":
+        return _make_standard_boxes(expr)
+    if form_name == "TraditionalForm":
+        return _make_traditional_boxes(expr)
+    raise WolframEvaluationError("Box conversion currently supports only InputForm, StandardForm, and TraditionalForm.")
 
 
 def _make_standard_boxes(expr: Expr) -> Expr:
-    wrapper = _display_form_wrapper(expr)
+    wrapper = _display_form_call(expr)
     if wrapper is not None:
-        form_name, payload = wrapper
+        form_name, payload = wrapper.name, wrapper.payload
         if form_name == "InputForm":
             return _input_form_display_boxes(payload)
         if form_name == "FullForm":
@@ -4617,6 +6187,33 @@ def _make_standard_boxes(expr: Expr) -> Expr:
             return _output_form_display_boxes(payload)
         if form_name == "StandardForm":
             return _standard_form_display_boxes(payload)
+        if form_name == "TraditionalForm":
+            return _traditional_form_display_boxes(payload)
+        if form_name == "TeXForm":
+            return _tex_form_display_boxes(payload)
+        if form_name == "MathMLForm":
+            return _mathml_form_display_boxes(payload)
+        if form_name in {
+            "AccountingForm",
+            "BaseForm",
+            "CForm",
+            "DecimalForm",
+            "DisplayForm",
+            "EngineeringForm",
+            "FortranForm",
+            "MatrixForm",
+            "NumberForm",
+            "PaddedForm",
+            "PercentForm",
+            "PrintForm",
+            "ScientificForm",
+            "SequenceForm",
+            "StringForm",
+            "TableForm",
+            "TextForm",
+            "TreeForm",
+        }:
+            return _textual_display_boxes(wrapper)
 
     if isinstance(expr, Symbol):
         return string(expr.to_input_form())
@@ -4682,6 +6279,60 @@ def _make_standard_boxes(expr: Expr) -> Expr:
     return _generic_call_boxes(expr)
 
 
+def _make_traditional_boxes(expr: Expr) -> Expr:
+    wrapper = _display_form_wrapper(expr)
+    if wrapper is not None:
+        form_name, payload = wrapper
+        if form_name == "TraditionalForm":
+            return _make_traditional_boxes(payload)
+        if form_name == "StandardForm":
+            return _make_standard_boxes(payload)
+
+    if isinstance(expr, (Symbol, Integer, Real, SpecialReal, String, ByteArrayExpr)):
+        return _make_standard_boxes(expr)
+    if isinstance(expr, RationalNumber):
+        return call("FractionBox", _make_traditional_boxes(integer(expr.value.numerator)), _make_traditional_boxes(integer(expr.value.denominator)))
+    if isinstance(expr, ComplexNumber):
+        return _make_traditional_boxes(call("Complex", expr.real_part, expr.imaginary_part))
+    if not isinstance(expr, Call):
+        return string(expr.to_input_form())
+
+    if isinstance(expr.head_expr, Symbol):
+        head_name = _system_dispatch_name(expr.head_expr)
+        if head_name == "List":
+            return _bracketed_traditional_row_box("{", expr.arguments, "}")
+        if head_name == "Association":
+            return _bracketed_traditional_row_box("<|", expr.arguments, "|>")
+        if head_name == "Rule" and len(expr.arguments) == 2:
+            return _infix_traditional_row_box(expr.arguments[0], "->", expr.arguments[1])
+        if head_name == "RuleDelayed" and len(expr.arguments) == 2:
+            return _infix_traditional_row_box(expr.arguments[0], ":>", expr.arguments[1])
+        if head_name == "Plus" and len(expr.arguments) >= 2:
+            return _separated_traditional_row_box(_traditional_plus_arguments(expr.arguments), "+")
+        if head_name == "Times" and len(expr.arguments) >= 2:
+            return _separated_traditional_row_box(expr.arguments, " ")
+        if head_name == "Power" and len(expr.arguments) == 2:
+            base, exponent = expr.arguments
+            if isinstance(exponent, Integer) and exponent.value == -1:
+                return call("FractionBox", string("1"), _make_traditional_boxes(base))
+            if isinstance(exponent, RationalNumber) and exponent.value == Fraction(1, 2):
+                return call("SqrtBox", _make_traditional_boxes(base))
+            return call("SuperscriptBox", _make_traditional_boxes(base), _make_traditional_boxes(exponent))
+        if head_name == "Rational" and len(expr.arguments) == 2:
+            return call("FractionBox", _make_traditional_boxes(expr.arguments[0]), _make_traditional_boxes(expr.arguments[1]))
+        if head_name == "Subscript" and len(expr.arguments) == 2:
+            return call("SubscriptBox", _make_traditional_boxes(expr.arguments[0]), _make_traditional_boxes(expr.arguments[1]))
+        if head_name == "Subsuperscript" and len(expr.arguments) == 3:
+            return call(
+                "SubsuperscriptBox",
+                _make_traditional_boxes(expr.arguments[0]),
+                _make_traditional_boxes(expr.arguments[1]),
+                _make_traditional_boxes(expr.arguments[2]),
+            )
+
+    return _generic_traditional_call_boxes(expr)
+
+
 def _rule_option(name: str, value: Expr) -> Expr:
     return call("Rule", symbol(name), value)
 
@@ -4737,6 +6388,45 @@ def _standard_form_display_boxes(expr: Expr) -> Expr:
     )
 
 
+def _traditional_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "TagBox",
+        call("FormBox", _make_traditional_boxes(expr), symbol("TraditionalForm")),
+        symbol("TraditionalForm"),
+        _rule_option("Editable", symbol("True")),
+    )
+
+
+def _tex_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "InterpretationBox",
+        string(wl_string(_tex_form_text(expr))),
+        expr,
+        _rule_option("Editable", symbol("True")),
+        _rule_option("AutoDelete", symbol("True")),
+    )
+
+
+def _mathml_form_display_boxes(expr: Expr) -> Expr:
+    return call(
+        "InterpretationBox",
+        string(wl_string(_mathml_form_text(expr).rstrip("\n"))),
+        expr,
+        _rule_option("Editable", symbol("True")),
+        _rule_option("AutoDelete", symbol("True")),
+    )
+
+
+def _textual_display_boxes(wrapper: _DisplayFormCall) -> Expr:
+    return call(
+        "InterpretationBox",
+        string(_display_form_call_text(wrapper)),
+        wrapper.as_expr(),
+        _rule_option("Editable", symbol("True")),
+        _rule_option("AutoDelete", symbol("True")),
+    )
+
+
 def _make_full_form_boxes(expr: Expr) -> Expr:
     if isinstance(expr, RationalNumber):
         return _make_full_form_boxes(
@@ -4776,6 +6466,14 @@ def _bracketed_row_box(open_token: str, arguments: Sequence[Expr], close_token: 
     return _row_box(string(open_token), middle, string(close_token))
 
 
+def _bracketed_traditional_row_box(open_token: str, arguments: Sequence[Expr], close_token: str) -> Expr:
+    if arguments:
+        middle = _separated_traditional_row_box(arguments, ",")
+    else:
+        middle = string("")
+    return _row_box(string(open_token), middle, string(close_token))
+
+
 def _generic_call_boxes(expr: Call) -> Expr:
     if expr.arguments:
         arguments = _separated_row_box(expr.arguments, ",")
@@ -4784,8 +6482,20 @@ def _generic_call_boxes(expr: Call) -> Expr:
     return _row_box(_make_standard_boxes(expr.head_expr), string("["), arguments, string("]"))
 
 
+def _generic_traditional_call_boxes(expr: Call) -> Expr:
+    if expr.arguments:
+        arguments = _separated_traditional_row_box(expr.arguments, ",")
+    else:
+        arguments = string("")
+    return _row_box(_make_traditional_boxes(expr.head_expr), string("["), arguments, string("]"))
+
+
 def _infix_row_box(left: Expr, operator: str, right: Expr) -> Expr:
     return _row_box(_make_standard_boxes(left), string(operator), _make_standard_boxes(right))
+
+
+def _infix_traditional_row_box(left: Expr, operator: str, right: Expr) -> Expr:
+    return _row_box(_make_traditional_boxes(left), string(operator), _make_traditional_boxes(right))
 
 
 def _separated_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
@@ -4794,6 +6504,15 @@ def _separated_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
         if index:
             pieces.append(string(separator))
         pieces.append(_make_standard_boxes(argument))
+    return _row_box(*pieces)
+
+
+def _separated_traditional_row_box(arguments: Sequence[Expr], separator: str) -> Expr:
+    pieces: list[Expr] = []
+    for index, argument in enumerate(arguments):
+        if index:
+            pieces.append(string(separator))
+        pieces.append(_make_traditional_boxes(argument))
     return _row_box(*pieces)
 
 
@@ -4861,7 +6580,7 @@ def _syntax_q(input_expr: Expr, form_value: Expr | None) -> bool:
             return False
         form_name = _normalize_textual_expression_form(form_value, "SyntaxQ")
         try:
-            parse_input_form(input_expr.value) if form_name == "InputForm" else parse_standard_form(input_expr.value)
+            _parse_textual_expression(input_expr.value, form_name)
             return True
         except WolframSyntaxError:
             return False
@@ -4878,7 +6597,7 @@ def _syntax_length_text(text: str, form_name: str) -> int:
     if not text:
         return 0
     try:
-        parse_input_form(text) if form_name == "InputForm" else parse_standard_form(text)
+        _parse_textual_expression(text, form_name)
         return len(text)
     except WolframSyntaxError as exc:
         message = str(exc)
@@ -4901,7 +6620,7 @@ def _box_expr_to_standard_text(expr: Expr) -> str:
     if isinstance(expr, Call) and expr.has_head("BoxData") and len(expr.arguments) == 1:
         return _box_expr_to_standard_text(expr.arguments[0])
     if isinstance(expr, Call) and expr.has_head("RowBox"):
-        return _row_box_to_standard_text(expr)
+        return _box_item_to_standard_text(expr)
     return _box_item_to_standard_text(expr)
 
 
@@ -5262,10 +6981,10 @@ def _assignment_target_record(
     lhs: Expr,
     function_name: str,
 ) -> tuple[str, SymbolRecord] | None:
-    from .expression_definitions import VALUE_KIND_DOWN, VALUE_KIND_SUB, classify_assignment_lhs
+    from .expression_definitions import VALUE_KIND_DOWN, VALUE_KIND_OWN, VALUE_KIND_SUB, classify_assignment_lhs
 
     kind, target = classify_assignment_lhs(lhs)
-    if kind not in {VALUE_KIND_DOWN, VALUE_KIND_SUB} or target is None:
+    if kind not in {VALUE_KIND_OWN, VALUE_KIND_DOWN, VALUE_KIND_SUB} or target is None:
         raise WolframEvaluationError(
             f"{function_name} does not support this left-hand side in Tungsten yet."
         )
@@ -5274,6 +6993,17 @@ def _assignment_target_record(
         _emit_protected_symbol_message(function_name, record)
         return None
     return kind, record
+
+
+def _same_symbol(a: Expr, b: Expr) -> bool:
+    if not isinstance(a, Symbol) or not isinstance(b, Symbol):
+        return False
+    try:
+        a_name = _SYMBOL_REGISTRY.record_for_symbol(a).full_name
+        b_name = _SYMBOL_REGISTRY.record_for_symbol(b).full_name
+        return a_name == b_name
+    except WolframEvaluationError:
+        return False
 
 
 def _assign_compound_definition(
@@ -5287,7 +7017,14 @@ def _assign_compound_definition(
     if target is None:
         return call(function_name, lhs, rhs) if function_name == "Set" else symbol("Null")
     kind, record = target
-    from .expression_definitions import assign_definition
+    from .expression_definitions import VALUE_KIND_OWN, assign_definition
+
+    if kind == VALUE_KIND_OWN:
+        record.own_value = rhs
+        _refresh_canonical_own_values(record)
+        if record.own_values_definitions:
+            record.own_values_definitions[-1].delayed = delayed
+        return symbol("Null") if delayed else rhs
 
     assign_definition(
         record,
@@ -5297,6 +7034,96 @@ def _assign_compound_definition(
         delayed=delayed,
     )
     return symbol("Null") if delayed else rhs
+
+
+def _tag_reaches_head_chain(tag: Symbol, expr: Expr) -> bool:
+    current = expr
+    while isinstance(current, Call):
+        head = current.head_expr
+        if _same_symbol(head, tag):
+            return True
+        current = head
+    return _same_symbol(current, tag)
+
+
+def _tag_occurs_in_upvalue_position(tag: Symbol, lhs: Expr) -> bool:
+    if isinstance(lhs, Call) and lhs.has_head("Condition") and len(lhs.arguments) == 2:
+        return _tag_occurs_in_upvalue_position(tag, lhs.arguments[0])
+    if isinstance(lhs, Call) and lhs.has_head("HoldPattern") and len(lhs.arguments) == 1:
+        return _tag_occurs_in_upvalue_position(tag, lhs.arguments[0])
+    if not isinstance(lhs, Call):
+        return False
+    return any(
+        _same_symbol(argument, tag)
+        or (isinstance(argument, Call) and _tag_reaches_head_chain(tag, argument))
+        for argument in lhs.arguments
+    )
+
+
+def _emit_tag_position_message(function_name: str, tag: Symbol, lhs: Expr) -> None:
+    emit_message(
+        call("MessageName", symbol(function_name), string("tagpos")),
+        f"Tag {tag.to_input_form()} does not occur in a supported position in {lhs.to_input_form()}.",
+    )
+
+
+def _tag_assignment_target(
+    tag: Symbol,
+    lhs: Expr,
+    function_name: str,
+) -> tuple[str, SymbolRecord] | None:
+    tag_record = _SYMBOL_REGISTRY.record_for_symbol(tag)
+    from .expression_definitions import VALUE_KIND_UP, classify_assignment_lhs
+
+    natural_kind, natural_target = classify_assignment_lhs(lhs)
+    if natural_target is not None:
+        natural_record = _SYMBOL_REGISTRY.record_for_symbol(natural_target)
+        if natural_record.full_name == tag_record.full_name:
+            if not _record_allows_value_mutation(tag_record):
+                _emit_protected_symbol_message(function_name, tag_record)
+                return None
+            return natural_kind, tag_record
+
+    if _tag_occurs_in_upvalue_position(tag, lhs):
+        if not _record_allows_value_mutation(tag_record):
+            _emit_protected_symbol_message(function_name, tag_record)
+            return None
+        return VALUE_KIND_UP, tag_record
+
+    _emit_tag_position_message(function_name, tag, lhs)
+    return None
+
+
+def tag_set_expr(arguments: Sequence[Expr], *, delayed: bool) -> Expr:
+    function_name = "TagSetDelayed" if delayed else "TagSet"
+    if len(arguments) != 3:
+        raise WolframEvaluationError(f"{function_name} expects a tag, left-hand side, and right-hand side.")
+    tag, lhs, rhs = arguments
+    if not isinstance(tag, Symbol):
+        raise WolframEvaluationError(f"{function_name} expects a symbol tag.")
+    rhs_value = rhs if delayed else evaluate(rhs)
+    lhs = _normalize_assignment_lhs(lhs)
+    target = _tag_assignment_target(tag, lhs, function_name)
+    if target is None:
+        return symbol("Null") if delayed else call(function_name, tag, lhs, rhs_value)
+    kind, record = target
+    from .expression_definitions import VALUE_KIND_OWN, assign_definition
+
+    if kind == VALUE_KIND_OWN:
+        record.own_value = rhs_value
+        _refresh_canonical_own_values(record)
+        if record.own_values_definitions:
+            record.own_values_definitions[-1].delayed = delayed
+        return symbol("Null") if delayed else rhs_value
+
+    assign_definition(
+        record,
+        kind=kind,
+        hold_pattern=call("HoldPattern", lhs),
+        rhs=rhs_value,
+        delayed=delayed,
+    )
+    return symbol("Null") if delayed else rhs_value
 
 
 def set_delayed_expr(arguments: Sequence[Expr]) -> Expr:
@@ -5330,6 +7157,89 @@ def set_delayed_expr(arguments: Sequence[Expr]) -> Expr:
     if record.own_values_definitions:
         record.own_values_definitions[-1].delayed = True
     return symbol("Null")
+
+
+def _apply_inplace_arithmetic_to_symbol(
+    head_name: str,
+    target: Expr,
+    delta: int,
+    *,
+    return_old: bool,
+) -> Expr:
+    """Mutate a Symbol's own value by ``delta`` and return the old or
+    new value.
+
+    Used by ``Increment`` / ``PreIncrement`` / ``Decrement`` /
+    ``PreDecrement``. ``head_name`` is only used for error messages.
+    Currently only bare-symbol targets are supported; compound targets
+    such as ``parts[i]`` fall through to the inert form.
+    """
+    if not isinstance(target, Symbol):
+        raise WolframEvaluationError(
+            f"{head_name} currently expects a bare-symbol target."
+        )
+    record = _SYMBOL_REGISTRY.record_for_symbol(target)
+    if not _record_allows_value_mutation(record):
+        _emit_protected_symbol_message(head_name, record)
+        raise WolframEvaluationError(
+            f"{head_name}: cannot modify protected symbol."
+        )
+    old_value = evaluate(target)
+    new_value = evaluate(call("Plus", old_value, integer(delta)))
+    record.own_value = new_value
+    _refresh_canonical_own_values(record)
+    return old_value if return_old else new_value
+
+
+def increment_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``Increment[x]`` (parser form ``x++``).
+
+    Returns the value of ``x`` *before* the increment, then sets
+    ``x`` to ``x + 1``. Tungsten currently supports only bare-symbol
+    targets; compound targets such as ``parts[i]`` fall through to
+    the inert form.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Increment expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "Increment", arguments[0], +1, return_old=True
+    )
+
+
+def decrement_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``Decrement[x]`` (parser form ``x--``).
+
+    Returns the old value of ``x`` and sets ``x`` to ``x - 1``.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Decrement expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "Decrement", arguments[0], -1, return_old=True
+    )
+
+
+def pre_increment_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``PreIncrement[x]`` (parser form ``++x``).
+
+    Sets ``x`` to ``x + 1`` and returns the new value.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("PreIncrement expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "PreIncrement", arguments[0], +1, return_old=False
+    )
+
+
+def pre_decrement_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``PreDecrement[x]`` (parser form ``--x``).
+
+    Sets ``x`` to ``x - 1`` and returns the new value.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("PreDecrement expects exactly one argument.")
+    return _apply_inplace_arithmetic_to_symbol(
+        "PreDecrement", arguments[0], -1, return_old=False
+    )
 
 
 def set_expr(arguments: Sequence[Expr]) -> Expr:
@@ -5375,9 +7285,9 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
         if target is None:
             return symbol("$Failed")
         kind, record = target
-        from .expression_definitions import remove_definition
+        from .expression_definitions import remove_definitions
 
-        return symbol("Null") if remove_definition(record, kind, call("HoldPattern", lhs)) else symbol("$Failed")
+        return symbol("Null") if remove_definitions(record, kind, call("HoldPattern", lhs)) else symbol("$Failed")
     record = _SYMBOL_REGISTRY.record_for_symbol(lhs)
     if not _record_allows_value_mutation(record):
         _emit_protected_symbol_message("Unset", record)
@@ -5388,6 +7298,33 @@ def unset_expr(arguments: Sequence[Expr]) -> Expr:
     record.own_value = None
     _refresh_canonical_own_values(record)
     return symbol("Null")
+
+
+def tag_unset_expr(arguments: Sequence[Expr]) -> Expr:
+    if len(arguments) != 2:
+        raise WolframEvaluationError("TagUnset expects a tag and a left-hand side.")
+    tag, lhs = arguments
+    if not isinstance(tag, Symbol):
+        raise WolframEvaluationError("TagUnset expects a symbol tag.")
+    lhs = _normalize_assignment_lhs(lhs)
+    target = _tag_assignment_target(tag, lhs, "TagUnset")
+    if target is None:
+        return symbol("$Failed")
+    kind, record = target
+    from .expression_definitions import VALUE_KIND_OWN, coalesce_legacy_own_value, remove_definitions
+
+    if remove_definitions(record, kind, call("HoldPattern", lhs)):
+        if kind == VALUE_KIND_OWN:
+            if not record.own_values_definitions:
+                record.own_value = None
+            else:
+                coalesce_legacy_own_value(record)
+        return symbol("Null")
+    emit_message(
+        call("MessageName", symbol("TagUnset"), string("norep")),
+        f"Assignment on {tag.to_input_form()} for {lhs.to_input_form()} not found.",
+    )
+    return symbol("$Failed")
 
 
 def _clear_record(record: SymbolRecord) -> None:
@@ -5590,6 +7527,15 @@ def _definition_pattern_expr(hold_pattern: Expr) -> Expr:
 
 
 def _apply_definitions(expr: Expr, definitions: Sequence[object]) -> Expr | None:
+    """Apply the first matching definition rule to ``expr``.
+
+    Each rule is evaluated as a function-application boundary: a bare
+    ``Return[value]`` raised inside the rule's RHS is caught here and
+    unwraps to ``value``, matching the kernel's "Return exits the
+    nearest enclosing function definition" semantics. Headed
+    ``Return[value, head]`` signals propagate through unchanged so
+    the targeted handler upstream can catch them.
+    """
     for definition in definitions:
         pattern = _definition_pattern_expr(definition.hold_pattern)
         bindings = _match_pattern(expr, pattern)
@@ -5598,12 +7544,17 @@ def _apply_definitions(expr: Expr, definitions: Sequence[object]) -> Expr | None
         condition = getattr(definition, "condition", None)
         if condition is not None and not _condition_test_succeeds(condition, bindings):
             continue
-        replacement, applied = _instantiate_replacement_template(
-            definition.rhs,
-            bindings,
-            delayed=definition.delayed,
-            evaluate_result=True,
-        )
+        try:
+            replacement, applied = _instantiate_replacement_template(
+                definition.rhs,
+                bindings,
+                delayed=definition.delayed,
+                evaluate_result=True,
+            )
+        except _TungstenReturnSignal as signal:
+            if signal.head_name is None:
+                return signal.value
+            raise
         if applied:
             assert replacement is not None
             return replacement
@@ -5615,6 +7566,54 @@ def _apply_down_value_definitions(head: Symbol, expr: Expr) -> Expr | None:
     if not record.down_values_definitions:
         return None
     return _apply_definitions(expr, tuple(record.down_values_definitions))
+
+
+def _head_chain_symbols(expr: Expr) -> tuple[Symbol, ...]:
+    symbols: list[Symbol] = []
+    current = expr
+    while isinstance(current, Call):
+        head = current.head_expr
+        if isinstance(head, Symbol):
+            symbols.append(head)
+            break
+        current = head
+    return tuple(symbols)
+
+
+def _up_value_candidate_symbols(expr: Expr) -> tuple[Symbol, ...]:
+    if not isinstance(expr, Call):
+        return ()
+    candidates: list[Symbol] = []
+    seen: set[str] = set()
+
+    def add(candidate: Symbol) -> None:
+        try:
+            full_name = _SYMBOL_REGISTRY.record_for_symbol(candidate).full_name
+        except WolframEvaluationError:
+            return
+        if full_name in seen:
+            return
+        seen.add(full_name)
+        candidates.append(candidate)
+
+    for argument in expr.arguments:
+        if isinstance(argument, Symbol):
+            add(argument)
+        elif isinstance(argument, Call):
+            for candidate in _head_chain_symbols(argument):
+                add(candidate)
+    return tuple(candidates)
+
+
+def _apply_up_value_definitions(expr: Expr) -> Expr | None:
+    for candidate in _up_value_candidate_symbols(expr):
+        record = _SYMBOL_REGISTRY.record_for_symbol(candidate)
+        if not record.up_values_definitions:
+            continue
+        result = _apply_definitions(expr, tuple(record.up_values_definitions))
+        if result is not None:
+            return result
+    return None
 
 
 def _subvalue_target_symbol(expr: Expr) -> Symbol | None:
@@ -5663,6 +7662,91 @@ def throw_expr(arguments: Sequence[Expr]) -> None:
     if len(arguments) == 3:
         raise _TungstenThrowSignal(evaluate(arguments[0]), evaluate(arguments[1]), evaluate(arguments[2]))
     raise WolframEvaluationError("Throw expects one, two, or three arguments.")
+
+
+def break_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenBreakSignal`` so the nearest enclosing
+    ``Do`` / ``While`` / ``For`` exits cleanly.
+
+    ``Break`` takes no arguments. If any are supplied, Tungsten falls
+    through to the inert form (matching the kernel's ``Break::argx``
+    error and inert return).
+    """
+    if len(arguments) != 0:
+        raise WolframEvaluationError("Break expects no arguments.")
+    raise _TungstenBreakSignal()
+
+
+def continue_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenContinueSignal`` so the nearest enclosing
+    ``Do`` / ``While`` / ``For`` skips to its next iteration.
+
+    Like ``Break``, ``Continue`` takes no arguments; extra arguments
+    fall through to the inert form via ``WolframEvaluationError``.
+    """
+    if len(arguments) != 0:
+        raise WolframEvaluationError("Continue expects no arguments.")
+    raise _TungstenContinueSignal()
+
+
+def return_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenReturnSignal`` for ``Return[expr]`` or
+    ``Return[expr, head]``.
+
+    The single-argument form propagates through the evaluator until a
+    function-definition rule application catches it (so an ordinary
+    SetDelayed-defined ``f[x_] := ...; Return[v]; ...`` returns ``v``
+    from ``f[...]``). The two-argument form names the enclosing head
+    that should catch the signal — the head must evaluate to a
+    ``Symbol`` (e.g. ``Module``, ``Block``, ``For``, ``While``,
+    ``Do``).
+
+    A bare ``Return[]`` is treated as ``Return[Null]`` to match the
+    kernel; arities outside ``{0, 1, 2}`` fall through to the inert
+    form.
+    """
+    if len(arguments) == 0:
+        raise _TungstenReturnSignal(symbol("Null"))
+    if len(arguments) == 1:
+        raise _TungstenReturnSignal(evaluate(arguments[0]))
+    if len(arguments) == 2:
+        head_expr = evaluate(arguments[1])
+        if not isinstance(head_expr, Symbol):
+            raise WolframEvaluationError(
+                "Return's second argument must evaluate to a Symbol."
+            )
+        raise _TungstenReturnSignal(evaluate(arguments[0]), head_expr.name)
+    raise WolframEvaluationError("Return expects zero, one, or two arguments.")
+
+
+def label_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``Label[name]``.
+
+    ``Label`` is a marker for ``Goto``: by itself it has no
+    side effect and stays inert (``Label[name]`` evaluates to
+    ``Label[name]``), matching the kernel. The marker semantics
+    happen entirely inside ``CompoundExpression`` — when a ``Goto``
+    signal is raised, that handler scans its argument list for a
+    structurally matching ``Label[...]`` and resumes from after it.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Label expects exactly one argument.")
+    return call("Label", arguments[0])
+
+
+def goto_expr(arguments: Sequence[Expr]) -> None:
+    """Raise a ``_TungstenGotoSignal`` so the nearest enclosing
+    ``CompoundExpression`` resumes at a matching ``Label``.
+
+    The label argument is evaluated before the signal is raised so that
+    forms like ``Goto[Symbol[\"end\"]]`` work the same as the literal
+    ``Goto[end]``. If no enclosing ``CompoundExpression`` carries a
+    matching ``Label``, the signal propagates to ``evaluate`` and is
+    converted back to the inert ``Goto[label]`` form.
+    """
+    if len(arguments) != 1:
+        raise WolframEvaluationError("Goto expects exactly one argument.")
+    raise _TungstenGotoSignal(evaluate(arguments[0]))
 
 
 def _uncaught_throw_result(signal: _TungstenThrowSignal) -> Expr:
@@ -5954,15 +8038,63 @@ def print_expr(arguments: Sequence[Expr]) -> Expr:
 
 
 def compound_expression_expr(arguments: Sequence[Expr]) -> Expr:
+    """Evaluate ``expr1; expr2; ...`` left to right and return the
+    final value (or ``Null`` for a trailing semicolon).
+
+    ``Goto[label]`` raised inside any ``arg`` is caught here: Tungsten
+    scans the argument list for the first ``Label[label]`` whose label
+    is structurally equal to the goto target and resumes evaluation
+    from the position immediately after that ``Label``. A goto whose
+    target does not match any ``Label`` in this CompoundExpression
+    propagates outward so an enclosing CompoundExpression (or the
+    top-level evaluator's inert-fallback) can handle it.
+
+    ``Label[name]`` itself is handled inline by ``label_expr`` and
+    just returns ``Null``; the marker behavior happens entirely in
+    this loop. The Label scan is structural: ``Label[a]`` matches
+    ``Goto[a]`` because Tungsten compares the label expressions for
+    equality after evaluating the goto argument.
+    """
     result: Expr = symbol("Null")
-    for argument in arguments:
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
         try:
             result = evaluate(argument)
         except TungstenAbortRequested:
             if not _defer_abort_to_current_protect():
                 raise
             result = symbol("Null")
+        except _TungstenGotoSignal as signal:
+            target_index = _find_label_index(arguments, signal.label)
+            if target_index is None:
+                raise
+            index = target_index + 1
+            result = symbol("Null")
+            continue
+        index += 1
     return result
+
+
+def _find_label_index(arguments: Sequence[Expr], label: Expr) -> int | None:
+    """Return the index of the first ``Label[label]`` argument matching
+    ``label``, or ``None`` if no marker matches.
+
+    Labels can be evaluated lazily — ``Label[end]`` parses with ``end``
+    as a symbol that may have an own value at goto-time. Tungsten
+    compares the *unevaluated* label argument inside ``Label[...]``
+    against the goto target so a label slot whose name evaluates
+    differently from the goto's argument still matches when the
+    surface text is identical (the kernel's behavior in practice).
+    """
+    for index, argument in enumerate(arguments):
+        if not (isinstance(argument, Call) and argument.has_head("Label")):
+            continue
+        if len(argument.arguments) != 1:
+            continue
+        if argument.arguments[0] == label:
+            return index
+    return None
 
 
 def check_abort_expr(arguments: Sequence[Expr]) -> Expr:
@@ -8067,6 +10199,8 @@ def head_of(expr: Expr) -> Expr:
 
 
 def length(expr: Expr) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        return expr.dimensions[0] if expr.dimensions else 0
     byte_values = _byte_array_values(expr)
     if byte_values is not None:
         return len(byte_values)
@@ -8074,6 +10208,8 @@ def length(expr: Expr) -> int:
 
 
 def depth(expr: Expr) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        return len(expr.dimensions) + 1
     entries = _association_entries(expr)
     if entries is not None:
         if not entries:
@@ -8092,6 +10228,8 @@ def part(expr: Expr, *specs: int | Expr) -> Expr:
     normalized = tuple(integer(spec) if isinstance(spec, int) else spec for spec in specs)
     if not normalized:
         return expr
+    if isinstance(expr, SparseArrayExpr):
+        return sparse_array_part(expr, normalized)
     return _part_recursive(expr, normalized)
 
 
@@ -8163,9 +10301,17 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Abs",
     "Accuracy",
     "And",
+    "AlphabeticSort",
     "Append",
+    "AppendTo",
     "Apply",
     "Array",
+    "ArrayDepth",
+    "ArrayFlatten",
+    "ArrayPad",
+    "ArrayQ",
+    "ArrayReshape",
+    "ArrayRules",
     "AtomQ",
     "BaseDecode",
     "BaseEncode",
@@ -8183,11 +10329,15 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Composition",
     "ConstantArray",
     "Construct",
+    "Cross",
     "Delete",
+    "DeleteAdjacentDuplicates",
     "DeleteCases",
     "DeleteDuplicates",
     "DeleteDuplicatesBy",
+    "Det",
     "Depth",
+    "Dimensions",
     "Discard",
     "DiscreteDelta",
     "Dot",
@@ -8201,6 +10351,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "FixedPoint",
     "FixedPointList",
     "Flatten",
+    "FlattenAt",
     "Fold",
     "FoldList",
     "FoldPair",
@@ -8217,9 +10368,12 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Im",
     "IntegerQ",
     "InexactNumberQ",
+    "Insert",
+    "Inverse",
     "Join",
     "KroneckerDelta",
     "Last",
+    "LeviCivitaTensor",
     "Length",
     "LengthWhile",
     "Less",
@@ -8237,6 +10391,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "MapIndexed",
     "MapThread",
     "MatchQ",
+    "MatrixPower",
     "Max",
     "MaximalBy",
     "MemberQ",
@@ -8250,7 +10405,9 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "NestWhile",
     "NestWhileList",
     "Not",
+    "Normal",
     "NumberQ",
+    "NumericalSort",
     "Operate",
     "Or",
     "Order",
@@ -8269,6 +10426,7 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Quotient",
     "QuotientRemainder",
     "Ramp",
+    "RandomSample",
     "Range",
     "Re",
     "RealAbs",
@@ -8297,6 +10455,11 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Sign",
     "Sort",
     "SortBy",
+    "SparseArray",
+    "SparseArrayQ",
+    "Split",
+    "SplitBy",
+    "Subsequences",
     "Conjugate",
     "StringContainsQ",
     "StringDrop",
@@ -8320,6 +10483,8 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
     "Thread",
     "Through",
     "Times",
+    "Tr",
+    "Transpose",
     "ToCharacterCode",
     "Tuples",
     "UnitStep",
@@ -8775,11 +10940,374 @@ def rotate_right(expr: Expr, amount: Expr | int = 1) -> Expr:
 
 
 def flatten(expr: Expr, level_spec: Expr | int | None = None) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_flatten(expr, level_spec)
     compound = _require_compound(expr, "Flatten")
     max_depth = _normalize_flatten_level(level_spec)
     if max_depth == 0:
         return compound
     return _flatten_same_head(compound, max_depth)
+
+
+def array_depth(expr: Expr) -> Expr:
+    return integer(_array_depth_value(expr))
+
+
+def _array_depth_value(expr: Expr) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        return len(expr.dimensions)
+    if isinstance(expr, Call) and expr.has_head("List"):
+        if not expr.arguments:
+            return 1
+        return 1 + max(_array_depth_value(argument) for argument in expr.arguments)
+    return 0
+
+
+def array_q(expr: Expr, depth_expr: Expr | None = None, test: Expr | None = None) -> Expr:
+    try:
+        dimensions = expr.dimensions if isinstance(expr, SparseArrayExpr) else _strict_dense_dimensions(expr)
+    except WolframEvaluationError:
+        return _bool_symbol(False)
+
+    if not dimensions:
+        return _bool_symbol(False)
+
+    if depth_expr is not None:
+        if not isinstance(depth_expr, Integer):
+            raise WolframEvaluationError("ArrayQ currently expects an explicit integer depth.")
+        if len(dimensions) != depth_expr.value:
+            return _bool_symbol(False)
+
+    if test is None:
+        return _bool_symbol(True)
+
+    if isinstance(expr, SparseArrayExpr):
+        total_size = math.prod(dimensions)
+        if len(expr.entries) < total_size and not _predicate_succeeds(test, expr.fill_value):
+            return _bool_symbol(False)
+        return _bool_symbol(all(_predicate_succeeds(test, entry.value) for entry in expr.entries))
+
+    return _bool_symbol(all(_predicate_succeeds(test, value) for value in _dense_leaf_values(expr)))
+
+
+def _dense_leaf_values(expr: Expr) -> tuple[Expr, ...]:
+    if isinstance(expr, Call) and expr.has_head("List"):
+        values: list[Expr] = []
+        for argument in expr.arguments:
+            values.extend(_dense_leaf_values(argument))
+        return tuple(values)
+    return (expr,)
+
+
+def _array_dimensions(expr: Expr, function_name: str) -> tuple[int, ...]:
+    if isinstance(expr, SparseArrayExpr):
+        return expr.dimensions
+    dimensions = _strict_dense_dimensions(expr)
+    if not dimensions:
+        raise WolframEvaluationError(f"{function_name} expects a rectangular array.")
+    return dimensions
+
+
+def _array_indices(dimensions: Sequence[int]) -> Iterable[tuple[int, ...]]:
+    return itertools.product(*(range(1, dimension + 1) for dimension in dimensions))
+
+
+def _array_linear_index(indices: Sequence[int], dimensions: Sequence[int]) -> int:
+    linear = 0
+    for index, dimension in zip(indices, dimensions, strict=True):
+        linear = linear * dimension + (index - 1)
+    return linear
+
+
+def _array_indices_from_linear(linear: int, dimensions: Sequence[int]) -> tuple[int, ...]:
+    if not dimensions:
+        return ()
+    result = [1] * len(dimensions)
+    remaining = linear
+    for axis in range(len(dimensions) - 1, -1, -1):
+        dimension = dimensions[axis]
+        remaining, offset = divmod(remaining, dimension)
+        result[axis] = offset + 1
+    return tuple(result)
+
+
+def _array_value_at(expr: Expr, indices: Sequence[int]) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_value_at(expr, indices)
+    current = expr
+    for index in indices:
+        if not isinstance(current, Call) or not current.has_head("List"):
+            raise WolframEvaluationError("Expected a rectangular List array.")
+        current = current.arguments[index - 1]
+    return current
+
+
+def _build_dense_array(dimensions: Sequence[int], builder: Callable[[tuple[int, ...]], Expr]) -> Expr:
+    return _build_array_from_dimensions(dimensions, builder)
+
+
+def _sparse_array_flatten(array: SparseArrayExpr, level_spec: Expr | int | None = None) -> Expr:
+    level = _normalize_flatten_level(level_spec)
+    rank = len(array.dimensions)
+    if level == 0 or rank <= 1:
+        return array
+
+    if level is None:
+        collapse_count = rank
+    else:
+        collapse_count = min(rank, level + 1)
+    new_dimensions = (math.prod(array.dimensions[:collapse_count]), *array.dimensions[collapse_count:])
+
+    entries: list[_SparseArrayEntry] = []
+    collapsed_dimensions = array.dimensions[:collapse_count]
+    for entry in array.entries:
+        collapsed_index = _array_linear_index(entry.indices[:collapse_count], collapsed_dimensions) + 1
+        entries.append(_SparseArrayEntry((collapsed_index, *entry.indices[collapse_count:]), entry.value))
+    return _sparse_array_expr(new_dimensions, entries, array.fill_value)
+
+
+def array_reshape(expr: Expr, dimensions_expr: Expr | int, padding: Expr | None = None) -> Expr:
+    dimensions = tuple(_normalize_dimensions(dimensions_expr, "ArrayReshape"))
+    fill = integer(0) if padding is None else padding
+
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_reshape(expr, dimensions, fill)
+
+    values = _dense_leaf_values(expr)
+    total_size = math.prod(dimensions) if dimensions else 1
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        linear = _array_linear_index(indices, dimensions) if dimensions else 0
+        return values[linear] if linear < len(values) else fill
+
+    if not dimensions:
+        return values[0] if values else fill
+    return _build_dense_array(dimensions, value_at)
+
+
+def _sparse_array_reshape(array: SparseArrayExpr, dimensions: Sequence[int], fill: Expr) -> Expr:
+    old_total = math.prod(array.dimensions)
+    new_total = math.prod(dimensions) if dimensions else 1
+    if not dimensions:
+        if old_total == 0:
+            return fill
+        return _sparse_array_value_at(array, _array_indices_from_linear(0, array.dimensions))
+
+    can_preserve_sparse = new_total <= old_total or array.fill_value == fill
+    if not can_preserve_sparse:
+        return array_reshape(sparse_array_normal(array), list_expr(*(integer(dimension) for dimension in dimensions)), fill)
+
+    output_fill = array.fill_value if new_total <= old_total else fill
+    entries: list[_SparseArrayEntry] = []
+    for entry in array.entries:
+        linear = _array_linear_index(entry.indices, array.dimensions)
+        if linear >= new_total:
+            continue
+        entries.append(_SparseArrayEntry(_array_indices_from_linear(linear, dimensions), entry.value))
+    return _sparse_array_expr(dimensions, entries, output_fill)
+
+
+def _normalize_array_padding(padding_expr: Expr | int, rank: int) -> list[tuple[int, int]]:
+    if isinstance(padding_expr, int):
+        if padding_expr < 0:
+            raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+        return [(padding_expr, padding_expr)] * rank
+    if isinstance(padding_expr, Integer):
+        return _normalize_array_padding(padding_expr.value, rank)
+    if isinstance(padding_expr, Call) and padding_expr.has_head("List"):
+        if rank == 1 and len(padding_expr.arguments) == 2 and all(isinstance(item, Integer) for item in padding_expr.arguments):
+            left = padding_expr.arguments[0].value  # type: ignore[union-attr]
+            right = padding_expr.arguments[1].value  # type: ignore[union-attr]
+            if left < 0 or right < 0:
+                raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+            return [(left, right)]
+        if len(padding_expr.arguments) == rank and all(isinstance(item, Integer) for item in padding_expr.arguments):
+            widths = [item.value for item in padding_expr.arguments if isinstance(item, Integer)]
+            if any(width < 0 for width in widths):
+                raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+            return [(width, width) for width in widths]
+        if len(padding_expr.arguments) == rank:
+            pairs: list[tuple[int, int]] = []
+            for item in padding_expr.arguments:
+                if not isinstance(item, Call) or not item.has_head("List") or len(item.arguments) != 2:
+                    raise WolframEvaluationError("ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}.")
+                if not all(isinstance(part, Integer) for part in item.arguments):
+                    raise WolframEvaluationError("ArrayPad padding widths must be explicit integers.")
+                left = item.arguments[0].value  # type: ignore[union-attr]
+                right = item.arguments[1].value  # type: ignore[union-attr]
+                if left < 0 or right < 0:
+                    raise WolframEvaluationError("ArrayPad expects non-negative padding widths.")
+                pairs.append((left, right))
+            return pairs
+    raise WolframEvaluationError("ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}.")
+
+
+def array_pad(expr: Expr, padding_expr: Expr | int, padding_value: Expr | None = None) -> Expr:
+    dimensions = _array_dimensions(expr, "ArrayPad")
+    widths = _normalize_array_padding(padding_expr, len(dimensions))
+    fill = integer(0) if padding_value is None else padding_value
+    new_dimensions = tuple(dimension + left + right for dimension, (left, right) in zip(dimensions, widths, strict=True))
+    left_offsets = tuple(left for left, _right in widths)
+
+    if isinstance(expr, SparseArrayExpr):
+        if fill == expr.fill_value:
+            return _sparse_array_expr(
+                new_dimensions,
+                (
+                    _SparseArrayEntry(
+                        tuple(index + offset for index, offset in zip(entry.indices, left_offsets, strict=True)),
+                        entry.value,
+                    )
+                    for entry in expr.entries
+                ),
+                expr.fill_value,
+            )
+        return array_pad(sparse_array_normal(expr), padding_expr, fill)
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        source_indices: list[int] = []
+        for index, dimension, (left, _right) in zip(indices, dimensions, widths, strict=True):
+            source_index = index - left
+            if source_index < 1 or source_index > dimension:
+                return fill
+            source_indices.append(source_index)
+        return _array_value_at(expr, source_indices)
+
+    return _build_dense_array(new_dimensions, value_at)
+
+
+def array_flatten(expr: Expr) -> Expr:
+    if not isinstance(expr, Call) or not expr.has_head("List"):
+        raise WolframEvaluationError("ArrayFlatten expects a rectangular list of array blocks.")
+    block_rows: list[tuple[Expr, ...]] = []
+    for row in expr.arguments:
+        if not isinstance(row, Call) or not row.has_head("List"):
+            raise WolframEvaluationError("ArrayFlatten expects a rectangular list of array blocks.")
+        block_rows.append(row.arguments)
+    if not block_rows:
+        return _evaluated_list_expr()
+    column_count = len(block_rows[0])
+    if column_count == 0 or any(len(row) != column_count for row in block_rows):
+        raise WolframEvaluationError("ArrayFlatten expects a rectangular block matrix.")
+
+    block_shapes: list[list[tuple[int, int]]] = []
+    any_sparse = False
+    for row in block_rows:
+        shape_row: list[tuple[int, int]] = []
+        for block in row:
+            if isinstance(block, SparseArrayExpr):
+                if len(block.dimensions) != 2:
+                    raise WolframEvaluationError("ArrayFlatten currently expects rank-2 SparseArray blocks.")
+                if block.fill_value != integer(0):
+                    return array_flatten(_blocks_to_dense_expr(block_rows))
+                any_sparse = True
+                shape_row.append((block.dimensions[0], block.dimensions[1]))
+                continue
+            dimensions = _strict_dense_dimensions(block)
+            if len(dimensions) != 2:
+                raise WolframEvaluationError("ArrayFlatten currently expects rank-2 array blocks.")
+            shape_row.append((dimensions[0], dimensions[1]))
+        block_shapes.append(shape_row)
+
+    row_heights: list[int] = []
+    for row_index, shape_row in enumerate(block_shapes):
+        height = shape_row[0][0]
+        if any(shape[0] != height for shape in shape_row):
+            raise WolframEvaluationError(f"ArrayFlatten block row {row_index + 1} has inconsistent heights.")
+        row_heights.append(height)
+
+    column_widths: list[int] = []
+    for column_index in range(column_count):
+        width = block_shapes[0][column_index][1]
+        if any(shape_row[column_index][1] != width for shape_row in block_shapes):
+            raise WolframEvaluationError(f"ArrayFlatten block column {column_index + 1} has inconsistent widths.")
+        column_widths.append(width)
+
+    output_dimensions = (sum(row_heights), sum(column_widths))
+    if any_sparse:
+        entries: list[_SparseArrayEntry] = []
+        row_offset = 0
+        for block_row, height in zip(block_rows, row_heights, strict=True):
+            column_offset = 0
+            for block, width in zip(block_row, column_widths, strict=True):
+                entries.extend(_array_flatten_block_entries(block, row_offset, column_offset))
+                column_offset += width
+            row_offset += height
+        return _sparse_array_expr(output_dimensions, entries, integer(0))
+
+    rows: list[Expr] = []
+    for block_row, height in zip(block_rows, row_heights, strict=True):
+        for local_row in range(1, height + 1):
+            row_values: list[Expr] = []
+            for block in block_row:
+                assert isinstance(block, Call)
+                block_row_expr = block.arguments[local_row - 1]
+                assert isinstance(block_row_expr, Call)
+                row_values.extend(block_row_expr.arguments)
+            rows.append(_evaluated_list_expr(*row_values))
+    return _evaluated_list_expr(*rows)
+
+
+def _blocks_to_dense_expr(block_rows: Sequence[Sequence[Expr]]) -> Expr:
+    return _evaluated_list_expr(*(
+        _evaluated_list_expr(*(sparse_array_normal(block) if isinstance(block, SparseArrayExpr) else block for block in row))
+        for row in block_rows
+    ))
+
+
+def _array_flatten_block_entries(block: Expr, row_offset: int, column_offset: int) -> list[_SparseArrayEntry]:
+    entries: list[_SparseArrayEntry] = []
+    if isinstance(block, SparseArrayExpr):
+        for entry in block.entries:
+            entries.append(_SparseArrayEntry((row_offset + entry.indices[0], column_offset + entry.indices[1]), entry.value))
+        return entries
+    dimensions = _strict_dense_dimensions(block)
+    for row, column in _array_indices(dimensions):
+        value = _array_value_at(block, (row, column))
+        if value != integer(0):
+            entries.append(_SparseArrayEntry((row_offset + row, column_offset + column), value))
+    return entries
+
+
+def _normalize_transpose_permutation(rank: int, permutation_expr: Expr | None) -> tuple[int, ...]:
+    if rank < 2 and permutation_expr is None:
+        return tuple(range(rank))
+    if permutation_expr is None:
+        return (1, 0, *range(2, rank))
+    if not isinstance(permutation_expr, Call) or not permutation_expr.has_head("List"):
+        raise WolframEvaluationError("Transpose expects a permutation list as its second argument.")
+    if len(permutation_expr.arguments) != rank or not all(isinstance(item, Integer) for item in permutation_expr.arguments):
+        raise WolframEvaluationError("Transpose permutation length must match the array rank.")
+    permutation = tuple(item.value - 1 for item in permutation_expr.arguments if isinstance(item, Integer))
+    if sorted(permutation) != list(range(rank)):
+        raise WolframEvaluationError("Transpose expects a permutation of array axes.")
+    return permutation
+
+
+def transpose(expr: Expr, permutation_expr: Expr | None = None) -> Expr:
+    dimensions = _array_dimensions(expr, "Transpose")
+    permutation = _normalize_transpose_permutation(len(dimensions), permutation_expr)
+    if permutation == tuple(range(len(dimensions))):
+        return expr
+    new_dimensions = tuple(dimensions[axis] for axis in permutation)
+
+    if isinstance(expr, SparseArrayExpr):
+        return _sparse_array_expr(
+            new_dimensions,
+            (
+                _SparseArrayEntry(tuple(entry.indices[axis] for axis in permutation), entry.value)
+                for entry in expr.entries
+            ),
+            expr.fill_value,
+        )
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        source_indices = [0] * len(dimensions)
+        for output_axis, source_axis in enumerate(permutation):
+            source_indices[source_axis] = indices[output_axis]
+        return _array_value_at(expr, source_indices)
+
+    return _build_dense_array(new_dimensions, value_at)
 
 
 def delete(expr: Expr, positions: Expr | int) -> Expr:
@@ -8814,6 +11342,201 @@ def replace_part(expr: Expr, replacements: Expr) -> Expr:
     for path, replacement in _sort_path_items(planned):
         result, _changed = _try_replace_at_path(result, path, replacement)
     return result
+
+
+def insert(expr: Expr, item: Expr, positions: Expr | int) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) == 1 and isinstance(positions, (Integer, int)):
+            return _sparse_vector_insert(expr, item, _normalize_integer_argument(positions, "Insert"))
+        return insert(sparse_array_normal(expr), item, positions)
+
+    paths = _insert_paths(positions)
+    result = expr
+    for path in _sort_paths(paths):
+        result, changed = _try_insert_at_path(result, path, item)
+        if not changed:
+            raise WolframEvaluationError(f"Insert positions are invalid for {expr.to_input_form()}.")
+    return result
+
+
+def _insert_paths(positions: Expr | int) -> list[list[_IndexSelector]]:
+    if isinstance(positions, int):
+        return [[_IndexSelector(positions)]]
+    if isinstance(positions, Integer):
+        return [[_IndexSelector(positions.value)]]
+    if isinstance(positions, Call) and positions.has_head("List"):
+        if all(isinstance(item, Integer) for item in positions.arguments):
+            return [[_IndexSelector(item.value) for item in positions.arguments if isinstance(item, Integer)]]
+        paths: list[list[_IndexSelector]] = []
+        for item in positions.arguments:
+            if not isinstance(item, Call) or not item.has_head("List") or not all(isinstance(part, Integer) for part in item.arguments):
+                raise WolframEvaluationError("Insert expects an integer position, a position list, or a list of position lists.")
+            paths.append([_IndexSelector(part.value) for part in item.arguments if isinstance(part, Integer)])
+        return paths
+    raise WolframEvaluationError("Insert expects an integer position, a position list, or a list of position lists.")
+
+
+def _insert_offset(length_value: int, index: int) -> int | None:
+    if index == 0:
+        return 0
+    if index > 0:
+        offset = index - 1
+    else:
+        offset = length_value + index + 1
+    if 0 <= offset <= length_value:
+        return offset
+    return None
+
+
+def _try_insert_at_path(expr: Expr, path: Sequence[_IndexSelector], item: Expr) -> tuple[Expr, bool]:
+    if not path:
+        return (expr, False)
+    if not isinstance(expr, Call):
+        return (expr, False)
+
+    selector = path[0]
+    if len(path) == 1:
+        offset = _insert_offset(len(expr.arguments), selector.index)
+        if offset is None:
+            return (expr, False)
+        arguments = list(expr.arguments)
+        arguments.insert(offset, item)
+        return (_rebuild(expr, arguments), True)
+
+    resolved = _try_resolve_index(len(expr.arguments), selector.index)
+    if resolved is None:
+        return (expr, False)
+    arguments = list(expr.arguments)
+    updated_child, changed = _try_insert_at_path(arguments[resolved], path[1:], item)
+    if not changed:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
+def _sparse_vector_insert(array: SparseArrayExpr, item: Expr, index: int) -> Expr:
+    length_value = array.dimensions[0]
+    offset = _insert_offset(length_value, index)
+    if offset is None:
+        raise WolframEvaluationError("Insert position is invalid for SparseArray.")
+    inserted_index = offset + 1
+    entries: list[_SparseArrayEntry] = []
+    for entry in array.entries:
+        source_index = entry.indices[0]
+        target_index = source_index + 1 if source_index >= inserted_index else source_index
+        entries.append(_SparseArrayEntry((target_index,), entry.value))
+    if item != array.fill_value:
+        entries.append(_SparseArrayEntry((inserted_index,), item))
+    return _sparse_array_expr((length_value + 1,), entries, array.fill_value)
+
+
+def flatten_at(expr: Expr, positions: Expr | int) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return flatten_at(sparse_array_normal(expr), positions)
+    paths, invalid = _expand_operation_paths(expr, integer(positions) if isinstance(positions, int) else positions)
+    unique_paths = _dedupe_paths(paths)
+    if invalid or any(not path for path in unique_paths):
+        raise WolframEvaluationError(f"FlattenAt positions are invalid for {expr.to_input_form()}.")
+
+    result = expr
+    for path in _sort_paths(unique_paths):
+        result, changed = _try_flatten_at_path(result, path)
+        if not changed:
+            raise WolframEvaluationError(f"FlattenAt positions are invalid for {expr.to_input_form()}.")
+    return result
+
+
+def _try_flatten_at_path(expr: Expr, path: Sequence[_IndexSelector | _KeySelector]) -> tuple[Expr, bool]:
+    if not path or not isinstance(expr, Call):
+        return (expr, False)
+    selector = path[0]
+    if not isinstance(selector, _IndexSelector):
+        return (expr, False)
+    resolved = selector.index - 1
+    if not 0 <= resolved < len(expr.arguments):
+        return (expr, False)
+    arguments = list(expr.arguments)
+    if len(path) == 1:
+        target = arguments[resolved]
+        if not isinstance(target, Call):
+            return (expr, False)
+        arguments[resolved:resolved + 1] = list(target.arguments)
+        return (_rebuild(expr, arguments), True)
+    updated_child, changed = _try_flatten_at_path(arguments[resolved], path[1:])
+    if not changed:
+        return (expr, False)
+    arguments[resolved] = updated_child
+    return (_rebuild(expr, arguments), True)
+
+
+def split(expr: Expr, test: Expr | None = None) -> Expr:
+    values = _sequence_values(expr, "Split")
+    if not values:
+        return _evaluated_list_expr()
+    groups: list[list[Expr]] = [[values[0]]]
+    for value in values[1:]:
+        if _duplicate_test_succeeds(test, groups[-1][-1], value):
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+    return _evaluated_list_expr(*(_evaluated_list_expr(*group) for group in groups))
+
+
+def split_by(expr: Expr, function: Expr) -> Expr:
+    values = _sequence_values(expr, "SplitBy")
+    if not values:
+        return _evaluated_list_expr()
+    groups: list[list[Expr]] = [[values[0]]]
+    previous_key = evaluate(_apply_callable(function, (values[0],)))
+    for value in values[1:]:
+        key = evaluate(_apply_callable(function, (value,)))
+        if key == previous_key:
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+            previous_key = key
+    return _evaluated_list_expr(*(_evaluated_list_expr(*group) for group in groups))
+
+
+def delete_adjacent_duplicates(expr: Expr, test: Expr | None = None) -> Expr:
+    values = _sequence_values(expr, "DeleteAdjacentDuplicates")
+    if not values:
+        return _evaluated_list_expr()
+    kept = [values[0]]
+    for value in values[1:]:
+        if not _duplicate_test_succeeds(test, kept[-1], value):
+            kept.append(value)
+    return _evaluated_list_expr(*kept)
+
+
+def subsequences(expr: Expr, spec: Expr | None = None) -> Expr:
+    values = _sequence_values(expr, "Subsequences")
+    count = len(values)
+    if spec is None:
+        bounds = (1, count)
+    elif isinstance(spec, Integer):
+        bounds = (1, spec.value)
+    elif isinstance(spec, Call) and spec.has_head("List"):
+        if len(spec.arguments) == 1 and isinstance(spec.arguments[0], Integer):
+            target = spec.arguments[0].value
+            bounds = (target, target)
+        elif len(spec.arguments) == 2 and isinstance(spec.arguments[0], Integer) and isinstance(spec.arguments[1], Integer):
+            bounds = (spec.arguments[0].value, spec.arguments[1].value)
+        else:
+            raise WolframEvaluationError("Subsequences currently supports n, {n}, or {min, max} length specs.")
+    else:
+        raise WolframEvaluationError("Subsequences expects an integer count or a length specification list.")
+
+    lower = max(bounds[0], 0)
+    upper = min(max(bounds[1], -1), count)
+    output: list[Expr] = []
+    for length_value in range(lower, upper + 1):
+        if length_value == 0:
+            output.append(_evaluated_list_expr())
+            continue
+        for start in range(0, count - length_value + 1):
+            output.append(_evaluated_list_expr(*values[start:start + length_value]))
+    return _evaluated_list_expr(*output)
 
 
 def _is_function_expr(expr: Expr) -> bool:
@@ -9708,9 +12431,11 @@ def _expr_kind_rank(expr: Expr) -> int:
         return 2
     if isinstance(expr, ByteArrayExpr):
         return 3
-    if isinstance(expr, Call):
+    if isinstance(expr, SparseArrayExpr):
         return 4
-    return 5
+    if isinstance(expr, Call):
+        return 5
+    return 6
 
 
 def _numeric_tie_compare(left: Expr, right: Expr) -> int:
@@ -9747,6 +12472,8 @@ def _canonical_compare(left: Expr, right: Expr) -> int:
         return _text_compare(left.name, right.name)
     if isinstance(left, ByteArrayExpr) and isinstance(right, ByteArrayExpr):
         return _integer_sign((left.values > right.values) - (left.values < right.values))
+    if isinstance(left, SparseArrayExpr) and isinstance(right, SparseArrayExpr):
+        return _text_compare(left.to_full_form(), right.to_full_form())
     if isinstance(left, Call) and isinstance(right, Call):
         head_compare = _canonical_compare(left.head_expr, right.head_expr)
         if head_compare != 0:
@@ -9860,6 +12587,54 @@ def sort_expr(expr: Expr, ordering_function: Expr | None = None, *, reverse: boo
     items = _sequence_ordering_items(expr, "Sort")
     sorted_items = _sort_items_by_value(items, ordering_function, reverse=reverse)
     return _rebuild_ordered_expr(expr, sorted_items)
+
+
+def alphabetic_sort(expr: Expr) -> Expr:
+    items = _sequence_ordering_items(expr, "AlphabeticSort")
+
+    def key(item: _OrderingItem) -> str:
+        value = item.value
+        return value.value.casefold() if isinstance(value, String) else value.to_input_form().casefold()
+
+    return _rebuild_ordered_expr(expr, sorted(items, key=key))
+
+
+def _numerical_sort_key_text(value: str) -> tuple[tuple[int, str | int], ...]:
+    parts: list[tuple[int, str | int]] = []
+    for part in re.split(r"(\d+)", value.casefold()):
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((1, int(part)))
+        else:
+            parts.append((0, part))
+    return tuple(parts)
+
+
+def numerical_sort(expr: Expr) -> Expr:
+    items = _sequence_ordering_items(expr, "NumericalSort")
+
+    def key(item: _OrderingItem) -> tuple[tuple[int, str | int], ...]:
+        value = item.value
+        text = value.value if isinstance(value, String) else value.to_input_form()
+        return _numerical_sort_key_text(text)
+
+    return _rebuild_ordered_expr(expr, sorted(items, key=key))
+
+
+def random_sample(expr: Expr, count: Expr | None = None) -> Expr:
+    items = list(_sequence_ordering_items(expr, "RandomSample"))
+    if count is None or (isinstance(count, Symbol) and count.name == "All"):
+        sample_count = len(items)
+    elif isinstance(count, Call) and count.has_head("UpTo") and len(count.arguments) == 1 and isinstance(count.arguments[0], Integer):
+        sample_count = min(len(items), count.arguments[0].value)
+    elif isinstance(count, Integer):
+        sample_count = count.value
+    else:
+        raise WolframEvaluationError("RandomSample expects an integer, UpTo[n], All, or no count.")
+    if sample_count < 0 or sample_count > len(items):
+        raise WolframEvaluationError("RandomSample count must be between 0 and the sequence length.")
+    return _rebuild_ordered_expr(expr, random.sample(items, sample_count))
 
 
 def ordered_q(expr: Expr, ordering_function: Expr | None = None) -> Symbol:
@@ -10418,6 +13193,10 @@ def through(expr: Expr) -> Expr:
 
 
 def _sequence_values(expr: Expr, function_name: str) -> tuple[Expr, ...]:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 1:
+            raise WolframEvaluationError(f"{function_name} expects a one-dimensional SparseArray sequence.")
+        return tuple(_sparse_array_value_at(expr, (index,)) for index in range(1, expr.dimensions[0] + 1))
     return tuple(item.value for item in _selection_items(expr, function_name))
 
 
@@ -11266,6 +14045,13 @@ def dot(arguments: Sequence[Expr]) -> Expr:
         raise WolframEvaluationError("Dot expects at least two arguments.")
 
     def dot_two(left: Expr, right: Expr) -> Expr:
+        if isinstance(left, SparseArrayExpr) and isinstance(right, SparseArrayExpr):
+            return _sparse_dot(left, right)
+        if isinstance(left, SparseArrayExpr):
+            return dot_two(sparse_array_normal(left), right)
+        if isinstance(right, SparseArrayExpr):
+            return dot_two(left, sparse_array_normal(right))
+
         left_rows = _list_rows(left, "Dot")
         right_rows = _list_rows(right, "Dot")
 
@@ -11281,20 +14067,23 @@ def dot(arguments: Sequence[Expr]) -> Expr:
             return list_expr(*(dot_two(list_expr(*row), right) for row in left_rows))
 
         if left_rows is None and isinstance(left, Call) and left.has_head("List") and right_rows is not None:
-            width = len(right_rows[0]) if right_rows else 0
-            if any(len(row) != width for row in right_rows):
+            if len(left.arguments) != len(right_rows):
+                raise WolframEvaluationError("Dot expects compatible vector/matrix dimensions.")
+            right_width = len(right_rows[0]) if right_rows else 0
+            if any(len(row) != right_width for row in right_rows):
                 raise WolframEvaluationError("Dot currently expects rectangular matrices.")
             columns = [
                 list_expr(*(row[column_index] for row in right_rows))
-                for column_index in range(width)
+                for column_index in range(right_width)
             ]
             return list_expr(*(dot_two(left, column) for column in columns))
 
         if left_rows is not None and right_rows is not None:
-            width = len(left_rows[0]) if left_rows else 0
-            if any(len(row) != width for row in left_rows):
+            left_width = len(left_rows[0]) if left_rows else 0
+            if any(len(row) != left_width for row in left_rows):
                 raise WolframEvaluationError("Dot currently expects rectangular matrices.")
-            if any(len(row) != width for row in right_rows):
+            right_width = len(right_rows[0]) if right_rows else 0
+            if any(len(row) != right_width for row in right_rows) or left_width != len(right_rows):
                 raise WolframEvaluationError("Dot currently expects compatible matrix dimensions.")
             return list_expr(*(dot_two(list_expr(*row), right) for row in left_rows))
 
@@ -11304,6 +14093,483 @@ def dot(arguments: Sequence[Expr]) -> Expr:
     for argument in arguments[1:]:
         current = evaluate(dot_two(current, argument))
     return current
+
+
+def _sparse_dot(left: SparseArrayExpr, right: SparseArrayExpr) -> Expr:
+    if left.fill_value != integer(0) or right.fill_value != integer(0):
+        return dot((sparse_array_normal(left), sparse_array_normal(right)))
+
+    left_rank = len(left.dimensions)
+    right_rank = len(right.dimensions)
+    if left_rank not in {1, 2} or right_rank not in {1, 2}:
+        raise WolframEvaluationError("Dot currently supports sparse vectors and matrices only.")
+
+    left_entries = _sparse_array_entry_map(left)
+    right_entries = _sparse_array_entry_map(right)
+
+    def add_to(target: dict[tuple[int, ...], Expr], indices: tuple[int, ...], contribution: Expr) -> None:
+        if contribution == integer(0):
+            return
+        previous = target.get(indices)
+        target[indices] = contribution if previous is None else evaluate(call("Plus", previous, contribution))
+
+    if left_rank == 1 and right_rank == 1:
+        if left.dimensions[0] != right.dimensions[0]:
+            raise WolframEvaluationError("Dot expects vectors of the same length.")
+        total_terms = [
+            evaluate(call("Times", left_value, right_entries[indices]))
+            for indices, left_value in left_entries.items()
+            if indices in right_entries
+        ]
+        return evaluate(call("Plus", *total_terms)) if total_terms else integer(0)
+
+    if left_rank == 2 and right_rank == 1:
+        rows, width = left.dimensions
+        if width != right.dimensions[0]:
+            raise WolframEvaluationError("Dot expects compatible sparse matrix/vector dimensions.")
+        output: dict[tuple[int, ...], Expr] = {}
+        for (row, column), left_value in left_entries.items():
+            right_value = right_entries.get((column,))
+            if right_value is not None:
+                add_to(output, (row,), evaluate(call("Times", left_value, right_value)))
+        return _sparse_array_expr(
+            (rows,),
+            (_SparseArrayEntry(indices, value) for indices, value in output.items()),
+            integer(0),
+        )
+
+    if left_rank == 1 and right_rank == 2:
+        width = left.dimensions[0]
+        right_rows, columns = right.dimensions
+        if width != right_rows:
+            raise WolframEvaluationError("Dot expects compatible sparse vector/matrix dimensions.")
+        output: dict[tuple[int, ...], Expr] = {}
+        for (row, column), right_value in right_entries.items():
+            left_value = left_entries.get((row,))
+            if left_value is not None:
+                add_to(output, (column,), evaluate(call("Times", left_value, right_value)))
+        return _sparse_array_expr(
+            (columns,),
+            (_SparseArrayEntry(indices, value) for indices, value in output.items()),
+            integer(0),
+        )
+
+    rows, width = left.dimensions
+    right_rows, columns = right.dimensions
+    if width != right_rows:
+        raise WolframEvaluationError("Dot expects compatible sparse matrix dimensions.")
+    right_by_row: dict[int, list[tuple[int, Expr]]] = {}
+    for (row, column), value in right_entries.items():
+        right_by_row.setdefault(row, []).append((column, value))
+
+    output: dict[tuple[int, ...], Expr] = {}
+    for (row, shared), left_value in left_entries.items():
+        for column, right_value in right_by_row.get(shared, ()):
+            add_to(output, (row, column), evaluate(call("Times", left_value, right_value)))
+    return _sparse_array_expr(
+        (rows, columns),
+        (_SparseArrayEntry(indices, value) for indices, value in output.items()),
+        integer(0),
+    )
+
+
+def _is_one_expr_value(expr: Expr) -> bool:
+    if isinstance(expr, Integer):
+        return expr.value == 1
+    if isinstance(expr, RationalNumber):
+        return expr.value == 1
+    return False
+
+
+def _expr_sum(terms: Sequence[Expr]) -> Expr:
+    return evaluate(call("Plus", *terms)) if terms else integer(0)
+
+
+def _expr_product(factors: Sequence[Expr]) -> Expr:
+    return evaluate(call("Times", *factors)) if factors else integer(1)
+
+
+def _expr_negate(expr: Expr) -> Expr:
+    if _is_exact_zero(expr):
+        return integer(0)
+    return evaluate(call("Times", integer(-1), expr))
+
+
+def _expr_subtract(left: Expr, right: Expr) -> Expr:
+    if _is_exact_zero(right):
+        return left
+    return evaluate(call("Plus", left, _expr_negate(right)))
+
+
+def _expr_inverse(expr: Expr) -> Expr:
+    if _is_one_expr_value(expr):
+        return integer(1)
+    return evaluate(call("Power", expr, integer(-1)))
+
+
+def _expr_divide(numerator: Expr, denominator: Expr) -> Expr:
+    if _is_exact_zero(numerator):
+        return integer(0)
+    if _is_one_expr_value(denominator):
+        return numerator
+    return evaluate(call("Times", numerator, _expr_inverse(denominator)))
+
+
+def _matrix_rows(expr: Expr, function_name: str) -> list[list[Expr]]:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 2:
+            raise WolframEvaluationError(f"{function_name} expects a matrix.")
+        rows, columns = expr.dimensions
+        return [
+            [_sparse_array_value_at(expr, (row, column)) for column in range(1, columns + 1)]
+            for row in range(1, rows + 1)
+        ]
+    rows = _list_rows(expr, function_name)
+    if rows is None:
+        raise WolframEvaluationError(f"{function_name} expects a matrix.")
+    width = len(rows[0]) if rows else 0
+    if any(len(row) != width for row in rows):
+        raise WolframEvaluationError(f"{function_name} expects a rectangular matrix.")
+    return [list(row) for row in rows]
+
+
+def _require_square_matrix_rows(expr: Expr, function_name: str) -> list[list[Expr]]:
+    rows = _matrix_rows(expr, function_name)
+    width = len(rows[0]) if rows else 0
+    if len(rows) != width:
+        raise WolframEvaluationError(f"{function_name} expects a square matrix.")
+    return rows
+
+
+def _require_square_matrix_size(expr: Expr, function_name: str) -> int:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 2 or expr.dimensions[0] != expr.dimensions[1]:
+            raise WolframEvaluationError(f"{function_name} expects a square matrix.")
+        return expr.dimensions[0]
+    return len(_require_square_matrix_rows(expr, function_name))
+
+
+def _fraction_matrix(rows: Sequence[Sequence[Expr]]) -> list[list[Fraction]] | None:
+    matrix: list[list[Fraction]] = []
+    for row in rows:
+        fraction_row: list[Fraction] = []
+        for value in row:
+            fraction = _exact_fraction(value)
+            if fraction is None:
+                return None
+            fraction_row.append(fraction)
+        matrix.append(fraction_row)
+    return matrix
+
+
+def _fraction_to_expr(value: Fraction) -> Expr:
+    return rational_number(value.numerator, value.denominator)
+
+
+def _determinant_exact_numeric(rows: Sequence[Sequence[Expr]]) -> Expr | None:
+    matrix = _fraction_matrix(rows)
+    if matrix is None:
+        return None
+    n = len(matrix)
+    if n == 0:
+        return integer(1)
+
+    sign = 1
+    for column in range(n):
+        pivot_row = next((row for row in range(column, n) if matrix[row][column] != 0), None)
+        if pivot_row is None:
+            return integer(0)
+        if pivot_row != column:
+            matrix[column], matrix[pivot_row] = matrix[pivot_row], matrix[column]
+            sign *= -1
+        pivot = matrix[column][column]
+        for row in range(column + 1, n):
+            if matrix[row][column] == 0:
+                continue
+            factor = matrix[row][column] / pivot
+            for target_column in range(column, n):
+                matrix[row][target_column] -= factor * matrix[column][target_column]
+
+    determinant = Fraction(sign, 1)
+    for index in range(n):
+        determinant *= matrix[index][index]
+    return _fraction_to_expr(determinant)
+
+
+def _permutation_sign(values: Sequence[int]) -> int:
+    inversions = 0
+    for left_index, left in enumerate(values):
+        for right in values[left_index + 1:]:
+            if left > right:
+                inversions += 1
+    return -1 if inversions % 2 else 1
+
+
+def _determinant_from_candidates(row_candidates: Sequence[Sequence[tuple[int, Expr]]]) -> Expr:
+    n = len(row_candidates)
+    if n == 0:
+        return integer(1)
+    if any(not candidates for candidates in row_candidates):
+        return integer(0)
+
+    terms: list[Expr] = []
+
+    def recurse(row_index: int, used_columns: set[int], columns: list[int], factors: list[Expr]) -> None:
+        if row_index == n:
+            sign = _permutation_sign(columns)
+            term_factors = ([integer(-1)] if sign < 0 else []) + factors
+            terms.append(_expr_product(term_factors))
+            return
+        for column, value in row_candidates[row_index]:
+            if column in used_columns or _is_exact_zero(value):
+                continue
+            used_columns.add(column)
+            columns.append(column)
+            factors.append(value)
+            recurse(row_index + 1, used_columns, columns, factors)
+            factors.pop()
+            columns.pop()
+            used_columns.remove(column)
+
+    recurse(0, set(), [], [])
+    return _expr_sum(terms)
+
+
+def _determinant_symbolic(rows: Sequence[Sequence[Expr]]) -> Expr:
+    candidates = [
+        [(column_index, value) for column_index, value in enumerate(row) if not _is_exact_zero(value)]
+        for row in rows
+    ]
+    return _determinant_from_candidates(candidates)
+
+
+def _determinant_from_rows(rows: Sequence[Sequence[Expr]]) -> Expr:
+    numeric = _determinant_exact_numeric(rows)
+    if numeric is not None:
+        return numeric
+    return _determinant_symbolic(rows)
+
+
+def _determinant_sparse(array: SparseArrayExpr) -> Expr:
+    if len(array.dimensions) != 2 or array.dimensions[0] != array.dimensions[1]:
+        raise WolframEvaluationError("Det expects a square matrix.")
+    if array.fill_value != integer(0):
+        return _determinant_from_rows(_matrix_rows(array, "Det"))
+    n = array.dimensions[0]
+    rows: list[list[tuple[int, Expr]]] = [[] for _ in range(n)]
+    for entry in array.entries:
+        row, column = entry.indices
+        if not _is_exact_zero(entry.value):
+            rows[row - 1].append((column - 1, entry.value))
+    return _determinant_from_candidates(rows)
+
+
+def det(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return _determinant_sparse(expr)
+    rows = _require_square_matrix_rows(expr, "Det")
+    return _determinant_from_rows(rows)
+
+
+def _inverse_exact_numeric(rows: Sequence[Sequence[Expr]]) -> Expr | None:
+    matrix = _fraction_matrix(rows)
+    if matrix is None:
+        return None
+    n = len(matrix)
+    augmented = [
+        [*matrix[row], *(Fraction(1 if row == column else 0, 1) for column in range(n))]
+        for row in range(n)
+    ]
+
+    for column in range(n):
+        pivot_row = next((row for row in range(column, n) if augmented[row][column] != 0), None)
+        if pivot_row is None:
+            raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+        if pivot_row != column:
+            augmented[column], augmented[pivot_row] = augmented[pivot_row], augmented[column]
+        pivot = augmented[column][column]
+        augmented[column] = [value / pivot for value in augmented[column]]
+        for row in range(n):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor == 0:
+                continue
+            augmented[row] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(augmented[row], augmented[column], strict=True)
+            ]
+
+    return _evaluated_list_expr(*(
+        _evaluated_list_expr(*(_fraction_to_expr(value) for value in augmented[row][n:]))
+        for row in range(n)
+    ))
+
+
+def _minor_rows(rows: Sequence[Sequence[Expr]], remove_row: int, remove_column: int) -> list[list[Expr]]:
+    return [
+        [value for column, value in enumerate(row) if column != remove_column]
+        for row_index, row in enumerate(rows)
+        if row_index != remove_row
+    ]
+
+
+def _sparse_diagonal_inverse(array: SparseArrayExpr) -> Expr | None:
+    if len(array.dimensions) != 2 or array.dimensions[0] != array.dimensions[1] or array.fill_value != integer(0):
+        return None
+    size = array.dimensions[0]
+    diagonal: dict[int, Expr] = {}
+    for entry in array.entries:
+        row, column = entry.indices
+        if row != column:
+            return None
+        diagonal[row] = entry.value
+    if len(diagonal) != size:
+        raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+    entries: list[_SparseArrayEntry] = []
+    for index in range(1, size + 1):
+        value = diagonal[index]
+        if _is_exact_zero(value):
+            raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+        entries.append(_SparseArrayEntry((index, index), _expr_inverse(value)))
+    return _sparse_array_expr(array.dimensions, entries, integer(0))
+
+
+def inverse(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        sparse_diagonal = _sparse_diagonal_inverse(expr)
+        if sparse_diagonal is not None:
+            return sparse_diagonal
+    rows = _require_square_matrix_rows(expr, "Inverse")
+    numeric = _inverse_exact_numeric(rows)
+    if numeric is not None:
+        return numeric
+
+    determinant = _determinant_from_rows(rows)
+    if _is_exact_zero(determinant):
+        raise WolframEvaluationError("Inverse expects a nonsingular matrix.")
+    size = len(rows)
+    inverse_rows: list[Expr] = []
+    for output_row in range(size):
+        values: list[Expr] = []
+        for output_column in range(size):
+            cofactor = _determinant_from_rows(_minor_rows(rows, output_column, output_row))
+            if (output_row + output_column) % 2:
+                cofactor = _expr_negate(cofactor)
+            values.append(_expr_divide(cofactor, determinant))
+        inverse_rows.append(_evaluated_list_expr(*values))
+    return _evaluated_list_expr(*inverse_rows)
+
+
+def _sparse_identity_matrix(size: int) -> SparseArrayExpr:
+    return _sparse_array_expr(
+        (size, size),
+        (_SparseArrayEntry((index, index), integer(1)) for index in range(1, size + 1)),
+        integer(0),
+    )
+
+
+def matrix_power(expr: Expr, exponent_expr: Expr | int) -> Expr:
+    exponent = _normalize_integer_argument(exponent_expr, "MatrixPower")
+    size = _require_square_matrix_size(expr, "MatrixPower")
+    if exponent == 0:
+        return _sparse_identity_matrix(size) if isinstance(expr, SparseArrayExpr) else identity_matrix(size)
+
+    base = inverse(expr) if exponent < 0 else expr
+    remaining = abs(exponent)
+    result: Expr = _sparse_identity_matrix(size) if isinstance(base, SparseArrayExpr) else identity_matrix(size)
+    while remaining:
+        if remaining & 1:
+            result = evaluate(dot((result, base)))
+        remaining >>= 1
+        if remaining:
+            base = evaluate(dot((base, base)))
+    return result
+
+
+def _vector_values(expr: Expr, function_name: str) -> tuple[Expr, ...]:
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 1:
+            raise WolframEvaluationError(f"{function_name} expects vectors.")
+        return tuple(_sparse_array_value_at(expr, (index,)) for index in range(1, expr.dimensions[0] + 1))
+    if isinstance(expr, Call) and expr.has_head("List"):
+        return expr.arguments
+    raise WolframEvaluationError(f"{function_name} expects vectors.")
+
+
+def cross(left: Expr, right: Expr) -> Expr:
+    left_values = _vector_values(left, "Cross")
+    right_values = _vector_values(right, "Cross")
+    if len(left_values) != len(right_values) or len(left_values) not in {2, 3}:
+        raise WolframEvaluationError("Cross currently supports pairs of 2D or 3D vectors.")
+    if len(left_values) == 2:
+        return _expr_subtract(
+            _expr_product((left_values[0], right_values[1])),
+            _expr_product((left_values[1], right_values[0])),
+        )
+    result_values = (
+        _expr_subtract(_expr_product((left_values[1], right_values[2])), _expr_product((left_values[2], right_values[1]))),
+        _expr_subtract(_expr_product((left_values[2], right_values[0])), _expr_product((left_values[0], right_values[2]))),
+        _expr_subtract(_expr_product((left_values[0], right_values[1])), _expr_product((left_values[1], right_values[0]))),
+    )
+    if isinstance(left, SparseArrayExpr) or isinstance(right, SparseArrayExpr):
+        return _sparse_array_expr(
+            (3,),
+            (_SparseArrayEntry((index,), value) for index, value in enumerate(result_values, start=1)),
+            integer(0),
+        )
+    return _evaluated_list_expr(*result_values)
+
+
+def _combine_terms(terms: Sequence[Expr], combiner: Expr | None) -> Expr:
+    if combiner is None or (isinstance(combiner, Symbol) and _system_dispatch_name(combiner) == "Plus"):
+        return _expr_sum(terms)
+    return evaluate(_apply_callable(combiner, tuple(terms)))
+
+
+def tr(expr: Expr, combiner: Expr | None = None) -> Expr:
+    dimensions = _array_dimensions(expr, "Tr")
+    if len(dimensions) == 1:
+        terms = [_array_value_at(expr, (index,)) for index in range(1, dimensions[0] + 1)]
+        return _combine_terms(terms, combiner)
+    if len(dimensions) != 2:
+        raise WolframEvaluationError("Tr currently supports vectors and matrices.")
+    diagonal_count = min(dimensions)
+    if isinstance(expr, SparseArrayExpr) and expr.fill_value == integer(0):
+        terms = [
+            entry.value
+            for entry in expr.entries
+            if entry.indices[0] == entry.indices[1] and entry.indices[0] <= diagonal_count
+        ]
+        return _combine_terms(terms, combiner)
+    terms = [_array_value_at(expr, (index, index)) for index in range(1, diagonal_count + 1)]
+    return _combine_terms(terms, combiner)
+
+
+def levi_civita_tensor(dimension_expr: Expr, head_expr: Expr | None = None) -> Expr:
+    dimension = _normalize_integer_argument(dimension_expr, "LeviCivitaTensor")
+    if dimension < 0:
+        raise WolframEvaluationError("LeviCivitaTensor expects a non-negative dimension.")
+    dimensions = (dimension,) * dimension
+    sparse_requested = isinstance(head_expr, Symbol) and _system_dispatch_name(head_expr) == "SparseArray"
+    if sparse_requested:
+        return _sparse_array_expr(
+            dimensions if dimensions else (1,),
+            (
+                _SparseArrayEntry(tuple(permutation), integer(_permutation_sign(tuple(index - 1 for index in permutation))))
+                for permutation in itertools.permutations(range(1, dimension + 1), dimension)
+            ),
+            integer(0),
+        )
+
+    def value_at(indices: tuple[int, ...]) -> Expr:
+        if len(set(indices)) != len(indices):
+            return integer(0)
+        return integer(_permutation_sign(tuple(index - 1 for index in indices)))
+
+    if not dimensions:
+        return integer(1)
+    return _build_dense_array(dimensions, value_at)
 
 
 def apply_head(new_head: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr:
@@ -11473,6 +14739,8 @@ def values_expr(expr: Expr) -> Expr:
 
 
 def normal(expr: Expr) -> Expr:
+    if isinstance(expr, SparseArrayExpr):
+        return sparse_array_normal(expr)
     byte_values = _byte_array_values(expr)
     if byte_values is not None:
         return list_expr(*(integer(value) for value in byte_values))
@@ -13083,6 +16351,33 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
                 raise
             emit_message(call("MessageName", symbol("Confirm"), string("confirmnotag")))
             return signal.failure
+        except _TungstenBreakSignal:
+            if previous_depth > 0:
+                raise
+            # Bare ``Break[]`` outside a loop emits ``Break::nofwd`` and
+            # stays inert. Tungsten reproduces the inert fallback (the
+            # message is currently not emitted).
+            return call("Break")
+        except _TungstenContinueSignal:
+            if previous_depth > 0:
+                raise
+            return call("Continue")
+        except _TungstenReturnSignal as signal:
+            if previous_depth > 0:
+                raise
+            # Uncaught ``Return[expr]`` / ``Return[expr, head]`` becomes
+            # the inert ``Return[evaluated_expr]`` / ``Return[..., head]``
+            # form, matching the kernel's "Return outside a function
+            # definition" behavior.
+            if signal.head_name is None:
+                return call("Return", signal.value)
+            return call("Return", signal.value, symbol(signal.head_name))
+        except _TungstenGotoSignal as signal:
+            if previous_depth > 0:
+                raise
+            # ``Goto`` whose target ``Label`` is not present in any
+            # enclosing CompoundExpression becomes inert ``Goto[label]``.
+            return call("Goto", signal.label)
         except TungstenAbortRequested:
             if previous_depth > 0:
                 raise

@@ -1,8 +1,8 @@
 # Tungsten Architecture
 
 Created (UTC): 2026-04-23T02:16:55Z
-Updated (UTC): 2026-04-26T22:15:47Z
-Repository HEAD: 60e6aed0a17fcb29f09f07f9877b3445a9e662d1
+Updated (UTC): 2026-04-27T00:34:28Z
+Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
 
 ## Summary
 
@@ -89,13 +89,14 @@ The current Tungsten package is composed of the following modules.
 | `wolfram_strings.py` | Own shared Wolfram string literal escaping, parsing, and inline-box segmentation. | Local text parsing only |
 | `notebook.py` | Parse, inspect, render, and patch notebook files without a kernel. | Local text parsing only |
 | `inline_boxes.py` | Extract box-bearing objects from saved notebook cells and compose inline-box string literals. | `notebook.py`, `wolfram_strings.py` |
-| `expression.py` | Own the expression AST facade, evaluation session state, public compatibility imports, and structural helpers not yet split out. | `expression_parser.py`, `expression_evaluator.py` through lazy wrappers |
+| `expression.py` | Own the expression AST facade, sparse-array value representation, evaluation session state, public compatibility imports, and structural helpers not yet split out. | `expression_parser.py`, `expression_evaluator.py` through lazy wrappers |
 | `expression_parser.py` | Tokenize/parse Wolfram InputForm/FullForm text and lower the supported StandardForm box subset. | `expression.py`, `wolfram_strings.py` |
 | `expression_evaluator.py` | Dispatch one evaluated expression to the appropriate built-in family. | `expression.py` |
 | `expression_arithmetic.py` | Evaluate arithmetic, numeric constructors, relations, Boolean logic, predicates, integer-number-theory functions, real-rounding heads, and the explicit-number subset of special functions. | `expression.py` |
 | `expression_patterns.py` | Match ordinary expression patterns and implement replacement/search helpers. | `expression.py` |
-| `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `rules_for_kind`) and the routing seam for compound-LHS Set / SetDelayed plus planned UpSet / TagSet support. | `expression.py` |
-| `expression_scoping.py` | Home for the lexical/dynamic scoping constructs. Owns the `With[bindings, body]` implementation (capture-avoiding substitution backed by `expression._substitute_named_symbols_in_expr`); ``Module`` and ``Block`` remain stubs that emit a clear "not yet implemented" message on call. | `expression.py` |
+| `expression_definitions.py` | Own the canonical symbol-definition storage shape (`Definition`, `assign_definition`, `remove_definitions`, `rules_for_kind`) and the routing seam for compound-LHS Set / SetDelayed plus tagged TagSet / TagSetDelayed support. | `expression.py` |
+| `expression_scoping.py` | Home for the lexical/dynamic scoping constructs. Owns ``With[bindings, body]`` (capture-avoiding substitution backed by `expression._substitute_named_symbols_in_expr`), ``Module[{locals}, body]`` (fresh-symbol allocation through `SymbolRegistry.allocate_module_local_symbols` plus capture-avoiding rename of `body` through `expression._rename_bound_symbols_in_expr`), and ``Block[locals, body]`` / ``Internal``InheritedBlock[locals, body]`` (snapshot-and-restore of the symbols' complete value state in a Python ``try`` / ``finally`` so the restore survives non-local control flow). Exports the snapshot/restore primitives that the iteration module reuses. | `expression.py` |
+| `expression_iteration.py` | Home for the iteration and looping constructs. Owns the iter-spec heads ``Table`` (builds nested ``List`` results), ``Do`` (runs the body for side effects, returns ``Null``), ``Sum`` and ``Product`` (collect per-iteration body values into a flat list and fold through ``Plus`` / ``Times``), as well as the predicate-driven loops ``For[init, test, incr, body]`` and ``While[test, body]`` / ``While[test]``. Iter-spec iteration variables are Block-scoped through the snapshot/restore primitives borrowed from ``expression_scoping``; later iter specs are resolved in the scope where earlier iterators are already bound, so dependent iter forms (``{j, i}`` after ``{i, ...}``) work as in the kernel. ``Do`` / ``For`` / ``While`` catch the non-local control signals raised by ``Break[]`` / ``Continue[]`` / ``Return[expr, head]`` so the loop exits cleanly or skips to its next iteration. | `expression.py`, `expression_scoping.py` |
 | `docs_index.py` | Build/search/read a local SQLite FTS documentation index from notebook files. | `discovery.py`, `notebook.py`, SQLite, optional `es.exe` |
 | `frontend.py` | Provide a narrow FrontEnd automation surface through kernel-backed calls. | `kernel.py`, `docs_index.py` |
 | `assistant.py` | Automate Notebook Assistant for a selected source cell and optionally insert code below it. | `kernel.py`, `notebook.py` |
@@ -209,6 +210,12 @@ parser/evaluator. The exact node types are owned by that module, but architectur
 point is that they are separate from `NotebookDocument` and deliberately not reused for notebook
 structure.
 
+`SparseArrayExpr` is one specialized atomic node in that model. It stores dimensions, an implicit
+value, and explicit coordinate/value entries in Tungsten-owned structural form, and lazily attaches
+a PyData Sparse `sparse.COO` backend when the package is importable and can represent the payload.
+Evaluator behavior remains defined by the Tungsten structure so fallback behavior and symbolic
+values do not depend on the external package's arithmetic semantics.
+
 The expression implementation is now split across a small facade plus family modules:
 
 - `expression_parser.py` owns tokenization, Pratt parsing, and supported StandardForm box
@@ -222,19 +229,45 @@ The expression implementation is now split across a small facade plus family mod
   `Definition` dataclass and the ``OwnValues`` / ``DownValues`` / ``UpValues`` / ``SubValues`` /
   ``NValues`` ordered-list contract — plus the LHS classifier
   (``classify_assignment_lhs``) that routes Set / SetDelayed / UpSet / TagSet
-  assignments to the right value list. Bare-symbol Set / SetDelayed and ordinary compound-LHS
-  Set / SetDelayed both write through this surface today; UpSet / TagSet remain the next
-  assignment families to wire into the same seam.
-- `expression_scoping.py` owns the lexical/dynamic scoping constructs. ``With[bindings,
-  body]`` is fully implemented: it parses each binding (``Set`` evaluates the RHS once
-  in the outer scope; ``SetDelayed`` holds it), builds a substitution map, and applies
-  the shared ``expression._substitute_named_symbols_in_expr`` capture-avoiding
-  substitution into ``body``. The shared helper now recognizes ``Function``, ``With``,
+  assignments to the right value list. Bare-symbol Set / SetDelayed, ordinary compound-LHS
+  Set / SetDelayed, and TagSet / TagSetDelayed write through this surface today; UpSet remains
+  the next direct up-value assignment family to wire into the same seam.
+- `expression_scoping.py` owns the lexical/dynamic scoping constructs.
+  ``With[bindings, body]`` parses each binding (``Set`` evaluates the RHS once in the
+  outer scope; ``SetDelayed`` holds it), builds a substitution map, and applies the
+  shared ``expression._substitute_named_symbols_in_expr`` capture-avoiding substitution
+  into ``body``. ``Module[{locals}, body]`` allocates a fresh per-invocation symbol
+  ``name$N`` for every local through ``SymbolRegistry.allocate_module_local_symbols``
+  (which increments the per-process module counter once and gives every local from one
+  Module call the same suffix); each binding's RHS is evaluated in the outer scope and
+  installed as the fresh symbol's own value, then ``body`` is rewritten through
+  ``expression._rename_bound_symbols_in_expr`` so every reference to a local resolves
+  to its fresh symbol. The shared rewrite helpers now recognize ``Function``, ``With``,
   ``Module``, and ``Block`` as scoping calls so inner-bound names that would shadow the
-  substitution are filtered out, and inner-bound names that would *capture* a free
-  variable in a substituted value are alpha-renamed to a fresh ``name$`` symbol.
-  ``Module`` and ``Block`` themselves remain stubs that emit ``Module::nyet`` /
-  ``Block::nyet`` rather than leave the call silently inert.
+  rewrite are filtered out, and inner-bound names that would *capture* a free variable
+  in a substituted value are alpha-renamed to a fresh ``name$`` symbol.
+  ``Block[locals, body]`` and ``Internal``InheritedBlock[locals, body]`` are
+  functionally identical in modern Wolfram and are implemented through a shared
+  ``_block_implementation`` helper: each binding's symbol is snapshotted (legacy
+  ``own_value`` plus all canonical value-list slots), the optional initializer sets
+  the OwnValue, the body evaluates, and the snapshot is restored in a Python
+  ``try`` / ``finally`` so non-local control flow (``Throw``, ``Abort``, time
+  constraints, confirmation failures) still reverts outer state.
+- `expression_iteration.py` owns the iteration constructs ``Table``, ``Do``,
+  ``Sum``, and ``Product``. All four share the standard iter-spec vocabulary
+  (``n`` / ``{n}`` for variable-less iteration, ``{i, n}``, ``{i, imin, imax}``,
+  ``{i, imin, imax, di}``, ``{i, list}``); each iteration variable is Block-scoped
+  through the snapshot/restore primitives borrowed from ``expression_scoping``, so
+  the iteration variable's outer state is restored on exit and non-local control
+  flow still reverts the binding. Multiple iter specs nest with the leftmost
+  outermost; later iter specs are resolved in the scope where earlier iterators
+  are already bound, so dependent iter forms work as in the kernel. ``Table``
+  collects results into a nested ``List``; ``Do`` evaluates the body for side
+  effects only and returns ``Null``. ``Sum`` and ``Product`` walk the iteration
+  in flat fashion and fold the collected per-iteration body values through
+  ``Plus`` (Sum, identity ``0``) or ``Times`` (Product, identity ``1``); both
+  reject the bare-integer ``n`` form to match the kernel, which keeps
+  ``Sum[a, 3]`` inert while accepting ``Sum[a, {3}]``.
 - `expression.py` remains the compatibility import surface and still hosts shared expression data
   types, session state, formatting, strings, associations, functional/list operations, and other
   built-in families awaiting future extraction.

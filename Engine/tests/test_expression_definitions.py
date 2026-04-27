@@ -233,13 +233,15 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
         suffix = abs(hash((id(self), self._testMethodName))) % 1000000
         self.f = f"tungstenFn{suffix}"
         self.g = f"tungstenG{suffix}"
+        self.h = f"tungstenH{suffix}"
+        self.q = f"tungstenQ{suffix}"
         self.x = f"tungstenX{suffix}"
         self.y = f"tungstenY{suffix}"
-        for name in (self.f, self.g, self.x, self.y):
+        for name in (self.f, self.g, self.h, self.q, self.x, self.y):
             evaluate(parse_input_form(f"ClearAll[{name}]"))
 
     def tearDown(self) -> None:
-        for name in (self.f, self.g, self.x, self.y):
+        for name in (self.f, self.g, self.h, self.q, self.x, self.y):
             evaluate(parse_input_form(f"ClearAll[{name}]"))
 
     def test_set_with_pattern_lhs_assigns_downvalue(self) -> None:
@@ -308,6 +310,31 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
         evaluate(parse_input_form(f"{self.g}[{self.x}_] := {self.x} /; {self.x} > 0"))
         self.assertEqual(_full(f"{{{self.f}[2], {self.f}[-1], {self.g}[2], {self.g}[-1]}}"), f"List[2, {self.f}[-1], 2, {self.g}[-1]]")
 
+    def test_downvalues_support_conditions_at_multiple_levels(self) -> None:
+        evaluate(parse_input_form(f"({self.f}[{self.x}_] /; {self.x} > 0) := lhsOuter[{self.x}]"))
+        evaluate(parse_input_form(f"{self.g}[{self.x}_ /; {self.x} < 0] := lhsInner[{self.x}]"))
+        evaluate(parse_input_form(f"{self.h}[{self.x}_] := rhsCondition[{self.x}] /; {self.x} > 10"))
+
+        self.assertEqual(_full(f"{self.f}[2]"), "lhsOuter[2]")
+        self.assertEqual(_full(f"{self.f}[-2]"), f"{self.f}[-2]")
+        self.assertEqual(_full(f"{self.g}[-2]"), "lhsInner[-2]")
+        self.assertEqual(_full(f"{self.g}[2]"), f"{self.g}[2]")
+        self.assertEqual(_full(f"{self.h}[11]"), "rhsCondition[11]")
+        self.assertEqual(_full(f"{self.h}[5]"), f"{self.h}[5]")
+
+    def test_downvalue_multiple_equations_and_unset(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := positive /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f}[{self.x}_] := negative /; {self.x} < 0"))
+        evaluate(parse_input_form(f"{self.f}[0] = zero"))
+
+        self.assertEqual(_full(f"{self.f}[2]"), "positive")
+        self.assertEqual(_full(f"{self.f}[-2]"), "negative")
+        self.assertEqual(_full(f"{self.f}[0]"), "zero")
+        self.assertEqual(_full(f"{self.f}[{self.x}_] =."), "Null")
+        self.assertEqual(_full(f"{self.f}[2]"), f"{self.f}[2]")
+        self.assertEqual(_full(f"{self.f}[-2]"), f"{self.f}[-2]")
+        self.assertEqual(_full(f"{self.f}[0]"), "zero")
+
     def test_curried_lhs_assigns_subvalue(self) -> None:
         evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := {{{self.x}, {self.y}}}"))
         self.assertEqual(_full(f"{self.f}[1][2]"), "List[1, 2]")
@@ -327,6 +354,16 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
             f"List[RuleDelayed[HoldPattern[{self.g}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]], List[{self.x}, {self.y}]]]",
         )
 
+    def test_subvalue_multiple_equations_and_unset(self) -> None:
+        evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := positive[{self.y}] /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f}[{self.x}_][{self.y}_] := negative[{self.y}] /; {self.x} < 0"))
+
+        self.assertEqual(_full(f"{self.f}[2][9]"), "positive[9]")
+        self.assertEqual(_full(f"{self.f}[-2][9]"), "negative[9]")
+        self.assertEqual(_full(f"{self.f}[{self.x}_][{self.y}_] =."), "Null")
+        self.assertEqual(_full(f"{self.f}[2][9]"), f"{self.f}[2][9]")
+        self.assertEqual(_full(f"{self.f}[-2][9]"), f"{self.f}[-2][9]")
+
     def test_compound_unset_removes_matching_definition(self) -> None:
         evaluate(parse_input_form(f"{self.f}[1] = 10"))
         evaluate(parse_input_form(f"{self.f}[1] =."))
@@ -337,6 +374,115 @@ class CompoundLhsAssignmentTests(unittest.TestCase):
         evaluate(parse_input_form(f"{self.f}[{self.x}_] := {self.x}"))
         self.assertEqual(_full(f"ValueQ[{self.f}[2]]"), "True")
         self.assertEqual(_full(f"ValueQ[{self.g}[2]]"), "False")
+
+    def test_tagset_redundant_own_down_and_sub_values(self) -> None:
+        self.assertEqual(_full(f"{self.f} /: {self.f} = 7"), "7")
+        self.assertEqual(_full(f"{self.f}"), "7")
+        self.assertEqual(
+            _full(f"OwnValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}], 7]]",
+        )
+        evaluate(parse_input_form(f"ClearAll[{self.f}]"))
+
+        evaluate(parse_input_form(f"{self.f} /: {self.f}[{self.x}_] := {self.x} + 1"))
+        self.assertEqual(_full(f"{self.f}[3]"), "4")
+        self.assertEqual(
+            _full(f"DownValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]]], Plus[{self.x}, 1]]]",
+        )
+        evaluate(parse_input_form(f"ClearAll[{self.f}]"))
+
+        evaluate(parse_input_form(f"{self.f} /: {self.f}[{self.x}_][{self.y}_] := {{{self.x}, {self.y}}}"))
+        self.assertEqual(_full(f"{self.f}[1][2]"), "List[1, 2]")
+        self.assertEqual(
+            _full(f"SubValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.f}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]], List[{self.x}, {self.y}]]]",
+        )
+
+    def test_tagset_and_tagsetdelayed_create_upvalues(self) -> None:
+        evaluate(parse_input_form(f"{self.y} = 5"))
+        self.assertEqual(_full(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] = {self.x} + {self.y}"), f"Plus[5, {self.x}]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[3]]"), "8")
+        evaluate(parse_input_form(f"{self.y} = 10"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[3]]"), "8")
+        self.assertEqual(_full(f"DownValues[{self.h}]"), "List[]")
+        self.assertEqual(
+            _full(f"UpValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]]]], Plus[5, {self.x}]]]",
+        )
+
+        evaluate(parse_input_form(f"{self.g} /: {self.h}[{self.g}[{self.x}_]] := {self.x} + {self.y}"))
+        self.assertEqual(_full(f"{self.h}[{self.g}[3]]"), "13")
+        evaluate(parse_input_form(f"{self.y} = 20"))
+        self.assertEqual(_full(f"{self.h}[{self.g}[3]]"), "23")
+
+    def test_upvalues_apply_before_downvalues_and_respect_hold_all_complete(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := up[{self.x}]"))
+        evaluate(parse_input_form(f"{self.h}[{self.x}_] := down[{self.x}]"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[1]]"), "up[1]")
+
+        evaluate(parse_input_form(f"SetAttributes[{self.q}, HoldAll]"))
+        evaluate(parse_input_form(f"{self.f} /: {self.q}[{self.f}[{self.x}_]] := heldUp[{self.x}]"))
+        self.assertEqual(_full(f"{self.q}[{self.f}[2]]"), "heldUp[2]")
+
+        evaluate(parse_input_form(f"SetAttributes[{self.g}, HoldAllComplete]"))
+        evaluate(parse_input_form(f"{self.f} /: {self.g}[{self.f}[{self.x}_]] := suppressed[{self.x}]"))
+        self.assertEqual(_full(f"{self.g}[{self.f}[2]]"), f"{self.g}[{self.f}[2]]")
+
+    def test_tagset_supports_conditions_at_multiple_levels(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: ({self.h}[{self.f}[{self.x}_]] /; {self.x} > 0) := lhsOuter[{self.x}]"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_ /; {self.x} < 0]] := lhsInner[{self.x}]"))
+        evaluate(parse_input_form(f"{self.f} /: condRhs[{self.f}[{self.x}_]] := rhsCondition[{self.x}] /; {self.x} > 10"))
+
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "lhsOuter[2]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), "lhsInner[-2]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[0]]"), f"{self.h}[{self.f}[0]]")
+        self.assertEqual(_full(f"condRhs[{self.f}[11]]"), "rhsCondition[11]")
+        self.assertEqual(_full(f"condRhs[{self.f}[5]]"), f"condRhs[{self.f}[5]]")
+
+    def test_tagset_multiple_equations_and_exact_priority(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := positive /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := negative /; {self.x} < 0"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[0]] = zero"))
+
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "positive")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), "negative")
+        self.assertEqual(_full(f"{self.h}[{self.f}[0]]"), "zero")
+        upvalues = _full(f"UpValues[{self.f}]")
+        self.assertIn(f"RuleDelayed[HoldPattern[{self.h}[{self.f}[0]]], zero]", upvalues)
+        self.assertIn(f"RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]]]], Condition[positive, Greater[{self.x}, 0]]]", upvalues)
+        self.assertIn(f"RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]]]], Condition[negative, Less[{self.x}, 0]]]", upvalues)
+
+    def test_tagset_head_chain_argument_and_deep_invalid_occurrence(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_][{self.y}_]] := {{{self.x}, {self.y}}}"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[1][2]]"), "List[1, 2]")
+        self.assertEqual(
+            _full(f"UpValues[{self.f}]"),
+            f"List[RuleDelayed[HoldPattern[{self.h}[{self.f}[Pattern[{self.x}, Blank[]]][Pattern[{self.y}, Blank[]]]]], List[{self.x}, {self.y}]]]",
+        )
+
+        evaluate(parse_input_form(f"{self.g} /: {self.h}[deep[{self.g}[{self.x}_]]] := {self.x}"))
+        self.assertEqual(_full(f"{self.h}[deep[{self.g}[1]]]"), f"{self.h}[deep[{self.g}[1]]]")
+        self.assertEqual(_full(f"UpValues[{self.g}]"), "List[]")
+
+    def test_tagunset_removes_tagged_values_only(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := {self.x}"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]] =."), "$Failed")
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "2")
+
+        self.assertEqual(_full(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] =."), "Null")
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), f"{self.h}[{self.f}[2]]")
+        self.assertEqual(_full(f"UpValues[{self.f}]"), "List[]")
+
+    def test_tagunset_removes_all_equations_for_same_lhs(self) -> None:
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := positive /; {self.x} > 0"))
+        evaluate(parse_input_form(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] := negative /; {self.x} < 0"))
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), "positive")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), "negative")
+        self.assertEqual(_full(f"{self.f} /: {self.h}[{self.f}[{self.x}_]] =."), "Null")
+        self.assertEqual(_full(f"{self.h}[{self.f}[2]]"), f"{self.h}[{self.f}[2]]")
+        self.assertEqual(_full(f"{self.h}[{self.f}[-2]]"), f"{self.h}[{self.f}[-2]]")
+        self.assertEqual(_full(f"UpValues[{self.f}]"), "List[]")
 
 
 class ValueGetterTests(unittest.TestCase):
@@ -378,22 +524,17 @@ class ValueGetterTests(unittest.TestCase):
 
 
 class ScopingStubTests(unittest.TestCase):
-    """``Module`` and ``Block`` are still stubs that emit a clear
-    not-yet-supported message and return the inert call. ``With`` was
-    implemented in a follow-up pass and now performs capture-avoiding
-    substitution; see ``WithEvaluationTests`` for its behavior."""
+    """``With``, ``Module``, and ``Block`` are all implemented; see
+    ``WithEvaluationTests``, ``ModuleEvaluationTests``, and
+    ``BlockEvaluationTests`` for their behavior. This class is kept as a
+    placeholder so any future scoping construct that lands as a stub
+    has an obvious home."""
 
-    def test_module_returns_inert_form(self) -> None:
-        self.assertEqual(
-            _full("Module[{x = 5}, x + 1]"),
-            "Module[List[Set[x, 5]], Plus[x, 1]]",
-        )
-
-    def test_block_returns_inert_form(self) -> None:
-        self.assertEqual(
-            _full("Block[{x = 5}, x + 1]"),
-            "Block[List[Set[x, 5]], Plus[x, 1]]",
-        )
+    def test_no_active_stubs(self) -> None:
+        # Sanity check: With, Module, and Block are not stubs anymore.
+        self.assertEqual(_full("With[{x = 5}, x + 1]"), "6")
+        self.assertEqual(_full("Module[{x = 5}, x + 1]"), "6")
+        self.assertEqual(_full("Block[{x = 5}, x + 1]"), "6")
 
 
 class WithEvaluationTests(unittest.TestCase):
@@ -554,6 +695,636 @@ class WithEvaluationTests(unittest.TestCase):
         # error too. We assert on the inert fallback shape here.
         result = _full("With[{x = 1, x = 2}, x]")
         self.assertEqual(result, "With[List[Set[x, 1], Set[x, 2]], x]")
+
+
+class ModuleEvaluationTests(unittest.TestCase):
+    """``Module[{locals}, body]`` allocates a fresh per-invocation symbol
+    for every local, installs each binding's RHS as the fresh symbol's
+    own value (in the *outer* scope, so bindings are independent), and
+    rewrites ``body`` to refer to the fresh symbols.
+
+    The fresh symbol's exact suffix number is process-counter-dependent,
+    so tests that observe a fresh symbol's full form use a Tungsten-style
+    sentinel (``x$N`` with ``N`` from the registry's
+    ``allocate_module_local_symbols`` helper) and assert on shape rather
+    than literal equality. Tests that observe only the *value* of a
+    Module expression are unaffected by the suffix.
+    """
+
+    def test_basic_immediate_binding(self) -> None:
+        self.assertEqual(_full("Module[{x = 5}, x + 1]"), "6")
+
+    def test_multiple_independent_bindings(self) -> None:
+        self.assertEqual(_full("Module[{x = 5, y = 6}, x + y]"), "11")
+
+    def test_bindings_are_independent_so_second_does_not_see_first(self) -> None:
+        # Each binding's RHS is evaluated in the OUTER scope, so the
+        # second binding's ``x + 1`` sees the OUTER (free) ``x``, not
+        # the local. The local ``x`` separately gets value 5.
+        self.assertEqual(
+            _full("Module[{x = 5, y = x + 1}, {x, y}]"),
+            "List[5, Plus[1, x]]",
+        )
+
+    def test_set_delayed_binding_holds_rhs(self) -> None:
+        self.assertEqual(
+            _full("Module[{x := a + b}, {x, x}]"),
+            "List[Plus[a, b], Plus[a, b]]",
+        )
+
+    def test_no_init_binding_returns_fresh_symbol(self) -> None:
+        # The fresh symbol's exact name varies per session; assert on
+        # the shape and on the ``x$`` prefix instead.
+        rendered = _full("Module[{x}, x + 1]")
+        self.assertTrue(
+            rendered.startswith("Plus[1, x$") and rendered.endswith("]"),
+            f"unexpected fresh-symbol shape: {rendered!r}",
+        )
+
+    def test_no_init_with_init_mixed(self) -> None:
+        self.assertEqual(_full("Module[{x, y = 5}, y * 2]"), "10")
+
+    def test_empty_bindings_returns_evaluated_body(self) -> None:
+        self.assertEqual(_full("Module[{}, 7]"), "7")
+
+    def test_local_can_be_mutated_in_body(self) -> None:
+        # Module makes its locals real symbols, so the body can ``Set``
+        # them. This is what distinguishes Module from With (whose body
+        # would substitute the value directly).
+        self.assertEqual(_full("Module[{x = 5}, x = 99; x]"), "99")
+
+    def test_local_can_be_mutated_in_loop(self) -> None:
+        self.assertEqual(
+            _full(
+                "Module[{counter = 0}, "
+                "counter = counter + 1; counter = counter + 1; counter]"
+            ),
+            "2",
+        )
+
+    def test_nested_inner_module_shadows(self) -> None:
+        self.assertEqual(_full("Module[{x = 1}, Module[{x = 2}, x]]"), "2")
+
+    def test_nested_module_chains_through_outer_locals(self) -> None:
+        # Outer ``x`` is in scope for the inner Module's RHS evaluation
+        # because the inner RHS evaluates in the (outer-of-inner) scope,
+        # which has the outer Module's local in scope.
+        self.assertEqual(
+            _full("Module[{x = 1}, Module[{y = x + 1}, x + y]]"),
+            "3",
+        )
+
+    def test_function_with_shadowing_parameter_blocks_substitution(self) -> None:
+        self.assertEqual(
+            _full("Module[{x = 5}, Function[x, x + 1][7]]"),
+            "8",
+        )
+
+    def test_function_with_non_shadowed_parameter_picks_up_local(self) -> None:
+        self.assertEqual(
+            _full("Module[{x = 5}, Function[y, x + y][3]]"),
+            "8",
+        )
+
+    def test_with_evaluating_into_module_works(self) -> None:
+        # ``With``'s substitution flows through the inner Module's
+        # bindings RHS, then Module evaluates normally.
+        self.assertEqual(_full("With[{x = 5}, Module[{y = x + 1}, y]]"), "6")
+
+    def test_function_with_module_local_in_body(self) -> None:
+        self.assertEqual(
+            _full("Function[t, Module[{u = t + 1}, u * 2]][10]"),
+            "22",
+        )
+
+    def test_three_locals_share_same_counter_suffix(self) -> None:
+        self.assertEqual(
+            _full("Module[{x = 1, y = 2, z = 3}, x + y + z]"),
+            "6",
+        )
+
+    def test_set_delayed_function_uses_fresh_module_each_call(self) -> None:
+        # ``f := Module[{x = 5}, x + 1]; f`` evaluates the Module on
+        # every read of ``f``. Each read allocates a fresh ``x$N`` —
+        # both reads still produce ``6`` because the body is identical.
+        evaluate(parse_input_form("ClearAll[tungstenModuleF]"))
+        try:
+            evaluate(parse_input_form("tungstenModuleF := Module[{x = 5}, x + 1]"))
+            self.assertEqual(_full("tungstenModuleF"), "6")
+            self.assertEqual(_full("tungstenModuleF"), "6")
+        finally:
+            evaluate(parse_input_form("ClearAll[tungstenModuleF]"))
+
+    def test_local_appears_in_own_values_under_fresh_name(self) -> None:
+        # ``OwnValues[x]`` inside the Module body should report the
+        # fresh ``x$N`` symbol's own value, not the original ``x``.
+        rendered = _full("Module[{x = 5}, OwnValues[x]]")
+        self.assertTrue(
+            rendered.startswith("List[RuleDelayed[HoldPattern[x$"),
+            f"unexpected OwnValues shape: {rendered!r}",
+        )
+        self.assertIn("], 5]]", rendered)
+
+    def test_module_local_is_a_symbol(self) -> None:
+        # ``Head[x]`` inside the Module body is ``Symbol`` — the fresh
+        # ``x$N`` is a real registry symbol, not a special placeholder.
+        self.assertEqual(_full("Module[{x}, Head[x]]"), "Symbol")
+        self.assertEqual(_full("Module[{x}, x === x]"), "True")
+
+    def test_substitutes_through_hold(self) -> None:
+        # ``Module`` rewrites references to ``x`` even through ``Hold``;
+        # the held form retains the fresh symbol.
+        rendered = _full("Module[{x = 5}, Hold[x]]")
+        self.assertTrue(
+            rendered.startswith("Hold[x$") and rendered.endswith("]"),
+            f"unexpected Hold shape: {rendered!r}",
+        )
+
+    def test_function_with_slot_initializer(self) -> None:
+        self.assertEqual(_full("(Module[{x = #}, x + 1] &)[10]"), "11")
+
+    def test_length_of_module_result(self) -> None:
+        self.assertEqual(_full("Length[Module[{x = 5}, {x, x, x}]]"), "3")
+        self.assertEqual(
+            _full("Module[{x = 5}, {x, x, x}]"),
+            "List[5, 5, 5]",
+        )
+
+    def test_independent_bindings_chain_falls_through_to_outer(self) -> None:
+        # ``Module[{a = 1, b = a + 1, c = b + 1}, c]`` is independent
+        # like With: the second and third RHS see the OUTER ``a`` and
+        # ``b``, which are unbound, so ``c`` gets value ``b + 1``
+        # where ``b`` is the outer (free) ``b``.
+        self.assertEqual(
+            _full("Module[{a = 1, b = a + 1, c = b + 1}, c]"),
+            "Plus[1, b]",
+        )
+
+    def test_invalid_bindings_list_raises(self) -> None:
+        result = _full("Module[5, x]")
+        self.assertEqual(result, "Module[5, x]")
+
+    def test_duplicate_binding_name_raises(self) -> None:
+        result = _full("Module[{x = 1, x = 2}, x]")
+        self.assertEqual(
+            result,
+            "Module[List[Set[x, 1], Set[x, 2]], x]",
+        )
+
+
+class ModuleClosureTests(unittest.TestCase):
+    """End-to-end closure scenarios where a Module-allocated fresh symbol
+    is captured by an outer assignment and later called.
+
+    The shape is::
+
+        g = Module[{f}, f[...] := ...; ... (* more definitions *); f]
+        g[...]   (* dispatches into f's DownValues stored on f$N *)
+
+    The scenario depends on three independent pieces working together:
+
+    1. Module rewrites every reference to a local in the body — including
+       the LHS of nested ``Set`` / ``SetDelayed`` and any later occurrence
+       in the body — to the fresh ``f$N`` symbol.
+    2. The compound-LHS ``Set`` / ``SetDelayed`` dispatch installs the
+       rewritten rule on ``f$N``'s ``DownValues`` storage.
+    3. The Module returns the fresh ``f$N`` symbol; the outer ``Set[g, ...]``
+       stores it as ``g``'s own value; later ``g[args]`` resolves ``g``
+       to ``f$N`` and dispatches against ``f$N``'s ``DownValues``.
+
+    These tests use process-unique global names (``tungstenClosure*``)
+    rather than ``g`` / ``h`` so they don't bleed state across runs.
+    """
+
+    def setUp(self) -> None:
+        self.names_to_clear: list[str] = []
+
+    def tearDown(self) -> None:
+        for name in self.names_to_clear:
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
+
+    def _track(self, *names: str) -> None:
+        self.names_to_clear.extend(names)
+
+    def test_simple_closure_dispatches_one_definition(self) -> None:
+        # The canonical user scenario: define a function inside a Module,
+        # return it, call it through the outer assignment.
+        self._track("tungstenClosureG1")
+        evaluate(parse_input_form("tungstenClosureG1 = Module[{f}, f[x_] := x^2; f]"))
+        self.assertEqual(_full("tungstenClosureG1[3]"), "9")
+        self.assertEqual(
+            _full("tungstenClosureG1[a + b]"),
+            "Power[Plus[a, b], 2]",
+        )
+
+    def test_closure_with_multi_equation_definition_dispatches_each_branch(self) -> None:
+        # Two ``f[...] := ...`` bindings in the same Module body install
+        # two DownValues on the same ``f$N``. The literal-LHS (specific)
+        # one wins for ``h[0]`` and the pattern-LHS one wins for ``h[5]``.
+        self._track("tungstenClosureH1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureH1 = Module[{f}, f[0] := 1; f[n_] := n * f[n - 1]; f]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureH1[5]"), "120")
+        self.assertEqual(_full("tungstenClosureH1[10]"), "3628800")
+
+    def test_closure_mutual_recursion_through_two_module_locals(self) -> None:
+        # Both ``e`` and ``o`` are Module locals. Module's rewrite gives
+        # them ``e$N`` and ``o$N`` (same ``N``); references between them
+        # in the body resolve consistently. The mutual recursion bottoms
+        # out at the literal-LHS base cases.
+        self._track("tungstenClosureE1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureE1 = Module[{e, o}, "
+                "e[0] := True; e[n_] := o[n - 1]; "
+                "o[0] := False; o[n_] := e[n - 1]; "
+                "e]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureE1[10]"), "True")
+        self.assertEqual(_full("tungstenClosureE1[7]"), "False")
+
+    def test_closure_memoization_via_set_inside_set_delayed(self) -> None:
+        # Wolfram's standard memoization idiom:
+        #   fib[n_] := fib[n] = If[n < 2, n, fib[n-1] + fib[n-2]]
+        # Each ``fib$N[k]`` evaluates once via the pattern rule, then the
+        # inner ``fib$N[k] = ...`` Set installs a literal-LHS DownValue
+        # so subsequent calls hit the cached result directly.
+        self._track("tungstenClosureMemo1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureMemo1 = Module[{cache, fib}, "
+                "cache = <||>; "
+                "fib[n_] := fib[n] = If[n < 2, n, fib[n - 1] + fib[n - 2]]; "
+                "fib]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureMemo1[10]"), "55")
+        self.assertEqual(_full("tungstenClosureMemo1[20]"), "6765")
+
+    def test_closure_with_function_capturing_module_local(self) -> None:
+        # A ``Function`` returned from Module captures the local symbol;
+        # each call mutates the same ``n$N`` because ``n`` was a Module
+        # local, not a Function-bound parameter.
+        self._track("tungstenClosureCounter1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureCounter1 = Module[{n = 0}, "
+                "Function[{}, n = n + 1; n]]"
+            )
+        )
+        self.assertEqual(
+            _full(
+                "{tungstenClosureCounter1[], "
+                "tungstenClosureCounter1[], "
+                "tungstenClosureCounter1[]}"
+            ),
+            "List[1, 2, 3]",
+        )
+
+    def test_two_independent_closures_do_not_share_state(self) -> None:
+        # Each Module call gets its own fresh ``f$N`` so the two closures
+        # have completely separate DownValue tables.
+        self._track("tungstenClosureA1", "tungstenClosureA2")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureA1 = Module[{f}, f[x_] := x + 1; f]"
+            )
+        )
+        evaluate(
+            parse_input_form(
+                "tungstenClosureA2 = Module[{f}, f[x_] := x * 2; f]"
+            )
+        )
+        self.assertEqual(
+            _full("{tungstenClosureA1[5], tungstenClosureA2[5]}"),
+            "List[6, 10]",
+        )
+
+    def test_immediate_call_inside_module_body(self) -> None:
+        # The closure pattern still works when the function is called
+        # directly inside the Module body rather than escaping outward.
+        # ``f[0] := 1; f[n_] := n + f[n - 1]`` gives
+        # ``f[n] = 1 + Sum[k, {k, 1, n}] = 1 + n(n+1)/2`` -> 56 at n=10.
+        self.assertEqual(
+            _full("Module[{f}, f[0] := 1; f[n_] := n + f[n - 1]; f[10]]"),
+            "56",
+        )
+
+    def test_closure_with_multiple_arguments(self) -> None:
+        self._track("tungstenClosureBin1")
+        evaluate(
+            parse_input_form(
+                "tungstenClosureBin1 = Module[{f}, f[x_, y_] := x + y; f]"
+            )
+        )
+        self.assertEqual(_full("tungstenClosureBin1[3, 4]"), "7")
+        self.assertEqual(
+            _full("tungstenClosureBin1[a, b]"),
+            "Plus[a, b]",
+        )
+
+
+class BlockEvaluationTests(unittest.TestCase):
+    """``Block[locals, body]`` is dynamic save-and-restore scoping.
+
+    For each named local Tungsten snapshots the symbol's complete value
+    state at entry, evaluates ``body``, and restores the snapshot on
+    exit. The optional initializer sets the symbol's own value during
+    the body. Modifications inside the body — to OwnValues, DownValues,
+    UpValues, SubValues, NValues — are reverted on exit, even when the
+    body raises (the restore happens in a Python ``try``/``finally``).
+
+    Kernel-confirmed semantics (modern Wolfram 14.x, distinct from
+    older docs that claimed Block cleared values at entry):
+
+    - Block does *not* clear values at entry; the body sees the outer
+      values until the optional initializer overrides the OwnValue.
+    - With an initializer, the OwnValue replaces the symbol's head
+      dispatch so existing DownValues are bypassed for the body.
+    - Modifications inside the body are reverted on exit; this is the
+      primary mechanism Block provides.
+
+    Tungsten reuses process-local global names (``tungstenBlock*``) so
+    the tests do not collide with each other or with ``Block`` /
+    ``InheritedBlock`` tests in other files.
+    """
+
+    def setUp(self) -> None:
+        self.names_to_clear: list[str] = []
+
+    def tearDown(self) -> None:
+        for name in self.names_to_clear:
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
+
+    def _track(self, *names: str) -> None:
+        self.names_to_clear.extend(names)
+
+    def test_basic_immediate_initializer(self) -> None:
+        self.assertEqual(_full("Block[{x = 5}, x + 1]"), "6")
+
+    def test_multiple_initializers(self) -> None:
+        self.assertEqual(_full("Block[{x = 5, y = 6}, x + y]"), "11")
+
+    def test_no_initializer_keeps_outer_value(self) -> None:
+        # Block without an initializer does NOT clear the symbol; the
+        # body sees the outer value (kernel-confirmed).
+        self._track("tungstenBlockA")
+        evaluate(parse_input_form("tungstenBlockA = 100"))
+        self.assertEqual(_full("Block[{tungstenBlockA}, tungstenBlockA]"), "100")
+
+    def test_initializer_replaces_outer_value(self) -> None:
+        self._track("tungstenBlockB")
+        evaluate(parse_input_form("tungstenBlockB = 100"))
+        self.assertEqual(
+            _full("Block[{tungstenBlockB = 5}, tungstenBlockB]"),
+            "5",
+        )
+
+    def test_outer_own_value_is_restored_on_exit(self) -> None:
+        self._track("tungstenBlockC")
+        evaluate(parse_input_form("tungstenBlockC = 100"))
+        evaluate(parse_input_form("Block[{tungstenBlockC = 5}, tungstenBlockC]"))
+        self.assertEqual(_full("tungstenBlockC"), "100")
+
+    def test_body_can_mutate_local_and_outer_is_restored(self) -> None:
+        self._track("tungstenBlockD")
+        evaluate(parse_input_form("tungstenBlockD = 100"))
+        result = _full(
+            "Block[{tungstenBlockD}, tungstenBlockD = 5; tungstenBlockD]"
+        )
+        self.assertEqual(result, "5")
+        self.assertEqual(_full("tungstenBlockD"), "100")
+
+    def test_outer_down_values_are_visible_inside_block(self) -> None:
+        # Block does not clear DownValues at entry; outer DV is visible.
+        self._track("tungstenBlockE")
+        evaluate(parse_input_form("tungstenBlockE[1] = 99"))
+        self.assertEqual(
+            _full("Block[{tungstenBlockE}, tungstenBlockE[1]]"),
+            "99",
+        )
+
+    def test_down_values_added_inside_block_revert_on_exit(self) -> None:
+        # The save/restore covers DownValues too; an addition inside the
+        # body is reverted on exit.
+        self._track("tungstenBlockF")
+        evaluate(parse_input_form("tungstenBlockF[1] = 99"))
+        # Inside the block both values are visible.
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockF}, "
+                "tungstenBlockF[2] = 88; "
+                "{tungstenBlockF[1], tungstenBlockF[2]}]"
+            ),
+            "List[99, 88]",
+        )
+        # After the block, the addition is reverted.
+        self.assertEqual(_full("tungstenBlockF[2]"), "tungstenBlockF[2]")
+        # And the original DownValue is still there.
+        self.assertEqual(_full("tungstenBlockF[1]"), "99")
+
+    def test_down_values_modified_inside_block_revert_on_exit(self) -> None:
+        # Modifying an existing DownValue inside the block reverts on exit.
+        self._track("tungstenBlockG")
+        evaluate(parse_input_form("tungstenBlockG[1] = 99"))
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockG}, "
+                "tungstenBlockG[1] = 100; tungstenBlockG[1]]"
+            ),
+            "100",
+        )
+        self.assertEqual(_full("tungstenBlockG[1]"), "99")
+
+    def test_initializer_replaces_head_for_dispatch_inside_block(self) -> None:
+        # When an initializer sets an OwnValue on a symbol that also has
+        # DownValues, the OwnValue replaces the head, bypassing DV
+        # dispatch. The kernel returns ``5[1]`` (inert) for ``f[1]`` when
+        # ``f`` has been bound to 5.
+        self._track("tungstenBlockH")
+        evaluate(parse_input_form("tungstenBlockH[x_] := x^2"))
+        # Without initializer the DV dispatches normally.
+        self.assertEqual(
+            _full("Block[{tungstenBlockH}, tungstenBlockH[3]]"),
+            "9",
+        )
+        # With initializer, the OwnValue overrides head dispatch.
+        self.assertEqual(
+            _full("Block[{tungstenBlockH = 7}, tungstenBlockH[3]]"),
+            "7[3]",
+        )
+        # Outer DV is restored.
+        self.assertEqual(_full("tungstenBlockH[3]"), "9")
+
+    def test_empty_bindings_returns_evaluated_body(self) -> None:
+        self.assertEqual(_full("Block[{}, 7]"), "7")
+
+    def test_nested_block_inner_shadows_outer(self) -> None:
+        self.assertEqual(
+            _full("Block[{x = 1}, Block[{x = 2}, x]]"),
+            "2",
+        )
+
+    def test_nested_block_outer_visible_in_inner(self) -> None:
+        # Block uses dynamic scoping, so the inner Block's body still
+        # has access to the outer Block's local while in scope (here
+        # via the second binding's RHS).
+        self.assertEqual(
+            _full("Block[{x = 5}, Block[{y = x + 1}, y * 2]]"),
+            "12",
+        )
+
+    def test_block_with_module_inside_body(self) -> None:
+        # Block sets x = 5; Module's binding RHS sees x = 5 (dynamic scope).
+        self._track("tungstenBlockI")
+        evaluate(parse_input_form("tungstenBlockI = 99"))
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockI = 5}, "
+                "Module[{y = tungstenBlockI + 1}, y]]"
+            ),
+            "6",
+        )
+        self.assertEqual(_full("tungstenBlockI"), "99")
+
+    def test_block_with_function_called_inside_body(self) -> None:
+        # Function captures via dynamic scope: the Function is just a
+        # body referring to the Block's local x, which has value 5
+        # during the body.
+        self.assertEqual(
+            _full("Block[{x = 5}, Function[y, x + y][3]]"),
+            "8",
+        )
+
+    def test_set_delayed_initializer_re_evaluates_each_lookup(self) -> None:
+        # ``Block[{f := body}, ...]`` stores the held ``body`` as f's
+        # OwnValue, so each lookup re-evaluates it.
+        self._track("tungstenBlockJ", "tungstenBlockJSeed")
+        evaluate(parse_input_form("tungstenBlockJSeed = 5"))
+        self.assertEqual(
+            _full(
+                "Block[{tungstenBlockJ := tungstenBlockJSeed + 1}, "
+                "tungstenBlockJ + tungstenBlockJ]"
+            ),
+            "12",
+        )
+
+    def test_invalid_bindings_list_raises(self) -> None:
+        result = _full("Block[5, x]")
+        self.assertEqual(result, "Block[5, x]")
+
+    def test_duplicate_binding_name_raises(self) -> None:
+        result = _full("Block[{x = 1, x = 2}, x]")
+        self.assertEqual(
+            result,
+            "Block[List[Set[x, 1], Set[x, 2]], x]",
+        )
+
+    def test_state_restored_even_when_body_aborts(self) -> None:
+        # The save/restore is exception-safe via Python try/finally.
+        # Tungsten implements ``Throw`` / ``Catch`` as evaluator-level
+        # control flow; we verify that the inner Set is reverted even
+        # though Throw escapes the Block body.
+        self._track("tungstenBlockK")
+        evaluate(parse_input_form("tungstenBlockK = 100"))
+        self.assertEqual(
+            _full(
+                "Catch[Block[{tungstenBlockK = 5}, "
+                "tungstenBlockK = 99; Throw[escaped]]]"
+            ),
+            "escaped",
+        )
+        # After the Throw escaped through Block, the outer value is restored.
+        self.assertEqual(_full("tungstenBlockK"), "100")
+
+
+class InheritedBlockEvaluationTests(unittest.TestCase):
+    """``Internal`InheritedBlock`` is functionally identical to ``Block``
+    in modern Wolfram 14.x. Both save the symbols' complete value state,
+    optionally apply initializers, evaluate the body, and restore on
+    exit. The historical distinction (Block clearing values at entry)
+    is no longer present in the live kernel for either form.
+
+    Tungsten dispatches both ``InheritedBlock`` (unqualified) and
+    ``Internal`InheritedBlock`` (kernel-canonical qualified spelling)
+    through the same handler.
+    """
+
+    def setUp(self) -> None:
+        self.names_to_clear: list[str] = []
+
+    def tearDown(self) -> None:
+        for name in self.names_to_clear:
+            evaluate(parse_input_form(f"ClearAll[{name}]"))
+
+    def _track(self, *names: str) -> None:
+        self.names_to_clear.extend(names)
+
+    def test_qualified_name_dispatches(self) -> None:
+        self.assertEqual(
+            _full("Internal`InheritedBlock[{x = 5}, x + 1]"),
+            "6",
+        )
+
+    def test_unqualified_name_dispatches(self) -> None:
+        self.assertEqual(
+            _full("InheritedBlock[{x = 5}, x + 1]"),
+            "6",
+        )
+
+    def test_inherits_outer_own_value_without_initializer(self) -> None:
+        self._track("tungstenIB1")
+        evaluate(parse_input_form("tungstenIB1 = 5"))
+        self.assertEqual(
+            _full("Internal`InheritedBlock[{tungstenIB1}, tungstenIB1]"),
+            "5",
+        )
+
+    def test_local_set_is_reverted_on_exit(self) -> None:
+        self._track("tungstenIB2")
+        evaluate(parse_input_form("tungstenIB2 = 5"))
+        self.assertEqual(
+            _full(
+                "Internal`InheritedBlock[{tungstenIB2}, "
+                "tungstenIB2 = 99; tungstenIB2]"
+            ),
+            "99",
+        )
+        self.assertEqual(_full("tungstenIB2"), "5")
+
+    def test_local_down_value_modification_is_reverted(self) -> None:
+        # The classic InheritedBlock idiom: locally extend a symbol's
+        # DownValues and have the additions reverted on exit.
+        self._track("tungstenIB3")
+        evaluate(parse_input_form("tungstenIB3[1] = 99"))
+        self.assertEqual(
+            _full(
+                "Internal`InheritedBlock[{tungstenIB3}, "
+                "tungstenIB3[1] = 100; tungstenIB3[1]]"
+            ),
+            "100",
+        )
+        self.assertEqual(_full("tungstenIB3[1]"), "99")
+
+    def test_locally_added_down_value_is_reverted(self) -> None:
+        # Inside the block we ADD a new DV; on exit the addition is gone.
+        self._track("tungstenIB4")
+        evaluate(parse_input_form("tungstenIB4[1] = 99"))
+        self.assertEqual(
+            _full(
+                "Internal`InheritedBlock[{tungstenIB4}, "
+                "tungstenIB4[2] = 88; "
+                "{tungstenIB4[1], tungstenIB4[2]}]"
+            ),
+            "List[99, 88]",
+        )
+        self.assertEqual(_full("tungstenIB4[2]"), "tungstenIB4[2]")
+        # And the original DV is still there.
+        self.assertEqual(_full("tungstenIB4[1]"), "99")
 
 
 if __name__ == "__main__":

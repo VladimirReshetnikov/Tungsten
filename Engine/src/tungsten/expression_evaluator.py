@@ -115,6 +115,81 @@ def evaluate_once(expr: Expr) -> Expr:
             from .expression_scoping import block_expr
             return block_expr(expr.arguments)
 
+        if raw_head_name in {"InheritedBlock", "Internal`InheritedBlock"}:
+            # Wolfram puts ``InheritedBlock`` in the ``Internal``` context;
+            # accept both the qualified and unqualified spelling so the
+            # kernel-style ``Internal``InheritedBlock`` and the ergonomic
+            # short name dispatch identically.
+            from .expression_scoping import inherited_block_expr
+            return inherited_block_expr(expr.arguments)
+
+        if raw_head_name == "Table":
+            # ``Table`` is HoldAll on its iterator specs and body; dispatch
+            # before argument evaluation so the iterator variable is not
+            # resolved to its outer value before Table can Block-scope it.
+            from .expression_iteration import table_expr
+            return table_expr(expr.arguments)
+
+        if raw_head_name == "Do":
+            from .expression_iteration import do_expr
+            return do_expr(expr.arguments)
+
+        if raw_head_name == "Sum":
+            # ``Sum`` is HoldAll on its iter specs and body so the iter
+            # variable is not looked up before Block-scoping installs
+            # the per-iteration value, matching the kernel's behavior.
+            from .expression_iteration import sum_expr
+            return sum_expr(expr.arguments)
+
+        if raw_head_name == "Product":
+            from .expression_iteration import product_expr
+            return product_expr(expr.arguments)
+
+        if raw_head_name == "For":
+            # ``For`` is HoldAll: init / test / incr / body all need
+            # to be re-evaluated each iteration, so we dispatch with
+            # the raw arguments before the standard arg-eval pass.
+            from .expression_iteration import for_expr
+            return for_expr(expr.arguments)
+
+        if raw_head_name == "While":
+            from .expression_iteration import while_expr
+            return while_expr(expr.arguments)
+
+        if raw_head_name == "Break":
+            return break_expr(expr.arguments)
+
+        if raw_head_name == "Continue":
+            return continue_expr(expr.arguments)
+
+        if raw_head_name == "Return":
+            return return_expr(expr.arguments)
+
+        if raw_head_name == "Label":
+            # ``Label`` is HoldAll: its argument is a tag, not an
+            # expression to be evaluated. Dispatch before the
+            # standard arg-eval pass so the original tag expression
+            # is preserved for the goto-scan in CompoundExpression.
+            return label_expr(expr.arguments)
+
+        if raw_head_name == "Goto":
+            return goto_expr(expr.arguments)
+
+        if raw_head_name == "Increment":
+            # ``Increment`` / ``Decrement`` / ``PreIncrement`` /
+            # ``PreDecrement`` are HoldFirst — the target symbol must
+            # not be looked up as a value before we can mutate it.
+            return increment_expr(expr.arguments)
+
+        if raw_head_name == "Decrement":
+            return decrement_expr(expr.arguments)
+
+        if raw_head_name == "PreIncrement":
+            return pre_increment_expr(expr.arguments)
+
+        if raw_head_name == "PreDecrement":
+            return pre_decrement_expr(expr.arguments)
+
         if raw_head_name == "TimeConstrained":
             return time_constrained_expr(expr.arguments)
 
@@ -166,8 +241,24 @@ def evaluate_once(expr: Expr) -> Expr:
         if raw_head_name == "SetDelayed":
             return set_delayed_expr(expr.arguments)
 
+        if raw_head_name == "AppendTo":
+            if len(expr.arguments) != 2:
+                raise WolframEvaluationError("AppendTo expects exactly two arguments.")
+            current = evaluate(expr.arguments[0])
+            appended = append(current, evaluate(expr.arguments[1]))
+            return set_expr((expr.arguments[0], appended))
+
+        if raw_head_name == "TagSet":
+            return tag_set_expr(expr.arguments, delayed=False)
+
+        if raw_head_name == "TagSetDelayed":
+            return tag_set_expr(expr.arguments, delayed=True)
+
         if raw_head_name == "Unset":
             return unset_expr(expr.arguments)
+
+        if raw_head_name == "TagUnset":
+            return tag_unset_expr(expr.arguments)
 
         if raw_head_name == "Clear":
             return clear_expr(expr.arguments)
@@ -419,9 +510,18 @@ def evaluate_once(expr: Expr) -> Expr:
             return failure_property(evaluated_head, evaluated_arguments[0])
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
+    if isinstance(evaluated_head, SparseArrayExpr):
+        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        if len(evaluated_arguments) == 1:
+            return sparse_array_property(evaluated_head, evaluated_arguments[0])
+        return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+
     if not isinstance(evaluated_head, Symbol):
         evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
         evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
+        up_value_result = _apply_up_value_definitions(evaluated_expr)
+        if up_value_result is not None:
+            return up_value_result
         sub_value_result = _apply_sub_value_definitions(evaluated_expr)
         if sub_value_result is not None:
             return sub_value_result
@@ -438,9 +538,18 @@ def evaluate_once(expr: Expr) -> Expr:
     if listable_result is not None:
         return listable_result
 
+    if "HoldAllComplete" not in _attribute_names_for_symbol(evaluated_head):
+        up_value_result = _apply_up_value_definitions(evaluated_expr)
+        if up_value_result is not None:
+            return up_value_result
+
     down_value_result = _apply_down_value_definitions(evaluated_head, evaluated_expr)
     if down_value_result is not None:
         return down_value_result
+
+    sparse_arithmetic_result = evaluate_sparse_array_arithmetic(evaluated_expr)
+    if sparse_arithmetic_result is not None:
+        return sparse_arithmetic_result
 
     constructor_result = _evaluate_numeric_constructor(evaluated_expr)
     if constructor_result is not None:
@@ -482,8 +591,15 @@ def evaluate_once(expr: Expr) -> Expr:
     if integer_special_result is not None:
         return integer_special_result
 
+    polynomial_result = _evaluate_polynomial_functions(evaluated_expr)
+    if polynomial_result is not None:
+        return polynomial_result
+
     if evaluated_head.name == "ByteArray":
         return byte_array(evaluated_arguments)
+
+    if evaluated_head.name == "SparseArray":
+        return sparse_array(*evaluated_arguments)
 
     if evaluated_head.name == "Identity":
         if len(evaluated_arguments) != 1:
@@ -538,7 +654,7 @@ def evaluate_once(expr: Expr) -> Expr:
             return to_string_expr(evaluated_arguments[0])
         if len(evaluated_arguments) == 2:
             return to_string_expr(evaluated_arguments[0], evaluated_arguments[1])
-        raise WolframEvaluationError("ToString expects an expression and an optional InputForm or StandardForm specifier.")
+        raise WolframEvaluationError("ToString expects an expression and an optional supported form specifier.")
 
     if evaluated_head_name == "ToBoxes":
         if len(evaluated_arguments) == 1:
@@ -574,7 +690,7 @@ def evaluate_once(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 3:
             return to_expression_expr(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
         raise WolframEvaluationError(
-            "ToExpression expects input, an optional InputForm or StandardForm specifier, and an optional wrapper head."
+            "ToExpression expects input, an optional supported form specifier, and an optional wrapper head."
         )
 
     if evaluated_head.name == "SameQ":
@@ -830,6 +946,25 @@ def evaluate_once(expr: Expr) -> Expr:
             raise WolframEvaluationError("Depth expects exactly one argument.")
         return integer(depth(evaluated_arguments[0]))
 
+    if evaluated_head.name == "Dimensions":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Dimensions expects exactly one argument.")
+        return dimensions_expr(evaluated_arguments[0])
+
+    if evaluated_head.name == "ArrayDepth":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("ArrayDepth expects exactly one argument.")
+        return array_depth(evaluated_arguments[0])
+
+    if evaluated_head.name == "ArrayQ":
+        if len(evaluated_arguments) == 1:
+            return array_q(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return array_q(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return array_q(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("ArrayQ expects an expression, optional depth, and optional element test.")
+
     if evaluated_head.name == "Head":
         if len(evaluated_arguments) != 1:
             raise WolframEvaluationError("Head expects exactly one argument.")
@@ -872,6 +1007,11 @@ def evaluate_once(expr: Expr) -> Expr:
         subject = evaluated_arguments[0]
         positions = evaluated_arguments[1]
         return extract(subject, positions)
+
+    if evaluated_head.name == "ArrayRules":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("ArrayRules expects exactly one argument.")
+        return array_rules(evaluated_arguments[0])
 
     if evaluated_head.name == "Level":
         if len(evaluated_arguments) not in {2, 3}:
@@ -982,10 +1122,20 @@ def evaluate_once(expr: Expr) -> Expr:
             return flatten(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("Flatten currently supports an expression and an optional level specification.")
 
+    if evaluated_head.name == "FlattenAt":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("FlattenAt expects exactly two arguments.")
+        return flatten_at(evaluated_arguments[0], evaluated_arguments[1])
+
     if evaluated_head.name == "Delete":
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("Delete expects exactly two arguments.")
         return delete(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Insert":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("Insert expects exactly three arguments.")
+        return insert(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
 
     if evaluated_head.name == "ReplacePart":
         if len(evaluated_arguments) != 2:
@@ -1170,6 +1320,40 @@ def evaluate_once(expr: Expr) -> Expr:
     if evaluated_head.name == "Dot":
         return dot(evaluated_arguments)
 
+    if evaluated_head.name == "Cross":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("Cross currently expects exactly two vector arguments.")
+        return cross(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Tr":
+        if len(evaluated_arguments) == 1:
+            return tr(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return tr(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Tr expects an array and an optional combiner.")
+
+    if evaluated_head.name == "Transpose":
+        if len(evaluated_arguments) == 1:
+            return transpose(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return transpose(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Transpose expects an array and an optional permutation.")
+
+    if evaluated_head.name == "Det":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Det expects exactly one matrix argument.")
+        return det(evaluated_arguments[0])
+
+    if evaluated_head.name == "Inverse":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Inverse expects exactly one matrix argument.")
+        return inverse(evaluated_arguments[0])
+
+    if evaluated_head.name == "MatrixPower":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("MatrixPower expects a matrix and an integer exponent.")
+        return matrix_power(evaluated_arguments[0], evaluated_arguments[1])
+
     if evaluated_head.name == "Tuples":
         if len(evaluated_arguments) == 1:
             return tuples_expr(evaluated_arguments[0])
@@ -1183,6 +1367,25 @@ def evaluate_once(expr: Expr) -> Expr:
         if len(evaluated_arguments) == 3:
             return array(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
         raise WolframEvaluationError("Array expects two or three arguments.")
+
+    if evaluated_head.name == "ArrayFlatten":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("ArrayFlatten expects exactly one argument.")
+        return array_flatten(evaluated_arguments[0])
+
+    if evaluated_head.name == "ArrayPad":
+        if len(evaluated_arguments) == 2:
+            return array_pad(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return array_pad(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("ArrayPad expects an array, padding widths, and an optional padding value.")
+
+    if evaluated_head.name == "ArrayReshape":
+        if len(evaluated_arguments) == 2:
+            return array_reshape(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return array_reshape(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        raise WolframEvaluationError("ArrayReshape expects an expression, dimensions, and an optional padding value.")
 
     if evaluated_head.name == "ConstantArray":
         if len(evaluated_arguments) != 2:
@@ -1212,6 +1415,13 @@ def evaluate_once(expr: Expr) -> Expr:
         raise WolframEvaluationError(
             "DiagonalMatrix expects a list, an optional offset, and an optional matrix size."
         )
+
+    if evaluated_head.name == "LeviCivitaTensor":
+        if len(evaluated_arguments) == 1:
+            return levi_civita_tensor(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return levi_civita_tensor(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("LeviCivitaTensor expects a dimension and an optional head.")
 
     if evaluated_head.name == "Partition":
         if len(evaluated_arguments) == 2:
@@ -1475,6 +1685,23 @@ def evaluate_once(expr: Expr) -> Expr:
             return sort_expr(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("Sort expects an expression and an optional ordering function.")
 
+    if evaluated_head.name == "AlphabeticSort":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("AlphabeticSort expects exactly one argument.")
+        return alphabetic_sort(evaluated_arguments[0])
+
+    if evaluated_head.name == "NumericalSort":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("NumericalSort expects exactly one argument.")
+        return numerical_sort(evaluated_arguments[0])
+
+    if evaluated_head.name == "RandomSample":
+        if len(evaluated_arguments) == 1:
+            return random_sample(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return random_sample(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("RandomSample expects an expression and an optional count.")
+
     if evaluated_head.name == "ReverseSort":
         if len(evaluated_arguments) == 1:
             return sort_expr(evaluated_arguments[0], reverse=True)
@@ -1575,6 +1802,25 @@ def evaluate_once(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("DeleteDuplicatesBy expects exactly two arguments.")
         return delete_duplicates_by(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "DeleteAdjacentDuplicates":
+        if len(evaluated_arguments) == 1:
+            return delete_adjacent_duplicates(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return delete_adjacent_duplicates(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("DeleteAdjacentDuplicates expects an expression and an optional binary test.")
+
+    if evaluated_head.name == "Split":
+        if len(evaluated_arguments) == 1:
+            return split(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return split(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Split expects an expression and an optional binary test.")
+
+    if evaluated_head.name == "SplitBy":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("SplitBy expects exactly two arguments.")
+        return split_by(evaluated_arguments[0], evaluated_arguments[1])
 
     if evaluated_head.name == "DuplicateFreeQ":
         if len(evaluated_arguments) == 1:
@@ -1807,6 +2053,13 @@ def evaluate_once(expr: Expr) -> Expr:
             return subsets(evaluated_arguments[0], evaluated_arguments[1])
         raise WolframEvaluationError("Subsets expects a list and an optional length spec.")
 
+    if evaluated_head.name == "Subsequences":
+        if len(evaluated_arguments) == 1:
+            return subsequences(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return subsequences(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("Subsequences expects a list and an optional length spec.")
+
     if evaluated_head.name == "Permutations":
         if len(evaluated_arguments) == 1:
             return permutations(evaluated_arguments[0])
@@ -1850,4 +2103,3 @@ def evaluate_once(expr: Expr) -> Expr:
         return chinese_remainder(evaluated_arguments[0], evaluated_arguments[1])
 
     return evaluated_expr
-

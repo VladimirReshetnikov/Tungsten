@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and anyone scripting the CLI or PowerShell wrappers
 - Scope: Tungsten command-line and PowerShell surfaces
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-25T21:57:56Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-27T00:34:28Z
+- Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -416,6 +416,8 @@ python -m tungsten expr evaluate --code 'x = 1 + 2; {ValueQ[x], OwnValues[x], x}
 python -m tungsten expr evaluate --code 'x = 1; Clear[x]; ValueQ[x]'
 python -m tungsten expr evaluate --code 'f[x_] := x + 1; {f[3], DownValues[f]}'
 python -m tungsten expr evaluate --code 'f[x_][y_] := {x, y}; {f[1][2], SubValues[f]}'
+python -m tungsten expr evaluate --code 'f /: h[f[x_]] := x + 10; {h[f[2]], UpValues[f]}'
+python -m tungsten expr evaluate --code 'f /: h[f[x_]] =.; UpValues[f]'
 python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
@@ -475,6 +477,18 @@ python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}
 python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
 python -m tungsten expr evaluate --code "ToString[FullForm[{1, 2/3, a + b}]]"
 python -m tungsten expr evaluate --code "ToBoxes[InputForm[1 + x]]"
+python -m tungsten expr evaluate --code "ToString[1 + x, TeXForm]"
+python -m tungsten expr evaluate --code "ToString[1 + x, MathMLForm]"
+python -m tungsten expr evaluate --code "ToString[1 + x, TraditionalForm]"
+python -m tungsten expr evaluate --code "ToString[x^2, CForm]"
+python -m tungsten expr evaluate --code "ToString[x^2, FortranForm]"
+python -m tungsten expr evaluate --code "NumberForm[1.2345, 3]"
+python -m tungsten expr evaluate --code "PercentForm[0.1234, 3]"
+python -m tungsten expr evaluate --code "TableForm[{{1, 22}, {333, 4}}]"
+python -m tungsten expr evaluate --code 'StringForm["a `` `1`", b]'
+python -m tungsten expr evaluate --code "ToExpression[ToString[1 + x, TeXForm], TeXForm, HoldComplete]"
+python -m tungsten expr evaluate --code "ToBoxes[TraditionalForm[1 + x]]"
+python -m tungsten expr evaluate --code "ToBoxes[CForm[x^2]]"
 python -m tungsten expr evaluate --code "Print[FullForm[{1, 2/3, a + b}]]"
 python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
 python -m tungsten expr evaluate --code 'ToExpression[RowBox[{"a", "\[CirclePlus]", "b"}], StandardForm, HoldComplete]'
@@ -485,6 +499,8 @@ python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, String
 python -m tungsten expr evaluate --code "Normal[ByteArray[\"QUJD\"]]"
 python -m tungsten expr evaluate --code "BaseEncode[StringToByteArray[\"abc\"], \"Base16\"]"
 python -m tungsten expr evaluate --code "ToCharacterCode[ByteArrayToString[ByteArray[{97, 195, 169}], \"UTF-8\"]]"
+python -m tungsten expr evaluate --code "Normal[SparseArray[{{1, 2} -> a, {2, 3} -> b}, {2, 3}]]"
+python -m tungsten expr evaluate --code "ArrayRules[SparseArray[{{1, 2} -> a}, {2, 3}]]"
 ```
 
 The implemented inert evaluator currently covers:
@@ -492,17 +508,21 @@ The implemented inert evaluator currently covers:
 - `Length`
 - `Depth`
 - `Head`
+- `Dimensions`
+- `ArrayRules`
 - symbol and context registry heads such as `Symbol`, `SymbolName`, `Unique`, `Names`, `NameQ`,
   `Contexts`, `Context`, `$Context`, `$ContextPath`, `Attributes`, `SetAttributes`,
-  `ClearAttributes`, `Protect`, `Unprotect`, `Set`, `Unset`, `Clear`, `ClearAll`, `OwnValues`,
-  `DownValues`, `SubValues`, and `ValueQ`
+  `ClearAttributes`, `Protect`, `Unprotect`, `Set`, `SetDelayed`, `TagSet`, `TagSetDelayed`,
+  `Unset`, `TagUnset`, `Clear`, `ClearAll`, `OwnValues`, `DownValues`, `UpValues`, `SubValues`,
+  and `ValueQ`
 - explicit-number arithmetic via `Rational`, `Complex`, `Plus`, `Times`, `Power`, `N`,
   `Precision`, `Accuracy`, `SetPrecision`, and `SetAccuracy` when all relevant arguments in the
   evaluated subexpression are explicit Tungsten numbers
 - numeric relational heads such as `Equal`, `Unequal`, `Less`, `LessEqual`, `Greater`, and
   `GreaterEqual` over explicit numbers, with order comparisons limited to real-valued numbers
 - simple predicate heads such as `AtomQ`, `IntegerQ`, `NumberQ`, `ExactNumberQ`,
-  `InexactNumberQ`, `RealValuedNumberQ`, `MachineNumberQ`, `StringQ`, `EvenQ`, `OddQ`, and `TrueQ`
+  `InexactNumberQ`, `RealValuedNumberQ`, `MachineNumberQ`, `StringQ`, `SparseArrayQ`, `EvenQ`,
+  `OddQ`, and `TrueQ`
 - hold-like conditionals such as `If`, `Which`, `Switch`, and `Piecewise`
 - bounded numeric heads such as `UnitStep`, `Unitize`, `Sign`, `Abs`, `Re`, `Im`, `Conjugate`,
   `RealSign`, `RealAbs`, `Mod`, `Quotient`, `QuotientRemainder`, `Min`, `Max`, `Clip`,
@@ -524,24 +544,32 @@ The implemented inert evaluator currently covers:
   `NestWhile`, `NestWhileList`, `FixedPoint`, `FixedPointList`, `Operate`, `Comap`, and
   `ComapApply`
 - higher-order structural traversal heads such as `Scan`, `MapApply`, `MapAll`, `MapIndexed`,
-  `Through`, `MapThread`, `Thread`, `Distribute`, `Outer`, `Inner`, and `Dot`
+  `Through`, `MapThread`, `Thread`, `Distribute`, `Outer`, `Inner`, `Dot`, `Cross`, `Tr`,
+  `Transpose`, `Det`, `Inverse`, and integer `MatrixPower`, including sparse-preserving paths
+  where a zero-fill sparse representation still matches the result
 - array, matrix, and sequence-construction heads such as `Tuples`, `Array`, `ConstantArray`,
-  `Range`, `UnitVector`, `IdentityMatrix`, `DiagonalMatrix`, `Partition`, `BlockMap`,
+  `ArrayDepth`, `ArrayQ`, `ArrayFlatten`, `ArrayPad`, `ArrayReshape`, `Range`, `UnitVector`,
+  `IdentityMatrix`, `DiagonalMatrix`, `LeviCivitaTensor`, `SparseArray`, `Partition`, `BlockMap`,
   `TakeList`, and `TakeDrop`
 - fold, search, and de-duplication heads such as `Fold`, `FoldList`, `FoldWhile`,
   `FoldWhileList`, `FoldPair`, `FoldPairList`, `SequenceFold`, `SequenceFoldList`,
   `LengthWhile`, `FirstCase`, `Position`, `MemberQ`, `DeleteDuplicates`,
-  `DeleteDuplicatesBy`, and `DuplicateFreeQ`
+  `DeleteDuplicatesBy`, `DeleteAdjacentDuplicates`, `Split`, `SplitBy`, `Subsequences`, and
+  `DuplicateFreeQ`
 - ordering and by-key selection heads such as `Order`, `OrderedQ`, `Ordering`, `OrderingBy`,
   `Sort`, `SortBy`, `ReverseSort`, `ReverseSortBy`, `MinimalBy`, `MaximalBy`,
-  `LexicographicOrder`, and `LexicographicSort`
+  `LexicographicOrder`, `LexicographicSort`, `AlphabeticSort`, `NumericalSort`, and
+  `RandomSample`
 - byte and character heads such as `ByteArray`, `ByteArrayQ`, `BaseEncode`, `BaseDecode`,
   `Characters`, `StringLength`, `StringTake`, `StringDrop`, `StringJoin`, `StringInsert`,
   `StringReverse`, `StringMatchQ`, `StringFreeQ`, `StringStartsQ`, `StringEndsQ`,
   `StringPosition`, `StringContainsQ`, `StringCases`, `StringReplace`, `ToCharacterCode`,
   `FromCharacterCode`, `StringToByteArray`, `ByteArrayToString`, `ImportString`, `ExportString`,
   `ImportByteArray`, `ExportByteArray`, `ToString`, `ToExpression`, `ToBoxes`, `MakeBoxes`,
-  `MakeExpression`, `StripBoxes`, `SyntaxQ`, and `SyntaxLength`
+  `MakeExpression`, `StripBoxes`, `SyntaxQ`, `SyntaxLength`, `TraditionalForm`, `TeXForm`,
+  `MathMLForm`, `OutputForm`, `TextForm`, `CForm`, `FortranForm`, `NumberForm`, `ScientificForm`,
+  `EngineeringForm`, `AccountingForm`, `PaddedForm`, `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`,
+  `TreeForm`, `DisplayForm`, `StringForm`, and `SequenceForm`
 - `Pick`
 - `First`
 - `Last`
@@ -551,6 +579,7 @@ The implemented inert evaluator currently covers:
 - `Discard`
 - `SelectFirst`
 - `TakeWhile`
+- `Normal`
 - `Part`
 - `Extract`
 - `Level`
