@@ -372,10 +372,25 @@ def evaluate_once(expr: Expr) -> Expr:
             return match_q(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
 
         if raw_head_name == "FreeQ":
-            if len(expr.arguments) == 2:
-                return free_q(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
-            if len(expr.arguments) == 3:
-                return free_q(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            free_args = list(expr.arguments)
+            free_include_heads = True
+            if free_args and _is_heads_option_rule(free_args[-1]):
+                heads_rule = free_args.pop()
+                assert isinstance(heads_rule, Call)
+                free_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+            if len(free_args) == 2:
+                return free_q(
+                    _evaluate_transparent_argument(free_args[0]),
+                    free_args[1],
+                    include_heads=free_include_heads,
+                )
+            if len(free_args) == 3:
+                return free_q(
+                    _evaluate_transparent_argument(free_args[0]),
+                    free_args[1],
+                    evaluate(free_args[2]),
+                    include_heads=free_include_heads,
+                )
             raise WolframEvaluationError("FreeQ expects an expression, a pattern, and an optional level specification.")
 
         if raw_head_name == "Cases":
@@ -414,26 +429,58 @@ def evaluate_once(expr: Expr) -> Expr:
             )
 
         if raw_head_name == "DeleteCases":
-            if len(expr.arguments) == 2:
-                return delete_cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
-            if len(expr.arguments) == 3:
-                return delete_cases(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
-            if len(expr.arguments) == 4:
+            # Strip an optional trailing ``Heads -> True/False`` rule.
+            delete_args = list(expr.arguments)
+            delete_include_heads = False
+            if delete_args and _is_heads_option_rule(delete_args[-1]):
+                heads_rule = delete_args.pop()
+                assert isinstance(heads_rule, Call)
+                delete_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+            if len(delete_args) == 2:
                 return delete_cases(
-                    _evaluate_transparent_argument(expr.arguments[0]),
-                    expr.arguments[1],
-                    evaluate(expr.arguments[2]),
-                    evaluate(expr.arguments[3]),
+                    _evaluate_transparent_argument(delete_args[0]),
+                    delete_args[1],
+                    include_heads=delete_include_heads,
+                )
+            if len(delete_args) == 3:
+                return delete_cases(
+                    _evaluate_transparent_argument(delete_args[0]),
+                    delete_args[1],
+                    evaluate(delete_args[2]),
+                    include_heads=delete_include_heads,
+                )
+            if len(delete_args) == 4:
+                return delete_cases(
+                    _evaluate_transparent_argument(delete_args[0]),
+                    delete_args[1],
+                    evaluate(delete_args[2]),
+                    evaluate(delete_args[3]),
+                    include_heads=delete_include_heads,
                 )
             raise WolframEvaluationError(
                 "DeleteCases expects an expression, a pattern, and optional level and match limits."
             )
 
         if raw_head_name == "Replace":
-            if len(expr.arguments) == 2:
-                return replace(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1])
-            if len(expr.arguments) == 3:
-                return replace(_evaluate_transparent_argument(expr.arguments[0]), expr.arguments[1], evaluate(expr.arguments[2]))
+            replace_args = list(expr.arguments)
+            replace_include_heads = False
+            if replace_args and _is_heads_option_rule(replace_args[-1]):
+                heads_rule = replace_args.pop()
+                assert isinstance(heads_rule, Call)
+                replace_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+            if len(replace_args) == 2:
+                return replace(
+                    _evaluate_transparent_argument(replace_args[0]),
+                    replace_args[1],
+                    include_heads=replace_include_heads,
+                )
+            if len(replace_args) == 3:
+                return replace(
+                    _evaluate_transparent_argument(replace_args[0]),
+                    replace_args[1],
+                    evaluate(replace_args[2]),
+                    include_heads=replace_include_heads,
+                )
             raise WolframEvaluationError(
                 "Replace expects an expression, replacement rules, and an optional level specification."
             )
@@ -511,32 +558,47 @@ def evaluate_once(expr: Expr) -> Expr:
         if _is_pure_function_expr(evaluated_head):
             evaluated_arguments = _prepare_pure_function_arguments(evaluated_head, expr.arguments)
         else:
-            evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+            evaluated_arguments = _splice_sequence_arguments(
+                tuple(evaluate(argument) for argument in expr.arguments),
+                enclosing_head=evaluated_head,
+            )
         return _apply_callable(evaluated_head, evaluated_arguments)
     if _is_function_expr(evaluated_head):
         raise WolframEvaluationError("Unsupported Function parameter specification.")
 
     association_head_entries = _association_entries(evaluated_head)
     if association_head_entries is not None:
-        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        evaluated_arguments = _splice_sequence_arguments(
+            tuple(evaluate(argument) for argument in expr.arguments),
+            enclosing_head=evaluated_head,
+        )
         if len(evaluated_arguments) == 1:
             return lookup(evaluated_head, evaluated_arguments[0])
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     if _is_failure_expr(evaluated_head):
-        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        evaluated_arguments = _splice_sequence_arguments(
+            tuple(evaluate(argument) for argument in expr.arguments),
+            enclosing_head=evaluated_head,
+        )
         if len(evaluated_arguments) == 1:
             return failure_property(evaluated_head, evaluated_arguments[0])
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     if isinstance(evaluated_head, SparseArrayExpr):
-        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        evaluated_arguments = _splice_sequence_arguments(
+            tuple(evaluate(argument) for argument in expr.arguments),
+            enclosing_head=evaluated_head,
+        )
         if len(evaluated_arguments) == 1:
             return sparse_array_property(evaluated_head, evaluated_arguments[0])
         return Call(head_expr=evaluated_head, arguments=evaluated_arguments)
 
     if not isinstance(evaluated_head, Symbol):
-        evaluated_arguments = _splice_sequence_arguments(tuple(evaluate(argument) for argument in expr.arguments))
+        evaluated_arguments = _splice_sequence_arguments(
+            tuple(evaluate(argument) for argument in expr.arguments),
+            enclosing_head=evaluated_head,
+        )
         evaluated_expr = Call(head_expr=evaluated_head, arguments=evaluated_arguments)
         up_value_result = _apply_up_value_definitions(evaluated_expr)
         if up_value_result is not None:
@@ -1144,7 +1206,13 @@ def evaluate_once(expr: Expr) -> Expr:
             return flatten(evaluated_arguments[0])
         if len(evaluated_arguments) == 2:
             return flatten(evaluated_arguments[0], evaluated_arguments[1])
-        raise WolframEvaluationError("Flatten currently supports an expression and an optional level specification.")
+        if len(evaluated_arguments) == 3:
+            return flatten(
+                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+            )
+        raise WolframEvaluationError(
+            "Flatten expects an expression, an optional level specification, and an optional head."
+        )
 
     if evaluated_head.name == "FlattenAt":
         if len(evaluated_arguments) != 2:
@@ -1167,12 +1235,18 @@ def evaluate_once(expr: Expr) -> Expr:
         return replace_part(evaluated_arguments[0], evaluated_arguments[1])
 
     if evaluated_head.name == "Scan":
-        if len(evaluated_arguments) == 1:
+        scan_args = list(evaluated_arguments)
+        scan_include_heads = False
+        if scan_args and _is_heads_option_rule(scan_args[-1]):
+            heads_rule = scan_args.pop()
+            assert isinstance(heads_rule, Call)
+            scan_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+        if len(scan_args) == 1:
             return evaluated_expr
-        if len(evaluated_arguments) == 2:
-            return scan(evaluated_arguments[0], evaluated_arguments[1])
-        if len(evaluated_arguments) == 3:
-            return scan(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(scan_args) == 2:
+            return scan(scan_args[0], scan_args[1], include_heads=scan_include_heads)
+        if len(scan_args) == 3:
+            return scan(scan_args[0], scan_args[1], scan_args[2], include_heads=scan_include_heads)
         raise WolframEvaluationError("Scan expects a function, an expression, and an optional level specification.")
 
     if evaluated_head.name == "Apply":
@@ -1189,27 +1263,45 @@ def evaluate_once(expr: Expr) -> Expr:
     if evaluated_head.name == "MapApply":
         if len(evaluated_arguments) == 1:
             return evaluated_expr
-        if len(evaluated_arguments) != 2:
-            raise WolframEvaluationError("MapApply currently supports exactly two arguments.")
-        return map_apply(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 2:
+            return map_apply(evaluated_arguments[0], evaluated_arguments[1])
+        if len(evaluated_arguments) == 3:
+            return map_apply(
+                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+            )
+        raise WolframEvaluationError(
+            "MapApply expects a function, an expression, and an optional level specification."
+        )
 
     if evaluated_head.name == "Map":
-        if len(evaluated_arguments) == 2:
-            return map_expr(evaluated_arguments[0], evaluated_arguments[1])
-        if len(evaluated_arguments) == 3:
+        map_args = list(evaluated_arguments)
+        map_include_heads = False
+        if map_args and _is_heads_option_rule(map_args[-1]):
+            heads_rule = map_args.pop()
+            assert isinstance(heads_rule, Call)
+            map_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+        if len(map_args) == 2:
+            return map_expr(map_args[0], map_args[1], include_heads=map_include_heads)
+        if len(map_args) == 3:
             return map_expr(
-                evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2]
+                map_args[0], map_args[1], map_args[2], include_heads=map_include_heads
             )
         raise WolframEvaluationError(
             "Map expects a function, an expression, and an optional level specification."
         )
 
     if evaluated_head.name == "MapAll":
-        if len(evaluated_arguments) == 1:
+        map_all_args = list(evaluated_arguments)
+        map_all_include_heads = False
+        if map_all_args and _is_heads_option_rule(map_all_args[-1]):
+            heads_rule = map_all_args.pop()
+            assert isinstance(heads_rule, Call)
+            map_all_include_heads = isinstance(heads_rule.arguments[1], Symbol) and heads_rule.arguments[1].name == "True"
+        if len(map_all_args) == 1:
             return evaluated_expr
-        if len(evaluated_arguments) != 2:
+        if len(map_all_args) != 2:
             raise WolframEvaluationError("MapAll currently supports exactly two arguments.")
-        return map_all(evaluated_arguments[0], evaluated_arguments[1])
+        return map_all(map_all_args[0], map_all_args[1], include_heads=map_all_include_heads)
 
     if evaluated_head.name == "MapIndexed":
         if len(evaluated_arguments) == 1:
@@ -1329,8 +1421,16 @@ def evaluate_once(expr: Expr) -> Expr:
             return distribute(evaluated_arguments[0], evaluated_arguments[1])
         if len(evaluated_arguments) == 3:
             return distribute(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
+        if len(evaluated_arguments) == 5:
+            return distribute(
+                evaluated_arguments[0],
+                evaluated_arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+                evaluated_arguments[4],
+            )
         raise WolframEvaluationError(
-            "Distribute currently supports an expression, an optional distributed head, and an optional outer head."
+            "Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
         )
 
     if evaluated_head.name == "Outer":
@@ -2221,6 +2321,79 @@ def evaluate_once(expr: Expr) -> Expr:
         if len(evaluated_arguments) != 2:
             raise WolframEvaluationError("ContainsExactly expects exactly two arguments.")
         return contains_exactly(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "ContainsOnly":
+        return contains_only(evaluated_arguments)
+
+    if evaluated_head.name == "VectorQ":
+        if len(evaluated_arguments) == 1:
+            return vector_q(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return vector_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("VectorQ expects an expression and an optional element predicate.")
+
+    if evaluated_head.name == "MatrixQ":
+        if len(evaluated_arguments) == 1:
+            return matrix_q(evaluated_arguments[0])
+        if len(evaluated_arguments) == 2:
+            return matrix_q(evaluated_arguments[0], evaluated_arguments[1])
+        raise WolframEvaluationError("MatrixQ expects an expression and an optional element predicate.")
+
+    if evaluated_head.name == "FirstPosition":
+        if len(evaluated_arguments) == 2:
+            return first_position(evaluated_arguments[0], expr.arguments[1])
+        if len(evaluated_arguments) == 3:
+            return first_position(
+                evaluated_arguments[0], expr.arguments[1], evaluated_arguments[2]
+            )
+        if len(evaluated_arguments) == 4:
+            return first_position(
+                evaluated_arguments[0],
+                expr.arguments[1],
+                evaluated_arguments[2],
+                evaluated_arguments[3],
+            )
+        raise WolframEvaluationError(
+            "FirstPosition expects an expression, a pattern, and optional default and level specification."
+        )
+
+    if evaluated_head.name == "PositionLargest":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("PositionLargest expects exactly one argument.")
+        return position_largest(evaluated_arguments[0])
+
+    if evaluated_head.name == "PositionSmallest":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("PositionSmallest expects exactly one argument.")
+        return position_smallest(evaluated_arguments[0])
+
+    if evaluated_head.name == "PositionIndex":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("PositionIndex expects exactly one argument.")
+        return position_index(evaluated_arguments[0])
+
+    if evaluated_head.name == "CountDistinct":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("CountDistinct expects exactly one argument.")
+        return count_distinct(evaluated_arguments[0])
+
+    if evaluated_head.name == "CountsBy":
+        if len(evaluated_arguments) != 2:
+            raise WolframEvaluationError("CountsBy expects a list and a key function.")
+        return counts_by(evaluated_arguments[0], evaluated_arguments[1])
+
+    if evaluated_head.name == "Ratios":
+        if len(evaluated_arguments) != 1:
+            raise WolframEvaluationError("Ratios expects exactly one argument.")
+        return ratios(evaluated_arguments[0])
+
+    if evaluated_head.name == "Subdivide":
+        return subdivide(evaluated_arguments)
+
+    if evaluated_head.name == "SubsetMap":
+        if len(evaluated_arguments) != 3:
+            raise WolframEvaluationError("SubsetMap expects a function, a list, and a list of positions.")
+        return subset_map(evaluated_arguments[0], evaluated_arguments[1], evaluated_arguments[2])
 
     if evaluated_head.name == "Subsets":
         if len(evaluated_arguments) == 1:

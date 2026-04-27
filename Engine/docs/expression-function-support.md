@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py` and satellite evaluator modules such as `expression_algebraic.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-27T17:19:00Z
-- Repository HEAD: f4a230578d18a99e678d1c62a908b230ac46f7f4
+- Updated (UTC): 2026-04-27T18:00:00Z
+- Repository HEAD: 9a4ceae3c (in-tree changes pending commit)
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -84,23 +84,27 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   selects which subexpressions have their head replaced.
 - `Scan` currently supports `Scan[f, expr]`, `Scan[f, expr, levelspec]`, and the one-argument
   operator form `Scan[f]`.
-- `MapApply` currently supports `MapApply[f, expr]` plus the one-argument operator form
-  `MapApply[f]`.
+- `MapApply` now supports `MapApply[f, expr]`, `MapApply[f, expr, levelspec]`, and the
+  one-argument operator form `MapApply[f]`. Levelspec semantics mirror `Map`: integer ``n``
+  means levels 1..n, ``{n}`` selects only level ``n``, and negative integers count from the
+  leaves.
 - `MapAll` currently supports `MapAll[f, expr]` plus the one-argument operator form `MapAll[f]`.
 - `MapIndexed` currently supports `MapIndexed[f, expr]`, `MapIndexed[f, expr, levelspec]`, and
   the one-argument operator form `MapIndexed[f]`. The level spec uses Tungsten's existing
   `Position` traversal semantics: integer `n` means levels 1..n, `{n}` means level `n` only,
   `{m, n}` means the inclusive range, and negative levels count from leaves toward the root.
-- `Flatten` currently supports `Flatten[expr]` and `Flatten[expr, n]` where `n` is a non-negative
-  integer or `Infinity`.
+- `Flatten` currently supports `Flatten[expr]`, `Flatten[expr, n]` where `n` is a non-negative
+  integer or `Infinity`, and the 3-argument `Flatten[expr, n, h]` form that flattens nested
+  ``h``-headed subexpressions while keeping the outer head intact.
 - `Through` currently supports both `Through[expr]` and `Through[expr, head]`. The two-argument
   form only threads when the head of `expr` matches `head` by name; otherwise the expression is
   returned unchanged.
 - `MapThread` now supports `MapThread[f, lists]`, `MapThread[f, lists, n]` (parallel-threading
   depth), and the trivial `MapThread[f, lists, 0]` form that just applies `f` to the immediate
   list. The parallel `List` structures must agree in shape down to depth `n`.
-- `Distribute` currently supports only the common direct forms
-  `Distribute[expr]`, `Distribute[expr, g]`, and `Distribute[expr, g, f]`.
+- `Distribute` currently supports `Distribute[expr]`, `Distribute[expr, g]`,
+  `Distribute[expr, g, f]`, and the 5-argument form `Distribute[expr, g, f, gp, fp]` which
+  replaces the inner head `f` with `fp` and the outer head `g` with `gp` while distributing.
 - `Inner` currently supports first-level compounds of equal length only.
 - `Dot` currently supports `List` vectors and rectangular `List` matrices, plus zero-fill
   `SparseArray` vector/matrix products. Mixed sparse/dense products intentionally densify the
@@ -138,10 +142,15 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   to arbitrary lists of rules.
 - `AssociationMap` currently supports the key-list form only: `AssociationMap[f, {k1, ...}]`.
   Passing an `Association` directly is left inert; the kernel emits an error there.
-- `Position`, `Cases`, `Count`, and `MemberQ` accept an optional trailing `Heads -> True/False`
-  rule and honor it. The `True` (default) value includes head positions; `Heads -> False`
-  excludes them. `DeleteCases`, `FreeQ`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Map`,
-  `MapAll`, and `Scan` do not yet honor the `Heads` option in this pass.
+- `Position`, `Cases`, `Count`, `MemberQ`, `DeleteCases`, `FreeQ`, `Replace`, `Map`, `MapAll`,
+  and `Scan` accept an optional trailing `Heads -> True/False` rule and honor it. Each head
+  uses the kernel's documented default (e.g. `Position` and `FreeQ` default to `Heads -> True`;
+  `Cases`, `Count`, `MemberQ`, `DeleteCases`, `Replace`, `Map`, `MapAll`, `Scan` default to
+  `Heads -> False`). With `Heads -> True`, `DeleteCases` collapses a matching head into a
+  ``Sequence[...]`` wrapper that splices into the enclosing call, mirroring the kernel's
+  ``DeleteCases[ff[1, gg[2, gg], 3], gg, {0, Infinity}, Heads -> True]`` -> ``ff[1, 2, 3]``
+  contract. `ReplaceAll` and `ReplaceRepeated` walk heads unconditionally (matching the
+  kernel) and ignore an explicit `Heads` rule.
 - Registry-backed `Listable` threading is implemented for built-ins whose Wolfram 14.3 attribute
   snapshot contains `Listable` and for user symbols modified with `SetAttributes`. For example,
   `Boole[{True, False, True}]` evaluates to `{1, 0, 1}` through the same attribute path as
@@ -573,7 +582,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `NestWhileList` | `NestWhileList[f, expr, test]` | Returns the successive values produced while the current value satisfies the predicate, including the first value that fails the test. Tungsten currently supports the direct three-argument form only. | [NestWhileList](https://reference.wolfram.com/language/ref/NestWhileList) |
 | `FixedPoint` | `FixedPoint[f, expr]`, `FixedPoint[f, expr, n]` | Repeats function application until a structural fixed point is reached. With an explicit `n`, Tungsten follows Wolfram's soft-limit behavior and returns the value after at most `n` iterations. | [FixedPoint](https://reference.wolfram.com/language/ref/FixedPoint) |
 | `FixedPointList` | `FixedPointList[f, expr]`, `FixedPointList[f, expr, n]` | Returns the successive values through the first structural fixed point or through the explicit soft iteration limit. | [FixedPointList](https://reference.wolfram.com/language/ref/FixedPointList) |
-| `Operate` | `Operate[p, expr]`, `Operate[p, expr, n]` | Applies a function to the head at the requested nesting depth, leaving arguments unchanged. | [Operate](https://reference.wolfram.com/language/ref/Operate) |
+| `Operate` | `Operate[p, expr]`, `Operate[p, expr, n]` for ``n >= 0`` | Applies a function to the head at the requested nesting depth, leaving arguments unchanged. ``Operate[p, expr, 0]`` wraps the entire expression: ``p[expr]``. | [Operate](https://reference.wolfram.com/language/ref/Operate) |
 | `Comap` | `Comap[functions, expr]` and callable operator form `Comap[functions]` | Applies one expression to every function in a function collection while preserving the collection's outer structure. | [Comap](https://reference.wolfram.com/language/ref/Comap) |
 | `ComapApply` | `ComapApply[functions, expr]` and callable operator form `ComapApply[functions]` | Applies the arguments of a nonatomic expression to every function in a function collection while preserving the collection's outer structure. | [ComapApply](https://reference.wolfram.com/language/ref/ComapApply) |
 | `Association` | `Association[rule1, ...]`, `Association[{rule1, ...}]`, `Association[assoc]`, and single-key function-position lookup `assoc[key]` | Normalizes associations structurally, including last-occurrence-wins duplicate-key semantics while preserving the first occurrence position of a duplicate key. Invalid constructor forms remain inert. | [Association](https://reference.wolfram.com/language/ref/Association) |
@@ -681,7 +690,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Reverse` | `Reverse[expr]`, `Reverse[expr, n]`, `Reverse[expr, {n}]`, `Reverse[expr, {min, max}]` | Reverses the immediate arguments at level 1 (default), at one specific level (integer `n` is shorthand for `{n}`), at the listed level, or across an inclusive range of levels. Associations reverse entry order. | [Reverse](https://reference.wolfram.com/language/ref/Reverse) |
 | `RotateLeft` | `RotateLeft[expr]`, `RotateLeft[expr, n]`, `RotateLeft[expr, {n1, n2, ...}]` | Rotates immediate arguments to the left. The list-of-amounts form rotates each level in turn — `n1` at the outermost, `n2` at every immediate child, and so on. Associations rotate entry order. | [RotateLeft](https://reference.wolfram.com/language/ref/RotateLeft) |
 | `RotateRight` | `RotateRight[expr]`, `RotateRight[expr, n]`, `RotateRight[expr, {n1, n2, ...}]` | Symmetric to `RotateLeft`. | [RotateRight](https://reference.wolfram.com/language/ref/RotateRight) |
-| `Flatten` | `Flatten[expr]`, `Flatten[expr, n]`, `Flatten[expr, Infinity]` | Flattens nested subexpressions that have the same head as the outer expression. For `SparseArray`, reshapes explicit coordinates without densifying when a single fill value still represents the result. | [Flatten](https://reference.wolfram.com/language/ref/Flatten) |
+| `Flatten` | `Flatten[expr]`, `Flatten[expr, n]`, `Flatten[expr, Infinity]`, `Flatten[expr, n, h]` | Flattens nested subexpressions that have the same head as the outer expression (or the explicit head ``h`` for the 3-argument form). For `SparseArray`, reshapes explicit coordinates without densifying when a single fill value still represents the result. | [Flatten](https://reference.wolfram.com/language/ref/Flatten) |
 | `FlattenAt` | `FlattenAt[expr, pos]` | Replaces the selected nonatomic part by its immediate arguments. Sparse inputs densify before position-splicing. | [FlattenAt](https://reference.wolfram.com/language/ref/FlattenAt) |
 | `Insert` | `Insert[expr, item, pos]` | Inserts `item` before an exact position or at several exact position lists. Rank-1 `SparseArray` insertion preserves sparse storage; higher-rank sparse inputs densify. | [Insert](https://reference.wolfram.com/language/ref/Insert) |
 | `Delete` | `Delete[expr, pos]` | Removes one or more exact-position parts from an expression. For associations, a final top-level key or numeric selector removes an entry, while deeper suffixes operate inside the selected value. | [Delete](https://reference.wolfram.com/language/ref/Delete) |
@@ -689,7 +698,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `ReplacePart` | `ReplacePart[expr, rule]`, `ReplacePart[expr, {rule1, ...}]` | Replaces exact-position parts using explicit rules. For associations, top-level selectors replace entry values, not entire rules. | [ReplacePart](https://reference.wolfram.com/language/ref/ReplacePart) |
 | `Scan` | `Scan[f, expr]`, `Scan[f, expr, levelspec]`, operator form `Scan[f]` | Applies a function for structural side effects and returns `Null`. Tungsten does not model side effects, but it still applies supported callables structurally over the visited levels. | [Scan](https://reference.wolfram.com/language/ref/Scan) |
 | `Apply` | `Apply[f, expr]`, `Apply[f, expr, levelspec]` | Replaces the head of a nonatomic expression with another expression. With a level spec, replaces heads at every position whose level matches. For associations, Tungsten applies over values, producing `f[value1, ...]`. | [Apply](https://reference.wolfram.com/language/ref/Apply) |
-| `MapApply` | `MapApply[f, expr]`, infix `@@@`, and operator form `MapApply[f]` | Replaces the heads of immediate nonatomic elements with `f` while preserving the outer head. | [MapApply](https://reference.wolfram.com/language/ref/MapApply) |
+| `MapApply` | `MapApply[f, expr]`, `MapApply[f, expr, levelspec]`, infix `@@@`, and operator form `MapApply[f]` | Replaces the heads of immediate nonatomic elements (or every node whose level matches the spec) with `f` while preserving the outer head. | [MapApply](https://reference.wolfram.com/language/ref/MapApply) |
 | `Map` | `Map[f, expr]`, `Map[f, expr, levelspec]` | Applies a function structurally to each immediate argument by default; with a level spec, applies at every subexpression whose level matches the spec. For associations, Tungsten maps over values and keeps keys unchanged. | [Map](https://reference.wolfram.com/language/ref/Map) |
 | `MapAll` | `MapAll[f, expr]`, operator form `MapAll[f]` | Applies a function at every visited node, including leaves and rebuilt compound expressions. Associations are traversed through values. | [MapAll](https://reference.wolfram.com/language/ref/MapAll) |
 | `MapIndexed` | `MapIndexed[f, expr]`, `MapIndexed[f, expr, levelspec]`, operator form `MapIndexed[f]` | Maps at the requested levels (default level 1) and supplies each visited position as an integer list (or ``Key[k]`` components for association traversal). Levelspec accepts integer ``n`` (levels 1..n), ``{n}`` (level n only), or negative integers (counting from leaves to root). Each call replaces the visited subexpression with ``f[subexpr, position]``. | [MapIndexed](https://reference.wolfram.com/language/ref/MapIndexed) |
@@ -766,7 +775,7 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `Tally` | `Tally[list]`, `Tally[list, test]`, `Tally[assoc]` | Returns a list of `{value, count}` pairs in first-occurrence order. With a binary test, equality is determined by the test rather than structural identity. | [Tally](https://reference.wolfram.com/language/ref/Tally) |
 | `Counts` | `Counts[list]`, `Counts[assoc]`; Tungsten extension: `Counts[list, test]` | Returns an `Association` mapping each distinct element to the number of occurrences, preserving first-occurrence order. With a binary test, equality is determined by the test rather than structural identity. | [Counts](https://reference.wolfram.com/language/ref/Counts) |
 | `Catenate` | `Catenate[list-of-lists]`, `Catenate[list-of-assocs]`, `Catenate[<\|...\|>]` | Concatenates the value sequences of the immediate elements; associations contribute their values. | [Catenate](https://reference.wolfram.com/language/ref/Catenate) |
-| `Differences` | `Differences[list]`, `Differences[list, n]`, `Differences[assoc]` | Returns the first-difference list of consecutive elements; `Differences[list, n]` applies the first-difference operator `n` times in succession. Returns `{}` for inputs of length `<= 1`. | [Differences](https://reference.wolfram.com/language/ref/Differences) |
+| `Differences` | `Differences[list]`, `Differences[list, n]`, `Differences[array, {n1, n2, …}]`, `Differences[assoc]` | Returns the first-difference list of consecutive elements; `Differences[list, n]` applies the operator `n` times. The multivariate ``{n1, n2, …}`` form applies first-differences ``ni`` times along axis ``i`` for nested rectangular arrays. Returns `{}` when an axis is exhausted. | [Differences](https://reference.wolfram.com/language/ref/Differences) |
 | `Accumulate` | `Accumulate[list]`, `Accumulate[list, f]`, `Accumulate[assoc]` | Returns the running totals of consecutive elements. The two-argument form replaces the default `Plus` combiner with the supplied callable, applying ``f[running, next]`` at each step. Associations preserve their keys. | [Accumulate](https://reference.wolfram.com/language/ref/Accumulate) |
 | `Riffle` | `Riffle[list, x]`, `Riffle[list, {x1, ..., xk}]`, `Riffle[list, x, {a, b, s}]` | Inserts the separator (or cycles through a list of separators) between adjacent elements. With a span spec, Tungsten places the separator at output positions ``a, a+s, a+2s, …``; ``b`` may be a positive cap or ``-1`` (or any non-positive value, treated as "until the items are exhausted"). | [Riffle](https://reference.wolfram.com/language/ref/Riffle) |
 | `Count` | `Count[expr, patt]`, `Count[expr, patt, levelspec]`, plus `Heads -> True/False` option | Counts occurrences of pattern matches at the requested level (default `{1}`, matching the kernel). The ``Heads`` option toggles whether head positions count toward the total. | [Count](https://reference.wolfram.com/language/ref/Count) |
@@ -834,6 +843,19 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `SequenceCases` | `SequenceCases[list, patt]` | Collect every non-overlapping contiguous sublist matching the fixed-arity `List` pattern (with optional `Condition` guard at the top level). Variable-length sequence patterns (`{a_, b__, c_}`) are out of scope in this pass. | [SequenceCases](https://reference.wolfram.com/language/ref/SequenceCases.html) |
 | `SequencePosition` | `SequencePosition[list, patt]` | Return `{start, end}` 1-based inclusive spans of every non-overlapping match. | [SequencePosition](https://reference.wolfram.com/language/ref/SequencePosition.html) |
 | `SequenceCount` | `SequenceCount[list, patt]` | Count of non-overlapping matches. | [SequenceCount](https://reference.wolfram.com/language/ref/SequenceCount.html) |
+| `VectorQ` | `VectorQ[expr]`, `VectorQ[expr, test]` | Returns `True` for flat `List` arrays (and rank-1 `SparseArray` values) whose elements optionally satisfy `test`. | [VectorQ](https://reference.wolfram.com/language/ref/VectorQ.html) |
+| `MatrixQ` | `MatrixQ[expr]`, `MatrixQ[expr, test]` | Returns `True` for rank-2 rectangular `List` arrays (and rank-2 `SparseArray` values) whose entries optionally satisfy `test`. | [MatrixQ](https://reference.wolfram.com/language/ref/MatrixQ.html) |
+| `FirstPosition` | `FirstPosition[expr, patt]`, `FirstPosition[expr, patt, default]`, `FirstPosition[expr, patt, default, levelspec]` | Returns the first match's exact structural position list, or `default` (defaulting to `Missing["NotFound"]`) when no match exists. Uses the same default `{0, Infinity}` traversal as `Position`. | [FirstPosition](https://reference.wolfram.com/language/ref/FirstPosition.html) |
+| `PositionLargest` | `PositionLargest[list]` | Returns the 1-based positions of the largest elements under canonical Tungsten order. Ties yield multiple positions. | [PositionLargest](https://reference.wolfram.com/language/ref/PositionLargest.html) |
+| `PositionSmallest` | `PositionSmallest[list]` | Returns the 1-based positions of the smallest elements under canonical Tungsten order. Ties yield multiple positions. | [PositionSmallest](https://reference.wolfram.com/language/ref/PositionSmallest.html) |
+| `PositionIndex` | `PositionIndex[list]` | Returns an `Association` mapping each distinct element to the list of 1-based positions where it occurs, in first-occurrence order. | [PositionIndex](https://reference.wolfram.com/language/ref/PositionIndex.html) |
+| `CountDistinct` | `CountDistinct[list]` | Returns the number of distinct elements in `list` under structural identity. | [CountDistinct](https://reference.wolfram.com/language/ref/CountDistinct.html) |
+| `CountsBy` | `CountsBy[list, f]` | Returns an `Association` mapping each distinct ``f``-key to the number of elements that produced it; preserves first-seen key order. | [CountsBy](https://reference.wolfram.com/language/ref/CountsBy.html) |
+| `ContainsOnly` | `ContainsOnly[a, b]`, `ContainsOnly[a, b, SameTest -> f]` | Returns `True` when every element of `a` appears in `b` under structural identity (or under the supplied `SameTest`). | [ContainsOnly](https://reference.wolfram.com/language/ref/ContainsOnly.html) |
+| `Subdivide` | `Subdivide[n]`, `Subdivide[n, k]`, `Subdivide[xmin, xmax, k]` | Returns ``n + 1`` evenly-spaced points spanning ``[0, 1]``, ``k + 1`` points spanning ``[0, n]``, or ``k + 1`` points spanning ``[xmin, xmax]``. | [Subdivide](https://reference.wolfram.com/language/ref/Subdivide.html) |
+| `Splice` | `Splice[{e1, …}]` and `Splice[{e1, …}, h]` as a direct argument of an enclosing call | Spliced into the enclosing argument list when the enclosing head matches `h` (default `List`). Bare `Splice[{...}]` outside any enclosing call stays inert. Held heads (`Hold`, `HoldComplete`, `Unevaluated`) suppress splicing. | [Splice](https://reference.wolfram.com/language/ref/Splice.html) |
+| `Ratios` | `Ratios[list]` | Returns the list of adjacent quotients ``list[[i + 1]] / list[[i]]``. Returns `{}` for inputs of length ≤ 1. | [Ratios](https://reference.wolfram.com/language/ref/Ratios.html) |
+| `SubsetMap` | `SubsetMap[f, list, positions]` | Extracts the elements at flat integer (or single-element ``{i}``) positions, applies `f` to that sublist, then re-injects the transformed values into `list` at the same positions. | [SubsetMap](https://reference.wolfram.com/language/ref/SubsetMap.html) |
 
 ## Notes on position semantics
 

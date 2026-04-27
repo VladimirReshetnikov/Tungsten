@@ -593,7 +593,14 @@ f[n_] := f[n] = Union[Flatten[Table[Outer[#1 \[CircleTimes] {#2 \[Diamond] 1} &,
             ))
             self.assertEqual(_full("Table[Length[f[n]], {n, 1, 6}]"), "List[1, 1, 2, 5, 13, 32]")
         finally:
-            evaluate(parse_expression("ClearAll[Precedes, CirclePlus, CircleTimes, f]", form="input"))
+            # The exotic operator definitions above bind ``f``,
+            # ``\[Precedes]``, ``\[CirclePlus]``, ``\[CircleTimes]`` in the
+            # process-local registry. Subsequent tests that use plain ``f[…]``
+            # would inherit those values, so clean them up here.
+            evaluate(parse_expression(
+                "ClearAll[Precedes, CirclePlus, CircleTimes, Diamond, f]",
+                form="input",
+            ))
 
 
 class EofKindCollisionParserTests(unittest.TestCase):

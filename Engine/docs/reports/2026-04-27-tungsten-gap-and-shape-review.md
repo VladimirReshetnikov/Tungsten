@@ -4,8 +4,8 @@
 - Audience: Vladimir, Tungsten maintainers planning the next implementation passes
 - Scope: `src/Tungsten/src/tungsten/` Python package — only the kernel-free expression subsystem. The Wolfram kernel interop layer is out of scope here.
 - Created (UTC): 2026-04-27T16:48:25Z
-- Updated (UTC): 2026-04-27T17:19:00Z
-- Repository HEAD: f4a230578d18a99e678d1c62a908b230ac46f7f4
+- Updated (UTC): 2026-04-27T18:10:00Z
+- Repository HEAD: 9a4ceae3c (in-tree changes pending commit)
 - Predecessors (now archived): `2026-04-23-external-review.md`, `2026-04-24-parser-evaluator-kernel-parity.md`, `2026-04-24-parser-evaluator-kernel-parity-evil-qa.md`, `2026-04-26-expression-parity-deep-review.md`, `2026-04-26-function-surface-gap-report.md`. Each archived header carries a notice; this document is the active gap inventory.
 
 ## Purpose and method
@@ -84,35 +84,16 @@ The SymPy bridge already underpins `Expand`, `Factor`, `Collect`, `Coefficient`,
 
 **Missing family members.** All confirmed inert.
 
-- `VectorQ[expr]`, `VectorQ[expr, test]`.
-- `MatrixQ[expr]`, `MatrixQ[expr, test]`.
-- `FirstPosition[expr, patt]`, `FirstPosition[expr, patt, default]`, `FirstPosition[expr, patt, default, levelspec]`.
-- `PositionLargest[list]`, `PositionSmallest[list]`.
-- `PositionIndex[list]`.
-- `CountDistinct[list]`.
-- `CountsBy[list, f]`.
-- `ContainsOnly[a, b]`, `ContainsOnly[a, b, SameTest -> f]`.
-- `Subdivide[n]`, `Subdivide[n, k]`, `Subdivide[xmin, xmax, k]`.
-- `Splice[{a, b, c}]`, `f[Splice[{a, b}], c]` — variadic argument splicer.
-- `Ratios[list]` — adjacent-pair ratios.
-- `SubsetMap[f, list, positions]`.
 - `ArrayFilter[f, list, n]`, `ArrayReduce[f, list, dims]` — out-of-scope per current direction; `ArrayReduce` is small enough to wrap as a structural fold.
 - `Groupings[list, k]`, `SequenceReplace`, `SequenceSplit` — out-of-scope per current direction.
 - `Numerator` / `Denominator` listable threading once the heads exist (also bucket A).
 
 **Missing argument shapes.**
 
-- `MapApply[f, expr, levelspec]` — only 2-arg form. Mechanical extension on top of the `Map` levelspec walker.
-- `Operate[g, expr, 0]` — kernel returns `g[expr]`; Tungsten leaves it inert. **Real bug**, isolated. The same dispatch already handles default and `n=1`. One-line fix.
-- `Distribute[expr, g, f, gp, fp]` 5-arg form.
-- `Inner[f, l, r, g, h]` 5-arg generalization.
-- `Flatten[expr, n, h]` 3-arg form selecting which head to flatten.
-- `Take[assoc, {Key[k], …}]` — only numeric / span specs work on associations today. Verified: `Take[<|a->1, b->2, c->3|>, {Key[a], Key[b]}]` returns the input unchanged instead of `<|a->1, b->2|>`. Treat the unsupported selector list as a Tungsten diagnostic rather than silent inertness.
-- `Differences[list, {n1, n2}]` multivariate.
+- `Inner[f, l, r, g, n]` 5-argument tensor-rank form (the kernel uses ``n`` as the contracted-axis depth, not a wrapping head).
 - `Outer[f, list1, list2, …, n]` levelspec form.
-- `Position[expr, patt, levelspec, n, "Index"]` — second-property form.
 
-**Missing options.** `Heads -> True/False` is honored on `Position`, `Cases`, `Count`, `MemberQ`. It is **not** honored on `DeleteCases`, `FreeQ`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Map`, `MapAll`, `Scan`. The cross-cutting fix is one shared option-parsing path.
+**Missing options.** `ReplaceAll` and `ReplaceRepeated` walk heads unconditionally and ignore an explicit `Heads` rule (the kernel has the same behavior). All other pattern-search and traversal heads now honor `Heads -> True/False`.
 
 ### E. Linear algebra (out-of-scope per README, residual notes)
 
@@ -278,12 +259,7 @@ Without these, `For[i = 0, i < n, i += 2, …]`, `s += t`, and similar accumulat
 
 **Missing options.** `Print[args, options]` accepts `PageWidth`, `CharacterEncoding` in the kernel; ignored here.
 
-### N. Pure functions and composition (residual)
-
-- `Operate[g, expr, 0]` bug — see bucket D.
-- `MapApply[f, expr, levelspec]` — only 2-arg form (also bucket D).
-
-### O. Sessions, messages, hooks, introspection
+### N. Sessions, messages, hooks, introspection
 
 Largely overlaps with I and K.
 
@@ -291,7 +267,7 @@ Largely overlaps with I and K.
 - `MessageName[sym, "tag"]` reading.
 - `$AssertFunction`.
 
-### P. Boxes, forms, and display wrappers
+### O. Boxes, forms, and display wrappers
 
 Almost all FrontEnd-tied wrappers are out of scope: `Row`, `Column`, `Grid`, `Style`, `Framed`, `Panel`, `Pane`, `Item`, `Magnify`, `Tooltip`, `Mouseover`, `Button`, `Manipulate`. `BoxData`, `Cell`, `CellGroup`, `Notebook`, `NotebookGet`, `NotebookPut` overlap with the notebook subsystem.
 
@@ -303,7 +279,7 @@ Worth noting in the kernel-free interpreter:
 - `BaseForm[x, base, opts]` — options ignored.
 - `TableForm[list, opts]`, `MatrixForm[m, opts]` — `TableHeadings`, `TableSpacing`, `TableAlignments` ignored.
 
-### Q. Sparse arrays and typed atoms
+### P. Sparse arrays and typed atoms
 
 Already mature. Remaining:
 
@@ -311,7 +287,7 @@ Already mature. Remaining:
 - General pattern rules in `SparseArray` constructor.
 - Wolfram-internal compressed FullForm — round-trip of arbitrary kernel-emitted sparse arrays will not work.
 
-### R. Encoding, I/O, hashing
+### Q. Encoding, I/O, hashing
 
 - `Hash` family — see buckets A and H.
 - File I/O: `OpenWrite`, `OpenAppend`, `Read`, `Close`, `WriteString`, `Write`, `BinaryWrite`, `BinaryRead`. Out of scope for kernel-free.
@@ -328,29 +304,21 @@ Already mature. Remaining:
 
 These items hit multiple buckets and are worth flagging once at the top of any planning doc:
 
-1. **Options system as a service.** `Options[f]`, `OptionValue[opts, key]`, `SetOptions[f, opts]`, `FilterRules[opts, spec]`, plus `OptionsPattern[f]` validation. Until this lands, every option-bearing head silently drops options it doesn't natively understand. (Buckets H, I, P, R.)
+1. **Options system as a service.** `Options[f]`, `OptionValue[opts, key]`, `SetOptions[f, opts]`, `FilterRules[opts, spec]`, plus `OptionsPattern[f]` validation. Until this lands, every option-bearing head silently drops options it doesn't natively understand. (Buckets H, I, O, Q.)
 2. **`Default[h, n]` registry.** `Optional[patt]` / `_.` shorthand cannot synthesize defaults for user-defined heads. (Bucket I.)
-3. **`Heads -> True/False` on the rest of the pattern-search and traversal family.** Honored by `Position`, `Cases`, `Count`, `MemberQ`. Should be honored by `DeleteCases`, `FreeQ`, `Replace`, `ReplaceAll`, `ReplaceRepeated`, `Map`, `MapAll`, `Scan`. (Buckets D, I.)
-4. **Compound LHS for mutations.** `Set[m[[i, j]], v]`, `Increment[parts[i]]`, `AppendTo[parts[i], x]`, `Unset[parts[i]]`. (Bucket L.)
-5. **Direct value-list assignment.** `OwnValues[sym] = …`, `DownValues[sym] = …`, `UpValues[sym] = …`, `SubValues[sym] = …`, `NValues[sym] = …`. (Bucket K.)
-6. **Symbolic constants beyond inert.** `Pi`, `E`, `EulerGamma`, `GoldenRatio`, `Catalan`, `Khinchin`, `Glaisher`, `Degree`. Need at least `Re` / `Im` / `Sign` / `Abs` rules. (Bucket A.)
-7. **Transcendentals.** `Log`, `Exp`, `Sin`/`Cos`/`Tan`/inverse, `Sinh`/`Cosh`/`Tanh`/inverse, `Gamma`, `Beta`. README still lists these as out-of-scope; if that holds, document the divergence explicitly so users do not chase silent inertness. (Bucket A.)
-8. **Random number generation.** Entire `Random*` family. (Bucket F.)
-9. **Numerator / Denominator and rational simplification.** `Numerator`, `Denominator`, `Together`, `Apart`, `Cancel`. SymPy bridge already exists. (Buckets A, C.)
-10. **Polynomial algebra extensions.** `PolynomialGCD`, `PolynomialQuotient`, `PolynomialMod`, `PolynomialReduce`, `Resultant`, `Discriminant`. SymPy bridge wrappers. (Bucket C.)
-11. **`Echo` family.** Tiny, high-leverage ergonomics for the REPL. (Bucket M.)
-12. **String-pattern arguments.** `StringSplit[s, patt]`, `StringTrim[s, patt]`, `StringCount[s, patt]` — restricted to literal-string forms today. The string-pattern engine already exists; this is plumbing. (Bucket H.)
-13. **String-search options.** `IgnoreCase`, `Overlaps`, `MetaCharacters` across the string-pattern family. (Bucket H.)
-14. **`AddTo` / `SubtractFrom` / `TimesBy` / `DivideBy` / `PrependTo`.** Companion mutators to `AppendTo` / `Increment`. (Bucket L.)
-15. **Statistics and integer helpers.** `Skewness`, `Kurtosis`, `RootMeanSquare`, `Correlation`, `Covariance`, `Divisible`, `CoprimeQ`, `NumberDigit`, `Factorial`, `Factorial2`, `Pochhammer`, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber`. Small wrappers, high data-science value. (Buckets A, B, F.)
-16. **Operator forms.** `Map[f][expr]`, `Cases[patt][expr]`, `Replace[rules][expr]`, `MatchQ[patt][expr]`, `Position[patt][expr]`, `DeleteCases[patt][expr]`. The asymmetry with the dozen-plus heads that *do* support operator forms is confusing.
-
-## Real bugs (small, isolated)
-
-These are not feature gaps — they are documented behavior that disagrees with the kernel:
-
-- **`Operate[g, expr, 0]` returns the input unchanged.** Kernel: `g[expr]`. Bucket D / N.
-- **`Take[<|a->1, b->2, c->3|>, {Key[a], Key[b]}]` returns the input unchanged.** Kernel: `<|a->1, b->2|>`. The matrix bullet about "association supports numeric or span-style only" likely covers this, but the inert-rather-than-error behavior is surprising; consider raising a Tungsten diagnostic for unsupported association selector lists. (Bucket D.)
+3. **Compound LHS for mutations.** `Set[m[[i, j]], v]`, `Increment[parts[i]]`, `AppendTo[parts[i], x]`, `Unset[parts[i]]`. (Bucket L.)
+4. **Direct value-list assignment.** `OwnValues[sym] = …`, `DownValues[sym] = …`, `UpValues[sym] = …`, `SubValues[sym] = …`, `NValues[sym] = …`. (Bucket K.)
+5. **Symbolic constants beyond inert.** `Pi`, `E`, `EulerGamma`, `GoldenRatio`, `Catalan`, `Khinchin`, `Glaisher`, `Degree`. Need at least `Re` / `Im` / `Sign` / `Abs` rules. (Bucket A.)
+6. **Transcendentals.** `Log`, `Exp`, `Sin`/`Cos`/`Tan`/inverse, `Sinh`/`Cosh`/`Tanh`/inverse, `Gamma`, `Beta`. README still lists these as out-of-scope; if that holds, document the divergence explicitly so users do not chase silent inertness. (Bucket A.)
+7. **Random number generation.** Entire `Random*` family. (Bucket F.)
+8. **Numerator / Denominator and rational simplification.** `Numerator`, `Denominator`, `Together`, `Apart`, `Cancel`. SymPy bridge already exists. (Buckets A, C.)
+9. **Polynomial algebra extensions.** `PolynomialGCD`, `PolynomialQuotient`, `PolynomialMod`, `PolynomialReduce`, `Resultant`, `Discriminant`. SymPy bridge wrappers. (Bucket C.)
+10. **`Echo` family.** Tiny, high-leverage ergonomics for the REPL. (Bucket M.)
+11. **String-pattern arguments.** `StringSplit[s, patt]`, `StringTrim[s, patt]`, `StringCount[s, patt]` — restricted to literal-string forms today. The string-pattern engine already exists; this is plumbing. (Bucket H.)
+12. **String-search options.** `IgnoreCase`, `Overlaps`, `MetaCharacters` across the string-pattern family. (Bucket H.)
+13. **`AddTo` / `SubtractFrom` / `TimesBy` / `DivideBy` / `PrependTo`.** Companion mutators to `AppendTo` / `Increment`. (Bucket L.)
+14. **Statistics and integer helpers.** `Skewness`, `Kurtosis`, `RootMeanSquare`, `Correlation`, `Covariance`, `Divisible`, `CoprimeQ`, `NumberDigit`, `Factorial`, `Factorial2`, `Pochhammer`, `StirlingS1`, `StirlingS2`, `BellB`, `CatalanNumber`. Small wrappers, high data-science value. (Buckets A, B, F.)
+15. **Operator forms.** `Map[f][expr]`, `Cases[patt][expr]`, `Replace[rules][expr]`, `MatchQ[patt][expr]`, `Position[patt][expr]`, `DeleteCases[patt][expr]`. The asymmetry with the dozen-plus heads that *do* support operator forms is confusing.
 
 ## Suggested next-pass priorities
 
@@ -361,16 +329,14 @@ These are opinion, not a roadmap, ordered by leverage per implementation complex
 | 1 | `Numerator`, `Denominator`, `Together`, `Apart`, `Cancel` | Wraps SymPy bridge; unblocks rational simplification. |
 | 1 | `AddTo`, `SubtractFrom`, `TimesBy`, `DivideBy`, `PrependTo`, `AssociateTo`, `KeyDropFrom` | Companion mutators; make `For[i = 0, i < n, i += 2, …]` work. |
 | 1 | Compound LHS for `Set` / `Increment` (`m[[i, j]] = v`, `Increment[parts[i]]`, `AppendTo[parts[i], x]`) | One cross-cutting change that removes a long-standing limitation. |
-| 1 | `Operate[g, expr, 0]` bug fix | One-line fix; small. |
 | 1 | `Divisible`, `CoprimeQ`, `NumberDigit`, `Factorial`, `Factorial2` | Trivial wrappers; close out bucket B residuals. |
-| 1 | `VectorQ`, `MatrixQ`, `FirstPosition`, `PositionLargest`, `PositionSmallest`, `PositionIndex`, `CountDistinct`, `CountsBy`, `KeyFreeQ`, `KeySortBy`, `ContainsOnly`, `Subdivide`, `Ratios` | One-line predicate / search helpers; close out bucket D residuals. |
+| 1 | `KeyFreeQ`, `KeySortBy` | Small association helpers; close out bucket J residuals. |
 | 1 | String helpers backed by existing Python: `StringDelete`, `StringExtract`, `StringPart`, `StringPartition`, `StringRotateLeft`, `StringRotateRight`, `StringTakeDrop`, `ToTitleCase`, `StringReplaceList`, `StringReplacePart` | Pure plumbing on existing string-pattern compiler. |
 | 2 | Random number generation (`RandomInteger`, `RandomReal`, `RandomComplex`, `RandomChoice`, `SeedRandom`, `BlockRandom`) | High-impact for scripting / sampling workloads. |
 | 2 | `Echo`, `EchoFunction`, `EchoTiming` | Lightweight debugging surface for the REPL. |
 | 2 | Symbolic constants `Re`/`Im`/`Sign`/`Abs` rules for `Pi`, `E`, `EulerGamma`, `Degree` | Required scaffold for any later transcendental work; small. |
 | 2 | Options system: `Options[f]`, `OptionValue`, `SetOptions`, `FilterRules`, `OptionsPattern` validation | Cross-cutting unblocker; many heads silently drop options. |
 | 2 | `Default[h, n]` registry | Unlocks `_.` shorthand for user heads. |
-| 2 | `Heads -> True/False` on `DeleteCases`, `FreeQ`, `Replace`, `ReplaceAll`, `Map`, `Scan` | Closes a documented gap in pattern traversal. |
 | 2 | String-pattern arguments to `StringSplit`, `StringTrim`, `StringCount` | The pattern compiler exists; route the existing call sites through it. |
 | 2 | Polynomial extensions `PolynomialGCD`, `PolynomialQuotient`, `PolynomialMod`, `PolynomialReduce`, `Resultant`, `Discriminant` | SymPy wrappers; close out bucket C. |
 | 2 | Statistics: `Skewness`, `Kurtosis`, `RootMeanSquare`, `Correlation`, `Covariance` | Small numeric helpers; pair with random. |

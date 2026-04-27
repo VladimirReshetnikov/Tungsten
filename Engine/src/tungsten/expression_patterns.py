@@ -957,10 +957,16 @@ def _level_bounds_match(positive_level: int, negative_level: int, level_min: int
     return negative_level >= level_min or positive_level <= level_max
 
 
-def free_q(expr: Expr, pattern: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Symbol:
+def free_q(
+    expr: Expr,
+    pattern: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+    *,
+    include_heads: bool = True,
+) -> Symbol:
     level_spec = list_expr(integer(0), symbol("Infinity")) if spec is None else spec
     records: list[_PatternRecord] = []
-    _collect_pattern_records(expr, 0, records, heads=True)
+    _collect_pattern_records(expr, 0, records, heads=include_heads)
     level_min, level_max = _normalize_level_spec(level_spec)
     for record in records:
         if not _level_bounds_match(record.positive_level, record.negative_level, level_min, level_max):
@@ -1512,6 +1518,7 @@ def _replace_recursive(
     level_min: int,
     level_max: int,
     held_context: bool = False,
+    include_heads: bool = False,
 ) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
@@ -1525,6 +1532,7 @@ def _replace_recursive(
                 level_min=level_min,
                 level_max=level_max,
                 held_context=held_context,
+                include_heads=include_heads,
             )
             mutable_entries.append(_AssociationEntry(entry.rule_head, entry.key, updated_value))
             changed = changed or updated_value != entry.value
@@ -1542,14 +1550,30 @@ def _replace_recursive(
                 level_min=level_min,
                 level_max=level_max,
                 held_context=child_held_context,
+                include_heads=include_heads,
             )
             for argument in expr.arguments
         )
-        if updated_arguments != expr.arguments:
+        if include_heads:
+            updated_head = _replace_recursive(
+                expr.head_expr,
+                ruleset,
+                positive_level=positive_level + 1,
+                level_min=level_min,
+                level_max=level_max,
+                held_context=held_context,
+                include_heads=include_heads,
+            )
+        else:
+            updated_head = expr.head_expr
+        if updated_arguments != expr.arguments or updated_head is not expr.head_expr:
             rebuilt = (
-                Call(head_expr=expr.head_expr, arguments=updated_arguments)
+                Call(head_expr=updated_head, arguments=updated_arguments)
                 if held_context
-                else _rebuild(expr, updated_arguments)
+                else _rebuild(
+                    expr if updated_head is expr.head_expr else Call(head_expr=updated_head, arguments=updated_arguments),
+                    updated_arguments,
+                )
             )
         else:
             rebuilt = expr
@@ -1567,16 +1591,27 @@ def replace(
     expr: Expr,
     rules: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
+    *,
+    include_heads: bool = False,
 ) -> Expr:
     rules = _evaluate_replacement_rules_argument(rules)
     if _is_nested_replacement_rules_list(rules):
         assert isinstance(rules, Call)
-        return _evaluated_list_expr(*(replace(expr, item, spec) for item in rules.arguments))
+        return _evaluated_list_expr(
+            *(replace(expr, item, spec, include_heads=include_heads) for item in rules.arguments)
+        )
     ruleset = _normalize_single_replacement_ruleset(rules, "Replace")
     if spec is None:
         return _apply_replacement_rules(expr, ruleset)[0]
     level_min, level_max = _normalize_level_spec(spec)
-    return _replace_recursive(expr, ruleset, positive_level=0, level_min=level_min, level_max=level_max)
+    return _replace_recursive(
+        expr,
+        ruleset,
+        positive_level=0,
+        level_min=level_min,
+        level_max=level_max,
+        include_heads=include_heads,
+    )
 
 
 def _replace_all_single_pass(
@@ -1630,7 +1665,7 @@ def _replace_all_single_pass(
                 _normalize_arguments_for_head(updated_head.name, updated_arguments, evaluated=True)
             )
         else:
-            updated_arguments = list(_splice_sequence_arguments(updated_arguments))
+            updated_arguments = list(_splice_sequence_arguments(updated_arguments, enclosing_head=updated_head))
     return (Call(head_expr=updated_head, arguments=tuple(updated_arguments)), True)
 
 
@@ -1763,6 +1798,7 @@ def _delete_cases_recursive(
     level_min: int,
     level_max: int,
     remaining: list[int | None],
+    include_heads: bool,
 ) -> Expr | object:
     entries = _association_entries(expr)
     if entries is not None:
@@ -1776,6 +1812,7 @@ def _delete_cases_recursive(
                 level_min=level_min,
                 level_max=level_max,
                 remaining=remaining,
+                include_heads=include_heads,
             )
             if transformed is _DELETE_SENTINEL:
                 changed = True
@@ -1785,6 +1822,30 @@ def _delete_cases_recursive(
             changed = changed or transformed != entry.value
         rebuilt: Expr = _association_expr(transformed_entries) if changed else expr
     elif isinstance(expr, Call):
+        head_was_deleted = False
+        if include_heads:
+            new_head_result = _delete_cases_recursive(
+                expr.head_expr,
+                pattern,
+                positive_level=positive_level + 1,
+                level_min=level_min,
+                level_max=level_max,
+                remaining=remaining,
+                include_heads=include_heads,
+            )
+            if new_head_result is _DELETE_SENTINEL:
+                # When the head itself matches the pattern, the whole call
+                # collapses into a ``Sequence`` of its surviving arguments —
+                # the kernel splices that ``Sequence`` into the enclosing
+                # call so ``DeleteCases[f[1, g[2, g], 3], g, {0, Infinity}, Heads -> True]``
+                # yields ``f[1, 2, 3]``.
+                new_head: Expr = symbol("Sequence")
+                head_was_deleted = True
+            else:
+                assert isinstance(new_head_result, Expr)
+                new_head = new_head_result
+        else:
+            new_head = expr.head_expr
         transformed_args: list[Expr] = []
         for argument in expr.arguments:
             transformed = _delete_cases_recursive(
@@ -1794,12 +1855,24 @@ def _delete_cases_recursive(
                 level_min=level_min,
                 level_max=level_max,
                 remaining=remaining,
+                include_heads=include_heads,
             )
             if transformed is _DELETE_SENTINEL:
                 continue
             assert isinstance(transformed, Expr)
             transformed_args.append(transformed)
-        rebuilt: Expr = call(expr.head_expr, *transformed_args)
+        # Splice nested Sequence[...] / Splice[...] arguments now so a
+        # head-delete that turned the inner call into ``Sequence[...]``
+        # gets folded into the enclosing argument list (e.g. the
+        # ``DeleteCases[f[1, g[2, g], 3], g, {0, Infinity}, Heads -> True]``
+        # -> ``f[1, 2, 3]`` contract).
+        spliced_args = _splice_sequence_arguments(transformed_args, enclosing_head=new_head)
+        rebuilt = call(new_head, *spliced_args)
+        if head_was_deleted and remaining[0] != 0:
+            # Skip the post-rebuild match check — the Sequence wrapper
+            # is structural only and should not itself be a candidate
+            # for further deletion at this level.
+            return rebuilt
     else:
         rebuilt = expr
 
@@ -1824,6 +1897,8 @@ def delete_cases(
     pattern: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
     limit: Expr | int | None = None,
+    *,
+    include_heads: bool = False,
 ) -> Expr:
     level_spec = integer(1) if spec is None else spec
     level_min, level_max = _normalize_level_spec(level_spec)
@@ -1835,6 +1910,7 @@ def delete_cases(
         level_min=level_min,
         level_max=level_max,
         remaining=remaining,
+        include_heads=include_heads,
     )
     if transformed is _DELETE_SENTINEL:
         # Whole-expression deletion at level 0: the kernel returns a

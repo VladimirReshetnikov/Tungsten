@@ -332,5 +332,310 @@ class DeleteDuplicatesByTestArgTests(unittest.TestCase):
         )
 
 
+class VectorMatrixQTests(unittest.TestCase):
+    def test_vector_q(self) -> None:
+        self.assertEqual(_full("VectorQ[{1, 2, 3}]"), "True")
+        self.assertEqual(_full("VectorQ[{1, {2}, 3}]"), "False")
+        self.assertEqual(_full("VectorQ[5]"), "False")
+
+    def test_vector_q_with_test(self) -> None:
+        self.assertEqual(_full("VectorQ[{1, 2, 3}, IntegerQ]"), "True")
+        self.assertEqual(_full("VectorQ[{1, 2.5, 3}, IntegerQ]"), "False")
+
+    def test_matrix_q(self) -> None:
+        self.assertEqual(_full("MatrixQ[{{1, 2}, {3, 4}}]"), "True")
+        self.assertEqual(_full("MatrixQ[{{1, 2}, {3}}]"), "False")
+        self.assertEqual(_full("MatrixQ[{1, 2, 3}]"), "False")
+
+    def test_matrix_q_with_test(self) -> None:
+        self.assertEqual(_full("MatrixQ[{{1, 2}, {3, 4}}, IntegerQ]"), "True")
+        self.assertEqual(_full("MatrixQ[{{1, 2}, {3, 4.5}}, IntegerQ]"), "False")
+
+
+class FirstPositionAndPositionXTests(unittest.TestCase):
+    def test_first_position_returns_first_match(self) -> None:
+        self.assertEqual(_full("FirstPosition[{1, 2, 3}, 2]"), "List[2]")
+
+    def test_first_position_default_when_missing(self) -> None:
+        self.assertEqual(
+            _full("FirstPosition[{1, 2, 3}, 5]"),
+            'Missing["NotFound"]',
+        )
+        self.assertEqual(_full("FirstPosition[{1, 2, 3}, 5, deflt]"), "deflt")
+
+    def test_position_largest_returns_all_tied_positions(self) -> None:
+        self.assertEqual(
+            _full("PositionLargest[{1, 5, 3, 5}]"), "List[2, 4]"
+        )
+
+    def test_position_smallest_picks_minimum(self) -> None:
+        self.assertEqual(
+            _full("PositionSmallest[{4, 1, 2, 1}]"), "List[2, 4]"
+        )
+
+    def test_position_index_groups_first_occurrence(self) -> None:
+        self.assertEqual(
+            _full("PositionIndex[{u, v, w, u, v}]"),
+            "Association[Rule[u, List[1, 4]], Rule[v, List[2, 5]], Rule[w, List[3]]]",
+        )
+
+
+class CountDistinctAndCountsByTests(unittest.TestCase):
+    def test_count_distinct_under_structural_equality(self) -> None:
+        self.assertEqual(_full("CountDistinct[{1, 2, 2, 3}]"), "3")
+
+    def test_counts_by_buckets_by_key_function(self) -> None:
+        self.assertEqual(
+            _full("CountsBy[{1.5, 2.3, 3.7}, Floor]"),
+            "Association[Rule[1, 1], Rule[2, 1], Rule[3, 1]]",
+        )
+
+    def test_counts_by_collapses_equal_keys(self) -> None:
+        # Floor of 1.5 / 1.7 / 1.9 all bucket to 1.
+        self.assertEqual(
+            _full("CountsBy[{1.5, 1.7, 1.9, 2.5, 3.7}, Floor]"),
+            "Association[Rule[1, 3], Rule[2, 1], Rule[3, 1]]",
+        )
+
+
+class ContainsOnlyTests(unittest.TestCase):
+    def test_contains_only_true(self) -> None:
+        self.assertEqual(
+            _full("ContainsOnly[{1, 2, 3}, {1, 2, 3, 4}]"), "True"
+        )
+
+    def test_contains_only_false_when_extra_element(self) -> None:
+        self.assertEqual(
+            _full("ContainsOnly[{1, 2, 5}, {1, 2, 3, 4}]"), "False"
+        )
+
+    def test_contains_only_with_same_test(self) -> None:
+        # SameTest -> Equal makes 1 and 1.0 compare equal, so the call
+        # succeeds even though they aren't structurally identical.
+        self.assertEqual(
+            _full("ContainsOnly[{1.0, 2}, {1, 2, 3}, SameTest -> Equal]"),
+            "True",
+        )
+
+
+class SubdivideTests(unittest.TestCase):
+    def test_subdivide_unit_interval(self) -> None:
+        self.assertEqual(
+            _full("Subdivide[4]"),
+            "List[0, Rational[1, 4], Rational[1, 2], Rational[3, 4], 1]",
+        )
+
+    def test_subdivide_n_k(self) -> None:
+        self.assertEqual(
+            _full("Subdivide[10, 4]"),
+            "List[0, Rational[5, 2], 5, Rational[15, 2], 10]",
+        )
+
+    def test_subdivide_xmin_xmax_k(self) -> None:
+        self.assertEqual(
+            _full("Subdivide[1, 10, 4]"),
+            "List[1, Rational[13, 4], Rational[11, 2], Rational[31, 4], 10]",
+        )
+
+
+class SpliceTests(unittest.TestCase):
+    def test_splice_into_list_default(self) -> None:
+        self.assertEqual(
+            _full("{1, Splice[{2, 3}], 4}"),
+            "List[1, 2, 3, 4]",
+        )
+
+    def test_splice_does_not_splice_into_arbitrary_head(self) -> None:
+        self.assertEqual(
+            _full("ww[Splice[{a, b}], c]"),
+            "ww[Splice[List[a, b]], c]",
+        )
+
+    def test_splice_with_explicit_head_target(self) -> None:
+        self.assertEqual(
+            _full("ww[Splice[{a, b}, ww], c]"),
+            "ww[a, b, c]",
+        )
+
+    def test_bare_splice_stays_inert(self) -> None:
+        self.assertEqual(
+            _full("Splice[{a, b, c}]"),
+            "Splice[List[a, b, c]]",
+        )
+
+    def test_splice_blocked_in_held_context(self) -> None:
+        self.assertEqual(
+            _full("Hold[Splice[{a, b}]]"),
+            "Hold[Splice[List[a, b]]]",
+        )
+
+
+class RatiosTests(unittest.TestCase):
+    def test_ratios_of_powers_of_two(self) -> None:
+        self.assertEqual(
+            _full("Ratios[{1, 2, 4, 8, 16}]"),
+            "List[2, 2, 2, 2]",
+        )
+
+    def test_ratios_of_short_input_is_empty(self) -> None:
+        self.assertEqual(_full("Ratios[{}]"), "List[]")
+        self.assertEqual(_full("Ratios[{42}]"), "List[]")
+
+
+class SubsetMapTests(unittest.TestCase):
+    def test_subset_map_with_flat_indices(self) -> None:
+        # Reverse the slice at positions {1, 3, 5}: a, c, e -> e, c, a.
+        # Other positions retain their values, so b and d stay put.
+        self.assertEqual(
+            _full("SubsetMap[Reverse, {a, b, c, d, e}, {1, 3, 5}]"),
+            "List[e, b, c, d, a]",
+        )
+
+    def test_subset_map_with_one_element_position_lists(self) -> None:
+        self.assertEqual(
+            _full("SubsetMap[Reverse, {a, b, c, d, e}, {{1}, {3}, {5}}]"),
+            "List[e, b, c, d, a]",
+        )
+
+
+class OperateLevelZeroTests(unittest.TestCase):
+    def test_operate_level_zero_wraps_whole_expression(self) -> None:
+        self.assertEqual(_full("Operate[gg, ff[a, b], 0]"), "gg[ff[a, b]]")
+
+    def test_operate_default_level_one(self) -> None:
+        self.assertEqual(_full("Operate[gg, ff[a, b]]"), "gg[ff][a, b]")
+
+
+class MapApplyLevelSpecTests(unittest.TestCase):
+    def test_map_apply_at_level_one(self) -> None:
+        self.assertEqual(
+            _full("MapApply[ff, {{1, 2}, {3, 4}}, {1}]"),
+            "List[ff[1, 2], ff[3, 4]]",
+        )
+
+    def test_map_apply_at_level_two(self) -> None:
+        self.assertEqual(
+            _full("MapApply[ff, {{{a, b}, {c, d}}, {{e, f}, {g, h}}}, {2}]"),
+            "List[List[ff[a, b], ff[c, d]], List[ff[e, f], ff[g, h]]]",
+        )
+
+
+class FlattenThreeArgTests(unittest.TestCase):
+    def test_flatten_three_arg_with_named_inner_head(self) -> None:
+        self.assertEqual(
+            _full("Flatten[gg[a, hh[b, hh[c, d]], e], Infinity, hh]"),
+            "gg[a, b, c, d, e]",
+        )
+
+    def test_flatten_three_arg_keeps_outer_intact(self) -> None:
+        # Inner List heads aren't matched, so {b, {c, d}} stays nested.
+        self.assertEqual(
+            _full("Flatten[{a, hh[b, hh[c, d]], e}, Infinity, hh]"),
+            "List[a, b, c, d, e]",
+        )
+
+
+class DistributeFiveArgTests(unittest.TestCase):
+    def test_distribute_five_arg(self) -> None:
+        self.assertEqual(
+            _full("Distribute[(a + b)*c, Plus, Times, pp, qq]"),
+            "qq[pp[c, a], pp[c, b]]",
+        )
+
+
+class TakeAssocKeySelectorDiagnosticTests(unittest.TestCase):
+    def test_key_selector_list_emits_diagnostic(self) -> None:
+        # Tungsten emits a Take::error diagnostic and leaves the call
+        # inert when an unsupported key-list selector is used on an
+        # association — instead of silently returning the input.
+        self.assertEqual(
+            _full(
+                "CompoundExpression["
+                "Take[<|aa -> 1, bb -> 2, cc -> 3|>, {Key[aa], Key[bb]}],"
+                " $MessageList]"
+            ),
+            'List[HoldForm[MessageName[Take, "error"]]]',
+        )
+
+
+class DifferencesMultivariateTests(unittest.TestCase):
+    def test_differences_multivariate_first_along_each_axis(self) -> None:
+        self.assertEqual(
+            _full(
+                "Differences[{{1, 2, 3, 4}, {5, 7, 9, 11}, {13, 16, 19, 22}}, {1, 1}]"
+            ),
+            "List[List[1, 1, 1], List[1, 1, 1]]",
+        )
+
+    def test_differences_multivariate_second_axis_higher(self) -> None:
+        self.assertEqual(
+            _full("Differences[{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}, {1, 2}]"),
+            "List[List[0], List[0]]",
+        )
+
+
+class HeadsOptionFamilyTests(unittest.TestCase):
+    def test_delete_cases_with_heads_true_strips_matching_head(self) -> None:
+        # The kernel splices the wrapper Sequence into the parent so the
+        # whole gg[2, gg] collapses to 2.
+        self.assertEqual(
+            _full(
+                "DeleteCases[ff[1, gg[2, gg], 3], gg, {0, Infinity}, Heads -> True]"
+            ),
+            "ff[1, 2, 3]",
+        )
+
+    def test_delete_cases_with_heads_false_leaves_head(self) -> None:
+        self.assertEqual(
+            _full(
+                "DeleteCases[ff[1, gg[2, gg], 3], gg, {0, Infinity}, Heads -> False]"
+            ),
+            "ff[1, gg[2], 3]",
+        )
+
+    def test_free_q_heads_option_distinguishes_head_vs_argument(self) -> None:
+        self.assertEqual(_full("FreeQ[gg[1, 2], gg, Heads -> True]"), "False")
+        self.assertEqual(_full("FreeQ[gg[1, 2], gg, Heads -> False]"), "True")
+
+    def test_replace_levelspec_heads_option(self) -> None:
+        self.assertEqual(
+            _full("Replace[gg[a, b], gg -> qq, {0, Infinity}, Heads -> True]"),
+            "qq[a, b]",
+        )
+        self.assertEqual(
+            _full("Replace[gg[a, b], gg -> qq, {0, Infinity}, Heads -> False]"),
+            "gg[a, b]",
+        )
+
+    def test_map_heads_option_wraps_head_too(self) -> None:
+        self.assertEqual(
+            _full("Map[ff, gg[a, b], Heads -> True]"),
+            "ff[gg][ff[a], ff[b]]",
+        )
+
+    def test_map_all_heads_option(self) -> None:
+        self.assertEqual(
+            _full("MapAll[ff, gg[a, b], Heads -> True]"),
+            "ff[ff[gg][ff[a], ff[b]]]",
+        )
+
+    def test_scan_heads_option_visits_heads(self) -> None:
+        # Scan returns Null but emits side effects via Sow under a
+        # Reap. With Heads -> True the head ``gg`` is visited too;
+        # with Heads -> False (default) only the arguments are.
+        self.assertEqual(
+            _full(
+                "Reap[Scan[Sow, gg[a, b], {0, Infinity}, Heads -> True]][[2, 1]]"
+            ),
+            "List[gg, a, b, gg[a, b]]",
+        )
+        self.assertEqual(
+            _full(
+                "Reap[Scan[Sow, gg[a, b], {0, Infinity}, Heads -> False]][[2, 1]]"
+            ),
+            "List[a, b, gg[a, b]]",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

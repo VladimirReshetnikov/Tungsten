@@ -7766,13 +7766,16 @@ def _normalize_assignment_lhs(lhs: Expr) -> Expr:
             for index, argument in enumerate(lhs.arguments)
         )
         if not _attributes_suppress_sequence_splicing(attribute_names):
-            prepared = _splice_sequence_arguments(prepared)
+            prepared = _splice_sequence_arguments(prepared, enclosing_head=normalized_head)
         if _system_dispatch_name(normalized_head) in {"Association", "List"}:
             prepared = _drop_nothing_arguments(prepared)
         prepared = _normalize_attribute_call(normalized_head, prepared)
         return Call(head_expr=normalized_head, arguments=prepared)
 
-    prepared = _splice_sequence_arguments(tuple(evaluate(argument) for argument in lhs.arguments))
+    prepared = _splice_sequence_arguments(
+        tuple(evaluate(argument) for argument in lhs.arguments),
+        enclosing_head=normalized_head,
+    )
     return Call(head_expr=normalized_head, arguments=prepared)
 
 
@@ -10858,8 +10861,14 @@ def match_q(expr: Expr, pattern: Expr) -> Symbol:
     return _expression_patterns_module().match_q(expr, pattern)
 
 
-def free_q(expr: Expr, pattern: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Symbol:
-    return _expression_patterns_module().free_q(expr, pattern, spec)
+def free_q(
+    expr: Expr,
+    pattern: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+    *,
+    include_heads: bool = True,
+) -> Symbol:
+    return _expression_patterns_module().free_q(expr, pattern, spec, include_heads=include_heads)
 
 
 def _condition_test_succeeds(test: Expr, bindings: dict[str, Expr]) -> bool:
@@ -10970,8 +10979,10 @@ def replace(
     expr: Expr,
     rules: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
+    *,
+    include_heads: bool = False,
 ) -> Expr:
-    return _expression_patterns_module().replace(expr, rules, spec)
+    return _expression_patterns_module().replace(expr, rules, spec, include_heads=include_heads)
 
 
 def replace_all(expr: Expr, rules: Expr) -> Expr:
@@ -11004,8 +11015,12 @@ def delete_cases(
     pattern: Expr,
     spec: Expr | int | tuple[int, int] | None = None,
     limit: Expr | int | None = None,
+    *,
+    include_heads: bool = False,
 ) -> Expr:
-    return _expression_patterns_module().delete_cases(expr, pattern, spec, limit)
+    return _expression_patterns_module().delete_cases(
+        expr, pattern, spec, limit, include_heads=include_heads
+    )
 
 
 def head_of(expr: Expr) -> Expr:
@@ -11309,13 +11324,29 @@ _UNEVALUATED_TRANSPARENT_HEADS = {
 }
 
 
-def _splice_sequence_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:
+def _splice_sequence_arguments(arguments: Sequence[Expr], enclosing_head: Expr | None = None) -> tuple[Expr, ...]:
     spliced: list[Expr] = []
     for argument in arguments:
         if isinstance(argument, Call) and argument.has_head("Sequence"):
             spliced.extend(argument.arguments)
-        else:
-            spliced.append(argument)
+            continue
+        if (
+            isinstance(argument, Call)
+            and argument.has_head("Splice")
+            and len(argument.arguments) in {1, 2}
+            and isinstance(argument.arguments[0], Call)
+            and argument.arguments[0].has_head("List")
+        ):
+            # ``Splice[{e1, ...}]`` defaults to splicing into ``List`` heads;
+            # ``Splice[{e1, ...}, h]`` splices when the enclosing head matches
+            # ``h``. Bare ``Splice[{...}]`` outside a call stays inert.
+            target_head: Expr = (
+                argument.arguments[1] if len(argument.arguments) == 2 else Symbol("List")
+            )
+            if enclosing_head is not None and enclosing_head == target_head:
+                spliced.extend(argument.arguments[0].arguments)
+                continue
+        spliced.append(argument)
     return tuple(spliced)
 
 
@@ -11362,7 +11393,7 @@ def _prepare_symbol_call_arguments(head: Symbol, raw_arguments: Sequence[Expr]) 
         for index, argument in enumerate(raw_arguments)
     )
     if not _attributes_suppress_sequence_splicing(attribute_names):
-        prepared = _splice_sequence_arguments(prepared)
+        prepared = _splice_sequence_arguments(prepared, enclosing_head=head)
     if _system_dispatch_name(head) in {"Association", "List"}:
         prepared = _drop_nothing_arguments(prepared)
     return prepared
@@ -11426,7 +11457,7 @@ def _normalize_arguments_for_head(
 ) -> tuple[Expr, ...]:
     normalized = tuple(arguments)
     if head_name not in _SEQUENCE_SUPPRESSING_HEADS:
-        normalized = _splice_sequence_arguments(normalized)
+        normalized = _splice_sequence_arguments(normalized, enclosing_head=Symbol(head_name))
     if evaluated and head_name in {"Association", "List"}:
         normalized = _drop_nothing_arguments(normalized)
     return normalized
@@ -11811,14 +11842,47 @@ def _rotate_per_axis(expr: Expr, amounts: Sequence[int], function_name: str) -> 
     return _rebuild(rotated, new_children)
 
 
-def flatten(expr: Expr, level_spec: Expr | int | None = None) -> Expr:
+def flatten(expr: Expr, level_spec: Expr | int | None = None, head_spec: Expr | None = None) -> Expr:
+    """``Flatten[expr]`` / ``Flatten[expr, n]`` / ``Flatten[expr, n, h]``.
+
+    The 3-arg form flattens nested ``h``-headed subexpressions instead of
+    matching the outer expression's head. ``n`` may be ``Infinity`` (no
+    depth cap) or a non-negative integer.
+    """
     if isinstance(expr, SparseArrayExpr):
+        if head_spec is not None:
+            raise WolframEvaluationError(
+                "Flatten currently does not implement the 3-argument head-selecting form for SparseArray inputs."
+            )
         return _sparse_array_flatten(expr, level_spec)
     compound = _require_compound(expr, "Flatten")
     max_depth = _normalize_flatten_level(level_spec)
     if max_depth == 0:
         return compound
-    return _flatten_same_head(compound, max_depth)
+    if head_spec is None:
+        return _flatten_same_head(compound, max_depth)
+    return _flatten_named_head(compound, head_spec, max_depth)
+
+
+def _flatten_named_head(expr: Call, target_head: Expr, remaining: int | None) -> Expr:
+    """Flatten nested calls whose head equals ``target_head`` while
+    keeping the outer head intact. Mirrors ``Flatten[expr, n, h]``.
+    """
+    if remaining == 0:
+        return expr
+
+    arguments: list[Expr] = []
+    for argument in expr.arguments:
+        if isinstance(argument, Call) and argument.head_expr == target_head:
+            nested = _flatten_named_head(argument, target_head, None if remaining is None else remaining - 1)
+            assert isinstance(nested, Call)
+            arguments.extend(nested.arguments)
+            continue
+        if isinstance(argument, Call):
+            arguments.append(_flatten_named_head(argument, target_head, remaining))
+        else:
+            arguments.append(argument)
+    return _rebuild(expr, arguments)
 
 
 def array_depth(expr: Expr) -> Expr:
@@ -13744,54 +13808,130 @@ def lexicographic_sort(expr: Expr, ordering_function: Expr | None = None) -> Exp
     return _rebuild_ordered_expr(expr, sorted_items)
 
 
-def scan(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Symbol:
+def scan(
+    function: Expr,
+    expr: Expr,
+    spec: Expr | int | tuple[int, int] | None = None,
+    *,
+    include_heads: bool = False,
+) -> Symbol:
     level_spec = integer(1) if spec is None else spec
-    for item in level(expr, level_spec):
-        _apply_callable(function, (item,))
+    if not include_heads:
+        for item in level(expr, level_spec):
+            _apply_callable(function, (item,))
+        return symbol("Null")
+
+    level_min, level_max = _normalize_level_spec(level_spec)
+
+    def walk(current: Expr, current_level: int) -> None:
+        entries = _association_entries(current)
+        if entries is not None:
+            for entry in entries:
+                walk(entry.value, current_level + 1)
+        elif isinstance(current, Call):
+            walk(current.head_expr, current_level + 1)
+            for argument in current.arguments:
+                walk(argument, current_level + 1)
+        if _level_in_range(current_level, current, level_min, level_max):
+            _apply_callable(function, (current,))
+
+    walk(expr, 0)
     return symbol("Null")
 
 
-def map_apply(function: Expr, expr: Expr) -> Expr:
+def map_apply(function: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr:
+    """``MapApply[f, expr]`` / ``MapApply[f, expr, levelspec]``.
+
+    The default form replaces the head of every immediate child with
+    ``f`` (matching ``f @@@ expr``). With a level spec, the same
+    head-replacement rule applies at every position whose level
+    matches the spec.
+    """
+    if level_spec is None:
+        entries = _association_entries(expr)
+        if entries is not None:
+            return _association_expr(
+                _AssociationEntry(
+                    rule_head=entry.rule_head,
+                    key=entry.key,
+                    value=apply_head(function, entry.value),
+                )
+                for entry in entries
+            )
+        if not isinstance(expr, Call):
+            return expr
+        return _rebuild(expr, tuple(apply_head(function, argument) for argument in expr.arguments))
+
+    level_min, level_max = _normalize_level_spec(level_spec)
+    return _walk_map_apply_levels(function, expr, level_min, level_max, current_level=0)
+
+
+def _walk_map_apply_levels(
+    function: Expr, expr: Expr, level_min: int, level_max: int, current_level: int
+) -> Expr:
+    """Walk ``expr`` and replace heads at every position whose level
+    matches the spec — analogous to ``Map`` but using ``apply_head``
+    (the ``MapApply`` rule) at each visited node.
+    """
     entries = _association_entries(expr)
     if entries is not None:
-        return _association_expr(
+        new_entries = [
             _AssociationEntry(
                 rule_head=entry.rule_head,
                 key=entry.key,
-                value=apply_head(function, entry.value),
+                value=_walk_map_apply_levels(
+                    function, entry.value, level_min, level_max, current_level + 1
+                ),
             )
             for entry in entries
+        ]
+        rebuilt: Expr = _association_expr(new_entries)
+        if _level_in_range(current_level, expr, level_min, level_max) and current_level >= 1:
+            return apply_head(function, rebuilt)
+        return rebuilt
+
+    if isinstance(expr, Call):
+        new_arguments = tuple(
+            _walk_map_apply_levels(function, argument, level_min, level_max, current_level + 1)
+            for argument in expr.arguments
         )
-    if not isinstance(expr, Call):
-        return expr
-    return _rebuild(expr, tuple(apply_head(function, argument) for argument in expr.arguments))
+        rebuilt = _rebuild(expr, new_arguments)
+        if _level_in_range(current_level, expr, level_min, level_max) and current_level >= 1:
+            return apply_head(function, rebuilt)
+        return rebuilt
+
+    return expr
 
 
-def _map_all_recursive(function: Expr, expr: Expr) -> Expr:
+def _map_all_recursive(function: Expr, expr: Expr, include_heads: bool) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
         rebuilt = _association_expr(
             _AssociationEntry(
                 rule_head=entry.rule_head,
                 key=entry.key,
-                value=_map_all_recursive(function, entry.value),
+                value=_map_all_recursive(function, entry.value, include_heads),
             )
             for entry in entries
         )
         return _apply_callable(function, (rebuilt,))
 
     if isinstance(expr, Call):
-        rebuilt = _rebuild(
-            expr,
-            tuple(_map_all_recursive(function, argument) for argument in expr.arguments),
+        new_arguments = tuple(
+            _map_all_recursive(function, argument, include_heads) for argument in expr.arguments
         )
+        if include_heads:
+            new_head = _map_all_recursive(function, expr.head_expr, include_heads)
+            rebuilt = Call(head_expr=new_head, arguments=new_arguments)
+        else:
+            rebuilt = _rebuild(expr, new_arguments)
         return _apply_callable(function, (rebuilt,))
 
     return _apply_callable(function, (expr,))
 
 
-def map_all(function: Expr, expr: Expr) -> Expr:
-    return _map_all_recursive(function, expr)
+def map_all(function: Expr, expr: Expr, *, include_heads: bool = False) -> Expr:
+    return _map_all_recursive(function, expr, include_heads)
 
 
 def map_indexed(function: Expr, expr: Expr, spec: Expr | int | tuple[int, int] | None = None) -> Expr:
@@ -14062,8 +14202,11 @@ def fixed_point_list(function: Expr, expr: Expr, max_iterations: Expr | int | No
 
 def operate(operator: Expr, expr: Expr, level_value: Expr | int = 1) -> Expr:
     level_number = _normalize_integer_argument(level_value, "Operate")
-    if level_number < 1:
-        raise WolframEvaluationError("Operate expects a positive integer level.")
+    if level_number < 0:
+        raise WolframEvaluationError("Operate expects a non-negative integer level.")
+    if level_number == 0:
+        # Wolfram's Operate[p, expr, 0] wraps the entire expression: p[expr].
+        return _apply_callable(operator, (expr,))
     if not isinstance(expr, Call):
         return expr
     if level_number == 1:
@@ -14233,13 +14376,33 @@ def thread(expr: Expr, thread_head: Expr | None = None) -> Expr:
     return Call(head_expr=effective_head, arguments=tuple(results))
 
 
-def distribute(expr: Expr, distributed_head: Expr | None = None, outer_head: Expr | None = None) -> Expr:
+def distribute(
+    expr: Expr,
+    distributed_head: Expr | None = None,
+    outer_head: Expr | None = None,
+    distributed_replacement: Expr | None = None,
+    outer_replacement: Expr | None = None,
+) -> Expr:
+    """``Distribute[expr]`` / ``Distribute[expr, g]`` / ``Distribute[expr, g, f]``
+    / ``Distribute[expr, g, f, gp, fp]``.
+
+    The 5-argument form replaces the inner head ``g`` with ``gp`` and the
+    outer head ``f`` with ``fp`` while distributing. The 3- and 5-argument
+    forms also restrict distribution to expressions whose outer head is ``f``.
+    """
     if not isinstance(expr, Call):
         return expr
 
     effective_distributed_head = symbol("Plus") if distributed_head is None else distributed_head
     if outer_head is not None and expr.head_expr != outer_head:
         return expr
+
+    effective_outer_replacement = (
+        outer_replacement if outer_replacement is not None else effective_distributed_head
+    )
+    effective_inner_replacement = (
+        distributed_replacement if distributed_replacement is not None else expr.head_expr
+    )
 
     argument_options: list[tuple[Expr, ...]] = []
     found = False
@@ -14257,13 +14420,15 @@ def distribute(expr: Expr, distributed_head: Expr | None = None, outer_head: Exp
 
     def recurse(index: int, chosen: list[Expr]) -> None:
         if index == len(argument_options):
-            distributed_arguments.append(Call(head_expr=expr.head_expr, arguments=tuple(chosen)))
+            distributed_arguments.append(
+                Call(head_expr=effective_inner_replacement, arguments=tuple(chosen))
+            )
             return
         for option in argument_options[index]:
             recurse(index + 1, [*chosen, option])
 
     recurse(0, [])
-    return Call(head_expr=effective_distributed_head, arguments=tuple(distributed_arguments))
+    return Call(head_expr=effective_outer_replacement, arguments=tuple(distributed_arguments))
 
 
 def outer(function: Expr, *args: Expr) -> Expr:
@@ -15762,12 +15927,19 @@ def _level_in_range(
     return _level_bounds_match(current_level, negative_level, level_min, level_max)
 
 
-def map_expr(function: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr:
-    """Map[f, expr] / Map[f, expr, levelspec].
+def map_expr(
+    function: Expr,
+    expr: Expr,
+    level_spec: Expr | None = None,
+    *,
+    include_heads: bool = False,
+) -> Expr:
+    """Map[f, expr] / Map[f, expr, levelspec] / Map[..., Heads -> True/False].
 
     The default form applies ``f`` to each immediate argument; with a level
     spec, ``f`` is applied to every subexpression whose level matches the
     spec, postorder. Atoms below the lowest matching level are left alone.
+    With ``Heads -> True`` the head of every visited call is also wrapped.
     """
     if level_spec is None:
         entries = _association_entries(expr)
@@ -15782,16 +15954,28 @@ def map_expr(function: Expr, expr: Expr, level_spec: Expr | None = None) -> Expr
             )
         if not isinstance(expr, Call):
             return expr
-        return _rebuild(
-            expr, tuple(_apply_callable(function, (argument,)) for argument in expr.arguments)
-        )
+        rebuilt_arguments = tuple(_apply_callable(function, (argument,)) for argument in expr.arguments)
+        if include_heads:
+            return Call(
+                head_expr=_apply_callable(function, (expr.head_expr,)),
+                arguments=rebuilt_arguments,
+            )
+        return _rebuild(expr, rebuilt_arguments)
 
     level_min, level_max = _normalize_level_spec(level_spec)
-    return _walk_map_levels(function, expr, level_min, level_max, current_level=0)
+    return _walk_map_levels(
+        function, expr, level_min, level_max, current_level=0, include_heads=include_heads
+    )
 
 
 def _walk_map_levels(
-    function: Expr, expr: Expr, level_min: int, level_max: int, current_level: int
+    function: Expr,
+    expr: Expr,
+    level_min: int,
+    level_max: int,
+    current_level: int,
+    *,
+    include_heads: bool = False,
 ) -> Expr:
     entries = _association_entries(expr)
     if entries is not None:
@@ -15800,7 +15984,12 @@ def _walk_map_levels(
                 rule_head=entry.rule_head,
                 key=entry.key,
                 value=_walk_map_levels(
-                    function, entry.value, level_min, level_max, current_level + 1
+                    function,
+                    entry.value,
+                    level_min,
+                    level_max,
+                    current_level + 1,
+                    include_heads=include_heads,
                 ),
             )
             for entry in entries
@@ -15812,10 +16001,28 @@ def _walk_map_levels(
 
     if isinstance(expr, Call):
         new_arguments = tuple(
-            _walk_map_levels(function, argument, level_min, level_max, current_level + 1)
+            _walk_map_levels(
+                function,
+                argument,
+                level_min,
+                level_max,
+                current_level + 1,
+                include_heads=include_heads,
+            )
             for argument in expr.arguments
         )
-        rebuilt = _rebuild(expr, new_arguments)
+        if include_heads:
+            new_head = _walk_map_levels(
+                function,
+                expr.head_expr,
+                level_min,
+                level_max,
+                current_level + 1,
+                include_heads=include_heads,
+            )
+            rebuilt = Call(head_expr=new_head, arguments=new_arguments)
+        else:
+            rebuilt = _rebuild(expr, new_arguments)
         if _level_in_range(current_level, expr, level_min, level_max):
             return _apply_callable(function, (rebuilt,))
         return rebuilt
@@ -17169,35 +17376,80 @@ def catenate(expr: Expr) -> Expr:
 
 
 def differences(expr: Expr, order_expr: Expr | None = None) -> Expr:
-    """``Differences[list]`` / ``Differences[list, n]`` — successive
-    first-order differences applied ``n`` times (default 1).
+    """``Differences[list]`` / ``Differences[list, n]`` /
+    ``Differences[array, {n1, n2, …}]``.
 
-    The result of one pass over a list of length ``k`` is a list of
-    length ``k - 1``; applying ``n`` passes yields a list of length
-    ``k - n`` (or empty when ``k <= n``). For inputs of length ≤ 1
-    the result is the empty list, matching the kernel.
+    The 1-arg form computes the first-difference list; the 2-arg
+    form repeats that ``n`` times. The multivariate spec
+    ``{n1, n2, …}`` applies first-differences ``n1`` times along
+    axis 1, then ``n2`` times along axis 2, and so on for nested
+    rectangular arrays.
     """
     if order_expr is None:
-        order = 1
-    elif isinstance(order_expr, Integer) and order_expr.value >= 0:
+        return _differences_axis(expr, 1)
+
+    if isinstance(order_expr, Integer):
+        if order_expr.value < 0:
+            raise WolframEvaluationError("Differences expects a non-negative integer order.")
         order = order_expr.value
-    else:
-        raise WolframEvaluationError("Differences expects a non-negative integer order.")
+        items_seq = list(_list_or_association_values(expr, "Differences"))
+        for _ in range(order):
+            items_seq = _differences_one_pass(items_seq)
+            if not items_seq:
+                break
+        return _evaluated_list_expr(*items_seq)
 
-    def one_pass(items: Sequence[Expr]) -> list[Expr]:
-        if len(items) <= 1:
-            return []
-        return [
-            evaluate(call("Plus", items[index + 1], call("Times", integer(-1), items[index])))
-            for index in range(len(items) - 1)
-        ]
+    if isinstance(order_expr, Call) and order_expr.has_head("List"):
+        orders: list[int] = []
+        for component in order_expr.arguments:
+            if not (isinstance(component, Integer) and component.value >= 0):
+                raise WolframEvaluationError(
+                    "Differences multivariate orders must be non-negative integers."
+                )
+            orders.append(component.value)
+        return _differences_multivariate(expr, orders)
 
+    raise WolframEvaluationError("Differences expects an integer order or a list of orders.")
+
+
+def _differences_one_pass(items: Sequence[Expr]) -> list[Expr]:
+    if len(items) <= 1:
+        return []
+    return [
+        evaluate(call("Plus", items[index + 1], call("Times", integer(-1), items[index])))
+        for index in range(len(items) - 1)
+    ]
+
+
+def _differences_axis(expr: Expr, count: int) -> Expr:
     items_seq = list(_list_or_association_values(expr, "Differences"))
-    for _ in range(order):
-        items_seq = one_pass(items_seq)
+    for _ in range(count):
+        items_seq = _differences_one_pass(items_seq)
         if not items_seq:
             break
     return _evaluated_list_expr(*items_seq)
+
+
+def _differences_multivariate(expr: Expr, orders: Sequence[int]) -> Expr:
+    """Apply ``orders[0]`` first-differences along axis 1, then
+    ``orders[1]`` along axis 2, etc. Each axis recurses into the
+    inner rows.
+    """
+    if not orders:
+        return expr
+    head_order, *tail_orders = orders
+    items = list(_list_or_association_values(expr, "Differences"))
+
+    # Apply ``head_order`` first-differences along the outermost axis.
+    for _ in range(head_order):
+        items = _differences_one_pass(items)
+        if not items:
+            return list_expr()
+
+    if not tail_orders:
+        return list_expr(*items)
+
+    return list_expr(*(_differences_multivariate(item, tail_orders) for item in items))
 
 
 def accumulate(expr: Expr, function: Expr | None = None) -> Expr:
@@ -17398,6 +17650,352 @@ def contains_exactly(left: Expr, right: Expr) -> Expr:
         all(any(item == other for other in left_set) for item in right_set)
         and all(any(item == other for other in right_set) for item in left_set)
     )
+
+
+def contains_only(arguments: Sequence[Expr]) -> Expr:
+    """``ContainsOnly[a, b]`` / ``ContainsOnly[a, b, SameTest -> f]``.
+
+    Returns ``True`` when every element of ``a`` appears in ``b`` under
+    structural identity, or under the supplied ``SameTest`` predicate.
+    """
+    data, same_test = _split_same_test_option_arguments(arguments, "ContainsOnly")
+    if len(data) != 2:
+        raise WolframEvaluationError("ContainsOnly expects two arguments and an optional SameTest rule.")
+    left_items = _list_or_association_values(data[0], "ContainsOnly")
+    right_items = list(_list_or_association_values(data[1], "ContainsOnly"))
+    for item in left_items:
+        if not any(_same_test_succeeds(same_test, item, candidate) for candidate in right_items):
+            return _bool_symbol(False)
+    return _bool_symbol(True)
+
+
+def vector_q(expr: Expr, test: Expr | None = None) -> Expr:
+    """``VectorQ[expr]`` / ``VectorQ[expr, test]``.
+
+    Returns ``True`` when ``expr`` is a length-1 array — a flat ``List``
+    whose every element is itself non-``List`` — and (optionally) every
+    element satisfies ``test``. ``SparseArray`` rank-1 values qualify too.
+    """
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 1:
+            return _bool_symbol(False)
+        if test is None:
+            return _bool_symbol(True)
+        if expr.dimensions[0] > len(expr.entries) and not _predicate_succeeds(test, expr.fill_value):
+            return _bool_symbol(False)
+        return _bool_symbol(all(_predicate_succeeds(test, entry.value) for entry in expr.entries))
+    if not (isinstance(expr, Call) and expr.has_head("List")):
+        return _bool_symbol(False)
+    for argument in expr.arguments:
+        if isinstance(argument, Call) and argument.has_head("List"):
+            return _bool_symbol(False)
+    if test is None:
+        return _bool_symbol(True)
+    return _bool_symbol(all(_predicate_succeeds(test, value) for value in expr.arguments))
+
+
+def matrix_q(expr: Expr, test: Expr | None = None) -> Expr:
+    """``MatrixQ[expr]`` / ``MatrixQ[expr, test]``.
+
+    Returns ``True`` for rank-2 rectangular ``List`` arrays (and rank-2
+    ``SparseArray`` values) whose every element optionally satisfies
+    ``test``.
+    """
+    if isinstance(expr, SparseArrayExpr):
+        if len(expr.dimensions) != 2:
+            return _bool_symbol(False)
+        if test is None:
+            return _bool_symbol(True)
+        total_size = expr.dimensions[0] * expr.dimensions[1]
+        if total_size > len(expr.entries) and not _predicate_succeeds(test, expr.fill_value):
+            return _bool_symbol(False)
+        return _bool_symbol(all(_predicate_succeeds(test, entry.value) for entry in expr.entries))
+    try:
+        dimensions = _strict_dense_dimensions(expr)
+    except WolframEvaluationError:
+        return _bool_symbol(False)
+    if len(dimensions) != 2:
+        return _bool_symbol(False)
+    if test is None:
+        return _bool_symbol(True)
+    return _bool_symbol(all(_predicate_succeeds(test, value) for value in _dense_leaf_values(expr)))
+
+
+def first_position(
+    expr: Expr,
+    pattern: Expr,
+    default: Expr | object = _MISSING,
+    spec: Expr | int | tuple[int, int] | None = None,
+) -> Expr:
+    """``FirstPosition[expr, patt]`` / ``FirstPosition[expr, patt, default]`` /
+    ``FirstPosition[expr, patt, default, levelspec]``.
+
+    Returns the first match's exact structural position list. Falls back
+    to ``default`` (or ``Missing["NotFound"]`` if absent) when no match
+    exists. Defaults to the ``Position``-style traversal: levels
+    ``{0, Infinity}`` with heads included.
+    """
+    positions = position(expr, pattern, spec=spec, limit=1)
+    assert isinstance(positions, Call) and positions.has_head("List")
+    if positions.arguments:
+        return positions.arguments[0]
+    if default is not _MISSING:
+        return default  # type: ignore[return-value]
+    return _missing_not_found()
+
+
+def position_largest(expr: Expr) -> Expr:
+    """``PositionLargest[list]`` returns the 1-based positions of the
+    largest elements in ``list`` under canonical Tungsten order. Ties
+    yield multiple positions; the empty list yields ``{}``.
+    """
+    items = _list_or_association_values(expr, "PositionLargest")
+    if not items:
+        return list_expr()
+    largest_indices: list[int] = []
+    for index, item in enumerate(items, start=1):
+        if not largest_indices:
+            largest_indices.append(index)
+            continue
+        comparison = _canonical_compare(item, items[largest_indices[0] - 1])
+        if comparison > 0:
+            largest_indices = [index]
+        elif comparison == 0:
+            largest_indices.append(index)
+    return list_expr(*(integer(idx) for idx in largest_indices))
+
+
+def position_smallest(expr: Expr) -> Expr:
+    """``PositionSmallest[list]`` returns the 1-based positions of the
+    smallest elements in ``list`` under canonical Tungsten order. Ties
+    yield multiple positions; the empty list yields ``{}``.
+    """
+    items = _list_or_association_values(expr, "PositionSmallest")
+    if not items:
+        return list_expr()
+    smallest_indices: list[int] = []
+    for index, item in enumerate(items, start=1):
+        if not smallest_indices:
+            smallest_indices.append(index)
+            continue
+        comparison = _canonical_compare(item, items[smallest_indices[0] - 1])
+        if comparison < 0:
+            smallest_indices = [index]
+        elif comparison == 0:
+            smallest_indices.append(index)
+    return list_expr(*(integer(idx) for idx in smallest_indices))
+
+
+def position_index(expr: Expr) -> Expr:
+    """``PositionIndex[list]`` returns an ``Association`` mapping each
+    distinct element to the list of 1-based positions where it occurs,
+    in first-occurrence order.
+    """
+    items = _list_or_association_values(expr, "PositionIndex")
+    order: list[Expr] = []
+    bucket: dict[int, list[int]] = {}
+    keys: dict[int, Expr] = {}
+    for index, item in enumerate(items, start=1):
+        for existing_id, existing_key in keys.items():
+            if existing_key == item:
+                bucket[existing_id].append(index)
+                break
+        else:
+            element_id = id(item) if isinstance(item, (Call, SparseArrayExpr)) else len(keys)
+            # ``id()`` can collide if Python reuses memory addresses, so seed
+            # from a counter when no existing key matches.
+            unique_id = len(keys)
+            while unique_id in keys:
+                unique_id += 1
+            keys[unique_id] = item
+            bucket[unique_id] = [index]
+            order.append(item)
+    entries: list[_AssociationEntry] = []
+    for representative in order:
+        for unique_id, key in keys.items():
+            if key == representative:
+                entries.append(
+                    _AssociationEntry(
+                        rule_head=Symbol("Rule"),
+                        key=representative,
+                        value=list_expr(*(integer(idx) for idx in bucket[unique_id])),
+                    )
+                )
+                break
+    return _association_expr(entries)
+
+
+def count_distinct(expr: Expr) -> Expr:
+    """``CountDistinct[list]`` returns the number of distinct elements
+    in ``list`` under structural identity.
+    """
+    items = _list_or_association_values(expr, "CountDistinct")
+    seen: list[Expr] = []
+    for item in items:
+        if not any(item == existing for existing in seen):
+            seen.append(item)
+    return integer(len(seen))
+
+
+def counts_by(expr: Expr, key_function: Expr) -> Expr:
+    """``CountsBy[list, f]`` returns an ``Association`` mapping each
+    distinct ``f``-key to the number of elements that produced it.
+    """
+    items = _list_or_association_values(expr, "CountsBy")
+    order: list[Expr] = []
+    counts: dict[int, int] = {}
+    keys: dict[int, Expr] = {}
+    for item in items:
+        key = evaluate(_apply_callable(key_function, (item,)))
+        for unique_id, existing in keys.items():
+            if existing == key:
+                counts[unique_id] += 1
+                break
+        else:
+            unique_id = len(keys)
+            keys[unique_id] = key
+            counts[unique_id] = 1
+            order.append(key)
+    entries: list[_AssociationEntry] = []
+    for representative in order:
+        for unique_id, key in keys.items():
+            if key == representative:
+                entries.append(
+                    _AssociationEntry(
+                        rule_head=Symbol("Rule"),
+                        key=representative,
+                        value=integer(counts[unique_id]),
+                    )
+                )
+                break
+    return _association_expr(entries)
+
+
+def ratios(expr: Expr) -> Expr:
+    """``Ratios[list]`` returns the list of adjacent quotients
+    ``list[[i + 1]] / list[[i]]``. Returns ``{}`` for inputs of length
+    ≤ 1.
+    """
+    items = _list_or_association_values(expr, "Ratios")
+    if len(items) <= 1:
+        return list_expr()
+    output: list[Expr] = []
+    for index in range(1, len(items)):
+        output.append(
+            evaluate(
+                call(
+                    "Times",
+                    items[index],
+                    call("Power", items[index - 1], integer(-1)),
+                )
+            )
+        )
+    return _evaluated_list_expr(*output)
+
+
+def subdivide(arguments: Sequence[Expr]) -> Expr:
+    """``Subdivide[n]`` / ``Subdivide[n, k]`` / ``Subdivide[xmin, xmax, k]``.
+
+    Returns ``k + 1`` evenly-spaced points spanning ``[0, n]``,
+    ``[0, n]``, or ``[xmin, xmax]`` respectively. The single-argument
+    form ``Subdivide[n]`` returns ``n + 1`` points spanning ``[0, 1]``.
+    """
+    if len(arguments) == 1:
+        n_expr = arguments[0]
+        if not isinstance(n_expr, Integer) or n_expr.value <= 0:
+            raise WolframEvaluationError("Subdivide expects a positive integer count.")
+        n = n_expr.value
+        return _evaluated_list_expr(
+            *(
+                evaluate(call("Times", integer(index), rational_number(1, n)))
+                for index in range(n + 1)
+            )
+        )
+    if len(arguments) == 2:
+        n_expr, k_expr = arguments
+        if not isinstance(k_expr, Integer) or k_expr.value <= 0:
+            raise WolframEvaluationError("Subdivide expects a positive integer subdivision count.")
+        return _evaluated_list_expr(
+            *(
+                evaluate(
+                    call("Times", n_expr, integer(index), call("Power", k_expr, integer(-1)))
+                )
+                for index in range(k_expr.value + 1)
+            )
+        )
+    if len(arguments) == 3:
+        lo_expr, hi_expr, k_expr = arguments
+        if not isinstance(k_expr, Integer) or k_expr.value <= 0:
+            raise WolframEvaluationError("Subdivide expects a positive integer subdivision count.")
+        k = k_expr.value
+        step = call(
+            "Times",
+            call("Plus", hi_expr, call("Times", integer(-1), lo_expr)),
+            call("Power", integer(k), integer(-1)),
+        )
+        return _evaluated_list_expr(
+            *(
+                evaluate(call("Plus", lo_expr, call("Times", integer(index), step)))
+                for index in range(k + 1)
+            )
+        )
+    raise WolframEvaluationError("Subdivide expects 1, 2, or 3 arguments.")
+
+
+def subset_map(function: Expr, target: Expr, positions_expr: Expr) -> Expr:
+    """``SubsetMap[f, list, positions]`` extracts the elements at
+    ``positions``, applies ``f`` to that sublist, then re-injects the
+    transformed values into ``list`` at the same positions. The result
+    has the same shape as ``list``.
+    """
+    if not isinstance(target, Call) or not target.has_head("List"):
+        raise WolframEvaluationError("SubsetMap currently expects a List as the second argument.")
+    if not (isinstance(positions_expr, Call) and positions_expr.has_head("List")):
+        raise WolframEvaluationError(
+            "SubsetMap expects a List of positions as the third argument."
+        )
+
+    items = list(target.arguments)
+    indices: list[int] = []
+    for raw_position in positions_expr.arguments:
+        # Accept ``i`` (integer) or ``{i}`` (single-element list) — the
+        # most common shapes. Wolfram also accepts deeper paths but the
+        # documented examples are flat first-level positions.
+        if isinstance(raw_position, Integer):
+            indices.append(raw_position.value)
+            continue
+        if (
+            isinstance(raw_position, Call)
+            and raw_position.has_head("List")
+            and len(raw_position.arguments) == 1
+            and isinstance(raw_position.arguments[0], Integer)
+        ):
+            indices.append(raw_position.arguments[0].value)
+            continue
+        raise WolframEvaluationError(
+            "SubsetMap currently supports flat integer positions (or one-element ``{i}`` lists)."
+        )
+
+    resolved: list[int] = []
+    for index in indices:
+        resolved_index = _resolve_index(len(items), index)
+        resolved.append(resolved_index)
+
+    selected = list_expr(*(items[idx] for idx in resolved))
+    transformed = evaluate(_apply_callable(function, (selected,)))
+    if not (isinstance(transformed, Call) and transformed.has_head("List")):
+        raise WolframEvaluationError(
+            "SubsetMap expects the function to return a List of the same length as the selection."
+        )
+    if len(transformed.arguments) != len(resolved):
+        raise WolframEvaluationError(
+            "SubsetMap expects the function to return a List of the same length as the selection."
+        )
+
+    new_items = list(items)
+    for slot, value in zip(resolved, transformed.arguments):
+        new_items[slot] = value
+    return _rebuild(target, tuple(new_items))
 
 
 def _resolve_size_range(
@@ -17772,8 +18370,19 @@ def _sequence_length(expr: Expr) -> int:
 
 def _take_or_drop(expr: Expr, specs: Sequence[Expr | int], *, drop: bool) -> Expr:
     function_name = "Drop" if drop else "Take"
-    selectors = _normalize_take_drop_selectors(expr, specs[0], function_name)
+    spec = specs[0]
+
     entries = _association_entries(expr)
+    if entries is not None and _is_association_key_selector_list(spec):
+        # The kernel supports key-list specs on associations
+        # (``Take[<|a -> 1, b -> 2, c -> 3|>, {Key[a], Key[b]}]``); raise a
+        # Tungsten diagnostic so callers don't get silent inertness.
+        raise WolframEvaluationError(
+            f"{function_name} on associations currently supports only numeric or span selectors; "
+            "key-list selectors such as ``{Key[a], …}`` are not yet implemented."
+        )
+
+    selectors = _normalize_take_drop_selectors(expr, spec, function_name)
     if entries is not None:
         if drop:
             removed = {_resolve_index(len(entries), selector) for selector in selectors}
@@ -17788,6 +18397,22 @@ def _take_or_drop(expr: Expr, specs: Sequence[Expr | int], *, drop: bool) -> Exp
             tuple(argument for index, argument in enumerate(compound.arguments) if index not in removed),
         )
     return _rebuild(compound, tuple(_select_single_part_value(compound, selector) for selector in selectors))
+
+
+def _is_association_key_selector_list(spec: Expr | int) -> bool:
+    """Detect a ``{Key[k1], …}`` or ``{"k1", …}`` selector list, which the
+    kernel honors on associations but which Tungsten does not yet implement.
+    """
+    if not isinstance(spec, Call) or not spec.has_head("List"):
+        return False
+    if not spec.arguments:
+        return False
+    for entry in spec.arguments:
+        if isinstance(entry, Call) and entry.has_head("Key"):
+            return True
+        if isinstance(entry, String):
+            return True
+    return False
 
 
 def _normalize_take_drop_selectors(expr: Expr, spec: Expr | int, function_name: str) -> list[int]:
