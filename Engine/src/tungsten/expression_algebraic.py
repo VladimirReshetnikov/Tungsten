@@ -31,6 +31,12 @@ def _evaluate_algebraic_functions(expr: Call) -> Expr | None:
             return _root_reduce_expr(expr.arguments)
         if expr.has_head("MinimalPolynomial"):
             return _minimal_polynomial_expr(expr.arguments)
+        if expr.has_head("Arg"):
+            return _arg_expr(expr.arguments)
+        if expr.has_head("ReIm"):
+            return _re_im_expr(expr.arguments)
+        if expr.has_head("ComplexExpand"):
+            return _complex_expand_expr(expr.arguments)
     except Exception:
         # Algebraic-number conversion is intentionally best-effort. Unsupported or
         # unexpectedly hard cases must leave the expression inert, not crash the REPL.
@@ -93,6 +99,388 @@ def _minimal_polynomial_expr(arguments: Sequence[Expr]) -> Expr | None:
         return call("Function", result) if len(arguments) == 1 else result
     except (_AlgebraicConversionError, _sp.PolynomialError, ValueError, NotImplementedError):
         return None
+
+
+def _arg_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    components = _complex_components_expr(arguments[0])
+    if components is None:
+        return None
+    return _arg_from_components(*components)
+
+
+def _re_im_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    components = _complex_components_expr(arguments[0])
+    if components is None:
+        return None
+    return _evaluated_list_expr(*components)
+
+
+def _complex_expand_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    return _complex_expand_scalar(arguments[0])
+
+
+def _complex_expand_scalar(expr: Expr) -> Expr | None:
+    if isinstance(expr, Call) and expr.has_head("List"):
+        expanded_items = tuple(_complex_expand_scalar(argument) for argument in expr.arguments)
+        if any(item is None for item in expanded_items):
+            return None
+        return _evaluated_list_expr(*(item for item in expanded_items if item is not None))
+    components = _complex_components_expr(expr)
+    if components is None:
+        return None
+    return _expr_from_components(*components)
+
+
+def _complex_components_expr(expr: Expr) -> tuple[Expr, Expr] | None:
+    if _is_exact_real_number(expr) or isinstance(expr, Real | SpecialReal):
+        return expr, integer(0)
+    if isinstance(expr, ComplexNumber):
+        return expr.real_part, expr.imaginary_part
+    if isinstance(expr, RootNumber):
+        real = _component_expr(expr, "Re")
+        imaginary = _component_expr(expr, "Im")
+        if real is None or imaginary is None:
+            return None
+        return real, imaginary
+    if _is_real_transcendental_expr(expr):
+        return expr, integer(0)
+    if isinstance(expr, Symbol):
+        if _system_dispatch_name(expr) == "I":
+            return integer(0), integer(1)
+        return None
+    if not isinstance(expr, Call):
+        return None
+
+    head_name = _system_dispatch_name(expr.head_expr) if isinstance(expr.head_expr, Symbol) else None
+    if head_name == "Plus":
+        components = tuple(_complex_components_expr(argument) for argument in expr.arguments)
+        if any(component is None for component in components):
+            return None
+        real_terms = [component[0] for component in components if component is not None]
+        imaginary_terms = [component[1] for component in components if component is not None]
+        return _complex_simplify(call("Plus", *real_terms)), _complex_simplify(call("Plus", *imaginary_terms))
+    if head_name == "Times":
+        real_part: Expr = integer(1)
+        imaginary_part: Expr = integer(0)
+        for argument in expr.arguments:
+            components = _complex_components_expr(argument)
+            if components is None:
+                return None
+            real_part, imaginary_part = _complex_multiply_components(real_part, imaginary_part, *components)
+        return real_part, imaginary_part
+    if head_name == "Power" and len(expr.arguments) == 2:
+        return _complex_power_components(expr.arguments[0], expr.arguments[1])
+    if head_name == "Sqrt" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        return None if components is None else _complex_sqrt_components(*components)
+    if head_name == "Re" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        return None if components is None else (components[0], integer(0))
+    if head_name == "Im" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        return None if components is None else (components[1], integer(0))
+    if head_name == "Conjugate" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        return None if components is None else (components[0], _complex_negate(components[1]))
+    if head_name == "Abs" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        return None if components is None else (_abs_from_components(*components), integer(0))
+    if head_name == "Arg" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        return None if components is None else (_arg_from_components(*components), integer(0))
+    if head_name == "Exp" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        if components is None:
+            return None
+        real, imaginary = components
+        scale = _complex_simplify(call("Exp", real))
+        return _complex_simplify(call("Times", scale, call("Cos", imaginary))), _complex_simplify(
+            call("Times", scale, call("Sin", imaginary))
+        )
+    if head_name == "Log" and len(expr.arguments) == 1:
+        components = _complex_components_expr(expr.arguments[0])
+        if components is None:
+            return None
+        return _complex_simplify(call("Log", _abs_from_components(*components))), _arg_from_components(*components)
+    if head_name == "Log" and len(expr.arguments) == 2:
+        numerator = _complex_components_expr(call("Log", expr.arguments[1]))
+        denominator = _complex_components_expr(call("Log", expr.arguments[0]))
+        if numerator is None or denominator is None:
+            return None
+        return _complex_divide_components(*numerator, *denominator)
+    if head_name in {"Sin", "Cos", "Sinh", "Cosh"} and len(expr.arguments) == 1:
+        return _complex_direct_function_components(expr.arguments[0], head_name)
+
+    rewritten = _complex_rewrite_elementary_call(head_name, expr.arguments)
+    if rewritten is not None:
+        return _complex_components_expr(rewritten)
+
+    return None
+
+
+def _complex_rewrite_elementary_call(head_name: str | None, arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    argument = arguments[0]
+    if head_name == "Tan":
+        return call("Times", call("Sin", argument), call("Power", call("Cos", argument), integer(-1)))
+    if head_name == "Cot":
+        return call("Times", call("Cos", argument), call("Power", call("Sin", argument), integer(-1)))
+    if head_name == "Sec":
+        return call("Power", call("Cos", argument), integer(-1))
+    if head_name == "Csc":
+        return call("Power", call("Sin", argument), integer(-1))
+    if head_name == "Tanh":
+        return call("Times", call("Sinh", argument), call("Power", call("Cosh", argument), integer(-1)))
+    if head_name == "Coth":
+        return call("Times", call("Cosh", argument), call("Power", call("Sinh", argument), integer(-1)))
+    if head_name == "Sech":
+        return call("Power", call("Cosh", argument), integer(-1))
+    if head_name == "Csch":
+        return call("Power", call("Sinh", argument), integer(-1))
+    if head_name == "ArcSin":
+        return call(
+            "Times",
+            integer(-1),
+            symbol("I"),
+            call("Log", call("Plus", call("Times", symbol("I"), argument), call("Sqrt", call("Plus", integer(1), call("Times", integer(-1), call("Power", argument, integer(2))))))),
+        )
+    if head_name == "ArcCos":
+        return call("Plus", call("Times", rational_number(1, 2), symbol("Pi")), call("Times", integer(-1), call("ArcSin", argument)))
+    if head_name == "ArcTan":
+        return call(
+            "Times",
+            rational_number(1, 2),
+            symbol("I"),
+            call(
+                "Plus",
+                call("Log", call("Plus", integer(1), call("Times", integer(-1), symbol("I"), argument))),
+                call("Times", integer(-1), call("Log", call("Plus", integer(1), call("Times", symbol("I"), argument)))),
+            ),
+        )
+    if head_name == "ArcCot":
+        return call("Plus", call("Times", rational_number(1, 2), symbol("Pi")), call("Times", integer(-1), call("ArcTan", argument)))
+    if head_name == "ArcSec":
+        return call("ArcCos", call("Power", argument, integer(-1)))
+    if head_name == "ArcCsc":
+        return call("ArcSin", call("Power", argument, integer(-1)))
+    if head_name == "ArcSinh":
+        return call("Log", call("Plus", argument, call("Sqrt", call("Plus", call("Power", argument, integer(2)), integer(1)))))
+    if head_name == "ArcCosh":
+        return call(
+            "Log",
+            call(
+                "Plus",
+                argument,
+                call(
+                    "Times",
+                    call("Sqrt", call("Plus", argument, integer(1))),
+                    call("Sqrt", call("Plus", argument, integer(-1))),
+                ),
+            ),
+        )
+    if head_name == "ArcTanh":
+        return call(
+            "Times",
+            rational_number(1, 2),
+            call("Plus", call("Log", call("Plus", integer(1), argument)), call("Times", integer(-1), call("Log", call("Plus", integer(1), call("Times", integer(-1), argument))))),
+        )
+    if head_name == "ArcCoth":
+        return call("ArcTanh", call("Power", argument, integer(-1)))
+    if head_name == "ArcSech":
+        return call("ArcCosh", call("Power", argument, integer(-1)))
+    if head_name == "ArcCsch":
+        return call("ArcSinh", call("Power", argument, integer(-1)))
+    if head_name == "Haversine":
+        return call("Times", rational_number(1, 2), call("Plus", integer(1), call("Times", integer(-1), call("Cos", argument))))
+    if head_name == "InverseHaversine":
+        return call("Times", integer(2), call("ArcSin", call("Sqrt", argument)))
+    if head_name == "Gudermannian":
+        return call("Times", integer(2), call("ArcTan", call("Tanh", call("Times", rational_number(1, 2), argument))))
+    if head_name == "InverseGudermannian":
+        return call("Log", call("Tan", call("Plus", call("Times", rational_number(1, 4), symbol("Pi")), call("Times", rational_number(1, 2), argument))))
+
+    degree_base = _degree_transcendental_base_name(head_name or "")
+    if degree_base is not None:
+        if degree_base.startswith("Arc"):
+            return call("Times", call(degree_base, argument), integer(180), call("Power", symbol("Pi"), integer(-1)))
+        return call(degree_base, call("Times", argument, symbol("Degree")))
+    return None
+
+
+def _complex_direct_function_components(argument: Expr, function_name: str) -> tuple[Expr, Expr] | None:
+    components = _complex_components_expr(argument)
+    if components is None:
+        return None
+    real, imaginary = components
+    if function_name == "Sin":
+        return (
+            _complex_simplify(call("Times", call("Sin", real), call("Cosh", imaginary))),
+            _complex_simplify(call("Times", call("Cos", real), call("Sinh", imaginary))),
+        )
+    if function_name == "Cos":
+        return (
+            _complex_simplify(call("Times", call("Cos", real), call("Cosh", imaginary))),
+            _complex_simplify(call("Times", integer(-1), call("Sin", real), call("Sinh", imaginary))),
+        )
+    if function_name == "Sinh":
+        return (
+            _complex_simplify(call("Times", call("Sinh", real), call("Cos", imaginary))),
+            _complex_simplify(call("Times", call("Cosh", real), call("Sin", imaginary))),
+        )
+    if function_name == "Cosh":
+        return (
+            _complex_simplify(call("Times", call("Cosh", real), call("Cos", imaginary))),
+            _complex_simplify(call("Times", call("Sinh", real), call("Sin", imaginary))),
+        )
+    return None
+
+
+def _complex_power_components(base: Expr, exponent: Expr) -> tuple[Expr, Expr] | None:
+    exponent_fraction = _exact_fraction(exponent)
+    if exponent_fraction is not None and exponent_fraction.denominator == 1:
+        power = exponent_fraction.numerator
+        if power == 0:
+            return integer(1), integer(0)
+        if power < 0:
+            positive = _complex_power_components(base, integer(-power))
+            if positive is None:
+                return None
+            return _complex_divide_components(integer(1), integer(0), *positive)
+        result = (integer(1), integer(0))
+        factor = _complex_components_expr(base)
+        if factor is None:
+            return None
+        remaining = power
+        while remaining:
+            if remaining & 1:
+                result = _complex_multiply_components(*result, *factor)
+            remaining >>= 1
+            if remaining:
+                factor = _complex_multiply_components(*factor, *factor)
+        return result
+    if exponent_fraction == Fraction(1, 2):
+        components = _complex_components_expr(base)
+        return None if components is None else _complex_sqrt_components(*components)
+    exponent_components = _complex_components_expr(exponent)
+    if exponent_components is None or not _is_effectively_zero(exponent_components[1]):
+        return None
+    return _complex_components_expr(call("Exp", call("Times", exponent_components[0], call("Log", base))))
+
+
+def _complex_sqrt_components(real: Expr, imaginary: Expr) -> tuple[Expr, Expr]:
+    real = _complex_simplify(real)
+    imaginary = _complex_simplify(imaginary)
+    imaginary_sign = _compare_real_expr(imaginary, integer(0))
+    if imaginary_sign == 0:
+        real_sign = _compare_real_expr(real, integer(0))
+        if real_sign is not None and real_sign >= 0:
+            return _real_sqrt_expr(real), integer(0)
+        if real_sign is not None and real_sign < 0:
+            return integer(0), _real_sqrt_expr(_complex_negate(real))
+    magnitude = _abs_from_components(real, imaginary)
+    real_part = _real_sqrt_expr(_complex_simplify(call("Times", rational_number(1, 2), call("Plus", magnitude, real))))
+    imaginary_magnitude = _real_sqrt_expr(
+        _complex_simplify(call("Times", rational_number(1, 2), call("Plus", magnitude, _complex_negate(real))))
+    )
+    if imaginary_sign is None:
+        sign_expr = _complex_simplify(call("Sign", imaginary))
+    else:
+        sign_expr = integer(1 if imaginary_sign > 0 else -1)
+    return real_part, _complex_simplify(call("Times", sign_expr, imaginary_magnitude))
+
+
+def _complex_multiply_components(left_real: Expr, left_imaginary: Expr, right_real: Expr, right_imaginary: Expr) -> tuple[Expr, Expr]:
+    real = call(
+        "Plus",
+        call("Times", left_real, right_real),
+        call("Times", integer(-1), left_imaginary, right_imaginary),
+    )
+    imaginary = call(
+        "Plus",
+        call("Times", left_real, right_imaginary),
+        call("Times", left_imaginary, right_real),
+    )
+    return _complex_simplify(real), _complex_simplify(imaginary)
+
+
+def _complex_divide_components(left_real: Expr, left_imaginary: Expr, right_real: Expr, right_imaginary: Expr) -> tuple[Expr, Expr]:
+    denominator = _complex_simplify(call("Plus", call("Power", right_real, integer(2)), call("Power", right_imaginary, integer(2))))
+    real_numerator = _complex_simplify(call("Plus", call("Times", left_real, right_real), call("Times", left_imaginary, right_imaginary)))
+    imaginary_numerator = _complex_simplify(call("Plus", call("Times", left_imaginary, right_real), call("Times", integer(-1), left_real, right_imaginary)))
+    return (
+        _complex_simplify(call("Times", real_numerator, call("Power", denominator, integer(-1)))),
+        _complex_simplify(call("Times", imaginary_numerator, call("Power", denominator, integer(-1)))),
+    )
+
+
+def _abs_from_components(real: Expr, imaginary: Expr) -> Expr:
+    return _real_sqrt_expr(_complex_simplify(call("Plus", call("Power", real, integer(2)), call("Power", imaginary, integer(2)))))
+
+
+def _arg_from_components(real: Expr, imaginary: Expr) -> Expr | None:
+    real = _complex_simplify(real)
+    imaginary = _complex_simplify(imaginary)
+    real_sign = _compare_real_expr(real, integer(0))
+    imaginary_sign = _compare_real_expr(imaginary, integer(0))
+    if real_sign == 0 and imaginary_sign == 0:
+        return integer(0)
+    if imaginary_sign == 0:
+        if real_sign is None:
+            return None
+        return integer(0) if real_sign > 0 else symbol("Pi")
+    if real_sign == 0:
+        if imaginary_sign is None:
+            return None
+        return _complex_simplify(call("Times", rational_number(1 if imaginary_sign > 0 else -1, 2), symbol("Pi")))
+    return _complex_simplify(call("ArcTan", real, imaginary))
+
+
+def _expr_from_components(real: Expr, imaginary: Expr) -> Expr:
+    real = _complex_simplify(real)
+    imaginary = _complex_simplify(imaginary)
+    if _is_effectively_zero(imaginary):
+        return real
+    return _complex_simplify(call("Plus", real, call("Times", symbol("I"), imaginary)))
+
+
+def _real_sqrt_expr(expr: Expr) -> Expr:
+    return _complex_simplify(call("Power", expr, rational_number(1, 2)))
+
+
+def _complex_negate(expr: Expr) -> Expr:
+    return _complex_simplify(call("Times", integer(-1), expr))
+
+
+def _complex_simplify(expr: Expr) -> Expr:
+    evaluated = evaluate(expr)
+    if _contains_root_number(evaluated):
+        return _root_reduce_expr((evaluated,)) or evaluated
+    return evaluated
+
+
+def _contains_root_number(expr: Expr) -> bool:
+    if isinstance(expr, RootNumber):
+        return True
+    if isinstance(expr, ComplexNumber):
+        return _contains_root_number(expr.real_part) or _contains_root_number(expr.imaginary_part)
+    if isinstance(expr, Call):
+        return any(_contains_root_number(argument) for argument in expr.arguments)
+    return False
+
+
+def _is_effectively_zero(expr: Expr) -> bool:
+    simplified = _complex_simplify(expr)
+    if _is_numeric_zero(simplified):
+        return True
+    comparison = _compare_real_expr(simplified, integer(0))
+    return comparison == 0
 
 
 def _numericize_algebraic_expr(expr: Expr, precision: int | None) -> Expr | None:

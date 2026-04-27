@@ -1784,6 +1784,59 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse_input_form("1/Overflow[]")).to_full_form(), "Underflow[]")
         self.assertEqual(evaluate(parse_input_form("1/Underflow[]")).to_full_form(), "Overflow[]")
 
+    def test_arg_reim_and_variable_free_complex_expand(self) -> None:
+        arg_reim_cases = {
+            "Arg[0]": "0",
+            "Arg[1]": "0",
+            "Arg[-1]": "Pi",
+            "Arg[I]": "Times[Rational[1, 2], Pi]",
+            "Arg[-I]": "Times[Rational[-1, 2], Pi]",
+            "Arg[1 + I]": "Times[Rational[1, 4], Pi]",
+            "Arg[1 + 2 I]": "ArcTan[1, 2]",
+            "Arg[-1 + 2 I]": "ArcTan[-1, 2]",
+            "ReIm[1 + 2 I]": "List[1, 2]",
+            "ReIm[Pi]": "List[Pi, 0]",
+            "ReIm[Root[#^2 + 1 &, 1]]": "List[0, -1]",
+            "Arg[Root[#^2 + 1 &, 1]]": "Times[Rational[-1, 2], Pi]",
+        }
+        for source, expected in arg_reim_cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(evaluate(parse_input_form(source)).to_full_form(), expected)
+
+        complex_expand_cases = {
+            "ComplexExpand[Re[1 + 2 I]]": "1",
+            "ComplexExpand[Im[1 + 2 I]]": "2",
+            "ComplexExpand[Conjugate[1 + 2 I]]": "Complex[1, -2]",
+            "ComplexExpand[Abs[1 + 2 I]]": "Power[5, Rational[1, 2]]",
+            "ComplexExpand[Arg[1 + I]]": "Times[Rational[1, 4], Pi]",
+            "ComplexExpand[Exp[1 + 2 I]]": "Times[E, Plus[Cos[2], Times[Complex[0, 1], Sin[2]]]]",
+            "ComplexExpand[Sin[1 + 2 I]]": "Plus[Times[Complex[0, 1], Cos[1], Sinh[2]], Times[Cosh[2], Sin[1]]]",
+            "ComplexExpand[Cos[1 + 2 I]]": "Plus[Times[Complex[0, -1], Sin[1], Sinh[2]], Times[Cos[1], Cosh[2]]]",
+            "ComplexExpand[Tan[1 + 2 I]]": "Times[Plus[Sin[2], Times[Complex[0, 1], Sinh[4]]], Power[Plus[Cos[2], Cosh[4]], -1]]",
+            "ComplexExpand[Log[1 + 2 I]]": "Plus[Log[Power[5, Rational[1, 2]]], Times[Complex[0, 1], ArcTan[2]]]",
+            "ComplexExpand[Sqrt[1 + 2 I]]": "Plus[Power[Times[Rational[1, 2], Plus[1, Power[5, Rational[1, 2]]]], Rational[1, 2]], Times[Complex[0, 1], Power[Times[Rational[1, 2], Plus[-1, Power[5, Rational[1, 2]]]], Rational[1, 2]]]]",
+            "ComplexExpand[ArcSin[2]]": "Plus[Times[Complex[0, -1], Log[Plus[2, Power[3, Rational[1, 2]]]]], Times[Rational[1, 2], Pi]]",
+            "ComplexExpand[Re[ArcSin[2]]]": "Times[Rational[1, 2], Pi]",
+            "ComplexExpand[Im[ArcSin[2]]]": "Times[-1, Log[Plus[2, Power[3, Rational[1, 2]]]]]",
+            "ComplexExpand[Re[Root[#^2 + 1 &, 1]]]": "0",
+            "ComplexExpand[Conjugate[Root[#^2 + 1 &, 1]]]": "Complex[0, 1]",
+            "ComplexExpand[Abs[Root[#^2 + 1 &, 1]]]": "1",
+            "ComplexExpand[Arg[Root[#^2 + 1 &, 1]]]": "Times[Rational[-1, 2], Pi]",
+            "ComplexExpand[{Re[1 + I], Im[1 + I], Abs[1 + I], Arg[1 + I]}]": "List[1, 1, Power[2, Rational[1, 2]], Times[Rational[1, 4], Pi]]",
+        }
+        banned_heads = ("Abs[", "Arg[", "Re[", "Im[", "Conjugate[")
+        for source, expected in complex_expand_cases.items():
+            with self.subTest(source=source):
+                result = evaluate(parse_input_form(source)).to_full_form()
+                self.assertEqual(result, expected)
+                for banned in banned_heads:
+                    self.assertNotIn(banned, result)
+
+        self.assertEqual(
+            evaluate(parse_input_form("ComplexExpand[x + I]")).to_full_form(),
+            "ComplexExpand[Plus[Complex[0, 1], x]]",
+        )
+
     def test_transcendental_constants_exact_numeric_and_degree_functions(self) -> None:
         exact_cases = {
             "Exp[1]": "E",
