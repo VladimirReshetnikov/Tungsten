@@ -523,6 +523,75 @@ class ColonChainParserTests(unittest.TestCase):
             "Pattern[y, BlankNullSequence[]]]]]",
         )
 
+    def test_named_character_operator_precedence_matches_oeis_a199812_rule(self) -> None:
+        expr = parse_expression(
+            r"x_ \[CircleTimes] {y_, z__} := x \[CircleTimes] {y} \[CirclePlus] x \[CircleTimes] {z}",
+            form="input",
+        )
+        self.assertEqual(
+            expr.to_full_form(),
+            "SetDelayed[CircleTimes[Pattern[x, Blank[]], "
+            "List[Pattern[y, Blank[]], Pattern[z, BlankSequence[]]]], "
+            "CirclePlus[CircleTimes[x, List[y]], CircleTimes[x, List[z]]]]",
+        )
+
+
+class OuterLevelspecTests(unittest.TestCase):
+    """``Outer`` accepts an optional integer levelspec and defaults to full depth."""
+
+    def test_default_descends_to_atoms(self) -> None:
+        # No levelspec descends fully into each input, applying the function to
+        # the leaves while preserving every intermediate level of nesting.
+        self.assertEqual(
+            _full("Outer[f, {{a, b}, {c, d}}, {{x, y}, {z, w}}]"),
+            "List[List[List[List[f[a, x], f[a, y]], List[f[a, z], f[a, w]]], "
+            "List[List[f[b, x], f[b, y]], List[f[b, z], f[b, w]]]], "
+            "List[List[List[f[c, x], f[c, y]], List[f[c, z], f[c, w]]], "
+            "List[List[f[d, x], f[d, y]], List[f[d, z], f[d, w]]]]]",
+        )
+
+    def test_explicit_level_one(self) -> None:
+        # Levelspec ``1`` treats only the outer level of each input as a sequence
+        # of items to combine.
+        self.assertEqual(
+            _full("Outer[f, {{a, b}, {c, d}}, {{x, y}, {z, w}}, 1]"),
+            "List[List[f[List[a, b], List[x, y]], f[List[a, b], List[z, w]]], "
+            "List[f[List[c, d], List[x, y]], f[List[c, d], List[z, w]]]]",
+        )
+
+    def test_atoms_short_circuit_descent(self) -> None:
+        # Atoms encountered before the requested depth are treated as leaves
+        # (matching the kernel's behavior on irregular inputs).
+        self.assertEqual(
+            _full("Outer[f, {a, {b, c}}, {x, y}, 1]"),
+            "List[List[f[a, x], f[a, y]], List[f[List[b, c], x], f[List[b, c], y]]]",
+        )
+
+    def test_oeis_a199812_prefix_evaluation(self) -> None:
+        # The OEIS A199812 ordinal-distinct-tower-counting code uses ``Outer[..., 1]``
+        # in its memoized recursion and relies on Wolfram precedence for
+        # ``\[CircleTimes]`` binding tighter than ``\[CirclePlus]``.
+        evaluate(parse_expression("ClearAll[Precedes, CirclePlus, CircleTimes, f]", form="input"))
+        evaluate(parse_expression(
+            r"""_ \[Precedes] {} = False;
+{} \[Precedes] {__} = True;
+{a_ \[Diamond] _, ___} \[Precedes] {b_ \[Diamond] _, ___} := a \[Precedes] b /; a =!= b;
+{a_ \[Diamond] m_, ___} \[Precedes] {a_ \[Diamond] n_, ___} := m < n /; m != n;
+{z_, x___} \[Precedes] {z_, y___} := {x} \[Precedes] {y};
+m_ \[CirclePlus] {} := m;
+{} \[CirclePlus] n_ := n;
+{x___, a_ \[Diamond] m_} \[CirclePlus] {a_ \[Diamond] n_, y___} := {x, a \[Diamond] (m + n), y};
+{x___, a_ \[Diamond] m_} \[CirclePlus] z : {b_ \[Diamond] n_, y___} := If[a \[Precedes] b, {x} \[CirclePlus] z, {x, a \[Diamond] m, b \[Diamond] n, y}];
+{} \[CircleTimes] _ = {};
+_ \[CircleTimes] {} = {};
+{a_ \[Diamond] m_, x___} \[CircleTimes] {b_ \[Diamond] n_} := If[b === {}, {a \[Diamond] (m n), x}, {(a \[CirclePlus] b) \[Diamond] n}];
+x_ \[CircleTimes] {y_, z__} := x \[CircleTimes] {y} \[CirclePlus] x \[CircleTimes] {z};
+f[1] = {{{} \[Diamond] 1}};
+f[n_] := f[n] = Union[Flatten[Table[Outer[#1 \[CircleTimes] {#2 \[Diamond] 1} &, f[k], f[n - k], 1], {k, n - 1}], 2]];""",
+            form="input",
+        ))
+        self.assertEqual(_full("Table[Length[f[n]], {n, 1, 6}]"), "List[1, 1, 2, 5, 13, 32]")
+
 
 class EofKindCollisionParserTests(unittest.TestCase):
     """A symbol literally named ``eof`` must not collide with the EOF kind sentinel."""

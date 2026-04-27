@@ -1052,6 +1052,9 @@ class _Parser:
     _POWER_BP = 160
     _TIMES_BP = 140
     _NONCOMMUTATIVE_TIMES_BP = 145
+    _DIAMOND_BP = 144
+    _CIRCLE_TIMES_BP = 142
+    _CIRCLE_PLUS_BP = 125
     _PLUS_BP = 120
     _COMPARE_BP = 100
     _AND_BP = 80
@@ -1075,6 +1078,11 @@ class _Parser:
     _FUNCTION_BP = 10
     _SPAN_BP = 110
     _PREFIX_BP = 150
+    _ESCAPED_INFIX_BINDING_POWERS = {
+        "CirclePlus": _CIRCLE_PLUS_BP,
+        "CircleTimes": _CIRCLE_TIMES_BP,
+        "Diamond": _DIAMOND_BP,
+    }
 
     def __init__(self, text: str) -> None:
         self.text = text
@@ -1807,7 +1815,11 @@ class _Parser:
         spec = binary_specs.get(text)
         escaped_operator_head = _ESCAPED_INFIX_OPERATOR_HEADS.get(text)
         if spec is None and escaped_operator_head is not None:
-            spec = (self._COMPARE_BP, self._COMPARE_BP + 1, escaped_operator_head)
+            escaped_bp = self._ESCAPED_INFIX_BINDING_POWERS.get(
+                escaped_operator_head,
+                self._COMPARE_BP,
+            )
+            spec = (escaped_bp, escaped_bp + 1, escaped_operator_head)
         if spec is None:
             return None
 
@@ -1903,5 +1915,4 @@ class _Parser:
         result = call(head_name, left, right)
         self._operator_expr_heads[id(result)] = head_name
         return result
-
 

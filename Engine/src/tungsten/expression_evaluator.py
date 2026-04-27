@@ -47,7 +47,7 @@ def evaluate_once(expr: Expr) -> Expr:
                 return expr
             token = _ACTIVE_OWN_VALUE_SYMBOLS.set(active_symbols + (record.full_name,))
             try:
-                return evaluate(record.own_value)
+                return _evaluate_iteration_continuation(record.own_value)
             finally:
                 _ACTIVE_OWN_VALUE_SYMBOLS.reset(token)
         return expr

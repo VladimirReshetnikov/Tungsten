@@ -2363,6 +2363,11 @@ class ExpressionEvaluationTests(unittest.TestCase):
             for _ in range(30):
                 nested = f"ReleaseHold[Hold[{nested}]]"
             recursion_session = submit_with_session(nested)
+            assert recursion_session.outputs is not None
+            self.assertEqual(
+                recursion_session.outputs[recursion_session.line].to_full_form(),
+                "TerminatedEvaluation[RecursionLimit]",
+            )
             assert recursion_session.message_history is not None
             self.assertEqual(
                 recursion_session.message_history[recursion_session.line][0].name.to_input_form(),
@@ -2370,13 +2375,20 @@ class ExpressionEvaluationTests(unittest.TestCase):
             )
 
             evaluate(parse_input_form("$IterationLimit = 20"))
-            iteration_session = submit_with_session("Map[Identity, Range[50]]")
+            self.assertEqual(evaluate(parse_input_form("Length[Map[Identity, Range[50]]]")).to_full_form(), "50")
+            iteration_session = submit_with_session("ClearAll[f]; f[x_] := f[x + 1]; f[0]")
+            assert iteration_session.outputs is not None
+            self.assertEqual(
+                iteration_session.outputs[iteration_session.line].to_full_form(),
+                "TerminatedEvaluation[IterationLimit]",
+            )
             assert iteration_session.message_history is not None
             self.assertEqual(
                 iteration_session.message_history[iteration_session.line][0].name.to_input_form(),
                 "$IterationLimit::itlim",
             )
         finally:
+            evaluate(parse_input_form("ClearAll[f, g]"))
             evaluate(parse_input_form("$RecursionLimit = 1024"))
             evaluate(parse_input_form("$IterationLimit = 4096"))
 

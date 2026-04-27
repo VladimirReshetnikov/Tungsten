@@ -74,6 +74,14 @@ class _TungstenConfirmSignal(Exception):
         self.tag = tag
 
 
+class _TungstenTerminatedEvaluationSignal(Exception):
+    """Internal signal raised when a system evaluation limit is exceeded."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class _TungstenBreakSignal(Exception):
     """Internal signal raised by ``Break[]``.
 
@@ -130,6 +138,7 @@ _CONTROL_SIGNAL_TYPES = (
     _TungstenThrowSignal,
     _TungstenTimeConstraintSignal,
     _TungstenConfirmSignal,
+    _TungstenTerminatedEvaluationSignal,
     _TungstenBreakSignal,
     _TungstenContinueSignal,
     _TungstenReturnSignal,
@@ -8084,8 +8093,11 @@ def _apply_definitions(expr: Expr, definitions: Sequence[object]) -> Expr | None
                 definition.rhs,
                 bindings,
                 delayed=definition.delayed,
-                evaluate_result=True,
+                evaluate_result=False,
             )
+            if applied:
+                assert replacement is not None
+                replacement = _evaluate_iteration_continuation(replacement)
         except _TungstenReturnSignal as signal:
             if signal.head_name is None:
                 return signal.value
@@ -13991,22 +14003,57 @@ def distribute(expr: Expr, distributed_head: Expr | None = None, outer_head: Exp
     return Call(head_expr=effective_distributed_head, arguments=tuple(distributed_arguments))
 
 
-def outer(function: Expr, *sequences: Expr) -> Expr:
+def outer(function: Expr, *args: Expr) -> Expr:
+    """Apply ``Outer`` over one or more sequences with optional levelspec(s).
+
+    Supported call shapes mirror the kernel:
+
+    - ``Outer[f, t1, ..., tn]`` descends ``ti`` to its full depth (``Infinity``
+      levelspec) and applies ``f`` to every combination of leaf elements.
+    - ``Outer[f, t1, ..., tn, n]`` descends ``n`` levels into each ``ti``.
+    - ``Outer[f, t1, ..., tn, n1, n2, ..., nk]`` accepts up to ``n``
+      per-sequence integer levelspecs at the tail; the last spec is broadcast
+      to any remaining sequences.
+
+    A leaf reached before the requested level (because the input ran out of
+    nesting) is treated as a leaf, matching the kernel's behavior on irregular
+    inputs.
+    """
+    if not args:
+        raise WolframEvaluationError("Outer expects at least one sequence.")
+
+    sequences = list(args)
+    levels: list[int] = []
+    while len(sequences) > 1 and isinstance(sequences[-1], Integer):
+        levels.insert(0, sequences.pop().value)
     if not sequences:
         raise WolframEvaluationError("Outer expects at least one sequence.")
+
+    def depth_for(index: int) -> int | None:
+        if not levels:
+            return None
+        if index < len(levels):
+            return levels[index]
+        return levels[-1]
+
     normalized_sequences: list[Call] = []
     for sequence in sequences:
         compound = _require_compound(sequence, "Outer")
         normalized_sequences.append(compound)
 
+    def descend(node: Expr, depth_remaining: int | None, index: int, chosen: list[Expr]) -> Expr:
+        if depth_remaining == 0 or not isinstance(node, Call):
+            return recurse(index + 1, [*chosen, node])
+        next_depth = depth_remaining - 1 if depth_remaining is not None else None
+        return _rebuild(
+            node,
+            tuple(descend(child, next_depth, index, chosen) for child in node.arguments),
+        )
+
     def recurse(index: int, chosen: list[Expr]) -> Expr:
         if index == len(normalized_sequences):
             return _apply_callable(function, tuple(chosen))
-        current = normalized_sequences[index]
-        return _rebuild(
-            current,
-            tuple(recurse(index + 1, [*chosen, item]) for item in current.arguments),
-        )
+        return descend(normalized_sequences[index], depth_for(index), index, chosen)
 
     return recurse(0, [])
 
@@ -18092,15 +18139,22 @@ def _rebuild_selected_parts(
     return _rebuild(expr, values)
 
 
-def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
+def evaluate(
+    expr: Expr,
+    *,
+    session: EvaluationSession | None = None,
+    _iteration_continuation: bool = False,
+) -> Expr:
     previous_depth = _ACTIVE_EVALUATION_DEPTH.get()
     if previous_depth == 0 and session is None:
         _GLOBAL_MESSAGES.clear()
         _GLOBAL_VISIBLE_MESSAGES.clear()
         _GLOBAL_PRINTS.clear()
-    root_iteration_token = None
-    if previous_depth == 0:
-        root_iteration_token = _ACTIVE_EVALUATION_ITERATION_COUNT.set(0)
+    iteration_root_token = None
+    previous_iteration_count = _ACTIVE_EVALUATION_ITERATION_COUNT.get()
+    if not _iteration_continuation:
+        iteration_root_token = _ACTIVE_EVALUATION_ITERATION_COUNT.set(0)
+        previous_iteration_count = 0
     apply_main_loop_hooks = (
         previous_depth == 0
         and session is not None
@@ -18109,19 +18163,22 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
     session_token = None
     if session is not None:
         session_token = _ACTIVE_EVALUATION_SESSION.set(session)
+    current_depth = previous_depth if _iteration_continuation else previous_depth + 1
     recursion_limit = _finite_system_limit_value("$RecursionLimit")
-    if recursion_limit is not None and previous_depth + 1 > recursion_limit:
+    if recursion_limit is not None and current_depth > recursion_limit:
         emit_message(
             call("MessageName", symbol("$RecursionLimit"), string("reclim")),
             f"Recursion depth exceeded {recursion_limit}.",
         )
         if session_token is not None:
             _ACTIVE_EVALUATION_SESSION.reset(session_token)
-        if root_iteration_token is not None:
-            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(root_iteration_token)
-        return expr
-    iteration_count = _ACTIVE_EVALUATION_ITERATION_COUNT.get() + 1
-    _ACTIVE_EVALUATION_ITERATION_COUNT.set(iteration_count)
+        if iteration_root_token is not None:
+            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(iteration_root_token)
+        if previous_depth > 0:
+            raise _TungstenTerminatedEvaluationSignal("RecursionLimit")
+        return call("TerminatedEvaluation", symbol("RecursionLimit"))
+    iteration_count = previous_iteration_count + 1
+    iteration_token = _ACTIVE_EVALUATION_ITERATION_COUNT.set(iteration_count)
     iteration_limit = _finite_system_limit_value("$IterationLimit")
     if iteration_limit is not None and iteration_count > iteration_limit:
         emit_message(
@@ -18130,10 +18187,13 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
         )
         if session_token is not None:
             _ACTIVE_EVALUATION_SESSION.reset(session_token)
-        if root_iteration_token is not None:
-            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(root_iteration_token)
-        return expr
-    depth_token = _ACTIVE_EVALUATION_DEPTH.set(previous_depth + 1)
+        _ACTIVE_EVALUATION_ITERATION_COUNT.reset(iteration_token)
+        if iteration_root_token is not None:
+            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(iteration_root_token)
+        if previous_depth > 0:
+            raise _TungstenTerminatedEvaluationSignal("IterationLimit")
+        return call("TerminatedEvaluation", symbol("IterationLimit"))
+    depth_token = _ACTIVE_EVALUATION_DEPTH.set(current_depth)
     try:
         try:
             _check_time_constraints()
@@ -18153,6 +18213,10 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
                 raise
             emit_message(call("MessageName", symbol("Confirm"), string("confirmnotag")))
             return signal.failure
+        except _TungstenTerminatedEvaluationSignal as signal:
+            if previous_depth > 0:
+                raise
+            return call("TerminatedEvaluation", symbol(signal.reason))
         except _TungstenBreakSignal:
             if previous_depth > 0:
                 raise
@@ -18190,15 +18254,20 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
     finally:
         if session_token is not None:
             _ACTIVE_EVALUATION_SESSION.reset(session_token)
+        _ACTIVE_EVALUATION_ITERATION_COUNT.reset(iteration_token)
         _ACTIVE_EVALUATION_DEPTH.reset(depth_token)
-        if root_iteration_token is not None:
-            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(root_iteration_token)
+        if iteration_root_token is not None:
+            _ACTIVE_EVALUATION_ITERATION_COUNT.reset(iteration_root_token)
 
 
 def _evaluate(expr: Expr) -> Expr:
     from .expression_evaluator import evaluate_once
 
     return evaluate_once(expr)
+
+
+def _evaluate_iteration_continuation(expr: Expr) -> Expr:
+    return evaluate(expr, _iteration_continuation=True)
 
 
 def parse_expression(text: str, form: str = "input") -> Expr:
