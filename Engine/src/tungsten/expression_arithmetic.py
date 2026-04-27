@@ -174,6 +174,9 @@ def _simplify_plus_arguments(arguments: Sequence[Expr]) -> Expr | None:
         return integer(0)
     if len(result_arguments) == 1:
         return result_arguments[0]
+    factored = _factor_common_additive_terms(result_arguments)
+    if factored is not None:
+        return factored
     result = Call(head_expr=symbol("Plus"), arguments=tuple(result_arguments))
     if result.arguments == tuple(arguments):
         return None
@@ -206,6 +209,104 @@ def _build_additive_term(coefficient: Expr, base: Expr) -> Expr | None:
     if _is_one_expr(coefficient):
         return base
     return _times_expr_from_factors((coefficient, base))
+
+
+def _factor_common_additive_terms(arguments: Sequence[Expr]) -> Expr | None:
+    decomposed = [_decompose_additive_term_factors(argument) for argument in arguments]
+    best_indices: tuple[int, ...] = ()
+    best_common: tuple[Expr, ...] = ()
+    unique_factors: list[Expr] = []
+    for _coefficient, factors in decomposed:
+        for factor in factors:
+            if factor not in unique_factors:
+                unique_factors.append(factor)
+
+    for factor in unique_factors:
+        indices = tuple(index for index, (_coefficient, factors) in enumerate(decomposed) if factor in factors)
+        if len(indices) < 2:
+            continue
+        common = _common_factor_list(*(decomposed[index][1] for index in indices))
+        if not common:
+            continue
+        if (len(indices), len(common)) > (len(best_indices), len(best_common)):
+            best_indices = indices
+            best_common = tuple(common)
+
+    if not best_indices or not best_common:
+        return None
+
+    index_set = set(best_indices)
+    quotients: list[Expr] = []
+    for index in best_indices:
+        coefficient, factors = decomposed[index]
+        remaining_factors = _remove_common_factors(factors, best_common)
+        quotient_factors: list[Expr] = []
+        if not _is_one_expr(coefficient):
+            quotient_factors.append(coefficient)
+        quotient_factors.extend(remaining_factors)
+        quotients.append(_times_expr_from_factors(quotient_factors))
+
+    common_expr = _times_expr_from_factors(best_common)
+    inner_sum = evaluate(call("Plus", *quotients))
+    factored_term = evaluate(call("Times", common_expr, inner_sum))
+
+    rebuilt: list[Expr] = []
+    inserted = False
+    for index, argument in enumerate(arguments):
+        if index in index_set:
+            if not inserted:
+                rebuilt.append(factored_term)
+                inserted = True
+            continue
+        rebuilt.append(argument)
+
+    if tuple(rebuilt) == tuple(arguments):
+        return None
+    if not rebuilt:
+        return integer(0)
+    if len(rebuilt) == 1:
+        return rebuilt[0]
+    return evaluate(Call(head_expr=symbol("Plus"), arguments=tuple(rebuilt)))
+
+
+def _decompose_additive_term_factors(argument: Expr) -> tuple[Expr, list[Expr]]:
+    if _is_number_expr(argument):
+        return argument, []
+    if isinstance(argument, Call) and argument.has_head("Times"):
+        coefficient: Expr = integer(1)
+        factors: list[Expr] = []
+        for factor in argument.arguments:
+            if _is_number_expr(factor):
+                multiplied = _mul_numeric_expr(coefficient, factor)
+                if multiplied is None:
+                    factors.append(factor)
+                else:
+                    coefficient = multiplied
+            else:
+                factors.append(factor)
+        return coefficient, factors
+    return integer(1), [argument]
+
+
+def _common_factor_list(*factor_lists: Sequence[Expr]) -> list[Expr]:
+    if not factor_lists:
+        return []
+    common: list[Expr] = []
+    remaining = [list(factors) for factors in factor_lists]
+    for factor in list(remaining[0]):
+        if all(factor in factors for factors in remaining[1:]):
+            common.append(factor)
+            for factors in remaining:
+                factors.remove(factor)
+    return common
+
+
+def _remove_common_factors(factors: Sequence[Expr], common: Sequence[Expr]) -> list[Expr]:
+    remaining = list(factors)
+    for factor in common:
+        if factor in remaining:
+            remaining.remove(factor)
+    return remaining
 
 
 def _simplify_times_arguments(arguments: Sequence[Expr]) -> Expr | None:
@@ -298,6 +399,10 @@ def _simplify_power_expr(base: Expr, exponent: Expr) -> Expr | None:
     if _is_one_expr(base):
         return integer(1)
 
+    fractional_power = _exact_fractional_power_expr(base, exponent)
+    if fractional_power is not None:
+        return fractional_power
+
     integer_exponent = _exact_integer_value(exponent)
     if integer_exponent is not None:
         if isinstance(base, Call) and base.has_head("Power") and len(base.arguments) == 2:
@@ -307,6 +412,68 @@ def _simplify_power_expr(base: Expr, exponent: Expr) -> Expr | None:
         if isinstance(base, Call) and base.has_head("Times"):
             return evaluate(call("Times", *(call("Power", factor, exponent) for factor in base.arguments)))
     return None
+
+
+def _exact_fractional_power_expr(base: Expr, exponent: Expr) -> Expr | None:
+    base_fraction = _exact_fraction(base)
+    exponent_fraction = _exact_fraction(exponent)
+    if base_fraction is None or exponent_fraction is None or exponent_fraction.denominator == 1:
+        return None
+    if base_fraction == 0:
+        return integer(0) if exponent_fraction > 0 else symbol("ComplexInfinity")
+    if base_fraction < 0:
+        if exponent_fraction == Fraction(1, 2):
+            positive_base = _fraction_expr(-base_fraction)
+            positive_power = _exact_fractional_power_expr(positive_base, exponent)
+            if positive_power is None:
+                positive_power = call("Power", positive_base, exponent)
+            return evaluate(call("Times", positive_power, symbol("I")))
+        return None
+
+    numerator = exponent_fraction.numerator
+    denominator = exponent_fraction.denominator
+    powered = base_fraction ** abs(numerator)
+    outside, inside = _extract_fraction_nth_root(powered, denominator)
+    if outside == 1 and inside == base_fraction and abs(numerator) == 1:
+        return None
+
+    if numerator < 0:
+        outside = Fraction(1, 1) / outside
+        radical_exponent = Fraction(-1, denominator)
+    else:
+        radical_exponent = Fraction(1, denominator)
+
+    factors: list[Expr] = []
+    if outside != 1:
+        factors.append(_fraction_expr(outside))
+    if inside != 1:
+        factors.append(
+            call(
+                "Power",
+                _fraction_expr(inside),
+                rational_number(radical_exponent.numerator, radical_exponent.denominator),
+            )
+        )
+    if not factors:
+        return integer(1)
+    if len(factors) == 1:
+        return factors[0]
+    return evaluate(call("Times", *factors))
+
+
+def _extract_fraction_nth_root(value: Fraction, root: int) -> tuple[Fraction, Fraction]:
+    numerator_outside, numerator_inside = _extract_integer_nth_root(value.numerator, root)
+    denominator_outside, denominator_inside = _extract_integer_nth_root(value.denominator, root)
+    return Fraction(numerator_outside, denominator_outside), Fraction(numerator_inside, denominator_inside)
+
+
+def _extract_integer_nth_root(value: int, root: int) -> tuple[int, int]:
+    outside = 1
+    inside = 1
+    for prime, exponent in _factor_int(value):
+        outside *= prime ** (exponent // root)
+        inside *= prime ** (exponent % root)
+    return outside, inside
 
 
 def _exact_integer_value(expr: Expr) -> int | None:
@@ -355,6 +522,21 @@ def _evaluate_numeric_relation(expr: Call) -> Expr | None:
         return _bool_symbol(True)
 
     if expr.has_head("Equal"):
+        values, options = _split_trailing_option_rules(expr.arguments)
+        same_test = _option_value(options, "SameTest")
+        if same_test is not None:
+            if len(values) <= 1:
+                return _bool_symbol(True)
+            for left, right in zip(values, values[1:]):
+                try:
+                    test_result = _apply_callable(same_test, (left, right))
+                except WolframEvaluationError:
+                    return None
+                if test_result == symbol("False"):
+                    return symbol("False")
+                if test_result != symbol("True"):
+                    return None
+            return symbol("True")
         if not all(_is_number_expr(argument) for argument in expr.arguments):
             return None
         comparisons = [_numeric_same_value(left, right) for left, right in zip(expr.arguments, expr.arguments[1:])]
@@ -1074,11 +1256,7 @@ def _integer_digits_int(n: int, base: int) -> list[int]:
 
 def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
     if expr.has_head("N"):
-        if len(expr.arguments) == 1:
-            return _n_expr(expr.arguments[0])
-        if len(expr.arguments) == 2:
-            return _n_expr(expr.arguments[0], expr.arguments[1])
-        return None
+        return _n_expr_from_arguments(expr.arguments)
 
     if expr.has_head("Precision"):
         if len(expr.arguments) != 1:
@@ -1145,7 +1323,28 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
             return None
         return _real_abs_expr(expr.arguments[0])
 
-    if expr.has_head("Sign") or expr.has_head("RealSign"):
+    if expr.has_head("Sign"):
+        if len(expr.arguments) != 1:
+            return None
+        argument = expr.arguments[0]
+        if _is_real_number_expr(argument):
+            zero_compare = _compare_real_expr(argument, integer(0))
+            if zero_compare is None:
+                return None
+            return integer((zero_compare > 0) - (zero_compare < 0))
+        if not isinstance(argument, ComplexNumber):
+            return None
+        if _is_numeric_zero(argument):
+            return integer(0)
+        magnitude = _numeric_abs_expr(argument)
+        if magnitude is None:
+            return None
+        divided = _div_numeric_expr(argument, magnitude)
+        if divided is not None:
+            return divided
+        return evaluate(call("Times", argument, call("Power", magnitude, integer(-1))))
+
+    if expr.has_head("RealSign"):
         if len(expr.arguments) != 1 or not _is_real_number_expr(expr.arguments[0]):
             return None
         zero_compare = _compare_real_expr(expr.arguments[0], integer(0))
@@ -1175,36 +1374,20 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
             return None
         return expr.arguments[0] if comparison > 0 else integer(0)
 
+    if expr.has_head("Mod"):
+        return _numeric_mod_expr(expr.arguments)
+
     if expr.has_head("Min") or expr.has_head("Max"):
-        if not expr.arguments:
-            return symbol("Infinity") if expr.has_head("Min") else symbol("-Infinity")
-        # Wolfram folds Min/Max through a single List wrapper:
-        # ``Min[{1, 2, 3}]`` is the same as ``Min[1, 2, 3]``.
-        unwrapped = _flatten_list_arguments(expr.arguments)
-        if not unwrapped:
-            return symbol("Infinity") if expr.has_head("Min") else symbol("-Infinity")
-        if not all(
-            _is_real_number_expr(argument)
-            or _is_real_algebraic_expr(argument)
-            or _is_positive_infinity_expr(argument)
-            or _is_negative_infinity_expr(argument)
-            for argument in unwrapped
-        ):
-            return None
-        best = unwrapped[0]
-        for argument in unwrapped[1:]:
-            comparison = _compare_real_expr(argument, best)
-            if comparison is None:
-                return None
-            if (expr.has_head("Min") and comparison < 0) or (expr.has_head("Max") and comparison > 0):
-                best = argument
-        return best
+        return _min_max_expr(expr.head_expr, expr.arguments)
 
     if expr.has_head("Floor") or expr.has_head("Ceiling") or expr.has_head("Round") \
             or expr.has_head("IntegerPart") or expr.has_head("FractionalPart"):
-        if len(expr.arguments) != 1:
-            return None
-        return _real_rounding_expr(expr.head_expr, expr.arguments[0])
+        if len(expr.arguments) == 1:
+            return _real_rounding_expr(expr.head_expr, expr.arguments[0])
+        if expr.has_head("Floor") or expr.has_head("Ceiling") or expr.has_head("Round"):
+            if len(expr.arguments) == 2:
+                return _rounding_multiple_expr(expr.head_expr, expr.arguments[0], expr.arguments[1])
+        return None
 
     if expr.has_head("Sqrt"):
         if len(expr.arguments) != 1:

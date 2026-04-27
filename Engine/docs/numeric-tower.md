@@ -98,7 +98,11 @@ exposes as <code>Developer`MachineIntegerQ</code>.
 ## Precision And Accuracy
 
 `N[expr]` converts exact numeric atoms to machine precision by default. `N[expr, p]` converts them
-to decimal arbitrary-precision reals with precision marker `p`.
+to decimal arbitrary-precision reals with precision marker `p`. Tungsten also numericizes common
+symbolic constants and elementary numeric calls through SymPy, such as `N[Pi, 20]`,
+`N[Sin[Pi/6], 20]`, and `N[Log[E], 20]`. As a Tungsten extension, option-like trailing rules
+`WorkingPrecision`, `AccuracyGoal`, and `PrecisionGoal` are accepted and treated as requested
+decimal precision.
 
 `Precision` returns:
 

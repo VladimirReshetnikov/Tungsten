@@ -242,6 +242,11 @@ class ArithmeticAutomaticSimplificationTests(unittest.TestCase):
         self.assertEqual(_full("2 x + 3 x"), "Times[5, x]")
         self.assertEqual(_full("a x + a x"), "Times[2, a, x]")
         self.assertEqual(_full("x y + x y"), "Times[2, x, y]")
+        self.assertEqual(_full("a x + b x"), "Times[x, Plus[a, b]]")
+        self.assertEqual(
+            _full("a x + b x + c y + d y"),
+            "Plus[Times[x, Plus[a, b]], Times[y, Plus[c, d]]]",
+        )
 
     def test_plus_cancels_opposite_terms(self) -> None:
         self.assertEqual(_full("x - x"), "0")
