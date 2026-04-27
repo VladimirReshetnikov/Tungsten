@@ -404,6 +404,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "ClearAll",
     "ClearAttributes",
     "Clip",
+    "Coefficient",
+    "CoefficientList",
+    "Collect",
     "Comap",
     "ComapApply",
     "Complex",
@@ -463,6 +466,8 @@ _SYSTEM_SYMBOL_NAMES = {
     "Equivalent",
     "EvenQ",
     "Except",
+    "Expand",
+    "Exponent",
     "ExportByteArray",
     "ExportString",
     "Extract",
@@ -470,6 +475,9 @@ _SYSTEM_SYMBOL_NAMES = {
     "Failsafe",
     "FailsafeFailed",
     "False",
+    "Factor",
+    "FactorInteger",
+    "FactorList",
     "Failure",
     "FailureQ",
     "ExactNumberQ",
@@ -521,6 +529,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Inner",
     "Intersection",
     "Integer",
+    "IntegerExponent",
     "IntegerQ",
     "Join",
     "Key",
@@ -578,6 +587,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "MissingQ",
     "MinusPlus",
     "Mod",
+    "MonomialList",
     "Most",
     "MachinePrecision",
     "Names",
@@ -638,6 +648,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "Pick",
     "Plus",
     "PlusMinus",
+    "PolynomialQ",
     "Position",
     "Power",
     "Precision",
@@ -804,6 +815,7 @@ _SYSTEM_SYMBOL_NAMES = {
     "UnsameQ",
     "ValueQ",
     "Values",
+    "Variables",
     "Verbatim",
     "VerticalBar",
     "VerticalSeparator",
@@ -4243,6 +4255,16 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
 
 def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
     return _expression_arithmetic_module()._evaluate_numeric_special_functions(expr)
+
+
+def _expression_polynomial_module():
+    from . import expression_polynomial as _polynomial
+
+    return _polynomial
+
+
+def _evaluate_polynomial_functions(expr: Call) -> Expr | None:
+    return _expression_polynomial_module()._evaluate_polynomial_functions(expr)
 
 
 def _flatten_list_arguments(arguments: Sequence[Expr]) -> tuple[Expr, ...]:

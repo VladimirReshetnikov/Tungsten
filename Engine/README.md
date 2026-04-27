@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-27T00:34:28Z
-- Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
+- Updated (UTC): 2026-04-27T01:09:34Z
+- Repository HEAD: 7703c0dbf110e4f115cfd6f2e6c91f11e6eb2eb9
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -94,7 +94,7 @@ Even in that broader future direction, Tungsten is not intended to implement:
 - real- or complex-valued elementary or special mathematical functions;
 - expression simplification algorithms;
 - equation solving;
-- polynomial algebra;
+- broad polynomial algebra beyond Tungsten's exact integer/rational coefficient subset;
 - derivatives or integrals;
 - optimization problems;
 - anything that requires specialized mathematical algorithms.
@@ -131,7 +131,10 @@ The current workspace is built around seven complementary capabilities:
    subset, number-theory heads `GCD`, `LCM`, `Divisors`, `PrimeQ`, `CompositeQ`, `PrimePowerQ`,
    `EulerPhi`, `MoebiusMu`, `Prime`, `PrimePi`, `NextPrime`, `PowerMod`, `ChineseRemainder`,
    `IntegerLength`, `IntegerDigits`, `FromDigits`, and bitwise
-   `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`,
+   `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`, exact polynomial heads
+   `Expand`, `PolynomialQ`, `Variables`, `MonomialList`, `Collect`, `Coefficient`, `Exponent`,
+   `CoefficientList`, `Factor`, `FactorList`, plus number-theory heads `FactorInteger` and
+   `IntegerExponent`,
    Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
@@ -220,6 +223,7 @@ The current workspace is built around seven complementary capabilities:
 | Notebook representation | Tungsten-owned structural parser for notebook expressions |
 | Expression representation | Tungsten-owned AST and Pratt-style parser |
 | Sparse array backend | PyData Sparse `sparse.COO` when available, with a Tungsten structural fallback |
+| Exact polynomial backend | SymPy for integer/rational coefficient polynomial operations |
 | Platform expectation | Windows-first local machine with a real Wolfram installation |
 | Optional desktop automation helper | WinDesk for visible-window testing and the experimental inline assistant path |
 

@@ -13,7 +13,8 @@ authors = [
   { name = "OpenAI Codex" }
 ]
 dependencies = [
-  "sparse>=0.18.0"
+  "sparse>=0.18.0",
+  "sympy>=1.14,<2",
 ]
 
 [project.scripts]

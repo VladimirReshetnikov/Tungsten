@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T18:33:04Z
-- Updated (UTC): 2026-04-27T00:34:28Z
-- Repository HEAD: 9b7cb3dc1051f354b5da892397b825a822ede8e3
+- Updated (UTC): 2026-04-27T01:09:34Z
+- Repository HEAD: 7703c0dbf110e4f115cfd6f2e6c91f11e6eb2eb9
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Symbol and Context Registry](./symbol-context-registry.md)
@@ -230,6 +230,11 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
   through Python `Decimal`. It does not implement general simplification, interval uncertainty
   propagation, special mathematical constants, or full Wolfram precision tracking. See
   [numeric-tower.md](./numeric-tower.md) for representation and divergence notes.
+- Exact polynomial algebra is implemented for the common integer/rational coefficient subset by
+  translating supported Tungsten expressions to SymPy and back. The supported subset covers
+  symbols, explicitly requested compound variables such as `f[a]`, exact integer and rational
+  coefficients, `Plus`, `Times`, and `Power`. Polynomial options such as `Modulus`,
+  `GaussianIntegers`, and `Extension` are intentionally unsupported.
 - Pure functions currently support positional slot forms, `SlotSequence` / `##`, named-parameter
   forms such as `Function[x, body]`, `Function[{x, y}, body]`, `x |-> body`, and
   `x \[Function] body`, and the evaluation-impact subset of third-argument `Function` attributes.
@@ -557,9 +562,21 @@ symbols remain inert, and Tungsten does not implement general Wolfram evaluation
 | `IntegerPart` | `IntegerPart[x]` for explicit integers, rationals, and reals | Truncates `x` toward zero. | [IntegerPart](https://reference.wolfram.com/language/ref/IntegerPart) |
 | `FractionalPart` | `FractionalPart[x]` for explicit integers, rationals, and reals | Returns `x - IntegerPart[x]`; the result keeps the sign of `x`. | [FractionalPart](https://reference.wolfram.com/language/ref/FractionalPart) |
 | `Sqrt` | `Sqrt[n]` for explicit integers, rationals, and reals | Returns an exact integer for perfect squares, the radical form `Power[n, 1/2]` for other exact non-negatives, a machine real for explicit reals, and `Sqrt[m] * I` for negative integers. Tungsten does not implement general algebraic simplification; non-perfect-square exact values stay in radical form. | [Sqrt](https://reference.wolfram.com/language/ref/Sqrt) |
+| `Expand` | `Expand[expr]` | Expands products and positive integer powers in the supported exact polynomial subset. Pattern-restricted and option forms remain inert. | [Expand](https://reference.wolfram.com/language/ref/Expand) |
+| `PolynomialQ` | `PolynomialQ[expr]`, `PolynomialQ[expr, var]`, `PolynomialQ[expr, {var1, ...}]` | Tests whether `expr` is polynomial in the requested variables, or in its inferred free symbols for the one-argument Tungsten extension. Explicit compound variables such as `f[a]` are recognized when supplied as `var`. | [PolynomialQ](https://reference.wolfram.com/language/ref/PolynomialQ) |
+| `Variables` | `Variables[poly]` | Returns the sorted free symbolic variables that Tungsten's polynomial bridge can identify in a supported polynomial or rational expression. | [Variables](https://reference.wolfram.com/language/ref/Variables) |
+| `MonomialList` | `MonomialList[poly]`, `MonomialList[poly, {var1, ...}]` | Returns expanded monomial terms sorted by exponent vectors in SymPy/Wolfram-style lexicographic order for the supported exact polynomial subset. Explicit monomial-order and modulus forms are unsupported. | [MonomialList](https://reference.wolfram.com/language/ref/MonomialList) |
+| `Collect` | `Collect[expr, var]`, `Collect[expr, {var1, ...}]` | Collects expanded polynomial terms by powers of one or more requested variables. The coefficient-transforming third argument is not implemented. | [Collect](https://reference.wolfram.com/language/ref/Collect) |
+| `Coefficient` | `Coefficient[expr, form]`, `Coefficient[expr, form, n]` | Returns the coefficient of `form^n` in the expanded supported polynomial expression. The form may be a symbol, an explicitly supplied compound variable, or a product of powers such as `x y`. | [Coefficient](https://reference.wolfram.com/language/ref/Coefficient) |
+| `Exponent` | `Exponent[expr, form]`, `Exponent[expr, {form1, ...}]`, `Exponent[expr, form, h]` | Returns the maximum exponent of a supported monomial form in the expanded expression; `Exponent[0, x]` returns `-Infinity`. The third argument is applied to the set of detected exponents. | [Exponent](https://reference.wolfram.com/language/ref/Exponent) |
+| `CoefficientList` | `CoefficientList[poly, var]`, `CoefficientList[poly, {var1, ...}]`, `CoefficientList[poly, {var1, ...}, {dim1, ...}]` | Returns low-to-high coefficient arrays, including full rectangular multivariate arrays with zero fill. `CoefficientList[0, var]` returns `{}` unless explicit dimensions request padding. | [CoefficientList](https://reference.wolfram.com/language/ref/CoefficientList) |
+| `Factor` | `Factor[poly]` | Factors supported exact polynomials over the rationals. Option forms for modular, Gaussian-integer, and extension-field factorization are unsupported. | [Factor](https://reference.wolfram.com/language/ref/Factor) |
+| `FactorList` | `FactorList[poly]` | Returns `{{content, 1}, {factor1, exponent1}, ...}` for supported exact polynomial factorizations over the rationals, including the kernel-style singleton forms for `0`, `1`, and `-1`. | [FactorList](https://reference.wolfram.com/language/ref/FactorList) |
 | `GCD` | `GCD[]`, `GCD[n1, ...]` for explicit integers | `GCD[]` is `0`; otherwise returns the greatest common divisor of the absolute values. | [GCD](https://reference.wolfram.com/language/ref/GCD) |
 | `LCM` | `LCM[]`, `LCM[n1, ...]` for explicit integers | `LCM[]` is `1`; an explicit zero argument forces the result to `0`. | [LCM](https://reference.wolfram.com/language/ref/LCM) |
 | `Divisors` | `Divisors[n]` for nonzero explicit integers | Returns the increasing list of positive divisors of `\|n\|`. | [Divisors](https://reference.wolfram.com/language/ref/Divisors) |
+| `FactorInteger` | `FactorInteger[n]` for explicit integers and rationals | Returns prime/exponent pairs, including `{-1, 1}` for negative inputs and negative exponents for rational denominators. Partial factorization and Gaussian-integer forms are unsupported. | [FactorInteger](https://reference.wolfram.com/language/ref/FactorInteger) |
+| `IntegerExponent` | `IntegerExponent[n]`, `IntegerExponent[n, b]` for explicit integers and base `|b| > 1` | Returns the largest exponent such that `b^k` divides `n`; the one-argument form uses base 10, and `IntegerExponent[0, b]` returns `Infinity`. | [IntegerExponent](https://reference.wolfram.com/language/ref/IntegerExponent) |
 | `PrimeQ` | `PrimeQ[n]` for explicit integers | Deterministic for all 64-bit values via Miller–Rabin with the standard witness set; an extended witness list is used for larger inputs. | [PrimeQ](https://reference.wolfram.com/language/ref/PrimeQ) |
 | `CompositeQ` | `CompositeQ[n]` for explicit integers | Returns `True` iff `n >= 4` and `n` is not prime. | [CompositeQ](https://reference.wolfram.com/language/ref/CompositeQ) |
 | `PrimePowerQ` | `PrimePowerQ[n]` for explicit integers | Returns `True` iff `n >= 2` factors as a single prime base. | [PrimePowerQ](https://reference.wolfram.com/language/ref/PrimePowerQ) |

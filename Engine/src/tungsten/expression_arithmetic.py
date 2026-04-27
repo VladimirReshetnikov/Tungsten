@@ -562,6 +562,12 @@ def _evaluate_simple_predicates(expr: Call) -> Expr | None:
 
 
 def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
+    if expr.has_head("FactorInteger"):
+        return _factor_integer_expr(expr.arguments)
+
+    if expr.has_head("IntegerExponent"):
+        return _integer_exponent_expr(expr.arguments)
+
     values = _integer_values(expr.arguments)
     if values is None:
         return None
@@ -825,6 +831,54 @@ def _evaluate_integer_special_functions(expr: Call) -> Expr | None:
         return None
 
     return None
+
+
+def _factor_integer_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) != 1:
+        return None
+    value = _exact_fraction(arguments[0])
+    if value is None:
+        return None
+    if value == 0:
+        return _evaluated_list_expr(_evaluated_list_expr(integer(0), integer(1)))
+    if value == 1:
+        return _evaluated_list_expr(_evaluated_list_expr(integer(1), integer(1)))
+    if value == -1:
+        return _evaluated_list_expr(_evaluated_list_expr(integer(-1), integer(1)))
+
+    factors: list[tuple[int, int]] = []
+    numerator = value.numerator
+    denominator = value.denominator
+    if numerator < 0:
+        factors.append((-1, 1))
+        numerator = -numerator
+    factors.extend(_factor_int(numerator))
+    factors.extend((prime, -exponent) for prime, exponent in _factor_int(denominator))
+    return _evaluated_list_expr(
+        *(_evaluated_list_expr(integer(prime), integer(exponent)) for prime, exponent in factors)
+    )
+
+
+def _integer_exponent_expr(arguments: Sequence[Expr]) -> Expr | None:
+    if len(arguments) not in {1, 2}:
+        return None
+    if not isinstance(arguments[0], Integer):
+        return None
+    base = 10
+    if len(arguments) == 2:
+        if not isinstance(arguments[1], Integer):
+            return None
+        base = abs(arguments[1].value)
+    if base <= 1:
+        return None
+    value = abs(arguments[0].value)
+    if value == 0:
+        return symbol("Infinity")
+    exponent = 0
+    while value % base == 0:
+        exponent += 1
+        value //= base
+    return integer(exponent)
 
 
 def _is_prime_int(n: int) -> bool:
@@ -1143,4 +1197,3 @@ def _evaluate_numeric_special_functions(expr: Call) -> Expr | None:
         return _sqrt_expr(expr.arguments[0])
 
     return None
-

@@ -539,6 +539,10 @@ def evaluate_once(expr: Expr) -> Expr:
     if integer_special_result is not None:
         return integer_special_result
 
+    polynomial_result = _evaluate_polynomial_functions(evaluated_expr)
+    if polynomial_result is not None:
+        return polynomial_result
+
     if evaluated_head.name == "ByteArray":
         return byte_array(evaluated_arguments)
 

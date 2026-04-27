@@ -3605,5 +3605,80 @@ class StatisticalAndNumberTheoryExtensionsTests(unittest.TestCase):
         )
 
 
+class PolynomialAlgebraTests(unittest.TestCase):
+    """Exact rational/integer polynomial algebra backed by Tungsten's
+    kernel-free expression evaluator."""
+
+    def test_factor_integer_and_integer_exponent(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("FactorInteger[-12]")).to_full_form(),
+            "List[List[-1, 1], List[2, 2], List[3, 1]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FactorInteger[18/35]")).to_full_form(),
+            "List[List[2, 1], List[3, 2], List[5, -1], List[7, -1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("FactorInteger[0]")).to_full_form(), "List[List[0, 1]]")
+        self.assertEqual(evaluate(parse_input_form("IntegerExponent[1000]")).to_full_form(), "3")
+        self.assertEqual(evaluate(parse_input_form("IntegerExponent[0, 10]")).to_full_form(), "Infinity")
+
+    def test_expand_polynomial_q_variables_and_monomial_list(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Expand[(x + 1)^3]")).to_full_form(),
+            "Plus[1, Power[x, 3], Times[3, x], Times[3, Power[x, 2]]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[(x + 1)^2, x]")).to_full_form(), "True")
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[1/x, x]")).to_full_form(), "False")
+        self.assertEqual(evaluate(parse_input_form("PolynomialQ[f[a]+f[a]^2, f[a]]")).to_full_form(), "True")
+        self.assertEqual(
+            evaluate(parse_input_form("Variables[(x + y)^2 + 3 z]")).to_full_form(),
+            "List[x, y, z]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("MonomialList[x y + x^2 + 3, {x, y}]")).to_full_form(),
+            "List[Power[x, 2], Times[x, y], 3]",
+        )
+
+    def test_coefficient_exponent_and_coefficient_list(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Coefficient[2 x^2 y + 3 x y + y, x, 1]")).to_full_form(),
+            "Times[3, y]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Coefficient[x^2 y^2 + 3 x y + 1, x y, 2]")).to_full_form(),
+            "1",
+        )
+        self.assertEqual(evaluate(parse_input_form("Exponent[0, x]")).to_full_form(), "-Infinity")
+        self.assertEqual(evaluate(parse_input_form("Exponent[x^2 y^2 + x y + 1, x y]")).to_full_form(), "2")
+        self.assertEqual(
+            evaluate(parse_input_form("CoefficientList[x^2 + 3 x + 2, x]")).to_full_form(),
+            "List[2, 3, 1]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("CoefficientList[x y + 2 y + 3, {x, y}]")).to_full_form(),
+            "List[List[3, 2], List[0, 1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("CoefficientList[0, x]")).to_full_form(), "List[]")
+
+    def test_collect_factor_and_factor_list(self) -> None:
+        self.assertEqual(
+            evaluate(parse_input_form("Collect[x y + x + 2 y, x]")).to_full_form(),
+            "Plus[Times[2, y], Times[x, Plus[1, y]]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[x^2 - 1]")).to_full_form(),
+            "Times[Plus[-1, x], Plus[1, x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("Factor[2 x y + 2 y]")).to_full_form(),
+            "Times[2, y, Plus[1, x]]",
+        )
+        self.assertEqual(
+            evaluate(parse_input_form("FactorList[2 x^2 - 2]")).to_full_form(),
+            "List[List[2, 1], List[Plus[-1, x], 1], List[Plus[1, x], 1]]",
+        )
+        self.assertEqual(evaluate(parse_input_form("FactorList[0]")).to_full_form(), "List[List[0, 1]]")
+
+
 if __name__ == "__main__":
     unittest.main()
