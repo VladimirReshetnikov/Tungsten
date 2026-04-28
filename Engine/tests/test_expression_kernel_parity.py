@@ -1107,5 +1107,271 @@ class ColonChainAssociativityTests(unittest.TestCase):
         )
 
 
+class GetPutFilenameTokenizationTests(unittest.TestCase):
+    """``<<file.m`` consumes a context-sensitive filename token rather than
+    splitting on operator characters such as ``.``, ``/``, ``\\``, ``:``,
+    ``-``, ``*``, ``!``, ``?``, ``~``, and ``$``. Verified against the live
+    kernel; ``<<file.m`` parses as ``Get["file.m"]``, not
+    ``Dot[Get["file"], m]``.
+    """
+
+    def test_get_with_dot(self) -> None:
+        self.assertEqual(
+            parse_expression("<<file.m", form="input").to_full_form(),
+            'Get["file.m"]',
+        )
+
+    def test_get_with_context_dot(self) -> None:
+        self.assertEqual(
+            parse_expression("<<a.b.c", form="input").to_full_form(),
+            'Get["a.b.c"]',
+        )
+
+    def test_get_with_path(self) -> None:
+        self.assertEqual(
+            parse_expression("<<a/b/c.m", form="input").to_full_form(),
+            'Get["a/b/c.m"]',
+        )
+
+    def test_get_with_context_backticks(self) -> None:
+        self.assertEqual(
+            parse_expression("<<a`b`", form="input").to_full_form(),
+            'Get["a`b`"]',
+        )
+
+    def test_get_with_quoted_string(self) -> None:
+        self.assertEqual(
+            parse_expression('<<"file.m"', form="input").to_full_form(),
+            'Get["file.m"]',
+        )
+
+    def test_get_with_dollar_path(self) -> None:
+        self.assertEqual(
+            parse_expression("<<$path", form="input").to_full_form(),
+            'Get["$path"]',
+        )
+
+    def test_get_with_whitespace(self) -> None:
+        self.assertEqual(
+            parse_expression("<< file.m", form="input").to_full_form(),
+            'Get["file.m"]',
+        )
+
+    def test_get_terminates_at_semicolon(self) -> None:
+        self.assertEqual(
+            parse_expression("<<a.m;b", form="input").to_full_form(),
+            'CompoundExpression[Get["a.m"], b]',
+        )
+
+    def test_put_with_dot(self) -> None:
+        self.assertEqual(
+            parse_expression("expr >> file.m", form="input").to_full_form(),
+            'Put[expr, "file.m"]',
+        )
+
+    def test_put_append_with_dot(self) -> None:
+        self.assertEqual(
+            parse_expression("expr >>> file.m", form="input").to_full_form(),
+            'PutAppend[expr, "file.m"]',
+        )
+
+    def test_get_with_windows_path(self) -> None:
+        self.assertEqual(
+            parse_expression("<<C:/path/file.m", form="input").to_full_form(),
+            'Get["C:/path/file.m"]',
+        )
+
+
+class MapApplyAssociativityTests(unittest.TestCase):
+    """``/@``, ``//@``, ``@@``, ``@@@`` are right-associative in Wolfram, so
+    ``a /@ b /@ c`` parses as ``Map[a, Map[b, c]]``, not
+    ``Map[Map[a, b], c]``. Tungsten previously had these as left-associative.
+    """
+
+    def test_map_chain_right_associative(self) -> None:
+        self.assertEqual(
+            parse_expression("a /@ b /@ c", form="input").to_full_form(),
+            "Map[a, Map[b, c]]",
+        )
+
+    def test_map_chain_three(self) -> None:
+        self.assertEqual(
+            parse_expression("a /@ b /@ c /@ d", form="input").to_full_form(),
+            "Map[a, Map[b, Map[c, d]]]",
+        )
+
+    def test_map_all_chain_right_associative(self) -> None:
+        self.assertEqual(
+            parse_expression("a //@ b //@ c", form="input").to_full_form(),
+            "MapAll[a, MapAll[b, c]]",
+        )
+
+    def test_apply_chain_right_associative(self) -> None:
+        self.assertEqual(
+            parse_expression("a @@ b @@ c", form="input").to_full_form(),
+            "Apply[a, Apply[b, c]]",
+        )
+
+    def test_map_apply_chain_right_associative(self) -> None:
+        self.assertEqual(
+            parse_expression("a @@@ b @@@ c", form="input").to_full_form(),
+            "MapApply[a, MapApply[b, c]]",
+        )
+
+
+class CompositionMixedAssociativityTests(unittest.TestCase):
+    """``@*`` (Composition, kernel precedence 650) sits one tick above ``/*``
+    (RightComposition, 648). Tungsten encodes this with same-BP entries but
+    different right_bp values: ``@*`` keeps left-associative ``BP+1`` so that
+    ``f @* g /* h`` parses as ``RightComposition[Composition[f, g], h]``,
+    while ``/*`` uses right-associative ``BP`` so that ``f /* g @* h`` parses
+    as ``RightComposition[f, Composition[g, h]]``.
+    """
+
+    def test_left_to_right_composition(self) -> None:
+        self.assertEqual(
+            parse_expression("f @* g /* h", form="input").to_full_form(),
+            "RightComposition[Composition[f, g], h]",
+        )
+
+    def test_right_to_left_composition(self) -> None:
+        self.assertEqual(
+            parse_expression("f /* g @* h", form="input").to_full_form(),
+            "RightComposition[f, Composition[g, h]]",
+        )
+
+    def test_composition_chain_flat(self) -> None:
+        self.assertEqual(
+            parse_expression("f @* g @* h", form="input").to_full_form(),
+            "Composition[f, g, h]",
+        )
+
+    def test_right_composition_chain_flat(self) -> None:
+        self.assertEqual(
+            parse_expression("f /* g /* h", form="input").to_full_form(),
+            "RightComposition[f, g, h]",
+        )
+
+
+class DotPrecedenceTests(unittest.TestCase):
+    """``Dot`` (kernel 490) sits between ``Diamond`` (450) and
+    ``NonCommutativeMultiply`` (510), strictly above ``Times`` (400). Tungsten
+    previously gave ``.`` the same BP as ``*``, which made ``a*b.c`` parse
+    left-associative as ``Dot[Times[a, b], c]`` instead of the kernel's
+    ``Times[a, Dot[b, c]]``.
+    """
+
+    def test_times_then_dot(self) -> None:
+        self.assertEqual(
+            parse_expression("a*b.c", form="input").to_full_form(),
+            "Times[a, Dot[b, c]]",
+        )
+
+    def test_dot_then_times(self) -> None:
+        self.assertEqual(
+            parse_expression("a.b*c", form="input").to_full_form(),
+            "Times[Dot[a, b], c]",
+        )
+
+    def test_dot_chain_flat(self) -> None:
+        self.assertEqual(
+            parse_expression("a.b.c", form="input").to_full_form(),
+            "Dot[a, b, c]",
+        )
+
+    def test_dot_with_noncommutative_multiply(self) -> None:
+        self.assertEqual(
+            parse_expression("a.b**c", form="input").to_full_form(),
+            "Dot[a, NonCommutativeMultiply[b, c]]",
+        )
+
+    def test_unary_minus_consumes_dot(self) -> None:
+        self.assertEqual(
+            parse_expression("-a.b", form="input").to_full_form(),
+            "Times[-1, Dot[a, b]]",
+        )
+
+    def test_unary_minus_consumes_noncommutative_multiply(self) -> None:
+        self.assertEqual(
+            parse_expression("-a**b", form="input").to_full_form(),
+            "Times[-1, NonCommutativeMultiply[a, b]]",
+        )
+
+
+class PrefixNotPrecedenceTests(unittest.TestCase):
+    """Prefix ``!`` (kernel ``Not`` precedence 230) sits between ``&&``/``||``
+    (And/Or = 215) and ``==``/``<`` (Equal/Less = 290), so ``!a == b`` is
+    ``Not[Equal[a, b]]`` and ``!a && b`` is ``And[Not[a], b]``. Tungsten
+    previously placed prefix ``!`` at the higher ``_PREFIX_BP`` shared with
+    unary ``+`` / ``-``, which inverted these parses.
+    """
+
+    def test_not_consumes_equal(self) -> None:
+        self.assertEqual(
+            parse_expression("!a == b", form="input").to_full_form(),
+            "Not[Equal[a, b]]",
+        )
+
+    def test_not_consumes_less(self) -> None:
+        self.assertEqual(
+            parse_expression("!a < b", form="input").to_full_form(),
+            "Not[Less[a, b]]",
+        )
+
+    def test_not_consumes_plus(self) -> None:
+        self.assertEqual(
+            parse_expression("!a + b", form="input").to_full_form(),
+            "Not[Plus[a, b]]",
+        )
+
+    def test_not_consumes_times(self) -> None:
+        self.assertEqual(
+            parse_expression("!a * b", form="input").to_full_form(),
+            "Not[Times[a, b]]",
+        )
+
+    def test_not_does_not_consume_and(self) -> None:
+        self.assertEqual(
+            parse_expression("!a && b", form="input").to_full_form(),
+            "And[Not[a], b]",
+        )
+
+    def test_not_does_not_consume_or(self) -> None:
+        self.assertEqual(
+            parse_expression("!a || b", form="input").to_full_form(),
+            "Or[Not[a], b]",
+        )
+
+    def test_not_does_not_consume_replace_all(self) -> None:
+        self.assertEqual(
+            parse_expression("!a /. b", form="input").to_full_form(),
+            "ReplaceAll[Not[a], b]",
+        )
+
+
+class StringEscapeUnterminatedNamedCharTests(unittest.TestCase):
+    """The kernel's string-literal lexer preserves unterminated ``\\[`` as
+    literal source text rather than rejecting the whole string. Tungsten
+    previously raised a ``WolframSyntaxError`` for ``"\\["``; the
+    ``decode_named_character_escape`` non-strict variant now mirrors the
+    kernel's leniency.
+    """
+
+    def test_unterminated_bracket_preserved(self) -> None:
+        from tungsten.wolfram_strings import parse_wl_string_literal
+
+        self.assertEqual(parse_wl_string_literal('"\\["'), "\\[")
+
+    def test_unterminated_named_escape_preserved(self) -> None:
+        from tungsten.wolfram_strings import parse_wl_string_literal
+
+        self.assertEqual(parse_wl_string_literal('"\\[Alpha"'), "\\[Alpha")
+
+    def test_unknown_named_escape_preserved(self) -> None:
+        from tungsten.wolfram_strings import parse_wl_string_literal
+
+        self.assertEqual(parse_wl_string_literal('"\\[NoSuchName]"'), "\\[NoSuchName]")
+
+
 if __name__ == "__main__":
     unittest.main()

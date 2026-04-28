@@ -112,7 +112,12 @@ The parser currently handles:
   `x!!`, `a::tag`, `a ~ f ~ b`, `<< file`, `expr >> file`, `expr >>> file`, `?name`, and
   `??name`, lowered to `Increment`, `PreIncrement`, `Decrement`, `PreDecrement`, `Factorial`,
   `Factorial2`, `MessageName`, ordinary function application, `Get`, `Put`, `PutAppend`, and
-  `Information`;
+  `Information`. The `<<`, `>>`, and `>>>` operators consume a context-sensitive
+  filename token after the operator, allowing characters that would otherwise
+  tokenize as operators (`.`, `/`, `\`, `:`, `-`, `*`, `!`, `?`, `~`, `` ` ``, `$`) — so
+  `<<file.m` parses as `Get["file.m"]`, `<<a/b/c.m` parses as `Get["a/b/c.m"]`, and
+  `<<C:/path/file.m` parses as `Get["C:/path/file.m"]`. A leading `"` falls through
+  to the regular string scanner, so `<<"file.m"` keeps quoted-string semantics;
 - comparisons and boolean operators, with same-head chained comparisons parsed as n-ary relation
   calls such as `Less[a, b, c]` and mixed chained comparisons parsed as
   `Inequality[a, Less, b, LessEqual, c]`;
@@ -221,6 +226,24 @@ The important parse-stage rules are:
 - Postfix `&` (Function) precedence sits between assignment and composition: `a = b &`
   parses as `Set[a, Function[b]]` and `a; b &` as `CompoundExpression[a, Function[b]]`,
   but `a -> b &` is `Function[Rule[a, b]]` and `a @* b &` is `Function[Composition[a, b]]`.
+- `/@` (Map), `//@` (MapAll), `@@` (Apply), and `@@@` (MapApply) are right-associative,
+  matching the kernel: `a /@ b /@ c` parses as `Map[a, Map[b, c]]`, not the
+  left-associative `Map[Map[a, b], c]`. The same applies to `@@` and `@@@`.
+- `@*` (Composition) and `/*` (RightComposition) sit at the same precedence,
+  with `@*` right-binding one tick tighter so the kernel parse trees match for
+  both orderings: `f @* g /* h` parses as `RightComposition[Composition[f, g], h]`,
+  while `f /* g @* h` parses as `RightComposition[f, Composition[g, h]]`. Same-operator
+  chains stay flat (`a @* b @* c` is `Composition[a, b, c]`, `a /* b /* c` is
+  `RightComposition[a, b, c]`).
+- `Dot` (`.`) sits strictly above `Times` and below `NonCommutativeMultiply` (`**`),
+  matching the kernel's precedence ordering Times (400) < Dot (490) < NCT (510) < Power
+  (590). So `a*b.c` parses as `Times[a, Dot[b, c]]`, `a.b*c` as `Times[Dot[a, b], c]`,
+  and `-a.b` as `Times[-1, Dot[a, b]]` (unary `-` consumes Dot).
+- Prefix `!` (Not) sits between `&&`/`||` (And/Or) and `==`/`<` (Equal/Less),
+  matching the kernel's `Not` precedence 230. So `!a == b` is `Not[Equal[a, b]]`,
+  `!a + b` is `Not[Plus[a, b]]`, but `!a && b` is `And[Not[a], b]` and `!a /. b`
+  is `ReplaceAll[Not[a], b]`. Unary `+` and `-` keep the higher prefix precedence
+  shared with the kernel's unary Minus (~411), between Times and CircleTimes/Diamond/Dot.
 - `:` is right-associative when the leading element is not a symbol, so `x_:y_:z_` parses
   as `Optional[Pattern[x, _], Optional[Pattern[y, _], Pattern[z, _]]]`. Symbol-led chains
   follow the kernel's special rule: `a:b:c:d` is `Optional[Pattern[a, b], Pattern[c, d]]`,
@@ -743,6 +766,10 @@ These are intentional current boundaries, not hidden TODOs:
   retained as a textual `Real("2*^3")` rather than the integer `2000` that the kernel would
   produce. Magnitude-bearing reals round-trip as their original textual form. This is a parser
   limit that does not affect downstream evaluation of explicit numeric calls.
+- Base-real literals follow the same parse-only model as `mantissa*^exponent`: `16^^f.f` is
+  accepted by the tokenizer and held as a textual `Real("16^^f.f")` rather than folded to
+  `15.9375` (the kernel's value). The same applies when a precision mark is attached, e.g.
+  `16^^3.f``20`. Round-tripping through `to_input_form` preserves the original textual form.
 - `ToExpression["...", InputForm, HoldComplete]` returns `$Failed` in the kernel when the input
   is unparseable; Tungsten emits a `ToExpression::sntx`-shaped Tungsten message and leaves the
   call unevaluated rather than synthesizing `$Failed`. Code that branches on `$Failed` may need
@@ -756,6 +783,55 @@ These are intentional current boundaries, not hidden TODOs:
   `DeleteCases`, `Position`, `MemberQ`, and `FirstCase` descend into values and can match whole
   associations, but they do not search keys or raw `Rule` wrappers. Use `KeyValuePattern` for
   entry-level matching that intentionally sees keys.
+- Whole-file parsing of multi-expression source: when the input contains multiple
+  newline-separated top-level expressions, Tungsten currently treats `\n` as
+  ordinary whitespace and merges adjacent expressions via implicit `Times` (so
+  `"a\nb"` parses as `Times[a, b]`). The kernel treats a top-level newline as an
+  expression separator, so `ToExpression["a\nb", InputForm, HoldComplete]` returns
+  the multi-argument `HoldComplete[a, b]`. Tungsten's `parse_expression` returns a
+  single `Expr`; the parser-corpus comparison normalizes the kernel side by
+  rewriting `HoldComplete[exprs__]` to `HoldComplete[CompoundExpression[exprs]]`
+  before comparing summary metadata. This affects almost all `.wl` / `.m`
+  package files. Multi-expression input that is `;`-separated is unaffected and
+  parses to the expected `CompoundExpression[...]`.
+- The pattern subset is intentionally bounded but slightly *more* lenient than the
+  kernel in two cases: `_..` parses as `Repeated[Blank[]]` and `x_..` as
+  `Repeated[Pattern[x, Blank[]]]`, both of which the kernel rejects because its
+  tokenizer prefers the `_.` Optional shorthand and the trailing `.` then has no
+  operand. Real package source never contains `_..` directly — only the
+  CodeFormatter / CodeInspector test suites use it as syntax-error fixture text —
+  so the leniency is harmless in practice.
+- `Plus??` is rejected by Tungsten with `Expected 'eof', found '??' at offset 4.`
+  but accepted by the kernel as `HoldComplete[Plus]` (the kernel's tokenizer
+  drops a trailing `??` with no operand). This is a leniency gap in the other
+  direction; low-impact.
+- `|->` (NamedFunction) currently uses a single symmetric Pratt binding power, so
+  `a = x |-> y` parses as `Function[Set[a, x], y]` rather than the kernel's
+  `Set[a, Function[x, y]]`. Other observed kernel-only behavior includes
+  `a |-> b = c` -> `Function[a, Set[b, c]]`, `a |-> b &` -> `Function[a, Function[b]]`,
+  and `a |-> b -> c` -> `Function[a, Rule[b, c]]`. Splitting `|->` into
+  asymmetric left/right binding powers is the planned fix; deferred because
+  `|->` is rarely chained with `=`, `&`, or `->` in real package source.
+- `?` (PatternTest) does not absorb a trailing `:` into its right-hand side:
+  `x_?test:1` parses as `Optional[PatternTest[Pattern[x, _], test], 1]` rather
+  than the kernel's `PatternTest[Pattern[x, _], Pattern[test, 1]]`. The kernel's
+  `?` allows exactly one follow-up `:` operator on the RHS while excluding
+  higher-precedence operators like `+`, `*`, `|`, `/;`. Tungsten cannot match
+  this through standard Pratt min_bp tuning; a custom `?`-RHS parser would be
+  needed. Low-impact (zero corpus matches outside CodeParser fixture text).
+- The kernel's relative ordering of `/@`, `/.`, and `@*` is preserved within each
+  family but not yet across all interactions with arithmetic and comparison
+  operators. In the kernel `Map`/`Apply` (precedence 620) and `Composition`
+  (650) sit *above* `Power` (590) and `Times` (400), so e.g. `f /@ a + b` is
+  `Plus[Map[f, a], b]` (the `/@` binds tighter than `+`) and `f /. g @* h` is
+  `ReplaceAll[f, Composition[g, h]]`. Tungsten currently keeps these structural
+  operators at lower binding powers than arithmetic, so the same inputs parse
+  as `Map[f, Plus[a, b]]` and `Composition[ReplaceAll[f, g], h]` respectively.
+  This is a known parser divergence: real-world package source typically
+  parenthesizes the structural-operator operand (`(f /@ list) + offset`,
+  `f /. (g @* h)`), so the impact on corpus parse-success is limited, but the
+  held parse trees diverge from the kernel for un-parenthesized mixed
+  expressions.
 
 Common Wolfram `Listable` heads such as `Plus`, `Times`, `Power`, `Equal`, `Less`, `LessEqual`,
 `Greater`, `GreaterEqual`, `UnitStep`, `Unitize`, `Sign`, `Abs`, `RealSign`, `RealAbs`, `Mod`,

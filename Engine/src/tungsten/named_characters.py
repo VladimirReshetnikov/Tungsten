@@ -76,7 +76,13 @@ def decode_named_character_escape(text: str, index: int) -> tuple[str, int] | No
         return None
     end = text.find("]", index + 2)
     if end < 0:
-        raise ValueError(f"Unterminated Wolfram named character escape at offset {index}.")
+        # The kernel's string-literal lexer preserves an unterminated ``\[`` as
+        # literal source text rather than rejecting the entire string. Return
+        # ``None`` so callers can fall through to the leading-backslash branch
+        # (``parse_wl_string_literal`` re-emits the source verbatim). For
+        # identifier-position parsing, use ``decode_named_character_escape_strict``
+        # below instead.
+        return None
     name = text[index + 2 : end]
     character = named_character(name)
     if character is None:

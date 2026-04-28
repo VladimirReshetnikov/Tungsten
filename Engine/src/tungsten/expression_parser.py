@@ -1147,6 +1147,65 @@ def _find_inline_box_end(text: str, start: int) -> int | None:
     raise WolframSyntaxError(f"Unterminated Wolfram inline box escape at offset {start}.")
 
 
+# Wolfram's Get/Put operators (`<<`, `>>`, `>>>`) consume a context-sensitive
+# "filename" token that allows characters which would otherwise tokenize as
+# operators (`.`, `/`, `\`, `:`, `-`, `*`, `!`, `?`, `~`, `` ` ``). The character
+# class below was reverse-engineered from the live Wolfram 14.3 kernel: characters
+# that produce a successful ``ToExpression["<<text", InputForm, HoldComplete]``
+# parse for an unbroken trailing run after the operator are admitted; characters
+# that act as expression terminators (whitespace, `;`, `,`, brackets, `+`, `&`,
+# `%`, `^`, `@`, `#`, `=`, `<`, `>`, `|`, `'`) end the filename. Letter-like
+# Unicode (categories ``L`` and ``N``) is also admitted so that named-character
+# escapes embedded in package paths still tokenize as part of the filename.
+_GET_PUT_FILENAME_PUNCT = frozenset("_-*:/\\.`$!?~")
+
+
+def _is_get_put_filename_char(char: str) -> bool:
+    if char in _GET_PUT_FILENAME_PUNCT:
+        return True
+    if char.isalnum():
+        return True
+    return False
+
+
+def _scan_get_put_filename(text: str, start: int) -> tuple[_Token, int] | None:
+    """Scan a Get/Put filename literal starting at ``start``.
+
+    Skips inline whitespace (but not newlines, which separate top-level
+    expressions) and a single ``\\<newline>`` line continuation, then consumes
+    a maximal run of filename characters. Returns ``(token, end)`` if a
+    non-empty run was found, otherwise ``None``. A leading ``"`` is left for
+    the regular string scanner to handle.
+    """
+    index = start
+    while index < len(text) and text[index] in (" ", "\t"):
+        index += 1
+    # Tolerate a single backslash-newline line continuation between the
+    # operator and the filename, mirroring the rest of the tokenizer.
+    cont_end = _line_continuation_end(text, index) if index < len(text) and text[index] == "\\" else None
+    if cont_end is not None:
+        index = cont_end
+        while index < len(text) and text[index] in (" ", "\t"):
+            index += 1
+    if index >= len(text):
+        return None
+    if text[index] == '"':
+        return None
+    name_start = index
+    while index < len(text) and _is_get_put_filename_char(text[index]):
+        index += 1
+    if index == name_start:
+        return None
+    filename = text[name_start:index]
+    return _Token(
+        kind="filename",
+        text=filename,
+        start=name_start,
+        end=index,
+        value=filename,
+    ), index
+
+
 def _tokenize(text: str) -> list[_Token]:
     tokens: list[_Token] = []
     index = 0
@@ -1224,6 +1283,11 @@ def _tokenize(text: str) -> list[_Token]:
                 tokens.append(_Token(kind="operator", text=candidate, start=index, end=index + len(candidate), value=candidate))
                 index += len(candidate)
                 matched = True
+                if candidate in {"<<", ">>", ">>>"}:
+                    scanned = _scan_get_put_filename(text, index)
+                    if scanned is not None:
+                        filename_token, index = scanned
+                        tokens.append(filename_token)
                 break
         if matched:
             continue
@@ -1262,9 +1326,19 @@ class _Parser:
     _MESSAGE_NAME_BP = 183
     _POSTFIX_UNARY_BP = 175
     _INFIX_FUNCTION_BP = 165
+    # Operator precedences are roughly aligned with the kernel's
+    # Precedence[head] table: a higher Tungsten BP corresponds to a tighter
+    # kernel binding. The numbers themselves are not equal to the kernel's
+    # Precedence values (Tungsten uses a compressed range), only the relative
+    # ordering must match for parse-tree parity.
     _POWER_BP = 160
     _TIMES_BP = 140
-    _NONCOMMUTATIVE_TIMES_BP = 145
+    # ``Dot`` (kernel 490) sits between ``Diamond`` (450) and
+    # ``NonCommutativeMultiply`` (510). Tungsten previously gave ``.`` the same
+    # ``_TIMES_BP`` as ``*``, which made ``a*b.c`` parse left-associative as
+    # ``Dot[Times[a, b], c]`` instead of the kernel's ``Times[a, Dot[b, c]]``.
+    _DOT_BP = 145
+    _NONCOMMUTATIVE_TIMES_BP = 146  # ``**`` (kernel 510), one tick above Dot
     _DIAMOND_BP = 144
     _CIRCLE_TIMES_BP = 142
     _CIRCLE_PLUS_BP = 125
@@ -1296,6 +1370,16 @@ class _Parser:
     _FUNCTION_BP = 10
     _SPAN_BP = 110
     _PREFIX_BP = 150
+    # Prefix-operator binding powers diverge from a single ``_PREFIX_BP`` because
+    # the kernel's prefix operators sit at very different precedences. ``!``
+    # (kernel Not = 230) sits between ``&&`` (And = 215) and ``==`` (Equal =
+    # 290), so ``!a == b`` is ``Not[Equal[a, b]]`` and ``!a && b`` is
+    # ``And[Not[a], b]``. ``-`` and ``+`` (kernel unary Minus = 411) sit between
+    # ``*`` (Times = 400) and ``CircleTimes`` (420), so ``-a*b`` is
+    # ``Times[Times[-1, a], b]`` (Times stays outside) but ``-a.b`` is
+    # ``Times[-1, Dot[a, b]]`` (Dot is consumed).
+    _PREFIX_NOT_BP = 90
+    _PREFIX_PLUS_MINUS_BP = 142
     _ESCAPED_INFIX_BINDING_POWERS = {
         "CirclePlus": _CIRCLE_PLUS_BP,
         "CircleTimes": _CIRCLE_TIMES_BP,
@@ -1582,13 +1666,13 @@ class _Parser:
             return call(head_name, self._parse_expression(self._POSTFIX_UNARY_BP, terminators))
 
         if token.text == "+":
-            operand = self._parse_expression(self._PREFIX_BP, terminators)
+            operand = self._parse_expression(self._PREFIX_PLUS_MINUS_BP, terminators)
             result = call("Plus", operand)
             self._operator_expr_heads[id(result)] = "Plus"
             return result
 
         if token.text == "-":
-            operand = self._parse_expression(self._PREFIX_BP, terminators)
+            operand = self._parse_expression(self._PREFIX_PLUS_MINUS_BP, terminators)
             if isinstance(operand, Integer):
                 return integer(-operand.value)
             if isinstance(operand, Real):
@@ -1598,7 +1682,7 @@ class _Parser:
             return call("Times", integer(-1), operand)
 
         if token.text == "!":
-            return call("Not", self._parse_expression(self._PREFIX_BP, terminators))
+            return call("Not", self._parse_expression(self._PREFIX_NOT_BP, terminators))
 
         if token.text == ";;":
             return self._parse_prefix_span(terminators)
@@ -1785,6 +1869,9 @@ class _Parser:
 
     def _parse_file_name_literal(self, context: str) -> String:
         token = self._peek()
+        if token.kind == "filename":
+            self._consume()
+            return string(str(token.value))
         if token.kind == "symbol":
             self._consume()
             return string(str(token.value))
@@ -2027,17 +2114,26 @@ class _Parser:
             ":>": (self._RULE_BP, self._RULE_BP, "RuleDelayed"),
             "/.": (self._REPLACE_BP, self._REPLACE_BP + 1, "ReplaceAll"),
             "//.": (self._REPLACE_BP, self._REPLACE_BP + 1, "ReplaceRepeated"),
-            "/@": (self._MAP_BP, self._MAP_BP + 1, "Map"),
-            "//@": (self._MAP_BP, self._MAP_BP + 1, "MapAll"),
-            "@@": (self._APPLY_BP, self._APPLY_BP + 1, "Apply"),
-            "@@@": (self._APPLY_BP, self._APPLY_BP + 1, "MapApply"),
-            # Left-associative so mixed ``f @* g /* h`` parses as
-            # ``RightComposition[Composition[f, g], h]`` to match the kernel.
+            # ``/@``, ``//@``, ``@@``, ``@@@`` are right-associative in Wolfram:
+            # ``a /@ b /@ c`` parses as ``Map[a, Map[b, c]]``, not
+            # ``Map[Map[a, b], c]``. The right_bp matches left_bp so the right
+            # operand can re-enter at the same precedence.
+            "/@": (self._MAP_BP, self._MAP_BP, "Map"),
+            "//@": (self._MAP_BP, self._MAP_BP, "MapAll"),
+            "@@": (self._APPLY_BP, self._APPLY_BP, "Apply"),
+            "@@@": (self._APPLY_BP, self._APPLY_BP, "MapApply"),
+            # The kernel places Composition (650) one tick above RightComposition
+            # (648). To replicate this with a single Tungsten BP, ``@*`` keeps
+            # ``right_bp = COMPOSITION_BP + 1`` (left-associative) so that mixed
+            # ``f @* g /* h`` parses as ``RightComposition[Composition[f, g], h]``.
+            # ``/*`` instead uses ``right_bp = COMPOSITION_BP`` (right-associative)
+            # so ``f /* g @* h`` re-enters at the same precedence and parses as
+            # ``RightComposition[f, Composition[g, h]]`` -- matching the kernel.
             "@*": (self._COMPOSITION_BP, self._COMPOSITION_BP + 1, "Composition"),
-            "/*": (self._COMPOSITION_BP, self._COMPOSITION_BP + 1, "RightComposition"),
+            "/*": (self._COMPOSITION_BP, self._COMPOSITION_BP, "RightComposition"),
             "@": (self._AT_BP, self._AT_BP, None),
             "//": (self._POSTFIX_BP, self._POSTFIX_BP + 1, None),
-            ".": (self._TIMES_BP, self._TIMES_BP + 1, "Dot"),
+            ".": (self._DOT_BP, self._DOT_BP + 1, "Dot"),
             "=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "Set"),
             ":=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "SetDelayed"),
             "^=": (self._ASSIGNMENT_BP, self._ASSIGNMENT_BP, "UpSet"),
