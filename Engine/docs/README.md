@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-27T20:51:45Z
-- Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7
+- Updated (UTC): 2026-04-28T01:43:15Z
+- Repository HEAD: 2689dffeee9f9c16d9e3cbe4bfd55ef011ecdf82
 
 ## What this docs tree is for
 
@@ -106,6 +106,7 @@ The docs are split so readers can choose the right depth:
 | [reports/2026-04-24-license-seat-investigation.md](reports/2026-04-24-license-seat-investigation.md) | Investigation report for intermittent license-seat failures, ghost/orphaned Wolfram processes, and Tungsten's launch-gate mitigation. |
 | [reports/2026-04-27-tungsten-gap-and-shape-review.md](reports/2026-04-27-tungsten-gap-and-shape-review.md) | Planning inventory of remaining Tungsten expression-function family holes, incomplete Wolfram argument shapes, unsupported options, and implementation buckets. Supersedes the earlier `2026-04-26-function-surface-gap-report.md`, the `2026-04-26-expression-parity-deep-review.md`, the `2026-04-24-parser-evaluator-kernel-parity*.md` pair, and the `2026-04-23-external-review.md` (all archived). |
 | [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md) | Recommendation report for a simple Tungsten notebook FrontEnd, including WebView2, browser-hosted, VS Code, Jupyter, native UI, direct StandardForm boxes, and TeX/MathJax alternatives. |
+| [reports/2026-04-28-modern-mathematica-core-design.md](reports/2026-04-28-modern-mathematica-core-design.md) | Compatibility-free design report for a modern Mathematica-like core language and evaluator, informed by Tungsten's parser, evaluator, pattern, symbol-registry, and notebook boundaries. |
 
 ## Suggested learning path by task
 
