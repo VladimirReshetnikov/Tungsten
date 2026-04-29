@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-27T20:51:45Z
-- Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7
+- Updated (UTC): 2026-04-28T23:55:11Z
+- Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
 - Related code:
   - `src/Tungsten/src/tungsten/`
   - `src/Tungsten/pwsh/`
@@ -19,6 +19,7 @@
   - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
   - [REPL](./docs/repl.md)
+  - [Large-Number Fallback Design](./docs/overflow-underflow-large-number-fallback.md)
   - [Symbol and Context Registry](./docs/symbol-context-registry.md)
   - [Parser Corpus](./docs/parser-corpus.md)
   - [Inline Box Strings](./docs/inline-box-strings.md)
@@ -478,6 +479,7 @@ If you are new to Tungsten, this reading order works well:
    - [Notebook Assistant](./docs/notebook-assistant.md)
    - [Inline Box Strings](./docs/inline-box-strings.md)
    - [Expression Parser](./docs/expression-parser.md)
+   - [Large-Number Fallback Design](./docs/overflow-underflow-large-number-fallback.md)
    - [Troubleshooting](./docs/troubleshooting.md)
    - [Implementation Details](./docs/implementation-details.md)
 

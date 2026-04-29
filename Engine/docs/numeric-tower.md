@@ -2,11 +2,12 @@
 
 - Status: Implementation notes for Tungsten's kernel-free numeric evaluator
 - Scope: `src/Tungsten/src/tungsten/expression.py`
-- Updated (UTC): 2026-04-27T20:51:45Z
-- Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7
+- Updated (UTC): 2026-04-28T23:55:11Z
+- Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
 - Related docs:
   - [Expression Function Support](./expression-function-support.md)
   - [Numeric Simplification](./numeric-simplification.md)
+  - [Overflow And Underflow Large-Number Fallback Design](./overflow-underflow-large-number-fallback.md)
   - [Expression Parser](./expression-parser.md)
   - [Usage Reference](./usage-reference.md)
   - [Wolfram Numbers tutorial](https://reference.wolfram.com/language/tutorial/Numbers.html)

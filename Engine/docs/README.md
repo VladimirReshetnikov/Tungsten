@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-28T01:43:15Z
-- Repository HEAD: 2689dffeee9f9c16d9e3cbe4bfd55ef011ecdf82
+- Updated (UTC): 2026-04-28T23:55:11Z
+- Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
 
 ## What this docs tree is for
 
@@ -67,13 +67,14 @@ The docs are split so readers can choose the right depth:
 9. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
 10. [expression-function-support.md](./expression-function-support.md)
 11. [numeric-simplification.md](./numeric-simplification.md)
-12. [pattern-matching-plan.md](./pattern-matching-plan.md)
-13. [parser-corpus.md](./parser-corpus.md)
-14. [inline-box-strings.md](./inline-box-strings.md)
-15. [notebook-assistant.md](./notebook-assistant.md)
-16. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+12. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
+13. [pattern-matching-plan.md](./pattern-matching-plan.md)
+14. [parser-corpus.md](./parser-corpus.md)
+15. [inline-box-strings.md](./inline-box-strings.md)
+16. [notebook-assistant.md](./notebook-assistant.md)
+17. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
     if you are planning a GUI notebook FrontEnd or StandardForm renderer
-17. [troubleshooting.md](./troubleshooting.md)
+18. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -90,6 +91,7 @@ The docs are split so readers can choose the right depth:
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
 | [numeric-tower.md](numeric-tower.md) | Implementation notes for explicit numeric atoms, arithmetic, precision, numeric predicates, and bounded numeric evaluation. |
 | [numeric-simplification.md](numeric-simplification.md) | Focused note describing `NumericQ`, variable-free `Simplify` / `FullSimplify`, and the exact transformations the offline simplifier applies. |
+| [overflow-underflow-large-number-fallback.md](overflow-underflow-large-number-fallback.md) | Design proposal for adding a certified very-large-number fallback when machine arithmetic would otherwise overflow, underflow, or collapse to lossy zero. |
 | [wolfram-string-literal-spec.md](wolfram-string-literal-spec.md) | Normative specification for Wolfram-Language string literals, escape sequences, and named-character handling, with parity rules against the Wolfram 14.3 kernel. |
 | [symbol-context-registry.md](symbol-context-registry.md) | Normative design note for Tungsten's process-local symbol registry, fixed context state, name queries, `Unique`, and `ValueQ` boundaries. |
 | [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
@@ -147,6 +149,9 @@ The docs are split so readers can choose the right depth:
 - Read [expression-parser.md](./expression-parser.md).
 - Read [numeric-tower.md](./numeric-tower.md) and [numeric-simplification.md](./numeric-simplification.md)
   if your work touches numeric predicates, `N`, `Simplify`, or exact/inexact conversion.
+- Read [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
+  if your work touches machine overflow, underflow, structural large numbers, or Nummy-derived
+  tower arithmetic.
 - Read [symbol-context-registry.md](./symbol-context-registry.md) if you need precise
   `$Context`, `$ContextPath`, `Names`, `NameQ`, `Attributes`, `Symbol`, `Unique`, or `ValueQ`
   behavior, including the Wolfram 14.3 <code>System`</code> symbol snapshot.
