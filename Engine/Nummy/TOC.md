@@ -47,9 +47,12 @@ Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - [python standalone experiments](prior-art/python/)
 - [Oeis.A002845](prior-art/Oeis.A002845/)
 - [SparseNumerics](prior-art/SparseNumerics/)
-- [gmp-6.3.0](prior-art/gmp-6.3.0/)
 - [name-the-biggest-number](prior-art/name-the-biggest-number/)
 - [LIO](prior-art/LIO/)
+
+## Shared Library References
+
+- [GNU MP 6.3.0](../../../lib/gmp-6.3.0/)
 
 ## Implementation Experiments
 

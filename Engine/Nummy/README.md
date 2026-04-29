@@ -77,13 +77,15 @@ physically representable?"
 | [`python`](prior-art/python/) | Standalone Python files: a small break_eternity-style experiment and `hypernums.py`. |
 | [`Oeis.A002845`](prior-art/Oeis.A002845/) | C# project computing terms of OEIS A002845 via a recursive sparse-binary `SparseInteger` representation. |
 | [`SparseNumerics`](prior-art/SparseNumerics/) | C# library extracted from `Oeis.A002845`, exposing the recursive `SparseInteger` type as a standalone NuGet-shaped package. |
-| [`gmp-6.3.0`](prior-art/gmp-6.3.0/) | Vendored GNU MP 6.3.0 upstream source; reference implementation for big-integer/big-float arithmetic and a candidate backend named in the design proposals. |
 | [`name-the-biggest-number`](prior-art/name-the-biggest-number/) | codyroux's Coq-formalized "biggest number" competition in the spirit of Scott Aaronson; a constructive/proof-theoretic angle on the googology corpus. |
 | [`LIO`](prior-art/LIO/) | Swastik Banerjee's `LIO[sign, level, index]` Wolfram Mathematica implementation of Clenshaw-Olver level-index arithmetic; surveyed alongside other Wolfram-side big-number routes under [`docs/reports/wolfram/`](docs/reports/wolfram/). |
 
 Vendored code in this corpus should be treated as reference/source-study
 material. Prefer adding Nummy-owned experiments under `src/` or a clearly
 named new prior-art directory instead of editing upstream snapshots in place.
+GNU MP 6.3.0 is still an important repo-level reference and candidate backend,
+but its upstream source snapshot now lives outside Nummy at
+[`../../../lib/gmp-6.3.0/`](../../../lib/gmp-6.3.0/).
 
 ## Theory Corpus
 
@@ -125,7 +127,9 @@ is archived under
 
 ## Licensing Notes
 
-`src/Tungsten/Nummy/LICENSE` contains the Nummy workspace license. Several prior-art
-subtrees have their own `LICENSE` or `license.txt` files; those files govern
-their respective vendored/reference contents. Check the nearest license before
-copying prior-art code into any future Nummy-owned implementation.
+Nummy does not carry a separate license file. Nummy-owned code and
+documentation inherit the repository license, MIT-0; see
+[`../../../LICENSE`](../../../LICENSE). Several prior-art subtrees have their
+own `LICENSE` or `license.txt` files; those files govern their respective
+vendored/reference contents. Check the nearest license before copying
+prior-art code into any future Nummy-owned implementation.
