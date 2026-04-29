@@ -4,9 +4,10 @@ Nummy is Tungsten's workspace for overflow-resistant arithmetic over very large
 and very small numbers. The project is currently research-first and now lives
 inside `src/Tungsten` because its next production target is Tungsten's
 kernel-free large-number fallback. The implementation surface under `src/`
-contains three independent Python alpha/beta/gamma experiments for the same
-power-tower arithmetic task, while the broader research corpus and prior-art
-reference implementations remain collected under `docs/` and `prior-art/`.
+contains the canonical Tungie calculator REPL plus three independent Python
+alpha/beta/gamma experiments for the same power-tower arithmetic task, while
+the broader research corpus and prior-art reference implementations remain
+collected under `docs/` and `prior-art/`.
 
 The main design family represented here is level-index and symmetric
 level-index arithmetic, plus the related power-tower and "incremental game"
@@ -29,14 +30,23 @@ much wider dynamic range.
 | `src/alpha/` | First Python reference implementation with structural tower arithmetic, certified precision-aware REPL behavior, and a perturbative path for the MathOverflow expression. |
 | `src/beta/` | Independent asymptotic power-tower implementation with its own package, REPL, examples, and focused tests. |
 | `src/gamma/` | Independent compact tower/REPL implementation with project-local design notes and tests. |
+| `src/tungie/` | Canonical dependency-light Tungsten-inspired calculator subset, with its own parser, evaluator, REPL, and tests. |
 
 ## Implementation Experiments
 
-The `src/alpha/`, `src/beta/`, and `src/gamma/` directories are intentionally
-parallel, self-contained implementations of the same Nummy exploration. They
-are not merged into a shared runtime package, and similarly named files inside
-those directories should be read as implementation-local artifacts rather than
-as competing versions of one file.
+The `src/tungie/` directory is the current canonical calculator REPL surface for
+Nummy. It is a dependency-light Tungsten-inspired subset with ordinary
+Tungsten-style integers and reals, exact rationals from calculator arithmetic,
+and an `In[n]:=` REPL prompt. It intentionally excludes Nummy large-number
+representations, strings, rules, associations, base-form integer literals,
+chained inequalities, chained assignments, nested semicolon expressions, trig
+functions, and formatting heads.
+
+The `src/alpha/`, `src/beta/`, and `src/gamma/` directories remain intentionally
+parallel, self-contained implementations of the same Nummy power-tower
+exploration. They are not merged into a shared runtime package, and similarly
+named files inside those directories should be read as implementation-local
+artifacts rather than as competing versions of one file.
 
 When comparing the implementations, run their tests and examples from inside
 their respective directories so package names, import paths, and REPL entry
@@ -116,8 +126,7 @@ The active production direction is Tungsten's large-number fallback design in
 Nummy remains the research corpus and implementation staging area feeding that
 work.
 
-The active Nummy-side direction for replacing the three prototype calculator
-REPLs is the Tungie proposal in
+The active Nummy-side design reference for Tungie is
 [`docs/reports/tungie-language-and-repl-proposal__e9b88699e6fe.md`](docs/reports/tungie-language-and-repl-proposal__e9b88699e6fe.md).
 It defines a lightweight Tungsten-inspired calculator subset, built-in symbol
 surface, and evaluation contract for a dependency-light canonical Nummy REPL.
