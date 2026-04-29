@@ -40,6 +40,73 @@ _NULL = symbol("Null")
 _INDETERMINATE = symbol("Indeterminate")
 _UNDEFINED = symbol("Undefined")
 
+_PREDEFINED_SYMBOL_NAMES = frozenset(
+    {
+        "$MachineEpsilon",
+        "$MachinePrecision",
+        "$MaxMachineNumber",
+        "$MinMachineNumber",
+        "Abs",
+        "Accuracy",
+        "And",
+        "Ceiling",
+        "Clear",
+        "Degree",
+        "Divide",
+        "E",
+        "Equal",
+        "ExactNumberQ",
+        "Exit",
+        "Exp",
+        "False",
+        "Floor",
+        "FractionalPart",
+        "Greater",
+        "GreaterEqual",
+        "I",
+        "If",
+        "InexactNumberQ",
+        "Indeterminate",
+        "Infinity",
+        "IntegerPart",
+        "IntegerQ",
+        "Less",
+        "LessEqual",
+        "List",
+        "Log",
+        "MachineNumberQ",
+        "MachinePrecision",
+        "Max",
+        "Min",
+        "N",
+        "Normal",
+        "Not",
+        "Null",
+        "NumberQ",
+        "NumericQ",
+        "Or",
+        "Out",
+        "Pi",
+        "Plus",
+        "Power",
+        "Precision",
+        "Rational",
+        "Rationalize",
+        "RealValuedNumberQ",
+        "Round",
+        "Set",
+        "SetAccuracy",
+        "SetPrecision",
+        "Sign",
+        "Sqrt",
+        "Times",
+        "True",
+        "Undefined",
+        "UndefinedQ",
+        "Unequal",
+    }
+)
+
 _PI_DIGITS = "3.14159265358979323846264338327950288419716939937510582097494459230781640628620899"
 _E_DIGITS = "2.71828182845904523536028747135266249775724709369995957496696762772407663035354759"
 
@@ -64,9 +131,8 @@ class EvaluationSession:
         assert self.current_messages is not None
         self.current_messages.clear()
         result = evaluate(expr, session=self)
-        if not _is_null(result):
-            assert self.outputs is not None
-            self.outputs[self.line] = result
+        assert self.outputs is not None
+        self.outputs[self.line] = result
         return self.line, result
 
     def emit_error(self, message: str) -> None:
@@ -93,6 +159,8 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
         return _NULL if expr.suppress_output else result
 
     if isinstance(expr, Assignment):
+        if _is_predefined_symbol_name(expr.name):
+            return _error_null(session, f"Cannot assign to predefined symbol {expr.name}.")
         if session is None:
             raise TungieEvaluationError("Assignments require an evaluation session.")
         value = evaluate(expr.value, session=session)
@@ -224,7 +292,10 @@ def _clear(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
     assert session.symbols is not None
     for argument in args:
         if isinstance(argument, Symbol):
-            session.symbols.pop(argument.name, None)
+            if _is_predefined_symbol_name(argument.name):
+                session.emit_error(f"Cannot clear predefined symbol {argument.name}.")
+            else:
+                session.symbols.pop(argument.name, None)
     return _NULL
 
 
@@ -1171,6 +1242,16 @@ def _undefined(session: EvaluationSession | None, message: str) -> Symbol:
     return _UNDEFINED
 
 
+def _error_null(session: EvaluationSession | None, message: str) -> Symbol:
+    if session is not None:
+        session.emit_error(message)
+    return _NULL
+
+
+def _is_predefined_symbol_name(name: str) -> bool:
+    return name in _PREDEFINED_SYMBOL_NAMES
+
+
 def _is_undefined(expr: Expr) -> bool:
     return isinstance(expr, Symbol) and expr.name == "Undefined"
 
@@ -1208,7 +1289,3 @@ def _truth(expr: Expr) -> bool | None:
 
 def _bool(value: bool) -> Symbol:
     return _TRUE if value else _FALSE
-
-
-def _is_null(expr: Expr) -> bool:
-    return isinstance(expr, Symbol) and expr.name == "Null"

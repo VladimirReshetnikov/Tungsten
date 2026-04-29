@@ -25,15 +25,19 @@ main-loop hook and input-history symbols.
   literals, function calls, unary `+`, unary `-`, and boolean `!`.
 - Binary comparisons `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - Top-level semicolon sequencing, without semicolon expressions inside
-  parentheses or function arguments.
+  parentheses or function arguments. An input ending in `;` evaluates to
+  `Null`, stores that `Null` in `Out[n]`, and normally prints no result.
 - Simple top-level assignment in the form `name = expr`; chained assignments
-  are intentionally rejected.
+  are intentionally rejected. Assigning to predefined symbols emits an error
+  message and returns `Null`.
 - REPL history through `%`, `%%`, `%n`, and `Out[n]`; the prompt remains
   `In[n]:=`, but `In`, `InString`, and `$Line` are not built-ins.
 - Calculator built-ins including `N`, `SetPrecision`, `SetAccuracy`,
   `Precision`, `Accuracy`, `Abs`, `Sign`, `Floor`, `Ceiling`, `Round`,
   `IntegerPart`, `FractionalPart`, `Sqrt`, `Exp`, `Log`, `Min`, `Max`, `If`,
-  `Clear`, `Rational`, `Rationalize`, and numeric predicates.
+  `Clear`, `Rational`, `Rationalize`, and numeric predicates. `Clear` reports
+  each predefined symbol argument without clearing it, while still clearing
+  user-defined symbol arguments.
 - Division by zero, zero raised to a negative power, and negative numbers
   raised to non-integer powers emit an evaluation error message and return the
   special symbol `Undefined`.

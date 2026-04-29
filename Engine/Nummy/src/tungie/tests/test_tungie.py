@@ -149,7 +149,42 @@ class EvaluationTests(unittest.TestCase):
     def test_top_level_semicolon_programs(self) -> None:
         session = EvaluationSession()
         self.assertEqual(session.evaluate_input(parse("x = 1; x + 2"))[1].to_full_form(), "3")
-        self.assertEqual(session.evaluate_input(parse("x = 2;"))[1].to_full_form(), "Null")
+        line, result = session.evaluate_input(parse("x = 2;"))
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(session.outputs[line].to_full_form(), "Null")
+        self.assertEqual(session.evaluate_input(parse("Out[2]"))[1].to_full_form(), "Null")
+        self.assertEqual(session.evaluate_input(parse("%"))[1].to_full_form(), "Null")
+
+    def test_predefined_symbols_cannot_be_assigned(self) -> None:
+        session = EvaluationSession()
+        line, result = session.evaluate_input(parse("Pi = 3"))
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(session.outputs[line].to_full_form(), "Null")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Cannot assign to predefined symbol Pi."])
+        self.assertEqual(session.evaluate_input(parse("Pi"))[1].to_full_form(), "Pi")
+
+        _line, result = session.evaluate_input(parse("Plus = 1/0"))
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Cannot assign to predefined symbol Plus."])
+
+    def test_clear_reports_predefined_symbols_and_clears_others(self) -> None:
+        session = EvaluationSession()
+        session.evaluate_input(parse("x = 3"))
+        session.evaluate_input(parse("y = 4"))
+
+        _line, result = session.evaluate_input(parse("Clear[x, Pi, y, E]"))
+        messages = list(session.current_messages or [])
+
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(
+            messages,
+            [
+                "Evaluate::error: Cannot clear predefined symbol Pi.",
+                "Evaluate::error: Cannot clear predefined symbol E.",
+            ],
+        )
+        self.assertEqual(session.evaluate_input(parse("x"))[1].to_full_form(), "x")
+        self.assertEqual(session.evaluate_input(parse("y"))[1].to_full_form(), "y")
 
 
 class ReplTests(unittest.TestCase):
@@ -189,6 +224,32 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Out[1]= Undefined", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "Evaluate::error: Division by zero.\n")
+
+    def test_repl_suppresses_null_results_but_continues_history(self) -> None:
+        stdin = io.StringIO("1+1;\n2+2\nExit[]\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        transcript = stdout.getvalue()
+        self.assertNotIn("Out[1]=", transcript)
+        self.assertIn("Out[2]= 4", transcript)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_repl_reports_predefined_assignment_without_printing_null(self) -> None:
+        stdin = io.StringIO("Pi = 3\n2+2\nExit[]\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        transcript = stdout.getvalue()
+        self.assertNotIn("Out[1]=", transcript)
+        self.assertIn("Out[2]= 4", transcript)
+        self.assertEqual(stderr.getvalue(), "Evaluate::error: Cannot assign to predefined symbol Pi.\n")
 
 
 if __name__ == "__main__":

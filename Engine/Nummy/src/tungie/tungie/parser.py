@@ -89,8 +89,6 @@ class Parser:
         if self._at("symbol") and self._peek(1).text == "=":
             name = self._consume().text
             self._expect("=")
-            if name in _PROTECTED_ASSIGNMENT_NAMES:
-                raise TungieSyntaxError(f"Cannot assign to protected symbol {name}.")
             value = self._parse_expression(0, {";", "eof"})
             return Assignment(name, value)
         return self._parse_expression(0, {";", "eof"})
@@ -271,20 +269,3 @@ def _flatten_call(head: str, *arguments: Expr) -> Expr:
 
 def _is_comparison(expr: Expr) -> bool:
     return isinstance(expr, Call) and isinstance(expr.head, Symbol) and expr.head.name in _COMPARISON_HEADS
-
-
-_PROTECTED_ASSIGNMENT_NAMES = {
-    "E",
-    "Pi",
-    "Degree",
-    "I",
-    "True",
-    "False",
-    "Null",
-    "Infinity",
-    "MachinePrecision",
-    "$MachinePrecision",
-    "$MachineEpsilon",
-    "$MaxMachineNumber",
-    "$MinMachineNumber",
-}
