@@ -43,12 +43,13 @@ ideas.
 | [Root Squaring Using Level-Index Arithmetic (Clenshaw 1989)](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989/README.md>) | Application-focused paper using LI arithmetic for root-squaring. |
 | [The Higher Arithmetic (Hayes)](<The Higher Arithmetic - Hayes/README.md>) | Popular exposition linking bignums, tapered arithmetic, logarithmic systems, and level-index arithmetic. |
 | [Rechnerarithmetik 2008.09 Handout](<Rechnerarithmetik.2008.09.handout/README.md>) | German lecture handout covering logarithmic number systems, tapered floating point, and LI/SLI. |
-| [SLI Arithmetic (Wikipedia).wiki](<SLI Arithmetic (Wikipedia).wiki>) | Wikitext source snapshot for the SLI article and its references. |
+| [SLI Arithmetic (Wikipedia).md](<SLI Arithmetic (Wikipedia).md>) | Markdown rendering of the local Wikipedia snapshot for the SLI article and its references. |
 
 ## Artifact Conventions
 
-Each paper directory keeps the PDF, matching `.tex` OCR/LaTeX sidecar, and
-generated `.md` rendering together. The PDF remains the citation and layout
-authority; the generated Markdown is primarily for search, structural reading,
-and quoting short excerpts. Extracted `images/` directories are kept next to
-the `.tex` files that reference them.
+Each paper directory keeps the matching `.tex` OCR/LaTeX sidecar and generated
+`.md` rendering together, with the PDF retained where the corpus still carries
+one. When present, the PDF remains the citation and layout authority; generated
+Markdown is primarily for search, structural reading, and quoting short
+excerpts. Extracted `images/` directories are kept next to the `.tex` files
+that reference them.

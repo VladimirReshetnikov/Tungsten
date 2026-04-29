@@ -31,7 +31,7 @@ Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - [Theory Corpus](docs/theory/README.md)
   - [Symmetric Level-Index Arithmetic: An Accessible Introduction](<docs/theory/symmetric-level-index-arithmetic-introduction__316e449481ec.md>)
   - [Theory TOC](docs/theory/TOC.md)
-  - [SLI Arithmetic Wikipedia Snapshot](<docs/theory/SLI Arithmetic (Wikipedia).wiki>)
+  - [SLI Arithmetic Wikipedia Snapshot](<docs/theory/SLI Arithmetic (Wikipedia).md>)
 - Worked Examples
   - [How to Calculate 10^10^10^10^10^-10^10 (MathOverflow)](docs/how-to-calculate-1010101010-1010/README.md)
 

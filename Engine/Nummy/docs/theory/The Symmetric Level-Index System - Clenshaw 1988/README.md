@@ -10,9 +10,8 @@ of level-index arithmetic.
 
 ## Files
 
-- [PDF](<The Symmetric Level-Index System - Clenshaw 1988.pdf>) - authoritative paper copy.
 - [Markdown rendering](<The Symmetric Level-Index System - Clenshaw 1988.md>) - generated from the TeX sidecar for easier reading and search.
-- [TeX sidecar](<The Symmetric Level-Index System - Clenshaw 1988.tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
+- [TeX sidecar](<The Symmetric Level-Index System - Clenshaw 1988.tex>) - searchable OCR/LaTeX source used to generate the Markdown rendering.
 
 ## Why It Matters
 

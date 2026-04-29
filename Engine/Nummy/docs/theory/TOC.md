@@ -8,23 +8,18 @@ Repository HEAD: dad97d346dba0cc2ef8655f3527cb5fc37f61b72
 
 - [Symmetric Level-Index Arithmetic: An Accessible Introduction](symmetric-level-index-arithmetic-introduction__316e449481ec.md)
 - [Beyond Floating Point (Clenshaw 1984)](<Beyond Floating Point - Clenshaw 1984/README.md>)
-  - [PDF](<Beyond Floating Point - Clenshaw 1984/Beyond Floating Point - Clenshaw 1984.pdf>)
   - [Markdown rendering](<Beyond Floating Point - Clenshaw 1984/Beyond Floating Point - Clenshaw 1984.md>)
   - [TeX sidecar](<Beyond Floating Point - Clenshaw 1984/Beyond Floating Point - Clenshaw 1984.tex>)
 - [The Symmetric Level-Index System (Clenshaw 1988)](<The Symmetric Level-Index System - Clenshaw 1988/README.md>)
-  - [PDF](<The Symmetric Level-Index System - Clenshaw 1988/The Symmetric Level-Index System - Clenshaw 1988.pdf>)
   - [Markdown rendering](<The Symmetric Level-Index System - Clenshaw 1988/The Symmetric Level-Index System - Clenshaw 1988.md>)
   - [TeX sidecar](<The Symmetric Level-Index System - Clenshaw 1988/The Symmetric Level-Index System - Clenshaw 1988.tex>)
 - [Level-Index Arithmetic - An Introductory Survey (Clenshaw 1989)](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989/README.md>)
-  - [PDF](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989/Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989.pdf>)
   - [Markdown rendering](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989/Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989.md>)
   - [TeX sidecar](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989/Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989.tex>)
 - [Root Squaring Using Level-Index Arithmetic (Clenshaw 1989)](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989/README.md>)
-  - [PDF](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989/Root Squaring Using Level-Index Arithmetic - Clenshaw 1989.pdf>)
   - [Markdown rendering](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989/Root Squaring Using Level-Index Arithmetic - Clenshaw 1989.md>)
   - [TeX sidecar](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989/Root Squaring Using Level-Index Arithmetic - Clenshaw 1989.tex>)
 - [The Higher Arithmetic (Hayes)](<The Higher Arithmetic - Hayes/README.md>)
-  - [PDF](<The Higher Arithmetic - Hayes/The Higher Arithmetic - Hayes.pdf>)
   - [Markdown rendering](<The Higher Arithmetic - Hayes/The Higher Arithmetic - Hayes.md>)
   - [TeX sidecar](<The Higher Arithmetic - Hayes/The Higher Arithmetic - Hayes.tex>)
 - [Rechnerarithmetik 2008.09 Handout](<Rechnerarithmetik.2008.09.handout/README.md>)
@@ -34,4 +29,4 @@ Repository HEAD: dad97d346dba0cc2ef8655f3527cb5fc37f61b72
 
 ## Source Snapshots
 
-- [SLI Arithmetic (Wikipedia).wiki](<SLI Arithmetic (Wikipedia).wiki>)
+- [SLI Arithmetic (Wikipedia).md](<SLI Arithmetic (Wikipedia).md>)

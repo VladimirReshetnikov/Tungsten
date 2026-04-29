@@ -21,7 +21,7 @@ much wider dynamic range.
 | `docs/proposals/` | Historical proposal index; standalone Nummy design drafts are archived there because the active production direction now lives in Tungsten docs. |
 | `docs/proposals/archived/` | Historical standalone Nummy design proposals, kept for source-study context. |
 | `docs/reports/` | Long-form reports and library surveys relevant to Nummy design. |
-| `docs/theory/` | Source papers, article snapshots, PDF sidecars, and OCR/LaTeX text for level-index arithmetic. |
+| `docs/theory/` | Source papers, article snapshots, OCR/LaTeX sidecars, and generated Markdown text for level-index arithmetic. |
 | `docs/how-to-calculate-1010101010-1010/` | Archived MathOverflow Q&A computing the leading digits of a five-level power tower; concrete worked example for SLI/dominance arithmetic. |
 | `prior-art/` | Vendored or local reference implementations used as source-study material, not production Nummy code. |
 | `prior-art/python/` | Standalone Python experiments and ports that are not packaged as independent projects. |
@@ -104,10 +104,10 @@ paper list. The shortest path through the material is:
 6. Clenshaw and Turner, "Root Squaring Using Level-Index Arithmetic" for a
    concrete numerical application.
 
-PDFs are the authoritative copies in the theory corpus. Matching `.tex` files
-are OCR/LaTeX sidecars; matching `.md` files are generated Markdown renderings
-for search, quoting small excerpts, and agent analysis. Some OCR sidecars
-reference extracted `images/` subdirectories.
+When present, PDFs are the authoritative layout copies in the theory corpus.
+Matching `.tex` files are OCR/LaTeX sidecars; matching `.md` files are
+generated Markdown renderings for search, quoting small excerpts, and agent
+analysis. Some OCR sidecars reference extracted `images/` subdirectories.
 
 ## Design Direction
 

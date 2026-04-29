@@ -27,7 +27,7 @@ Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - [Theory README](theory/README.md)
 - [Theory TOC](theory/TOC.md)
 - [Symmetric Level-Index Arithmetic: An Accessible Introduction](theory/symmetric-level-index-arithmetic-introduction__316e449481ec.md)
-- [SLI Arithmetic Wikipedia Snapshot](<theory/SLI Arithmetic (Wikipedia).wiki>)
+- [SLI Arithmetic Wikipedia Snapshot](<theory/SLI Arithmetic (Wikipedia).md>)
 
 ## Worked Examples
 

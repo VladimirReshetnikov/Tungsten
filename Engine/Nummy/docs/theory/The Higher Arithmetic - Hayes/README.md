@@ -10,9 +10,8 @@ floating-point representation.
 
 ## Files
 
-- [PDF](<The Higher Arithmetic - Hayes.pdf>) - authoritative article copy.
 - [Markdown rendering](<The Higher Arithmetic - Hayes.md>) - generated from the TeX sidecar for easier reading and search.
-- [TeX sidecar](<The Higher Arithmetic - Hayes.tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
+- [TeX sidecar](<The Higher Arithmetic - Hayes.tex>) - searchable OCR/LaTeX source used to generate the Markdown rendering.
 - [`images/`](images/) - extracted figures referenced by the TeX sidecar.
 
 ## Why It Matters

@@ -21,13 +21,14 @@ and archived standalone design proposals.
 
 ## Conventions
 
-- PDFs in `theory/` are the authoritative copies of papers and articles.
+- When present, PDFs in `theory/` are the authoritative layout copies of
+  papers and articles.
 - Matching `.tex` files are OCR/LaTeX sidecars with the same base name as their
-  corresponding PDF.
+  generated Markdown rendering.
 - Matching `.md` files are generated from the `.tex` sidecars for easier
   Markdown-native reading and search.
 - `images/` directories under individual paper directories contain extracted
   figures referenced by OCR sidecars.
-- `.wiki` files are source snapshots used for reference and citation tracing.
+- Markdown source snapshots are used for reference and citation tracing.
 - Reports may summarize external projects, but prior-art source snapshots live
   under `../prior-art/`.
