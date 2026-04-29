@@ -34,6 +34,7 @@ from .values import symbol
 
 MACHINE_PRECISION = 15.954589770191003
 DEFAULT_PRECISION = 16
+MAX_DIRECT_DECIMAL_EXPONENT = 999_999
 _INFINITY = symbol("Infinity")
 _NEGATIVE_INFINITY = call("Times", integer(-1), _INFINITY)
 _TRUE = symbol("True")
@@ -91,6 +92,7 @@ _PREDEFINED_SYMBOL_NAMES = frozenset(
         "Pi",
         "Plus",
         "Power",
+        "Pow10Tower",
         "Precision",
         "Rational",
         "Rationalize",
@@ -100,6 +102,7 @@ _PREDEFINED_SYMBOL_NAMES = frozenset(
         "SetAccuracy",
         "SetPrecision",
         "Sign",
+        "ScientificScale",
         "Sqrt",
         "Times",
         "True",
@@ -251,6 +254,10 @@ def _evaluate_call(expr: Call, *, session: EvaluationSession | None) -> Expr:
         return _divide(evaluated_args, session=session)
     if head_name == "Power":
         return _power(evaluated_args, session=session)
+    if head_name == "Pow10Tower":
+        return _pow10_tower(evaluated_args)
+    if head_name == "ScientificScale":
+        return _scientific_scale(evaluated_args, session=session)
     if head_name in {"Equal", "Unequal", "Less", "LessEqual", "Greater", "GreaterEqual"}:
         return _relation(head_name, evaluated_args)
     if head_name == "Abs":
@@ -508,6 +515,75 @@ def _power(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
             return result
 
     return call("Power", base, exponent)
+
+
+def _pow10_tower(args: tuple[Expr, ...]) -> Expr:
+    if len(args) != 2:
+        return call("Pow10Tower", *args)
+    height, top = args
+    if not isinstance(height, Integer) or height.value < 0:
+        return call("Pow10Tower", *args)
+    if height.value == 0:
+        return top
+    direct = _direct_pow10_tower_value(height.value, top, MAX_DIRECT_DECIMAL_EXPONENT)
+    return _fraction_expr(direct) if direct is not None else call("Pow10Tower", height, top)
+
+
+def _scientific_scale(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
+    if len(args) != 2:
+        return call("ScientificScale", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
+    mantissa, exponent = args
+    exponent_exact = _exact_fraction(exponent)
+    if exponent_exact is None or exponent_exact.denominator != 1:
+        return call("ScientificScale", mantissa, exponent)
+    exponent_value = exponent_exact.numerator
+    if abs(exponent_value) > MAX_DIRECT_DECIMAL_EXPONENT:
+        return call("ScientificScale", mantissa, exponent)
+
+    mantissa_exact = _exact_fraction(mantissa)
+    if mantissa_exact is not None:
+        scale = Fraction(10**exponent_value, 1) if exponent_value >= 0 else Fraction(1, 10 ** -exponent_value)
+        return _fraction_expr(mantissa_exact * scale)
+
+    info = _real_info_for_expr(mantissa)
+    if info is None:
+        return call("ScientificScale", mantissa, exponent)
+    precision = _reported_precision(info.precision)
+    try:
+        with localcontext() as context:
+            context.prec = _guarded_precision(precision)
+            context.Emax = max(context.Emax, MAX_DIRECT_DECIMAL_EXPONENT)
+            context.Emin = min(context.Emin, -MAX_DIRECT_DECIMAL_EXPONENT)
+            value = +(info.value * (Decimal(10) ** exponent_value))
+        return _decimal_real(value, precision)
+    except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
+        return call("ScientificScale", mantissa, exponent)
+
+
+def _direct_pow10_tower_value(height: int, top: Expr, limit: int) -> Fraction | None:
+    exact = _exact_fraction(top)
+    if exact is None or exact.denominator != 1:
+        return None
+    value = exact
+    for _ in range(height):
+        if value.denominator != 1:
+            return None
+        exponent = value.numerator
+        if exponent >= 0:
+            if exponent > _max_pow10_exponent_for_limit(limit):
+                return None
+            value = Fraction(10**exponent, 1)
+        else:
+            if -exponent > _max_pow10_exponent_for_limit(limit):
+                return None
+            value = Fraction(1, 10 ** -exponent)
+    return value if abs(value) <= limit else None
+
+
+def _max_pow10_exponent_for_limit(limit: int) -> int:
+    return len(str(limit)) - 1
 
 
 def _relation(head: str, args: tuple[Expr, ...]) -> Expr:
@@ -1105,7 +1181,7 @@ def _format_decimal(value: Decimal) -> str:
         mantissa, exponent = text.split("E")
         exponent_value = int(exponent)
         mantissa = _trim_trailing_decimal_zeros(mantissa)
-        return f"{mantissa}*^{exponent_value:+d}"
+        return f"{mantissa}*^{exponent_value}"
     text = format(value, "f")
     if "." not in text:
         text += "."

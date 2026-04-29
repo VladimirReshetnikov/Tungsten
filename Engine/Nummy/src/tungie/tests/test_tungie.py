@@ -22,6 +22,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parse("1.2``3").to_full_form(), "1.2``3")
         self.assertEqual(parse("1.2*^3").to_full_form(), "1.2*^3")
         self.assertEqual(parse(".5").to_full_form(), ".5")
+        self.assertEqual(parse("1.2/^3").to_full_form(), "1.2*^-3")
+        self.assertEqual(parse("1.2*^-3").to_input_form(), "1.2/^3")
+        self.assertEqual(parse("1.2 *^ -3").to_input_form(), "1.2/^3")
+        self.assertEqual(
+            parse("1.2*^^3").to_full_form(),
+            "ScientificScale[1.2, Pow10Tower[1, 3]]",
+        )
+        self.assertEqual(
+            parse("1.2/^^3").to_full_form(),
+            "ScientificScale[1.2, Times[-1, Pow10Tower[1, 3]]]",
+        )
+        self.assertEqual(parse("1.2*^^^3").to_input_form(), "1.2*^^^3")
 
     def test_rejects_deliberately_excluded_syntax(self) -> None:
         rejected = [
@@ -33,6 +45,11 @@ class ParserTests(unittest.TestCase):
             "1 < 2 < 3",
             "f[1; 2]",
             "(1; 2)",
+            "1.2/^-3",
+            "1.2/^^-3",
+            "1.2/^^(-3)",
+            "1.2*^^-3",
+            "1.2*^^(-3)",
         ]
         for source in rejected:
             with self.subTest(source=source):
@@ -102,8 +119,15 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("N[1/3, 20]"), "0.33333333333333333333`20")
         self.assertEqual(eval_text("N[Pi, 20]"), "3.1415926535897932385`20")
         self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20")
-        self.assertEqual(eval_text("10^309."), "1`16*^+309")
-        self.assertEqual(eval_text("10^309.`20"), "1`20*^+309")
+        self.assertEqual(eval_text("10^309."), "1`16*^309")
+        self.assertEqual(eval_text("10^309.`20"), "1`20*^309")
+        self.assertEqual(eval_text("1.1*^^2"), "1.1`16*^100")
+        self.assertEqual(evaluate(parse("1.1/^^2")).to_input_form(), "1.1`16/^100")
+        self.assertEqual(
+            eval_text("1.1*^^6"),
+            "ScientificScale[1.1`16, Pow10Tower[1, 6]]",
+        )
+        self.assertEqual(evaluate(parse("1.1*^^6")).to_input_form(), "1.1`16*^^6")
 
     def test_precision_and_accuracy_builtins(self) -> None:
         self.assertEqual(eval_text("Precision[1]"), "Infinity")

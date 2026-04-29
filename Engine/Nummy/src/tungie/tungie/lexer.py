@@ -57,6 +57,10 @@ def lex(source: str) -> list[Token]:
             tokens.append(Token("operator", two, index, index + 2))
             index += 2
             continue
+        if char in {"*", "/"} and index + 1 < len(source) and source[index + 1] == "^":
+            token, index = _scan_scale_operator(source, index)
+            tokens.append(token)
+            continue
         if char in _SINGLE_CHAR_OPERATORS:
             tokens.append(Token("operator", char, index, index + 1))
             index += 1
@@ -119,7 +123,8 @@ def _scan_number(source: str, start: int) -> tuple[Token, int]:
         index = _scan_optional_decimal_digits(source, index)
 
     saw_magnitude = False
-    if source.startswith("*^", index):
+    normalized_text: str | None = None
+    if source.startswith("*^", index) and not source.startswith("*^^", index):
         saw_magnitude = True
         index += 2
         if index < len(source) and source[index] in "+-":
@@ -129,10 +134,31 @@ def _scan_number(source: str, start: int) -> tuple[Token, int]:
             index += 1
         if index == magnitude_start:
             raise TungieSyntaxError("Scientific notation requires an integer exponent after *^.")
+    elif source.startswith("/^", index) and not source.startswith("/^^", index):
+        saw_magnitude = True
+        operator_start = index
+        index += 2
+        if index < len(source) and source[index] == "-":
+            raise TungieSyntaxError("Negative exponents after /^ are not supported; use *^ instead.")
+        if index < len(source) and source[index] == "+":
+            index += 1
+        magnitude_start = index
+        while index < len(source) and source[index].isdigit():
+            index += 1
+        if index == magnitude_start:
+            raise TungieSyntaxError("Reciprocal scientific notation requires an integer exponent after /^.")
+        normalized_text = f"{source[start:operator_start]}*^-{source[magnitude_start:index]}"
 
-    text = source[start:index]
+    text = normalized_text or source[start:index]
     kind = "real" if saw_dot or saw_precision or saw_magnitude else "integer"
     return Token(kind, text, start, index), index
+
+
+def _scan_scale_operator(source: str, start: int) -> tuple[Token, int]:
+    index = start + 1
+    while index < len(source) and source[index] == "^":
+        index += 1
+    return Token("operator", source[start:index], start, index), index
 
 
 def _scan_optional_decimal_digits(source: str, index: int) -> int:

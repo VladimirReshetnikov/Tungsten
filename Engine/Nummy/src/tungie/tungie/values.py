@@ -49,6 +49,9 @@ class Real(Expr):
     def to_full_form(self) -> str:
         return self.text
 
+    def to_input_form(self) -> str:
+        return _format_real(self.text)
+
 
 @dataclass(frozen=True)
 class Call(Expr):
@@ -63,6 +66,10 @@ class Call(Expr):
         return f"{self.head.to_full_form()}[{arguments}]"
 
     def to_input_form(self) -> str:
+        if self.has_head("ScientificScale") and len(self.args) == 2:
+            scale = _format_scientific_scale(self.args[0], self.args[1])
+            if scale is not None:
+                return scale
         if self.has_head("List"):
             return "{" + ", ".join(argument.to_input_form() for argument in self.args) + "}"
         if self.has_head("Plus"):
@@ -149,6 +156,16 @@ def _head_name(expr: Expr) -> str | None:
     return expr.name if isinstance(expr, Symbol) else None
 
 
+def _format_real(text: str) -> str:
+    text = text.replace("*^+", "*^")
+    if "*^-" not in text:
+        return text
+    mantissa, exponent = text.split("*^-", 1)
+    if not exponent or not exponent[0].isdigit():
+        return text
+    return f"{mantissa}/^{exponent}"
+
+
 _BINARY_OPERATOR_HEADS = {
     "And": "&&",
     "Or": "||",
@@ -180,6 +197,9 @@ def _format_plus(arguments: tuple[Expr, ...]) -> str:
 def _format_times(arguments: tuple[Expr, ...]) -> str:
     if not arguments:
         return "1"
+    scale = _format_scale_product(arguments)
+    if scale is not None:
+        return scale
     if len(arguments) == 2 and isinstance(arguments[1], Call) and arguments[1].has_head("Power"):
         base, exponent = arguments[1].args if len(arguments[1].args) == 2 else (None, None)
         if isinstance(exponent, Integer) and exponent.value == -1 and base is not None:
@@ -187,6 +207,77 @@ def _format_times(arguments: tuple[Expr, ...]) -> str:
     if len(arguments) == 2 and isinstance(arguments[0], Integer) and arguments[0].value == -1:
         return "-" + _parenthesize(arguments[1], 70)
     return " * ".join(_parenthesize(argument, 60) for argument in arguments)
+
+
+def _format_scale_product(arguments: tuple[Expr, ...]) -> str | None:
+    if len(arguments) != 2 or not isinstance(arguments[1], Call):
+        return None
+    scale = _scale_operator_and_top(arguments[1])
+    if scale is None:
+        return None
+    operator, top = scale
+    return f"{_parenthesize(arguments[0], 80)}{operator}{_parenthesize(top, 80)}"
+
+
+def _format_scientific_scale(mantissa: Expr, exponent: Expr) -> str | None:
+    sign, exponent = _strip_scale_exponent_minus(exponent)
+    tower = _pow10_tower_height_and_top(exponent)
+    if tower is None:
+        return None
+    height, top = tower
+    operator = ("*" if sign > 0 else "/") + "^" * (height + 1)
+    return f"{_parenthesize(mantissa, 80)}{operator}{_parenthesize(top, 80)}"
+
+
+def _scale_operator_and_top(expr: Call) -> tuple[str, Expr] | None:
+    if not expr.has_head("Power") or len(expr.args) != 2:
+        return None
+    base, exponent = expr.args
+    if not isinstance(base, Integer) or base.value != 10:
+        return None
+
+    sign = "*"
+    exponent = _strip_scale_exponent_minus(exponent)
+    if exponent[0] < 0:
+        sign = "/"
+    tower = _pow10_tower_height_and_top(exponent[1])
+    if tower is None:
+        return None
+    height, top = tower
+    return sign + "^" * (height + 1), top
+
+
+def _strip_scale_exponent_minus(expr: Expr) -> tuple[int, Expr]:
+    if isinstance(expr, Integer) and expr.value < 0:
+        return -1, Integer(-expr.value)
+    if isinstance(expr, Real) and expr.text.startswith("-"):
+        return -1, Real(expr.text[1:])
+    if (
+        isinstance(expr, Call)
+        and expr.has_head("Times")
+        and len(expr.args) == 2
+        and isinstance(expr.args[0], Integer)
+        and expr.args[0].value == -1
+    ):
+        return -1, expr.args[1]
+    return 1, expr
+
+
+def _pow10_tower_height_and_top(expr: Expr) -> tuple[int, Expr] | None:
+    if isinstance(expr, Call) and expr.has_head("Pow10Tower") and len(expr.args) == 2:
+        height, top = expr.args
+        if isinstance(height, Integer) and height.value >= 0:
+            return height.value, top
+        return None
+    height = 0
+    current = expr
+    while isinstance(current, Call) and current.has_head("Power") and len(current.args) == 2:
+        base, exponent = current.args
+        if not isinstance(base, Integer) or base.value != 10:
+            break
+        height += 1
+        current = exponent
+    return height, current
 
 
 def _split_negative(expr: Expr) -> tuple[int, Expr]:

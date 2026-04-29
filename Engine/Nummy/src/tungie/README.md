@@ -10,10 +10,11 @@ calculator REPLs while staying independent from Tungsten's broad interpreter
 runtime and heavy dependencies.
 
 This first implementation intentionally focuses on ordinary Tungsten-style
-integers, rationals produced by exact arithmetic, and real literals. It does
-not include Nummy large-number representations, base-form integer literals,
-strings, rules, associations, trig functions, formatting heads, or Tungsten's
-main-loop hook and input-history symbols.
+integers, rationals produced by exact arithmetic, real literals, and the first
+structural base-10 scale forms needed for Nummy's large-number arithmetic. It
+does not include full Nummy large-number arithmetic, base-form integer
+literals, strings, rules, associations, trig functions, formatting heads, or
+Tungsten's main-loop hook and input-history symbols.
 
 ## Supported Surface
 
@@ -22,7 +23,15 @@ main-loop hook and input-history symbols.
   such as <code>1.23`20</code>, and accuracy marks such as
   <code>1.23``20</code>. Unmarked real literals are tracked decimal values:
   their precision is the larger of the current `$Precision` and the number of
-  significant digits written in the literal.
+  significant digits written in the literal. Reciprocal scientific notation
+  `m/^e` is accepted as input and is preferred in output over `m*^-e`;
+  `m*^-e` remains accepted input.
+- Compact base-10 scale notation: `m*^^e` means `m * 10^(10^e)`,
+  `m*^^^e` means `m * 10^(10^(10^e))`, and additional carets insert another
+  `10` between adjacent exponentiation operators. The reciprocal forms `/^^`,
+  `/^^^`, and so on negate the outer scale exponent, so `m/^^e` means
+  `m * 10^(-10^e)`. Direct negative top arguments after `/^`, `/^^`, etc. and
+  after any two-or-more-caret `*^^` form are intentionally rejected for now.
 - Arithmetic operators `+`, `-`, `*`, `/`, `^`, implicit multiplication, list
   literals, function calls, unary `+`, unary `-`, and boolean `!`.
 - Exact rational arithmetic for `+`, `-`, `*`, `/`, and for `^` when the
@@ -31,7 +40,7 @@ main-loop hook and input-history symbols.
 - Inexact operations use tracked decimal arithmetic rather than machine-real
   arithmetic, and may reduce the result precision when guard-digit evaluation
   shows that fewer leading digits are stable. Very large or small decimal
-  results use compact `*^` scientific notation.
+  results use compact `*^` or `/^` scientific notation.
 - Binary comparisons `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - Top-level semicolon sequencing, without semicolon expressions inside
   parentheses or function arguments. An input ending in `;` evaluates to

@@ -49,6 +49,7 @@ _INFIX_HEADS = {
 
 _COMPARISON_HEADS = {"Equal", "Unequal", "Less", "LessEqual", "Greater", "GreaterEqual"}
 _COMPARISON_OPERATORS = {"==", "!=", "<", "<=", ">", ">="}
+_SCALE_BINDING_POWER = 80
 
 
 def parse(source: str) -> Expr:
@@ -113,6 +114,17 @@ class Parser:
                     break
                 right = self._parse_expression(implicit_bp + 1, terminators)
                 left = _flatten_call("Times", left, right)
+                continue
+
+            if token.kind == "operator" and _is_scale_operator(token.text):
+                operator = token.text
+                if _SCALE_BINDING_POWER < min_bp:
+                    break
+                self._consume()
+                if _scale_rejects_negative_argument(operator) and self._text() == "-":
+                    raise TungieSyntaxError(f"Negative exponents after {operator} are not supported.")
+                right = self._parse_expression(_SCALE_BINDING_POWER, terminators)
+                left = _make_scale(operator, left, right)
                 continue
 
             if token.kind != "operator" or token.text not in _INFIX_BINDING_POWER:
@@ -255,6 +267,62 @@ def _negate(expr: Expr) -> Expr:
     if isinstance(expr, Real) and not expr.text.startswith("-"):
         return real("-" + expr.text)
     return call("Times", integer(-1), expr)
+
+
+def _make_scale(operator: str, left: Expr, right: Expr) -> Expr:
+    if _scale_rejects_negative_argument(operator) and _is_negative_literal(right):
+        raise TungieSyntaxError(f"Negative exponents after {operator} are not supported.")
+
+    level = operator.count("^")
+    if level == 1:
+        folded = _fold_scientific_literal(operator, left, right)
+        if folded is not None:
+            return folded
+
+    exponent = _pow10_tower(level - 1, right)
+    if operator.startswith("/"):
+        exponent = _negate(exponent)
+    return call("ScientificScale", left, exponent)
+
+
+def _fold_scientific_literal(operator: str, left: Expr, right: Expr) -> Real | None:
+    left_text = _literal_text(left)
+    if left_text is None or not isinstance(right, Integer):
+        return None
+    exponent = right.value
+    if operator.startswith("/"):
+        if exponent < 0:
+            raise TungieSyntaxError(f"Negative exponents after {operator} are not supported.")
+        exponent = -exponent
+    return real(f"{left_text}*^{exponent}")
+
+
+def _literal_text(expr: Expr) -> str | None:
+    if isinstance(expr, Integer):
+        return str(expr.value)
+    if isinstance(expr, Real):
+        return expr.text
+    return None
+
+
+def _pow10_tower(height: int, top: Expr) -> Expr:
+    return top if height == 0 else call("Pow10Tower", integer(height), top)
+
+
+def _is_scale_operator(text: str) -> bool:
+    return len(text) >= 2 and text[0] in {"*", "/"} and set(text[1:]) == {"^"}
+
+
+def _scale_rejects_negative_argument(operator: str) -> bool:
+    return operator.startswith("/") or operator.count("^") >= 2
+
+
+def _is_negative_literal(expr: Expr) -> bool:
+    if isinstance(expr, Integer):
+        return expr.value < 0
+    if isinstance(expr, Real):
+        return expr.text.startswith("-")
+    return False
 
 
 def _flatten_call(head: str, *arguments: Expr) -> Expr:
