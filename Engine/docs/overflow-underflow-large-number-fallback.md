@@ -2,15 +2,15 @@
 
 - Status: Design proposal for Tungsten's kernel-free numeric evaluator
 - Audience: Tungsten maintainers, Nummy maintainers, REPL implementers, and test authors
-- Scope: `src/Tungsten/src/tungsten/`, with source material from `src/Nummy/src/{alpha,beta,gamma}/`
+- Scope: `src/Tungsten/src/tungsten/`, with source material from `src/Tungsten/Nummy/src/{alpha,beta,gamma}/`
 - Created (UTC): 2026-04-28T23:55:11Z
-- Updated (UTC): 2026-04-28T23:55:11Z
-- Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
+- Updated (UTC): 2026-04-29T00:49:16Z
+- Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - Related docs:
   - [Numeric Tower](./numeric-tower.md)
   - [Numeric Simplification](./numeric-simplification.md)
   - [REPL](./repl.md)
-  - [Nummy Alpha/Beta/Gamma Unified Comparison](../../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md)
+  - [Nummy Alpha/Beta/Gamma Unified Comparison](../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md)
 
 ## Summary
 
@@ -410,7 +410,7 @@ For Tungsten:
 - use gamma's landmark-tail vocabulary for payload design;
 - add a common certainty object before exposing proof-grade precision claims.
 
-The resulting code should not depend on `src/Nummy/src/alpha`, `beta`, or `gamma` at runtime. Those
+The resulting code should not depend on `src/Tungsten/Nummy/src/alpha`, `beta`, or `gamma` at runtime. Those
 directories are independent experiments with overlapping package names and REPL concerns. Tungsten
 needs a focused internal engine with stable AST and JSON integration.
 

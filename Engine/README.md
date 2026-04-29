@@ -4,10 +4,11 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-28T23:55:11Z
-- Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
+- Updated (UTC): 2026-04-29T00:49:16Z
+- Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - Related code:
   - `src/Tungsten/src/tungsten/`
+  - `src/Tungsten/Nummy/`
   - `src/Tungsten/pwsh/`
   - `src/Tungsten/dotnet/`
   - `src/Tungsten/tests/`
@@ -39,6 +40,8 @@ typed host applications:
 - ask the built-in Notebook Assistant about a specific source cell and optionally insert generated
   Wolfram Language code back into the notebook;
 - parse and structurally analyze Wolfram expressions without access to a kernel.
+- develop the overflow-resistant large-number arithmetic research and prototypes that feed the
+  kernel-free numeric fallback.
 
 Tungsten is deliberately not trying to be a full alternative Wolfram runtime. It is an automation
 layer over the real local installation, plus a small amount of kernel-free structural tooling where
@@ -433,6 +436,10 @@ The current documentation should state these boundaries plainly:
 | `src/Tungsten/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
 | `src/Tungsten/src/tungsten/assistant.py` | Notebook Assistant automation |
 | `src/Tungsten/src/tungsten/cli.py` | JSON-first CLI entrypoint |
+| `src/Tungsten/Nummy/` | Tungsten-owned large-number arithmetic research corpus, prior-art snapshots, and alpha/beta/gamma prototype implementations |
+| `src/Tungsten/Nummy/docs/` | Nummy theory corpus, reports, and archived standalone design proposals |
+| `src/Tungsten/Nummy/prior-art/` | Source-study reference implementations for very-large-number arithmetic |
+| `src/Tungsten/Nummy/src/` | Independent alpha, beta, and gamma Python experiments used as large-number fallback source material |
 | `src/Tungsten/pwsh/` | PowerShell wrappers |
 | `src/Tungsten/tests/` | Python unit and integration coverage |
 | `src/Tungsten/scripts/Test-TungstenSmoke.ps1` | End-to-end smoke runner |

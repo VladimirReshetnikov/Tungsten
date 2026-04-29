@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-28T23:55:11Z
-- Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
+- Updated (UTC): 2026-04-29T00:49:16Z
+- Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 
 ## What this docs tree is for
 
@@ -28,6 +28,9 @@ The docs are split so readers can choose the right depth:
 - the architecture and implementation documents are maintainer-oriented;
 - focused guides cover specific subsystems such as Notebook Assistant, inline-box strings, parser
   corpus validation, the expression parser, and notebook FrontEnd planning.
+- the sibling Nummy workspace under `../Nummy/` holds the large-number arithmetic research corpus,
+  archived standalone proposals, prior-art snapshots, and alpha/beta/gamma prototypes that feed
+  Tungsten's numeric fallback work.
 
 ## Recommended reading order
 
@@ -92,6 +95,9 @@ The docs are split so readers can choose the right depth:
 | [numeric-tower.md](numeric-tower.md) | Implementation notes for explicit numeric atoms, arithmetic, precision, numeric predicates, and bounded numeric evaluation. |
 | [numeric-simplification.md](numeric-simplification.md) | Focused note describing `NumericQ`, variable-free `Simplify` / `FullSimplify`, and the exact transformations the offline simplifier applies. |
 | [overflow-underflow-large-number-fallback.md](overflow-underflow-large-number-fallback.md) | Design proposal for adding a certified very-large-number fallback when machine arithmetic would otherwise overflow, underflow, or collapse to lossy zero. |
+| [../Nummy/README.md](../Nummy/README.md) | Nummy workspace guide for the Tungsten-owned large-number arithmetic corpus and prototypes. |
+| [../Nummy/docs/proposals/README.md](../Nummy/docs/proposals/README.md) | Historical index for archived standalone Nummy design proposals. |
+| [../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md](../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md) | Current synthesis of the alpha, beta, and gamma prototype engines used as source material for Tungsten large-number work. |
 | [wolfram-string-literal-spec.md](wolfram-string-literal-spec.md) | Normative specification for Wolfram-Language string literals, escape sequences, and named-character handling, with parity rules against the Wolfram 14.3 kernel. |
 | [symbol-context-registry.md](symbol-context-registry.md) | Normative design note for Tungsten's process-local symbol registry, fixed context state, name queries, `Unique`, and `ValueQ` boundaries. |
 | [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
@@ -186,7 +192,7 @@ The docs are split so readers can choose the right depth:
 
 ## Relationship to the rest of the repo
 
-Tungsten is its own independent workspace under `src/Tungsten`. It is not a thin wrapper over
-another project in this repository. When Tungsten uses another local project, such as WinDesk for
-experimental desktop-assistant flows, it treats that project as an optional integration rather than
-as a hidden implementation dependency.
+Tungsten is its own independent workspace under `src/Tungsten`. `src/Tungsten/Nummy/` is now a
+Tungsten subworkspace for large-number arithmetic research and prototypes. When Tungsten uses any
+other local project, such as WinDesk for experimental desktop-assistant flows, it treats that project
+as an optional integration rather than as a hidden implementation dependency.

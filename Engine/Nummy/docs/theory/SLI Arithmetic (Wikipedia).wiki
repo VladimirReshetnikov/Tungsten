@@ -1,0 +1,75 @@
+{{Short description|Type of computer arithmetic}}
+{{Use dmy dates|date=May 2019|cs1-dates=y}}
+The '''level-index''' ('''LI''') representation of numbers, and its [[algorithm]]s for [[floating point arithmetic|arithmetic]] operations, were introduced by [[Charles Clenshaw]] and [[Frank William John Olver|Frank Olver]] in 1984.<ref name="Clenshaw_1984"/>
+
+The symmetric form of the LI system and its arithmetic operations were presented by Clenshaw and Peter Turner in 1987.<ref name="Clenshaw_1988"/>
+
+Michael<!-- A. --> Anuta, Daniel<!-- W. --> Lozier, Nicolas Schabanel and Turner developed the algorithm for '''symmetric level-index''' ('''SLI''') arithmetic, and a parallel implementation of it. There has been extensive work on developing the SLI arithmetic algorithms and extending them to [[complex number|complex]] and [[vector (mathematics and physics)|vector]] arithmetic operations.
+
+==Definition==
+The idea of the level-index system is to represent a non-negative [[real number]] {{mvar|X}} as
+: <math>X = e^{e^{e^{\cdots^{e^f}}}},</math>
+where <math>0 \leq f < 1</math>, and the process of exponentiation is performed {{mvar|l}} times, with <math>\ell \geq 0</math>.  {{mvar|l}} and {{mvar|f}} are the '''level''' and '''index''' of {{mvar|X}} respectively.  {{math|1=''x'' = ''l'' + ''f''}} is the LI image of {{mvar|X}}.  For example,
+: <math>X = 1234567 = e^{e^{e^{0.9711308}}},</math>
+so its LI image is
+: <math>x = \ell + f = 3 + 0.9711308 = 3.9711308.</math>
+
+The symmetric form is used to allow negative exponents, if the magnitude of {{mvar|X}} is less than&nbsp;1.  One takes {{math|[[Sign function|sgn]](log(''X''))}} or {{math|sgn({{abs|''X''}}&nbsp;-&nbsp;{{abs|''X''}}<sup>-1</sup>)}} and stores it (after substituting +1 for 0 for the reciprocal sign; since for {{math|1=''X''&nbsp;=&nbsp;1&nbsp;=&nbsp;''e''<sup>0</sup>}} the LI image is {{math|1=''x''&nbsp;=&nbsp;1.0}} and uniquely defines {{math|1=''X'' = 1}}, we can do away without a third state and use only one bit for the two states -1 and +1{{clarify |date=December 2023}}) as the reciprocal sign {{mvar|r<sub>X</sub>}}.  Mathematically, this is equivalent to taking the [[Multiplicative inverse|reciprocal]] (multiplicative inverse) of a small-magnitude number, and then finding the SLI image for the reciprocal.  Using one bit for the reciprocal sign enables the representation of extremely small numbers.
+
+A [[sign bit]] may also be used to allow negative numbers. One takes [[Sign function|sgn]](''X'') and stores it (after substituting +1 for 0 for the sign; since for {{math|1=''X''&nbsp;=&nbsp;0}} the LI image is {{math|1=''x''&nbsp;=&nbsp;0.0}} and uniquely defines {{math|1=''X''&nbsp;=&nbsp;0}}, we can do away without a third state and use only one bit for the two states -1 and +1{{clarify |date=December 2023}}) as the sign {{mvar|s<sub>X</sub>}}.  Mathematically, this is equivalent to taking the inverse (additive inverse) of a negative number, and then finding the SLI image for the inverse.  Using one bit for the sign enables the representation of negative numbers.
+
+The mapping function is called the '''generalized logarithm function'''.  It is defined as
+: <math>\psi(X) = \begin{cases}
+ X & \text{if } 0 \leq X < 1, \\
+ 1 + \psi(\ln X) & \text{if } X \geq 1,
+\end{cases} </math>
+and it maps <math>[0, \infty )</math> onto itself monotonically, thus being invertible on this interval. The inverse, the '''generalized exponential function''', is defined by
+: <math>\varphi(x) = \begin{cases}
+ x & \text{if } 0 \leq x < 1, \\
+ e^{\varphi(x-1)} & \text{if } x \geq 1.
+\end{cases} </math>
+
+The density of values {{mvar|X}} represented by {{mvar|x}} has no discontinuities as we go from level {{mvar|l}} to {{math|''l''&nbsp;+&nbsp;1}} (a very desirable property) since
+: <math>\left.\frac{d\varphi(x)}{dx}\right|_{x=1} = \left.\frac{d\varphi(e^x)}{dx}\right|_{x=0}.</math>
+
+The generalized logarithm function is closely related to the [[iterated logarithm]] used in computer science analysis of algorithms.
+
+Formally, we can define the SLI representation for an arbitrary real {{mvar|X}} (not 0 or 1) as
+: <math>X = s_X\varphi(x)^{r_X},</math>
+where {{mvar|s<sub>X</sub>}} is the sign (additive inversion or not) of {{mvar|X}}, and {{mvar|r<sub>X</sub>}} is the reciprocal sign (multiplicative inversion or not) as in the following equations:
+: <math>
+ s_X = \sgn(X),\quad
+ r_X = \sgn\big(|X| - |X|^{-1}\big),\quad
+ x = \psi\big(\max\big(|X|, |X|^{-1}\big)\big) = \psi\big(|X|^{r_X}\big),</math>
+whereas for {{mvar|X}} = 0 or 1, we have
+: <math>s_0 = +1,\quad r_0 = +1,\quad x = 0.0,</math>
+: <math>s_1 = +1,\quad r_1 = +1,\quad x = 1.0.</math>
+
+For example,
+: <math>X = -\dfrac{1}{1234567} = -e^{-e^{e^{0.9711308}}},</math>
+and its SLI representation is
+: <math>x = -\varphi(3.9711308)^{-1}.</math>
+
+==See also==
+* [[Tetration]]
+* [[Floating point]] (FP)
+* [[Tapered floating point]] (TFP)
+* [[Logarithmic number system]] (LNS)
+* [[Level (logarithmic quantity)]]
+
+==References==
+{{Reflist|refs=
+<ref name="Clenshaw_1984">{{cite journal |author-first1=Charles William |author-last1=Clenshaw |author-first2=Frank William John |author-last2=Olver |author-link2=Frank William John Olver |title=Beyond floating point |journal=[[Journal of the ACM]] |volume=31 |issue=2 |pages=319–328 |date=1984 |doi=10.1145/62.322429|doi-access=free }}</ref>
+<ref name="Clenshaw_1988">{{cite journal |author-first1=Charles William |author-last1=Clenshaw |author-first2=Peter R. |author-last2=Turner |title=The Symmetric Level-Index System |journal=[[IMA Journal of Numerical Analysis]] |issn=0272-4979 |oclc=42026743 |publisher=[[Oxford University Press]], Institute of Mathematics and Its Applications |volume=8 |issue=4 |pages=517–526 |date=1988-10-01 |orig-year=1986-09-16, 1987-06-04 |doi=10.1093/imanum/8.4.517 |url=https://www.researchgate.net/publication/31393487 |access-date=2018-07-10}}</ref>
+}}
+
+==Further reading==
+* {{cite journal |author-first1=Charles William |author-last1=Clenshaw |author-first2=Frank William John |author-last2=Olver |author-link2=Frank William John Olver |author-first3=Peter R. |author-last3=Turner |title=Level-index arithmetic: An introductory survey |journal=Numerical Analysis and Parallel Processing |series=Lecture Notes in Mathematics (LNM) |type=Conference proceedings / The Lancaster Numerical Analysis Summer School 1987 |volume=1397 |date=1989 |pages=95–168 |doi=10.1007/BFb0085718|isbn=978-3-540-51645-3 }}
+* {{cite journal |author-first1=Charles William |author-last1=Clenshaw |author-first2=Peter R. |author-last2=Turner |title=Root Squaring Using Level-Index Arithmetic |journal=[[Computing (journal)|Computing]] |publisher=[[Springer-Verlag]] |volume=43 |number=2 |pages=171–185 |date=1989-06-23 |doi=10.1007/BF02241860 |orig-year=1988-10-04 |issn=0010-485X}}
+* {{cite web |title=Rechnerarithmetik: Logarithmische Zahlensysteme |type=Lecture script |date=Summer 2008 |author-first=Eberhard |author-last=Zehendner |language=German |publisher=[[Friedrich-Schiller-Universität Jena]] |pages=21–22 |url=https://users.fmi.uni-jena.de/~nez/rechnerarithmetik_5/folien/Rechnerarithmetik.2008.09.handout.pdf |access-date=2018-07-09 |url-status=live |archive-url=https://web.archive.org/web/20180709202904/https://users.fmi.uni-jena.de/~nez/rechnerarithmetik_5/folien/Rechnerarithmetik.2008.09.handout.pdf |archive-date=2018-07-09}} [https://web.archive.org/web/20180806175620/https://users.fmi.uni-jena.de/~nez/rechnerarithmetik_5/folien/Rechnerarithmetik.2008.komplett.pdf]
+* {{cite journal |title=The Higher Arithmetic |author-first=Brian |author-last=Hayes |journal=[[American Scientist]] |date=September–October 2009 |volume=97 |number=5 |pages=364–368 |doi=10.1511/2009.80.364 |url=https://www.americanscientist.org/article/the-higher-arithmetic |access-date=2018-07-09 |url-status=live |archive-url=https://web.archive.org/web/20180709194903/https://www.americanscientist.org/article/the-higher-arithmetic |archive-date=2018-07-09|url-access=subscription }} [https://www.americanscientist.org/sites/americanscientist.org/files/20097301410207456-2009-09Hayes.pdf<!-- https://web.archive.org/web/20180709200456/https://www.americanscientist.org/sites/americanscientist.org/files/20097301410207456-2009-09Hayes.pdf -->]. Also reprinted in: {{cite book |title=Foolproof, and Other Mathematical Meditations |chapter=Chapter 8: Higher Arithmetic |publisher=[[The MIT Press]] |author-first=Brian |author-last=Hayes |date=2017 |edition=1 |isbn=978-0-26203686-3 |id={{ISBN|0-26203686-X}} |pages=113–126 |url=https://books.google.com/books?id=E4c3DwAAQBAJ}}
+
+==External links==
+* sli-c-library (hosted by Google Code), [http://code.google.com/p/sli-c-library/ "C++ Implementation of Symmetric Level-Index Arithmetic"].
+
+[[Category:Computer arithmetic]]

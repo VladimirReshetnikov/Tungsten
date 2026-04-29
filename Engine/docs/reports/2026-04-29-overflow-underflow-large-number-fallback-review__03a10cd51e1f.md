@@ -27,8 +27,8 @@ I recommend accepting the design with a few targeted clarifications:
 This range is largely a documentation-and-analysis tranche:
 
 - Nummy: multiple alpha/beta/gamma comparison reports were generated, merged, then consolidated into
-  `src/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md` with antecedents archived under
-  `src/Nummy/docs/reports/archived/`.
+  `src/Tungsten/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md` with antecedents archived under
+  `src/Tungsten/Nummy/docs/reports/archived/`.
 - Tungsten: numeric docs were updated and a new proposal was added:
   `src/Tungsten/docs/overflow-underflow-large-number-fallback.md`, plus a short
   `src/Tungsten/src/tungsten/review-notes-2026-04-28.md` capturing implementation seams.
@@ -54,11 +54,11 @@ information loss happens *before* any Tungsten semantic layer can react.
 I ran the acceptance expression through all three prototypes and observed the same behavior
 summarized in the unified comparison:
 
-- `alpha` (from `src/Nummy/src/alpha`) accepts ordinary syntax and prints the landmark-plus-tail
+- `alpha` (from `src/Tungsten/Nummy/src/alpha`) accepts ordinary syntax and prints the landmark-plus-tail
   form with a precision mark; `Floor[...]` returns a sparse exact integer part.
-- `beta` (from `src/Nummy/src/beta`) preserves the scale structurally for ordinary syntax, but
+- `beta` (from `src/Tungsten/Nummy/src/beta`) preserves the scale structurally for ordinary syntax, but
   recovers the finite tail only through its dedicated `LeadingDigits[...]` builtin.
-- `gamma` (from `src/Nummy/src/gamma`) prints a compact `10^10^10 + ...` form from ordinary syntax,
+- `gamma` (from `src/Tungsten/Nummy/src/gamma`) prints a compact `10^10^10 + ...` form from ordinary syntax,
   but does not expose precision marks or a `Floor[...]` path.
 
 This matches the archived and unified reports and supports the proposal’s “harvest alpha discipline,
@@ -193,7 +193,7 @@ code and tests demonstrate today:
   though the evaluator is intentionally narrow.
 
 The Tungsten proposal draws the right conclusions from that analysis (reuse lessons, not code; add a
-certainty object; keep runtime independence from `src/Nummy/src/*`).
+certainty object; keep runtime independence from `src/Tungsten/Nummy/src/*`).
 
 ## Concrete Suggestions For The Tungsten Implementation
 

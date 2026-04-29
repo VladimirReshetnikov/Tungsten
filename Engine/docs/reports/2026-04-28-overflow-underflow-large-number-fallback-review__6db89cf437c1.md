@@ -2,9 +2,9 @@
 
 - Status: Independent design review of `src/Tungsten/docs/overflow-underflow-large-number-fallback.md`
 - Audience: Vladimir, Tungsten maintainers, Nummy maintainers, future readers comparing the proposal with the implementations
-- Scope: the proposal text plus the Nummy alpha/beta/gamma source under `src/Nummy/src/{alpha,beta,gamma}/`, the unified comparison at `src/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md`, and the relevant Tungsten arithmetic seams in `src/Tungsten/src/tungsten/expression.py`
+- Scope: the proposal text plus the Nummy alpha/beta/gamma source under `src/Tungsten/Nummy/src/{alpha,beta,gamma}/`, the unified comparison at `src/Tungsten/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md`, and the relevant Tungsten arithmetic seams in `src/Tungsten/src/tungsten/expression.py`
 - Reviewed proposal: [overflow-underflow-large-number-fallback.md](../overflow-underflow-large-number-fallback.md)
-- Reviewed unified comparison: [alpha-beta-gamma-unified-comparison.md](../../../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md)
+- Reviewed unified comparison: [alpha-beta-gamma-unified-comparison.md](../../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md)
 - Created (UTC): 2026-04-29T00:17:02Z
 - Repository HEAD: de64e8978becc8d82170622d071d646ba5ae9f44
 
@@ -42,7 +42,7 @@ Tungsten code paths.
 
 I also verified the gamma quantization regression noted in the unified report:
 `compute_mo_1010101010_1010(precision=80, frac_digits=20)` raises `decimal.InvalidOperation` at
-[pow10_tower.py:256](../../../Nummy/src/gamma/nummy_tower/pow10_tower.py:256) inside
+[pow10_tower.py:256](../../Nummy/src/gamma/nummy_tower/pow10_tower.py:256) inside
 `_format_decimal_fixed`. The tested `precision=120, frac_digits=10` path still succeeds. This is a
 real bug in the gamma display layer, not just an API contract gap.
 
@@ -123,7 +123,7 @@ Confirmed. Alpha's `CalculatorValue` carries an exact `Fraction` for `+`, `-`, `
 powers along with `certified` and `perturbation` state, exactly as the proposal characterizes. The
 ordinary-expression path through `parse_power → power → from_fraction or from_tower` does what
 the proposal describes. The "uncertified structural output → precision `0`" rule is real
-([calculator.py:421-422](../../../Nummy/src/alpha/nummy/calculator.py:421)).
+([calculator.py:421-422](../../Nummy/src/alpha/nummy/calculator.py:421)).
 
 The sparse exact integer `Floor[…]` result for the MathOverflow expression is the strongest single
 piece of behavior in any of the three implementations and is a good template for Tungsten's
@@ -161,7 +161,7 @@ Tungsten currently handles mutable evaluator state.
 The unified comparison says gamma "directly demonstrates the MathOverflow behavior in a small
 codebase" and that gamma's REPL "recognizes the exact MO tower shape while building structural
 base-10 towers." Both true. What is *understated* is how literal that recognizer is.
-[gamma_repl.py:230](../../../Nummy/src/gamma/gamma_repl.py:230) reads:
+[gamma_repl.py:230](../../Nummy/src/gamma/gamma_repl.py:230) reads:
 
 ```python
 if next_t.height == 5 and _is_effectively_integer(next_t.top) and int(next_t.top) == -(10**10):
@@ -190,7 +190,7 @@ magnitude variations the perturbation engine itself can solve."
 ### Alpha's perturbation propagator is also base-10-only and hardcoded for tower heights 0-3
 
 Alpha's `TowerPerturbationState.anchor_tower`
-([calculator.py:77-90](../../../Nummy/src/alpha/nummy/calculator.py:77)) returns the anchor for
+([calculator.py:77-90](../../Nummy/src/alpha/nummy/calculator.py:77)) returns the anchor for
 each tower level via a switch table:
 
 ```python
@@ -205,7 +205,7 @@ return TowerReal.from_layer(self.levels - 3, 10_000_000_000).with_flags(INEXACT)
 
 These are `f_k(0)` for `f_{k+1}(x) = 10^f_k(x)` starting from `f_0 = 0`, but they are inlined as
 literals rather than computed from a recurrence. `power` advancement
-([calculator.py:244-251](../../../Nummy/src/alpha/nummy/calculator.py:244)) is also
+([calculator.py:244-251](../../Nummy/src/alpha/nummy/calculator.py:244)) is also
 base-10-gated: it advances perturbation state only when `self.exact_fraction == Fraction(10, 1)`.
 
 This is fine as a calculator surface and good source material for Tungsten, but the proposal's
@@ -215,11 +215,11 @@ only a base-10 specialization.
 
 ### Beta's `apply_pow10` deliberately stops at the deferred-scale boundary
 
-Beta's [`apply_pow10`](../../../Nummy/src/beta/nummy/asymptotic.py:127) raises
+Beta's [`apply_pow10`](../../Nummy/src/beta/nummy/asymptotic.py:127) raises
 `NotImplementedError` whenever `value.scale_layer != 0`, with a comment explaining that the MO
 problem terminates at level 5 without needing the deferred-scale propagator. Beta's
 `compute_mo_expression` enforces `num_levels <= 5`
-([mo.py:69-74](../../../Nummy/src/beta/nummy/mo.py:69)).
+([mo.py:69-74](../../Nummy/src/beta/nummy/mo.py:69)).
 
 That is a deliberate scope cut, not a bug. But Tungsten's Phase 4 says "Make ordinary `Power`
 syntax route to this path without user-visible helpers," which implies a *general* tower
@@ -235,7 +235,7 @@ The Open Decisions section is the natural place to add this.
 
 ### Beta's REPL `^` already refuses what the Tungsten fallback wants to handle
 
-[`beta/nummy/calc.py:590-595`](../../../Nummy/src/beta/nummy/calc.py:590) raises
+[`beta/nummy/calc.py:590-595`](../../Nummy/src/beta/nummy/calc.py:590) raises
 `CalcEvaluationError` for `^` whenever `|exponent| > 10^15`. Beta's REPL does not even attempt
 `10^(10^16)`; it tells the user to call `nummy.compute_mo_expression`. The fact that beta's
 `LeadingDigits[k, n]` is "the only way" to reach the asymptotic core is therefore an *intentional*
