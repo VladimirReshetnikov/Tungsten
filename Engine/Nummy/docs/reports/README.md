@@ -15,6 +15,7 @@ theory corpus and prototype/reference libraries.
 | [Shortcomings of Floating-Point Arithmetic in Modern CAS](cas-floating-point-shortcomings__288318099677.md) | Survey of why modern CAS floating-point models, including Wolfram Language/Mathematica-style precision tracking, still inherit mantissa/exponent limits and do not make magnitude scale a first-class arithmetic coordinate. |
 | [Power-Tower Arithmetic and SLI in Python](<Power-Tower Arithmetic and SLI in Python.md>) | Survey of SLI, power-tower representations, Hypercalc-style arithmetic, Python library options, uncertainty propagation, and the trade-off between magnitude reach and conventional precision. |
 | [Nummy Alpha/Beta/Gamma Unified Comparison](alpha-beta-gamma-unified-comparison.md) | Current deduplicated comparison of the three implementation experiments, including claim triage, prior-art/theory alignment, and synthesis recommendation. |
+| [Tungie Language And REPL Proposal](tungie-language-and-repl-proposal__e9b88699e6fe.md) | Current proposal for replacing the three prototype calculator REPLs with one lightweight, Tungsten-inspired, dependency-light Nummy interpreter. |
 
 ## Topical Subdirectories
 

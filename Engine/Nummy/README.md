@@ -116,6 +116,12 @@ The active production direction is Tungsten's large-number fallback design in
 Nummy remains the research corpus and implementation staging area feeding that
 work.
 
+The active Nummy-side direction for replacing the three prototype calculator
+REPLs is the Tungie proposal in
+[`docs/reports/tungie-language-and-repl-proposal__e9b88699e6fe.md`](docs/reports/tungie-language-and-repl-proposal__e9b88699e6fe.md).
+It defines a lightweight Tungsten-inspired calculator subset, built-in symbol
+surface, and evaluation contract for a dependency-light canonical Nummy REPL.
+
 Earlier standalone Nummy design proposals are now historical. Their landing
 surface is [`docs/proposals/archived/`](docs/proposals/archived/). They remain
 useful source-study material, but they no longer describe the active ownership
