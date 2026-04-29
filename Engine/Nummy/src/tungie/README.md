@@ -26,6 +26,8 @@ main-loop hook and input-history symbols.
 - Exact rational arithmetic for `+`, `-`, `*`, `/`, and for `^` when the
   exact rational result is representable. Other exact numeric powers are
   approximated with the current `$Precision`.
+- Precision-marked inexact operations may reduce the result precision when
+  guard-digit evaluation shows that fewer leading digits are stable.
 - Binary comparisons `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - Top-level semicolon sequencing, without semicolon expressions inside
   parentheses or function arguments. An input ending in `;` evaluates to

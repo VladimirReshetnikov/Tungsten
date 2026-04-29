@@ -550,7 +550,7 @@ def _abs(args: tuple[Expr, ...]) -> Expr:
     if real_info is not None:
         if real_info.kind == "machine":
             return _machine_real(abs(float(real_info.value)))
-        return _decimal_real(abs(real_info.value), max(1, int(real_info.precision or MACHINE_PRECISION)))
+        return _decimal_real(abs(real_info.value), _reported_precision(real_info.precision))
     return call("Abs", value)
 
 
@@ -610,7 +610,7 @@ def _rounding(head: str, args: tuple[Expr, ...], *, session: EvaluationSession |
     integer_part = Decimal(int(info.value.to_integral_value(rounding=ROUND_DOWN)))
     if info.kind == "machine":
         return _machine_real(float(info.value) - float(integer_part))
-    precision = max(1, int(info.precision or MACHINE_PRECISION))
+    precision = _reported_precision(info.precision)
     return _decimal_real(info.value - integer_part, precision)
 
 
@@ -757,7 +757,8 @@ def _precision(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> 
         return call("Precision", value)
     if info.kind == "machine":
         return _MACHINE_PRECISION_SYMBOL
-    return real(f"{float(info.precision or MACHINE_PRECISION):g}.")
+    precision = info.precision if info.precision is not None else MACHINE_PRECISION
+    return real(f"{float(precision):g}.")
 
 
 def _accuracy(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
@@ -914,7 +915,7 @@ def _integer_nth_root_exact(value: int, root: int) -> int | None:
 
 def _approximate_exact_power(base: Fraction, exponent: Fraction, *, precision: int) -> Expr:
     with localcontext() as context:
-        context.prec = max(precision, 1)
+        context.prec = _guarded_precision(precision)
         base_value = Decimal(base.numerator) / Decimal(base.denominator)
         exponent_value = Decimal(exponent.numerator) / Decimal(exponent.denominator)
         result = +_decimal_power([base_value, exponent_value])
@@ -1010,15 +1011,22 @@ def _inexact_result(args: tuple[Expr, ...] | list[Expr], operation, machine_oper
     precision = _combined_precision(args)
     if precision is None:
         return None
+    working_precision = _guarded_precision(precision)
     values = [_decimal_for_expr(argument, precision) for argument in args]
-    if any(value is None for value in values):
+    guarded_values = [_decimal_for_expr(argument, working_precision) for argument in args]
+    if any(value is None for value in values) or any(value is None for value in guarded_values):
         return None
     assert all(value is not None for value in values)
+    assert all(value is not None for value in guarded_values)
     try:
         with localcontext() as context:
             context.prec = max(precision, 1)
-            result = +operation(list(values))
-        return _decimal_real(result, precision)
+            baseline_result = +operation(list(values))
+        with localcontext() as context:
+            context.prec = working_precision
+            guarded_result = +operation(list(guarded_values))
+        result_precision = _matching_precision(baseline_result, guarded_result, precision)
+        return _decimal_real(guarded_result, result_precision)
     except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
         return None
 
@@ -1131,10 +1139,11 @@ def _machine_real(value: float) -> Expr:
 def _decimal_real(value: Decimal, precision: int) -> Expr:
     if not value.is_finite():
         return symbol("Infinity") if value > 0 else call("Times", integer(-1), symbol("Infinity"))
+    value = _round_decimal(value, precision)
     text = format(value, "f")
     if "." not in text:
         text += "."
-    return real(f"{text}`{precision}.")
+    return real(f"{text}`{precision}")
 
 
 def _decimal_real_accuracy(value: Decimal, accuracy: int) -> Expr:
@@ -1143,7 +1152,29 @@ def _decimal_real_accuracy(value: Decimal, accuracy: int) -> Expr:
     text = format(value, "f")
     if "." not in text:
         text += "."
-    return real(f"{text}``{accuracy}.")
+    return real(f"{text}``{accuracy}")
+
+
+def _round_decimal(value: Decimal, precision: int) -> Decimal:
+    with localcontext() as context:
+        context.prec = max(precision, 1)
+        return +value
+
+
+def _guarded_precision(precision: int) -> int:
+    precision = max(precision, 1)
+    return precision + max(8, precision // 10)
+
+
+def _matching_precision(left: Decimal, right: Decimal, max_precision: int) -> int:
+    if max_precision <= 0:
+        return 0
+    if not left.is_finite() or not right.is_finite():
+        return max(1, max_precision)
+    for precision in range(max(1, max_precision), 0, -1):
+        if _round_decimal(left, precision) == _round_decimal(right, precision):
+            return precision
+    return 1
 
 
 @dataclass(frozen=True)
@@ -1201,7 +1232,7 @@ def _combined_precision(args: tuple[Expr, ...] | list[Expr]) -> int | None:
             return None
         if info.kind == "machine":
             return None
-        precisions.append(max(1, int(info.precision or MACHINE_PRECISION)))
+        precisions.append(_reported_precision(info.precision))
     return min(precisions) if precisions else None
 
 
@@ -1371,3 +1402,9 @@ def _current_precision(session: EvaluationSession | None) -> int:
     if precision is None or precision == math.inf:
         return DEFAULT_PRECISION
     return max(1, int(precision))
+
+
+def _reported_precision(precision: float | None) -> int:
+    if precision is None:
+        precision = MACHINE_PRECISION
+    return max(0, int(precision))

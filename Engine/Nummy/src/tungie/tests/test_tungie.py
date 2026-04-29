@@ -91,20 +91,23 @@ class EvaluationTests(unittest.TestCase):
     def test_machine_and_precision_real_arithmetic(self) -> None:
         self.assertEqual(eval_text("1 + 2."), "3.")
         self.assertEqual(eval_text("1./3"), "0.3333333333333333")
-        self.assertEqual(eval_text("1.25`20 + 2.5`20"), "3.75`20.")
-        self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333`16.")
-        self.assertEqual(eval_text("N[1/3, 20]"), "0.33333333333333333333`20.")
-        self.assertEqual(eval_text("N[Pi, 20]"), "3.1415926535897932385`20.")
-        self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20.")
+        self.assertEqual(eval_text("1.25`20 + 2.5`20"), "3.75`20")
+        self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333`16")
+        self.assertEqual(eval_text("N[1/3, 20]"), "0.33333333333333333333`20")
+        self.assertEqual(eval_text("N[Pi, 20]"), "3.1415926535897932385`20")
+        self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20")
 
     def test_precision_and_accuracy_builtins(self) -> None:
         self.assertEqual(eval_text("Precision[1]"), "Infinity")
         self.assertEqual(eval_text("Precision[1.]"), "MachinePrecision")
         self.assertEqual(eval_text("Precision[1.23`20]"), "20.")
+        self.assertEqual(eval_text("Precision[.1`0]"), "0.")
+        self.assertEqual(eval_text("Abs[-.1`0]"), "0.1`0")
+        self.assertEqual(eval_text(".1`0 + 0"), "0.1`0")
         self.assertEqual(eval_text("Accuracy[1000.]"), "12.954589770191003")
-        self.assertEqual(eval_text("SetPrecision[1/3, 20]"), "0.33333333333333333333`20.")
+        self.assertEqual(eval_text("SetPrecision[1/3, 20]"), "0.33333333333333333333`20")
         self.assertEqual(eval_text("SetPrecision[1.25, Infinity]"), "Rational[5, 4]")
-        self.assertEqual(eval_text("SetAccuracy[1.23, 20]"), "1.23``20.")
+        self.assertEqual(eval_text("SetAccuracy[1.23, 20]"), "1.23``20")
 
     def test_calculator_builtins(self) -> None:
         self.assertEqual(eval_text("Abs[-3]"), "3")
@@ -128,7 +131,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("If[1 < 2, 7, 9]"), "7")
         self.assertEqual(eval_text("1/2 < .75"), "True")
         self.assertEqual(eval_text("{1, 2} + 3"), "List[4, 5]")
-        self.assertEqual(eval_text("N[{1/2, 1/3}, 5]"), "List[0.5`5., 0.33333`5.]")
+        self.assertEqual(eval_text("N[{1/2, 1/3}, 5]"), "List[0.5`5, 0.33333`5]")
 
     def test_excluded_builtins_remain_inert(self) -> None:
         self.assertEqual(eval_text("Sin[0]"), "Sin[0]")
@@ -140,24 +143,29 @@ class EvaluationTests(unittest.TestCase):
     def test_precision_symbol_controls_unspecified_exact_power_approximation(self) -> None:
         session = EvaluationSession()
         self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "16")
-        self.assertEqual(session.evaluate_input(parse("2^(1/2)"))[1].to_full_form(), "1.414213562373095`16.")
+        self.assertEqual(session.evaluate_input(parse("2^(1/2)"))[1].to_full_form(), "1.414213562373095`16")
         self.assertEqual(session.evaluate_input(parse("$Precision = 20"))[1].to_full_form(), "20")
         self.assertEqual(
             session.evaluate_input(parse("2^(1/2)"))[1].to_full_form(),
-            "1.4142135623730950488`20.",
+            "1.4142135623730950488`20",
         )
         self.assertEqual(
             session.evaluate_input(parse("N[2^(1/2), 50]"))[1].to_full_form(),
-            "1.4142135623730950488016887242096980785696718753770`50.",
+            "1.4142135623730950488016887242096980785696718753769`50",
         )
-        self.assertEqual(session.evaluate_input(parse("N[$Precision, 50]"))[1].to_full_form(), "50.`50.")
+        self.assertEqual(
+            session.evaluate_input(parse("N[2^(1/2), 52]"))[1].to_full_form(),
+            "1.414213562373095048801688724209698078569671875376948`52",
+        )
+        self.assertEqual(session.evaluate_input(parse("N[$Precision, 50]"))[1].to_full_form(), "50.`50")
         self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "20")
-        self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20.")
+        self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20")
 
     def test_exact_power_rules(self) -> None:
         self.assertEqual(eval_text("(1/8)^(-1/3)"), "2")
         self.assertEqual(eval_text("(27/8)^(2/3)"), "Rational[9, 4]")
-        self.assertEqual(eval_text("2^(1/2)"), "1.414213562373095`16.")
+        self.assertEqual(eval_text("2^(1/2)"), "1.414213562373095`16")
+        self.assertEqual(eval_text("2^.5`50"), "1.414213562373095048801688724209698078569671875377`49")
         self.assertEqual(eval_text("0^0"), "1")
         self.assertEqual(eval_text("x^0"), "1")
         self.assertEqual(eval_text("0^(1/2)"), "0")
