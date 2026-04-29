@@ -24,6 +24,8 @@ and archived standalone design proposals.
 - PDFs in `theory/` are the authoritative copies of papers and articles.
 - Matching `.tex` files are OCR/LaTeX sidecars with the same base name as their
   corresponding PDF.
+- Matching `.md` files are generated from the `.tex` sidecars for easier
+  Markdown-native reading and search.
 - `images/` directories under individual paper directories contain extracted
   figures referenced by OCR sidecars.
 - `.wiki` files are source snapshots used for reference and citation tracing.

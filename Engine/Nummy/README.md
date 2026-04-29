@@ -105,8 +105,9 @@ paper list. The shortest path through the material is:
    concrete numerical application.
 
 PDFs are the authoritative copies in the theory corpus. Matching `.tex` files
-are OCR/LaTeX sidecars intended for search, quoting small excerpts, and agent
-analysis. Some OCR sidecars reference extracted `images/` subdirectories.
+are OCR/LaTeX sidecars; matching `.md` files are generated Markdown renderings
+for search, quoting small excerpts, and agent analysis. Some OCR sidecars
+reference extracted `images/` subdirectories.
 
 ## Design Direction
 

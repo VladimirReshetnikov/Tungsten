@@ -305,13 +305,13 @@ Flip-over
 
 ## Local Reading Path
 
-- [The Higher Arithmetic (Hayes)](<The Higher Arithmetic [Hayes]/README.md>) is
+- [The Higher Arithmetic (Hayes)](<The Higher Arithmetic - Hayes/README.md>) is
   the friendliest motivation.
-- [Beyond Floating Point (Clenshaw 1984)](<Beyond Floating Point [Clenshaw 1984]/README.md>)
+- [Beyond Floating Point (Clenshaw 1984)](<Beyond Floating Point - Clenshaw 1984/README.md>)
   introduces the level-index system and generalized logarithms.
-- [The Symmetric Level-Index System (Clenshaw 1988)](<The Symmetric Level-Index System [Clenshaw 1988]/README.md>)
+- [The Symmetric Level-Index System (Clenshaw 1988)](<The Symmetric Level-Index System - Clenshaw 1988/README.md>)
   is the primary SLI source in this corpus.
-- [Level-Index Arithmetic - An Introductory Survey (Clenshaw 1989)](<Level-Index Arithmetic - An Introductory Survey [Clenshaw 1989]/README.md>)
+- [Level-Index Arithmetic - An Introductory Survey (Clenshaw 1989)](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989/README.md>)
   gives the broadest technical context.
 - [Power-Tower Arithmetic and SLI in Python](<../reports/Power-Tower Arithmetic and SLI in Python.md>)
   connects SLI ideas to Hypercalc-style and Python-facing huge-number

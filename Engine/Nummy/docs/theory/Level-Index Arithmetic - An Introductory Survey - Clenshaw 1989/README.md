@@ -11,8 +11,9 @@ level-index arithmetic compares with other alternatives to floating point.
 
 ## Files
 
-- [PDF](<Level-Index Arithmetic - An Introductory Survey [Clenshaw 1989].pdf>) - authoritative paper copy.
-- [TeX sidecar](<Level-Index Arithmetic - An Introductory Survey [Clenshaw 1989].tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
+- [PDF](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989.pdf>) - authoritative paper copy.
+- [Markdown rendering](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989.md>) - generated from the TeX sidecar for easier reading and search.
+- [TeX sidecar](<Level-Index Arithmetic - An Introductory Survey - Clenshaw 1989.tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
 - [`images/`](images/) - extracted figures referenced by the TeX sidecar.
 
 ## Why It Matters

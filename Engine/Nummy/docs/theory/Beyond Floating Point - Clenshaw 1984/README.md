@@ -11,8 +11,9 @@ exponentials rather than widening a conventional exponent field.
 
 ## Files
 
-- [PDF](<Beyond Floating Point [Clenshaw 1984].pdf>) - authoritative paper copy.
-- [TeX sidecar](<Beyond Floating Point [Clenshaw 1984].tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
+- [PDF](<Beyond Floating Point - Clenshaw 1984.pdf>) - authoritative paper copy.
+- [Markdown rendering](<Beyond Floating Point - Clenshaw 1984.md>) - generated from the TeX sidecar for easier reading and search.
+- [TeX sidecar](<Beyond Floating Point - Clenshaw 1984.tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
 - [`images/`](images/) - extracted figures referenced by the TeX sidecar.
 
 ## Why It Matters

@@ -12,6 +12,7 @@ dynamic number formats.
 ## Files
 
 - [PDF](<Rechnerarithmetik.2008.09.handout.pdf>) - authoritative handout copy.
+- [Markdown rendering](<Rechnerarithmetik.2008.09.handout.md>) - generated from the TeX sidecar for easier reading and search.
 - [TeX sidecar](<Rechnerarithmetik.2008.09.handout.tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
 
 ## Why It Matters

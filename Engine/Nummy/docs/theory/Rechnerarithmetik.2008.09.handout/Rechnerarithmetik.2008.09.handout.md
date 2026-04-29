@@ -1,0 +1,376 @@
+---
+author:
+- Eberhard Zehendner
+title: |
+  Rechnerarithmetik\
+  Vorlesung im Sommersemester 2008
+---
+
+FSU Jena
+
+Thema: Logarithmische Zahlensysteme
+
+# Logarithmische Zahlensysteme: Einsatzbereich
+
+Logarithmische Zahlensysteme (logarithmic number systems LNS) dienen der Vereinfachung von
+
+- Multiplikation (wird zu gewöhnlicher Addition)
+
+- Division (wird zu gewöhnlicher Subtraktion)
+
+- Potenzierung (wird zu gewöhnlicher Multiplikation)
+
+- Radizieren (wird zu gewöhnlicher Division)
+
+Dagegen sind Addition und Subtraktion in logarithmischer Darstellung komplizierter als in gewöhnlicher Darstellung.
+
+Logarithmische Zahlensysteme sind insbesondere gut geeignet für Signalverarbeitung mit geringen Genauigkeitsanforderungen und beabsichtigtem reduziertem Energieaufwand Typische Verteilungen von Filter-Koeffizienten passen empirisch zu logarithmischer Darstellung Laufendes Projekt: European Logarithmic Microprocessor (ESPRIT-Projekt, Beginn 1999)
+
+# European Logarithmic Microprocessor
+
+- Coleman, J.N.; Softley, C.I.; Kadlec, J.; Matousek, R.; Licko, M.; Pohl, Z.; Hermanek, A.: The European Logarithmic Microprocessor - a QR RLS application.\
+  Conference Record of the Thirty-Fifth Asilomar Conference on Signals, Systems and Computers, Volume 1, 2001 pp. 155-159.\
+  Summary: In contrast to all other microprocessors, which use floating-point for their real arithmetic, the European Logarithmic Microprocessor is the world’s first device to use the logarithmic number system for this purpose. Simulation work has already suggested that this can deliver approximately twofold improvements in speed and accuracy. This paper describes the ELM device, and illustrates its operation using an example from a class of RLS algorithms.
+
+- Coleman, J.N.; Softley, C.I.; Kadlec, J.; Matousek, R.; Tichy, M.; Pohl, Z.; Hermanek, A.; Benschop, N.F.:\
+  The European Logarithmic Microprocesor.\
+  IEEE Transactions on Computers, April 2008 (Vol. 57, No. 4) pp. 532-546.\
+  Abstract: In 2000 we described a proposal for a logarithmic arithmetic unit, which we suggested would offer a faster, more accurate alternative to floating-point procedures. Would it in fact do so, and could it feasibly be integrated into a microprocessor so that the intended benefits might be realised? Herein we describe the European Logarithmic Microprocessor, a device designed around that unit, and compare its performance with that of a commercial superscalar pipelined floating-point processor. We conclude that the experiment has been successful; that for 32-bit work logarithmic arithmetic may now be the technique of choice.
+
+Die Konversion zwischen logarithmischen Zahlensystemen und Standarddarstellungen erfordert die Berechnung von Logarithmen und Antilogarithmen.
+
+Wegen der dabei auftretenden Approximationsfehler sind die Operanden bzw. Ergebnisse in logarithmischer Darstellung ungenau.
+
+Typische Anwendungsfelder (z. B. digitale Filter) erfordern wenige Konversionen, aber viele Multiplikationen oder Divisionen.
+
+Von der Darstellung alleine her gesehen, sind logarithmische Zahlensysteme sogar etwas genauer als Gleitkommasysteme annähernd gleichen Zahlenbereichs.
+
+Die Vorzeichen-Logarithmus-Darstellung (sign logarithm SL) einer zu codierenden reellen Zahl $`X`$ besteht aus dem Vorzeichenbit $`S_{X}`$ und dem Logarithmus $`L_{X}`$ des Betrags von $`X`$, $`X=(-1)^{S_{X}} \times R^{L_{X}}`$.
+
+Falls $`|X|<1`$ zugelassen ist, muss $`L_{X}`$ auch negative Werte annehmen können.\
+Da log 0 nicht definiert ist, muss außerdem die Null eine spezielle Darstellung besitzen.
+
+Meist wird $`R=2`$ gewählt und $`L_{X}`$ in einer binären Festkommadarstellung angegeben:
+
+``` math
+S_{X} L_{X}=S_{X} x_{k-1} x_{k-2} \ldots x_{1} x_{0} \cdot x_{-1} x_{-2} \ldots x_{-n}
+```
+
+Der Nachkommateil besitzt hier $`n`$ Bits, der ganzzahlige Anteil $`k`$ Bits (einschließlich eines eventuellen Vorzeichenbits des Logarithmus).
+
+Beispiel: SL mit $`k=4, n=3`$
+
+Mit $`L_{X}`$ in 2-Komplement-Darstellung ohne Bias gilt z. B.
+
+``` math
+\begin{array}{rll}
+00111.111 & =+2^{\left(8-\frac{1}{8}\right)} \approx+234.753_{10} & \\
+00001.010 & =+2^{\left(1+\frac{1}{4}\right)} \approx+2.37841_{10} \\
+01110.100 & =+2^{-\left(1+\frac{1}{2}\right)} \approx+0.35355_{10} \\
+01000.000 & =+2^{-8} \approx+0.003906_{10} & \\
+\text { spezielle Darstellung } & & \text { (kleinste positive Zahl) } \\
+11000.000 & =-2^{-8} \approx-0.003906_{10} & \text { (Null) } \\
+11110.100 & =-2^{-\left(1+\frac{1}{2}\right)} \approx-0.35355_{10} & \\
+10001.010 & =-2^{\left(1+\frac{1}{4}\right)} \approx-2.37841_{10} & \\
+10111.111 & =-2^{\left(8-\frac{1}{8}\right)} \approx-234.753_{10} & \text { (betragskleinste negative Zahl) }
+\end{array}
+```
+
+# Vereinfachung arithmetischer Operationen
+
+Operationen ohne Rundungsfehler:
+
+<div class="center">
+
+|  |  |  |
+|:---|:---|:---|
+| Multiplikation | $`\left(S_{X}, L_{X}\right) \times\left(S_{Y}, L_{Y}\right)=\left(S_{X} \oplus S_{Y}, L_{X}+L_{Y}\right)`$ | (Festkomma-Addition) |
+| Division | $`\left(S_{X}, L_{X}\right) /\left(S_{Y}, L_{Y}\right)=\left(S_{X} \oplus S_{Y}, L_{X}-L_{Y}\right)`$ | (Festkomma-Subtraktion) |
+| Kehrwert | $`1 /\left(S_{X}, L_{X}\right)=\left(S_{X},-L_{X}\right)`$ | (Komplement) |
+| Quadrat | $`\left(S_{X}, L_{X}\right)^{2}=\left(0,2 \times L_{X}\right)`$ | (Linksverschiebung) |
+| ganze Potenz | $`\left(S_{X}, L_{X}\right)^{Z}=\left(S_{X} \wedge(Z \bmod 2), Z \times L_{X}\right)`$ | (Festkomma-Multiplikation) |
+
+</div>
+
+Operationen, bei denen ein Rundungsfehler auftreten kann:
+
+<div class="center">
+
+|  |  |  |
+|:---|:---|:---|
+| Wurzel | $`\sqrt{\left(0, L_{X}\right)}=\left(0, L_{X} / 2\right)`$ | (Rechtsverschiebung) |
+| Potenz | $`\left(0, L_{X}\right)^{Y}=\left(0, Y \times L_{X}\right)`$ | (Festkomma-Multiplikation) |
+
+</div>
+
+Überlauf und Unterlauf können in allen Fällen leicht erkannt werden.
+
+# Addition und Subtraktion von SL-Zahlen
+
+Für Addition und Subtraktion in logarithmischen Zahlensystemen existieren verschiedene alternative Ansätze:
+
+1.  Wertetabelle der Größe $`I \times 2^{2 \times I}`$ bit (mit $`I=k+n`$ ), nicht praktikabel für übliche Werte von $`I`$.
+
+2.  Die Operanden werden delogarithmiert und mit gewöhnlicher Addition behandelt, das Ergebnis wird logarithmiert (Rückgriff auf Wertetabellen der Größe $`I \times 2^{\prime}`$ bit, die für die Konvertierung in bzw. aus Standarddarstellungen ohnehin gebraucht werden).
+
+3.  Direkte Berechnung einer approximativen Summe oder Differenz (wegen kleinerer Wertetabellen der bevorzugte Ansatz).
+
+# Approximative Summen und Differenzen
+
+Seien o. B. d. A. $`X, Y>0`$.
+
+``` math
+\begin{aligned}
+& X>Y: \quad Z=X+Y=X \times\left(1+\frac{Y}{X}\right), \quad Z=X-Y=X \times\left(1-\frac{Y}{X}\right), \\
+& L_{Z}=\log _{2} X+\log _{2}\left(1+\frac{Y}{X}\right) \quad L_{Z}=\log _{2} X+\log _{2}\left(1-\frac{Y}{X}\right) \\
+& =L_{X}+\Phi^{+}\left(L_{X}-L_{Y}\right)=L_{X}+\Phi^{-}\left(L_{X}-L_{Y}\right) \\
+& \Phi^{+}(h)=\log _{2}\left(1+2^{-h}\right), h>0 \quad \text { mit } \quad \Phi^{-}(h)=\log _{2}\left(1-2^{-h}\right), h>0 \\
+& X<Y: \quad L_{Z}=L_{Y}+\Phi^{+}\left(L_{Y}-L_{X}\right) \quad L_{Z}=L_{Y}+\Phi^{-}\left(L_{Y}-L_{X}\right) \\
+& X=Y: \quad L_{Z}=L_{X}+1 \quad Z=0
+\end{aligned}
+```
+
+# Implementierung von $`\Phi^{+}`$und $`\Phi^{-}`$
+
+$`\Phi^{+}`$und $`\Phi^{-}`$können durch Wertetabellen der Größe $`I \times 2^{I}`$ bit implementiert werden.\
+Um eine möglichst hohe Genauigkeit der Addition/Subtraktion zu garantieren, werden die exakten Werte von $`\log _{2}\left(1 \pm 2^{-h}\right)`$ zum Eintrag in die Wertetabelle Round-to-nearest gerundet.
+
+Wegen $`0<\Phi^{+}(h)<1`$ braucht bei der Addition nur ein Nachkommateil erzeugt werden. Statt einer ( $`l \times 2^{l}`$ )-bit Wertetabelle genügt also eine ( $`n \times 2^{l}`$ )-bit Wertetabelle.
+
+Für große $`h`$ ist $`\log _{2}\left(1 \pm 2^{-h}\right) \approx \pm 2^{-h}`$, und damit fast Null; wegen der beschränkten Genauigkeit werden diese Werte durch die Rundung zu Null und es macht keinen Sinn, sie explizit zu speichern.
+
+Die Wertetabellen können auch in eine Reihe kleinerer Tabellen zerlegt werden, in denen jeweils ein ähnlicher Effekt ausgenutzt werden kann.
+
+Bei Kombination von Wertetabellen und Interpolation müssen weniger Einträge in der Wertetabelle gespeichert werden; hierzu gibt es ziemlich raffinierte, schnelle Verfahren.
+
+Festkommaformat ↔ logarithmische Darstellung:
+
+``` math
+v \times m=v \times R^{L}
+```
+
+Gleitkommaformat ↔ logarithmische Darstellung:
+
+``` math
+v \times m \times R^{e}=v \times R^{L+e}
+```
+
+Es wird also im Prinzip nur eine Logarithmentafel für $`1 \leq m<R`$ und eine Antilogarithmentafel für $`0 \leq L<1`$ benötigt.
+
+# Berechnung der Logarithmen
+
+Sei $`m=m_{u} m_{u-1} \ldots m_{0} \cdot m_{-1} m_{-2} \ldots m_{-w}`$ und $`t=\max \left\{i: m_{i}=1\right\}`$.
+
+Es gilt $`m=2^{t}+\sum_{i=-w}^{t-1} 2^{i} \times m_{i}=2^{t} \times\left(1+\sum_{i=-w}^{t-1} 2^{i-t} \times m_{i}\right)=2^{t} \times(1+h)`$ mit $`0 \leq h<1`$.
+
+Also $`\log _{2} m=t+\log _{2}(1+h)`$, wobei $`t`$ der ganzzahlige Anteil des Logarithmus ist, $`\log _{2}(1+h)`$ der Nachkommateil.
+
+Meist wird $`\log _{2}(1+h) \approx h`$ ausgenutzt.
+
+Eine Verbesserung ergibt sich durch geschickte Unterteilung des Intervalls $`[0,1)`$ für $`h`$.
+
+Die Implementierung erfolgt mittels eines Zählers und eines Schieberegisters.
+
+Index Calculus Double-Base Number System (IDBNS), $`y=v \times 2^{a} \times 3^{b}, a, b \in \mathbb{Z}`$\
+Eigenschaft: $`\forall \varepsilon>0, x \geq 0 \exists a, b \in \mathbb{Z}:\left|x-2^{a} \times 3^{b}\right|<\varepsilon`$\
+Andere Basen, mehr Ziffern (n digit two-dimensional logarithmic representation):
+
+``` math
+y=\sum_{i=1}^{n} v_{i} \times 2^{a_{i}} \times p^{b_{i}}, \quad p \text { ungerade }
+```
+
+Beispiel: Darstellung mit Fehler $`\leq 0,5 u l p`$\
+Standard-Darstellung: $`x \in \operatorname{Int}_{2}(10)`$ (10-Bit-Darstellung)\
+SL-Repräsentation erfordert 12 Bit Logarithmus und ein Vorzeichenbit\
+Repräsentation durch zweistelliges 2-D LNS ( $`n=2, p=47`$ ): $`a_{i} \in \operatorname{Int}_{2}(6), b_{i} \in \operatorname{Int}_{2}(3) 334 \approx 2^{9} \times 47^{-1}+2^{25} \times 47^{-3} \approx 334,082429`$
+
+Ziel der Darstellung mit mehreren Basen: Verwendung kleinerer Tabellen
+
+# Arithmetik mit variierender relativer Genauigkeit
+
+Zweck variierender relativer Genauigkeit:
+
+- Verbesserung der durchschnittlichen relativen Genauigkeit.
+
+- Vergrößerung des Zahlenbereichs zur Vermeidung von Überlauf oder Unterlauf.
+
+Die durchschnittliche relative Genauigkeit lässt sich durch Tapered-Floating-Point-Systeme verbessern; als Nebeneffekt ergibt sich zusätzlich eine gewisse Vergrößerung des Zahlenbereichs.
+
+Eine entscheidende Vergrößerung des Zahlenbereichs wird erreicht durch verschiedene Methoden des Leveling.
+
+# Tapered-Floating-Point-Systeme
+
+Ansatz von Morris (1971), aufgegriffen von Iri und Matsui (1981).
+
+Statt eines Gleitkommaformats mit Signifikanten- und Exponentenfeldern fester Länge besteht ein Tapered-Floating-Point-Format aus Signifikanten- und Exponentenfeldern variierender Länge.
+
+Hinzu kommt ein Pointerfeld fester Länge, das die Anzahl der Ziffern im Exponentenfeld angibt.
+
+Die Anzahl der Ziffern im Signifikantenfeld (einschließlich des Vorzeichens der Zahl) ergibt sich als Differenz der festen Gesamtlänge des Formats abzüglich der Längen des Exponenten- und Pointerfelds.
+
+# Tapered-Floating-Point-Systeme: Implementierung
+
+Die Anzahl der Ziffern im Exponentenfeld sollte für jeden konkreten Exponenten minimal gewählt werden, um eine möglichst hohe Genauigkeit zu ermöglichen.
+
+Liegt der Signifikant bzw. Exponent in Binärcodierung vor, so gilt:
+
+- Die führende Ziffer des Betrags des Signifikanten bzw. Exponenten braucht nicht gespeichert zu werden, da sie stets den Wert 1 trägt (Hidden-Bit).
+
+- Ein Signifikantenfeld bzw. Exponentenfeld mit nur einem Bit kann die Signifikanten bzw. Exponenten $`\pm 1`$ darstellen (besteht nur aus dem Vorzeichen).
+
+- Ein Signifikantenfeld der Länge Null zeigt die Zahl Null an.
+
+- Ein Exponentenfeld der Länge Null codiert den Exponenten 0.
+
+# Eigenschaften von Tapered-Floating-Point-Formaten
+
+Vorteile:
+
+- Im gewöhnlichen Zahlenbereich von Gleitkommasystemen können Zahlen, die weder sehr groß noch sehr klein sind, mit erhöhter Genauigkeit gespeichert werden.
+
+- Der Zahlenbereich kann durch geringere Genauigkeit für die hinzukommenden Zahlen wesentlich erweitert werden.
+
+Nachteile:
+
+- Die Implementierung ist aufwändiger als für gewöhnliche Gleitkommasysteme.
+
+- Bei gleichem Speicheraufwand ist für manche Zahlen im gewöhnlichen Zahlenbereich entsprechender Gleitkommasysteme die Genauigkeit wegen des Pointerfelds geringer.
+
+Praktische Implementierungen zeigen, dass bei gleichem Speicheraufwand durch Tapered-Floating-Point-Systeme in der Regel eine höhere durchschnittliche Genauigkeit erreicht wird.
+
+# Genauigkeit von Tapered-Floating-Point-Systemen
+
+Betragsgroße und betragskleine Zahlen sind wegen des betragsgroßen Exponenten ungenauer als solche moderater Magnitude.
+
+# Beispiel
+
+Länge 64 Bit, davon 6 Bit für das Pointerfeld: Zahlenbereich $`\approx \pm 10^{ \pm 4 \times 10^{16}}`$
+
+<div class="center">
+
+<table>
+<thead>
+<tr>
+<th style="text-align: left;"><span class="math inline">|<em>x</em>|≈</span></th>
+<th colspan="2" style="text-align: left;">relativer Fehler beschränkt durch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">1</td>
+<td style="text-align: left;"><span class="math inline">2<sup>−57</sup></span></td>
+<td style="text-align: left;">(höchste relative Genauigkeit)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><span class="math inline">2<sup>±16</sup></span></td>
+<td style="text-align: left;"><span class="math inline">2<sup>−52</sup></span></td>
+<td style="text-align: left;"></td>
+</tr>
+<tr>
+<td style="text-align: left;"><span class="math inline">10<sup>±8 × 10<sup>7</sup></sup></span></td>
+<td style="text-align: left;"><span class="math inline">2<sup>−28</sup></span></td>
+<td style="text-align: left;"></td>
+</tr>
+<tr>
+<td style="text-align: left;"><span class="math inline">10<sup>±4 × 10<sup>16</sup></sup></span></td>
+<td style="text-align: left;"><span class="math inline">100%</span></td>
+<td style="text-align: left;">(soweit <span class="math inline"><em>x</em></span> im zulässigen Bereich)</td>
+</tr>
+</tbody>
+</table>
+
+</div>
+
+Das Format double im Standard IEEE-754 besitzt einen Zahlenbereich von $`\approx \pm 10^{ \pm 308}`$ bei gleichmäßigem maximalen relativen Fehler $`\approx 2^{-52}`$.
+
+# Wahrscheinlichkeit von Überlauf und Unterlauf
+
+Bei Tapered-Floating-Point-Systemen sind Überlauf und Unterlauf wegen des erweiterten Exponentenbereichs recht unwahrscheinlich, können aber - insbesondere bei wiederholter Exponentiation - dennoch auftreten.
+
+Mit Leveling erreicht man Größenordnungen, die in der Praxis nicht mehr vorkommen. Damit ist zwar nicht ausgeschlossen, dass Überlauf oder Unterlauf auftritt, die Wahrscheinlichkeit ist aber so gut wie Null.
+
+Zu beachten ist, dass die Operationen,,$`+- \times, /`$ für höhere Levels hochgradig ungenau ausfallen.
+
+# Leveling nach Iri und Matsui
+
+Ist der Exponent einer darzustellenden Zahl betragsgrößer als der maximale Exponent eines Tapered-Floating-Point-Formates (Level 0), so wird der Betrag dieses Exponenten selbst in einem (etwas kleineren) Tapered-Floating-Point-Format (Level 1) repräsentiert.\
+Ein spezieller Wert des Pointerfelds zeigt an, wann der Exponent im Level 1 Format vorliegt.
+
+# Beispiel
+
+Level 0: Länge 64 Bit, davon 6 Bit Pointerfeld; Zahlenbereich $`\approx \pm 10^{ \pm 4 \times 10^{16}}`$\
+Level 1: Länge 56 Bit, davon 6 Bit Pointerfeld; Zahlenbereich $`\approx \pm 10^{ \pm 10^{10^{15}}}`$\
+Dieses Prinzip kann über weitere Stufen (Level 2, Level 3, …) fortgesetzt werden, bis die immer kleiner werdenden Exponentenfelder dem eine Grenze setzen.\
+Mit fortschreitendem Level wird die Darstellung aber immer ungenauer.
+
+# Level-Index-Arithmetik
+
+# Level-Index (LI)
+
+Clenshaw und Olver (1984)\
+Zahlenformat: Vorzeichen $`v \in\{0,1\}`$ der Zahl, vorzeichenlose Festkommazahl $`f`$ zur Codierung des Betrags.
+
+Der ganzzahlige Anteil von $`f`$ heißt Level, der Nachkommateil von $`f`$ heißt Index.\
+$`x=(-1)^{v} \times \Phi(f)`$\
+$`\Phi(f)= \begin{cases}f & \text { falls } 0 \leq f \leq 1 \\ e^{\Phi(f-1)} & \text { sonst }\end{cases}`$
+
+# Symmetric Level-Index (SLI)
+
+Clenshaw/Olver/Turner (1987)\
+Zahlenformat: Vorzeichen $`v \in\{0,1\}`$ der Zahl, Vorzeichen $`u \in\{0,1\}`$ des Exponenten, vorzeichenlose Festkommazahl $`f`$ zur Codierung des Betrags.\
+$`x=(-1)^{v} \times \Psi(f)^{(-1)^{u}}`$\
+$`\Psi(f)= \begin{cases}e^{f} & \text { falls } 0 \leq f \leq 1 \\ e^{\Psi(f-1)} & \text { sonst }\end{cases}`$
+
+Länge 64 Bit, davon 3 Bit Levelfeld:
+
+``` math
+\begin{aligned}
+& \text { Zahlenbereich } \approx \pm \\
+& \text { } \begin{array}{l}
+\approx \text { chste Genauigkeit) } \\
+\approx 2^{-52} \\
+-30
+\end{array}
+\end{aligned}
+```
+
+Für noch größere $`|x|`$ kann der relative Fehler unvorstellbar groß werden.
+
+# Dynamische Vereinbarung von Zahlformaten
+
+Cohen/Hamacher/Hull (1981):\
+Clean Arithmetic with Decimal base And Controlled precision (CADAC)
+
+Hull et al. (1985): NUMERICAL TURING
+
+- Zahlenbasis 10
+
+- Nachkommateile mit $`p`$ Stellen
+
+- Ganzzahlige Exponenten im Bereich $`[-10 \times p,+10 \times p]`$
+
+An jeder Stelle des Programms kann eine precision $`p`$ in Form eines dynamisch ausgewerteten Ausdrucks erklärt werden.
+
+Eine precision-Definition legt für den Rest des Gültigkeitsbereiches der die Definition enthaltenden Kontrollstruktur bzw. bis zum nächsten Auftreten einer precision-Definition innerhalb derselben Kontrollstruktur die Genauigkeit $`p`$ aller deklarierten Variablen und aller Gleitkommaoperationen fest.
+
+Jede Variable kann alternativ auch direkt mit einem Ausdruck versehen werden, der ihre Genauigkeit $`p`$ angibt.
+
+# Algorithmen in Numerical Turing
+
+- Hohe Genauigkeit für den gesamten Algorithmus ist aufwändig.
+
+- Hohe Genauigkeit wird meist nicht durchgängig benötigt (nur an kritischen Stellen).
+
+- Der Grad an nötiger Genauigkeit hängt oft von den Daten ab, ist also zur Übersetzungszeit schwer abschätzbar.
+
+Beispiel: Berechnung der Quadratwurzel nach dem Newton-Verfahren:
+
+    var p:= 3
+    const maxp := currentprecision+2
+    loop
+        p := min(2*p-2,maxp)
+            % p = 4, 6, 10, ..., maxp
+        precision p
+        approx := .5*(approx+f/approx)
+        exit when p = maxp
+    end loop

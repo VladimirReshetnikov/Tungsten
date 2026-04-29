@@ -10,8 +10,9 @@ using LI arithmetic in a numerical algorithm.
 
 ## Files
 
-- [PDF](<Root Squaring Using Level-Index Arithmetic [Clenshaw 1989].pdf>) - authoritative paper copy.
-- [TeX sidecar](<Root Squaring Using Level-Index Arithmetic [Clenshaw 1989].tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
+- [PDF](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989.pdf>) - authoritative paper copy.
+- [Markdown rendering](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989.md>) - generated from the TeX sidecar for easier reading and search.
+- [TeX sidecar](<Root Squaring Using Level-Index Arithmetic - Clenshaw 1989.tex>) - searchable OCR/LaTeX sidecar named to match the PDF.
 - [`images/`](images/) - extracted figures referenced by the TeX sidecar.
 
 ## Why It Matters

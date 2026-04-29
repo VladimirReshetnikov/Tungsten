@@ -20,6 +20,8 @@ each level of the tower around `1 + cx + O(x^2)` with `c = ln(10)` and
 
 - [PDF](how-to-calculate-1010101010-1010.pdf) - rendered snapshot of the
   MathOverflow page.
+- [Markdown rendering](how-to-calculate-1010101010-1010.md) - generated from
+  the TeX sidecar for easier reading and search.
 - [TeX sidecar](how-to-calculate-1010101010-1010.tex) - searchable LaTeX
   source matching the PDF, useful for quoting individual formulas.
 - [Plain-text excerpt](how-to-calculate-1010101010-1010.txt) - condensed
