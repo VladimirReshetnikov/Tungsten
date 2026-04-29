@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from decimal import ROUND_CEILING
@@ -11,6 +12,7 @@ from decimal import localcontext
 from fractions import Fraction
 import math
 import re
+from typing import Iterator
 
 from .errors import TungieEvaluationError
 from .errors import TungieExitRequested
@@ -31,6 +33,7 @@ from .values import symbol
 
 
 MACHINE_PRECISION = 15.954589770191003
+DEFAULT_PRECISION = 16
 _MACHINE_PRECISION_SYMBOL = symbol("MachinePrecision")
 _INFINITY = symbol("Infinity")
 _NEGATIVE_INFINITY = call("Times", integer(-1), _INFINITY)
@@ -117,10 +120,12 @@ class EvaluationSession:
     symbols: dict[str, Expr] | None = None
     outputs: dict[int, Expr] | None = None
     current_messages: list[str] | None = None
+    precision_override: int | None = None
 
     def __post_init__(self) -> None:
         if self.symbols is None:
             self.symbols = {}
+        self.symbols.setdefault("$Precision", integer(DEFAULT_PRECISION))
         if self.outputs is None:
             self.outputs = {}
         if self.current_messages is None:
@@ -181,6 +186,8 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
 
 
 def _evaluate_symbol(expr: Symbol, session: EvaluationSession | None) -> Expr:
+    if expr.name == "$Precision" and session is not None and session.precision_override is not None:
+        return integer(max(1, int(session.precision_override)))
     if expr.name == "$MachinePrecision":
         return real(repr(MACHINE_PRECISION))
     if expr.name == "$MachineEpsilon":
@@ -193,6 +200,8 @@ def _evaluate_symbol(expr: Symbol, session: EvaluationSession | None) -> Expr:
         return call("Times", rational(1, 180), symbol("Pi"))
     if session is not None and session.symbols is not None and expr.name in session.symbols:
         return session.symbols[expr.name]
+    if expr.name == "$Precision":
+        return integer(DEFAULT_PRECISION)
     return expr
 
 
@@ -480,16 +489,18 @@ def _power(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
         return _UNDEFINED
     if threaded := _thread_listable("Power", args, session=session):
         return threaded
+    if _is_zero(exponent):
+        return integer(1)
     if _is_zero(base) and _is_negative_number(exponent):
         return _undefined(session, "Zero cannot be raised to a negative power.")
-    if _is_negative_number(base) and not _is_integer_number(exponent):
-        return _undefined(session, "Negative numbers cannot be raised to non-integer powers.")
-    if _is_zero(exponent):
-        return _INDETERMINATE if _is_zero(base) else integer(1)
+    if _is_zero(base) and _is_positive_number(exponent):
+        return integer(0)
     if _is_one(exponent):
         return base
     if _is_one(base):
         return integer(1)
+    if _is_negative_number(base) and not _is_integer_number(exponent):
+        return _undefined(session, "Negative numbers cannot be raised to non-integer powers.")
 
     exact_base = _exact_fraction(base)
     exact_exponent = _exact_fraction(exponent)
@@ -497,7 +508,7 @@ def _power(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
         exact = _exact_power(exact_base, exact_exponent)
         if exact is not None:
             return _fraction_expr(exact)
-        return call("Power", _fraction_expr(exact_base), _fraction_expr(exact_exponent))
+        return _approximate_exact_power(exact_base, exact_exponent, precision=_current_precision(session))
 
     if _all_approximable(args) and any(_contains_inexact(argument) for argument in args):
         result = _inexact_result(args, _decimal_power, lambda values: math.pow(values[0], values[1]))
@@ -683,14 +694,18 @@ def _log(args: tuple[Expr, ...]) -> Expr:
 def _n(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) not in {1, 2}:
         return call("N", *args)
-    expr = evaluate(args[0], session=session)
-    if _is_undefined(expr):
-        return _UNDEFINED
-    precision = None
+    precision: int | None | float = _current_precision(session)
     if len(args) == 2:
         precision = _precision_argument(evaluate(args[1], session=session))
         if precision == math.inf:
+            expr = evaluate(args[0], session=session)
             return expr
+    if precision is None:
+        expr = evaluate(args[0], session=session)
+    else:
+        expr = _evaluate_with_precision(args[0], precision, session=session)
+    if _is_undefined(expr):
+        return _UNDEFINED
     return _approximate(expr, precision)
 
 
@@ -877,15 +892,33 @@ def _exact_power(base: Fraction, exponent: Fraction) -> Fraction | None:
 
 
 def _integer_nth_root_exact(value: int, root: int) -> int | None:
-    if value < 0:
+    if root <= 0 or value < 0:
         return None
+    if root == 1:
+        return value
     if value in {0, 1}:
         return value
-    candidate = round(value ** (1 / root))
-    for nearby in range(max(candidate - 2, 0), candidate + 3):
-        if nearby ** root == value:
-            return nearby
+    low = 0
+    high = 1 << max(1, (value.bit_length() + root - 1) // root)
+    while low <= high:
+        candidate = (low + high) // 2
+        powered = candidate ** root
+        if powered == value:
+            return candidate
+        if powered < value:
+            low = candidate + 1
+        else:
+            high = candidate - 1
     return None
+
+
+def _approximate_exact_power(base: Fraction, exponent: Fraction, *, precision: int) -> Expr:
+    with localcontext() as context:
+        context.prec = max(precision, 1)
+        base_value = Decimal(base.numerator) / Decimal(base.denominator)
+        exponent_value = Decimal(exponent.numerator) / Decimal(exponent.denominator)
+        result = +_decimal_power([base_value, exponent_value])
+    return _decimal_real(result, precision)
 
 
 def _decimal_power(values: list[Decimal]) -> Decimal:
@@ -934,6 +967,27 @@ def _approximate(expr: Expr, precision: int | None) -> Expr:
         return _machine_real(value) if value is not None else expr
     value = _decimal_for_expr(expr, precision)
     return _decimal_real(value, precision) if value is not None else expr
+
+
+def _evaluate_with_precision(expr: Expr, precision: int | None | float, *, session: EvaluationSession | None) -> Expr:
+    if precision is None or precision == math.inf:
+        return evaluate(expr, session=session)
+    if session is None:
+        temp_session = EvaluationSession()
+        temp_session.precision_override = max(1, int(precision))
+        return evaluate(expr, session=temp_session)
+    with _temporary_precision(session, max(1, int(precision))):
+        return evaluate(expr, session=session)
+
+
+@contextmanager
+def _temporary_precision(session: EvaluationSession, precision: int) -> Iterator[None]:
+    old_precision = session.precision_override
+    session.precision_override = precision
+    try:
+        yield
+    finally:
+        session.precision_override = old_precision
 
 
 def _inexact_result(args: tuple[Expr, ...] | list[Expr], operation, machine_operation=None) -> Expr | None:
@@ -1118,7 +1172,7 @@ def _real_info(expr: Real) -> RealInfo | None:
     mantissa = match.group("mantissa")
     magnitude = match.group("magnitude")
     exponent = int(magnitude[2:]) if magnitude else 0
-    value = Decimal(mantissa) * (Decimal(10) ** exponent)
+    value = _decimal_literal_value(mantissa, exponent)
     mark = match.group("mark")
     if not mark:
         return RealInfo(value=value, kind="machine", precision=MACHINE_PRECISION)
@@ -1128,6 +1182,13 @@ def _real_info(expr: Real) -> RealInfo | None:
         return RealInfo(value=value, kind="accuracy", precision=accuracy + _decimal_log10_abs(value), accuracy=accuracy)
     precision = float(digits) if digits else MACHINE_PRECISION
     return RealInfo(value=value, kind="precision", precision=precision)
+
+
+def _decimal_literal_value(mantissa: str, exponent: int) -> Decimal:
+    digit_count = sum(1 for char in mantissa if char.isdigit())
+    with localcontext() as context:
+        context.prec = max(digit_count, 1)
+        return +(Decimal(mantissa) * (Decimal(10) ** exponent))
 
 
 def _combined_precision(args: tuple[Expr, ...] | list[Expr]) -> int | None:
@@ -1166,8 +1227,9 @@ def _all_approximable(args: tuple[Expr, ...] | list[Expr]) -> bool:
 
 
 def _precision_argument(expr: Expr) -> int | None | float:
-    if isinstance(expr, Integer):
-        return max(1, expr.value)
+    exact = _exact_fraction(expr)
+    if exact is not None:
+        return max(1, int(exact))
     if isinstance(expr, Real):
         info = _real_info(expr)
         return max(1, int(info.value)) if info is not None else None
@@ -1268,6 +1330,14 @@ def _is_negative_number(expr: Expr) -> bool:
     return info is not None and info.value < 0
 
 
+def _is_positive_number(expr: Expr) -> bool:
+    exact = _exact_fraction(expr)
+    if exact is not None:
+        return exact > 0
+    info = _real_info_for_expr(expr)
+    return info is not None and info.value > 0
+
+
 def _is_integer_number(expr: Expr) -> bool:
     exact = _exact_fraction(expr)
     if exact is not None:
@@ -1289,3 +1359,15 @@ def _truth(expr: Expr) -> bool | None:
 
 def _bool(value: bool) -> Symbol:
     return _TRUE if value else _FALSE
+
+
+def _current_precision(session: EvaluationSession | None) -> int:
+    if session is not None and session.precision_override is not None:
+        return max(1, int(session.precision_override))
+    value: Expr | None = None
+    if session is not None and session.symbols is not None:
+        value = session.symbols.get("$Precision")
+    precision = _precision_argument(value) if value is not None else DEFAULT_PRECISION
+    if precision is None or precision == math.inf:
+        return DEFAULT_PRECISION
+    return max(1, int(precision))

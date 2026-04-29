@@ -92,7 +92,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("1 + 2."), "3.")
         self.assertEqual(eval_text("1./3"), "0.3333333333333333")
         self.assertEqual(eval_text("1.25`20 + 2.5`20"), "3.75`20.")
-        self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333")
+        self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333`16.")
         self.assertEqual(eval_text("N[1/3, 20]"), "0.33333333333333333333`20.")
         self.assertEqual(eval_text("N[Pi, 20]"), "3.1415926535897932385`20.")
         self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20.")
@@ -136,6 +136,32 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("Boole[True]"), "Boole[True]")
         self.assertEqual(eval_text("InputForm[1 + x]"), "InputForm[Plus[1, x]]")
         self.assertEqual(eval_text("Short[{1, 2, 3}]"), "Short[List[1, 2, 3]]")
+
+    def test_precision_symbol_controls_unspecified_exact_power_approximation(self) -> None:
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "16")
+        self.assertEqual(session.evaluate_input(parse("2^(1/2)"))[1].to_full_form(), "1.414213562373095`16.")
+        self.assertEqual(session.evaluate_input(parse("$Precision = 20"))[1].to_full_form(), "20")
+        self.assertEqual(
+            session.evaluate_input(parse("2^(1/2)"))[1].to_full_form(),
+            "1.4142135623730950488`20.",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[2^(1/2), 50]"))[1].to_full_form(),
+            "1.4142135623730950488016887242096980785696718753770`50.",
+        )
+        self.assertEqual(session.evaluate_input(parse("N[$Precision, 50]"))[1].to_full_form(), "50.`50.")
+        self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "20")
+        self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20.")
+
+    def test_exact_power_rules(self) -> None:
+        self.assertEqual(eval_text("(1/8)^(-1/3)"), "2")
+        self.assertEqual(eval_text("(27/8)^(2/3)"), "Rational[9, 4]")
+        self.assertEqual(eval_text("2^(1/2)"), "1.414213562373095`16.")
+        self.assertEqual(eval_text("0^0"), "1")
+        self.assertEqual(eval_text("x^0"), "1")
+        self.assertEqual(eval_text("0^(1/2)"), "0")
+        self.assertEqual(eval_text("1^x"), "1")
 
     def test_session_assignment_clear_and_history(self) -> None:
         session = EvaluationSession()

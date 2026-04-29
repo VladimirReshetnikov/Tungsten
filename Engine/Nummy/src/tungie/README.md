@@ -23,6 +23,9 @@ main-loop hook and input-history symbols.
   <code>1.23``20</code>.
 - Arithmetic operators `+`, `-`, `*`, `/`, `^`, implicit multiplication, list
   literals, function calls, unary `+`, unary `-`, and boolean `!`.
+- Exact rational arithmetic for `+`, `-`, `*`, `/`, and for `^` when the
+  exact rational result is representable. Other exact numeric powers are
+  approximated with the current `$Precision`.
 - Binary comparisons `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - Top-level semicolon sequencing, without semicolon expressions inside
   parentheses or function arguments. An input ending in `;` evaluates to
@@ -32,6 +35,10 @@ main-loop hook and input-history symbols.
   message and returns `Null`.
 - REPL history through `%`, `%%`, `%n`, and `Out[n]`; the prompt remains
   `In[n]:=`, but `In`, `InString`, and `$Line` are not built-ins.
+- Mutable session precision through `$Precision`, initially `16`, used when a
+  numeric operation needs an approximation and no precision is specified
+  explicitly. `N[expr, p]` temporarily evaluates `expr` with `$Precision` set
+  to `p`.
 - Calculator built-ins including `N`, `SetPrecision`, `SetAccuracy`,
   `Precision`, `Accuracy`, `Abs`, `Sign`, `Floor`, `Ceiling`, `Round`,
   `IntegerPart`, `FractionalPart`, `Sqrt`, `Exp`, `Log`, `Min`, `Max`, `If`,
@@ -45,6 +52,9 @@ main-loop hook and input-history symbols.
   `Undefined`; `UndefinedQ[expr]` tests for that symbol. `If[Undefined, a, b]`
   returns `Undefined`, while `Undefined` in a selected branch behaves like any
   other value.
+- Power special cases are calculator-oriented: `base^0` evaluates to exact
+  `1`, including `0^0`; `1^exponent` evaluates to exact `1`; and `0^exponent`
+  evaluates to exact `0` for positive numeric exponents.
 
 ## Running
 

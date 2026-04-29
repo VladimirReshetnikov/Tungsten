@@ -219,7 +219,7 @@ The required built-in set should stay small enough to test exhaustively.
 | `Infinity`, `-Infinity`, `Indeterminate` | Non-finite markers for diagnostic and boundary behavior. |
 | `Overflow[]`, `Underflow[]` | Explicit diagnostic atoms, distinct from finite large/tiny values produced by Nummy fallback. |
 | `$MachinePrecision`, `$MaxMachineNumber`, `$MinMachineNumber`, `$MachineEpsilon` | Host-machine reference constants for ordinary float comparison. |
-| `$DefaultPrecision` | Precision for unmarked inexact decimal work when a mode intentionally differs from machine precision. Default should preserve Wolfram-like machine precision semantics. |
+| `$Precision` | Mutable session precision, initially `16`, for numeric operations that need an approximation when precision is not otherwise specified. `N[expr, p]` temporarily evaluates `expr` with `$Precision` set to `p`. |
 
 ### Arithmetic And Elementary Numerics
 
@@ -312,9 +312,15 @@ debugging harder.
 Exact integer and rational arithmetic is closed under:
 
 - `+`, `-`, `*`, `/`;
-- integer powers;
+- integer powers and rational powers whose result is an exact rational;
 - exact comparisons;
 - `Floor`, `Ceiling`, `Round`, `IntegerPart`, and `FractionalPart`.
+
+Exact `Power` has calculator-oriented identities before approximate fallback:
+`base^0` evaluates to exact `1`, including `0^0`; `1^exponent` evaluates to
+exact `1`; and `0^exponent` evaluates to exact `0` for positive numeric
+exponents. Exact numeric powers outside those identities and outside the exact
+rational-result cases are approximated using the current `$Precision`.
 
 Exact integer powers must estimate dense digit count before allocating. If a result would exceed
 `$MaxExactIntegerDigits`, Tungie returns a sparse exact value or a structural power expression
