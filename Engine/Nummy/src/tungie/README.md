@@ -40,7 +40,20 @@ Tungsten's main-loop hook and input-history symbols.
 - Inexact operations use tracked decimal arithmetic rather than machine-real
   arithmetic, and may reduce the result precision when guard-digit evaluation
   shows that fewer leading digits are stable. Very large or small decimal
-  results use compact `*^` or `/^` scientific notation.
+  results use compact `*^` or `/^` scientific notation. When a result's
+  base-10 exponent is larger than `$MaxDirectDecimalExponent`, Tungie keeps it
+  as a structural `ScientificScale[mantissa, exponent]` value instead of
+  returning an inert expression after Decimal overflow; exact or effectively
+  integral powers of ten in the scale exponent are printed compactly as
+  `*^^n`, `/^^n`, and longer tower forms.
+- Scale values participate in calculator arithmetic. Multiplication and
+  division combine mantissas and add or subtract base-10 scale exponents;
+  powers of positive numeric values convert to scale form when ordinary Decimal
+  arithmetic would overflow; powers of positive scale values multiply the scale
+  exponent; addition and subtraction keep a dominant term when the scale
+  separation is larger than the certified precision and combine equal-scale
+  terms exactly enough to expose cancellation such as
+  `10^1000000. - 10^1000000.`.
 - Binary comparisons `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - Top-level semicolon sequencing, without semicolon expressions inside
   parentheses or function arguments. An input ending in `;` evaluates to
@@ -54,12 +67,17 @@ Tungsten's main-loop hook and input-history symbols.
   numeric operation needs an approximation and no precision is specified
   explicitly. `N[expr, p]` temporarily evaluates `expr` with `$Precision` set
   to `p`.
+- Mutable scale-evaluation threshold through `$MaxDirectDecimalExponent`,
+  initially `999999`. Exponents at or below the threshold are evaluated as
+  ordinary tracked Decimals when possible; larger exponents stay prefactored.
+  `Clear[$Precision]` and `Clear[$MaxDirectDecimalExponent]` emit warnings and
+  reset those symbols to their defaults.
 - Calculator built-ins including `N`, `SetPrecision`, `SetAccuracy`,
   `Precision`, `Accuracy`, `Abs`, `Sign`, `Floor`, `Ceiling`, `Round`,
   `IntegerPart`, `FractionalPart`, `Sqrt`, `Exp`, `Log`, `Min`, `Max`, `If`,
   `Clear`, `Rational`, `Rationalize`, and numeric predicates. `Clear` reports
-  each predefined symbol argument without clearing it, while still clearing
-  user-defined symbol arguments.
+  each predefined symbol argument without clearing it, resets the mutable
+  system variables above, and still clears user-defined symbol arguments.
 - Division by zero, zero raised to a negative power, and negative numbers
   raised to non-integer powers emit an evaluation error message and return the
   special symbol `Undefined`.

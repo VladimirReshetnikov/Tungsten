@@ -70,6 +70,10 @@ class Call(Expr):
             scale = _format_scientific_scale(self.args[0], self.args[1])
             if scale is not None:
                 return scale
+        if self.has_head("Pow10Tower") and len(self.args) == 2:
+            tower = _format_pow10_tower(self.args[0], self.args[1])
+            if tower is not None:
+                return tower
         if self.has_head("List"):
             return "{" + ", ".join(argument.to_input_form() for argument in self.args) + "}"
         if self.has_head("Plus"):
@@ -225,8 +229,49 @@ def _format_scientific_scale(mantissa: Expr, exponent: Expr) -> str | None:
     if tower is None:
         return None
     height, top = tower
+    if height == 0 and not isinstance(top, Integer):
+        return None
     operator = ("*" if sign > 0 else "/") + "^" * (height + 1)
-    return f"{_parenthesize(mantissa, 80)}{operator}{_parenthesize(top, 80)}"
+    return f"{_scale_mantissa_text(mantissa)}{operator}{_scale_coordinate_text(top)}"
+
+
+def _format_pow10_tower(height: Expr, top: Expr) -> str | None:
+    if not isinstance(height, Integer) or height.value <= 0:
+        return None
+    if height.value == 1 and not isinstance(top, Integer):
+        return None
+    operator = "*" + "^" * height.value
+    return f"1{operator}{_scale_coordinate_text(top)}"
+
+
+def _scale_coordinate_text(expr: Expr) -> str:
+    if isinstance(expr, (Integer, Rational, Real, Symbol)):
+        return _parenthesize(expr, 80)
+    return f"({expr.to_input_form()})"
+
+
+def _scale_mantissa_text(expr: Expr) -> str:
+    if isinstance(expr, Real):
+        return _parenthesize(Real(_trim_scale_mantissa_real(expr.text)), 80)
+    return _parenthesize(expr, 80)
+
+
+def _trim_scale_mantissa_real(text: str) -> str:
+    if "*^" in text:
+        return text
+    marker_start = text.find("`")
+    if marker_start >= 0:
+        decimal = text[:marker_start]
+        marker = text[marker_start:]
+    else:
+        decimal = text
+        marker = ""
+    if "." not in decimal:
+        return text
+    decimal = decimal.rstrip("0").rstrip(".")
+    if decimal in {"", "-", "+"}:
+        decimal += "0"
+    return decimal + marker
 
 
 def _scale_operator_and_top(expr: Call) -> tuple[str, Expr] | None:
@@ -260,6 +305,14 @@ def _strip_scale_exponent_minus(expr: Expr) -> tuple[int, Expr]:
         and expr.args[0].value == -1
     ):
         return -1, expr.args[1]
+    if isinstance(expr, Call) and expr.has_head("Plus") and expr.args:
+        positive_terms: list[Expr] = []
+        for argument in expr.args:
+            sign, body = _strip_scale_exponent_minus(argument)
+            if sign > 0:
+                return 1, expr
+            positive_terms.append(body)
+        return -1, Call(expr.head, tuple(positive_terms))
     return 1, expr
 
 

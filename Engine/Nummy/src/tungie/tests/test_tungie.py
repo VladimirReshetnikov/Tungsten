@@ -121,6 +121,9 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20")
         self.assertEqual(eval_text("10^309."), "1`16*^309")
         self.assertEqual(eval_text("10^309.`20"), "1`20*^309")
+        self.assertEqual(eval_text("10^999999."), "1`16*^999999")
+        self.assertEqual(eval_text("10^1000000."), "ScientificScale[1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(evaluate(parse("10^1000000.")).to_input_form(), "1`16*^^6")
         self.assertEqual(eval_text("1.1*^^2"), "1.1`16*^100")
         self.assertEqual(evaluate(parse("1.1/^^2")).to_input_form(), "1.1`16/^100")
         self.assertEqual(
@@ -128,6 +131,62 @@ class EvaluationTests(unittest.TestCase):
             "ScientificScale[1.1`16, Pow10Tower[1, 6]]",
         )
         self.assertEqual(evaluate(parse("1.1*^^6")).to_input_form(), "1.1`16*^^6")
+
+    def test_very_large_scale_arithmetic(self) -> None:
+        self.assertEqual(
+            eval_text("(1.1*^^6) * (2*^^6)"),
+            "ScientificScale[2.2`16, 2000000]",
+        )
+        self.assertEqual(eval_text("10^999999. * 10."), "ScientificScale[1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(evaluate(parse("(1.1*^^6) * (2*^^6)")).to_input_form(), "2.2`16*^2000000")
+        self.assertEqual(eval_text("(1.1*^^6) / (2*^^6)"), "0.55`16")
+        self.assertEqual(eval_text("(10^1000000.)^2"), "ScientificScale[1`16, 2000000]")
+        self.assertEqual(eval_text("2^4000000."), "ScientificScale[9.6085073`8, 1204119]")
+        self.assertEqual(eval_text("10^1000000. + 1"), "ScientificScale[1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(eval_text("10^1000000. + 10^999999."), "ScientificScale[1.1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(eval_text("1.0 + 1.1/^^10"), "1.0`16")
+        self.assertEqual(eval_text("1.0 + 1.1/^^20"), "1.0`16")
+        reciprocal_scale = evaluate(parse("1/1.1*^^6")).to_input_form()
+        self.assertEqual(reciprocal_scale, "9.090909090909091`16/^1000001")
+        self.assertEqual(parse(reciprocal_scale).to_full_form(), "9.090909090909091`16*^-1000001")
+        reciprocal_reciprocal = evaluate(parse("1/(1/1.1*^^20)")).to_input_form()
+        self.assertEqual(reciprocal_reciprocal, "1.1`16*^^20")
+        self.assertEqual(
+            parse(reciprocal_reciprocal).to_full_form(),
+            "ScientificScale[1.1`16, Pow10Tower[1, 20]]",
+        )
+        self.assertEqual(
+            evaluate(parse("ScientificScale[1.2, x]")).to_input_form(),
+            "ScientificScale[1.2`16, x]",
+        )
+        self.assertEqual(eval_text("10^1000000. - 10^1000000."), "0")
+        self.assertEqual(eval_text("10^1000000. > 10^999999."), "True")
+        self.assertEqual(eval_text("Sign[10^1000000.]"), "1")
+        self.assertEqual(eval_text("Precision[10^1000000.]"), "16.")
+
+    def test_max_direct_decimal_exponent_controls_scale_boundary(self) -> None:
+        session = EvaluationSession()
+
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent"))[1].to_full_form(),
+            "999999",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent = 99"))[1].to_full_form(),
+            "99",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("1.1*^^2"))[1].to_full_form(),
+            "ScientificScale[1.1`16, Pow10Tower[1, 2]]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent = 1000000"))[1].to_full_form(),
+            "1000000",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("10^1000000."))[1].to_full_form(),
+            "1`16*^1000000",
+        )
 
     def test_precision_and_accuracy_builtins(self) -> None:
         self.assertEqual(eval_text("Precision[1]"), "Infinity")
@@ -140,6 +199,9 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("Precision[.1`0]"), "0.")
         self.assertEqual(eval_text("Abs[-.1`0]"), "0.1`0")
         self.assertEqual(eval_text(".1`0 + 0"), "0.1`0")
+        self.assertEqual(eval_text("1.`10 + 1.`2/^10"), "1.000000000`10")
+        self.assertEqual(eval_text("Precision[1.`10 + 1.`2/^10]"), "10.")
+        self.assertEqual(eval_text("Accuracy[1.`10 + 1.`2/^10]"), "10.")
         self.assertEqual(eval_text("Accuracy[1000.]"), "13.")
         self.assertEqual(eval_text("SetPrecision[1/3, 20]"), "0.33333333333333333333`20")
         self.assertEqual(eval_text("SetPrecision[1.25, Infinity]"), "Rational[5, 4]")
@@ -256,6 +318,27 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertEqual(session.evaluate_input(parse("x"))[1].to_full_form(), "x")
         self.assertEqual(session.evaluate_input(parse("y"))[1].to_full_form(), "y")
+
+    def test_clear_resets_mutable_system_symbols_with_warnings(self) -> None:
+        session = EvaluationSession()
+        session.evaluate_input(parse("$Precision = 40"))
+        session.evaluate_input(parse("$MaxDirectDecimalExponent = 99"))
+
+        _line, result = session.evaluate_input(parse("Clear[$Precision, $MaxDirectDecimalExponent]"))
+
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(
+            session.current_messages,
+            [
+                "Evaluate::warning: Clear resets $Precision to its default value 16.",
+                "Evaluate::warning: Clear resets $MaxDirectDecimalExponent to its default value 999999.",
+            ],
+        )
+        self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "16")
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent"))[1].to_full_form(),
+            "999999",
+        )
 
 
 class ReplTests(unittest.TestCase):
