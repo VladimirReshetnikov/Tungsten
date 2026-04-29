@@ -37,9 +37,10 @@ Tungsten's main-loop hook and input-history symbols.
 - Exact rational arithmetic for `+`, `-`, `*`, `/`, and for `^` when the
   exact rational result is representable. Other exact numeric powers are
   approximated with the current `$Precision`.
-- Inexact operations use tracked decimal arithmetic rather than machine-real
-  arithmetic, and may reduce the result precision when guard-digit evaluation
-  shows that fewer leading digits are stable. Very large or small decimal
+- Inexact operations use tracked decimal interval arithmetic rather than
+  machine-real arithmetic. Approximate numbers carry a nominal center plus an
+  absolute uncertainty radius; `Precision` and `Accuracy` are derived from that
+  interval and may be fractional, zero, or negative. Very large or small decimal
   results use compact `*^` or `/^` scientific notation. When a result's
   base-10 exponent is larger than `$MaxDirectDecimalExponent`, Tungie keeps it
   as a structural `ScientificScale[mantissa, exponent]` value instead of
@@ -78,6 +79,8 @@ Tungsten's main-loop hook and input-history symbols.
   `Clear`, `Rational`, `Rationalize`, and numeric predicates. `Clear` reports
   each predefined symbol argument without clearing it, resets the mutable
   system variables above, and still clears user-defined symbol arguments.
+- The active interval-precision contract is specified in
+  [`../../docs/reports/tungie-interval-precision-spec.md`](../../docs/reports/tungie-interval-precision-spec.md).
 - Division by zero, zero raised to a negative power, and negative numbers
   raised to non-integer powers emit an evaluation error message and return the
   special symbol `Undefined`.
@@ -86,8 +89,8 @@ Tungsten's main-loop hook and input-history symbols.
   returns `Undefined`, while `Undefined` in a selected branch behaves like any
   other value.
 - Power special cases are calculator-oriented: `base^0` evaluates to exact
-  `1`, including `0^0`; `1^exponent` evaluates to exact `1`; and `0^exponent`
-  evaluates to exact `0` for positive numeric exponents.
+  `1`, including `0^0`; exact `1^exponent` evaluates to exact `1`; and
+  `0^exponent` evaluates to exact `0` for positive numeric exponents.
 
 ## Running
 

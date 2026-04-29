@@ -71,9 +71,11 @@ class EvaluationTests(unittest.TestCase):
             "1/0": "Division by zero.",
             "0/0": "Division by zero.",
             "1./0.": "Division by zero.",
+            "1/1.`0": "Division by zero.",
             "Rational[1, 0]": "Division by zero.",
             "0^-1": "Zero cannot be raised to a negative power.",
             "0.^-1": "Zero cannot be raised to a negative power.",
+            "(1.`0)^-1": "Zero cannot be raised to a negative power.",
             "(-1)^(1/2)": "Negative numbers cannot be raised to non-integer powers.",
             "Sqrt[-1]": "Negative numbers cannot be raised to non-integer powers.",
         }
@@ -112,7 +114,7 @@ class EvaluationTests(unittest.TestCase):
             ".500000000000000000000000000000000000`36",
         )
         self.assertEqual(eval_text("1.234567890123456789 + 0"), "1.234567890123456789`19")
-        self.assertEqual(eval_text("1 + 2."), "3.`16")
+        self.assertEqual(eval_text("1 + 2."), "3.`16.176091257969945")
         self.assertEqual(eval_text("1./3"), "0.3333333333333333`16")
         self.assertEqual(eval_text("1.25`20 + 2.5`20"), "3.75`20")
         self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333`16")
@@ -137,13 +139,19 @@ class EvaluationTests(unittest.TestCase):
             eval_text("(1.1*^^6) * (2*^^6)"),
             "ScientificScale[2.2`16, 2000000]",
         )
-        self.assertEqual(eval_text("10^999999. * 10."), "ScientificScale[1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(
+            eval_text("10^999999. * 10."),
+            "ScientificScale[1`15.6989700032502826, Pow10Tower[1, 6]]",
+        )
         self.assertEqual(evaluate(parse("(1.1*^^6) * (2*^^6)")).to_input_form(), "2.2`16*^2000000")
         self.assertEqual(eval_text("(1.1*^^6) / (2*^^6)"), "0.55`16")
         self.assertEqual(eval_text("(10^1000000.)^2"), "ScientificScale[1`16, 2000000]")
         self.assertEqual(eval_text("2^4000000."), "ScientificScale[9.6085073`8, 1204119]")
         self.assertEqual(eval_text("10^1000000. + 1"), "ScientificScale[1`16, Pow10Tower[1, 6]]")
-        self.assertEqual(eval_text("10^1000000. + 10^999999."), "ScientificScale[1.1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(
+            eval_text("10^1000000. + 10^999999."),
+            "ScientificScale[1.1`16.041392685158225, Pow10Tower[1, 6]]",
+        )
         self.assertEqual(eval_text("1.0 + 1.1/^^10"), "1.0`16")
         self.assertEqual(eval_text("1.0 + 1.1/^^20"), "1.0`16")
         reciprocal_scale = evaluate(parse("1/1.1*^^6")).to_input_form()
@@ -196,16 +204,21 @@ class EvaluationTests(unittest.TestCase):
             "36.",
         )
         self.assertEqual(eval_text("Precision[1.23`20]"), "20.")
+        self.assertEqual(eval_text("Precision[1.`15.5]"), "15.5")
+        self.assertEqual(eval_text("Precision[1.`-2.25]"), "-2.25")
         self.assertEqual(eval_text("Precision[.1`0]"), "0.")
+        self.assertEqual(eval_text("Accuracy[1000.`10.5]"), "7.5")
+        self.assertEqual(eval_text("Accuracy[1.23``20.5]"), "20.5")
         self.assertEqual(eval_text("Abs[-.1`0]"), "0.1`0")
         self.assertEqual(eval_text(".1`0 + 0"), "0.1`0")
-        self.assertEqual(eval_text("1.`10 + 1.`2/^10"), "1.000000000`10")
+        self.assertEqual(eval_text("1.`10 + 1.`2/^10"), "1.0000000001`10")
         self.assertEqual(eval_text("Precision[1.`10 + 1.`2/^10]"), "10.")
         self.assertEqual(eval_text("Accuracy[1.`10 + 1.`2/^10]"), "10.")
+        self.assertEqual(eval_text("Precision[SetPrecision[1.`2, 20]]"), "2.")
         self.assertEqual(eval_text("Accuracy[1000.]"), "13.")
         self.assertEqual(eval_text("SetPrecision[1/3, 20]"), "0.33333333333333333333`20")
         self.assertEqual(eval_text("SetPrecision[1.25, Infinity]"), "Rational[5, 4]")
-        self.assertEqual(eval_text("SetAccuracy[1.23, 20]"), "1.23``20")
+        self.assertEqual(eval_text("SetAccuracy[1.23, 20]"), "1.23``15.9100948885606021")
         self.assertEqual(eval_text("MachineNumberQ[1.]"), "False")
 
     def test_calculator_builtins(self) -> None:
@@ -264,11 +277,22 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("(1/8)^(-1/3)"), "2")
         self.assertEqual(eval_text("(27/8)^(2/3)"), "Rational[9, 4]")
         self.assertEqual(eval_text("2^(1/2)"), "1.414213562373095`16")
-        self.assertEqual(eval_text("2^.5`50"), "1.414213562373095048801688724209698078569671875377`49")
+        self.assertEqual(
+            eval_text("2^.5`50"),
+            "1.41421356237309504880168872420969807856967187537695`50.4602045301884335",
+        )
         self.assertEqual(eval_text("0^0"), "1")
         self.assertEqual(eval_text("x^0"), "1")
         self.assertEqual(eval_text("0^(1/2)"), "0")
         self.assertEqual(eval_text("1^x"), "1")
+
+    def test_negative_precision_scale_power(self) -> None:
+        result = evaluate(parse("(1.*^^2)^(1.*^^2)"))
+        self.assertEqual(result.to_input_form(), "1`-86.3640977218404131*^^102")
+        self.assertEqual(
+            eval_text("Precision[(1.*^^2)^(1.*^^2)]"),
+            "-86.3640977218404131",
+        )
 
     def test_session_assignment_clear_and_history(self) -> None:
         session = EvaluationSession()

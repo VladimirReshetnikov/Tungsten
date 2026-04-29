@@ -19,6 +19,7 @@ Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - [Shortcomings of Floating-Point Arithmetic in Modern CAS](reports/cas-floating-point-shortcomings__288318099677.md)
 - [Power-Tower Arithmetic and SLI in Python](<reports/Power-Tower Arithmetic and SLI in Python.md>)
 - [Tungie Language And REPL Proposal](reports/tungie-language-and-repl-proposal__e9b88699e6fe.md)
+- [Tungie Interval Precision Specification](reports/tungie-interval-precision-spec.md)
 - [Wolfram / Mathematica Big-Number Reports](reports/wolfram/README.md)
   - [Big-Number Packages Report 1](reports/wolfram/big-number-packages-report-1.md)
   - [Big-Number Packages Report 2](reports/wolfram/big-number-packages-report-2.md)

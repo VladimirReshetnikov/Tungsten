@@ -10,6 +10,7 @@ Repository HEAD: dad97d346dba0cc2ef8655f3527cb5fc37f61b72
 - [Power-Tower Arithmetic and SLI in Python](<Power-Tower Arithmetic and SLI in Python.md>)
 - [Nummy Alpha/Beta/Gamma Unified Comparison](alpha-beta-gamma-unified-comparison.md)
 - [Tungie Language And REPL Proposal](tungie-language-and-repl-proposal__e9b88699e6fe.md)
+- [Tungie Interval Precision Specification](tungie-interval-precision-spec.md)
 - [Archived comparison reports](archived/README.md)
 
 ## Wolfram / Mathematica
