@@ -88,26 +88,39 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("If[True, Undefined, 2]"), "Undefined")
         self.assertEqual(eval_text("If[False, Undefined, 2]"), "2")
 
-    def test_machine_and_precision_real_arithmetic(self) -> None:
-        self.assertEqual(eval_text("1 + 2."), "3.")
-        self.assertEqual(eval_text("1./3"), "0.3333333333333333")
+    def test_tracked_precision_real_arithmetic(self) -> None:
+        self.assertEqual(eval_text(".5"), ".5`16")
+        self.assertEqual(
+            eval_text(".500000000000000000000000000000000000"),
+            ".500000000000000000000000000000000000`36",
+        )
+        self.assertEqual(eval_text("1.234567890123456789 + 0"), "1.234567890123456789`19")
+        self.assertEqual(eval_text("1 + 2."), "3.`16")
+        self.assertEqual(eval_text("1./3"), "0.3333333333333333`16")
         self.assertEqual(eval_text("1.25`20 + 2.5`20"), "3.75`20")
         self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333`16")
         self.assertEqual(eval_text("N[1/3, 20]"), "0.33333333333333333333`20")
         self.assertEqual(eval_text("N[Pi, 20]"), "3.1415926535897932385`20")
         self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20")
+        self.assertEqual(eval_text("10^309."), "1`16*^+309")
+        self.assertEqual(eval_text("10^309.`20"), "1`20*^+309")
 
     def test_precision_and_accuracy_builtins(self) -> None:
         self.assertEqual(eval_text("Precision[1]"), "Infinity")
-        self.assertEqual(eval_text("Precision[1.]"), "MachinePrecision")
+        self.assertEqual(eval_text("Precision[1.]"), "16.")
+        self.assertEqual(
+            eval_text("Precision[.500000000000000000000000000000000000]"),
+            "36.",
+        )
         self.assertEqual(eval_text("Precision[1.23`20]"), "20.")
         self.assertEqual(eval_text("Precision[.1`0]"), "0.")
         self.assertEqual(eval_text("Abs[-.1`0]"), "0.1`0")
         self.assertEqual(eval_text(".1`0 + 0"), "0.1`0")
-        self.assertEqual(eval_text("Accuracy[1000.]"), "12.954589770191003")
+        self.assertEqual(eval_text("Accuracy[1000.]"), "13.")
         self.assertEqual(eval_text("SetPrecision[1/3, 20]"), "0.33333333333333333333`20")
         self.assertEqual(eval_text("SetPrecision[1.25, Infinity]"), "Rational[5, 4]")
         self.assertEqual(eval_text("SetAccuracy[1.23, 20]"), "1.23``20")
+        self.assertEqual(eval_text("MachineNumberQ[1.]"), "False")
 
     def test_calculator_builtins(self) -> None:
         self.assertEqual(eval_text("Abs[-3]"), "3")
@@ -116,10 +129,10 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("Ceiling[-3.7]"), "-3")
         self.assertEqual(eval_text("Round[2.5]"), "2")
         self.assertEqual(eval_text("IntegerPart[-3.7]"), "-3")
-        self.assertEqual(eval_text("FractionalPart[-3.7]"), "-0.7000000000000002")
+        self.assertEqual(eval_text("FractionalPart[-3.7]"), "-0.7`16")
         self.assertEqual(eval_text("Min[3, 2, 5]"), "2")
-        self.assertEqual(eval_text("Max[3/2, 1.7]"), "1.7")
-        self.assertEqual(eval_text("Exp[1.]"), "2.718281828459045")
+        self.assertEqual(eval_text("Max[3/2, 1.7]"), "1.7`16")
+        self.assertEqual(eval_text("Exp[1.]"), "2.718281828459045`16")
         self.assertEqual(eval_text("Exp[1]"), "E")
         self.assertEqual(eval_text("Log[E]"), "1")
         self.assertEqual(eval_text("Log[10, 1000]"), "3")
@@ -222,6 +235,20 @@ class EvaluationTests(unittest.TestCase):
 
 
 class ReplTests(unittest.TestCase):
+    def test_repl_ctrl_c_exits_without_traceback(self) -> None:
+        class InterruptedInput(io.StringIO):
+            def readline(self, *args, **kwargs) -> str:  # type: ignore[no-untyped-def]
+                raise KeyboardInterrupt
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=InterruptedInput(), stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(stdout.getvalue(), "In[1]:= \n")
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_repl_uses_tungsten_style_prompts_history_and_exit(self) -> None:
         stdin = io.StringIO("1+2\n% + 10\n%% + %1\nExit[7]\n")
         stdout = io.StringIO()

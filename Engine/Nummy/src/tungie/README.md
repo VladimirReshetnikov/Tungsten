@@ -20,14 +20,18 @@ main-loop hook and input-history symbols.
 - Decimal integer literals with arbitrary Python integer precision.
 - Decimal real literals, including `*^` scientific notation, precision marks
   such as <code>1.23`20</code>, and accuracy marks such as
-  <code>1.23``20</code>.
+  <code>1.23``20</code>. Unmarked real literals are tracked decimal values:
+  their precision is the larger of the current `$Precision` and the number of
+  significant digits written in the literal.
 - Arithmetic operators `+`, `-`, `*`, `/`, `^`, implicit multiplication, list
   literals, function calls, unary `+`, unary `-`, and boolean `!`.
 - Exact rational arithmetic for `+`, `-`, `*`, `/`, and for `^` when the
   exact rational result is representable. Other exact numeric powers are
   approximated with the current `$Precision`.
-- Precision-marked inexact operations may reduce the result precision when
-  guard-digit evaluation shows that fewer leading digits are stable.
+- Inexact operations use tracked decimal arithmetic rather than machine-real
+  arithmetic, and may reduce the result precision when guard-digit evaluation
+  shows that fewer leading digits are stable. Very large or small decimal
+  results use compact `*^` scientific notation.
 - Binary comparisons `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - Top-level semicolon sequencing, without semicolon expressions inside
   parentheses or function arguments. An input ending in `;` evaluates to

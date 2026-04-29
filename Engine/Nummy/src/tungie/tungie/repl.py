@@ -11,6 +11,9 @@ from .parser import parse
 from .values import Symbol
 
 
+_INTERRUPTED_EXIT_CODE = 130
+
+
 def banner() -> str:
     return (
         "Tungie 0.1.0 Lightweight Tungsten-inspired Calculator\n"
@@ -38,7 +41,12 @@ def run_repl(
         output_stream.write(f"In[{session.line + 1}]:= ")
         output_stream.flush()
 
-        source = input_stream.readline()
+        try:
+            source = input_stream.readline()
+        except KeyboardInterrupt:
+            output_stream.write("\n")
+            output_stream.flush()
+            return _INTERRUPTED_EXIT_CODE
         if source == "":
             output_stream.write("\n")
             output_stream.flush()
@@ -51,6 +59,10 @@ def run_repl(
         try:
             expr = parse(source)
             line, result = session.evaluate_input(expr)
+        except KeyboardInterrupt:
+            output_stream.write("\n")
+            output_stream.flush()
+            return _INTERRUPTED_EXIT_CODE
         except TungieSyntaxError as exc:
             error_stream.write(f"Syntax::sntxi: {exc}\n\n")
             error_stream.flush()
