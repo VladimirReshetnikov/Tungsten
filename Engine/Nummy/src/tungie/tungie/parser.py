@@ -204,7 +204,7 @@ class Parser:
         if operator == "-":
             return _flatten_call("Plus", left, _negate(right))
         if operator == "/":
-            return _flatten_call("Times", left, call("Power", right, integer(-1)))
+            return call("Divide", left, right)
         if operator in {"*", "+"}:
             return _flatten_call(_INFIX_HEADS[operator], left, right)
         return call(_INFIX_HEADS[operator], left, right)

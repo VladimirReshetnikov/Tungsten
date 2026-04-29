@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         except TungieExitRequested as exc:
             return exc.code
+        assert session.current_messages is not None
+        for message in session.current_messages:
+            print(message, file=sys.stderr)
         print(result.to_input_form())
         return 0
     parser.error(f"unknown command: {args.command}")

@@ -34,6 +34,13 @@ main-loop hook and input-history symbols.
   `Precision`, `Accuracy`, `Abs`, `Sign`, `Floor`, `Ceiling`, `Round`,
   `IntegerPart`, `FractionalPart`, `Sqrt`, `Exp`, `Log`, `Min`, `Max`, `If`,
   `Clear`, `Rational`, `Rationalize`, and numeric predicates.
+- Division by zero, zero raised to a negative power, and negative numbers
+  raised to non-integer powers emit an evaluation error message and return the
+  special symbol `Undefined`.
+- Arithmetic and relational operations involving `Undefined` return
+  `Undefined`; `UndefinedQ[expr]` tests for that symbol. `If[Undefined, a, b]`
+  returns `Undefined`, while `Undefined` in a selected branch behaves like any
+  other value.
 
 ## Running
 

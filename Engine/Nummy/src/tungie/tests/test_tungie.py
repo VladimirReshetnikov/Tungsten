@@ -49,6 +49,45 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("(2/3) (9/4)"), "Rational[3, 2]")
         self.assertEqual(eval_text("Rational[2, 4]"), "Rational[1, 2]")
 
+    def test_invalid_numeric_operations_return_undefined_and_emit_messages(self) -> None:
+        invalid = {
+            "1/0": "Division by zero.",
+            "0/0": "Division by zero.",
+            "1./0.": "Division by zero.",
+            "Rational[1, 0]": "Division by zero.",
+            "0^-1": "Zero cannot be raised to a negative power.",
+            "0.^-1": "Zero cannot be raised to a negative power.",
+            "(-1)^(1/2)": "Negative numbers cannot be raised to non-integer powers.",
+            "Sqrt[-1]": "Negative numbers cannot be raised to non-integer powers.",
+        }
+        for source, message in invalid.items():
+            with self.subTest(source=source):
+                session = EvaluationSession()
+                _line, result = session.evaluate_input(parse(source))
+                self.assertEqual(result.to_full_form(), "Undefined")
+                self.assertEqual(session.current_messages, [f"Evaluate::error: {message}"])
+
+    def test_undefined_propagates_through_arithmetic_and_relations(self) -> None:
+        self.assertEqual(eval_text("Undefined + 1"), "Undefined")
+        self.assertEqual(eval_text("2 Undefined"), "Undefined")
+        self.assertEqual(eval_text("Undefined/3"), "Undefined")
+        self.assertEqual(eval_text("Undefined^2"), "Undefined")
+        self.assertEqual(eval_text("Undefined < 3"), "Undefined")
+        self.assertEqual(eval_text("Undefined == Undefined"), "Undefined")
+        self.assertEqual(eval_text("Abs[Undefined]"), "Undefined")
+        self.assertEqual(eval_text("Min[1, Undefined]"), "Undefined")
+        self.assertEqual(eval_text("UndefinedQ[Undefined]"), "True")
+        self.assertEqual(eval_text("UndefinedQ[1]"), "False")
+        session = EvaluationSession()
+        _line, result = session.evaluate_input(parse("UndefinedQ[1/0]"))
+        self.assertEqual(result.to_full_form(), "True")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Division by zero."])
+
+    def test_if_treats_undefined_condition_specially(self) -> None:
+        self.assertEqual(eval_text("If[Undefined, 1, 2]"), "Undefined")
+        self.assertEqual(eval_text("If[True, Undefined, 2]"), "Undefined")
+        self.assertEqual(eval_text("If[False, Undefined, 2]"), "2")
+
     def test_machine_and_precision_real_arithmetic(self) -> None:
         self.assertEqual(eval_text("1 + 2."), "3.")
         self.assertEqual(eval_text("1./3"), "0.3333333333333333")
@@ -139,6 +178,17 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Out[1]= Quit", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_repl_prints_messages_and_undefined_result(self) -> None:
+        stdin = io.StringIO("1/0\nExit[]\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Out[1]= Undefined", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "Evaluate::error: Division by zero.\n")
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ _TRUE = symbol("True")
 _FALSE = symbol("False")
 _NULL = symbol("Null")
 _INDETERMINATE = symbol("Indeterminate")
-_COMPLEX_INFINITY = symbol("ComplexInfinity")
+_UNDEFINED = symbol("Undefined")
 
 _PI_DIGITS = "3.14159265358979323846264338327950288419716939937510582097494459230781640628620899"
 _E_DIGITS = "2.71828182845904523536028747135266249775724709369995957496696762772407663035354759"
@@ -49,20 +49,29 @@ class EvaluationSession:
     line: int = 0
     symbols: dict[str, Expr] | None = None
     outputs: dict[int, Expr] | None = None
+    current_messages: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.symbols is None:
             self.symbols = {}
         if self.outputs is None:
             self.outputs = {}
+        if self.current_messages is None:
+            self.current_messages = []
 
     def evaluate_input(self, expr: Expr) -> tuple[int, Expr]:
         self.line += 1
+        assert self.current_messages is not None
+        self.current_messages.clear()
         result = evaluate(expr, session=self)
         if not _is_null(result):
             assert self.outputs is not None
             self.outputs[self.line] = result
         return self.line, result
+
+    def emit_error(self, message: str) -> None:
+        assert self.current_messages is not None
+        self.current_messages.append(f"Evaluate::error: {message}")
 
     def resolve_output(self, index: int | None) -> Expr:
         assert self.outputs is not None
@@ -154,11 +163,13 @@ def _evaluate_call(expr: Call, *, session: EvaluationSession | None) -> Expr:
     if head_name == "List":
         return list_expr(evaluated_args)
     if head_name == "Rational":
-        return _rational_constructor(evaluated_args)
+        return _rational_constructor(evaluated_args, session=session)
     if head_name == "Plus":
         return _plus(evaluated_args, session=session)
     if head_name == "Times":
         return _times(evaluated_args, session=session)
+    if head_name == "Divide":
+        return _divide(evaluated_args, session=session)
     if head_name == "Power":
         return _power(evaluated_args, session=session)
     if head_name in {"Equal", "Unequal", "Less", "LessEqual", "Greater", "GreaterEqual"}:
@@ -168,7 +179,7 @@ def _evaluate_call(expr: Call, *, session: EvaluationSession | None) -> Expr:
     if head_name == "Sign":
         return _sign(evaluated_args)
     if head_name in {"Floor", "Ceiling", "Round", "IntegerPart", "FractionalPart"}:
-        return _rounding(head_name, evaluated_args)
+        return _rounding(head_name, evaluated_args, session=session)
     if head_name == "Min" or head_name == "Max":
         return _min_max(head_name, evaluated_args)
     if head_name == "Sqrt":
@@ -189,6 +200,7 @@ def _evaluate_call(expr: Call, *, session: EvaluationSession | None) -> Expr:
         "ExactNumberQ",
         "InexactNumberQ",
         "RealValuedNumberQ",
+        "UndefinedQ",
     }:
         return _predicate(head_name, evaluated_args)
 
@@ -220,6 +232,8 @@ def _if(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) not in {2, 3, 4}:
         return call("If", *args)
     condition = evaluate(args[0], session=session)
+    if _is_undefined(condition):
+        return _UNDEFINED
     if _truth(condition) is True:
         return evaluate(args[1], session=session)
     if _truth(condition) is False:
@@ -283,17 +297,17 @@ def _not(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     return call("Not", value)
 
 
-def _rational_constructor(args: tuple[Expr, ...]) -> Expr:
+def _rational_constructor(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) != 2 or not isinstance(args[0], Integer) or not isinstance(args[1], Integer):
         return call("Rational", *args)
     if args[1].value == 0:
-        if args[0].value == 0:
-            return _INDETERMINATE
-        return _COMPLEX_INFINITY
+        return _undefined(session, "Division by zero.")
     return rational(args[0].value, args[1].value)
 
 
 def _plus(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
+    if _any_undefined(args):
+        return _UNDEFINED
     if threaded := _thread_listable("Plus", args, session=session):
         return threaded
     flattened = _flatten("Plus", args)
@@ -328,6 +342,8 @@ def _plus(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
 
 
 def _times(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
+    if _any_undefined(args):
+        return _UNDEFINED
     if threaded := _thread_listable("Times", args, session=session):
         return threaded
     flattened = _flatten("Times", args)
@@ -371,12 +387,32 @@ def _times(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
     return _one_identity("Times", result_args, integer(1))
 
 
+def _divide(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
+    if len(args) != 2:
+        return call("Divide", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
+    numerator, denominator = args
+    if _is_zero(denominator):
+        return _undefined(session, "Division by zero.")
+    result = _div_numeric(numerator, denominator, session=session)
+    if result is not None:
+        return result
+    return call("Divide", numerator, denominator)
+
+
 def _power(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) != 2:
         return call("Power", *args)
     base, exponent = args
+    if _any_undefined(args):
+        return _UNDEFINED
     if threaded := _thread_listable("Power", args, session=session):
         return threaded
+    if _is_zero(base) and _is_negative_number(exponent):
+        return _undefined(session, "Zero cannot be raised to a negative power.")
+    if _is_negative_number(base) and not _is_integer_number(exponent):
+        return _undefined(session, "Negative numbers cannot be raised to non-integer powers.")
     if _is_zero(exponent):
         return _INDETERMINATE if _is_zero(base) else integer(1)
     if _is_one(exponent):
@@ -403,6 +439,8 @@ def _power(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
 def _relation(head: str, args: tuple[Expr, ...]) -> Expr:
     if len(args) != 2:
         return call(head, *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     comparison = _compare(args[0], args[1])
     if comparison is None:
         return call(head, *args)
@@ -420,6 +458,8 @@ def _relation(head: str, args: tuple[Expr, ...]) -> Expr:
 def _abs(args: tuple[Expr, ...]) -> Expr:
     if len(args) != 1:
         return call("Abs", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     value = args[0]
     exact = _exact_fraction(value)
     if exact is not None:
@@ -435,24 +475,30 @@ def _abs(args: tuple[Expr, ...]) -> Expr:
 def _sign(args: tuple[Expr, ...]) -> Expr:
     if len(args) != 1:
         return call("Sign", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     comparison = _compare(args[0], integer(0))
     if comparison is None:
         return call("Sign", args[0])
     return integer((comparison > 0) - (comparison < 0))
 
 
-def _rounding(head: str, args: tuple[Expr, ...]) -> Expr:
+def _rounding(head: str, args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) not in {1, 2}:
         return call(head, *args)
     if len(args) == 2 and head not in {"Floor", "Ceiling", "Round"}:
         return call(head, *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     value = args[0]
     multiple = args[1] if len(args) == 2 else integer(1)
     if len(args) == 2:
-        quotient = _div_numeric(value, multiple)
+        quotient = _div_numeric(value, multiple, session=session)
         if quotient is None:
             return call(head, *args)
-        rounded = _rounding(head, (quotient,))
+        rounded = _rounding(head, (quotient,), session=session)
+        if _is_undefined(rounded):
+            return _UNDEFINED
         return _mul_numeric(rounded, multiple) or call(head, *args)
 
     exact = _exact_fraction(value)
@@ -487,6 +533,8 @@ def _rounding(head: str, args: tuple[Expr, ...]) -> Expr:
 
 
 def _min_max(head: str, args: tuple[Expr, ...]) -> Expr:
+    if _any_undefined(args):
+        return _UNDEFINED
     if not args:
         return symbol("Infinity") if head == "Min" else _NEGATIVE_INFINITY
     best = args[0]
@@ -502,12 +550,16 @@ def _min_max(head: str, args: tuple[Expr, ...]) -> Expr:
 def _sqrt(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) != 1:
         return call("Sqrt", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     return _power((args[0], rational(1, 2)), session=session)
 
 
 def _exp(args: tuple[Expr, ...]) -> Expr:
     if len(args) != 1:
         return call("Exp", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     value = args[0]
     if _is_zero(value):
         return integer(1)
@@ -523,6 +575,8 @@ def _exp(args: tuple[Expr, ...]) -> Expr:
 def _log(args: tuple[Expr, ...]) -> Expr:
     if len(args) not in {1, 2}:
         return call("Log", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     if len(args) == 1:
         value = args[0]
         if _is_one(value):
@@ -559,6 +613,8 @@ def _n(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) not in {1, 2}:
         return call("N", *args)
     expr = evaluate(args[0], session=session)
+    if _is_undefined(expr):
+        return _UNDEFINED
     precision = None
     if len(args) == 2:
         precision = _precision_argument(evaluate(args[1], session=session))
@@ -571,6 +627,8 @@ def _set_precision(args: tuple[Expr, ...], *, session: EvaluationSession | None)
     if len(args) != 2:
         return call("SetPrecision", *args)
     expr = evaluate(args[0], session=session)
+    if _is_undefined(expr):
+        return _UNDEFINED
     precision = _precision_argument(evaluate(args[1], session=session))
     if precision is None:
         return _approximate(expr, None)
@@ -587,6 +645,8 @@ def _set_accuracy(args: tuple[Expr, ...], *, session: EvaluationSession | None) 
     if len(args) != 2:
         return call("SetAccuracy", *args)
     expr = evaluate(args[0], session=session)
+    if _is_undefined(expr):
+        return _UNDEFINED
     accuracy = _precision_argument(evaluate(args[1], session=session))
     if accuracy is None:
         return _approximate(expr, None)
@@ -632,6 +692,8 @@ def _accuracy(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> E
 def _rationalize(args: tuple[Expr, ...]) -> Expr:
     if len(args) not in {1, 2}:
         return call("Rationalize", *args)
+    if _any_undefined(args):
+        return _UNDEFINED
     exact = _exact_from_decimal(args[0])
     return exact if exact is not None else args[0]
 
@@ -653,6 +715,8 @@ def _predicate(head: str, args: tuple[Expr, ...]) -> Expr:
         return _bool(isinstance(value, Real))
     if head == "RealValuedNumberQ":
         return _bool(_is_numeric_atom(value))
+    if head == "UndefinedQ":
+        return _bool(_is_undefined(value))
     return call(head, value)
 
 
@@ -707,13 +771,15 @@ def _mul_numeric(left: Expr, right: Expr) -> Expr | None:
     return _inexact_result((left, right), lambda values: values[0] * values[1], lambda values: values[0] * values[1])
 
 
-def _div_numeric(left: Expr, right: Expr) -> Expr | None:
+def _div_numeric(left: Expr, right: Expr, *, session: EvaluationSession | None = None) -> Expr | None:
     left_exact = _exact_fraction(left)
     right_exact = _exact_fraction(right)
     if left_exact is not None and right_exact is not None:
         if right_exact == 0:
-            return _INDETERMINATE if left_exact == 0 else _COMPLEX_INFINITY
+            return _undefined(session, "Division by zero.")
         return _fraction_expr(left_exact / right_exact)
+    if _is_zero(right):
+        return _undefined(session, "Division by zero.")
     return _inexact_result((left, right), lambda values: values[0] / values[1], lambda values: values[0] / values[1])
 
 
@@ -1097,6 +1163,38 @@ def _is_one(expr: Expr) -> bool:
         return exact == 1
     info = _real_info_for_expr(expr)
     return info is not None and info.value == 1
+
+
+def _undefined(session: EvaluationSession | None, message: str) -> Symbol:
+    if session is not None:
+        session.emit_error(message)
+    return _UNDEFINED
+
+
+def _is_undefined(expr: Expr) -> bool:
+    return isinstance(expr, Symbol) and expr.name == "Undefined"
+
+
+def _any_undefined(args: tuple[Expr, ...] | list[Expr]) -> bool:
+    return any(_is_undefined(argument) for argument in args)
+
+
+def _is_negative_number(expr: Expr) -> bool:
+    exact = _exact_fraction(expr)
+    if exact is not None:
+        return exact < 0
+    info = _real_info_for_expr(expr)
+    return info is not None and info.value < 0
+
+
+def _is_integer_number(expr: Expr) -> bool:
+    exact = _exact_fraction(expr)
+    if exact is not None:
+        return exact.denominator == 1
+    info = _real_info_for_expr(expr)
+    if info is None:
+        return False
+    return info.value == info.value.to_integral_value()
 
 
 def _truth(expr: Expr) -> bool | None:

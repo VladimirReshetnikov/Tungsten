@@ -62,6 +62,12 @@ def run_repl(
             error_stream.flush()
             continue
 
+        assert session.current_messages is not None
+        for message in session.current_messages:
+            error_stream.write(message)
+            error_stream.write("\n")
+        error_stream.flush()
+
         if _should_print(result):
             output_stream.write(f"\nOut[{line}]= {result.to_input_form()}\n\n")
         else:

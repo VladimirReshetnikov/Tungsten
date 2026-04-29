@@ -158,6 +158,7 @@ _BINARY_OPERATOR_HEADS = {
     "LessEqual": "<=",
     "Greater": ">",
     "GreaterEqual": ">=",
+    "Divide": "/",
 }
 
 
@@ -218,6 +219,8 @@ def _precedence(expr: Expr) -> int:
             return 40
         if expr.has_head("Plus"):
             return 50
+        if expr.has_head("Divide"):
+            return 60
         if expr.has_head("Times"):
             return 60
         if expr.has_head("Power"):
