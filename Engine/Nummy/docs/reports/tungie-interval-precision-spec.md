@@ -199,6 +199,26 @@ The current target example is:
 This says the nominal scale coordinate is `10^102`, while the represented
 ordinary value has no certified significant decimal digits.
 
+Positive numeric powers that exceed the direct Decimal exponent threshold use
+the same log-space interval model. The certified precision is computed from the
+uncertainty in `exponent * log10(base)`, not from matching rendered mantissa
+digits. This avoids precision cliffs when a nominal value sits near a base-10
+carry boundary, such as the choice between `9.99999*^n` and `1*^(n + 1)`.
+
+Exact scale powers whose exponent is itself a compact scale value are a
+deferred structural-evaluation case. The intended exact result for the
+representative expression is:
+
+```text
+1*^^^2 ^ 1*^^^2 -> 1*^^(10^100 + 100)
+```
+
+In full-form terms, the right-hand side is
+`ScientificScale[1, Pow10Tower[1, Plus[Power[10, 100], 100]]]`, and the
+`10^100 + 100` coordinate may be expanded to an exact integer without creating
+an unmanageable object. Tungie currently leaves this expression inert until the
+exact structural scale-power policy is settled.
+
 ## Error And Undefined Behavior
 
 The following operations emit evaluation errors and return `Undefined`:

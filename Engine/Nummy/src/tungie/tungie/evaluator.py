@@ -1217,7 +1217,7 @@ def _try_scale_power(base: Expr, exponent: Expr, *, session: EvaluationSession |
         return None
 
     if base_exact != 10 and (base_info is None or base_info.value != 10):
-        return _try_positive_numeric_power_scale(base, exponent, exponent_value, session=session)
+        return _try_positive_numeric_power_scale(base, exponent, session=session)
 
     max_direct_exponent = _current_max_direct_decimal_exponent(session)
     precisions = [
@@ -1366,52 +1366,65 @@ def _scale_from_log10_center(
 def _try_positive_numeric_power_scale(
     base: Expr,
     exponent: Expr,
-    exponent_value: int,
     *,
     session: EvaluationSession | None,
 ) -> Expr | None:
     if not _is_positive_number(base):
         return None
-    precision = _combined_precision((base, exponent))
-    if precision is None:
+    if not (_contains_inexact(base) or _contains_inexact(exponent)):
         return None
     max_direct_exponent = _current_max_direct_decimal_exponent(session)
-    working_precision = _guarded_precision(precision)
-    baseline = _power_scale_decimal_parts(base, exponent_value, precision)
-    guarded = _power_scale_decimal_parts(base, exponent_value, working_precision)
-    if baseline is None or guarded is None:
+    base_interval = _interval_for_expr(base)
+    exponent_interval = _interval_for_expr(exponent)
+    if base_interval is None or exponent_interval is None:
         return None
-    baseline_exponent, baseline_mantissa = baseline
-    guarded_exponent, guarded_mantissa = guarded
-    if abs(guarded_exponent) <= max_direct_exponent:
+    if exponent_interval.center.is_zero():
         return None
-    if baseline_exponent != guarded_exponent:
-        return None
-    result_precision = _matching_precision(baseline_mantissa, guarded_mantissa, precision)
-    return _scientific_scale(
-        (
-            _decimal_real(guarded_mantissa, result_precision),
-            _compact_scale_exponent(guarded_exponent, max_direct_exponent),
-        ),
-        session=session,
+    working_precision = _guarded_precision(
+        max(
+            50,
+            _context_precision_from_measure(base_interval.precision),
+            _context_precision_from_measure(exponent_interval.precision),
+        )
     )
-
-
-def _power_scale_decimal_parts(base: Expr, exponent_value: int, precision: int) -> tuple[int, Decimal] | None:
-    base_value = _decimal_for_expr(base, precision)
-    if base_value is None or base_value <= 0:
+    base_log = _positive_numeric_log10_interval(base_interval, working_precision)
+    if base_log is None:
         return None
     try:
         with localcontext() as context:
-            context.prec = max(precision, 1)
-            log10_base = base_value.ln() / Decimal(10).ln()
-            scale_log = log10_base * Decimal(exponent_value)
-            scale_exponent = int(scale_log.to_integral_value(rounding=ROUND_FLOOR))
-            fractional = scale_log - Decimal(scale_exponent)
-            mantissa = +(Decimal(10).ln() * fractional).exp()
-            if mantissa == Decimal(10):
-                return scale_exponent + 1, Decimal(1)
-            return scale_exponent, mantissa
+            _configure_decimal_context(context, working_precision, base_log.center, exponent_interval.center)
+            log_center = +(base_log.center * exponent_interval.center)
+        if abs(log_center.to_integral_value(rounding=ROUND_FLOOR)) <= max_direct_exponent:
+            return None
+        log_accuracy = _accuracy_sum(
+            [
+                _multiplication_accuracy([base_log, exponent_interval]),
+                _accuracy_from_radius(_decimal_rounding_radius(log_center, working_precision)),
+            ]
+        )
+        precision = _precision_from_log10_uncertainty_accuracy(log_accuracy)
+        return _scale_from_log10_center(log_center, precision, session=session)
+    except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
+        return None
+
+
+def _positive_numeric_log10_interval(interval: DecimalInterval, working_precision: int) -> DecimalInterval | None:
+    if interval.center <= 0 or not _zero_excluded(interval.center, interval.accuracy):
+        return None
+    input_accuracy = _log10_uncertainty_accuracy(interval.center, interval.accuracy)
+    if input_accuracy is None:
+        return None
+    try:
+        with localcontext() as context:
+            _configure_decimal_context(context, working_precision, interval.center)
+            center = +(interval.center.ln() / _decimal_ln10(context.prec))
+        accuracy = _accuracy_sum(
+            [
+                input_accuracy,
+                _accuracy_from_radius(_decimal_rounding_radius(center, working_precision)),
+            ]
+        )
+        return DecimalInterval(center, accuracy)
     except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
         return None
 

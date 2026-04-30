@@ -167,7 +167,9 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(parse("(1.1*^^6) * (2*^^6)")).to_input_form(), "2.2`16*^2000000")
         self.assertEqual(eval_text("(1.1*^^6) / (2*^^6)"), "0.55`16")
         self.assertEqual(eval_text("(10^1000000.)^2"), "ScientificScale[1.`15.6989700043360188, 2000000]")
-        self.assertEqual(eval_text("2^4000000."), "ScientificScale[9.6085073`8, 1204119]")
+        self.assertEqual(eval_text("2^4000000."), "ScientificScale[9.608507308`9.5571145476268992, 1204119]")
+        self.assertEqual(eval_text("9.999999999999998^10^10"), "ScientificScale[9.99998`6, 9999999999]")
+        self.assertEqual(eval_text("9.999999999999999^10^10"), "ScientificScale[9.99999`6, 9999999999]")
         self.assertEqual(eval_text("10^1000000. + 1"), "ScientificScale[1`16, Pow10Tower[1, 6]]")
         self.assertEqual(
             eval_text("10^1000000. + 10^999999."),
