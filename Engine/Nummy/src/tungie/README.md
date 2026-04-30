@@ -32,6 +32,8 @@ Tungsten's main-loop hook and input-history symbols.
   `/^^^`, and so on negate the outer scale exponent, so `m/^^e` means
   `m * 10^(-10^e)`. Direct negative top arguments after `/^`, `/^^`, etc. and
   after any two-or-more-caret `*^^` form are intentionally rejected for now.
+  Exact multi-caret scale literals such as `1*^^4` stay prefactored with
+  infinite precision rather than being expanded into huge exact integers.
 - Arithmetic operators `+`, `-`, `*`, `/`, `^`, implicit multiplication, list
   literals, function calls, unary `+`, unary `-`, and boolean `!`.
 - Exact rational arithmetic for `+`, `-`, `*`, `/`, and for `^` when the

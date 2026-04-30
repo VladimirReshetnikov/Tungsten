@@ -159,6 +159,14 @@ with compact input and output forms such as ``1`16*^^6``. The scale expression
 means `mantissa * 10^exponent`; `Pow10Tower[1, 6]` in the exponent is printed as
 `*^^6`.
 
+Exact multi-caret scale literals keep their prefactored scale representation
+and report infinite precision. For example, `1*^^4` evaluates to
+`ScientificScale[1, Pow10Tower[1, 4]]`, not to the integer `10^10000`.
+Likewise `1/^^4` keeps a negative tower exponent. This preserves compactness
+and avoids accidental giant integer display or storage. Inexact mantissas still
+evaluate directly when the scale coordinate is within the direct Decimal
+threshold, so `1.1*^^2` becomes ordinary scientific notation.
+
 Direct scale evaluation shifts accuracy by the base-10 exponent. For finite
 direct scientific notation, multiplying by `10^e` changes absolute accuracy by
 `-e` while preserving the represented value-space precision when appropriate.

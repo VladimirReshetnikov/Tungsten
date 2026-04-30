@@ -126,6 +126,13 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("10^999999."), "1`16*^999999")
         self.assertEqual(eval_text("10^1000000."), "ScientificScale[1`16, Pow10Tower[1, 6]]")
         self.assertEqual(evaluate(parse("10^1000000.")).to_input_form(), "1`16*^^6")
+        self.assertEqual(evaluate(parse("1*^^2")).to_input_form(), "1*^^2")
+        self.assertEqual(evaluate(parse("1*^^4")).to_input_form(), "1*^^4")
+        self.assertEqual(evaluate(parse("1/^^4")).to_input_form(), "1/^^4")
+        self.assertEqual(eval_text("Precision[1*^^4]"), "Infinity")
+        self.assertEqual(evaluate(parse("ScientificScale[1, 10000]")).to_input_form(), "1*^^4")
+        self.assertEqual(evaluate(parse("1*^^4 * 1")).to_input_form(), "1*^^4")
+        self.assertEqual(eval_text("1*^^4 / (1*^^4)"), "1")
         self.assertEqual(eval_text("1.1*^^2"), "1.1`16*^100")
         self.assertEqual(evaluate(parse("1.1/^^2")).to_input_form(), "1.1`16/^100")
         self.assertEqual(

@@ -251,6 +251,8 @@ def _evaluate_call(expr: Call, *, session: EvaluationSession | None) -> Expr:
         return _or(expr.args, session=session)
     if head_name == "Not":
         return _not(expr.args, session=session)
+    if head_name == "ScientificScale":
+        return _scientific_scale(_evaluate_scientific_scale_args(expr.args, session=session), session=session)
 
     evaluated_args = tuple(evaluate(argument, session=session) for argument in expr.args)
 
@@ -268,8 +270,6 @@ def _evaluate_call(expr: Call, *, session: EvaluationSession | None) -> Expr:
         return _power(evaluated_args, session=session)
     if head_name == "Pow10Tower":
         return _pow10_tower(evaluated_args, session=session)
-    if head_name == "ScientificScale":
-        return _scientific_scale(evaluated_args, session=session)
     if head_name in {"Equal", "Unequal", "Less", "LessEqual", "Greater", "GreaterEqual"}:
         return _relation(head_name, evaluated_args)
     if head_name == "Abs":
@@ -549,6 +549,30 @@ def _power(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
     return call("Power", base, exponent)
 
 
+def _evaluate_scientific_scale_args(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> tuple[Expr, ...]:
+    if len(args) != 2:
+        return tuple(evaluate(argument, session=session) for argument in args)
+    return evaluate(args[0], session=session), _evaluate_scale_exponent(args[1], session=session)
+
+
+def _evaluate_scale_exponent(expr: Expr, *, session: EvaluationSession | None) -> Expr:
+    if isinstance(expr, Call) and expr.has_head("Pow10Tower") and len(expr.args) == 2:
+        height = evaluate(expr.args[0], session=session)
+        top = evaluate(expr.args[1], session=session)
+        if isinstance(height, Integer) and height.value == 0:
+            return top
+        return call("Pow10Tower", height, top)
+    if (
+        isinstance(expr, Call)
+        and expr.has_head("Times")
+        and len(expr.args) == 2
+        and isinstance(expr.args[0], Integer)
+        and expr.args[0].value == -1
+    ):
+        return call("Times", integer(-1), _evaluate_scale_exponent(expr.args[1], session=session))
+    return evaluate(expr, session=session)
+
+
 def _pow10_tower(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) != 2:
         return call("Pow10Tower", *args)
@@ -589,14 +613,18 @@ def _scientific_scale(args: tuple[Expr, ...], *, session: EvaluationSession | No
 
     max_direct_exponent = _current_max_direct_decimal_exponent(session)
     exponent_exact = _exact_fraction(exponent)
-    if exponent_exact is None or exponent_exact.denominator != 1:
+    exponent_value = exponent_exact.numerator if exponent_exact is not None and exponent_exact.denominator == 1 else None
+    if exponent_value is None:
+        exponent_value = _scale_exponent_exact_int(exponent)
+    if exponent_value is None:
         return call("ScientificScale", mantissa, exponent)
-    exponent_value = exponent_exact.numerator
     if abs(exponent_value) > max_direct_exponent:
         return call("ScientificScale", mantissa, _compact_scale_exponent(exponent_value, max_direct_exponent))
 
     mantissa_exact = _exact_fraction(mantissa)
     if mantissa_exact is not None:
+        if _keeps_exact_scale_prefactored(mantissa_exact, exponent, exponent_value, session=session):
+            return call("ScientificScale", mantissa, _prefactored_scale_exponent(exponent, exponent_value, session=session))
         scale = Fraction(10**exponent_value, 1) if exponent_value >= 0 else Fraction(1, 10 ** -exponent_value)
         return _fraction_expr(mantissa_exact * scale)
 
@@ -633,6 +661,43 @@ def _direct_pow10_tower_value(height: int, top: Expr, limit: int) -> Fraction | 
                 return None
             value = Fraction(1, 10 ** -exponent)
     return value if abs(value) <= limit else None
+
+
+def _keeps_exact_scale_prefactored(
+    mantissa: Fraction,
+    exponent: Expr,
+    exponent_value: int,
+    *,
+    session: EvaluationSession | None,
+) -> bool:
+    if _pow10_tower_parts(exponent) is not None:
+        return True
+    digit_budget = _current_max_displayed_digits(session)
+    numerator_budget = digit_budget - max(exponent_value, 0)
+    denominator_budget = digit_budget - max(-exponent_value, 0)
+    return (
+        _integer_decimal_digit_count_exceeds(mantissa.numerator, numerator_budget)
+        or _integer_decimal_digit_count_exceeds(mantissa.denominator, denominator_budget)
+    )
+
+
+def _prefactored_scale_exponent(expr: Expr, exponent_value: int, *, session: EvaluationSession | None) -> Expr:
+    if _pow10_tower_parts(expr) is not None:
+        return expr
+    display_limit = max(0, _current_max_displayed_digits(session) - 1)
+    return _compact_scale_exponent(exponent_value, display_limit)
+
+
+def _integer_decimal_digit_count_exceeds(value: int, limit: int) -> bool:
+    if limit < 1:
+        return True
+    absolute = abs(value)
+    if absolute == 0:
+        return 1 > limit
+    bit_limit = int((limit + 1) / math.log10(2)) + 2
+    if absolute.bit_length() > bit_limit:
+        return True
+    return len(str(absolute)) > limit
 
 
 def _max_pow10_exponent_for_limit(limit: int) -> int:
