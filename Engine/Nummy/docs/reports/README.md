@@ -19,6 +19,7 @@ theory corpus and prototype/reference libraries.
 | [Tungie Interval Precision Specification](tungie-interval-precision-spec.md) | Implementation-level contract for Tungie's current center-plus-radius interval precision model, including fractional and negative precision behavior. |
 | [Base-10 Level-Interval Arithmetic Proposal](base10-level-interval-arithmetic-proposal.md) | Proposal for a standalone interval arithmetic system with exact base-10 level endpoints, rational coordinate budgets, and outward-rounded arithmetic/power semantics. |
 | [Certified Exp10 And Log10 With Rational Intervals](certified-exp10-log10-with-rational-intervals.md) | Companion design note for implementing certified `exp10` and `log10` from integer/rational interval arithmetic without depending on transcendental-function libraries. |
+| [Review: Base-10 Level-Interval Arithmetic And Certified Exp10/Log10 Proposals](review-base10-level-interval-and-certified-exp10-log10__a942cf5a2192.md) | Review of the two design proposals against the recent Tungie precision-hardening trajectory, with concrete amendments for both documents and two latent wins available against the current evaluator. |
 
 ## Topical Subdirectories
 
