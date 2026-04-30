@@ -39,14 +39,15 @@ Tungsten's main-loop hook and input-history symbols.
   approximated with the current `$Precision`.
 - Inexact operations use tracked decimal interval arithmetic rather than
   machine-real arithmetic. Approximate numbers carry a nominal center plus an
-  absolute uncertainty radius; `Precision` and `Accuracy` are derived from that
-  interval and may be fractional, zero, or negative. Very large or small decimal
-  results use compact `*^` or `/^` scientific notation. When a result's
-  base-10 exponent is larger than `$MaxDirectDecimalExponent`, Tungie keeps it
-  as a structural `ScientificScale[mantissa, exponent]` value instead of
-  returning an inert expression after Decimal overflow; exact or effectively
-  integral powers of ten in the scale exponent are printed compactly as
-  `*^^n`, `/^^n`, and longer tower forms.
+  absolute uncertainty radius represented as log-space accuracy; `Precision`
+  and `Accuracy` are derived from that interval and may be fractional, zero,
+  negative, or extremely large. Very large or small decimal results use compact
+  `*^` or `/^` scientific notation. When a result's base-10 exponent is larger
+  than `$MaxDirectDecimalExponent`, Tungie keeps it as a structural
+  `ScientificScale[mantissa, exponent]` value instead of returning an inert
+  expression after Decimal overflow; exact or effectively integral powers of
+  ten in the scale exponent are printed compactly as `*^^n`, `/^^n`, and longer
+  tower forms.
 - Scale values participate in calculator arithmetic. Multiplication and
   division combine mantissas and add or subtract base-10 scale exponents;
   powers of positive numeric values convert to scale form when ordinary Decimal
@@ -71,8 +72,13 @@ Tungsten's main-loop hook and input-history symbols.
 - Mutable scale-evaluation threshold through `$MaxDirectDecimalExponent`,
   initially `999999`. Exponents at or below the threshold are evaluated as
   ordinary tracked Decimals when possible; larger exponents stay prefactored.
-  `Clear[$Precision]` and `Clear[$MaxDirectDecimalExponent]` emit warnings and
-  reset those symbols to their defaults.
+  Mutable display budget through `$MaxDisplayedDigits`, initially `1000`,
+  controls how many decimal digits Tungie may print for exact-centered
+  certified values before keeping the value compact as `SetPrecision[...]` or
+  `SetAccuracy[...]`.
+  `Clear[$Precision]`, `Clear[$MaxDirectDecimalExponent]`, and
+  `Clear[$MaxDisplayedDigits]` emit warnings and reset those symbols to their
+  defaults.
 - Calculator built-ins including `N`, `SetPrecision`, `SetAccuracy`,
   `Precision`, `Accuracy`, `Abs`, `Sign`, `Floor`, `Ceiling`, `Round`,
   `IntegerPart`, `FractionalPart`, `Sqrt`, `Exp`, `Log`, `Min`, `Max`, `If`,

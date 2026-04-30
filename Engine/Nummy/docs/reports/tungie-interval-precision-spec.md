@@ -8,21 +8,27 @@ future Nummy numeric design.
 
 ## Numeric Model
 
-Every finite inexact number denotes a decimal interval with:
+Every finite inexact number denotes an uncertainty enclosure with:
 
 - nominal center `c`;
-- absolute uncertainty radius `r`;
-- accuracy `a = -log10(r)`;
+- absolute uncertainty radius `r`, represented internally as accuracy
+  `a = -log10(r)`;
 - precision `p = a + log10(abs(c))` when `c != 0`.
 
 For an inexact value whose center is zero, `Accuracy` remains meaningful and
 `Precision` reports `0`. Exact integers and rationals do not carry intervals and
 report `Precision` and `Accuracy` as `Infinity`.
 
-Tungie stores precision and accuracy metadata as `Decimal` values. Certified
-precision and accuracy may therefore be fractional, zero, or negative. Working
-precision remains a positive integer control used by `$Precision`, `N[expr, p]`,
-and Decimal evaluation contexts.
+Tungie stores precision and accuracy metadata as `Decimal` values, including
+huge values. Certified precision and accuracy may therefore be fractional, zero,
+negative, or much larger than any useful Decimal context precision. Working and
+display precision are separate bounded policies.
+
+The internal model is closest to Wolfram Language `CenteredInterval`: a nominal
+center plus a radius. Tungie follows `Interval`-style containment semantics: a
+certified result must contain every value implied by its inputs. Tungie does not
+adopt `Around`'s statistical default propagation for certified calculator
+numbers.
 
 ## Literal Parsing
 
@@ -42,8 +48,31 @@ A double-backtick mark specifies accuracy:
 - <code>1.23``20.5</code> has center `1.23`, accuracy `20.5`, and derived
   precision.
 
-The internal radius convention is `r = 10^-a`. Tungie does not currently expose
-public `Interval[...]` syntax.
+The internal radius convention is `r = 10^-a`, but Tungie normally manipulates
+`a` directly and does not materialize `r`. Tungie does not currently expose
+public `Interval[...]`, `CenteredInterval[...]`, or `Around[...]` syntax.
+
+## Exact-Centered Certified Values
+
+Exact input to `N`, `SetPrecision`, or `SetAccuracy` may create an inexact
+certified value whose nominal center is still exact. The compact center can be
+an exact rational or a numeric exact expression that Tungie can approximate on
+demand, such as `Power[2, Rational[1, 2]]` or `Log[2]`. If the requested
+precision would require printing more than `$MaxDisplayedDigits` decimal
+digits, Tungie keeps the result compact using existing syntax.
+
+Examples:
+
+```text
+N[1/3, 10000000000000] -> SetPrecision[1/3, 10000000000000]
+Precision[N[1/3, 10000000000000]] -> 10000000000000.
+N[Sqrt[2], 10000000000000] -> SetPrecision[Power[2, Rational[1, 2]], 10000000000000]
+N[1, 10000000000000] -> 1`10000000000000
+```
+
+These forms are values, not unevaluated requests: arithmetic and `Precision` /
+`Accuracy` understand them as certified inexact values with exact or
+exact-expression centers.
 
 ## Formatting
 
@@ -61,6 +90,11 @@ Formatting rules:
   otherwise prints up to 18 significant decimal digits;
 - for negative or zero precision, Tungie still prints a nominal center with at
   least one significant digit plus the honest precision marker.
+- `$MaxDisplayedDigits`, initially `1000`, controls when exact-centered values
+  are printed as decimal expansions and when they stay in compact
+  `SetPrecision[...]` / `SetAccuracy[...]` form. The setting is a display and
+  compactness policy, not permission to fabricate a shorter decimal center with
+  a larger precision marker.
 
 For scale values, the marker on the displayed mantissa is the precision of the
 whole represented value. The exponent and hyper-exponent coordinates are nominal
@@ -75,22 +109,22 @@ propagation.
 Addition and subtraction:
 
 - centers are added or subtracted;
-- radii are added.
+- uncertainty radii are added using log-space accuracy arithmetic.
 
 Multiplication:
 
 - the center is the product of centers;
 - for two operands, the radius bound is
   `abs(x) ry + abs(y) rx + rx ry`;
-- products of more than two operands apply the same rule pairwise.
+- Tungie computes those terms as accuracies and sums them in log space.
 
 Division:
 
 - the denominator interval must exclude zero;
 - if it contains zero, Tungie emits the existing division-by-zero diagnostic and
   returns `Undefined`;
-- otherwise Tungie uses a conservative reciprocal interval and multiplies by the
-  numerator interval.
+- otherwise Tungie uses a conservative log-space reciprocal uncertainty bound
+  and divides the nominal centers.
 
 Powers:
 
@@ -105,9 +139,13 @@ Powers:
 
 `SetPrecision[x, p]` and `SetAccuracy[x, a]` may lower certainty by widening an
 already inexact interval. They do not increase certainty of an inexact input.
-For example, `Precision[SetPrecision[1.`2, 20]]` remains `2.`. Exact input to
-`N`, `SetPrecision`, or `SetAccuracy` may create a new inexact interval at the
-requested positive working precision or accuracy.
+For example, `Precision[SetPrecision[1.`2, 20]]` remains `2.`. Exact input may
+create a new exact-centered certified value at the requested precision or
+accuracy without printing all digits.
+
+Uncertain values are treated as independent unless Tungie proves shared exact
+structure. Thus two separately produced values with identical printed forms are
+not assumed to cancel exactly.
 
 ## Scale Values
 
@@ -133,15 +171,15 @@ term when the separation exceeds certified precision.
 Positive scale powers with inexact exponents are evaluated in log10 space:
 
 - let `L = exponent * log10(base)`;
-- compute a nominal center and radius for `L`;
+- compute a nominal center and log-radius accuracy for `L`;
 - output `10^L` as a scale value;
 - derive the printed value-space precision from the log-coordinate uncertainty
-  using the current logarithmic approximation `-log10(ln(10) * radius_L)`.
+  using a conservative logarithmic bound.
 
 The current target example is:
 
 ```text
-(1.*^^2)^(1.*^^2) -> 1`-86.3640977218404131*^^102
+(1.*^^2)^(1.*^^2) -> 1`-100.362215688699468*^^102
 ```
 
 This says the nominal scale coordinate is `10^102`, while the represented
@@ -169,17 +207,22 @@ This implementation does not yet provide:
 - the full MathOverflow leading-digits algorithm;
 - arbitrary precision for every built-in with complete interval propagation.
 
-Two-argument `Log` and several non-core built-ins still use the older Decimal
-center-evaluation fallback. Those are outside the first interval-precision
-surface and should be upgraded before being treated as part of Nummy's final
-certified arithmetic kernel.
+For some nonlinear operations, huge-accuracy inputs may currently fall back to
+symbolic form rather than attempting unsafe radius materialization. Two-argument
+`Log` and several non-core built-ins still use a Decimal center-evaluation
+fallback. Those are outside the first interval-precision surface and should be
+upgraded before being treated as part of Nummy's final certified arithmetic
+kernel.
 
 ## Reference Model
 
 The terminology follows the Wolfram Language distinction between precision as a
 relative uncertainty measure and accuracy as an absolute uncertainty measure.
-The implementation is Tungie-specific and currently uses conservative decimal
-intervals rather than Wolfram's full arbitrary-precision machinery.
+The implementation is Tungie-specific and uses compact log-radius metadata
+rather than Wolfram's full arbitrary-precision interval machinery.
 
 - https://reference.wolfram.com/language/tutorial/Numbers.html
 - https://reference.wolfram.com/language/tutorial/NumericalOperationsOnFunctions.html
+- https://reference.wolfram.com/language/ref/Interval
+- https://reference.wolfram.com/language/ref/CenteredInterval
+- https://reference.wolfram.com/language/ref/Around

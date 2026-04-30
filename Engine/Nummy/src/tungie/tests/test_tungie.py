@@ -114,7 +114,7 @@ class EvaluationTests(unittest.TestCase):
             ".500000000000000000000000000000000000`36",
         )
         self.assertEqual(eval_text("1.234567890123456789 + 0"), "1.234567890123456789`19")
-        self.assertEqual(eval_text("1 + 2."), "3.`16.176091257969945")
+        self.assertEqual(eval_text("1 + 2."), "3.`16.1760912590556812")
         self.assertEqual(eval_text("1./3"), "0.3333333333333333`16")
         self.assertEqual(eval_text("1.25`20 + 2.5`20"), "3.75`20")
         self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333`16")
@@ -141,7 +141,7 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertEqual(
             eval_text("10^999999. * 10."),
-            "ScientificScale[1`15.6989700032502826, Pow10Tower[1, 6]]",
+            "ScientificScale[1`15.6989700043360188, Pow10Tower[1, 6]]",
         )
         self.assertEqual(evaluate(parse("(1.1*^^6) * (2*^^6)")).to_input_form(), "2.2`16*^2000000")
         self.assertEqual(eval_text("(1.1*^^6) / (2*^^6)"), "0.55`16")
@@ -221,6 +221,78 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("SetAccuracy[1.23, 20]"), "1.23``15.9100948885606021")
         self.assertEqual(eval_text("MachineNumberQ[1.]"), "False")
 
+    def test_arbitrary_certified_precision_is_compact(self) -> None:
+        huge = "10000000000000"
+        self.assertEqual(eval_text(f"1/1`{huge}"), f"1`{huge}")
+        self.assertEqual(eval_text(f"Precision[1/1`{huge}]"), f"{huge}.")
+        self.assertEqual(eval_text(f"1`{huge} + 0"), f"1`{huge}")
+        self.assertEqual(eval_text(f"1`{huge} * 1"), f"1`{huge}")
+        self.assertEqual(eval_text(f"1`{huge} / 1"), f"1`{huge}")
+        self.assertEqual(eval_text(f"N[1/3, {huge}]"), f"SetPrecision[Rational[1, 3], {huge}]")
+        self.assertEqual(eval_text(f"Precision[N[1/3, {huge}]]"), f"{huge}.")
+        self.assertEqual(eval_text(f"N[1/3, {huge}] + N[2/3, {huge}]"), f"1`{huge}")
+        self.assertEqual(eval_text("1`100 > 0"), "True")
+        self.assertEqual(eval_text("1`100 > 2"), "False")
+        self.assertEqual(eval_text("1`-5 > 0"), "Greater[1`-5, 0]")
+        self.assertEqual(eval_text("1`100 == 1`100"), "Equal[1`100, 1`100]")
+
+        session = EvaluationSession()
+        _line, result = session.evaluate_input(parse("1/1`-5"))
+        self.assertEqual(result.to_full_form(), "Undefined")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Division by zero."])
+
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse(f"$Precision = {huge}"))[1].to_full_form(), huge)
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3]"))[1].to_full_form(),
+            f"SetPrecision[Rational[1, 3], {huge}]",
+        )
+        self.assertEqual(
+            eval_text(f"N[Sqrt[2], {huge}]"),
+            f"SetPrecision[Power[2, Rational[1, 2]], {huge}]",
+        )
+        self.assertEqual(
+            eval_text(f"Precision[N[Sqrt[2], {huge}]]"),
+            f"{huge}.",
+        )
+
+    def test_max_displayed_digits_controls_lazy_exact_output(self) -> None:
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse("$MaxDisplayedDigits"))[1].to_full_form(), "1000")
+        self.assertEqual(session.evaluate_input(parse("$MaxDisplayedDigits = 20"))[1].to_full_form(), "20")
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3, 30]"))[1].to_full_form(),
+            "SetPrecision[Rational[1, 3], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3, 30] + 0"))[1].to_full_form(),
+            "SetPrecision[Rational[1, 3], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3, 20]"))[1].to_full_form(),
+            "0.33333333333333333333`20",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30]"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30] + 0"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30] * 1"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30] / 1"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("Precision[N[Sqrt[2], 30]]"))[1].to_full_form(),
+            "30.",
+        )
+
     def test_calculator_builtins(self) -> None:
         self.assertEqual(eval_text("Abs[-3]"), "3")
         self.assertEqual(eval_text("Sign[-3/2]"), "-1")
@@ -288,10 +360,10 @@ class EvaluationTests(unittest.TestCase):
 
     def test_negative_precision_scale_power(self) -> None:
         result = evaluate(parse("(1.*^^2)^(1.*^^2)"))
-        self.assertEqual(result.to_input_form(), "1`-86.3640977218404131*^^102")
+        self.assertEqual(result.to_input_form(), "1`-100.362215688699468*^^102")
         self.assertEqual(
             eval_text("Precision[(1.*^^2)^(1.*^^2)]"),
-            "-86.3640977218404131",
+            "-100.362215688699468",
         )
 
     def test_session_assignment_clear_and_history(self) -> None:
@@ -347,8 +419,9 @@ class EvaluationTests(unittest.TestCase):
         session = EvaluationSession()
         session.evaluate_input(parse("$Precision = 40"))
         session.evaluate_input(parse("$MaxDirectDecimalExponent = 99"))
+        session.evaluate_input(parse("$MaxDisplayedDigits = 20"))
 
-        _line, result = session.evaluate_input(parse("Clear[$Precision, $MaxDirectDecimalExponent]"))
+        _line, result = session.evaluate_input(parse("Clear[$Precision, $MaxDirectDecimalExponent, $MaxDisplayedDigits]"))
 
         self.assertEqual(result.to_full_form(), "Null")
         self.assertEqual(
@@ -356,6 +429,7 @@ class EvaluationTests(unittest.TestCase):
             [
                 "Evaluate::warning: Clear resets $Precision to its default value 16.",
                 "Evaluate::warning: Clear resets $MaxDirectDecimalExponent to its default value 999999.",
+                "Evaluate::warning: Clear resets $MaxDisplayedDigits to its default value 1000.",
             ],
         )
         self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "16")
@@ -363,6 +437,7 @@ class EvaluationTests(unittest.TestCase):
             session.evaluate_input(parse("$MaxDirectDecimalExponent"))[1].to_full_form(),
             "999999",
         )
+        self.assertEqual(session.evaluate_input(parse("$MaxDisplayedDigits"))[1].to_full_form(), "1000")
 
 
 class ReplTests(unittest.TestCase):

@@ -35,9 +35,12 @@ from .values import symbol
 MACHINE_PRECISION = 15.954589770191003
 DEFAULT_PRECISION = 16
 MAX_DIRECT_DECIMAL_EXPONENT = 999_999
+MAX_WORKING_PRECISION = 1000
+MAX_COMPACT_DECIMAL_PRECISION = 1000
 _SYSTEM_SYMBOL_DEFAULTS = {
     "$Precision": integer(DEFAULT_PRECISION),
     "$MaxDirectDecimalExponent": integer(MAX_DIRECT_DECIMAL_EXPONENT),
+    "$MaxDisplayedDigits": integer(MAX_COMPACT_DECIMAL_PRECISION),
 }
 _INFINITY = symbol("Infinity")
 _NEGATIVE_INFINITY = call("Times", integer(-1), _INFINITY)
@@ -126,7 +129,7 @@ class EvaluationSession:
     symbols: dict[str, Expr] | None = None
     outputs: dict[int, Expr] | None = None
     current_messages: list[str] | None = None
-    precision_override: int | None = None
+    precision_override: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.symbols is None:
@@ -201,7 +204,7 @@ def evaluate(expr: Expr, *, session: EvaluationSession | None = None) -> Expr:
 
 def _evaluate_symbol(expr: Symbol, session: EvaluationSession | None) -> Expr:
     if expr.name == "$Precision" and session is not None and session.precision_override is not None:
-        return integer(max(1, int(session.precision_override)))
+        return _decimal_measure_expr(max(Decimal(1), session.precision_override))
     if expr.name == "$MachinePrecision":
         return _evaluate_real(real(repr(MACHINE_PRECISION)), None)
     if expr.name == "$MachineEpsilon":
@@ -419,7 +422,7 @@ def _plus(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if scale_result is not None:
         return scale_result
     if _all_approximable(flattened) and any(_contains_inexact(argument) for argument in flattened):
-        result = _interval_plus(flattened)
+        result = _interval_plus(flattened, session=session)
         if result is not None:
             return result
 
@@ -428,7 +431,7 @@ def _plus(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     saw_numeric = False
     for argument in flattened:
         if _is_numeric_atom(argument):
-            combined = _add_numeric(numeric, argument)
+            combined = _add_numeric(numeric, argument, session=session)
             if combined is None:
                 non_numeric.append(argument)
             else:
@@ -454,7 +457,7 @@ def _times(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
     if scale_result is not None:
         return scale_result
     if _all_approximable(flattened) and any(_contains_inexact(argument) for argument in flattened):
-        result = _interval_times(flattened)
+        result = _interval_times(flattened, session=session)
         if result is not None:
             return result
 
@@ -463,7 +466,7 @@ def _times(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
     saw_numeric = False
     for argument in flattened:
         if _is_numeric_atom(argument):
-            combined = _mul_numeric(numeric, argument)
+            combined = _mul_numeric(numeric, argument, session=session)
             if combined is None:
                 non_numeric.append(argument)
             else:
@@ -529,6 +532,13 @@ def _power(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr
         exact = _exact_power(exact_base, exact_exponent)
         if exact is not None:
             return _fraction_expr(exact)
+        requested_precision = _current_precision_measure(session)
+        if _measure_exceeds_working_precision(requested_precision, session=session):
+            return call(
+                "SetPrecision",
+                call("Power", _fraction_expr(exact_base), _fraction_expr(exact_exponent)),
+                _decimal_measure_expr(requested_precision),
+            )
         return _approximate_exact_power(exact_base, exact_exponent, precision=_current_precision(session))
 
     if _all_approximable(args) and any(_contains_inexact(argument) for argument in args):
@@ -693,7 +703,7 @@ def _rounding(head: str, args: tuple[Expr, ...], *, session: EvaluationSession |
         rounded = _rounding(head, (quotient,), session=session)
         if _is_undefined(rounded):
             return _UNDEFINED
-        return _mul_numeric(rounded, multiple) or call(head, *args)
+        return _mul_numeric(rounded, multiple, session=session) or call(head, *args)
 
     exact = _exact_fraction(value)
     if exact is not None:
@@ -799,7 +809,7 @@ def _log(args: tuple[Expr, ...]) -> Expr:
 def _n(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) not in {1, 2}:
         return call("N", *args)
-    precision: int | None | float = _current_precision(session)
+    precision: Decimal | None | float = _current_precision_measure(session)
     if len(args) == 2:
         precision = _precision_argument(evaluate(args[1], session=session))
         if precision == math.inf:
@@ -811,55 +821,82 @@ def _n(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
         expr = _evaluate_with_precision(args[0], precision, session=session)
     if _is_undefined(expr):
         return _UNDEFINED
-    return _approximate(expr, precision)
+    return _approximate(expr, precision, session=session)
 
 
 def _set_precision(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) != 2:
         return call("SetPrecision", *args)
+    precision = _precision_argument(evaluate(args[1], session=session))
+    if precision is None:
+        expr = evaluate(args[0], session=session)
+        if _is_undefined(expr):
+            return _UNDEFINED
+        return _approximate(expr, None, session=session)
+    if precision == math.inf:
+        expr = evaluate(args[0], session=session)
+        if _is_undefined(expr):
+            return _UNDEFINED
+        exact = _exact_from_decimal(expr)
+        return exact if exact is not None else expr
+    compact = _compact_precision_expr(args[0], precision, session=session)
+    if compact is not None:
+        return compact
     expr = evaluate(args[0], session=session)
     if _is_undefined(expr):
         return _UNDEFINED
-    precision = _precision_argument(evaluate(args[1], session=session))
-    if precision is None:
-        return _approximate(expr, None)
-    if precision == math.inf:
-        exact = _exact_from_decimal(expr)
-        return exact if exact is not None else expr
     info = _real_info_for_expr(expr)
     if info is not None:
-        target = Decimal(int(precision))
+        target = _measure_decimal(precision)
         return _decimal_real(info.value, min(info.precision, target))
-    decimal_value = _decimal_for_expr(expr, int(precision))
+    exact = _exact_fraction(expr)
+    if exact is not None and _measure_exceeds_working_precision(precision, session=session):
+        if exact.denominator == 1 and abs(exact.numerator) < 10**18:
+            return real(f"{exact.numerator}`{_format_measure(precision)}")
+        return call("SetPrecision", _fraction_expr(exact), _decimal_measure_expr(precision))
+    decimal_value = _decimal_for_expr(expr, _context_precision_from_measure(precision, session=session))
     if decimal_value is None:
         return call("SetPrecision", expr, args[1])
-    return _decimal_real(decimal_value, int(precision))
+    return _decimal_real(decimal_value, _measure_decimal(precision))
 
 
 def _set_accuracy(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
     if len(args) != 2:
         return call("SetAccuracy", *args)
+    accuracy = _precision_argument(evaluate(args[1], session=session))
+    if accuracy is None:
+        expr = evaluate(args[0], session=session)
+        if _is_undefined(expr):
+            return _UNDEFINED
+        return _approximate(expr, None, session=session)
+    if accuracy == math.inf:
+        expr = evaluate(args[0], session=session)
+        if _is_undefined(expr):
+            return _UNDEFINED
+        exact = _exact_from_decimal(expr)
+        return exact if exact is not None else expr
+    compact = _compact_accuracy_expr(args[0], accuracy, session=session)
+    if compact is not None:
+        return compact
     expr = evaluate(args[0], session=session)
     if _is_undefined(expr):
         return _UNDEFINED
-    accuracy = _precision_argument(evaluate(args[1], session=session))
-    if accuracy is None:
-        return _approximate(expr, None)
-    if accuracy == math.inf:
-        exact = _exact_from_decimal(expr)
-        return exact if exact is not None else expr
     info = _real_info_for_expr(expr)
     if info is not None:
-        target = Decimal(int(accuracy))
+        target = _measure_decimal(accuracy)
         return _decimal_real_accuracy(info.value, min(info.accuracy, target))
-    decimal_probe = _decimal_for_expr(expr, int(accuracy) + 8)
+    exact = _exact_fraction(expr)
+    if exact is not None and _measure_exceeds_working_precision(accuracy, session=session):
+        return call("SetAccuracy", _fraction_expr(exact), _decimal_measure_expr(accuracy))
+    working_accuracy = _context_precision_from_measure(accuracy, session=session)
+    decimal_probe = _decimal_for_expr(expr, working_accuracy + 8)
     if decimal_probe is None:
         return call("SetAccuracy", expr, args[1])
-    precision = max(1, int(Decimal(int(accuracy)) + max(_decimal_log10_abs(decimal_probe), Decimal(0))))
+    precision = max(1, _bounded_int(_measure_decimal(accuracy) + max(_decimal_log10_abs(decimal_probe), Decimal(0))))
     decimal_value = _decimal_for_expr(expr, precision)
     if decimal_value is None:
         return call("SetAccuracy", expr, args[1])
-    return _decimal_real_accuracy(decimal_value, int(accuracy))
+    return _decimal_real_accuracy(decimal_value, _measure_decimal(accuracy))
 
 
 def _precision(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> Expr:
@@ -868,6 +905,9 @@ def _precision(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> 
     value = evaluate(args[0], session=session)
     if _exact_fraction(value) is not None:
         return _INFINITY
+    certified = _certified_interval_for_expr(value)
+    if certified is not None:
+        return _plain_real(certified.precision)
     scale = _scale_parts(value)
     if scale is not None:
         if _exact_fraction(scale.mantissa) is not None:
@@ -888,6 +928,9 @@ def _accuracy(args: tuple[Expr, ...], *, session: EvaluationSession | None) -> E
     value = evaluate(args[0], session=session)
     if _exact_fraction(value) is not None:
         return _INFINITY
+    certified = _certified_interval_for_expr(value)
+    if certified is not None:
+        return _plain_real(certified.accuracy)
     scale = _scale_parts(value)
     if scale is not None:
         if _exact_fraction(scale.mantissa) is not None:
@@ -1006,7 +1049,7 @@ def _try_scale_plus(args: list[Expr], *, session: EvaluationSession | None) -> E
     for term in terms:
         for index, existing in enumerate(combined):
             if term.exponent == existing.exponent:
-                mantissa = _add_numeric(existing.mantissa, term.mantissa)
+                mantissa = _add_numeric(existing.mantissa, term.mantissa, session=session)
                 if mantissa is None:
                     return None
                 combined[index] = ScaleParts(mantissa, existing.exponent)
@@ -1046,7 +1089,7 @@ def _try_scale_times(args: list[Expr], *, session: EvaluationSession | None) -> 
     for argument in args:
         parts = _scale_parts(argument)
         if parts is not None:
-            next_mantissa = _mul_numeric(mantissa, parts.mantissa)
+            next_mantissa = _mul_numeric(mantissa, parts.mantissa, session=session)
             if next_mantissa is None:
                 return None
             mantissa = next_mantissa
@@ -1054,7 +1097,7 @@ def _try_scale_times(args: list[Expr], *, session: EvaluationSession | None) -> 
             continue
         if not _is_numeric_atom(argument):
             return None
-        next_mantissa = _mul_numeric(mantissa, argument)
+        next_mantissa = _mul_numeric(mantissa, argument, session=session)
         if next_mantissa is None:
             return None
         mantissa = next_mantissa
@@ -1148,10 +1191,14 @@ def _try_inexact_scale_power(
         with localcontext() as context:
             _configure_decimal_context(context, working_precision, base_log.center, exponent_interval.center)
             log_center = +(base_log.center * exponent_interval.center)
+            base_log_radius = _materialized_radius(base_log.accuracy)
+            exponent_radius = _materialized_radius(exponent_interval.accuracy)
+            if base_log_radius is None or exponent_radius is None:
+                return None
             log_radius = (
-                abs(base_log.center) * exponent_interval.radius
-                + abs(exponent_interval.center) * base_log.radius
-                + base_log.radius * exponent_interval.radius
+                abs(base_log.center) * exponent_radius
+                + abs(exponent_interval.center) * base_log_radius
+                + base_log_radius * exponent_radius
             )
             log_radius = +log_radius + _decimal_rounding_radius(log_center, working_precision)
         precision = _precision_from_log10_uncertainty(log_radius)
@@ -1170,12 +1217,12 @@ def _scale_log10_interval(parts: ScaleParts) -> DecimalInterval | None:
         if mantissa_exact <= 0:
             return None
         mantissa = _decimal_for_fraction(mantissa_exact, DEFAULT_PRECISION)
-        return DecimalInterval(Decimal(exponent_value) + _decimal_log10_abs(mantissa), Decimal(0))
+        return DecimalInterval(Decimal(exponent_value) + _decimal_log10_abs(mantissa), Decimal("Infinity"))
     info = _real_info_for_expr(parts.mantissa)
     if info is None or info.value <= 0:
         return None
-    radius = _radius_from_accuracy(info.accuracy)
-    if radius >= info.value:
+    radius = _materialized_radius(info.accuracy)
+    if radius is None or radius >= info.value:
         return None
     center = Decimal(exponent_value) + _decimal_log10_abs(info.value)
     return DecimalInterval(center, _log10_radius_for_positive_interval(info.value, radius))
@@ -1502,7 +1549,7 @@ def _add_scale_exponents(left: Expr, right: Expr, *, session: EvaluationSession 
     if left_exact is not None and right_exact is not None:
         return _fraction_expr(left_exact + right_exact)
 
-    result = _add_numeric(left, right)
+    result = _add_numeric(left, right, session=session)
     if result is not None:
         return result
     return call("Plus", left, right)
@@ -1591,7 +1638,7 @@ def _multiply_scale_exponent(exponent: Expr, factor: Expr, *, session: Evaluatio
             if height == 1:
                 return _scientific_scale((mantissa, top), session=session)
 
-    result = _mul_numeric(exponent, factor)
+    result = _mul_numeric(exponent, factor, session=session)
     if result is not None:
         return result
     return call("Times", factor, exponent)
@@ -1702,20 +1749,20 @@ def _abs_numeric(expr: Expr) -> Expr:
     return expr
 
 
-def _add_numeric(left: Expr, right: Expr) -> Expr | None:
+def _add_numeric(left: Expr, right: Expr, *, session: EvaluationSession | None = None) -> Expr | None:
     left_exact = _exact_fraction(left)
     right_exact = _exact_fraction(right)
     if left_exact is not None and right_exact is not None:
         return _fraction_expr(left_exact + right_exact)
-    return _interval_plus((left, right))
+    return _interval_plus((left, right), session=session)
 
 
-def _mul_numeric(left: Expr, right: Expr) -> Expr | None:
+def _mul_numeric(left: Expr, right: Expr, *, session: EvaluationSession | None = None) -> Expr | None:
     left_exact = _exact_fraction(left)
     right_exact = _exact_fraction(right)
     if left_exact is not None and right_exact is not None:
         return _fraction_expr(left_exact * right_exact)
-    return _interval_times((left, right))
+    return _interval_times((left, right), session=session)
 
 
 def _div_numeric(left: Expr, right: Expr, *, session: EvaluationSession | None = None) -> Expr | None:
@@ -1813,6 +1860,8 @@ def _compare(left: Expr, right: Expr) -> int | None:
     scale_comparison = _compare_scale_values(left, right)
     if scale_comparison is not None:
         return scale_comparison
+    if _contains_inexact(left) or _contains_inexact(right):
+        return _compare_interval_values(left, right)
     if _all_approximable((left, right)):
         left_value = _decimal_for_expr(left, 50)
         right_value = _decimal_for_expr(right, 50)
@@ -1821,6 +1870,18 @@ def _compare(left: Expr, right: Expr) -> int | None:
     if left == right:
         return 0
     return None
+
+
+def _compare_interval_values(left: Expr, right: Expr) -> int | None:
+    left_interval = _interval_for_expr(left)
+    right_interval = _interval_for_expr(right)
+    if left_interval is None or right_interval is None:
+        return None
+    center = left_interval.center - right_interval.center
+    accuracy = _accuracy_sum([left_interval.accuracy, right_interval.accuracy])
+    if not _zero_excluded(center, accuracy):
+        return None
+    return (center > 0) - (center < 0)
 
 
 def _compare_scale_values(left: Expr, right: Expr) -> int | None:
@@ -1892,28 +1953,46 @@ def _compare_scale_exponents(left: Expr, right: Expr) -> int | None:
     return None
 
 
-def _approximate(expr: Expr, precision: int | None) -> Expr:
+def _approximate(
+    expr: Expr,
+    precision: Decimal | int | float | None,
+    *,
+    session: EvaluationSession | None = None,
+) -> Expr:
     if isinstance(expr, Call) and expr.has_head("List"):
-        return list_expr(_approximate(argument, precision) for argument in expr.args)
+        return list_expr(_approximate(argument, precision, session=session) for argument in expr.args)
     if precision is None:
-        precision = DEFAULT_PRECISION
-    value = _decimal_for_expr(expr, precision)
-    return _decimal_real(value, precision) if value is not None else expr
+        precision = Decimal(DEFAULT_PRECISION)
+    exact = _exact_fraction(expr)
+    if exact is not None and _measure_exceeds_working_precision(precision, session=session):
+        if exact.denominator == 1 and abs(exact.numerator) < 10**18:
+            return real(f"{exact.numerator}`{_format_measure(precision)}")
+        return call("SetPrecision", _fraction_expr(exact), _decimal_measure_expr(precision))
+    certified = _certified_interval_for_expr(expr)
+    if certified is not None and _measure_exceeds_working_precision(certified.precision, session=session):
+        return _interval_to_expr(certified, session=session)
+    compact = _compact_precision_expr(expr, precision, session=session)
+    if compact is not None:
+        return compact
+    value = _decimal_for_expr(expr, _context_precision_from_measure(precision, session=session))
+    return _decimal_real(value, _measure_decimal(precision)) if value is not None else expr
 
 
-def _evaluate_with_precision(expr: Expr, precision: int | None | float, *, session: EvaluationSession | None) -> Expr:
+def _evaluate_with_precision(expr: Expr, precision: Decimal | int | None | float, *, session: EvaluationSession | None) -> Expr:
     if precision is None or precision == math.inf:
         return evaluate(expr, session=session)
+    precision_measure = _measure_decimal(precision)
+    working_precision = _context_precision_from_measure(precision_measure)
     if session is None:
         temp_session = EvaluationSession()
-        temp_session.precision_override = max(1, int(precision))
+        temp_session.precision_override = max(Decimal(1), precision_measure)
         return evaluate(expr, session=temp_session)
-    with _temporary_precision(session, max(1, int(precision))):
+    with _temporary_precision(session, max(Decimal(1), precision_measure), working_precision):
         return evaluate(expr, session=session)
 
 
 @contextmanager
-def _temporary_precision(session: EvaluationSession, precision: int) -> Iterator[None]:
+def _temporary_precision(session: EvaluationSession, precision: Decimal, working_precision: int) -> Iterator[None]:
     old_precision = session.precision_override
     session.precision_override = precision
     try:
@@ -1942,11 +2021,9 @@ def _inexact_result(args: tuple[Expr, ...] | list[Expr], operation) -> Expr | No
 @dataclass(frozen=True)
 class DecimalInterval:
     center: Decimal
-    radius: Decimal
-
-    @property
-    def accuracy(self) -> Decimal:
-        return _accuracy_from_radius(self.radius)
+    accuracy: Decimal
+    exact_center: Fraction | None = None
+    compact_center: Expr | None = None
 
     @property
     def precision(self) -> Decimal:
@@ -1954,15 +2031,19 @@ class DecimalInterval:
 
 
 def _interval_for_expr(expr: Expr) -> DecimalInterval | None:
+    certified = _certified_interval_for_expr(expr)
+    if certified is not None:
+        return certified
     exact = _exact_fraction(expr)
     if exact is not None:
         value = _decimal_for_fraction(exact, _working_precision_for_exact_fraction(exact))
-        return DecimalInterval(value, Decimal(0))
+        return DecimalInterval(value, Decimal("Infinity"), exact, _fraction_expr(exact))
     if isinstance(expr, Real):
         info = _real_info(expr)
         if info is None:
             return None
-        return DecimalInterval(info.value, _radius_from_accuracy(info.accuracy))
+        exact_center = _small_exact_fraction_from_decimal(info.value)
+        return DecimalInterval(info.value, info.accuracy, exact_center)
     return None
 
 
@@ -1970,52 +2051,289 @@ def _interval_working_precision(intervals: list[DecimalInterval]) -> int:
     finite_precisions = [
         _context_precision_from_measure(interval.precision)
         for interval in intervals
-        if interval.radius != 0
+        if interval.accuracy != Decimal("Infinity")
     ]
     if not finite_precisions:
         return _guarded_precision(DEFAULT_PRECISION)
     return _guarded_precision(max(finite_precisions))
 
 
-def _interval_plus(args: tuple[Expr, ...] | list[Expr]) -> Expr | None:
+def _certified_interval_for_expr(expr: Expr) -> DecimalInterval | None:
+    if not isinstance(expr, Call) or len(expr.args) != 2:
+        return None
+    if not (expr.has_head("SetPrecision") or expr.has_head("SetAccuracy")):
+        return None
+    center_expr, measure_expr = expr.args
+    measure = _precision_argument(measure_expr)
+    if measure is None or measure == math.inf:
+        return None
+    measure_decimal = _measure_decimal(measure)
+    exact = _exact_fraction(center_expr)
+    if exact is not None:
+        center = _decimal_for_fraction(exact, _context_precision_from_measure(DEFAULT_PRECISION))
+        if expr.has_head("SetPrecision"):
+            accuracy = _accuracy_from_precision_fraction(exact, measure_decimal)
+        else:
+            accuracy = measure_decimal
+        return DecimalInterval(center, accuracy, exact, center_expr)
+    compact_center = _exact_numeric_center_expr(center_expr)
+    if compact_center is None:
+        return None
+    center = _decimal_for_expr(compact_center, DEFAULT_PRECISION + 8)
+    if center is None:
+        return None
+    if expr.has_head("SetPrecision"):
+        accuracy = _accuracy_from_precision(center, measure_decimal)
+    else:
+        accuracy = measure_decimal
+    return DecimalInterval(center, accuracy, None, compact_center)
+
+
+def _interval_to_expr(interval: DecimalInterval, *, session: EvaluationSession | None = None) -> Expr:
+    precision = interval.precision
+    if (
+        interval.exact_center is None
+        and interval.compact_center is not None
+        and _measure_exceeds_working_precision(precision, session=session)
+    ):
+        return call("SetPrecision", interval.compact_center, _decimal_measure_expr(precision))
+    if interval.exact_center is not None and _measure_exceeds_working_precision(precision, session=session):
+        center_expr = interval.compact_center or _fraction_expr(interval.exact_center)
+        if interval.exact_center.denominator == 1 and abs(interval.exact_center.numerator) < 10**18:
+            return real(f"{interval.exact_center.numerator}`{_format_measure(precision)}")
+        return call("SetPrecision", center_expr, _decimal_measure_expr(precision))
+    return _decimal_real_with_accuracy(interval.center, interval.accuracy)
+
+
+def _compact_precision_expr(
+    expr: Expr,
+    precision: Decimal | int | float,
+    *,
+    session: EvaluationSession | None = None,
+) -> Expr | None:
+    if not _measure_exceeds_working_precision(precision, session=session):
+        return None
+    exact = _exact_fraction(expr)
+    if exact is not None:
+        if exact.denominator == 1 and abs(exact.numerator) < 10**18:
+            return real(f"{exact.numerator}`{_format_measure(precision)}")
+        return call("SetPrecision", _fraction_expr(exact), _decimal_measure_expr(precision))
+    center = _exact_numeric_center_expr(expr)
+    if center is None:
+        return None
+    return call("SetPrecision", center, _decimal_measure_expr(precision))
+
+
+def _compact_accuracy_expr(
+    expr: Expr,
+    accuracy: Decimal | int | float,
+    *,
+    session: EvaluationSession | None = None,
+) -> Expr | None:
+    if not _measure_exceeds_working_precision(accuracy, session=session):
+        return None
+    exact = _exact_fraction(expr)
+    if exact is not None:
+        return call("SetAccuracy", _fraction_expr(exact), _decimal_measure_expr(accuracy))
+    center = _exact_numeric_center_expr(expr)
+    if center is None:
+        return None
+    return call("SetAccuracy", center, _decimal_measure_expr(accuracy))
+
+
+def _exact_numeric_center_expr(expr: Expr) -> Expr | None:
+    if _contains_inexact(expr):
+        return None
+    try:
+        center = _decimal_for_expr(expr, DEFAULT_PRECISION + 8)
+    except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
+        return None
+    if center is None or not center.is_finite():
+        return None
+    return expr
+
+
+def _sum_exact_centers(intervals: list[DecimalInterval]) -> Fraction | None:
+    total = Fraction(0)
+    for interval in intervals:
+        if interval.exact_center is None:
+            return None
+        total += interval.exact_center
+    return total
+
+
+def _center_expr_for_interval(interval: DecimalInterval) -> Expr | None:
+    if interval.compact_center is not None:
+        return interval.compact_center
+    if interval.exact_center is not None:
+        return _fraction_expr(interval.exact_center)
+    return None
+
+
+def _sum_compact_centers(intervals: list[DecimalInterval]) -> Expr | None:
+    exact_total = Fraction(0)
+    terms: list[Expr] = []
+    for interval in intervals:
+        if interval.exact_center is not None:
+            exact_total += interval.exact_center
+            continue
+        center = _center_expr_for_interval(interval)
+        if center is None:
+            return None
+        terms.append(center)
+    if exact_total:
+        terms.append(_fraction_expr(exact_total))
+    return _one_identity("Plus", terms, integer(0))
+
+
+def _product_exact_centers(intervals: list[DecimalInterval]) -> Fraction | None:
+    product = Fraction(1)
+    for interval in intervals:
+        if interval.exact_center is None:
+            return None
+        product *= interval.exact_center
+    return product
+
+
+def _product_compact_centers(intervals: list[DecimalInterval]) -> Expr | None:
+    exact_product = Fraction(1)
+    factors: list[Expr] = []
+    for interval in intervals:
+        if interval.exact_center is not None:
+            exact_product *= interval.exact_center
+            continue
+        center = _center_expr_for_interval(interval)
+        if center is None:
+            return None
+        factors.append(center)
+    if exact_product == 0:
+        return integer(0)
+    if exact_product != 1 or not factors:
+        factors.insert(0, _fraction_expr(exact_product))
+    return _one_identity("Times", factors, integer(1))
+
+
+def _divide_compact_centers(numerator: DecimalInterval, denominator: DecimalInterval) -> Expr | None:
+    numerator_center = _center_expr_for_interval(numerator)
+    denominator_center = _center_expr_for_interval(denominator)
+    if numerator_center is None or denominator_center is None:
+        return None
+    if numerator.exact_center == 0:
+        return integer(0)
+    if denominator.exact_center == 1:
+        return numerator_center
+    if numerator.exact_center is not None and denominator.exact_center is not None:
+        return _fraction_expr(numerator.exact_center / denominator.exact_center)
+    return call("Times", numerator_center, call("Power", denominator_center, integer(-1)))
+
+
+def _decimal_product(values) -> Decimal:
+    result = Decimal(1)
+    for value in values:
+        result *= value
+    return +result
+
+
+def _accuracy_sum(accuracies: list[Decimal]) -> Decimal:
+    if any(accuracy == Decimal("-Infinity") for accuracy in accuracies):
+        return Decimal("-Infinity")
+    finite = [accuracy for accuracy in accuracies if accuracy != Decimal("Infinity")]
+    if not finite:
+        return Decimal("Infinity")
+    base = min(finite)
+    with localcontext() as context:
+        context.prec = 50
+        total = Decimal(0)
+        for accuracy in finite:
+            delta = accuracy - base
+            if delta > MAX_WORKING_PRECISION:
+                continue
+            total += Decimal(10) ** (-delta)
+        return +(base - _decimal_log10_abs(total))
+
+
+def _multiplication_accuracy(intervals: list[DecimalInterval]) -> Decimal:
+    terms: list[Decimal] = []
+    for index, interval in enumerate(intervals):
+        if interval.accuracy == Decimal("Infinity"):
+            continue
+        others_log_abs = Decimal(0)
+        for other_index, other in enumerate(intervals):
+            if other_index != index:
+                if other.center.is_zero():
+                    others_log_abs = Decimal("-Infinity")
+                    break
+                others_log_abs += _decimal_log10_abs(other.center)
+        terms.append(interval.accuracy - others_log_abs)
+    finite_uncertain = [interval.accuracy for interval in intervals if interval.accuracy != Decimal("Infinity")]
+    if len(finite_uncertain) >= 2:
+        terms.append(sum(finite_uncertain, Decimal(0)))
+    return _accuracy_sum(terms)
+
+
+def _division_accuracy(numerator: DecimalInterval, denominator: DecimalInterval) -> Decimal:
+    terms: list[Decimal] = []
+    denominator_log_abs = _decimal_log10_abs(denominator.center)
+    if numerator.accuracy != Decimal("Infinity"):
+        terms.append(numerator.accuracy + denominator_log_abs)
+    if denominator.accuracy != Decimal("Infinity"):
+        numerator_log_abs = Decimal("-Infinity") if numerator.center.is_zero() else _decimal_log10_abs(numerator.center)
+        terms.append(denominator.accuracy - numerator_log_abs + denominator_log_abs * 2)
+    if numerator.accuracy != Decimal("Infinity") and denominator.accuracy != Decimal("Infinity"):
+        terms.append(numerator.accuracy + denominator.accuracy + denominator_log_abs)
+    return _accuracy_sum(terms)
+
+
+def _zero_excluded(center: Decimal, accuracy: Decimal) -> bool:
+    if center.is_zero():
+        return False
+    if accuracy == Decimal("Infinity"):
+        return True
+    if accuracy == Decimal("-Infinity"):
+        return False
+    return accuracy > -_decimal_log10_abs(center)
+
+
+def _interval_plus(
+    args: tuple[Expr, ...] | list[Expr],
+    *,
+    session: EvaluationSession | None = None,
+) -> Expr | None:
     intervals = [_interval_for_expr(argument) for argument in args]
     if any(interval is None for interval in intervals):
         return None
     assert all(interval is not None for interval in intervals)
     working_precision = _interval_working_precision(intervals)
     try:
+        exact_center = _sum_exact_centers(intervals)
+        compact_center = _sum_compact_centers(intervals)
         with localcontext() as context:
             _configure_decimal_context(context, working_precision, *(interval.center for interval in intervals))
-            center = +sum((interval.center for interval in intervals), Decimal(0))
-            radius = sum((interval.radius for interval in intervals), Decimal(0))
-            radius += _decimal_rounding_radius(center, working_precision)
-        return _decimal_real_with_accuracy(center, _accuracy_from_radius(radius))
+            center = _decimal_for_fraction(exact_center, working_precision) if exact_center is not None else +sum((interval.center for interval in intervals), Decimal(0))
+        accuracy = _accuracy_sum([interval.accuracy for interval in intervals])
+        return _interval_to_expr(DecimalInterval(center, accuracy, exact_center, compact_center), session=session)
     except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
         return None
 
 
-def _interval_times(args: tuple[Expr, ...] | list[Expr]) -> Expr | None:
+def _interval_times(
+    args: tuple[Expr, ...] | list[Expr],
+    *,
+    session: EvaluationSession | None = None,
+) -> Expr | None:
     intervals = [_interval_for_expr(argument) for argument in args]
     if any(interval is None for interval in intervals):
         return None
     assert all(interval is not None for interval in intervals)
     working_precision = _interval_working_precision(intervals)
     try:
+        exact_center = _product_exact_centers(intervals)
+        compact_center = _product_compact_centers(intervals)
         with localcontext() as context:
             _configure_decimal_context(context, working_precision, *(interval.center for interval in intervals))
-            center = Decimal(1)
-            radius = Decimal(0)
-            for interval in intervals:
-                next_center = +(center * interval.center)
-                next_radius = (
-                    abs(center) * interval.radius
-                    + abs(interval.center) * radius
-                    + radius * interval.radius
-                )
-                center = next_center
-                radius = +next_radius
-            radius += _decimal_rounding_radius(center, working_precision)
-        return _decimal_real_with_accuracy(center, _accuracy_from_radius(radius))
+            center = _decimal_for_fraction(exact_center, working_precision) if exact_center is not None else _decimal_product(interval.center for interval in intervals)
+        accuracy = _multiplication_accuracy(intervals)
+        return _interval_to_expr(DecimalInterval(center, accuracy, exact_center, compact_center), session=session)
     except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
         return None
 
@@ -2025,22 +2343,19 @@ def _interval_divide(left: Expr, right: Expr, *, session: EvaluationSession | No
     denominator = _interval_for_expr(right)
     if numerator is None or denominator is None:
         return None
-    if denominator.radius >= abs(denominator.center):
+    if not _zero_excluded(denominator.center, denominator.accuracy):
         return _undefined(session, "Division by zero.")
     working_precision = _interval_working_precision([numerator, denominator])
     try:
+        exact_center = None
+        if numerator.exact_center is not None and denominator.exact_center not in {None, Fraction(0)}:
+            exact_center = numerator.exact_center / denominator.exact_center
+        compact_center = _divide_compact_centers(numerator, denominator)
         with localcontext() as context:
             _configure_decimal_context(context, working_precision, numerator.center, denominator.center)
-            center = +(numerator.center / denominator.center)
-            denom_gap = abs(denominator.center) - denominator.radius
-            reciprocal_radius = denominator.radius / (abs(denominator.center) * denom_gap)
-            radius = (
-                abs(numerator.center) * reciprocal_radius
-                + abs(Decimal(1) / denominator.center) * numerator.radius
-                + numerator.radius * reciprocal_radius
-            )
-            radius = +radius + _decimal_rounding_radius(center, working_precision)
-        return _decimal_real_with_accuracy(center, _accuracy_from_radius(radius))
+            center = _decimal_for_fraction(exact_center, working_precision) if exact_center is not None else +(numerator.center / denominator.center)
+        accuracy = _division_accuracy(numerator, denominator)
+        return _interval_to_expr(DecimalInterval(center, accuracy, exact_center, compact_center), session=session)
     except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
         return None
 
@@ -2055,18 +2370,23 @@ def _interval_power(base: Expr, exponent: Expr, *, session: EvaluationSession | 
     if base_interval.center == 0 and exponent_interval.center < 0:
         return _undefined(session, "Zero cannot be raised to a negative power.")
 
+    base_radius = _materialized_radius(base_interval.accuracy)
+    exponent_radius = _materialized_radius(exponent_interval.accuracy)
+    if base_radius is None or exponent_radius is None:
+        return None
+
     exponent_exact = _exact_fraction(exponent)
     if exponent_exact is not None and exponent_exact.denominator == 1:
-        if exponent_exact.numerator < 0 and base_interval.radius >= abs(base_interval.center):
+        if exponent_exact.numerator < 0 and not _zero_excluded(base_interval.center, base_interval.accuracy):
             return _undefined(session, "Zero cannot be raised to a negative power.")
-        return _interval_integer_power(base_interval, exponent_exact.numerator)
+        return _interval_integer_power(base_interval, exponent_exact.numerator, base_radius)
     exponent_integral = exponent_interval.center.to_integral_value()
-    if exponent_interval.radius == 0 and exponent_interval.center == exponent_integral:
-        if exponent_integral < 0 and base_interval.radius >= abs(base_interval.center):
+    if exponent_interval.accuracy == Decimal("Infinity") and exponent_interval.center == exponent_integral:
+        if exponent_integral < 0 and not _zero_excluded(base_interval.center, base_interval.accuracy):
             return _undefined(session, "Zero cannot be raised to a negative power.")
-        return _interval_integer_power(base_interval, int(exponent_integral))
+        return _interval_integer_power(base_interval, int(exponent_integral), base_radius)
 
-    if base_interval.radius >= base_interval.center:
+    if not _zero_excluded(base_interval.center, base_interval.accuracy):
         return _undefined(session, "Negative numbers cannot be raised to non-integer powers.")
 
     working_precision = _interval_working_precision([base_interval, exponent_interval])
@@ -2074,13 +2394,13 @@ def _interval_power(base: Expr, exponent: Expr, *, session: EvaluationSession | 
         with localcontext() as context:
             _configure_decimal_context(context, working_precision, base_interval.center, exponent_interval.center)
             center = +_decimal_power([base_interval.center, exponent_interval.center])
-            base_gap = base_interval.center - base_interval.radius
+            base_gap = base_interval.center - base_radius
             log_center = base_interval.center.ln()
-            log_radius = _log_radius_for_positive_interval(base_interval.center, base_interval.radius)
+            log_radius = _log_radius_for_positive_interval(base_interval.center, base_radius)
             power_radius = abs(center) * (
-                abs(exponent_interval.center) * base_interval.radius / base_gap
-                + abs(log_center) * exponent_interval.radius
-                + exponent_interval.radius * log_radius
+                abs(exponent_interval.center) * base_radius / base_gap
+                + abs(log_center) * exponent_radius
+                + exponent_radius * log_radius
             )
             radius = +power_radius + _decimal_rounding_radius(center, working_precision)
         return _decimal_real_with_accuracy(center, _accuracy_from_radius(radius))
@@ -2092,13 +2412,16 @@ def _interval_exp(expr: Expr) -> Expr | None:
     interval = _interval_for_expr(expr)
     if interval is None:
         return None
+    radius_value = _materialized_radius(interval.accuracy)
+    if radius_value is None:
+        return None
     working_precision = _interval_working_precision([interval])
     try:
         with localcontext() as context:
-            _configure_decimal_context(context, working_precision, interval.center, interval.radius)
+            _configure_decimal_context(context, working_precision, interval.center, radius_value)
             center = +interval.center.exp()
-            upper = (interval.center + interval.radius).exp()
-            lower = (interval.center - interval.radius).exp()
+            upper = (interval.center + radius_value).exp()
+            lower = (interval.center - radius_value).exp()
             radius = max(abs(upper - center), abs(center - lower))
             radius = +radius + _decimal_rounding_radius(center, working_precision)
         return _decimal_real_with_accuracy(center, _accuracy_from_radius(radius))
@@ -2108,15 +2431,18 @@ def _interval_exp(expr: Expr) -> Expr | None:
 
 def _interval_log(expr: Expr) -> Expr | None:
     interval = _interval_for_expr(expr)
-    if interval is None or interval.center <= 0 or interval.radius >= interval.center:
+    if interval is None or interval.center <= 0 or not _zero_excluded(interval.center, interval.accuracy):
+        return None
+    radius_value = _materialized_radius(interval.accuracy)
+    if radius_value is None:
         return None
     working_precision = _interval_working_precision([interval])
     try:
         with localcontext() as context:
-            _configure_decimal_context(context, working_precision, interval.center, interval.radius)
+            _configure_decimal_context(context, working_precision, interval.center, radius_value)
             center = +interval.center.ln()
-            upper = (interval.center + interval.radius).ln()
-            lower = (interval.center - interval.radius).ln()
+            upper = (interval.center + radius_value).ln()
+            lower = (interval.center - radius_value).ln()
             radius = max(abs(upper - center), abs(center - lower))
             radius = +radius + _decimal_rounding_radius(center, working_precision)
         return _decimal_real_with_accuracy(center, _accuracy_from_radius(radius))
@@ -2124,7 +2450,7 @@ def _interval_log(expr: Expr) -> Expr | None:
         return None
 
 
-def _interval_integer_power(base: DecimalInterval, exponent: int) -> Expr | None:
+def _interval_integer_power(base: DecimalInterval, exponent: int, base_radius: Decimal) -> Expr | None:
     working_precision = _interval_working_precision([base])
     try:
         with localcontext() as context:
@@ -2133,16 +2459,16 @@ def _interval_integer_power(base: DecimalInterval, exponent: int) -> Expr | None
             if exponent == 0:
                 radius = Decimal(0)
             elif exponent > 0:
-                high = abs(base.center) + base.radius
+                high = abs(base.center) + base_radius
                 radius = (high ** exponent) - abs(center)
                 if radius < 0:
                     radius = -radius
             else:
-                if base.radius >= abs(base.center):
+                if base_radius >= abs(base.center):
                     return None
                 positive_power = -exponent
-                low = abs(base.center) - base.radius
-                high = abs(base.center) + base.radius
+                low = abs(base.center) - base_radius
+                high = abs(base.center) + base_radius
                 reciprocal_span = (low ** -positive_power) - (high ** -positive_power)
                 radius = abs(reciprocal_span)
             radius = +radius + _decimal_rounding_radius(center, working_precision)
@@ -2181,6 +2507,13 @@ def _decimal_for_expr(expr: Expr, precision: int) -> Decimal | None:
         if expr.name == "Infinity":
             return None
     if isinstance(expr, Call):
+        certified = _certified_interval_for_expr(expr)
+        if certified is not None:
+            if certified.exact_center is not None:
+                return _decimal_for_fraction(certified.exact_center, precision)
+            with localcontext() as context:
+                context.prec = max(precision, 1)
+                return +certified.center
         if expr.has_head("Times"):
             values = [_decimal_for_expr(argument, precision) for argument in expr.args]
             if any(value is None for value in values):
@@ -2205,7 +2538,19 @@ def _decimal_for_expr(expr: Expr, precision: int) -> Decimal | None:
                 return None
             with localcontext() as context:
                 context.prec = max(precision, 1)
-                return +_decimal_power([value for value in values if value is not None])
+                try:
+                    return +_decimal_power([value for value in values if value is not None])
+                except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
+                    return None
+        if expr.has_head("Sqrt") and len(expr.args) == 1:
+            value = _decimal_for_expr(expr.args[0], precision)
+            if value is not None:
+                with localcontext() as context:
+                    context.prec = max(precision, 1)
+                    try:
+                        return +_decimal_power([value, Decimal("0.5")])
+                    except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
+                        return None
         if expr.has_head("Exp") and len(expr.args) == 1:
             value = _decimal_for_expr(expr.args[0], precision)
             if value is not None:
@@ -2235,7 +2580,7 @@ def _evaluate_real(expr: Real, session: EvaluationSession | None) -> Real:
     match = _REAL_RE.match(expr.text)
     if match is None or match.group("mark"):
         return expr
-    precision = _literal_precision(match.group("mantissa"), _current_precision(session))
+    precision = _literal_precision(match.group("mantissa"), _current_precision_measure(session))
     return real(f"{match.group('mantissa')}`{_format_measure(precision)}{match.group('magnitude') or ''}")
 
 
@@ -2320,10 +2665,11 @@ def _format_measure(value: Decimal | int | float) -> str:
         return "Infinity" if measure > 0 else "-Infinity"
     if measure.is_zero():
         return "0"
-    with localcontext() as context:
-        context.prec = 18
-        measure = +measure
-    text = format(measure.normalize(), "f")
+    if measure != measure.to_integral_value():
+        with localcontext() as context:
+            context.prec = 18
+            measure = +measure
+    text = format(measure, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
@@ -2339,14 +2685,40 @@ def _display_measure(value: Decimal | int | float) -> Decimal:
     return measure
 
 
-def _context_precision_from_measure(measure: Decimal | int | float | None) -> int:
+def _bounded_int(value: Decimal | int | float, *, cap: int = MAX_WORKING_PRECISION) -> int:
+    measure = _measure_decimal(value)
+    if not measure.is_finite():
+        return cap
+    if measure <= 0:
+        return 0
+    ceiling = measure.to_integral_value(rounding=ROUND_CEILING)
+    if ceiling > cap:
+        return cap
+    return int(ceiling)
+
+
+def _context_precision_from_measure(
+    measure: Decimal | int | float | None,
+    *,
+    session: EvaluationSession | None = None,
+    cap: int | None = None,
+) -> int:
     if measure is None:
         return DEFAULT_PRECISION
     value = _measure_decimal(measure)
     if not value.is_finite() or value <= 0:
         return 1
-    ceiling = value.to_integral_value(rounding=ROUND_CEILING)
-    return max(1, int(ceiling))
+    limit = cap if cap is not None else _current_max_displayed_digits(session)
+    return max(1, _bounded_int(value, cap=limit))
+
+
+def _measure_exceeds_working_precision(
+    measure: Decimal | int | float,
+    *,
+    session: EvaluationSession | None = None,
+) -> bool:
+    value = _measure_decimal(measure)
+    return value.is_finite() and value > Decimal(_current_max_displayed_digits(session))
 
 
 def _configure_decimal_context(context, precision: int, *values: Decimal) -> None:
@@ -2365,6 +2737,19 @@ def _decimal_for_fraction(value: Fraction, precision: int) -> Decimal:
         return Decimal(value.numerator) / Decimal(value.denominator)
 
 
+def _small_exact_fraction_from_decimal(value: Decimal) -> Fraction | None:
+    if not value.is_finite():
+        return None
+    if value.is_zero():
+        return Fraction(0)
+    if abs(value.adjusted()) > MAX_COMPACT_DECIMAL_PRECISION:
+        return None
+    digits = len(value.as_tuple().digits)
+    if digits > MAX_COMPACT_DECIMAL_PRECISION:
+        return None
+    return Fraction(value)
+
+
 def _working_precision_for_exact_fraction(value: Fraction) -> int:
     return max(
         DEFAULT_PRECISION,
@@ -2373,16 +2758,19 @@ def _working_precision_for_exact_fraction(value: Fraction) -> int:
     )
 
 
-def _radius_from_accuracy(accuracy: Decimal | int | float) -> Decimal:
+def _materialized_radius(accuracy: Decimal | int | float) -> Decimal | None:
     accuracy_measure = _measure_decimal(accuracy)
     if accuracy_measure == Decimal("Infinity"):
         return Decimal(0)
     if accuracy_measure == Decimal("-Infinity"):
         return Decimal("Infinity")
+    if abs(accuracy_measure) > MAX_WORKING_PRECISION:
+        return None
     with localcontext() as context:
         context.prec = _guarded_precision(max(DEFAULT_PRECISION, _context_precision_from_measure(abs(accuracy_measure)) + 4))
-        context.Emax = max(context.Emax, abs(int(accuracy_measure.to_integral_value(rounding=ROUND_CEILING))) + 100)
-        context.Emin = min(context.Emin, -abs(int(accuracy_measure.to_integral_value(rounding=ROUND_FLOOR))) - 100)
+        exponent_bound = _bounded_int(abs(accuracy_measure), cap=MAX_WORKING_PRECISION) + 100
+        context.Emax = max(context.Emax, exponent_bound)
+        context.Emin = min(context.Emin, -exponent_bound)
         return +(Decimal(10) ** (-accuracy_measure))
 
 
@@ -2404,6 +2792,19 @@ def _accuracy_from_precision(center: Decimal, precision: Decimal | int | float) 
     if center.is_zero():
         return precision_measure
     return precision_measure - _decimal_log10_abs(center)
+
+
+def _accuracy_from_precision_fraction(center: Fraction, precision: Decimal | int | float) -> Decimal:
+    precision_measure = _measure_decimal(precision)
+    if center == 0:
+        return precision_measure
+    return precision_measure - _decimal_log10_abs_fraction(center)
+
+
+def _decimal_log10_abs_fraction(value: Fraction) -> Decimal:
+    if value == 0:
+        return Decimal("-Infinity")
+    return _decimal_log10_abs(_decimal_for_fraction(abs(value), DEFAULT_PRECISION + 50))
 
 
 def _decimal_rounding_radius(value: Decimal, precision: int) -> Decimal:
@@ -2498,8 +2899,8 @@ def _decimal_literal_value(mantissa: str, exponent: int) -> Decimal:
         return +(Decimal(mantissa) * (Decimal(10) ** exponent))
 
 
-def _literal_precision(mantissa: str, floor: int) -> Decimal:
-    return Decimal(max(floor, _literal_digit_count(mantissa)))
+def _literal_precision(mantissa: str, floor: Decimal | int) -> Decimal:
+    return max(_measure_decimal(floor), Decimal(_literal_digit_count(mantissa)))
 
 
 def _literal_digit_count(mantissa: str) -> int:
@@ -2523,6 +2924,8 @@ def _combined_precision(args: tuple[Expr, ...] | list[Expr]) -> int | None:
 def _contains_inexact(expr: Expr) -> bool:
     if isinstance(expr, Real):
         return True
+    if _certified_interval_for_expr(expr) is not None:
+        return True
     if isinstance(expr, Call):
         return any(_contains_inexact(argument) for argument in expr.args)
     return False
@@ -2532,16 +2935,17 @@ def _all_approximable(args: tuple[Expr, ...] | list[Expr]) -> bool:
     return all(_decimal_for_expr(argument, DEFAULT_PRECISION) is not None for argument in args)
 
 
-def _precision_argument(expr: Expr) -> int | None | float:
+def _precision_argument(expr: Expr) -> Decimal | None | float:
     exact = _exact_fraction(expr)
     if exact is not None:
-        return max(1, int(exact))
+        value = Decimal(exact.numerator) if exact.denominator == 1 else Decimal(int(exact))
+        return max(Decimal(1), value)
     if isinstance(expr, Real):
         info = _real_info(expr)
-        return max(1, int(info.value)) if info is not None else None
+        return max(Decimal(1), info.value) if info is not None else None
     if isinstance(expr, Symbol):
         if expr.name == "MachinePrecision":
-            return DEFAULT_PRECISION
+            return Decimal(DEFAULT_PRECISION)
         if expr.name == "Infinity":
             return math.inf
     return None
@@ -2598,7 +3002,7 @@ def _exact_from_decimal(expr: Expr) -> Expr | None:
 
 
 def _is_numeric_atom(expr: Expr) -> bool:
-    return isinstance(expr, (Integer, Rational, Real)) or _scale_parts(expr) is not None
+    return isinstance(expr, (Integer, Rational, Real)) or _scale_parts(expr) is not None or _certified_interval_for_expr(expr) is not None
 
 
 def _is_zero(expr: Expr) -> bool:
@@ -2608,6 +3012,9 @@ def _is_zero(expr: Expr) -> bool:
     scale = _scale_parts(expr)
     if scale is not None:
         return _is_zero(scale.mantissa)
+    certified = _certified_interval_for_expr(expr)
+    if certified is not None:
+        return certified.center == 0
     info = _real_info_for_expr(expr)
     return info is not None and info.value == 0
 
@@ -2619,6 +3026,9 @@ def _is_one(expr: Expr) -> bool:
     scale = _scale_parts(expr)
     if scale is not None:
         return _is_one(scale.mantissa) and _is_zero(scale.exponent)
+    certified = _certified_interval_for_expr(expr)
+    if certified is not None:
+        return certified.center == 1
     info = _real_info_for_expr(expr)
     return info is not None and info.value == 1
 
@@ -2654,6 +3064,9 @@ def _numeric_sign(expr: Expr) -> int | None:
     scale = _scale_parts(expr)
     if scale is not None:
         return _numeric_sign(scale.mantissa)
+    certified = _certified_interval_for_expr(expr)
+    if certified is not None:
+        return (certified.center > 0) - (certified.center < 0)
     info = _real_info_for_expr(expr)
     if info is not None:
         return (info.value > 0) - (info.value < 0)
@@ -2695,16 +3108,20 @@ def _bool(value: bool) -> Symbol:
     return _TRUE if value else _FALSE
 
 
-def _current_precision(session: EvaluationSession | None) -> int:
+def _current_precision_measure(session: EvaluationSession | None) -> Decimal:
     if session is not None and session.precision_override is not None:
-        return max(1, int(session.precision_override))
+        return max(Decimal(1), session.precision_override)
     value: Expr | None = None
     if session is not None and session.symbols is not None:
         value = session.symbols.get("$Precision")
-    precision = _precision_argument(value) if value is not None else DEFAULT_PRECISION
+    precision = _precision_argument(value) if value is not None else Decimal(DEFAULT_PRECISION)
     if precision is None or precision == math.inf:
-        return DEFAULT_PRECISION
-    return max(1, int(precision))
+        return Decimal(DEFAULT_PRECISION)
+    return max(Decimal(1), _measure_decimal(precision))
+
+
+def _current_precision(session: EvaluationSession | None) -> int:
+    return _context_precision_from_measure(_current_precision_measure(session), session=session)
 
 
 def _current_max_direct_decimal_exponent(session: EvaluationSession | None) -> int:
@@ -2714,7 +3131,17 @@ def _current_max_direct_decimal_exponent(session: EvaluationSession | None) -> i
     limit = _precision_argument(value) if value is not None else MAX_DIRECT_DECIMAL_EXPONENT
     if limit is None or limit == math.inf:
         return MAX_DIRECT_DECIMAL_EXPONENT
-    return max(0, int(limit))
+    return max(0, _bounded_int(_measure_decimal(limit), cap=10_000_000))
+
+
+def _current_max_displayed_digits(session: EvaluationSession | None) -> int:
+    value: Expr | None = None
+    if session is not None and session.symbols is not None:
+        value = session.symbols.get("$MaxDisplayedDigits")
+    limit = _precision_argument(value) if value is not None else Decimal(MAX_COMPACT_DECIMAL_PRECISION)
+    if limit is None or limit == math.inf:
+        return MAX_COMPACT_DECIMAL_PRECISION
+    return max(1, _bounded_int(_measure_decimal(limit), cap=MAX_WORKING_PRECISION))
 
 
 def _reported_precision(precision: Decimal | int | float | None) -> int:
