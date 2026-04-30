@@ -17,6 +17,7 @@ theory corpus and prototype/reference libraries.
 | [Nummy Alpha/Beta/Gamma Unified Comparison](alpha-beta-gamma-unified-comparison.md) | Current deduplicated comparison of the three implementation experiments, including claim triage, prior-art/theory alignment, and synthesis recommendation. |
 | [Tungie Language And REPL Proposal](tungie-language-and-repl-proposal__e9b88699e6fe.md) | Current proposal for replacing the three prototype calculator REPLs with one lightweight, Tungsten-inspired, dependency-light Nummy interpreter. |
 | [Tungie Interval Precision Specification](tungie-interval-precision-spec.md) | Implementation-level contract for Tungie's current center-plus-radius interval precision model, including fractional and negative precision behavior. |
+| [Base-10 Level-Interval Arithmetic Proposal](base10-level-interval-arithmetic-proposal.md) | Proposal for a standalone interval arithmetic system with exact base-10 level endpoints, rational coordinate budgets, and outward-rounded arithmetic/power semantics. |
 
 ## Topical Subdirectories
 
