@@ -35,6 +35,20 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parse("1.2*^^^3").to_input_form(), "1.2*^^^3")
 
+    def test_scale_literal_binds_tighter_than_power(self) -> None:
+        self.assertEqual(
+            parse("1`100*^^2 ^ 1`100*^^2").to_full_form(),
+            parse("(1`100*^^2) ^ (1`100*^^2)").to_full_form(),
+        )
+        self.assertEqual(
+            parse("1*^^2^3").to_full_form(),
+            "Power[ScientificScale[1, Pow10Tower[1, 2]], 3]",
+        )
+        self.assertEqual(
+            parse("2^1*^^2").to_full_form(),
+            "Power[2, ScientificScale[1, Pow10Tower[1, 2]]]",
+        )
+
     def test_rejects_deliberately_excluded_syntax(self) -> None:
         rejected = [
             '"x"',
@@ -366,6 +380,10 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(eval_text("1^x"), "1")
 
     def test_negative_precision_scale_power(self) -> None:
+        self.assertEqual(
+            eval_text("1`100*^^2 ^ 1`100*^^2"),
+            eval_text("(1`100*^^2) ^ (1`100*^^2)"),
+        )
         result = evaluate(parse("(1.*^^2)^(1.*^^2)"))
         self.assertEqual(result.to_input_form(), "1`-100.362215688699468*^^102")
         self.assertEqual(

@@ -167,6 +167,11 @@ and avoids accidental giant integer display or storage. Inexact mantissas still
 evaluate directly when the scale coordinate is within the direct Decimal
 threshold, so `1.1*^^2` becomes ordinary scientific notation.
 
+Scale literal notation binds as a numeric atom before ordinary power. Thus
+``1`100*^^2 ^ 1`100*^^2`` is parsed as
+``(1`100*^^2) ^ (1`100*^^2)``, not as a scale value whose top coordinate is
+itself a power expression.
+
 Direct scale evaluation shifts accuracy by the base-10 exponent. For finite
 direct scientific notation, multiplying by `10^e` changes absolute accuracy by
 `-e` while preserving the represented value-space precision when appropriate.

@@ -50,6 +50,7 @@ _INFIX_HEADS = {
 _COMPARISON_HEADS = {"Equal", "Unequal", "Less", "LessEqual", "Greater", "GreaterEqual"}
 _COMPARISON_OPERATORS = {"==", "!=", "<", "<=", ">", ">="}
 _SCALE_BINDING_POWER = 80
+_SCALE_RIGHT_BINDING_POWER = _SCALE_BINDING_POWER + 1
 
 
 def parse(source: str) -> Expr:
@@ -123,7 +124,7 @@ class Parser:
                 self._consume()
                 if _scale_rejects_negative_argument(operator) and self._text() == "-":
                     raise TungieSyntaxError(f"Negative exponents after {operator} are not supported.")
-                right = self._parse_expression(_SCALE_BINDING_POWER, terminators)
+                right = self._parse_expression(_SCALE_RIGHT_BINDING_POWER, terminators)
                 left = _make_scale(operator, left, right)
                 continue
 
