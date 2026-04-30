@@ -1241,7 +1241,7 @@ def _try_inexact_scale_power(
     *,
     session: EvaluationSession | None,
 ) -> Expr | None:
-    if not _contains_inexact(exponent):
+    if not (_contains_inexact(scale_base.mantissa) or _contains_inexact(exponent)):
         return None
     base_log = _scale_log10_interval(scale_base)
     exponent_interval = _interval_for_expr(exponent)
@@ -1250,23 +1250,23 @@ def _try_inexact_scale_power(
     if exponent_interval.center <= 0:
         return None
     working_precision = _guarded_precision(
-        max(_context_precision_from_measure(base_log.precision), _context_precision_from_measure(exponent_interval.precision))
+        max(
+            50,
+            _context_precision_from_measure(base_log.precision),
+            _context_precision_from_measure(exponent_interval.precision),
+        )
     )
     try:
         with localcontext() as context:
             _configure_decimal_context(context, working_precision, base_log.center, exponent_interval.center)
             log_center = +(base_log.center * exponent_interval.center)
-            base_log_radius = _materialized_radius(base_log.accuracy)
-            exponent_radius = _materialized_radius(exponent_interval.accuracy)
-            if base_log_radius is None or exponent_radius is None:
-                return None
-            log_radius = (
-                abs(base_log.center) * exponent_radius
-                + abs(exponent_interval.center) * base_log_radius
-                + base_log_radius * exponent_radius
-            )
-            log_radius = +log_radius + _decimal_rounding_radius(log_center, working_precision)
-        precision = _precision_from_log10_uncertainty(log_radius)
+        log_accuracy = _accuracy_sum(
+            [
+                _multiplication_accuracy([base_log, exponent_interval]),
+                _accuracy_from_radius(_decimal_rounding_radius(log_center, working_precision)),
+            ]
+        )
+        precision = _precision_from_log10_uncertainty_accuracy(log_accuracy)
         scale = _scale_from_log10_center(log_center, precision, session=session)
         return scale
     except (ArithmeticError, InvalidOperation, ValueError, OverflowError):
@@ -1286,32 +1286,51 @@ def _scale_log10_interval(parts: ScaleParts) -> DecimalInterval | None:
     info = _real_info_for_expr(parts.mantissa)
     if info is None or info.value <= 0:
         return None
-    radius = _materialized_radius(info.accuracy)
-    if radius is None or radius >= info.value:
+    log_accuracy = _log10_uncertainty_accuracy(info.value, info.accuracy)
+    if log_accuracy is None:
         return None
     center = Decimal(exponent_value) + _decimal_log10_abs(info.value)
-    return DecimalInterval(center, _log10_radius_for_positive_interval(info.value, radius))
+    return DecimalInterval(center, log_accuracy)
 
 
-def _log10_radius_for_positive_interval(center: Decimal, radius: Decimal) -> Decimal:
-    if radius == 0:
-        return Decimal(0)
-    if radius >= center:
-        raise InvalidOperation
-    with localcontext() as context:
-        _configure_decimal_context(context, 50, center, radius)
-        upper = (center + radius).ln() / _decimal_ln10(context.prec)
-        nominal = center.ln() / _decimal_ln10(context.prec)
-        lower = (center - radius).ln() / _decimal_ln10(context.prec)
-        return +max(upper - nominal, nominal - lower)
-
-
-def _precision_from_log10_uncertainty(radius: Decimal) -> Decimal:
-    if radius == 0:
+def _log10_uncertainty_accuracy(center: Decimal, accuracy: Decimal) -> Decimal | None:
+    if center <= 0 or not _zero_excluded(center, accuracy):
+        return None
+    if accuracy == Decimal("Infinity"):
         return Decimal("Infinity")
+    precision = _precision_from_accuracy(center, accuracy)
+    if precision <= 0:
+        return None
+    log_ln10 = _decimal_log10_abs(_decimal_ln10())
+    correction = _log10_relative_log_radius_correction(precision)
+    return precision + log_ln10 + correction
+
+
+def _log10_relative_log_radius_correction(precision: Decimal) -> Decimal:
+    if precision > MAX_WORKING_PRECISION:
+        return Decimal("-1e-30")
+    working_precision = _guarded_precision(max(DEFAULT_PRECISION, _context_precision_from_measure(precision) + 4))
+    exponent_bound = _bounded_int(precision, cap=MAX_WORKING_PRECISION) + 100
     with localcontext() as context:
-        _configure_decimal_context(context, 50, radius)
-        return -(_decimal_log10_abs(radius) + _decimal_log10_abs(_decimal_ln10(context.prec)))
+        context.prec = working_precision
+        context.Emax = max(context.Emax, exponent_bound)
+        context.Emin = min(context.Emin, -exponent_bound)
+        relative_radius = +(Decimal(10) ** (-precision))
+        if relative_radius <= 0 or relative_radius >= 1:
+            raise InvalidOperation
+        scaled_log_radius = +(-(Decimal(1) - relative_radius).ln() / relative_radius)
+    with localcontext() as context:
+        context.prec = 50
+        _configure_decimal_context(context, 50, scaled_log_radius)
+        return -(scaled_log_radius.ln() / _decimal_ln10(context.prec))
+
+
+def _precision_from_log10_uncertainty_accuracy(accuracy: Decimal) -> Decimal:
+    if accuracy == Decimal("Infinity"):
+        return Decimal("Infinity")
+    if accuracy == Decimal("-Infinity"):
+        return Decimal("-Infinity")
+    return accuracy - _decimal_log10_abs(_decimal_ln10())
 
 
 def _scale_from_log10_center(

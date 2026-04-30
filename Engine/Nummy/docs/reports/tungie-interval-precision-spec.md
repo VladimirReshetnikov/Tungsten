@@ -184,7 +184,8 @@ term when the separation exceeds certified precision.
 Positive scale powers with inexact exponents are evaluated in log10 space:
 
 - let `L = exponent * log10(base)`;
-- compute a nominal center and log-radius accuracy for `L`;
+- compute a nominal center and log-radius accuracy for `L` without
+  materializing the radius;
 - output `10^L` as a scale value;
 - derive the printed value-space precision from the log-coordinate uncertainty
   using a conservative logarithmic bound.
@@ -192,7 +193,7 @@ Positive scale powers with inexact exponents are evaluated in log10 space:
 The current target example is:
 
 ```text
-(1.*^^2)^(1.*^^2) -> 1`-100.362215688699468*^^102
+(1.*^^2)^(1.*^^2) -> 1`-86.364097721838251*^^102
 ```
 
 This says the nominal scale coordinate is `10^102`, while the represented

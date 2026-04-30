@@ -166,7 +166,7 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertEqual(evaluate(parse("(1.1*^^6) * (2*^^6)")).to_input_form(), "2.2`16*^2000000")
         self.assertEqual(eval_text("(1.1*^^6) / (2*^^6)"), "0.55`16")
-        self.assertEqual(eval_text("(10^1000000.)^2"), "ScientificScale[1`16, 2000000]")
+        self.assertEqual(eval_text("(10^1000000.)^2"), "ScientificScale[1.`15.6989700043360188, 2000000]")
         self.assertEqual(eval_text("2^4000000."), "ScientificScale[9.6085073`8, 1204119]")
         self.assertEqual(eval_text("10^1000000. + 1"), "ScientificScale[1`16, Pow10Tower[1, 6]]")
         self.assertEqual(
@@ -385,10 +385,18 @@ class EvaluationTests(unittest.TestCase):
             eval_text("(1`100*^^2) ^ (1`100*^^2)"),
         )
         result = evaluate(parse("(1.*^^2)^(1.*^^2)"))
-        self.assertEqual(result.to_input_form(), "1`-100.362215688699468*^^102")
+        self.assertEqual(result.to_input_form(), "1`-86.364097721838251*^^102")
         self.assertEqual(
             eval_text("Precision[(1.*^^2)^(1.*^^2)]"),
-            "-100.362215688699468",
+            "-86.364097721838251",
+        )
+        self.assertEqual(
+            evaluate(parse("1`1000*^^2 ^ 1`1000*^^2")).to_input_form(),
+            "1`897.635902278161749*^^102",
+        )
+        self.assertEqual(
+            evaluate(parse("1`1001*^^2 ^ 1`1001*^^2")).to_input_form(),
+            "1`898.635902278161749*^^102",
         )
 
     def test_session_assignment_clear_and_history(self) -> None:
