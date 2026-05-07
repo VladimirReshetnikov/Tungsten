@@ -1,0 +1,24 @@
+https://mathoverflow.net/questions/79217/how-to-calculate-1010101010-1010
+
+How to find an integer part of $10^{10^{10^{10^{10^{-10^{10}}}}}}$? It looks like it is slightly above $10^{10^{10}}$.
+
+asked Oct 27, 2011 at 0:18
+Vladimir Reshetnikov
+---
+
+I think the number in question is $10^{10^{10}}+10^{11}\ln^4(10)$ plus a tiny positive number. That is, it starts with a digit $1$, followed by $10^{10}-13$ zeros, then by the string $2811012357389$, then a decimal point, and then some garbage (which starts like $4407116278\dots$).
+
+To see this let $x:=10^{-10^{10}}$, a tiny positive number, and put $c:=\ln(10)$, an important constant. We have
+$$10^x=1+cx+O(x^2)$$
+$$10^{10^x}=10^{1+cx+O(x^2)}=10+10c^2x+O(x^2)$$
+$$10^{10^{10^x}}=10^{10+10c^2x+O(x^2)}=10^{10}+10^{11}c^3x+O(x^2)$$
+$$10^{10^{10^{10^x}}}=10^{10^{10}+10^{11}c^3x+O(x^2)}=10^{10^{10}}+10^{10^{10}}10^{11}c^4x+O(x^2),$$
+where $O(x^2)$ means something tiny all the way. 
+
+In the last expression we have $10^{10^{10}}10^{11}c^4x=10^{11}c^4$, which justifies my claim.
+
+answered Oct 27, 2011 at 1:03
+GH from MO
+
+---
+

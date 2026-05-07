@@ -1,0 +1,1493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+  <meta name="theme-color" content="#9cf">
+  <meta name="msapplication-navbutton-color" content="#9cf">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+ <meta name="GENERATOR" content="Rilybot AROS from RHTF">
+ <meta name="Author" content="Robert Munafo">
+ <meta name="format-detection" content="telephone=no">
+ <link rel="search" type="application/opensearchdescription+xml" title="mrob" href="/opensearch.xml">
+ <meta name="keywords" content="HyperCalc, JavaScript, by, Robert, P., Munafo, Kenny, TM~, Chan, online, calculator, large, numbers, exponential, tetration, level-index, cannot, overflow" />
+ <meta name="description" content="HyperCalc JavaScript, by Robert P. Munafo and Kenny TM~ Chan -- Explore a wide variety of topics from large numbers to sociology at mrob.com" />
+ <meta name="x-rhtf-glname" content="hypercalc-javascript" />
+ <link rel="shortcut icon" href="/favicon.ico" />
+ <title> HyperCalc JavaScript, by Robert P. Munafo and Kenny TM~ Chan at MROB </title>
+ <link rel="stylesheet" href="../../../style.css" />
+ <link rel="canonical" href="http://www.mrob.com/pub/comp/hypercalc/hypercalc-javascript.html">
+</head>
+
+<body >
+<div class="motd edtrl"><div class="mdbef0"></div><div class="mdbef1">mdbtxt1</div><div class="mdbef2">mdbtxt2</div><center><a href="#postmotd">Proceed to Safety</a></center></div><div class="mdspc edtrl"></div><a name="postmotd" class="edtrl"><div id="banner">
+<div id="topnav">
+<a href="../../../pub/index.html">mrob</a>
+&nbsp;&nbsp;
+<a href="../../../pub/ries/index.html">RIES</a> <a href="../../../pub/math/numbers.html">Numbers</a> <a href="../../../pub/math/largenum.html">Largenum</a> <a href="../../../pub/math/nu-sequences.html">Sequences</a> <a href="../../../pub/muency.html">Mandelbrot</a>
+&nbsp;&nbsp;
+<a href="../../../pub/comp/xmorphia/index.html">Xmorphia</a>
+</div>
+  <div id="search">
+    <form action="https://www.google.com/search" style="display: inline; float:right">
+      <label for="q">Search:</label>
+      <input name="query" type="hidden" value="site:mrob.com" />
+      <input style="font-family:Palatino" name="q" id="q" size="15" value="" />
+      <input name="btnG" type="submit" value="Go" />
+    </form>
+  </div>
+</div>
+<div style="clear:both;"></div>
+<div id="content">
+<h1>HyperCalc JavaScript, by Robert P. Munafo and Kenny TM~ Chan&nbsp;&nbsp;&nbsp;&nbsp;</h1>
+<!--
+    HyperCalc, Copyright (C) 1998-2003, 2016 Robert P. Munafo
+                   <and> (C) 2004-2005 Kenny TM~ Chan.
+    This program is free software; you can redistribute it and/or
+    modify it under the terms of the GNU General Public License as
+    published by the Free Software Foundation; either version 2 of the
+    License, or (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+    General Public License (inside the help manual) for more
+    details.
+    To recieve a copy of the GNU General Public License, write to the
+    Free Software Foundation, Inc., 59 Temple Place, Suite 330,
+    Boston, MA 02111-1307 USA
+- - -
+Kenny TM~ Chan was a student at a high school in Hong Long. He found a
+2002 version of Hypercalc (in Perl). The revision history of the Perl
+and earlier versions of Hypercalc is in: mrob.com/pub/perl/hypercalc.txt
+(skip down to "REVISION HISTORY")
+Revision history (by Kenny TM~ Chan)
+ 20041018 Started to convert HyperCalc Perl into Visual Basic.
+ 20041021 2004 Convert into JavaScript instead, since the language of
+VB does not really match that of Perl but JS. Moreover, JS has
+built-in support of Regular Expressions while VB not.
+ 20041104 HyperCalc JavaScript basically finished. Started documenta-
+tion.
+ 20041105 Now the program displays 9^9^9 as 4.2812 . . . ×
+10^369693099 instead of 10^369693099.631.... (i.e., will use scientic
+notation as much as possible.)
+ 20041107 Improved output history out-of-range detection. Handles
+1E+12345 correctly. Can use Mathematica-Style 2*ˆ6 for normal 2E6.
+5ˆˆ(5) now displays instead of 10 10^10^10^100000 10^10^10^10^10^5
+(i.e., try to collapse PT level as much as possible. The current
+routine is not perfect yet, however). Implemented input history. Fixed
+a bug that causes functions not working.
+ 20050111 Now the program outputs 10^−8 instead of 1e-8. Improved the
+input-review system that it won’t wait too long when calling several $
+repeatedly.
+ 20050116 Fixed a bug that calculates e^10^86/2 wrong (resulting a PT-0).
+Added the ? command. This is "HyperCalc JavaScript version 1.2.6"
+Revisions by Robert Munafo:
+ 20120802 From the mention at googology.wikia.com/wiki/Hypercalc, I
+discovered Hypercalc by Kenny TM~ Chan (version 1.2.6) at
+ylmass.edu.hk/~mathsclub/HyperCalc/HyperCalc.html
+ 20120804 I published version 1.2.6 on mrob.com at
+mrob.com/pub/comp/hypercalc/hypercalc-javascript.html
+ 20160608 Fix Stirling approximation and related tests in gamma()
+   "^^" still accepted in input, but use "PT" in help and in output to
+eliminate ambiguity with the more common use of "^^" for tetration, and
+for consistency with the Perl version's output
+  Add mt_trunc and use it to print mantissas to a realistic precision
+ 20160609 More fixes in makePT and makeScientific so they don't try to
+form a mantissa when the exponent of 10 is more than 12 digits. (For
+example, 17!! is now shown as 10^(5.021159048901 × 10^15) instead of
+10^5021159048900643)
+ 20190314 Fix a bug in mul() that was using 1/57 as the scale (instead of
+the proper 16)
+-->
+<style type="text/css">
+/*<![CDATA[*/
+.bluecolor { color : blue; }        /* Tags of blue font color, for infomation output */
+.redcolor  { color : red; }        /* Tags of red font color, for errors */
+.marooncolor  { color : maroon; }      /* Tags of dark red font color, for warnings */
+.graycolor { color : gray; }
+.textAreaStyle {          /* Output screen */
+  border-width: 2px;
+  border-style: inset;
+  height: 200px;
+  display: block;
+  overflow: scroll;
+  font-family: Times, serif;
+}
+.noDisplay { display: none; }        /* Hidden stuff */
+.valImg{            /* XHTML & CSS valid images */
+  border-width: 0px;
+  width: 88px;
+  height: 31px;
+}
+.sans{
+  font-family: Arial, sans-serif;
+}
+.smallcaps{
+  font-weight: bold;
+  font-variant: small-caps;
+}
+.rightalign{ text-align: right; }      /* Align to the right */
+.centeralign{ text-align: center; }      /* Align to the center */
+.olalpha{ list-style-type: lower-alpha; }
+h2{ text-align: center; }
+h3{ text-align: center; }
+/*]]>*/
+</style>
+<script type="text/javascript">
+/*<![CDATA[*/
+if (! RegExp)
+  alert("Your browser's Javascript implementation does not support Regular Expression and therefore HyperCalc cannot run properly.\nPlease update your browser.")
+var log300 = Math.log(300) * Math.LOG10E;
+var val = 1, pt = 0;
+var sqrt2pi = Math.sqrt(2 * Math.PI);
+var sqrtpi = Math.sqrt(Math.PI);
+var pi2 = Math.PI * Math.PI;
+var twopi = 2 * Math.PI;
+var delayedError = "";  // Delayed Error: Error shown after evaluation completed.
+var in_str = "";        // in_str: Input Command String.
+var imrs = new Array();        // imrs: Array of Immediate Results. (as PTVector)
+var inps = new Array("0/0");   // inps: Array of Inputs. (as String)
+var outs = new Array([0,NaN]); // outs: Array of Outputs. (as PTVector)
+var vars = new Array();        // vars: Array of Custom variables (as PTVector)
+var fns  = new Array();        // fns: Array of Custom functions (as String)
+// illchar: RegExp of Illegal characters in names of custom stuff.
+var illchar = /([\!\%\^*\(\)\-\=\+\[\{\]\}\\\.\/\ \:\#\$])/;
+/*****************************************************************************/
+// Generic functions
+function isArray(a){ return (a instanceof Array); }  // isArray: check if something is an array (PTVector)
+              // String.trim: remove spaces at both ends.
+function string_trim(){ return this.replace(/^\s+|\s+$/g, ""); }
+String.prototype.trim = string_trim;
+/*****************************************************************************/
+// Dbl / PT Shared functions
+function abs(n){
+  return isArray(n) ? [n[pt], Math.abs(n[val])] : Math.abs(n);
+}
+function sgn(n){
+  return isArray(n) ? sgn(n[val]) : ((n > 0) ? 1 : ((n < 0) ? -1 : 0));
+}
+function setsign(n, s){
+  return isArray(n) ? [n[pt], s*Math.abs(n[val])] : s*Math.abs(n);
+}
+// function exp:
+//   Exponential function
+function exp(a){
+  if (isArray(a)){        // PT function falls here
+    var x = normalize(a), l1;
+    if (isNaN(x[val]))
+      return [0, NaN];
+    else if (x[val] == Infinity)    // Handle infinities first
+      return [0, Infinity];
+    else if (x[val] == -Infinity)
+      return [0, 0];
+    else if (x[pt] == 0)
+      return (x[val] < Math.log(1e300)) ? [0, Math.exp(x[val])] : normalize([1, x[val] * Math.LOG10E]);
+    else if (x[val] < 0)      // Now handle the rest of the negative cases
+      return (x[pt] == 1 && x[val] > -2.87276069890608) ? [0, Math.exp(-pow10(-x[val]))] : [0, 0];
+    else if (x[pt] == 1){      // Now handle positive PT1
+      l1 = x[val] + log10(Math.LOG10E);
+      return (l1 < log10(300)) ? [1, Math.LOG10E * pow10(x[val])] : [2, l1];
+    } else          // X is PT2 or greater. e^X is uncomputably larger than 10^x, so we just promote to the
+      return [x[pt] + 1, x[val]];  //  next higher PT with the same val.
+  } else            // Double
+    return Math.exp(a);
+}
+// function neg:
+//   Negation
+function neg(a){ return (isArray(a)) ? [a[pt], -a[val]] : -a; }
+// function div:
+//   Division
+function div(a,b){
+  if (isArray(a) && isArray(b)){      // PT function falls here
+    var n = normalize(a), d = normalize(b), s = 1, p1;
+    if (isNaN(n[val]) || isNaN(d[val]))
+      return [0, NaN];
+    if (d[val] == 0)      // Handle divide by zero case first, it's easy.
+      return [0, n[val] * Infinity];  //  0 * Infinity = NaN in JS.
+    if (n[val] < 0){
+      s = -1;
+      n[val] = -n[val];
+    }
+    if (d[val] < 0){
+      s = -s;
+      d[val] = -d[val];
+    }
+    if (isEqual(n, d))
+      return (n[val] != Infinity) ? [0, s] : [0, NaN];
+    else if (n[val] == Infinity)    // Deal with infinities
+      return [0, s * Infinity];
+    else if (n[pt] == 0 && d[pt] == 0){  // Simple case: both are plain numbers. Divide and check for promote.
+      p1 = n[val] / d[val];
+      if (p1 >= 1e300)    // Overflowed range of pt0: promote to pt1
+        return [1, s * (log10(n[val]) - log10(d[val]))];
+      else
+        return [0, s * p1];
+    } else if (n[pt] == 1 && d[pt] == 0)  // Dividing a PT1 by a PT0.
+      return normalize([1, n[val] - log10(d[val])]);
+    else if (n[pt] == 1 && d[pt] == 1)  // Both arguments are PT1. Subtract the logs and check for demote.
+      return normalize([1, s*(n[val] - d[val])]);
+    else if (isLessThan(n, d))    // In all the other cases, if the arguments are of dirrerent PT types the answer is simple.
+      return [0, 0];
+    else          // In these cases the answer is the numerator.
+      return setsign(n, s);
+  } else if (isArray(a) && !isArray(b))    // PT / Double
+    return div(a, [0, b]);
+  else if (!isArray(a) && isArray(b))    // Double / PT
+    return div([0, a], b);
+  else            // Double  / Double
+    return a / b;
+}
+// function sub:
+//   Subtraction
+function sub(a,b){
+  if (isArray(a) && isArray(b)){      // PT function falls here
+    var s, tdm1, x = normalize(a), y = normalize(b);
+    if (isNaN(x[val]) || isNaN(y[val]))  // Deal with NaN (Prevent Runtime Error!!)
+      return [0, NaN];
+    if (abs(x[val]) == Infinity)    // Deal with infinities.
+      return (x[val] == y[val]) ? [0, NaN] : x;
+    else if (abs(y[val]) == Infinity)
+      return neg(y);
+    if (isEqual(x, y))      // If X = Y then return 0 directly -- just to speed things up
+      return [0, 0];
+    else if (isLessThan(x, y))    // If X < Y then switch place and calculate -(Y - X)... just to save coding :)
+      return neg(sub(y, x));
+    if (y[val] < 0)        // Deal with -ve numbers
+      return (x[val] >= 0) ? add(x, neg(y)) : sub(neg(y), neg(x));
+    if (x[pt] == 0)        // THIS is the real calculation time...
+      return [0, x[val] - y[val]];  // Same PTLevel at 0. Let's subtract directly.
+    else if (x[pt] == 1){
+      s = (y[pt] == 1) ? y[val] : log10(y[val]);
+      return normalize([1, log10(1 - pow10(s - x[val])) + x[val]]);
+    } else
+      return x;
+  } else if (isArray(a) && !isArray(b))    // PT - Double
+    return sub(a, [0, b]);
+  else if (!isArray(a) && isArray(b))    // Double - PT
+    return sub([0, a], b);
+  else            // Double - Double
+    return a - b;
+}
+// function mul:
+//   Multiplication
+function mul(a,b){
+  if (isArray(a) && isArray(b)){      // PT function falls here
+    var x = normalize(a), y = normalize(b), t, p1, d1, s = 1;
+    if (isNaN(x[val]) || isNaN(y[val]))  // The multiply routine is implemented fully from primitives, with 12 separate cases for 
+      return [0, NaN];    //  all the combinations of PT class of the two arguments and the result. It's this way 
+              //  because the multiply was implemented before the add (??), and it is left as-is for accuracy and speed.
+    if (x[val] < 0){      // Enforce positive arguments and remember sign.
+      s = -1;
+      x[val] = -x[val]
+    }
+    if (y[val] < 0){
+      s = -s;
+      y[val] = -y[val]
+    }
+    if (isLessThan(x, y)){      // Put bigger argument first, so we have fewer cases to handle
+      t = x;
+      x = y;
+      y = t;
+    }
+    if (y[val] == 0)      // trivial case (y = 0)
+      return [0, 0];
+    else if (x[val] == Infinity)    // Infinity
+      return [0, s*Infinity];
+    else if (x[pt] == 0){      // Simple case: both are plain numbers
+      p1 = x[val] * y[val];
+      if (p1 > 1e300)      // Overflowed range of pt0: recompute product as a pt1
+        return [1, s*(log10(x[val]) + log10(y[val]))];
+      else
+        return [0, s*p1];
+    } else if (x[pt] == 1 && y[pt] == 0)  // X is PT1 and Y is PT0.
+      return normalize([1, s*(x[val]+log10(y[val]))]);
+    else if (x[pt] == 1)      // Both are PT1's -- just add the logs.
+      return normalize([1, s*(x[val]+y[val])]);
+    else if (x[pt] == 2 && y[pt] < 2)  // X is PT2 and Y is PT0 or PT1. The answer is always equal to the larger, which is x.
+      return setsign(x, s);
+    else if (x[pt] == 2){      // Both are PT2's. In this case, the product is equal to the larger except in cases like
+              //  {2, 312.0} * {2, 308.0} where the two values are within +- scale or so, where we have to do the
+              //  log(sum(exp(diff))) thing.
+      d1 = x[val] - y[val];
+      if (d1 < 17)      // X is a little bigger
+        return [2, s * (log10(1 + pow10(-d1)) + x[val])];
+      else        // X is way bigger
+        return setsign(x, s);
+    } else          // For anything with X bigger than a PT2, the product is the larger of the two.
+      return setsign(x, s);
+  } else if (isArray(a) && !isArray(b))    // PT * Double
+    return mul(a, [0, b]);
+  else if (!isArray(a) && isArray(b))    // Double * PT
+    return mul([0, a], b);
+  else            // Double * Double
+    return a * b;
+}
+// function add:
+//   Addition
+function add(a,b){
+  if (isArray(a) && isArray(b)){      // PT function falls here
+    var x = normalize(a), y = normalize(b), s, tdm1, temp;
+    if (isNaN(x[val] + y[val]))    // Deal with NaN (Prevent Runtime Error!!)
+      return [0, NaN];
+    if (isLessThan(x, y)){      // Put bigger argument first, so we have fewer cases to handle
+      temp = x;
+      x = y;
+      y = temp;
+    }
+    if (abs(x[val]) == Infinity)    // Deal with infinities
+      return (y[val] != -sgn(x[val]) * Infinity) ? [0, x[val]] : [0, NaN];
+    if (y[val] < 0)        // Deal with negative quantities.
+      return (x[val] >= 0) ? sub(x, neg(y)) : neg(add(neg(y), neg(x)));
+              // Now it's our main body...
+              //  It is assumed X and Y are both +ve
+              //  Because we've filtered the rest ;)
+    if (x[pt] == 0)        // Same PTLevel at 0. Let's add directly.
+      return normalize([0, x[val] + y[val]]);
+    else if(x[pt] == 1){      // PT1: Add w/ formula.
+      s = (y[pt] == 1) ? y[val] : log10(y[val]);
+      return normalize([1, log10(pow10(s - x[val]) + 1) + x[val]]);
+    } else          // PT2 or higher: X dominates.
+      return x;
+  } else if (isArray(a) && !isArray(b))    // PT + Double
+    return add(a, [0, b]);
+  else if (!isArray(a) && isArray(b))    // Double + PT
+    return add([0, a], b);
+  else            // Double + Double
+    return a + b;
+}
+// function log:
+//   Logarithmic function, returning R.P. for -ve numbers
+function log(n){ return (isArray(n)) ? normalize(div(log10(n), [0, Math.LOG10E])) : Math.log(abs(n)); }
+// function pow10:
+//   Raise power by 10
+function pow10(n){
+  if (isArray(n)){        // pt_pow10 is almost as simple as pt_log10, and for similar reasons.
+    n = normalize(n);
+    if (isNaN(n[val]))
+      return [0, NaN];
+    if (n[val] == Infinity)      // Handle infinities first
+      return [0, Infinity];
+    else if (n[val] == -Infinity)
+      return [0, 0];
+    else if (n[val] < 0)
+      return (n[pt] == 0) ? [0, pow10(n[val])] : [0, 0];
+    else
+      return [n[pt] + 1, n[val]];
+  } else
+    return Math.pow(10, n);
+}
+// function logn:
+//   Log with Base-n (Note that the number comes FIRST)
+function logn(a, b){
+  if (isArray(a) && isArray(b)){      // this function is a better match for being the analogue of the divide function because of the symmetry
+    var n = normalize(a), rv, pis;    //  of the formula for computing it. (pow10(log(log(n)) - log(log(b)))
+    b = normalize(b);
+    if (isNaN(n[val]) || isNaN(b[val]))
+      return [0, NaN];
+    else if (n[val] == 0){
+      if (b[val] < -1 || b[val] >= 1)
+        return [0, -Infinity];
+      else if (b[val] == -1)
+        return [0, 0];
+      else if (abs(b[val]) > 0)
+        return [0, Infinity];
+      else        // -inf / -inf = nan
+        return [0, NaN];
+    } else if (abs(n[val]) == Infinity){
+      if (b[val] < -1 || b[val] >= 1)
+        return [0, Infinity];
+      else if (b[val] == -1)
+        return [0, 0];
+      else if (abs(b[val]) > 0)
+        return [0, -Infinity];
+      else
+        return [0, NaN];
+    } else {
+      if (n[val] < 0 && b[val] >= 0)  // Real component of log of a negative number is the log of the magnitude
+        n[val] = -n[val];
+      if (n[pt] == 0 && b[pt] == 0)  // Both arguments are PT0. The biggest the answer can possibly be is somewhere around 1.0e19 (a wild guess
+              //   based on just playing around on the calculator), definitely well within PT0 bounds.
+        return normalize([0, logn(n[val], b[val])]);
+      else {         // Otherwise we just defer to the primitives.
+        if (b[val] >= 0)
+          return div(log10(n), log10(b));
+        else{
+          b = log10(b);
+          rv = div(mul(log10(n), b), add(pi2, mul(b, b)));
+          if (n[val] < 0)
+            rv = add(rv, div(pi2, add(pi2, mul(b, b))));
+          return rv;
+        }
+      }
+    }
+  } else if (!isArray(a) && isArray(b))
+    return logn([0, a], b);
+  else if (isArray(a) && !isArray(b))
+    return logn(a, [0, b]);
+  else {
+    if (a == 0) {        // Handle special values first...
+      if (b < -1 || b >= 1)
+        return -Infinity;
+      else if (b == -1)
+        return 0;
+      else if (b != 0)
+        return Infinity;
+      else
+        return NaN;
+    } else if (abs(a) == Infinity) {
+      if (b < -1 || b >= 1)
+        return Infinity;
+      else if (b == -1)
+        return 0;
+      else if (b != 0)
+        return -Infinity;
+      else
+        return NaN;
+    } else
+      return Math.log(a) / Math.log(b);
+  }
+}
+// function log10:
+//   Log with Base-10
+function log10(a){
+  if (isArray(a)){        // log10 is very simple, because it's a single function argument and
+    a = normalize(a);      //  there are no strange boundary conditions where we demote or promote.
+    if (isNaN(a[val]))
+      return [0, NaN];
+    if (a[val] == 0)      // Handle 0 and infinities first
+      return [0, -Infinity];
+    else if (abs(a[val]) == Infinity)
+      return [0, Infinity];
+    else if (a[pt] == 0)
+      return [0, log10(a[val])];
+    else
+      return [a[pt] - 1, abs(a[val])];
+  } else
+    return Math.log(a) * Math.LOG10E;
+}
+// Stirling series approximation for N!
+// Intended for N greater than 140 and less than about 10^100
+function pt_stirling(n)
+{
+  var n2 = mul(n, n);
+  var n3 = mul(n2, n);
+  var n4 = mul(n2, n2);
+  var s1 = add(1, div(1/12, n));
+  s1 = add(s1, div(1/288, n2));
+  s1 = sub(s1, div(139/51840, n3));
+  s1 = sub(s1, div(571/2488320, n4));
+  return mul( sqrt(mul(twopi, n)), mul( pow(div(n, Math.E), n), s1 ) );
+}
+// Old bug-ridden formula:
+// exp(add(
+//      div(1/12, n),
+//      add(log(sqrt(mul(0.159154943091895, n))), sub(mul(n, log(n)), n))
+// ));
+// The constant 0.159154943091895 is 1/(2 pi)
+// function gamma:
+//   Gamma function.
+function gamma(n)
+{
+  if (isArray(n)) {
+    /* Argument is a PT */
+    var rv;
+    n = normalize(n);
+    if (n[val] == Infinity)
+      return [0, Infinity];
+    else if (isNaN(n[val]))
+      return [0, NaN];
+    else if (n[pt] == 0 && n[val] < 140)  // Direct implementation of Gamma of float
+      return normalize([0, gamma(n[val])]);
+    else if (n[val] < 0)      // "Define" PTx's as integers...
+      return [0, -Infinity];
+    else if (n[pt] == 0)      // Stirling
+      return pt_stirling(sub(n,1));
+    else if (n[pt] == 1)
+      return exp(mul(n, sub(log(n), 1)));
+    else
+      // for sufficiently large values gamma(n) reduces to pt_exp(n).
+      return exp(n);
+  } else {
+    /* Not an array: try to interpret as float */
+    if (isNaN(n))        // Return NaN on NaN
+      return NaN;
+    else if (n == Infinity)
+      return Infinity;
+    else if (n <= 0 && n == Math.floor(n))  // Return -Infinity for Non-positive Integers
+      return -Infinity;
+    else if (n < -178)      // Return 0 for *Really small* Negative numbers
+      return 0;
+    else if (n > 0 && n <= 19 && n == Math.floor(n)){
+      switch(n){      // Return some "Preset" values for positive integers
+        case  1:     // Speed the whole thing up & reduce approximation errors
+        case  2: return 1;  // Note: Since all values are "returned", there's no need for "break"-ing.
+        case  3: return 2;
+        case  4: return 6;
+        case  5: return 24;
+        case  6: return 120;
+        case  7: return 720;
+        case  8: return 5040;
+        case  9: return 40320;
+        case 10: return 362880;
+        case 11: return 3628800;
+        case 12: return 39916800;
+        case 13: return 479001600;
+        case 14: return 6227020800;
+        case 15: return 87178291200;
+        case 16: return 1307674368000;
+        case 17: return 20922789888000;
+        case 18: return 355687428096000;
+        case 19: return 6402373705728000;
+      }
+    } else if (n == 0.5)      // gamma(0.5) = sqrt(pi)
+      return sqrtpi;
+    else if (n > 0) {      // Lanczos approximation
+      var p = [76.1800917294715, -86.5053203294168, 24.0140982408309,
+               -1.23173957245015, 1.20865097386618e-03, -5.395239384953e-06];
+      var thesum = 0, i;
+      for (i = 0; i < 6; i ++)
+        thesum += p[i] / (i + 1 + n);
+      return (thesum + 1.00000000019001) * sqrt2pi / n * Math.pow(n + 5.5, n + 0.5) * Math.exp(- n - 5.5);
+    } else           // Get the value of negative argument by the positve one
+      return Math.pi / (n * gamma(-n) * Math.sin(-Math.PI * n));
+  }
+}
+// function sqrt:
+//   Square root
+function sqrt(n){
+  if (isArray(n)){
+    var x = normalize(n);
+    if (x[val] <= 0)
+      return [0, 0];
+    else if (x[pt] == 0)
+      return [0, sqrt(x[val])];
+    else if (x[pt] == 1)
+      return normalize([1, x[val] / 2]);
+    else if (x[pt] == 2)
+      return normalize([2, x[val] - 0.30102999566398119521373889472449]);
+    else
+      return x;
+  } else
+    return (n > 0) ? Math.sqrt(n) : 0;
+}
+// Trigonometric functions... 
+function sin(n){ return makeType(Math.sin(makeDouble(n)), n); }
+function cos(n){ return makeType(Math.cos(makeDouble(n)), n); }
+function tan(n){ return makeType(Math.tan(makeDouble(n)), n); }
+function atan(n){ return makeType(Math.atan(makeDouble(n)), n); }
+function asin(n){
+  var i = makeDouble(n);
+  var rv = (abs(i) > 1) ? sgn(i) * Math.PI / 2 : Math.asin(i);
+  return makeType(rv, n);
+}
+function acos(n){
+  var i = makeDouble(n);
+  var rv = (abs(i) > 1) ? 0 : Math.acos(i);
+  return makeType(rv, n);
+}
+// function pow:
+//   Raising power.
+//     pow function is more complex than exp and pow10, because
+//     it has to deal with any base. Specifically, if the base is negative
+//     it computes the angle and magnitude of the complex answer
+//     so it can calculate the real component.
+function pow(b, e){
+  if (isArray(b) && isArray(e)){      // A routine that breaks out all the cases explicitly would be a little more accurate and a little faster --
+    var p1, s7 = 1;       //  but it's not enough to be of immediate concern for the usability of the calculator.
+    b = normalize(b);
+    e = normalize(e);
+// Handle 0's, 1's, and infinities first. Some of these are handled
+// quickly as a speed optimization, and others because they're special
+// cases.
+//    Here is a table illustrating the special cases; a total of 19
+// special cases are handled. Any entry that says "." is computed
+// the normal way, but the others are special cases. For the "C*i"
+// cases we actually compute the cosine of the exponent to determine
+// the sign of infinity that should result. The rows/columns labeled
+// -5, -0.5, 0.5 and 5 represent any typical numbers (there is nothing
+// special about -5 -0.5, 0.5 or 5)
+//       +--------------EXPONENT---------------
+//   pow |ninf -5  -1  -0.5 0 0.5   1   5   inf
+// +-----+-------------------------------------
+// |  inf|  0   0   0    0  1 inf  inf inf  inf
+// |    5|  0   .   .    .  1  .    5   .   inf
+// B    1|  1   1   1    1  1  1    1   1    1
+// A  0.5| inf  .   .    .  1  .   0.5  .    0
+// S    0| inf inf inf  inf 1  0    0   0    0
+// E -0.5| inf  .   .    .  1  .  -0.5  .    0
+// |   -1|  1   .   .    .  1  .   -1   .    1
+// |   -5|  0   .   .    .  1  .   -5   .   inf
+// | ninf|  0   0   0    0  1 C*i ninf C*i  inf
+//
+// (i.e, We define anything^0 = 1 and (-anything)^inf = inf
+    if (isNaN(b[val]) || isNaN(e[val]))
+      return [0, NaN];
+    else if (e[val] == 0 || b[val] == 1)
+      return [0, 1];
+    else if (e[val] == 1)
+      return b;
+    else if ((b[val] == Infinity && e[val] > 0) || (b[val] == 0 && e[val] < 0))
+      return [0, Infinity];
+    p1 = b[val] * b[val];
+    if(e[val] == Infinity)
+      return [0, ((p1 > 1) ? Infinity : (p1 == 1) ? 1 : 0)];
+    else if (e[val] == -Infinity)
+      return [0, ((p1 > 1) ? 0 : (p1 == 1) ? 1 : Infinity)];
+    else if (b[val] == -Infinity){
+      if (e[val] < 0)
+        return [0, 0];
+      else if (e[val] == 1)
+        return [0, -Infinity];
+      else if (e[val] == Infinity)
+        return [0, Infinity];
+      p1 = Math.cos(Math.PI * e[val]);
+      return [0, ((p1 == 0) ? 0 : p1 * Infinity)];
+    }
+    if (b[val] < 0 && e[pt] == 0)    // extract sign and scale information.
+      s7 = Math.cos(e[val]*Math.PI);  // For PT0, Compute the real component of the angle. Otherwise, It'll round off to a multiple of 2pi,
+              //  so just scale by 1.
+    b[val] = abs(b[val]);
+    if (b[pt] == 0 && e[pt] == 0){    // Now b.val is positive, so it's okay to take the log of it if we need to.
+      p1 = pow(b[val], e[val]);
+      if (p1 < 1e300)
+        return [0, s7 * p1];
+      else        // Overflowed on direct computation, so compute it by logs instead.
+        return [1, (log10(b[val]) * e[val] + log10(s7)) * sgn(s7)];
+    }
+              // For the remaining cases, it seems that we should be able to
+    return mul(pow10(mul(log10(b), e)), [0, s7]);
+  } else if (isArray(b) && !isArray(e)) 
+    return pow(b, [0, e]);
+  else if (!isArray(b) && isArray(e))
+    return pow([0, b], e);
+  else{
+    var s = 1, m;
+    if (b < 0){        // Handle negative bases
+      b = -b;        //   The angle of the base is pi, so the angle of the exponent will be pi * e. Take cosine of this to
+      s = Math.cos(Math.PI * e);  //   determine how much of the answer will be in the real component.
+    }
+    m = Math.pow(b, e);
+    if (m == Infinity)      // If we got an overflow, we might be able to salvage the computation by using logarithms. This happens
+              //  when we compute -20.0 to the power of 238.49999999999 (exactly 10 9's there) The magnitude is
+              //  1.97e310, which overflows, but the scale is 3.1416e-10 so the answer is actually well within
+              //  range (and even within PT0 range)
+      return -sgn(s) * Math.exp(Math.log(b) * e + Math.log(-abs(s)));
+    else
+      return m;
+  }
+}
+// function root:
+//   Taking Root
+function root(b, r){
+  if (!isArray(b) && !isArray(r))
+    return pow(b,div(1,r));      // Yes, I'm very lazy at defining new functions... so?
+  else if (!isArray(b) && isArray(r))
+    return root([0, b], r);
+  else if (isArray(b) && !isArray(r))
+    return root(b, [0, r]);
+  else{            // There is a lot of similarity with the pt_pow routine because pt_root is just dividing the log
+              //  by the exponent rather than multiplying.
+    var p1, s8 = 1, p = normalize(b), q = normalize(r);
+    if (isNaN(p[val]) || isNaN(q[val]))
+      return [0, NaN];
+    else if (r[val] == 0)      // 0th root, which is like raising to the power of infinity.
+      return [0, ((b[val] == 0) ? 0 : (b[val] < 1) ? 1 : Infinity)];
+    if (b[val] < 0 && r[pt] == 0)    // extract sign and scale information.
+      s8 = Math.cos(Math.PI/r[val]);  // For PT0, We can calculate sin (cos?). Otherwise, We're raising to a power that's very very close to 0,
+              //  so close that the cosine is essentially 1.0
+    b[val] = abs(b[val]);
+    if (b[pt] == 0 && r[pt] == 0){    // Now b.val is non-negative, so it's okay to take the log of it if we need to.
+      p1 = root(b[val], r[val]);  // Compute the root directly. This will overflow if we're taking say the 0.1th root of 1e100, which is
+              //  like taking 1e100 to the 10th power.
+      if (p1 < 1e300)
+        return [0, s8 * p1];
+      else        // Overflowed on direct computation, so compute it by logs instead.
+        return normalize([1, sgn(s8) * (log10(abs(s8)) + log10(b[val]) / r[val])]);
+    }
+              // For the remaining cases, it seems that we should be able to just use powers and logs.
+    return mul(pow10(div(log10(b), r)), [0, s8]);
+  }
+}
+// function isEqual:
+//   Read my name!
+function isEqual(c, d){
+  var c1, d1;
+  if (isArray(c) && isArray(d)){
+    c1 = normalize(c);
+    d1 = normalize(d);
+    return c1[val] == d1[val] && c1[pt] == d1[pt];
+  } else if(!isArray(c) && isArray(d))
+    return isEqual([0, c], d);
+  else if(isArray(c) && !isArray(d))
+    return isEqual(c, [0, d]);
+  else
+    return c == d;
+}
+// function isLessThan:
+//   Check if a < b.
+//   We define inf < inf as false
+function isLessThan(c, d){
+  var a, b;
+  if (isArray(c) && isArray(d)){
+    a = normalize(c);
+    b = normalize(d);
+    if (isNaN(a[val]) || isNaN(b[val]) || (a[val] > 0 && b[val] < 0) || (a[val] != Infinity && b[val] == Infinity))
+      return false;
+    else
+      return (a[val] < 0 && b[val] > 0) || ((a[val] > 0 && b[val] > 0) && (a[pt] < b[pt]) || ((a[pt] == b[pt]) && (a[val] < b[val]))) || ((a[val] < 0 && b[val] < 0) && (a[pt] > b[pt]) || ((a[pt] == b[pt]) && (a[val] < b[val]))) || (a[val] == Infinity && b[val] != Infinity);
+  } else if(!isArray(c) && isArray(d))
+    return isLessThan([0, c], d);
+  else if(isArray(c) && !isArray(d))
+    return isLessThan(c, [0, d]);
+  else
+    return c < d;
+}
+//Hyperbolic functions.
+function sinh(x){ return div(sub(exp(x), exp(neg(x))), 2); }
+function cosh(x){ return div(add(exp(x), exp(neg(x))), 2); }
+function tanh(y){
+  var x = normalize(y);
+  var e2x = exp(mul(x, 2));
+  if (isArray(x) && (x[pt] == 0 && abs(x[val]) > 18 || x[pt] > 0))
+    return [0, sgn(x)];  
+  else
+    return div(sub(e2x, 1), add(e2x, 1));
+}
+function asinh(x){ return log(add(x, sqrt(add(mul(x, x), 1)))); }
+function acosh(x){ return (isLessThan(1, abs(x))) ? makeType(0, x) : log(add(abs(x), sqrt(sub(mul(x, x), 1)))); }
+function atanh(x){ return mul(0.5, log(div(neg(add(x, 1)), sub(x, 1)))); }
+/*****************************************************************************/
+// PT Specific functions
+// function normalize:
+//   Try to make a PTVector into the normal range
+function normalize(h){
+  if (isNaN(h[val]) || abs(h[val]) == Infinity || h[val] == 0)
+    return [0, h[val]];
+  while (abs(h[val]) < log300 && h[pt] > 0){
+    h[val] = sgn(h[val]) * pow10(abs(h[val]));
+    h[pt] --;
+  }
+  while (abs(h[val]) > 1e300){
+    h[val] = sgn(h[val]) * log10(h[val]);
+    h[pt] ++;
+  }
+  return h;
+}
+// function makeDouble:
+//   Convert a PTVector into Double
+function makeDouble(h){
+  h = normalize(h);
+  if (isArray(h)){
+    if (h[pt] == 0)
+      return h[val];
+    else if (h[pt] == 1)
+      return sgn(h[val]) * pow10(abs(h[val]));
+    else
+      return sgn(h[val]) * Infinity;
+  } else
+    return h;
+}
+// function makeType:
+//   Convert "expr" into the same type as "ref".
+function makeType(expr, ref){
+  if (isArray(ref) == isArray(expr))
+    return expr;
+  else if (isArray(ref))      // Double to PT
+    return normalize([0, expr]);
+  else          // PT to double
+    return makeDouble(expr);
+}
+/*****************************************************************************/
+//String-to-PT functions
+// function str2pt1:
+//   Convert normal str to pt
+function str2pt1(x){
+  var rv, low, hi;
+  if (x.toUpperCase().indexOf("E") < 0)
+    return [0, parseFloat(x)];
+  else{
+    rv = parseFloat(x);
+    if (isFinite(rv))
+      return normalize([0, rv]);
+    else if (/^(.+)[Ee](.+)$/.test(x)){
+      low = parseFloat(RegExp.$1);
+      hi = parseFloat(RegExp.$2);
+      return mul([0, low], pow10([0, hi]));
+    } else {
+      delayedError += "<ul><li><span class=\"redcolor\">Unknown number [" + x + "] <\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>";
+      return [0, NaN];
+    }
+  }
+}
+// function str2pt:
+//   takes string numbers of the format "2p[+-]3.4e[+-]56", or simple floating-point numbers like "[+-]3.4E[+-]56", or IR inlines like "I17", 
+//   performs the appropriate conversion or value retrieval and returns a PTVector result. 
+function str2pt(x){
+  var rv = new Array(2), rv2;
+  if (x == "Z")
+    return [0, Infinity];
+  else if (/^I(\d+)/.test(x))    // retrieve a stored intermediate result
+    return imrs[parseInt(RegExp.$1)];
+  else if (/^R(\d+)/.test(x)) {
+    rv2 = parseInt(RegExp.$1);
+    if (outs[rv2] !== undefined)
+      return outs[rv2];
+    else {
+      delayedError += "<ul><li><span class=\"redcolor\">Output history record [\%" + rv2 + "] not found<\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>";
+      return [0, NaN];
+    }
+  } else if (/^(.+)P(.+)$/.test(x)){
+    rv[pt] = parseInt(RegExp.$1);
+    rv2 = str2pt1(RegExp.$2.replace(/N/g, "-"));
+    rv2[pt] += rv[pt];
+    return rv2;
+  } else
+    return str2pt1(x.replace(/N/g, "-"));
+}
+// function def_imr:
+//   Define an IMR data.
+function def_imr(pt){
+  imrs[(++imrs.length)-1] = pt;
+  return "I" + (imrs.length-1);
+}
+// function def_out:
+//   Define an output history data.
+function def_out(pt){
+  outs[(++outs.length)-1] = pt;
+  return "R" + (outs.length-1);
+}
+// function def_in:
+//   Define an input history data.
+function def_in(str){
+  var k = (++inps.length) - 1;
+  inps[k] = str;
+  while (/^\$(\d+)$/.test(inps[k]))
+    inps[k] = inps[parseInt(RegExp.$1)];
+}
+/*****************************************************************************/
+//String functions
+// function str_*:
+//   Do * for PT's while inputs are strings.
+function str_add(x, y){ return def_imr(add(str2pt(x), str2pt(y))); }
+function str_sub(x, y){ return def_imr(sub(str2pt(x), str2pt(y))); }
+function str_mul(x, y){ return def_imr(mul(str2pt(x), str2pt(y))); }
+function str_div(x, y){ return def_imr(div(str2pt(x), str2pt(y))); }
+function str_neg(x)   { return def_imr(neg(str2pt(x))); }
+function str_exp(x)   { return def_imr(exp(str2pt(x))); }
+function str_log(x)   { return def_imr(log(str2pt(x))); }
+function str_atan(x)  { return def_imr(atan(str2pt(x))); }
+function str_log10(x) { return def_imr(log10(str2pt(x))); }
+function str_pow(x, y){ return def_imr(pow(str2pt(x), str2pt(y))); }
+function str_fact(x)  {
+  /* Factorial function */
+  return def_imr(gamma(add(str2pt(x), 1)));
+}
+function str_gamma(x) {
+  return def_imr(gamma(str2pt(x)));
+}
+function str_sqrt(x)  { return def_imr(sqrt(str2pt(x))); }
+function str_asin(x)  { return def_imr(asin(str2pt(x))); }
+function str_acos(x)  { return def_imr(acos(str2pt(x))); }
+function str_sin(x)   { return def_imr(sin(str2pt(x))); }
+function str_cos(x)   { return def_imr(cos(str2pt(x))); }
+function str_tan(x)   { return def_imr(tan(str2pt(x))); }
+function str_root(x, y){ return def_imr(root(str2pt(y), str2pt(x))); }
+function str_logn(x, y){ return def_imr(logn(str2pt(y), str2pt(x))); }
+/*****************************************************************************/
+//Evaluation functions
+function elimSpace(e){
+  var s = e;
+  //It's a times for 5 5
+  s = s.replace(/([0-9.EINPRZ])(\s+)([0-9.EINPRZ])/g, "$1*$3");
+  // Even no spaces, for 5( or )5 or )( or )s there's invisible times.
+  s = s.replace(/([0-9.EINPRZ])(\s*)([ABDGJKLQSTXZ\(\[])/g, "$1*$3");
+  s = s.replace(/([\)\]])(\s*)([0-9.EINPRABDGJKLQSTXZ\(\[])/g, "$1*$3");
+  //Otherwise it's a removable space
+  s = s.replace(/\s+/g, "");
+  return s;
+}
+function eval2(e){
+  var hitting = true, pre, a, op, b, post, hl, hr, hf = false, i, temps, re = new Array(8);
+  // Regular expressions...
+  re[0] = /^(.+)[\(\[]([^\(\)\[\]]+)[\)\]](.+)$/;            // Evaluate inside parentheses
+  re[1] = /^(.*[^0-9.EINPRZ])([0-9.EINPRZ]+)([!])([^0-9.EINPRZ].*)$/;      // operator ! (factorial)
+  re[2] = /^(.*[^0-9.EINPRZ])([N])([0-9.EINPRZ]+)([^0-9.EINPRZ].*)$/;      // operator - (N, unary minus)
+  re[3] = /^(.*[^0-9.EIPRZ])([ABDGJKLQSTX])\{([0-9.EINPRZ]+)\}([^0-9.EINPRZ].*)$/;  // single-parameter
+  re[4] = /^(.*[^0-9.EIPRZ])([MV])\{([0-9.EINPRZ]+),([0-9.EINPRZ]+)\}([^0-9.EINPRZ].*)$/;  // root and log_n functions
+  re[5] = /^(.*[^0-9.EINPRZ])([0-9.EINPRZ]+)(\^)([0-9.EINPRZ]+)([^0-9.EINPRZ].*)$/;  // pow
+  re[6] = /^(.*[-+\(\|])([0-9.EINPRZ]+)([*x\/])([0-9.EINPRZ]+)([^0-9.EINPRZ].*)$/;  // multiplication and division
+  re[7] = /^(.*[\(\|])([0-9.EINPRZ]+)([-+])([0-9.EINPRZ]+)([^0-9.EINPRZ].*)$/;    // addition and subtraction
+            // expand.ihist sometimes leaves an expression that has an extra set of parens around it
+  e = e.replace(/^(\(|\[)(.*)(\)|\])$/, "$2");
+  while(true){        // beginning of parenthesis loop
+    hitting = false;
+    for(i = 0; i < 8; i ++){
+      if (re[i].test(e)){
+        hitting = true;
+        switch(i){
+          case 0:  // Evaluate inside parentheses
+            hl = RegExp.$1;
+            e = "|" + RegExp.$2 + "|";
+            hr = RegExp.$3;
+            hf = true;
+            break;
+          case 1:  // Unary operators.
+          case 2:
+          case 3:
+            post = RegExp.$4;
+            pre = RegExp.$1;
+            op = RegExp.$2;
+            a = RegExp.$3;
+            if (i == 1){
+              temps = op;
+              op = a;
+              a = temps;
+            }
+            switch(op){
+              case "!": e = pre + str_fact (a) + post; break;
+              case "G": e = pre + str_gamma(a) + post; break;
+              case "N": e = pre + str_neg  (a) + post; break;
+              case "X": e = pre + str_exp  (a) + post; break;
+              case "A": e = pre + str_atan (a) + post; break;
+              case "Q": e = pre + str_sqrt (a) + post; break;
+              case "K": e = pre + str_log  (a) + post; break;
+              case "L": e = pre + str_log10(a) + post; break;
+              case "B": e = pre + str_cos  (a) + post; break;
+              case "S": e = pre + str_sin  (a) + post; break;
+              case "T": e = pre + str_tan  (a) + post; break;
+              case "D": e = pre + str_acos (a) + post; break;
+              case "J": e = pre + str_asin (a) + post; break;
+            }
+            break;
+          case 4:  // Binary operators      
+          case 5:
+          case 6:
+          case 7:
+            pre = RegExp.$1;
+            a = RegExp.$2;
+            op = RegExp.$3;
+            b = RegExp.$4;
+            post = RegExp.$5;
+            if (i == 4){
+              temps = op;
+              op = a;
+              a = temps;
+            }
+            switch(op){
+              case "V": e = pre + str_root(a, b) + post; break;
+              case "M": e = pre + str_logn(a, b) + post; break;
+              case "^": e = pre + str_pow (a, b) + post; break;
+              case "*":
+              case "x": e = pre + str_mul (a, b) + post; break;
+              case "/": e = pre + str_div (a, b) + post; break;
+              case "+": e = pre + str_add (a, b) + post; break;
+              case "-": e = pre + str_sub (a, b) + post; break;
+            }
+            break;
+        } // switch
+        e = e.replace(/ /g, "");
+        break;
+      } // if
+    } // for
+    if (! hitting){
+      if (hf){
+        e = e.replace(/\|/g, "");
+        e = hl + ((/[ABDGJKLMQSTVX]$/.test(hl)) ? ("{" + e + "}") : e) + hr;
+        hf = false;
+      } else
+        break;
+    }
+  } // while
+  return e;
+} // function
+            // eval1 was the original main function for evaluating an input expression, before command history substitution
+function eval1(ee){        //  was added.
+  var s, e, pre, v, post, rv, i, plev, indata, cchar, argc, re = /\$(\d+)/, drept = 0, cv;
+  imrs.length = 1;      // init intermediate-result counter (and all stuff inside IMR)
+            // map all alphabetics to lower case; convert "^^" to "pt"
+  e = ("|" + ee + "|").toLowerCase().replace(/\^\^|pt/g, "p").replace(/\*\^/g, "e");
+            // create invisible times.
+  e = e.replace(/([0-9.]+)(e)(?![\+\-]?\d+)/g, "$1*e").replace(/([0-9.]+)(p)(?![\+\-]?[0-9.]+)/g, "$1*$2").replace(/([0-9.]+)([a-df-oq-z\%\$])/g, "$1*$2");
+  while (re.test(e)) {      // input history
+    cv = parseInt(RegExp.$1);
+    if (cv < inps.length)
+      e = e.replace(re, "(" + inps[cv].replace(/\$/g, "#") + ")").replace(/\#/g, "\$");
+    else
+      return [-1, "Input history recalls current/future input"];
+    drept ++
+    if (drept >= 1000)
+      return [-1, "Input history recall causes a possible infinite loop"];
+  }
+  drept = 0;
+  while(/^(.*[^0-9.a-z])([a-z][0-9a-z]*)([^0-9.a-z].*)$/.test(e)){
+    pre = RegExp.$1;
+    v = RegExp.$2;
+    post = RegExp.$3;
+    switch(v){
+      case "e": s = def_imr([0, Math.E]); break;
+      case "pi": s = def_imr([0, Math.PI]); break;
+      case "goldenratio":
+      case "phi": s = def_imr([0, 1.6180339887498948482045868343656]); break;
+      case "eulergamma": s = def_imr([0, 0.57721566490153286061]); break;
+      case "degree":
+      case "deg": s = def_imr([0, Math.PI / 180]); break;
+      case "arctan":
+      case "atan":
+      case "atn": s = "A"; break;
+      case "cos": s = "B"; break;
+      case "tan": s = "T"; break;
+      case "sin": s = "S"; break;
+      case "arccos":
+      case "acos":
+      case "acs": s = "D"; break;
+      case "arcsin":
+      case "asin":
+      case "asn": s = "J"; break;
+      case "ln":
+      case "loge": s = "K"; break;
+      case "log":
+      case "log10": s = "L"; break;
+      case "logn":
+      case "logb": s = "M"; break;
+      case "inf":
+      case "infty":
+      case "infinity":
+      case "infin": s = "Z"; break;
+      case "p":
+      case "pt": s = "P"; break;
+      case "sqrt":
+      case "sqr": s = "Q"; break;
+      case "rt":
+      case "root": s = "V"; break;
+      case "exp": s = "X"; break;
+      case "gamma": s = "G"; break;
+      default:    // FF won't work w/o "escape".
+        if (/^%\d+$/.test(escape(v)))
+          s = s.replace(/%/, "R").toUpperCase();
+        else if (vars[v] != undefined)
+          s = def_imr(vars[v]);
+        else if (fns[v] != undefined){
+          s = "(" + fns[v] + ")";
+          plev = 1;
+          // Fetch the "(...)" afterwards.
+          if (fns[v].indexOf("#") >= 0){
+            if (! /^\s*[\(\[]/.test(post))
+              return [-1, "Argument(s) required for function [" + v + "]"];
+            else{
+              post = post.trim();
+              argc = 1;
+              indata = "";
+              for (i = 1; i < post.length - 1; i ++){
+                cchar = post.charAt(i);
+                indata += cchar;
+                if (cchar == "(" || cchar == "[")
+                  plev ++;
+                else if (cchar == ")" || cchar == "]"){
+                  plev --;
+                  if (plev <= 0){
+                    s = s.replace(new RegExp("\#" + argc, "g"), "(" + indata.substr(0, indata.length-1).trim() + ")");
+                    post = post.substr(i+1);
+                    break;
+                  }
+                } else if (cchar == "," && plev == 1){
+                  s = s.replace(new RegExp("\#" + argc, "g"), "(" + indata.substr(0, indata.length-1).trim() + ")");
+                  argc ++;
+                  indata = "";
+                }
+              }
+            }
+          }
+        } else 
+          return [-1, "Undefined variable or function [" + v + "]"];
+    }
+    e = pre + s + post;
+    drept ++
+    if (drept >= 1000)
+      return [-1, "Custom function causes a possible infinite loop"];
+  }
+  e = e.replace(/%(\d+)/g, "R$1");
+            // Substitute "%" with previous answer...
+            //  then it's safe to convert spaces into "*"...
+            //  then put numbers in standard form...
+  e = e.replace(/%/g, def_imr(outs[outs.length - 1]))
+  e = elimSpace(e);
+  e = e.replace(/\s+/g, "*").replace(/([-\(\[\|\/*x\+e\^,])-/g, "$1N");
+  e = e.replace(/([0-9.])e([0-9.N\-\+])/g, "$1E$2").replace(/( *)[pP]( *)/g, "P").replace(/([\d.])E\+([\d.])/g, "$1E$2");
+  e = eval2(e).replace(/\|/g, "");    // Then do the actual parsing and evaluation.
+  rv = str2pt(e);
+  if (rv === undefined)
+    return [-1, "Undefined result"];
+  def_out(rv);
+  return rv;
+}
+/*****************************************************************************/
+// Scroll-into-view
+// Copied from http://www.faqts.com/knowledge_base/view.phtml/aid/8554 for implementation of scrollIntoView in Mozilla-type browsers.
+if (!document.lastChild.scrollIntoView && HTMLElement){
+  function HTMLElement_getPageCoords () {
+    var coords = {x: 0, y: 0};
+    var el = this;
+    do {
+      coords.x += el.offsetLeft;
+      coords.y += el.offsetTop;
+    } while ((el = el.offsetParent));
+    return coords;
+  }
+  HTMLElement.prototype.getPageCoords = HTMLElement_getPageCoords;
+  function HTMLElement_scrollIntoView () {
+    var coords = this.getPageCoords();
+    window.scrollTo (coords.x, coords.y);
+  }
+  HTMLElement.prototype.scrollIntoView = HTMLElement_scrollIntoView;
+}
+/*****************************************************************************/
+// Display Function
+// function escapeHTML:
+//   Convert "<" into "&lt;", etc.
+function escapeHTML(expr){ return expr.replace(/&/g, "&amp;").replace(/\074/g, "&lt;").replace(/\076/g, "&gt;").replace(/\"/g, "&quot;"); }
+// Helper function for makeScientific: performs mantissa truncation
+function mt_trunc(m, ex)
+{
+  var pr, e1;
+  pr = 14;
+  e1 = 1;
+  while ((e1 < ex) && (pr > 1)) {
+    e1 *= 10;
+    pr--;
+  }
+  return m.toFixed(pr);
+}
+// function makeScientific:
+//   Convert "1.234e56" into "1.234 * 10^56", etc.
+function makeScientific(f)
+{ 
+  var fs = f + "", low, hi, l2, h2;
+  if (fs.indexOf("e", 0) < 0) {
+    fs = f.toExponential(20) + "";
+  }
+  if (fs.indexOf("e", 0) < 0) {
+    return (fs.replace(/Infinity/g, "&infin;"));
+  }
+  if (/^([0-9.\-]+)e(\+?)([0-9.\-]+)$/.test(fs)){
+    low = RegExp.$1;
+    hi = RegExp.$3;
+    l2 = parseFloat(low);
+    h2 = parseFloat(hi);
+    if (h2 > 12 || h2 < -6) {
+      /* Exponent is bug enough that we should use scientific notation */
+      l2 *= Math.pow(10, h2 - Math.floor(h2));
+      h2 = Math.floor(h2);
+      if (l2 > 1) {
+        return mt_trunc(l2, h2) + " &times; 10<sup>" + h2 + "<\/sup>";
+      } else {
+        return "10<sup>" + h2 + "<\/sup>";
+      }
+    } else {
+      return (l2 * Math.pow(10, h2));
+    }
+  }
+}
+// function makePT:
+//   Format a PT for printing.
+function makePT(pk)
+{
+  var y, z, p = normalize(pk), fpart = Math.abs(p[val]);
+  if (p[pt] == 0 || p[val] == 0)
+    return makeScientific(p[val]);
+  else if (p[pt] == 1) {
+    if (fpart < 300) {
+      return (makeScientific(Math.pow(10, p[val])));
+    } else if (fpart < 1e14) {
+      z = Math.floor(fpart);
+      y = sgn(p[val]) * Math.pow(10, fpart - z);
+      if (abs(y) > 1) {
+        /* The result has enough precision to have a mantissa digit */
+        return (mt_trunc(y, z) + " &times; 10<sup>" + z + "<\/sup>");
+      } else {
+        // return "10^z" or "-10^z"
+        return (y + "0<sup>" + z + "<\/sup>");
+      }
+    }
+  }
+  if (p[pt] <= 5) {
+    return sgn(p[val]) + "0<sup>" + makePT([p[pt]-1, fpart]) + "<\/sup>";
+  } else {
+    return (p[val] > 0)
+         ? (p[pt] + " PT (" + makeScientific(abs(p[val])) + ")")
+         : ("-(" + p[pt] + " PT (" + makeScientific(abs(p[val])) + "))");
+  }
+}
+// function calculate:
+//   Calculate and print the result of calculation.
+function calculate(){
+  var v = "", pr, disableIn = false;
+  in_str = document.getElementById("theInput").value.trim().replace(/\$(?!\d)/g, "\044" + (inps.length - 1));
+  if (in_str == "")
+    return;
+  else if (in_str == "!:="){
+    v = "<ul><li><span class=\"bluecolor\">The following is a list of all functions and their definitions:<\/span><ul>";
+    for (pr in fns)
+      v += "<li>" + pr + " := <b>" + fns[pr] + "<\/b><\/li>";
+    v += "<\/ul><\/li><\/ul>";
+    def_out([0, NaN]);
+  } else if (in_str == "!="){
+    v = "<ul><li><span class=\"bluecolor\">The following is a list of all variables and their content:<\/span><ul>";
+    for (pr in vars)
+      v += "<li>" + pr + " = <b>" + makePT(vars[pr]) + "<\/b><\/li>";
+    v += "<\/ul><\/li><\/ul>";
+    def_out([0, NaN]);
+  } else if (in_str == "!!:=" || in_str == "!:=.") {
+    fns = new Array();
+    v = "<ul><li><span class=\"bluecolor\">All functions have been successfully removed<\/li><\/ul>";
+    def_out([0, NaN]);
+  } else if (in_str == "!!=" || in_str == "!=.") {
+    vars = new Array();
+    v = "<ul><li><span class=\"bluecolor\">All variables have been successfully removed<\/li><\/ul>";
+    def_out([0, NaN]);
+  } else if (in_str == "!!"){
+    document.getElementById("theTextArea").innerHTML = "";
+    v = "<ul><li><b class=\"bluecolor\">Screen cleared<\/b><\/li><\/ul>";
+    def_out([0, NaN]);
+  } else if (in_str == "!!%" || in_str == "!!$"){
+    outs.length = 1;
+    inps.length = 1;
+    v = "<ul><li><b class=\"bluecolor\">I/O history cleared<\/b><\/li><\/ul>";
+    def_out([0, NaN]);
+  } else if (in_str == "?") {
+    v = "<ul><li><span class=\"bluecolor\">The following is a list of all commands:<\/span>";
+    v += "<table border=\"1\" cellspacing=\"0\" bordercolor=\"silver\" style=\"border-collapse: collapse;\">";
+    v += "<tr><td><i>x<\/i><b>PT<\/b><i>y<\/i><\/td><td>Notation for a ''Power Tower'' of 10's<br \/>(3PT4 = ''3 powers of 10 with a 4 on top'' = 10<sup>10<sup>10<sup>4<\/sup><\/sup><\/sup> = 10<sup>10<sup>10000<\/sup><\/sup>)<\/td><\/tr>";
+    v += "<tr><td><i>x<\/i><b>E<\/b><i>y<\/i><\/td><td>Scientic Notation (<i>x<\/i> &times; 10<sup><i>y<\/i><\/sup>)<\/td><\/tr>";
+    v += "<tr><td><i>x<\/i><b>PT<\/b><i>y<\/i><b>E<\/b><i>z<\/i><\/td><td>PT and E may be combined: 2PT3.45E67 = 10<sup>10<sup>3.45 &times; 10<sup>67<\/sup><\/sup><\/sup><\/td><\/tr>";
+    v += "<tr><td><i>x<\/i> <b>+<\/b> <i>y<\/i><\/td><td>Addition<\/td><\/tr>";
+    v += "<tr><td><i>x<\/i> <b>-<\/b> <i>y<\/i><\/td><td>Subtraction<\/td><\/tr>";
+    v += "<tr><td><i>x<\/i> <b>*<\/b> <i>y<\/i><\/td><td rowspan=\"2\">Multiplication<\/td><\/tr>";
+    v += "<tr><td><i>x<\/i> <i>y<\/i><\/td><\/tr>";
+    v += "<tr><td><i>x<\/i> <b>/<\/b> <i>y<\/i><\/td><td>Division<\/td><\/tr>";
+    v += "<tr><td><i>x<\/i> <b>^<\/b> <i>y<\/i><\/td><td>Raising Power (<i>x<sup>y<\/sup><\/i>)<\/td><\/tr>";
+    v += "<tr><td><i>x<\/i> <b>!<\/b><\/td><td>Factorial<\/td><\/tr>";
+    v += "<tr><td><b>e<\/b><\/td><td>Base of Natural Logarithm (2.718&hellip;)<\/td><\/tr>";
+    v += "<tr><td><b>pi<\/b><\/td><td>&pi; (3.141&hellip;)<\/td><\/tr>";
+    v += "<tr><td><b>phi<\/b><\/td><td>Golden Ratio (1.618&hellip;)<\/td><\/tr>";
+    v += "<tr><td><b>eulerGamma<\/b><\/td><td>Euler&rsquo;s Gamma Constant (0.577&hellip;)<\/td><\/tr>";
+    v += "<tr><td><b>inf<\/b><\/td><td>Infinity<\/td><\/tr>";
+    v += "<tr><td><b>deg<\/b><\/td><td>Degree Sign<\/td><\/tr>";
+    v += "<tr><td><b>ln<\/b> (<i>x<\/i>)<\/td><td>Natural Logarithm<\/td><\/tr>";
+    v += "<tr><td><b>log<\/b> (<i>x<\/i>)<\/td><td>Common Logarithm<\/td><\/tr>";
+    v += "<tr><td><b>logb<\/b> (<i>b<\/i>, <i>x<\/i>)<\/td><td>Logarithm of Base <i>b<\/i><\/td><\/tr>";
+    v += "<tr><td><b>exp<\/b> (<i>x<\/i>)<\/td><td>Natural Anti-Logarithm<\/td><\/tr>";
+    v += "<tr><td><b>sqrt<\/b> (<i>x<\/i>)<\/td><td>Square Root<\/td><\/tr>";
+    v += "<tr><td><b>root<\/b> (<i>n<\/i>, <i>x<\/i>)<\/td><td>Take Root (<sup><i>n<\/i><\/sup>&radic;<i style=\"text-decoration: overline;\">x<\/i>)<\/td><\/tr>";
+    v += "<tr><td><b>sin<\/b> (<i>x<\/i>)<\/td><td>Sine<\/td><\/tr>";
+    v += "<tr><td><b>cos<\/b> (<i>x<\/i>)<\/td><td>Cosine<\/td><\/tr>";
+    v += "<tr><td><b>tan<\/b> (<i>x<\/i>)<\/td><td>Tangent<\/td><\/tr>";
+    v += "<tr><td><b>asin<\/b> (<i>x<\/i>)<\/td><td>Inverse Sine<\/td><\/tr>";
+    v += "<tr><td><b>acos<\/b> (<i>x<\/i>)<\/td><td>Inverse Cosine<\/td><\/tr>";
+    v += "<tr><td><b>atan<\/b> (<i>x<\/i>)<\/td><td>Inverse Tangent<\/td><\/tr>";
+    v += "<tr><td><b>gamma<\/b> (<i>x<\/i>)<\/td><td>Gamma Function<\/td><\/tr>";
+    v += "<tr><td><b>%<\/b><\/td><td>Last Output<\/td><\/tr>";
+    v += "<tr><td><b>$<\/b><\/td><td>Last Input<\/td><\/tr>";
+    v += "<tr><td><b>%<\/b><i>n<\/i><\/td><td>The <i>n<\/i>-th Output<\/td><\/tr>";
+    v += "<tr><td><b>$<\/b><i>n<\/i><\/td><td>The <i>n<\/i>-th Input<\/td><\/tr>";
+    v += "<tr><td><i>var<\/i> <b>=<\/b> <i>expr<\/i><\/td><td>Variable Definition<\/td><\/tr>";
+    v += "<tr><td><i>func<\/i> <b>:=<\/b> <i>expr<\/i><\/td><td>Function Definition<\/td><\/tr>";
+    v += "<tr><td><i>var<\/i> <b>=.<\/b><\/td><td rowspan=\"2\">Remove Variable/Function<\/td><\/tr>";
+    v += "<tr><td><i>func<\/i> <b>:=.<\/b><\/td><\/tr>";
+    v += "<tr><td><b>#<\/b><\/td><td>The First Parameter<\/td><\/tr>";
+    v += "<tr><td><b>#<\/b><i>n<\/i><\/td><td>The <i>n<\/i>-th Parameter<\/td><\/tr>";
+    v += "<tr><td><b>!!<\/b><\/td><td>Clear screen<\/td><\/tr>";
+    v += "<tr><td><b>!!%<\/b><\/td><td rowspan=\"2\">Clear I/O<\/td><\/tr>";
+    v += "<tr><td><b>!!$<\/b><\/td><\/tr>";
+    v += "<tr><td><b>!=<\/b><\/td><td>List All Defined Variables<\/td><\/tr>";
+    v += "<tr><td><b>!:=<\/b><\/td><td>List All Defined Functions<\/td><\/tr>";
+    v += "<tr><td><b>!!=<\/b><\/td><td>Remove All Variables<\/td><\/tr>";
+    v += "<tr><td><b>!!:=<\/b><\/td><td>Remove All Functions<\/td><\/tr>";
+    v += "<\/table>";
+    v += "<\/li><\/ul>";
+  } else if (in_str.indexOf("\045") >= 0 && outs.length == 1 && in_str.indexOf(":=") < 0) {
+    // Invalid History reference.
+    v = "<ul><li><span class=\"redcolor\">Output history not initialized<\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>";
+    disableIn = true;
+  } else if (in_str.indexOf("\$") >= 0 && inps.length == 1 && in_str.indexOf(":=") < 0) {
+    v = "<ul><li><span class=\"redcolor\">Input history not initialized<\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>";
+    disableIn = true;
+  } else if (in_str.indexOf(":=") > 0){
+    // Function Defintion.
+    var fnarr = in_str.split(":=");
+    fnarr[0] = fnarr[0].trim().toLowerCase();
+    fnarr[1] = fnarr[1].trim().replace(/\#(?!\d)/g, "#1").toLowerCase().replace(/([0-9.]+)(e)(?![\+\-]?\d+)/g, "$1*e").replace(/([0-9.]+)(p|pt)(?![\+\-]?[0-9.]+)/g, "$1*$2").replace(/([0-9.]+)([a-df-oq-z\%\#])/g, "$1*$2");
+    if (illchar.test(fnarr[0]) || fnarr[1].indexOf("=") >= 0) {
+      v = "<ul><li><span class=\"redcolor\">The function definition of [" + fnarr[0] + "] contains invalid character<\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>"
+      disableIn = true;
+    } else {
+      fns[fnarr[0]] = fnarr[1];
+      delete vars[fnarr[0]];
+      v = "<ul><li><span class=\"bluecolor\">The function [" + fnarr[0] + "] <\/span> has been defined to be <b>" + fnarr[1] + "<\/b><\/li><\/ul>"
+      def_out([0, NaN]);
+    }
+  } else if (in_str.indexOf("=.") > 0){
+    // Remove function / variable
+    var vname = in_str.substring(0, in_str.indexOf("=.")).trim();
+    if (illchar.test(vname) || (fns[vname] == undefined && vars[vname] == undefined))
+      v = "<ul><li><span class=\"marooncolor\">The variable/function [<b>" + vname + "<\/b>] is invalid or already removed.<\/li><\/ul>";
+    else if (fns[vname] != undefined) {
+      v = "<ul><li><span class=\"bluecolor\">The function [" + vname + "]<\/span> has been successfully removed<\/li><\/ul>";
+      delete fns[vname];
+    } else if (vars[vname] != undefined) {
+      v = "<ul><li><span class=\"bluecolor\">The variable [" + vname + "]<\/span> has been successfully removed<\/li><\/ul>";
+      delete vars[vname];
+    }
+    def_out([0, NaN]);
+  } else if (in_str.indexOf("=") > 0){
+    // Variable Defintion.
+    var vrarr = in_str.split("="), rv;
+    vrarr[0] = vrarr[0].trim().toLowerCase();
+    vrarr[1] = vrarr[1].trim();
+    if (illchar.test(vrarr[0]) || vrarr[1].indexOf("=") >= 0) {
+      disableIn = true;
+      v = "<ul><li><span class=\"redcolor\">The variable definition of [" + vrarr[0] + "] contains invalid character<\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>";
+    } else {
+      rv = eval1(vrarr[1]);
+      if (rv[pt] == -1) {
+        v = "<ul><li><span class=\"redcolor\">" + rv[val] + "<\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>";
+        disableIn = true;
+      } else {
+        v = "<ul><li><span class=\"bluecolor\">The variable [" + vrarr[0] + "] <\/span> has been defined to be <b>" + vrarr[1] + "<\/b><\/li><\/ul>";
+        v += "<tt>Out[" + (outs.length-1) + "] = <\/tt><b>" + makePT(rv) + "<\/b><\/p>";
+        vars[vrarr[0]] = rv;
+        delete fns[vrarr[0]];
+      }
+    }
+  } else {
+    var rv = eval1(in_str);
+    var my_seq = outs.length;
+    if(rv[pt] == -1) {
+      v = "<ul><li><span class=\"redcolor\">" + rv[val] + "<\/span> in expression <b>" + in_str + "<\/b><\/li><\/ul>";
+      disableIn = true;
+    } else {
+      v = "<p><tt>In[" + inps.length + "] := <\/tt>" + escapeHTML(in_str) + "<br \/>";
+      if (delayedError != "") {
+        v += delayedError;
+        delayedError = "";
+      }
+      if (isNaN(rv[val]))
+        v += "<tt>Out[" + (outs.length-1) + "] = <\/tt><b class=\"marooncolor\">NaN<\/b><\/p>"
+      else
+        v += "<tt>Out[" + (outs.length-1) + "] = <\/tt><b>" + makePT(rv) + "<\/b><\/p>";
+    }
+  }
+  if (!disableIn)
+    def_in(in_str);
+  document.getElementById("theTextArea").innerHTML += v;
+  document.getElementById("theTextArea").lastChild.scrollIntoView();
+  document.getElementById("theInput").select();
+  document.getElementById("theInput").focus();
+}
+// function doSubmission:
+//   Cancel the submit action and call "calculate()".
+function doSubmission(){
+  calculate();
+  return false;
+}
+// function tryCalculate:
+//   Try to invoke the "calculate()" function if the user pressed "ENTER".
+function tryCalculate(e){
+  var kk;
+  if (!e)
+    e = event;
+  kk = typeof(e.keyCode) == 'number' ? e.keyCode : e.which;
+  if (kk == 13)
+    calculate();
+}
+// function resizeTextArea:
+//   Resize the height of the output screen to 61.8% of that of the visible region.
+function resizeTextArea(){
+  document.getElementById("theTextArea").style.height = (window.innerHeight !== undefined) ? ((window.innerHeight * 0.618) + "px") : (document.getElementsByTagName("body")[0].clientHeight * 0.618);
+}
+// function debugOuts:
+//   List all outputs
+function debugOuts(){
+  var v = "", i;
+  for (i = 0; i < outs.length; i ++)
+    v += "<b>%" + i + "<\/b> = " + outs[i] + "<br \/>";
+  document.getElementById("theTextArea").innerHTML += v;
+}
+/*]]>*/
+</script>
+<body onload="resizeTextArea();">
+<h2>HyperCalc</h2>
+<div id="theTextArea" class="textAreaStyle">
+<h3><span class="sans">HyperCalc</span> JavaScript,
+Copyright &copy; 1998 - 2003, 2016 Robert P. Munafo
+<i>and</i> &copy; 2004-2005 Kenny TM~ Chan.</h3>
+<p><span class="sans">HyperCalc</span> JavaScript comes with
+<span class="smallcaps">absolutely no warranty</span>.<br />
+<span class="sans">HyperCalc</span> JavaScript is a free software,
+and you are welcome to redistribute it under certain conditions.
+For details, please refer to Chapter 5 of
+<a href="Kenny-TM-HyperCalc.pdf">the help manual</a><br />
+For general help, type ? and hit &lt;return&gt;.
+</p>
+<hr />
+</div>
+<form action="#" onsubmit="doSubmission();">
+<p><input type="text" size="100" id="theInput" placeholder="27^(86!)" value="Please enable Javascript." autofocus />
+<input type="button" value="Calculate!" onclick="calculate();" />
+<input type="text" class="noDisplay" value="Please enable CSS." style="font-family: times;" />
+</p>
+</form>
+<script type="text/javascript">
+/*<![CDATA[*/
+if (document.captureEvents){
+  document.captureEvents(Event.KEYUP);
+  window.captureEvents(Event.RESIZE);
+}
+document.getElementById("theInput").onkeyup = tryCalculate;
+document.getElementById("theInput").value = "";
+window.onresize = resizeTextArea;
+/*]]>*/
+</script>
+<noscript>
+<ul><li>
+This is a Javascript version of HyperCalc, so you'll need to update your
+browser or enable Javascript to use it.
+</li></ul>
+</noscript>
+<p class="rightalign"><a href="http://www.spreadfirefox.com/?q=affiliates&amp;id=0&amp;t=70">
+ <img class="valImg" alt="Get Firefox!" title="Get Firefox!"
+   src="http://sfx-images.mozilla.org/affiliates/Buttons/88x31/get.gif"/>
+</a>
+<a href="http://validator.w3.org/check?uri=referer">
+ <img src="http://www.w3.org/Icons/valid-xhtml11" alt="Valid XHTML 1.1!"
+   class="valImg" title="Valid XHTML 1.1!" />
+</a>
+<a href="http://jigsaw.w3.org/css-validator/check/referer">
+ <img class="valImg" src="http://jigsaw.w3.org/css-validator/images/vcss"
+   alt="Valid CSS!" title="Valid CSS!" />
+</a>
+</p>
+<p class="a">
+See the <a href="../../../pub/perl/hypercalc.html">main Hypercalc page</a> for history, documentation,
+and the more powerful Perl version.
+</p>
+
+<p class="a">
+You might also like my <a href="../../../pub/math/numbers.html">numbers</a> and
+<a href="../../../pub/math/largenum.html">large numbers</a> pages, and the <a href="../../../pub/ries/index.html">RIES</a> inverse
+equation-solver.
+
+
+</p><hr>
+<span class="footer">
+<span class="s">Robert Munafo's home pages on <a href="https://aws.amazon.com">AWS</a> &nbsp;&nbsp;
+&copy; 1996-2024 Robert P. Munafo.</span>
+&nbsp;&nbsp; <a href="../../../pub/personal.html">about</a> &nbsp;&nbsp; <a href="../../../main-contact.html">contact</a>
+<br />
+<span class="s">This work is licensed under a Creative Commons
+Attribution-NonCommercial 4.0 International License.
+Details <a href="../../../cc-license.html">here</a>.</span>
+</span>
+<br />
+<span class="s">This page was written in the "embarrassingly readable" markup language <a href="../../../pub/rhtf/index.html">RHTF</a>, and was last updated on 2019 Mar 14.</span> <img src="../../../images/symbols/rbot-16.png" alt=""  ><span style="font-size: small">s.27</span><br /></div>
+</body></html>

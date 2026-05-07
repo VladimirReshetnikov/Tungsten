@@ -1,0 +1,216 @@
+# Tungsten REPL
+
+- Status: Informational and reference-oriented (console-mode kernel-free interpreter)
+- Audience: Tungsten users, script authors, maintainers, and testers comparing Tungsten with `wolfram.exe`
+- Scope: `src/Tungsten/src/tungsten/repl.py`, `src/Tungsten/src/tungsten/expression.py`, and the `tungsten` console entry point
+- Created (UTC): 2026-04-25T21:57:56Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Related docs:
+  - [Usage Reference](./usage-reference.md)
+  - [Expression Parser](./expression-parser.md)
+  - [Symbol and Context Registry](./symbol-context-registry.md)
+  - [Structural Expression Function Support](./expression-function-support.md)
+
+## Purpose
+
+The Tungsten REPL is a console-mode, kernel-free interpreter for Tungsten's structural Wolfram
+Language subset. It is intentionally shaped like `wolfram.exe`: it prints `In[n]:=` prompts,
+prints successful results as `Out[n]= ...`, and maintains line-local history values for the
+session.
+
+The REPL does not launch the Wolfram kernel. It uses Tungsten's offline parser and structural
+evaluator, so it is useful for quick structural experiments, parser debugging, and agent scripts
+that want Wolfram-like interaction without consuming a kernel license seat.
+
+## Starting It
+
+From a source checkout:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+python -m tungsten repl
+```
+
+Running `python -m tungsten` with no arguments starts the same REPL.
+
+After installing Tungsten as an editable or packaged Python project, the `pyproject.toml`
+`project.scripts` entry point creates a Windows console launcher named `tungsten.exe`:
+
+```powershell
+python -m pip install -e .\src\Tungsten
+tungsten.exe
+```
+
+The repository also includes a small .NET console launcher at
+`dotnet/Tungsten.Console`. It builds to `dotnet/Tungsten.Console/bin/<configuration>/net10.0/tungsten.exe`
+and delegates to `python -m tungsten` with the source tree added to `PYTHONPATH` when it can find
+the checkout:
+
+```powershell
+dotnet build .\src\Tungsten\dotnet\Tungsten.DotNet.slnx
+.\src\Tungsten\dotnet\Tungsten.Console\bin\Debug\net10.0\tungsten.exe
+```
+
+The launcher keeps the existing JSON-first CLI surface intact. Supplying subcommands such as
+`tungsten.exe expr evaluate --code "1+2"` still runs the ordinary CLI command; invoking
+`tungsten.exe` without arguments starts the REPL.
+
+## Session Values
+
+The REPL maintains these Wolfram-style session values:
+
+- `$Line` evaluates to the current input line number while that input is being evaluated.
+- `In[n]` returns the delayed input expression for line `n` and then evaluates it.
+- `In[]` is shorthand for the previous input expression.
+- `In[-k]` addresses input relative to the current line.
+- `InString[n]` returns the exact submitted text for line `n` as a string.
+- `InString[]` and `InString[-k]` use the same previous / relative addressing convention.
+- `Out[n]` returns the stored output expression for line `n`.
+- `Out[]` and `Out[-k]` use the same previous / relative addressing convention.
+- `%`, `%%`, and `%n` parse as `Out[-1]`, `Out[-2]`, and `Out[n]`, respectively.
+- `$HistoryLength` controls retention for `In`, `InString`, `Out`, `MessageList`, and printed-line
+  history. The default is `Infinity`; a finite value keeps the current input plus the most recent
+  preceding entries, so `$HistoryLength = 2` makes `DownValues[In]` on the current line show only
+  the current line and one previous line.
+
+The line is recorded before evaluation begins, matching the important `wolfram.exe` behavior that
+`DownValues[In]` for the current line already includes that line's input.
+
+## Evaluation and Output Limits
+
+Tungsten implements the console-facing limit symbols that matter for unattended agent sessions:
+
+```wolfram
+$RecursionLimit
+$IterationLimit
+$HistoryLength
+$OutputSizeLimit
+```
+
+`$RecursionLimit` defaults to `1024` and accepts `Infinity` or integers at least `20`.
+`$IterationLimit` defaults to `4096` and accepts the same value range. When either limit is
+exceeded, Tungsten emits a non-fatal message and leaves the expression at that evaluator boundary
+unevaluated; it does not terminate the REPL.
+
+`$OutputSizeLimit` is a Tungsten REPL setting with default `12000`. If the rendered `Out[n]` text is
+longer than the current finite limit, the REPL displays a `Short`-style abbreviation using
+`<<...>>` skeleton markers. `Infinity` disables this shortening. This is intentionally heuristic:
+the goal is to keep `tungsten.exe` transcripts navigable, not to reproduce Wolfram FrontEnd box
+elision byte-for-byte.
+
+`Short` and `Shallow` participate in output display:
+
+```wolfram
+Short[Range[100]]
+Shallow[Range[100], {Infinity, 5}]
+```
+
+At the top level they label output as `Out[n]//Short=` or `Out[n]//Shallow=` and render abbreviated
+text. The stored `Out[n]` value is the underlying expression, matching the useful console behavior
+where `FullForm[%]` sees the payload rather than the display wrapper.
+
+## Main-Loop Hooks
+
+The REPL supports Tungsten's session subset of Wolfram main-loop hooks:
+
+```wolfram
+$PreRead = Function[s, StringReplace[s, "sq" -> "Sqrt"]]
+$Pre = Function[x, HoldForm[x], HoldAll]
+$Post = FullForm
+$PrePrint = InputForm
+$MessagePrePrint = FullForm
+```
+
+Hook order follows the console model:
+
+- `$PreRead` is applied to the complete input string before parsing and before `InString[n]` is
+  stored. If it returns a non-string, Tungsten emits `$PreRead::prstr` and parses the original
+  string.
+- `In[n]` stores the parsed expression after `$PreRead`, but before `$Pre`.
+- `$Pre` is applied before ordinary evaluation.
+- `$Post` is applied after ordinary evaluation and before `Out[n]` is stored.
+- `$PrePrint` is applied only to the displayed expression after `Out[n]` is stored, so it does not
+  affect `%` or `Out[n]`.
+- `$MessagePrePrint` is applied to message insertions before Tungsten renders message text.
+
+Hook bodies are evaluated with main-loop hooks suppressed to avoid recursive `$Pre` / `$Post` /
+`$PrePrint` application while the hook itself is running.
+
+## DownValues
+
+`DownValues` is implemented in read-only form. For session-history symbols it is synthesized
+from the active REPL session:
+
+```wolfram
+DownValues[In]
+DownValues[InString]
+DownValues[Out]
+```
+
+The returned shape mirrors Wolfram's ordinary structure:
+
+```wolfram
+{HoldPattern[In[1]] :> 1 + 2, HoldPattern[In[2]] :> $Line}
+```
+
+For user symbols, `DownValues[f]` returns the rules created by supported compound-LHS assignments:
+
+```wolfram
+In[1]:= f[x_] := x + 1
+
+Out[1]= Null
+
+In[2]:= {f[3], DownValues[f]}
+
+Out[2]= {4, {HoldPattern[f[x_]] :> x + 1}}
+
+In[3]:= f /: h[f[x_]] := x + 10
+
+Out[3]= Null
+
+In[4]:= {h[f[2]], UpValues[f]}
+
+Out[4]= {12, {HoldPattern[h[f[x_]]] :> x + 10}}
+```
+
+Tungsten still does not implement direct assignment to value lists such as `DownValues[f] = ...`,
+direct `UpSet` / `UpSetDelayed`, or inspection of general built-in definitions.
+
+## Exiting
+
+The REPL exits on any of these forms:
+
+```wolfram
+Exit
+Exit[]
+Exit[code]
+Quit
+Quit[]
+Quit[code]
+```
+
+The optional integer code becomes the process exit code. Non-integer exit-code arguments report an
+evaluation error and leave the session running.
+
+## Deliberate Differences From `wolfram.exe`
+
+Tungsten matches the console shape and history state that matter for offline structural work, but
+it is not a drop-in Wolfram kernel:
+
+- Evaluation is limited to Tungsten's implemented structural subset.
+- Output rendering is Tungsten `InputForm`-like for most expressions, with top-level strings shown
+  without quotes to resemble the ordinary Wolfram console. Outermost display wrappers use
+  Wolfram-style labels and text: `InputForm[expr]` prints as `Out[n]//InputForm= ...`,
+  `FullForm[expr]` prints as `Out[n]//FullForm= ...`, and the same display selection is used
+  for `Print[InputForm[expr]]`, `Print[FullForm[expr]]`, `OutputForm[expr]`, and
+  `StandardForm[expr]`. `TraditionalForm[expr]`, `TeXForm[expr]`, `MathMLForm[expr]`,
+  `CForm[expr]`, `FortranForm[expr]`, `TextForm[expr]`, and common output-format wrappers such as
+  `NumberForm`, `ScientificForm`, `EngineeringForm`, `AccountingForm`, `PaddedForm`,
+  `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`, `TreeForm`, `DisplayForm`, `StringForm`, and `SequenceForm` also
+  select display text. TraditionalForm uses inline boxes, TeXForm uses Tungsten's compact TeX
+  subset, MathMLForm uses presentation MathML, and the additional wrappers use deterministic
+  keyboard-text approximations rather than FrontEnd layout.
+- Syntax errors and evaluation errors are reported with Tungsten messages rather than exact Wolfram
+  message names and formatting.
+- The REPL currently reads one input line at a time; full Wolfram multi-line input recovery is out
+  of scope for this pass.

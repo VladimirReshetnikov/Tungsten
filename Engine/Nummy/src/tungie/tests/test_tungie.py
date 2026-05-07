@@ -1,0 +1,558 @@
+from __future__ import annotations
+
+import io
+import unittest
+
+from tungie import EvaluationSession
+from tungie import evaluate
+from tungie import parse
+from tungie.errors import TungieSyntaxError
+from tungie.repl import run_repl
+
+
+def eval_text(source: str, session: EvaluationSession | None = None) -> str:
+    return evaluate(parse(source), session=session).to_full_form()
+
+
+class ParserTests(unittest.TestCase):
+    def test_parses_calculator_expression_subset(self) -> None:
+        self.assertEqual(parse("1 + 2 x^3").to_full_form(), "Plus[1, Times[2, Power[x, 3]]]")
+        self.assertEqual(parse("{1, 2, 3}").to_full_form(), "List[1, 2, 3]")
+        self.assertEqual(parse("1.2`20").to_full_form(), "1.2`20")
+        self.assertEqual(parse("1.2``3").to_full_form(), "1.2``3")
+        self.assertEqual(parse("1.2*^3").to_full_form(), "1.2*^3")
+        self.assertEqual(parse(".5").to_full_form(), ".5")
+        self.assertEqual(parse("1.2/^3").to_full_form(), "1.2*^-3")
+        self.assertEqual(parse("1.2*^-3").to_input_form(), "1.2/^3")
+        self.assertEqual(parse("1.2 *^ -3").to_input_form(), "1.2/^3")
+        self.assertEqual(
+            parse("1.2*^^3").to_full_form(),
+            "ScientificScale[1.2, Pow10Tower[1, 3]]",
+        )
+        self.assertEqual(
+            parse("1.2/^^3").to_full_form(),
+            "ScientificScale[1.2, Times[-1, Pow10Tower[1, 3]]]",
+        )
+        self.assertEqual(parse("1.2*^^^3").to_input_form(), "1.2*^^^3")
+
+    def test_scale_literal_binds_tighter_than_power(self) -> None:
+        self.assertEqual(
+            parse("1`100*^^2 ^ 1`100*^^2").to_full_form(),
+            parse("(1`100*^^2) ^ (1`100*^^2)").to_full_form(),
+        )
+        self.assertEqual(
+            parse("1*^^2^3").to_full_form(),
+            "Power[ScientificScale[1, Pow10Tower[1, 2]], 3]",
+        )
+        self.assertEqual(
+            parse("2^1*^^2").to_full_form(),
+            "Power[2, ScientificScale[1, Pow10Tower[1, 2]]]",
+        )
+
+    def test_rejects_deliberately_excluded_syntax(self) -> None:
+        rejected = [
+            '"x"',
+            "a -> b",
+            "a :> b",
+            "16^^ff",
+            "x = y = 5",
+            "1 < 2 < 3",
+            "f[1; 2]",
+            "(1; 2)",
+            "1.2/^-3",
+            "1.2/^^-3",
+            "1.2/^^(-3)",
+            "1.2*^^-3",
+            "1.2*^^(-3)",
+        ]
+        for source in rejected:
+            with self.subTest(source=source):
+                with self.assertRaises(TungieSyntaxError):
+                    parse(source)
+
+
+class EvaluationTests(unittest.TestCase):
+    def test_exact_integer_and_rational_arithmetic(self) -> None:
+        self.assertEqual(eval_text("1 + 2*3"), "7")
+        self.assertEqual(eval_text("2^10"), "1024")
+        self.assertEqual(eval_text("2^-3"), "Rational[1, 8]")
+        self.assertEqual(eval_text("1/2 + 1/3"), "Rational[5, 6]")
+        self.assertEqual(eval_text("(2/3) (9/4)"), "Rational[3, 2]")
+        self.assertEqual(eval_text("Rational[2, 4]"), "Rational[1, 2]")
+
+    def test_invalid_numeric_operations_return_undefined_and_emit_messages(self) -> None:
+        invalid = {
+            "1/0": "Division by zero.",
+            "0/0": "Division by zero.",
+            "1./0.": "Division by zero.",
+            "1/1.`0": "Division by zero.",
+            "Rational[1, 0]": "Division by zero.",
+            "0^-1": "Zero cannot be raised to a negative power.",
+            "0.^-1": "Zero cannot be raised to a negative power.",
+            "(1.`0)^-1": "Zero cannot be raised to a negative power.",
+            "(-1)^(1/2)": "Negative numbers cannot be raised to non-integer powers.",
+            "Sqrt[-1]": "Negative numbers cannot be raised to non-integer powers.",
+        }
+        for source, message in invalid.items():
+            with self.subTest(source=source):
+                session = EvaluationSession()
+                _line, result = session.evaluate_input(parse(source))
+                self.assertEqual(result.to_full_form(), "Undefined")
+                self.assertEqual(session.current_messages, [f"Evaluate::error: {message}"])
+
+    def test_undefined_propagates_through_arithmetic_and_relations(self) -> None:
+        self.assertEqual(eval_text("Undefined + 1"), "Undefined")
+        self.assertEqual(eval_text("2 Undefined"), "Undefined")
+        self.assertEqual(eval_text("Undefined/3"), "Undefined")
+        self.assertEqual(eval_text("Undefined^2"), "Undefined")
+        self.assertEqual(eval_text("Undefined < 3"), "Undefined")
+        self.assertEqual(eval_text("Undefined == Undefined"), "Undefined")
+        self.assertEqual(eval_text("Abs[Undefined]"), "Undefined")
+        self.assertEqual(eval_text("Min[1, Undefined]"), "Undefined")
+        self.assertEqual(eval_text("UndefinedQ[Undefined]"), "True")
+        self.assertEqual(eval_text("UndefinedQ[1]"), "False")
+        session = EvaluationSession()
+        _line, result = session.evaluate_input(parse("UndefinedQ[1/0]"))
+        self.assertEqual(result.to_full_form(), "True")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Division by zero."])
+
+    def test_if_treats_undefined_condition_specially(self) -> None:
+        self.assertEqual(eval_text("If[Undefined, 1, 2]"), "Undefined")
+        self.assertEqual(eval_text("If[True, Undefined, 2]"), "Undefined")
+        self.assertEqual(eval_text("If[False, Undefined, 2]"), "2")
+
+    def test_tracked_precision_real_arithmetic(self) -> None:
+        self.assertEqual(eval_text(".5"), ".5`16")
+        self.assertEqual(
+            eval_text(".500000000000000000000000000000000000"),
+            ".500000000000000000000000000000000000`36",
+        )
+        self.assertEqual(eval_text("1.234567890123456789 + 0"), "1.234567890123456789`19")
+        self.assertEqual(eval_text("1 + 2."), "3.`16.1760912590556812")
+        self.assertEqual(eval_text("1./3"), "0.3333333333333333`16")
+        self.assertEqual(eval_text("1.25`20 + 2.5`20"), "3.75`20")
+        self.assertEqual(eval_text("N[1/3]"), "0.3333333333333333`16")
+        self.assertEqual(eval_text("N[1/3, 20]"), "0.33333333333333333333`20")
+        self.assertEqual(eval_text("N[Pi, 20]"), "3.1415926535897932385`20")
+        self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20")
+        self.assertEqual(eval_text("10^309."), "1`16*^309")
+        self.assertEqual(eval_text("10^309.`20"), "1`20*^309")
+        self.assertEqual(eval_text("10^999999."), "1`16*^999999")
+        self.assertEqual(eval_text("10^1000000."), "ScientificScale[1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(evaluate(parse("10^1000000.")).to_input_form(), "1`16*^^6")
+        self.assertEqual(evaluate(parse("1*^^2")).to_input_form(), "1*^^2")
+        self.assertEqual(evaluate(parse("1*^^4")).to_input_form(), "1*^^4")
+        self.assertEqual(evaluate(parse("1/^^4")).to_input_form(), "1/^^4")
+        self.assertEqual(eval_text("Precision[1*^^4]"), "Infinity")
+        self.assertEqual(evaluate(parse("ScientificScale[1, 10000]")).to_input_form(), "1*^^4")
+        self.assertEqual(evaluate(parse("1*^^4 * 1")).to_input_form(), "1*^^4")
+        self.assertEqual(eval_text("1*^^4 / (1*^^4)"), "1")
+        self.assertEqual(eval_text("1.1*^^2"), "1.1`16*^100")
+        self.assertEqual(evaluate(parse("1.1/^^2")).to_input_form(), "1.1`16/^100")
+        self.assertEqual(
+            eval_text("1.1*^^6"),
+            "ScientificScale[1.1`16, Pow10Tower[1, 6]]",
+        )
+        self.assertEqual(evaluate(parse("1.1*^^6")).to_input_form(), "1.1`16*^^6")
+
+    def test_very_large_scale_arithmetic(self) -> None:
+        self.assertEqual(
+            eval_text("(1.1*^^6) * (2*^^6)"),
+            "ScientificScale[2.2`16, 2000000]",
+        )
+        self.assertEqual(
+            eval_text("10^999999. * 10."),
+            "ScientificScale[1`15.6989700043360188, Pow10Tower[1, 6]]",
+        )
+        self.assertEqual(evaluate(parse("(1.1*^^6) * (2*^^6)")).to_input_form(), "2.2`16*^2000000")
+        self.assertEqual(eval_text("(1.1*^^6) / (2*^^6)"), "0.55`16")
+        self.assertEqual(eval_text("(10^1000000.)^2"), "ScientificScale[1.`15.6989700043360188, 2000000]")
+        self.assertEqual(eval_text("2^4000000."), "ScientificScale[9.608507308`9.5571145476268992, 1204119]")
+        self.assertEqual(eval_text("9.999999999999998^10^10"), "ScientificScale[9.99998`6, 9999999999]")
+        self.assertEqual(eval_text("9.999999999999999^10^10"), "ScientificScale[9.99999`6, 9999999999]")
+        self.assertEqual(eval_text("10^1000000. + 1"), "ScientificScale[1`16, Pow10Tower[1, 6]]")
+        self.assertEqual(
+            eval_text("10^1000000. + 10^999999."),
+            "ScientificScale[1.1`16.041392685158225, Pow10Tower[1, 6]]",
+        )
+        self.assertEqual(eval_text("1.0 + 1.1/^^10"), "1.0`16")
+        self.assertEqual(eval_text("1.0 + 1.1/^^20"), "1.0`16")
+        reciprocal_scale = evaluate(parse("1/1.1*^^6")).to_input_form()
+        self.assertEqual(reciprocal_scale, "9.090909090909091`16/^1000001")
+        self.assertEqual(parse(reciprocal_scale).to_full_form(), "9.090909090909091`16*^-1000001")
+        reciprocal_reciprocal = evaluate(parse("1/(1/1.1*^^20)")).to_input_form()
+        self.assertEqual(reciprocal_reciprocal, "1.1`16*^^20")
+        self.assertEqual(
+            parse(reciprocal_reciprocal).to_full_form(),
+            "ScientificScale[1.1`16, Pow10Tower[1, 20]]",
+        )
+        self.assertEqual(
+            evaluate(parse("ScientificScale[1.2, x]")).to_input_form(),
+            "ScientificScale[1.2`16, x]",
+        )
+        self.assertEqual(eval_text("10^1000000. - 10^1000000."), "0")
+        self.assertEqual(eval_text("10^1000000. > 10^999999."), "True")
+        self.assertEqual(eval_text("Sign[10^1000000.]"), "1")
+        self.assertEqual(eval_text("Precision[10^1000000.]"), "16.")
+
+    def test_max_direct_decimal_exponent_controls_scale_boundary(self) -> None:
+        session = EvaluationSession()
+
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent"))[1].to_full_form(),
+            "999999",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent = 99"))[1].to_full_form(),
+            "99",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("1.1*^^2"))[1].to_full_form(),
+            "ScientificScale[1.1`16, Pow10Tower[1, 2]]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent = 1000000"))[1].to_full_form(),
+            "1000000",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("10^1000000."))[1].to_full_form(),
+            "1`16*^1000000",
+        )
+
+    def test_precision_and_accuracy_builtins(self) -> None:
+        self.assertEqual(eval_text("Precision[1]"), "Infinity")
+        self.assertEqual(eval_text("Precision[1.]"), "16.")
+        self.assertEqual(
+            eval_text("Precision[.500000000000000000000000000000000000]"),
+            "36.",
+        )
+        self.assertEqual(eval_text("Precision[1.23`20]"), "20.")
+        self.assertEqual(eval_text("Precision[1.`15.5]"), "15.5")
+        self.assertEqual(eval_text("Precision[1.`-2.25]"), "-2.25")
+        self.assertEqual(eval_text("Precision[.1`0]"), "0.")
+        self.assertEqual(eval_text("Accuracy[1000.`10.5]"), "7.5")
+        self.assertEqual(eval_text("Accuracy[1.23``20.5]"), "20.5")
+        self.assertEqual(eval_text("Abs[-.1`0]"), "0.1`0")
+        self.assertEqual(eval_text(".1`0 + 0"), "0.1`0")
+        self.assertEqual(eval_text("1.`10 + 1.`2/^10"), "1.0000000001`10")
+        self.assertEqual(eval_text("Precision[1.`10 + 1.`2/^10]"), "10.")
+        self.assertEqual(eval_text("Accuracy[1.`10 + 1.`2/^10]"), "10.")
+        self.assertEqual(eval_text("Precision[SetPrecision[1.`2, 20]]"), "2.")
+        self.assertEqual(eval_text("Accuracy[1000.]"), "13.")
+        self.assertEqual(eval_text("SetPrecision[1/3, 20]"), "0.33333333333333333333`20")
+        self.assertEqual(eval_text("SetPrecision[1.25, Infinity]"), "Rational[5, 4]")
+        self.assertEqual(eval_text("SetAccuracy[1.23, 20]"), "1.23``15.9100948885606021")
+        self.assertEqual(eval_text("MachineNumberQ[1.]"), "False")
+
+    def test_arbitrary_certified_precision_is_compact(self) -> None:
+        huge = "10000000000000"
+        self.assertEqual(eval_text(f"1/1`{huge}"), f"1`{huge}")
+        self.assertEqual(eval_text(f"Precision[1/1`{huge}]"), f"{huge}.")
+        self.assertEqual(eval_text(f"1`{huge} + 0"), f"1`{huge}")
+        self.assertEqual(eval_text(f"1`{huge} * 1"), f"1`{huge}")
+        self.assertEqual(eval_text(f"1`{huge} / 1"), f"1`{huge}")
+        self.assertEqual(eval_text(f"N[1/3, {huge}]"), f"SetPrecision[Rational[1, 3], {huge}]")
+        self.assertEqual(eval_text(f"Precision[N[1/3, {huge}]]"), f"{huge}.")
+        self.assertEqual(eval_text(f"N[1/3, {huge}] + N[2/3, {huge}]"), f"1`{huge}")
+        self.assertEqual(eval_text("1`100 > 0"), "True")
+        self.assertEqual(eval_text("1`100 > 2"), "False")
+        self.assertEqual(eval_text("1`-5 > 0"), "Greater[1`-5, 0]")
+        self.assertEqual(eval_text("1`100 == 1`100"), "Equal[1`100, 1`100]")
+
+        session = EvaluationSession()
+        _line, result = session.evaluate_input(parse("1/1`-5"))
+        self.assertEqual(result.to_full_form(), "Undefined")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Division by zero."])
+
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse(f"$Precision = {huge}"))[1].to_full_form(), huge)
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3]"))[1].to_full_form(),
+            f"SetPrecision[Rational[1, 3], {huge}]",
+        )
+        self.assertEqual(
+            eval_text(f"N[Sqrt[2], {huge}]"),
+            f"SetPrecision[Power[2, Rational[1, 2]], {huge}]",
+        )
+        self.assertEqual(
+            eval_text(f"Precision[N[Sqrt[2], {huge}]]"),
+            f"{huge}.",
+        )
+
+    def test_max_displayed_digits_controls_lazy_exact_output(self) -> None:
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse("$MaxDisplayedDigits"))[1].to_full_form(), "1000")
+        self.assertEqual(session.evaluate_input(parse("$MaxDisplayedDigits = 20"))[1].to_full_form(), "20")
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3, 30]"))[1].to_full_form(),
+            "SetPrecision[Rational[1, 3], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3, 30] + 0"))[1].to_full_form(),
+            "SetPrecision[Rational[1, 3], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[1/3, 20]"))[1].to_full_form(),
+            "0.33333333333333333333`20",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30]"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30] + 0"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30] * 1"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[Sqrt[2], 30] / 1"))[1].to_full_form(),
+            "SetPrecision[Power[2, Rational[1, 2]], 30]",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("Precision[N[Sqrt[2], 30]]"))[1].to_full_form(),
+            "30.",
+        )
+
+    def test_calculator_builtins(self) -> None:
+        self.assertEqual(eval_text("Abs[-3]"), "3")
+        self.assertEqual(eval_text("Sign[-3/2]"), "-1")
+        self.assertEqual(eval_text("Floor[3.7]"), "3")
+        self.assertEqual(eval_text("Ceiling[-3.7]"), "-3")
+        self.assertEqual(eval_text("Round[2.5]"), "2")
+        self.assertEqual(eval_text("IntegerPart[-3.7]"), "-3")
+        self.assertEqual(eval_text("FractionalPart[-3.7]"), "-0.7`16")
+        self.assertEqual(eval_text("Min[3, 2, 5]"), "2")
+        self.assertEqual(eval_text("Max[3/2, 1.7]"), "1.7`16")
+        self.assertEqual(eval_text("Exp[1.]"), "2.718281828459045`16")
+        self.assertEqual(eval_text("Exp[1]"), "E")
+        self.assertEqual(eval_text("Log[E]"), "1")
+        self.assertEqual(eval_text("Log[10, 1000]"), "3")
+
+    def test_booleans_if_lists_and_comparisons(self) -> None:
+        self.assertEqual(eval_text("True && False"), "False")
+        self.assertEqual(eval_text("True || False"), "True")
+        self.assertEqual(eval_text("!False"), "True")
+        self.assertEqual(eval_text("If[1 < 2, 7, 9]"), "7")
+        self.assertEqual(eval_text("1/2 < .75"), "True")
+        self.assertEqual(eval_text("{1, 2} + 3"), "List[4, 5]")
+        self.assertEqual(eval_text("N[{1/2, 1/3}, 5]"), "List[0.5`5, 0.33333`5]")
+
+    def test_excluded_builtins_remain_inert(self) -> None:
+        self.assertEqual(eval_text("Sin[0]"), "Sin[0]")
+        self.assertEqual(eval_text("Quit"), "Quit")
+        self.assertEqual(eval_text("Boole[True]"), "Boole[True]")
+        self.assertEqual(eval_text("InputForm[1 + x]"), "InputForm[Plus[1, x]]")
+        self.assertEqual(eval_text("Short[{1, 2, 3}]"), "Short[List[1, 2, 3]]")
+
+    def test_precision_symbol_controls_unspecified_exact_power_approximation(self) -> None:
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "16")
+        self.assertEqual(session.evaluate_input(parse("2^(1/2)"))[1].to_full_form(), "1.414213562373095`16")
+        self.assertEqual(session.evaluate_input(parse("$Precision = 20"))[1].to_full_form(), "20")
+        self.assertEqual(
+            session.evaluate_input(parse("2^(1/2)"))[1].to_full_form(),
+            "1.4142135623730950488`20",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[2^(1/2), 50]"))[1].to_full_form(),
+            "1.4142135623730950488016887242096980785696718753769`50",
+        )
+        self.assertEqual(
+            session.evaluate_input(parse("N[2^(1/2), 52]"))[1].to_full_form(),
+            "1.414213562373095048801688724209698078569671875376948`52",
+        )
+        self.assertEqual(session.evaluate_input(parse("N[$Precision, 50]"))[1].to_full_form(), "50.`50")
+        self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "20")
+        self.assertEqual(eval_text("N[Sqrt[2], 20]"), "1.4142135623730950488`20")
+
+    def test_exact_power_rules(self) -> None:
+        self.assertEqual(eval_text("(1/8)^(-1/3)"), "2")
+        self.assertEqual(eval_text("(27/8)^(2/3)"), "Rational[9, 4]")
+        self.assertEqual(eval_text("2^(1/2)"), "1.414213562373095`16")
+        self.assertEqual(
+            eval_text("2^.5`50"),
+            "1.41421356237309504880168872420969807856967187537695`50.4602045301884335",
+        )
+        self.assertEqual(eval_text("0^0"), "1")
+        self.assertEqual(eval_text("x^0"), "1")
+        self.assertEqual(eval_text("0^(1/2)"), "0")
+        self.assertEqual(eval_text("1^x"), "1")
+
+    def test_negative_precision_scale_power(self) -> None:
+        self.assertEqual(
+            eval_text("1`100*^^2 ^ 1`100*^^2"),
+            eval_text("(1`100*^^2) ^ (1`100*^^2)"),
+        )
+        result = evaluate(parse("(1.*^^2)^(1.*^^2)"))
+        self.assertEqual(result.to_input_form(), "1`-86.364097721838251*^^102")
+        self.assertEqual(
+            eval_text("Precision[(1.*^^2)^(1.*^^2)]"),
+            "-86.364097721838251",
+        )
+        self.assertEqual(
+            evaluate(parse("1`1000*^^2 ^ 1`1000*^^2")).to_input_form(),
+            "1`897.635902278161749*^^102",
+        )
+        self.assertEqual(
+            evaluate(parse("1`1001*^^2 ^ 1`1001*^^2")).to_input_form(),
+            "1`898.635902278161749*^^102",
+        )
+
+    def test_session_assignment_clear_and_history(self) -> None:
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse("x = 3"))[1].to_full_form(), "3")
+        self.assertEqual(session.evaluate_input(parse("x + 2"))[1].to_full_form(), "5")
+        self.assertEqual(session.evaluate_input(parse("% + %1"))[1].to_full_form(), "8")
+        self.assertEqual(session.evaluate_input(parse("Out[1]"))[1].to_full_form(), "3")
+        self.assertEqual(session.evaluate_input(parse("Clear[x]"))[1].to_full_form(), "Null")
+        self.assertEqual(session.evaluate_input(parse("x + 2"))[1].to_full_form(), "Plus[2, x]")
+
+    def test_top_level_semicolon_programs(self) -> None:
+        session = EvaluationSession()
+        self.assertEqual(session.evaluate_input(parse("x = 1; x + 2"))[1].to_full_form(), "3")
+        line, result = session.evaluate_input(parse("x = 2;"))
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(session.outputs[line].to_full_form(), "Null")
+        self.assertEqual(session.evaluate_input(parse("Out[2]"))[1].to_full_form(), "Null")
+        self.assertEqual(session.evaluate_input(parse("%"))[1].to_full_form(), "Null")
+
+    def test_predefined_symbols_cannot_be_assigned(self) -> None:
+        session = EvaluationSession()
+        line, result = session.evaluate_input(parse("Pi = 3"))
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(session.outputs[line].to_full_form(), "Null")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Cannot assign to predefined symbol Pi."])
+        self.assertEqual(session.evaluate_input(parse("Pi"))[1].to_full_form(), "Pi")
+
+        _line, result = session.evaluate_input(parse("Plus = 1/0"))
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(session.current_messages, ["Evaluate::error: Cannot assign to predefined symbol Plus."])
+
+    def test_clear_reports_predefined_symbols_and_clears_others(self) -> None:
+        session = EvaluationSession()
+        session.evaluate_input(parse("x = 3"))
+        session.evaluate_input(parse("y = 4"))
+
+        _line, result = session.evaluate_input(parse("Clear[x, Pi, y, E]"))
+        messages = list(session.current_messages or [])
+
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(
+            messages,
+            [
+                "Evaluate::error: Cannot clear predefined symbol Pi.",
+                "Evaluate::error: Cannot clear predefined symbol E.",
+            ],
+        )
+        self.assertEqual(session.evaluate_input(parse("x"))[1].to_full_form(), "x")
+        self.assertEqual(session.evaluate_input(parse("y"))[1].to_full_form(), "y")
+
+    def test_clear_resets_mutable_system_symbols_with_warnings(self) -> None:
+        session = EvaluationSession()
+        session.evaluate_input(parse("$Precision = 40"))
+        session.evaluate_input(parse("$MaxDirectDecimalExponent = 99"))
+        session.evaluate_input(parse("$MaxDisplayedDigits = 20"))
+
+        _line, result = session.evaluate_input(parse("Clear[$Precision, $MaxDirectDecimalExponent, $MaxDisplayedDigits]"))
+
+        self.assertEqual(result.to_full_form(), "Null")
+        self.assertEqual(
+            session.current_messages,
+            [
+                "Evaluate::warning: Clear resets $Precision to its default value 16.",
+                "Evaluate::warning: Clear resets $MaxDirectDecimalExponent to its default value 999999.",
+                "Evaluate::warning: Clear resets $MaxDisplayedDigits to its default value 1000.",
+            ],
+        )
+        self.assertEqual(session.evaluate_input(parse("$Precision"))[1].to_full_form(), "16")
+        self.assertEqual(
+            session.evaluate_input(parse("$MaxDirectDecimalExponent"))[1].to_full_form(),
+            "999999",
+        )
+        self.assertEqual(session.evaluate_input(parse("$MaxDisplayedDigits"))[1].to_full_form(), "1000")
+
+
+class ReplTests(unittest.TestCase):
+    def test_repl_ctrl_c_exits_without_traceback(self) -> None:
+        class InterruptedInput(io.StringIO):
+            def readline(self, *args, **kwargs) -> str:  # type: ignore[no-untyped-def]
+                raise KeyboardInterrupt
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=InterruptedInput(), stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(stdout.getvalue(), "In[1]:= \n")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_repl_uses_tungsten_style_prompts_history_and_exit(self) -> None:
+        stdin = io.StringIO("1+2\n% + 10\n%% + %1\nExit[7]\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 7)
+        transcript = stdout.getvalue()
+        self.assertIn("In[1]:=", transcript)
+        self.assertIn("Out[1]= 3", transcript)
+        self.assertIn("Out[2]= 13", transcript)
+        self.assertIn("Out[3]= 6", transcript)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_quit_is_not_a_repl_exit_command(self) -> None:
+        stdin = io.StringIO("Quit\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Out[1]= Quit", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_repl_prints_messages_and_undefined_result(self) -> None:
+        stdin = io.StringIO("1/0\nExit[]\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Out[1]= Undefined", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "Evaluate::error: Division by zero.\n")
+
+    def test_repl_suppresses_null_results_but_continues_history(self) -> None:
+        stdin = io.StringIO("1+1;\n2+2\nExit[]\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        transcript = stdout.getvalue()
+        self.assertNotIn("Out[1]=", transcript)
+        self.assertIn("Out[2]= 4", transcript)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_repl_reports_predefined_assignment_without_printing_null(self) -> None:
+        stdin = io.StringIO("Pi = 3\n2+2\nExit[]\n")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        exit_code = run_repl(stdin=stdin, stdout=stdout, stderr=stderr, show_banner=False)
+
+        self.assertEqual(exit_code, 0)
+        transcript = stdout.getvalue()
+        self.assertNotIn("Out[1]=", transcript)
+        self.assertIn("Out[2]= 4", transcript)
+        self.assertEqual(stderr.getvalue(), "Evaluate::error: Cannot assign to predefined symbol Pi.\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

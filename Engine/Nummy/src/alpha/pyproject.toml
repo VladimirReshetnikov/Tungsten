@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nummy"
+version = "0.1.0"
+description = "Reference Python tower arithmetic for Nummy"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT-0" }
+authors = [
+  { name = "Nummy contributors" }
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nummy*"]
+
+[project.scripts]
+nummy = "nummy.cli:main"
