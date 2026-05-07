@@ -1,9 +1,0 @@
-"""``python -m nummy`` -- launch the REPL."""
-
-from __future__ import annotations
-
-from .repl import main
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
