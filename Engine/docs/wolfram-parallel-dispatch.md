@@ -159,10 +159,32 @@ isn't there yet.
    side, not just at the master side, if you want to suppress
    reducer noise.
 
+## A fourth strategy: MCP-driven persistent kernels
+
+The Wolfram MCP servers shipped by the AgentTools paclet
+(`Wolfram/AgentTools` from the paclet repository) implement what
+Strategy B would have built: a persistent master kernel (paid Wolfram
+or Wolfram Engine for Developers) addressable from any MCP client over
+stdio. Once registered in `.claude.json` /
+`claude_desktop_config.json`, Claude Code / Claude Desktop sees them as
+deferred tools (`mcp__Wolfram__WolframLanguageEvaluator`,
+`mcp__WolframEngine__WolframLanguageEvaluator`, plus several
+companions). The persistent kernel stays warm across calls — the
+single biggest cost for spawn-per-request Tungsten — and the MCP wire
+protocol takes care of cancellation, timeouts, and result formatting.
+
+For ad-hoc and interactive workloads this is the right tier; for batch
+jobs Tungsten's spawn-per-request stays cleaner (isolated state per
+run, JSON artifacts on disk, doesn't tie up the chat session). See
+`src/Hypergeometric/docs/test-execution-paths.md` for the Hypergeometric-
+specific decision matrix.
+
 ## Reference
 
 - `src/Tungsten/docs/wolfram-license-parallelism.md` —
   empirical license-slot investigation.
+- `src/Hypergeometric/docs/test-execution-paths.md` —
+  worked example of choosing between Tungsten and MCP per workload.
 - `C:\Users\vresh\AppData\Local\Temp\subkernel-probe.wl` —
   exploratory script that confirmed 4 workers spawn on this
   license; left in temp so it can be re-run.
