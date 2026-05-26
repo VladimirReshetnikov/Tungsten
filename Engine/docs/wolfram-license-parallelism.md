@@ -104,30 +104,79 @@ vovac:     "Duplicate entry for license ID ignored." x6
 ```
 
 vovac can **read** the system `mathpass` but Wolfram's licensing
-layer refuses the activation as not registered for that user. The
-`%(*userregistered*)` header binds the activation to a specific
-Wolfram user / Windows user combination. Running `wolfram.exe` as a
-different Windows user therefore does not borrow vresh's activation.
+layer refuses to honour any entry inside it for the vovac process.
 
-A second Windows user could in principle hold an **independent**
-activation under their own profile, but they would still need a
-key activated against their user — not free.
+The mechanism is not the `%(*userregistered*)` header — that line is
+a comment marker, not a per-user binding flag. The actual gate is
+the **MathID**: each entry in `mathpass` records the MathID
+(machine fingerprint) the key was activated against, and Wolfram
+recomputes the MathID at every kernel startup and only honours
+entries whose stored MathID matches what it recomputes.
+
+The MathID derivation includes the Windows-user identity (or
+per-user profile state) as one of its inputs, so vresh produces
+MathID `2751-636-401` (and friends, from old activations) while
+vovac running the same `wolfram.exe -pwfile <mathpass>` produces a
+different MathID that none of the entries match. Result: vovac
+sees its own MathID computed inside the kernel, compares it
+against the mathpass entries, finds no match, and reports
+`No valid password found`.
+
+The observable consequence is the same: running `wolfram.exe` as a
+different Windows user does not borrow vresh's activation. But the
+fix is *also* MathID-based, not user-rename-based: a second
+Windows user could hold an **independent** activation under their
+own profile (vovac would generate vovac's MathID and then a fresh
+activation against that MathID would be added to mathpass and
+honoured for vovac). That still costs one key activation, so the
+total concurrent-kernel ceiling on this machine is bounded by the
+number of distinct licenses you own, not by the number of Windows
+users you have.
 
 ## Path to 4 concurrent kernels
 
 Activate one key from the `L3458-6977` license group on this
-machine, for the current user (vresh):
+machine, for the current user (vresh).
+
+**Do not use the standalone `wolframscript.exe`** at
+`C:\Program Files\Wolfram Research\WolframScript\` for this. That
+binary is the Wolfram-Engine-for-Developers launcher; its
+`-activate` flag is hardwired to a Wolfram Engine install and
+fails on the paid Wolfram product with:
+
+```
+An appropriate wolfram.exe location could not be determined. When
+using the -activate option with WolframScript, wolfram.exe must be
+located within a Wolfram Engine installation.
+```
+
+The fix is one of two product-correct entry points:
+
+**(a)** the `wolframscript.exe` that ships *inside* the Wolfram
+14.3 install, which knows it belongs to the paid product:
 
 ```powershell
-& "C:\Program Files\Wolfram Research\WolframScript\wolframscript.exe" `
+& "C:\Program Files\Wolfram Research\Wolfram\14.3\wolframscript.exe" `
     -activate 3458-6977-EUAT9H
 ```
 
-This is a **one-way** operation: it burns one of the key's allowed
-machine activations. The `-activate` flag without an explicit
-`-username` / `-password` falls back to interactive credential
-entry against the Wolfram cloud — Vladimir would need to confirm
-the prompt.
+**(b)** the WolframNB.exe (notebook front end) interactive
+activation dialog:
+
+```powershell
+& "C:\Program Files\Wolfram Research\Wolfram\14.3\WolframNB.exe"
+```
+
+The first time the front end is run with a key that has free
+slots remaining, it pops the Wolfram Product Activation dialog
+(Preferences -> Product Settings -> Activate Additional Product
+in newer 14.x builds). Paste the key, complete the cloud sign-in,
+and on success the new entry lands in
+`C:\ProgramData\Wolfram\Licensing\mathpass`.
+
+Either path is **one-way**: it burns one of the key's allowed
+machine activations. The cloud sign-in step is interactive — this
+cannot be fully scripted without prior `wolframscript -authenticate`.
 
 After activation, the system mathpass should grow a new entry tied
 to the new key + a fresh MathID. The new line should NOT trigger
