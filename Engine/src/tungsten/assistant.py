@@ -214,6 +214,48 @@ class NotebookAssistantController:
         )
         return NotebookAssistantResult(evaluation=evaluation, payload=payload)
 
+    def ask(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str | None = None,
+        extra_instructions: str | None = None,
+        model_service: str | None = None,
+        model_name: str | None = None,
+        tools: list[str] | None = None,
+    ) -> NotebookAssistantResult:
+        """Send a free-form prompt to the Wolfram Notebook Assistant.
+
+        Unlike `ask_cell`, this entry point does not require a notebook
+        file or a cell selector. Tungsten still uses the same
+        Wolfram`Chatbook` machinery under the hood (a temporary hidden
+        chat notebook that the Notebook Assistant evaluates against and
+        Tungsten throws away afterwards), but the caller only has to
+        supply the prompt text.
+
+        Returns a NotebookAssistantResult whose payload includes
+        `response_text` (the assistant's text answer extracted from the
+        chat object) and `code_blocks` / `wolfram_code_blocks` for any
+        fenced code blocks the answer contained. Errors land in the
+        same `success / error_type / error` shape used by the rest of
+        the controller.
+        """
+        evaluation = self.runner.evaluate_text(
+            self._build_ask_script(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                extra_instructions=extra_instructions,
+                model_service=model_service,
+                model_name=model_name,
+                tools=tools,
+            ),
+            require_front_end=True,
+        )
+
+        payload = self._parse_payload(evaluation)
+        payload = self._finalize_ask_payload(payload=payload)
+        return NotebookAssistantResult(evaluation=evaluation, payload=payload)
+
     def prepare_inline(
         self,
         *,
@@ -443,6 +485,48 @@ class NotebookAssistantController:
 
         return payload
 
+    def _finalize_ask_payload(
+        self,
+        *,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        """Postprocess the raw payload from `_build_ask_script`.
+
+        Pulls the assistant's text response and any fenced code blocks
+        out of the chat object string, dropping the (now-superfluous)
+        raw chat object payload entry. Mirrors `_finalize_ask_cell_payload`
+        without the notebook-insertion machinery, since the bare `ask`
+        entry point has no source notebook to insert code into.
+        """
+        if not payload.get("success"):
+            return payload
+
+        chat_object_string = payload.get("assistant_chat_object_string")
+        if not isinstance(chat_object_string, str) or not chat_object_string:
+            return {
+                "success": False,
+                "error_type": "AssistantResponseUnavailable",
+                "error": "Notebook Assistant did not return a chat object string that Tungsten could inspect.",
+            }
+
+        response_text = self._extract_assistant_text(chat_object_string)
+        if not response_text:
+            return {
+                "success": False,
+                "error_type": "AssistantResponseUnavailable",
+                "error": "Notebook Assistant completed, but Tungsten could not extract an assistant text response.",
+                "assistant_chat_object_string": chat_object_string,
+            }
+
+        code_blocks = self._extract_code_blocks(response_text)
+        wolfram_code_blocks = [block for block in code_blocks if bool(block.get("insertable"))]
+        enriched = dict(payload)
+        enriched["response_text"] = response_text
+        enriched["code_blocks"] = code_blocks
+        enriched["wolfram_code_blocks"] = wolfram_code_blocks
+        enriched.pop("assistant_chat_object_string", None)
+        return enriched
+
     def _finalize_ask_cell_payload(
         self,
         *,
@@ -624,6 +708,123 @@ class NotebookAssistantController:
             return {"cell_index": index}
 
         raise ValueError("Tungsten could not derive a stable cell selector from the notebook row.")
+
+    def _build_ask_script(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str | None,
+        extra_instructions: str | None,
+        model_service: str | None,
+        model_name: str | None,
+        tools: list[str] | None,
+    ) -> str:
+        """Wolfram script for the bare `ask` entry point.
+
+        Creates a hidden temporary chat notebook, writes the prompt as
+        a ChatInput cell, evaluates it via `Wolfram`Chatbook`ChatCellEvaluate`,
+        captures the chat object as an InputForm string, closes the
+        notebook, and emits an `ExportString[..., "RawJSON"]` payload
+        that `_parse_payload` understands.
+
+        Unlike `_build_script`, this path has no source notebook to
+        bind to and no source cell to embed - it's purely
+        ask-the-assistant-a-question, returning the assistant's text
+        answer plus any fenced code blocks.
+        """
+        settings: dict[str, object] = {
+            "AutoSaveConversations": False,
+            "Tools": list(tools) if tools is not None else [
+                "WolframLanguageEvaluator",
+                "DocumentationSearcher",
+                "WolframAlpha",
+            ],
+        }
+        if model_service is not None or model_name is not None:
+            settings["Model"] = {
+                "Service": model_service if model_service is not None else "Automatic",
+                "Name": model_name if model_name is not None else "Automatic",
+            }
+        settings_json = json.dumps(settings, ensure_ascii=True)
+
+        combined_instructions = (extra_instructions or "").strip()
+        system_prompt_text = (system_prompt or "").strip()
+
+        return f"""
+Needs["Wolfram`Chatbook`" -> None];
+
+tungstenSettings = ImportString[{wl_string(settings_json)}, "RawJSON"];
+tungstenPrompt = {wl_string(prompt)};
+tungstenSystemPrompt = {wl_string(system_prompt_text)};
+tungstenExtraInstructions = {wl_string(combined_instructions)};
+
+tungstenChatCellEvaluate = Symbol["Wolfram`Chatbook`ChatCellEvaluate"];
+
+ClearAll[tungstenError, tungstenChatSettings];
+
+tungstenError[type_String, message_String, extra_: <||>] :=
+    Join[<|"success" -> False, "error_type" -> type, "error" -> message|>, extra];
+
+tungstenChatSettings[nbo_NotebookObject] := Quiet @ Check[
+    CurrentValue[nbo, {{TaggingRules, "ChatNotebookSettings"}}] = tungstenSettings,
+    Null
+];
+
+tungstenResult = Module[
+    {{assistantNotebook, chatCell, chatObject, chatRaw, combinedPrompt}},
+
+    combinedPrompt = Which[
+        tungstenSystemPrompt =!= "" && tungstenExtraInstructions =!= "",
+            tungstenSystemPrompt <> "\\n\\n" <> tungstenPrompt <> "\\n\\n" <> tungstenExtraInstructions,
+        tungstenSystemPrompt =!= "",
+            tungstenSystemPrompt <> "\\n\\n" <> tungstenPrompt,
+        tungstenExtraInstructions =!= "",
+            tungstenPrompt <> "\\n\\n" <> tungstenExtraInstructions,
+        True,
+            tungstenPrompt
+    ];
+
+    assistantNotebook = Quiet @ Check[
+        CreateDocument[
+            Notebook[{{Cell["Tungsten Assistant Ask Session", "Section"]}}],
+            Visible -> False
+        ],
+        $Failed
+    ];
+    If[
+        ! MatchQ[assistantNotebook, _NotebookObject],
+        tungstenError[
+            "AssistantNotebookCreateFailed",
+            "Tungsten could not create the temporary Notebook Assistant notebook."
+        ],
+        (
+            tungstenChatSettings @ assistantNotebook;
+            SelectionMove[assistantNotebook, After, Notebook, AutoScroll -> False];
+            NotebookWrite[
+                assistantNotebook,
+                Cell[combinedPrompt, "ChatInput"]
+            ];
+            chatCell = Quiet @ Check[Last[Cells[assistantNotebook]], $Failed];
+            chatObject = Quiet @ Check[
+                If[MatchQ[chatCell, _CellObject],
+                    tungstenChatCellEvaluate[chatCell, assistantNotebook],
+                    $Failed],
+                $Failed
+            ];
+            chatRaw = ToString[chatObject, InputForm, PageWidth -> Infinity];
+            Quiet @ Check[NotebookClose @ assistantNotebook, Null];
+
+            <|
+                "success" -> True,
+                "prompt" -> tungstenPrompt,
+                "assistant_chat_object_string" -> chatRaw
+            |>
+        )
+    ]
+];
+
+ExportString[tungstenResult, "RawJSON"]
+""".strip()
 
     def _build_script(
         self,

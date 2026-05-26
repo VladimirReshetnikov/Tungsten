@@ -359,6 +359,47 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Drive the built-in Notebook Assistant against a notebook cell.",
     )
     assistant_subparsers = assistant_parser.add_subparsers(dest="assistant_command", required=True)
+
+    assistant_ask_bare = assistant_subparsers.add_parser(
+        "ask",
+        help=(
+            "Send a free-form prompt to the Notebook Assistant. "
+            "Unlike ask-cell, no notebook file or cell selector is required - "
+            "the assistant evaluates against a temporary hidden chat notebook "
+            "that Tungsten throws away after capturing the response."
+        ),
+    )
+    assistant_ask_bare.add_argument(
+        "--prompt",
+        required=True,
+        help="The question or instruction sent to the Notebook Assistant.",
+    )
+    assistant_ask_bare.add_argument(
+        "--system-prompt",
+        help="Optional system prompt prepended to the user message.",
+    )
+    assistant_ask_bare.add_argument(
+        "--extra-instructions",
+        help="Optional trailing instructions appended after the prompt.",
+    )
+    assistant_ask_bare.add_argument(
+        "--tool",
+        action="append",
+        help=(
+            "Notebook Assistant tool name to enable. Repeatable. Defaults to "
+            "WolframLanguageEvaluator, DocumentationSearcher, WolframAlpha when omitted."
+        ),
+    )
+    assistant_ask_bare.add_argument(
+        "--model-service",
+        help="Optional service override (e.g. OpenAI, Anthropic). Defaults to the Notebook Assistant's preferred service.",
+    )
+    assistant_ask_bare.add_argument(
+        "--model-name",
+        help="Optional model name override.",
+    )
+    assistant_ask_bare.add_argument("--require-success", action="store_true")
+
     assistant_ask = assistant_subparsers.add_parser(
         "ask-cell",
         help="Ask Notebook Assistant about a selected cell and optionally insert Wolfram Language code below it.",
@@ -751,6 +792,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "assistant":
         controller = NotebookAssistantController(runner=WolframKernelRunner(installation))
+        if args.assistant_command == "ask":
+            tools = list(args.tool) if args.tool else None
+            result = controller.ask(
+                prompt=args.prompt,
+                system_prompt=args.system_prompt,
+                extra_instructions=args.extra_instructions,
+                model_service=args.model_service,
+                model_name=args.model_name,
+                tools=tools,
+            )
+            payload = result.to_dict()
+            _json_dump(payload)
+            if args.require_success and not result.assistant_success:
+                return 1
+            return 0
+
         if args.assistant_command == "ask-cell":
             result = controller.ask_cell(
                 notebook_path=args.file,
