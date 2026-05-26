@@ -363,10 +363,12 @@ ClearAll[
     Tungsten`Private`HeadStringify,
     Tungsten`Private`StringList
 ];
-SetAttributes[Tungsten`Private`CapturedPrint, HoldAll];
+(* Stock Print is NOT HoldAll - its args evaluate before display. The capture
+   shim must match that contract: callers writing Print[Prime[10]] expect "29"
+   in the output buffer, not the string "Prime[10]". *)
 Tungsten`Private`CapturedPrint[args___] := AppendTo[
     output,
-    ToString[Unevaluated[SequenceForm[args]], OutputForm, PageWidth -> Infinity]
+    ToString[SequenceForm[args], OutputForm, PageWidth -> Infinity]
 ];
 Tungsten`Private`Stringify[value_] := Quiet @ Check[
     ToString[Unevaluated[value], InputForm, PageWidth -> Infinity],

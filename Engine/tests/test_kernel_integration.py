@@ -40,6 +40,25 @@ class KernelIntegrationTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("Power::infy", " ".join(result.messages))
 
+    def test_print_captures_evaluated_arguments(self) -> None:
+        """Print's args must evaluate before capture, matching stock Wolfram
+        semantics (Print is not HoldAll). Regression: prior to this fix the
+        capture shim was HoldAll, so Print[Prime[10]] surfaced the literal
+        string "Prime[10]" in the output buffer instead of "29"."""
+        runner = WolframKernelRunner(self.installation)
+        result = runner.evaluate_text("Print[Prime[10]]; Prime[20]")
+
+        self.assertTrue(result.evaluation_available)
+        self.assertEqual(result.result, "71")
+        self.assertEqual(result.output, ["29"])
+
+    def test_print_captures_multiple_args_after_evaluation(self) -> None:
+        runner = WolframKernelRunner(self.installation)
+        result = runner.evaluate_text('Print["sum=", 1 + 2]; 0')
+
+        self.assertTrue(result.evaluation_available)
+        self.assertEqual(result.output, ["sum=3"])
+
     def test_front_end_round_trip(self) -> None:
         if self.installation.frontend_executable is None:
             self.skipTest("No local FrontEnd executable was discovered.")
