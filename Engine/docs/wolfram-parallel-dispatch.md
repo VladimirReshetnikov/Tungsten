@@ -9,20 +9,32 @@
 ## What the license actually allows
 
 The `:2,2,4,4:` field in `C:\ProgramData\Wolfram\Licensing\mathpass`
-permits **two simultaneous main kernels** PLUS **four worker
-subkernels per main kernel**. Empirically confirmed:
+permits **two simultaneous main kernels** plus **a machine-wide
+pool of four worker subkernels** — *not* four workers per master.
+Empirically confirmed:
 
 | Probe | Result |
 |---|---|
 | 5x `wolfram.exe -script` concurrent | 2 succeed; 3 fail with `Duplicate entry for license ID` |
-| 1x `wolfram.exe -script`, then `LaunchKernels[6]` | Master + 4 `WolframKernel.exe` workers (one fewer than requested) |
+| 1x `wolfram.exe -script`, then `LaunchKernels[6]` | Master + 4 `WolframKernel.exe` workers |
+| **2x `wolfram.exe -script` concurrent, each calling `LaunchKernels[6]`** | M1 gets **4 workers**; M2 gets **0 workers**. Observer at +5s / +10s / +18s sees exactly 4 `WolframKernel.exe` and 2 `wolfram.exe`. |
 
 So the realistic ceiling on this machine, current single-license
-setup, is **1 master + 4 workers = 5 parallel evaluation contexts**
-in one script invocation. If we also activated the second license
-group (`L3458-6977`, see `wolfram-license-parallelism.md`), we'd
-get **2 master + up to 8 worker = 10 parallel contexts** — two
-copies of the same {master, 4-worker} group running independently.
+setup, is **1 active master + 4 workers = 5 parallel evaluation
+contexts** — even though the license technically permits two
+concurrent main kernels, the second master cannot acquire any
+workers when the first has already claimed the pool. Running two
+masters in parallel is therefore only useful when each is doing
+purely serial work; for `ParallelMap`-style workloads, one master
+with four workers is strictly better than two masters fighting
+over zero workers each.
+
+If the second license group (`L3458-6977`, see
+`wolfram-license-parallelism.md`) were also activated, each
+license group would presumably get its own independent worker pool,
+yielding **2 master + 4+4 = 10 parallel contexts**. That's
+unverified speculation until we activate; the empirical evidence
+here is only single-license.
 
 ## Three implementation strategies
 
@@ -130,11 +142,16 @@ isn't there yet.
    each worker has its own independent counter — no cross-worker
    interference, but also no shared budget.
 
-4. **License-slot contention.** The `:2,2,4,4:` allows 4 workers
-   PER MASTER. If we ever run two masters (Strategy A inside two
-   Tungsten requests at once, or Strategy B with two persistent
-   sessions), each master gets its own 4-worker pool. They don't
-   share workers.
+4. **License-slot contention.** The `:2,2,4,4:` license slot does
+   NOT give 4 workers per master — the four-worker pool is shared
+   machine-wide across all running masters. Verified experimentally
+   (see the "two-masters" probe results in the table above): when
+   two `wolfram.exe -script` processes both call `LaunchKernels[6]`
+   concurrently, the first claims all four workers and the second
+   gets zero. Two-Tungsten-requests-at-once therefore makes things
+   *worse* for ParallelMap-style work than one request alone, since
+   the second master is idle-with-no-workers while the first runs
+   at full parallel.
 
 5. **`Quiet` doesn't propagate across workers.** Messages from
    subkernel evaluations come back through the `KernelStatus`
