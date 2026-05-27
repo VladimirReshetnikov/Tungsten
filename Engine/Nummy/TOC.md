@@ -50,10 +50,6 @@ Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - [name-the-biggest-number](prior-art/name-the-biggest-number/)
 - [LIO](prior-art/LIO/)
 
-## Shared Library References
-
-- [GNU MP 6.3.0](../../../lib/gmp-6.3.0/)
-
 ## Implementation Experiments
 
 - [Unified comparison report](docs/reports/alpha-beta-gamma-unified-comparison.md)

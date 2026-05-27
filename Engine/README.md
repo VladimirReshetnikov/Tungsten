@@ -222,7 +222,11 @@ The current workspace is built around seven complementary capabilities:
 ### Deliberately narrow or experimental
 
 - The visible inline Notebook Assistant desktop-driving backend remains experimental. It depends on
-  a visible foreground notebook window and, in practice, on WinDesk-backed automation.
+  a visible foreground notebook window and, in practice, on WinDesk-backed automation. WinDesk is
+  not part of this repository — it lives in the sibling
+  [`Tools`](https://github.com/VladimirReshetnikov/Tools) repository. To use the WinDesk path, build
+  `WinDesk.PowerShell` from that repository and either pre-import the module or set
+  `$env:TUNGSTEN_WINDESK_MODULE_PATH` to the built `WinDesk.PowerShell.dll`.
 - The expression subsystem intentionally covers only a pragmatic StandardForm subset, a limited
   semantic box subset, and a small built-in evaluation surface.
 - FrontEnd automation is intentionally selective rather than exhaustive.
@@ -242,7 +246,7 @@ The current workspace is built around seven complementary capabilities:
 | Sparse array backend | PyData Sparse `sparse.COO` when available, with a Tungsten structural fallback |
 | Exact polynomial backend | SymPy for integer/rational coefficient polynomial operations |
 | Platform expectation | Windows-first local machine with a real Wolfram installation |
-| Optional desktop automation helper | WinDesk for visible-window testing and the experimental inline assistant path |
+| Optional desktop automation helper | WinDesk (external, from the sibling [`Tools`](https://github.com/VladimirReshetnikov/Tools) repo) for visible-window testing and the experimental inline assistant path |
 
 ## Architecture at a glance
 

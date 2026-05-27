@@ -291,7 +291,7 @@ This is exactly why the default backend is not the visible inline popup.
 - Prefer the default `NotebookChatCell` backend.
 - Use `DesktopInline` only when you specifically want visible UI-level automation.
 - Ensure the notebook window is visible, not minimized, and can become foreground.
-- Ensure WinDesk is available if you are depending on the desktop path.
+- Ensure WinDesk is available if you are depending on the desktop path. WinDesk is not part of this repository — it lives in the sibling [`Tools`](https://github.com/VladimirReshetnikov/Tools) repository. Build `WinDesk.PowerShell` there, then either pre-import the module or set `$env:TUNGSTEN_WINDESK_MODULE_PATH` to the built `WinDesk.PowerShell.dll`.
 
 ## Problem: PowerShell cannot find the Tungsten wrapper functions
 

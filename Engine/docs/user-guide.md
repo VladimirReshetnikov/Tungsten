@@ -73,7 +73,7 @@ It is less appropriate when you need:
 
 - Everything above.
 - A visible desktop session.
-- WinDesk available and importable.
+- WinDesk available and importable. WinDesk is not part of this repository — it lives in the sibling [`Tools`](https://github.com/VladimirReshetnikov/Tools) repository. Build `WinDesk.PowerShell` there, then either pre-import the module in your session or set `$env:TUNGSTEN_WINDESK_MODULE_PATH` to the built `WinDesk.PowerShell.dll`.
 - Willingness to let Tungsten activate the notebook window.
 
 ## Environment setup

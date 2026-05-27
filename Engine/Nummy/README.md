@@ -93,9 +93,6 @@ physically representable?"
 Vendored code in this corpus should be treated as reference/source-study
 material. Prefer adding Nummy-owned experiments under `src/` or a clearly
 named new prior-art directory instead of editing upstream snapshots in place.
-GNU MP 6.3.0 is still an important repo-level reference and candidate backend,
-but its upstream source snapshot now lives outside Nummy at
-[`../../../lib/gmp-6.3.0/`](../../../lib/gmp-6.3.0/).
 
 ## Theory Corpus
 

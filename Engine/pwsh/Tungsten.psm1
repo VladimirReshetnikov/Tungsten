@@ -154,59 +154,43 @@ function New-TungstenNotebookAssistantFailure {
 
 function Resolve-TungstenWinDeskModulePath {
     [CmdletBinding()]
-    param(
-        [switch] $BuildIfNeeded = $true
-    )
+    param()
 
-    $repoRoot = Resolve-Path (Join-Path $script:ProjectRoot "..\..")
-    $winDeskProjectRoot = Join-Path $repoRoot "src\WinDesk\src\WinDesk.PowerShell"
-    $winDeskProjectFile = Join-Path $winDeskProjectRoot "WinDesk.PowerShell.csproj"
+    # WinDesk.PowerShell is an external dependency that lives in the sibling
+    # https://github.com/VladimirReshetnikov/Tools repository. Tungsten cannot
+    # build it locally; the caller must point us at an already-built copy.
+    #
+    # Resolution order:
+    #   1. $env:TUNGSTEN_WINDESK_MODULE_PATH if it is set to a readable file.
+    #   2. A WinDesk.PowerShell.dll already discoverable on PSModulePath.
+    #
+    # If neither works, Tungsten throws and the caller can either pre-import
+    # the module manually or set the env var.
 
-    $findModule = {
-        @(Get-ChildItem -Path $winDeskProjectRoot -Recurse -Filter "WinDesk.PowerShell.dll" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "\\bin\\(Debug|Release)\\" } |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1)
+    $hint = $env:TUNGSTEN_WINDESK_MODULE_PATH
+    if (-not [string]::IsNullOrWhiteSpace($hint) -and (Test-Path -LiteralPath $hint -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $hint).Path
     }
 
-    $module = @(& $findModule)
-    if ($module.Count -gt 0) {
-        return $module[0].FullName
+    $available = Get-Module -ListAvailable -Name WinDesk.PowerShell -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending |
+        Select-Object -First 1
+    if ($null -ne $available) {
+        return $available.Path
     }
 
-    if (-not $BuildIfNeeded) {
-        throw "WinDesk.PowerShell.dll was not found under $winDeskProjectRoot."
-    }
-
-    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if ($null -eq $dotnet) {
-        throw "dotnet was not found on PATH, so Tungsten cannot build the required WinDesk PowerShell module."
-    }
-
-    & $dotnet.Source build $winDeskProjectFile "-v" "minimal" "-p:UseSharedCompilation=false" "-m:1"
-    if ($LASTEXITCODE -ne 0) {
-        throw "dotnet build failed while building the WinDesk PowerShell module."
-    }
-
-    $module = @(& $findModule)
-    if ($module.Count -eq 0) {
-        throw "WinDesk.PowerShell.dll was still not found after building $winDeskProjectFile."
-    }
-
-    return $module[0].FullName
+    throw "WinDesk.PowerShell is not available. Build it from the sibling Tools repository (https://github.com/VladimirReshetnikov/Tools) and either pre-import the module in this session or set `$env:TUNGSTEN_WINDESK_MODULE_PATH to the built WinDesk.PowerShell.dll."
 }
 
 function Import-TungstenWinDeskModule {
     [CmdletBinding()]
-    param(
-        [switch] $BuildIfNeeded = $true
-    )
+    param()
 
     if ($null -ne (Get-Command Get-WinDeskWindow -ErrorAction SilentlyContinue)) {
         return
     }
 
-    $modulePath = Resolve-TungstenWinDeskModulePath -BuildIfNeeded:$BuildIfNeeded
+    $modulePath = Resolve-TungstenWinDeskModulePath
     Import-Module $modulePath -Force
 }
 

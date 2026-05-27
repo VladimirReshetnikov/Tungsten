@@ -26,11 +26,6 @@ extraction; they are not the production Nummy implementation.
 | [`name-the-biggest-number`](name-the-biggest-number/) | Coq | codyroux's "name the biggest number" competition: each contender is a constructive `nat`-valued Coq definition with a formal proof that it dominates the previous contender. A different angle on the corpus - formal/constructive size bounds rather than overflow-resistant arithmetic - aligned with Scott Aaronson's "Who Can Name the Bigger Number?". | `LICENSE` (MIT) |
 | [`LIO`](LIO/) | Wolfram Mathematica | Swastik Banerjee's level-index arithmetic implementation in the Wolfram Language. Defines `LIO[sign, level, index]` with `ToLIO`, `FromLIO`, `PowerForm`, and `LevelIndexArithmetic` operations following Clenshaw and Olver. Vendored as the article ([`LIO.md`](LIO/LIO.md)), notebook ([`LIO.nb`](LIO/LIO.nb)), and PDF ([`LIO.pdf`](LIO/LIO.pdf)); discussed further under [`../docs/reports/wolfram/`](../docs/reports/wolfram/). | Wolfram Community publication (no explicit license file) |
 
-The former `gmp-6.3.0/` prior-art snapshot moved to the repo-level
-[`../../../../lib/gmp-6.3.0/`](../../../../lib/gmp-6.3.0/) tree so GNU MP's
-upstream source and licensing remain with the shared `lib/` references rather
-than inside Nummy.
-
 ## Usage Guidance
 
 - Treat vendored source as reference material unless a task explicitly asks to

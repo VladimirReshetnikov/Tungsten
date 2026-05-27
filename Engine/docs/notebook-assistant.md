@@ -248,7 +248,7 @@ Use that backend only when all of the following are true:
 
 - the notebook window is visible on the desktop;
 - Tungsten is allowed to bring that window to the foreground;
-- the WinDesk PowerShell module is available;
+- the WinDesk PowerShell module is available (it lives in the sibling [`Tools`](https://github.com/VladimirReshetnikov/Tools) repository and must be built there, then pre-imported in this session or pointed to via `$env:TUNGSTEN_WINDESK_MODULE_PATH`);
 - you specifically want UI-level interaction rather than the more reliable hidden chat-notebook
   path.
 

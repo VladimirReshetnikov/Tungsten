@@ -17,7 +17,3 @@ Repository HEAD: dad97d346dba0cc2ef8655f3527cb5fc37f61b72
 - [SparseNumerics](SparseNumerics/)
 - [name-the-biggest-number](name-the-biggest-number/)
 - [LIO](LIO/)
-
-## Shared Library References
-
-- [GNU MP 6.3.0](../../../../lib/gmp-6.3.0/)

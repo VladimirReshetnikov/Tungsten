@@ -127,10 +127,13 @@ Cell["hello \!\(\*StyleBox[\"Hi\", FontWeight->Bold]\)", "Text", CellID->2001]
         Start-Sleep -Seconds 2
 
         if ($UseWinDesk) {
-            $repoRoot = Resolve-Path (Join-Path $projectRoot "..\..")
-            $winDeskModule = Join-Path $repoRoot "src\WinDesk\src\WinDesk.PowerShell\bin\Debug\net10.0-windows\WinDesk.PowerShell.dll"
-            if (Test-Path $winDeskModule) {
-                Import-Module $winDeskModule -Force
+            # WinDesk.PowerShell is an external dependency from the sibling
+            # https://github.com/VladimirReshetnikov/Tools repository. Tungsten
+            # cannot build it locally; the caller must point us at an already-
+            # built copy via $env:TUNGSTEN_WINDESK_MODULE_PATH or have it on
+            # PSModulePath.
+            try {
+                Import-TungstenWinDeskModule
                 $window = Get-WinDeskWindow -VisibleOnly | Where-Object { $_.Title -like "*Wolfram*" } | Select-Object -First 1
                 if ($null -ne $window) {
                     $capturePath = Join-Path $env:TEMP "tungsten-front-end-smoke.png"
@@ -138,11 +141,11 @@ Cell["hello \!\(\*StyleBox[\"Hi\", FontWeight->Bold]\)", "Text", CellID->2001]
                     Write-Host "WinDesk capture written to $capturePath"
                 }
                 else {
-                    Write-Host "WinDesk module is present, but no visible Wolfram window was found."
+                    Write-Host "WinDesk module is loaded, but no visible Wolfram window was found."
                 }
             }
-            else {
-                Write-Host "Skipping WinDesk capture because the WinDesk PowerShell module has not been built yet."
+            catch {
+                Write-Host "Skipping WinDesk capture: $($_.Exception.Message)"
             }
         }
     }

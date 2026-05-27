@@ -108,7 +108,6 @@ The docs are split so readers can choose the right depth:
 | [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
 | [parser-corpus.md](parser-corpus.md) | Parser corpus discovery, Wolfram held-parser comparison, outputs, and test-entrypoint reference. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
-| [reports/2026-04-25-parser-corpus-indexed-search.md](reports/2026-04-25-parser-corpus-indexed-search.md) | Investigation of using `src/Indexed` for fast repeated search over the Tungsten Wolfram parser corpus, including corpus-fit gaps and recommended extensions. |
 | [reports/2026-04-25-parser-speed-experiments.md](reports/2026-04-25-parser-speed-experiments.md) | Notebook parser profiling, landed parser-speed improvements, parser-corpus throughput measurements, and next optimization proposals. |
 | [reports/2026-04-25-parser-corpus-speed.md](reports/2026-04-25-parser-corpus-speed.md) | Parser corpus throughput measurements, bottleneck analysis, implemented optimizations, and full-corpus runtime estimates. |
 | [reports/2026-04-24-license-seat-investigation.md](reports/2026-04-24-license-seat-investigation.md) | Investigation report for intermittent license-seat failures, ghost/orphaned Wolfram processes, and Tungsten's launch-gate mitigation. |
