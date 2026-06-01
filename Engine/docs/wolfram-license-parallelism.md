@@ -1,32 +1,81 @@
 # Running multiple Wolfram kernels in parallel
 
 - Created (UTC): 2026-05-26T15:45:00Z
-- Repository HEAD: 4b3f2a32be9fbb04f7c1f01b1e9a17b6c8d3f6dc
+- Updated (UTC): 2026-06-01T02:51:00Z
+- Repository HEAD: c295d1784eabc3674d12e6f8b827b0fb313b90c2
 - Audience: Vladimir; future Tungsten maintainers
-- Status: Investigation report. Read before activating additional keys.
+- Status: Current-state reference. **Both owned licenses are now activated;
+  the machine runs 4 concurrent Wolfram 14.3 kernels.**
 
 ## TL;DR
 
 Vladimir's Wolfram account holds 4 activation keys
 (`3458-6977-EUAT9H`, `3458-6977-QLUG23`, `9828-7240-KAY472`,
-`9828-7240-8794RH`). The current Tungsten setup is capped at **2
-concurrent `wolfram.exe` processes**. The cap is real, not a
-Tungsten artifact — `wolfram.exe` itself refuses the 3rd concurrent
-launch with `Duplicate entry for license ID ignored` / `No valid
-password found`.
-
-The 4 keys are **2 distinct licenses**, not 4:
-- License `L9828-7240`: keys `KAY472` (currently in use), `8794RH`
+`9828-7240-8794RH`), which are **2 distinct licenses**, not 4:
+- License `L9828-7240`: keys `KAY472`, `8794RH`
 - License `L3458-6977`: keys `EUAT9H`, `QLUG23`
 
-So to go from **2 → 4** concurrent kernels, **activate one key from
-the `L3458-6977` group** on this machine. To go beyond 4, additional
-Wolfram licenses would be required (the keys we have are pairs that
-share the same license pool).
+**As of 2026-06-01 both licenses are activated on this machine**, so it now
+runs **4 concurrent `wolfram.exe` kernels** (2 per license), confirmed
+empirically. `KAY472` lives in the **system** mathpass and `EUAT9H` in the
+**user** mathpass (see below); `wolfram.exe` merges both. Each license caps at
+2 main kernels (the `:2,2,…:` field), so the two together yield 4.
 
-## Evidence
+To go **beyond 4** you would need an *additional* Wolfram license (a different
+`L`-prefix). The two unused keys (`8794RH` in `L9828-7240`, `QLUG23` in
+`L3458-6977`) are siblings of the two licenses already active and add nothing —
+they deduplicate against the same license IDs.
 
-### 1. Current mathpass
+## Current setup — how the 4 kernels work (2026-06-01)
+
+The two licenses are recorded in **two different mathpass files**, and
+`wolfram.exe` honours both:
+
+| license | key | mathpass file | seat field |
+|---------|-----|---------------|-----------|
+| `L9828-7240` | `9828-7240-KAY472` | `C:\ProgramData\Wolfram\Licensing\mathpass` (system) | `:2,2,4,4:` |
+| `L3458-6977` | `3458-6977-EUAT9H` | `C:\Users\vresh\AppData\Roaming\Wolfram\Licensing\mathpass` (user) | `:2,2,8,8:` |
+
+`EUAT9H` was activated interactively in Wolfram 14.3 (it reports back via
+`$ActivationKey` and the *About Wolfram* dialog). The activation wrote **only
+the user mathpass** — the system mathpass was left unchanged, and **no manual
+mathpass edit was needed**.
+
+**Key empirical finding:** `-pwfile` does **not** *replace* the mathpass search —
+the per-user mathpass is read **in addition** to any `-pwfile`. So Tungsten's
+existing launch path (`-pwfile <copy of the system mathpass>`, which contains
+only `KAY472`) already sees `EUAT9H` from the user mathpass and gets all 4
+seats. **No Tungsten code change is required** — only the cached cap value.
+
+A 6-way concurrency probe (`Temp/license-probe2.py`, 2-license version) confirms
+4 under every launch mode:
+
+```
+A. DEFAULT launch (no -pwfile; merges user+system) : activated 4/6   {L3458-6977: 2, L9828-7240: 2}
+B. SYSTEM mathpass only via -pwfile (current Tungsten): activated 4/6   {L9828-7240: 2, L3458-6977: 2}
+C. MERGED user+system via -pwfile                    : activated 4/6   {L9828-7240: 2, L3458-6977: 2}
+```
+
+The 5th and 6th launches fail (rc 40 "No valid password found" under `-pwfile`,
+rc 85 under default) — the expected ceiling once both licenses' 2-kernel seats
+are taken.
+
+Tungsten's cap cache (`%LOCALAPPDATA%\Tungsten\wolfram-license-cache.json`) has
+been bumped from `2` to `4` to match.
+
+> Note: a *third* activation key, `9919-6315-Q6KVQR`, may also appear in
+> `$ActivationKey`; it belongs to the separately-installed **free Wolfram Engine
+> for Developers**, not to Wolfram 14.3, and is irrelevant to the 14.3 seat count.
+
+## Evidence (the pre-activation investigation)
+
+The analysis below is the single-license investigation (2026-05-26) that led to
+activating `EUAT9H`. The mathpass snapshot in §1 **predates** that activation —
+it shows only `KAY472` in the system mathpass, before `EUAT9H` was added to the
+user mathpass. The mechanism it documents (MathID matching, the `:2,2,4,4:` seat
+field, dedupe of same-key entries) still holds.
+
+### 1. Pre-activation mathpass (system only)
 
 `C:\ProgramData\Wolfram\Licensing\mathpass`:
 
@@ -133,10 +182,12 @@ total concurrent-kernel ceiling on this machine is bounded by the
 number of distinct licenses you own, not by the number of Windows
 users you have.
 
-## Path to 4 concurrent kernels
+## How the second license was activated (reference — executed 2026-06-01)
 
 Activate one key from the `L3458-6977` license group on this
-machine, for the current user (vresh).
+machine, for the current user (vresh). This is the procedure that was
+run to activate `EUAT9H`; keep it for reference (e.g. re-activating after
+a hardware change, or activating `QLUG23` instead).
 
 **Do not use the standalone `wolframscript.exe`** at
 `C:\Program Files\Wolfram Research\WolframScript\` for this. That
@@ -178,24 +229,26 @@ Either path is **one-way**: it burns one of the key's allowed
 machine activations. The cloud sign-in step is interactive — this
 cannot be fully scripted without prior `wolframscript -authenticate`.
 
-After activation, the system mathpass should grow a new entry tied
-to the new key + a fresh MathID. The new line should NOT trigger
-`Duplicate entry for license ID` (it's a different license ID),
-which doubles the concurrent-`wolfram.exe` cap to 4.
+On this machine the activation wrote a new entry to the **user** mathpass
+(`C:\Users\vresh\AppData\Roaming\Wolfram\Licensing\mathpass`), tied to the new
+key + a fresh MathID; the **system** mathpass was left unchanged. Because the
+entry is a different license ID it does **not** trigger `Duplicate entry for
+license ID`, and because the user mathpass is honoured alongside any `-pwfile`,
+the concurrent-`wolfram.exe` cap rose to 4 with **no further mathpass edit**.
 
-To verify after activation:
+Verified with the 2-license probe:
 
 ```powershell
-python C:\Users\vresh\AppData\Local\Temp\license-probe.py
+python C:\Users\vresh\AppData\Local\Temp\license-probe2.py
 ```
 
-Expected: `Total activated: 4` (instead of 2).
-
-Then bump Tungsten's cache:
+Result: `activated 4/6` under default, system-`-pwfile`, and merged-`-pwfile`
+launches alike (2 seats per license). The Tungsten cap cache was then bumped to
+match:
 
 ```powershell
-echo '{ "max_license_processes": 4, "updated_utc": "..." }' `
-    > "$env:LOCALAPPDATA\Tungsten\wolfram-license-cache.json"
+'{ "max_license_processes": 4, "updated_utc": "2026-06-01T02:51:00Z" }' `
+    | Set-Content "$env:LOCALAPPDATA\Tungsten\wolfram-license-cache.json"
 ```
 
 ## Path to >4 concurrent kernels
@@ -217,13 +270,19 @@ of independent licenses Vladimir owns.
 
 The license-aware launch gate in Tungsten
 (`wait_for_wolfram_license_slot` + `cached_max_license_processes`)
-already serializes launches against the discovered cap. Once the
-extra activation lands, the only required change is updating the
-cached cap value. The launch gate, the dedupe-mathpass helper, and
-the process-snapshot logic remain unchanged.
+serializes launches against the discovered cap. The activation has now landed,
+so the only required change was **updating the cached cap value from `2` to `4`**
+(done — `%LOCALAPPDATA%\Tungsten\wolfram-license-cache.json`). The launch gate,
+the dedupe-mathpass helper, and the process-snapshot logic are unchanged.
 
-No code change is required to make the parallelism work — only an
-activation step that Tungsten cannot perform autonomously.
+**No Tungsten code change was required.** A subtlety worth recording: Tungsten
+launches with `-pwfile <copy of the system mathpass>`, which contains only
+`KAY472` — yet the probe shows it still acquires all 4 seats, because
+`wolfram.exe` reads the per-user mathpass (holding `EUAT9H`) **in addition** to
+`-pwfile`. So the pwfile helper did not need to be taught about the user
+mathpass. (If a future context ever launches where the user mathpass is *not*
+read, the merged-pwfile approach — `Temp/license-probe2.py` condition C — is the
+drop-in fix.)
 
 ## See also
 
@@ -232,6 +291,9 @@ activation step that Tungsten cannot perform autonomously.
 - `src/Tungsten/src/tungsten/wolfram_processes.py` —
   `wait_for_wolfram_license_slot`, license-process cache.
 - `C:\Users\vresh\AppData\Local\Temp\license-probe.py` — the
-  concurrency probe used to produce evidence (3).
+  single-license concurrency probe (pre-activation evidence §3).
+- `C:\Users\vresh\AppData\Local\Temp\license-probe2.py` — the 2-license
+  concurrency probe (default / system-`-pwfile` / merged-`-pwfile`) used to
+  confirm the 4-kernel cap after activating `EUAT9H`.
 - `C:\Users\vresh\AppData\Local\Temp\runas-probe.ps1` — the
   cross-user probe used to produce evidence (4).

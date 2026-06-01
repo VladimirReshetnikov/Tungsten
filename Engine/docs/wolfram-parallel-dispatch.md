@@ -11,6 +11,16 @@
 The `:2,2,4,4:` field in `C:\ProgramData\Wolfram\Licensing\mathpass`
 permits **two simultaneous main kernels** plus **a machine-wide
 pool of four worker subkernels** — *not* four workers per master.
+
+> **Update (2026-06-01):** a second license (`L3458-6977`, key `EUAT9H`, seat
+> field `:2,2,8,8:`) is now activated in the user mathpass, raising the
+> **main-kernel** cap to **4** (see
+> [`wolfram-license-parallelism.md`](wolfram-license-parallelism.md)). The
+> single-license worker-pool analysis below predates that activation; the
+> subkernel / `LaunchKernels` behaviour across the two licenses has not been
+> re-probed yet, so treat the worker numbers below as the single-license
+> baseline.
+
 Empirically confirmed:
 
 | Probe | Result |

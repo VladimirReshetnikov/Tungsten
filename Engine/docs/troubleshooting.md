@@ -143,9 +143,11 @@ The kernel result payload includes:
 - The deduplicated temporary file is intentional and not an error condition.
 - If `observed_wolfram_processes` contains old headless `wolfram.exe` / `WolframKernel.exe`
   entries, they may be consuming scarce controlling-process seats.
-- On this machine, successful live runs report `max_license_processes = 2`, so a single orphaned
-  batch kernel plus one fresh launch is enough to exhaust the seat budget for any additional
-  concurrent launch.
+- On this machine, with **two** licenses now activated (see
+  [`wolfram-license-parallelism.md`](wolfram-license-parallelism.md)), successful live runs report
+  `max_license_processes = 4`, so up to four concurrent main kernels are available; once that many
+  are live (e.g. orphaned batch kernels plus fresh launches), the next launch is refused for lack
+  of a seat.
 
 ## Problem: FrontEnd operations fail
 
