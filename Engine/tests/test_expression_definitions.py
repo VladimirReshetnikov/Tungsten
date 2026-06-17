@@ -1038,7 +1038,7 @@ class BlockEvaluationTests(unittest.TestCase):
     UpValues, SubValues, NValues — are reverted on exit, even when the
     body raises (the restore happens in a Python ``try``/``finally``).
 
-    Kernel-confirmed semantics (modern Wolfram 14.x, distinct from
+    Kernel-confirmed semantics (modern Wolfram kernels, distinct from
     older docs that claimed Block cleared values at entry):
 
     - Block does *not* clear values at entry; the body sees the outer
@@ -1244,7 +1244,7 @@ class BlockEvaluationTests(unittest.TestCase):
 
 class InheritedBlockEvaluationTests(unittest.TestCase):
     """``Internal`InheritedBlock`` is functionally identical to ``Block``
-    in modern Wolfram 14.x. Both save the symbols' complete value state,
+    in modern Wolfram kernels. Both save the symbols' complete value state,
     optionally apply initializers, evaluate the body, and restore on
     exit. The historical distinction (Block clearing values at entry)
     is no longer present in the live kernel for either form.

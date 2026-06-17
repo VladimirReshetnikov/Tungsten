@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, expression-subsystem users, automation authors, and reviewers
 - Scope: `src/Tungsten/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T17:48:49Z
-- Updated (UTC): 2026-04-26T05:21:30Z
-- Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
+- Updated (UTC): 2026-06-17T02:01:20Z
+- Repository HEAD: 07930f5d6e6c04bf3c3f12f7b0a95debd2ab7b56
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Structural Expression Function Support](./expression-function-support.md)
@@ -15,7 +15,7 @@
 
 Tungsten now has a process-local symbol and context registry for kernel-free expression work. The
 registry gives the inert evaluator enough name awareness to support common Wolfram name-management
-functions without launching a kernel. It also carries a Wolfram 14.3 <code>System`</code> symbol
+functions without launching a kernel. It also carries a Wolfram 15.0 <code>System`</code> symbol
 catalog and mutable per-symbol attribute metadata so discovery functions can see installed
 built-ins and the evaluator can honor common attributes even when Tungsten has no specialized
 evaluator rule for a symbol.
@@ -45,16 +45,16 @@ The current registry is initialized with:
 
 - <code>$Context = "Global`"</code>;
 - <code>$ContextPath = {"System`", "Global`"}</code>;
-- a generated Wolfram 14.3 snapshot at
-  `src/tungsten/data/system_symbols_wolfram_14_3.json`, currently containing 7800 immediate
+- a generated Wolfram 15.0 snapshot at
+  `src/tungsten/data/system_symbols_wolfram_15_0.json`, currently containing 7935 immediate
   <code>System`</code> symbols from <code>Names["System`*"]</code>;
-- the exact startup attribute list reported by the installed Wolfram 14.3 kernel for each of those
+- the exact startup attribute list reported by the installed Wolfram 15.0 kernel for each of those
   immediate <code>System`</code> symbols;
 - a small explicit fallback seed for the evaluator's built-in heads, used only if the generated
   snapshot is absent in an unusual source layout.
 
 The snapshot intentionally excludes nested contexts below <code>System`</code>. It mirrors the
-machine-local Wolfram 14.3 top-level system symbol catalog for discovery purposes, not the full set
+machine-local Wolfram 15.0 top-level system symbol catalog for discovery purposes, not the full set
 of packages and contexts that a live session could load later.
 
 ## Name Resolution
@@ -190,7 +190,7 @@ python -m tungsten expr evaluate --code 'Unique[temporarySymbol]'
 
 ## Regenerating the System Snapshot
 
-The snapshot is generated from the installed Wolfram 14.3 kernel rather than hand-authored:
+The snapshot is generated from the installed paid Wolfram 15.0 kernel rather than hand-authored:
 
 ```powershell
 pwsh -File .\src\Tungsten\scripts\Update-TungstenSystemSymbolSnapshot.ps1

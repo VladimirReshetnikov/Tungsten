@@ -65,12 +65,14 @@ If those five checks behave as expected, the core Tungsten stack is usually heal
 
 - Run `python -m tungsten env show`.
 - Verify that the local installation really exists at the expected path, for example:
-  `C:\Program Files\Wolfram Research\Wolfram\14.3`.
+  `C:\Program Files\Wolfram Research\Wolfram\15.0`.
 
 ### Recovery
 
 - Set `TUNGSTEN_WOLFRAM_HOME` to the installation root if the installation lives in a
   non-default location.
+- Set `TUNGSTEN_WOLFRAM_PRODUCT=engine` only when you intentionally want the installed
+  Wolfram Engine for Developers 14.3 runtime instead of paid Wolfram 15.0.
 - Re-run `python -m tungsten env show` to verify discovery.
 
 ## Problem: Kernel evaluation does not produce a structured payload
@@ -104,8 +106,8 @@ If those five checks behave as expected, the core Tungsten stack is usually heal
 
 ### Important context
 
-On this machine, the installed `mathpass` historically contained duplicate license entries. Tungsten
-works around that by writing a temporary deduplicated copy and invoking:
+On this machine, the selected product's installed `mathpass` has historically contained duplicate
+license entries. Tungsten works around that by writing a temporary deduplicated copy and invoking:
 
 ```text
 wolfram.exe -noprompt -pwfile <temporary-copy> -script <wrapper>

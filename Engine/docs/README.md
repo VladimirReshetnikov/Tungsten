@@ -98,7 +98,7 @@ The docs are split so readers can choose the right depth:
 | [../Nummy/README.md](../Nummy/README.md) | Nummy workspace guide for the Tungsten-owned large-number arithmetic corpus and prototypes. |
 | [../Nummy/docs/proposals/README.md](../Nummy/docs/proposals/README.md) | Historical index for archived standalone Nummy design proposals. |
 | [../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md](../Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md) | Current synthesis of the alpha, beta, and gamma prototype engines used as source material for Tungsten large-number work. |
-| [wolfram-string-literal-spec.md](wolfram-string-literal-spec.md) | Normative specification for Wolfram-Language string literals, escape sequences, and named-character handling, with parity rules against the Wolfram 14.3 kernel. |
+| [wolfram-string-literal-spec.md](wolfram-string-literal-spec.md) | Normative specification for Wolfram-Language string literals, escape sequences, and named-character handling, with parity rules against the Wolfram 15.0 kernel. |
 | [symbol-context-registry.md](symbol-context-registry.md) | Normative design note for Tungsten's process-local symbol registry, fixed context state, name queries, `Unique`, and `ValueQ` boundaries. |
 | [sequence-nothing-evaluation.md](sequence-nothing-evaluation.md) | Normative specification for `Sequence` splicing and `Nothing` removal in Tungsten's kernel-free evaluator. |
 | [sequence-pattern-matching.md](sequence-pattern-matching.md) | Normative specification for structural sequence-pattern allocation, named sequence bindings, repetition, optional arguments, options patterns, and match-priority wrappers. |
@@ -159,7 +159,7 @@ The docs are split so readers can choose the right depth:
   tower arithmetic.
 - Read [symbol-context-registry.md](./symbol-context-registry.md) if you need precise
   `$Context`, `$ContextPath`, `Names`, `NameQ`, `Attributes`, `Symbol`, `Unique`, or `ValueQ`
-  behavior, including the Wolfram 14.3 <code>System`</code> symbol snapshot.
+  behavior, including the Wolfram 15.0 <code>System`</code> symbol snapshot.
 - Read [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md) if you need precise
   `Sequence` / `Nothing` evaluation-order behavior.
 - Read [sequence-pattern-matching.md](./sequence-pattern-matching.md) if you need the exact

@@ -25,7 +25,7 @@ bounded, explicit version of those rules so common structural transformations su
 list element with `Nothing` or constructing a call with `Sequence` work without launching a kernel.
 
 This document defines that behavior. It also states where Tungsten deliberately stops because it
-does not implement evaluator-wide attribute semantics, definitions, or upvalues. The separate symbol registry can report read-only Wolfram 14.3 <code>System`</code> attributes,
+does not implement evaluator-wide attribute semantics, definitions, or upvalues. The separate symbol registry can report read-only Wolfram 15.0 <code>System`</code> attributes,
 but most of those attributes do not drive evaluation here.
 
 ## Source Observations
@@ -37,7 +37,7 @@ The official documentation also states that `Nothing` represents a list element 
 automatically, that `Nothing[...]` gives `Nothing`, and that `Nothing` is not removed from held or
 inactive expressions.
 
-Live-kernel probes on Wolfram 14.3 confirmed these representative cases:
+Live-kernel probes confirmed these representative cases:
 
 | Expression | Kernel result |
 |---|---|
@@ -103,7 +103,7 @@ Tungsten treats `Sequence` as follows:
   deliberately does not strip `Unevaluated` from inert unknown heads or from list construction.
 
 Tungsten now implements registry-backed evaluator attributes. User-defined symbols can acquire
-`SequenceHold` or `HoldAllComplete` behavior with `SetAttributes`, and Wolfram 14.3 System symbols
+`SequenceHold` or `HoldAllComplete` behavior with `SetAttributes`, and Wolfram 15.0 System symbols
 use the attributes loaded from the startup snapshot. The explicit built-in list above remains the
 important reference for Tungsten's Hold-family heads, while ordinary calls also consult mutable
 symbol metadata.

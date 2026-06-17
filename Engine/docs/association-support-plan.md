@@ -83,12 +83,12 @@ Primary references:
 
 - `Association` reference page:
   - local notebook:
-    `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\Association.nb`
+    `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\Association.nb`
   - web:
     [Association](https://reference.wolfram.com/language/ref/Association)
 - `Associations` guide:
   - local notebook:
-    `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\Guides\Associations.nb`
+    `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\Guides\Associations.nb`
   - web:
     [Associations Guide](https://reference.wolfram.com/language/guide/Associations)
 

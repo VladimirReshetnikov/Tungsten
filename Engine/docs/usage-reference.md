@@ -119,15 +119,21 @@ python -m tungsten env show --probe
 
 Important output fields:
 
+- `product`
+- `product_family`
+- `version`
 - `install_dir`
 - `kernel_cli`
 - `kernel_executable`
 - `frontend_executable`
 - `wolframscript`
 - `mathpass`
+- `mathpass_candidates`
 - `docs_roots`
 - `bundled_python_client`
 - `default_index_path`
+- `available_installations`
+- `selection_reason`
 - `probe` when `--probe` is supplied
 
 ### `kernel`

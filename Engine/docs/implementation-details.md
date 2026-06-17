@@ -37,10 +37,11 @@ It is not currently hardened as a multi-tenant service boundary or untrusted-cod
 
 ## Machine findings that materially shaped the design
 
-### 1. This machine has a real, usable Wolfram installation
+### 1. This machine has real, usable Wolfram installations
 
-The target environment includes a real Wolfram 14.3 installation with the important executables and
-assets Tungsten needs:
+The target environment includes paid Wolfram 15.0 as the default runtime and Wolfram Engine for
+Developers 14.3 as an explicit Engine fallback. The paid 15.0 installation has the important
+executables and assets Tungsten needs:
 
 - `wolfram.exe`
 - `WolframKernel.exe`
@@ -52,11 +53,13 @@ assets Tungsten needs:
 That justified building a real automation framework around the installation rather than a
 notebook-only utility or a mock layer.
 
-### 2. The local `mathpass` is the key operational wrinkle
+### 2. The selected product's `mathpass` is the key operational wrinkle
 
-The most important machine-specific finding was that the installed `mathpass` contains duplicate
+The most important machine-specific finding was that an installed `mathpass` can contain duplicate
 license entries. Using that raw file directly can cause command-line evaluation failures. A
-deduplicated copy works.
+deduplicated copy works. Tungsten therefore discovers a product-scoped `mathpass`: paid Wolfram
+15.0 prefers `ProgramData\Wolfram`, while the explicit Engine path prefers the per-user
+`WolframEngine` license file.
 
 This finding moved from "one weird local hack" to "core Tungsten behavior." As a result:
 
@@ -69,9 +72,9 @@ This finding moved from "one weird local hack" to "core Tungsten behavior." As a
 
 Later live investigation showed that the local license ceiling is also materially relevant:
 
-- successful runs report `$MaxLicenseProcesses = 2`;
+- successful runs report `$MaxLicenseProcesses`, which Tungsten caches for later launch decisions;
 - a single orphaned headless `wolfram.exe` can consume one controlling-process seat;
-- parallel Tungsten launches can then exhaust the remaining seat and surface as `No valid password found.`
+- parallel Tungsten launches can then exhaust the remaining seats and surface as license failures.
 
 Tungsten therefore now pairs the `mathpass` workaround with lightweight runtime seat management:
 
@@ -123,7 +126,8 @@ Several candidate execution surfaces were available:
 - `wolframscript.exe`
 - the bundled Python client
 
-The current default is `wolfram.exe -noprompt -script`.
+The current default is the paid Wolfram 15.0 top-level `wolfram.exe -noprompt -script`. Setting
+`TUNGSTEN_WOLFRAM_PRODUCT=engine` selects the installed Wolfram Engine 14.3 wrapper instead.
 
 ### Why this choice won
 
@@ -136,9 +140,10 @@ The current default is `wolfram.exe -noprompt -script`.
 
 ### Why Tungsten does not primarily use `wolframscript.exe`
 
-`wolframscript.exe` is valuable and present, but on this machine it was not the most reliable
-evaluation path under the raw licensing state. Tungsten needed a substrate it could control more
-explicitly.
+`wolframscript.exe` is valuable and present, and the standalone WolframScript install currently
+launches paid Wolfram 15.0 on this machine. Tungsten still uses product-local `wolfram.exe` because
+it is the most explicit substrate: discovery selects the product family, kernel execution can pass
+a temporary `-pwfile`, and callers do not need to reason about PATH-mediated wrapper resolution.
 
 ### Why Tungsten does not primarily use `WolframKernel.exe`
 
@@ -324,7 +329,7 @@ The code is split by workstream where the seams are now stable enough:
   value state at entry, applies optional initializers, evaluates the body, and
   restores the snapshot on exit through Python ``try`` / ``finally`` so non-local
   control flow (``Throw``, ``Abort``, ``Confirm`` failures, time-constraint
-  expirations) still reverts outer state. In modern Wolfram 14.x, ``Block`` and
+  expirations) still reverts outer state. In modern Wolfram kernels, ``Block`` and
   ``InheritedBlock`` are functionally identical (no clearing at entry); Tungsten
   preserves that identity rather than replicating older docs that distinguished
   them by entry-time clearing. The shared substitute and rename helpers both
@@ -514,7 +519,7 @@ text semantically." Using `es.exe` for that common case makes the experience dra
 ### Why docs-root discovery now filters update paclets by install version
 
 This machine has multiple `SystemDocsUpdate*` paclets for older Wolfram versions side by side with
-the current 14.3 installation. Indexing every update paclet would duplicate reference notebooks and
+the current Wolfram 15.0 documentation. Indexing every update paclet would duplicate reference notebooks and
 inflate the local SQLite index.
 
 Tungsten therefore filters `SystemDocsUpdate*` roots to the current install-version prefix before
@@ -780,7 +785,7 @@ that `Check` is not disabled merely because its output is quieted.
   the outermost session evaluation boundary, `repl.py` applies `$PrePrint` after `Out[n]` has been
   recorded, and message insertion rendering applies `$MessagePrePrint`. Hook evaluation uses a
   context flag that suppresses recursive main-loop hook application while hook bodies run.
-- The expression subsystem preloads Wolfram 14.3 <code>System`</code> symbol attributes into the symbol
+- The expression subsystem preloads Wolfram 15.0 <code>System`</code> symbol attributes into the symbol
   registry and also supports process-local attribute mutation through `Attributes[sym] = attrs`,
   `SetAttributes`, `ClearAttributes`, `Protect`, `Unprotect`, and `ClearAll`. The evaluator now
   applies the common argument-shaping attributes (`HoldFirst`, `HoldRest`, `HoldAll`,

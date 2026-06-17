@@ -163,7 +163,8 @@ var client = new TungstenClient(
         DefaultTimeout = TimeSpan.FromMinutes(10),
         EnvironmentVariables = new Dictionary<string, string?>
         {
-            ["TUNGSTEN_WOLFRAM_HOME"] = @"C:\Program Files\Wolfram Research\Wolfram\14.3",
+            ["TUNGSTEN_WOLFRAM_HOME"] = @"C:\Program Files\Wolfram Research\Wolfram\15.0",
+            // Or use ["TUNGSTEN_WOLFRAM_PRODUCT"] = "engine" for Wolfram Engine 14.3.
         },
     });
 ```

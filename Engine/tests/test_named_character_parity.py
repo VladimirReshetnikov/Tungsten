@@ -3,7 +3,7 @@
 These tests probe the parser's handling of `\\[Name]` named-character escapes
 and the four numeric escape forms `\\:XXXX`, `\\.XX`, `\\OOO`, `\\|XXXXXX`,
 both inside string literals and in identifier (outside-string) position.
-The reference behavior is the Wolfram 14.3 kernel.
+The reference behavior is the local Wolfram 15.0 kernel.
 
 Tests are organized into:
 
@@ -250,7 +250,7 @@ class NamedCharacterTableConsistencyTests(unittest.TestCase):
     """The shipped named-characters table contains the expected family members."""
 
     def test_table_has_expected_size(self) -> None:
-        # The Wolfram 14.3 font ships 1102 entries; the JSON file excludes 2
+        # The Wolfram 15.0 font ships 1102 entries; the JSON file excludes 2
         # kernel-rejected entries (COMPATIBILITYKanjiSpace, COMPATIBILITYNoBreak),
         # leaving 1100 usable names.
         self.assertEqual(len(named_character_codepoints()), 1100)
@@ -427,7 +427,7 @@ class LinearSyntaxStringEscapeTests(unittest.TestCase):
     decode to PUA codepoints or are deleted. Tungsten currently preserves the
     literal backslash + character.
 
-    Codepoints from probing Wolfram 14.3:
+    Codepoints from probing Wolfram:
     - ``\\!`` -> U+F7C1
     - ``\\(`` -> U+F7C9
     - ``\\)`` -> U+F7C0

@@ -148,6 +148,8 @@ Several data structures act as architectural seams between layers.
 Defined in `discovery.py`, this is the canonical description of the discovered local environment.
 It includes:
 
+- product metadata (`product`, `product_family`, `version`) and the full list of available local
+  Wolfram product installations;
 - installation paths such as `kernel_cli`, `kernel_executable`, `frontend_executable`, and
   `wolframscript`;
 - `mathpass`;

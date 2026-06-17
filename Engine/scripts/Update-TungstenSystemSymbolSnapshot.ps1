@@ -1,5 +1,5 @@
 param(
-    [string]$WolframRoot = "C:\Program Files\Wolfram Research\Wolfram\14.3",
+    [string]$WolframRoot = "C:\Program Files\Wolfram Research\Wolfram\15.0",
     [string]$OutputPath = ""
 )
 
@@ -7,12 +7,12 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $projectRoot "src\tungsten\data\system_symbols_wolfram_14_3.json"
+    $OutputPath = Join-Path $projectRoot "src\tungsten\data\system_symbols_wolfram_15_0.json"
 }
 
-$wolframScript = Join-Path $WolframRoot "wolframscript.exe"
-if (-not (Test-Path -LiteralPath $wolframScript)) {
-    throw "wolframscript.exe was not found under '$WolframRoot'."
+$wolframExe = Join-Path $WolframRoot "wolfram.exe"
+if (-not (Test-Path -LiteralPath $wolframExe)) {
+    throw "wolfram.exe was not found under '$WolframRoot'."
 }
 
 $outputDirectory = Split-Path -Parent $OutputPath
@@ -32,9 +32,20 @@ Export["__OUTPUT__", payload, "RawJSON", CharacterEncoding -> "UTF-8"]
 '@
 $code = $code.Replace("__OUTPUT__", $wolframOutputPath)
 
-& $wolframScript -code $code
-if ($LASTEXITCODE -ne 0) {
-    throw "wolframscript exited with code $LASTEXITCODE."
+$scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("tungsten-system-symbols-" + [guid]::NewGuid().ToString("N") + ".wl")
+try {
+    Set-Content -LiteralPath $scriptPath -Value $code -Encoding UTF8
+    & $wolframExe -noprompt -script $scriptPath
+    $exitCode = $LASTEXITCODE
+}
+finally {
+    if (Test-Path -LiteralPath $scriptPath) {
+        Remove-Item -LiteralPath $scriptPath -Force
+    }
+}
+
+if ($exitCode -ne 0) {
+    throw "wolfram.exe exited with code $exitCode."
 }
 
 $json = Get-Content -LiteralPath $OutputPath -Raw -Encoding UTF8 | ConvertFrom-Json

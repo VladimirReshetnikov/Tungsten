@@ -986,7 +986,7 @@ _SYSTEM_SYMBOL_NAMES = {
 }
 
 
-_SYSTEM_SYMBOL_SNAPSHOT_RESOURCE = "data/system_symbols_wolfram_14_3.json"
+_SYSTEM_SYMBOL_SNAPSHOT_RESOURCE = "data/system_symbols_wolfram_15_0.json"
 
 
 _SPECIAL_SESSION_SETTING_DEFAULTS: dict[str, Expr] = {

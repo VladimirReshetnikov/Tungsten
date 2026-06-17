@@ -1,13 +1,24 @@
 # Running multiple Wolfram kernels in parallel
 
 - Created (UTC): 2026-05-26T15:45:00Z
-- Updated (UTC): 2026-06-01T02:51:00Z
-- Repository HEAD: c295d1784eabc3674d12e6f8b827b0fb313b90c2
+- Updated (UTC): 2026-06-17T02:17:48Z
+- Repository HEAD: 07930f5d6e6c04bf3c3f12f7b0a95debd2ab7b56
 - Audience: Vladimir; future Tungsten maintainers
-- Status: Current-state reference. **Both owned licenses are now activated;
-  the machine runs 4 concurrent Wolfram 14.3 kernels.**
+- Status: Current-state reference for paid Wolfram 15.0 as Tungsten's default runtime, with the
+  earlier 14.3-era paid-product seat investigation preserved below. Wolfram Engine for Developers
+  14.3 is installed separately and does not change the paid-product seat count.
 
 ## TL;DR
+
+The active paid Wolfram 15.0 command-line kernel currently reports
+`$MaxLicenseProcesses = 2` under default launch, system `-pwfile`, and user `-pwfile` modes. Tungsten
+therefore treats **2 paid Wolfram controlling kernels** as the live operating point and caches the
+observed value from successful evaluations.
+
+The 2026-06-01 investigation below is retained because it explains how the license entries relate
+to each other. At that time, the then-current paid product exposed 4 concurrent controlling kernels.
+That four-kernel observation should be treated as historical until a fresh paid Wolfram 15.0
+concurrency probe proves otherwise.
 
 Vladimir's Wolfram account holds 4 activation keys
 (`3458-6977-EUAT9H`, `3458-6977-QLUG23`, `9828-7240-KAY472`,
@@ -15,28 +26,29 @@ Vladimir's Wolfram account holds 4 activation keys
 - License `L9828-7240`: keys `KAY472`, `8794RH`
 - License `L3458-6977`: keys `EUAT9H`, `QLUG23`
 
-**As of 2026-06-01 both licenses are activated on this machine**, so it now
-runs **4 concurrent `wolfram.exe` kernels** (2 per license), confirmed
-empirically. `KAY472` lives in the **system** mathpass and `EUAT9H` in the
-**user** mathpass (see below); `wolfram.exe` merges both. Each license caps at
-2 main kernels (the `:2,2,…:` field), so the two together yield 4.
+**As of 2026-06-17 Tungsten selects paid Wolfram 15.0 by default**:
+`C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe`. The live paid 15.0 probe reports
+2 controlling kernels. The earlier paid-product probe found **4 concurrent `wolfram.exe` kernels**
+under the then-current paid installation; keep that result as background evidence, not as the
+current cache target.
 
-To go **beyond 4** you would need an *additional* Wolfram license (a different
-`L`-prefix). The two unused keys (`8794RH` in `L9828-7240`, `QLUG23` in
-`L3458-6977`) are siblings of the two licenses already active and add nothing —
-they deduplicate against the same license IDs.
+In the historical four-kernel configuration, going **beyond 4** would have
+required an *additional* Wolfram license (a different `L`-prefix). The two unused
+keys (`8794RH` in `L9828-7240`, `QLUG23` in `L3458-6977`) are siblings of the
+two licenses already active and add nothing — they deduplicate against the same
+license IDs.
 
-## Current setup — how the 4 kernels work (2026-06-01)
+## Historical paid-product setup — how the 4-kernel result worked (verified 2026-06-01)
 
 The two licenses are recorded in **two different mathpass files**, and
-`wolfram.exe` honours both:
+the then-current `wolfram.exe` honoured both:
 
 | license | key | mathpass file | seat field |
 |---------|-----|---------------|-----------|
 | `L9828-7240` | `9828-7240-KAY472` | `C:\ProgramData\Wolfram\Licensing\mathpass` (system) | `:2,2,4,4:` |
 | `L3458-6977` | `3458-6977-EUAT9H` | `C:\Users\vresh\AppData\Roaming\Wolfram\Licensing\mathpass` (user) | `:2,2,8,8:` |
 
-`EUAT9H` was activated interactively in Wolfram 14.3 (it reports back via
+`EUAT9H` was activated interactively in the then-current paid Wolfram installation (it reports back via
 `$ActivationKey` and the *About Wolfram* dialog). The activation wrote **only
 the user mathpass** — the system mathpass was left unchanged, and **no manual
 mathpass edit was needed**.
@@ -65,7 +77,7 @@ been bumped from `2` to `4` to match.
 
 > Note: a *third* activation key, `9919-6315-Q6KVQR`, may also appear in
 > `$ActivationKey`; it belongs to the separately-installed **free Wolfram Engine
-> for Developers**, not to Wolfram 14.3, and is irrelevant to the 14.3 seat count.
+> for Developers 14.3**, not to paid Wolfram, and is irrelevant to the paid-product seat count.
 
 ## Evidence (the pre-activation investigation)
 
@@ -189,11 +201,10 @@ machine, for the current user (vresh). This is the procedure that was
 run to activate `EUAT9H`; keep it for reference (e.g. re-activating after
 a hardware change, or activating `QLUG23` instead).
 
-**Do not use the standalone `wolframscript.exe`** at
-`C:\Program Files\Wolfram Research\WolframScript\` for this. That
-binary is the Wolfram-Engine-for-Developers launcher; its
-`-activate` flag is hardwired to a Wolfram Engine install and
-fails on the paid Wolfram product with:
+For paid-product activation, prefer a product-local wrapper or the product FrontEnd rather than
+the standalone `C:\Program Files\Wolfram Research\WolframScript\wolframscript.exe`. The standalone
+wrapper currently launches paid Wolfram 15.0 for ordinary evaluation on this machine, but the
+historical `-activate` path was product-sensitive and failed with:
 
 ```
 An appropriate wolfram.exe location could not be determined. When
@@ -203,11 +214,11 @@ located within a Wolfram Engine installation.
 
 The fix is one of two product-correct entry points:
 
-**(a)** the `wolframscript.exe` that ships *inside* the Wolfram
-14.3 install, which knows it belongs to the paid product:
+**(a)** the `wolframscript.exe` that ships *inside* the paid Wolfram
+15.0 install, which knows it belongs to the paid product:
 
 ```powershell
-& "C:\Program Files\Wolfram Research\Wolfram\14.3\wolframscript.exe" `
+& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolframscript.exe" `
     -activate 3458-6977-EUAT9H
 ```
 
@@ -215,7 +226,7 @@ The fix is one of two product-correct entry points:
 activation dialog:
 
 ```powershell
-& "C:\Program Files\Wolfram Research\Wolfram\14.3\WolframNB.exe"
+& "C:\Program Files\Wolfram Research\Wolfram\15.0\WolframNB.exe"
 ```
 
 The first time the front end is run with a key that has free
@@ -251,38 +262,41 @@ match:
     | Set-Content "$env:LOCALAPPDATA\Tungsten\wolfram-license-cache.json"
 ```
 
-## Path to >4 concurrent kernels
+## Historical path to >4 concurrent kernels
 
 Both remaining keys (`8794RH` in `L9828-7240`, `QLUG23` in
 `L3458-6977`) are **siblings** of keys we already considered, in
 the same two license groups. Activating them does nothing useful:
-they are deduplicated against the same license ID. To go beyond 4
-concurrent kernels Vladimir would need to acquire an **additional**
-Wolfram license (different `L`-prefix), then activate one of its
-keys here.
+they are deduplicated against the same license ID. In the historical 4-kernel
+setup, going beyond that ceiling would have required an **additional** Wolfram
+license (different `L`-prefix), then activating one of its keys here.
 
 A `runas`-based approach (multiple Windows users, each with their
 own activation) is possible but expensive: each user still needs a
 distinct activation, so the upper bound is still set by the number
 of independent licenses Vladimir owns.
 
-## What this means for Tungsten
+## Historical Tungsten impact
 
 The license-aware launch gate in Tungsten
 (`wait_for_wolfram_license_slot` + `cached_max_license_processes`)
-serializes launches against the discovered cap. The activation has now landed,
-so the only required change was **updating the cached cap value from `2` to `4`**
-(done — `%LOCALAPPDATA%\Tungsten\wolfram-license-cache.json`). The launch gate,
-the dedupe-mathpass helper, and the process-snapshot logic are unchanged.
+serializes launches against the discovered cap. In the 2026-06-01 paid-product
+state, the only required change was **updating the cached cap value from `2` to
+`4`** (`%LOCALAPPDATA%\Tungsten\wolfram-license-cache.json`). The launch gate,
+the dedupe-mathpass helper, and the process-snapshot logic were unchanged.
 
-**No Tungsten code change was required.** A subtlety worth recording: Tungsten
-launches with `-pwfile <copy of the system mathpass>`, which contains only
-`KAY472` — yet the probe shows it still acquires all 4 seats, because
-`wolfram.exe` reads the per-user mathpass (holding `EUAT9H`) **in addition** to
-`-pwfile`. So the pwfile helper did not need to be taught about the user
-mathpass. (If a future context ever launches where the user mathpass is *not*
-read, the merged-pwfile approach — `Temp/license-probe2.py` condition C — is the
-drop-in fix.)
+The 2026-06-17 paid Wolfram 15.0 retest supersedes that cache target for normal
+operation: successful Wolfram 15.0 evaluations report `$MaxLicenseProcesses = 2`,
+and Tungsten refreshes its cache from that live kernel value. If a future
+concurrency probe shows a higher Wolfram 15.0 ceiling, the cache can follow the
+observed kernel value again.
+
+A subtlety worth preserving from the 4-kernel investigation: Tungsten launched
+with `-pwfile <copy of the system mathpass>`, which contained only `KAY472`, yet
+the probe still acquired all 4 seats because the then-current `wolfram.exe` read
+the per-user mathpass (holding `EUAT9H`) **in addition** to `-pwfile`. If a future
+context ever launches where the user mathpass is *not* read, the merged-pwfile
+approach — `Temp/license-probe2.py` condition C — is the drop-in fix.
 
 ## See also
 

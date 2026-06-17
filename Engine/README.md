@@ -183,7 +183,7 @@ The current workspace is built around seven complementary capabilities:
    `Unique`, `Names`, `NameQ`, `Contexts`, `Context`, `$Context`, `$ContextPath`,
    mutable `Attributes`, `SetAttributes`, `ClearAttributes`, `Protect`, `Unprotect`,
    `ClearAll`, and `ValueQ`. The registry is pre-seeded with the immediate
-   <code>System`</code> symbol catalog and attributes from the installed Wolfram 14.3 kernel so
+   <code>System`</code> symbol catalog and attributes from the installed Wolfram 15.0 kernel so
    built-ins are discoverable even when Tungsten does not implement their evaluation rules; the
    evaluator consults those attributes plus process-local user mutations for common hold,
    sequence, listable, flat, orderless, and one-identity matching behavior.
@@ -200,8 +200,8 @@ The current workspace is built around seven complementary capabilities:
 
 ### Shipped now
 
-- Environment discovery for the local Wolfram installation, documentation roots, bundled Python
-  client tree, and default index path.
+- Environment discovery for paid Wolfram 15.0 by default, explicit Wolfram Engine 14.3 selection,
+  documentation roots, bundled Python client tree, and product-scoped default index paths.
 - Automatic `mathpass` deduplication plus launch-gate / process-scan handling before kernel execution.
 - Structured kernel evaluation with timing, messages, printed output capture, and explicit success
   metadata.
@@ -237,7 +237,7 @@ The current workspace is built around seven complementary capabilities:
 |------|----------------|
 | Runtime | Python 3.11+ |
 | Package layout | `setuptools` package under `src/tungsten/` |
-| Primary execution substrate | `wolfram.exe -script` |
+| Primary execution substrate | Paid Wolfram 15.0 `wolfram.exe -script` by default; `TUNGSTEN_WOLFRAM_PRODUCT=engine` selects Wolfram Engine 14.3 |
 | PowerShell integration | Thin JSON-first wrapper module in `pwsh/Tungsten.psm1` |
 | .NET integration | Thin typed wrapper library in `dotnet/Tungsten.DotNet/` |
 | Documentation index | SQLite FTS5 |
@@ -251,9 +251,9 @@ The current workspace is built around seven complementary capabilities:
 ## Architecture at a glance
 
 ```text
-                  local Wolfram installation
+                  local Wolfram installations
         ┌───────────────────────────────────────────────┐
-        │ wolfram.exe / WolframKernel.exe / WolframNB  │
+        │ Wolfram 15.0 / Wolfram Engine 14.3 wrappers  │
         │ mathpass / local docs notebooks / Chatbook   │
         └───────────────────────────────────────────────┘
                               ▲
@@ -282,9 +282,15 @@ For the deeper component model and execution flow, see [Architecture](./docs/arc
 
 ## The most important environment fact on this machine
 
-This machine has a real Wolfram 14.3 installation, but the installed `mathpass` contains duplicate
-license entries. That matters because the obvious command-line paths can fail if they use the raw
-installed file directly.
+This machine intentionally has two Wolfram product families installed:
+
+- paid Wolfram 15.0 at `C:\Program Files\Wolfram Research\Wolfram\15.0`;
+- Wolfram Engine for Developers 14.3 at `C:\Program Files\Wolfram Research\Wolfram Engine\14.3`.
+
+Tungsten prefers the paid Wolfram 15.0 product by default. Set
+`TUNGSTEN_WOLFRAM_PRODUCT=engine` only when an Engine-specific run is intended. The selected
+product's installed `mathpass` can contain duplicate license entries; that matters because the
+obvious command-line paths can fail if they use the raw installed file directly.
 
 Tungsten handles that by:
 

@@ -1150,7 +1150,7 @@ def _find_inline_box_end(text: str, start: int) -> int | None:
 # Wolfram's Get/Put operators (`<<`, `>>`, `>>>`) consume a context-sensitive
 # "filename" token that allows characters which would otherwise tokenize as
 # operators (`.`, `/`, `\`, `:`, `-`, `*`, `!`, `?`, `~`, `` ` ``). The character
-# class below was reverse-engineered from the live Wolfram 14.3 kernel: characters
+# class below was reverse-engineered from the live Wolfram kernel: characters
 # that produce a successful ``ToExpression["<<text", InputForm, HoldComplete]``
 # parse for an unbroken trailing run after the operator are admitted; characters
 # that act as expression terminators (whitespace, `;`, `,`, brackets, `+`, `&`,

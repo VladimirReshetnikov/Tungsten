@@ -1,7 +1,7 @@
 {
-	"wolframVersion":"14.3.0 for Microsoft Windows (64-bit) (July 8, 2025)",
+	"wolframVersion":"15.0.0 for Microsoft Windows (64-bit) (May 19, 2026)",
 	"context":"System`",
-	"symbolCount":7800,
+	"symbolCount":7935,
 	"symbols":[
 		[
 			"",
@@ -1466,6 +1466,13 @@
 			]
 		],
 		[
+			"AgentToolsDeployment",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"AggregatedEntityClass",
 			[
 				"Protected",
@@ -1821,6 +1828,15 @@
 		[
 			"AlternatingGroup",
 			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"AlternatingHarmonicNumber",
+			[
+				"Listable",
+				"NumericFunction",
 				"Protected",
 				"ReadProtected"
 			]
@@ -2895,6 +2911,41 @@
 		],
 		[
 			"AssessmentResultObject",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"AssetAdd",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"AssetExistsQ",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"AssetObject",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"AssetRemove",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"AssetValue",
 			[
 				"Protected",
 				"ReadProtected"
@@ -4601,6 +4652,13 @@
 			]
 		],
 		[
+			"BezierSurface",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"BilateralFilter",
 			[
 				"Protected",
@@ -5054,6 +5112,12 @@
 			[
 				"Protected",
 				"ReadProtected"
+			]
+		],
+		[
+			"BlinkingCellInsertionPoint",
+			[
+				"Protected"
 			]
 		],
 		[
@@ -5750,6 +5814,13 @@
 			]
 		],
 		[
+			"BubbleHistogram",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"BubbleScale",
 			[
 				"Protected",
@@ -5786,6 +5857,13 @@
 		],
 		[
 			"BulletGauge",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"BunchKaufmanDecomposition",
 			[
 				"Protected",
 				"ReadProtected"
@@ -6352,10 +6430,30 @@
 			]
 		],
 		[
+			"CatchExceptions",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"CategoricalDistribution",
 			[
 				"Protected",
 				"ReadProtected"
+			]
+		],
+		[
+			"CategoricalHistogram",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"CategoricalValue",
+			[
+				"Protected"
 			]
 		],
 		[
@@ -6594,6 +6692,12 @@
 			]
 		],
 		[
+			"CellFrameRoundingRadius",
+			[
+				"Protected"
+			]
+		],
+		[
 			"CellFrameStyle",
 			[
 				"Protected"
@@ -6638,6 +6742,12 @@
 		],
 		[
 			"CellInsertionPointCell",
+			[
+				"Protected"
+			]
+		],
+		[
+			"CellInsertionPointColor",
 			[
 				"Protected"
 			]
@@ -7555,6 +7665,12 @@
 		],
 		[
 			"ClickToCopyEnabled",
+			[
+				"Protected"
+			]
+		],
+		[
+			"CliffordAlgebra",
 			[
 				"Protected"
 			]
@@ -8711,6 +8827,13 @@
 			]
 		],
 		[
+			"ComponentKeys",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"ComponentMeasurements",
 			[
 				"Protected",
@@ -8864,8 +8987,7 @@
 		[
 			"ConfidenceLevel",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -8891,7 +9013,6 @@
 		[
 			"Confirm",
 			[
-				"HoldAll",
 				"Protected",
 				"ReadProtected"
 			]
@@ -8899,7 +9020,6 @@
 		[
 			"ConfirmAssert",
 			[
-				"HoldAll",
 				"Protected",
 				"ReadProtected"
 			]
@@ -8907,7 +9027,6 @@
 		[
 			"ConfirmBy",
 			[
-				"HoldAll",
 				"Protected",
 				"ReadProtected"
 			]
@@ -8915,7 +9034,6 @@
 		[
 			"ConfirmMatch",
 			[
-				"HoldAll",
 				"Protected",
 				"ReadProtected"
 			]
@@ -8923,7 +9041,6 @@
 		[
 			"ConfirmQuiet",
 			[
-				"HoldAll",
 				"Protected",
 				"ReadProtected"
 			]
@@ -9217,8 +9334,7 @@
 		[
 			"ConstructColumns",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -10146,10 +10262,7 @@
 		],
 		[
 			"CovarianceEstimatorFunction",
-			[
-				"Protected",
-				"ReadProtected"
-			]
+			[]
 		],
 		[
 			"CovarianceFunction",
@@ -10394,6 +10507,13 @@
 		],
 		[
 			"CreateWindow",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"CreditConstraint",
 			[
 				"Protected",
 				"ReadProtected"
@@ -10839,6 +10959,13 @@
 			"DarkMagenta",
 			[
 				"Protected"
+			]
+		],
+		[
+			"DarkModePane",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -11345,6 +11472,13 @@
 			[
 				"NHoldRest",
 				"Protected"
+			]
+		],
+		[
+			"DecisionTreeModel",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -12047,9 +12181,23 @@
 			]
 		],
 		[
+			"DeployAgentTools",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"Deployed",
 			[
 				"Protected"
+			]
+		],
+		[
+			"DeployedAgentTools",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -12848,6 +12996,13 @@
 			]
 		],
 		[
+			"DiscreteHilbertTransform",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"DiscreteIndicator",
 			[
 				"Protected",
@@ -13065,10 +13220,7 @@
 		],
 		[
 			"DispersionEstimatorFunction",
-			[
-				"Protected",
-				"ReadProtected"
-			]
+			[]
 		],
 		[
 			"Display",
@@ -14476,7 +14628,6 @@
 		[
 			"Enclose",
 			[
-				"HoldFirst",
 				"Protected",
 				"ReadProtected"
 			]
@@ -14590,6 +14741,13 @@
 		],
 		[
 			"Entity",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"EntityAugmentColumns",
 			[
 				"Protected",
 				"ReadProtected"
@@ -14801,6 +14959,13 @@
 			[
 				"Orderless",
 				"Protected"
+			]
+		],
+		[
+			"EquivalentStrain",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -15176,6 +15341,26 @@
 			]
 		],
 		[
+			"EventSeriesAccumulate",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"EventSeriesLookup",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"EventSeriesQ",
+			[
+				"Protected"
+			]
+		],
+		[
 			"ExactBlackmanWindow",
 			[
 				"Listable",
@@ -15206,6 +15391,34 @@
 			"Except",
 			[
 				"Protected"
+			]
+		],
+		[
+			"Exception",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"ExceptionQ",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"ExceptionTypeRegisteredQ",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"ExceptionTypes",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -15386,13 +15599,17 @@
 		],
 		[
 			"ExponentialFamily",
+			[]
+		],
+		[
+			"ExponentialGeneratingFunction",
 			[
 				"Protected",
 				"ReadProtected"
 			]
 		],
 		[
-			"ExponentialGeneratingFunction",
+			"ExponentialModel",
 			[
 				"Protected",
 				"ReadProtected"
@@ -15467,6 +15684,13 @@
 			"Expression",
 			[
 				"Protected"
+			]
+		],
+		[
+			"ExpressionAsset",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -15881,7 +16105,10 @@
 		],
 		[
 			"Failsafe",
-			[]
+			[
+				"Protected",
+				"ReadProtected"
+			]
 		],
 		[
 			"Failure",
@@ -16118,6 +16345,13 @@
 		],
 		[
 			"File",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"FileAsset",
 			[
 				"Protected",
 				"ReadProtected"
@@ -16946,6 +17180,12 @@
 			]
 		],
 		[
+			"FindSolarEclipse",
+			[
+				"Protected"
+			]
+		],
+		[
 			"FindSpanningTree",
 			[
 				"Protected"
@@ -17302,6 +17542,20 @@
 			]
 		],
 		[
+			"FluidViscosity",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"FluidViscousStress",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"Fold",
 			[
 				"Protected"
@@ -17592,6 +17846,13 @@
 		],
 		[
 			"FormulaLookup",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"FormulaModel",
 			[
 				"Protected",
 				"ReadProtected"
@@ -17998,6 +18259,13 @@
 			"FrobeniusNumber",
 			[
 				"Protected"
+			]
+		],
+		[
+			"FrobeniusReduce",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -18760,6 +19028,14 @@
 			]
 		],
 		[
+			"GeneralizedPolyLog",
+			[
+				"NumericFunction",
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"GeneralizedPower",
 			[
 				"NHoldAll",
@@ -18940,6 +19216,20 @@
 		],
 		[
 			"GeoArraySize",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"GeoAxes",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"GeoAxesOrigin",
 			[
 				"Protected",
 				"ReadProtected"
@@ -20277,6 +20567,19 @@
 			]
 		],
 		[
+			"GraphValuePlot",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"GrassmannAlgebra",
+			[
+				"Protected"
+			]
+		],
+		[
 			"Gray",
 			[
 				"Protected"
@@ -20831,6 +21134,15 @@
 			"HarmonicNumber",
 			[
 				"Listable",
+				"NumericFunction",
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"HarmonicPolyLog",
+			[
+				"NHoldFirst",
 				"NumericFunction",
 				"Protected",
 				"ReadProtected"
@@ -21454,7 +21766,8 @@
 		[
 			"HoldCompleteForm",
 			[
-				"HoldAllComplete"
+				"HoldAllComplete",
+				"Protected"
 			]
 		],
 		[
@@ -21748,6 +22061,15 @@
 		],
 		[
 			"HypergeometricU",
+			[
+				"Listable",
+				"NumericFunction",
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"HyperHarmonicNumber",
 			[
 				"Listable",
 				"NumericFunction",
@@ -22779,8 +23101,7 @@
 		[
 			"IncludeConstantBasis",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -22810,10 +23131,7 @@
 		],
 		[
 			"IncludeGroupAggregates",
-			[
-				"Protected",
-				"ReadProtected"
-			]
+			[]
 		],
 		[
 			"IncludeHydrogens",
@@ -22833,6 +23151,13 @@
 			"IncludeMetaInformation",
 			[
 				"Protected"
+			]
+		],
+		[
+			"IncludeOuterFace",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -22878,8 +23203,7 @@
 		[
 			"IncludeWindowTimes",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -22892,6 +23216,13 @@
 		],
 		[
 			"IncrementalFunction",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"IncrementalObject",
 			[
 				"Protected",
 				"ReadProtected"
@@ -23196,6 +23527,12 @@
 			]
 		],
 		[
+			"InitializationGroup",
+			[
+				"Protected"
+			]
+		],
+		[
 			"InitializationObject",
 			[
 				"HoldFirst",
@@ -23425,8 +23762,7 @@
 		[
 			"InsertColumns",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -24632,6 +24968,12 @@
 			]
 		],
 		[
+			"JordanReduce",
+			[
+				"Protected"
+			]
+		],
+		[
 			"JulianDate",
 			[
 				"Protected",
@@ -25526,6 +25868,13 @@
 			]
 		],
 		[
+			"LDLDecomposition",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"LeaderSize",
 			[
 				"Protected",
@@ -26079,6 +26428,13 @@
 			]
 		],
 		[
+			"LightModePane",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"LightOrange",
 			[
 				"Protected"
@@ -26218,6 +26574,13 @@
 			]
 		],
 		[
+			"LinearModel",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"LinearModelFit",
 			[
 				"Protected",
@@ -26226,10 +26589,7 @@
 		],
 		[
 			"LinearOffsetFunction",
-			[
-				"Protected",
-				"ReadProtected"
-			]
+			[]
 		],
 		[
 			"LinearOptimization",
@@ -26420,10 +26780,7 @@
 		],
 		[
 			"LinkFunction",
-			[
-				"Protected",
-				"ReadProtected"
-			]
+			[]
 		],
 		[
 			"LinkHost",
@@ -26957,6 +27314,13 @@
 			]
 		],
 		[
+			"LLMSkill",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"LLMSynthesize",
 			[
 				"Protected",
@@ -27281,6 +27645,13 @@
 			]
 		],
 		[
+			"LogModel",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"LogMultinormalDistribution",
 			[
 				"Protected",
@@ -27532,6 +27903,13 @@
 			]
 		],
 		[
+			"LQRegulatorTrain",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"LUBackSubstitution",
 			[
 				"Protected"
@@ -27627,6 +28005,20 @@
 			"Magenta",
 			[
 				"Protected"
+			]
+		],
+		[
+			"MagneticFieldIntensity",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MagneticFluxDensity",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -29208,8 +29600,7 @@
 		[
 			"MinimumTimeIncrement",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -29441,6 +29832,20 @@
 			]
 		],
 		[
+			"ModelFit",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"ModelFitReport",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"ModelPredictiveController",
 			[
 				"Protected",
@@ -29523,6 +29928,13 @@
 		],
 		[
 			"MoleculeFeatureDistance",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MoleculeFingerprint",
 			[
 				"Protected",
 				"ReadProtected"
@@ -29627,7 +30039,28 @@
 			]
 		],
 		[
+			"MoleculeSubstructure",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MoleculeSubstructureCases",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"MoleculeSubstructureCount",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MoleculeSubstructureQ",
 			[
 				"Protected",
 				"ReadProtected"
@@ -29698,7 +30131,6 @@
 		[
 			"Monitor",
 			[
-				"HoldAll",
 				"Protected",
 				"ReadProtected"
 			]
@@ -29884,8 +30316,7 @@
 		[
 			"MovingMap",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -29975,6 +30406,30 @@
 			]
 		],
 		[
+			"MultipleHarmonicNumber",
+			[
+				"NumericFunction",
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MultiplePolyLog",
+			[
+				"NumericFunction",
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MultipleZeta",
+			[
+				"NumericFunction",
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"MultiplicativeOrder",
 			[
 				"Protected"
@@ -30020,6 +30475,122 @@
 		],
 		[
 			"MultivariateTDistribution",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicChord",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicDuration",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicInterval",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicKeySignature",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicMeasure",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicMeasurements",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicNote",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicObjectQ",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicPitch",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicPlot",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicRest",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicScale",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicScore",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicTempo",
+			[]
+		],
+		[
+			"MusicTimeSignature",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicTransform",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"MusicVoice",
 			[
 				"Protected",
 				"ReadProtected"
@@ -30164,6 +30735,13 @@
 		],
 		[
 			"NearestMeshCells",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"NearestModel",
 			[
 				"Protected",
 				"ReadProtected"
@@ -30405,6 +30983,10 @@
 				"Protected",
 				"ReadProtected"
 			]
+		],
+		[
+			"NetEvaluator",
+			[]
 		],
 		[
 			"NetExternalObject",
@@ -30734,6 +31316,13 @@
 			]
 		],
 		[
+			"NextValue",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"NeymanScottPointProcess",
 			[
 				"Protected",
@@ -30825,6 +31414,13 @@
 			]
 		],
 		[
+			"Nominal",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"NominalScale",
 			[
 				"Protected",
@@ -30875,7 +31471,8 @@
 		[
 			"NonCommutativeAlgebra",
 			[
-				"Protected"
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -30918,6 +31515,12 @@
 		],
 		[
 			"NonCommutativePolynomialReduce",
+			[
+				"Protected"
+			]
+		],
+		[
+			"NonCommutativePolynomialReduction",
 			[
 				"Protected"
 			]
@@ -31365,6 +31968,12 @@
 			[
 				"Protected",
 				"ReadProtected"
+			]
+		],
+		[
+			"NotebookTheme",
+			[
+				"Protected"
 			]
 		],
 		[
@@ -32287,6 +32896,12 @@
 			]
 		],
 		[
+			"OrbitalElements",
+			[
+				"Protected"
+			]
+		],
+		[
 			"Order",
 			[
 				"Protected"
@@ -32303,6 +32918,13 @@
 			"OrderedQ",
 			[
 				"Protected"
+			]
+		],
+		[
+			"OrderedSchurDecomposition",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -32335,6 +32957,13 @@
 			[
 				"Orderless",
 				"Protected"
+			]
+		],
+		[
+			"Ordinal",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -32583,6 +33212,34 @@
 		],
 		[
 			"Package",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PackageExported",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PackageImport",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PackageInitialize",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PackageScoped",
 			[
 				"Protected",
 				"ReadProtected"
@@ -33415,6 +34072,20 @@
 			[]
 		],
 		[
+			"PartialFractionElements",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PartialFractions",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"ParticleAcceleratorData",
 			[
 				"Protected",
@@ -33680,6 +34351,13 @@
 			]
 		],
 		[
+			"PerceptronModel",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"PerfectNumber",
 			[
 				"Protected",
@@ -33716,6 +34394,20 @@
 			"PeriodicInterpolation",
 			[
 				"Protected"
+			]
+		],
+		[
+			"PeriodicModel",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PeriodicTablePlot",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -33966,6 +34658,13 @@
 		],
 		[
 			"PetersenGraph",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PfaffianDet",
 			[
 				"Protected",
 				"ReadProtected"
@@ -34319,6 +35018,13 @@
 			]
 		],
 		[
+			"PlotGrid",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"PlotHighlighting",
 			[
 				"Protected",
@@ -34654,6 +35360,13 @@
 			]
 		],
 		[
+			"PolarDecomposition",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"PolarGridLines",
 			[
 				"Protected",
@@ -34900,6 +35613,13 @@
 			]
 		],
 		[
+			"PolynomialModel",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"PolynomialQ",
 			[
 				"Protected"
@@ -34919,6 +35639,13 @@
 		],
 		[
 			"PolynomialReduce",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PolynomialReduction",
 			[
 				"Protected",
 				"ReadProtected"
@@ -34959,6 +35686,13 @@
 		],
 		[
 			"PoolingLayer",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"PopovDecomposition",
 			[
 				"Protected",
 				"ReadProtected"
@@ -35116,6 +35850,13 @@
 			[
 				"Listable",
 				"Protected"
+			]
+		],
+		[
+			"PowerModel",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -36557,6 +37298,13 @@
 			]
 		],
 		[
+			"RankDecomposition",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"RankedMax",
 			[
 				"Protected",
@@ -36622,6 +37370,12 @@
 		],
 		[
 			"RasterBoxOptions",
+			[
+				"Protected"
+			]
+		],
+		[
+			"RasterInterpolation",
 			[
 				"Protected"
 			]
@@ -37387,6 +38141,13 @@
 			]
 		],
 		[
+			"RegisterExceptionType",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"RegisterExternalEvaluator",
 			[
 				"Protected",
@@ -37408,8 +38169,7 @@
 		[
 			"RegularlySampledQ",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -37584,11 +38344,23 @@
 			]
 		],
 		[
-			"RemoteInputFiles",
+			"RemoteGeoZone",
 			[
 				"Protected",
 				"ReadProtected"
 			]
+		],
+		[
+			"RemoteInputFiles",
+			[]
+		],
+		[
+			"RemoteJobName",
+			[]
+		],
+		[
+			"RemoteJobNotifications",
+			[]
 		],
 		[
 			"RemoteKernelObject",
@@ -37598,11 +38370,15 @@
 			]
 		],
 		[
-			"RemoteProviderSettings",
+			"RemoteMachineClass",
 			[
 				"Protected",
 				"ReadProtected"
 			]
+		],
+		[
+			"RemoteProviderSettings",
+			[]
 		],
 		[
 			"RemoteRun",
@@ -37905,8 +38681,7 @@
 		[
 			"ResamplingMethod",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -39220,6 +39995,13 @@
 			]
 		],
 		[
+			"ScrollVideo",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"SearchAdjustment",
 			[
 				"Protected",
@@ -39360,12 +40142,6 @@
 		],
 		[
 			"Selectable",
-			[
-				"Protected"
-			]
-		],
-		[
-			"SelectableTopLevelGraphics",
 			[
 				"Protected"
 			]
@@ -40203,6 +40979,12 @@
 			]
 		],
 		[
+			"ShowChatbar",
+			[
+				"Protected"
+			]
+		],
+		[
 			"ShowClosedCellArea",
 			[
 				"Protected"
@@ -40884,6 +41666,13 @@
 		],
 		[
 			"SocketWaitNext",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"SocketWriteMessage",
 			[
 				"Protected",
 				"ReadProtected"
@@ -42999,6 +43788,12 @@
 			]
 		],
 		[
+			"SubValuesHoldAll",
+			[
+				"Protected"
+			]
+		],
+		[
 			"Succeeds",
 			[]
 		],
@@ -43684,6 +44479,20 @@
 			]
 		],
 		[
+			"SystemModelSurrogate",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"SystemModelSurrogateTrain",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"SystemModelSustain",
 			[
 				"Protected",
@@ -44043,6 +44852,13 @@
 			]
 		],
 		[
+			"TabularSummary",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"TabView",
 			[
 				"Protected",
@@ -44079,6 +44895,20 @@
 			"TagBoxOptions",
 			[
 				"Protected"
+			]
+		],
+		[
+			"TaggedEdgeStyle",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
+			"TaggedNestGraph",
+			[
+				"Protected",
+				"ReadProtected"
 			]
 		],
 		[
@@ -44351,6 +45181,12 @@
 			[
 				"Protected",
 				"ReadProtected"
+			]
+		],
+		[
+			"TemplateSelectableGraphics",
+			[
+				"Protected"
 			]
 		],
 		[
@@ -44944,6 +45780,13 @@
 			]
 		],
 		[
+			"ThrowException",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"ThueMorse",
 			[
 				"Protected",
@@ -45096,6 +45939,13 @@
 			]
 		],
 		[
+			"TimeObservationWindow",
+			[
+				"Protected",
+				"ReadProtected"
+			]
+		],
+		[
 			"TimeRemaining",
 			[
 				"Protected"
@@ -45129,8 +45979,13 @@
 		[
 			"TimeSeriesAggregate",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
+			]
+		],
+		[
+			"TimeSeriesEvents",
+			[
+				"Protected"
 			]
 		],
 		[
@@ -45143,8 +45998,7 @@
 		[
 			"TimeSeriesInsert",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -45157,8 +46011,7 @@
 		[
 			"TimeSeriesMap",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -45183,21 +46036,38 @@
 			]
 		],
 		[
+			"TimeSeriesQ",
+			[
+				"Protected"
+			]
+		],
+		[
 			"TimeSeriesResample",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
 			"TimeSeriesRescale",
 			[
+				"Protected"
+			]
+		],
+		[
+			"TimeSeriesShift",
+			[
+				"Protected"
+			]
+		],
+		[
+			"TimeSeriesStructure",
+			[
 				"Protected",
 				"ReadProtected"
 			]
 		],
 		[
-			"TimeSeriesShift",
+			"TimeSeriesSummary",
 			[
 				"Protected",
 				"ReadProtected"
@@ -45206,15 +46076,13 @@
 		[
 			"TimeSeriesThread",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
 			"TimeSeriesWindow",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -45973,8 +46841,7 @@
 		[
 			"TransformColumns",
 			[
-				"Protected",
-				"ReadProtected"
+				"Protected"
 			]
 		],
 		[
@@ -47604,10 +48471,7 @@
 		],
 		[
 			"VarianceEstimatorFunction",
-			[
-				"Protected",
-				"ReadProtected"
-			]
+			[]
 		],
 		[
 			"VarianceGammaDistribution",
@@ -49108,6 +49972,12 @@
 			]
 		],
 		[
+			"WeylAlgebra",
+			[
+				"Protected"
+			]
+		],
+		[
 			"WheelGraph",
 			[
 				"Protected",
@@ -49314,12 +50184,6 @@
 		],
 		[
 			"WindowMargins",
-			[
-				"Protected"
-			]
-		],
-		[
-			"WindowMovable",
 			[
 				"Protected"
 			]
@@ -50803,6 +51667,10 @@
 			[]
 		],
 		[
+			"$NetEvaluator",
+			[]
+		],
+		[
 			"$NetworkConnected",
 			[
 				"Protected",
@@ -51520,6 +52388,12 @@
 			[
 				"Protected",
 				"ReadProtected"
+			]
+		],
+		[
+			"$WCSConfiguration",
+			[
+				"Protected"
 			]
 		],
 		[

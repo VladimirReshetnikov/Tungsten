@@ -3,34 +3,38 @@
 - Status: Reference (specification of Wolfram-Language string-literal lexis and the
   parallel character-escape rules that apply outside string literals)
 - Audience: Tungsten parser, evaluator, and renderer maintainers; reviewers comparing
-  Tungsten behavior against the local Wolfram 14.3 kernel
+  Tungsten behavior against the local Wolfram 15.0 kernel
 - Scope: textual surface syntax of Wolfram Language string literals (`"..."`), the
   identical numeric and named-character escape forms that appear outside string
   literals as identifier and operator characters, and the canonical FullForm rendering
   rules that turn parsed strings back into source text
 - Created (UTC): 2026-04-27T19:01:27Z
-- Repository HEAD: 9f34a00792e3b1c988cebccb17987d8421240085
+- Updated (UTC): 2026-06-17T02:01:20Z
+- Repository HEAD: 07930f5d6e6c04bf3c3f12f7b0a95debd2ab7b56
 - Authoritative references:
   - [tutorial/StringsAndCharacters](https://reference.wolfram.com/language/tutorial/StringsAndCharacters.html)
   - [tutorial/MathematicalAndOtherNotation](https://reference.wolfram.com/language/tutorial/MathematicalAndOtherNotation.html)
   - [guide/ListingOfNamedCharacters](https://reference.wolfram.com/language/guide/ListingOfNamedCharacters.html)
   - [ref/ToString](https://reference.wolfram.com/language/ref/ToString.html)
   - Local font data file:
-    `C:/Program Files/Wolfram Research/Wolfram/14.3/SystemFiles/FrontEnd/TextResources/UnicodeCharacters.tr`
+    `C:/Program Files/Wolfram Research/Wolfram/15.0/SystemFiles/FrontEnd/TextResources/UnicodeCharacters.tr`
     (1102 named characters with their canonical Unicode codepoints, used as the parity
     oracle in this specification)
 
 ## Motivation
 
-Tungsten currently recognizes ~220 named Wolfram characters out of 1102 in Wolfram 14.3,
-and its string-literal escape parser is more permissive than the kernel — it preserves
-malformed and unknown escapes as literal backslash text rather than rejecting them.
-This document captures the kernel's behavior precisely so the parser, the
-`parse_wl_string_literal` helper, and the FullForm renderer can be brought into parity.
+Tungsten ships the Wolfram 15.0 named-character table as
+`src/tungsten/data/wolfram_named_characters_15_0.json`: 1100 usable names from the
+1102-entry FrontEnd resource file after excluding the two compatibility entries that the
+kernel rejects. Its string-literal escape parser is deliberately more permissive than the
+kernel for malformed non-named escapes: it preserves them as literal backslash text rather
+than rejecting them. This document captures the kernel's behavior precisely so the parser,
+the `parse_wl_string_literal` helper, and the FullForm renderer can be compared against the
+local reference kernel.
 
-This is **specification-only**. Implementation work is not in scope here; see the
-companion report at [reports/2026-04-27-named-char-and-escape-parity.md](./reports/2026-04-27-named-char-and-escape-parity.md)
-for the parity-gap inventory.
+The companion report at
+[reports/2026-04-27-named-char-and-escape-parity.md](./reports/2026-04-27-named-char-and-escape-parity.md)
+records the original 14.3 parity-gap inventory.
 
 ## Vocabulary
 
@@ -41,10 +45,10 @@ for the parity-gap inventory.
 - A **string literal** is a token starting with `"`, ending with the matching `"`, and
   containing zero or more characters in between.
 - A **named character** is a character that has an `\[Name]` long-form alias in the
-  Wolfram Language. The kernel's font data file lists 1102 such names in 14.3.
+  Wolfram Language. The Wolfram 15.0 font data file lists 1102 such names.
 - The **PUA** (Private Use Area) is the codepoint range `0xE000..0xF8FF`, reserved by
-  Unicode for application-specific use. Wolfram assigns 450 of the 1102 named
-  characters to PUA codepoints in `0xF000..0xFFFE`. These are visible only when the
+  Unicode for application-specific use. The shipped Tungsten 15.0 table has 449 usable
+  named characters assigned to PUA codepoints in `0xF000..0xFFFE`. These are visible only when the
   Wolfram font is loaded; they are otherwise unrendered glyphs.
 
 ## String-literal lexis
@@ -64,7 +68,7 @@ sequence. Parsing fails (`ToExpression[..., InputForm]` returns `$Failed`, and
 ### `<regular>`: literal characters
 
 Any source character whose codepoint is not `0x22` (`"`) or `0x5C` (`\`) appears
-literally in the result. Source files are typically UTF-8 in Wolfram 14.x, so a literal
+literally in the result. Source files are typically UTF-8 in modern Wolfram kernels, so a literal
 `"π"` contains the single codepoint U+03C0.
 
 The Wolfram parser does **not** require source files to be ASCII; multi-byte UTF-8
@@ -259,7 +263,7 @@ significant differences from the string-literal context:
    `\[Alpha]` and `\:03B1` and the literal `α` all parse to the same symbol whose
    `SymbolName` is the single-character string `"α"` (one codepoint).
 
-The full alias table is small. The known built-in aliases as of 14.3 are:
+The full alias table is small. The known built-in aliases used by Tungsten are:
 
 | Named character | Codepoint | Canonical SymbolName |
 |-----------------|-----------|----------------------|
@@ -299,7 +303,7 @@ governed by the following decision rules, applied per character:
 8. **`U+10000..U+10FFFF` (supplementary planes)**: emit as `\|XXXXXX`. Wolfram
    currently has no supplementary-plane named characters.
 
-This is the rule observed in 14.3 by sampling
+This is the rule observed by sampling the local Wolfram kernel with
 `ToString[FullForm[<one-character-string>]]` for representative codepoints. Some
 codepoints in the Latin-1 range (e.g. U+00A9 ©, U+00B0 °) prefer the named form, while
 others (e.g. U+00B2 ²) prefer octal — the choice is per-codepoint and stored in the
@@ -328,8 +332,8 @@ re-parse it through `ToExpression[..., InputForm]`, take the single codepoint of
 result. The result codepoint must equal the original.
 
 This is the parity acceptance test for renderer + parser symmetry. Tungsten currently
-fails round-trip for codepoints whose FullForm rendering uses a `\[Name]` form that
-Tungsten does not recognize.
+uses the committed named-character table for `\[Name]` forms, so the remaining round-trip
+risks are renderer preference details rather than missing name-table coverage.
 
 ## Identifier round-trip
 
@@ -349,22 +353,21 @@ diverges by:
   decodes `\:03C0` directly without applying the alias rule that maps it back to
   `"Pi"`.
 
-The implementation will need both a comprehensive named-character table and an
-alias-canonicalization step in the lexer.
+The implementation uses the comprehensive named-character table plus an alias-canonicalization
+step in the lexer for the supported alias set.
 
 ## Related Tungsten code paths
 
 - [src/tungsten/wolfram_strings.py](../src/tungsten/wolfram_strings.py) —
   `parse_wl_string_literal` decodes string-literal escapes; `_decode_character_escape`
-  handles the four numeric forms; the named-character form `\[Name]` is currently not
-  decoded inside strings.
+  handles the four numeric forms and the named-character form `\[Name]`.
 - [src/tungsten/expression_parser.py](../src/tungsten/expression_parser.py) —
   `_scan_escaped_token` handles `\[Name]` outside strings;
   `_scan_simple_character_escape` handles `\:`, `\.`, `\|`, octal outside strings.
 - [src/tungsten/expression.py](../src/tungsten/expression.py) — `_ESCAPED_TOKEN_MAP`
   (~13 entries), `_ESCAPED_SYMBOL_ALIASES` (~5 entries), and
-  `_ESCAPED_INFIX_OPERATOR_HEADS` (~63 entries) constitute Tungsten's hand-curated
-  named-character table. Tungsten knows about 220 of the 1102 14.3 names.
+  `_ESCAPED_INFIX_OPERATOR_HEADS` (~63 entries) describe token/operator behavior layered on
+  top of the generated 1100-name Wolfram 15.0 character table.
 
 The implementation gap analysis is in
 [reports/2026-04-27-named-char-and-escape-parity.md](./reports/2026-04-27-named-char-and-escape-parity.md).

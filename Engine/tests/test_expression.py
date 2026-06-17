@@ -482,7 +482,7 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         self.assertEqual(expr.to_full_form(), "Times[Power[x, 3], Power[Plus[1, Times[a, b]], -1]]")
 
     def test_association_key_part_example_from_docs_parses_standard_form(self) -> None:
-        source = self._extract_boxdata_by_cell_id("Association.nb", 192453798)
+        source = self._extract_boxdata_by_cell_id("Association.nb", 1266901259)
         expr = parse_standard_form(source)
         self.assertEqual(
             expr.to_full_form(),
@@ -490,7 +490,7 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         )
 
     def test_association_string_key_part_example_from_docs_parses_standard_form(self) -> None:
-        source = self._extract_boxdata_by_cell_id("Association.nb", 581979623)
+        source = self._extract_boxdata_by_cell_id("Association.nb", 1807590842)
         expr = parse_standard_form(source)
         self.assertEqual(
             expr.to_full_form(),
@@ -498,27 +498,27 @@ class StandardFormBoxNotebookExamplesTests(unittest.TestCase):
         )
 
     def test_association_numeric_part_example_from_docs_parses_standard_form(self) -> None:
-        source = self._extract_boxdata_by_cell_id("Association.nb", 703193542)
+        source = self._extract_boxdata_by_cell_id("Association.nb", 764160725)
         expr = parse_standard_form(source)
         self.assertEqual(
             expr.to_full_form(),
             "Part[Association[Rule[a, x], Rule[b, y], Rule[c, z]], 2]",
         )
 
-    def test_association_mixed_nesting_example_from_docs_parses_standard_form(self) -> None:
-        source = self._extract_boxdata_by_cell_id("Association.nb", 100783286)
+    def test_association_nested_key_part_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Association.nb", 1053350556)
         expr = parse_standard_form(source)
         self.assertEqual(
             expr.to_full_form(),
-            "Part[List[Association[Rule[a, x], Rule[b, List[y, z]]]], 1, Key[b], 2]",
+            "Part[List[5, 7, assoc], 3, Key[b], 2]",
         )
 
-    def test_association_mixed_string_key_example_from_docs_parses_standard_form(self) -> None:
-        source = self._extract_boxdata_by_cell_id("Association.nb", 622564489)
+    def test_association_key_list_part_example_from_docs_parses_standard_form(self) -> None:
+        source = self._extract_boxdata_by_cell_id("Association.nb", 1839540970)
         expr = parse_standard_form(source)
         self.assertEqual(
             expr.to_full_form(),
-            'Part[List[Association[Rule["a", x], Rule["b", List[y, z]]]], 1, "b", 2]',
+            "Part[assoc, List[Key[2], Key[3]]]",
         )
 
     def test_matchq_example_from_docs_parses_standard_form_pattern_shorthand(self) -> None:
@@ -2432,7 +2432,7 @@ class ExpressionEvaluationTests(unittest.TestCase):
         self.assertEqual(name_q_wildcard.to_full_form(), "True")
         self.assertEqual(name_q_false.to_full_form(), "False")
         self.assertEqual(visible_builtin.to_full_form(), "True")
-        self.assertEqual(system_symbol_count.to_full_form(), "7806")
+        self.assertEqual(system_symbol_count.to_full_form(), "7941")
         self.assertEqual(unimplemented_system_symbol.to_full_form(), "True")
         self.assertEqual(
             plus_attributes.to_full_form(),

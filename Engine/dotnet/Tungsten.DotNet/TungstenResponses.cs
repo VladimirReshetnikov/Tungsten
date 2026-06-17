@@ -8,6 +8,15 @@ namespace Tungsten.DotNet;
 /// </summary>
 public sealed record TungstenEnvironmentResponse
 {
+    [JsonPropertyName("product")]
+    public string? Product { get; init; }
+
+    [JsonPropertyName("product_family")]
+    public string? ProductFamily { get; init; }
+
+    [JsonPropertyName("version")]
+    public string? Version { get; init; }
+
     [JsonPropertyName("install_dir")]
     public string? InstallDir { get; init; }
 
@@ -35,8 +44,50 @@ public sealed record TungstenEnvironmentResponse
     [JsonPropertyName("default_index_path")]
     public string? DefaultIndexPath { get; init; }
 
+    [JsonPropertyName("user_base")]
+    public string? UserBase { get; init; }
+
+    [JsonPropertyName("system_base")]
+    public string? SystemBase { get; init; }
+
+    [JsonPropertyName("mathpass_candidates")]
+    public string[] MathpassCandidates { get; init; } = [];
+
+    [JsonPropertyName("available_installations")]
+    public TungstenInstallationSummary[] AvailableInstallations { get; init; } = [];
+
+    [JsonPropertyName("selection_reason")]
+    public string? SelectionReason { get; init; }
+
     [JsonPropertyName("probe")]
     public JsonElement Probe { get; init; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement> ExtensionData { get; init; } = [];
+}
+
+/// <summary>
+/// Describes one local Wolfram product/version discovered by Tungsten.
+/// </summary>
+public sealed record TungstenInstallationSummary
+{
+    [JsonPropertyName("product")]
+    public string? Product { get; init; }
+
+    [JsonPropertyName("product_family")]
+    public string? ProductFamily { get; init; }
+
+    [JsonPropertyName("version")]
+    public string? Version { get; init; }
+
+    [JsonPropertyName("install_dir")]
+    public string? InstallDir { get; init; }
+
+    [JsonPropertyName("kernel_cli")]
+    public string? KernelCli { get; init; }
+
+    [JsonPropertyName("wolframscript")]
+    public string? WolframScript { get; init; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement> ExtensionData { get; init; } = [];

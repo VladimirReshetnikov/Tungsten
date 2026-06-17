@@ -23,7 +23,7 @@ This document specifies Tungsten's support for Wolfram named-parameter pure func
 The important semantic requirement is lexical scoping with capture-avoiding renaming. The design is
 based on:
 
-- live-kernel experiments on this machine with Wolfram 14.3;
+- live-kernel experiments on this machine with the local Wolfram installation;
 - the official `Function` documentation:
   [Function](https://reference.wolfram.com/language/ref/Function.html);
 - the official scoping tutorial:
@@ -248,7 +248,7 @@ This implementation does not attempt to reproduce every Wolfram scoping construc
 - no interaction-specific renaming across rules, pattern names, `With`, `Module`, or other scoping
   constructs beyond ordinary recursive traversal;
 - no mutable attribute registry or evaluator-wide attribute semantics beyond the pure-function
-  application subset described above. Tungsten does have a read-only Wolfram 14.3
+  application subset described above. Tungsten does have a read-only Wolfram 15.0
   <code>System`</code> attribute snapshot for `Attributes`, `Names`, and `NameQ`;
 - no attempt to mimic kernel messages exactly.
 

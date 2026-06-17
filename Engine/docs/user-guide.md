@@ -59,7 +59,8 @@ It is less appropriate when you need:
 
 ### To use kernel-backed Tungsten features
 
-- A local Wolfram installation discoverable by Tungsten.
+- A local Wolfram installation discoverable by Tungsten. On this machine Tungsten defaults to
+  paid Wolfram 15.0 and can opt into Wolfram Engine 14.3 with `TUNGSTEN_WOLFRAM_PRODUCT=engine`.
 - A usable `wolfram.exe` CLI.
 - A usable `mathpass` path. Tungsten handles the duplicate-entry machine quirk automatically, but it
   still needs a discoverable source file.

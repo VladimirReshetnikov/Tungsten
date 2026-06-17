@@ -7,7 +7,7 @@ from importlib import resources
 
 @lru_cache(maxsize=1)
 def named_character_codepoints() -> dict[str, int]:
-    data_path = resources.files(__package__).joinpath("data/wolfram_named_characters_14_3.json")
+    data_path = resources.files(__package__).joinpath("data/wolfram_named_characters_15_0.json")
     with data_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     characters = payload["characters"]

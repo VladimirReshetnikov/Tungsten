@@ -26,7 +26,12 @@ public sealed class TungstenClientTests
 
             var response = await client.GetEnvironmentAsync(probe: true);
 
-            Assert.Equal(@"C:\Program Files\Wolfram Research\Wolfram\14.3", response.InstallDir);
+            Assert.Equal("Wolfram", response.Product);
+            Assert.Equal("wolfram", response.ProductFamily);
+            Assert.Equal("15.0", response.Version);
+            Assert.Equal(@"C:\Program Files\Wolfram Research\Wolfram\15.0", response.InstallDir);
+            Assert.Equal("default-product-preference", response.SelectionReason);
+            Assert.Equal("engine", response.AvailableInstallations[1].ProductFamily);
             Assert.True(response.ExtensionData.ContainsKey("forwarded_args"));
             Assert.Equal(
                 ["env", "show", "--probe"],
@@ -318,10 +323,35 @@ switch ($ForwardedArgs[0]) {
     }
     "env" {
         Write-Json @{
-            install_dir = "C:\Program Files\Wolfram Research\Wolfram\14.3"
-            kernel_cli = "C:\Program Files\Wolfram Research\Wolfram\14.3\wolfram.exe"
+            product = "Wolfram"
+            product_family = "wolfram"
+            version = "15.0"
+            install_dir = "C:\Program Files\Wolfram Research\Wolfram\15.0"
+            kernel_cli = "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe"
             docs_roots = @("C:\Docs")
             default_index_path = "C:\Docs\index.sqlite3"
+            user_base = "C:\Users\vresh\AppData\Roaming\Wolfram"
+            system_base = "C:\ProgramData\Wolfram"
+            mathpass_candidates = @("C:\ProgramData\Wolfram\Licensing\mathpass")
+            available_installations = @(
+                @{
+                    product = "Wolfram"
+                    product_family = "wolfram"
+                    version = "15.0"
+                    install_dir = "C:\Program Files\Wolfram Research\Wolfram\15.0"
+                    kernel_cli = "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe"
+                    wolframscript = "C:\Program Files\Wolfram Research\Wolfram\15.0\wolframscript.exe"
+                },
+                @{
+                    product = "Wolfram Engine"
+                    product_family = "engine"
+                    version = "14.3"
+                    install_dir = "C:\Program Files\Wolfram Research\Wolfram Engine\14.3"
+                    kernel_cli = "C:\Program Files\Wolfram Research\Wolfram Engine\14.3\wolfram.exe"
+                    wolframscript = "C:\Program Files\Wolfram Research\Wolfram Engine\14.3\wolframscript.exe"
+                }
+            )
+            selection_reason = "default-product-preference"
             probe = if ($ForwardedArgs -contains "--probe") { @{ evaluation = @{ success = $true } } } else { $null }
             forwarded_args = $ForwardedArgs
             pythonpath = $env:PYTHONPATH

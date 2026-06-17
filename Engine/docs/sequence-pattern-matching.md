@@ -33,7 +33,7 @@ list.
 
 The goal is Wolfram-compatible behavior for ordinary expression heads, including the common
 attribute-sensitive cases needed by structural replacement. Tungsten now keeps mutable
-process-local symbol attributes, consults the Wolfram 14.3 System attribute snapshot, and uses
+process-local symbol attributes, consults the Wolfram 15.0 System attribute snapshot, and uses
 `Flat`, `Orderless`, and `OneIdentity` when matching ordinary expression patterns. It still does
 not implement user-defined `Default[...]` values or `OptionValue`.
 
@@ -58,7 +58,7 @@ The Wolfram documentation defines:
 - `OptionsPattern[]` as a pattern for a sequence or nested list of option rules;
 - `Longest[p]` and `Shortest[p]` as match-priority wrappers for ambiguous sequence choices.
 
-Live Wolfram 14.3 probes confirmed the covered ordinary behavior:
+Live Wolfram probes confirmed the covered ordinary behavior:
 
 | Pattern | Candidate | First match |
 |---|---|---|

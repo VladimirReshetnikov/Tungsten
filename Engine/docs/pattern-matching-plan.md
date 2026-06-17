@@ -92,14 +92,14 @@ Primary references:
 - [Cases](https://reference.wolfram.com/language/ref/Cases)
 - [DeleteCases](https://reference.wolfram.com/language/ref/DeleteCases)
 - local notebooks:
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\MatchQ.nb`
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\FreeQ.nb`
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\Cases.nb`
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\DeleteCases.nb`
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\Blank.nb`
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\Except.nb`
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\HoldPattern.nb`
-  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\14.3\Documentation\English\System\ReferencePages\Symbols\Verbatim.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\MatchQ.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\FreeQ.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\Cases.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\DeleteCases.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\Blank.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\Except.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\HoldPattern.nb`
+  - `C:\Program Files\Common Files\Wolfram Research\Documentation.en-us\15.0\Documentation\English\System\ReferencePages\Symbols\Verbatim.nb`
 
 Important documented rules that shape this design:
 

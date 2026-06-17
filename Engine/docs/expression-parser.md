@@ -63,7 +63,7 @@ Use the expression subsystem when you want:
 
 - structural analysis without launching a kernel;
 - symbol and context name queries without launching a kernel;
-- read-only Wolfram 14.3 <code>System`</code> symbol and attribute discovery without launching a kernel;
+- read-only Wolfram 15.0 <code>System`</code> symbol and attribute discovery without launching a kernel;
 - canonical formatting of textual Wolfram expressions;
 - lightweight expression traversal from Python or PowerShell;
 - deterministic scripting behavior that does not depend on evaluation rules, definitions, or
@@ -749,7 +749,7 @@ The current subsystem does not aim to support:
 
 These are intentional current boundaries, not hidden TODOs:
 
-- `Plus`, `Times`, `And`, and `Or` now use the Wolfram 14.3 attribute snapshot for flattening,
+- `Plus`, `Times`, `And`, and `Or` now use the Wolfram 15.0 attribute snapshot for flattening,
   canonicalization, list threading, and held Boolean argument handling, but Tungsten still only
   implements the arithmetic and Boolean evaluator rules documented in
   [expression-function-support.md](./expression-function-support.md).
