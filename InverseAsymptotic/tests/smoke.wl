@@ -90,6 +90,15 @@ check["verify: x + x^2 Log[x]",         verifiedQ[x + x^2 Log[x], x, 4]];
 check["verify: x + Log[x] at Inf",      verifiedQ[x + Log[x], x, 4, "At" -> Infinity]];
 check["verify: x - Log[x] at Inf",      verifiedQ[x - Log[x], x, 4, "At" -> Infinity]];
 
+(* ---- two-valued (even leading order) branch disclosure --------------- *)
+check["x^2 reports RealBranches = 2",
+  Quiet[InverseAsymptoticData[x^2, x, \[FormalY], 2]["RealBranches"]] === 2];
+check["x^2 both real branches obtainable via Direction",
+  agreesWithKnown[x^2, x, 2, Sqrt[\[FormalY]]] &&
+    agreesWithKnown[x^2, x, 2, -Sqrt[\[FormalY]], Direction -> "FromBelow"]];
+check["x^3 (odd, injective) reports RealBranches = 1",
+  Quiet[InverseAsymptoticData[x^3, x, \[FormalY], 2]["RealBranches"]] === 1];
+
 (* ---- negative cases: out-of-scale inputs must be refused ------------- *)
 check["refuse leading-log  x Log[x]",   InverseAsymptotic[x Log[x], x, y, 3] === $Failed];
 check["refuse oscillatory  Sin[1/x]",   InverseAsymptotic[Sin[1/x] - 1, x, y, 3] === $Failed];

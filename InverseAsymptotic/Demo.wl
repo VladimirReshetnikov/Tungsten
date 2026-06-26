@@ -54,9 +54,10 @@ show["x^2 from below  ->  -Sqrt[y]",
 
 Print["\n### Diagnostics association ###"];
 Module[{d = InverseAsymptoticData[x + x^Sqrt[2], x, y, 4]},
-  Print["  Leading           = ", d["Leading"]];
+  Print["  LeadingPower      = ", d["LeadingPower"]];
   Print["  Side              = ", d["Side"]];
   Print["  RemainderExponent = ", d["RemainderExponent"]];
+  Print["  RealBranches      = ", d["RealBranches"]];
   Print["  Verified          = ", d["Verified"],
         "   (measured decay order ", N[d["MeasuredOrder"], 6], ")"]];
 

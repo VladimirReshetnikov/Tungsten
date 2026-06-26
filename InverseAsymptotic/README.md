@@ -142,10 +142,12 @@ InverseAsymptoticData[f, x, y, n]          (* Association with full diagnostics 
 ### Diagnostics (`InverseAsymptoticData`)
 
 Returns an `Association` with: `"Expansion"`, `"Monomials"` (the raw `{coef, power,
-logPower}` list for the inverse expressed in `x`), `"Leading"` (`{c, p}`), `"ImagePoint"`,
-`"Side"`, `"RemainderExponent"`, `"InfiniteImage"`, `"Sigma"`, and — when `"Verify"` is on
-— `"Verified"`, `"MaxResidual"`, `"MeasuredOrder"` (the empirically measured decay
-exponent of the residual, which should match `RemainderExponent`).
+logPower}` list for the inverse expressed in `x`), `"LeadingPower"` (`{c, p}`),
+`"ImagePoint"`, `"Side"`, `"RemainderExponent"`, `"InfiniteImage"`, `"Sigma"`,
+`"RealBranches"` (`1`, or `2` when an even leading order makes the inverse two-valued —
+the other branch is the opposite `Direction`), and — when `"Verify"` is on — `"Verified"`,
+`"MaxResidual"`, `"MeasuredOrder"` (the empirically measured decay exponent of the
+residual, which should match `RemainderExponent`).
 
 ## How it works
 

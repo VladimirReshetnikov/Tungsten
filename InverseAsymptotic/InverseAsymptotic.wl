@@ -44,10 +44,16 @@
    powers, integer powers of logarithms, and analytic compositions (Exp, Sin,
    ... ).  Both flagship examples above, the elementary inverses (Exp[x]-1 ->
    Log[1+y], Sin -> ArcSin, Tan -> ArcTan, x - x^2 -> Catalan generating
-   function), inversions at a nonzero point, and inversions at infinity
-   (x + Log x, x + Sqrt[x]) are all in scope.  Leading terms that themselves
-   carry a logarithm (x Log x, x Exp[x] -> ProductLog) are detected and reported
-   as outside this version's scale, rather than answered incorrectly.
+   function, x Exp[x] -> ProductLog -- whose leading term IS the pure power x),
+   inversions at a nonzero point, and inversions at infinity (x + Log x,
+   x + Sqrt[x]) are all in scope.  When the LEADING term itself carries a
+   logarithm (x Log x, whose inverse is a Lambert-W / iterated-logarithm object
+   outside the c z^p Log^k scale), the input is detected and reported, rather
+   than answered incorrectly; nested logarithms (Log[Log[...]]) in corrections
+   are likewise refused, and the rate-based verifier guards against any silent
+   truncation.  An even leading order makes the real inverse two-valued; the
+   returned branch is the one matching Direction (the other is the opposite
+   Direction), and "RealBranches" -> 2 is flagged in the diagnostics.
 
    Main entry points:
      InverseAsymptotic[f, x, y, n]          -> expansion of f^(-1)(y), n levels
@@ -60,22 +66,32 @@ InverseAsymptotic::usage =
   "InverseAsymptotic[f, x, y, n] gives an n-level asymptotic expansion of the \
 real-valued branch of the inverse of the function x |-> f (an expression in x), \
 as a series in the output variable y, valid as y -> f(a) with x -> a (a = 0 from \
-above by default).  The expansion is returned in the natural power-log/irrational \
-scale of the inverse, which may include logarithms and non-integer or irrational \
-powers.  Options: \"At\" (the point a, default 0), Direction (\"FromAbove\" or \
-\"FromBelow\"), \"ImagePoint\" (Automatic), \"Remainder\" (append an O[...] term), \
-\"Verify\" (numeric back-substitution check).";
+above by default).  InverseAsymptotic[f, x -> a, y, n] sets the expansion point. \
+The result is an ordinary power-log sum (which may carry logarithms and \
+non-integer or irrational powers) plus, by default, an inert BigO[...] remainder \
+term -- not a SeriesData object -- and is $Failed on out-of-scale input. \
+Options: \"At\" (the point a, default 0; a finite value or +-Infinity), \
+Direction (\"FromAbove\"/1 default, or \"FromBelow\"/-1; selects the one-sided \
+real branch), \"ImagePoint\" (the image f(a), default Automatic), \"Remainder\" \
+(True: append the BigO[...] term), \"Verify\" (True: rate-based numeric \
+back-substitution check), \"VerificationTolerance\" (exact-residual floor, \
+default 10^-18).";
 
 InverseAsymptoticData::usage =
-  "InverseAsymptoticData[f, x, y, n] is like InverseAsymptotic but returns an \
-Association with the expansion, the list of {coefficient, power, logPower} \
-monomials, the leading monomial, the image point, the approach side, the \
-remainder exponent, and the numeric verification residual.";
+  "InverseAsymptoticData[f, x, y, n] (also [f, x -> a, y, n]) is like \
+InverseAsymptotic but returns an Association with keys \"Expansion\", \
+\"Monomials\" (the {coefficient, power, logPower} list for the inverse in x), \
+\"LeadingPower\" ({c, p} of f at the point), \"ImagePoint\", \"Side\", \
+\"RemainderExponent\", \"InfiniteImage\", \"Sigma\", \"RealBranches\" (1, or 2 \
+when the even leading order makes the inverse two-valued), and -- only when \
+\"Verify\" -> True -- \"Verified\", \"MaxResidual\", and \"MeasuredOrder\" (the \
+empirically measured decay exponent of the back-substitution residual).";
 
 BigO::usage =
   "BigO[v, p] is an inert order term displayed as O(v^p); it marks the remainder \
 of an InverseAsymptotic expansion when the remainder cannot be represented by the \
-built-in SeriesData (irrational or logarithmic scales).";
+built-in SeriesData (irrational or logarithmic scales).  It is the term appended \
+when \"Remainder\" -> True.";
 
 InverseAsymptotic::leadlog =
   "The leading behaviour of `1` at the requested point is not a pure power c x^p \
@@ -93,8 +109,15 @@ InverseAsymptotic::badside =
   "Inversion at an infinite image with the image tending to -Infinity is not \
 supported in this version; substitute y -> -y by hand.";
 InverseAsymptotic::nconv =
-  "The fixed-point iteration did not stabilize for `1`; returning the best \
-available truncation.";
+  "The fixed-point iteration did not stabilize for `1` within the iteration \
+budget; returning the best available truncation (which may be incomplete).";
+InverseAsymptotic::branches =
+  "f has an even leading order (~ (x - a)^`1`) at the point, so its real inverse \
+is two-valued; the returned branch matches Direction -> `2`.  The other real \
+branch (to the same image side) is obtained with the opposite Direction.";
+InverseAsymptotic::singular =
+  "The analytic function `1` is applied to an argument tending to one of its \
+singularities; the expansion is outside the supported scale.";
 
 Begin["`Private`"];
 
@@ -182,7 +205,7 @@ tsLog[base_, z_, pcut_] := Module[{B, c, p, k, S, minexp, jmax, res, Spow, j},
     , {j, 1, jmax}];
   tlTrunc[tlCollect[res], pcut]];
 
-tsAnalytic[h_, base_, z_, pcut_] := Module[{B, c0, S, minexp, jmax, res, Spow, j, der},
+tsAnalytic[h_, base_, z_, pcut_] := Module[{B, c0, S, minexp, jmax, res, Spow, j, der, ders},
   B = tsExp[base, z, pcut];
   If[B === $Failed, Return[$Failed]];
   c0 = Total[Cases[B, {co_, q_ /; PossibleZeroQ[q], 0} :> co]];
@@ -191,11 +214,17 @@ tsAnalytic[h_, base_, z_, pcut_] := Module[{B, c0, S, minexp, jmax, res, Spow, j
      Message[InverseAsymptotic::notsmall, base]; Return[$Failed]];
   minexp = If[S === {}, Infinity, Min[N[#[[2]]] & /@ S]];
   jmax = If[S === {} || minexp <= 0, 0, Ceiling[pcut/minexp] + 1];
-  res = {{h[c0], 0, 0}};
+  (* refuse when the argument tends to a singularity of h (Tan->pi/2, Log/Sqrt->0,
+     ArcSin->1, ...): h(c0) or any needed derivative is non-finite *)
+  ders = Table[D[h[t], {t, j}] /. t -> c0, {j, 0, jmax}];
+  If[! FreeQ[ders, DirectedInfinity | ComplexInfinity | Indeterminate] ||
+       MemberQ[ders, _Limit],
+     Message[InverseAsymptotic::singular, h]; Return[$Failed]];
+  res = {{ders[[1]], 0, 0}};
   Spow = {{1, 0, 0}};
   Do[
     Spow = tlTimes[Spow, S, pcut];
-    der = D[h[t], {t, j}] /. t -> c0;
+    der = ders[[j + 1]];
     res = Join[res, {der/j! #[[1]], #[[2]], #[[3]]} & /@ Spow];
     , {j, 1, jmax}];
   tlTrunc[tlCollect[res], pcut]];
@@ -212,29 +241,34 @@ tlToExpr[ml_, z_] := Total[(#[[1]] z^#[[2]] Log[z]^#[[3]]) & /@ ml];
 
 (* leading monomial c x^p of fexpr as x -> 0+ (pure power; log-free).
    Returns {c, p} or $Failed (with a reason tag in the second slot). *)
-leadingPower[fexpr_, x_] := Quiet@Module[{p, c},
+leadingPower[fexpr_, x_] := Quiet[Module[{p, c},
   p = Limit[x D[fexpr, x]/fexpr, x -> 0, Direction -> "FromAbove"];
   If[! TrueQ[NumericQ[N[p]] && Element[N[p], Reals] && N[p] != 0],
      Return[{$Failed, "power"}]];
   c = Limit[fexpr/x^p, x -> 0, Direction -> "FromAbove"];
+  (* screen the SYMBOLIC c first (a surviving Log/Limit head, or a non-real /
+     non-numeric coefficient, signals a logarithmic or undefined leading term) *)
   If[c === 0 || c === Indeterminate || ! FreeQ[c, DirectedInfinity] ||
-     ! FreeQ[c, Limit] || ! FreeQ[N[c], _Log] || ! TrueQ[NumericQ[N[c]]],
+     ! FreeQ[c, Log] || ! FreeQ[c, Limit] || ! TrueQ[NumericQ[N[c]]],
      Return[{$Failed, "log"}]];
-  {Simplify[c], Simplify[p]}];
+  {Simplify[c], Simplify[p]}], {Power::infy, Infinity::indet, Power::indet}];
 
-(* contractive fixed point:  X <- ((z - f(X) + c X^p)/c)^(1/p),  z = image var *)
-invertCore[fexpr_, x_, z_, c_, p_, pcut_, maxiter_: 80] := Quiet@Module[
-  {X, Xprev, Xe, i, ok = True},
+(* contractive fixed point:  X <- ((z - f(X) + c X^p)/c)^(1/p),  z = image var.
+   Returns the monomial list; emits ::nconv if it does not stabilize in budget. *)
+invertCore[fexpr_, x_, z_, c_, p_, pcut_, maxiter_: 80] := Quiet[Module[
+  {X, Xprev, Xprev2, i, ok = False},
   X = {{c^(-1/p), 1/p, 0}};
+  Xprev2 = Null;
   Do[
-    Xprev = X;
-    Xe = tlToExpr[X, z];
-    X = tsExp[((z - (fexpr /. x -> Xe) + c Xe^p)/c)^(1/p), z, pcut];
+    Xprev2 = Xprev; Xprev = X;
+    X = tsExp[((z - (fexpr /. x -> tlToExpr[X, z]) + c tlToExpr[X, z]^p)/c)^(1/p), z, pcut];
     If[X === $Failed, Return[$Failed]];
-    If[sameMono[X, Xprev], ok = True; Break[]];
-    ok = False;
+    (* converged (fixed point) or fell into a 2-cycle of the truncation *)
+    If[sameMono[X, Xprev] || (Xprev2 =!= Null && sameMono[X, Xprev2]),
+       ok = True; Break[]];
     , {i, maxiter}];
-  X];
+  If[! ok, Message[InverseAsymptotic::nconv, fexpr]];
+  X], {Power::infy, Infinity::indet, Power::indet, Divide::infy, General::indet}];
 
 sameMono[a_, b_] := Length[a] === Length[b] &&
   AllTrue[Transpose[{monoSort[a], monoSort[b]}],
@@ -242,7 +276,10 @@ sameMono[a_, b_] := Length[a] === Length[b] &&
        PossibleZeroQ[#[[1, 1]] - #[[2, 1]]]) &];
 monoSort[m_] := SortBy[m, {N[#[[2]]] &, #[[3]] &}];
 
-distinctExps[X_] := SortBy[Union[#[[2]] & /@ X, SameTest -> (Abs[N[#1 - #2]] < $tol &)], N];
+(* distinct exponents, grouped by EXACT equality (so incommensurate exponents
+   that happen to be numerically close, e.g. a Z-combination m + n Sqrt2 near an
+   integer at high order, are never fused), sorted ascending by numeric value *)
+distinctExps[X_] := SortBy[Union[#[[2]] & /@ X, SameTest -> (PossibleZeroQ[#1 - #2] &)], N];
 
 (* keep the first nlevels distinct power-levels of a monomial list (all log terms
    per level kept together -- never split an equal-exponent group).
@@ -272,12 +309,12 @@ invertLevels[fexpr_, x_, z_, c_, p_, nlevels_] := Module[
 
 Options[InverseAsymptotic] = {
   "At" -> 0, Direction -> "FromAbove", "ImagePoint" -> Automatic,
-  "Remainder" -> True, "Verify" -> True, "VerificationTolerance" -> 10^-8};
+  "Remainder" -> True, "Verify" -> True, "VerificationTolerance" -> 10^-18};
 Options[InverseAsymptoticData] = Options[InverseAsymptotic];
 
 (* core worker: returns the diagnostics Association or $Failed *)
 iaWork[fexpr_, x_, y_, nlev_, opts_List] := Module[
-  {a, dir, imgOpt, t, sub, g, b, infImg, aInf, G0, lp, c, p, sigma,
+  {a, dir, imgOpt, t, sub, g, b, infImg, aInf, G0, lp, c, p, sigma, branches,
    redInv, mono, monoFull, maxE, recip, xfull, xmono, cutoff, emit, side},
   a = "At" /. opts; dir = Direction /. opts; imgOpt = "ImagePoint" /. opts;
   aInf = MemberQ[{Infinity, -Infinity, DirectedInfinity[1], DirectedInfinity[-1]}, a];
@@ -291,11 +328,7 @@ iaWork[fexpr_, x_, y_, nlev_, opts_List] := Module[
         Quiet@Limit[g, t -> 0, Direction -> "FromAbove"], imgOpt];
   infImg = (b === Infinity || b === -Infinity || ! FreeQ[b, DirectedInfinity]);
   (* reduced function G0(t) -> 0+ as t -> 0+; image map z -> (image of y) *)
-  If[infImg,
-    If[b === -Infinity || (! FreeQ[b, DirectedInfinity] && TrueQ[N[b] < 0]),
-       Message[InverseAsymptotic::badside]; Return[$Failed]];
-    G0 = 1/g,                              (* positive infinitesimal zz = 1/y *)
-    G0 = g - b];                           (* positive infinitesimal zz = +-(y - b) *)
+  G0 = If[infImg, 1/g, g - b];
   lp = leadingPower[G0, t];
   If[MatchQ[lp, {$Failed, _}],
     If[lp[[2]] === "log", Message[InverseAsymptotic::leadlog, fexpr],
@@ -303,6 +336,17 @@ iaWork[fexpr_, x_, y_, nlev_, opts_List] := Module[
     Return[$Failed]];
   {c, p} = lp;
   sigma = Sign[c];
+  (* sigma must resolve to +-1; for an infinite image, sigma encodes which side
+     (sigma < 0 means the image tends to -Infinity, not supported here) *)
+  If[! MatchQ[sigma, 1 | -1],
+     Message[InverseAsymptotic::nolead, fexpr]; Return[$Failed]];
+  If[infImg && sigma < 0, Message[InverseAsymptotic::badside]; Return[$Failed]];
+  (* even leading order -> the real inverse is two-valued (the opposite Direction
+     gives the other branch to the same image side) *)
+  branches = If[IntegerQ[p] && EvenQ[p], 2, 1];
+  If[branches == 2,
+     Message[InverseAsymptotic::branches, p,
+        If[dir === "FromBelow" || dir === -1, "\"FromBelow\"", "\"FromAbove\""]]];
   (* invert  sigma*G0(t) == zz  (positive leading coef -> real positive zz seed),
      carrying everything through the monomial engine to a clean emission. *)
   If[aInf,
@@ -329,8 +373,9 @@ iaWork[fexpr_, x_, y_, nlev_, opts_List] := Module[
     PossibleZeroQ[b], "y -> 0" <> If[sigma > 0, "+", "-"],
     True, "y -> " <> ToString[b, InputForm] <> If[sigma > 0, "+", "-"]];
   <|"Expansion" -> emit, "Monomials" -> xmono,
-    "Leading" -> {c, p}, "ImagePoint" -> b, "Side" -> side,
-    "RemainderExponent" -> cutoff, "InfiniteImage" -> infImg, "Sigma" -> sigma|>];
+    "LeadingPower" -> {c, p}, "ImagePoint" -> b, "Side" -> side,
+    "RemainderExponent" -> cutoff, "InfiniteImage" -> infImg, "Sigma" -> sigma,
+    "RealBranches" -> branches|>];
 
 (* Turn x-monomials (in the positive infinitesimal zz) into an expression in y,
    grouped by power level so each power carries a single Log-polynomial coefficient
@@ -348,23 +393,37 @@ emitMonomials[xmono_, y_, b_, sigma_, infImg_] := Module[{w, lg, groups},
 (* Correct asymptotic check: the back-substitution residual r(d) = f(X(y)) - y,
    with d the positive infinitesimal (|y-b| finite, or 1/|y| infinite), must
    DECAY at least like d^cutoff as d -> 0.  We measure the empirical decay
-   exponent across two shrinking samples and compare to the remainder exponent;
-   a fixed absolute tolerance would wrongly flag a low-order truncation. *)
-verifyExpansion[fexpr_, x_, y_, assoc_, tol_] := Quiet@Block[{$MaxExtraPrecision = 600},
-  Module[{b, sigma, infImg, expr, cutoff, ds, samples, resids, measured, residAt},
+   exponent across THREE shrinking samples (requiring both consecutive slopes to
+   reach the order) and compare to the remainder exponent; a fixed absolute
+   tolerance would wrongly flag a low-order truncation, so the absolute branch is
+   reserved as an EXACT floor (a genuinely exact inverse has a vanishing residual).
+   Note: the broad N::meprec etc. are deliberately NOT silenced here, so a
+   precision failure in the check surfaces rather than masquerading as a pass. *)
+verifyExpansion[fexpr_, x_, y_, assoc_, tol_] :=
+ Quiet[Block[{$MaxExtraPrecision = 600},
+  Module[{b, sigma, infImg, expr, cutoff, maxLogK, slack, ds, samples, resids,
+          slopes, measured, residAt, pos},
     b = assoc["ImagePoint"]; sigma = assoc["Sigma"]; infImg = assoc["InfiniteImage"];
     expr = assoc["Expansion"]; cutoff = assoc["RemainderExponent"];
-    ds = {1/1000, 1/1000000};                       (* shrinking infinitesimals *)
+    (* slack grows with the largest Log-power present: logs depress the apparent
+       decay exponent at finite samples *)
+    maxLogK = Max[Append[#[[3]] & /@ assoc["Monomials"], 0]];
+    slack = 0.4 + 0.3 maxLogK;
+    ds = {1/10^3, 1/10^5, 1/10^7};                  (* shrinking infinitesimals *)
     samples = If[infImg, sigma/ds, b + sigma ds];   (* image points on valid side *)
-    residAt[yv_] := Module[{xa},
-      xa = expr /. y -> yv;
+    residAt[yv_] := Module[{xa}, xa = expr /. y -> yv;
       N[Abs[(fexpr /. x -> xa) - yv], 30]];
     resids = residAt /@ samples;
-    measured = If[! (Positive[resids[[1]]] && Positive[resids[[2]]]), Infinity,
-       N[Log[resids[[2]]/resids[[1]]]/Log[ds[[2]]/ds[[1]]]]];
-    (* accept if the residual decays at least ~ d^(cutoff - slack); log factors
-       depress the apparent exponent slightly at finite samples *)
-    {TrueQ[measured >= N[cutoff] - 0.75] || Max[resids] < tol, Max[resids], measured}]];
+    pos = AllTrue[resids, Positive];
+    slopes = If[! pos, {Infinity},
+      Table[N[Log[resids[[i + 1]]/resids[[i]]]/Log[ds[[i + 1]]/ds[[i]]]],
+        {i, Length[ds] - 1}]];
+    measured = Min[slopes];
+    (* pass if every consecutive slope reaches cutoff - slack, OR the residual is
+       at the exact floor (a truly exact inverse), but NOT merely "small" *)
+    {TrueQ[measured >= N[cutoff] - slack] || Max[resids] < tol,
+     Max[resids], measured}]],
+  {Power::infy, Infinity::indet, Power::indet, Divide::infy, General::indet}];
 
 (* ================= public API ======================================== *)
 
@@ -410,6 +469,8 @@ BigO /: MakeBoxes[BigO[v_, p_], StandardForm] :=
   RowBox[{"O", "(", MakeBoxes[v^p, StandardForm], ")"}];
 BigO /: MakeBoxes[BigO[v_, p_], TraditionalForm] :=
   RowBox[{"O", "(", MakeBoxes[v^p, TraditionalForm], ")"}];
+(* plain-text contexts (OutputForm / InputForm / Print) read O(v^p) too *)
+Format[BigO[v_, p_], OutputForm] := SequenceForm["O(", v^p, ")"];
 
 End[];
 EndPackage[];
