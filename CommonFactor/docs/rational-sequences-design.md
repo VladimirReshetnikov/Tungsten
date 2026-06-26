@@ -5,8 +5,8 @@
 - Scope: `src/CommonFactor`
 - Created (UTC): 2026-06-26T16:24:53Z
 - Repository HEAD: 2b46b217d65478e0fff0f7f4f6265e11189f5e01
-- Last updated (UTC): 2026-06-26T17:40:08Z
-- Update basis HEAD: d6802de177e266474afbe9613bb86ac46021fb3e
+- Last updated (UTC): 2026-06-26T18:11:27Z
+- Update basis HEAD: 2c8c932f91a2934f95f079e775a3dd0c8ccc7c45
 
 ## Problem Statement
 
@@ -624,6 +624,33 @@ Add:
 - tests for assigned index symbols, finite timeouts, ratio candidates, reciprocal
   candidates, accidental denominator cancellations, isolated zeros, zero-covering
   factors, and all-zero input diagnostics.
+
+## Implementation Notes
+
+The implemented rational path follows this design with a few performance-shaped
+choices:
+
+- exact nonzero integer input still uses the original greedy divisibility path;
+- exact rational input and any input containing zeros use the zero-aware beam
+  path;
+- `QuotientSequence` may contain `Missing["RemovableZero"]`, while
+  `KnownResidualPairs` exposes the indexed known observations suitable for
+  `FindSequenceFunction`;
+- signed valuation discovery fits affine and quadratic prime-valuation profiles
+  on the finite support only;
+- direct ratio templates cover the practical linear, factorial, Pochhammer,
+  falling-factorial, binomial, and Catalan-over-factorial families by default;
+- Gamma and BarnesG remain available as grammar atoms, but the default rational
+  ratio grid deliberately does not include all Gamma/BarnesG pairings because
+  those candidates are too expensive to evaluate speculatively;
+- `ValuationL1` is currently reported as a cheap placeholder in rational beam
+  scoring.  Exact valuation sums are useful diagnostics, but factoring every
+  hypothetical residual inside the beam made ordinary calls too slow;
+- when the inherited `"MaxSteps"` is left at its integer default, rational mode
+  caps the default beam depth at two.  Explicit `"MaxSteps"` values still request
+  deeper rational searches;
+- zero-covering states have a small protected lane in the beam so a temporarily
+  worse root factor can survive long enough to pair with a denominator factor.
 
 ## Open Questions
 

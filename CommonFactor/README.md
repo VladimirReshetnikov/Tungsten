@@ -1,7 +1,7 @@
 # CommonFactor
 
-- Status: Initial Wolfram Language package and smoke suite
-- Audience: Vladimir and future agents investigating finite integer sequences
+- Status: Wolfram Language package and smoke suite
+- Audience: Vladimir and future agents investigating finite exact sequences
 - Scope: `src/CommonFactor`
 - Created (UTC): 2026-06-26T15:37:34Z
 - Repository HEAD: 99d9ca081c8c148d90a9f6c438f34d4b0ee8489a
@@ -9,8 +9,8 @@
 - Related design: [Rational sequence support](docs/rational-sequences-design.md)
 
 `CommonFactor` is a heuristic Wolfram Language package for finding a large
-symbolic common factor in a finite exact integer sequence.  It is aimed at the
-case where the raw sequence grows too quickly or irregularly for
+symbolic common factor in a finite exact integer or rational sequence.  It is
+aimed at the case where the raw sequence grows too quickly or irregularly for
 `FindSequenceFunction`, but a substantial factor such as
 
 ```wolframlanguage
@@ -21,11 +21,11 @@ can be peeled away, leaving a slower quotient sequence.
 
 The implementation is intentionally best-effort.  It does not prove that the
 reported factor is globally largest or unique.  Instead, it discovers candidates
-in stages, tests exact divisibility on the observed index range, scores
-candidates by observed growth with a small formula-complexity penalty, and
-greedily removes the strongest currently available factor.  The returned
-association includes the selected factor list and the residual sequence so the
-result can be inspected and refined.
+in stages and chooses factors that simplify the observed residual.  Exact
+nonzero integer input uses a fast divisibility-driven greedy path.  Rational
+input and integer input containing zeros use a zero-aware beam search over exact
+rational quotient states.  The returned association includes the selected factor
+list and the residual sequence so the result can be inspected and refined.
 
 ## Public API
 
@@ -47,12 +47,22 @@ returns diagnostics:
   "QuotientSequence" -> ...,
   "ResidualSequence" -> ...,
   "ResidualGCD" -> ...,
+  "ResidualComplexity" -> ...,
+  "ZeroIndices" -> ...,
+  "UnknownQuotientIndices" -> ...,
+  "KnownResidualPairs" -> ...,
   "SelectedFactors" -> ...,
   "CandidateCount" -> ...,
   "IndexRange" -> ...,
   "TimedOut" -> ...
 |>
 ```
+
+For rational and zero-containing input, `QuotientSequence` can contain
+`Missing["RemovableZero"]` at indices where both the observed term and the
+selected factor vanish.  `KnownResidualPairs` gives the corresponding explicit
+`{index, value}` observations, omitting those removable holes so it can be passed
+directly to `FindSequenceFunction`.
 
 By default `CommonFactorReduce` prints a progress line every time it discovers a
 larger factor, then continues searching.  Set `"Progress" -> False` for quiet
@@ -89,6 +99,13 @@ The widening knobs are:
 - `"ShiftGrowthStep"` — how far to extend the shift range each round;
 - `"ExtendedOrderMax"` — maximum small order for Pochhammer/falling/Gamma-quotient
   candidates in the first round; later rounds increase it gradually.
+- `"QuotientTarget"` — `Automatic`, `"Rational"`, `"Integer"`, or
+  `"PreferInteger"` for rational/zero-aware residual scoring;
+- `"BeamWidth"` and `"TemporaryDamageAllowance"` — rational-mode controls for
+  retaining temporarily worse states, especially denominator moves and
+  zero-covering factors;
+- `"RatioPairLimit"` — maximum shift-pair count for the direct rational ratio
+  templates.
 
 Custom candidate expressions can be supplied with `"ExtraCandidates"`, either as
 plain expressions in `n` or as labels:

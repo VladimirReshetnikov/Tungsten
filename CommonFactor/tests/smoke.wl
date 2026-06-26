@@ -149,8 +149,48 @@ check["rejects unbounded rounds without a time limit",
   Quiet[CommonFactorReduce[{2, 4, 8}, n, "Progress" -> False,
     "SearchRounds" -> Infinity]] === $Failed];
 
-check["rejects non-integer input",
-  Quiet[CommonFactorReduce[{2, 3/2, 4}, n, "Progress" -> False]] === $Failed];
+ratSeq1 = Table[((k + 2)/(k + 3)) Prime[110 + k], {k, 1, 5}];
+ratData1 = CommonFactorReduce[ratSeq1, n,
+  "Progress" -> False,
+  "IncludeExtendedCandidates" -> False];
+check["rational mode recovers a small linear ratio",
+  AssociationQ[ratData1] &&
+    sameValuesQ[ratData1["Factor"], (n + 2)/(n + 3), n, ratData1["IndexRange"]] &&
+    ratData1["QuotientSequence"] === Table[Prime[110 + k], {k, 1, 5}] &&
+    ratData1["InputDomain"] === "Rational"];
+
+zeroSeq1 = Table[If[k == 3, 0, 10^k Prime[200 + k]], {k, 1, 6}];
+zeroData1 = CommonFactorReduce[zeroSeq1, n,
+  "Progress" -> False,
+  "MaxSteps" -> 2];
+check["zero terms remain ordinary zeros when the factor is nonzero there",
+  AssociationQ[zeroData1] &&
+    sameValuesQ[zeroData1["Factor"], 10^n, n, zeroData1["IndexRange"]] &&
+    zeroData1["QuotientSequence"] === {1229, 1231, 0, 1249, 1259, 1277} &&
+    zeroData1["UnknownQuotientIndices"] === {} &&
+    MemberQ[zeroData1["KnownResidualPairs"], {3, 0}]];
+
+zeroSeq2 = Table[((k - 2) (k - 5) Prime[230 + k])/Factorial[k], {k, 1, 7}];
+zeroData2 = CommonFactorReduce[zeroSeq2, n,
+  "Progress" -> False,
+  "IncludeExtendedCandidates" -> False,
+  "MaxSteps" -> 2];
+check["zero-covering factors produce removable quotient holes",
+  AssociationQ[zeroData2] &&
+    sameValuesQ[zeroData2["Factor"], ((n - 2) (n - 5))/Factorial[n],
+      n, Complement[zeroData2["IndexRange"], zeroData2["UnknownQuotientIndices"]]] &&
+    zeroData2["UnknownQuotientIndices"] === {2, 5} &&
+    zeroData2["KnownResidualPairs"] === {{1, 1453}, {3, 1471}, {4, 1481}, {6, 1487}, {7, 1489}}];
+
+allZeroData = CommonFactorReduce[{0, 0, 0}, n, "Progress" -> False];
+check["all-zero input returns a diagnostic rather than inventing a factor",
+  AssociationQ[allZeroData] &&
+    allZeroData["Factor"] === 1 &&
+    allZeroData["ZeroIndices"] === {1, 2, 3} &&
+    StringQ[allZeroData["Diagnostic"]]];
+
+check["rejects inexact input",
+  Quiet[CommonFactorReduce[{2, 1.5, 4}, n, "Progress" -> False]] === $Failed];
 
 Print["================================================================"];
 Print[If[fail == 0, "ALL PASS", ToString[fail] <> " FAILURE(S)"]];
