@@ -89,6 +89,18 @@ check["verify: x^Pi + x",               verifiedQ[x^Pi + x, x, 3]];
 check["verify: x + x^2 Log[x]",         verifiedQ[x + x^2 Log[x], x, 4]];
 check["verify: x + Log[x] at Inf",      verifiedQ[x + Log[x], x, 4, "At" -> Infinity]];
 check["verify: x - Log[x] at Inf",      verifiedQ[x - Log[x], x, 4, "At" -> Infinity]];
+(* MSE 3946567 / 3948765 and the multi-independent-irrational generalization:
+   value groups of rank >= 3 (two+ Q-independent irrationals).  A min-gap pcut
+   heuristic silently dropped a whole generator's terms here -- guard it. *)
+check["verify: x + x^GoldenRatio (MSE 3946567)", verifiedQ[x + x^GoldenRatio, x, 6]];
+check["verify: x + x^Sqrt2 + x^2 (MSE 3948765)", verifiedQ[x + x^Sqrt[2] + x^2, x, 6]];
+check["verify: x + x^Sqrt2 + x^Sqrt3 (two independent irrationals)",
+  verifiedQ[x + x^Sqrt[2] + x^Sqrt[3], x, 5]];
+check["x + x^Sqrt2 + x^Sqrt3 keeps the z^Sqrt3 generator term",
+  ! FreeQ[InverseAsymptoticData[x + x^Sqrt[2] + x^Sqrt[3], x, \[FormalY], 5]["Expansion"],
+     \[FormalY]^Sqrt[3]]];
+check["verify: x + x^Sqrt2 + x^Sqrt3 + x^Sqrt5 (three independent irrationals)",
+  verifiedQ[x + x^Sqrt[2] + x^Sqrt[3] + x^Sqrt[5], x, 6]];
 
 (* ---- two-valued (even leading order) branch disclosure --------------- *)
 check["x^2 reports RealBranches = 2",

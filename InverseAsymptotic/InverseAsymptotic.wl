@@ -351,14 +351,18 @@ invertLevels[fexpr_, x_, z_, c_, p_, nlevels_] := Module[
     If[X === $Failed, Return[$Failed]];
     exps = N /@ distinctExps[X];
     If[Length[exps] > nlevels, Break[]];
-    If[Length[exps] >= 2,
-      (* know the gap now -> jump straight to a cutoff covering nlevels+ shells *)
-      gap = Min[Select[Differences[Sort[exps]], # > 10^-6 &]];
-      pcut = base + (nlevels + 1.5) gap;
-      X = invertCore[fexpr, x, z, c, p, pcut];
-      Break[]];
-    pcut += step;   (* still < 2 shells: widen the window *)
-    , {2 nlevels + 8}];
+    (* not enough shells yet: extrapolate the cutoff from the AVERAGE shell
+       spacing seen so far and widen.  Using the average (not the minimum) gap is
+       essential for irregular / incommensurate scales: when several independent
+       irrationals interleave (e.g. Sqrt[3] ~ 1.732 next to 2 Sqrt[2]-1 ~ 1.828),
+       the minimum gap is a spurious small value that would under-size pcut and
+       silently drop a whole generator's terms.  pcut grows monotonically so the
+       loop always makes progress and never shrinks below a probe that already
+       found a shell. *)
+    gap = If[Length[exps] >= 2 && Max[exps] > base + 10^-6,
+             (Max[exps] - base)/Length[exps], step];
+    pcut = Max[base + (nlevels + 2) gap, pcut + step/2];
+    , {4 nlevels + 12}];
   If[X === $Failed, Return[$Failed]];
   truncLevels[X, nlevels]];
 
