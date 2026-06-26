@@ -19,12 +19,12 @@ case where the raw sequence grows too quickly or irregularly for
 can be peeled away, leaving a slower quotient sequence.
 
 The implementation is intentionally best-effort.  It does not prove that the
-reported factor is globally largest or unique.  Instead, it generates a broad
-library of simple candidate sequence factors, tests exact divisibility on the
-observed index range, scores candidates by observed growth with a small
-formula-complexity penalty, and greedily removes the strongest currently
-available factor.  The returned association includes the selected factor list
-and the residual sequence so the result can be inspected and refined.
+reported factor is globally largest or unique.  Instead, it discovers candidates
+in stages, tests exact divisibility on the observed index range, scores
+candidates by observed growth with a small formula-complexity penalty, and
+greedily removes the strongest currently available factor.  The returned
+association includes the selected factor list and the residual sequence so the
+result can be inspected and refined.
 
 ## Public API
 
@@ -48,19 +48,46 @@ returns diagnostics:
   "ResidualGCD" -> ...,
   "SelectedFactors" -> ...,
   "CandidateCount" -> ...,
-  "IndexRange" -> ...
+  "IndexRange" -> ...,
+  "TimedOut" -> ...
 |>
 ```
 
-The default candidate grammar includes:
+By default `CommonFactorReduce` prints a progress line every time it discovers a
+larger factor, then continues searching.  Set `"Progress" -> False` for quiet
+batch use, or pass a pure function to receive a payload association for each
+step.  `TimeConstraint -> t` makes the search time-bounded and returns the best
+factor found so far when the budget elapses; with finite time and
+`"SearchRounds" -> Automatic`, the candidate horizon keeps widening until the
+time budget is exhausted.
 
+The candidate sources include:
+
+- prime-valuation discovery from `FactorInteger`, inferring factors such as
+  `13^n`, `p^(a n+b)`, and exact quadratic valuation powers such as `p^(n^2)`;
 - shifted exponentials `c^(n+s)` for bases `2..12`;
+- quadratic exponentials such as `c^(n^2)`, `c^(n (n+1)/2)`, and shifted variants;
 - linear factors `n+s` and `2 n+s`;
 - `Factorial[n+s]`, `Factorial[2 n+s]`;
 - `Factorial2[n+s]`, `Factorial2[2 n+s]`;
+- `Pochhammer[n+s, k]` (rising factorials) and `FactorialPower[n+s, k]`
+  (falling factorials);
+- integer-valued `Gamma` quotients such as `Gamma[2 n+s+1]/Gamma[n+s+1]`;
 - central and nearby binomial coefficients;
+- multinomials such as `Multinomial[n, n, n]`;
 - `CatalanNumber[n+s]`;
-- `Fibonacci[n+s]` and `LucasL[n+s]`.
+- `Fibonacci[n+s]` and `LucasL[n+s]`;
+- `BarnesG[n+s+2]`, representing superfactorial-style products;
+- periodic sign factors such as `(-1)^n`.
+
+The widening knobs are:
+
+- `"SearchRounds"` — number of candidate-expansion rounds, or `Automatic`
+  (`1` with no time limit, unbounded with a finite `TimeConstraint`);
+- `"BaseGrowthStep"` — how far to extend the exponential base range each round;
+- `"ShiftGrowthStep"` — how far to extend the shift range each round;
+- `"ExtendedOrderMax"` — maximum small order for Pochhammer/falling/Gamma-quotient
+  candidates in the first round; later rounds increase it gradually.
 
 Custom candidate expressions can be supplied with `"ExtraCandidates"`, either as
 plain expressions in `n` or as labels:
