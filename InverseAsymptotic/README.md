@@ -1,7 +1,8 @@
 # InverseAsymptotic — real-branch asymptotics of inverse functions
 
 - Created (UTC): 2026-06-26T04:57:01Z
-- Repository HEAD: 3915ec6ce0cb1e3f3fc06c73b6d7ebeebae20f43
+- Updated (UTC): 2026-06-26T16:28:15Z
+- Repository HEAD: 99d9ca081c8c148d90a9f6c438f34d4b0ee8489a
 
 A Wolfram Language package that computes the **asymptotic expansion of the real-valued
 branch of an inverse function**, in the generalized power–logarithm scale the inverse
@@ -13,15 +14,25 @@ It is the direct answer to
 [“How to get an asymptotic of the real-valued branch of the inverse function”](https://mathematica.stackexchange.com/questions/236367)
 on Mathematica StackExchange.
 
+This package is the **merge of the best of two independent implementations** (see the
+[comparison report](docs/comparison-with-inverse-asymptotic-2.md)): it keeps this
+implementation's branch-correctness discipline (real branch through `x0`, native analytic
+expansion, honest refusal, rate-based numeric verification) and adopts the idiomatic
+interface of [`src/InverseAsymptotic-2`](../InverseAsymptotic-2/) (GPT-5.5's version):
+`{x, x0}` / `{y, y0}` specs, `SeriesTermGoal`, pure-`Function` / `ConditionalExpression`
+inputs, and a `InverseFunction`-based fallback — but **gated** so it can never ship a
+wrong or complex branch.
+
 ```wolfram
 Get["src/InverseAsymptotic/InverseAsymptotic.wl"];
 
+(* idiomatic spec form (matches the MSE question's ConditionalExpression input) *)
+InverseAsymptotic[ConditionalExpression[# + #^Sqrt[2], # >= 0] &, {x, 0}, {z, 0}, SeriesTermGoal -> 4]
+(*  z - z^Sqrt[2] + Sqrt[2] z^(2 Sqrt[2]-1) + (1/Sqrt[2] - 3) z^(3 Sqrt[2]-2) + O(z^(4 Sqrt[2]-3))  *)
+
+(* short / compatibility forms *)
 InverseAsymptotic[x + x^2 (1 + Log[x]), x, y, 3]
 (*  y + (-1 - Log[y]) y^2 + (3 + 5 Log[y] + 2 Log[y]^2) y^3 + O(y^4)  *)
-
-InverseAsymptotic[x + x^Sqrt[2], x, y, 4]
-(*  y - y^Sqrt[2] + Sqrt[2] y^(2 Sqrt[2]-1) + (1/Sqrt[2] - 3) y^(3 Sqrt[2]-2)
-        + O(y^(4 Sqrt[2]-3))                                                  *)
 ```
 
 Both results are produced for the real branch through `x = 0`, in the exact scale the
@@ -103,49 +114,72 @@ The **real** branch is obtained automatically: the iteration is seeded with the 
 leading term `(z/c)^(1/p)` and every step is real, so it never drifts onto a complex
 sheet the way `InverseFunction` can.
 
+### A gated system-inverse fallback (real special functions for free)
+
+For a head the native engine does not know (`Erf`, `Gamma`, `BesselJ`, …) the package
+falls back to `Asymptotic[InverseFunction[f][y], …]` — but **only after numerically
+certifying** that the candidate is real, satisfies `f(x(y)) = y`, *and* passes through
+the requested `x0`. So `Erf[x]` at `x -> 0` returns the genuine `InverseErf` series
+(flagged `"Method" -> "GatedSystemInverseFallback"`), while the wrong/complex branches
+that `InverseFunction` may otherwise choose are rejected by the gate. The fallback is
+controlled by the `"FallbackToSystemInverse"` option (default `True`).
+
 ### Out of scope (reported, not guessed)
 
 When the **leading term itself carries a logarithm** — `x Log x`, whose inverse is a
 Lambert‑W / iterated‑logarithm object `y / ProductLog[y]` outside the `c z^p Log^k`
-scale — the package emits `InverseAsymptotic::leadlog` and returns `$Failed` rather than
-fabricating an answer. Likewise oscillatory / essential‑singularity inputs
-(`Sin[1/x]`) with no leading monomial yield `InverseAsymptotic::nolead`. For a function
-that is not locally injective at the point (`f'` vanishes to even order), the package
-returns the single real branch matching the requested `Direction`; the other branch is
-reached by flipping `Direction`.
+scale — the package emits `InverseAsymptotic::leadlog` and returns `$Failed`. The gated
+fallback does not rescue it: `InverseFunction[x Log x]` is the analytic branch through
+`x = 1`, which the gate rejects because it does not pass through the requested `x0 = 0`.
+Likewise oscillatory / essential‑singularity inputs (`Sin[1/x]`) with no leading monomial
+yield `InverseAsymptotic::nolead`. For a function that is not locally injective at the
+point (`f'` vanishes to even order), the package returns the single real branch matching
+the requested `Direction` and flags `"RealBranches" -> 2`; the other branch is reached by
+flipping `Direction`.
 
 ## API
 
 ```
-InverseAsymptotic[f, x, y, n]              (* expansion of f^(-1)(y), n power-levels  *)
-InverseAsymptotic[f, x -> a, y, n]         (* same, with the expansion point a        *)
-InverseAsymptoticData[f, x, y, n]          (* Association with full diagnostics        *)
+InverseAsymptotic[f, {x, x0}, {y, y0}]      (* expansion of f^(-1)(y) as y -> y0, x -> x0 *)
+InverseAsymptotic[f, {x, x0}, y]            (* y0 = f(x0) inferred by Limit               *)
+InverseAsymptotic[f, x, y]                  (* x0 = 0                                       *)
+InverseAsymptotic[f, x -> x0, y]            (* expansion point as a rule                    *)
+InverseAsymptotic[f, x, y, n]               (* compatibility form: positional term count n  *)
+InverseAsymptoticData[f, {x, x0}, {y, y0}]  (* Association with full diagnostics            *)
+InverseAsymptoticTerms[f, {x, x0}, {y, y0}] (* per-monomial {Power,LogPower,Coefficient,Term} *)
+InverseAsymptoticVerify[f, approx, {x, x0}, {y, y0}]  (* certify a candidate inverse        *)
 ```
 
-- `f` — an expression in `x` (i.e. `f(x)`); `x`, `y` — symbols; `n` — number of distinct
-  **power-levels** to keep (all logarithmic terms at a given power are kept together).
+- `f` — an expression in `x`, a pure `Function`, or a `ConditionalExpression` (the form
+  used in the source MSE question, e.g. `ConditionalExpression[# + #^Sqrt[2], # >= 0] &`).
 - The result is a plain sum of gauge monomials plus an inert `BigO[var, p]` remainder
   (displayed `O(var^p)`), in the spirit of `Asymptotic` (`SeriesData` cannot carry
-  irrational or logarithmic exponents).
+  irrational or logarithmic exponents). The argument structure mirrors `Series` /
+  `Asymptotic` / `AsymptoticSolve`.
 
 ### Options
 
 | option | default | meaning |
 |---|---|---|
-| `"At"` | `0` | the point `a` with `x -> a`; accepts a finite value or `±Infinity` (or use the `x -> a` rule form) |
-| `Direction` | `"FromAbove"` | side of approach, `"FromAbove"`/`1` or `"FromBelow"`/`-1`; selects the one-sided real branch |
-| `"ImagePoint"` | `Automatic` | the image value `b = f(a)`; inferred by default |
+| `SeriesTermGoal` | `4` | number of distinct **power-levels** to keep (all log terms at a given power kept together) |
+| `Direction` | `"FromAbove"` | side of approach, `"FromAbove"`/`-1` or `"FromBelow"`/`1`; selects the one-sided real branch |
+| `Assumptions` | `$Assumptions` | constraints on parameters / the branch |
+| `"FallbackToSystemInverse"` | `True` | allow the gated `InverseFunction` fallback for unknown heads |
+| `"At"`, `"ImagePoint"` | `0`, `Automatic` | compatibility overrides for the short `[f, x, y, …]` forms |
 | `"Remainder"` | `True` | append the `BigO[…]` order term |
-| `"Verify"` | `True` | run the numeric back-substitution check (emits `::verify` if weak) |
-| `"VerificationTolerance"` | `10^-8` | residual floor for the verifier |
+| `"Verify"` | `True` | run the rate-based numeric back-substitution check (emits `::verify` if weak) |
+| `"TimeBudget"`, `"MemoryBudget"` | `60`, `2*^9` | budget for the native engine; on exceedance it returns `$Failed` rather than exhausting the kernel |
+
+The positional term count `n` is also accepted (`InverseAsymptotic[f, x, y, n]`); `-1`/`"FromAbove"`
+and `1`/`"FromBelow"` are interchangeable for `Direction`, matching `Asymptotic`.
 
 ### Diagnostics (`InverseAsymptoticData`)
 
-Returns an `Association` with: `"Expansion"`, `"Monomials"` (the raw `{coef, power,
-logPower}` list for the inverse expressed in `x`), `"LeadingPower"` (`{c, p}`),
-`"ImagePoint"`, `"Side"`, `"RemainderExponent"`, `"InfiniteImage"`, `"Sigma"`,
-`"RealBranches"` (`1`, or `2` when an even leading order makes the inverse two-valued —
-the other branch is the opposite `Direction`), and — when `"Verify"` is on — `"Verified"`,
+Returns an `Association` with: `"Expansion"`, `"Terms"`, `"Monomials"`, `"LeadingPower"`
+(`{c, p}`), `"InputPoint"`/`"OutputPoint"`, `"ImagePoint"`, `"Side"`,
+`"RemainderExponent"`, `"InfiniteImage"`, `"Sigma"`, `"RealBranches"` (`1`, or `2` when an
+even leading order makes the inverse two-valued), `"Method"` (`"NativeTransseries"` or
+`"GatedSystemInverseFallback"`), and — when `"Verify"` is on — `"Verified"`,
 `"MaxResidual"`, `"MeasuredOrder"` (the empirically measured decay exponent of the
 residual, which should match `RemainderExponent`).
 
@@ -164,11 +198,18 @@ residual, which should match `RemainderExponent`).
    powers (`z^Sqrt[2]` via the binomial series in `z^(Sqrt[2]-1)`) and logarithms that
    `Series`/`Asymptotic` cannot. An equal-power logarithmic group is always kept or
    dropped as one unit, never split.
+   The cutoff is **right-sized**: it grows from the leading exponent until the shell gap
+   is known, then jumps to a cutoff covering exactly the requested number of levels — so
+   `x + x^Sqrt[2]` (shell gap `Sqrt[2]-1 ≈ 0.41`) expands in well under a second instead
+   of computing dozens of unwanted shells.
 4. **Point / image normalization.** Finite or infinite expansion point, either approach
    direction, and finite or infinite image are reduced to the canonical `t -> 0+`,
    `z -> 0+` problem by local substitutions, with the sign bookkeeping carried through the
    monomial representation so the emitted expression is clean (no `Log[1/y]` artifacts).
-5. **Numeric re-verification.** The back-substitution residual `f(X(y)) - y` is measured at
+5. **Gated fallback.** If the native engine cannot expand `f` (an unknown special-function
+   head), `Asymptotic[InverseFunction[f][y], …]` is tried — and returned only if a numeric
+   check certifies it is real, solves `f(x(y)) = y`, and passes through `x0`.
+6. **Numeric re-verification.** The back-substitution residual `f(X(y)) - y` is measured at
    a shrinking sequence of sample points; its empirical decay exponent must reach the
    claimed remainder order. (A fixed absolute tolerance would wrongly flag a low-order
    truncation, since an `O(y^4)` expansion legitimately has a sizable residual at moderate
@@ -181,13 +222,20 @@ computable term by term by exactly this kind of generalized Newton/bootstrap ite
 ## Testing
 
 ```powershell
-& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/InverseAsymptotic/tests/smoke.wl
+$wl = "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe"
+& $wl -script src/InverseAsymptotic/tests/smoke.wl        # 27 checks, compat API
+& $wl -script src/InverseAsymptotic/tests/merged-api.wl   # 20 checks, merged interface + gated fallback
 ```
 
-The smoke suite (exit `0` = all pass) checks the flagship MSE answers symbolically, nine
+`smoke.wl` (exit `0` = all pass) checks the flagship MSE answers symbolically, nine
 closed-form inverses (`Log[1+y]`, `ArcSin`, `ArcTan`, `ArcSinh`, the Catalan generating
 function, `Sqrt[1+y]-1`, `ProductLog`, `Exp[y]`, `ArcCos`) to high precision, every scale
-type via the rate-based verifier, and the refusal of out-of-scale inputs.
+type via the rate-based verifier, and the refusal of out-of-scale inputs. `merged-api.wl`
+checks the new `{x,x0}`/`{y,y0}` interface (including the pure-`Function` /
+`ConditionalExpression` input forms — it passes all of `src/InverseAsymptotic-2`'s own
+test cases), real-branch correctness where the fallback could go wrong (`Sin`, `Sinh`,
+`Cos`, the `x^2` lower branch), the gated fallback (`Erf -> InverseErf`), and the gate
+rejecting the wrong-branch fallbacks (`x Log x`, `Sin[1/x]`).
 
 ## References
 
@@ -213,5 +261,8 @@ type via the rate-based verifier, and the refusal of out-of-scale inputs.
 ## Files
 
 - [`InverseAsymptotic.wl`](InverseAsymptotic.wl) — the package.
-- [`tests/smoke.wl`](tests/smoke.wl) — the regression suite.
+- [`tests/smoke.wl`](tests/smoke.wl) — regression suite (27 checks, compat API).
+- [`tests/merged-api.wl`](tests/merged-api.wl) — merged interface + gated fallback (20 checks).
+- [`tests/cross-from-inverse-2.wl`](tests/cross-from-inverse-2.wl) — `src/InverseAsymptotic-2`'s test cases run against this package.
 - [`Demo.wl`](Demo.wl) — a runnable showcase of the examples above.
+- [`docs/comparison-with-inverse-asymptotic-2.md`](docs/comparison-with-inverse-asymptotic-2.md) — head-to-head comparison of the two implementations and the rationale for this merge.

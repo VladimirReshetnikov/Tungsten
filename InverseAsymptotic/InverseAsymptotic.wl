@@ -55,37 +55,62 @@
    returned branch is the one matching Direction (the other is the opposite
    Direction), and "RealBranches" -> 2 is flagged in the diagnostics.
 
+   INTERFACE.  The idiomatic surface mirrors Series/Asymptotic/AsymptoticSolve:
+   InverseAsymptotic[f, {x, x0}, {y, y0}] with SeriesTermGoal -> n, accepting an
+   expression, a pure Function, or a ConditionalExpression for f.  For a head the
+   native engine does not know (Erf, Gamma, ...), a GATED fallback to
+   Asymptotic[InverseFunction[f][y], ...] is returned only after numerically
+   certifying that it is real, solves f(x(y)) = y, AND passes through x0 -- so the
+   wrong/complex branch InverseFunction might otherwise choose is never shipped.
+   This is the merge of the best of two independent implementations of the task;
+   see docs/comparison-with-inverse-asymptotic-2.md.
+
    Main entry points:
-     InverseAsymptotic[f, x, y, n]          -> expansion of f^(-1)(y), n levels
-     InverseAsymptoticData[f, x, y, n]      -> Association with full diagnostics
+     InverseAsymptotic[f, {x, x0}, {y, y0}]     -> expansion of f^(-1)(y)
+     InverseAsymptotic[f, x, y, n]              -> compat form (x0 = 0, positional n)
+     InverseAsymptoticData[f, {x, x0}, {y, y0}] -> Association with full diagnostics
+     InverseAsymptoticTerms / InverseAsymptoticVerify
 *)
 
 BeginPackage["InverseAsymptotic`"];
 
 InverseAsymptotic::usage =
-  "InverseAsymptotic[f, x, y, n] gives an n-level asymptotic expansion of the \
-real-valued branch of the inverse of the function x |-> f (an expression in x), \
-as a series in the output variable y, valid as y -> f(a) with x -> a (a = 0 from \
-above by default).  InverseAsymptotic[f, x -> a, y, n] sets the expansion point. \
-The result is an ordinary power-log sum (which may carry logarithms and \
-non-integer or irrational powers) plus, by default, an inert BigO[...] remainder \
-term -- not a SeriesData object -- and is $Failed on out-of-scale input. \
-Options: \"At\" (the point a, default 0; a finite value or +-Infinity), \
-Direction (\"FromAbove\"/1 default, or \"FromBelow\"/-1; selects the one-sided \
-real branch), \"ImagePoint\" (the image f(a), default Automatic), \"Remainder\" \
-(True: append the BigO[...] term), \"Verify\" (True: rate-based numeric \
-back-substitution check), \"VerificationTolerance\" (exact-residual floor, \
-default 10^-18).";
+  "InverseAsymptotic[f, {x, x0}, {y, y0}] gives an asymptotic expansion of the \
+real-valued branch x(y) of the inverse of f (an expression in x, a pure Function, \
+or a ConditionalExpression) as y -> y0 with x -> x0.  Short forms: \
+InverseAsymptotic[f, {x, x0}, y] (y0 -> f(x0) by Limit), InverseAsymptotic[f, x, y] \
+(x0 = 0), InverseAsymptotic[f, x -> x0, y], and the compatibility form \
+InverseAsymptotic[f, x, y, n] (positional term count, x0 = 0).  The result is an \
+ordinary power-log sum (which may carry logarithms and non-integer or irrational \
+powers) plus, by default, an inert BigO[...] remainder -- not a SeriesData object. \
+The expansion is always the REAL branch through x0: analytic heads are expanded \
+natively (never via InverseFunction's branch), and a gated system-inverse fallback \
+is returned only if it is real, satisfies f(x(y))=y, and passes through x0. \
+Options: SeriesTermGoal (number of distinct power levels, default 4), Direction \
+(\"FromAbove\"/-1 default, or \"FromBelow\"/1; selects the one-sided real branch), \
+Assumptions, \"FallbackToSystemInverse\" (default True), \"ImagePoint\"/\"At\" \
+(compat overrides), \"Remainder\", \"Verify\", \"VerificationTolerance\".";
 
 InverseAsymptoticData::usage =
-  "InverseAsymptoticData[f, x, y, n] (also [f, x -> a, y, n]) is like \
-InverseAsymptotic but returns an Association with keys \"Expansion\", \
-\"Monomials\" (the {coefficient, power, logPower} list for the inverse in x), \
-\"LeadingPower\" ({c, p} of f at the point), \"ImagePoint\", \"Side\", \
-\"RemainderExponent\", \"InfiniteImage\", \"Sigma\", \"RealBranches\" (1, or 2 \
-when the even leading order makes the inverse two-valued), and -- only when \
-\"Verify\" -> True -- \"Verified\", \"MaxResidual\", and \"MeasuredOrder\" (the \
-empirically measured decay exponent of the back-substitution residual).";
+  "InverseAsymptoticData[f, {x, x0}, {y, y0}] is like InverseAsymptotic but returns \
+an Association: \"Expansion\", \"Terms\" (per-monomial {\"Power\",\"LogPower\",\
+\"Coefficient\",\"Term\"} table), \"Monomials\", \"LeadingPower\" ({c, p}), \
+\"InputPoint\"/\"OutputPoint\", \"ImagePoint\", \"Side\", \"RemainderExponent\", \
+\"InfiniteImage\", \"Sigma\", \"RealBranches\" (1, or 2 when the even leading order \
+makes the inverse two-valued), \"Method\" (\"NativeTransseries\" or \
+\"GatedSystemInverseFallback\"), and -- when \"Verify\" -> True -- \"Verified\", \
+\"MaxResidual\", \"MeasuredOrder\".";
+
+InverseAsymptoticTerms::usage =
+  "InverseAsymptoticTerms[f, {x, x0}, {y, y0}] returns the per-monomial term table \
+of InverseAsymptotic[f, {x, x0}, {y, y0}]: a list of Associations with keys \
+\"Power\", \"LogPower\", \"Coefficient\", and \"Term\".";
+
+InverseAsymptoticVerify::usage =
+  "InverseAsymptoticVerify[f, approx, {x, x0}, {y, y0}] certifies a candidate \
+inverse approx against f near the point, returning an Association with \
+\"SatisfiesEquation\"/\"ResidualSmallerThanLastTerm\" (f(approx)-y is small on the \
+valid side), \"Real\", and \"PassesThroughX0\" (approx -> x0 as y -> y0).";
 
 BigO::usage =
   "BigO[v, p] is an inert order term displayed as O(v^p); it marks the remainder \
@@ -118,6 +143,11 @@ branch (to the same image side) is obtained with the opposite Direction.";
 InverseAsymptotic::singular =
   "The analytic function `1` is applied to an argument tending to one of its \
 singularities; the expansion is outside the supported scale.";
+InverseAsymptotic::budget =
+  "The native expansion of `1` exceeded the time/memory budget (the generalized \
+power-log arithmetic is expensive for irrational exponent scales at high term \
+counts); returning $Failed.  Lower SeriesTermGoal, or raise \"TimeBudget\" / \
+\"MemoryBudget\".";
 
 Begin["`Private`"];
 
@@ -126,18 +156,26 @@ $tol = 10.^-9;
 (* ================= transseries monomial engine ======================= *)
 (* normal form: list of {coef, p, k};  coef z-free, p exact real, k integer >= 0 *)
 
+(* $Failed propagates through every monomial-list op, so an unsupported
+   subexpression anywhere makes the whole expansion fail cleanly (which is what
+   lets the gated fallback fire instead of the engine churning on garbage). *)
+tlCollect[$Failed] := $Failed;
 tlCollect[ml_] := Module[{g},
   g = GatherBy[ml, {#[[2]], #[[3]]} &];
   g = {Simplify[Total[#[[All, 1]]]], #[[1, 2]], #[[1, 3]]} & /@ g;
   g = DeleteCases[g, {c_ /; PossibleZeroQ[c], _, _}];
   SortBy[g, {N[#[[2]]] &, #[[3]] &}]];
 
+tlTrunc[$Failed, _] := $Failed;
 tlTrunc[ml_, pcut_] := Select[ml, N[#[[2]]] < pcut - $tol &];
 
+tlTimes[$Failed, _, _] := $Failed;
+tlTimes[_, $Failed, _] := $Failed;
 tlTimes[a_, b_, pcut_] := tlCollect@tlTrunc[
    Flatten[Table[{ra[[1]] rb[[1]], ra[[2]] + rb[[2]], ra[[3]] + rb[[3]]},
       {ra, a}, {rb, b}], 1], pcut];
 
+tlPowInt[$Failed, _, _] := $Failed;
 tlPowInt[a_, e_Integer, pcut_] /; e >= 0 := Module[{r = {{1, 0, 0}}, i},
   Do[r = tlTimes[r, a, pcut], {i, e}]; r];
 
@@ -155,9 +193,12 @@ tsExp[expr_, z_, pcut_] := Module[{e = expr},
     e === z, {{1, 1, 0}},
     e === Log[z], {{1, 0, 1}},
     Head[e] === Plus,
-      tlCollect@tlTrunc[Join @@ (tsExp[#, z, pcut] & /@ (List @@ e)), pcut],
+      With[{subs = tsExp[#, z, pcut] & /@ (List @@ e)},
+        If[MemberQ[subs, $Failed], $Failed, tlCollect@tlTrunc[Join @@ subs, pcut]]],
     Head[e] === Times,
-      Fold[tlTimes[#1, tsExp[#2, z, pcut], pcut] &, {{1, 0, 0}}, List @@ e],
+      With[{subs = tsExp[#, z, pcut] & /@ (List @@ e)},
+        If[MemberQ[subs, $Failed], $Failed,
+           Fold[tlTimes[#1, #2, pcut] &, {{1, 0, 0}}, subs]]],
     Head[e] === Power && ! FreeQ[e[[2]], z],
       tsAnalytic[Exp, e[[2]] Log[e[[1]]], z, pcut],   (* base^exp = Exp[exp Log base] *)
     Head[e] === Power, tsPow[e[[1]], e[[2]], z, pcut],
@@ -256,19 +297,23 @@ leadingPower[fexpr_, x_] := Quiet[Module[{p, c},
 (* contractive fixed point:  X <- ((z - f(X) + c X^p)/c)^(1/p),  z = image var.
    Returns the monomial list; emits ::nconv if it does not stabilize in budget. *)
 invertCore[fexpr_, x_, z_, c_, p_, pcut_, maxiter_: 80] := Quiet[Module[
-  {X, Xprev, Xprev2, i, ok = False},
+  {X, Xprev, Xprev2, i, ok = False, failed = False},
   X = {{c^(-1/p), 1/p, 0}};
   Xprev2 = Null;
+  (* a Break-with-flag loop; Return inside Do does not reliably exit the Module *)
   Do[
     Xprev2 = Xprev; Xprev = X;
     X = tsExp[((z - (fexpr /. x -> tlToExpr[X, z]) + c tlToExpr[X, z]^p)/c)^(1/p), z, pcut];
-    If[X === $Failed, Return[$Failed]];
+    If[X === $Failed, failed = True; Break[]];
     (* converged (fixed point) or fell into a 2-cycle of the truncation *)
     If[sameMono[X, Xprev] || (Xprev2 =!= Null && sameMono[X, Xprev2]),
        ok = True; Break[]];
     , {i, maxiter}];
-  If[! ok, Message[InverseAsymptotic::nconv, fexpr]];
-  X], {Power::infy, Infinity::indet, Power::indet, Divide::infy, General::indet}];
+  Which[
+    failed, $Failed,
+    ! ok, Message[InverseAsymptotic::nconv, fexpr]; X,
+    True, X]],
+  {Power::infy, Infinity::indet, Power::indet, Divide::infy, General::indet}];
 
 sameMono[a_, b_] := Length[a] === Length[b] &&
   AllTrue[Transpose[{monoSort[a], monoSort[b]}],
@@ -290,18 +335,30 @@ truncLevels[ml_, nlevels_] := Module[{exps, cutoff},
               If[ml === {}, 0, Max[#[[2]] & /@ ml] + 1]];   (* keep exact *)
   {Select[ml, N[#[[2]]] < N[cutoff] - $tol &], cutoff}];
 
-(* invert to the first nlevels distinct power-levels.
+(* invert to the first nlevels distinct power-levels.  The cutoff pcut is sized
+   to cover exactly nlevels shells: starting from the leading exponent it grows
+   until at least two shells appear, estimates the shell gap, and jumps to the
+   right pcut.  (A fixed pcut = 1/p + O(nlevels) over-computes badly when the
+   shell gap is small, e.g. the inverse of x + x^Sqrt[2] has gap Sqrt[2]-1.)
    Returns {monomials, remainderExponent}. *)
 invertLevels[fexpr_, x_, z_, c_, p_, nlevels_] := Module[
-  {pcut, X, step},
-  step = If[NumericQ[N[p]] && N[p] != 0, Abs[1/p], 1];
-  pcut = N[1/p] + (nlevels + 3) step;
-  X = $Failed;
+  {base, step, pcut, X, exps, gap},
+  base = N[1/p];
+  step = Max[Abs[base], 1];
+  pcut = base + step; X = $Failed;
   Do[
     X = invertCore[fexpr, x, z, c, p, pcut];
-    If[X =!= $Failed && Length[distinctExps[X]] > nlevels, Break[]];
-    pcut += (nlevels + 3) step;
-    , {7}];
+    If[X === $Failed, Return[$Failed]];
+    exps = N /@ distinctExps[X];
+    If[Length[exps] > nlevels, Break[]];
+    If[Length[exps] >= 2,
+      (* know the gap now -> jump straight to a cutoff covering nlevels+ shells *)
+      gap = Min[Select[Differences[Sort[exps]], # > 10^-6 &]];
+      pcut = base + (nlevels + 1.5) gap;
+      X = invertCore[fexpr, x, z, c, p, pcut];
+      Break[]];
+    pcut += step;   (* still < 2 shells: widen the window *)
+    , {2 nlevels + 8}];
   If[X === $Failed, Return[$Failed]];
   truncLevels[X, nlevels]];
 
@@ -309,8 +366,12 @@ invertLevels[fexpr_, x_, z_, c_, p_, nlevels_] := Module[
 
 Options[InverseAsymptotic] = {
   "At" -> 0, Direction -> "FromAbove", "ImagePoint" -> Automatic,
+  SeriesTermGoal -> Automatic, Assumptions :> $Assumptions,
+  "FallbackToSystemInverse" -> True, "TimeBudget" -> 60, "MemoryBudget" -> 2*^9,
   "Remainder" -> True, "Verify" -> True, "VerificationTolerance" -> 10^-18};
 Options[InverseAsymptoticData] = Options[InverseAsymptotic];
+Options[InverseAsymptoticTerms] = Options[InverseAsymptotic];
+Options[InverseAsymptoticVerify] = Options[InverseAsymptotic];
 
 (* core worker: returns the diagnostics Association or $Failed *)
 iaWork[fexpr_, x_, y_, nlev_, opts_List] := Module[
@@ -427,33 +488,174 @@ verifyExpansion[fexpr_, x_, y_, assoc_, tol_] :=
 
 (* ================= public API ======================================== *)
 
-InverseAsymptotic[fexpr_, x_Symbol, y_Symbol, nlev_Integer, opts : OptionsPattern[]] :=
-  Module[{assoc},
-    assoc = InverseAsymptoticData[fexpr, x, y, nlev, opts];
-    If[! AssociationQ[assoc], Return[$Failed]];
-    If[TrueQ[OptionValue["Remainder"]],
-       assoc["Expansion"] + remainderTerm[assoc, y],
-       assoc["Expansion"]]];
+(* ---- input normalization: a bare expression, a pure Function, or a
+   ConditionalExpression (the form in the source MSE question) -> {expr, cond} *)
+normalizeInput[fun_Function, x_] := normalizeInput[fun[x], x];
+normalizeInput[ConditionalExpression[e_, cond_], x_] := {e, cond};
+normalizeInput[e_, x_] := {e, True};
 
-(* sugar: the expansion point as a rule, InverseAsymptotic[f, x -> a, y, n] *)
-InverseAsymptotic[fexpr_, (Rule | RuleDelayed)[x_Symbol, a_], y_Symbol, nlev_Integer,
-   opts : OptionsPattern[]] := InverseAsymptotic[fexpr, x, y, nlev, "At" -> a, opts];
-InverseAsymptoticData[fexpr_, (Rule | RuleDelayed)[x_Symbol, a_], y_Symbol, nlev_Integer,
-   opts : OptionsPattern[]] := InverseAsymptoticData[fexpr, x, y, nlev, "At" -> a, opts];
+(* Direction spec -> internal "FromAbove"/"FromBelow".  Convention matches
+   Asymptotic / src/InverseAsymptotic-2:  -1 and "FromAbove" (default) select the
+   image side reached as x -> x0+, 1 and "FromBelow" the x -> x0- side. *)
+normDir["FromBelow"] := "FromBelow";
+normDir[1] := "FromBelow";
+normDir[_] := "FromAbove";
 
-InverseAsymptoticData[fexpr_, x_Symbol, y_Symbol, nlev_Integer, opts : OptionsPattern[]] :=
-  Module[{ov, assoc, ver, tol},
-    ov = Flatten[{opts, Options[InverseAsymptotic]}];
-    assoc = iaWork[fexpr, x, y, nlev, ov];
-    If[! AssociationQ[assoc], Return[$Failed]];
-    tol = "VerificationTolerance" /. ov;
-    If[TrueQ["Verify" /. ov],
-      ver = verifyExpansion[fexpr, x, y, assoc, tol];
-      assoc = Join[assoc, <|"Verified" -> ver[[1]], "MaxResidual" -> ver[[2]],
-                            "MeasuredOrder" -> ver[[3]]|>];
-      If[! TrueQ[ver[[1]]],
-         Message[InverseAsymptotic::verify, ver[[3]], assoc["RemainderExponent"]]]];
-    assoc];
+resolveGoal[ol_List] := With[{g = SeriesTermGoal /. ol},
+  If[IntegerQ[g] && g > 0, g, 4]];
+
+(* image point y0 = lim_{x->x0} f on the chosen side, when not supplied *)
+computeImage[expr_, x_, x0_, dir_] := Quiet@TimeConstrained[
+  Which[
+    MatchQ[x0, Infinity | DirectedInfinity[1]], Limit[expr, x -> Infinity],
+    MatchQ[x0, -Infinity | DirectedInfinity[-1]], Limit[expr, x -> -Infinity],
+    True, Limit[expr, x -> x0, Direction -> dir]], 10, $Failed];
+
+(* per-monomial term table in the natural output variable *)
+inverseTermTable[assoc_, y_] := Module[
+  {xmono = assoc["Monomials"], b = assoc["ImagePoint"], sigma = assoc["Sigma"],
+   infImg = assoc["InfiniteImage"], w},
+  w = If[infImg, 1/y, If[sigma > 0, y - b, b - y]];
+  Function[m, Module[{c = m[[1]], p = m[[2]], k = m[[3]]},
+     <|"Power" -> If[infImg, -p, p], "LogPower" -> k, "Coefficient" -> c,
+       "Term" -> If[infImg, c (-1)^k y^(-p) Log[y]^k, c w^p Log[w]^k]|>]] /@ xmono];
+
+(* ---- the GATED system-inverse fallback --------------------------------
+   When the native engine cannot expand f (e.g. a special-function head it does
+   not know), fall back to Asymptotic[InverseFunction[f][y], ...] -- but return it
+   ONLY after numerically certifying that the branch is real, satisfies
+   f(x(y)) == y, AND passes through the requested x0.  This is what keeps the
+   wrong/complex branches that InverseFunction may choose (the Pi branch for Sin,
+   the complex branch for Sinh, the x=1 branch for x Log x) from ever shipping. *)
+gatedFallback[expr_, x_, x0_, y_, y0_, n_, dir_, ass_] := Quiet@Module[{cand},
+  If[y0 === $Failed || ! FreeQ[y0, x], Return[$Failed]];
+  cand = TimeConstrained[
+    Asymptotic[InverseFunction[Function[\[FormalX], expr /. x -> \[FormalX]]][y],
+      {y, y0, n}, SeriesTermGoal -> n, Assumptions -> ass], 25, $Failed];
+  If[cand === $Failed || ! FreeQ[cand, InverseFunction | Asymptotic], Return[$Failed]];
+  If[TrueQ@branchThroughX0Q[expr, x, x0, y, y0, cand, dir], cand, $Failed]];
+
+(* certify: cand is real, solves f(cand)=y, and cand -> x0 as y -> y0 *)
+branchThroughX0Q[expr_, x_, x0_, y_, y0_, cand_, dir_] := Quiet@Block[{$MaxExtraPrecision = 400},
+  Module[{finX0, finY0, atY0, through, d, samples},
+    finX0 = FreeQ[x0, DirectedInfinity] && x0 =!= Infinity && x0 =!= -Infinity;
+    finY0 = FreeQ[y0, DirectedInfinity] && y0 =!= Infinity && y0 =!= -Infinity;
+    atY0 = TimeConstrained[Limit[cand, y -> y0], 8, $Failed];
+    through = If[finX0,
+      (NumericQ[N[atY0]] && TrueQ[Abs[N[atY0 - x0, 20]] < 10^-6]) || TrueQ@PossibleZeroQ[atY0 - x0],
+      MatchQ[atY0, x0 | DirectedInfinity[_]]];
+    If[! TrueQ[through], Return[False]];
+    d = 1/10^4;
+    samples = If[finY0, {y0 + d, y0 - d}, {1/d, -1/d}];
+    AnyTrue[samples, Function[yt, Module[{cv},
+      cv = N[cand /. y -> yt, 30];
+      NumericQ[cv] && TrueQ[Abs[Im[cv]] < 10^-10 Max[Abs[cv], 1]] &&
+        TrueQ[Abs[N[(expr /. x -> cv) - yt, 20]] < 10^-7 Max[Abs[yt], 1]] &&
+        If[finX0, TrueQ[Abs[cv - N[x0]] < 1/50], TrueQ[Abs[cv] > 10]]]]]]];
+
+(* core worker: normalize input, run the native engine, gate the fallback,
+   verify, and augment the diagnostics Association. *)
+iaDataCore[fRaw_, x_, x0_, y_, y0in_, n_, opts___] := Module[
+  {ol, expr, cond, dir, ass, fbQ, vQ, remQ, vtol, tbud, mbud, y0, assoc, ver, fb},
+  ol = Flatten[{opts, Options[InverseAsymptotic]}];
+  {expr, cond} = normalizeInput[fRaw, x];
+  dir = normDir[Direction /. ol];
+  ass = (Assumptions /. ol) && cond;
+  fbQ = TrueQ["FallbackToSystemInverse" /. ol];
+  vQ = TrueQ["Verify" /. ol];
+  remQ = TrueQ["Remainder" /. ol];
+  vtol = "VerificationTolerance" /. ol;
+  tbud = "TimeBudget" /. ol; mbud = "MemoryBudget" /. ol;
+  (* run the native engine under a time/memory budget so a costly irrational-scale
+     expansion degrades to $Failed instead of exhausting the kernel *)
+  assoc = TimeConstrained[
+     MemoryConstrained[
+       Quiet[iaWork[expr, x, y, n, {"At" -> x0, Direction -> dir, "ImagePoint" -> y0in}],
+         {tsExp::unsup}],
+       mbud, $iaOverBudget],
+     tbud, $iaOverBudget];
+  If[assoc === $iaOverBudget,
+     Message[InverseAsymptotic::budget, fRaw]; Return[$Failed]];
+  If[! AssociationQ[assoc],
+    (* native could not expand / refused: try the gated fallback *)
+    y0 = If[y0in === Automatic, computeImage[expr, x, x0, dir], y0in];
+    fb = If[fbQ, gatedFallback[expr, x, x0, y, y0, n, dir, ass], $Failed];
+    If[fb === $Failed, Return[$Failed]];
+    Return[<|"Expansion" -> fb, "Method" -> "GatedSystemInverseFallback",
+       "InputPoint" -> x0, "OutputPoint" -> y0, "OutputVariable" -> y,
+       "Remainder" -> False, "Verified" -> True|>]];
+  (* native success: verify + augment *)
+  If[vQ,
+    ver = verifyExpansion[expr, x, y, assoc, vtol];
+    assoc = Join[assoc, <|"Verified" -> ver[[1]], "MaxResidual" -> ver[[2]],
+       "MeasuredOrder" -> ver[[3]]|>];
+    If[! TrueQ[ver[[1]]],
+       Message[InverseAsymptotic::verify, ver[[3]], assoc["RemainderExponent"]]]];
+  Join[assoc, <|"Method" -> "NativeTransseries", "InputPoint" -> x0,
+     "OutputPoint" -> assoc["ImagePoint"], "OutputVariable" -> y,
+     "Remainder" -> remQ, "Terms" -> inverseTermTable[assoc, y]|>]];
+
+(* ---- InverseAsymptoticData signatures (spec, rule, terse, and compat n) ---- *)
+InverseAsymptoticData[f_, {x_Symbol, x0_}, {y_Symbol, y0_}, n_Integer, opts : OptionsPattern[]] :=
+  iaDataCore[f, x, x0, y, y0, n, opts];
+InverseAsymptoticData[f_, {x_Symbol, x0_}, {y_Symbol, y0_}, opts : OptionsPattern[]] :=
+  iaDataCore[f, x, x0, y, y0, resolveGoal[Flatten[{opts, Options[InverseAsymptotic]}]], opts];
+InverseAsymptoticData[f_, {x_Symbol, x0_}, y_Symbol, n_Integer, opts : OptionsPattern[]] :=
+  iaDataCore[f, x, x0, y, Automatic, n, opts];
+InverseAsymptoticData[f_, {x_Symbol, x0_}, y_Symbol, opts : OptionsPattern[]] :=
+  iaDataCore[f, x, x0, y, Automatic, resolveGoal[Flatten[{opts, Options[InverseAsymptotic]}]], opts];
+InverseAsymptoticData[f_, (Rule | RuleDelayed)[x_Symbol, x0_], rest__] :=
+  InverseAsymptoticData[f, {x, x0}, rest];
+InverseAsymptoticData[f_, x_Symbol, y_Symbol, n_Integer, opts : OptionsPattern[]] := With[
+  {ol = Flatten[{opts, Options[InverseAsymptotic]}]},
+  iaDataCore[f, x, "At" /. ol, y, "ImagePoint" /. ol, n, opts]];
+InverseAsymptoticData[f_, x_Symbol, y_Symbol, opts : OptionsPattern[]] := With[
+  {ol = Flatten[{opts, Options[InverseAsymptotic]}]},
+  iaDataCore[f, x, "At" /. ol, y, "ImagePoint" /. ol, resolveGoal[ol], opts]];
+
+(* ---- InverseAsymptotic (the expansion) forwards to ...Data ---- *)
+InverseAsymptotic[f_, specs__] := Module[{d = InverseAsymptoticData[f, specs]},
+  If[! AssociationQ[d], Return[$Failed]];
+  If[TrueQ[d["Remainder"]] && d["Method"] === "NativeTransseries",
+     d["Expansion"] + remainderTerm[d, d["OutputVariable"]], d["Expansion"]]];
+
+(* ---- InverseAsymptoticTerms ---- *)
+InverseAsymptoticTerms[f_, specs__] := Module[{d = InverseAsymptoticData[f, specs]},
+  If[AssociationQ[d], d["Terms"], d]];
+
+(* ---- InverseAsymptoticVerify: certify a user-supplied approx against f ---- *)
+InverseAsymptoticVerify[fRaw_, approx_, {x_Symbol, x0_}, {y_Symbol, y0_}, opts : OptionsPattern[]] :=
+ Quiet@Block[{$MaxExtraPrecision = 400}, Module[
+  {ol, expr, cond, dir, ass, y0r, finY0, d, ys, real, satisfies, through, residOrder},
+  ol = Flatten[{opts, Options[InverseAsymptotic]}];
+  {expr, cond} = normalizeInput[fRaw, x];
+  dir = normDir[Direction /. ol]; ass = (Assumptions /. ol) && cond;
+  y0r = If[y0 === Automatic, computeImage[expr, x, x0, dir], y0];
+  If[y0r === $Failed, Return[$Failed]];
+  finY0 = FreeQ[y0r, DirectedInfinity] && y0r =!= Infinity && y0r =!= -Infinity;
+  d = {1/10^3, 1/10^5};
+  ys = If[finY0, y0r + (If[dir === "FromBelow", -1, 1]) d, 1/d];
+  real = AllTrue[ys, Function[yt, With[{cv = N[approx /. y -> yt, 30]},
+     NumericQ[cv] && TrueQ[Abs[Im[cv]] < 10^-10 Max[Abs[cv], 1]]]]];
+  (* rate-based: the residual f(approx)-y must decay FASTER than the infinitesimal
+     (an absolute threshold would falsely reject a valid low-order approximation) *)
+  satisfies = Module[{r1, r2, m},
+     r1 = Abs[N[(expr /. x -> (approx /. y -> ys[[1]])) - ys[[1]], 30]];
+     r2 = Abs[N[(expr /. x -> (approx /. y -> ys[[2]])) - ys[[2]], 30]];
+     m = If[Positive[r1] && Positive[r2], N[Log[r2/r1]/Log[d[[2]]/d[[1]]]], Infinity];
+     TrueQ[m > 1] || Max[r1, r2] < 10^-18];
+  through = With[{atY0 = TimeConstrained[Limit[approx, y -> y0r], 8, $Failed]},
+     If[FreeQ[x0, DirectedInfinity] && x0 =!= Infinity && x0 =!= -Infinity,
+        (NumericQ[N[atY0]] && TrueQ[Abs[N[atY0 - x0, 20]] < 10^-6]) || TrueQ@PossibleZeroQ[atY0 - x0],
+        MatchQ[atY0, x0 | DirectedInfinity[_]]]];
+  <|"ResidualSmallerThanLastTerm" -> TrueQ[satisfies],
+    "SatisfiesEquation" -> TrueQ[satisfies], "Real" -> TrueQ[real],
+    "PassesThroughX0" -> TrueQ[through], "OutputPoint" -> y0r|>]];
+
+InverseAsymptoticVerify[fRaw_, approx_, {x_Symbol, x0_}, y_Symbol, opts : OptionsPattern[]] :=
+  InverseAsymptoticVerify[fRaw, approx, {x, x0}, {y, Automatic}, opts];
+InverseAsymptoticVerify[fRaw_, approx_, x_Symbol, y_Symbol, opts : OptionsPattern[]] :=
+  InverseAsymptoticVerify[fRaw, approx, {x, 0}, {y, Automatic}, opts];
 
 (* remainder term as BigO in the natural variable *)
 remainderTerm[assoc_, y_] := Module[{b, sigma, infImg, cut, v},

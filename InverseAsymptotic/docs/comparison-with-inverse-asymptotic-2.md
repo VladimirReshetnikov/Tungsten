@@ -10,6 +10,17 @@ expansion of the **real-valued branch** of an inverse function, the task posed i
 - [`src/InverseAsymptotic`](../InverseAsymptotic.wl) — written by Claude (Opus 4.8). Below: **IA-1**.
 - [`src/InverseAsymptotic-2`](../../InverseAsymptotic-2/InverseAsymptotic.wl) — written by GPT-5.5. Below: **IA-2**.
 
+> **Update — this comparison has been acted on.** Following the recommendation below,
+> `src/InverseAsymptotic` (IA-1) has since been **merged to the "best of both"**: it now
+> carries IA-2's idiomatic interface (`{x, x0}` / `{y, y0}` specs, `SeriesTermGoal`,
+> pure-`Function` / `ConditionalExpression` inputs) on top of IA-1's correctness discipline,
+> plus a **gated** `InverseFunction` fallback (returned only if numerically certified real,
+> solving `f(x(y))=y`, and passing through `x0`). The merged package passes all of IA-2's
+> own test cases *and* the real-branch cases IA-2 fails (see
+> [`tests/merged-api.wl`](../tests/merged-api.wl)). The analysis below describes the two
+> packages **as originally written** (IA-1 at commit `aa9cbd524`); `src/InverseAsymptotic-2`
+> is retained unchanged as the GPT-5.5 reference.
+
 This report compares their approaches, cross-ports and cross-runs their test
 suites, and records which implementation passes the other's tests. Every claim
 below was checked against the running Wolfram 15.0 kernel. Because both packages

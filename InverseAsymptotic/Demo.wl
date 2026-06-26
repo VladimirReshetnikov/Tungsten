@@ -65,4 +65,22 @@ Print["\n### Out-of-scale inputs are refused, not guessed ###"];
 Print["  x Log[x] (leading log -> Lambert-W regime):"];
 Print["    ", Quiet@Check[InverseAsymptotic[x Log[x], x, y, 3], "$Failed + InverseAsymptotic::leadlog"]];
 
+Print["\n### Merged idiomatic interface (IA-2 surface) ###"];
+show["{x,x0},{y,y0} + SeriesTermGoal",
+  InverseAsymptotic[x + x^2 (1 + Log[x]), {x, 0}, {y, 0}, SeriesTermGoal -> 3]];
+show["ConditionalExpression input (the MSE form)",
+  InverseAsymptotic[ConditionalExpression[# + #^Sqrt[2], # >= 0] &, {x, 0}, {z, 0}, SeriesTermGoal -> 4]];
+
+Print["\n### Real branch, never InverseFunction's branch ###"];
+show["Sin -> ArcSin (through 0, NOT the x=Pi branch)",
+  InverseAsymptotic[Sin[x], {x, 0}, {y, 0}, SeriesTermGoal -> 4]];
+show["Sinh -> ArcSinh (real, NOT complex)",
+  InverseAsymptotic[Sinh[x], {x, 0}, {y, 0}, SeriesTermGoal -> 4]];
+
+Print["\n### Gated system-inverse fallback (verified real branch through x0) ###"];
+Module[{d = InverseAsymptoticData[Erf[x], {x, 0}, {y, 0}, SeriesTermGoal -> 4]},
+  Print["  Erf[x] -> ", d["Expansion"], "   [", d["Method"], "]  (= InverseErf series)"]];
+Print["  x Log[x]: gate rejects the analytic x=1 branch -> ",
+  Quiet@InverseAsymptotic[x Log[x], {x, 0}, {y, 0}, SeriesTermGoal -> 3]];
+
 Print["================================================================"];
