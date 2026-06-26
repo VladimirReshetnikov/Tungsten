@@ -5,15 +5,23 @@
 - Scope: `src/CommonFactor`
 - Created (UTC): 2026-06-26T16:24:53Z
 - Repository HEAD: 2b46b217d65478e0fff0f7f4f6265e11189f5e01
+- Last updated (UTC): 2026-06-26T17:40:08Z
+- Update basis HEAD: d6802de177e266474afbe9613bb86ac46021fb3e
 
 ## Problem Statement
 
-`CommonFactor` currently assumes an exact nonzero integer sequence and searches
-for a symbolic factor `F(n)` whose evaluated values divide every observed term.
-For exact rational sequences this literal divisibility test is no longer a
-useful definition: every nonzero rational sequence factor divides every rational
-term in the field `Q`.  The real task is instead to find a symbolic rational
-factor that makes the quotient arithmetically simpler.
+`CommonFactor` currently assumes an exact integer sequence and searches for a
+symbolic factor `F(n)` whose evaluated values divide every observed term.  That
+model is too narrow for rational input, and it is also too narrow for perfectly
+natural sequences with isolated zeros, such as a polynomial factor divided by a
+factorial.
+
+For exact rational sequences, literal divisibility is no longer a useful
+definition: any rational factor whose observed values are finite and nonzero on
+the observed support divides every rational term in the field `Q`.  The real
+task is instead to find a symbolic rational factor that makes the quotient
+arithmetically simpler while treating zero terms as part of the data, not as
+terms to discard or as accidents that break the search.
 
 The tempting fallback,
 
@@ -26,8 +34,8 @@ constant, changes local prime-valuation profiles, and often makes the sequence
 larger and less recognizable.
 
 The rational extension should therefore work directly with reduced exact
-rationals, using signed prime valuations and an exact residual-complexity
-objective.
+rationals, using signed prime valuations on the finite support, an explicit zero
+mask, and an exact residual-complexity objective.
 
 ## Key Observation
 
@@ -42,11 +50,129 @@ This is the right analogue of integer prime exponents.  It captures both
 numerator and denominator structure and avoids the false separation introduced
 by treating `Numerator[q]` and `Denominator[q]` as independent sequences.
 
+For `q == 0`, however, this finite vector does not exist.  Algebraically one can
+say `v_p(0) = +Infinity`, but infinities are not observations to fit with affine,
+quadratic, factorial, or Gamma-derived valuation templates.  The implementation
+should split the observed index set into:
+
+```text
+S = {i | a_i != 0}    finite support, used for signed valuations and heights
+Z = {i | a_i == 0}    zero mask, used for zero preservation and root discovery
+```
+
+The zero mask is real information, but it is a different kind of information
+from finite prime exponents.
+
 However, signed valuations also expose a hard identifiability limit.  If a
 symbolic factor and the residual sequence cancel before the observed rational
 terms are reduced, the pre-cancellation story is not recoverable from the data
 alone.  The package can only recover a mathematically equivalent factor supported
 by the reduced rational values.
+
+## Zero Terms and Removable Factors
+
+Zeros should be handled by a zero-aware quotient operation, not by filtering them
+out before the search.  For each observed index `i`, candidate evaluation falls
+into one of four cases:
+
+| Term | Candidate value | Quotient state | Candidate status |
+| --- | --- | --- | --- |
+| `a_i != 0` | finite, `F(i) != 0` | known value `a_i/F(i)` | valid at `i` |
+| `a_i != 0` | `F(i) == 0` | impossible | reject candidate |
+| `a_i == 0` | finite, `F(i) != 0` | known value `0` | valid at `i` |
+| `a_i == 0` | `F(i) == 0` | `Missing["RemovableZero"]` unless filled later | valid as a removable-zero hypothesis |
+
+Candidate values that evaluate to `ComplexInfinity`, `Indeterminate`,
+`Undefined`, or a non-rational exact expression should be rejected by default.
+If the expression has a removable singularity in Wolfram Language syntax, the
+normal candidate-canonicalization path should simplify it before this table is
+applied; the zero-aware quotient should not try to prove arbitrary analytic
+limits as part of its cheap evaluation loop.
+
+The last row is the subtle case.  If both `a_i` and `F(i)` are zero, the observed
+sequence alone does not determine the quotient value at that index.  For example,
+
+```wolframlanguage
+a_n = ((n - 2) (n - 5) Prime[100+n]) / n!
+```
+
+has zeros at `n == 2` and `n == 5`.  The factor `(n - 2) (n - 5)/n!` is perfectly
+meaningful, but a finite list of reduced values only tells us the quotient away
+from the roots.  The quotient at the roots is a removable value that may be
+recoverable from a discovered formula for the residual, not from direct
+division of the observed samples.
+
+The result object should therefore be allowed to carry a punctured residual
+sequence:
+
+```wolframlanguage
+{knownQ1, Missing["RemovableZero"], knownQ3, ...}
+```
+
+It should also carry an indexed known-observation view:
+
+```wolframlanguage
+{{i1, knownQ1}, {i3, knownQ3}, ...}
+```
+
+This is the form to pass to sequence-function discovery tools.  In particular,
+`FindSequenceFunction` can work with holes when the observed indices are supplied
+explicitly, so unknown removable positions should be omitted from that indexed
+dataset rather than represented by `Missing` or `Indeterminate`.  Known zero
+quotients from the third row of the table are not holes; they should remain in
+the indexed dataset as ordinary `{index, 0}` observations.
+
+The intended call shape is:
+
+```wolframlanguage
+residualFormula = FindSequenceFunction[knownResidualPairs, n]
+```
+
+where the first element of each pair is the actual sequence index.  For example,
+`FindSequenceFunction[Table[{2 k, 2^k}, {k, 8}], n]` recovers `2^(n/2)`, showing
+that omitted odd indices are genuine holes rather than implicit missing values.
+
+This is better than silently producing `Indeterminate`, replacing the value with
+`0`, or rejecting every zero-covering factor.  A later reconstruction pass may
+fill removable values when it can justify them, for example by:
+
+- evaluating a symbolic residual formula found from explicit indexed support
+  observations;
+- taking an exact limit when an explicit symbolic expression for the original
+  sequence is supplied by the user;
+- using a user-supplied candidate factor whose quotient expression is known;
+- interpolating only as a diagnostic, not as a proof of the value.
+
+Multiplicity is even less identifiable.  A single observed zero does not reveal
+whether the hidden factor contains `(n-r)`, `(n-r)^2`, or a higher power.  The
+default zero-mask candidate should use multiplicity one.  Higher multiplicities
+should enter only through widening rounds, user-supplied candidates, nearby
+finite-difference evidence, or because they produce a much simpler residual on
+the finite support.
+
+### Zero-Mask Candidate Discovery
+
+The zero mask should seed its own small candidate family:
+
+```wolframlanguage
+n - r
+Times @@ (n - r_j)
+Pochhammer[n - rHigh, m]              (* roots rHigh-m+1, ..., rHigh *)
+FallingFactorial[n - rLow, m]         (* roots rLow, ..., rLow+m-1 *)
+```
+
+These candidates are zero-covering candidates: they are accepted only if they do
+not vanish on the finite support and if the resulting punctured residual improves
+the score enough to pay for the formula cost and any unknown removable values.
+They should get, at most, a modest explanatory bonus for compactly matching the
+observed zero mask.  Otherwise a finite sample with one zero would invite
+arbitrary overfitted factors.
+
+If all observed terms are zero, there is no finite valuation or residual-height
+signal at all.  The package should return factor `1` with a diagnostic such as
+`"All observed terms are zero; common factors are not identifiable from the
+data."` unless the user supplied explicit candidate factors or an original
+symbolic expression to analyze.
 
 ## Experiments
 
@@ -157,10 +283,17 @@ signals of a rational factor.
 For an exact rational sequence `a_i`, a symbolic rational factor `F(n)` is
 acceptable when:
 
-1. `F(i)` is a nonzero exact rational for every observed index.
-2. The quotient `q_i = a_i / F(i)` is exact rational.
-3. The quotient sequence is simpler under a documented residual-complexity
-   objective.
+1. `F(i)` is a finite exact rational at every observed index.
+2. `F(i) != 0` for every support index `i` where `a_i != 0`.
+3. The quotient state at every index follows the zero-aware table above.
+4. The known quotient values, together with the missing-removable mask, are
+   simpler under a documented residual-complexity objective.
+
+The residual should be exposed in two equivalent views:
+
+- a position-preserving vector that may contain `Missing["RemovableZero"]`;
+- explicit indexed known observations suitable for `FindSequenceFunction` and
+  other tools that understand holes.
 
 There should be no default requirement that the quotient be integer.  Instead,
 integer quotients should receive a strong preference because they are often the
@@ -179,20 +312,34 @@ with values:
 - `"Integer"`: require all quotient terms to be integers.
 - `"PreferInteger"`: rational mode, but add a strong integer-quotient bonus.
 
-The existing integer behavior should remain the fast path for integer sequences.
+For `"Integer"`, `Missing["RemovableZero"]` should not be counted as an integer
+value.  The result can still be returned as the best punctured state, but the
+diagnostics should say that the integer quotient is verified only on the finite
+known support unless removable values were filled.
+
+The existing integer behavior should remain the fast path for integer sequences,
+but it should share the same zero-aware quotient logic.  Integer sequences can
+have natural zeros too.
 
 ## Residual Complexity
 
 The rational-mode score should be based on a vector of exact residual statistics,
 not on one scalar alone.
 
-For a rational sequence `r`, define:
+For a rational residual sequence `r`, define the known value list by deleting
+`Missing["RemovableZero"]`.  Known zeros contribute height `0`; they are excluded
+from finite valuation sums.
 
 ```wolframlanguage
-sizeHeight[r] = Total[Log[Max[Abs[Numerator[#]], Abs[Denominator[#]]]] & /@ r]
-numHeight[r]  = Total[Log[Max[1, Abs[Numerator[#]]]] & /@ r]
-denHeight[r]  = Total[Log[Denominator[#]] & /@ r]
-valL1[r]      = Total over observed primes p and indices i of Abs[v_p(r_i)]
+knownValues[r] = DeleteMissing[r]
+knownPairs[r, indices] = Cases[Transpose[{indices, r}], {i_, q_} /; ! MissingQ[q] :> {i, q}]
+finiteSupport[r] = Select[knownValues[r], # != 0 &]
+
+sizeHeight[r] = Total[Log[Max[Abs[Numerator[#]], Abs[Denominator[#]]]] & /@ knownValues[r]]
+numHeight[r]  = Total[Log[Max[1, Abs[Numerator[#]]]] & /@ knownValues[r]]
+denHeight[r]  = Total[Log[Denominator[#]] & /@ knownValues[r]]
+valL1[r]      = Total over observed primes p and q in finiteSupport[r] of Abs[v_p(q)]
+unknownCount[r] = Count[r, Missing["RemovableZero"]]
 ```
 
 Recommended ranking key:
@@ -202,6 +349,7 @@ Recommended ranking key:
   sizeHeight,
   denWeight denHeight,
   valWeight valL1,
+  unknownWeight unknownCount,
   formulaPenalty,
   tieBreakers...
 }
@@ -224,9 +372,16 @@ Candidate acceptance should require one of:
 The last case is necessary because a denominator component can be temporarily
 bad while the paired rational factor is excellent.
 
+Zero-covering factors need one additional guard: they should not win merely
+because they turn several observed zeros into missing values.  A state with fewer
+unknown removable values should dominate an otherwise identical state, and a
+state with unknowns should beat a fully known state only when its finite-support
+residual is materially simpler or its zero mask is explained by a compact,
+low-complexity factor.
+
 ## Candidate Generation
 
-Rational support should add candidates in three layers.
+Rational support should add candidates in four layers.
 
 ### 1. Signed Valuation Discovery
 
@@ -304,6 +459,23 @@ Candidate explosion is real.  Use staged generation:
 This keeps the search effectively unbounded without making ordinary calls
 unbounded.
 
+### 4. Zero-Mask Templates
+
+From the observed zero indices, generate compact root factors after the ordinary
+finite-support valuation candidates:
+
+```wolframlanguage
+n - r
+Product[n - r, {r, roots}]
+Pochhammer[n - rHigh, m]
+FallingFactorial[n - rLow, m]
+```
+
+These are evaluated with the zero-aware quotient table.  They should not
+contribute signed valuation rows, because their valuation at their roots is not
+finite.  Away from their roots, however, they may combine productively with
+rational denominator factors such as `1/n!`.
+
 ## Search Strategy
 
 The integer reducer can stay greedy because integer divisibility imposes a
@@ -315,7 +487,12 @@ State:
 <|
   "Factor" -> product expression,
   "FactorValues" -> vector,
-  "ResidualSequence" -> seq / factorValues,
+  "ResidualSequence" -> zero-aware quotient vector,
+  "SupportIndices" -> indices where the original term is not zero,
+  "ZeroIndices" -> indices where the original term is zero,
+  "UnknownQuotientIndices" -> indices with Missing["RemovableZero"],
+  "KnownResidualPairs" -> explicit {index, value} observations for residual tools,
+  "ZeroFactors" -> selected factors that vanish on zero indices,
   "SelectedFactors" -> list,
   "ScoreVector" -> residual complexity components
 |>
@@ -324,7 +501,8 @@ State:
 Expansion:
 
 1. Generate candidate factors for the current round.
-2. For each beam state and candidate, evaluate the quotient exactly.
+2. For each beam state and candidate, evaluate the quotient with the zero-aware
+   table.
 3. Compute the residual-complexity vector.
 4. Keep the best states under dominance pruning.
 
@@ -333,14 +511,17 @@ Dominance:
 - If two states have identical residual sequences, keep the one with lower formula
   complexity.
 - If one state has no worse `sizeHeight`, no worse `denHeight`, no worse `valL1`,
-  and lower formula complexity, discard the dominated state.
+  no worse `unknownCount`, and lower formula complexity, discard the dominated
+  state.
 - Keep a small number of mildly worse states so denominator-only moves can survive
   until they pair with numerator moves.
+- For punctured states, identical residual sequences require both identical known
+  values and identical missing-removable masks.
 
 Progress output:
 
 ```text
-CommonFactor: round r, best factor = ..., residual height = ..., denominator height = ...
+CommonFactor: round r, best factor = ..., residual height = ..., denominator height = ..., removable zeros = ...
 ```
 
 Unlike the integer reducer's current progress line, rational progress should
@@ -351,10 +532,19 @@ The result association should add:
 ```wolframlanguage
 "InputDomain" -> "Rational"
 "ResidualComplexity" -> <|...|>
+"ZeroIndices" -> {...}
+"UnknownQuotientIndices" -> {...}
+"KnownResidualPairs" -> {{i1, q1}, ...}
 "BestStateCount" -> ...
 "SearchMode" -> "Beam"
 "QuotientTarget" -> ...
 ```
+
+When the package attempts residual recognition, the indexed known pairs should be
+the default input.  If a candidate residual formula is found from those pairs,
+the package may evaluate it at `UnknownQuotientIndices` and fill the punctured
+residual only after checking consistency with all known observations and, when
+available, holdout indices.
 
 ## Time-Bounded Behavior
 
@@ -366,6 +556,9 @@ The result association should add:
   generation, beam expansion) checks the remaining budget;
 - when time elapses, return the best beam state found so far;
 - if no factor has been found, return factor `1` and the original sequence.
+- if only punctured states were found, return the best one with explicit
+  `UnknownQuotientIndices` diagnostics rather than pretending the residual is a
+  complete ordinary sequence.
 
 This matches the integer reducer's current best-so-far semantics while making
 rational search naturally extensible.
@@ -379,13 +572,19 @@ Add internal helpers:
 ```wolframlanguage
 rationalSequenceQ
 rationalCandidateValuesQ
+sequenceSupport
+zeroIndices
+zeroAwareQuotient
+knownResidualPairs
 rationalComplexityVector
 rationalCandidateScore
 signedValuationRows
+puncturedValuationRows
 ```
 
 Do not change integer behavior yet.  Add a private experimental entry point or
-option-gated path and tests for the four synthetic examples above.
+option-gated path and tests for the four synthetic examples above, plus a
+zero-containing example.
 
 ### Phase 2: Rational Candidate Generation
 
@@ -394,7 +593,8 @@ Add:
 - reciprocal atoms;
 - signed valuation discovery;
 - rational base clustering;
-- direct small-family ratio templates.
+- direct small-family ratio templates;
+- zero-mask root templates.
 
 `CommonFactorCandidateReport` should show rational candidates and their full
 complexity breakdown.
@@ -419,8 +619,11 @@ Add:
 - progress output for rational score components;
 - explanatory warnings when LCM integerization would be much larger;
 - holdout validation for candidate products when enough terms exist;
+- residual-recognition calls that pass explicit index-value pairs so holes remain
+  holes;
 - tests for assigned index symbols, finite timeouts, ratio candidates, reciprocal
-  candidates, and accidental denominator cancellations.
+  candidates, accidental denominator cancellations, isolated zeros, zero-covering
+  factors, and all-zero input diagnostics.
 
 ## Open Questions
 
@@ -432,6 +635,11 @@ Add:
   toward `CatalanNumber`, `Binomial`, `Pochhammer`, and factorials when possible.
 - Some rational factors are only visible after several individually neutral
   moves.  Beam width and temporary-damage policy determine whether those survive.
+- How aggressive should zero-mask discovery be?  Multiplicity and sparse-root
+  interpolation are easy to overfit from finite data, so the default should be
+  conservative.
+- Should public residual sequences expose `Missing["RemovableZero"]` directly, or
+  wrap punctured output in a richer association with known values and holes?
 - Reduced rational data cannot identify hidden pre-cancellation structure.  The
   documentation should say this plainly so the package is not expected to recover
   a story the data no longer contains.
@@ -440,9 +648,11 @@ Add:
 
 The best design is not to integerize rational sequences and not to split
 numerators from denominators.  Work directly over reduced rationals, represent
-terms and candidates by signed valuation vectors, and choose factors by exact
-residual-complexity reduction.  Generate rational candidates directly, especially
-family ratios, and search with a small beam rather than a single greedy path.
+finite support terms and candidates by signed valuation vectors, keep zeros in a
+separate mask, and choose factors by exact residual-complexity reduction.
+Generate rational candidates directly, especially family ratios and conservative
+zero-mask root factors, and search with a small beam rather than a single greedy
+path.
 
 That gives the package a principled rational mode while preserving the current
-integer fast path.
+integer fast path, and it makes both modes resilient to natural zero terms.
