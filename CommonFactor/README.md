@@ -6,6 +6,7 @@
 - Created (UTC): 2026-06-26T15:37:34Z
 - Repository HEAD: 99d9ca081c8c148d90a9f6c438f34d4b0ee8489a
 - Related source: [Mathematica StackExchange question 261053](https://mathematica.stackexchange.com/questions/261053/largest-symbolic-common-factor-of-an-integer-sequence-not-simply-gcd)
+- Related design: [Rational sequence support](docs/rational-sequences-design.md)
 
 `CommonFactor` is a heuristic Wolfram Language package for finding a large
 symbolic common factor in a finite exact integer sequence.  It is aimed at the
