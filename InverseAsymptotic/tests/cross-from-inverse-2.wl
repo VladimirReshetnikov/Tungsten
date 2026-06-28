@@ -4,11 +4,11 @@
    cross-from-inverse-2.wl
 
    Runs the test CASES of the GPT-5.5 reference implementation (IA-2, since
-   removed; its cases are preserved here) against THIS package (IA-1),
-   translated to IA-1's API.  Answers: "can IA-1 pass
-   IA-2's tests?"  (Spoiler from the live kernel: yes, all 7 mathematically;
-   the one caveat is that IA-1 does not accept IA-2's pure-function /
-   ConditionalExpression input form -- see the FORM check.)
+   removed; its cases are preserved here) against THIS (merged) package,
+   translated to its API.  Answers: "does this package pass IA-2's tests?"
+   (Spoiler from the live kernel: yes, all 7 mathematically; and -- unlike the
+   original pre-merge IA-1 -- the merged package also accepts IA-2's
+   pure-function / ConditionalExpression input form, confirmed by the FORM check.)
 
    Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/InverseAsymptotic/tests/cross-from-inverse-2.wl
    Exit 0 = all pass.  Loads ONLY IA-1 (no context collision).
@@ -26,7 +26,7 @@ inv[f_, x_, y_, n_, o___] := Quiet@TimeConstrained[
    InverseAsymptotic[f, x, y, n, "Remainder" -> False, o], 30, $Failed];
 eq[r_, exp_, as_] := r =!= $Failed && TrueQ[Quiet@Simplify[r - exp == 0, as]];
 
-Print["=== IA-2's test cases against IA-1 ==="];
+Print["=== IA-2's test cases against the merged package ==="];
 
 check["[IA2-1] x+x^2(1+Log x), goal 2",
   eq[inv[x + x^2 (1 + Log[x]), x, y, 2], y - y^2 (1 + Log[y]), y > 0]];
@@ -52,13 +52,12 @@ check["[IA2-6] x^2+x^3, goal 4",
 check["[IA2-7] verify-equivalent (IA-1 self-verifies x+x^2(1+Log x))",
   TrueQ[Quiet@InverseAsymptoticData[x + x^2 (1 + Log[x]), x, y, 2]["Verified"]]];
 
-(* FORM note (not counted as a failure): IA-2 accepts a pure function /
-   ConditionalExpression; IA-1 takes a bare expression in x.  This documents the
-   one input-form gap surfaced by IA-2's test 3. *)
-Print["[FORM] IA-1 accepts ConditionalExpression[#+#^Sqrt2,#>=0]& as input? ",
-  inv[ConditionalExpression[# + #^Sqrt[2], # >= 0] &, x, z, 4] =!= $Failed,
-  "  (expected False -- IA-1 takes a bare expression; the math passes via [IA2-3])"];
+(* FORM check: the merged package accepts IA-2's pure-function /
+   ConditionalExpression input form -- the one input-form gap of the original
+   pre-merge IA-1 (surfaced by IA-2's test 3), now closed by the merge. *)
+check["[FORM] merged API accepts ConditionalExpression[#+#^Sqrt2,#>=0]&",
+  inv[ConditionalExpression[# + #^Sqrt[2], # >= 0] &, x, z, 4] =!= $Failed];
 
 Print["================================================================"];
-Print[If[fail == 0, "ALL PASS -- IA-1 passes IA-2's tests", ToString[fail] <> " FAILURE(S)"]];
+Print[If[fail == 0, "ALL PASS -- this package passes IA-2's tests", ToString[fail] <> " FAILURE(S)"]];
 If[$ScriptCommandLine =!= {}, Exit[If[fail == 0, 0, 1]]];
