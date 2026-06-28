@@ -1,6 +1,7 @@
 # `src/InverseAsymptotic` vs `src/InverseAsymptotic-2` — head-to-head comparison
 
 - Created (UTC): 2026-06-26T05:36:34Z
+- Updated (UTC): 2026-06-28T18:49:23Z (IA-2 removed; postscript added)
 - Repository HEAD: a84f89feb34f7ca500d7657762afa3a17ba8dbad
 
 Two independent Wolfram Language packages solve the same problem — the asymptotic
@@ -8,7 +9,7 @@ expansion of the **real-valued branch** of an inverse function, the task posed i
 [Mathematica StackExchange #236367](https://mathematica.stackexchange.com/questions/236367):
 
 - [`src/InverseAsymptotic`](../InverseAsymptotic.wl) — written by Claude (Opus 4.8). Below: **IA-1**.
-- [`src/InverseAsymptotic-2`](../../InverseAsymptotic-2/InverseAsymptotic.wl) — written by GPT-5.5. Below: **IA-2**.
+- `src/InverseAsymptotic-2` (since removed — see the postscript) — written by GPT-5.5. Below: **IA-2**.
 
 > **Update — this comparison has been acted on.** Following the recommendation below,
 > `src/InverseAsymptotic` (IA-1) has since been **merged to the "best of both"**: it now
@@ -19,7 +20,8 @@ expansion of the **real-valued branch** of an inverse function, the task posed i
 > own test cases *and* the real-branch cases IA-2 fails (see
 > [`tests/merged-api.wl`](../tests/merged-api.wl)). The analysis below describes the two
 > packages **as originally written** (IA-1 at commit `aa9cbd524`); `src/InverseAsymptotic-2`
-> is retained unchanged as the GPT-5.5 reference.
+> was subsequently **removed** (2026-06-28) after an empirical re-verification confirmed this
+> package fully subsumes it — see the postscript at the end of this report.
 
 This report compares their approaches, cross-ports and cross-runs their test
 suites, and records which implementation passes the other's tests. Every claim
@@ -213,18 +215,30 @@ IA-1 is the safer default for real-branch fidelity, and IA-2 is the more
 convenient front end for inputs already known to be in the analytic/power-log
 class.
 
-## Reproducing
+## Postscript — `src/InverseAsymptotic-2` removed (2026-06-28)
 
-The cross-test files run each suite against the *other* package in a fresh
-kernel:
+After this comparison, the merge was re-verified empirically against the running
+Wolfram 15.0 kernel — the merged `src/InverseAsymptotic` run head-to-head against a
+renamed in-kernel copy of IA-2. The merged package passes **all** of IA-2's own test
+cases and **strictly dominates** IA-2 on every case where the two differ: `Sin -> ArcSin`
+(IA-2 returns the `Pi` branch), `Sinh -> ArcSinh` (IA-2 returns a complex branch),
+`x + Erf[x] -> $Failed` honest refusal (IA-2's ungated fallback ships
+unevaluated-`Derivative` garbage), and pure `Erf[x] -> InverseErf` in both.
+
+IA-2's one architecturally distinct idea — the hybrid delegation to the kernel's
+`Asymptotic` for forward expansion — was found to add **no** real head breadth: it runs
+only *after* IA-2's native `Plus/Times/Power/Log` expander already succeeds, and
+substituting a power series into such an expression keeps it in that fragment, so the
+hybrid never reaches a head the native engine could not. With nothing left to absorb, the
+GPT-5.5 reference directory `src/InverseAsymptotic-2` was deleted; this report is kept as
+the rationale record.
+
+The surviving cross-test — IA-2's cases (preserved) run against this package — is:
 
 ```powershell
 $wl = "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe"
-# IA-2's test cases against IA-1:
-& $wl -script src/InverseAsymptotic/tests/cross-from-inverse-2.wl
-# IA-1's test cases against IA-2:
-& $wl -script src/InverseAsymptotic-2/tests/cross-from-inverse-1.wl
+& $wl -script src/InverseAsymptotic/tests/cross-from-inverse-2.wl   # all pass
 ```
 
-(Each file loads only its target package, so there is no `` InverseAsymptotic` ``
-context collision; do not `Get` both into the same kernel.)
+(The reverse direction, IA-1's cases against IA-2, is no longer reproducible because IA-2
+was removed; that result is recorded in the matrix above.)

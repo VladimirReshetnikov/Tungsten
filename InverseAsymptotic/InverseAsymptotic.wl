@@ -499,7 +499,7 @@ normalizeInput[ConditionalExpression[e_, cond_], x_] := {e, cond};
 normalizeInput[e_, x_] := {e, True};
 
 (* Direction spec -> internal "FromAbove"/"FromBelow".  Convention matches
-   Asymptotic / src/InverseAsymptotic-2:  -1 and "FromAbove" (default) select the
+   Asymptotic:  -1 and "FromAbove" (default) select the
    image side reached as x -> x0+, 1 and "FromBelow" the x -> x0- side. *)
 normDir["FromBelow"] := "FromBelow";
 normDir[1] := "FromBelow";

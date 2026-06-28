@@ -1,8 +1,8 @@
 # InverseAsymptotic — real-branch asymptotics of inverse functions
 
 - Created (UTC): 2026-06-26T04:57:01Z
-- Updated (UTC): 2026-06-26T16:28:15Z
-- Repository HEAD: 99d9ca081c8c148d90a9f6c438f34d4b0ee8489a
+- Updated (UTC): 2026-06-28T18:49:23Z
+- Repository HEAD: 2484d18eafaf9b9a643acddc880cad8d523dae37
 
 A Wolfram Language package that computes the **asymptotic expansion of the real-valued
 branch of an inverse function**, in the generalized power–logarithm scale the inverse
@@ -18,7 +18,7 @@ This package is the **merge of the best of two independent implementations** (se
 [comparison report](docs/comparison-with-inverse-asymptotic-2.md)): it keeps this
 implementation's branch-correctness discipline (real branch through `x0`, native analytic
 expansion, honest refusal, rate-based numeric verification) and adopts the idiomatic
-interface of [`src/InverseAsymptotic-2`](../InverseAsymptotic-2/) (GPT-5.5's version):
+interface of the independent GPT-5.5 implementation (since removed):
 `{x, x0}` / `{y, y0}` specs, `SeriesTermGoal`, pure-`Function` / `ConditionalExpression`
 inputs, and a `InverseFunction`-based fallback — but **gated** so it can never ship a
 wrong or complex branch.
@@ -232,7 +232,7 @@ closed-form inverses (`Log[1+y]`, `ArcSin`, `ArcTan`, `ArcSinh`, the Catalan gen
 function, `Sqrt[1+y]-1`, `ProductLog`, `Exp[y]`, `ArcCos`) to high precision, every scale
 type via the rate-based verifier, and the refusal of out-of-scale inputs. `merged-api.wl`
 checks the new `{x,x0}`/`{y,y0}` interface (including the pure-`Function` /
-`ConditionalExpression` input forms — it passes all of `src/InverseAsymptotic-2`'s own
+`ConditionalExpression` input forms — it passes all of the GPT-5.5 implementation's own
 test cases), real-branch correctness where the fallback could go wrong (`Sin`, `Sinh`,
 `Cos`, the `x^2` lower branch), the gated fallback (`Erf -> InverseErf`), and the gate
 rejecting the wrong-branch fallbacks (`x Log x`, `Sin[1/x]`).
@@ -263,6 +263,6 @@ rejecting the wrong-branch fallbacks (`x Log x`, `Sin[1/x]`).
 - [`InverseAsymptotic.wl`](InverseAsymptotic.wl) — the package.
 - [`tests/smoke.wl`](tests/smoke.wl) — regression suite (27 checks, compat API).
 - [`tests/merged-api.wl`](tests/merged-api.wl) — merged interface + gated fallback (20 checks).
-- [`tests/cross-from-inverse-2.wl`](tests/cross-from-inverse-2.wl) — `src/InverseAsymptotic-2`'s test cases run against this package.
+- [`tests/cross-from-inverse-2.wl`](tests/cross-from-inverse-2.wl) — the GPT-5.5 implementation's test cases (preserved here) run against this package.
 - [`Demo.wl`](Demo.wl) — a runnable showcase of the examples above.
 - [`docs/comparison-with-inverse-asymptotic-2.md`](docs/comparison-with-inverse-asymptotic-2.md) — head-to-head comparison of the two implementations and the rationale for this merge.

@@ -3,8 +3,9 @@
 (* =====================================================================
    cross-from-inverse-2.wl
 
-   Runs the test CASES of src/InverseAsymptotic-2 (GPT-5.5's IA-2) against
-   THIS package (IA-1), translated to IA-1's API.  Answers: "can IA-1 pass
+   Runs the test CASES of the GPT-5.5 reference implementation (IA-2, since
+   removed; its cases are preserved here) against THIS package (IA-1),
+   translated to IA-1's API.  Answers: "can IA-1 pass
    IA-2's tests?"  (Spoiler from the live kernel: yes, all 7 mathematically;
    the one caveat is that IA-1 does not accept IA-2's pure-function /
    ConditionalExpression input form -- see the FORM check.)
