@@ -4,7 +4,8 @@
 - Audience: Tungsten maintainers working on the kernel-free expression evaluator
 - Scope: `List` and `Association` representation, asymptotic parity, dependency choice, validation, and rollout
 - Created (UTC): 2026-06-28T23:00:26Z
-- Repository HEAD: 4e90e28ac58e85acffe1076eba23fd6475b560f2
+- Updated (UTC): 2026-06-28T23:31:40Z
+- Repository HEAD: eae2b72892eab0002b62a9cbf87371f0a30268bf
 - Related code:
   - [`expression.py`](../src/tungsten/expression.py)
   - [`expression_evaluator.py`](../src/tungsten/expression_evaluator.py)
@@ -85,20 +86,42 @@ The current implementation has these relevant properties:
 The important consequence is not just a slower constant. Scalar lookup-like operations are
 structurally linear because the key index is not retained on the association value.
 
+## Second-Pass Corrections
+
+The second review changed several parts of the first draft.
+
+- Stage A should be described as **lookup parity**, not full update parity. With ordered entries
+  stored in a Python tuple, `Append`, `Prepend`, and key-based `ReplacePart` still allocate a new
+  entry tuple. They can reuse a persistent key index path, but their returned ordered storage is
+  still `O(n)` until Stage B adds a persistent random-access entry vector.
+- The first implementation should **subclass `Call`** or otherwise preserve the `Call` fields
+  exactly. The current evaluator is heavily `Call`-centric; a standalone `AssociationExpr(Expr)`
+  would require a broad audit before it could be safe.
+- `rpds-py` remains the best Stage A dependency, but `immutables` should be treated as an optional
+  spike/reference implementation rather than a production fallback. On the active CPython 3.14
+  probe it built from source, while `rpds-py` installed directly and advertises Python 3.11 through
+  3.15 classifiers.
+- `rpds.List` is not a Stage B ordered-entry candidate: its API is linked-list-shaped, with
+  `first`, `rest`, `push_front`, and `drop_first`, not random access.
+- Duplicate-key behavior is not one generic rule. Constructor-like operations (`Association`,
+  `Join`, `KeyMap`) preserve the first key slot while updating to the last value; `Append` and
+  `Prepend` deliberately move a replaced key to the end or start, respectively.
+
 ## Library Recommendation
 
 Tungsten should prefer a free, existing persistent-map implementation instead of implementing a HAMT
 from scratch. The dependency should sit behind a tiny adapter so we keep one Tungsten-owned key-index
 contract even if the backing library changes.
 
-The dependency check performed for this proposal used `python -m pip index versions` on
-2026-06-28:
+The dependency check performed for this proposal used isolated `uv run --isolated --with ...`
+probes on the active CPython 3.14.4 interpreter, plus package metadata from the installed
+distributions, on 2026-06-28:
 
 | Package | Current PyPI version seen | Fit | Recommendation |
 |---|---:|---|---|
-| `rpds-py` | `2026.5.1` | Rust-backed persistent `HashTrieMap`, MIT, Python `>=3.11`, current classifiers include Python 3.11 through 3.15. | Best first candidate for Tungsten's required persistent key index because it matches Tungsten's Python range and has current Windows wheel coverage. |
-| `immutables` | `0.21` | Direct HAMT-backed immutable `Map`, Apache 2.0, explicit `O(log N)` get/set documentation, Windows wheels through CPython 3.13 on the checked PyPI page. | Best semantic fit if Tungsten runs on CPython 3.11-3.13. Keep as the preferred fallback or alternate if `rpds-py` constants/API are poor. |
-| `pyrsistent` | `0.20.0` | MIT, includes `PVector` and `PMap`; docs state amortized `O(1)` append and `log32(n)` random access/update for vectors. | Do not make required until Python 3.13/3.14 support is verified. Useful for an optional ordered-entry persistent-vector spike. |
+| `rpds-py` | `2026.5.1` | Rust-backed persistent `HashTrieMap`, MIT, Python `>=3.11`, classifiers include Python 3.11 through 3.15. The isolated probe confirmed `get`, `insert`, `remove`, `update`, `keys`, `values`, and `items`. | Best Stage A dependency for Tungsten's retained key index. The adapter must not rely on `HashTrieMap` iteration order. |
+| `immutables` | `0.21` | Direct HAMT-backed immutable `Map`, Apache 2.0, explicit `O(log N)` get/set documentation. The isolated active-Python probe worked, but it built from source and package classifiers only name Python 3.8 through 3.12. | Keep as a semantic reference or dev-only adapter. Do not make it a required dependency unless wheel/source-build reliability is validated for Tungsten's active Python range. |
+| `pyrsistent` | `0.20.0` | MIT, includes `PVector` and `PMap`; docs state amortized `O(1)` append and `log32(n)` random access/update for vectors. The isolated active-Python probe imported and exercised `PVector`, but package classifiers only name Python 3.8 through 3.12. | Useful for a Stage B ordered-entry vector spike. Do not make required for Stage A. Benchmark and packaging-check before adoption. |
 | `sortedcontainers` | `2.4.0` | Apache 2.0, production-stable sorted collections. | Do not use for `Association`; sorted-key order is the wrong semantic model. It may be useful elsewhere, but not for this parity fix. |
 | `numpy` | already locked transitively through `sparse` | Contiguous numeric arrays. | Useful for a later packed numeric list optimization, not for general symbolic `Association`. |
 
@@ -107,8 +130,9 @@ Recommended dependency shape:
 1. Add a private adapter module, for example `tungsten.persistent_maps`, with a minimal protocol:
    `empty()`, `from_items()`, `get()`, `contains()`, `insert()`, `remove()`, and `update_many()`.
 2. Back it with `rpds.HashTrieMap` first.
-3. Keep a one-file alternate implementation over `immutables.Map` behind the same adapter during the
-   initial spike, because `immutables` documents the exact HAMT performance model Tungsten wants.
+3. Optionally keep a dev-only alternate implementation over `immutables.Map` during the initial
+   spike, because `immutables` documents the exact HAMT performance model Tungsten wants. Do not
+   lock it as production dependency unless the packaging concern above is resolved.
 4. Keep the old temporary Python `dict` logic only as a builder/transient implementation, not as the
    retained association representation.
 
@@ -117,16 +141,20 @@ package's public API.
 
 ## Proposed Representation
 
-Introduce a specialized association node:
+Introduce a specialized association node. For the first implementation, it should remain a
+`Call`-compatible object:
 
 ```python
-class AssociationExpr(Expr):
-    entries: tuple[_AssociationEntry, ...]
-    key_index: PersistentMap[Expr, int]
+@dataclass(frozen=True, eq=False)
+class AssociationExpr(Call):
+    entries: tuple[_AssociationEntry, ...] = field(compare=False, hash=False, repr=False)
+    key_index: PersistentMap[Expr, int] = field(compare=False, hash=False, repr=False)
+
+    def __eq__(self, other): ...
+    def __hash__(self): ...
 ```
 
-The actual implementation can either subclass `Call` for short-term compatibility or implement the
-same `Expr` methods directly. The required behavioral contract is:
+The required behavioral contract is:
 
 - `head()` returns `Symbol("Association")`.
 - `args()` returns the rule expressions in association order.
@@ -139,12 +167,19 @@ same `Expr` methods directly. The required behavioral contract is:
 
 Implementation preference:
 
-- Keep `entries` as the source of truth for order.
+- Keep the inherited `head_expr` and `arguments` fields as the visible Wolfram expression shape.
+- Keep `entries` and `key_index` as private accelerators excluded from equality and hashing.
+- Implement equality against `Call`-compatible values by comparing only `head_expr` and `arguments`.
+  The dataclass-generated equality method is not sufficient because it is class-sensitive.
+- Implement hashing as the same visible-shape hash used for an ordinary `Call` with head
+  `Association` and the same rule arguments.
 - Store `key_index` as `key -> entry_index`.
-- Keep `arguments` either lazily derived from `entries` or stored as a compatibility cache excluded
-  from equality decisions.
+- Store `arguments` eagerly in Stage A, because too much code currently reads `.arguments` directly
+  after an `isinstance(expr, Call)` check.
 - Make `_association_expr(...)` the only public constructor for valid association values.
 - Make `_association_entries(expr)` return `expr.entries` in `O(1)` for `AssociationExpr`.
+- Keep the existing raw `Call(Symbol("Association"), ...)` path valid for held or malformed syntax
+  that has not yet gone through evaluator normalization.
 
 The key index stores indexes rather than entries so value replacement can update a single ordered
 slot while leaving the key map unchanged.
@@ -160,10 +195,17 @@ class AssociationBuilder:
     positions: dict[Expr, int]
 
     def append_constructor_entry(entry): ...
-    def append_rule_like_append(entry): ...
+    def append_to_end(entry): ...
+    def prepend_to_start(entry): ...
     def set_existing_value(index, value): ...
     def freeze() -> AssociationExpr: ...
 ```
+
+The builder needs explicit normalization modes:
+
+- constructor/merge mode: first key slot survives, later duplicate value replaces it;
+- append mode: any old key slot is removed, then the new entry is appended;
+- prepend mode: any old key slot is removed, then the new entry is inserted at the front.
 
 The builder is private and short-lived. It is used for:
 
@@ -196,13 +238,15 @@ hash/compare cost.
 | `assoc[[i]]` | `O(n)` | `O(1)` with tuple entries | If entries later move to a persistent vector, this becomes `O(log n)`. |
 | `KeyTake[assoc, keys]` | `O(n + m)` | `O(m log_B n + m)` | Output order follows the key spec. |
 | `KeyDrop[assoc, keys]` | `O(n + m)` | `O(n + m log_B n)` or `O(n + m)` | Filtering all entries is output-sensitive; build a transient key set for large `m`. |
-| `Append[assoc, newKey -> v]` | `O(n)` | `O(log_B n)` index plus ordered append | With tuple entries, the ordered append still copies `O(n)` pointers. Persistent-vector storage is the follow-up if append-update loops matter. |
-| `Append[assoc, oldKey -> v]` | `O(n)` | `O(n)` unless ordered storage supports efficient delete/move | Wolfram moves the surviving key position for append-like replacement, so order maintenance is not lookup-only. |
-| `ReplacePart[assoc, Key[k] -> v]` | `O(n)` | `O(log_B n)` lookup plus ordered slot update | Tuple entries copy `O(n)`; persistent-vector storage can make the retained structure `O(log n)`. |
+| `Append[assoc, newKey -> v]` | `O(n)` | Stage A: `O(n)`; Stage B: `O(log n)`-like if ordered entries become persistent-vector-backed | Stage A still copies the ordered-entry tuple. |
+| `Append[assoc, oldKey -> v]` | `O(n)` | Stage A: `O(n)`; Stage B still needs order-maintenance work | Wolfram moves the surviving key position for append-like replacement, so order maintenance is not lookup-only. |
+| `ReplacePart[assoc, Key[k] -> v]` | `O(n)` | Stage A: `O(n)`; Stage B: `O(log_B n + log n)`-like | Stage A lookup is fast, but the tuple slot replacement copies `O(n)` pointers. |
 | Construct from `N` rules | `O(N)` | `O(N)` | Builder path preserves current asymptotics and improves constants by avoiding duplicate scans. |
 
 The first implementation should close every scalar key-operation row. Persistent ordered-entry
 storage is a second representation decision, not a blocker for removing the current lookup scans.
+The plan should therefore be read as two-tiered: Stage A fixes repeated scalar lookup; Stage B is the
+only stage that can plausibly fix update-heavy association loops.
 
 ## Persistent Ordered Entries Decision
 
@@ -228,9 +272,12 @@ the same `AssociationExpr` API. Candidate source:
 
 - `pyrsistent.PVector`, if compatibility with Tungsten's active Python versions is verified.
 
-If no maintained free library fits the active Python range, a small internal 32-way persistent vector
-is the only justifiable homegrown piece. It should be introduced only after Stage A, with focused
-tests showing which operations still miss the parity target.
+The `rpds-py` package is not currently a candidate for this slot despite being the recommended map
+dependency: its exposed `List` API is linked-list-shaped rather than random-access-vector-shaped.
+
+If no maintained free library fits the active Python range and measured workload, a small internal
+32-way persistent vector is the only justifiable homegrown piece. It should be introduced only after
+Stage A, with focused tests showing which operations still miss the parity target.
 
 ## List Strategy
 
@@ -265,16 +312,17 @@ Probe requirements:
 - supports lookup, insert, remove, and bulk construction without converting the whole map to a
   mutable dictionary for every operation;
 - has wheels for the active Windows Python versions Tungsten actually uses.
+- does not expose or depend on persistent-map iteration order for Wolfram-visible association order.
 
-Keep a local alternate adapter over `immutables.Map` during this step so the implementation can be
-switched before committing the dependency if the first candidate behaves poorly.
+Keep a local alternate adapter over `immutables.Map` only as a spike if the first candidate behaves
+poorly. Treat it as dev-only unless packaging is validated.
 
 Expected files touched: one new adapter module, `pyproject.toml`, `uv.lock`, and one focused test
 module.
 
 ### Step 2. Introduce `AssociationExpr`
 
-Implement the specialized node and change `_association_expr(...)` to return it.
+Implement the specialized node as a `Call` subclass and change `_association_expr(...)` to return it.
 
 Required helper changes:
 
@@ -284,6 +332,8 @@ Required helper changes:
 - `_association_values(expr)` reads entries directly.
 - `_association_from_arguments(...)` uses `AssociationBuilder`.
 - `to_full_form`, `to_input_form`, `to_dict`, and `args` remain public-shape compatible.
+- `AssociationExpr` equality and hash are implemented explicitly so they match the visible
+  `Call[Association, ...]` shape, not the cache fields or Python subclass identity.
 
 Expected files touched: `expression.py`, possibly one extracted association helper module, plus
 tests.
@@ -330,6 +380,8 @@ guardrails:
   `Lookup[assoc, key]` does not re-validate every rule once the value is an `AssociationExpr`;
 - use a custom `Expr` key type with counted `__hash__` and `__eq__` calls to detect `R * n`
   comparison growth on `R` repeated independent lookups;
+- monkeypatch `_rule_entry` in scalar-path tests, because the old implementation revalidates every
+  visible rule during lookup;
 - add a microbenchmark script under `src/Tungsten/scripts/` that reports slopes for association
   sizes such as 10, 100, 1000, and 10000 entries without becoming a correctness gate.
 
@@ -381,29 +433,38 @@ The implementation must preserve these observable behaviors:
 
 | Risk | Mitigation |
 |---|---|
-| Structural equality changes for association keys | Keep equality/hash based on visible Wolfram full form. Add tests where associations, calls, strings, symbols, and nested expressions are keys. |
-| Existing code checks `isinstance(expr, Call)` before `has_head("Association")` | Either subclass `Call` or audit and route all association-aware logic through `_association_entries` / `_is_association`. |
+| Stage A is mistaken for full update parity | State explicitly that Stage A fixes retained-key-index lookup paths only. Keep update-heavy cases in a Stage B decision gate. |
+| Structural equality changes for association keys | Implement `AssociationExpr` as a `Call`-compatible value whose equality and hash compare only visible `head_expr` / `arguments`, including equality against raw `Call[Association, ...]` when shapes match. Add tests where associations, calls, strings, symbols, and nested expressions are keys. |
+| Existing code checks `isinstance(expr, Call)` before `has_head("Association")` | Subclass `Call` in Stage A. Separately audit `_association_entries`, `_is_association`, direct `.arguments`, and direct `.head_expr` call sites before considering a non-`Call` node. |
 | Private index accidentally appears as a child during traversal or pattern matching | Store it outside `args()` and exclude it from `to_dict()`, `to_full_form()`, `Position`, and pattern traversal. |
-| Dependency compatibility drifts across Python versions | Hide dependency API behind `persistent_maps`; add an import smoke test; prefer `rpds-py` for current Python-version coverage. |
+| Persistent map iteration order leaks into Wolfram-visible order | Store order only in `entries`; never render, traverse, or export by iterating `key_index`. Add a test with keys whose map iteration order differs from insertion order if the library exposes that behavior. |
+| Dependency compatibility drifts across Python versions | Hide dependency API behind `persistent_maps`; add an import/API smoke test for `rpds-py`; keep `immutables` dev-only unless its build and wheel story is acceptable. |
 | Memory increases because entries and index are both retained | This is the cost of asymptotic parity. For small associations, a threshold can keep a compact tuple-only representation if measurements justify it. |
 | `RuleDelayed` entries have evaluation subtleties | Preserve the current structural handling. The representation stores rule head plus key and value; it does not invent delayed evaluation. |
 | Bulk construction becomes slower due persistent map churn | Use `AssociationBuilder` with mutable `dict` positions and freeze the persistent map once. |
+| Duplicate-key order semantics regress | Encode separate builder methods for constructor mode, append mode, and prepend mode. Preserve the existing live-kernel-calibrated tests for `Association`, `Join`, `Append`, and `Prepend`. |
+| Association-as-function lookup is missed | Include the `expression_evaluator.py` association-head path in the scalar-key rewiring step and add tests for `assoc[key]`. |
+| Raw held `Association[...]` syntax becomes invalid | Keep `_association_entries` able to parse plain `Call[Association, Rule[...], ...]` values, and normalize only at evaluator construction boundaries. |
+| Hash cost dominates for large structural keys | Treat `h(key)` as part of the documented complexity. Add counted-hash/equality tests to detect entry scans separately from unavoidable key hashing. |
+| Informational microbenchmarks become brittle gates | Keep wall-clock scripts outside the required unit suite. Gate only on operation-count or revalidation-count tests. |
 
 ## Acceptance Criteria
 
 The proposal is implemented when all of these are true:
 
-1. Valid evaluated associations are represented by `AssociationExpr` or an equivalent specialized
-   node with retained ordered entries and retained key index.
+1. Valid evaluated associations are represented by a `Call`-compatible `AssociationExpr` or an
+   equivalent specialized node with retained ordered entries and retained key index.
 2. `Lookup[assoc, key]`, `KeyExistsQ`, `KeyMemberQ`, and `Part[assoc, Key[key]]` do not scan all
    entries for an already-normalized association.
 3. `AssociationQ`, `First`, and `Last` on a valid association are constant-time with respect to the
    number of entries.
-4. Bulk association construction and joining remain linear in total input size.
-5. Existing association behavior tests continue to pass.
-6. New complexity guardrails would fail against the current list-of-rules implementation.
-7. The dependency decision is recorded in docs and locked in `uv.lock`.
-8. The implementation remains kernel-free and preserves public `FullForm`, `InputForm`, `Normal`,
+4. Stage A documents and preserves `O(n)` ordered-entry copying for `Append`, `Prepend`, and
+   key-based replacement until a persistent ordered-entry vector is deliberately added.
+5. Bulk association construction and joining remain linear in total input size.
+6. Existing association behavior tests continue to pass.
+7. New complexity guardrails would fail against the current list-of-rules implementation.
+8. The dependency decision is recorded in docs and locked in `uv.lock`.
+9. The implementation remains kernel-free and preserves public `FullForm`, `InputForm`, `Normal`,
    and CLI JSON behavior.
 
 ## Recommended First Commit Shape
