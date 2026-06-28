@@ -4,12 +4,14 @@
 - Audience: Tungsten maintainers and contributors working on the kernel-free expression evaluator
 - Scope: List and Association representation and asymptotic operation costs in Wolfram Language and Tungsten
 - Created (UTC): 2026-06-28T22:46:59Z
-- Repository HEAD: 732d7f348d53adf5badfb9e1ff30a89e572665be
+- Updated (UTC): 2026-06-28T23:05:51Z
+- Repository HEAD: 4e90e28ac58e85acffe1076eba23fd6475b560f2
 - Related code:
   - [`expression.py`](../src/tungsten/expression.py)
 - Related docs:
   - [`association-support-plan.md`](./association-support-plan.md)
   - [`expression-function-support.md`](./expression-function-support.md)
+  - [`list-association-parity-proposal.md`](./list-association-parity-proposal.md)
 - External references:
   - [Wolfram Language: Some Notes on Internal Implementation](https://reference.wolfram.com/language/tutorial/SomeNotesOnInternalImplementation.html)
   - [Wolfram Language: Association](https://reference.wolfram.com/language/ref/Association.html)
@@ -242,6 +244,12 @@ implementation directions include:
 The first option is the cleanest long-term shape if Tungsten's association-heavy workloads grow:
 preserve the Wolfram syntax contract at the boundary while giving the evaluator a representation
 closer to Wolfram's own association model.
+
+The concrete implementation proposal is now recorded in
+[`list-association-parity-proposal.md`](./list-association-parity-proposal.md). It recommends a
+specialized association node with ordered entries, a retained persistent key index, a transient
+bulk-builder path, and complexity guardrails that would fail against the current list-of-rules
+implementation.
 
 ## Summary
 

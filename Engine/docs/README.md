@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-06-28T22:50:55Z
-- Repository HEAD: 732d7f348d53adf5badfb9e1ff30a89e572665be
+- Updated (UTC): 2026-06-28T23:05:51Z
+- Repository HEAD: 4e90e28ac58e85acffe1076eba23fd6475b560f2
 
 ## What this docs tree is for
 
@@ -70,15 +70,16 @@ The docs are split so readers can choose the right depth:
 9. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
 10. [expression-function-support.md](./expression-function-support.md)
 11. [list-association-complexity.md](./list-association-complexity.md)
-12. [numeric-simplification.md](./numeric-simplification.md)
-13. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
-14. [pattern-matching-plan.md](./pattern-matching-plan.md)
-15. [parser-corpus.md](./parser-corpus.md)
-16. [inline-box-strings.md](./inline-box-strings.md)
-17. [notebook-assistant.md](./notebook-assistant.md)
-18. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+12. [list-association-parity-proposal.md](./list-association-parity-proposal.md)
+13. [numeric-simplification.md](./numeric-simplification.md)
+14. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
+15. [pattern-matching-plan.md](./pattern-matching-plan.md)
+16. [parser-corpus.md](./parser-corpus.md)
+17. [inline-box-strings.md](./inline-box-strings.md)
+18. [notebook-assistant.md](./notebook-assistant.md)
+19. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
     if you are planning a GUI notebook FrontEnd or StandardForm renderer
-19. [troubleshooting.md](./troubleshooting.md)
+20. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -107,6 +108,7 @@ The docs are split so readers can choose the right depth:
 | [named-pure-functions-spec.md](named-pure-functions-spec.md) | Detailed specification for named-parameter pure functions and Tungsten's capture-avoiding renaming rules. |
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
 | [list-association-complexity.md](list-association-complexity.md) | Maintainer note comparing the theoretical complexity of common Wolfram `List` and `Association` operations with Tungsten's Python expression representation. |
+| [list-association-parity-proposal.md](list-association-parity-proposal.md) | Proposal for closing the `Association` asymptotic gap with a retained persistent key index, bulk builders, dependency choices, and validation guardrails. |
 | [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
 | [parser-corpus.md](parser-corpus.md) | Parser corpus discovery, Wolfram held-parser comparison, outputs, and test-entrypoint reference. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
@@ -175,6 +177,9 @@ The docs are split so readers can choose the right depth:
 - Read [list-association-complexity.md](./list-association-complexity.md) when you need the
   asymptotic cost model for Wolfram-style lists and associations versus Tungsten's current Python
   representation.
+- Read [list-association-parity-proposal.md](./list-association-parity-proposal.md) when planning
+  changes that close the retained-key-index and association-builder gaps identified by the
+  complexity note.
 - Read [pattern-matching-plan.md](./pattern-matching-plan.md) if you need the design boundaries and validation strategy for the new pattern subset.
 - Use [usage-reference.md](./usage-reference.md) for `expr parse` and `expr evaluate`.
 - Use [parser-corpus.md](./parser-corpus.md) when measuring parser acceptance against the local
