@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `src/Tungsten`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-29T00:49:16Z
-- Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
+- Updated (UTC): 2026-06-28T22:50:55Z
+- Repository HEAD: 732d7f348d53adf5badfb9e1ff30a89e572665be
 
 ## What this docs tree is for
 
@@ -69,15 +69,16 @@ The docs are split so readers can choose the right depth:
 8. [import-export-formats.md](./import-export-formats.md)
 9. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
 10. [expression-function-support.md](./expression-function-support.md)
-11. [numeric-simplification.md](./numeric-simplification.md)
-12. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
-13. [pattern-matching-plan.md](./pattern-matching-plan.md)
-14. [parser-corpus.md](./parser-corpus.md)
-15. [inline-box-strings.md](./inline-box-strings.md)
-16. [notebook-assistant.md](./notebook-assistant.md)
-17. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+11. [list-association-complexity.md](./list-association-complexity.md)
+12. [numeric-simplification.md](./numeric-simplification.md)
+13. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
+14. [pattern-matching-plan.md](./pattern-matching-plan.md)
+15. [parser-corpus.md](./parser-corpus.md)
+16. [inline-box-strings.md](./inline-box-strings.md)
+17. [notebook-assistant.md](./notebook-assistant.md)
+18. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
     if you are planning a GUI notebook FrontEnd or StandardForm renderer
-18. [troubleshooting.md](./troubleshooting.md)
+19. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -105,6 +106,7 @@ The docs are split so readers can choose the right depth:
 | [import-export-formats.md](import-export-formats.md) | Focused guide for kernel-free `ImportString` / `ExportString` / `ImportByteArray` / `ExportByteArray` support and the implemented format subset. |
 | [named-pure-functions-spec.md](named-pure-functions-spec.md) | Detailed specification for named-parameter pure functions and Tungsten's capture-avoiding renaming rules. |
 | [expression-function-support.md](expression-function-support.md) | Support matrix for the structural Wolfram functions that Tungsten currently implements offline. |
+| [list-association-complexity.md](list-association-complexity.md) | Maintainer note comparing the theoretical complexity of common Wolfram `List` and `Association` operations with Tungsten's Python expression representation. |
 | [pattern-matching-plan.md](pattern-matching-plan.md) | Design and rollout plan for Tungsten's first kernel-free Wolfram pattern-matching subset. |
 | [parser-corpus.md](parser-corpus.md) | Parser corpus discovery, Wolfram held-parser comparison, outputs, and test-entrypoint reference. |
 | [troubleshooting.md](troubleshooting.md) | Diagnostics, failure modes, and troubleshooting guidance for installation, licensing, FrontEnd, and assistant workflows. |
@@ -170,6 +172,9 @@ The docs are split so readers can choose the right depth:
 - Read [named-pure-functions-spec.md](./named-pure-functions-spec.md) if you need the exact
   capture-avoiding renaming rule for named pure functions.
 - Read [expression-function-support.md](./expression-function-support.md) for the exact built-in coverage and official Wolfram reference links.
+- Read [list-association-complexity.md](./list-association-complexity.md) when you need the
+  asymptotic cost model for Wolfram-style lists and associations versus Tungsten's current Python
+  representation.
 - Read [pattern-matching-plan.md](./pattern-matching-plan.md) if you need the design boundaries and validation strategy for the new pattern subset.
 - Use [usage-reference.md](./usage-reference.md) for `expr parse` and `expr evaluate`.
 - Use [parser-corpus.md](./parser-corpus.md) when measuring parser acceptance against the local
