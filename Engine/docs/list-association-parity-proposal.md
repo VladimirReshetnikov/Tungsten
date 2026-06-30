@@ -355,27 +355,39 @@ new tuple of entries (and a new index).
 
 ### Stage B: persistent vector for ordered entries
 
-If update-heavy association workloads are important, add a persistent ordered-entry vector behind the
-same `AssociationExpr` API, and at that point move the key index from a plain `dict` to a persistent
-map (via the `tungsten.persistent_maps` adapter) so it can structurally share across updates.
+Stage B is **measurement-gated** (Step 6), and the honest default is that it may never be needed. If
+it is, the plan is *not* "pick a library", because no maintained package with `cp313` wheels provides
+the structure Stage B wants. The findings, verified on the 3.13 Windows runtime:
 
-Candidate sources, with the caveats verified on Tungsten's 3.13 Windows runtime:
+- `rpds-py` — the already-chosen map dependency — exposes only `HashTrieMap`, `HashTrieSet`, `List`,
+  `Queue`, and `Stack`. There is **no random-access persistent `Vector`** (the Rust `rpds` crate has
+  one; the Python binding does not surface it). `rpds.List` is a linked list
+  (`first`/`rest`/`push_front`/`drop_first`), not random access.
+- `pyrsistent.PVector` would fit, but ships no `cp313` wheel, so it falls back to pure Python on this
+  runtime (`pvectorc` absent) and loses its advertised profile. Its silent C-extension degradation
+  also runs against the repo preference for explicit, non-opaque dependency behavior, so it should not
+  be a runtime dependency — at most a benchmark oracle on machines where its C extension is present.
 
-- `pyrsistent.PVector` gives `log32(n)` random access and amortized `O(1)` append — **but only when
-  its `pvectorc` C extension is present.** `pyrsistent 0.20.0` ships no `cp313` `win_amd64` wheel, so
-  it builds from sdist on this runtime and `pvectorc` is unavailable (`import pvectorc` →
-  `ModuleNotFoundError`); `PVector` then falls back to pure Python and does not deliver that profile.
-  Treat it as performance-unverified until a C-extension build is pinned.
-- `rpds.List` is **not** a candidate for this slot despite `rpds-py` being the recommended map
-  dependency: its API is linked-list-shaped (`first`/`rest`/`push_front`/`drop_first`), not random
-  access.
+A persistent ordered-entry vector therefore means a **small homegrown 32-way bitmapped vector trie**
+(the structure `pyrsistent.PVector` itself implements — ~150–250 LOC, pure-Python, no dependency),
+with the key index moved from the Stage A plain `dict` to `rpds.HashTrieMap` via the `persistent_maps`
+adapter so it too shares structure across updates. Correctness is testable against `pyrsistent` where
+its C extension is available.
 
-Given the `pyrsistent` gap, a small internal 32-way persistent vector may in fact be the most reliable
-Stage B choice on this runtime. Whichever is chosen, it should be introduced only after Stage A, with
-focused tests showing which operations still miss the parity target — and with the
-`Append`-of-existing-key case understood as inherently order-maintaining (it removes a key from an
-interior slot and re-adds it at the end), which a persistent vector does not make sub-linear on its
-own.
+Even this only fixes *half* the update surface, and the split is fundamental, not a library
+limitation:
+
+- **Sub-linear with a bitmapped vector trie:** `Append` of a *new* key (push-at-tail), value
+  replacement / `ReplacePart` (set-at-index), and random `assoc[[i]]` — all `O(log32 n)`.
+- **Stays `O(n)`:** the *order-rearranging* operations — `Append` of an *existing* key (Wolfram moves
+  it to the end), `Prepend`, and `KeyDrop` — because they delete from an interior position, which a
+  bitmapped vector trie cannot do sub-linearly. Making those `O(log n)` needs an RRB-tree or finger
+  tree with `O(log n)` split/concat, for which there is no maintained Python library and whose
+  pure-Python constants would likely eat the asymptotic win. Do not build one without a specific
+  workload that demands it.
+
+Whichever path is taken, introduce it only after Stage A, with focused tests showing which operations
+still miss the parity target.
 
 ## List Strategy
 
@@ -509,12 +521,14 @@ After Stage A lands, evaluate these update-heavy cases:
 - `Fold[Append, <||>, rules]` if the evaluator supports the relevant fold shape;
 - association-producing loops in existing Tungsten tests or scripts.
 
-If these remain materially worse in the operation-count guardrails, prototype persistent ordered
-entries. Mind the `pyrsistent.PVector` caveat from *Stage B* above — on this 3.13 runtime it has no
-`cp313` wheel and falls back to a pure-Python `PVector` without the `pvectorc` accelerator — so the
-prototype should either pin a verified C-extension build or go straight to a small homegrown 32-way
-persistent vector. If neither is justified by the measured workload, keep the tuple representation and
-record why Stage B is deferred.
+If these remain materially worse in the operation-count guardrails, prototype the homegrown persistent
+vector described in *Stage B*. The likely outcome, though, is that Stage B is **not** needed: bulk
+construction already goes through `AssociationBuilder` in `O(N)`, and tight functional mutation loops
+(`Fold[Append, <||>, …]`) are both uncommon and against the grain of how associations are used —
+Wolfram's own hot-mutation idiom is `AssociateTo`, an explicit non-goal here. "Stage B is unnecessary"
+is a legitimate, documented result; record the measurements either way. If a homegrown vector is
+built, remember it makes only the *new-key append / value-replace / random-index* cases sub-linear;
+the order-rearranging cases (`Append` of an existing key, `Prepend`, `KeyDrop`) stay `O(n)`.
 
 ### Step 7. Document the final current state
 

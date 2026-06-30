@@ -204,10 +204,14 @@ front.)
 
 ## Open questions deferred to implementation
 
-- **Stage B ordered-entry storage** is genuinely unsettled given item 3: `pyrsistent.PVector` is
-  pure-Python on this runtime, so the homegrown 32-way persistent vector may end up the only option
-  that actually delivers sub-linear updates. This should be decided with measurements *after* Stage A,
-  exactly as the proposal's Step 6 gate intends.
+- **Stage B ordered-entry storage** has no library answer, and this is now settled: `rpds-py` exposes
+  no random-access `Vector` (only `HashTrieMap`/`HashTrieSet`/`List`/`Queue`/`Stack`), and
+  `pyrsistent.PVector` is pure-Python on this runtime, so a small homegrown 32-way bitmapped vector
+  trie is the only viable ordered store. It makes only the new-key-`Append` / value-replace /
+  random-index cases sub-linear; the order-rearranging cases (existing-key `Append`, `Prepend`,
+  `KeyDrop`) stay `O(n)` short of a finger tree that no one should write speculatively. The whole
+  thing is measurement-gated (Step 6) and may simply never be built, since bulk construction is
+  already `O(N)` via the builder.
 - **Append under a persistent vector** splits cleanly, and the proposal's two Append rows are already
   honest about it: appending a *new* key (the `Append[assoc, newKey -> v]` row) is a pure
   push-at-end, legitimately `O(log n)` on a persistent vector once the absence check goes through the
