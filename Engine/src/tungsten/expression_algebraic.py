@@ -1298,6 +1298,8 @@ def _to_sympy_algebraic(expr: Expr) -> Any:
             return _sp.Mul(*(_to_sympy_algebraic(argument) for argument in expr.arguments))
         if expr.has_head("Power") and len(expr.arguments) == 2:
             return _sp.Pow(_to_sympy_algebraic(expr.arguments[0]), _to_sympy_algebraic(expr.arguments[1]))
+        if expr.has_head("Sqrt") and len(expr.arguments) == 1:
+            return _sp.sqrt(_to_sympy_algebraic(expr.arguments[0]))
         if expr.has_head("Conjugate") and len(expr.arguments) == 1:
             return _to_sympy_conjugate(expr.arguments[0])
         if expr.has_head("Re") and len(expr.arguments) == 1:
@@ -1397,6 +1399,8 @@ def _to_sympy_conjugate(expr: Expr) -> Any:
             exponent = _to_sympy_algebraic(expr.arguments[1])
             if exponent.is_Rational:
                 return _sp.Pow(_to_sympy_conjugate(expr.arguments[0]), exponent)
+        if expr.has_head("Sqrt") and len(expr.arguments) == 1:
+            return _sp.sqrt(_to_sympy_conjugate(expr.arguments[0]))
     raise _AlgebraicConversionError(expr.to_full_form())
 
 
