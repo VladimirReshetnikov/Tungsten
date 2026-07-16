@@ -4,7 +4,7 @@ Created (UTC): 2026-04-28
 
 ## Scope and Method
 
-This report compares the three repository-owned implementations under `src/Tungsten/Nummy/src/`:
+This report compares the three repository-owned implementations under `Engine/Nummy/src/`:
 
 - `alpha`
 - `beta`
@@ -12,8 +12,8 @@ This report compares the three repository-owned implementations under `src/Tungs
 
 and maps them against:
 
-- prior-art implementations under `src/Tungsten/Nummy/prior-art/`
-- theory corpus under `src/Tungsten/Nummy/docs/theory/`
+- prior-art implementations under `Engine/Nummy/prior-art/`
+- theory corpus under `Engine/Nummy/docs/theory/`
 
 Primary source inputs for this report were the implementation-level design/README docs, the existing implementation comparison, and the prior-art/theory landing pages.
 
@@ -21,7 +21,7 @@ Primary source inputs for this report were the implementation-level design/READM
 
 ## 1) High-level Positioning of the Three Implementations
 
-### Alpha (`src/Tungsten/Nummy/src/alpha`)
+### Alpha (`Engine/Nummy/src/alpha`)
 
 Alpha is the most **calculator-product-facing** implementation today. It combines structural tower arithmetic, exact rational handling in layer-0 arithmetic, conservative precision labeling, and a perturbation path that can recover the MathOverflow tail directly from normal expression syntax.
 
@@ -32,7 +32,7 @@ Key characteristics:
 - Explicit “certified vs structural approximation” display semantics.
 - Built to avoid overclaiming decimal correctness for non-certified tower regimes.
 
-### Beta (`src/Tungsten/Nummy/src/beta`)
+### Beta (`Engine/Nummy/src/beta`)
 
 Beta is the strongest **asymptotic-analysis engine** of the three. It builds a more formalized perturbation pipeline using `mpmath`, with richer tests and `LeadingDigits[k, n]` as an explicit first-class operation.
 
@@ -43,7 +43,7 @@ Key characteristics:
 - Most explicit implementation of “compute huge dominant term + finite correction” via dedicated built-ins.
 - Less direct than alpha/gamma for the specific “type only the ordinary expression and get the tail” calculator behavior.
 
-### Gamma (`src/Tungsten/Nummy/src/gamma`)
+### Gamma (`Engine/Nummy/src/gamma`)
 
 Gamma is the most **minimal and inspectable acceptance prototype**. It has a compact structural model (`Pow10Tower`) plus a near-landmark tail representation that directly demonstrates the MathOverflow behavior in a small codebase.
 

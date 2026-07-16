@@ -18,7 +18,7 @@ REPL / calculator:
         access to the limited expression-language calculator.
     run_repl                -- launch the interactive ``In[n]:=`` prompt.
 
-See ``src/Tungsten/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md``
+See ``Engine/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md``
 for the current cross-prototype design summary.
 """
 

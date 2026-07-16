@@ -5,7 +5,7 @@ Created (UTC): 2026-04-28T00:44:03Z
 Repository HEAD: 2689dffeee9f9c16d9e3cbe4bfd55ef011ecdf82
 
 This document maps the prior-art reference projects under
-[`src/Tungsten/Nummy/prior-art/`](../../prior-art/) into a single design picture. The
+[`Engine/Nummy/prior-art/`](../../prior-art/) into a single design picture. The
 short version is that the corpus contains two related but distinct lineages:
 
 - Practical power-tower and hyperoperation number libraries, mostly from

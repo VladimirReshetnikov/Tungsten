@@ -368,7 +368,7 @@ function New-CorpusReadme([string] $ManifestPath, [string] $OutDirPath, [pscusto
     $lines.Add('Refresh command:') | Out-Null
     $lines.Add('') | Out-Null
     $lines.Add('```powershell') | Out-Null
-    $lines.Add('pwsh -File C:\Tools3\Tools\src\Tungsten\scripts\Acquire-TungstenWolframUpstreamTests.ps1 -Force') | Out-Null
+    $lines.Add('pwsh -File C:\Tungsten\Engine\scripts\Acquire-TungstenWolframUpstreamTests.ps1 -Force') | Out-Null
     $lines.Add('```') | Out-Null
     $lines.Add('') | Out-Null
     $lines.Add('Notes:') | Out-Null

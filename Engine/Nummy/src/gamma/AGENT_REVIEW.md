@@ -1,4 +1,4 @@
-# Agent Review: `src/Tungsten/Nummy/src/gamma`
+# Agent Review: `Engine/Nummy/src/gamma`
 
 Created (UTC): 2026-04-28T21:25:00Z
 
@@ -22,7 +22,7 @@ MathOverflow example.
   - `tests/`: `unittest` coverage for the above.
 - `gamma_repl.py`
   - A small calculator REPL with `In[n]:=` / `Out[n]=` prompts and `%`/`%%`/`%n` history,
-    inspired by `src/Tungsten`’s `tungsten.exe` interface.
+    inspired by `Engine`’s `tungsten.exe` interface.
 
 ## Observations
 

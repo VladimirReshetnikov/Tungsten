@@ -185,7 +185,7 @@ approaches is summarized in
 ## Layout
 
 ```
-src/Tungsten/Nummy/src/beta/
+Engine/Nummy/src/beta/
 |-- README.md                  -- this file
 |-- pyproject.toml             -- minimal package metadata
 |-- nummy/
@@ -215,7 +215,7 @@ src/Tungsten/Nummy/src/beta/
 
 ## Running
 
-The package depends only on `mpmath`. From `src/Tungsten/Nummy/src/beta/`:
+The package depends only on `mpmath`. From `Engine/Nummy/src/beta/`:
 
 ```bash
 # Interactive REPL:

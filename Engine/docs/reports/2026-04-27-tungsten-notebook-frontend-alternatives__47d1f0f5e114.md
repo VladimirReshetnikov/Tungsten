@@ -2,7 +2,7 @@
 
 - Status: Recommendation report
 - Audience: Tungsten maintainers and implementers
-- Scope: `src/Tungsten` notebook GUI, StandardForm rendering subset, and simple `.nb` editing
+- Scope: `Engine` notebook GUI, StandardForm rendering subset, and simple `.nb` editing
 - Created (UTC): 2026-04-27T17:06:48Z
 - Repository HEAD: 72450c52ff291b2be07d3eee3ec5b61a1d9ffc64
 
@@ -72,8 +72,8 @@ The current codebase gives a future GUI several unusually useful foundations:
   such as `BoxData`, `FormBox`, `StyleBox`, `TagBox`, `TooltipBox`, and `InterpretationBox`, and
   reconstruction of common `RowBox` shapes.
 - `TeXForm` and `MathMLForm` output exist today for a generated subset.
-- `src/Tungsten/dotnet/Tungsten.DotNet` already contains a typed .NET client over the JSON CLI.
-- `src/Tungsten/dotnet/Tungsten.Console` already provides the `tungsten.exe` launcher.
+- `Engine/dotnet/Tungsten.DotNet` already contains a typed .NET client over the JSON CLI.
+- `Engine/dotnet/Tungsten.Console` already provides the `tungsten.exe` launcher.
 
 The important gaps are:
 

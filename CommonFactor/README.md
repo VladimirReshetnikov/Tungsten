@@ -2,7 +2,7 @@
 
 - Status: Wolfram Language package and smoke suite
 - Audience: Vladimir and future agents investigating finite exact sequences
-- Scope: `src/CommonFactor`
+- Scope: `CommonFactor`
 - Created (UTC): 2026-06-26T15:37:34Z
 - Repository HEAD: 99d9ca081c8c148d90a9f6c438f34d4b0ee8489a
 - Related source: [Mathematica StackExchange question 261053](https://mathematica.stackexchange.com/questions/261053/largest-symbolic-common-factor-of-an-integer-sequence-not-simply-gcd)
@@ -143,11 +143,11 @@ with quotient `b`.
 Run the smoke suite with the paid Wolfram 15 kernel:
 
 ```powershell
-& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/CommonFactor/tests/smoke.wl
+& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script CommonFactor/tests/smoke.wl
 ```
 
 The demo script prints the motivating decomposition:
 
 ```powershell
-& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/CommonFactor/Demo.wl
+& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script CommonFactor/Demo.wl
 ```

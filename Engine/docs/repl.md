@@ -2,7 +2,7 @@
 
 - Status: Informational and reference-oriented (console-mode kernel-free interpreter)
 - Audience: Tungsten users, script authors, maintainers, and testers comparing Tungsten with `wolfram.exe`
-- Scope: `src/Tungsten/src/tungsten/repl.py`, `src/Tungsten/src/tungsten/expression.py`, and the `tungsten` console entry point
+- Scope: `Engine/src/tungsten/repl.py`, `Engine/src/tungsten/expression.py`, and the `tungsten` console entry point
 - Created (UTC): 2026-04-25T21:57:56Z
 - Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Related docs:
@@ -27,7 +27,7 @@ that want Wolfram-like interaction without consuming a kernel license seat.
 From a source checkout:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 python -m tungsten repl
 ```
 
@@ -37,7 +37,7 @@ After installing Tungsten as an editable or packaged Python project, the `pyproj
 `project.scripts` entry point creates a Windows console launcher named `tungsten.exe`:
 
 ```powershell
-python -m pip install -e .\src\Tungsten
+python -m pip install -e .\Engine
 tungsten.exe
 ```
 
@@ -47,8 +47,8 @@ and delegates to `python -m tungsten` with the source tree added to `PYTHONPATH`
 the checkout:
 
 ```powershell
-dotnet build .\src\Tungsten\dotnet\Tungsten.DotNet.slnx
-.\src\Tungsten\dotnet\Tungsten.Console\bin\Debug\net10.0\tungsten.exe
+dotnet build .\Engine\dotnet\Tungsten.DotNet.slnx
+.\Engine\dotnet\Tungsten.Console\bin\Debug\net10.0\tungsten.exe
 ```
 
 The launcher keeps the existing JSON-first CLI surface intact. Supplying subcommands such as

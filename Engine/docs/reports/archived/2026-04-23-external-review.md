@@ -2,9 +2,9 @@
 
 - Status: **Archived — no longer current.** This was a broad external-consultant pass at HEAD `d21a3a9c…`. Findings F-1 (kernel `result_head` HoldAll bug) through F-15 (observability hooks) have been addressed or explicitly accepted in the time since; the `expr` CLI now returns structured JSON on parse/eval errors, docs-root sprawl is filtered, the Wolfram helper prelude has been deduplicated, etc. For the *current* function-surface gap inventory see `../2026-04-27-tungsten-gap-and-shape-review.md`. **Do not treat this document as current state.**
 
-  Original status line: Report (external-consultant review of `src/Tungsten` as of the date below).
+  Original status line: Report (external-consultant review of `Engine` as of the date below).
 - Audience: Vladimir Reshetnikov (project owner), Tungsten maintainers, future reviewers
-- Scope: `src/Tungsten` — Python package, PowerShell module, typed .NET client, tests, docs, and scripts
+- Scope: `Engine` — Python package, PowerShell module, typed .NET client, tests, docs, and scripts
 - Created (UTC): 2026-04-23T19:56:30Z
 - Repository HEAD: d21a3a9c626457e9fe8eb91e7a3cfec73cd7b432
 - Reviewer context: Simulated external consultant-contractor. Hands-on validation was performed against the actual local Wolfram 14.3 installation on this machine.
@@ -270,7 +270,7 @@ user base.
 - **Hardcoded absolute example paths (`C:\Tools1\Tools\...`) in `dotnet-api.md` and
   `expression-parser.md`.** These happen to match the real checkout location on this
   machine, so they aren't *wrong* — but per repo policy, doc examples should use
-  repo-root-relative paths (e.g., `.\src\Tungsten\src`), which README and user-guide
+  repo-root-relative paths (e.g., `.\Engine\src`), which README and user-guide
   already follow. Absolute paths to the Wolfram installation itself are fine since the
   installation is external to the repo; the policy only applies to *in-repo* references.
 - **`docs/README.md` lists `implementation-details.md` in "Documents in this folder" but
@@ -444,7 +444,7 @@ for library callers that's fine, but the CLI is free to catch and reformat.
 **Observed.** `Repository HEAD:` differs across docs (three different SHA prefixes seen at the
 time of this review). Separately, `dotnet-api.md` and `expression-parser.md` use hardcoded
 absolute example paths (`C:\Tools1\Tools\...`). Those paths happen to be correct for the
-current machine, but the README and user-guide use repo-root-relative paths (`.\src\Tungsten\src`),
+current machine, but the README and user-guide use repo-root-relative paths (`.\Engine\src`),
 and the repo convention is to keep in-repo references relative so examples work for anyone
 with a different checkout location. (Absolute paths to the *Wolfram installation* are
 external to the repo and are not subject to this policy.)
@@ -458,7 +458,7 @@ the repo to a different location has to mentally translate every path.
    `Repository HEAD:` and `Updated (UTC):` across all docs before commit. Run it as part of
    a pre-commit hook or, more pragmatically, from CI/`Test-TungstenSmoke.ps1`.
 2. Convert the hardcoded `C:\Tools1\Tools\...` prefixes in in-repo examples to relative
-   paths like `.\src\Tungsten\src` (or `<repository-root>\src\Tungsten\...` placeholders).
+   paths like `.\Engine\src` (or `<repository-root>\Engine\...` placeholders).
    README and user-guide already follow this convention; `dotnet-api.md` and
    `expression-parser.md` are the main stragglers. Leave absolute Wolfram-installation
    paths (`C:\Program Files\Wolfram Research\...`) as-is since they live outside the repo.

@@ -4,13 +4,13 @@
 
   Original status line: Report (adversarial parity addendum to `2026-04-24-parser-evaluator-kernel-parity.md`).
 - Audience: Vladimir Reshetnikov, Tungsten maintainers
-- Scope: `src/Tungsten/src/tungsten/expression.py`, documented support matrix
+- Scope: `Engine/src/tungsten/expression.py`, documented support matrix
 - Created (UTC): 2026-04-24T20:37:12Z
 - Repository HEAD: f72ac6c1d78d422b9f05559ee263786a244bb686
 - Companion artifacts:
   - Prior report (findings B1–B9): [`2026-04-24-parser-evaluator-kernel-parity.md`](./2026-04-24-parser-evaluator-kernel-parity.md)
   - Regression tests for all findings B1–B18:
-    [`tests/test_expression_kernel_parity.py`](../../tests/test_expression_kernel_parity.py)
+    [`tests/test_expression_kernel_parity.py`](../../../tests/test_expression_kernel_parity.py)
   - Evil harness (not committed): `C:\tmp\tungsten-diff\evil_harness.py` — 178 adversarial cases
 
 ## Executive summary
@@ -76,7 +76,7 @@ review simply isn't possible without it.
 
 - **Category**: parser bug
 - **Priority**: P1
-- **Source**: [`expression.py:6623`](../../src/tungsten/expression.py#L6623) (`_AT_BP = 40`)
+- **Source**: [`expression.py:6623`](../../../src/tungsten/expression.py#L6623) (`_AT_BP = 40`)
 - **Tests**: `AtPrefixPrecedenceTests.*_wolfram_target` (expected-failure)
 
 **Observed.**
@@ -107,7 +107,7 @@ change must preserve.
 - **Category**: parser bug (structural)
 - **Priority**: P1
 - **Source**: parser's span handling — the relevant region is reached from the Pratt loop
-  at [`expression.py:6860`](../../src/tungsten/expression.py#L6860). Internally `a ;; b ;; c`
+  at [`expression.py:6860`](../../../src/tungsten/expression.py#L6860). Internally `a ;; b ;; c`
   is produced as `Span[a, Span[b, c]]` rather than `Span[a, b, c]`.
 - **Tests**: `SpanParserTests.*_wolfram_target` (expected-failure)
 
@@ -138,7 +138,7 @@ two `;;` tokens at a time into `Span[a, b]` or `Span[a, b, c]`.
 
 - **Category**: evaluator bug (same shape as B5 / Dot)
 - **Priority**: P2
-- **Source**: [`expression.py:4501-4510`](../../src/tungsten/expression.py#L4501-L4510)
+- **Source**: [`expression.py:4501-4510`](../../../src/tungsten/expression.py#L4501-L4510)
 - **Tests**: `KeyMapEvaluationTests.*_wolfram_target` (expected-failure)
 
 **Observed.**
@@ -198,7 +198,7 @@ This also unlocks correct `#name` shorthand behavior end-to-end without any pars
 
 - **Category**: evaluator bug
 - **Priority**: P2
-- **Source**: [`expression.py:3671-3681`](../../src/tungsten/expression.py#L3671-L3681)
+- **Source**: [`expression.py:3671-3681`](../../../src/tungsten/expression.py#L3671-L3681)
 - **Tests**: `FixedPointMaxIterationsTests.*_wolfram_target` (expected-failure)
 
 **Observed.**

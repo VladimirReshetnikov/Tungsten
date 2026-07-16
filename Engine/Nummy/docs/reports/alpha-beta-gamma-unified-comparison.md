@@ -5,7 +5,7 @@ Created (UTC): 2026-04-28
 ## Scope
 
 This is the final unified comparison of the three Nummy implementation
-experiments under `src/Tungsten/Nummy/src/`:
+experiments under `Engine/Nummy/src/`:
 
 - `alpha/`
 - `beta/`

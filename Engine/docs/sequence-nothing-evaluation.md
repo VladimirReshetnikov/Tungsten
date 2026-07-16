@@ -2,7 +2,7 @@
 
 - Status: Normative specification for Tungsten's kernel-free evaluator
 - Audience: Tungsten maintainers and users who need precise offline evaluation behavior
-- Scope: `src/Tungsten/src/tungsten/expression.py`
+- Scope: `Engine/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T01:00:00Z
 - Updated (UTC): 2026-04-25T23:42:00Z
 - Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a

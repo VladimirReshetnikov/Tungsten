@@ -3,7 +3,7 @@
 Created (UTC): 2026-04-28
 
 This report reviews the three parallel Python implementations preserved under
-`src/Tungsten/Nummy/src/` after merging `nummy/alpha`, `nummy/beta`, and `nummy/gamma`
+`Engine/Nummy/src/` after merging `nummy/alpha`, `nummy/beta`, and `nummy/gamma`
 into `main`.
 
 The review scope is:
@@ -104,7 +104,7 @@ Validation results from the merged tree:
 
 ### Alpha
 
-From `src/Tungsten/Nummy/src/alpha`:
+From `Engine/Nummy/src/alpha`:
 
 ```powershell
 @'
@@ -134,7 +134,7 @@ expression and returns the exact sparse integer part.
 
 ### Beta
 
-From `src/Tungsten/Nummy/src/beta`, the normal expression:
+From `Engine/Nummy/src/beta`, the normal expression:
 
 ```powershell
 @'
@@ -167,7 +167,7 @@ behavior Vladimir explicitly asked for.
 
 ### Gamma
 
-From `src/Tungsten/Nummy/src/gamma`:
+From `Engine/Nummy/src/gamma`:
 
 ```powershell
 @'

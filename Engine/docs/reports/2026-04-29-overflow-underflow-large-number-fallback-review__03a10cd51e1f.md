@@ -1,7 +1,7 @@
 # Review: Overflow/Underflow Large-Number Fallback (Tungsten)
 
 - Status: Maintainer review of the design proposal
-- Reviewed proposal: `src/Tungsten/docs/overflow-underflow-large-number-fallback.md`
+- Reviewed proposal: `Engine/docs/overflow-underflow-large-number-fallback.md`
 - Reviewed history window: `370c28b9562eccbda96d2c6a25d6d64da10250d8` (inclusive) .. `de64e8978becc8d82170622d071d646ba5ae9f44` (HEAD)
 - Created (UTC): 2026-04-29T00:29:34Z
 - Repository HEAD: de64e8978becc8d82170622d071d646ba5ae9f44
@@ -27,18 +27,18 @@ I recommend accepting the design with a few targeted clarifications:
 This range is largely a documentation-and-analysis tranche:
 
 - Nummy: multiple alpha/beta/gamma comparison reports were generated, merged, then consolidated into
-  `src/Tungsten/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md` with antecedents archived under
-  `src/Tungsten/Nummy/docs/reports/archived/`.
+  `Engine/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md` with antecedents archived under
+  `Engine/Nummy/docs/reports/archived/`.
 - Tungsten: numeric docs were updated and a new proposal was added:
-  `src/Tungsten/docs/overflow-underflow-large-number-fallback.md`, plus a short
-  `src/Tungsten/src/tungsten/review-notes-2026-04-28.md` capturing implementation seams.
+  `Engine/docs/overflow-underflow-large-number-fallback.md`, plus a short
+  `Engine/src/tungsten/review-notes-2026-04-28.md` capturing implementation seams.
 
 ## What I Verified
 
 ### Tungsten numeric choke points
 
 I reviewed the concrete integration seams called out by the proposal in
-`src/Tungsten/src/tungsten/expression.py`:
+`Engine/src/tungsten/expression.py`:
 
 - `_machine_real` maps `inf` → `Overflow[]` and does not model underflow.
 - `_inexact_real_result` is the machine-real fold point for `Plus`/`Times` real arithmetic when
@@ -54,11 +54,11 @@ information loss happens *before* any Tungsten semantic layer can react.
 I ran the acceptance expression through all three prototypes and observed the same behavior
 summarized in the unified comparison:
 
-- `alpha` (from `src/Tungsten/Nummy/src/alpha`) accepts ordinary syntax and prints the landmark-plus-tail
+- `alpha` (from `Engine/Nummy/src/alpha`) accepts ordinary syntax and prints the landmark-plus-tail
   form with a precision mark; `Floor[...]` returns a sparse exact integer part.
-- `beta` (from `src/Tungsten/Nummy/src/beta`) preserves the scale structurally for ordinary syntax, but
+- `beta` (from `Engine/Nummy/src/beta`) preserves the scale structurally for ordinary syntax, but
   recovers the finite tail only through its dedicated `LeadingDigits[...]` builtin.
-- `gamma` (from `src/Tungsten/Nummy/src/gamma`) prints a compact `10^10^10 + ...` form from ordinary syntax,
+- `gamma` (from `Engine/Nummy/src/gamma`) prints a compact `10^10^10 + ...` form from ordinary syntax,
   but does not expose precision marks or a `Floor[...]` path.
 
 This matches the archived and unified reports and supports the proposal’s “harvest alpha discipline,
@@ -172,7 +172,7 @@ first introduced by the `de64e897...` commit.
 
 Recommendation:
 
-- Decide on a single rule and enforce it with `src/Tungsten/scripts/Update-TungstenDocsProvenance.ps1`.
+- Decide on a single rule and enforce it with `Engine/scripts/Update-TungstenDocsProvenance.ps1`.
   If the rule is “HEAD at doc creation time before commit”, this is fine; otherwise consider bumping
   the metadata once the docs are committed.
 
@@ -193,7 +193,7 @@ code and tests demonstrate today:
   though the evaluator is intentionally narrow.
 
 The Tungsten proposal draws the right conclusions from that analysis (reuse lessons, not code; add a
-certainty object; keep runtime independence from `src/Tungsten/Nummy/src/*`).
+certainty object; keep runtime independence from `Engine/Nummy/src/*`).
 
 ## Concrete Suggestions For The Tungsten Implementation
 

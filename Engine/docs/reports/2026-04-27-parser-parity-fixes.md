@@ -2,11 +2,11 @@
 
 - Status: Report (parser-only parity sweep against the local Wolfram 14.3 kernel, with seven follow-up parser fixes)
 - Audience: Vladimir Reshetnikov, Tungsten parser maintainers
-- Scope: `src/Tungsten/src/tungsten/expression_parser.py` plus regression tests
+- Scope: `Engine/src/tungsten/expression_parser.py` plus regression tests
 - Created (UTC): 2026-04-27T16:59:41Z
 - Repository HEAD: 175b26b178ab2da565608973d317a455292141e7
 - Related code:
-  - [src/Tungsten/src/tungsten/expression_parser.py](../../src/tungsten/expression_parser.py)
+  - [Engine/src/tungsten/expression_parser.py](../../src/tungsten/expression_parser.py)
   - [tests/test_expression_kernel_parity.py](../../tests/test_expression_kernel_parity.py)
 - Related docs:
   - [Expression Parser](../expression-parser.md)
@@ -244,7 +244,7 @@ optionally absorbs a `:` suffix. Low-impact: `x_?test:1` is uncommon in real sou
 ### G7. Recent-commit churn observations
 
 The Tungsten gap report at
-[2026-04-26-function-surface-gap-report.md](2026-04-26-function-surface-gap-report.md)
+[2026-04-26-function-surface-gap-report.md](archived/2026-04-26-function-surface-gap-report.md)
 states that buckets B (number theory) and D (Lists/arrays/tensors/structural) were
 implemented in follow-up commits. Recent `git log` shows seven commits in the past day
 landing related work:
@@ -264,7 +264,7 @@ evaluator work. I did not separately probe the new evaluator-side built-ins.
 ## Verification
 
 ```text
-$ cd src/Tungsten && PYTHONPATH=src python -m unittest discover -s tests -t .
+$ cd Engine && PYTHONPATH=src python -m unittest discover -s tests -t .
 Ran 702 tests in 47.463s
 OK (skipped=2, expected failures=2)
 ```
@@ -287,7 +287,7 @@ cosmetic divergences, and 1 leniency gap (`Plus??`). `probe5.py` (110 cases) rep
 
 ## Files changed
 
-- `src/Tungsten/src/tungsten/expression_parser.py`
+- `Engine/src/tungsten/expression_parser.py`
   - `_scan_percent_history`: returns `value=None` for bare ``%`` and only attaches
     trailing digits to a single ``%``.
   - `_negate_for_subtraction`: new helper, folds non-negative integer/real literals.
@@ -301,16 +301,16 @@ cosmetic divergences, and 1 leniency gap (`Plus??`). `probe5.py` (110 cases) rep
     `Optional` nesting.
   - ``@*`` / ``/*`` infix table entries now use `(BP, BP+1, head)` for left-associativity
     of mixed chains.
-- `src/Tungsten/src/tungsten/expression.py` — `_format_out` round-trips bare `Out[]` to
+- `Engine/src/tungsten/expression.py` — `_format_out` round-trips bare `Out[]` to
   `%`.
-- `src/Tungsten/tests/test_expression.py` — updated structural-operator-form test to
+- `Engine/tests/test_expression.py` — updated structural-operator-form test to
   expect `Out[]` and `% + %% + Out[12]`; updated polynomial-coefficient test to expect
   the folded `-2` literal.
-- `src/Tungsten/tests/test_expression_definitions.py` — updated `DownValues` rendering
+- `Engine/tests/test_expression_definitions.py` — updated `DownValues` rendering
   test to expect `Plus[x, -1]` rather than `Plus[x, Times[-1, 1]]`.
-- `src/Tungsten/tests/test_expression_kernel_parity.py` — added six new test classes:
+- `Engine/tests/test_expression_kernel_parity.py` — added six new test classes:
   `PercentOutputHistoryParserTests`, `BinaryMinusLiteralFoldingTests`,
   `UnderscoreDotPostfixRepeatedParserTests`, `FlatStructuralOperatorParserTests`,
   `PostfixFunctionPrecedenceTests`, `ColonChainAssociativityTests` (34 new tests total).
-- `src/Tungsten/docs/expression-parser.md` — updated the `%`/`%%`/`%n` line and added a
+- `Engine/docs/expression-parser.md` — updated the `%`/`%%`/`%n` line and added a
   `_...` / `x_...` line.

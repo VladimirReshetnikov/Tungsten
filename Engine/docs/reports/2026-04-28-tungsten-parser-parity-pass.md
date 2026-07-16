@@ -4,16 +4,16 @@
   with five follow-up parser fixes plus documentation gaps and non-parser issues
   flagged for the maintainer)
 - Audience: Vladimir Reshetnikov, Tungsten parser maintainers
-- Scope: `src/Tungsten/src/tungsten/expression_parser.py`,
-  `src/Tungsten/src/tungsten/named_characters.py`,
-  `src/Tungsten/src/tungsten/wolfram_strings.py` plus regression tests and
+- Scope: `Engine/src/tungsten/expression_parser.py`,
+  `Engine/src/tungsten/named_characters.py`,
+  `Engine/src/tungsten/wolfram_strings.py` plus regression tests and
   `expression-parser.md` documentation updates
 - Created (UTC): 2026-04-28T03:04:09Z
 - Repository HEAD: d7b15d267848a0ad22ccd1798e790bb27f621835
 - Related code:
-  - [src/Tungsten/src/tungsten/expression_parser.py](../../src/tungsten/expression_parser.py)
-  - [src/Tungsten/src/tungsten/named_characters.py](../../src/tungsten/named_characters.py)
-  - [src/Tungsten/src/tungsten/wolfram_strings.py](../../src/tungsten/wolfram_strings.py)
+  - [Engine/src/tungsten/expression_parser.py](../../src/tungsten/expression_parser.py)
+  - [Engine/src/tungsten/named_characters.py](../../src/tungsten/named_characters.py)
+  - [Engine/src/tungsten/wolfram_strings.py](../../src/tungsten/wolfram_strings.py)
   - [tests/test_expression_kernel_parity.py](../../tests/test_expression_kernel_parity.py)
 - Related docs:
   - [Expression Parser](../expression-parser.md)
@@ -189,7 +189,7 @@ as `Times[-1, Dot[a, b]]` instead of `Dot[Times[-1, a], b]`.
 
 ## Files changed
 
-- `src/Tungsten/src/tungsten/expression_parser.py`
+- `Engine/src/tungsten/expression_parser.py`
   - New `_GET_PUT_FILENAME_PUNCT`, `_is_get_put_filename_char`,
     `_scan_get_put_filename` for filename tokenization.
   - `_tokenize` calls `_scan_get_put_filename` after `<<`, `>>`, or `>>>`.
@@ -202,18 +202,18 @@ as `Times[-1, Dot[a, b]]` instead of `Dot[Times[-1, a], b]`.
     right-associativity; `/*` uses
     `(_COMPOSITION_BP, _COMPOSITION_BP, "RightComposition")` for asymmetric
     right-associativity.
-- `src/Tungsten/src/tungsten/named_characters.py`
+- `Engine/src/tungsten/named_characters.py`
   - `decode_named_character_escape` returns `None` instead of raising for
     unterminated `\[`. `decode_named_character_escape_strict` (identifier
     path) keeps the strict raise.
-- `src/Tungsten/tests/test_expression_kernel_parity.py`
+- `Engine/tests/test_expression_kernel_parity.py`
   - New regression suites: `GetPutFilenameTokenizationTests` (11 cases),
     `MapApplyAssociativityTests` (5 cases),
     `CompositionMixedAssociativityTests` (4 cases),
     `DotPrecedenceTests` (6 cases),
     `PrefixNotPrecedenceTests` (7 cases),
     `StringEscapeUnterminatedNamedCharTests` (3 cases).
-- `src/Tungsten/docs/expression-parser.md`
+- `Engine/docs/expression-parser.md`
   - Get / Put filename character class documented in the supported-syntax
     section.
   - New parse-stage normalization bullets for `/@` / `@@` right-assoc, mixed
@@ -401,7 +401,7 @@ text parser path. Out of scope for this report (and the `.nb` is malformed —
 ## Verification
 
 ```text
-$ cd src/Tungsten && PYTHONPATH=src python -m unittest discover -s tests -t .
+$ cd Engine && PYTHONPATH=src python -m unittest discover -s tests -t .
 Ran 866 tests in 62.449s
 OK (skipped=2, expected failures=2)
 ```

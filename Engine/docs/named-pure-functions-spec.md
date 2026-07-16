@@ -2,7 +2,7 @@
 
 - Status: Draft implementation specification for kernel-free pure-function scoping and attributes
 - Audience: Tungsten maintainers and contributors extending the expression subsystem
-- Scope: `src/Tungsten/src/tungsten/expression.py`
+- Scope: `Engine/src/tungsten/expression.py`
 - Created (UTC): 2026-04-24T16:05:00Z
 - Updated (UTC): 2026-04-25T20:58:10Z
 - Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a

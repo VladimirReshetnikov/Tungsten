@@ -4,7 +4,7 @@
    smoke.wl  --  load InverseAsymptotic` and re-verify the whole supported
                  class in a fresh kernel.
 
-   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/InverseAsymptotic/tests/smoke.wl
+   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script InverseAsymptotic/tests/smoke.wl
    Exit code 0 = all pass; 1 = a structural or numeric check failed.
 
    Each positive case asserts (a) the package's own rate-based back-substitution

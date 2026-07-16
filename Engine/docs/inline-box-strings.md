@@ -68,7 +68,7 @@ Tungsten can then compose:
 ### Compose a string from an explicit box expression
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 
 New-TungstenInlineBoxString `
     -Prefix "icon: " `
@@ -128,7 +128,7 @@ Get-TungstenNotebookCellInlineBoxes `
 ### Compose from explicit box expressions
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 
 python -m tungsten inline-box compose `
     --prefix "icon: " `

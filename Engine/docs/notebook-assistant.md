@@ -48,14 +48,14 @@ In practice:
 You can inspect available selectors with:
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 Get-TungstenNotebook -Path C:\path\to\analysis.nb
 ```
 
 or:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 python -m tungsten notebook inspect --file C:\path\to\analysis.nb
 ```
 
@@ -115,7 +115,7 @@ assistant text and extracted blocks, but nothing is inserted.
 Import the module:
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 ```
 
 Inspect the notebook to find the target cell:
@@ -173,7 +173,7 @@ if (-not $result.assistant_success) {
 Set `PYTHONPATH` to the repo-local source tree:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 ```
 
 Inspect the notebook:

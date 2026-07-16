@@ -4,7 +4,7 @@
    merged-api.wl  --  regression suite for the MERGED interface and the gated
    fallback (the "best of both" features added on top of the native engine).
 
-   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/InverseAsymptotic/tests/merged-api.wl
+   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script InverseAsymptotic/tests/merged-api.wl
    Exit 0 = all pass.
    ===================================================================== *)
 

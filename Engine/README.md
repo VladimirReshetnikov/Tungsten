@@ -1,18 +1,18 @@
 # Tungsten
 
 - Status: Informational (current-state project guide and maintainer-facing landing page)
-- Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `src/Tungsten`
-- Scope: `src/Tungsten`
+- Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
+- Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
 - Updated (UTC): 2026-04-29T00:49:16Z
 - Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
 - Related code:
-  - `src/Tungsten/src/tungsten/`
-  - `src/Tungsten/Nummy/`
-  - `src/Tungsten/pwsh/`
-  - `src/Tungsten/dotnet/`
-  - `src/Tungsten/tests/`
-  - `src/Tungsten/scripts/`
+  - `Engine/src/tungsten/`
+  - `Engine/Nummy/`
+  - `Engine/pwsh/`
+  - `Engine/dotnet/`
+  - `Engine/tests/`
+  - `Engine/scripts/`
 - Related docs:
   - [Documentation Index](./docs/README.md)
   - [User Guide](./docs/user-guide.md)
@@ -306,7 +306,7 @@ This is not a side detail. It is part of Tungsten's core execution model.
 ### Python CLI
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 
 python -m tungsten env show --probe
 python -m tungsten kernel eval --code "2+2"
@@ -325,7 +325,7 @@ python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2 --tungst
 ### PowerShell
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 
 Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
@@ -359,7 +359,7 @@ and failure-model guidance.
 ### Notebook Assistant end-to-end
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 
 $nb = Join-Path $env:TEMP "tungsten-assistant-demo.nb"
 New-TungstenNotebook -Path $nb -Title "Assistant Demo" -Cell @(
@@ -429,39 +429,39 @@ The current documentation should state these boundaries plainly:
 
 | Path | Purpose |
 |------|---------|
-| `src/Tungsten/pyproject.toml` | Python package metadata |
-| `src/Tungsten/src/tungsten/discovery.py` | Installation, docs-root, and path discovery |
-| `src/Tungsten/src/tungsten/licensing.py` | `mathpass` inspection and deduplication helpers |
-| `src/Tungsten/src/tungsten/kernel.py` | Structured kernel execution wrapper |
-| `src/Tungsten/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
-| `src/Tungsten/src/tungsten/inline_boxes.py` | Inline-box string composition and notebook-cell object extraction |
-| `src/Tungsten/src/tungsten/expression.py` | Kernel-free expression model, public facade, session runtime, structural helpers, and built-in family implementations not yet split out |
-| `src/Tungsten/src/tungsten/expression_parser.py` | Wolfram text tokenizer/parser and StandardForm box-to-expression interpretation |
-| `src/Tungsten/src/tungsten/expression_evaluator.py` | Single-step evaluator dispatch table, separated from the outer evaluation loop |
-| `src/Tungsten/src/tungsten/expression_arithmetic.py` | Arithmetic, numeric-constructor, relation, Boolean, predicate, and integer-number-theory evaluator rules |
-| `src/Tungsten/src/tungsten/expression_patterns.py` | Ordinary expression pattern matching, replacement rules, `Cases`/`DeleteCases`, and pattern-backed control helpers |
-| `src/Tungsten/src/tungsten/parser_corpus.py` | Local parser corpus discovery and Wolfram held-parser comparison |
-| `src/Tungsten/src/tungsten/wolfram_strings.py` | Shared Wolfram string literal and inline-box escape handling |
-| `src/Tungsten/src/tungsten/docs_index.py` | Offline documentation indexing/search |
-| `src/Tungsten/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
-| `src/Tungsten/src/tungsten/assistant.py` | Notebook Assistant automation |
-| `src/Tungsten/src/tungsten/cli.py` | JSON-first CLI entrypoint |
-| `src/Tungsten/Nummy/` | Tungsten-owned large-number arithmetic research corpus, prior-art snapshots, and alpha/beta/gamma prototype implementations |
-| `src/Tungsten/Nummy/docs/` | Nummy theory corpus, reports, and archived standalone design proposals |
-| `src/Tungsten/Nummy/prior-art/` | Source-study reference implementations for very-large-number arithmetic |
-| `src/Tungsten/Nummy/src/` | Independent alpha, beta, and gamma Python experiments used as large-number fallback source material |
-| `src/Tungsten/pwsh/` | PowerShell wrappers |
-| `src/Tungsten/tests/` | Python unit and integration coverage |
-| `src/Tungsten/scripts/Test-TungstenSmoke.ps1` | End-to-end smoke runner |
-| `src/Tungsten/scripts/Test-TungstenParserCorpus.ps1` | Parser corpus comparison runner |
-| `src/Tungsten/docs/` | Documentation set |
+| `Engine/pyproject.toml` | Python package metadata |
+| `Engine/src/tungsten/discovery.py` | Installation, docs-root, and path discovery |
+| `Engine/src/tungsten/licensing.py` | `mathpass` inspection and deduplication helpers |
+| `Engine/src/tungsten/kernel.py` | Structured kernel execution wrapper |
+| `Engine/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
+| `Engine/src/tungsten/inline_boxes.py` | Inline-box string composition and notebook-cell object extraction |
+| `Engine/src/tungsten/expression.py` | Kernel-free expression model, public facade, session runtime, structural helpers, and built-in family implementations not yet split out |
+| `Engine/src/tungsten/expression_parser.py` | Wolfram text tokenizer/parser and StandardForm box-to-expression interpretation |
+| `Engine/src/tungsten/expression_evaluator.py` | Single-step evaluator dispatch table, separated from the outer evaluation loop |
+| `Engine/src/tungsten/expression_arithmetic.py` | Arithmetic, numeric-constructor, relation, Boolean, predicate, and integer-number-theory evaluator rules |
+| `Engine/src/tungsten/expression_patterns.py` | Ordinary expression pattern matching, replacement rules, `Cases`/`DeleteCases`, and pattern-backed control helpers |
+| `Engine/src/tungsten/parser_corpus.py` | Local parser corpus discovery and Wolfram held-parser comparison |
+| `Engine/src/tungsten/wolfram_strings.py` | Shared Wolfram string literal and inline-box escape handling |
+| `Engine/src/tungsten/docs_index.py` | Offline documentation indexing/search |
+| `Engine/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
+| `Engine/src/tungsten/assistant.py` | Notebook Assistant automation |
+| `Engine/src/tungsten/cli.py` | JSON-first CLI entrypoint |
+| `Engine/Nummy/` | Tungsten-owned large-number arithmetic research corpus, prior-art snapshots, and alpha/beta/gamma prototype implementations |
+| `Engine/Nummy/docs/` | Nummy theory corpus, reports, and archived standalone design proposals |
+| `Engine/Nummy/prior-art/` | Source-study reference implementations for very-large-number arithmetic |
+| `Engine/Nummy/src/` | Independent alpha, beta, and gamma Python experiments used as large-number fallback source material |
+| `Engine/pwsh/` | PowerShell wrappers |
+| `Engine/tests/` | Python unit and integration coverage |
+| `Engine/scripts/Test-TungstenSmoke.ps1` | End-to-end smoke runner |
+| `Engine/scripts/Test-TungstenParserCorpus.ps1` | Parser corpus comparison runner |
+| `Engine/docs/` | Documentation set |
 
 ## Build and validation
 
 Run the Python tests from the Tungsten workspace:
 
 ```powershell
-Push-Location .\src\Tungsten
+Push-Location .\Engine
 try {
     $env:PYTHONPATH = (Resolve-Path .\src)
     python -m unittest discover -s tests -t .
@@ -474,13 +474,13 @@ finally {
 Run the repository-local smoke:
 
 ```powershell
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
-pwsh -File .\src\Tungsten\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100 -TungstenWorkers 8
-pwsh -File .\src\Tungsten\scripts\Update-TungstenDocsProvenance.ps1
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
+pwsh -File .\Engine\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100 -TungstenWorkers 8
+pwsh -File .\Engine\scripts\Update-TungstenDocsProvenance.ps1
 ```
 
 ## Documentation map

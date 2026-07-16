@@ -2,9 +2,9 @@
 
 - Status: **Archived — superseded.** Active gap inventory: `../2026-04-27-tungsten-gap-and-shape-review.md`. The C1–C9 findings landed across the second-pass implementation captured at the bottom of this document; remaining open items have been folded into the successor report. The historical post-merge note below is correct: the current authoritative description of behavior is `docs/expression-function-support.md`, not this document. **Do not treat this document as current state.**
 
-  Original status line: Report (focused parity review of `src/Tungsten/src/tungsten/expression.py` against the local Wolfram 14.3 kernel).
+  Original status line: Report (focused parity review of `Engine/src/tungsten/expression.py` against the local Wolfram 14.3 kernel).
 - Audience: Vladimir Reshetnikov, Tungsten maintainers
-- Scope: `src/Tungsten/src/tungsten/expression.py` (the kernel-free expression subsystem)
+- Scope: `Engine/src/tungsten/expression.py` (the kernel-free expression subsystem)
 - Created (UTC): 2026-04-26T19:04:46Z
 - Repository HEAD: a71088d55007ea86a1e13192cd8a437f53057c7c
 - Companion artifacts:
@@ -89,7 +89,7 @@ incidentally. It held up cleanly through the entire run, which is itself a small
 
 - **Category**: arity gap
 - **Priority**: P2
-- **Source**: [`expression.py:13003`](../../src/tungsten/expression.py#L13003) (Map dispatch)
+- **Source**: [`expression.py:13003`](../../../src/tungsten/expression.py#L13003) (Map dispatch)
 - **Status**: open
 
 ```text
@@ -107,7 +107,7 @@ levelspec]` already lands all of the level-spec walking infrastructure: the patt
 
 - **Category**: arity gap
 - **Priority**: P2
-- **Source**: [`expression.py:12977`](../../src/tungsten/expression.py#L12977)
+- **Source**: [`expression.py:12977`](../../../src/tungsten/expression.py#L12977)
 - **Status**: open
 
 ```text
@@ -173,7 +173,7 @@ small extension. The support table does state these limits explicitly.
 
 - **Category**: evaluator behavior
 - **Priority**: **P1** (most user-visible divergence)
-- **Source**: [`expression.py:3500`](../../src/tungsten/expression.py#L3500) (`_evaluate_numeric_arithmetic`)
+- **Source**: [`expression.py:3500`](../../../src/tungsten/expression.py#L3500) (`_evaluate_numeric_arithmetic`)
 - **Status**: open
 
 ```text
@@ -271,7 +271,7 @@ session.
 
 - **Category**: bug
 - **Priority**: P1
-- **Source**: [`expression.py:13351`](../../src/tungsten/expression.py#L13351)
+- **Source**: [`expression.py:13351`](../../../src/tungsten/expression.py#L13351)
 
 ```text
 MemberQ[{1, {2, 3}, 4}, 3]               Tungsten: True   Kernel: False

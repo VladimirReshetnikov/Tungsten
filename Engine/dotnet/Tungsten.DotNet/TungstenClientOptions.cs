@@ -54,7 +54,7 @@ public sealed record TungstenClientOptions
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
         var fullRoot = Path.GetFullPath(repositoryRoot);
-        var tungstenRoot = Path.Combine(fullRoot, "src", "Tungsten");
+        var tungstenRoot = Path.Combine(fullRoot, "Engine");
         var sourceRoot = Path.Combine(tungstenRoot, "src");
         var packageRoot = Path.Combine(sourceRoot, "tungsten");
 
@@ -79,7 +79,7 @@ public sealed record TungstenClientOptions
     {
         var repositoryRoot = TryFindRepositoryRoot(startDirectory)
             ?? throw new DirectoryNotFoundException(
-                $"Could not discover a repository root containing src{Path.DirectorySeparatorChar}Tungsten.");
+                $"Could not discover a repository root containing Engine.");
         return CreateForRepositoryRoot(repositoryRoot, executablePath);
     }
 
@@ -92,7 +92,7 @@ public sealed record TungstenClientOptions
         var current = new DirectoryInfo(currentPath);
         while (current is not null)
         {
-            var tungstenRoot = Path.Combine(current.FullName, "src", "Tungsten");
+            var tungstenRoot = Path.Combine(current.FullName, "Engine");
             if (
                 File.Exists(Path.Combine(tungstenRoot, "pyproject.toml")) &&
                 File.Exists(Path.Combine(tungstenRoot, "src", "tungsten", "cli.py")))

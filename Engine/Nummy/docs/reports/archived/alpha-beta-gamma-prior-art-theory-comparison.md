@@ -6,7 +6,7 @@ Repository HEAD: 370c28b9562eccbda96d2c6a25d6d64da10250d8
 
 ## Scope
 
-This report compares the three repository-owned Nummy implementations under `src/Tungsten/Nummy/src/` (`alpha`, `beta`, `gamma`), then maps them against the reference implementations under `src/Tungsten/Nummy/prior-art/` and the source-paper corpus under `src/Tungsten/Nummy/docs/theory/`.
+This report compares the three repository-owned Nummy implementations under `Engine/Nummy/src/` (`alpha`, `beta`, `gamma`), then maps them against the reference implementations under `Engine/Nummy/prior-art/` and the source-paper corpus under `Engine/Nummy/docs/theory/`.
 
 The comparison axis is not only feature count. It is the deeper fit between:
 

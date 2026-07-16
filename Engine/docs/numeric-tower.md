@@ -1,7 +1,7 @@
 # Tungsten Numeric Tower
 
 - Status: Implementation notes for Tungsten's kernel-free numeric evaluator
-- Scope: `src/Tungsten/src/tungsten/expression.py`
+- Scope: `Engine/src/tungsten/expression.py`
 - Updated (UTC): 2026-04-28T23:55:11Z
 - Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
 - Related docs:

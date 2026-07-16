@@ -2,7 +2,7 @@
 
 - Status: Design proposal for Tungsten's kernel-free numeric evaluator
 - Audience: Tungsten maintainers, Nummy maintainers, REPL implementers, and test authors
-- Scope: `src/Tungsten/src/tungsten/`, with source material from `src/Tungsten/Nummy/src/{alpha,beta,gamma}/`
+- Scope: `Engine/src/tungsten/`, with source material from `Engine/Nummy/src/{alpha,beta,gamma}/`
 - Created (UTC): 2026-04-28T23:55:11Z
 - Updated (UTC): 2026-04-29T00:49:16Z
 - Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
@@ -410,7 +410,7 @@ For Tungsten:
 - use gamma's landmark-tail vocabulary for payload design;
 - add a common certainty object before exposing proof-grade precision claims.
 
-The resulting code should not depend on `src/Tungsten/Nummy/src/alpha`, `beta`, or `gamma` at runtime. Those
+The resulting code should not depend on `Engine/Nummy/src/alpha`, `beta`, or `gamma` at runtime. Those
 directories are independent experiments with overlapping package names and REPL concerns. Tungsten
 needs a focused internal engine with stable AST and JSON integration.
 
@@ -543,7 +543,7 @@ not inflate the precision marker.
 
 ## Test Plan
 
-Add tests in `src/Tungsten/tests/test_expression.py` or a new numeric-focused test module.
+Add tests in `Engine/tests/test_expression.py` or a new numeric-focused test module.
 
 Core regression tests:
 

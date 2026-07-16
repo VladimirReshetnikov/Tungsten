@@ -300,9 +300,9 @@ approach — `Temp/license-probe2.py` condition C — is the drop-in fix.
 
 ## See also
 
-- `src/Tungsten/src/tungsten/licensing.py` — mathpass inspection
+- `Engine/src/tungsten/licensing.py` — mathpass inspection
   and dedupe.
-- `src/Tungsten/src/tungsten/wolfram_processes.py` —
+- `Engine/src/tungsten/wolfram_processes.py` —
   `wait_for_wolfram_license_slot`, license-process cache.
 - `C:\Users\vresh\AppData\Local\Temp\license-probe.py` — the
   single-license concurrency probe (pre-activation evidence §3).

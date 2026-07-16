@@ -4,7 +4,7 @@ here = If[StringQ[$InputFileName] && $InputFileName =!= "",
    DirectoryName[$InputFileName], Directory[]];
 pkg = FileNameJoin[{here, "OptimizedExpressions.wl"}];
 If[! FileExistsQ[pkg],
-  pkg = FileNameJoin[{Directory[], "src", "Optimized", "OptimizedExpressions.wl"}]
+  pkg = FileNameJoin[{Directory[], "Optimized", "OptimizedExpressions.wl"}]
 ];
 Get[pkg];
 

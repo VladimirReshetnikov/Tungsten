@@ -7,7 +7,7 @@ Repository HEAD: 3c2a03b0e2fe1a8eadcd7407d2fd5fa01dfb3852
 ## Purpose
 
 This note records the approach used for the first repository-owned Python
-implementation under `src/Tungsten/Nummy/src/alpha`. The immediate target is not a
+implementation under `Engine/Nummy/src/alpha`. The immediate target is not a
 complete SLI implementation. It is a practical, inspectable core that can:
 
 - represent base-10 power-tower magnitudes with heights in the low hundreds;
@@ -15,7 +15,7 @@ complete SLI implementation. It is a practical, inspectable core that can:
   or dense integers into memory;
 - keep dominance decisions explicit;
 - compute the integer part of the MathOverflow example archived at
-  `src/Tungsten/Nummy/docs/how-to-calculate-1010101010-1010` directly.
+  `Engine/Nummy/docs/how-to-calculate-1010101010-1010` directly.
 
 The implementation deliberately starts with a small surface area. It is a
 reference kernel, not a performance library.
@@ -237,7 +237,7 @@ separate so each can grow without rewriting the whole package.
 
 ## Validation Strategy
 
-The unit tests under `src/Tungsten/Nummy/src/alpha/tests/` cover:
+The unit tests under `Engine/Nummy/src/alpha/tests/` cover:
 
 - layer shifts through `pow10` and `log10`;
 - high-layer dominance;

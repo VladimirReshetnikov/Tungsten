@@ -1,13 +1,13 @@
 # CommonFactor — Adversarial Code & Documentation Review
 
 - Status: Review report
-- Audience: Vladimir; future agents maintaining `src/CommonFactor`
+- Audience: Vladimir; future agents maintaining `CommonFactor`
 - Scope: the `codex/common-factor` branch (package implemented by GPT-5.5 Codex)
 - Created (UTC): 2026-06-26T19:31:02Z
 - Repository HEAD: 1f7f46650687a40f673b402b51a27398b765c48e
 - Reviewer: Claude Code (Opus 4.8), with a 6-dimension static fan-out + completeness critic and
   hands-on adversarial testing on the local paid Wolfram 15.0 kernel
-- Subject commits: `81180fe00` → `1f7f46650` (5 commits adding `src/CommonFactor`)
+- Subject commits: `81180fe00` → `1f7f46650` (5 commits adding `CommonFactor`)
 
 ---
 
@@ -94,7 +94,7 @@ package issue, but it is worth a periodic orphan-kernel sweep.
 
 ## 4. Findings (detailed)
 
-Line references are to `src/CommonFactor/CommonFactor.wl` unless noted.
+Line references are to `CommonFactor/CommonFactor.wl` unless noted.
 
 ### F1 — [High] The flagship example returns an opaque Gamma-quotient, not the advertised recognizable factor — CONFIRMED
 
@@ -372,7 +372,7 @@ Findings that **survived** verification are F1–F9 above.
 
 ## 7. Reproduction appendix
 
-All run on Wolfram 15.0 with `Get["src/CommonFactor/CommonFactor.wl"]` and `Clear[n]` unless noted.
+All run on Wolfram 15.0 with `Get["CommonFactor/CommonFactor.wl"]` and `Clear[n]` unless noted.
 
 ```wolfram
 (* F1 *) b = Table[Prime[50+k],{k,9}]; seq = Table[10^k Factorial2[2k+1] k^2 b[[k]],{k,9}];

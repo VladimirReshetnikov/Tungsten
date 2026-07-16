@@ -527,7 +527,7 @@ Convenience entrypoints include:
 Parse without evaluating:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 python -m tungsten expr parse --code "1 + 2 x^3"
 python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
 python -m tungsten expr parse --code "f @ x // g" --form standard
@@ -592,7 +592,7 @@ The evaluate payload also includes:
 ## PowerShell usage
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 
 Convert-TungstenExpression -Code "1 + 2 x^3"
 Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"

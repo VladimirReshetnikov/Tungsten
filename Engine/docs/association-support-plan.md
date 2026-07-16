@@ -2,13 +2,13 @@
 
 - Status: Implemented and validated (this document now records both the plan and the completed scope)
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
-- Scope: Association parsing and structural evaluation in `src/Tungsten/src/tungsten/expression.py`
+- Scope: Association parsing and structural evaluation in `Engine/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T19:01:41Z
 - Updated (UTC): 2026-04-25T00:40:00Z
 - Repository HEAD: d5c80ad79cc968d21ae0e40731f2f0427674d6a0
 - Related code:
-  - `src/Tungsten/src/tungsten/expression.py`
-  - `src/Tungsten/tests/test_expression.py`
+  - `Engine/src/tungsten/expression.py`
+  - `Engine/tests/test_expression.py`
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Expression Function Support](./expression-function-support.md)
@@ -54,7 +54,7 @@ Validation completed:
 - direct live-kernel probes during implementation to calibrate edge semantics such as duplicate-key
   ordering, key-based `Part`, nested mixed paths, and `Prepend` behavior;
 - notebook-derived parser tests sourced from the installed `Association.nb` reference page;
-- Python unit validation via `python -m unittest discover -s .\src\Tungsten\tests -t .\src\Tungsten`.
+- Python unit validation via `python -m unittest discover -s .\Engine\tests -t .\Engine`.
 
 ## Why this needs design work
 

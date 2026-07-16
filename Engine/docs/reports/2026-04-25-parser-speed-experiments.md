@@ -120,23 +120,23 @@ guarantees, because the notebook size distribution is heavy-tailed.
 
 The landed changes are intentionally conservative:
 
-- `src/Tungsten/src/tungsten/notebook.py`
+- `Engine/src/tungsten/notebook.py`
   - Faster scanner loops for strings/comments and top-level splitting.
   - Single-pass function-call argument splitting.
   - Fewer duplicate `Cell[...]` and content-expression parses.
   - Lightweight notebook summary for parser-corpus use.
-- `src/Tungsten/src/tungsten/wolfram_strings.py`
+- `Engine/src/tungsten/wolfram_strings.py`
   - Faster string/comment skipping loops shared by notebook and inline-box parsing.
-- `src/Tungsten/src/tungsten/parser_corpus.py`
+- `Engine/src/tungsten/parser_corpus.py`
   - Notebook attempts use `NotebookDocument.summary()`.
   - Multi-process Tungsten parsing starts larger eligible files first.
-- `src/Tungsten/tests/test_notebook.py`
+- `Engine/tests/test_notebook.py`
   - Regression coverage for `parse_call` argument edge cases after the single-pass splitter.
 
 Validation:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path src\Tungsten\src).Path
+$env:PYTHONPATH = (Resolve-Path Engine\src).Path
 python -m unittest src.Tungsten.tests.test_notebook src.Tungsten.tests.test_parser_corpus
 ```
 

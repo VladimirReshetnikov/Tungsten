@@ -2,14 +2,14 @@
 
 - Status: Informational and operational (typed C#/.NET API guide and usage examples)
 - Audience: C#/.NET application authors, automation developers, maintainers, and reviewers
-- Scope: `src/Tungsten/dotnet` typed wrapper over Tungsten's JSON-first CLI
+- Scope: `Engine/dotnet` typed wrapper over Tungsten's JSON-first CLI
 - Created (UTC): 2026-04-23T19:01:41Z
 - Updated (UTC): 2026-04-24T20:06:49Z
 - Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
 - Related code:
-  - `src/Tungsten/dotnet/Tungsten.DotNet/`
-  - `src/Tungsten/dotnet/Tungsten.DotNet.Tests/`
-  - `src/Tungsten/src/tungsten/cli.py`
+  - `Engine/dotnet/Tungsten.DotNet/`
+  - `Engine/dotnet/Tungsten.DotNet.Tests/`
+  - `Engine/src/tungsten/cli.py`
 - Related docs:
   - [Project README](../README.md)
   - [Documentation Index](./README.md)
@@ -59,9 +59,9 @@ and Tungsten in turn delegates evaluation fidelity to the real local Wolfram ins
 
 The current .NET surface lives in two projects:
 
-- `src/Tungsten/dotnet/Tungsten.DotNet/`
+- `Engine/dotnet/Tungsten.DotNet/`
   - production client library;
-- `src/Tungsten/dotnet/Tungsten.DotNet.Tests/`
+- `Engine/dotnet/Tungsten.DotNet.Tests/`
   - argument-shape, deserialization, and repo-local integration coverage.
 
 The main public types are:
@@ -91,7 +91,7 @@ The .NET client assumes:
 - a usable `python` executable on `PATH`, unless `TungstenClientOptions.ExecutablePath` points
   somewhere else;
 - either:
-  - a repo-local Tungsten checkout under `src/Tungsten`, or
+  - a repo-local Tungsten checkout under `Engine`, or
   - a separately installable/importable Python `tungsten` package that your chosen launcher can
     resolve;
 - the same Tungsten prerequisites as the Python CLI for the specific feature you use.
@@ -106,7 +106,7 @@ The simplest repo-local setup is a project reference:
 
 ```xml
 <ItemGroup>
-  <ProjectReference Include="<repository-root>\src\Tungsten\dotnet\Tungsten.DotNet\Tungsten.DotNet.csproj" />
+  <ProjectReference Include="<repository-root>\Engine\dotnet\Tungsten.DotNet\Tungsten.DotNet.csproj" />
 </ItemGroup>
 ```
 
@@ -131,7 +131,7 @@ That configures:
 - `python` as the launcher;
 - `-m tungsten` as the command prefix;
 - `<repository-root>` as the working directory;
-- `<repository-root>\src\Tungsten\src` prepended to `PYTHONPATH`.
+- `<repository-root>\Engine\src` prepended to `PYTHONPATH`.
 
 ### Discovery-based setup
 
@@ -143,7 +143,7 @@ using Tungsten.DotNet;
 var client = TungstenClient.CreateForDiscoveredRepository(AppContext.BaseDirectory);
 ```
 
-This walks parent directories until it finds a repo root that contains `src/Tungsten`.
+This walks parent directories until it finds a repo root that contains `Engine`.
 
 ### Fully manual setup
 
@@ -159,7 +159,7 @@ var client = new TungstenClient(
         ExecutablePath = @"C:\Users\vresh\.pyenv\pyenv-win\versions\3.13.13\python.exe",
         LauncherArguments = ["-m", "tungsten"],
         WorkingDirectory = @"<repository-root>",
-        TungstenSourceRoot = @"<repository-root>\src\Tungsten\src",
+        TungstenSourceRoot = @"<repository-root>\Engine\src",
         DefaultTimeout = TimeSpan.FromMinutes(10),
         EnvironmentVariables = new Dictionary<string, string?>
         {
@@ -514,5 +514,5 @@ That has two important consequences:
 The current .NET wrapper was validated with:
 
 ```powershell
-dotnet test .\src\Tungsten\dotnet\Tungsten.DotNet.slnx
+dotnet test .\Engine\dotnet\Tungsten.DotNet.slnx
 ```

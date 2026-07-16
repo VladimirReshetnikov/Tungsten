@@ -2,7 +2,7 @@
 
 - Status: Informational and reference-oriented (kernel-free structural expression support matrix)
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline Wolfram expression manipulation
-- Scope: `src/Tungsten/src/tungsten/expression.py` and satellite evaluator modules such as `expression_algebraic.py`
+- Scope: `Engine/src/tungsten/expression.py` and satellite evaluator modules such as `expression_algebraic.py`
 - Created (UTC): 2026-04-23T18:33:04Z
 - Updated (UTC): 2026-04-27T20:51:45Z
 - Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7

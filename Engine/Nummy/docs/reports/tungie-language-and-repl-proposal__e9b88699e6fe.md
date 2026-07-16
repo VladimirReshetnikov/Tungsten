@@ -3,19 +3,19 @@
 - Status: Draft design proposal for a canonical Nummy calculator interpreter
 - Audience: Nummy maintainers, Tungsten maintainers, REPL implementers, large-number arithmetic
   test authors
-- Scope: `src/Tungsten/Nummy/src/`, replacing the alpha, beta, and gamma calculator REPL surfaces
+- Scope: `Engine/Nummy/src/`, replacing the alpha, beta, and gamma calculator REPL surfaces
   with one lightweight implementation contract
 - Created (UTC): 2026-04-29T02:15:00Z
 - Repository HEAD: c027a81817bb36b22d231d0558c6d73fe75b6eab
 - Related code:
-  - `src/Tungsten/Nummy/src/alpha/nummy/calculator.py`
-  - `src/Tungsten/Nummy/src/alpha/nummy/repl.py`
-  - `src/Tungsten/Nummy/src/beta/nummy/calc.py`
-  - `src/Tungsten/Nummy/src/beta/nummy/repl.py`
-  - `src/Tungsten/Nummy/src/gamma/gamma_repl.py`
-  - `src/Tungsten/Nummy/src/gamma/nummy_tower/`
-  - `src/Tungsten/src/tungsten/expression_parser.py`
-  - `src/Tungsten/src/tungsten/repl.py`
+  - `Engine/Nummy/src/alpha/nummy/calculator.py`
+  - `Engine/Nummy/src/alpha/nummy/repl.py`
+  - `Engine/Nummy/src/beta/nummy/calc.py`
+  - `Engine/Nummy/src/beta/nummy/repl.py`
+  - `Engine/Nummy/src/gamma/gamma_repl.py`
+  - `Engine/Nummy/src/gamma/nummy_tower/`
+  - `Engine/src/tungsten/expression_parser.py`
+  - `Engine/src/tungsten/repl.py`
 - Related docs:
   - [Nummy Alpha/Beta/Gamma Unified Comparison](alpha-beta-gamma-unified-comparison.md)
   - [Tungsten Expression Parser](../../../docs/expression-parser.md)
@@ -52,7 +52,7 @@ Tungie is a lightweight subset of Tungsten in three senses:
   corpus, and without optional mathematical packages.
 
 The implementation should live as a new canonical package, for example
-`src/Tungsten/Nummy/src/tungie/`, with the old alpha, beta, and gamma tracks left as reference
+`Engine/Nummy/src/tungie/`, with the old alpha, beta, and gamma tracks left as reference
 experiments until the canonical test suite covers their retained behaviors.
 
 ## Goals
@@ -514,7 +514,7 @@ contracts around the concepts it keeps.
 Recommended package layout:
 
 ```text
-src/Tungsten/Nummy/src/tungie/
+Engine/Nummy/src/tungie/
   __init__.py
   __main__.py
   cli.py

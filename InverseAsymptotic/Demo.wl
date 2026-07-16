@@ -3,7 +3,7 @@
 (* =====================================================================
    Demo.wl  --  a runnable showcase of InverseAsymptotic.
 
-   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/InverseAsymptotic/Demo.wl
+   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script InverseAsymptotic/Demo.wl
    ===================================================================== *)
 
 here = If[StringQ[$InputFileName] && $InputFileName =!= "",

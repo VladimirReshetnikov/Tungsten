@@ -2,7 +2,7 @@
 
 - Status: Informational and operational (diagnostics, failure modes, and recovery guidance)
 - Audience: Tungsten users and maintainers diagnosing local-environment, kernel, FrontEnd, assistant, or parser failures
-- Scope: `src/Tungsten` runtime behavior on a local Windows machine
+- Scope: `Engine` runtime behavior on a local Windows machine
 - Created (UTC): 2026-04-23T15:36:45Z
 - Updated (UTC): 2026-04-24T20:06:49Z
 - Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
@@ -32,7 +32,7 @@ This document gives a practical recovery path for each of those cases.
 These are the fastest high-signal checks:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 python -m tungsten env show --probe
 python -m tungsten kernel eval --code "2+2"
 python -m tungsten frontend probe
@@ -43,7 +43,7 @@ python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
 Or from PowerShell:
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 
 Get-TungstenEnvironment -Probe
 Invoke-TungstenKernel -Code "2+2"
@@ -308,7 +308,7 @@ This is exactly why the default backend is not the visible inline popup.
 - Import the module explicitly:
 
   ```powershell
-  Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+  Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
   ```
 
 - Verify it loaded:
@@ -389,7 +389,7 @@ failures.
 - Re-run the smoke serially:
 
   ```powershell
-  pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1
+  pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1
   ```
 
 - If necessary, close stray FrontEnd sessions and retry.

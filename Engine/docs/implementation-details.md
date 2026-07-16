@@ -2,7 +2,7 @@
 
 - Status: Informational and maintainership-oriented (design rationale, machine findings, and implementation-specific constraints)
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
-- Scope: `src/Tungsten` implementation choices and machine-shaped design constraints
+- Scope: `Engine` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
 - Updated (UTC): 2026-04-26T23:50:53Z
 - Repository HEAD: 2f34abe35e9a08b321a37fabe87297d20f7698d5

@@ -5,7 +5,7 @@
 - Repository HEAD: fef68fe7c4ff341cf5e62f4f20a8765192e63a38
 - Status: **Archived — superseded.** The active gap inventory is `../2026-04-27-tungsten-gap-and-shape-review.md`. Buckets B (number theory) and D (lists, arrays, tensors, structural) landed in follow-up commits after this report was written; the bullets here are kept as historical context. The successor report folds in the still-open items, refreshes the closed-list, and adds new findings on argument-shape coverage and `Heads` / `SameTest` option support. **Do not treat this document as current state.**
 - Audience: Tungsten maintainers planning the next implementation passes
-- Scope: Functions/heads in `src/Tungsten/src/tungsten/expression*.py`
+- Scope: Functions/heads in `Engine/src/tungsten/expression*.py`
 
 ## Purpose
 

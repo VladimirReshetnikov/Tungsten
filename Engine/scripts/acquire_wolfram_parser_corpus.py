@@ -842,7 +842,7 @@ def render_readme(
     lines.append("")
     lines.append("```powershell")
     lines.append(
-        r"pwsh -File C:\Tools3\Tools\src\Tungsten\scripts\Acquire-TungstenWolframParserCorpus.ps1 -Force"
+        r"pwsh -File C:\Tungsten\Engine\scripts\Acquire-TungstenWolframParserCorpus.ps1 -Force"
     )
     lines.append("```")
     lines.append("")

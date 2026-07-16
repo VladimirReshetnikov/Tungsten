@@ -50,7 +50,7 @@
 Set the local source directory on `PYTHONPATH`:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 ```
 
 ### `repl`
@@ -70,10 +70,10 @@ Examples:
 python -m tungsten repl
 python -m tungsten repl --no-banner
 python -m tungsten
-python -m pip install -e .\src\Tungsten
+python -m pip install -e .\Engine
 tungsten.exe
-dotnet build .\src\Tungsten\dotnet\Tungsten.DotNet.slnx
-.\src\Tungsten\dotnet\Tungsten.Console\bin\Debug\net10.0\tungsten.exe
+dotnet build .\Engine\dotnet\Tungsten.DotNet.slnx
+.\Engine\dotnet\Tungsten.Console\bin\Debug\net10.0\tungsten.exe
 ```
 
 Inside the REPL:
@@ -922,7 +922,7 @@ For real automation, prefer `assistant ask-cell`.
 Import the module:
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 ```
 
 ### Environment and kernel
@@ -997,12 +997,12 @@ Important assistant parameters:
 ## Smoke test entrypoint
 
 ```powershell
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
-pwsh -File .\src\Tungsten\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
+pwsh -File .\Engine\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100
 ```
 
 The smoke now covers:

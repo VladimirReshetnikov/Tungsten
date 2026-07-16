@@ -2,7 +2,7 @@
 
 - Status: Informational and reference-oriented (kernel-free import/export string and byte-array format support)
 - Audience: Tungsten users, automation authors, maintainers, and anyone relying on offline data interchange
-- Scope: `src/Tungsten/src/tungsten/expression.py`
+- Scope: `Engine/src/tungsten/expression.py`
 - Created (UTC): 2026-04-24T20:05:00Z
 - Updated (UTC): 2026-04-24T20:06:49Z
 - Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e

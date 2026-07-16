@@ -457,7 +457,7 @@ to a single canonical form*, not about the mathematics.
 I would suggest, in order:
 
 1. **Land a small code-backed prototype.** Create
-   `src/Tungsten/Nummy/src/level/` (or similar), implementing
+   `Engine/Nummy/src/level/` (or similar), implementing
    `LevelPoint(sign, level, orientation, coordinate: Fraction)`,
    `LevelInterval(lower, upper)`, rational-only `lnInterval` /
    `expInterval` / `log10Interval` / `exp10Interval`, and the basic

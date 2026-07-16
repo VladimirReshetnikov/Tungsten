@@ -3,7 +3,7 @@
 (* Smoke tests for OptimizedExpressions`.
 
    Run:
-     & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/Optimized/tests/smoke.wl
+     & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script Optimized/tests/smoke.wl
 
    Exit code 0 = all pass; 1 = at least one check failed.
 *)
@@ -12,7 +12,7 @@ here = If[StringQ[$InputFileName] && $InputFileName =!= "",
    DirectoryName[$InputFileName], Directory[]];
 pkg = FileNameJoin[{ParentDirectory[here], "OptimizedExpressions.wl"}];
 If[! FileExistsQ[pkg],
-  pkg = FileNameJoin[{Directory[], "src", "Optimized", "OptimizedExpressions.wl"}]
+  pkg = FileNameJoin[{Directory[], "Optimized", "OptimizedExpressions.wl"}]
 ];
 Get[pkg];
 

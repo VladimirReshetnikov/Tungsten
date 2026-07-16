@@ -2,14 +2,14 @@
 
 - Status: Implemented and validated (this document records the intended scope and the completed outcome)
 - Audience: Tungsten maintainers, reviewers, and contributors extending `expression.py`
-- Scope: kernel-free Wolfram pattern parsing and structural matching in `src/Tungsten/src/tungsten/expression.py`
+- Scope: kernel-free Wolfram pattern parsing and structural matching in `Engine/src/tungsten/expression.py`
 - Created (UTC): 2026-04-23T23:55:57Z
 - Updated (UTC): 2026-04-25T02:09:44Z
 - Repository HEAD: 79721cbfd92090c751acae5413701d61342eb98b
 - Related code:
-  - `src/Tungsten/src/tungsten/expression.py`
-  - `src/Tungsten/tests/test_expression.py`
-  - `src/Tungsten/tests/test_cli.py`
+  - `Engine/src/tungsten/expression.py`
+  - `Engine/tests/test_expression.py`
+  - `Engine/tests/test_cli.py`
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Expression Function Support](./expression-function-support.md)
@@ -59,7 +59,7 @@ Follow-up Association work has also been carried through:
 Validation completed:
 
 - Python unit validation via
-  `python -m unittest discover -s C:\Tools1\Tools\src\Tungsten\tests -t C:\Tools1\Tools\src\Tungsten`;
+  `python -m unittest discover -s C:\Tungsten\Engine\tests -t C:\Tungsten\Engine`;
 - targeted live-kernel comparisons for repeated named bindings, `Verbatim`, `Except`,
   `Cases[..., patt :> rhs]`, depth-first postorder search, and `DeleteCases` match limits.
 

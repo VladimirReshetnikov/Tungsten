@@ -2,7 +2,7 @@
 
 - Status: Report (live-machine investigation plus mitigation implementation)
 - Audience: Vladimir Reshetnikov, Tungsten maintainers, future debugging sessions
-- Scope: `src/Tungsten` kernel-launch reliability on the local Wolfram 14.3 Windows installation
+- Scope: `Engine` kernel-launch reliability on the local Wolfram 14.3 Windows installation
 - Created (UTC): 2026-04-24T18:16:08Z
 - Repository HEAD: dcad077d1f5fabcc31bef9998e628c916bcadfc2
 - Validation context: Performed against the real local installation at `C:\Program Files\Wolfram Research\Wolfram\14.3`

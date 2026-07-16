@@ -7,11 +7,11 @@
 - Updated (UTC): 2026-04-24T20:06:49Z
 - Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
 - Related code:
-  - `src/Tungsten/src/tungsten/cli.py`
-  - `src/Tungsten/src/tungsten/kernel.py`
-  - `src/Tungsten/src/tungsten/notebook.py`
-  - `src/Tungsten/src/tungsten/assistant.py`
-  - `src/Tungsten/pwsh/Tungsten.psm1`
+  - `Engine/src/tungsten/cli.py`
+  - `Engine/src/tungsten/kernel.py`
+  - `Engine/src/tungsten/notebook.py`
+  - `Engine/src/tungsten/assistant.py`
+  - `Engine/pwsh/Tungsten.psm1`
 - Related docs:
   - [Project README](../README.md)
   - [Usage Reference](./usage-reference.md)
@@ -84,7 +84,7 @@ It is less appropriate when you need:
 From the repository root:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 ```
 
 That points Python at the repo-local `tungsten` package.
@@ -92,7 +92,7 @@ That points Python at the repo-local `tungsten` package.
 ### PowerShell module setup
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 ```
 
 The module is intentionally thin. It sets `PYTHONPATH`, calls `python -m tungsten ...`,
@@ -105,14 +105,14 @@ deserializes the JSON response, and returns PowerShell objects.
 Python CLI:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 python -m tungsten env show --probe
 ```
 
 PowerShell:
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 Get-TungstenEnvironment -Probe
 ```
 
@@ -491,7 +491,7 @@ Use `expr parse` / `expr evaluate` when:
 Run the Tungsten test suite:
 
 ```powershell
-Push-Location .\src\Tungsten
+Push-Location .\Engine
 try {
     $env:PYTHONPATH = (Resolve-Path .\src)
     python -m unittest discover -s tests -t .
@@ -504,9 +504,9 @@ finally {
 Run the smoke:
 
 ```powershell
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
-pwsh -File .\src\Tungsten\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
+pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
 ```
 
 ## Where to go next

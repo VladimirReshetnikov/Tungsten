@@ -6,7 +6,7 @@ Repository HEAD: 370c28b9562eccbda96d2c6a25d6d64da10250d8
 
 ## Scope
 
-This report compares the three in-repo implementations under `src/Tungsten/Nummy/src` (`alpha`, `beta`, `gamma`), then cross-compares their representation/algorithm choices with the implementations in `src/Tungsten/Nummy/prior-art` and the theory corpus in `src/Tungsten/Nummy/docs/theory`.
+This report compares the three in-repo implementations under `Engine/Nummy/src` (`alpha`, `beta`, `gamma`), then cross-compares their representation/algorithm choices with the implementations in `Engine/Nummy/prior-art` and the theory corpus in `Engine/Nummy/docs/theory`.
 
 Primary acceptance target: evaluate and explain the archived MathOverflow expression
 `10^(10^(10^(10^(10^(-10^10)))))`, including recovery of the finite tail (`... + 2811012357389.440711...`) without materializing impossible-size decimal strings.
@@ -20,7 +20,7 @@ Primary acceptance target: evaluate and explain the archived MathOverflow expres
 
 ## Implementation Profiles
 
-### Alpha (`src/Tungsten/Nummy/src/alpha`)
+### Alpha (`Engine/Nummy/src/alpha`)
 
 **Core character**
 - Standard-library-only implementation with an integrated calculator UX.
@@ -41,7 +41,7 @@ Primary acceptance target: evaluate and explain the archived MathOverflow expres
 - Perturbation machinery is targeted and pragmatic rather than a broadly generalized asymptotic algebra.
 - More bespoke logic in evaluator/display pipeline.
 
-### Beta (`src/Tungsten/Nummy/src/beta`)
+### Beta (`Engine/Nummy/src/beta`)
 
 **Core character**
 - Most mathematically extensible prototype; depends on `mpmath`.
@@ -62,7 +62,7 @@ Primary acceptance target: evaluate and explain the archived MathOverflow expres
 - Normal `^` REPL expression path does not fully surface MO-tail recovery; best results currently behind specialized helper semantics.
 - Exact-rational semantics are weaker than alpha for ordinary layer-0 arithmetic.
 
-### Gamma (`src/Tungsten/Nummy/src/gamma`)
+### Gamma (`Engine/Nummy/src/gamma`)
 
 **Core character**
 - Minimal, focused research prototype emphasizing clarity and acceptance-driven behavior.

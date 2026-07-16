@@ -1,4 +1,4 @@
-# Code Review Notes: `src/Tungsten/Nummy/src/alpha`
+# Code Review Notes: `Engine/Nummy/src/alpha`
 
 Created (UTC): 2026-04-28T19:31:12Z
 
@@ -6,7 +6,7 @@ Repository HEAD: 3c2a03b0e2fe1a8eadcd7407d2fd5fa01dfb3852
 
 ## Observations
 
-The implementation started in `src/Tungsten/Nummy/src` and was later moved into this
+The implementation started in `Engine/Nummy/src` and was later moved into this
 `alpha/` subdirectory so the first reference implementation has an explicit
 generation label. The code remains repository-owned and separate from the
 vendored prior-art material.

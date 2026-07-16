@@ -2,7 +2,7 @@
 
 - Status: Current-state implementation note for `NumericQ`, `Simplify`, and `FullSimplify`
 - Audience: Tungsten maintainers, expression-evaluator contributors, and users relying on offline evaluation
-- Scope: `src/Tungsten/src/tungsten/expression.py`, `expression_arithmetic.py`, and `expression_evaluator.py`
+- Scope: `Engine/src/tungsten/expression.py`, `expression_arithmetic.py`, and `expression_evaluator.py`
 - Created (UTC): 2026-04-27T20:51:45Z
 - Repository HEAD: 61e28d844b1e32dca30f4a8d6ca402c4ec8a67b7
 - Related docs:

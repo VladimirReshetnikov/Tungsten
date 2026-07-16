@@ -48,7 +48,7 @@ The comparison classifies each file as:
 Set the local source directory on `PYTHONPATH`:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 ```
 
 Discover the current corpus selection:
@@ -113,7 +113,7 @@ Performance-oriented options:
 Import the Tungsten module:
 
 ```powershell
-Import-Module .\src\Tungsten\pwsh\Tungsten.psd1 -Force
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 ```
 
 Discover:
@@ -131,7 +131,7 @@ Compare-TungstenParserCorpus -MaxFiles 100 -MaxFileMB 2 -KernelBatchSize 100 -Tu
 The repository also includes a script wrapper:
 
 ```powershell
-pwsh -File .\src\Tungsten\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100
+pwsh -File .\Engine\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100
 ```
 
 ## Output Artifacts
@@ -158,7 +158,7 @@ The regular unit test suite does not launch Wolfram for parser corpus checks. To
 smoke against a known small corpus file:
 
 ```powershell
-Push-Location .\src\Tungsten
+Push-Location .\Engine
 try {
     $env:PYTHONPATH = (Resolve-Path .\src)
     $env:TUNGSTEN_PARSER_CORPUS_LIVE = "1"

@@ -4,11 +4,11 @@
 
   Original status line: Report (differential review of `expression.py` against the local Wolfram 14.3 kernel).
 - Audience: Vladimir Reshetnikov, Tungsten maintainers
-- Scope: `src/Tungsten/src/tungsten/expression.py`, documented support matrix in `docs/expression-function-support.md` and `docs/expression-parser.md`
+- Scope: `Engine/src/tungsten/expression.py`, documented support matrix in `docs/expression-function-support.md` and `docs/expression-parser.md`
 - Created (UTC): 2026-04-24T19:38:47Z
 - Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
 - Related artifacts:
-  - [`tests/test_expression_kernel_parity.py`](../../tests/test_expression_kernel_parity.py) — new regression tests added as part of this review (14 expected-failure targets lock in each bug's Wolfram-correct behavior)
+  - [`tests/test_expression_kernel_parity.py`](../../../tests/test_expression_kernel_parity.py) — new regression tests added as part of this review (14 expected-failure targets lock in each bug's Wolfram-correct behavior)
   - External harness (not committed): `C:\tmp\tungsten-diff\diff_harness.py` — 298-case differential runner used to generate these findings
 
 ## Contents
@@ -84,7 +84,7 @@ Each finding has: what the differential run saw, the root cause in `expression.p
 
 - **Category**: parser bug, semantic impact
 - **Priority**: P1
-- **Source**: [`expression.py:6871-6878`](../../src/tungsten/expression.py#L6871-L6878) (Pratt operator table) plus `_parse_infix_operator` at line 6860
+- **Source**: [`expression.py:6871-6878`](../../../src/tungsten/expression.py#L6871-L6878) (Pratt operator table) plus `_parse_infix_operator` at line 6860
 - **Tests**: `ChainedComparisonTests.*_wolfram_target` (expected-failure)
 
 **Observed.** Tungsten parses `a < b < c` as `Less[Less[a, b], c]`. The inner `Less[a, b]` evaluates to `True`, and the outer `Less[True, c]` is inert because `True` is not an explicit integer. So:
@@ -111,7 +111,7 @@ Wolfram also supports **mixed** chained comparisons like `1 < 2 == 2`, which the
 
 - **Category**: evaluator bug
 - **Priority**: P1
-- **Source**: [`expression.py:4233`](../../src/tungsten/expression.py#L4233) in `def position(...)`
+- **Source**: [`expression.py:4233`](../../../src/tungsten/expression.py#L4233) in `def position(...)`
 - **Tests**: `PositionDefaultLevelSpecTests.test_position_default_wolfram_target` (expected-failure)
 
 **Observed.** Tungsten's default is level 1, so `Position[f[a, g[b, a]], a]` returns `{{1}}`. Kernel: `{{1}, {2, 2}}`. When called with explicit `{0, Infinity}`, Tungsten agrees with the kernel.
@@ -130,7 +130,7 @@ level_spec = list_expr(integer(0), symbol("Infinity")) if spec is None else spec
 
 - **Category**: evaluator bug
 - **Priority**: P2
-- **Source**: [`expression.py:7036-7040`](../../src/tungsten/expression.py#L7036-L7040) in `_normalize_level_spec`
+- **Source**: [`expression.py:7036-7040`](../../../src/tungsten/expression.py#L7036-L7040) in `_normalize_level_spec`
 - **Tests**: `LevelSemanticsTests.test_level_minus_one_wolfram_target` (expected-failure)
 
 **Observed.** For `f[a, g[b, c], h[k[d]]]`:
@@ -175,7 +175,7 @@ This also fixes the related `Level[expr, {1, -1}]` case (currently undefined beh
 
 - **Category**: evaluator bug
 - **Priority**: P2
-- **Source**: [`expression.py:7016-7025`](../../src/tungsten/expression.py#L7016-L7025) in `_collect_levels`
+- **Source**: [`expression.py:7016-7025`](../../../src/tungsten/expression.py#L7016-L7025) in `_collect_levels`
 - **Tests**: `LevelSemanticsTests.test_level_*_wolfram_target` (expected-failure)
 
 **Observed.** `Level[f[a, g[b, c]], Infinity]`:
@@ -215,7 +215,7 @@ The root itself is then at the very end of the list; the existing `_level_matche
 
 - **Category**: evaluator bug
 - **Priority**: P2
-- **Source**: [`expression.py:4348-4390`](../../src/tungsten/expression.py#L4348-L4390) in `dot(...)`, dispatched at line 5838 (`evaluated_head.name == "Dot"`)
+- **Source**: [`expression.py:4348-4390`](../../../src/tungsten/expression.py#L4348-L4390) in `dot(...)`, dispatched at line 5838 (`evaluated_head.name == "Dot"`)
 - **Tests**: `DotEvaluationTests.test_dot_*_wolfram_target` (expected-failure)
 
 **Observed.**
@@ -257,7 +257,7 @@ I verified this is consistent with how sibling functions like `Outer`, `Inner`, 
 
 - **Category**: evaluator bug
 - **Priority**: P2
-- **Source**: [`expression.py:415-426`](../../src/tungsten/expression.py#L415-L426) in `_normalize_association_entries`
+- **Source**: [`expression.py:415-426`](../../../src/tungsten/expression.py#L415-L426) in `_normalize_association_entries`
 - **Tests**: `AssociationDuplicateKeyTests.test_duplicate_key_wolfram_target` (expected-failure)
 
 **Observed.**
@@ -423,7 +423,7 @@ The differential harness at `C:\tmp\tungsten-diff\diff_harness.py` is throwaway-
 - The `ToString[FullForm[result]]` pattern (instead of `ToString[result, FullForm, opts]`, which this kernel rejects with `ToString::fmtval`) is the reliable way to get FullForm text out of the kernel on this machine.
 - The Wolfram-side parse/eval split using `ToExpression[..., HoldComplete]` then `ReleaseHold` cleanly separates the three failure classes (parse, eval, post-eval stringification) in a way that mirrors Tungsten's own wrapper script.
 
-If Tungsten eventually wants a committed "differential smoke" that runs in CI or on demand, I'd suggest taking this harness, moving it under `src/Tungsten/scripts/`, naming it something like `Test-TungstenKernelParity.ps1` (PowerShell entry) + `diff_kernel_parity.py`, and limiting the corpus to cases that Tungsten currently passes plus a small "expected divergences" list that the script is allowed to skip. That gives you a trip-wire against future regressions without making the build take forever.
+If Tungsten eventually wants a committed "differential smoke" that runs in CI or on demand, I'd suggest taking this harness, moving it under `Engine/scripts/`, naming it something like `Test-TungstenKernelParity.ps1` (PowerShell entry) + `diff_kernel_parity.py`, and limiting the corpus to cases that Tungsten currently passes plus a small "expected divergences" list that the script is allowed to skip. That gives you a trip-wire against future regressions without making the build take forever.
 
 ## Closing thoughts
 

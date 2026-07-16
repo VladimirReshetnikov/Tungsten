@@ -3,7 +3,7 @@
 (* Runnable demo for CommonFactor`.
 
    Run:
-     & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/CommonFactor/Demo.wl
+     & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script CommonFactor/Demo.wl
 *)
 
 here = If[StringQ[$InputFileName] && $InputFileName =!= "",

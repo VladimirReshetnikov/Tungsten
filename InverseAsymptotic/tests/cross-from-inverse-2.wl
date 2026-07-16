@@ -10,7 +10,7 @@
    original pre-merge IA-1 -- the merged package also accepts IA-2's
    pure-function / ConditionalExpression input form, confirmed by the FORM check.)
 
-   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/InverseAsymptotic/tests/cross-from-inverse-2.wl
+   Run:  & "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script InverseAsymptotic/tests/cross-from-inverse-2.wl
    Exit 0 = all pass.  Loads ONLY IA-1 (no context collision).
    ===================================================================== *)
 

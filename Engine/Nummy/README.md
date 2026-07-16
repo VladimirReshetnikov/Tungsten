@@ -2,7 +2,7 @@
 
 Nummy is Tungsten's workspace for overflow-resistant arithmetic over very large
 and very small numbers. The project is currently research-first and now lives
-inside `src/Tungsten` because its next production target is Tungsten's
+inside `Engine` because its next production target is Tungsten's
 kernel-free large-number fallback. The implementation surface under `src/`
 contains the canonical Tungie calculator REPL plus three independent Python
 alpha/beta/gamma experiments for the same power-tower arithmetic task, while
@@ -142,7 +142,7 @@ is archived under
 
 Nummy does not carry a separate license file. Nummy-owned code and
 documentation inherit the repository license, MIT-0; see
-[`../../../LICENSE`](../../../LICENSE). Several prior-art subtrees have their
+[`../../LICENSE`](../../LICENSE). Several prior-art subtrees have their
 own `LICENSE` or `license.txt` files; those files govern their respective
 vendored/reference contents. Check the nearest license before copying
 prior-art code into any future Nummy-owned implementation.

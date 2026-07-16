@@ -13,7 +13,7 @@ documentation.
 
 | Report | Origin |
 | --- | --- |
-| [IMPLEMENTATION_COMPARISON.md](IMPLEMENTATION_COMPARISON.md) | Earlier local comparison report from `src/Tungsten/Nummy/src/`. |
+| [IMPLEMENTATION_COMPARISON.md](IMPLEMENTATION_COMPARISON.md) | Earlier local comparison report from `Engine/Nummy/src/`. |
 | [alpha-beta-gamma-prior-art-theory-comparison-2026-04-28.md](alpha-beta-gamma-prior-art-theory-comparison-2026-04-28.md) | Cloud-authored prior-art/theory comparison report. |
 | [alpha-beta-gamma-prior-art-theory-comparison.md](alpha-beta-gamma-prior-art-theory-comparison.md) | Cloud-authored prior-art/theory comparison report. |
 | [alpha-beta-gamma-prior-art-theory-comparison__8037b1a4a5ab.md](alpha-beta-gamma-prior-art-theory-comparison__8037b1a4a5ab.md) | Cloud-authored prior-art/theory comparison report. |

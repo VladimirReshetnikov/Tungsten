@@ -2,7 +2,7 @@
 
 - Status: Informational (index, reading order, and current-status map for Tungsten docs)
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
-- Scope: `src/Tungsten`
+- Scope: `Engine`
 - Created (UTC): 2026-04-23T15:36:45Z
 - Updated (UTC): 2026-07-03T17:10:00Z
 - Repository HEAD: e16db62ae188dbe7df0a3e0cd417e027122b0ebf
@@ -198,7 +198,7 @@ The docs are split so readers can choose the right depth:
   explicit reports rather than in README, user-guide, or architecture text.
 - Documents include `Created (UTC)` and `Repository HEAD` metadata. Revised documents also carry an
   `Updated (UTC)` field.
-- Use `pwsh -File .\src\Tungsten\scripts\Update-TungstenDocsProvenance.ps1` after a documentation
+- Use `pwsh -File .\Engine\scripts\Update-TungstenDocsProvenance.ps1` after a documentation
   pass so the shared Tungsten docs metadata stays consistent.
 - The documentation is Windows-first because Tungsten itself is currently built around local
   Windows Wolfram installations and PowerShell automation.
@@ -207,7 +207,7 @@ The docs are split so readers can choose the right depth:
 
 ## Relationship to the rest of the repo
 
-Tungsten is its own independent workspace under `src/Tungsten`. `src/Tungsten/Nummy/` is now a
+Tungsten is its own independent workspace under `Engine`. `Engine/Nummy/` is now a
 Tungsten subworkspace for large-number arithmetic research and prototypes. When Tungsten uses any
 other local project, such as WinDesk for experimental desktop-assistant flows, it treats that project
 as an optional integration rather than as a hidden implementation dependency.

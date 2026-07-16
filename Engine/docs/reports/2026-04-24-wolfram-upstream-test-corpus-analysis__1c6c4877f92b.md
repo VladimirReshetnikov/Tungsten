@@ -2,13 +2,13 @@
 
 - Status: Report (analysis of the downloaded upstream Wolfram-language corpus for Tungsten parser/evaluator test adaptation)
 - Audience: Vladimir Reshetnikov, Tungsten maintainers, future expression-subsystem contributors
-- Scope: `src/Tungsten` expression parsing/evaluation work, plus the local corpus under `C:\TestData\wolfram\tungsten-wolfram-upstream-tests`
+- Scope: `Engine` expression parsing/evaluation work, plus the local corpus under `C:\TestData\wolfram\tungsten-wolfram-upstream-tests`
 - Created (UTC): 2026-04-24T18:06:25Z
 - Repository HEAD: cf5b9a9f8ec5b6e93a9c8c064e1e994e1adface0
 - Inputs:
   - Corpus root: `C:\TestData\wolfram\tungsten-wolfram-upstream-tests`
   - Corpus manifest: `C:\TestData\wolfram\tungsten-wolfram-upstream-tests\manifest.json`
-  - Analyzer script: `src/Tungsten/scripts/analyze_upstream_wolfram_tests.py`
+  - Analyzer script: `Engine/scripts/analyze_upstream_wolfram_tests.py`
   - Analyzer output: `C:\TestData\wolfram\tungsten-wolfram-upstream-tests\analysis.json`
 
 ## Executive summary
@@ -55,7 +55,7 @@ evaluator surface, but only after filtering.
 I used two passes:
 
 1. Manual inspection of representative high-value files in each repository.
-2. A heuristic scan over the full local corpus using `src/Tungsten/scripts/analyze_upstream_wolfram_tests.py`.
+2. A heuristic scan over the full local corpus using `Engine/scripts/analyze_upstream_wolfram_tests.py`.
 
 The analyzer is intentionally approximate. It is good at ranking repositories and surfacing likely
 candidate files, but it still overcounts some utility files and cannot replace human filtering.

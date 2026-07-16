@@ -11,7 +11,7 @@ theory corpus and prototype/reference libraries.
 
 | Report | Context |
 | --- | --- |
-| [Prototype Corpus Overview](<Prototype Corpus Overview.md>) | Overview and comparison of the prior-art reference projects under `src/Tungsten/Nummy/prior-art`, including their relation to symmetric level-index arithmetic. |
+| [Prototype Corpus Overview](<Prototype Corpus Overview.md>) | Overview and comparison of the prior-art reference projects under `Engine/Nummy/prior-art`, including their relation to symmetric level-index arithmetic. |
 | [Shortcomings of Floating-Point Arithmetic in Modern CAS](cas-floating-point-shortcomings__288318099677.md) | Survey of why modern CAS floating-point models, including Wolfram Language/Mathematica-style precision tracking, still inherit mantissa/exponent limits and do not make magnitude scale a first-class arithmetic coordinate. |
 | [Power-Tower Arithmetic and SLI in Python](<Power-Tower Arithmetic and SLI in Python.md>) | Survey of SLI, power-tower representations, Hypercalc-style arithmetic, Python library options, uncertainty propagation, and the trade-off between magnitude reach and conventional precision. |
 | [Nummy Alpha/Beta/Gamma Unified Comparison](alpha-beta-gamma-unified-comparison.md) | Current deduplicated comparison of the three implementation experiments, including claim triage, prior-art/theory alignment, and synthesis recommendation. |

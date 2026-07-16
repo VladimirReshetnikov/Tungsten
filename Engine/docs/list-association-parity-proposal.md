@@ -506,7 +506,7 @@ guardrails:
   `HashTrieMap` iteration order is non-deterministic *even across identical insertion sequences*, so
   any reliance on it would be a latent reproducibility bug — add a test with keys whose map iteration
   order differs from insertion order;
-- add a microbenchmark script under `src/Tungsten/scripts/` that reports slopes for association
+- add a microbenchmark script under `Engine/scripts/` that reports slopes for association
   sizes such as 10, 100, 1000, and 10000 entries without becoming a correctness gate.
 
 The unit guardrails should be correctness-oriented. The microbenchmark is informational because

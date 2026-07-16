@@ -191,7 +191,7 @@ specific decision matrix.
 
 ## Reference
 
-- `src/Tungsten/docs/wolfram-license-parallelism.md` —
+- `Engine/docs/wolfram-license-parallelism.md` —
   empirical license-slot investigation.
 - `src/Hypergeometric/docs/test-execution-paths.md` —
   worked example of choosing between Tungsten and MCP per workload.

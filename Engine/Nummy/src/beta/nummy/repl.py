@@ -1,6 +1,6 @@
 """Interactive REPL for the Nummy calculator.
 
-Run from the ``src/Tungsten/Nummy/src/beta`` directory with::
+Run from the ``Engine/Nummy/src/beta`` directory with::
 
     PYTHONPATH=. python -m nummy
 

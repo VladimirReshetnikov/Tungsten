@@ -16,7 +16,7 @@ where:
 
 The ``apply_pow10`` propagator implements the level-to-level update used by
 the beta prototype and summarized in
-``src/Tungsten/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md``:
+``Engine/Nummy/docs/reports/alpha-beta-gamma-unified-comparison.md``:
 
     v_in  = scale_in  * series_in(x)
     v_out = 10^v_in

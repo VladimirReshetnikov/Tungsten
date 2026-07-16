@@ -2,7 +2,7 @@
 
 - Status: Design and experiment report
 - Audience: Vladimir and future agents extending `CommonFactor`
-- Scope: `src/CommonFactor`
+- Scope: `CommonFactor`
 - Created (UTC): 2026-06-26T16:24:53Z
 - Repository HEAD: 2b46b217d65478e0fff0f7f4f6265e11189f5e01
 - Last updated (UTC): 2026-06-26T18:11:27Z

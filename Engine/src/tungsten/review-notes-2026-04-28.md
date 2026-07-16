@@ -5,7 +5,7 @@ Repository HEAD: 7b191bfb92bffdc48fe7f81804217e67fb1e54ab
 
 ## Scope
 
-These notes record observations from reviewing `src/Tungsten/src/tungsten/` for the
+These notes record observations from reviewing `Engine/src/tungsten/` for the
 overflow/underflow large-number fallback design.
 
 ## Observations

@@ -5,10 +5,10 @@ Repository HEAD: 370c28b9562eccbda96d2c6a25d6d64da10250d8
 
 ## Scope and Method
 
-This report compares the three repository-owned implementations in `src/Tungsten/Nummy/src` (`alpha`, `beta`, `gamma`) and cross-checks them against:
+This report compares the three repository-owned implementations in `Engine/Nummy/src` (`alpha`, `beta`, `gamma`) and cross-checks them against:
 
-1. Prior-art implementations under `src/Tungsten/Nummy/prior-art/`.
-2. The theory corpus under `src/Tungsten/Nummy/docs/theory/`.
+1. Prior-art implementations under `Engine/Nummy/prior-art/`.
+2. The theory corpus under `Engine/Nummy/docs/theory/`.
 
 The focus is not only representable range, but also **computational behavior near tower landmarks**, especially for the archived motivating expression:
 

@@ -2,7 +2,7 @@
 
 - Status: Normative for Tungsten's current kernel-free symbol registry
 - Audience: Tungsten maintainers, expression-subsystem users, automation authors, and reviewers
-- Scope: `src/Tungsten/src/tungsten/expression.py`
+- Scope: `Engine/src/tungsten/expression.py`
 - Created (UTC): 2026-04-25T17:48:49Z
 - Updated (UTC): 2026-06-17T02:01:20Z
 - Repository HEAD: 07930f5d6e6c04bf3c3f12f7b0a95debd2ab7b56
@@ -169,7 +169,7 @@ every specialized built-in evaluator rule associated with the full Wolfram kerne
 ## Examples
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\src\Tungsten\src)
+$env:PYTHONPATH = (Resolve-Path .\Engine\src)
 
 python -m tungsten expr evaluate --code '$Context'
 python -m tungsten expr evaluate --code '$ContextPath'
@@ -193,7 +193,7 @@ python -m tungsten expr evaluate --code 'Unique[temporarySymbol]'
 The snapshot is generated from the installed paid Wolfram 15.0 kernel rather than hand-authored:
 
 ```powershell
-pwsh -File .\src\Tungsten\scripts\Update-TungstenSystemSymbolSnapshot.ps1
+pwsh -File .\Engine\scripts\Update-TungstenSystemSymbolSnapshot.ps1
 ```
 
 The generator records <code>Names["System`*"]</code> entries that do not themselves contain a

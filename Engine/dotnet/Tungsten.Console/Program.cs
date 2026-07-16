@@ -11,19 +11,19 @@ static string? FindTungstenPythonSource()
             return Path.Combine(directory.FullName, "src");
         }
 
-        var siblingCandidate = Path.Combine(directory.FullName, "src", "Tungsten", "src", "tungsten", "__init__.py");
+        var siblingCandidate = Path.Combine(directory.FullName, "Engine", "src", "tungsten", "__init__.py");
         if (File.Exists(siblingCandidate))
         {
-            return Path.Combine(directory.FullName, "src", "Tungsten", "src");
+            return Path.Combine(directory.FullName, "Engine", "src");
         }
 
         directory = directory.Parent;
     }
 
-    var currentDirectoryCandidate = Path.Combine(Environment.CurrentDirectory, "src", "Tungsten", "src", "tungsten", "__init__.py");
+    var currentDirectoryCandidate = Path.Combine(Environment.CurrentDirectory, "Engine", "src", "tungsten", "__init__.py");
     if (File.Exists(currentDirectoryCandidate))
     {
-        return Path.Combine(Environment.CurrentDirectory, "src", "Tungsten", "src");
+        return Path.Combine(Environment.CurrentDirectory, "Engine", "src");
     }
 
     return null;

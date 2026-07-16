@@ -3,7 +3,7 @@
 - Created (UTC): 2026-06-26T19:47:55Z
 - Repository HEAD: fbc379002652d67648e299fe6e6de86c27653dfb
 
-`src/Optimized/` is a Wolfram Language package for doing arithmetic and exact-symbol
+`Optimized/` is a Wolfram Language package for doing arithmetic and exact-symbol
 substitution on `Experimental`OptimizedExpression` objects without expanding them first.
 It is the repository answer to Vladimir's unanswered Mathematica StackExchange question
 [Computations with OptimizedExpressions without completely expanding them](https://mathematica.stackexchange.com/questions/221938/computations-with-optimizedexpressions-without-completely-expanding-them).
@@ -17,7 +17,7 @@ uses one temporary for `x + y`.
 ## Quick Start
 
 ```wolfram
-Get["src/Optimized/OptimizedExpressions.wl"];
+Get["Optimized/OptimizedExpressions.wl"];
 
 o1 = Experimental`OptimizeExpression[
   (x + y)^2 + z (x + y),
@@ -89,7 +89,7 @@ The optimizer deliberately exposes controls that are awkward or unavailable in
 ## Tests
 
 ```powershell
-cd src/Tungsten
+cd Engine
 uv run python -m tungsten kernel eval `
   --file ..\Optimized\tests\smoke.wl `
   --working-directory ..\.. `
@@ -108,7 +108,7 @@ The smoke suite checks:
 The direct Wolfram form also works when a kernel seat and the local `mathpass` setup are available:
 
 ```powershell
-& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script src/Optimized/tests/smoke.wl
+& "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe" -script Optimized/tests/smoke.wl
 ```
 
 ## Files

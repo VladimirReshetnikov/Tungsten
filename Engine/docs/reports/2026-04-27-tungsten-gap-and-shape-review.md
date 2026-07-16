@@ -2,7 +2,7 @@
 
 - Status: Research-and-plan (current-state inventory of remaining work in the kernel-free Tungsten interpreter)
 - Audience: Vladimir, Tungsten maintainers planning the next implementation passes
-- Scope: `src/Tungsten/src/tungsten/` Python package — only the kernel-free expression subsystem. The Wolfram kernel interop layer is out of scope here.
+- Scope: `Engine/src/tungsten/` Python package — only the kernel-free expression subsystem. The Wolfram kernel interop layer is out of scope here.
 - Created (UTC): 2026-04-27T16:48:25Z
 - Updated (UTC): 2026-04-27T20:38:45Z
 - Repository HEAD: e2ff91fdff0e3300d0f2e927bdb3829d0178bc0f

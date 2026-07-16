@@ -3,7 +3,7 @@
 - Created (UTC): 2026-06-26T19:47:55Z
 - Repository HEAD: fbc379002652d67648e299fe6e6de86c27653dfb
 
-This document describes the API and implementation of `src/Optimized/OptimizedExpressions.wl`.
+This document describes the API and implementation of `Optimized/OptimizedExpressions.wl`.
 The package implements DAG-preserving computation over Wolfram's
 `Experimental`OptimizedExpression` representation: addition, multiplication, division, and
 exact-symbol substitution can be performed on already-optimized operands without first calling

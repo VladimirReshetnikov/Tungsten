@@ -2,16 +2,16 @@
 
 - Status: Design report and architecture outline
 - Audience: Vladimir and Tungsten maintainers thinking about language/runtime direction
-- Scope: a from-scratch Wolfram-Language-like core language and evaluator, informed by `src/Tungsten`
+- Scope: a from-scratch Wolfram-Language-like core language and evaluator, informed by `Engine`
 - Created (UTC): 2026-04-28T01:43:15Z
 - Repository HEAD: 2689dffeee9f9c16d9e3cbe4bfd55ef011ecdf82
 - Related code:
-  - `src/Tungsten/src/tungsten/expression.py`
-  - `src/Tungsten/src/tungsten/expression_parser.py`
-  - `src/Tungsten/src/tungsten/expression_evaluator.py`
-  - `src/Tungsten/src/tungsten/expression_patterns.py`
-  - `src/Tungsten/src/tungsten/expression_scoping.py`
-  - `src/Tungsten/src/tungsten/notebook.py`
+  - `Engine/src/tungsten/expression.py`
+  - `Engine/src/tungsten/expression_parser.py`
+  - `Engine/src/tungsten/expression_evaluator.py`
+  - `Engine/src/tungsten/expression_patterns.py`
+  - `Engine/src/tungsten/expression_scoping.py`
+  - `Engine/src/tungsten/notebook.py`
 - Related Tungsten docs:
   - [../architecture.md](../architecture.md)
   - [../expression-parser.md](../expression-parser.md)

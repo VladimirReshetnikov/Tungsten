@@ -24,7 +24,7 @@ inputs, and a `InverseFunction`-based fallback — but **gated** so it can never
 wrong or complex branch.
 
 ```wolfram
-Get["src/InverseAsymptotic/InverseAsymptotic.wl"];
+Get["InverseAsymptotic/InverseAsymptotic.wl"];
 
 (* idiomatic spec form (matches the MSE question's ConditionalExpression input) *)
 InverseAsymptotic[ConditionalExpression[# + #^Sqrt[2], # >= 0] &, {x, 0}, {z, 0}, SeriesTermGoal -> 4]
@@ -73,7 +73,7 @@ reconstructing the real branch directly.
 ## Quick start
 
 ```wolfram
-Get[FileNameJoin[{"src", "InverseAsymptotic", "InverseAsymptotic.wl"}]];
+Get[FileNameJoin[{"InverseAsymptotic", "InverseAsymptotic.wl"}]];
 
 (* the two MSE examples *)
 InverseAsymptotic[x + x^2 (1 + Log[x]), x, y, 3]
@@ -223,8 +223,8 @@ computable term by term by exactly this kind of generalized Newton/bootstrap ite
 
 ```powershell
 $wl = "C:\Program Files\Wolfram Research\Wolfram\15.0\wolfram.exe"
-& $wl -script src/InverseAsymptotic/tests/smoke.wl        # 27 checks, compat API
-& $wl -script src/InverseAsymptotic/tests/merged-api.wl   # 20 checks, merged interface + gated fallback
+& $wl -script InverseAsymptotic/tests/smoke.wl        # 27 checks, compat API
+& $wl -script InverseAsymptotic/tests/merged-api.wl   # 20 checks, merged interface + gated fallback
 ```
 
 `smoke.wl` (exit `0` = all pass) checks the flagship MSE answers symbolically, nine
