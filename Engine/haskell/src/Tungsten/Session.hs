@@ -30,21 +30,32 @@ emptySession = EvaluationSession Map.empty
 data Iterator = Iterator !(Maybe Text) ![Expr]
   deriving (Eq, Show)
 
+data EvaluationExit
+  = SessionEvaluationFailure !EvaluationError !EvaluationSession
+  deriving (Eq, Show)
+
+type SessionResult value =
+  Either EvaluationExit (value, EvaluationSession)
+
 data IterationFailure
   = InvalidIterator !EvaluationSession
-  | IterationEvaluationFailure !EvaluationError
+  | IterationEvaluationFailure !EvaluationExit
   deriving (Eq, Show)
 
 evaluateInSession :: EvaluationSession -> Expr -> Either EvaluationError (Expr, EvaluationSession)
-evaluateInSession = evaluateSessionAt 0
+evaluateInSession session expression =
+  case evaluateSessionAt 0 session expression of
+    Left (SessionEvaluationFailure evaluationFailure _) -> Left evaluationFailure
+    Right result -> Right result
 
 evaluateSessionAt
   :: Int
   -> EvaluationSession
   -> Expr
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSessionAt depth session expression
-  | depth > 1024 = Left (EvaluationError "the session evaluation recursion limit was exceeded")
+  | depth > 1024 =
+      sessionFailure session "the session evaluation recursion limit was exceeded"
   | otherwise = case expression of
       Symbol name -> case Map.lookup name (sessionDefinitions session) of
         Nothing -> Right (expression, session)
@@ -90,7 +101,7 @@ evaluateSessionAt depth session expression
             (evaluatedArguments, argumentsSession) <- evaluateArguments depth headSession arguments'
             let evaluatedCall = Call evaluatedHead evaluatedArguments
                 normalizedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
-            reduced <- evaluate evaluatedCall
+            reduced <- liftPureEvaluation argumentsSession (evaluate evaluatedCall)
             if reduced == normalizedCall
               then Right (reduced, argumentsSession)
               else evaluateSessionAt (depth + 1) argumentsSession reduced
@@ -100,14 +111,14 @@ evaluateSessionTable
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSessionTable depth session arguments' = case arguments' of
   body : iteratorSpecs@(_ : _) ->
     case tableLoop depth session body iteratorSpecs of
       Left (InvalidIterator updated) ->
         Right (Call (Symbol "Table") arguments', updated)
-      Left (IterationEvaluationFailure evaluationFailure) ->
-        Left evaluationFailure
+      Left (IterationEvaluationFailure evaluationExit) ->
+        Left evaluationExit
       Right result -> Right result
   _ -> Right (Call (Symbol "Table") arguments', session)
 
@@ -115,14 +126,14 @@ evaluateSessionDo
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSessionDo depth session arguments' = case arguments' of
   body : iteratorSpecs@(_ : _) ->
     case flatIterationLoop False depth session body iteratorSpecs of
       Left (InvalidIterator updated) ->
         Right (Call (Symbol "Do") arguments', updated)
-      Left (IterationEvaluationFailure evaluationFailure) ->
-        Left evaluationFailure
+      Left (IterationEvaluationFailure evaluationExit) ->
+        Left evaluationExit
       Right (_, updated) -> Right (Symbol "Null", updated)
   _ -> Right (Call (Symbol "Do") arguments', session)
 
@@ -132,15 +143,15 @@ evaluateSessionAccumulator
   -> Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
   case arguments' of
     body : iteratorSpecs@(_ : _)
       | all isListIteratorSpec iteratorSpecs ->
           case flatIterationLoop True depth session body iteratorSpecs of
             Left (InvalidIterator updated) -> inert updated
-            Left (IterationEvaluationFailure evaluationFailure) ->
-              Left evaluationFailure
+            Left (IterationEvaluationFailure evaluationExit) ->
+              Left evaluationExit
             Right (terms, updated) ->
               evaluateSessionAt
                 (depth + 1)
@@ -318,9 +329,12 @@ invalidIterator :: EvaluationSession -> Either IterationFailure value
 invalidIterator = Left . InvalidIterator
 
 liftIterationEvaluation
-  :: Either EvaluationError value
-  -> Either IterationFailure value
-liftIterationEvaluation = either (Left . IterationEvaluationFailure) Right
+  :: SessionResult value
+  -> Either IterationFailure (value, EvaluationSession)
+liftIterationEvaluation =
+  either
+    (Left . IterationEvaluationFailure)
+    Right
 
 restoreIterationFailure
   :: Text
@@ -330,7 +344,12 @@ restoreIterationFailure
 restoreIterationFailure name previous = \case
   InvalidIterator failedSession ->
     InvalidIterator (restoreDefinition name previous failedSession)
-  failure -> failure
+  IterationEvaluationFailure evaluationExit ->
+    IterationEvaluationFailure
+      ( mapEvaluationExitSession
+          (restoreDefinition name previous)
+          evaluationExit
+      )
 
 evaluatedList :: [Expr] -> Expr
 evaluatedList = Call (Symbol "List") . evaluatedListArguments
@@ -367,7 +386,7 @@ evaluateSequence
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSequence depth = go (Symbol "Null")
  where
   go result session [] = Right (result, session)
@@ -379,7 +398,7 @@ evaluateSessionIf
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSessionIf depth session = \case
   condition : trueBranch : remaining -> do
     (evaluatedCondition, updated) <- evaluateSessionAt (depth + 1) session condition
@@ -395,7 +414,7 @@ evaluateSessionAnd
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSessionAnd depth = go []
  where
   go retained session [] = Right (logicalResult "And" (Symbol "True") retained, session)
@@ -410,7 +429,7 @@ evaluateSessionOr
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateSessionOr depth = go []
  where
   go retained session [] = Right (logicalResult "Or" (Symbol "False") retained, session)
@@ -425,7 +444,7 @@ evaluateArguments
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either EvaluationError ([Expr], EvaluationSession)
+  -> SessionResult [Expr]
 evaluateArguments depth = go []
  where
   go retained session [] = Right (retained, session)
@@ -439,11 +458,11 @@ evaluateUpdate
   -> Text
   -> (Expr -> Expr -> Expr)
   -> Expr
-  -> Either EvaluationError (Expr, EvaluationSession)
+  -> SessionResult Expr
 evaluateUpdate depth session name constructor rhs = do
   (current, currentSession) <- evaluateSessionAt (depth + 1) session (Symbol name)
   (value, valueSession) <- evaluateSessionAt (depth + 1) currentSession rhs
-  result <- evaluate (constructor current value)
+  result <- liftPureEvaluation valueSession (evaluate (constructor current value))
   pure (result, define name (ImmediateValue result) valueSession)
 
 updateConstructors :: Map.Map Text (Expr -> Expr -> Expr)
@@ -457,6 +476,29 @@ updateConstructors =
 
 call2 :: Text -> Expr -> Expr -> Expr
 call2 headName lhs rhs = Call (Symbol headName) [lhs, rhs]
+
+sessionFailure :: EvaluationSession -> Text -> SessionResult value
+sessionFailure session message =
+  Left (SessionEvaluationFailure (EvaluationError message) session)
+
+liftPureEvaluation
+  :: EvaluationSession
+  -> Either EvaluationError value
+  -> Either EvaluationExit value
+liftPureEvaluation session =
+  either
+    (\evaluationFailure ->
+        Left (SessionEvaluationFailure evaluationFailure session)
+    )
+    Right
+
+mapEvaluationExitSession
+  :: (EvaluationSession -> EvaluationSession)
+  -> EvaluationExit
+  -> EvaluationExit
+mapEvaluationExitSession updateSession = \case
+  SessionEvaluationFailure evaluationFailure failedSession ->
+    SessionEvaluationFailure evaluationFailure (updateSession failedSession)
 
 logicalResult :: Text -> Expr -> [Expr] -> Expr
 logicalResult _ identity [] = identity
