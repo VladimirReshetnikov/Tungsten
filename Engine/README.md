@@ -4,9 +4,10 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-29T00:49:16Z
-- Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
+- Updated (UTC): 2026-07-18T04:31:20Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 - Related code:
+  - `Engine/cpp/`
   - `Engine/src/tungsten/`
   - `Engine/Nummy/`
   - `Engine/pwsh/`
@@ -19,6 +20,7 @@
   - [Usage Reference](./docs/usage-reference.md)
   - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
+  - [C++ Runtime and Verification](./docs/cpp-port.md)
   - [REPL](./docs/repl.md)
   - [Large-Number Fallback Design](./docs/overflow-underflow-large-number-fallback.md)
   - [Symbol and Context Registry](./docs/symbol-context-registry.md)
@@ -28,8 +30,10 @@
 
 ## Summary
 
-Tungsten is a Python-first automation workspace for a local Wolfram installation, with thin
-PowerShell and .NET projection layers for script and application callers. It exists for the
+Tungsten is a native C++17 automation and symbolic-computation engine for a local Wolfram
+installation, with PowerShell and .NET projection layers for script and application callers. The
+Python implementation remains in-tree as the executable compatibility oracle and does not participate
+in the native runtime. Tungsten exists for the
 workflows that are awkward in the traditional Mathematica GUI but natural for agents, scripts, and
 typed host applications:
 
@@ -44,15 +48,15 @@ typed host applications:
   kernel-free numeric fallback.
 
 Tungsten is deliberately not trying to be a full alternative Wolfram runtime. It is an automation
-layer over the real local installation, plus a small amount of kernel-free structural tooling where
-that meaningfully improves agent workflows.
+layer over the real local installation, plus a substantial but bounded kernel-free expression and
+notebook runtime where that meaningfully improves agent workflows.
 
 ## Project goals
 
 Tungsten exists to satisfy a small set of load-bearing goals:
 
-- Make local Wolfram automation practical from `pwsh`, Python, and JSON-first tooling.
-- Provide a console-mode `tungsten.exe` REPL that feels familiar to `wolfram.exe` users while
+- Make local Wolfram automation practical from C++, `pwsh`, .NET, and JSON-first tooling.
+- Provide a console-mode `tungsten-cpp` REPL that feels familiar to `wolfram.exe` users while
   staying kernel-free.
 - Make the same workflows pleasant to call from C#/.NET without forcing callers to hand-roll
   process execution or JSON deserialization.
@@ -71,7 +75,7 @@ Tungsten exists to satisfy a small set of load-bearing goals:
 
 Tungsten is intentionally not trying to do several things:
 
-- It is not a full Wolfram kernel reimplementation.
+- It is not yet a full Wolfram kernel reimplementation; unsupported heads remain symbolic.
 - Today it does not attempt full box-language parsing or full StandardForm rendering.
 - It does not try to expose the entire FrontEnd API surface.
 - It does not depend on browser automation or online-only documentation scraping.
@@ -80,32 +84,25 @@ Tungsten is intentionally not trying to do several things:
 
 ## Longer-term expression direction
 
-The shipped expression subsystem is intentionally narrower than the long-term target. Over time, the
-kernel-free Tungsten expression stack is intended to:
+The shipped expression subsystem already covers structural manipulation, pure functions,
+definitions and scoping, control flow, exact and approximate arithmetic, integer number theory,
+arrays (including sparse forms), and a bounded elementary/transcendental numeric layer. Continued
+work focuses on closing measured compatibility edges without turning Tungsten into an unbounded
+general-purpose computer algebra system.
 
-- successfully parse all Wolfram Language syntax, including all built-in box forms;
-- evaluate structural expression manipulation;
-- evaluate pure functions;
-- evaluate functional and iterative programming helpers;
-- evaluate scoping and control-flow constructs;
-- perform exact integer arithmetic;
-- perform floating-point arithmetic;
-- handle array, matrix, and tensor manipulation, including sparse forms;
-- support some basic integer arithmetic functions such as `GCD` and `Divisors`.
+The main long-term boundaries remain:
 
-Even in that broader future direction, Tungsten is not intended to implement:
-
-- real- or complex-valued elementary or special mathematical functions;
-- general expression simplification algorithms beyond the bounded variable-free numeric simplifier;
-- equation solving;
-- broad polynomial algebra beyond Tungsten's exact Gaussian-rational coefficient subset;
-- derivatives or integrals;
-- optimization problems;
-- anything that requires specialized mathematical algorithms.
+- full Wolfram Language and box-language syntax is a target, but unsupported syntax is rejected
+  explicitly rather than guessed;
+- `Simplify`/`FullSimplify`, elementary functions, polynomial algebra, algebraic numbers, and
+  equation solving stay within documented native subsets;
+- general symbolic differential/integral calculus, optimization, and arbitrary specialized
+  mathematical algorithms remain outside the local evaluator's scope;
+- workflows requiring complete Wolfram semantics should use the real kernel-backed command path.
 
 ## Current feature map
 
-The current workspace is built around seven complementary capabilities:
+The current workspace is built around eight complementary capabilities:
 
 1. A kernel runner that executes Wolfram Language code through `wolfram.exe` and returns structured
    JSON instead of terminal-only output.
@@ -126,33 +123,27 @@ The current workspace is built around seven complementary capabilities:
    `##`, `##n`, and `Function[Null, body, attrs]`, supports named pure functions such as
    `Function[x, body]`, `Function[params, body, attrs]`, `x |-> body`, and
    `x \[Function] body` with capture-avoiding parameter renaming and the pure-function attribute
-   subset for hold, sequence, and listable behavior, then evaluates a broader inert
-   structural built-in set such as hold-like conditionals (`If`, `Which`, `Switch`, `Piecewise`),
+   subset for hold, sequence, and listable behavior. The native evaluator covers a broad but
+   incomplete portion of the Python-oracle compatibility inventory, including hold-like
+   conditionals (`If`, `Which`, `Switch`, `Piecewise`),
    integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `NumericQ`, `StringQ`,
    `DigitQ`, `LetterQ`, `EvenQ`, and `SparseArrayQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
    `Min`/`Max` (with single-list-argument fold), `Clip`, and `KroneckerDelta`, real-rounding heads
    `Floor`, `Ceiling`, `Round`, `IntegerPart`, `FractionalPart`, and `Sqrt` over the explicit-number
-   subset, combinatorial and number-theory heads `Binomial`, `Multinomial`, `GCD`, `LCM`,
-   `Divisors`, `FactorInteger`, `IntegerExponent`, `JacobiSymbol`, `KroneckerSymbol`,
-   `Fibonacci`, `LucasL`, `BernoulliB`, `EulerE`, `HarmonicNumber`, `ContinuedFraction`,
-   `FromContinuedFraction`, `PrimeQ`, `CompositeQ`, `PrimePowerQ`, `EulerPhi`,
-   `CarmichaelLambda`, `MoebiusMu`, `LiouvilleLambda`, `JordanTotient`, `RamanujanTau`,
-   `DivisorSigma`, `Prime`, `PrimePi`, `NextPrime`, `PowerMod`, `ModularInverse`,
-   `MultiplicativeOrder`, `PrimitiveRoot`, `ChineseRemainder`, `IntegerLength`,
-   `IntegerDigits`, `IntegerReverse`, `DigitCount`, `FromDigits`, `IntegerPartitions`,
-   `PartitionsP`, `PartitionsQ`, and bitwise
-   `BitAnd`/`BitOr`/`BitXor`/`BitShiftLeft`/`BitShiftRight`/`BitNot`/`BitClear`/`BitSet`/
-   `BitGet`/`BitLength`, exact polynomial heads
+   subset, native combinatorial and number-theory heads including `Binomial`, `Multinomial`,
+   `GCD`, `LCM`, `Divisors`, `FactorInteger`, `IntegerExponent`, `JacobiSymbol`,
+   `KroneckerSymbol`, integer sequences and partitions, prime predicates/enumeration, totients and
+   multiplicative functions, modular arithmetic, continued fractions, integer digits, and
+   Chinese remaindering, plus the `Bit*` integer family and exact polynomial heads
    `Expand`, `PolynomialQ`, `Variables`, `MonomialList`, `Collect`, `Coefficient`, `Exponent`,
-   `CoefficientList`, `Factor`, `FactorList`, and `Decompose`, SymPy-backed exact
-   algebraic-number heads
-   `Root`, `MinimalPolynomial`, and `RootReduce` for indexed polynomial roots over primitive
-   integer polynomials, rational algebraic expressions, rational powers, and direct
-   `Re`/`Im`/`Conjugate`/`Abs` forms, with exact comparisons for real-valued roots and
-   arbitrary-precision numeric approximation through `N`, plus variable-free numeric
-   `Simplify`/`FullSimplify` backed by ordinary evaluation, `RootReduce`, and a bounded SymPy pass,
-   bounded by the mutable `$MaxRootDegree` safety setting,
-   Boolean heads, `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
+   `CoefficientList`, `Factor`, `FactorList`, and `Decompose`, plus native exact algebraic-number
+   operations over bounded indexed polynomial roots, guarded by the mutable `$MaxRootDegree`
+   safety setting, and a numeric layer that recognizes `Pi`, `E`, `Degree`, direct and inverse
+   trigonometric/hyperbolic families, degree forms, Haversine and Gudermannian families, exact
+   special cases, machine values, and GMP-backed requested-precision projections. Variable-free
+   `Simplify` and `FullSimplify` apply the documented bounded identities and ordinary evaluation;
+   unsupported symbolic cases remain unchanged. The evaluator also covers Boolean heads,
+   `Length`, `Depth`, `MatchQ`, `Cases`, `DeleteCases`,
    `Replace`, `ReplaceAll`, `ReplaceRepeated`, functional combinators such as `Composition`,
    `Nest`, `FixedPoint`, `Fold`, and `SameAs`, traversal and threading heads such as `MapApply`,
    `MapAll`, `MapIndexed`, `Thread`, `Outer`, `Inner`, and `Dot` including sparse vector/matrix
@@ -187,7 +178,10 @@ The current workspace is built around seven complementary capabilities:
    built-ins are discoverable even when Tungsten does not implement their evaluation rules; the
    evaluator consults those attributes plus process-local user mutations for common hold,
    sequence, listable, flat, orderless, and one-identity matching behavior.
-5. A console-mode `tungsten.exe` / `python -m tungsten repl` interpreter with `wolfram.exe`-style
+   This is a broad compatibility implementation, not a claim of complete Python- or Wolfram-kernel parity;
+   unsupported heads and edge cases remain symbolic or are documented as gaps.
+5. A console-mode `tungsten-cpp repl` interpreter (also exposed by the .NET `tungsten.exe`
+   projection) with `wolfram.exe`-style
    `In[n]:=` / `Out[n]=` prompts, `$Line`, `In`, `InString`, `Out`, read-only history
    `DownValues`, `%` output-history shorthand, and `Exit` / `Quit`.
 6. An offline documentation index over the locally installed documentation notebooks.
@@ -213,11 +207,11 @@ The current workspace is built around seven complementary capabilities:
   code execution.
 - Built-in Notebook Assistant automation through the stable hidden chat-notebook backend, with the
   visible inline-desktop path retained as an experimental option.
-- Kernel-free Wolfram expression parsing and inert structural evaluation.
-- Kernel-free `wolfram.exe`-style REPL through `python -m tungsten repl`, no-argument
-  `python -m tungsten`, and the installable `tungsten.exe` console entry point.
-- PowerShell wrappers for all major Tungsten surfaces.
-- A typed .NET client wrapper over the JSON CLI for C# callers.
+- Kernel-free Wolfram expression parsing and bounded native evaluation.
+- Kernel-free `wolfram.exe`-style REPL through `tungsten-cpp repl` and the .NET `tungsten.exe`
+  console projection.
+- PowerShell wrappers for all major Tungsten surfaces, invoking the native binary directly.
+- A typed .NET client wrapper over the native JSON CLI for C# callers.
 
 ### Deliberately narrow or experimental
 
@@ -227,24 +221,24 @@ The current workspace is built around seven complementary capabilities:
   [`Tools`](https://github.com/VladimirReshetnikov/Tools) repository. To use the WinDesk path, build
   `WinDesk.PowerShell` from that repository and either pre-import the module or set
   `$env:TUNGSTEN_WINDESK_MODULE_PATH` to the built `WinDesk.PowerShell.dll`.
-- The expression subsystem intentionally covers only a pragmatic StandardForm subset, a limited
-  semantic box subset, and a small built-in evaluation surface.
+- The expression subsystem covers a pragmatic StandardForm and box subset and a broad but still
+  incomplete built-in evaluation surface. Unsupported forms remain symbolic.
 - FrontEnd automation is intentionally selective rather than exhaustive.
 
 ## Tech stack and operating assumptions
 
 | Area | Current choice |
 |------|----------------|
-| Runtime | Python 3.11+ |
-| Package layout | `setuptools` package under `src/tungsten/` |
+| Runtime | C++17 with CMake 3.20+ and GMP/GMPXX; Python 3.11+ only for the reference oracle and differential tooling |
+| Package layout | Native library, CLI, headers, and tests under `cpp/`; Python oracle under `src/tungsten/` |
 | Primary execution substrate | Paid Wolfram 15.0 `wolfram.exe -script` by default; `TUNGSTEN_WOLFRAM_PRODUCT=engine` selects Wolfram Engine 14.3 |
 | PowerShell integration | Thin JSON-first wrapper module in `pwsh/Tungsten.psm1` |
 | .NET integration | Thin typed wrapper library in `dotnet/Tungsten.DotNet/` |
 | Documentation index | SQLite FTS5 |
 | Notebook representation | Tungsten-owned structural parser for notebook expressions |
 | Expression representation | Tungsten-owned AST and Pratt-style parser |
-| Sparse array backend | PyData Sparse `sparse.COO` when available, with a Tungsten structural fallback |
-| Exact polynomial backend | SymPy for integer/rational coefficient polynomial operations |
+| Sparse array backend | Tungsten-owned native structural sparse arrays |
+| Exact polynomial backend | Tungsten-owned native exact integer/rational polynomial core |
 | Platform expectation | Windows-first local machine with a real Wolfram installation |
 | Optional desktop automation helper | WinDesk (external, from the sibling [`Tools`](https://github.com/VladimirReshetnikov/Tools) repo) for visible-window testing and the experimental inline assistant path |
 
@@ -258,24 +252,24 @@ The current workspace is built around seven complementary capabilities:
         └───────────────────────────────────────────────┘
                               ▲
                               │
-                    discovery.py + licensing.py
+                    discovery.cpp + licensing.cpp
                               │
         ┌─────────────────────┼─────────────────────┐
         │                     │                     │
         ▼                     ▼                     ▼
-   kernel.py            notebook.py          expression subsystem
-   docs_index.py        frontend.py          assistant.py
-                         inline_boxes.py     wolfram_strings.py
+   kernel.cpp           notebook.cpp         expression subsystem
+   docs_index.cpp       frontend.cpp         assistant.cpp
+                         inline_boxes.cpp    wolfram_strings.cpp
         │                     │                     │
         └─────────────────────┼─────────────────────┘
                               │
-                           cli.py
+                        cpp/src/main.cpp
                      ┌────────┴────────┐
                      │                 │
                      ▼                 ▼
                Tungsten.psm1   Tungsten.DotNet
                      │                 │
-       Python callers / pwsh scripts / .NET apps / agents
+          C++ CLI / pwsh scripts / .NET apps / agents
 ```
 
 For the deeper component model and execution flow, see [Architecture](./docs/architecture.md).
@@ -303,24 +297,32 @@ This is not a side detail. It is part of Tungsten's core execution model.
 
 ## Quick start
 
-### Python CLI
+### Native CLI
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
+Push-Location .\Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release
+$tungsten = if (Test-Path .\build\cpp\tungsten-cpp.exe) {
+    Resolve-Path .\build\cpp\tungsten-cpp.exe
+} else {
+    Resolve-Path .\build\cpp\Release\tungsten-cpp.exe
+}
 
-python -m tungsten env show --probe
-python -m tungsten kernel eval --code "2+2"
-python -m tungsten notebook create --file $env:TEMP\tungsten-demo.nb --title "Demo" --cell "Text:Hello" --cell "Input:2+2"
-python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
-python -m tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
-python -m tungsten docs search NotebookGet
-python -m tungsten expr evaluate --code "1 + 2 + 3"
-python -m tungsten expr evaluate --code '$ContextPath'
-python -m tungsten expr evaluate --code 'Attributes[Plus]'
-python -m tungsten repl
-python -m tungsten expr evaluate --code '{Symbol["TungstenReadme`alpha"], Names["TungstenReadme`*"]}'
-python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2 --tungsten-workers 8
+& $tungsten env show --probe
+& $tungsten kernel eval --code "2+2"
+& $tungsten notebook create --file $env:TEMP\tungsten-demo.nb --title "Demo" --cell "Text:Hello" --cell "Input:2+2"
+& $tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
+& $tungsten inline-box compose --prefix "icon: " --box-expr "GraphicsBox[{CircleBox[]}]"
+& $tungsten docs search NotebookGet
+& $tungsten expr evaluate --code "1 + 2 + 3"
+& $tungsten repl
+Pop-Location
 ```
+
+Single-configuration generators normally write `build/cpp/tungsten-cpp` (or `.exe` on Windows).
+Visual Studio and other multi-configuration generators normally write
+`build/cpp/Release/tungsten-cpp.exe`. The PowerShell and .NET projections check both layouts.
 
 ### PowerShell
 
@@ -417,8 +419,9 @@ The current documentation should state these boundaries plainly:
 - Kernel-backed features still require the real local installation and a working license path.
 - The expression parser handles common semantic box forms, but it still does not cover full box
   language or arbitrary StandardForm constructs.
-- The expression evaluator implements a pragmatic structural subset, including associations, but it
-  still leaves all other heads inert and does not attempt general kernel semantics.
+- The expression evaluator implements a broad, pragmatic subset, including associations, exact
+  number theory, elementary numeric functions, and stateful definitions. Unsupported heads remain
+  symbolic; it does not attempt general kernel semantics.
 - FrontEnd automation works only for the actions Tungsten explicitly exposes.
 - Notebook Assistant inline UI driving is intentionally not the default path because it is less
   reliable for automation than the hidden chat-notebook backend.
@@ -429,59 +432,67 @@ The current documentation should state these boundaries plainly:
 
 | Path | Purpose |
 |------|---------|
-| `Engine/pyproject.toml` | Python package metadata |
-| `Engine/src/tungsten/discovery.py` | Installation, docs-root, and path discovery |
-| `Engine/src/tungsten/licensing.py` | `mathpass` inspection and deduplication helpers |
-| `Engine/src/tungsten/kernel.py` | Structured kernel execution wrapper |
-| `Engine/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
-| `Engine/src/tungsten/inline_boxes.py` | Inline-box string composition and notebook-cell object extraction |
-| `Engine/src/tungsten/expression.py` | Kernel-free expression model, public facade, session runtime, structural helpers, and built-in family implementations not yet split out |
-| `Engine/src/tungsten/expression_parser.py` | Wolfram text tokenizer/parser and StandardForm box-to-expression interpretation |
-| `Engine/src/tungsten/expression_evaluator.py` | Single-step evaluator dispatch table, separated from the outer evaluation loop |
-| `Engine/src/tungsten/expression_arithmetic.py` | Arithmetic, numeric-constructor, relation, Boolean, predicate, and integer-number-theory evaluator rules |
-| `Engine/src/tungsten/expression_patterns.py` | Ordinary expression pattern matching, replacement rules, `Cases`/`DeleteCases`, and pattern-backed control helpers |
-| `Engine/src/tungsten/parser_corpus.py` | Local parser corpus discovery and Wolfram held-parser comparison |
-| `Engine/src/tungsten/wolfram_strings.py` | Shared Wolfram string literal and inline-box escape handling |
-| `Engine/src/tungsten/docs_index.py` | Offline documentation indexing/search |
-| `Engine/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
-| `Engine/src/tungsten/assistant.py` | Notebook Assistant automation |
-| `Engine/src/tungsten/cli.py` | JSON-first CLI entrypoint |
+| `Engine/CMakeLists.txt` | Native C++ library/CLI build, tests, install rules, and package export |
+| `Engine/cpp/include/tungsten/` | Installed C++ public headers |
+| `Engine/cpp/src/` | Native Engine implementation: CLI, evaluator, parser, notebooks, and Wolfram automation |
+| `Engine/cpp/tests/` | Native unit, component, and CLI smoke coverage |
+| `Engine/pyproject.toml` | Python reference-oracle metadata and differential tooling |
+| `Engine/src/tungsten/` | Python reference implementation and executable compatibility specification; it is not loaded by the native runtime |
+| `Engine/src/tungsten/cli.py` | Python reference JSON CLI used for differential validation |
 | `Engine/Nummy/` | Tungsten-owned large-number arithmetic research corpus, prior-art snapshots, and alpha/beta/gamma prototype implementations |
 | `Engine/Nummy/docs/` | Nummy theory corpus, reports, and archived standalone design proposals |
 | `Engine/Nummy/prior-art/` | Source-study reference implementations for very-large-number arithmetic |
 | `Engine/Nummy/src/` | Independent alpha, beta, and gamma Python experiments used as large-number fallback source material |
 | `Engine/pwsh/` | PowerShell wrappers |
-| `Engine/tests/` | Python unit and integration coverage |
-| `Engine/scripts/Test-TungstenSmoke.ps1` | End-to-end smoke runner |
+| `Engine/tests/` | Python executable specification and integration coverage |
+| `Engine/scripts/Test-TungstenSmoke.ps1` | Native parity gates plus end-to-end smoke runner |
 | `Engine/scripts/Test-TungstenParserCorpus.ps1` | Parser corpus comparison runner |
 | `Engine/docs/` | Documentation set |
 
 ## Build and validation
 
-Run the Python tests from the Tungsten workspace:
+Build and test the native engine from the Tungsten workspace:
+
+```powershell
+Push-Location .\Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release
+ctest --test-dir build/cpp -C Release --output-on-failure
+dotnet test .\dotnet\Tungsten.DotNet.slnx
+Pop-Location
+```
+
+Run the development-only Python oracle tests and differential checks:
 
 ```powershell
 Push-Location .\Engine
 try {
-    $env:PYTHONPATH = (Resolve-Path .\src)
-    python -m unittest discover -s tests -t .
+    uv run python -m unittest discover -s tests -t .
+    uv run python scripts/check_cpp_parser_parity.py
+    uv run python scripts/check_cpp_evaluator_parity.py --tests tests
+    uv run python scripts/check_cpp_stateful_evaluator_parity.py --require-perfect
+    uv run python scripts/check_cpp_recorded_evaluator_parity.py --workers 8 --require-perfect
+    uv run python scripts/check_cpp_cli_parity.py
 }
 finally {
     Pop-Location
 }
 ```
 
-Run the repository-local smoke:
+The parser differential is exact over 1,414 extracted literals, the stateful evaluator gate is
+82/82, the recorded evaluator gate is 2,499/2,499 calls across 585 tests, and the CLI differential
+is 119/119. The standalone evaluator extractor loses setup state; use the recorded evaluator
+harness with `--require-perfect` for the authoritative broad comparison. See
+[C++ Runtime and Verification](./docs/cpp-port.md) for the measured record.
+
+Install the native library, headers, CMake package, and CLI under a staging prefix when needed:
 
 ```powershell
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -IncludeAssistant
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd -UseWinDesk
-pwsh -File .\Engine\scripts\Test-TungstenParserCorpus.ps1 -MaxFiles 100 -TungstenWorkers 8
-pwsh -File .\Engine\scripts\Update-TungstenDocsProvenance.ps1
+cmake --install .\Engine\build\cpp --config Release --prefix .\Engine\build\install
 ```
+
+The installed CLI is under `Engine/build/install/bin`. For repository-local PowerShell or .NET
+smokes, leave the CLI in `Engine/build/cpp`, or set `TUNGSTEN_EXECUTABLE` to its exact path.
 
 ## Documentation map
 
@@ -492,7 +503,8 @@ If you are new to Tungsten, this reading order works well:
 3. [User Guide](./docs/user-guide.md) for practical workflows, tutorials, and scripting examples.
 4. [Usage Reference](./docs/usage-reference.md) for the full command surface.
 5. [Architecture](./docs/architecture.md) for the detailed component model and execution flow.
-6. Focused guides as needed:
+6. [C++ Runtime and Verification](./docs/cpp-port.md) for parity status and validation limits.
+7. Focused guides as needed:
    - [Notebook Assistant](./docs/notebook-assistant.md)
    - [Inline Box Strings](./docs/inline-box-strings.md)
    - [Expression Parser](./docs/expression-parser.md)
@@ -507,8 +519,8 @@ If you are new to Tungsten, this reading order works well:
   higher-level dependency surface is not the most dependable local runtime substrate here.
 - Notebook parsing/editing is kept independent from the kernel so agents can still inspect and
   patch notebooks even when evaluation is unavailable or undesirable.
-- The expression subsystem is also kernel-free, but it is explicitly structural and inert rather
-  than a general-purpose evaluator.
+- The expression subsystem is also kernel-free, with explicit bounded rules rather than a claim of
+  general-purpose Wolfram evaluation.
 - Inline-box string handling is also kernel-free for saved notebooks: Tungsten can extract
   box-bearing objects from notebook cell expressions and compose canonical Wolfram string literals
   without launching the kernel or FrontEnd.

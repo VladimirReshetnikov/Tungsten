@@ -1,8 +1,8 @@
 # Tungsten Notebook Assistant
 
 Created (UTC): 2026-04-23T04:36:53Z
-Updated (UTC): 2026-04-24T20:06:49Z
-Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+Updated (UTC): 2026-07-18T01:40:01Z
+Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 
 ## Summary
 
@@ -55,8 +55,7 @@ Get-TungstenNotebook -Path C:\path\to\analysis.nb
 or:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-python -m tungsten notebook inspect --file C:\path\to\analysis.nb
+tungsten-cpp notebook inspect --file C:\path\to\analysis.nb
 ```
 
 The flattened notebook rows include `index`, `path`, `style`, `preview`, `expression_uuid`,
@@ -168,24 +167,21 @@ if (-not $result.assistant_success) {
 }
 ```
 
-## Python CLI workflow
+## Native CLI workflow
 
-Set `PYTHONPATH` to the repo-local source tree:
-
-```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-```
+Build `tungsten-cpp` under `Engine/build/cpp`, place it on `PATH`, or invoke it by exact path. The
+native assistant CLI does not load the Python package.
 
 Inspect the notebook:
 
 ```powershell
-python -m tungsten notebook inspect --file C:\path\to\analysis.nb
+tungsten-cpp notebook inspect --file C:\path\to\analysis.nb
 ```
 
 Ask the assistant about a cell and insert the first Wolfram Language code block below it:
 
 ```powershell
-python -m tungsten assistant ask-cell `
+tungsten-cpp assistant ask-cell `
     --file C:\path\to\analysis.nb `
     --expression-uuid 7d4a0f9a-17a8-4bc0-b61d-c7497fc16557 `
     --question "Reply only with Wolfram Language code that computes 2+2." `
@@ -196,7 +192,7 @@ python -m tungsten assistant ask-cell `
 If you want all Wolfram Language code blocks from the reply inserted:
 
 ```powershell
-python -m tungsten assistant ask-cell `
+tungsten-cpp assistant ask-cell `
     --file C:\path\to\analysis.nb `
     --cell-index 7 `
     --question "Give two alternative Wolfram Language implementations." `

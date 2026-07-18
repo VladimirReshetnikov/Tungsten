@@ -2,10 +2,10 @@
 
 - Status: Normative for Tungsten's current kernel-free symbol registry
 - Audience: Tungsten maintainers, expression-subsystem users, automation authors, and reviewers
-- Scope: `Engine/src/tungsten/expression.py`
+- Scope: `Engine/cpp/src/evaluator.cpp`, `Engine/cpp/src/expression.cpp`, and the bundled symbol snapshot
 - Created (UTC): 2026-04-25T17:48:49Z
-- Updated (UTC): 2026-06-17T02:01:20Z
-- Repository HEAD: 07930f5d6e6c04bf3c3f12f7b0a95debd2ab7b56
+- Updated (UTC): 2026-07-18T01:40:01Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 - Related docs:
   - [Expression Parser](./expression-parser.md)
   - [Structural Expression Function Support](./expression-function-support.md)
@@ -22,24 +22,23 @@ evaluator rule for a symbol.
 
 The registry is not a package loader and does not attempt to mirror a complete mutable live kernel
 session. It is a structural service for parsing, rendering, name lookup, context lookup,
-generated-symbol allocation, own-value storage, and attribute-aware evaluation inside one Tungsten
-Python process.
+generated-symbol allocation, own-value storage, and attribute-aware evaluation inside one native
+Tungsten process.
 
 ## Registry Model
 
-Every registered symbol has a `SymbolRecord` containing:
+The native registry is intentionally compact and distributed across the expression runtime rather
+than exposed as a Python-style `SymbolRecord` object:
 
-- `full_name`: the fully qualified Wolfram name, such as <code>System`Plus</code> or
-  <code>Global`x</code>;
-- `context`: the context prefix including the trailing backtick, such as <code>System`</code>;
-- `short_name`: the final symbol name without context;
-- `built_in`: whether Tungsten seeded the record as part of its <code>System`</code> built-in
-  surface;
-- `attributes`: a tuple of Wolfram attribute names, such as `Protected`, `HoldAll`, `Flat`, or
-  `Listable`;
-- `own_value`, `down_values`, `up_values`, and `sub_values`: value/rule slots. Tungsten currently
-  creates own values and read-only REPL history down values; down/up/sub definition assignment is
-  still future work.
+- CMake embeds the generated <code>System`</code> symbol and attribute snapshots into the native
+  library;
+- name/context helpers resolve visible short names against <code>System`</code> and
+  <code>Global`</code> and retain explicitly qualified names;
+- `Evaluator` owns immediate values plus ordered down-, up-, and sub-value definition tables for
+  the lifetime of that evaluator instance;
+- mutable attributes are stored separately from the immutable bundled startup attributes;
+- `EvaluationSession` retains one evaluator across REPL inputs, while separate `expr evaluate`
+  processes start with fresh mutable state.
 
 The current registry is initialized with:
 
@@ -79,7 +78,7 @@ Rendered names use visible-context elision:
   <code>"TungstenExample`alpha"</code>.
 
 The registry is process-local. A single expression evaluation can create a symbol and query it
-later in the same expression, but separate `python -m tungsten expr evaluate ...` invocations start
+later in the same expression, but separate `tungsten-cpp expr evaluate ...` invocations start
 with a fresh registry.
 
 ## Supported Functions
@@ -169,23 +168,21 @@ every specialized built-in evaluator rule associated with the full Wolfram kerne
 ## Examples
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-
-python -m tungsten expr evaluate --code '$Context'
-python -m tungsten expr evaluate --code '$ContextPath'
-python -m tungsten expr evaluate --code 'Context[System`Plus]'
-python -m tungsten expr evaluate --code '{Symbol["TungstenExample`alpha"], Names["TungstenExample`*"]}'
-python -m tungsten expr evaluate --code 'NameQ["Plus"]'
-python -m tungsten expr evaluate --code 'NameQ["System`AASTriangle"]'
-python -m tungsten expr evaluate --code 'Length[Names["System`*"]]'
-python -m tungsten expr evaluate --code 'Attributes[Plus]'
-python -m tungsten expr evaluate --code 'Attributes[{Attributes, Plus, AASTriangle}]'
-python -m tungsten expr evaluate --code 'SetAttributes[f, {Flat, Orderless}]; f[b, f[a]]'
-python -m tungsten expr evaluate --code 'Attributes[g] = HoldAll; g[1 + 2, Evaluate[3 + 4]]'
-python -m tungsten expr evaluate --code 'Protect[x]; x = 1; Unprotect[x]; x = 1'
-python -m tungsten expr evaluate --code 'x = 1 + 2; {ValueQ[x], OwnValues[x], x}'
-python -m tungsten expr evaluate --code 'x = 1; x = .; ValueQ[x]'
-python -m tungsten expr evaluate --code 'Unique[temporarySymbol]'
+tungsten-cpp expr evaluate --code '$Context'
+tungsten-cpp expr evaluate --code '$ContextPath'
+tungsten-cpp expr evaluate --code 'Context[System`Plus]'
+tungsten-cpp expr evaluate --code '{Symbol["TungstenExample`alpha"], Names["TungstenExample`*"]}'
+tungsten-cpp expr evaluate --code 'NameQ["Plus"]'
+tungsten-cpp expr evaluate --code 'NameQ["System`AASTriangle"]'
+tungsten-cpp expr evaluate --code 'Length[Names["System`*"]]'
+tungsten-cpp expr evaluate --code 'Attributes[Plus]'
+tungsten-cpp expr evaluate --code 'Attributes[{Attributes, Plus, AASTriangle}]'
+tungsten-cpp expr evaluate --code 'SetAttributes[f, {Flat, Orderless}]; f[b, f[a]]'
+tungsten-cpp expr evaluate --code 'Attributes[g] = HoldAll; g[1 + 2, Evaluate[3 + 4]]'
+tungsten-cpp expr evaluate --code 'Protect[x]; x = 1; Unprotect[x]; x = 1'
+tungsten-cpp expr evaluate --code 'x = 1 + 2; {ValueQ[x], OwnValues[x], x}'
+tungsten-cpp expr evaluate --code 'x = 1; x = .; ValueQ[x]'
+tungsten-cpp expr evaluate --code 'Unique[temporarySymbol]'
 ```
 
 ## Regenerating the System Snapshot
@@ -198,8 +195,8 @@ pwsh -File .\Engine\scripts\Update-TungstenSystemSymbolSnapshot.ps1
 
 The generator records <code>Names["System`*"]</code> entries that do not themselves contain a
 backtick and uses <code>Attributes[Evaluate["System`" <> name]]</code> to account for the fact that `Attributes` has
-`HoldAll`. The JSON file is package data, so editable source runs and installed wheels use the
-same registry seed.
+`HoldAll`. CMake embeds the JSON file into the native library, and the Python oracle reads the same
+source snapshot for differential compatibility checks.
 
 ## Reference Material
 

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-07-03T17:10:00Z
-- Repository HEAD: e16db62ae188dbe7df0a3e0cd417e027122b0ebf
+- Updated (UTC): 2026-07-18T04:31:20Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 
 ## What this docs tree is for
 
@@ -13,7 +13,7 @@ This folder is the current-state documentation set for Tungsten, the repository'
 automation workspace. The documents here are meant to answer different questions cleanly:
 
 - "What is Tungsten and what does it already do?"
-- "How do I use it from Python or PowerShell?"
+- "How do I use the native CLI or PowerShell projection?"
 - "How do I use it from C#/.NET?"
 - "What are the exact commands and payload shapes?"
 - "How is it built internally?"
@@ -62,40 +62,43 @@ The docs are split so readers can choose the right depth:
 1. [../README.md](../README.md)
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
-4. [expression-parser.md](./expression-parser.md)
-5. [symbol-context-registry.md](./symbol-context-registry.md)
-6. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
-7. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
-8. [import-export-formats.md](./import-export-formats.md)
-9. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
-10. [expression-function-support.md](./expression-function-support.md)
-11. [list-association-complexity.md](./list-association-complexity.md)
-12. [list-association-parity-proposal.md](./list-association-parity-proposal.md)
-13. [reports/2026-07-03-list-association-persistent-backends.md](./reports/2026-07-03-list-association-persistent-backends.md)
+4. [cpp-port.md](./cpp-port.md)
+5. [expression-parser.md](./expression-parser.md)
+6. [symbol-context-registry.md](./symbol-context-registry.md)
+7. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
+8. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
+9. [import-export-formats.md](./import-export-formats.md)
+10. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
+11. [expression-function-support.md](./expression-function-support.md)
+12. [list-association-complexity.md](./list-association-complexity.md)
+13. [list-association-parity-proposal.md](./list-association-parity-proposal.md)
+14. [reports/2026-07-03-list-association-persistent-backends.md](./reports/2026-07-03-list-association-persistent-backends.md)
     if you are choosing the Stage B substrate or need the kernel-verified `Association` semantics
-14. [numeric-simplification.md](./numeric-simplification.md)
-14. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
-15. [pattern-matching-plan.md](./pattern-matching-plan.md)
-16. [parser-corpus.md](./parser-corpus.md)
-17. [inline-box-strings.md](./inline-box-strings.md)
-18. [notebook-assistant.md](./notebook-assistant.md)
-19. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+15. [numeric-simplification.md](./numeric-simplification.md)
+16. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
+17. [pattern-matching-plan.md](./pattern-matching-plan.md)
+18. [parser-corpus.md](./parser-corpus.md)
+19. [inline-box-strings.md](./inline-box-strings.md)
+20. [notebook-assistant.md](./notebook-assistant.md)
+21. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
     if you are planning a GUI notebook FrontEnd or StandardForm renderer
-20. [troubleshooting.md](./troubleshooting.md)
+22. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
 | Item | Purpose |
 |------|---------|
 | [../README.md](../README.md) | Current-state project landing page: goals, shipped surface, architecture summary, quick start, layout, and validation. |
-| [user-guide.md](user-guide.md) | Practical usage guide with setup steps, tutorial flows, and common PowerShell/Python workflows. |
+| [user-guide.md](user-guide.md) | Practical usage guide with CMake setup steps, native CLI tutorials, and common PowerShell workflows. |
 | [usage-reference.md](usage-reference.md) | Exhaustive command reference for the CLI and PowerShell wrapper surface. |
 | [dotnet-api.md](dotnet-api.md) | Typed C#/.NET client guide with repository setup, API map, examples, and failure-model notes. |
 | [architecture.md](architecture.md) | Current architecture reference: layer ownership, execution model, and subsystem boundaries. |
 | [implementation-details.md](implementation-details.md) | Environment-specific findings and the reasoning behind important implementation choices. |
+| [cpp-port.md](cpp-port.md) | Current native C++ runtime layout, verification record, parity gates, and known validation limits. |
+| [rust-port.md](rust-port.md) | Historical record of the superseded Rust migration phase; not current build or runtime guidance. |
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
-| [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |
+| [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and bounded native evaluator. |
 | [numeric-tower.md](numeric-tower.md) | Implementation notes for explicit numeric atoms, arithmetic, precision, numeric predicates, and bounded numeric evaluation. |
 | [numeric-simplification.md](numeric-simplification.md) | Focused note describing `NumericQ`, variable-free `Simplify` / `FullSimplify`, and the exact transformations the offline simplifier applies. |
 | [overflow-underflow-large-number-fallback.md](overflow-underflow-large-number-fallback.md) | Design proposal for adding a certified very-large-number fallback when machine arithmetic would otherwise overflow, underflow, or collapse to lossy zero. |
@@ -156,7 +159,7 @@ The docs are split so readers can choose the right depth:
 
 ### Kernel-free structural analysis
 
-- Read [repl.md](./repl.md) if you want the console-mode `tungsten.exe` interpreter and its
+- Read [repl.md](./repl.md) if you want the console-mode `tungsten-cpp(.exe)` interpreter and its
   `wolfram.exe`-style history behavior.
 - Read [expression-parser.md](./expression-parser.md).
 - Read [numeric-tower.md](./numeric-tower.md) and [numeric-simplification.md](./numeric-simplification.md)
@@ -178,8 +181,8 @@ The docs are split so readers can choose the right depth:
   capture-avoiding renaming rule for named pure functions.
 - Read [expression-function-support.md](./expression-function-support.md) for the exact built-in coverage and official Wolfram reference links.
 - Read [list-association-complexity.md](./list-association-complexity.md) when you need the
-  asymptotic cost model for Wolfram-style lists and associations versus Tungsten's current Python
-  representation.
+  historical asymptotic cost model for Wolfram-style lists and associations versus the Python
+  compatibility oracle's representation.
 - Read [list-association-parity-proposal.md](./list-association-parity-proposal.md) when planning
   changes that close the retained-key-index and association-builder gaps identified by the
   complexity note.

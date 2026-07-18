@@ -2,9 +2,10 @@
 
 - Status: Informational and reference-oriented (console-mode kernel-free interpreter)
 - Audience: Tungsten users, script authors, maintainers, and testers comparing Tungsten with `wolfram.exe`
-- Scope: `Engine/src/tungsten/repl.py`, `Engine/src/tungsten/expression.py`, and the `tungsten` console entry point
+- Scope: `Engine/cpp/src/repl.cpp`, the native expression subsystem, and the C++/.NET console entry points
 - Created (UTC): 2026-04-25T21:57:56Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-07-18T01:40:01Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 - Related docs:
   - [Usage Reference](./usage-reference.md)
   - [Expression Parser](./expression-parser.md)
@@ -27,24 +28,22 @@ that want Wolfram-like interaction without consuming a kernel license seat.
 From a source checkout:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-python -m tungsten repl
+Push-Location .\Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release
+.\build\cpp\tungsten-cpp.exe repl
+Pop-Location
 ```
 
-Running `python -m tungsten` with no arguments starts the same REPL.
+For a Visual Studio multi-configuration build, run
+`.\build\cpp\Release\tungsten-cpp.exe repl`. On non-Windows single-configuration builds, the path
+is `./build/cpp/tungsten-cpp`.
 
-After installing Tungsten as an editable or packaged Python project, the `pyproject.toml`
-`project.scripts` entry point creates a Windows console launcher named `tungsten.exe`:
-
-```powershell
-python -m pip install -e .\Engine
-tungsten.exe
-```
+Running `tungsten-cpp` with no arguments starts the same REPL.
 
 The repository also includes a small .NET console launcher at
 `dotnet/Tungsten.Console`. It builds to `dotnet/Tungsten.Console/bin/<configuration>/net10.0/tungsten.exe`
-and delegates to `python -m tungsten` with the source tree added to `PYTHONPATH` when it can find
-the checkout:
+and delegates directly to a repository build of `tungsten-cpp` or to `tungsten-cpp` on `PATH`:
 
 ```powershell
 dotnet build .\Engine\dotnet\Tungsten.DotNet.slnx
@@ -87,10 +86,11 @@ $HistoryLength
 $OutputSizeLimit
 ```
 
-`$RecursionLimit` defaults to `1024` and accepts `Infinity` or integers at least `20`.
-`$IterationLimit` defaults to `4096` and accepts the same value range. When either limit is
-exceeded, Tungsten emits a non-fatal message and leaves the expression at that evaluator boundary
-unevaluated; it does not terminate the REPL.
+`$RecursionLimit` defaults to `1024`; supported finite assignments update the native recursive
+evaluator guard. `$IterationLimit` defaults to `4096` and is assignable for compatibility, while
+the current iteration heads use their own bounded native loops rather than one universal
+Wolfram-style iteration counter. Limit messages and `Infinity` behavior are not yet exact parity;
+see [C++ Port](./cpp-port.md).
 
 `$OutputSizeLimit` is a Tungsten REPL setting with default `12000`. If the rendered `Out[n]` text is
 longer than the current finite limit, the REPL displays a `Short`-style abbreviation using
@@ -201,9 +201,9 @@ it is not a drop-in Wolfram kernel:
 - Output rendering is Tungsten `InputForm`-like for most expressions, with top-level strings shown
   without quotes to resemble the ordinary Wolfram console. Outermost display wrappers use
   Wolfram-style labels and text: `InputForm[expr]` prints as `Out[n]//InputForm= ...`,
-  `FullForm[expr]` prints as `Out[n]//FullForm= ...`, and the same display selection is used
-  for `Print[InputForm[expr]]`, `Print[FullForm[expr]]`, `OutputForm[expr]`, and
-  `StandardForm[expr]`. `TraditionalForm[expr]`, `TeXForm[expr]`, `MathMLForm[expr]`,
+  and `FullForm[expr]` prints as `Out[n]//FullForm= ...`. Nested `Print`/display-wrapper parity is
+  still incomplete and is tracked by the stateful differential suite. `TraditionalForm[expr]`,
+  `TeXForm[expr]`, `MathMLForm[expr]`,
   `CForm[expr]`, `FortranForm[expr]`, `TextForm[expr]`, and common output-format wrappers such as
   `NumberForm`, `ScientificForm`, `EngineeringForm`, `AccountingForm`, `PaddedForm`,
   `PercentForm`, `BaseForm`, `TableForm`, `MatrixForm`, `TreeForm`, `DisplayForm`, `StringForm`, and `SequenceForm` also

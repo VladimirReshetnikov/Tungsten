@@ -4,8 +4,8 @@
 - Audience: Tungsten users and maintainers diagnosing local-environment, kernel, FrontEnd, assistant, or parser failures
 - Scope: `Engine` runtime behavior on a local Windows machine
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-07-18T04:31:20Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 - Related docs:
   - [Project README](../README.md)
   - [User Guide](./user-guide.md)
@@ -23,21 +23,48 @@ problems fall into one of a handful of categories:
 - Documentation indexing/search is stale or incomplete.
 - Notebook Assistant automation cannot find or resolve the requested cell.
 - The kernel-free expression parser rejects syntax outside its intended subset.
-- PowerShell cannot find `python` or cannot import the Tungsten module correctly.
+- PowerShell cannot find `tungsten-cpp` or cannot import the Tungsten module correctly.
 
 This document gives a practical recovery path for each of those cases.
+
+The kernel-free native executable and its failure paths can also be exercised on Linux, but the
+installation, licensing, process-seat, FrontEnd, documentation, and assistant guidance below is
+Windows/Wolfram-specific. Those live paths were not validated by the Linux native-runtime pass.
+
+## Build or locate the native executable first
+
+From the repository root:
+
+```powershell
+Push-Location .\Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release --target tungsten-cpp
+Pop-Location
+```
+
+Direct callers can run `Engine\build\cpp\Release\tungsten-cpp.exe` for a typical Windows
+multi-configuration build or `Engine\build\cpp\tungsten-cpp` for a typical single-configuration
+build. The PowerShell module and the repository-aware .NET option factories honor
+`TUNGSTEN_EXECUTABLE`; otherwise they check the repository build locations and then `PATH`. A
+plain `TungstenClientOptions` instance uses `tungsten-cpp` from `PATH` unless its executable path is
+set explicitly.
+
+The native library requires GMP and GMPXX headers/libraries that are ABI-compatible with the build
+toolchain and with each other. If configuration succeeds but linking or a downstream consumer
+fails, first check architecture, runtime-library, and GMP installation consistency. The current
+verification record does not include a live MSVC/Visual Studio or macOS build, so validate those
+platforms locally before treating a packaged binary as supported.
 
 ## First diagnostic commands to run
 
 These are the fastest high-signal checks:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-python -m tungsten env show --probe
-python -m tungsten kernel eval --code "2+2"
-python -m tungsten frontend probe
-python -m tungsten docs search NotebookGet
-python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
+tungsten-cpp env show --probe
+tungsten-cpp kernel eval --code "2+2"
+tungsten-cpp frontend probe
+tungsten-cpp docs search NotebookGet
+tungsten-cpp expr evaluate --code "Level[f[a, g[b]], -1]"
 ```
 
 Or from PowerShell:
@@ -63,7 +90,7 @@ If those five checks behave as expected, the core Tungsten stack is usually heal
 
 ### Checks
 
-- Run `python -m tungsten env show`.
+- Run `tungsten-cpp env show`.
 - Verify that the local installation really exists at the expected path, for example:
   `C:\Program Files\Wolfram Research\Wolfram\15.0`.
 
@@ -73,7 +100,7 @@ If those five checks behave as expected, the core Tungsten stack is usually heal
   non-default location.
 - Set `TUNGSTEN_WOLFRAM_PRODUCT=engine` only when you intentionally want the installed
   Wolfram Engine for Developers 14.3 runtime instead of paid Wolfram 15.0.
-- Re-run `python -m tungsten env show` to verify discovery.
+- Re-run `tungsten-cpp env show` to verify discovery.
 
 ## Problem: Kernel evaluation does not produce a structured payload
 
@@ -86,7 +113,7 @@ If those five checks behave as expected, the core Tungsten stack is usually heal
 
 ### Checks
 
-- Run `python -m tungsten kernel eval --code "2+2"`.
+- Run `tungsten-cpp kernel eval --code "2+2"`.
 - Inspect `exit_code`, `stderr`, `evaluation_available`, and the `mathpass` payload.
 
 ### Common causes
@@ -119,6 +146,10 @@ Tungsten also now:
 - records the observed controlling-process ceiling from successful runs;
 - scans existing Wolfram-related processes before launch;
 - cleans up orphaned Tungsten-owned headless kernels from obviously stale prior runs.
+
+The Windows launcher currently enables broad handle inheritance for the child process. This is
+appropriate for Tungsten's trusted local automation model, but an embedding host with sensitive
+inheritable handles should de-inherit or close them before launching Wolfram.
 
 ### What to inspect
 
@@ -162,7 +193,7 @@ The kernel result payload includes:
 ### Checks
 
 ```powershell
-python -m tungsten frontend probe
+tungsten-cpp frontend probe
 ```
 
 If the kernel probe works but the FrontEnd probe does not, the problem is specifically in the FE
@@ -175,7 +206,7 @@ path rather than in the base Tungsten installation discovery.
 - Retry a minimal FE operation before a complex one:
 
   ```powershell
-  python -m tungsten frontend run --code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> False]]"
+  tungsten-cpp frontend run --code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> False]]"
   ```
 
 ## Problem: Documentation search returns poor results or no results
@@ -191,8 +222,8 @@ path rather than in the base Tungsten installation discovery.
 - Rebuild the index explicitly:
 
   ```powershell
-  python -m tungsten docs index
-  python -m tungsten docs search NotebookGet --rebuild
+  tungsten-cpp docs index
+  tungsten-cpp docs search NotebookGet --rebuild
   ```
 
 ### Important behavior
@@ -213,7 +244,7 @@ path rather than in the base Tungsten installation discovery.
 Inspect the notebook first:
 
 ```powershell
-python -m tungsten notebook inspect --file C:\path\to\file.nb
+tungsten-cpp notebook inspect --file C:\path\to\file.nb
 ```
 
 Then verify which of these selectors you are using:
@@ -317,17 +348,20 @@ This is exactly why the default backend is not the visible inline popup.
   Get-Command -Module Tungsten
   ```
 
-## Problem: PowerShell wrappers fail because `python` is missing
+## Problem: PowerShell wrappers cannot find the native executable
 
 ### Symptoms
 
-- Tungsten PowerShell commands throw `python was not found on PATH.`
+- Tungsten PowerShell commands report that `tungsten-cpp` could not be found or started.
 
 ### Recovery
 
-- Verify `python` is installed and on `PATH`.
-- If necessary, use the repository's Python installation workflow described in the repo guidance.
-- Re-run the PowerShell command after confirming `Get-Command python` succeeds.
+- Build the native executable with CMake and confirm either
+  `Engine/build/cpp/tungsten-cpp.exe` or a multi-configuration output such as
+  `Engine/build/cpp/Release/tungsten-cpp.exe` exists.
+- Set `TUNGSTEN_EXECUTABLE` to the exact executable path when using a nonstandard build layout.
+- Otherwise place `tungsten-cpp` on `PATH` and confirm `Get-Command tungsten-cpp` succeeds.
+- Re-import `Engine/pwsh/Tungsten.psd1` after changing the environment.
 
 ## Problem: The expression parser rejects valid Wolfram syntax you expected it to support
 
@@ -341,7 +375,7 @@ kernel. It currently supports:
 - a pragmatic StandardForm subset, including common semantic box forms such as `FractionBox`,
   `SqrtBox`, `RadicalBox`, `SuperscriptBox`, `SubscriptBox`, related script boxes, and common
   named-character operators;
-- a small inert evaluator for structural built-ins.
+- a broad but bounded native evaluator whose unsupported heads remain symbolic.
 
 It does not attempt full box language, arbitrary StandardForm surface syntax, or general kernel
 semantics.
@@ -353,7 +387,7 @@ semantics.
   than full evaluation.
 - Inspect the structured `success`, `error_type`, and `error` fields from `expr parse` or
   `expr evaluate`; Tungsten now reports syntax and inert-evaluation failures as JSON rather than as
-  raw Python tracebacks.
+  unstructured host-language exceptions.
 
 ## Problem: Canonical `input_form` output is different from the original source text
 
@@ -376,6 +410,34 @@ may produce canonical `input_form` like:
 This is expected. Tungsten's expression subsystem renders a canonicalized textual form of its AST;
 it is not trying to preserve the user's exact original formatting token-for-token.
 
+## Problem: Text contains U+FFFD or a notebook patch reports invalid UTF-8
+
+### Meaning
+
+Tungsten uses two deliberate text-input policies:
+
+- saved notebooks, documentation notebooks, parser-corpus files, `mathpass`, and captured kernel
+  stdout/stderr decode malformed UTF-8 with the same replacement boundaries as Python's
+  `errors="replace"`; malformed byte subsequences therefore appear as U+FFFD (`�`);
+- notebook patch JSON must be valid UTF-8 and valid JSON, so an invalid patch file is rejected
+  rather than decoded lossily.
+
+An empty patch object `{}` is a supported no-op. Non-empty patch operations require correctly typed
+fields, non-negative bounded paths, and in-range insertion indices; native patching does not coerce
+invalid values or clamp an out-of-range insertion as Python's `list.insert` would.
+
+Native JSON output escapes non-ASCII characters by default. Seeing `\u03b1` or a surrogate pair in
+raw output is normal JSON serialization, not evidence that the original Unicode text was damaged.
+
+### Recovery
+
+- Re-encode the source or patch as UTF-8 without a legacy code page or malformed byte sequence.
+- For a damaged notebook that still parses structurally, inspect the affected cell before saving;
+  saving a modified document will preserve the decoded U+FFFD character, not the original invalid
+  bytes.
+- For a patch file, fix the encoding rather than substituting replacement characters into the
+  operation payload.
+
 ## Problem: Smoke or tests fail intermittently while other Wolfram work is running
 
 ### Meaning
@@ -383,6 +445,10 @@ it is not trying to preserve the user's exact original formatting token-for-toke
 Tungsten's kernel and FrontEnd tests are integration-heavy compared to pure unit tests. Running
 multiple FE-heavy or kernel-heavy validation paths in parallel can create misleading transient
 failures.
+
+The smoke runner now starts with parser, 82-step stateful evaluator (`--require-perfect`), full
+recorded-evaluator (`--require-perfect`), and 119-case CLI parity gates. A deterministic failure in
+one of those gates is a native compatibility regression, not Wolfram license or desktop contention.
 
 ### Recovery
 
@@ -402,13 +468,6 @@ Use the docs first, but inspect code directly when:
 - you are extending Tungsten rather than merely using it;
 - the failure path appears to come from the wrapper surface rather than from the Wolfram runtime.
 
-The most relevant source files are:
-
-- `src/tungsten/discovery.py`
-- `src/tungsten/licensing.py`
-- `src/tungsten/kernel.py`
-- `src/tungsten/notebook.py`
-- `src/tungsten/docs_index.py`
-- `src/tungsten/frontend.py`
-- `src/tungsten/assistant.py`
-- `src/tungsten/expression.py`
+The most relevant source files are under `cpp/src/`: `discovery.cpp`, `licensing.cpp`,
+`kernel.cpp`, `notebook.cpp`, `docs_index.cpp`, `frontend.cpp`, `assistant.cpp`, `parser.cpp`, and
+`evaluator.cpp`. Their public interfaces are under `cpp/include/tungsten/`.

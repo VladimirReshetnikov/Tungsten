@@ -1,12 +1,13 @@
 # Tungsten Expression Parser
 
 Created (UTC): 2026-04-23T14:55:38Z
-Updated (UTC): 2026-04-26T04:49:30Z
-Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
+Updated (UTC): 2026-07-18T01:40:01Z
+Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 
 ## Summary
 
-`expression.py` gives Tungsten a real kernel-free Wolfram expression subsystem. It provides:
+`cpp/src/expression.cpp`, `parser.cpp`, and `evaluator.cpp` give Tungsten a native kernel-free
+Wolfram expression subsystem. It provides:
 
 - an AST for atoms and general expressions;
 - parsers for FullForm, InputForm, and a pragmatic StandardForm subset;
@@ -48,6 +49,8 @@ Repository HEAD: be1373c65e4260dd384f08b08e8b3677fc2a0bf3
 
 The important constraint is deliberate: this is not a replacement for the Wolfram kernel. Unknown
 symbols stay inert, and Tungsten only evaluates the specific built-ins it implements itself.
+The broad function inventory below describes the intended compatibility surface; C++ edge-case
+parity is still measured against the Python oracle and is not assumed to be perfect.
 
 For the exact supported structural function list, supported forms, and official Wolfram reference
 links, read [expression-function-support.md](./expression-function-support.md). For the supported
@@ -65,7 +68,7 @@ Use the expression subsystem when you want:
 - symbol and context name queries without launching a kernel;
 - read-only Wolfram 15.0 <code>System`</code> symbol and attribute discovery without launching a kernel;
 - canonical formatting of textual Wolfram expressions;
-- lightweight expression traversal from Python or PowerShell;
+- lightweight expression traversal from C++, the native CLI, or PowerShell;
 - deterministic scripting behavior that does not depend on evaluation rules, definitions, or
   notebook state.
 
@@ -296,9 +299,9 @@ The current string-pattern subset is also intentionally bounded:
 - ambiguous string sequence patterns use greedy allocation by default; wrapping a string-pattern
   subtree in `Shortest[...]` switches that subtree to non-greedy allocation, while `Longest[...]`
   explicitly requests greedy allocation;
-- `RegularExpression` is delegated to Python's `re` engine and character-class tests use Python /
-  Unicode-library predicates rather than trying to match Wolfram's exact PCRE and Unicode-version
-  behavior byte for byte;
+- `RegularExpression` uses the C++ standard library's ECMAScript regular-expression engine; the
+  leading `(?i)` form is recognized for case-insensitive matching. Character classes are a bounded
+  native subset and do not reproduce Wolfram's PCRE and Unicode-version behavior byte for byte;
 - `DatePattern` supports the documented date-element strings and simple supported separator
   string patterns, with range checks for the common numeric fields; it is a practical recognizer,
   not a full calendar validator;
@@ -395,7 +398,7 @@ f[Pattern[x, Blank[Integer]], Pattern[y, Blank[]]]
 
 ## Output model
 
-Both the CLI and the Python API expose a few useful normal forms.
+Both the CLI and the C++ API expose a few useful normal forms.
 
 ### Canonical `input_form`
 
@@ -431,7 +434,32 @@ understood semantically.
 
 The CLI returns a structured AST dictionary for inspection and downstream automation.
 
-## Python usage
+## C++ library usage
+
+```cpp
+#include <tungsten/evaluator.hpp>
+#include <tungsten/parser.hpp>
+
+#include <iostream>
+
+int main() {
+    const auto expression = tungsten::parse_expression(
+        "1 + 2 x^3", tungsten::ParseForm::Input);
+    tungsten::Evaluator evaluator;
+    const auto result = evaluator.evaluate(expression);
+
+    std::cout << expression.to_full_form() << '\n';
+    std::cout << result.to_input_form() << '\n';
+}
+```
+
+Installed CMake consumers link the exported `Tungsten::Engine` target. The public headers live
+under `cpp/include/tungsten/`.
+
+## Reference Python oracle API
+
+The Python package remains useful as the executable compatibility specification and for migration
+tooling. It is not loaded by `tungsten-cpp`:
 
 ```python
 from tungsten.expression import evaluate
@@ -462,7 +490,7 @@ integer_sum.to_full_form()
 # 6
 ```
 
-Convenience entrypoints include:
+Reference-oracle convenience entrypoints include:
 
 - `parse_input_form(...)`
 - `parse_full_form(...)`
@@ -527,53 +555,52 @@ Convenience entrypoints include:
 Parse without evaluating:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-python -m tungsten expr parse --code "1 + 2 x^3"
-python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
-python -m tungsten expr parse --code "f @ x // g" --form standard
-python -m tungsten expr parse --code "\"a\" <> \"b\" <> \"c\""
+tungsten-cpp expr parse --code "1 + 2 x^3"
+tungsten-cpp expr parse --code "Rule[x, List[1, 2]]" --form fullform
+tungsten-cpp expr parse --code "f @ x // g" --form standard
+tungsten-cpp expr parse --code "\"a\" <> \"b\" <> \"c\""
 ```
 
 Structurally evaluate implemented built-ins:
 
 ```powershell
-python -m tungsten expr evaluate --code "Length[{a, b, c}]"
-python -m tungsten expr evaluate --code '$ContextPath'
-python -m tungsten expr evaluate --code 'Context[System`Plus]'
-python -m tungsten expr evaluate --code '{Symbol["TungstenParser`alpha"], Names["TungstenParser`*"]}'
-python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
-python -m tungsten expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
-python -m tungsten expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
-python -m tungsten expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
-python -m tungsten expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
-python -m tungsten expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
-python -m tungsten expr evaluate --code "If[1 < 2, 1 + 2, 9]"
-python -m tungsten expr evaluate --code "Which[False, a, True, 1 + 2]"
-python -m tungsten expr evaluate --code "Piecewise[{{1, False}, {2, x}, {2 + 2, True}}]"
-python -m tungsten expr evaluate --code "Pick[f[a, b, c, d], {False, True, False, True}]"
-python -m tungsten expr evaluate --code "Select[f[1, a, 2, 3], IntegerQ]"
-python -m tungsten expr evaluate --code "SelectFirst[{1, a, 2, 3}, # > 1 &]"
-python -m tungsten expr evaluate --code "Discard[<|a -> 1, b -> x, c -> 2|>, IntegerQ, 1]"
-python -m tungsten expr evaluate --code "TakeWhile[f[2, 4, 6, 7, 8], EvenQ]"
-python -m tungsten expr evaluate --code "Mod[-14, 5]"
-python -m tungsten expr evaluate --code "Clip[-7, {-5, 5}, {100, 200}]"
-python -m tungsten expr evaluate --code "KroneckerDelta[3, 3, 3]"
-python -m tungsten expr evaluate --code "f[g[a]] /. g[x_] :> x"
-python -m tungsten expr evaluate --code "f[a] //. f[x_] :> x"
-python -m tungsten expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
-python -m tungsten expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
-python -m tungsten expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
-python -m tungsten expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
-python -m tungsten expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
-python -m tungsten expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~~ \"g\"]"
-python -m tungsten expr evaluate --code "StringCases[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
-python -m tungsten expr evaluate --code "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
-python -m tungsten expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
-python -m tungsten expr evaluate --code "ImportString[\"{\\\"a\\\":1}\", \"JSON\"]"
-python -m tungsten expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
-python -m tungsten expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
-python -m tungsten expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
-python -m tungsten expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
+tungsten-cpp expr evaluate --code "Length[{a, b, c}]"
+tungsten-cpp expr evaluate --code '$ContextPath'
+tungsten-cpp expr evaluate --code 'Context[System`Plus]'
+tungsten-cpp expr evaluate --code '{Symbol["TungstenParser`alpha"], Names["TungstenParser`*"]}'
+tungsten-cpp expr evaluate --code "Level[f[a, g[b]], -1]"
+tungsten-cpp expr evaluate --code "Extract[f[a, g[b]], {{1}, {2, 1}}]"
+tungsten-cpp expr evaluate --code "MatchQ[f[a, a], f[x_, x_]]"
+tungsten-cpp expr evaluate --code "Cases[{f[a], f[b]}, f[x_] :> x]"
+tungsten-cpp expr evaluate --code "DeleteCases[f[a, g[a]], a, Infinity]"
+tungsten-cpp expr evaluate --code "Replace[f[g[a]], x_ :> p[x], {0, Infinity}]"
+tungsten-cpp expr evaluate --code "If[1 < 2, 1 + 2, 9]"
+tungsten-cpp expr evaluate --code "Which[False, a, True, 1 + 2]"
+tungsten-cpp expr evaluate --code "Piecewise[{{1, False}, {2, x}, {2 + 2, True}}]"
+tungsten-cpp expr evaluate --code "Pick[f[a, b, c, d], {False, True, False, True}]"
+tungsten-cpp expr evaluate --code "Select[f[1, a, 2, 3], IntegerQ]"
+tungsten-cpp expr evaluate --code "SelectFirst[{1, a, 2, 3}, # > 1 &]"
+tungsten-cpp expr evaluate --code "Discard[<|a -> 1, b -> x, c -> 2|>, IntegerQ, 1]"
+tungsten-cpp expr evaluate --code "TakeWhile[f[2, 4, 6, 7, 8], EvenQ]"
+tungsten-cpp expr evaluate --code "Mod[-14, 5]"
+tungsten-cpp expr evaluate --code "Clip[-7, {-5, 5}, {100, 200}]"
+tungsten-cpp expr evaluate --code "KroneckerDelta[3, 3, 3]"
+tungsten-cpp expr evaluate --code "f[g[a]] /. g[x_] :> x"
+tungsten-cpp expr evaluate --code "f[a] //. f[x_] :> x"
+tungsten-cpp expr evaluate --code "ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}]"
+tungsten-cpp expr evaluate --code "ReplacePart[f[a, b, c], 2 -> x]"
+tungsten-cpp expr evaluate --code "MapAt[g, f[a, h[b, c], d], {2, 1}]"
+tungsten-cpp expr evaluate --code "StringTake[\"abcdef\", {2, 5, 2}]"
+tungsten-cpp expr evaluate --code "StringJoin[{\"a\", {\"b\", \"c\"}}]"
+tungsten-cpp expr evaluate --code "StringMatchQ[\"catalog\", \"c\" ~~ __ ~~ \"g\"]"
+tungsten-cpp expr evaluate --code "StringCases[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
+tungsten-cpp expr evaluate --code "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]"
+tungsten-cpp expr evaluate --code "StringPosition[\"ababa\", \"a\" ~~ __ ~~ \"a\"]"
+tungsten-cpp expr evaluate --code "ImportString[\"{\\\"a\\\":1}\", \"JSON\"]"
+tungsten-cpp expr evaluate --code "ImportByteArray[ExportByteArray[{{1, 2}, {3, 4}}, {\"GZIP\", \"CSV\"}], {\"GZIP\", \"CSV\"}]"
+tungsten-cpp expr evaluate --code "ToExpression[ToString[HoldComplete[1 + 2], InputForm], InputForm]"
+tungsten-cpp expr evaluate --code 'ToExpression["f @ x // g", StandardForm, HoldComplete]'
+tungsten-cpp expr evaluate --code "Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]"
 ```
 
 The parse payload includes:

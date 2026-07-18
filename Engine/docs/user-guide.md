@@ -2,15 +2,12 @@
 
 - Status: Informational and operational (current usage manual, tutorial, and scripting guide)
 - Audience: Users running Tungsten locally, maintainers validating it, and script authors building automation on top of it
-- Scope: Building, running, and troubleshooting Tungsten's Python CLI and PowerShell surfaces
+- Scope: Building, running, and troubleshooting Tungsten's native CLI and PowerShell surfaces
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-07-18T04:31:20Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 - Related code:
-  - `Engine/src/tungsten/cli.py`
-  - `Engine/src/tungsten/kernel.py`
-  - `Engine/src/tungsten/notebook.py`
-  - `Engine/src/tungsten/assistant.py`
+  - `Engine/cpp/`
   - `Engine/pwsh/Tungsten.psm1`
 - Related docs:
   - [Project README](../README.md)
@@ -68,7 +65,10 @@ It is less appropriate when you need:
 ### To use PowerShell wrappers
 
 - PowerShell 7.4+.
-- A `python` command on `PATH`.
+- CMake 3.20+, a C++17 compiler, and discoverable ABI-compatible GMP/GMPXX development libraries
+  to build the native engine.
+- A built `tungsten-cpp` executable in `Engine/build/cpp`, a `Release`/`Debug` multi-config
+  subdirectory, or on `PATH`. `TUNGSTEN_EXECUTABLE` can select an exact path.
 
 ### To use experimental visible inline assistant automation
 
@@ -79,15 +79,16 @@ It is less appropriate when you need:
 
 ## Environment setup
 
-### Python CLI setup
+### Native CLI setup
 
 From the repository root:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
+Push-Location .\Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release
+Pop-Location
 ```
-
-That points Python at the repo-local `tungsten` package.
 
 ### PowerShell module setup
 
@@ -95,19 +96,21 @@ That points Python at the repo-local `tungsten` package.
 Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
 ```
 
-The module is intentionally thin. It sets `PYTHONPATH`, calls `python -m tungsten ...`,
+The module is intentionally thin. It resolves `tungsten-cpp`, calls it directly,
 deserializes the JSON response, and returns PowerShell objects.
 
 ## Tutorial
 
 ### Tutorial 1: Verify the environment and the machine-local Wolfram installation
 
-Python CLI:
+Native CLI:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-python -m tungsten env show --probe
+.\Engine\build\cpp\tungsten-cpp.exe env show --probe
 ```
+
+For a Visual Studio multi-configuration build, use
+`.\Engine\build\cpp\Release\tungsten-cpp.exe` instead.
 
 PowerShell:
 
@@ -126,11 +129,11 @@ If this step fails, jump to [Troubleshooting](./troubleshooting.md) before going
 
 ### Tutorial 2: Evaluate Wolfram Language code through the real kernel
 
-Python CLI:
+Native CLI:
 
 ```powershell
-python -m tungsten kernel eval --code "2+2"
-python -m tungsten kernel eval --code "Print[Prime[10]]; Prime[20]"
+tungsten-cpp kernel eval --code "2+2"
+tungsten-cpp kernel eval --code "Print[Prime[10]]; Prime[20]"
 ```
 
 PowerShell:
@@ -144,15 +147,15 @@ Important behavior:
 
 - `result` and `result_head` are stringified `InputForm` representations.
 - `messages`, `messages_text`, and captured `Print` output are returned explicitly.
-- Tungsten does not try to coerce arbitrary Wolfram objects into Python-native or
-  PowerShell-native data structures.
+- Tungsten does not try to coerce arbitrary Wolfram objects into C++ or PowerShell-native data
+  structures.
 
 ### Tutorial 3: Create, inspect, and patch a notebook without the kernel
 
 Create a notebook:
 
 ```powershell
-python -m tungsten notebook create `
+tungsten-cpp notebook create `
     --file $env:TEMP\tungsten-demo.nb `
     --title "Demo Notebook" `
     --cell "Title:Demo Notebook" `
@@ -163,7 +166,7 @@ python -m tungsten notebook create `
 Inspect it:
 
 ```powershell
-python -m tungsten notebook inspect --file $env:TEMP\tungsten-demo.nb
+tungsten-cpp notebook inspect --file $env:TEMP\tungsten-demo.nb
 ```
 
 PowerShell equivalent:
@@ -206,7 +209,7 @@ $spec = Join-Path $env:TEMP "tungsten-patch.json"
 }
 '@ | Set-Content -Path $spec -Encoding UTF8
 
-python -m tungsten notebook patch --file $env:TEMP\tungsten-demo.nb --spec $spec
+tungsten-cpp notebook patch --file $env:TEMP\tungsten-demo.nb --spec $spec
 ```
 
 ### Tutorial 4: Build inline-box string literals from notebook cells
@@ -225,7 +228,7 @@ Cell[BoxData[GraphicsBox[{CircleBox[]}]], "Output", ExpressionUUID->"uuid-inline
 Extract the object from the selected cell and compose a ready-to-use string literal:
 
 ```powershell
-python -m tungsten inline-box from-cell `
+tungsten-cpp inline-box from-cell `
     --file $inlineBoxNotebook `
     --expression-uuid uuid-inline-box `
     --prefix "icon: "
@@ -263,21 +266,21 @@ For fuller details, see [Inline Box Strings](./inline-box-strings.md).
 Search:
 
 ```powershell
-python -m tungsten docs search NotebookGet
-python -m tungsten docs search NotebookImport --limit 5
+tungsten-cpp docs search NotebookGet
+tungsten-cpp docs search NotebookImport --limit 5
 ```
 
 Read a page:
 
 ```powershell
-python -m tungsten docs read paclet:ref/NotebookGet
-python -m tungsten docs read NotebookGet
+tungsten-cpp docs read paclet:ref/NotebookGet
+tungsten-cpp docs read NotebookGet
 ```
 
 Open a page in the FrontEnd:
 
 ```powershell
-python -m tungsten docs open paclet:ref/NotebookGet
+tungsten-cpp docs open paclet:ref/NotebookGet
 ```
 
 PowerShell equivalents:
@@ -298,25 +301,25 @@ Key point:
 Probe FrontEnd availability:
 
 ```powershell
-python -m tungsten frontend probe
+tungsten-cpp frontend probe
 ```
 
 Open a notebook:
 
 ```powershell
-python -m tungsten frontend open-notebook --file $env:TEMP\tungsten-demo.nb
+tungsten-cpp frontend open-notebook --file $env:TEMP\tungsten-demo.nb
 ```
 
 Run FE-targeted code:
 
 ```powershell
-python -m tungsten frontend run --code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> True]]"
+tungsten-cpp frontend run --code "CreateDocument[Notebook[{Cell[\"Hello\", \"Text\"]}, Visible -> True]]"
 ```
 
 Execute a token:
 
 ```powershell
-python -m tungsten frontend token OpenCloseGroup --file $env:TEMP\tungsten-demo.nb
+tungsten-cpp frontend token OpenCloseGroup --file $env:TEMP\tungsten-demo.nb
 ```
 
 PowerShell equivalents:
@@ -363,16 +366,16 @@ For full assistant details, see [Notebook Assistant](./notebook-assistant.md).
 Parse:
 
 ```powershell
-python -m tungsten expr parse --code "1 + 2 x^3"
-python -m tungsten expr parse --code "Rule[x, List[1, 2]]" --form fullform
+tungsten-cpp expr parse --code "1 + 2 x^3"
+tungsten-cpp expr parse --code "Rule[x, List[1, 2]]" --form fullform
 ```
 
 Evaluate built-ins inertly:
 
 ```powershell
-python -m tungsten expr evaluate --code "Length[{a, b, c}]"
-python -m tungsten expr evaluate --code "Level[f[a, g[b]], -1]"
-python -m tungsten expr evaluate --code "Part[f[a, b, c], {1, 3}]"
+tungsten-cpp expr evaluate --code "Length[{a, b, c}]"
+tungsten-cpp expr evaluate --code "Level[f[a, g[b]], -1]"
+tungsten-cpp expr evaluate --code "Part[f[a, b, c], {1, 3}]"
 ```
 
 PowerShell:
@@ -396,7 +399,7 @@ For the precise syntax/evaluation boundary, see [Expression Parser](./expression
 ### Pattern 1: Treat Tungsten as a JSON-first tool with thin wrappers
 
 This is the default design philosophy. The PowerShell functions are mostly just ergonomic names over
-the Python CLI.
+the native CLI.
 
 Example:
 
@@ -447,7 +450,7 @@ Tungsten discovers and/or uses these important path categories:
 You can inspect the discovered values with:
 
 ```powershell
-python -m tungsten env show
+tungsten-cpp env show
 ```
 
 ## Choosing the right Tungsten surface
@@ -488,26 +491,55 @@ Use `expr parse` / `expr evaluate` when:
 
 ## Validation and smoke testing
 
-Run the Tungsten test suite:
+Run the native Tungsten and .NET test suites:
+
+```powershell
+Push-Location .\Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release
+ctest --test-dir build/cpp -C Release --output-on-failure
+dotnet test .\dotnet\Tungsten.DotNet.slnx
+Pop-Location
+```
+
+Run the development-only Python reference-oracle suite and parity tools:
 
 ```powershell
 Push-Location .\Engine
 try {
-    $env:PYTHONPATH = (Resolve-Path .\src)
-    python -m unittest discover -s tests -t .
+    uv run python -m unittest discover -s tests -t .
+    uv run python scripts/check_cpp_parser_parity.py
+    uv run python scripts/check_cpp_evaluator_parity.py --tests tests
+    uv run python scripts/check_cpp_stateful_evaluator_parity.py --require-perfect
+    uv run python scripts/check_cpp_recorded_evaluator_parity.py --workers 8 --require-perfect
+    uv run python scripts/check_cpp_cli_parity.py
 }
 finally {
     Pop-Location
 }
 ```
 
-Run the smoke:
+The parser differential is exact over 1,414 literals, the stateful evaluator gate is 82/82, the
+recorded evaluator gate is 2,499/2,499 calls across 585 tests, and the CLI differential is 119/119.
+The static evaluator extractor loses setup state and is diagnostic; the recorded evaluator harness
+with `--require-perfect` is the authoritative broad comparison. See
+[C++ Runtime and Verification](./cpp-port.md).
+
+Run a repository-local PowerShell smoke against the C++ executable:
 
 ```powershell
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeAssistant
-pwsh -File .\Engine\scripts\Test-TungstenSmoke.ps1 -IncludeFrontEnd
+$env:TUNGSTEN_EXECUTABLE = (Resolve-Path .\Engine\build\cpp\tungsten-cpp.exe)
+Import-Module .\Engine\pwsh\Tungsten.psd1 -Force
+Invoke-TungstenExpression -Code "ReplacePart[f[a, b, c], 2 -> x]"
 ```
+
+Use the `Release` subdirectory for a multi-configuration build. Live Wolfram, FrontEnd, assistant,
+and WinDesk workflows require the corresponding Windows environment and are separate from the
+kernel-free CTest/parity gates.
+
+The current portability record does not include a live MSVC/Visual Studio or macOS build. The
+documented paths are supported design targets, but validate them locally before distributing a
+platform-specific binary.
 
 ## Where to go next
 

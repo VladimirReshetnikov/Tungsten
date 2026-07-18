@@ -5,15 +5,16 @@
 - Created (UTC): 2026-07-16T23:45:44Z
 - Extraction source: [`VladimirReshetnikov/Smithereens`](https://github.com/VladimirReshetnikov/Smithereens) at `94fc0c18b538a191192a0da658e66528940438c6`
 
-Tungsten collects a Python-first Wolfram automation engine and three focused Wolfram Language
-packages. The projects share a repository and runtime context, but each top-level directory is an
-independent workspace.
+Tungsten collects a native C++17 Wolfram automation engine and three focused Wolfram Language
+packages. The Engine retains its Python implementation as a development-only behavioral oracle;
+the projects share a repository and runtime context, but each top-level directory is an independent
+workspace.
 
 ## Projects
 
 | Directory | Purpose |
 |---|---|
-| [`Engine/`](Engine/) | Python-first automation over a local Wolfram installation, kernel-free Wolfram expression and notebook tooling, PowerShell and .NET projections, and the Nummy large-number research workspace. This directory was formerly `src/Tungsten/`. |
+| [`Engine/`](Engine/) | Native C++17 automation over a local Wolfram installation, kernel-free Wolfram expression and notebook tooling, PowerShell and .NET projections, a Python compatibility oracle, and the Nummy large-number research workspace. This directory was formerly `src/Tungsten/`. |
 | [`CommonFactor/`](CommonFactor/) | Heuristic discovery of large symbolic common factors in finite exact integer or rational sequences. |
 | [`InverseAsymptotic/`](InverseAsymptotic/) | Real-branch inverse-function asymptotics in generalized power-logarithm scales. |
 | [`Optimized/`](Optimized/) | DAG-preserving arithmetic and substitution for ``Experimental`OptimizedExpression`` values. |
@@ -26,10 +27,16 @@ The detailed history-rewrite method and verification record are in
 There is no repository-wide build. Use the entry point for the project being changed.
 
 ```powershell
-# Engine: Python tests and CLI
+# Engine: native C++ build, tests, and CLI
 cd Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release
+ctest --test-dir build/cpp -C Release --output-on-failure
+cmake --install build/cpp --config Release --prefix build/install
+./build/install/bin/tungsten-cpp kernel eval --code '2+2'
+
+# Engine compatibility oracle (development only)
 uv run python -m unittest discover -s tests -t .
-uv run python -m tungsten kernel eval --code '2+2'
 
 # Wolfram Language packages, from the repository root
 wolfram -script CommonFactor/tests/smoke.wl

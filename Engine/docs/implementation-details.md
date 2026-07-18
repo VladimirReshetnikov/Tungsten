@@ -4,8 +4,8 @@
 - Audience: Tungsten maintainers, reviewers, contributors, and advanced users who need the reasoning behind the current implementation
 - Scope: `Engine` implementation choices and machine-shaped design constraints
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-26T23:50:53Z
-- Repository HEAD: 2f34abe35e9a08b321a37fabe87297d20f7698d5
+- Updated (UTC): 2026-07-18T04:31:20Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 
 ## Summary
 
@@ -18,6 +18,10 @@ Where the architecture document says "what the layers are," this document answer
 - why the default Notebook Assistant backend is the hidden chat-notebook flow;
 - why the expression subsystem is separated from notebook parsing;
 - why some outputs are returned as strings even when they represent rich Wolfram objects.
+
+The active runtime is C++ under `cpp/`. Some detailed evaluator sections below retain the Python
+oracle's design because it defines the compatibility target; they must not be read as proof of
+native parity. Current native gaps are recorded in [cpp-port.md](./cpp-port.md).
 
 ## Threat model
 
@@ -34,6 +38,9 @@ That means Tungsten is designed for:
 - agents operating on the owner's machine.
 
 It is not currently hardened as a multi-tenant service boundary or untrusted-code execution broker.
+On Windows, child-process creation also uses the platform's broad inheritable-handle mode rather
+than an explicit handle allow-list. Embedding hosts with sensitive inheritable handles should
+de-inherit or close them before asking Tungsten to launch Wolfram.
 
 ## Machine findings that materially shaped the design
 
@@ -102,20 +109,20 @@ this machine today. Tungsten therefore:
 Once Tungsten supplies a deduplicated password file, kernel-side FE automation works on this
 machine. That unlocked the design of:
 
-- `frontend.py`;
+- `frontend.cpp`;
 - Notebook Assistant automation through a helper kernel script;
 - documentation opening through `NotebookLocate`;
 - token execution through `FrontEndTokenExecute`.
 
 Without that capability, Tungsten would have had to lean much harder on visible desktop automation.
 
-### 5. `es.exe` is a meaningful local performance win
+### 5. Native documentation indexing must remain portable
 
-The Everything CLI tool is present on this machine and is extremely effective for filename-oriented
-documentation lookup. Tungsten uses it opportunistically in `docs_index.py` for fast path
-resolution before falling back to recursive traversal or SQLite FTS.
-
-This is exactly the kind of machine-local affordance Tungsten is designed to exploit.
+The Python reference implementation can use the machine-local Everything `es.exe` CLI as a
+filename fast path. The native `docs_index.cpp` implementation deliberately does not depend on
+that optional Windows tool: it discovers notebooks through the configured documentation roots and
+uses a runtime-loaded SQLite FTS5 library for indexing, search, and lookup. This keeps the installed
+C++ package usable on machines where Everything is absent.
 
 ## Why Tungsten executes through `wolfram.exe`
 
@@ -172,7 +179,7 @@ Mixed terminal output is too ambiguous for that.
 
 ### The wrapper design
 
-`kernel.py` writes a script that:
+`kernel.cpp` writes a script that:
 
 - imports the user code from disk;
 - parses it with `ToExpression[..., HoldComplete]`;
@@ -190,8 +197,8 @@ under `HoldComplete` allows Tungsten to report parse failure deterministically b
 ### Why results are stringified instead of deeply serialized
 
 Arbitrary Wolfram expressions, FE objects, graphics, and symbolic constructs do not map cleanly
-onto JSON. Attempting to coerce them into a fake Python object model would create a lot of fragile
-special cases.
+onto JSON. Attempting to coerce them into a fake host-language object model would create a lot of
+fragile special cases.
 
 Tungsten instead returns:
 
@@ -202,6 +209,31 @@ Tungsten instead returns:
 
 This is less magical and more robust.
 
+## Why JSON and malformed UTF-8 handling are native compatibility surfaces
+
+The C++ runtime owns its JSON representation in `json.cpp`; neither the CLI nor the library shells
+out to Python for parsing or serialization. That component preserves an input number's valid JSON
+lexeme when parsing, rejects non-finite programmatically constructed numbers, and formats native
+`double` values with the shortest round-tripping spelling and the fixed/scientific thresholds used
+by CPython's JSON encoder. Integral doubles retain their `.0`, and JSON strings use ASCII escapes,
+including surrogate pairs for supplementary Unicode characters. Those details keep JSON-first CLI
+payloads stable at numeric and Unicode edges.
+
+Text files and process streams need a different policy from structured patch input. The shared
+`decode_utf8_lossy(...)` path follows Python's `bytes.decode("utf-8", errors="replace")` malformed
+subsequence boundaries. Kernel stdout/stderr, `mathpass`, parser-corpus source, documentation
+notebooks, and saved notebooks use that replacement-oriented behavior so diagnostics remain
+available even when an external artifact contains damaged bytes. A valid U+FFFD already present in
+the source and a U+FFFD inserted for malformed bytes are identical after decoding, so byte-level
+forensics must use the original artifact.
+
+Notebook JSON patch files are intentionally stricter: `load_patch_spec(...)` rejects invalid UTF-8
+before parsing JSON. Mutation instructions must not silently change while being decoded, whereas a
+notebook being inspected is more useful when its malformed byte region can be represented as U+FFFD.
+An empty object is a deliberate no-op for simple conditional patch pipelines. Non-empty operations
+still require typed fields, non-negative bounded paths, and an in-range insertion index; the native
+API does not reproduce Python coercion or `list.insert` clamping for invalid inputs.
+
 ## Why notebook editing is structural rather than semantic
 
 Notebook files are ordinary Wolfram expressions, but using the full Wolfram parser as a requirement
@@ -210,7 +242,7 @@ files even when the kernel is unavailable.
 
 ### Scope of the structural parser
 
-`notebook.py` is intentionally focused on:
+`notebook.cpp` is intentionally focused on:
 
 - strings;
 - nested comments;
@@ -231,6 +263,10 @@ That is enough to support:
 
 Notebook nodes preserve their original raw text when possible. If Tungsten edits a structure, it
 regenerates the affected region and clears raw caches only where needed.
+
+The native parser retains raw text as shared immutable `SourceSpan` buffers. `start()` and `end()`
+are UTF-8 byte offsets into that buffer, not Python Unicode code-point offsets. This difference is
+observable only to direct C++ callers inspecting spans; rendered notebook text is unaffected.
 
 This is important because it keeps unrelated notebook text stable and avoids unnecessary churn.
 
@@ -255,8 +291,8 @@ Those escapes are exactly how Mathematica stores embedded notebook objects insid
 
 ### Why this was fixed centrally
 
-Both `notebook.py` and `expression.py` parse Wolfram string literals. Fixing only one of them would
-have left Tungsten inconsistent and fragile. The new shared `wolfram_strings.py` module therefore
+Both `notebook.cpp` and `parser.cpp` parse Wolfram string literals. Fixing only one of them would
+have left Tungsten inconsistent and fragile. The shared `wolfram_strings.cpp` component therefore
 owns:
 
 - Wolfram string literal escaping;
@@ -299,9 +335,30 @@ The expression subsystem exists to support:
   `\[CirclePlus]`;
 - structural inspection;
 - canonical rendering;
-- a small set of structural built-ins for inert evaluation.
+- a broad but bounded set of native evaluator rules, with unsupported calls retained symbolically.
 
-The code is split by workstream where the seams are now stable enough:
+The native runtime divides this work among four components:
+
+- `expression.cpp` owns immutable expression nodes, exact GMP integer/rational atoms, canonical
+  constructors, and InputForm/FullForm/JSON rendering;
+- `parser.cpp` owns tokenization, FullForm and Pratt-style InputForm parsing, StandardForm box
+  lowering, named-character handling, and typed `ParseError` failures;
+- `evaluator.cpp` owns the explicit built-in dispatch, ordered own/down/up/sub-value tables,
+  mutable attributes, scoping, patterns, arithmetic, collections, strings, and control state;
+- `repl.cpp` owns the session boundary, input/output history, prompts, hooks, and transcript
+  formatting.
+
+Unknown or unsupported heads stay symbolic. The evaluator is deliberately centralized while the
+port is being differentially checked so rule ordering and state transitions remain visible in one
+place.
+
+Two public representation details are intentionally native. Exact `Root` index/method metadata use
+`std::size_t` and `long`, so these fields have host widths instead of Python's unbounded integer
+range. Sparse-expression JSON omits the Python oracle's optional `backend` name because that field
+describes a Python acceleration implementation rather than portable expression semantics.
+
+The following finer-grained module map documents the Python compatibility oracle used by
+differential tooling, not runtime imports made by `tungsten-cpp`:
 
 - `expression_parser.py` is the parser/StandardForm-box surface.
 - `expression_evaluator.py` is the one-step built-in dispatch table.
@@ -406,7 +463,11 @@ keeps this refactor behavior-preserving and avoids destabilizing all public impo
 still letting future parser, arithmetic, pattern, definitions, scoping, and built-in-family work
 happen in separate files.
 
-### Symbol-definition storage shape
+### Reference-oracle symbol-definition storage shape
+
+The details in this subsection describe the Python executable specification. The C++ evaluator
+uses its own native `Definition`, `PatternDefinition`, and definition-table members declared in
+`evaluator.hpp`; no Python registry objects participate at runtime.
 
 `SymbolRecord` carries five ordered lists of `Definition` records:
 `own_values_definitions`, `down_values_definitions`, `up_values_definitions`,
@@ -500,7 +561,7 @@ Tungsten deliberately avoids those as the primary path.
 - offline operation;
 - exact alignment with the installed documentation version and any local update paclets;
 - local search without FE startup;
-- deterministic records that can be consumed from Python and PowerShell.
+- deterministic records that can be consumed from the native CLI, PowerShell, and .NET.
 
 ### Why SQLite FTS5
 
@@ -511,10 +572,11 @@ SQLite is already available, reliable, and a good fit for a local single-user in
 - incremental query support;
 - no extra service dependency.
 
-### Why there is also a filename fast path
+### Why filename lookup stays inside the native index
 
 Many documentation lookups are effectively "find `NotebookGet.nb`" rather than "search the body
-text semantically." Using `es.exe` for that common case makes the experience dramatically faster.
+text semantically." The native index resolves those lookups from its own path/title/paclet fields;
+it does not invoke the optional Everything `es.exe` acceleration used by the Python oracle.
 
 ### Why docs-root discovery now filters update paclets by install version
 
@@ -589,7 +651,7 @@ The current default instead:
 2. creates a temporary hidden Chatbook notebook;
 3. asks the built-in assistant through Wolfram code;
 4. returns a serialized `ChatObject` string;
-5. extracts the assistant text in Python;
+5. extracts the assistant text in native C++;
 6. extracts fenced Wolfram code blocks;
 7. reinserts them below the source cell in a deterministic second step.
 
@@ -601,7 +663,7 @@ script-friendly control surface.
 The assistant module generates several Wolfram scripts: ask-cell, insertion, inline preparation,
 and inline capture. They all need the same notebook/cell resolution and metadata helpers.
 
-Tungsten now generates those shared helpers from one Python-side prelude template instead of
+Tungsten now generates those shared helpers from one C++-side prelude builder instead of
 copying near-identical Wolfram definitions into every builder method. That keeps selector behavior
 and metadata shaping aligned across assistant workflows.
 
@@ -611,7 +673,7 @@ Separating assistant generation from notebook mutation makes several things bett
 
 - reply extraction is easier to debug;
 - insertion can be disabled cleanly;
-- insertion policy is visible in Python and PowerShell rather than hidden in FE-side logic;
+- insertion policy is visible in the native CLI and PowerShell rather than hidden in FE-side logic;
 - future insertion heuristics can evolve independently from assistant prompting.
 
 ## Selector resolution policy for notebook-targeted workflows
@@ -649,15 +711,15 @@ intentionally resists that.
 The module mainly:
 
 - constructs CLI arguments;
-- ensures `PYTHONPATH` points at the repo-local `src/`;
-- invokes `python -m tungsten`;
+- resolves `tungsten-cpp` from `TUNGSTEN_EXECUTABLE`, `Engine/build/cpp`, or `PATH`;
+- invokes the native executable directly;
 - deserializes JSON;
 - exposes user-friendly function names.
 
 ### Why this is the right tradeoff
 
 - implementation logic stays in one language and one code path;
-- behavior stays consistent between Python and PowerShell callers;
+- behavior stays consistent between direct C++ CLI and PowerShell callers;
 - test burden stays smaller;
 - docs can treat the PowerShell layer as a projection instead of as a second architecture.
 
@@ -668,11 +730,34 @@ single test strategy is enough.
 
 ### Unit and component coverage
 
-Kernel-free subsystems and CLI shaping are covered by Python unit tests.
+Kernel-free native subsystems and CLI shaping are covered by CTest. Python unit tests remain the
+executable compatibility specification used by the `check_cpp_*_parity.py` development tools.
+
+The standard native build/test path is:
+
+```powershell
+Push-Location .\Engine
+cmake -S . -B build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp --config Release
+ctest --test-dir build/cpp -C Release --output-on-failure
+Pop-Location
+```
+
+At the current verification point, 16/16 native CTests pass, the parser differential matches all
+1,414 extracted literals (with one shared rejection), the fresh-process stateful evaluator gate is
+82/82, the recorded evaluator differential matches 2,499/2,499 calls across 585 tests, and the
+native/Python CLI differential is 119/119. The development-only Python oracle suite passes 846
+tests with 4 skips and 2 expected failures. The .NET projection suite passes 14/14 tests, including
+a native Unicode notebook-patch round trip that verifies patch specs are written as BOM-less UTF-8;
+see
+[C++ Runtime and Verification](./cpp-port.md).
 
 ### Live machine smoke coverage
 
-The smoke script covers the actual machine integration points:
+`scripts/Test-TungstenSmoke.ps1` first runs the native parser gate, the 82-step stateful evaluator
+gate with `--require-perfect`, the full recorded evaluator gate with `--require-perfect`, and the
+119-case CLI differential.
+It then covers the actual machine integration points:
 
 - discovery;
 - kernel execution;
@@ -681,6 +766,12 @@ The smoke script covers the actual machine integration points:
 - FrontEnd flows;
 - Notebook Assistant;
 - expression parsing/evaluation.
+
+The Linux native-runtime validation covers the native, kernel-free components and simulated or
+missing-runtime failure paths. It does not substitute for a serial Windows run with the target
+Wolfram installation. Product discovery under `Program Files`, `mathpass` licensing and process
+seat management, real `wolfram.exe` execution, FrontEnd automation, installed-documentation
+indexing, and Notebook Assistant still require that live Windows/Wolfram validation environment.
 
 ### Important operational lesson
 
@@ -726,20 +817,19 @@ dynamic evaluation context. Modeling them as ordinary expression rewrites would 
 - `TimeRemaining[]` must report the earliest active `TimeConstrained` deadline, which is a
   dynamic property rather than a property of the expression tree.
 
-Tungsten therefore keeps these as `contextvars`-backed evaluator scopes. That keeps nested
-evaluation deterministic and makes the behavior safe for scripts that run multiple sessions in the
-same Python process. `TimeConstrained` is intentionally practical rather than preemptive: it checks
-deadlines at Tungsten evaluator boundaries and during `Pause`, then evaluates the fallback outside
-the expired constraint scope. This mirrors the user-visible Wolfram shape for supported Tungsten
-workloads while avoiding unsafe host-language asynchronous interruption.
+The Python oracle keeps these as `contextvars`-backed evaluator scopes. The C++ evaluator carries
+corresponding native scope state and the fresh-process stateful differential now matches all 82/82
+steps, including the covered nested abort/time/cleanup scenarios. This remains a bounded
+compatibility surface rather than a promise of asynchronously interrupting arbitrary C++ work.
 
 ## Why confirmations and cleanup are signals, not rewrites
 
 The `Confirm*` family looks superficially like predicates returning either a value or a failure,
 but its useful behavior is non-local: a failing confirmation must stop the current evaluation and
 transfer to the nearest matching `Enclose`, while `WithCleanup` must still run cleanup before that
-transfer leaves the protected region. Tungsten models this with `_TungstenConfirmSignal`, parallel
-to the existing throw/abort/time signals.
+transfer leaves the protected region. The Python oracle models this with a dedicated non-local
+signal. The native evaluator carries explicit confirmation state and implements the bounded direct
+forms; nested cleanup/control parity remains incomplete.
 
 Generated confirmation failures are ordinary `Failure[ConfirmationFailed, Association[...]]`
 expressions. Tungsten currently records the properties needed by the implemented APIs, such as
@@ -752,47 +842,41 @@ occurrences lexically inside `Enclose`. Tungsten does not have source-level defi
 so untagged confirmations are handled dynamically by the active evaluator scope. Explicitly tagged
 confirmations still require a matching `Enclose[..., handler, form]` scope.
 
-`WithCleanup` catches Tungsten's evaluator control signals, runs cleanup, and then re-raises the
-original signal. Init and cleanup are evaluated under abort protection and with time-constraint
-checks suppressed, matching the practical guarantee that cleanup should complete even when the
-body is aborted or externally time-constrained.
+The compatibility target requires `WithCleanup` to run cleanup before propagating non-local
+control. The current C++ implementation covers the stateful differential scenarios for nested
+abort/time/message cleanup; unsupported shapes remain governed by the direct forms documented in
+[Expression Function Support](./expression-function-support.md).
 
 ## Why messages are non-fatal evaluator events
 
 The Wolfram kernel usually reports many failed preconditions as messages while returning the
-original expression unevaluated. Tungsten now follows that shape for expressions evaluated through
-the public evaluator: a `WolframEvaluationError` raised by a built-in implementation is converted
-at the nearest recursive `evaluate(...)` boundary into a generated `Head::error` message and the
-original expression is returned. This lets enclosing expressions continue, and it gives `Check`
-and `$MessageList` meaningful data without turning ordinary user mistakes into Python exceptions.
+original expression unevaluated. Native built-in rules that diagnose a supported failure append a
+message name and diagnostic text to `Evaluator`, then preserve the unevaluated expression. This
+lets enclosing expressions continue without turning ordinary user mistakes into host exceptions.
 
 The distinction is intentional:
 
-- direct helper APIs can still raise `WolframEvaluationError` when called as Python functions;
-- parser errors remain fatal syntax errors;
+- parser errors remain typed `ParseError` exceptions in C++ and structured CLI failures;
 - evaluator control-flow signals such as `Throw`, `Abort`, `Exit`, and `Quit` remain non-message
   control flow;
 - message records are Tungsten diagnostics, not attempts to reproduce Wolfram's localized message
   template database.
 
-`Quiet` is modeled as a scoped visibility filter. Quieted messages are still generated and can be
-seen by `$MessageList` during the same evaluation, but they are not saved into per-line
-`MessageList[n]` history and are not visible to an enclosing `Check`. A `Check` placed inside an
-outer `Quiet` still sees messages generated in its own body, matching the practical Wolfram rule
-that `Check` is not disabled merely because its output is quieted.
+The Python oracle models `Quiet` as a scoped visibility filter, and the native evaluator implements
+the same covered generation/visibility split for `Quiet`, `Check`, `Off`, and `On`. Message text is
+still a practical Tungsten diagnostic rather than a clone of Wolfram's localized template database,
+so the presence of these heads does not imply byte-for-byte kernel message formatting.
 - REPL/session main-loop hooks are modeled outside the recursive evaluator. `EvaluationSession`
-  applies `$PreRead` before parsing, `evaluate(..., session=...)` applies `$Pre` and `$Post` only at
-  the outermost session evaluation boundary, `repl.py` applies `$PrePrint` after `Out[n]` has been
-  recorded, and message insertion rendering applies `$MessagePrePrint`. Hook evaluation uses a
-  context flag that suppresses recursive main-loop hook application while hook bodies run.
+  applies `$PreRead` before parsing, `EvaluationSession::evaluate_input` applies `$Pre` and `$Post`
+  at the session boundary, and `preprint` applies `$PrePrint` after `Out[n]` has been recorded.
 - The expression subsystem preloads Wolfram 15.0 <code>System`</code> symbol attributes into the symbol
   registry and also supports process-local attribute mutation through `Attributes[sym] = attrs`,
   `SetAttributes`, `ClearAttributes`, `Protect`, `Unprotect`, and `ClearAll`. The evaluator now
   applies the common argument-shaping attributes (`HoldFirst`, `HoldRest`, `HoldAll`,
   `HoldAllComplete`, `SequenceHold`, `Listable`, `Flat`, `Orderless`, and the supported
-  `OneIdentity` matching cases) before invoking direct built-in rules. Attributes remain metadata,
-  not a full definition system: Tungsten still does not implement general down-value dispatch,
-  package scoping, `Default[...]`, or every specialized kernel behavior implied by attributes.
+  `OneIdentity` matching cases) before invoking direct built-in rules. The native evaluator supports
+  ordered own/down/up/sub-value dispatch, but not package loading, `Default[...]`, or every
+  specialized kernel behavior implied by attributes.
 - Outermost display forms (`InputForm`, `FullForm`, `OutputForm`, `StandardForm`,
   `TraditionalForm`, `TeXForm`, `MathMLForm`, `CForm`, `FortranForm`, `TextForm`, and the common
   numeric/table/string wrappers such as `NumberForm`, `ScientificForm`, `EngineeringForm`,
@@ -814,10 +898,10 @@ that `Check` is not disabled merely because its output is quieted.
   `MakeExpression`. `TeXForm` and `MathMLForm` are textual renderers with generated-subset parsers
   for ordinary arithmetic, powers, fractions, lists, rules, strings, and symbols; they intentionally
   do not attempt to parse arbitrary TeX or MathML documents.
-- `$RecursionLimit` and `$IterationLimit` are implemented as evaluator guardrails, but their
-  counters are Tungsten counters rather than Wolfram kernel internals. The implementation favors
-  the Wolfram failure shape: limits generate messages and return the current expression unevaluated
-  instead of raising Python exceptions through user code.
+- `$RecursionLimit` has a native recursive evaluator guard. `$IterationLimit` is exposed as a
+  mutable compatibility setting, while current iteration heads use bounded local loops instead of
+  a universal counter. Their overflow/message and `Infinity` edge behavior remains part of the
+  native parity backlog tracked in [cpp-port.md](./cpp-port.md).
 - `$HistoryLength` is enforced both when a line is recorded and when output is completed. That
   gives `DownValues[In]` the current-line-inclusive finite-history shape seen in `wolfram.exe`
   while keeping old `Out`, message, and print histories from growing without bound.
@@ -835,8 +919,9 @@ that `Check` is not disabled merely because its output is quieted.
   constants, and special `Overflow[]` / `Underflow[]` real atoms for common structural arithmetic,
   predicates, and precision/accuracy metadata; see `docs/numeric-tower.md`.
 - Assignment, update, prefix increment/decrement, message, file, information, factorial, and
-  infix-function operator forms are parsed to their Wolfram heads, but side-effectful heads remain
-  inert unless a future evaluator milestone explicitly gives them definition or I/O semantics.
+  infix-function operator forms are parsed to their Wolfram heads. The native evaluator implements
+  the documented process-local definition/update subset; file and information operations outside
+  explicitly listed rules remain inert.
 - Notebook parsing is structural rather than fully semantic.
 - FrontEnd coverage is intentionally narrow.
 - The visible inline Notebook Assistant path remains experimental.
@@ -845,10 +930,10 @@ that `Check` is not disabled merely because its output is quieted.
 
 The current implementation naturally suggests a few extensions if the project continues to grow.
 
-- More notebook patch operations in `notebook.py`.
+- More notebook patch operations in `notebook.cpp`.
 - Live FrontEnd selection-based inline-box capture for unsaved notebook state, if a future workflow
   really needs it.
-- More inert structural built-ins in `expression.py`, provided they remain explicit and testable.
+- More bounded native evaluator rules in `evaluator.cpp`, provided they remain explicit and testable.
 - Richer assistant post-processing, such as multiple insertion policies or code-block ranking.
 - Additional FE operations that still fit the "small, deterministic, Wolfram-code-addressable"
   model.

@@ -4,12 +4,12 @@
 - Audience: C#/.NET application authors, automation developers, maintainers, and reviewers
 - Scope: `Engine/dotnet` typed wrapper over Tungsten's JSON-first CLI
 - Created (UTC): 2026-04-23T19:01:41Z
-- Updated (UTC): 2026-04-24T20:06:49Z
-- Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+- Updated (UTC): 2026-07-18T01:40:01Z
+- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 - Related code:
   - `Engine/dotnet/Tungsten.DotNet/`
   - `Engine/dotnet/Tungsten.DotNet.Tests/`
-  - `Engine/src/tungsten/cli.py`
+  - `Engine/cpp/src/main.cpp`
 - Related docs:
   - [Project README](../README.md)
   - [Documentation Index](./README.md)
@@ -18,8 +18,8 @@
 
 ## Summary
 
-`Tungsten.DotNet` is a typed .NET wrapper over Tungsten's JSON-first Python CLI. It does not try to
-reimplement Tungsten in C#, embed Python, or talk to the Wolfram runtime directly. Instead, it
+`Tungsten.DotNet` is a typed .NET wrapper over Tungsten's native JSON-first CLI. It does not try to
+reimplement Tungsten in C# or talk to the Wolfram runtime directly. Instead, it
 gives C# callers a familiar, strongly typed process-wrapper API for the parts of Tungsten that are
 already stable and useful:
 
@@ -34,7 +34,7 @@ already stable and useful:
 
 The underlying execution model remains simple and explicit:
 
-1. `TungstenClient` launches `python -m tungsten ...`.
+1. `TungstenClient` launches `tungsten-cpp ...`.
 2. Tungsten returns JSON.
 3. The client deserializes that JSON into typed response models.
 
@@ -86,15 +86,12 @@ The main public types are:
 
 ## Runtime expectations
 
-The .NET client assumes:
-
-- a usable `python` executable on `PATH`, unless `TungstenClientOptions.ExecutablePath` points
-  somewhere else;
-- either:
-  - a repo-local Tungsten checkout under `Engine`, or
-  - a separately installable/importable Python `tungsten` package that your chosen launcher can
-    resolve;
-- the same Tungsten prerequisites as the Python CLI for the specific feature you use.
+The .NET client assumes a usable `tungsten-cpp` executable in the repository build output or on
+`PATH`, unless `TUNGSTEN_EXECUTABLE` or `TungstenClientOptions.ExecutablePath` selects another
+executable. Repository resolution checks `Engine/build/cpp/tungsten-cpp(.exe)` first, then common
+`Release`, `Debug`, `RelWithDebInfo`, and `MinSizeRel` multi-configuration subdirectories, then
+falls back to `tungsten-cpp` on `PATH`. Kernel-backed calls have the same local Wolfram
+requirements as the native CLI.
 
 Kernel-free calls such as notebook inspection or expression parsing do not require a running
 Wolfram kernel. Kernel-backed and FrontEnd-backed calls still depend on the machine-local Wolfram
@@ -128,10 +125,10 @@ var client = TungstenClient.CreateForRepositoryRoot(@"<repository-root>");
 
 That configures:
 
-- `python` as the launcher;
-- `-m tungsten` as the command prefix;
-- `<repository-root>` as the working directory;
-- `<repository-root>\Engine\src` prepended to `PYTHONPATH`.
+- `Engine\build\cpp\tungsten-cpp.exe`, a common multi-configuration build output, or
+  `tungsten-cpp` from `PATH`, in that order;
+- no launcher prefix;
+- `<repository-root>\Engine` as the working directory.
 
 ### Discovery-based setup
 
@@ -143,11 +140,12 @@ using Tungsten.DotNet;
 var client = TungstenClient.CreateForDiscoveredRepository(AppContext.BaseDirectory);
 ```
 
-This walks parent directories until it finds a repo root that contains `Engine`.
+This walks parent directories until it finds a repo root containing both
+`Engine/CMakeLists.txt` and `Engine/cpp/src/main.cpp`.
 
 ### Fully manual setup
 
-If you need a non-default Python launcher, a different working directory, or extra environment
+If you need a non-default native executable, a different working directory, or extra environment
 variables:
 
 ```csharp
@@ -156,10 +154,8 @@ using Tungsten.DotNet;
 var client = new TungstenClient(
     new TungstenClientOptions
     {
-        ExecutablePath = @"C:\Users\vresh\.pyenv\pyenv-win\versions\3.13.13\python.exe",
-        LauncherArguments = ["-m", "tungsten"],
-        WorkingDirectory = @"<repository-root>",
-        TungstenSourceRoot = @"<repository-root>\Engine\src",
+        ExecutablePath = @"<repository-root>\Engine\build\cpp\Release\tungsten-cpp.exe",
+        WorkingDirectory = @"<repository-root>\Engine",
         DefaultTimeout = TimeSpan.FromMinutes(10),
         EnvironmentVariables = new Dictionary<string, string?>
         {
@@ -168,6 +164,11 @@ var client = new TungstenClient(
         },
     });
 ```
+
+`ExecutablePath` may also name a custom launcher such as `pwsh`; put launcher-specific prefix
+arguments in `LauncherArguments`. Those arguments are emitted before Tungsten command arguments.
+`TungstenSourceRoot` remains available only for legacy Python-based custom launchers and prepends
+its value to `PYTHONPATH`; the native C++ executable does not require it.
 
 ## Usage examples
 
@@ -499,7 +500,7 @@ var environment = await client.GetEnvironmentAsync(probe: true, cts.Token);
 The .NET client is not a separate implementation of Tungsten semantics. It is a projection over the
 same CLI that powers:
 
-- direct Python invocation through `python -m tungsten ...`;
+- direct native invocation through `tungsten-cpp ...`;
 - the repo's PowerShell module in `pwsh/Tungsten.psm1`.
 
 That has two important consequences:

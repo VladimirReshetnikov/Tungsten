@@ -1,8 +1,8 @@
 # Tungsten Inline Box Strings
 
 Created (UTC): 2026-04-23T17:10:29Z
-Updated (UTC): 2026-04-24T20:06:49Z
-Repository HEAD: 110bbc4bc5b6ce3af5afd0e8cabbfef42d15a55e
+Updated (UTC): 2026-07-18T01:40:01Z
+Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
 
 ## Summary
 
@@ -123,14 +123,12 @@ Get-TungstenNotebookCellInlineBoxes `
     -ObjectIndex 1
 ```
 
-## Python CLI usage
+## Native CLI usage
 
 ### Compose from explicit box expressions
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\Engine\src)
-
-python -m tungsten inline-box compose `
+tungsten-cpp inline-box compose `
     --prefix "icon: " `
     --box-expr "GraphicsBox[{CircleBox[]}]"
 ```
@@ -138,7 +136,7 @@ python -m tungsten inline-box compose `
 ### Extract from a notebook cell
 
 ```powershell
-python -m tungsten inline-box from-cell `
+tungsten-cpp inline-box from-cell `
     --file C:\path\to\analysis.nb `
     --expression-uuid uuid-inline-box `
     --prefix "icon: "
@@ -147,7 +145,7 @@ python -m tungsten inline-box from-cell `
 ### Extract all objects from a selected cell
 
 ```powershell
-python -m tungsten inline-box from-cell `
+tungsten-cpp inline-box from-cell `
     --file C:\path\to\analysis.nb `
     --cell-index 0 `
     --all-objects `
@@ -200,8 +198,8 @@ synthetic notebooks.
 
 ## Relationship to other Tungsten subsystems
 
-- `wolfram_strings.py` owns the shared escape and inline-box parsing rules.
-- `notebook.py` owns kernel-free extraction of `BoxData[...]` contents from notebook cell
+- `wolfram_strings.cpp` owns the shared escape and inline-box parsing rules.
+- `notebook.cpp` owns kernel-free extraction of `BoxData[...]` contents from notebook cell
   expressions.
-- `inline_boxes.py` owns the user-facing composition and notebook-cell extraction workflow.
-- `expression.py` now preserves inline-box escapes when it parses string literals.
+- `inline_boxes.cpp` owns the user-facing composition and notebook-cell extraction workflow.
+- `parser.cpp` preserves inline-box escapes when it parses string literals.
