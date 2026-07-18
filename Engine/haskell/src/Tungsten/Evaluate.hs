@@ -1475,6 +1475,11 @@ matchPattern bindings expression patternExpression = case patternExpression of
     matched <- matchPattern bindings expression innerPattern
     testResult <- either (const Nothing) Just (evaluate (Call test [expression]))
     if testResult == Symbol "True" then Just matched else Nothing
+  Call (Symbol "HoldPattern") [innerPattern] ->
+    matchPattern bindings expression innerPattern
+  _
+    | Just _ <- sequencePatternBounds patternExpression ->
+        matchSequencePatternElements bindings patternExpression [expression]
   Call patternHead patternArguments -> case expression of
     Call expressionHead expressionArguments -> do
       headBindings <- matchPattern bindings expressionHead patternHead
@@ -1508,19 +1513,20 @@ matchPatternArguments bindings expressions (patternExpression : remainingPattern
   orElse (Just result) _ = Just result
   orElse Nothing alternative = alternative
 matchPatternArguments bindings expressions (patternExpression : remainingPatterns)
-  | Just sequencePattern <- sequencePatternDescriptor patternExpression =
-      matchSequenceCounts sequencePattern (candidateCounts sequencePattern)
+  | Just (minimumCount, patternMaximum) <- sequencePatternBounds patternExpression =
+      matchSequenceCounts (candidateCounts minimumCount patternMaximum)
  where
-  maximumCount = length expressions - minimumPatternArguments remainingPatterns
-  candidateCounts descriptor = [sequenceMinimum descriptor .. maximumCount]
-  matchSequenceCounts _ [] = Nothing
-  matchSequenceCounts descriptor (count : rest) =
+  availableCount = length expressions - minimumPatternArguments remainingPatterns
+  candidateCounts minimumCount patternMaximum =
+    [minimumCount .. min patternMaximum availableCount]
+  matchSequenceCounts [] = Nothing
+  matchSequenceCounts (count : rest) =
     let (segment, remainingExpressions) = splitAt count expressions
-     in case matchSequencePattern bindings descriptor segment of
+     in case matchSequencePatternElements bindings patternExpression segment of
           Just matched -> case matchPatternArguments matched remainingExpressions remainingPatterns of
             Just completed -> Just completed
-            Nothing -> matchSequenceCounts descriptor rest
-          Nothing -> matchSequenceCounts descriptor rest
+            Nothing -> matchSequenceCounts rest
+          Nothing -> matchSequenceCounts rest
 matchPatternArguments bindings (expression : remainingExpressions) (patternExpression : remainingPatterns) = do
   matched <- matchPattern bindings expression patternExpression
   matchPatternArguments matched remainingExpressions remainingPatterns
@@ -1532,7 +1538,80 @@ minimumPatternArguments = sum . map minimumForPattern
   minimumForPattern expression =
     case optionalPatternDescriptor expression of
       Just descriptor -> maybe 1 (const 0) (optionalDefault descriptor)
-      Nothing -> maybe 1 sequenceMinimum (sequencePatternDescriptor expression)
+      Nothing -> maybe 1 fst (sequencePatternBounds expression)
+
+sequencePatternBounds :: Expr -> Maybe (Int, Int)
+sequencePatternBounds expression = case expression of
+  Call (Symbol "BlankSequence") patternArguments
+    | length patternArguments <= 1 -> Just (1, levelInfinity)
+  Call (Symbol "BlankNullSequence") patternArguments
+    | length patternArguments <= 1 -> Just (0, levelInfinity)
+  Call (Symbol "PatternTest") [inner, _] -> sequencePatternBounds inner
+  Call (Symbol "Condition") [inner, _] -> sequencePatternBounds inner
+  Call (Symbol "HoldPattern") [inner] -> sequencePatternBounds inner
+  Call (Symbol "Pattern") [_, inner] -> sequencePatternBounds inner
+  Call (Symbol repetitionHead) patternArguments
+    | repetitionHead `elem` ["Repeated", "RepeatedNull"] -> do
+        itemPattern <- case patternArguments of
+          item : _ -> Just item
+          [] -> Nothing
+        (countMinimum, countMaximum) <- repetitionCountBounds repetitionHead patternArguments
+        let (itemMinimum, itemMaximum) = patternWidthBounds itemPattern
+        pure
+          ( boundedMultiply itemMinimum countMinimum
+          , boundedMultiply itemMaximum countMaximum
+          )
+  Call (Symbol "PatternSequence") patterns ->
+    Just (addPatternWidths (map patternWidthBounds patterns))
+  _ -> Nothing
+
+patternWidthBounds :: Expr -> (Int, Int)
+patternWidthBounds expression = case optionalPatternDescriptor expression of
+  Just descriptor ->
+    let (_, maximumWidth) = patternWidthBounds (optionalInner descriptor)
+     in (maybe 1 (const 0) (optionalDefault descriptor), maximumWidth)
+  Nothing -> maybe (1, 1) id (sequencePatternBounds expression)
+
+repetitionCountBounds :: Text -> [Expr] -> Maybe (Int, Int)
+repetitionCountBounds repetitionHead patternArguments = case patternArguments of
+  [_] -> Just (defaultMinimum, levelInfinity)
+  [_, specification] -> case specification of
+    Call (Symbol "List") [single] -> do
+      count <- repetitionBound single
+      Just (count, count)
+    Call (Symbol "List") [lower, upper] ->
+      (,) <$> repetitionBound lower <*> repetitionBound upper
+    _ -> do
+      upper <- repetitionBound specification
+      Just (defaultMinimum, upper)
+  _ -> Nothing
+ where
+  defaultMinimum = if repetitionHead == "Repeated" then 1 else 0
+
+repetitionBound :: Expr -> Maybe Int
+repetitionBound (Integer value)
+  | value >= 0 = Just (fromInteger (min (toInteger levelInfinity) value))
+repetitionBound (Symbol "Infinity") = Just levelInfinity
+repetitionBound _ = Nothing
+
+addPatternWidths :: [(Int, Int)] -> (Int, Int)
+addPatternWidths = foldl addWidth (0, 0)
+ where
+  addWidth (minimumTotal, maximumTotal) (minimumWidth, maximumWidth) =
+    ( boundedAdd minimumTotal minimumWidth
+    , boundedAdd maximumTotal maximumWidth
+    )
+
+boundedAdd :: Int -> Int -> Int
+boundedAdd left right
+  | left >= levelInfinity || right >= levelInfinity = levelInfinity
+  | otherwise = fromInteger (min (toInteger levelInfinity) (toInteger left + toInteger right))
+
+boundedMultiply :: Int -> Int -> Int
+boundedMultiply left right
+  | left == 0 || right == 0 = 0
+  | left >= levelInfinity || right >= levelInfinity = levelInfinity
+  | otherwise = fromInteger (min (toInteger levelInfinity) (toInteger left * toInteger right))
 
 optionalPatternDescriptor :: Expr -> Maybe OptionalPattern
 optionalPatternDescriptor = describe [] []
@@ -1610,6 +1689,63 @@ matchSequencePattern bindings descriptor values
         Just condition -> do
           result <- either (const Nothing) Just (evaluate (substituteBindings bound condition))
           if result == Symbol "True" then Just bound else Nothing
+
+matchSequencePatternElements :: PatternBindings -> Expr -> [Expr] -> Maybe PatternBindings
+matchSequencePatternElements bindings patternExpression values = case patternExpression of
+  Call (Symbol "HoldPattern") [innerPattern] ->
+    matchSequencePatternElements bindings innerPattern values
+  Call (Symbol "Condition") [innerPattern, condition] -> do
+    matched <- matchSequencePatternElements bindings innerPattern values
+    result <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
+    if result == Symbol "True" then Just matched else Nothing
+  Call (Symbol "PatternTest") [innerPattern, test] -> do
+    matched <- matchSequencePatternElements bindings innerPattern values
+    if all (predicateMatchesPure test) values then Just matched else Nothing
+  Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
+    matched <- matchSequencePatternElements bindings innerPattern values
+    bindSequence name values matched
+  Call (Symbol "PatternSequence") patterns ->
+    matchPatternArguments bindings values patterns
+  repeated@(Call (Symbol repetitionHead) _)
+    | repetitionHead `elem` ["Repeated", "RepeatedNull"] ->
+        matchRepeatedPattern bindings repeated values
+  _
+    | Just descriptor <- sequencePatternDescriptor patternExpression ->
+        matchSequencePattern bindings descriptor values
+  _ -> case values of
+    [value] -> matchPattern bindings value patternExpression
+    _ -> Nothing
+
+matchRepeatedPattern :: PatternBindings -> Expr -> [Expr] -> Maybe PatternBindings
+matchRepeatedPattern bindings (Call (Symbol repetitionHead) patternArguments) values = do
+  itemPattern <- case patternArguments of
+    item : _ -> Just item
+    [] -> Nothing
+  (countMinimum, countMaximum) <- repetitionCountBounds repetitionHead patternArguments
+  if countMinimum > countMaximum
+    then Nothing
+    else matchFrom itemPattern countMinimum countMaximum values 0 bindings
+ where
+  matchFrom itemPattern countMinimum countMaximum remaining count current
+    | null remaining =
+        if count >= countMinimum && count <= countMaximum then Just current else Nothing
+    | count >= countMaximum = Nothing
+    | otherwise = matchLengths (candidateLengths itemPattern remaining)
+   where
+    matchLengths [] = Nothing
+    matchLengths (width : rest) =
+      let (segment, suffix) = splitAt width remaining
+       in case matchSequencePatternElements current itemPattern segment of
+            Nothing -> matchLengths rest
+            Just matched -> case matchFrom itemPattern countMinimum countMaximum suffix (count + 1) matched of
+              Just completed -> Just completed
+              Nothing -> matchLengths rest
+  candidateLengths itemPattern remaining =
+    let (itemMinimum, itemMaximum) = patternWidthBounds itemPattern
+        concreteMinimum = max 1 itemMinimum
+        concreteMaximum = min itemMaximum (length remaining)
+     in [concreteMinimum .. concreteMaximum]
+matchRepeatedPattern _ _ _ = Nothing
 
 predicateMatchesPure :: Expr -> Expr -> Bool
 predicateMatchesPure test value = case evaluate (Call test [value]) of
