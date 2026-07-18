@@ -122,9 +122,12 @@ reduceBuiltin headName values = case headName of
   "ListQ" -> Right (unary headName (boolean . hasHead "List") values)
   "Association" -> Right (reduceAssociation values)
   "AssociationQ" -> Right (unary headName (boolean . isAssociation) values)
+  "Identity" -> Right (unary headName id values)
   "IntegerQ" -> Right (unary headName (boolean . isInteger) values)
   "NumberQ" -> Right (unary headName (boolean . isNumber) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
+  "EvenQ" -> Right (reduceParity True headName values)
+  "OddQ" -> Right (reduceParity False headName values)
   "First" -> Right (reduceFirstLast True headName values)
   "Last" -> Right (reduceFirstLast False headName values)
   "Rest" -> Right (reduceRestMost True headName values)
@@ -145,6 +148,13 @@ reduceBuiltin headName values = case headName of
   "AssociationThread" -> reduceAssociationThread values
   "AssociationMap" -> reduceAssociationMap values
   "KeySort" -> reduceKeySort values
+  "Merge" -> reduceMerge values
+  "GroupBy" -> reduceGroupBy values
+  "GatherBy" -> reduceGatherBy values
+  "Gather" -> reduceGather values
+  "KeyComplement" -> reduceKeyComplement values
+  "KeyUnion" -> reduceKeyUnion values
+  "KeyIntersection" -> reduceKeyIntersection values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -321,6 +331,10 @@ unary headName _ values = Call (Symbol headName) values
 unaryCallArguments :: Text -> ([Expr] -> [Expr]) -> [Expr] -> Expr
 unaryCallArguments _ function [Call expressionHead values] = Call expressionHead (function values)
 unaryCallArguments headName _ values = Call (Symbol headName) values
+
+reduceParity :: Bool -> Text -> [Expr] -> Expr
+reduceParity evenMode _ [Integer value] = boolean (even value == evenMode)
+reduceParity _ headName values = Call (Symbol headName) values
 
 reduceFirstLast :: Bool -> Text -> [Expr] -> Expr
 reduceFirstLast first _ [association]
@@ -627,6 +641,154 @@ reduceKeySort [association] = do
     Symbol {} -> 2
     _ -> 3
 reduceKeySort values = Right (Call (Symbol "KeySort") values)
+
+reduceMerge :: [Expr] -> Either EvaluationError Expr
+reduceMerge [Call (Symbol "List") associations, combiner] = do
+  entryLists <- traverse (requireAssociation "Merge") associations
+  let groups = foldl' addEntryGroup [] (concat entryLists)
+  combined <- traverse combineGroup groups
+  pure (associationExpr combined)
+ where
+  addEntryGroup groups (AssociationEntry ruleHead key value) =
+    case groupIndex key groups of
+      Nothing -> groups <> [(ruleHead, key, [value])]
+      Just index -> case groups !! index of
+        (firstRuleHead, firstKey, groupedValues) ->
+          replaceListIndex index (firstRuleHead, firstKey, groupedValues <> [value]) groups
+  combineGroup (ruleHead, key, groupedValues) = do
+    combinedValue <- evaluate (Call combiner [list groupedValues])
+    pure (AssociationEntry ruleHead key combinedValue)
+  groupIndex key = go 0
+   where
+    go _ [] = Nothing
+    go index ((_, candidate, _) : rest)
+      | key == candidate = Just index
+      | otherwise = go (index + 1) rest
+reduceMerge values = Right (Call (Symbol "Merge") values)
+
+data ValueGroup = ValueGroup !Expr ![Expr]
+  deriving (Eq, Show)
+
+addValueGroup :: Expr -> Expr -> [ValueGroup] -> [ValueGroup]
+addValueGroup key value groups = case valueGroupIndex key groups of
+  Nothing -> groups <> [ValueGroup key [value]]
+  Just index -> case groups !! index of
+    ValueGroup firstKey groupedValues ->
+      replaceListIndex index (ValueGroup firstKey (groupedValues <> [value])) groups
+
+valueGroupIndex :: Expr -> [ValueGroup] -> Maybe Int
+valueGroupIndex key = go 0
+ where
+  go _ [] = Nothing
+  go index (ValueGroup candidate _ : rest)
+    | key == candidate = Just index
+    | otherwise = go (index + 1) rest
+
+listOrAssociationValues :: Text -> Expr -> Either EvaluationError [Expr]
+listOrAssociationValues _ (Call (Symbol "List") values) = Right values
+listOrAssociationValues operation association = do
+  entries <- requireAssociation operation association
+  pure [value | AssociationEntry _ _ value <- entries]
+
+groupValuesBy :: Expr -> [Expr] -> Either EvaluationError [ValueGroup]
+groupValuesBy keyFunction = foldM add []
+ where
+  add groups value = do
+    key <- evaluate (Call keyFunction [value])
+    pure (addValueGroup key value groups)
+
+reduceGroupBy :: [Expr] -> Either EvaluationError Expr
+reduceGroupBy [dataExpression, specification] = do
+  values <- listOrAssociationValues "GroupBy" dataExpression
+  let (keyFunction, valueFunction) = case specification of
+        Call (Symbol "Rule") [key, value] -> (key, Just value)
+        _ -> (specification, Nothing)
+  groups <- groupValuesBy keyFunction values
+  entries <- traverse (groupEntry valueFunction) groups
+  pure (associationExpr entries)
+ where
+  groupEntry valueFunction (ValueGroup key groupedValues) = do
+    payload <- case valueFunction of
+      Nothing -> Right (list groupedValues)
+      Just function -> evaluate (Call function [list groupedValues])
+    pure (AssociationEntry "Rule" key payload)
+reduceGroupBy values = Right (Call (Symbol "GroupBy") values)
+
+reduceGatherBy :: [Expr] -> Either EvaluationError Expr
+reduceGatherBy [dataExpression, keyFunction] = do
+  values <- listOrAssociationValues "GatherBy" dataExpression
+  groups <- groupValuesBy keyFunction values
+  pure (list [list groupedValues | ValueGroup _ groupedValues <- groups])
+reduceGatherBy values = Right (Call (Symbol "GatherBy") values)
+
+reduceGather :: [Expr] -> Either EvaluationError Expr
+reduceGather [dataExpression] = do
+  values <- listOrAssociationValues "Gather" dataExpression
+  let groups = foldl' (\retained value -> addValueGroup value value retained) [] values
+  pure (list [list groupedValues | ValueGroup _ groupedValues <- groups])
+reduceGather values = Right (Call (Symbol "Gather") values)
+
+requireAssociationList :: Text -> Expr -> Either EvaluationError [[AssociationEntry]]
+requireAssociationList operation (Call (Symbol "List") associations@(_ : _)) =
+  traverse (requireAssociation operation) associations
+requireAssociationList operation _ =
+  Left (EvaluationError (operation <> " expects a non-empty list of Associations"))
+
+uniqueKeys :: [AssociationEntry] -> [Expr]
+uniqueKeys = foldl' appendKey []
+ where
+  appendKey keys (AssociationEntry _ key _)
+    | key `elem` keys = keys
+    | otherwise = keys <> [key]
+
+reduceKeyComplement :: [Expr] -> Either EvaluationError Expr
+reduceKeyComplement [associations] = do
+  members <- requireAssociationList "KeyComplement" associations
+  case members of
+    firstMember : remaining ->
+      let laterKeys = uniqueKeys (concat remaining)
+       in pure
+            ( associationExpr
+                [ entry
+                | entry@(AssociationEntry _ key _) <- firstMember
+                , key `notElem` laterKeys
+                ]
+            )
+    [] -> Left (EvaluationError "KeyComplement expects a non-empty list of Associations")
+reduceKeyComplement values = Right (Call (Symbol "KeyComplement") values)
+
+reduceKeyUnion :: [Expr] -> Either EvaluationError Expr
+reduceKeyUnion [associations] = do
+  members <- requireAssociationList "KeyUnion" associations
+  let keys = uniqueKeys (concat members)
+      align member =
+        associationExpr
+          [ case findAssociationEntry key member of
+              Just entry -> entry
+              Nothing ->
+                AssociationEntry
+                  "Rule"
+                  key
+                  (Call (Symbol "Missing") [String "KeyAbsent", key])
+          | key <- keys
+          ]
+  pure (list (map align members))
+reduceKeyUnion values = Right (Call (Symbol "KeyUnion") values)
+
+reduceKeyIntersection :: [Expr] -> Either EvaluationError Expr
+reduceKeyIntersection [associations] = do
+  members <- requireAssociationList "KeyIntersection" associations
+  case members of
+    firstMember : remaining -> do
+      let keys =
+            [ key
+            | AssociationEntry _ key _ <- firstMember
+            , all (maybe False (const True) . findAssociationEntry key) remaining
+            ]
+          project member = associationExpr (mapMaybe (`findAssociationEntry` member) keys)
+      pure (list (map project members))
+    [] -> Left (EvaluationError "KeyIntersection expects a non-empty list of Associations")
+reduceKeyIntersection values = Right (Call (Symbol "KeyIntersection") values)
 
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
