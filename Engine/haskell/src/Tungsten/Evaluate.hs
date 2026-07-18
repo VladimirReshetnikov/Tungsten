@@ -57,6 +57,9 @@ evaluateAt depth expression
       Call (Symbol "OwnValues") _ -> Right expression
       Call (Symbol "DownValues") _ -> Right expression
       Call (Symbol "Module") _ -> Right expression
+      Call (Symbol "Block") _ -> Right expression
+      Call (Symbol "InheritedBlock") _ -> Right expression
+      Call (Symbol "Internal`InheritedBlock") _ -> Right expression
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'

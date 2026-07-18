@@ -45,6 +45,9 @@ data Iterator = Iterator !(Maybe Text) ![Expr]
 data ModuleBinding = ModuleBinding !Text !(Maybe Definition)
   deriving (Eq, Show)
 
+data BlockBinding = BlockBinding !Text !(Maybe Definition)
+  deriving (Eq, Show)
+
 data SymbolValueSnapshot = SymbolValueSnapshot
   { snapshotOwnValue :: !(Maybe Definition)
   , snapshotDownValues :: !(Maybe [DownValue])
@@ -152,6 +155,10 @@ evaluateSessionAt depth session expression
         evaluateSessionDownValues session arguments'
       Call (Symbol "Module") arguments' ->
         evaluateSessionModule depth session arguments'
+      Call (Symbol headName) arguments'
+        | headName
+            `elem` ["Block", "InheritedBlock", "Internal`InheritedBlock"] ->
+            evaluateSessionBlock headName depth session arguments'
       Call (Symbol "Table") arguments' ->
         evaluateSessionTable depth session arguments'
       Call (Symbol "Do") arguments' ->
@@ -562,6 +569,86 @@ evaluateSessionModule depth session = \case
         Right (Call (Symbol "Module") originalArguments, session)
   arguments' -> Right (Call (Symbol "Module") arguments', session)
 
+evaluateSessionBlock
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionBlock headName depth session = \case
+  [Call (Symbol "List") [], body] ->
+    evaluateSessionAt (depth + 1) session body
+  originalArguments@[Call (Symbol "List") bindingExpressions, body]
+    | Just bindings <- parseBlockBindings bindingExpressions ->
+        let snapshots =
+              [ (name, snapshotSymbolValues name session)
+              | BlockBinding name _ <- bindings
+              ]
+            scopedResult = do
+              ((), initialized) <-
+                initializeBlockBindings depth session bindings
+              evaluateSessionAt (depth + 1) initialized body
+         in restoreScopedResult snapshots scopedResult
+    | otherwise ->
+        Right (Call (Symbol headName) originalArguments, session)
+  arguments' -> Right (Call (Symbol headName) arguments', session)
+
+parseBlockBindings :: [Expr] -> Maybe [BlockBinding]
+parseBlockBindings expressions = do
+  bindings <- traverse parseBinding expressions
+  let names = [name | BlockBinding name _ <- bindings]
+  if Set.size (Set.fromList names) == length names
+    then Just bindings
+    else Nothing
+ where
+  parseBinding = \case
+    Symbol name -> Just (BlockBinding name Nothing)
+    Call (Symbol "Set") [Symbol name, rhs] ->
+      Just (BlockBinding name (Just (ImmediateValue rhs)))
+    Call (Symbol "SetDelayed") [Symbol name, rhs] ->
+      Just (BlockBinding name (Just (DelayedValue rhs)))
+    _ -> Nothing
+
+initializeBlockBindings
+  :: Int
+  -> EvaluationSession
+  -> [BlockBinding]
+  -> SessionResult ()
+initializeBlockBindings depth = go
+ where
+  go session [] = Right ((), session)
+  go session (BlockBinding _ Nothing : rest) =
+    go session rest
+  go session (BlockBinding name (Just (DelayedValue rhs)) : rest) =
+    go (define name (DelayedValue rhs) session) rest
+  go session (BlockBinding name (Just (ImmediateValue rhs)) : rest) = do
+    (value, updated) <- evaluateSessionAt (depth + 1) session rhs
+    go (define name (ImmediateValue value) updated) rest
+
+restoreScopedResult
+  :: [(Text, SymbolValueSnapshot)]
+  -> SessionResult value
+  -> SessionResult value
+restoreScopedResult snapshots = \case
+  Left evaluationExit ->
+    Left
+      ( mapEvaluationExitSession
+          (restoreSnapshots snapshots)
+          evaluationExit
+      )
+  Right (value, session) ->
+    Right (value, restoreSnapshots snapshots session)
+
+restoreSnapshots
+  :: [(Text, SymbolValueSnapshot)]
+  -> EvaluationSession
+  -> EvaluationSession
+restoreSnapshots snapshots session =
+  foldl
+    (\updated (name, snapshot) -> restoreSymbolValues name snapshot updated)
+    session
+    snapshots
+
 parseModuleBindings :: [Expr] -> Maybe [ModuleBinding]
 parseModuleBindings expressions = do
   bindings <- traverse parseBinding expressions
@@ -941,6 +1028,9 @@ isHeldSessionHead (Symbol name) =
            , "DownValues"
            , "Condition"
            , "Module"
+           , "Block"
+           , "InheritedBlock"
+           , "Internal`InheritedBlock"
            ]
 isHeldSessionHead _ = False
 
