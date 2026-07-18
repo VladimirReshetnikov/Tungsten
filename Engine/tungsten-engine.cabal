@@ -49,6 +49,7 @@ library
     Tungsten.Repl
     Tungsten.Session
     Tungsten.WolframString
+    Tungsten.WolframProcesses
   build-depends:
     base       >= 4.21 && < 4.22,
     bytestring >= 0.12 && < 0.13,

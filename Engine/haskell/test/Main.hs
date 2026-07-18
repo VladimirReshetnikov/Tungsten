@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
@@ -5,6 +6,7 @@ module Main (main) where
 import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import Data.Char (chr)
+import Data.IORef (atomicModifyIORef', newIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -42,6 +44,7 @@ import Tungsten.ParserCorpus
 import Tungsten.Repl
 import Tungsten.Session
 import Tungsten.WolframString
+import Tungsten.WolframProcesses
 
 main :: IO ()
 main = do
@@ -73,6 +76,7 @@ tests =
   , checkDiscovery
   , checkDocumentationIndex
   , checkParserCorpus
+  , checkWolframProcesses
   , checkLicensing
   , checkKernelRunner
   , checkFrontEndBuilders
@@ -83,6 +87,40 @@ tests =
   , checkParserEvaluatorProtocol
   , checkProtocolErrors
   ]
+
+checkWolframProcesses :: IO Bool
+checkWolframProcesses = withTemporaryDirectory "tungsten-processes" $ \temporary -> do
+  let cache = temporary </> "wolfram-license-cache.json"
+      controlling =
+        WolframProcessInfo
+          1 0 "Mathematica.exe" Nothing Nothing Nothing False False False True
+      helper =
+        WolframProcessInfo
+          2 1 "WolframKernel.exe" Nothing (Just "wolframkernel.exe -mathlink helper")
+          Nothing False False False False
+      blocked = WolframProcessSnapshot [controlling, controlling {wolframProcessPid = 3}] (Just 2)
+      free = WolframProcessSnapshot [controlling, helper] (Just 2)
+  before <- readCachedMaxLicenseProcessesAt cache
+  writeCachedMaxLicenseProcessesAt cache 2
+  after <- readCachedMaxLicenseProcessesAt cache
+  snapshots <- newIORef [blocked, free]
+  let nextSnapshot = atomicModifyIORef' snapshots $ \case
+        [] -> ([], free)
+        value : rest -> (rest, value)
+  (finalSnapshot, _, satisfied) <-
+    waitForWolframLicenseSlotWith nextSnapshot (Just 2) 1 0
+  gateResult <- withWolframLaunchGate 1 0 (\waited -> pure (waited >= 0))
+  checks <- sequence
+    [ assertEqual "Wolfram process cache initially absent" Nothing before
+    , assertEqual "Wolfram process cache round trip" (Just 2) after
+    , assertEqual "Wolfram desktop controls a license" True (isControllingProcessCandidate "Mathematica.exe" "")
+    , assertEqual "Wolfram MathLink helper does not control a license" False (isControllingProcessCandidate "WolframKernel.exe" "wolframkernel.exe -mathlink helper")
+    , assertEqual "Wolfram process active count excludes helper" 1 (activeWolframProcessCount free)
+    , assertEqual "Wolfram license wait becomes satisfied" True satisfied
+    , assertEqual "Wolfram license wait returns free snapshot" free finalSnapshot
+    , assertEqual "Wolfram launch gate acquisition" (Right True) gateResult
+    ]
+  pure (and checks)
 
 checkAssistant :: IO Bool
 checkAssistant = do
