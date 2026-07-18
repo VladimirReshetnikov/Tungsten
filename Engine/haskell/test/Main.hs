@@ -12,6 +12,7 @@ import qualified Data.Text.IO as TextIO
 import System.Directory
   ( createDirectory
   , createDirectoryIfMissing
+  , doesFileExist
   , executable
   , getPermissions
   , getTemporaryDirectory
@@ -391,6 +392,42 @@ checkCliArguments = do
             (parseCliArguments ["expr", "parse", "--code", "1", "--file", "input.wl"])
         , assertLeft "CLI rejects unknown commands" (parseCliArguments ["kernel", "eval"])
         , assertEqual
+            "CLI parser-corpus discover"
+            ( Right
+                ( ParserCorpusCliCommand
+                    ( DiscoverParserCorpusCommand
+                        ( (defaultParserCorpusOptions "corpus")
+                            { parserCorpusCompareWolfram = False
+                            , parserCorpusWriteOutputs = False
+                            }
+                        )
+                        3
+                    )
+                )
+            )
+            (parseCliArguments ["parser-corpus", "discover", "--corpus-root", "corpus", "--sample", "3"])
+        , assertEqual
+            "CLI parser-corpus local comparison"
+            ( Right
+                ( ParserCorpusCliCommand
+                    ( CompareParserCorpusCommand
+                        ( (defaultParserCorpusOptions "corpus")
+                            { parserCorpusCompareWolfram = False
+                            , parserCorpusWriteOutputs = False
+                            }
+                        )
+                        True
+                        False
+                        False
+                    )
+                )
+            )
+            ( parseCliArguments
+                [ "parser-corpus", "compare", "--corpus-root", "corpus"
+                , "--skip-wolfram", "--no-write", "--include-results"
+                ]
+            )
+        , assertEqual
             "CLI notebook inspect"
             (Right (NotebookCliCommand (InspectNotebookCommand "demo.nb")))
             (parseCliArguments ["notebook", "inspect", "--file", "demo.nb"])
@@ -680,6 +717,50 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
   oversized <- case discovery of
     Right (file : _) -> parseCorpusFile file "input" (Just 0) 2000
     _ -> pure (ParserAttempt "tungsten" "failure" Nothing (Just "MissingFixture") Nothing Map.empty)
+  installation <- discoverInstallation
+  unavailableAttempts <- case discovery of
+    Right (file : _) ->
+      parseFilesWithWolframKernel installation {installationKernelCli = Nothing} [file] 2000
+    _ -> pure Map.empty
+  let decodedBatch = case discovery of
+        Right (file : _) ->
+          let attempt =
+                JsonObject
+                  ( Map.fromList
+                      [ ("elapsed_ms", JsonNumber "1.25")
+                      , ("parser", JsonString "wolfram")
+                      , ("status", JsonString "success")
+                      , ("summary", JsonObject (Map.singleton "leaf_count" (JsonNumber "3")))
+                      ]
+                  )
+              payload =
+                JsonArray
+                  [ JsonObject
+                      ( Map.fromList
+                          [ ("attempt", attempt)
+                          , ("path", JsonString (Text.pack (corpusFilePath file)))
+                          ]
+                      )
+                  ]
+           in decodeWolframBatchAttempts [file] 2000 (wlString (encodeJson payload))
+        _ -> Left "MissingFixture"
+  runResult <-
+    compareParserCorpus
+      installation
+      ( (defaultParserCorpusOptions corpusRoot)
+          { parserCorpusOutputDirectory = Just (corpusRoot </> "results")
+          , parserCorpusExcludeGlobs = ["**/bad.wl"]
+          , parserCorpusCompareWolfram = False
+          , parserCorpusTungstenWorkers = 2
+          }
+      )
+  outputChecks <- case runResult of
+    Left _ -> pure (False, False, False)
+    Right run -> do
+      summaryExists <- maybe (pure False) doesFileExist (Map.lookup "summary" (parserCorpusRunOutputFiles run))
+      resultsExist <- maybe (pure False) doesFileExist (Map.lookup "results_jsonl" (parserCorpusRunOutputFiles run))
+      reportExists <- maybe (pure False) doesFileExist (Map.lookup "report" (parserCorpusRunOutputFiles run))
+      pure (summaryExists, resultsExist, reportExists)
   let relativePaths = map corpusFileRelativePath (either (const []) id discovery)
       attemptStatuses = [(path, parserAttemptStatus attempt) | (path, attempt) <- attempts]
       filteredPaths = map corpusFileRelativePath (either (const []) id filtered)
@@ -700,6 +781,19 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
         attemptStatuses
     , assertEqual "parser corpus oversized skip" "skipped" (parserAttemptStatus oversized)
     , assertEqual "parser corpus outcome classification" "tungsten_only_success" (classifyParserOutcome success failure)
+    , assertEqual
+        "parser corpus unavailable kernel attempts"
+        [Just "KernelNotFound"]
+        (map parserAttemptErrorType (Map.elems unavailableAttempts))
+    , assertEqual
+        "parser corpus quoted Wolfram batch decoding"
+        (Right ["success"])
+        (map parserAttemptStatus . Map.elems <$> decodedBatch)
+    , assertEqual "parser corpus summary/result/report outputs" (True, True, True) outputChecks
+    , assertEqual
+        "parser corpus local comparison outcomes"
+        (Right ["skipped", "skipped"])
+        (map parserCorpusOutcome . parserCorpusRunResults <$> runResult)
     ]
   pure (and checks)
 

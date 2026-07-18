@@ -8,6 +8,7 @@ module Tungsten.Cli
   , NotebookCommand (..)
   , InlineBoxCommand (..)
   , DocumentationCommand (..)
+  , ParserCorpusCommand (..)
   , FrontEndCommand (..)
   , SourceSpec (..)
   , parseCliArguments
@@ -45,6 +46,7 @@ import Tungsten.Kernel
 import Tungsten.Licensing
 import Tungsten.Notebook
 import Tungsten.Parser
+import Tungsten.ParserCorpus
 import Tungsten.Repl (runRepl)
 import Tungsten.WolframString (WolframStringSegment (..))
 
@@ -58,6 +60,7 @@ data CliCommand
   | NotebookCliCommand !NotebookCommand
   | InlineBoxCliCommand !InlineBoxCommand
   | DocumentationCliCommand !DocumentationCommand
+  | ParserCorpusCliCommand !ParserCorpusCommand
   | HelpCommand
   deriving (Eq, Show)
 
@@ -90,6 +93,11 @@ data DocumentationCommand
   | SearchDocumentationCommand !Text !Int !(Maybe FilePath) !Bool
   | ReadDocumentationCommand !Text !(Maybe FilePath) !Bool
   | OpenDocumentationCommand !Text !(Maybe FilePath)
+  deriving (Eq, Show)
+
+data ParserCorpusCommand
+  = DiscoverParserCorpusCommand !ParserCorpusOptions !Int
+  | CompareParserCorpusCommand !ParserCorpusOptions !Bool !Bool !Bool
   deriving (Eq, Show)
 
 data FrontEndCommand
@@ -129,7 +137,127 @@ parseCliArguments = \case
   "docs" : "search" : query : arguments' -> parseDocumentationSearchArguments (T.pack query) arguments'
   "docs" : "read" : identifier : arguments' -> parseDocumentationReadArguments (T.pack identifier) arguments'
   "docs" : "open" : identifier : arguments' -> parseDocumentationOpenArguments (T.pack identifier) arguments'
+  "parser-corpus" : "discover" : arguments' -> parseParserCorpusDiscoverArguments arguments'
+  "parser-corpus" : "compare" : arguments' -> parseParserCorpusCompareArguments arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
+
+parseParserCorpusDiscoverArguments :: [String] -> Either Text CliCommand
+parseParserCorpusDiscoverArguments = go defaultOptions 20
+ where
+  defaultOptions = (defaultParserCorpusOptions defaultParserCorpusRoot)
+    { parserCorpusCompareWolfram = False
+    , parserCorpusWriteOutputs = False
+    }
+  go options sample [] = Right (ParserCorpusCliCommand (DiscoverParserCorpusCommand options sample))
+  go options sample ("--corpus-root" : value : rest) =
+    go options {parserCorpusRoot = value} sample rest
+  go options sample ("--extension" : value : rest) =
+    go options {parserCorpusExtensions = parserCorpusExtensions options <> [T.pack value]} sample rest
+  go options sample ("--include-glob" : value : rest) =
+    go options {parserCorpusIncludeGlobs = parserCorpusIncludeGlobs options <> [T.pack value]} sample rest
+  go options sample ("--exclude-glob" : value : rest) =
+    go options {parserCorpusExcludeGlobs = parserCorpusExcludeGlobs options <> [T.pack value]} sample rest
+  go options sample ("--max-files" : value : rest) = do
+    count <- parseIntegerOption "--max-files" value
+    go options {parserCorpusMaximumFiles = Just count} sample rest
+  go options sample ("--shuffle" : rest) = go options {parserCorpusShuffle = True} sample rest
+  go options sample ("--seed" : value : rest) = do
+    seed <- parseIntegerOption "--seed" value
+    go options {parserCorpusSeed = seed} sample rest
+  go options _ ("--sample" : value : rest) = do
+    sample <- parseIntegerOption "--sample" value
+    go options sample rest
+  go _ _ [flag]
+    | flag `elem` parserCorpusDiscoveryValueOptions <> ["--sample"] =
+        Left (T.pack flag <> " requires a value")
+  go _ _ (flag : _) = Left ("unknown parser-corpus discover option: " <> T.pack flag)
+
+parseParserCorpusCompareArguments :: [String] -> Either Text CliCommand
+parseParserCorpusCompareArguments = go defaultOptions (2 :: Double) Nothing False False False False
+ where
+  defaultOptions = defaultParserCorpusOptions defaultParserCorpusRoot
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch [] =
+    let maximumBytes
+          | noMaximum = Nothing
+          | Just count <- exactBytes = Just count
+          | otherwise = Just (floor (megabytes * 1024 * 1024))
+     in Right
+          ( ParserCorpusCliCommand
+              ( CompareParserCorpusCommand
+                  options {parserCorpusMaximumBytes = maximumBytes}
+                  includeResults
+                  failGap
+                  failMismatch
+              )
+          )
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--corpus-root" : value : rest) =
+    go options {parserCorpusRoot = value} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--extension" : value : rest) =
+    go options {parserCorpusExtensions = parserCorpusExtensions options <> [T.pack value]} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--include-glob" : value : rest) =
+    go options {parserCorpusIncludeGlobs = parserCorpusIncludeGlobs options <> [T.pack value]} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--exclude-glob" : value : rest) =
+    go options {parserCorpusExcludeGlobs = parserCorpusExcludeGlobs options <> [T.pack value]} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--max-files" : value : rest) = do
+    count <- parseIntegerOption "--max-files" value
+    go options {parserCorpusMaximumFiles = Just count} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--shuffle" : rest) =
+    go options {parserCorpusShuffle = True} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--seed" : value : rest) = do
+    seed <- parseIntegerOption "--seed" value
+    go options {parserCorpusSeed = seed} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options _ exactBytes noMaximum includeResults failGap failMismatch ("--max-file-mb" : value : rest) = do
+    megabytes <- parseNumberOption "--max-file-mb" value
+    go options megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes _ noMaximum includeResults failGap failMismatch ("--max-bytes" : value : rest) = do
+    exactBytes <- parseIntegerOption "--max-bytes" value
+    go options megabytes (Just exactBytes) noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes _ includeResults failGap failMismatch ("--no-max-bytes" : rest) =
+    go options megabytes exactBytes True includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--out-dir" : value : rest) =
+    go options {parserCorpusOutputDirectory = Just value} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--form" : value : rest)
+    | value `elem` ["input", "fullform", "standard"] =
+        go options {parserCorpusSourceForm = T.pack value} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+    | otherwise = Left "--form must be input, fullform, or standard"
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--skip-wolfram" : rest) =
+    go options {parserCorpusCompareWolfram = False} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--kernel-batch-size" : value : rest) = do
+    count <- parseIntegerOption "--kernel-batch-size" value
+    go options {parserCorpusKernelBatchSize = count} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--tungsten-workers" : value : rest) = do
+    count <- parseIntegerOption "--tungsten-workers" value
+    go options {parserCorpusTungstenWorkers = count} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--preview-chars" : value : rest) = do
+    count <- parseIntegerOption "--preview-chars" value
+    go options {parserCorpusPreviewCharacters = count} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap failMismatch ("--no-write" : rest) =
+    go options {parserCorpusWriteOutputs = False} megabytes exactBytes noMaximum includeResults failGap failMismatch rest
+  go options megabytes exactBytes noMaximum _ failGap failMismatch ("--include-results" : rest) =
+    go options megabytes exactBytes noMaximum True failGap failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults _ failMismatch ("--fail-on-tungsten-gap" : rest) =
+    go options megabytes exactBytes noMaximum includeResults True failMismatch rest
+  go options megabytes exactBytes noMaximum includeResults failGap _ ("--fail-on-mismatch" : rest) =
+    go options megabytes exactBytes noMaximum includeResults failGap True rest
+  go _ _ _ _ _ _ _ [flag]
+    | flag `elem` parserCorpusDiscoveryValueOptions <> parserCorpusCompareValueOptions =
+        Left (T.pack flag <> " requires a value")
+  go _ _ _ _ _ _ _ (flag : _) = Left ("unknown parser-corpus compare option: " <> T.pack flag)
+
+defaultParserCorpusRoot :: FilePath
+defaultParserCorpusRoot = "C:\\TestData\\wolfram\\tungsten-wolfram-parser-corpus"
+
+parserCorpusDiscoveryValueOptions :: [String]
+parserCorpusDiscoveryValueOptions =
+  ["--corpus-root", "--extension", "--include-glob", "--exclude-glob", "--max-files", "--seed"]
+
+parserCorpusCompareValueOptions :: [String]
+parserCorpusCompareValueOptions =
+  ["--out-dir", "--max-file-mb", "--max-bytes", "--form", "--kernel-batch-size", "--tungsten-workers", "--preview-chars"]
+
+parseNumberOption :: Read value => Text -> String -> Either Text value
+parseNumberOption name value =
+  maybe (Left (name <> " requires a number")) Right (readMaybe value)
 
 parseDocumentationIndexArguments :: [String] -> Either Text CliCommand
 parseDocumentationIndexArguments [] =
@@ -442,12 +570,72 @@ runCli arguments' = case parseCliArguments arguments' of
   Right (NotebookCliCommand command) -> runNotebookCommand command
   Right (InlineBoxCliCommand command) -> runInlineBoxCommand command
   Right (DocumentationCliCommand command) -> runDocumentationCommand command
+  Right (ParserCorpusCliCommand command) -> runParserCorpusCommand command
 
 configureHandles :: IO ()
 configureHandles = do
   hSetEncoding stdin utf8
   hSetEncoding stdout utf8
   hSetBuffering stdout LineBuffering
+
+runParserCorpusCommand :: ParserCorpusCommand -> IO Int
+runParserCorpusCommand = \case
+  DiscoverParserCorpusCommand options sampleCount -> do
+    discovery <-
+      discoverCorpusFiles
+        (parserCorpusRoot options)
+        (parserCorpusExtensions options)
+        (parserCorpusIncludeGlobs options)
+        (parserCorpusExcludeGlobs options)
+        (parserCorpusMaximumFiles options)
+        (parserCorpusShuffle options)
+        (parserCorpusSeed options)
+    case discovery of
+      Left message -> emitParserCorpusError "discover" message
+      Right files -> do
+        summary <- summarizeCorpusDiscovery (parserCorpusRoot options) files
+        let sample = JsonArray (map corpusFilePayload (take (max 0 sampleCount) files))
+            payload = case summary of
+              JsonObject values -> JsonObject (Map.insert "sample_files" sample values)
+              _ -> summary
+        emitJson payload
+        pure 0
+  CompareParserCorpusCommand options includeResults failGap failMismatch -> do
+    installation <- discoverInstallation
+    compared <- compareParserCorpus installation options
+    case compared of
+      Left message -> emitParserCorpusError "compare" message
+      Right run -> do
+        emitJson (parserCorpusRunPayload includeResults run)
+        let gaps = summaryCount "tungsten_gap" (parserCorpusRunSummary run)
+            tungstenOnly = summaryCount "tungsten_only_success" (parserCorpusRunSummary run)
+        pure
+          ( if failMismatch && (gaps > 0 || tungstenOnly > 0)
+              then 1
+              else if failGap && gaps > 0 then 1 else 0
+          )
+
+emitParserCorpusError :: Text -> Text -> IO Int
+emitParserCorpusError command message = do
+  emitJson
+    ( JsonObject
+        ( Map.fromList
+            [ ("command", JsonString command)
+            , ("error", JsonString message)
+            , ("error_type", JsonString "ParserCorpusError")
+            , ("success", JsonBool False)
+            ]
+        )
+    )
+  pure 1
+
+summaryCount :: Text -> JsonValue -> Integer
+summaryCount outcome (JsonObject summary) = case Map.lookup "outcomes" summary of
+  Just (JsonObject outcomes) -> case Map.lookup outcome outcomes of
+    Just (JsonNumber value) -> maybe 0 id (readMaybe (T.unpack value))
+    _ -> 0
+  _ -> 0
+summaryCount _ _ = 0
 
 serveProtocol :: IO ()
 serveProtocol = do
@@ -1112,6 +1300,9 @@ usage =
     , "  tungsten-hs frontend token TOKEN [--file PATH] [--require-success]"
     , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
+    , "  tungsten-hs parser-corpus discover [DISCOVERY OPTIONS] [--sample N]"
+    , "  tungsten-hs parser-corpus compare [DISCOVERY OPTIONS] [--skip-wolfram] [--no-write] [--include-results]"
+    , "    DISCOVERY OPTIONS: --corpus-root PATH [--extension EXT ...] [--include-glob GLOB ...] [--exclude-glob GLOB ...] [--max-files N] [--shuffle] [--seed N]"
     , "  tungsten-hs notebook inspect --file PATH"
     , "  tungsten-hs notebook create --file PATH [--title TEXT] [--cell STYLE:TEXT ...]"
     , "  tungsten-hs notebook patch --file PATH --spec PATH [--out PATH]"
