@@ -16,6 +16,10 @@ module Tungsten.Notebook
   , flattenCells
   , cellCount
   , groupCount
+  , notebookTitle
+  , cellId
+  , expressionUuid
+  , cellTags
   ) where
 
 import Data.Bifunctor (first)
@@ -170,6 +174,36 @@ groupCount document = sum (map countItem (notebookItems document))
  where
   countItem (CellGroup items _ _) = 1 + sum (map countItem items)
   countItem _ = 0
+
+notebookTitle :: NotebookDocument -> Maybe Text
+notebookTitle document = case ruleValue "WindowTitle" (notebookOptions document) of
+  Just (String value) -> Just value
+  _ -> Nothing
+
+cellId :: NotebookCell -> Maybe Integer
+cellId cell = case ruleValue "CellID" (cellOptions cell) of
+  Just (Integer value) -> Just value
+  _ -> Nothing
+
+expressionUuid :: NotebookCell -> Maybe Text
+expressionUuid cell = case ruleValue "ExpressionUUID" (cellOptions cell) of
+  Just (String value) -> Just value
+  _ -> Nothing
+
+cellTags :: NotebookCell -> [Text]
+cellTags cell = case ruleValue "CellTags" (cellOptions cell) of
+  Just (String value) -> [value]
+  Just (Call (Symbol "List") values) -> [value | String value <- values]
+  _ -> []
+
+ruleValue :: Text -> [Expr] -> Maybe Expr
+ruleValue name = go
+ where
+  go [] = Nothing
+  go (Call (Symbol "Rule") [Symbol actualName, value] : rest)
+    | actualName == name = Just value
+    | otherwise = go rest
+  go (_ : rest) = go rest
 
 preview :: Expr -> Text
 preview expression = truncateText 160 (collapseWhitespace source)

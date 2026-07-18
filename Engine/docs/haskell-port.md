@@ -4,7 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Repository HEAD: 531e58b42dce9db7dd9025e1014cedf3f1528d62
+- Updated (UTC): 2026-07-18T14:07:35Z
+- Repository HEAD: 037c66a9c187dc618389d368ea7bd19f57320389
 
 ## Purpose
 
@@ -25,6 +26,7 @@ cabal build all
 cabal test all --ghc-options=-Werror
 cabal run tungsten-hs -- expr parse --code '1 + 2 x^3'
 cabal run tungsten-hs -- expr evaluate --code 'Total[Range[10]]'
+cabal run tungsten-hs -- notebook inspect --file example.nb
 ```
 
 Parse a file or select FullForm explicitly:
@@ -57,6 +59,7 @@ Haskell process clients.
 | Evaluator | Exact arithmetic and powers, comparisons, Boolean control flow, structural predicates, parts, ranges and core list transforms, mapping/application, pure functions, exact replacement, held forms, and symbolic fallback |
 | JSON | Deterministic codec, tagged expression round trips, arbitrary integer lexemes, protocol requests/responses, parse/evaluate source commands, and structured errors |
 | CLI | `expr parse`, `expr evaluate`, inline/file sources, InputForm/FullForm selection, JSON output, exit codes, and protocol serving |
+| Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, and `notebook inspect`/`notebook create` CLI commands |
 
 ## Compatibility boundary
 
@@ -66,7 +69,7 @@ features yet:
 - the complete Wolfram tokenizer, named-character catalog, box-language and StandardForm parser;
 - mutable evaluation sessions, symbol definitions and attributes, general pattern matching,
   scoping, iteration, polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
-- notebook parsing, creation and patching, including inline box object workflows;
+- notebook patch specifications, source-span-preserving edits, and inline box object workflows;
 - Wolfram installation discovery, licensing workarounds, kernel execution, process coordination,
   and FrontEnd automation;
 - local documentation indexing, parser-corpus orchestration, the REPL, and Notebook Assistant;

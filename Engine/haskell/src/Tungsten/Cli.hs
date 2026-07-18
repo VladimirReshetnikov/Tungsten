@@ -5,6 +5,7 @@
 module Tungsten.Cli
   ( CliCommand (..)
   , ExpressionCommand (..)
+  , NotebookCommand (..)
   , SourceSpec (..)
   , parseCliArguments
   , runCli
@@ -29,11 +30,13 @@ import System.IO
 import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
 import Tungsten.Expression
 import Tungsten.Json
+import Tungsten.Notebook
 import Tungsten.Parser
 
 data CliCommand
   = ProtocolCommand
   | ExpressionCliCommand !ExpressionCommand !SourceSpec !Text
+  | NotebookCliCommand !NotebookCommand
   | HelpCommand
   deriving (Eq, Show)
 
@@ -41,6 +44,11 @@ data ExpressionCommand = ParseCommand | EvaluateCommand
   deriving (Eq, Show)
 
 data SourceSpec = InlineSource !Text | FileSource !FilePath
+  deriving (Eq, Show)
+
+data NotebookCommand
+  = InspectNotebookCommand !FilePath
+  | CreateNotebookCommand !FilePath !(Maybe Text) ![(Text, Text)]
   deriving (Eq, Show)
 
 parseCliArguments :: [String] -> Either Text CliCommand
@@ -51,7 +59,39 @@ parseCliArguments = \case
   ["-h"] -> Right HelpCommand
   "expr" : "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
   "expr" : "evaluate" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
-  _ -> Left "expected 'protocol', 'expr parse', or 'expr evaluate'"
+  "notebook" : "inspect" : arguments' -> parseNotebookInspectArguments arguments'
+  "notebook" : "create" : arguments' -> parseNotebookCreateArguments arguments'
+  _ -> Left "expected 'protocol', an 'expr' command, or a 'notebook' command"
+
+parseNotebookInspectArguments :: [String] -> Either Text CliCommand
+parseNotebookInspectArguments ["--file", path] =
+  Right (NotebookCliCommand (InspectNotebookCommand path))
+parseNotebookInspectArguments [] = Left "notebook inspect requires --file PATH"
+parseNotebookInspectArguments _ = Left "usage: notebook inspect --file PATH"
+
+parseNotebookCreateArguments :: [String] -> Either Text CliCommand
+parseNotebookCreateArguments = go Nothing Nothing []
+ where
+  go file title cells [] = case file of
+    Nothing -> Left "notebook create requires --file PATH"
+    Just path -> Right (NotebookCliCommand (CreateNotebookCommand path title (reverse cells)))
+  go Nothing title cells ("--file" : path : rest) = go (Just path) title cells rest
+  go (Just _) _ _ ("--file" : _ : _) = Left "notebook create accepts --file only once"
+  go file Nothing cells ("--title" : value : rest) = go file (Just (T.pack value)) cells rest
+  go _ (Just _) _ ("--title" : _ : _) = Left "notebook create accepts --title only once"
+  go file title cells ("--cell" : specification : rest) = do
+    cell <- parseCellSpecification (T.pack specification)
+    go file title (cell : cells) rest
+  go _ _ _ [flag]
+    | flag `elem` ["--file", "--title", "--cell"] = Left (T.pack flag <> " requires a value")
+  go _ _ _ (flag : _) = Left ("unknown notebook create option: " <> T.pack flag)
+
+parseCellSpecification :: Text -> Either Text (Text, Text)
+parseCellSpecification specification =
+  let (style, remainder) = T.breakOn ":" specification
+   in if T.null style || T.null remainder
+        then Left "notebook cells must use STYLE:TEXT"
+        else Right (style, T.drop 1 remainder)
 
 parseExpressionArguments :: ExpressionCommand -> [String] -> Either Text CliCommand
 parseExpressionArguments expressionCommand = go Nothing "input"
@@ -80,6 +120,7 @@ runCli arguments' = case parseCliArguments arguments' of
   Right ProtocolCommand -> configureHandles *> serveProtocol *> pure 0
   Right (ExpressionCliCommand command sourceSpec form) ->
     runExpressionCommand command sourceSpec form
+  Right (NotebookCliCommand command) -> runNotebookCommand command
 
 configureHandles :: IO ()
 configureHandles = do
@@ -128,6 +169,71 @@ readSource (InlineSource source) = pure (Right source)
 readSource (FileSource path) = do
   result <- try (TextIO.readFile path)
   pure $ first (T.pack . show) (result :: Either IOException Text)
+
+runNotebookCommand :: NotebookCommand -> IO Int
+runNotebookCommand = \case
+  InspectNotebookCommand path -> do
+    sourceResult <- readSource (FileSource path)
+    case sourceResult of
+      Left message -> emitNotebookError "inspect" "InputError" message
+      Right source -> case parseNotebook source of
+        Left notebookError ->
+          emitNotebookError "inspect" "NotebookError" (notebookErrorMessage notebookError)
+        Right document -> emitJson (notebookPayload document) *> pure 0
+  CreateNotebookCommand path title cells -> do
+    let document = createNotebook title cells
+    writeResult <- try (TextIO.writeFile path (renderNotebook document))
+    case (writeResult :: Either IOException ()) of
+      Left exception -> emitNotebookError "create" "OutputError" (T.pack (show exception))
+      Right () -> emitJson (notebookPayload document) *> pure 0
+
+notebookPayload :: NotebookDocument -> JsonValue
+notebookPayload document =
+  JsonObject
+    ( Map.fromList
+        [ ("cell_count", jsonInteger (fromIntegral (cellCount document)))
+        , ("cells", JsonArray (map cellRecordPayload (flattenCells document)))
+        , ("group_count", jsonInteger (fromIntegral (groupCount document)))
+        , ("options", JsonArray (map (JsonString . fullForm) (notebookOptions document)))
+        , ("title", maybe JsonNull JsonString (notebookTitle document))
+        ]
+    )
+
+cellRecordPayload :: CellRecord -> JsonValue
+cellRecordPayload record =
+  JsonObject
+    ( Map.fromList
+        [ ("cell_id", maybe JsonNull jsonInteger (cellId cell))
+        , ("cell_tags", JsonArray (map JsonString (cellTags cell)))
+        , ("depth", jsonInteger (fromIntegral (max 0 (length (cellRecordPath record) - 1))))
+        , ("expression_uuid", maybe JsonNull JsonString (expressionUuid cell))
+        , ("index", jsonInteger (fromIntegral (cellRecordIndex record)))
+        , ("kind", JsonString "cell")
+        , ("options", JsonArray (map (JsonString . fullForm) (cellOptions cell)))
+        , ("path", JsonArray (map (jsonInteger . fromIntegral) (cellRecordPath record)))
+        , ("preview", JsonString (cellRecordPreview record))
+        , ("style", maybe JsonNull JsonString (cellRecordStyle record))
+        ]
+    )
+ where
+  cell = cellRecordCell record
+
+emitNotebookError :: Text -> Text -> Text -> IO Int
+emitNotebookError command errorType message = do
+  emitJson
+    ( JsonObject
+        ( Map.fromList
+            [ ("command", JsonString command)
+            , ("error", JsonString message)
+            , ("error_type", JsonString errorType)
+            , ("success", JsonBool False)
+            ]
+        )
+    )
+  pure 1
+
+jsonInteger :: Integer -> JsonValue
+jsonInteger = JsonNumber . T.pack . show
 
 parseSource :: Text -> Text -> Either Text (Text, Expr)
 parseSource requestedForm source = case T.toLower (T.strip requestedForm) of
@@ -221,6 +327,8 @@ usage =
     , "  tungsten-hs protocol"
     , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
+    , "  tungsten-hs notebook inspect --file PATH"
+    , "  tungsten-hs notebook create --file PATH [--title TEXT] [--cell STYLE:TEXT ...]"
     , ""
     , "With no arguments, tungsten-hs serves the JSON-lines protocol for backward compatibility."
     ]

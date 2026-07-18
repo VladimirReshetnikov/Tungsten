@@ -173,6 +173,21 @@ checkCliArguments = do
             "CLI rejects two sources"
             (parseCliArguments ["expr", "parse", "--code", "1", "--file", "input.wl"])
         , assertLeft "CLI rejects unknown commands" (parseCliArguments ["kernel", "eval"])
+        , assertEqual
+            "CLI notebook inspect"
+            (Right (NotebookCliCommand (InspectNotebookCommand "demo.nb")))
+            (parseCliArguments ["notebook", "inspect", "--file", "demo.nb"])
+        , assertEqual
+            "CLI notebook create"
+            (Right (NotebookCliCommand (CreateNotebookCommand "demo.nb" (Just "Demo") [("Title", "Hello"), ("Input", "2+2")])))
+            ( parseCliArguments
+                [ "notebook", "create", "--file", "demo.nb", "--title", "Demo"
+                , "--cell", "Title:Hello", "--cell", "Input:2+2"
+                ]
+            )
+        , assertLeft
+            "CLI rejects malformed notebook cell"
+            (parseCliArguments ["notebook", "create", "--file", "demo.nb", "--cell", "missing-separator"])
         ]
   and <$> sequence checks
 
