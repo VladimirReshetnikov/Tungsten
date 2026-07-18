@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-07-18T14:19:50Z
-- Repository HEAD: c5ce72ad6057b04938321663fe28b89301184ff6
+- Updated (UTC): 2026-07-18T14:24:28Z
+- Repository HEAD: e48b7cd13413503ad073f7313daaceeaa8b3fd75
 - Related code:
   - `Engine/src/tungsten/`
   - `Engine/haskell/`
@@ -335,6 +335,7 @@ cabal run tungsten-hs -- expr parse --code '1 + 2 x^3'
 cabal run tungsten-hs -- expr evaluate --code 'Total[Range[10]]'
 cabal run tungsten-hs -- notebook inspect --file example.nb
 cabal run tungsten-hs -- repl
+cabal run tungsten-hs -- env show
 ```
 
 The Haskell port currently covers the kernel-free expression and structural notebook foundations. See

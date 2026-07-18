@@ -31,6 +31,7 @@ import System.IO
   , utf8
   )
 import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
+import Tungsten.Discovery
 import Tungsten.Expression
 import Tungsten.Json
 import Tungsten.Notebook
@@ -40,6 +41,7 @@ import Tungsten.Repl (runRepl)
 data CliCommand
   = ProtocolCommand
   | ReplCommand !Bool
+  | EnvironmentCommand
   | ExpressionCliCommand !ExpressionCommand !SourceSpec !Text
   | NotebookCliCommand !NotebookCommand
   | HelpCommand
@@ -63,6 +65,7 @@ parseCliArguments = \case
   ["protocol"] -> Right ProtocolCommand
   ["repl"] -> Right (ReplCommand True)
   ["repl", "--no-banner"] -> Right (ReplCommand False)
+  ["env", "show"] -> Right EnvironmentCommand
   ["--help"] -> Right HelpCommand
   ["-h"] -> Right HelpCommand
   "expr" : "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
@@ -145,6 +148,10 @@ runCli arguments' = case parseCliArguments arguments' of
   Right HelpCommand -> TextIO.putStrLn usage *> pure 0
   Right ProtocolCommand -> configureHandles *> serveProtocol *> pure 0
   Right (ReplCommand showBanner) -> configureHandles *> runRepl showBanner
+  Right EnvironmentCommand -> do
+    installation <- discoverInstallation
+    emitJson (installationPayload installation)
+    pure 0
   Right (ExpressionCliCommand command sourceSpec form) ->
     runExpressionCommand command sourceSpec form
   Right (NotebookCliCommand command) -> runNotebookCommand command
@@ -372,6 +379,46 @@ emitNotebookError command errorType message = do
 jsonInteger :: Integer -> JsonValue
 jsonInteger = JsonNumber . T.pack . show
 
+installationPayload :: WolframInstallation -> JsonValue
+installationPayload installation =
+  JsonObject
+    ( Map.fromList
+        [ ("available_installations", JsonArray (map installationSummaryPayload (installationAvailable installation)))
+        , ("bundled_python_client", jsonMaybeString (installationBundledPythonClient installation))
+        , ("default_index_path", JsonString (T.pack (installationDefaultIndexPath installation)))
+        , ("docs_roots", JsonArray (map (JsonString . T.pack) (installationDocsRoots installation)))
+        , ("frontend_executable", jsonMaybeString (installationFrontendExecutable installation))
+        , ("install_dir", jsonMaybeString (installationInstallDir installation))
+        , ("kernel_cli", jsonMaybeString (installationKernelCli installation))
+        , ("kernel_executable", jsonMaybeString (installationKernelExecutable installation))
+        , ("mathpass", jsonMaybeString (installationMathpass installation))
+        , ("mathpass_candidates", JsonArray (map (JsonString . T.pack) (installationMathpassCandidates installation)))
+        , ("product", JsonString (installationProduct installation))
+        , ("product_family", JsonString (installationProductFamily installation))
+        , ("selection_reason", maybe JsonNull JsonString (installationSelectionReason installation))
+        , ("system_base", jsonMaybeString (installationSystemBase installation))
+        , ("user_base", jsonMaybeString (installationUserBase installation))
+        , ("version", maybe JsonNull JsonString (installationVersion installation))
+        , ("wolframscript", jsonMaybeString (installationWolframscript installation))
+        ]
+    )
+
+installationSummaryPayload :: InstallationSummary -> JsonValue
+installationSummaryPayload summary =
+  JsonObject
+    ( Map.fromList
+        [ ("install_dir", JsonString (T.pack (summaryInstallDir summary)))
+        , ("kernel_cli", jsonMaybeString (summaryKernelCli summary))
+        , ("product", JsonString (summaryProduct summary))
+        , ("product_family", JsonString (summaryProductFamily summary))
+        , ("version", maybe JsonNull JsonString (summaryVersion summary))
+        , ("wolframscript", jsonMaybeString (summaryWolframscript summary))
+        ]
+    )
+
+jsonMaybeString :: Maybe FilePath -> JsonValue
+jsonMaybeString = maybe JsonNull (JsonString . T.pack)
+
 parseSource :: Text -> Text -> Either Text (Text, Expr)
 parseSource requestedForm source = case T.toLower (T.strip requestedForm) of
   "input" -> parseWith "input" parseInputForm
@@ -463,6 +510,7 @@ usage =
     [ "Usage:"
     , "  tungsten-hs protocol"
     , "  tungsten-hs repl [--no-banner]"
+    , "  tungsten-hs env show"
     , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs notebook inspect --file PATH"

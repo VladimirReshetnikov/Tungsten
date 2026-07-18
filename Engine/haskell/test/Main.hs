@@ -11,6 +11,7 @@ import System.Exit (exitFailure)
 import Tungsten.Cli
 import Tungsten.Expression
 import Tungsten.Evaluate
+import Tungsten.Discovery
 import Tungsten.Json
 import Tungsten.Notebook
 import Tungsten.Parser
@@ -40,6 +41,7 @@ tests =
   , checkNotebookPatchJson
   , checkEvaluationSession
   , checkRepl
+  , checkDiscovery
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -286,6 +288,20 @@ checkRepl = do
   replValueFrom _ = Nothing
   replExitFrom (ReplExit code _) = Just code
   replExitFrom _ = Nothing
+
+checkDiscovery :: IO Bool
+checkDiscovery = do
+  let desktop15 = InstallationSummary "Wolfram" "wolfram" (Just "15.0") "/wolfram/15.0" (Just "/wolfram/15.0/wolfram") Nothing
+      desktop14 = InstallationSummary "Wolfram" "wolfram" (Just "14.3") "/wolfram/14.3" (Just "/wolfram/14.3/wolfram") Nothing
+      engine16 = InstallationSummary "Wolfram Engine" "engine" (Just "16.0") "/engine/16.0" (Just "/engine/16.0/wolfram") Nothing
+      checks =
+        [ assertEqual "parse Wolfram version" [15, 0, 1] (parseVersion "15.0.1")
+        , assertEqual "skip empty Wolfram version fragment" [15, 1] (parseVersion "15..1")
+        , assertEqual "stop at nonnumeric Wolfram version fragment" [15] (parseVersion "15.preview.1")
+        , assertEqual "rank desktop before engine and newer first" [desktop15, desktop14, engine16] (sortInstallations [engine16, desktop14, desktop15])
+        , assertEqual "CLI environment command" (Right EnvironmentCommand) (parseCliArguments ["env", "show"])
+        ]
+  and <$> sequence checks
 
 checkNotebookModel :: IO Bool
 checkNotebookModel = do

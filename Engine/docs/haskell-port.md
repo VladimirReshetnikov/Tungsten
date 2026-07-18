@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T14:19:50Z
-- Repository HEAD: c5ce72ad6057b04938321663fe28b89301184ff6
+- Updated (UTC): 2026-07-18T14:24:28Z
+- Repository HEAD: e48b7cd13413503ad073f7313daaceeaa8b3fd75
 
 ## Purpose
 
@@ -29,6 +29,7 @@ cabal run tungsten-hs -- expr evaluate --code 'Total[Range[10]]'
 cabal run tungsten-hs -- notebook inspect --file example.nb
 cabal run tungsten-hs -- notebook patch --file example.nb --spec patch.json --out patched.nb
 cabal run tungsten-hs -- repl
+cabal run tungsten-hs -- env show
 ```
 
 Parse a file or select FullForm explicitly:
@@ -63,6 +64,7 @@ Haskell process clients.
 | JSON | Deterministic codec, tagged expression round trips, arbitrary integer lexemes, protocol requests/responses, parse/evaluate source commands, and structured errors |
 | CLI | `expr parse`, `expr evaluate`, inline/file sources, InputForm/FullForm selection, JSON output, exit codes, and protocol serving |
 | REPL | Persistent definitions, `In`/`InString`/`Out`, `%` output shorthand, `$Line`, Wolfram-style prompts, and `Exit`/`Quit` codes |
+| Discovery | Explicit `TUNGSTEN_WOLFRAM_HOME`, product-family selection, installed-version ranking, PATH fallback, executable/docs/license candidates, cache paths, and `env show` JSON |
 | Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, typed immutable patches, and `notebook inspect`/`notebook create`/`notebook patch` CLI commands |
 
 ## Compatibility boundary
@@ -74,8 +76,7 @@ features yet:
 - downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and inline box object workflows;
-- Wolfram installation discovery, licensing workarounds, kernel execution, process coordination,
-  and FrontEnd automation;
+- mathpass deduplication, kernel execution, process coordination, and FrontEnd automation;
 - local documentation indexing, parser-corpus orchestration, the REPL, and Notebook Assistant;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
