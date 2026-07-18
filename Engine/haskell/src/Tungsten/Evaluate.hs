@@ -160,6 +160,20 @@ reduceBuiltin headName values = case headName of
   "Catenate" -> reduceCatenate values
   "Differences" -> reduceDifferences values
   "Riffle" -> reduceRiffle values
+  "AllTrue" -> reduceTruthCollection "AllTrue" and values
+  "AnyTrue" -> reduceTruthCollection "AnyTrue" or values
+  "NoneTrue" -> reduceTruthCollection "NoneTrue" (not . or) values
+  "ContainsAll" -> reduceContains "ContainsAll" containsAll values
+  "ContainsAny" -> reduceContains "ContainsAny" containsAny values
+  "ContainsNone" -> reduceContains "ContainsNone" (\left right -> not (containsAny left right)) values
+  "ContainsExactly" -> reduceContains "ContainsExactly" containsExactly values
+  "Subsets" -> reduceSubsets values
+  "Permutations" -> reducePermutations values
+  "Permute" -> reducePermute values
+  "PadLeft" -> reducePad True values
+  "PadRight" -> reducePad False values
+  "Mean" -> reduceMean values
+  "Median" -> reduceMedian values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -856,6 +870,194 @@ reduceRiffle [Call (Symbol "List") values, separator] = case separator of
     go index (value : rest) =
       value : separators !! (index `mod` separatorCount) : go (index + 1) rest
 reduceRiffle values = Right (Call (Symbol "Riffle") values)
+
+reduceTruthCollection :: Text -> ([Bool] -> Bool) -> [Expr] -> Either EvaluationError Expr
+reduceTruthCollection operation combine [dataExpression, test] = do
+  values <- listOrAssociationValues operation dataExpression
+  outcomes <- traverse (evaluate . Call test . pure) values
+  pure (boolean (combine (map (== Symbol "True") outcomes)))
+reduceTruthCollection operation _ values = Right (Call (Symbol operation) values)
+
+reduceContains :: Text -> ([Expr] -> [Expr] -> Bool) -> [Expr] -> Either EvaluationError Expr
+reduceContains operation relation [left, right] = do
+  leftValues <- listOrAssociationValues operation left
+  rightValues <- listOrAssociationValues operation right
+  pure (boolean (relation leftValues rightValues))
+reduceContains operation _ values = Right (Call (Symbol operation) values)
+
+containsAll :: [Expr] -> [Expr] -> Bool
+containsAll left right = all (`elem` left) right
+
+containsAny :: [Expr] -> [Expr] -> Bool
+containsAny left right = any (`elem` left) right
+
+containsExactly :: [Expr] -> [Expr] -> Bool
+containsExactly left right = containsAll left right && containsAll right left
+
+reduceSubsets :: [Expr] -> Either EvaluationError Expr
+reduceSubsets = \case
+  [dataExpression] -> subsetsWithSizes dataExpression Nothing
+  [dataExpression, specification] -> subsetsWithSizes dataExpression (Just specification)
+  values -> Right (Call (Symbol "Subsets") values)
+ where
+  subsetsWithSizes dataExpression specification = do
+    values <- listOrAssociationValues "Subsets" dataExpression
+    sizes <- collectionSizes "Subsets" (length values) [0 .. length values] specification
+    pure (list [list subset | size <- sizes, subset <- combinationsOf size values])
+
+reducePermutations :: [Expr] -> Either EvaluationError Expr
+reducePermutations = \case
+  [dataExpression] -> permutationsWithSizes dataExpression Nothing
+  [dataExpression, specification] -> permutationsWithSizes dataExpression (Just specification)
+  values -> Right (Call (Symbol "Permutations") values)
+ where
+  permutationsWithSizes dataExpression specification = do
+    values <- listOrAssociationValues "Permutations" dataExpression
+    sizes <- collectionSizes "Permutations" (length values) [length values] specification
+    pure (list [list permutation | size <- sizes, permutation <- permutationsOf size values])
+
+collectionSizes :: Text -> Int -> [Int] -> Maybe Expr -> Either EvaluationError [Int]
+collectionSizes _ _ defaults Nothing = Right defaults
+collectionSizes operation maximumSize _ (Just specification) = case specification of
+  Call (Symbol "List") [Integer size]
+    | size >= 0 -> Right (inBounds [fromIntegral size])
+  Call (Symbol "List") [Integer lower, Integer upper]
+    | lower >= 0 && upper >= lower -> Right (inBounds [fromIntegral lower .. fromIntegral upper])
+  Integer upper
+    | upper >= 0 -> Right [0 .. min maximumSize (fromIntegral upper)]
+  _ -> Left (EvaluationError (operation <> " received an unsupported size specification"))
+ where
+  inBounds = filter (<= maximumSize)
+
+combinationsOf :: Int -> [value] -> [[value]]
+combinationsOf 0 _ = [[]]
+combinationsOf _ [] = []
+combinationsOf count (value : rest)
+  | count < 0 = []
+  | otherwise =
+      map (value :) (combinationsOf (count - 1) rest) <> combinationsOf count rest
+
+permutationsOf :: Int -> [value] -> [[value]]
+permutationsOf 0 _ = [[]]
+permutationsOf count values
+  | count < 0 = []
+  | otherwise =
+      [ value : permutation
+      | (value, remaining) <- selectEach values
+      , permutation <- permutationsOf (count - 1) remaining
+      ]
+ where
+  selectEach [] = []
+  selectEach (value : rest) =
+    (value, rest) : [(selected, value : remaining) | (selected, remaining) <- selectEach rest]
+
+reducePermute :: [Expr] -> Either EvaluationError Expr
+reducePermute [Call expressionHead subjectValues, permutationExpression]
+  | expressionHead /= Symbol "Association" = do
+      permutation <- parsePermutation (length subjectValues) permutationExpression
+      reordered <-
+        maybe
+          (Left (EvaluationError "Permute received an invalid permutation"))
+          Right
+          (traverse (valueAtDestination subjectValues permutation) [1 .. length subjectValues])
+      pure (Call expressionHead reordered)
+ where
+  valueAtDestination values' permutation destination = do
+    sourceIndex <- findSourceIndex destination permutation
+    pure (values' !! sourceIndex)
+  findSourceIndex destination = go 0
+   where
+    go _ [] = Nothing
+    go index (candidate : rest)
+      | destination == candidate = Just index
+      | otherwise = go (index + 1) rest
+reducePermute values = Right (Call (Symbol "Permute") values)
+
+parsePermutation :: Int -> Expr -> Either EvaluationError [Int]
+parsePermutation count = \case
+  Call (Symbol "List") values -> validate =<< traverse explicitPosition values
+  Call (Symbol "Cycles") [Call (Symbol "List") cycles] -> do
+    parsedCycles <- traverse parseCycle cycles
+    validate (foldl' applyCycle [1 .. count] parsedCycles)
+  _ -> Left (EvaluationError "Permute expects a positional list or Cycles expression")
+ where
+  explicitPosition (Integer position)
+    | position > 0 && position <= fromIntegral count = Right (fromIntegral position)
+  explicitPosition _ = Left (EvaluationError "Permute positions must be in range")
+  parseCycle (Call (Symbol "List") positions) = traverse explicitPosition positions
+  parseCycle _ = Left (EvaluationError "Permute cycles must contain position lists")
+  validate permutation
+    | length permutation == count
+    , allDistinct permutation
+    , all (`elem` permutation) [1 .. count] = Right permutation
+    | otherwise = Left (EvaluationError "Permute expects a complete permutation")
+  applyCycle permutation [] = permutation
+  applyCycle permutation [_] = permutation
+  applyCycle permutation (firstPosition : remaining) =
+    foldl'
+      (\result (source, destination) -> replaceListIndex (source - 1) destination result)
+      permutation
+      (zip (firstPosition : remaining) (remaining <> [firstPosition]))
+
+reducePad :: Bool -> [Expr] -> Either EvaluationError Expr
+reducePad leftMode = \case
+  [Call (Symbol "List") values, Integer target] -> pad values target (Integer 0)
+  [Call (Symbol "List") values, Integer target, fill] -> pad values target fill
+  values -> Right (Call (Symbol (if leftMode then "PadLeft" else "PadRight")) values)
+ where
+  pad values target fill
+    | target < 0 = Left (EvaluationError "PadLeft/PadRight expects a non-negative target length")
+    | targetLength <= length values =
+        Right
+          ( list
+              ( if leftMode
+                  then drop (length values - targetLength) values
+                  else take targetLength values
+              )
+          )
+    | leftMode = Right (list (replicate (targetLength - length values) fill <> values))
+    | otherwise = Right (list (values <> replicate (targetLength - length values) fill))
+   where
+    targetLength = fromIntegral target
+
+reduceMean :: [Expr] -> Either EvaluationError Expr
+reduceMean [dataExpression] = do
+  values <- listOrAssociationValues "Mean" dataExpression
+  case values of
+    [] -> Left (EvaluationError "Mean of an empty collection is undefined")
+    _ ->
+      pure
+        ( reduceTimes
+            [reducePlus values, fromExact (normalizeExact 1 (fromIntegral (length values)))]
+        )
+reduceMean values = Right (Call (Symbol "Mean") values)
+
+reduceMedian :: [Expr] -> Either EvaluationError Expr
+reduceMedian [dataExpression] = do
+  values <- listOrAssociationValues "Median" dataExpression
+  exactValues <-
+    maybe
+      (Left (EvaluationError "Median currently expects explicit exact real numbers"))
+      Right
+      (traverse toExact values)
+  case sortBy compareExactValue exactValues of
+    [] -> Left (EvaluationError "Median of an empty collection is undefined")
+    sorted ->
+      let count = length sorted
+       in if odd count
+            then Right (fromExact (sorted !! (count `div` 2)))
+            else
+              Right
+                ( fromExact
+                    ( multiplyExact
+                        (addExact (sorted !! (count `div` 2 - 1)) (sorted !! (count `div` 2)))
+                        (Exact 1 2)
+                    )
+                )
+ where
+  compareExactValue (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
+    compare (leftNumerator * rightDenominator) (rightNumerator * leftDenominator)
+reduceMedian values = Right (Call (Symbol "Median") values)
 
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
