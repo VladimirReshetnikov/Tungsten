@@ -16,11 +16,10 @@ module Tungsten.Expression
 
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
-import Data.Char (ord)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Set as Set
-import Numeric (showHex, showOct)
+import Tungsten.NamedCharacters (encodePrintableAscii)
 import Tungsten.WolframString (wlString)
 
 -- | The kernel-free expression model.  Every constructor is immutable, and
@@ -187,22 +186,7 @@ sparseConstructor dimensions entries fill =
     | otherwise = [rules, shape, fill]
 
 encodeSymbol :: Text -> Text
-encodeSymbol = T.concatMap encodeCharacter
- where
-  encodeCharacter character
-    | codepoint >= 32 && codepoint < 127 = T.singleton character
-    | codepoint == 8 = "\\b"
-    | codepoint == 9 = "\\t"
-    | codepoint == 10 = "\\n"
-    | codepoint == 12 = "\\f"
-    | codepoint == 13 = "\\r"
-    | codepoint == 27 = "\\[RawEscape]"
-    | codepoint < 32 || codepoint == 127 = "\\" <> pad 3 (showOct codepoint "")
-    | codepoint <= 0xffff = "\\:" <> pad 4 (showHex codepoint "")
-    | otherwise = "\\|" <> pad 6 (showHex codepoint "")
-   where
-    codepoint = ord character
-  pad width value = T.pack (replicate (width - length value) '0' ++ value)
+encodeSymbol = encodePrintableAscii
 
 base64Encode :: BS.ByteString -> Text
 base64Encode = T.pack . go . BS.unpack

@@ -14,7 +14,7 @@ module Tungsten.Parser
 
 import Control.Monad (void)
 import Data.Bifunctor (first)
-import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace, ord)
+import Data.Char (chr, digitToInt, isAlpha, isAlphaNum, isDigit, isHexDigit, isSpace, ord)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Parsec
@@ -25,6 +25,7 @@ import Text.Parsec
   , chainl1
   , chainr1
   , choice
+  , count
   , eof
   , getInput
   , many
@@ -43,6 +44,7 @@ import Text.Parsec
   )
 import qualified Text.Parsec as Parsec
 import Tungsten.Expression
+import Tungsten.NamedCharacters
 import Tungsten.WolframString (parseWolframStringLiteral)
 
 newtype ParseError = ParseError {parseErrorMessage :: Text}
@@ -274,9 +276,9 @@ listParser =
 
 associationParser :: Parser Expr
 associationParser = do
-  _ <- lexeme (try (string "<|"))
+  _ <- operator "<|" ""
   entries <- inputExpressionParser `sepBy` symbolChar ','
-  _ <- lexeme (try (string "|>"))
+  _ <- operator "|>" ""
   pure (Call (Symbol "Association") entries)
 
 slotParser :: Parser Expr
@@ -314,11 +316,13 @@ binaryExcept :: Text -> String -> (Expr -> Expr -> Expr) -> Parser (Expr -> Expr
 binaryExcept operatorText blocked constructor = constructor <$ operator operatorText blocked
 
 operator :: Text -> String -> Parser Text
-operator operatorText blocked = lexeme . try $ do
-  matched <- T.pack <$> string (T.unpack operatorText)
-  if null blocked
-    then pure matched
-    else notFollowedBy (oneOf blocked) *> pure matched
+operator operatorText blocked = lexeme (choice (map spellingParser (namedOperatorSpellings operatorText)))
+ where
+  spellingParser spelling = try $ do
+    _ <- string (T.unpack spelling)
+    if spelling /= operatorText || null blocked
+      then pure operatorText
+      else notFollowedBy (oneOf blocked) *> pure operatorText
 
 call2 :: Text -> Expr -> Expr -> Expr
 call2 headName lhs rhs = Call (Symbol headName) [lhs, rhs]
@@ -455,23 +459,63 @@ stringLiteralParser =
 
 symbolParser :: Parser Text
 symbolParser = do
-  firstCharacter <- satisfy isSymbolStart
-  remaining <- many (satisfy isSymbolContinuation)
-  pure (T.pack (firstCharacter : remaining))
+  firstComponent <- symbolComponent isSymbolStart
+  remaining <- many (symbolComponent isSymbolContinuation)
+  let name = T.concat (firstComponent : remaining)
+  pure $ case T.uncons name of
+    Just (character, rest) | T.null rest -> maybe name id (symbolAliasForCharacter character)
+    _ -> name
+
+symbolComponent :: (Char -> Bool) -> Parser Text
+symbolComponent accepted =
+  (T.singleton <$> satisfy accepted)
+    <|> try (escapedSymbolCharacter accepted)
+
+escapedSymbolCharacter :: (Char -> Bool) -> Parser Text
+escapedSymbolCharacter accepted = do
+  _ <- char '\\'
+  character <- namedEscape <|> numericEscape
+  if accepted character
+    then pure (T.singleton character)
+    else unexpected "a Wolfram operator or invalid identifier character"
+ where
+  namedEscape = do
+    _ <- char '['
+    name <- T.pack <$> many (satisfy (/= ']'))
+    _ <- char ']'
+    maybe (fail ("unknown Wolfram named character escape \\[" <> T.unpack name <> "]")) pure (namedCharacter name)
+  numericEscape = choice
+    [ char ':' *> hexadecimalCharacter 4
+    , char '.' *> hexadecimalCharacter 2
+    , char '|' *> hexadecimalCharacter 6
+    ]
+  hexadecimalCharacter width = do
+    digits <- count width (satisfy isHexDigit)
+    let codepoint = foldl' (\value digit -> value * 16 + digitToInt digit) 0 digits
+    if codepoint > 0x10ffff
+      then unexpected "a Unicode codepoint above U+10FFFF"
+      else pure (chr codepoint)
 
 isSymbolStart :: Char -> Bool
 isSymbolStart character =
   isAlpha character
     || character == '$'
     || character == '`'
-    || ord character > 127
+    || isNonAsciiSymbolCharacter character
 
 isSymbolContinuation :: Char -> Bool
 isSymbolContinuation character =
   isAlphaNum character
     || character == '$'
     || character == '`'
-    || ord character > 127
+    || isNonAsciiSymbolCharacter character
+
+isNonAsciiSymbolCharacter :: Char -> Bool
+isNonAsciiSymbolCharacter character =
+  let codepoint = ord character
+   in codepoint > 127
+        && not (codepoint >= 0xd800 && codepoint <= 0xdfff)
+        && not (isNamedOperatorCharacter character)
 
 ignored :: Parser ()
 ignored = skipMany (void (satisfy isSpace) <|> wolframComment)

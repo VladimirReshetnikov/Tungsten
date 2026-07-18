@@ -15,6 +15,7 @@ build-type:         Simple
 extra-source-files:
   README.md
   docs/haskell-port.md
+  src/tungsten/data/wolfram_named_characters_15_0.json
 tested-with:        GHC == 9.12.4
 
 common common-settings
@@ -39,6 +40,7 @@ library
     Tungsten.Json
     Tungsten.Kernel
     Tungsten.Licensing
+    Tungsten.NamedCharacters
     Tungsten.Notebook
     Tungsten.Parser
     Tungsten.Repl
@@ -53,7 +55,10 @@ library
     parsec     >= 3.1  && < 3.2,
     process    >= 1.6  && < 1.7,
     text       >= 2.1  && < 2.2,
-    time       >= 1.12 && < 1.15
+    time       >= 1.12 && < 1.15,
+    template-haskell >= 2.23 && < 2.24
+  other-modules:
+    Tungsten.NamedCharacterTH
 
 executable tungsten-hs
   import:          common-settings

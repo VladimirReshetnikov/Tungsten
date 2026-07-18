@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T15:14:31Z
-- Repository HEAD: b68944ed1ed42a9342dd2b00d6ee2f889a7cb599
+- Updated (UTC): 2026-07-18T15:24:20Z
+- Repository HEAD: 2939ffaf5548f089aea8facc47bc9217b6192cb7
 
 ## Purpose
 
@@ -63,6 +63,7 @@ Haskell process clients.
 | Expression values | Symbols, arbitrary integers, rationals, source-preserving reals, complex values, strings, byte arrays, general calls, algebraic roots, and sparse arrays |
 | Rendering | Canonical structural FullForm, including compact roots, sparse arrays, byte arrays, and Wolfram-aware escaped strings/symbols |
 | Wolfram strings | Character, control, numeric and line-continuation escapes; raw and PUA-decoded inline boxes; nested delimiter scanning through strings/comments; composition and display projection |
+| Named characters | Build-time embedding of all 1,100 Wolfram 15.0 kernel-accepted names, canonical symbol rendering, strict identifier escapes, single-character aliases, and core escaped operator spellings |
 | FullForm parser | Calls and chained heads, exact and real atoms, shared Wolfram string decoding, nested comments, rationals, and complex atoms |
 | InputForm parser | Core calls, lists, associations, parts, patterns, slots and pure functions, arithmetic, comparisons, Boolean operators, rules, replacements, conditions, assignments, application, and compound expressions |
 | Evaluator | Exact arithmetic and powers, comparisons, Boolean control flow, structural predicates, parts, ranges and core list transforms, mapping/application, pure functions, exact replacement, held forms, and symbolic fallback |
@@ -81,7 +82,7 @@ Haskell process clients.
 The following Engine areas still use the Python implementation and are not represented as Haskell
 features yet:
 
-- the complete Wolfram tokenizer, named-character catalog, box-language and StandardForm parser;
+- the complete Wolfram tokenizer, box-language and StandardForm parser, including the broad named infix-operator precedence table;
 - downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and byte-for-byte preservation of original box-expression formatting;
@@ -98,7 +99,7 @@ compatibility tests pass.
 The next useful port slices are:
 
 1. grow parser and evaluator parity from the Python corpus and the local Wolfram held-parser oracle;
-2. port the complete named-character catalog and source-preserving notebook spans;
+2. port source-preserving notebook spans and broader box-language interpretation;
 3. port definitions, attributes, pattern matching, scoping, and iteration on the immutable session;
 4. port documentation indexing, parser-corpus orchestration, and Notebook Assistant workflows;
 5. complete kernel licensing/concurrency behavior and broad Python CLI payload parity;

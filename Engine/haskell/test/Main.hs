@@ -22,6 +22,7 @@ import Tungsten.InlineBoxes
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Licensing
+import Tungsten.NamedCharacters
 import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.Repl
@@ -39,6 +40,7 @@ tests :: [IO Bool]
 tests =
   [ checkFullForms
   , checkWolframStrings
+  , checkNamedCharacters
   , checkInlineBoxes
   , checkFullFormParser
   , checkFullFormParserErrors
@@ -119,6 +121,54 @@ checkWolframStrings = do
             _ -> assertEqual "string JSON object shape" True False
         ]
   and <$> sequence checks
+
+checkNamedCharacters :: IO Bool
+checkNamedCharacters = do
+  let catalogEntries = Map.toList namedCharacterCodepoints
+      catalogDecodeCount =
+        length
+          [ ()
+          | (name, codepoint) <- catalogEntries
+          , parseFullForm ("\"\\[" <> name <> "]\"") == Right (String (Text.singleton (chr codepoint)))
+          ]
+      inputCases =
+        [ ("named identifier", "\\[Alpha]", Symbol "α")
+        , ("named identifier alias", "\\[Pi]", Symbol "Pi")
+        , ("imaginary unit alias", "\\[ImaginaryI]", Symbol "I")
+        , ("exponential alias", "\\[ExponentialE]", Symbol "E")
+        , ("hex identifier alias", "\\:03C0", Symbol "Pi")
+        , ("mid-identifier escape", "x\\:03C0", Symbol "xπ")
+        , ("generic PUA identifier", "\\:E000", Symbol (Text.singleton (chr 0xe000)))
+        , ("supplementary identifier", "\\|01F600", Symbol "😀")
+        , ("named And operator", "a \\[And] b", Call (Symbol "And") [Symbol "a", Symbol "b"])
+        , ("direct And operator", "a ∧ b", Call (Symbol "And") [Symbol "a", Symbol "b"])
+        , ("named rule operator", "a \\[Rule] b", Call (Symbol "Rule") [Symbol "a", Symbol "b"])
+        , ("named invisible multiplication", "2 \\[InvisibleTimes] x", Call (Symbol "Times") [Integer 2, Symbol "x"])
+        , ( "named association delimiters"
+          , "\\[LeftAssociation]a -> 1\\[RightAssociation]"
+          , Call (Symbol "Association") [Call (Symbol "Rule") [Symbol "a", Integer 1]]
+          )
+        ]
+      rejected =
+        [ ("unknown named identifier", "\\[NotARealName]")
+        , ("octal identifier", "\\041")
+        , ("operator PUA identifier", "\\:F4A1")
+        , ("surrogate identifier", "\\:D800")
+        ]
+  inputChecks <-
+    traverse
+      (\(label, source, expected) -> assertEqual label (Right expected) (parseInputForm source))
+      inputCases
+  rejectedChecks <-
+    traverse (\(label, source) -> assertLeft label (parseInputForm source)) rejected
+  structuralChecks <- sequence
+    [ assertEqual "complete named-character catalog size" 1100 (Map.size namedCharacterCodepoints)
+    , assertEqual "decode every named character in strings" 1100 catalogDecodeCount
+    , assertEqual "Wolfram Function codepoint" (Just (chr 0xf4a1)) (namedCharacter "Function")
+    , assertEqual "Wolfram ImaginaryI codepoint" (Just (chr 0xf74e)) (namedCharacter "ImaginaryI")
+    , assertEqual "render symbols with canonical named escapes" "\\[Alpha]" (fullForm (Symbol "α"))
+    ]
+  pure (and (inputChecks <> rejectedChecks <> structuralChecks))
 
 checkInlineBoxes :: IO Bool
 checkInlineBoxes = do
@@ -680,7 +730,7 @@ checkFullForms = do
           )
       cases =
         [ ("symbol", "System`Plus", fullForm (Symbol "System`Plus"))
-        , ("escaped symbol", "\\:03b1", fullForm (Symbol "α"))
+        , ("escaped symbol", "\\[Alpha]", fullForm (Symbol "α"))
         , ("arbitrary integer", "123456789012345678901234567890", fullForm (Integer 123456789012345678901234567890))
         , ("rational", "Rational[-2, 3]", fullForm (Rational (-2) 3))
         , ("real lexeme", "1.2300`40", fullForm (Real "1.2300`40"))

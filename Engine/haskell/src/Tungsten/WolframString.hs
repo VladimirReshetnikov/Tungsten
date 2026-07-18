@@ -22,6 +22,7 @@ module Tungsten.WolframString
 import Data.Char (chr, digitToInt, isHexDigit)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Tungsten.NamedCharacters (namedCharacter)
 
 inlineBoxPrefix :: Text
 inlineBoxPrefix = "\\!\\(\\*"
@@ -127,18 +128,6 @@ decodeNamedEscape source index = do
       name = T.take (end - index - 2) (T.drop (index + 2) source)
       verbatim = T.take (end - index + 1) (T.drop index source)
   pure (maybe verbatim T.singleton (namedCharacter name), end + 1)
-
-namedCharacter :: Text -> Maybe Char
-namedCharacter name = case name of
-  "Alpha" -> Just (chr 0x03b1)
-  "Beta" -> Just (chr 0x03b2)
-  "Gamma" -> Just (chr 0x03b3)
-  "Delta" -> Just (chr 0x03b4)
-  "Pi" -> Just (chr 0x03c0)
-  "Infinity" -> Just (chr 0x221e)
-  "Degree" -> Just (chr 0x00b0)
-  "ImaginaryI" -> Just (chr 0x2148)
-  _ -> Nothing
 
 decodeHexEscape :: Int -> Text -> Int -> Maybe (Text, Int)
 decodeHexEscape width source index = do
