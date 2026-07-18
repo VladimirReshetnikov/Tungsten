@@ -93,6 +93,10 @@ reduceCall expression = case expression of
     applyFunction functionArguments values
   Call (Call (Symbol "KeySelect") [criterion]) [association] ->
     reduceBuiltin "KeySelect" [association, criterion]
+  Call (Call (Symbol "SortBy") [function]) [subject] ->
+    reduceBuiltin "SortBy" [subject, function]
+  Call (Call (Symbol "ReverseSortBy") [function]) [subject] ->
+    reduceBuiltin "ReverseSortBy" [subject, function]
   Call (Symbol headName) values -> reduceBuiltin headName values
   _ -> Right expression
 
@@ -174,6 +178,16 @@ reduceBuiltin headName values = case headName of
   "PadRight" -> reducePad False values
   "Mean" -> reduceMean values
   "Median" -> reduceMedian values
+  "Order" -> Right (reduceOrder values)
+  "OrderedQ" -> reduceOrderedQ values
+  "Ordering" -> reduceOrderingIndices values
+  "Sort" -> reduceSort False values
+  "ReverseSort" -> reduceSort True values
+  "SortBy" -> reduceSortBy False values
+  "ReverseSortBy" -> reduceSortBy True values
+  "Union" -> reduceSetOperation SetUnion values
+  "Intersection" -> reduceSetOperation SetIntersection values
+  "Complement" -> reduceSetOperation SetComplement values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -650,15 +664,7 @@ reduceKeySort [association] = do
   pure (associationExpr (sortBy compareKey entries))
  where
   compareKey (AssociationEntry _ left _) (AssociationEntry _ right _) =
-    compare (canonicalKey left) (canonicalKey right)
-  canonicalKey expression = (canonicalRank expression, fullForm expression)
-  canonicalRank = \case
-    Integer {} -> 0 :: Int
-    Rational {} -> 0
-    Real {} -> 0
-    String {} -> 1
-    Symbol {} -> 2
-    _ -> 3
+    canonicalCompare left right
 reduceKeySort values = Right (Call (Symbol "KeySort") values)
 
 reduceMerge :: [Expr] -> Either EvaluationError Expr
@@ -1058,6 +1064,222 @@ reduceMedian [dataExpression] = do
   compareExactValue (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
     compare (leftNumerator * rightDenominator) (rightNumerator * leftDenominator)
 reduceMedian values = Right (Call (Symbol "Median") values)
+
+data OrderedItem = OrderedItem !Int !Expr !(Maybe AssociationEntry) ![Expr]
+  deriving (Eq, Show)
+
+canonicalCompare :: Expr -> Expr -> Ordering
+canonicalCompare left right
+  | left == right = EQ
+  | Just leftExact <- toExact left
+  , Just rightExact <- toExact right =
+      case compareExact leftExact rightExact of
+        EQ -> compare (numericKindRank left, fullForm left) (numericKindRank right, fullForm right)
+        ordering -> ordering
+  | expressionKindRank left /= expressionKindRank right =
+      compare (expressionKindRank left) (expressionKindRank right)
+canonicalCompare (String left) (String right) = compare left right
+canonicalCompare (Symbol left) (Symbol right) = compare left right
+canonicalCompare (ByteArray left) (ByteArray right) = compare left right
+canonicalCompare (Call leftHead leftValues) (Call rightHead rightValues) =
+  case canonicalCompare leftHead rightHead of
+    EQ -> compareExpressionLists leftValues rightValues
+    ordering -> ordering
+canonicalCompare left right = compare (fullForm left) (fullForm right)
+
+compareExact :: Exact -> Exact -> Ordering
+compareExact (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
+  compare (leftNumerator * rightDenominator) (rightNumerator * leftDenominator)
+
+numericKindRank :: Expr -> Int
+numericKindRank Integer {} = 0
+numericKindRank Rational {} = 1
+numericKindRank Real {} = 2
+numericKindRank Complex {} = 3
+numericKindRank Root {} = 4
+numericKindRank _ = 5
+
+expressionKindRank :: Expr -> Int
+expressionKindRank expression = case expression of
+  Integer {} -> 0
+  Rational {} -> 0
+  Real {} -> 0
+  Complex {} -> 0
+  Root {} -> 0
+  String {} -> 1
+  Symbol {} -> 2
+  ByteArray {} -> 3
+  SparseArray {} -> 4
+  Call {} -> 5
+
+compareExpressionLists :: [Expr] -> [Expr] -> Ordering
+compareExpressionLists [] [] = EQ
+compareExpressionLists [] (_ : _) = LT
+compareExpressionLists (_ : _) [] = GT
+compareExpressionLists (left : leftRest) (right : rightRest) =
+  case canonicalCompare left right of
+    EQ -> compareExpressionLists leftRest rightRest
+    ordering -> ordering
+
+orderedItems :: Text -> Expr -> Either EvaluationError [OrderedItem]
+orderedItems _ association
+  | Just entries <- associationEntries association =
+      Right
+        [ OrderedItem index value (Just entry) []
+        | (index, entry@(AssociationEntry _ _ value)) <- zip [1 ..] entries
+        ]
+orderedItems _ (Call _ values) =
+  Right [OrderedItem index value Nothing [] | (index, value) <- zip [1 ..] values]
+orderedItems operation _ = Left (EvaluationError (operation <> " expects a compound expression"))
+
+rebuildOrdered :: Expr -> [OrderedItem] -> Expr
+rebuildOrdered association items
+  | Just _ <- associationEntries association =
+      associationExpr [entry | OrderedItem _ _ (Just entry) _ <- items]
+rebuildOrdered (Call expressionHead _) items =
+  Call expressionHead [value | OrderedItem _ value _ _ <- items]
+rebuildOrdered expression _ = expression
+
+orderingFunctionCompare :: Maybe Expr -> Expr -> Expr -> Ordering
+orderingFunctionCompare Nothing = canonicalCompare
+orderingFunctionCompare (Just function) = compareWithFunction
+ where
+  compareWithFunction left right = case evaluate (Call function [left, right]) of
+    Right (Symbol "True") -> LT
+    Right (Integer result) -> compare 0 result
+    Right (Symbol "False") -> case evaluate (Call function [right, left]) of
+      Right (Symbol "True") -> GT
+      Right (Integer result) -> compare result 0
+      _ -> EQ
+    _ -> canonicalCompare left right
+
+reduceOrder :: [Expr] -> Expr
+reduceOrder [left, right] = Integer $ case canonicalCompare left right of
+  LT -> 1
+  EQ -> 0
+  GT -> -1
+reduceOrder values = Call (Symbol "Order") values
+
+reduceOrderedQ :: [Expr] -> Either EvaluationError Expr
+reduceOrderedQ = \case
+  [subject] -> check subject Nothing
+  [subject, function] -> check subject (Just function)
+  values -> Right (Call (Symbol "OrderedQ") values)
+ where
+  check subject function = do
+    items <- orderedItems "OrderedQ" subject
+    let values = [value | OrderedItem _ value _ _ <- items]
+        comparisons = zipWith (orderingFunctionCompare function) values (drop 1 values)
+    pure (boolean (all (/= GT) comparisons))
+
+reduceOrderingIndices :: [Expr] -> Either EvaluationError Expr
+reduceOrderingIndices = \case
+  [subject] -> order subject Nothing Nothing
+  [subject, count] -> order subject (Just count) Nothing
+  [subject, count, function] -> order subject (Just count) (Just function)
+  values -> Right (Call (Symbol "Ordering") values)
+ where
+  order subject count function = do
+    items <- orderedItems "Ordering" subject
+    let sorted = sortBy (compareOrderedItems function) items
+    selected <- countSlice "Ordering" count sorted
+    pure (list [Integer (fromIntegral index) | OrderedItem index _ _ _ <- selected])
+
+compareOrderedItems :: Maybe Expr -> OrderedItem -> OrderedItem -> Ordering
+compareOrderedItems function (OrderedItem _ left _ _) (OrderedItem _ right _ _) =
+  orderingFunctionCompare function left right
+
+countSlice :: Text -> Maybe Expr -> [value] -> Either EvaluationError [value]
+countSlice _ Nothing values = Right values
+countSlice _ (Just (Symbol "All")) values = Right values
+countSlice _ (Just (Integer count)) values
+  | count >= 0 = Right (take (min (length values) (fromIntegral count)) values)
+  | otherwise = Right (drop (max 0 (length values - fromIntegral (abs count))) values)
+countSlice operation _ _ = Left (EvaluationError (operation <> " expects an integer or All count"))
+
+reduceSort :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceSort reverseMode = \case
+  [subject] -> sortSubject subject Nothing Nothing
+  [subject, function] -> sortSubject subject (Just function) Nothing
+  [subject, function, count] -> sortSubject subject (Just function) (Just count)
+  values -> Right (Call (Symbol (if reverseMode then "ReverseSort" else "Sort")) values)
+ where
+  sortSubject subject function count = do
+    items <- orderedItems operation subject
+    let compareItems left right =
+          let result = compareOrderedItems function left right
+           in if reverseMode then invertOrdering result else result
+        sorted = sortBy compareItems items
+    selected <- countSlice operation count sorted
+    pure (rebuildOrdered subject selected)
+  operation = if reverseMode then "ReverseSort" else "Sort"
+
+invertOrdering :: Ordering -> Ordering
+invertOrdering LT = GT
+invertOrdering EQ = EQ
+invertOrdering GT = LT
+
+reduceSortBy :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceSortBy reverseMode = \case
+  [subject, functions] -> sortSubject subject functions Nothing
+  [subject, functions, orderingFunction] -> sortSubject subject functions (Just orderingFunction)
+  values -> Right (Call (Symbol operation) values)
+ where
+  sortSubject subject functions orderingFunction = do
+    items <- orderedItems operation subject
+    let (keyFunctions, stableTies) = case functions of
+          Call (Symbol "List") values -> (values, True)
+          _ -> ([functions], False)
+    decorated <- traverse (decorate keyFunctions) items
+    let compareItems (OrderedItem _ leftValue _ leftKeys) (OrderedItem _ rightValue _ rightKeys) =
+          let keyOrdering = compareKeyLists orderingFunction leftKeys rightKeys
+              tieOrdering = if stableTies then EQ else canonicalCompare leftValue rightValue
+              result = if keyOrdering == EQ then tieOrdering else keyOrdering
+           in if reverseMode then invertOrdering result else result
+    pure (rebuildOrdered subject (sortBy compareItems decorated))
+  decorate functions (OrderedItem index value entry _) = do
+    keys <- traverse (\function -> evaluate (Call function [value])) functions
+    pure (OrderedItem index value entry keys)
+  operation = if reverseMode then "ReverseSortBy" else "SortBy"
+
+compareKeyLists :: Maybe Expr -> [Expr] -> [Expr] -> Ordering
+compareKeyLists _ [] [] = EQ
+compareKeyLists _ [] (_ : _) = LT
+compareKeyLists _ (_ : _) [] = GT
+compareKeyLists function (left : leftRest) (right : rightRest) =
+  case orderingFunctionCompare function left right of
+    EQ -> compareKeyLists function leftRest rightRest
+    ordering -> ordering
+
+data SetOperation = SetUnion | SetIntersection | SetComplement
+
+reduceSetOperation :: SetOperation -> [Expr] -> Either EvaluationError Expr
+reduceSetOperation operation expressions = do
+  collections <- traverse (listOrAssociationValues operationName) expressions
+  pure (list (uniqueCanonical (sortBy canonicalCompare (resultValues collections))))
+ where
+  operationName = case operation of
+    SetUnion -> "Union"
+    SetIntersection -> "Intersection"
+    SetComplement -> "Complement"
+  resultValues collections = case operation of
+    SetUnion -> concat collections
+    SetIntersection -> case collections of
+      [] -> []
+      firstCollection : remaining ->
+        [value | value <- firstCollection, all (value `elem`) remaining]
+    SetComplement -> case collections of
+      [] -> []
+      firstCollection : remaining ->
+        let excluded = concat remaining
+         in [value | value <- firstCollection, value `notElem` excluded]
+
+uniqueCanonical :: [Expr] -> [Expr]
+uniqueCanonical = foldl' appendUnique []
+ where
+  appendUnique retained value
+    | value `elem` retained = retained
+    | otherwise = retained <> [value]
 
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
