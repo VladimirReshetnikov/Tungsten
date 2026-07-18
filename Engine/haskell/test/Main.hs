@@ -542,6 +542,8 @@ checkEvaluator = do
         , ("machine fractional parts", "{FractionalPart[3.7], FractionalPart[1.2], FractionalPart[-3.7], FractionalPart[2.0], FractionalPart[-0.0], FractionalPart[.5], FractionalPart[1.*^-5]}", "List[0.7000000000000002, 0.19999999999999996, -0.7000000000000002, 0., -0., 0.5, 1*^-05]")
         , ("marked fractional parts", "{FractionalPart[3.7000`30], FractionalPart[1.2``20], FractionalPart[1.2`20*^3], FractionalPart[12.34`20*^-1], FractionalPart[-0.0`30]}", "List[0.7000`30., 0.2`0., 0.0`20., 0.234`20., -0.0`30.]")
         , ("rounding edge behavior", "{Round[2.5000000000000001], Floor[1, 0], Ceiling[7, -3], Round[5, -2], Floor[x], Floor[1, x]}", "List[3, Indeterminate, 6, 4, Floor[x], Floor[1, x]]")
+        , ("componentwise complex rounding", "{IntegerPart[-3.7 + 4.2 I], FractionalPart[-3.7 + 4.2 I], Round[Complex[-3.5, 2.5]], IntegerPart[I]}", "List[Complex[-3, 4], Complex[-0.7000000000000002, 0.20000000000000018], Complex[-4, 2], Complex[0, 1]]")
+        , ("complex rounding normalization", "{IntegerPart[1.2 + 0.2 I], FractionalPart[1/2 + 0.2 I], FractionalPart[Complex[1/2, 1/5]]}", "List[1, Complex[0.5, 0.2], Complex[Rational[1, 2], Rational[1, 5]]]")
         , ("negative rational power", "(2/3)^-3", "Rational[27, 8]")
         , ("symbolic coefficient collection", "2 x 3", "Times[6, x]")
         , ("symbolic constant collection", "x + 1 + 2", "Plus[3, x]")

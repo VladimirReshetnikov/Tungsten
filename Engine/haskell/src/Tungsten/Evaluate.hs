@@ -318,7 +318,66 @@ roundScalar operation value
 roundScalar operation (Real source) = do
   info <- parseRealInfo source
   roundReal operation info
+roundScalar operation value
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value = do
+      roundedReal <- roundScalar operation realPart
+      roundedImaginary <- roundScalar operation imaginaryPart
+      pure (makeComplex roundedReal roundedImaginary)
 roundScalar _ _ = Nothing
+
+explicitComplexParts :: Expr -> Maybe (Expr, Expr)
+explicitComplexParts (Complex realPart imaginaryPart) = Just (realPart, imaginaryPart)
+explicitComplexParts (Symbol "I") = Just (Integer 0, Integer 1)
+explicitComplexParts expression
+  | Just coefficient <- imaginaryCoefficient expression = Just (Integer 0, coefficient)
+explicitComplexParts (Call (Symbol "Plus") [left, right])
+  | isExplicitReal left
+  , Just coefficient <- imaginaryCoefficient right = Just (left, coefficient)
+  | Just coefficient <- imaginaryCoefficient left
+  , isExplicitReal right = Just (right, coefficient)
+explicitComplexParts _ = Nothing
+
+imaginaryCoefficient :: Expr -> Maybe Expr
+imaginaryCoefficient (Symbol "I") = Just (Integer 1)
+imaginaryCoefficient (Call (Symbol "Times") [coefficient, Symbol "I"])
+  | isExplicitReal coefficient = Just coefficient
+imaginaryCoefficient (Call (Symbol "Times") [Symbol "I", coefficient])
+  | isExplicitReal coefficient = Just coefficient
+imaginaryCoefficient _ = Nothing
+
+isExplicitReal :: Expr -> Bool
+isExplicitReal value
+  | Just _ <- toExact value = True
+isExplicitReal (Real source) = case parseRealInfo source of
+  Just _ -> True
+  Nothing -> False
+isExplicitReal _ = False
+
+makeComplex :: Expr -> Expr -> Expr
+makeComplex realPart imaginaryPart
+  | Just (Exact 0 _) <- toExact imaginaryPart = realPart
+  | isMachineReal realPart || isMachineReal imaginaryPart =
+      Complex (toMachineReal realPart) (toMachineReal imaginaryPart)
+  | otherwise = Complex realPart imaginaryPart
+
+isMachineReal :: Expr -> Bool
+isMachineReal (Real source) = case parseRealInfo source of
+  Just (RealInfo _ MachineReal _ _ _) -> True
+  _ -> False
+isMachineReal _ = False
+
+toMachineReal :: Expr -> Expr
+toMachineReal value@(Real source) = case parseRealInfo source of
+  Just (RealInfo _ MachineReal _ _ _) -> value
+  Just (RealInfo exactValue _ _ _ _) -> exactToMachineReal exactValue
+  Nothing -> value
+toMachineReal value
+  | Just exactValue <- toExact value = exactToMachineReal exactValue
+toMachineReal value = value
+
+exactToMachineReal :: Exact -> Expr
+exactToMachineReal (Exact numerator denominator) =
+  Real (formatMachineReal (fromInteger numerator / fromInteger denominator))
 
 roundExactExpr :: RoundingOperation -> Exact -> Expr
 roundExactExpr RoundFractionalPart value = fromExact (fractionalExact value)
