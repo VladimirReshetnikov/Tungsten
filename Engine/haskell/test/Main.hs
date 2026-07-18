@@ -12,6 +12,7 @@ import Tungsten.Cli
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Json
+import Tungsten.Notebook
 import Tungsten.Parser
 
 main :: IO ()
@@ -31,6 +32,8 @@ tests =
   , checkEvaluator
   , checkEvaluatorErrors
   , checkCliArguments
+  , checkNotebookModel
+  , checkNotebookErrors
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -172,6 +175,35 @@ checkCliArguments = do
         , assertLeft "CLI rejects unknown commands" (parseCliArguments ["kernel", "eval"])
         ]
   and <$> sequence checks
+
+checkNotebookModel :: IO Bool
+checkNotebookModel = do
+  let source =
+        "Notebook[{Cell[\"Demo\", \"Title\", CellID -> 1], Cell[CellGroupData[{Cell[\"1+2\", \"Input\"], Cell[BoxData[RowBox[{\"1\", \"+\", \"2\"}]], \"Output\"]}, Open]]}, WindowTitle -> \"Demo\"]"
+      document = expectRight (parseNotebook source)
+      records = flattenCells document
+      created = createNotebook (Just "Generated") [("Title", "Generated"), ("Input", "2+2")]
+      checks =
+        [ assertEqual "notebook cell count" 3 (cellCount document)
+        , assertEqual "notebook group count" 1 (groupCount document)
+        , assertEqual "notebook paths" [[0], [1, 0], [1, 1]] (map cellRecordPath records)
+        , assertEqual "notebook styles" [Just "Title", Just "Input", Just "Output"] (map cellRecordStyle records)
+        , assertEqual "notebook previews" ["Demo", "1+2", "RowBox[List[\"1\", \"+\", \"2\"]]"] (map cellRecordPreview records)
+        , assertEqual "notebook render round trip" (Right document) (parseNotebook (renderNotebook document))
+        , assertEqual "created notebook cell count" 2 (cellCount created)
+        , assertEqual
+            "created notebook option"
+            [Call (Symbol "Rule") [Symbol "WindowTitle", String "Generated"]]
+            (notebookOptions created)
+        ]
+  and <$> sequence checks
+
+checkNotebookErrors :: IO Bool
+checkNotebookErrors = do
+  first <- assertLeft "reject non-notebook source" (parseNotebook "List[1, 2]")
+  second <- assertLeft "reject notebook without item list" (parseNotebook "Notebook[1]")
+  third <- assertLeft "reject malformed notebook syntax" (parseNotebook "Notebook[{")
+  pure (and [first, second, third])
 
 checkFullForms :: IO Bool
 checkFullForms = do

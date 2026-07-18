@@ -33,6 +33,7 @@ library
     Tungsten.Evaluate
     Tungsten.Expression
     Tungsten.Json
+    Tungsten.Notebook
     Tungsten.Parser
   build-depends:
     base       >= 4.21 && < 4.22,
