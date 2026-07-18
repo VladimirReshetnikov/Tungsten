@@ -1016,6 +1016,16 @@ checkEvaluationSession = do
         , ("And short circuits state", "False && (x = 1); x", "x")
         , ("Or short circuits state", "True || (x = 1); x", "x")
         , ("assignment update", "x = 10; AddTo[x, 5]; x", "15")
+        , ("table count iterators", "{Table[a, 3], Table[a, {3}], Table[i, {i, 5}]}", "List[List[a, a, a], List[a, a, a], List[1, 2, 3, 4, 5]]")
+        , ("table exact ranges", "{Table[i^2, {i, 1, 5}], Table[i, {i, 2, 8, 2}], Table[i, {i, 5, 1, -1}], Table[i, {i, 0, 1, 1/4}]}", "List[List[1, 4, 9, 16, 25], List[2, 4, 6, 8], List[5, 4, 3, 2, 1], List[0, Rational[1, 4], Rational[1, 2], Rational[3, 4], 1]]")
+        , ("table explicit values", "{Table[Sqrt[i], {i, {1, 4, 9, 16}}], Table[i, {i, {a, b, c}}], Table[i, {i, {i}}]}", "List[List[1, 2, 3, 4], List[a, b, c], List[i]]")
+        , ("table nested iterators", "{Table[i + j, {i, 3}, {j, 2}], Table[{i, j}, {i, 2}, {j, i}], Table[Table[i*j, {j, i}], {i, 3}]}", "List[List[List[2, 3], List[3, 4], List[4, 5]], List[List[List[1, 1]], List[List[2, 1], List[2, 2]]], List[List[1], List[2, 4], List[3, 6, 9]]]")
+        , ("table block scoping", "i = 99; x = 100; {Table[i, {i, 3}], i, Table[x + j, {j, 1, 3}], x}", "List[List[1, 2, 3], 99, List[101, 102, 103], 100]")
+        , ("table empty and invalid forms", "{Table[i, {i, 5, 1}], Table[i, {i, 0}], Table[i, {i, 1, 5, 0}], Table[i]}", "List[List[], List[], Table[i, List[i, 1, 5, 0]], Table[i]]")
+        , ("table invalid iterators preserve prior effects", "x = 0; Table[a, {i, x = x + 1, b}]; x", "1")
+        , ("table invalid forms remain held when nested", "{Table[1 + 2], f[Table[1 + 2]]}", "List[Table[Plus[1, 2]], f[Table[Plus[1, 2]]]]")
+        , ("table evaluated-head aliases remain inert and held", "i = 99; f = Table; f[i, {i, 3}]", "Table[i, List[i, 3]]")
+        , ("table evaluated list normalization", "{Table[Nothing, {3}], Table[Sequence[i, -i], {i, 2}], Table[f[i], {i, {Nothing, Sequence[a, b]}}], Table[i, {i, {Splice[{a, b}]}}]}", "List[List[], List[1, -1, 2, -2], List[f[a], f[b]], List[a, b]]")
         ]
   and <$> traverse evaluateSessionCase cases
  where

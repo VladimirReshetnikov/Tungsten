@@ -8,6 +8,7 @@
 module Tungsten.Evaluate
   ( EvaluationError (..)
   , evaluate
+  , exactRangeValues
   ) where
 
 import Control.Monad (foldM)
@@ -37,6 +38,7 @@ evaluateAt depth expression
       Call (Symbol "Function") _ -> Right expression
       Call (Symbol "SetDelayed") _ -> Right expression
       Call (Symbol "RuleDelayed") _ -> Right expression
+      Call (Symbol "Table") _ -> Right expression
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'
@@ -267,6 +269,30 @@ data RealKind
 
 data RealInfo = RealInfo !Exact !RealKind !Int !Bool !Text
   deriving (Eq, Show)
+
+-- | Expand an inclusive exact integer/rational range.  Iterator evaluation
+-- uses this reducer-owned helper so its arithmetic stays identical to Range
+-- and the other exact-number built-ins without exposing the private Exact
+-- representation across modules.
+exactRangeValues :: Expr -> Expr -> Expr -> Maybe [Expr]
+exactRangeValues start end step = do
+  startExact <- toExact start
+  endExact <- toExact end
+  stepExact@(Exact stepNumerator _) <- toExact step
+  if stepNumerator == 0
+    then Nothing
+    else generate 65536 startExact endExact stepExact
+ where
+  generate :: Int -> Exact -> Exact -> Exact -> Maybe [Expr]
+  generate remaining current final increment
+    | not (withinBounds current final increment) = Just []
+    | remaining <= 0 = Nothing
+    | otherwise =
+        (fromExact current :)
+          <$> generate (remaining - 1) (addExact current increment) final increment
+  withinBounds current final (Exact incrementNumerator _)
+    | incrementNumerator > 0 = compareExact current final /= GT
+    | otherwise = compareExact current final /= LT
 
 toExact :: Expr -> Maybe Exact
 toExact (Integer value) = Just (Exact value 1)
