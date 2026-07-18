@@ -2,17 +2,22 @@
 
 module Main (main) where
 
+import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import System.Directory (executable, getPermissions, getTemporaryDirectory, removeFile, setPermissions)
 import System.Exit (exitFailure)
+import System.Info (os)
+import System.IO (hClose, hSetEncoding, openTempFile, utf8)
 import Tungsten.Cli
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
 import Tungsten.Json
+import Tungsten.Kernel
 import Tungsten.Licensing
 import Tungsten.Notebook
 import Tungsten.Parser
@@ -44,6 +49,7 @@ tests =
   , checkRepl
   , checkDiscovery
   , checkLicensing
+  , checkKernelRunner
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -302,6 +308,17 @@ checkDiscovery = do
         , assertEqual "stop at nonnumeric Wolfram version fragment" [15] (parseVersion "15.preview.1")
         , assertEqual "rank desktop before engine and newer first" [desktop15, desktop14, engine16] (sortInstallations [engine16, desktop14, desktop15])
         , assertEqual "CLI environment command" (Right EnvironmentCommand) (parseCliArguments ["env", "show"])
+        , assertEqual
+            "CLI kernel command"
+            (Right (KernelCommand (InlineSource "2+2") (Just "/tmp") True True))
+            ( parseCliArguments
+                [ "kernel", "eval", "--front-end", "--code", "2+2"
+                , "--working-directory", "/tmp", "--require-success"
+                ]
+            )
+        , assertLeft
+            "CLI kernel requires source"
+            (parseCliArguments ["kernel", "eval", "--front-end"])
         ]
   and <$> sequence checks
 
@@ -322,6 +339,59 @@ checkLicensing = do
         , assertEqual "missing mathpass inspection" emptyMathpassInspection (inspectMathpassText Nothing "")
         ]
   and <$> sequence checks
+
+checkKernelRunner :: IO Bool
+checkKernelRunner = do
+  installation <- discoverInstallation
+  missing <-
+    evaluateKernelText
+      installation {installationKernelCli = Nothing, installationMathpass = Nothing}
+      "2+2"
+      Nothing
+      False
+  missingCheck <- assertEqual
+    "missing kernel result"
+    (127, Just "KernelNotFound", False)
+    (kernelExitCode missing, kernelFailureType missing, kernelEvaluationAvailable missing)
+  wrapperCheck <- do
+    let wrapper = buildWrapperScript "C:\\input.wl" "C:\\result.json" "C:\\work" True
+    first <- assertEqual "kernel wrapper uses front end" True ("evalExpr = If[True" `Text.isInfixOf` wrapper)
+    second <- assertEqual "kernel wrapper normalizes paths" True ("\"C:/input.wl\"" `Text.isInfixOf` wrapper)
+    third <- assertEqual "kernel wrapper captures Print" True ("CapturedPrint" `Text.isInfixOf` wrapper)
+    pure (and [first, second, third])
+  processCheck <- if os == "mingw32"
+    then pure True
+    else withFakeKernel $ \kernelPath -> do
+      result <-
+        evaluateKernelText
+          installation {installationKernelCli = Just kernelPath, installationMathpass = Nothing}
+          "2+2"
+          Nothing
+          False
+      first <- assertEqual "fake kernel exit" 0 (kernelExitCode result)
+      second <- assertEqual "fake kernel success" (Just True) (kernelSuccess result)
+      third <- assertEqual "fake kernel result" (Just "4") (kernelResult result)
+      fourth <- assertEqual "fake kernel output" ["printed"] (kernelOutput result)
+      fifth <- assertEqual "fake kernel stdout" "fake stdout" (kernelStdout result)
+      sixth <- assertEqual "fake kernel stderr" "fake stderr" (kernelStderr result)
+      seventh <- assertEqual "fake kernel payload availability" True (kernelEvaluationAvailable result)
+      pure (and [first, second, third, fourth, fifth, sixth, seventh])
+  pure (missingCheck && wrapperCheck && processCheck)
+
+withFakeKernel :: (FilePath -> IO value) -> IO value
+withFakeKernel = bracket create removeFile
+ where
+  create = do
+    directory <- getTemporaryDirectory
+    (path, handle) <- openTempFile directory "tungsten-fake-kernel.sh"
+    hSetEncoding handle utf8
+    TextIO.hPutStr
+      handle
+      "#!/bin/sh\nprintf '%s' '{\"success\":true,\"failure_type\":null,\"result\":\"4\",\"result_head\":\"Integer\",\"messages\":[],\"messages_text\":[],\"output\":[\"printed\"],\"timing\":0.01,\"absolute_timing\":0.02,\"license_processes\":1,\"max_license_processes\":2}' > \"$TUNGSTEN_KERNEL_RESULT_PATH\"\nprintf 'fake stdout'\nprintf 'fake stderr' >&2\n"
+    hClose handle
+    permissions <- getPermissions path
+    setPermissions path permissions {executable = True}
+    pure path
 
 checkNotebookModel :: IO Bool
 checkNotebookModel = do

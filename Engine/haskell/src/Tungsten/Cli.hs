@@ -34,6 +34,8 @@ import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
 import Tungsten.Discovery
 import Tungsten.Expression
 import Tungsten.Json
+import Tungsten.Kernel
+import Tungsten.Licensing
 import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.Repl (runRepl)
@@ -42,6 +44,7 @@ data CliCommand
   = ProtocolCommand
   | ReplCommand !Bool
   | EnvironmentCommand
+  | KernelCommand !SourceSpec !(Maybe FilePath) !Bool !Bool
   | ExpressionCliCommand !ExpressionCommand !SourceSpec !Text
   | NotebookCliCommand !NotebookCommand
   | HelpCommand
@@ -70,6 +73,7 @@ parseCliArguments = \case
   ["-h"] -> Right HelpCommand
   "expr" : "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
   "expr" : "evaluate" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
+  "kernel" : "eval" : arguments' -> parseKernelArguments arguments'
   "notebook" : "inspect" : arguments' -> parseNotebookInspectArguments arguments'
   "notebook" : "create" : arguments' -> parseNotebookCreateArguments arguments'
   "notebook" : "patch" : arguments' -> parseNotebookPatchArguments arguments'
@@ -80,6 +84,27 @@ parseNotebookInspectArguments ["--file", path] =
   Right (NotebookCliCommand (InspectNotebookCommand path))
 parseNotebookInspectArguments [] = Left "notebook inspect requires --file PATH"
 parseNotebookInspectArguments _ = Left "usage: notebook inspect --file PATH"
+
+parseKernelArguments :: [String] -> Either Text CliCommand
+parseKernelArguments = go Nothing Nothing False False
+ where
+  go source workingDirectory requireFrontEnd requireSuccess [] = case source of
+    Nothing -> Left "kernel eval requires exactly one of --code or --file"
+    Just sourceSpec -> Right (KernelCommand sourceSpec workingDirectory requireFrontEnd requireSuccess)
+  go Nothing work frontEnd requireSuccess ("--code" : value : rest) =
+    go (Just (InlineSource (T.pack value))) work frontEnd requireSuccess rest
+  go Nothing work frontEnd requireSuccess ("--file" : value : rest) =
+    go (Just (FileSource value)) work frontEnd requireSuccess rest
+  go (Just _) _ _ _ ((flag@("--code")) : _ : _) = Left (T.pack flag <> " conflicts with the existing kernel source")
+  go (Just _) _ _ _ ((flag@("--file")) : _ : _) = Left (T.pack flag <> " conflicts with the existing kernel source")
+  go source Nothing frontEnd requireSuccess ("--working-directory" : value : rest) =
+    go source (Just value) frontEnd requireSuccess rest
+  go _ (Just _) _ _ ("--working-directory" : _ : _) = Left "--working-directory may be supplied only once"
+  go source work _ requireSuccess ("--front-end" : rest) = go source work True requireSuccess rest
+  go source work frontEnd _ ("--require-success" : rest) = go source work frontEnd True rest
+  go _ _ _ _ [flag]
+    | flag `elem` ["--code", "--file", "--working-directory"] = Left (T.pack flag <> " requires a value")
+  go _ _ _ _ (flag : _) = Left ("unknown kernel eval option: " <> T.pack flag)
 
 parseNotebookCreateArguments :: [String] -> Either Text CliCommand
 parseNotebookCreateArguments = go Nothing Nothing []
@@ -152,6 +177,15 @@ runCli arguments' = case parseCliArguments arguments' of
     installation <- discoverInstallation
     emitJson (installationPayload installation)
     pure 0
+  Right (KernelCommand sourceSpec workingDirectory requireFrontEnd requireSuccess) -> do
+    installation <- discoverInstallation
+    result <- case sourceSpec of
+      InlineSource source -> evaluateKernelText installation source workingDirectory requireFrontEnd
+      FileSource path -> evaluateKernelFile installation path workingDirectory requireFrontEnd
+    emitJson (kernelPayload result)
+    pure $ if requireSuccess && kernelSuccess result == Just False
+      then 1
+      else if kernelEvaluationAvailable result then 0 else 2
   Right (ExpressionCliCommand command sourceSpec form) ->
     runExpressionCommand command sourceSpec form
   Right (NotebookCliCommand command) -> runNotebookCommand command
@@ -419,6 +453,60 @@ installationSummaryPayload summary =
 jsonMaybeString :: Maybe FilePath -> JsonValue
 jsonMaybeString = maybe JsonNull (JsonString . T.pack)
 
+kernelPayload :: KernelEvaluationResult -> JsonValue
+kernelPayload result =
+  JsonObject
+    ( Map.fromList
+        [ ("absolute_timing", jsonMaybeDouble (kernelAbsoluteTiming result))
+        , ("cached_max_license_processes", JsonNull)
+        , ("cleaned_tungsten_processes", JsonArray [])
+        , ("command", JsonArray (map JsonString (kernelCommand result)))
+        , ("elapsed_seconds", jsonDouble (kernelElapsedSeconds result))
+        , ("evaluation_available", JsonBool (kernelEvaluationAvailable result))
+        , ("exit_code", jsonInteger (fromIntegral (kernelExitCode result)))
+        , ("failure_type", maybe JsonNull JsonString (kernelFailureType result))
+        , ("json_path", jsonMaybeString (kernelJsonPath result))
+        , ("launch_gate_wait_seconds", JsonNumber "0")
+        , ("license_processes", jsonMaybeInt (kernelLicenseProcesses result))
+        , ("license_wait_satisfied", JsonNull)
+        , ("license_wait_seconds", JsonNumber "0")
+        , ("mathpass", mathpassPayload (kernelMathpass result))
+        , ("max_license_processes", jsonMaybeInt (kernelMaxLicenseProcesses result))
+        , ("messages", JsonArray (map JsonString (kernelMessages result)))
+        , ("messages_text", JsonArray (map JsonString (kernelMessagesText result)))
+        , ("observed_wolfram_processes", JsonArray [])
+        , ("output", JsonArray (map JsonString (kernelOutput result)))
+        , ("result", maybe JsonNull JsonString (kernelResult result))
+        , ("result_head", maybe JsonNull JsonString (kernelResultHead result))
+        , ("stderr", JsonString (kernelStderr result))
+        , ("stdout", JsonString (kernelStdout result))
+        , ("success", maybe JsonNull JsonBool (kernelSuccess result))
+        , ("timing", jsonMaybeDouble (kernelTiming result))
+        , ("used_mathpass_workaround", JsonBool (kernelUsedMathpassWorkaround result))
+        ]
+    )
+
+mathpassPayload :: MathpassInspection -> JsonValue
+mathpassPayload inspection =
+  JsonObject
+    ( Map.fromList
+        [ ("duplicate_entry_count", jsonInteger (fromIntegral (mathpassDuplicateEntryCount inspection)))
+        , ("header_present", JsonBool (mathpassHeaderPresent inspection))
+        , ("original_line_count", jsonInteger (fromIntegral (mathpassOriginalLineCount inspection)))
+        , ("path", jsonMaybeString (mathpassPath inspection))
+        , ("unique_entry_count", jsonInteger (fromIntegral (mathpassUniqueEntryCount inspection)))
+        ]
+    )
+
+jsonMaybeInt :: Maybe Int -> JsonValue
+jsonMaybeInt = maybe JsonNull (jsonInteger . fromIntegral)
+
+jsonMaybeDouble :: Maybe Double -> JsonValue
+jsonMaybeDouble = maybe JsonNull jsonDouble
+
+jsonDouble :: Double -> JsonValue
+jsonDouble = JsonNumber . T.pack . show
+
 parseSource :: Text -> Text -> Either Text (Text, Expr)
 parseSource requestedForm source = case T.toLower (T.strip requestedForm) of
   "input" -> parseWith "input" parseInputForm
@@ -511,6 +599,7 @@ usage =
     , "  tungsten-hs protocol"
     , "  tungsten-hs repl [--no-banner]"
     , "  tungsten-hs env show"
+    , "  tungsten-hs kernel eval (--code TEXT | --file PATH) [--working-directory PATH] [--front-end] [--require-success]"
     , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs notebook inspect --file PATH"

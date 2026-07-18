@@ -5,8 +5,8 @@ synopsis:           Haskell port of the Tungsten Wolfram expression engine
 description:
   An incremental Haskell port of Tungsten Engine with immutable Wolfram
   expressions, FullForm and InputForm parsing, deterministic and session
-  evaluation, structural notebooks, Wolfram installation discovery, a REPL, a
-  JSON-first command line, and a JSON-lines protocol.
+  evaluation, structural notebooks, Wolfram installation discovery and kernel
+  execution, a REPL, a JSON-first command line, and a JSON-lines protocol.
 license:            MIT-0
 author:             Tungsten contributors
 maintainer:         Tungsten contributors
@@ -35,6 +35,7 @@ library
     Tungsten.Evaluate
     Tungsten.Expression
     Tungsten.Json
+    Tungsten.Kernel
     Tungsten.Licensing
     Tungsten.Notebook
     Tungsten.Parser
@@ -47,7 +48,9 @@ library
     directory  >= 1.3  && < 1.4,
     filepath   >= 1.5  && < 1.6,
     parsec     >= 3.1  && < 3.2,
-    text       >= 2.1  && < 2.2
+    process    >= 1.6  && < 1.7,
+    text       >= 2.1  && < 2.2,
+    time       >= 1.12 && < 1.15
 
 executable tungsten-hs
   import:          common-settings
@@ -67,5 +70,6 @@ test-suite tungsten-engine-test
     base            >= 4.21 && < 4.22,
     bytestring      >= 0.12 && < 0.13,
     containers      >= 0.7  && < 0.8,
+    directory       >= 1.3  && < 1.4,
     text            >= 2.1  && < 2.2,
     tungsten-engine

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T14:24:28Z
-- Repository HEAD: e48b7cd13413503ad073f7313daaceeaa8b3fd75
+- Updated (UTC): 2026-07-18T14:32:01Z
+- Repository HEAD: 1f4051df6710e41e1dc465b6342140e8fca29ec1
 
 ## Purpose
 
@@ -30,6 +30,7 @@ cabal run tungsten-hs -- notebook inspect --file example.nb
 cabal run tungsten-hs -- notebook patch --file example.nb --spec patch.json --out patched.nb
 cabal run tungsten-hs -- repl
 cabal run tungsten-hs -- env show
+cabal run tungsten-hs -- kernel eval --code '2+2'
 ```
 
 Parse a file or select FullForm explicitly:
@@ -65,6 +66,7 @@ Haskell process clients.
 | CLI | `expr parse`, `expr evaluate`, inline/file sources, InputForm/FullForm selection, JSON output, exit codes, and protocol serving |
 | REPL | Persistent definitions, `In`/`InString`/`Out`, `%` output shorthand, `$Line`, Wolfram-style prompts, and `Exit`/`Quit` codes |
 | Discovery | Explicit `TUNGSTEN_WOLFRAM_HOME`, product-family selection, installed-version ranking, PATH fallback, executable/docs/license candidates, cache paths, and `env show` JSON |
+| Kernel runner | Temporary source/wrapper/result isolation, stable temporary mathpass deduplication, held parsing, `EvaluationData` metadata, evaluated `Print` capture, optional `UsingFrontEnd`, process output, JSON decoding, and `kernel eval` exit behavior |
 | Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, typed immutable patches, and `notebook inspect`/`notebook create`/`notebook patch` CLI commands |
 
 ## Compatibility boundary
@@ -76,7 +78,7 @@ features yet:
 - downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and inline box object workflows;
-- mathpass deduplication, kernel execution, process coordination, and FrontEnd automation;
+- cross-process license launch gates, stale-process cleanup, license-seat waiting, and general FrontEnd automation;
 - local documentation indexing, parser-corpus orchestration, the REPL, and Notebook Assistant;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
