@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T16:15:55Z
-- Repository HEAD: 46212df0ddac10e7ffcaa24125158d80f50beb6c
+- Updated (UTC): 2026-07-18T16:19:09Z
+- Repository HEAD: 863ed6f3c7ffaf59a2e9de45ae65b290a3be0f5c
 
 ## Purpose
 
@@ -41,6 +41,7 @@ cabal run tungsten-hs -- parser-corpus compare --corpus-root ./corpus --skip-wol
 cabal run tungsten-hs -- assistant ask --prompt 'Explain FullForm[1 + x]'
 cabal run tungsten-hs -- assistant ask-cell --file example.nb --cell-index 0 --question 'Explain this cell'
 cabal run tungsten-hs -- assistant prepare-inline --file example.nb --cell-index 0
+cabal run tungsten-hs -- assistant capture-inline --file example.nb --cell-index 0 --insert-wolfram-code-below
 ```
 
 Parse a file or select FullForm explicitly:
@@ -84,7 +85,7 @@ Haskell process clients.
 | Inline boxes | Typed composition records, `BoxData` and box-bearing string extraction, stable deduplication, flat-index/path/UUID/ID/tag selectors, object selection, and `inline-box compose`/`inline-box from-cell` JSON commands |
 | Documentation | Kernel-free notebook text/title extraction, Python-compatible SQLite/FTS5 schema, filename and full-text search, page reads, paclet resolution, and the `docs` CLI family |
 | Parser corpora | Deterministic recursive discovery, extension/include/exclude filtering, byte-budget skips, bounded local workers, held Wolfram kernel batches, outcome classification, summary/JSONL/Markdown reports, failure-policy exits, and the `parser-corpus` CLI family |
-| Notebook Assistant | Free-form and selected-cell hidden Chatbook requests, model/tool settings, stable notebook selectors, structured kernel failures, assistant text extraction, fenced-code classification, optional generated-input insertion/save, inline input creation/focus, and `assistant ask`/`assistant ask-cell`/`assistant prepare-inline` |
+| Notebook Assistant | Free-form and selected-cell hidden Chatbook requests, model/tool settings, stable notebook selectors, structured kernel failures, assistant text extraction, fenced-code classification, optional generated-input insertion/save, inline input creation/focus, completion/progress capture, inline output/code extraction, and the full `assistant` CLI family |
 
 ## Compatibility boundary
 
@@ -96,7 +97,6 @@ features yet:
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and byte-for-byte preservation of original box-expression formatting;
 - cross-process license launch gates, stale-process cleanup, and license-seat waiting;
-- inline Notebook Assistant response capture;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
 Do not redirect an existing Python, PowerShell, or .NET production caller to `tungsten-hs` unless
@@ -110,9 +110,8 @@ The next useful port slices are:
 1. grow parser and evaluator parity from the Python corpus and the local Wolfram held-parser oracle;
 2. port source-preserving notebook spans and broader box-language interpretation;
 3. port definitions, attributes, pattern matching, scoping, and iteration on the immutable session;
-4. complete inline Notebook Assistant response capture;
-5. complete kernel licensing/concurrency behavior and broad Python CLI payload parity;
-6. move the PowerShell and .NET projections only after their JSON contract tests pass against the
+4. complete kernel licensing/concurrency behavior and broad Python CLI payload parity;
+5. move the PowerShell and .NET projections only after their JSON contract tests pass against the
    Haskell executable.
 
 Each slice should keep the Python behavior as an oracle where possible and should be committed only

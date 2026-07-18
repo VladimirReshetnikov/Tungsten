@@ -123,6 +123,7 @@ data AssistantCommand
       !(Maybe Text)
       !Bool
   | PrepareInlineAssistantCommand !FilePath !CellSelector !Bool
+  | CaptureInlineAssistantCommand !FilePath !CellSelector !Text !Bool !Bool
   deriving (Eq, Show)
 
 data FrontEndCommand
@@ -167,6 +168,7 @@ parseCliArguments = \case
   "assistant" : "ask" : arguments' -> parseAssistantAskArguments arguments'
   "assistant" : "ask-cell" : arguments' -> parseAssistantAskCellArguments arguments'
   "assistant" : "prepare-inline" : arguments' -> parseAssistantPrepareInlineArguments arguments'
+  "assistant" : "capture-inline" : arguments' -> parseAssistantCaptureInlineArguments arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
 
 parseAssistantAskArguments :: [String] -> Either Text CliCommand
@@ -309,6 +311,57 @@ parseAssistantPrepareInlineArguments = go Nothing Nothing False
 
   addSelector Nothing value = Right value
   addSelector (Just _) _ = Left "assistant prepare-inline accepts exactly one cell selector"
+
+parseAssistantCaptureInlineArguments :: [String] -> Either Text CliCommand
+parseAssistantCaptureInlineArguments = go Nothing Nothing False False False False
+ where
+  go (Just file) (Just selector) insertFirst insertAll save requireSuccess [] =
+    Right
+      ( AssistantCliCommand
+          (CaptureInlineAssistantCommand file selector insertMode save requireSuccess)
+      )
+   where
+    insertMode | insertAll = "all"
+               | insertFirst = "first"
+               | otherwise = "none"
+  go Nothing _ _ _ _ _ [] = Left "assistant capture-inline requires --file PATH"
+  go _ Nothing _ _ _ _ [] = Left "assistant capture-inline requires exactly one cell selector"
+  go Nothing selector insertFirst insertAll save requireSuccess ("--file" : value : rest) =
+    go (Just value) selector insertFirst insertAll save requireSuccess rest
+  go (Just _) _ _ _ _ _ ("--file" : _ : _) = Left "assistant capture-inline accepts --file only once"
+  go file selector insertFirst insertAll save requireSuccess ("--cell-index" : value : rest) = do
+    index <- parseIntegerOption "--cell-index" value
+    next <- addSelector selector (SelectCellIndex index)
+    go file (Just next) insertFirst insertAll save requireSuccess rest
+  go file selector insertFirst insertAll save requireSuccess ("--cell-path" : value : rest) = do
+    path <- parseCellPath (T.pack value)
+    next <- addSelector selector (SelectCellPath path)
+    go file (Just next) insertFirst insertAll save requireSuccess rest
+  go file selector insertFirst insertAll save requireSuccess ("--expression-uuid" : value : rest) = do
+    next <- addSelector selector (SelectExpressionUuid (T.pack value))
+    go file (Just next) insertFirst insertAll save requireSuccess rest
+  go file selector insertFirst insertAll save requireSuccess ("--cell-id" : value : rest) = do
+    identifier <- parseIntegerOption "--cell-id" value
+    next <- addSelector selector (SelectCellId identifier)
+    go file (Just next) insertFirst insertAll save requireSuccess rest
+  go file selector insertFirst insertAll save requireSuccess ("--cell-tag" : value : rest) = do
+    next <- addSelector selector (SelectCellTag (T.pack value))
+    go file (Just next) insertFirst insertAll save requireSuccess rest
+  go file selector _ insertAll save requireSuccess ("--insert-wolfram-code-below" : rest) =
+    go file selector True insertAll save requireSuccess rest
+  go file selector insertFirst _ save requireSuccess ("--insert-all-wolfram-code-below" : rest) =
+    go file selector insertFirst True save requireSuccess rest
+  go file selector insertFirst insertAll _ requireSuccess ("--save" : rest) =
+    go file selector insertFirst insertAll True requireSuccess rest
+  go file selector insertFirst insertAll save _ ("--require-success" : rest) =
+    go file selector insertFirst insertAll save True rest
+  go _ _ _ _ _ _ [flag]
+    | flag `elem` ["--file", "--cell-index", "--cell-path", "--expression-uuid", "--cell-id", "--cell-tag"] =
+        Left (T.pack flag <> " requires a value")
+  go _ _ _ _ _ _ (flag : _) = Left ("unknown assistant capture-inline option: " <> T.pack flag)
+
+  addSelector Nothing value = Right value
+  addSelector (Just _) _ = Left "assistant capture-inline accepts exactly one cell selector"
 
 parseParserCorpusDiscoverArguments :: [String] -> Either Text CliCommand
 parseParserCorpusDiscoverArguments = go defaultOptions 20
@@ -774,6 +827,14 @@ runAssistantCommand = \case
     result <- prepareInlineAssistant installation path selector
     case result of
       Left message -> emitAssistantInputError "prepare-inline" message
+      Right assistantResult -> do
+        emitJson (assistantResultPayload assistantResult)
+        pure (if requireSuccess && not (assistantSuccess assistantResult) then 1 else 0)
+  CaptureInlineAssistantCommand path selector insertMode saveNotebook requireSuccess -> do
+    installation <- discoverInstallation
+    result <- captureInlineAssistant installation path selector insertMode saveNotebook
+    case result of
+      Left message -> emitAssistantInputError "capture-inline" message
       Right assistantResult -> do
         emitJson (assistantResultPayload assistantResult)
         pure (if requireSuccess && not (assistantSuccess assistantResult) then 1 else 0)
@@ -1476,6 +1537,7 @@ usage =
     , "  tungsten-hs assistant ask --prompt TEXT [--system-prompt TEXT] [--extra-instructions TEXT] [--tool NAME ...] [--model-service NAME] [--model-name NAME] [--require-success]"
     , "  tungsten-hs assistant ask-cell --file PATH SELECTOR --question TEXT [--insert-wolfram-code-below | --insert-all-wolfram-code-below] [--save] [--close-assistant-notebook] [--require-success]"
     , "  tungsten-hs assistant prepare-inline --file PATH SELECTOR [--require-success]"
+    , "  tungsten-hs assistant capture-inline --file PATH SELECTOR [--insert-wolfram-code-below | --insert-all-wolfram-code-below] [--save] [--require-success]"
     , "  tungsten-hs notebook inspect --file PATH"
     , "  tungsten-hs notebook create --file PATH [--title TEXT] [--cell STYLE:TEXT ...]"
     , "  tungsten-hs notebook patch --file PATH --spec PATH [--out PATH]"

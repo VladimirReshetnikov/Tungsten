@@ -18,10 +18,12 @@ module Tungsten.Assistant
   , buildAssistantAskCellScript
   , buildAssistantInsertScript
   , buildAssistantPrepareInlineScript
+  , buildAssistantCaptureInlineScript
   , askAssistant
   , askAssistantCell
   , askAssistantCellWithOptions
   , prepareInlineAssistant
+  , captureInlineAssistant
   ) where
 
 import Control.Exception (IOException, try)
@@ -494,6 +496,67 @@ buildAssistantPrepareInlineScript notebookPath selector =
   slash '\\' = '/'
   slash character = character
 
+buildAssistantCaptureInlineScript :: FilePath -> JsonValue -> Text -> Bool -> Text
+buildAssistantCaptureInlineScript notebookPath selector insertMode saveNotebook =
+  T.unlines
+    [ "Needs[\"Wolfram`Chatbook`\" -> None];"
+    , "tungstenSelector = ImportString[" <> wlString (encodeJson selector) <> ", \"RawJSON\"];"
+    , "tungstenNotebookPath = " <> wlString (T.pack (map slash notebookPath)) <> ";"
+    , "tungstenInsertMode = " <> wlString insertMode <> ";"
+    , "tungstenSaveNotebook = " <> if saveNotebook then "True;" else "False;"
+    , "tungstenCellToString = Symbol[\"Wolfram`Chatbook`CellToString\"];"
+    , "tungstenGetCodeBlockContent = Symbol[\"Wolfram`Chatbook`Formatting`Private`getCodeBlockContent\"];"
+    , "tungstenInsertAfterChatGeneratedCells = Symbol[\"Wolfram`Chatbook`Formatting`Private`insertAfterChatGeneratedCells\"];"
+    , assistantHelperBlock "tungstenCellToString @ cellExpr"
+        [ "tungstenFindInlineCell", "tungstenCodeCellData"
+        , "tungstenCodeBlocksFromExpression", "tungstenInsertBlocks"
+        ]
+    , "tungstenFindInlineCell[nbo_NotebookObject, source_CellObject] := Module[{attached, marker},"
+    , "  attached = Cells[source, AttachedCell -> True, CellStyle -> \"AttachedChatInput\"];"
+    , "  If[attached === {}, attached = Cells[nbo, AttachedCell -> True, CellStyle -> \"AttachedChatInput\"]];"
+    , "  If[attached === {}, Return[None]];"
+    , "  marker = ToString[source, InputForm, PageWidth -> Infinity];"
+    , "  SelectFirst[attached, Quiet @ Check[StringContainsQ[ToString[NotebookRead[#], InputForm, PageWidth -> Infinity], marker], False] &, First[attached]]"
+    , "];"
+    , "tungstenCodeCellData[cell_Cell] := Module[{content, language},"
+    , "  content = tungstenGetCodeBlockContent @ cell;"
+    , "  language = Which[MatchQ[content, Cell[_, \"Input\", ___]], \"WolframLanguage\", MatchQ[content, Cell[_, \"ExternalLanguage\", ___, CellEvaluationLanguage -> lang_, ___]], \"ExternalLanguage:\" <> ToString[lang, InputForm, PageWidth -> Infinity], True, \"Unknown\"];"
+    , "  <|\"language\" -> language, \"code\" -> Quiet @ Check[tungstenCellToString @ content, ToString[content, InputForm, PageWidth -> Infinity]], \"cell_expression\" -> ToString[content, InputForm, PageWidth -> Infinity], \"insertable\" -> MatchQ[content, Cell[_, \"Input\", ___]], \"cell\" -> content|>"
+    , "];"
+    , "tungstenCodeBlocksFromExpression[expr_] := Module[{rawBlocks}, rawBlocks = Cases[expr, block : Cell[_, \"ChatCodeBlock\", ___] :> block, Infinity]; tungstenCodeCellData /@ rawBlocks];"
+    , "tungstenInsertBlocks[source_CellObject, blocks_List, mode_String] := Module[{selected, inserted = {}, targetNotebook, insertionPoint, blockData, uuid, prepared, insertedCell},"
+    , "  selected = Switch[mode, \"all\", blocks, \"first\", Take[blocks, UpTo[1]], _, {}]; If[selected === {}, Return[inserted]];"
+    , "  targetNotebook = ParentNotebook @ source; insertionPoint = source;"
+    , "  Do[uuid = CreateUUID[]; prepared = Replace[blockData[\"cell\"], Cell[a___] :> Cell[a, ExpressionUUID -> uuid]]; tungstenInsertAfterChatGeneratedCells[insertionPoint, prepared]; insertedCell = Quiet @ Check[First[Cells[targetNotebook, ExpressionUUID -> uuid]], None]; If[MatchQ[insertedCell, _CellObject], insertionPoint = insertedCell]; AppendTo[inserted, <|\"expression_uuid\" -> uuid, \"cell_id\" -> Replace[If[MatchQ[insertedCell, _CellObject], CurrentValue[insertedCell, CellID], Null], {value_Integer :> value, _ :> Null}], \"code\" -> blockData[\"code\"]|>], {blockData, selected}];"
+    , "  inserted"
+    , "];"
+    , "tungstenResult = Module[{sourceNotebook, sourceCell, attachedCell, attachedExpr, inputString, outputCells, responseText, allCodeBlockData, wlCodeBlocks, inserted, hasProgress, completed},"
+    , "  sourceNotebook = tungstenResolveNotebook @ tungstenNotebookPath;"
+    , "  If[AssociationQ @ sourceNotebook, sourceNotebook,"
+    , "    sourceCell = tungstenResolveCell[sourceNotebook, tungstenSelector];"
+    , "    If[AssociationQ @ sourceCell, sourceCell,"
+    , "      attachedCell = tungstenFindInlineCell[sourceNotebook, sourceCell];"
+    , "      If[! MatchQ[attachedCell, _CellObject], tungstenError[\"InlineAssistantNotFound\", \"No inline Notebook Assistant input is currently attached to the requested source cell.\"],"
+    , "        attachedExpr = Quiet @ Check[NotebookRead @ attachedCell, $Failed];"
+    , "        inputString = Quiet @ Check[CurrentValue[attachedCell, {TaggingRules, \"ChatInputString\"}], \"\"];"
+    , "        outputCells = Cases[attachedExpr, cell : Cell[_, \"ChatOutput\", ___] :> cell, Infinity];"
+    , "        responseText = StringRiffle[Cases[outputCells, cell_Cell :> Quiet @ Check[tungstenCellToString @ cell, \"\"]], \"\\n\\n\"];"
+    , "        allCodeBlockData = tungstenCodeBlocksFromExpression @ attachedExpr; wlCodeBlocks = Select[allCodeBlockData, TrueQ @ #[\"insertable\"] &];"
+    , "        hasProgress = ! FreeQ[attachedExpr, _ProgressIndicator | _ProgressIndicatorBox, Infinity];"
+    , "        completed = StringQ[inputString] && inputString == \"\" && Length[outputCells] > 0 && ! hasProgress;"
+    , "        inserted = If[completed && tungstenInsertMode =!= \"none\", tungstenInsertBlocks[sourceCell, wlCodeBlocks, tungstenInsertMode], {}];"
+    , "        If[TrueQ @ tungstenSaveNotebook && inserted =!= {}, NotebookSave @ sourceNotebook];"
+    , "        <|\"success\" -> True, \"completed\" -> completed, \"has_progress_indicator\" -> hasProgress, \"inline_attached\" -> True, \"notebook_path\" -> tungstenNotebookPath, \"window_title\" -> Replace[Quiet @ Check[CurrentValue[sourceNotebook, WindowTitle], None], {s_String :> s, _ :> Null}], \"source_cell\" -> tungstenCellMetadata @ sourceCell, \"input_string\" -> tungstenStringValue @ inputString, \"response_text\" -> responseText, \"assistant_output_count\" -> Length[outputCells], \"code_blocks\" -> MapIndexed[Append[KeyDrop[#, \"cell\"], \"index\" -> First[#2]] &, allCodeBlockData], \"wolfram_code_blocks\" -> MapIndexed[Append[KeyDrop[#, \"cell\"], \"index\" -> First[#2]] &, wlCodeBlocks], \"insert_mode\" -> tungstenInsertMode, \"inserted\" -> inserted, \"saved_notebook\" -> TrueQ @ tungstenSaveNotebook && inserted =!= {}|>"
+    , "      ]"
+    , "    ]"
+    , "  ]"
+    , "];"
+    , "ExportString[tungstenResult, \"RawJSON\"]"
+    ]
+ where
+  slash '\\' = '/'
+  slash character = character
+
 assistantHelperBlock :: Text -> [Text] -> Text
 assistantHelperBlock previewExpression extraNames =
   T.unlines
@@ -637,6 +700,34 @@ prepareInlineAssistant installation requestedPath selector = do
         evaluateKernelText
           installation
           (buildAssistantPrepareInlineScript notebookPath (selectorFromCellRecord record))
+          Nothing
+          True
+      pure
+        ( Right
+            NotebookAssistantResult
+              { assistantEvaluation = evaluation
+              , assistantPayload = parseAssistantPayload evaluation
+              }
+        )
+
+captureInlineAssistant
+  :: WolframInstallation
+  -> FilePath
+  -> CellSelector
+  -> Text
+  -> Bool
+  -> IO (Either Text NotebookAssistantResult)
+captureInlineAssistant installation requestedPath selector insertMode saveNotebook = do
+  resolved <- resolveAssistantCell requestedPath selector
+  case resolved of
+    Left message -> pure (Left message)
+    Right (notebookPath, record) -> do
+      evaluation <-
+        evaluateKernelText
+          installation
+          ( buildAssistantCaptureInlineScript
+              notebookPath (selectorFromCellRecord record) insertMode saveNotebook
+          )
           Nothing
           True
       pure

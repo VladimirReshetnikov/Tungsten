@@ -135,6 +135,11 @@ checkAssistant = do
         buildAssistantPrepareInlineScript
           "/tmp/example.nb"
           (JsonObject (Map.singleton "expression_uuid" (JsonString "abc")))
+      captureInlineScript =
+        buildAssistantCaptureInlineScript
+          "/tmp/example.nb"
+          (JsonObject (Map.singleton "expression_uuid" (JsonString "abc")))
+          "all" True
   installation <- discoverInstallation
   unavailable <- askAssistant installation {installationKernelCli = Nothing} "2+2" Nothing Nothing Nothing Nothing Nothing
   kernelUnavailable <- evaluateKernelText installation {installationKernelCli = Nothing} "2+2" Nothing False
@@ -188,6 +193,10 @@ checkAssistant = do
         , assertEqual "assistant insertion script saves notebook" True ("tungstenSaveNotebook = True" `Text.isInfixOf` insertionScript)
         , assertEqual "assistant inline preparation opens assistant" True ("tungstenShowNotebookAssistance[sourceCell, \"Inline\"" `Text.isInfixOf` prepareInlineScript)
         , assertEqual "assistant inline preparation focuses input" True ("AttachedChatInputField" `Text.isInfixOf` prepareInlineScript)
+        , assertEqual "assistant inline capture checks completion" True ("hasProgress" `Text.isInfixOf` captureInlineScript && "completed" `Text.isInfixOf` captureInlineScript)
+        , assertEqual "assistant inline capture extracts code blocks" True ("tungstenCodeBlocksFromExpression" `Text.isInfixOf` captureInlineScript)
+        , assertEqual "assistant inline capture inserts all blocks" True ("tungstenInsertMode = \"all\"" `Text.isInfixOf` captureInlineScript)
+        , assertEqual "assistant inline capture saves inserted blocks" True ("tungstenSaveNotebook = True" `Text.isInfixOf` captureInlineScript)
         ]
   unitChecks <- and <$> sequence checks
   cellRunCheck <- withTemporaryDirectory "tungsten-assistant" $ \temporary -> do
@@ -203,6 +212,10 @@ checkAssistant = do
       prepareInlineAssistant
         installation {installationKernelCli = Nothing}
         notebookPath (SelectExpressionUuid "assistant-cell")
+    captured <-
+      captureInlineAssistant
+        installation {installationKernelCli = Nothing}
+        notebookPath (SelectCellIndex 0) "all" True
     selected <- assertEqual
       "assistant selected-cell unavailable path"
       (Right False)
@@ -211,7 +224,11 @@ checkAssistant = do
       "assistant inline preparation unavailable path"
       (Right False)
       (assistantSuccess <$> prepared)
-    pure (selected && preparedCheck)
+    capturedCheck <- assertEqual
+      "assistant inline capture unavailable path"
+      (Right False)
+      (assistantSuccess <$> captured)
+    pure (selected && preparedCheck && capturedCheck)
   pure (unitChecks && cellRunCheck)
 
 checkWolframStrings :: IO Bool
@@ -564,6 +581,18 @@ checkCliArguments = do
             ( parseCliArguments
                 [ "assistant", "prepare-inline", "--file", "demo.nb"
                 , "--expression-uuid", "cell-1", "--require-success"
+                ]
+            )
+        , assertEqual
+            "CLI inline Assistant capture"
+            ( Right
+                ( AssistantCliCommand
+                    (CaptureInlineAssistantCommand "demo.nb" (SelectCellId 42) "first" True True)
+                )
+            )
+            ( parseCliArguments
+                [ "assistant", "capture-inline", "--file", "demo.nb", "--cell-id", "42"
+                , "--insert-wolfram-code-below", "--save", "--require-success"
                 ]
             )
         , assertEqual
