@@ -34,6 +34,8 @@ tests =
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors
+  , checkNotebookPatches
+  , checkNotebookPatchJson
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -188,8 +190,38 @@ checkCliArguments = do
         , assertLeft
             "CLI rejects malformed notebook cell"
             (parseCliArguments ["notebook", "create", "--file", "demo.nb", "--cell", "missing-separator"])
+        , assertEqual
+            "CLI notebook patch"
+            (Right (NotebookCliCommand (PatchNotebookCommand "demo.nb" "patch.json" (Just "patched.nb"))))
+            ( parseCliArguments
+                [ "notebook", "patch", "--spec", "patch.json", "--file", "demo.nb"
+                , "--out", "patched.nb"
+                ]
+            )
+        , assertLeft
+            "CLI notebook patch requires spec"
+            (parseCliArguments ["notebook", "patch", "--file", "demo.nb"])
         ]
   and <$> sequence checks
+
+checkNotebookPatchJson :: IO Bool
+checkNotebookPatchJson = do
+  let payload =
+        expectRight
+          ( parseJson
+              "{\"operations\":[{\"op\":\"append_cell\",\"container_path\":[1],\"style\":\"Text\",\"text\":\"tail\"},{\"op\":\"insert_cell\",\"index\":0,\"content_expr\":\"BoxData[RowBox[{\\\"x\\\"}]]\"},{\"op\":\"replace_cell\",\"path\":[0],\"text\":\"new\"},{\"op\":\"delete_item\",\"path\":[2]},{\"op\":\"set_option\",\"name\":\"WindowTitle\",\"value_expr\":\"\\\"Patched\\\"\"}]}"
+          )
+      expected =
+        [ AppendCell (Just [1]) (NotebookCell (String "tail") (Just "Text") [])
+        , InsertCell Nothing 0 (NotebookCell (Call (Symbol "BoxData") [Call (Symbol "RowBox") [Call (Symbol "List") [String "x"]]]) (Just "Text") [])
+        , ReplaceCell [0] Nothing (String "new")
+        , DeleteItem [2]
+        , SetNotebookOption "WindowTitle" (String "Patched")
+        ]
+  first <- assertEqual "decode notebook JSON patches" (Right expected) (decodeNotebookPatches payload)
+  second <- assertLeft "reject non-array notebook patch operations" (decodeNotebookPatches (JsonObject (Map.singleton "operations" JsonNull)))
+  third <- assertLeft "reject unknown notebook patch operation" (decodeNotebookPatches (expectRight (parseJson "{\"operations\":[{\"op\":\"unknown\"}]}")))
+  pure (and [first, second, third])
 
 checkNotebookModel :: IO Bool
 checkNotebookModel = do
@@ -219,6 +251,35 @@ checkNotebookErrors = do
   second <- assertLeft "reject notebook without item list" (parseNotebook "Notebook[1]")
   third <- assertLeft "reject malformed notebook syntax" (parseNotebook "Notebook[{")
   pure (and [first, second, third])
+
+checkNotebookPatches :: IO Bool
+checkNotebookPatches = do
+  let source =
+        "Notebook[{Cell[\"Demo\", \"Title\"], Cell[CellGroupData[{Cell[\"old\", \"Input\"], Cell[\"result\", \"Output\"]}, Open]]}, WindowTitle -> \"Before\"]"
+      document = expectRight (parseNotebook source)
+      patches =
+        [ AppendCell Nothing (NotebookCell (String "Tail") (Just "Text") [])
+        , InsertCell (Just [1]) 1 (NotebookCell (String "Inserted") (Just "Text") [])
+        , ReplaceCell [0] Nothing (String "Retitled")
+        , DeleteItem [1, 0]
+        , SetNotebookOption "WindowTitle" (String "After")
+        ]
+      patched = expectRight (applyNotebookPatches patches document)
+      records = flattenCells patched
+      checks =
+        [ assertEqual "patched notebook title" (Just "After") (notebookTitle patched)
+        , assertEqual "patched notebook paths" [[0], [1, 0], [1, 1], [2]] (map cellRecordPath records)
+        , assertEqual "replacement preserves style" [Just "Title"] (take 1 (map cellRecordStyle records))
+        , assertEqual "patched notebook previews" ["Retitled", "Inserted", "result", "Tail"] (map cellRecordPreview records)
+        , assertLeft
+            "reject patch container through a cell"
+            (applyNotebookPatches [AppendCell (Just [0]) (NotebookCell (String "x") Nothing [])] document)
+        , assertLeft "reject replacing a group" (applyNotebookPatches [ReplaceCell [1] Nothing (String "x")] document)
+        , assertLeft
+            "reject out-of-range insertion"
+            (applyNotebookPatches [InsertCell Nothing 99 (NotebookCell (String "x") Nothing [])] document)
+        ]
+  and <$> sequence checks
 
 checkFullForms :: IO Bool
 checkFullForms = do

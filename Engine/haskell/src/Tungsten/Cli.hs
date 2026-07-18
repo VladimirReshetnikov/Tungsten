@@ -8,15 +8,18 @@ module Tungsten.Cli
   , NotebookCommand (..)
   , SourceSpec (..)
   , parseCliArguments
+  , decodeNotebookPatches
   , runCli
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TextIO
+import Text.Read (readMaybe)
 import System.IO
   ( BufferMode (LineBuffering)
   , hIsEOF
@@ -49,6 +52,7 @@ data SourceSpec = InlineSource !Text | FileSource !FilePath
 data NotebookCommand
   = InspectNotebookCommand !FilePath
   | CreateNotebookCommand !FilePath !(Maybe Text) ![(Text, Text)]
+  | PatchNotebookCommand !FilePath !FilePath !(Maybe FilePath)
   deriving (Eq, Show)
 
 parseCliArguments :: [String] -> Either Text CliCommand
@@ -61,6 +65,7 @@ parseCliArguments = \case
   "expr" : "evaluate" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
   "notebook" : "inspect" : arguments' -> parseNotebookInspectArguments arguments'
   "notebook" : "create" : arguments' -> parseNotebookCreateArguments arguments'
+  "notebook" : "patch" : arguments' -> parseNotebookPatchArguments arguments'
   _ -> Left "expected 'protocol', an 'expr' command, or a 'notebook' command"
 
 parseNotebookInspectArguments :: [String] -> Either Text CliCommand
@@ -92,6 +97,23 @@ parseCellSpecification specification =
    in if T.null style || T.null remainder
         then Left "notebook cells must use STYLE:TEXT"
         else Right (style, T.drop 1 remainder)
+
+parseNotebookPatchArguments :: [String] -> Either Text CliCommand
+parseNotebookPatchArguments = go Nothing Nothing Nothing
+ where
+  go notebookFile specFile outputFile [] = case (notebookFile, specFile) of
+    (Just notebookPath, Just specPath) ->
+      Right (NotebookCliCommand (PatchNotebookCommand notebookPath specPath outputFile))
+    _ -> Left "notebook patch requires --file PATH and --spec PATH"
+  go Nothing spec output ("--file" : path : rest) = go (Just path) spec output rest
+  go (Just _) _ _ ("--file" : _ : _) = Left "notebook patch accepts --file only once"
+  go file Nothing output ("--spec" : path : rest) = go file (Just path) output rest
+  go _ (Just _) _ ("--spec" : _ : _) = Left "notebook patch accepts --spec only once"
+  go file spec Nothing ("--out" : path : rest) = go file spec (Just path) rest
+  go _ _ (Just _) ("--out" : _ : _) = Left "notebook patch accepts --out only once"
+  go _ _ _ [flag]
+    | flag `elem` ["--file", "--spec", "--out"] = Left (T.pack flag <> " requires a value")
+  go _ _ _ (flag : _) = Left ("unknown notebook patch option: " <> T.pack flag)
 
 parseExpressionArguments :: ExpressionCommand -> [String] -> Either Text CliCommand
 parseExpressionArguments expressionCommand = go Nothing "input"
@@ -186,6 +208,116 @@ runNotebookCommand = \case
     case (writeResult :: Either IOException ()) of
       Left exception -> emitNotebookError "create" "OutputError" (T.pack (show exception))
       Right () -> emitJson (notebookPayload document) *> pure 0
+  PatchNotebookCommand notebookPath specPath outputPath -> do
+    notebookSource <- readSource (FileSource notebookPath)
+    specSource <- readSource (FileSource specPath)
+    case (notebookSource, specSource) of
+      (Left message, _) -> emitNotebookError "patch" "InputError" message
+      (_, Left message) -> emitNotebookError "patch" "InputError" message
+      (Right source, Right specText) -> case parseNotebook source of
+        Left notebookError ->
+          emitNotebookError "patch" "NotebookError" (notebookErrorMessage notebookError)
+        Right document -> case parseJson specText of
+          Left jsonError -> emitNotebookError "patch" "JsonError" (jsonErrorMessage jsonError)
+          Right payload -> case decodeNotebookPatches payload of
+            Left message -> emitNotebookError "patch" "PatchError" message
+            Right patches -> case applyNotebookPatches patches document of
+              Left notebookError ->
+                emitNotebookError "patch" "PatchError" (notebookErrorMessage notebookError)
+              Right patched -> do
+                let destination = maybe notebookPath id outputPath
+                writeResult <- try (TextIO.writeFile destination (renderNotebook patched))
+                case (writeResult :: Either IOException ()) of
+                  Left exception -> emitNotebookError "patch" "OutputError" (T.pack (show exception))
+                  Right () -> emitJson (notebookPayload patched) *> pure 0
+
+decodeNotebookPatches :: JsonValue -> Either Text [NotebookPatch]
+decodeNotebookPatches (JsonObject specification) = case Map.lookup "operations" specification of
+  Nothing -> Right []
+  Just (JsonArray operations) -> traverse decodeNotebookPatch operations
+  Just _ -> Left "patch specification operations must be an array"
+decodeNotebookPatches _ = Left "a patch specification must be a JSON object"
+
+decodeNotebookPatch :: JsonValue -> Either Text NotebookPatch
+decodeNotebookPatch (JsonObject operation) = do
+  operationName <- requiredString "op" operation
+  case T.strip operationName of
+    "append_cell" ->
+      AppendCell
+        <$> optionalPath "container_path" operation
+        <*> patchCell (Just "Text") operation
+    "insert_cell" ->
+      InsertCell
+        <$> optionalPath "container_path" operation
+        <*> requiredInt "index" operation
+        <*> patchCell (Just "Text") operation
+    "replace_cell" ->
+      ReplaceCell
+        <$> requiredPath "path" operation
+        <*> optionalStringField "style" operation
+        <*> patchContent operation
+    "delete_item" -> DeleteItem <$> requiredPath "path" operation
+    "set_option" -> do
+      name <- requiredString "name" operation
+      valueSource <- requiredString "value_expr" operation
+      value <- first parseErrorMessage (parseInputForm valueSource)
+      pure (SetNotebookOption name value)
+    unsupported -> Left ("unsupported patch operation: " <> unsupported)
+decodeNotebookPatch _ = Left "patch operations must be JSON objects"
+
+patchCell :: Maybe Text -> Map.Map Text JsonValue -> Either Text NotebookCell
+patchCell defaultStyle operation =
+  NotebookCell
+    <$> patchContent operation
+    <*> ((<|> defaultStyle) <$> optionalStringField "style" operation)
+    <*> pure []
+
+patchContent :: Map.Map Text JsonValue -> Either Text Expr
+patchContent operation = do
+  contentSource <- optionalStringField "content_expr" operation
+  text <- optionalStringField "text" operation
+  case contentSource of
+    Just source -> first parseErrorMessage (parseInputForm source)
+    Nothing -> Right (String (maybe "" id text))
+
+requiredString :: Text -> Map.Map Text JsonValue -> Either Text Text
+requiredString key values = case Map.lookup key values of
+  Just (JsonString value) -> Right value
+  Nothing -> Left ("missing patch field: " <> key)
+  Just _ -> Left ("patch field must be a string: " <> key)
+
+optionalStringField :: Text -> Map.Map Text JsonValue -> Either Text (Maybe Text)
+optionalStringField key values = case Map.lookup key values of
+  Nothing -> Right Nothing
+  Just JsonNull -> Right Nothing
+  Just (JsonString value) -> Right (Just value)
+  Just _ -> Left ("patch field must be a string: " <> key)
+
+requiredInt :: Text -> Map.Map Text JsonValue -> Either Text Int
+requiredInt key values = case Map.lookup key values of
+  Just (JsonNumber source) ->
+    maybe (Left ("patch field must be an integer: " <> key)) Right (readMaybe (T.unpack source))
+  Nothing -> Left ("missing patch field: " <> key)
+  Just _ -> Left ("patch field must be an integer: " <> key)
+
+optionalPath :: Text -> Map.Map Text JsonValue -> Either Text (Maybe [Int])
+optionalPath key values = case Map.lookup key values of
+  Nothing -> Right Nothing
+  Just JsonNull -> Right Nothing
+  Just value -> Just <$> pathValue key value
+
+requiredPath :: Text -> Map.Map Text JsonValue -> Either Text [Int]
+requiredPath key values = case Map.lookup key values of
+  Nothing -> Left ("missing patch field: " <> key)
+  Just value -> pathValue key value
+
+pathValue :: Text -> JsonValue -> Either Text [Int]
+pathValue key (JsonArray values) = traverse component values
+ where
+  component (JsonNumber source) =
+    maybe (Left ("patch path must contain integers: " <> key)) Right (readMaybe (T.unpack source))
+  component _ = Left ("patch path must contain integers: " <> key)
+pathValue key _ = Left ("patch path must be an integer array: " <> key)
 
 notebookPayload :: NotebookDocument -> JsonValue
 notebookPayload document =
@@ -329,6 +461,7 @@ usage =
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs notebook inspect --file PATH"
     , "  tungsten-hs notebook create --file PATH [--title TEXT] [--cell STYLE:TEXT ...]"
+    , "  tungsten-hs notebook patch --file PATH --spec PATH [--out PATH]"
     , ""
     , "With no arguments, tungsten-hs serves the JSON-lines protocol for backward compatibility."
     ]

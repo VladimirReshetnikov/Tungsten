@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-07-18T14:01:03Z
-- Repository HEAD: 531e58b42dce9db7dd9025e1014cedf3f1528d62
+- Updated (UTC): 2026-07-18T14:13:09Z
+- Repository HEAD: 837c3ddd5bf05f7746ae06478211e8b7fc2bfaab
 - Related code:
   - `Engine/src/tungsten/`
   - `Engine/haskell/`
@@ -32,7 +32,7 @@
 
 Tungsten is an automation workspace for a local Wolfram installation. The Python implementation
 remains the broad compatibility reference, while an active Haskell port provides the new typed
-expression, parser, evaluator, CLI, and JSON protocol foundation. Thin PowerShell and .NET
+expression, parser, evaluator, structural notebook, CLI, and JSON protocol foundation. Thin PowerShell and .NET
 projection layers continue to use the Python command surface. Tungsten exists for the
 workflows that are awkward in the traditional Mathematica GUI but natural for agents, scripts, and
 typed host applications:
@@ -333,9 +333,10 @@ cd Engine
 cabal test all --ghc-options=-Werror
 cabal run tungsten-hs -- expr parse --code '1 + 2 x^3'
 cabal run tungsten-hs -- expr evaluate --code 'Total[Range[10]]'
+cabal run tungsten-hs -- notebook inspect --file example.nb
 ```
 
-The Haskell port currently covers the kernel-free expression foundation. See
+The Haskell port currently covers the kernel-free expression and structural notebook foundations. See
 [Haskell Port](./docs/haskell-port.md) for its exact compatibility boundary and migration order.
 
 ### PowerShell

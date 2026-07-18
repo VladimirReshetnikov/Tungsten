@@ -8,6 +8,7 @@ module Tungsten.Notebook
   , NotebookItem (..)
   , NotebookCell (..)
   , CellRecord (..)
+  , NotebookPatch (..)
   , parseNotebook
   , notebookFromExpr
   , notebookToExpr
@@ -20,8 +21,10 @@ module Tungsten.Notebook
   , cellId
   , expressionUuid
   , cellTags
+  , applyNotebookPatches
   ) where
 
+import Control.Applicative ((<|>))
 import Data.Bifunctor (first)
 import Data.Char (isSpace)
 import Data.Text (Text)
@@ -58,6 +61,14 @@ data CellRecord = CellRecord
   , cellRecordPreview :: !Text
   , cellRecordCell :: !NotebookCell
   }
+  deriving (Eq, Show)
+
+data NotebookPatch
+  = AppendCell !(Maybe [Int]) !NotebookCell
+  | InsertCell !(Maybe [Int]) !Int !NotebookCell
+  | ReplaceCell ![Int] !(Maybe Text) !Expr
+  | DeleteItem ![Int]
+  | SetNotebookOption !Text !Expr
   deriving (Eq, Show)
 
 parseNotebook :: Text -> Either NotebookError NotebookDocument
@@ -204,6 +215,113 @@ ruleValue name = go
     | actualName == name = Just value
     | otherwise = go rest
   go (_ : rest) = go rest
+
+applyNotebookPatches :: [NotebookPatch] -> NotebookDocument -> Either NotebookError NotebookDocument
+applyNotebookPatches patches document = foldl applyOne (Right document) patches
+ where
+  applyOne accumulated patch = accumulated >>= applyNotebookPatch patch
+
+applyNotebookPatch :: NotebookPatch -> NotebookDocument -> Either NotebookError NotebookDocument
+applyNotebookPatch patch document = case patch of
+  AppendCell containerPath cell -> do
+    items <- modifyContainer (maybe [] id containerPath) (Right . (<> [CellItem cell])) (notebookItems document)
+    pure document {notebookItems = items}
+  InsertCell containerPath index cell -> do
+    items <- modifyContainer (maybe [] id containerPath) (insertAt index (CellItem cell)) (notebookItems document)
+    pure document {notebookItems = items}
+  ReplaceCell path requestedStyle content -> do
+    items <- modifyTarget path replaceTarget (notebookItems document)
+    pure document {notebookItems = items}
+   where
+    replaceTarget (CellItem existing) =
+      Right
+        ( CellItem
+            NotebookCell
+              { cellContent = content
+              , cellStyle = requestedStyle <|> cellStyle existing
+              , cellOptions = []
+              }
+        )
+    replaceTarget (RawItem _) =
+      Right (CellItem (NotebookCell content requestedStyle []))
+    replaceTarget CellGroup {} =
+      Left (NotebookError "replace_cell expects a cell or raw item target")
+  DeleteItem path -> do
+    items <- deleteAtPath path (notebookItems document)
+    pure document {notebookItems = items}
+  SetNotebookOption name value ->
+    Right document {notebookOptions = setRule name value (notebookOptions document)}
+
+modifyContainer
+  :: [Int]
+  -> ([NotebookItem] -> Either NotebookError [NotebookItem])
+  -> [NotebookItem]
+  -> Either NotebookError [NotebookItem]
+modifyContainer [] operation items = operation items
+modifyContainer (index : rest) operation items = do
+  item <- itemAt index items
+  replacement <- case item of
+    CellGroup children state options ->
+      CellGroup <$> modifyContainer rest operation children <*> pure state <*> pure options
+    _ -> Left (NotebookError "a notebook container path does not identify a cell group")
+  replaceAt index replacement items
+
+modifyTarget
+  :: [Int]
+  -> (NotebookItem -> Either NotebookError NotebookItem)
+  -> [NotebookItem]
+  -> Either NotebookError [NotebookItem]
+modifyTarget [] _ _ = Left (NotebookError "a notebook item path cannot be empty")
+modifyTarget [index] operation items = do
+  target <- itemAt index items
+  replacement <- operation target
+  replaceAt index replacement items
+modifyTarget (index : rest) operation items = do
+  item <- itemAt index items
+  replacement <- case item of
+    CellGroup children state options ->
+      CellGroup <$> modifyTarget rest operation children <*> pure state <*> pure options
+    _ -> Left (NotebookError "a notebook item path does not resolve through a cell group")
+  replaceAt index replacement items
+
+deleteAtPath :: [Int] -> [NotebookItem] -> Either NotebookError [NotebookItem]
+deleteAtPath [] _ = Left (NotebookError "a notebook deletion path cannot be empty")
+deleteAtPath [index] items
+  | index < 0 || index >= length items = Left (NotebookError "a notebook item path is out of range")
+  | otherwise = Right (take index items <> drop (index + 1) items)
+deleteAtPath (index : rest) items = do
+  item <- itemAt index items
+  replacement <- case item of
+    CellGroup children state options ->
+      CellGroup <$> deleteAtPath rest children <*> pure state <*> pure options
+    _ -> Left (NotebookError "a notebook deletion path does not resolve through a cell group")
+  replaceAt index replacement items
+
+insertAt :: Int -> NotebookItem -> [NotebookItem] -> Either NotebookError [NotebookItem]
+insertAt index value items
+  | index < 0 || index > length items = Left (NotebookError "a notebook insertion index is out of range")
+  | otherwise = Right (take index items <> [value] <> drop index items)
+
+itemAt :: Int -> [NotebookItem] -> Either NotebookError NotebookItem
+itemAt index items
+  | index < 0 || index >= length items = Left (NotebookError "a notebook item path is out of range")
+  | otherwise = case drop index items of
+      item : _ -> Right item
+      [] -> Left (NotebookError "a notebook item path is out of range")
+
+replaceAt :: Int -> NotebookItem -> [NotebookItem] -> Either NotebookError [NotebookItem]
+replaceAt index value items
+  | index < 0 || index >= length items = Left (NotebookError "a notebook item path is out of range")
+  | otherwise = Right (take index items <> [value] <> drop (index + 1) items)
+
+setRule :: Text -> Expr -> [Expr] -> [Expr]
+setRule name value = go
+ where
+  replacement = Call (Symbol "Rule") [Symbol name, value]
+  go [] = [replacement]
+  go (Call (Symbol "Rule") [Symbol actualName, _] : rest)
+    | actualName == name = replacement : rest
+  go (item : rest) = item : go rest
 
 preview :: Expr -> Text
 preview expression = truncateText 160 (collapseWhitespace source)
