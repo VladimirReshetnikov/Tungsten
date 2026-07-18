@@ -36,6 +36,7 @@ import Tungsten.Licensing
 import Tungsten.NamedCharacters
 import Tungsten.Notebook
 import Tungsten.Parser
+import Tungsten.ParserCorpus
 import Tungsten.Repl
 import Tungsten.Session
 import Tungsten.WolframString
@@ -68,6 +69,7 @@ tests =
   , checkRepl
   , checkDiscovery
   , checkDocumentationIndex
+  , checkParserCorpus
   , checkLicensing
   , checkKernelRunner
   , checkFrontEndBuilders
@@ -659,6 +661,47 @@ withTemporaryDirectory prefix = bracket create removeDirectoryRecursive
     removeFile path
     createDirectory path
     pure path
+
+checkParserCorpus :: IO Bool
+checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoot -> do
+  let githubRoot = corpusRoot </> "github" </> "sample"
+      notebookRoot = corpusRoot </> "notebookarchive"
+  createDirectoryIfMissing True githubRoot
+  createDirectoryIfMissing True notebookRoot
+  TextIO.writeFile (githubRoot </> "expr.wl") "1 + 2 x"
+  TextIO.writeFile (githubRoot </> "bad.wl") "x @= 1"
+  TextIO.writeFile (githubRoot </> "notes.txt") "skip"
+  TextIO.writeFile (notebookRoot </> "sample.nb") "Notebook[{Cell[\"Hello\", \"Text\"]}]"
+  discovery <- discoverCorpusFiles corpusRoot [] [] ["**/bad.wl"] Nothing False 0
+  filtered <- discoverCorpusFiles corpusRoot ["wl"] ["github/*"] [] (Just 1) False 0
+  attempts <- case discovery of
+    Left _ -> pure []
+    Right files -> traverse (\file -> (corpusFileRelativePath file,) <$> parseCorpusFile file "input" (Just 2097152) 2000) files
+  oversized <- case discovery of
+    Right (file : _) -> parseCorpusFile file "input" (Just 0) 2000
+    _ -> pure (ParserAttempt "tungsten" "failure" Nothing (Just "MissingFixture") Nothing Map.empty)
+  let relativePaths = map corpusFileRelativePath (either (const []) id discovery)
+      attemptStatuses = [(path, parserAttemptStatus attempt) | (path, attempt) <- attempts]
+      filteredPaths = map corpusFileRelativePath (either (const []) id filtered)
+      success = ParserAttempt "tungsten" "success" Nothing Nothing Nothing Map.empty
+      failure = ParserAttempt "wolfram" "failure" Nothing (Just "ParseFailure") Nothing Map.empty
+  checks <- sequence
+    [ assertEqual
+        "parser corpus deterministic discovery"
+        ["github/sample/expr.wl", "notebookarchive/sample.nb"]
+        relativePaths
+    , assertEqual
+        "parser corpus include/extension/max filters"
+        ["github/sample/bad.wl"]
+        filteredPaths
+    , assertEqual
+        "parser corpus local parse attempts"
+        [("github/sample/expr.wl", "success"), ("notebookarchive/sample.nb", "success")]
+        attemptStatuses
+    , assertEqual "parser corpus oversized skip" "skipped" (parserAttemptStatus oversized)
+    , assertEqual "parser corpus outcome classification" "tungsten_only_success" (classifyParserOutcome success failure)
+    ]
+  pure (and checks)
 
 checkLicensing :: IO Bool
 checkLicensing = do

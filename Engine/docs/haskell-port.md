@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T15:35:37Z
-- Repository HEAD: 4fa8f25acd5c2e271857628aa6af1d21316ecacf
+- Updated (UTC): 2026-07-18T15:43:17Z
+- Repository HEAD: beefaaf16eaab9cbb9963279762f14f65f87fa33
 
 ## Purpose
 
@@ -78,6 +78,7 @@ Haskell process clients.
 | Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, typed immutable patches, and `notebook inspect`/`notebook create`/`notebook patch` CLI commands |
 | Inline boxes | Typed composition records, `BoxData` and box-bearing string extraction, stable deduplication, flat-index/path/UUID/ID/tag selectors, object selection, and `inline-box compose`/`inline-box from-cell` JSON commands |
 | Documentation | Kernel-free notebook text/title extraction, Python-compatible SQLite/FTS5 schema, filename and full-text search, page reads, paclet resolution, and the `docs` CLI family |
+| Parser corpora | Deterministic recursive discovery, extension/include/exclude filtering, corpus metadata, byte-budget skips, timed local source/notebook attempts, outcome classification, and structured JSON payloads |
 
 ## Compatibility boundary
 
@@ -89,7 +90,7 @@ features yet:
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and byte-for-byte preservation of original box-expression formatting;
 - cross-process license launch gates, stale-process cleanup, license-seat waiting, and Notebook Assistant automation;
-- parser-corpus orchestration and Notebook Assistant;
+- kernel-backed parser-corpus comparison, batch reports and CLI orchestration, plus Notebook Assistant;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
 Do not redirect an existing Python, PowerShell, or .NET production caller to `tungsten-hs` unless
@@ -103,7 +104,7 @@ The next useful port slices are:
 1. grow parser and evaluator parity from the Python corpus and the local Wolfram held-parser oracle;
 2. port source-preserving notebook spans and broader box-language interpretation;
 3. port definitions, attributes, pattern matching, scoping, and iteration on the immutable session;
-4. port parser-corpus orchestration and Notebook Assistant workflows;
+4. complete kernel-backed parser-corpus reports and port Notebook Assistant workflows;
 5. complete kernel licensing/concurrency behavior and broad Python CLI payload parity;
 6. move the PowerShell and .NET projections only after their JSON contract tests pass against the
    Haskell executable.

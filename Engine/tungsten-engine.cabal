@@ -44,6 +44,7 @@ library
     Tungsten.NamedCharacters
     Tungsten.Notebook
     Tungsten.Parser
+    Tungsten.ParserCorpus
     Tungsten.Repl
     Tungsten.Session
     Tungsten.WolframString
