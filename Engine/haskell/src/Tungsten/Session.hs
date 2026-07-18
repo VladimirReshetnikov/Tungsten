@@ -48,6 +48,9 @@ data ModuleBinding = ModuleBinding !Text !(Maybe Definition)
 data BlockBinding = BlockBinding !Text !(Maybe Definition)
   deriving (Eq, Show)
 
+data WithBinding = WithBinding !Text !Expr !Bool
+  deriving (Eq, Show)
+
 data SymbolValueSnapshot = SymbolValueSnapshot
   { snapshotOwnValue :: !(Maybe Definition)
   , snapshotDownValues :: !(Maybe [DownValue])
@@ -155,6 +158,8 @@ evaluateSessionAt depth session expression
         evaluateSessionDownValues session arguments'
       Call (Symbol "Module") arguments' ->
         evaluateSessionModule depth session arguments'
+      Call (Symbol "With") arguments' ->
+        evaluateSessionWith depth session arguments'
       Call (Symbol headName) arguments'
         | headName
             `elem` ["Block", "InheritedBlock", "Internal`InheritedBlock"] ->
@@ -171,7 +176,7 @@ evaluateSessionAt depth session expression
         | Just constructor <- Map.lookup headName updateConstructors ->
             evaluateUpdate depth session name constructor rhs
       Call (Symbol headName) _
-        | headName `elem` ["Hold", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed", "Condition"] ->
+        | headName `elem` ["Hold", "HoldComplete", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed", "Condition"] ->
             Right (expression, session)
       Call expressionHead arguments' -> do
         (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
@@ -568,6 +573,64 @@ evaluateSessionModule depth session = \case
     | otherwise ->
         Right (Call (Symbol "Module") originalArguments, session)
   arguments' -> Right (Call (Symbol "Module") arguments', session)
+
+evaluateSessionWith
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionWith depth session = \case
+  [Call (Symbol "List") [], body] ->
+    evaluateSessionAt (depth + 1) session body
+  originalArguments@[Call (Symbol "List") bindingExpressions, body] ->
+    case collectWithBindings depth session Set.empty Map.empty bindingExpressions of
+      Left evaluationExit -> Left evaluationExit
+      Right (Nothing, updated) ->
+        Right (Call (Symbol "With") originalArguments, updated)
+      Right (Just substitutions, updated) ->
+        evaluateSessionAt
+          (depth + 1)
+          updated
+          (substituteNamedSymbols substitutions body)
+  arguments' -> Right (Call (Symbol "With") arguments', session)
+
+collectWithBindings
+  :: Int
+  -> EvaluationSession
+  -> Set.Set Text
+  -> Map.Map Text Expr
+  -> [Expr]
+  -> SessionResult (Maybe (Map.Map Text Expr))
+collectWithBindings _ session _ substitutions [] =
+  Right (Just substitutions, session)
+collectWithBindings depth session seen substitutions (binding : rest) =
+  case parseWithBinding binding of
+    Nothing -> Right (Nothing, session)
+    Just (WithBinding name rhs delayed)
+      | Set.member name seen -> Right (Nothing, session)
+      | delayed ->
+          collectWithBindings
+            depth
+            session
+            (Set.insert name seen)
+            (Map.insert name rhs substitutions)
+            rest
+      | otherwise -> do
+          (value, updated) <- evaluateSessionAt (depth + 1) session rhs
+          collectWithBindings
+            depth
+            updated
+            (Set.insert name seen)
+            (Map.insert name value substitutions)
+            rest
+
+parseWithBinding :: Expr -> Maybe WithBinding
+parseWithBinding = \case
+  Call (Symbol "Set") [Symbol name, rhs] ->
+    Just (WithBinding name rhs False)
+  Call (Symbol "SetDelayed") [Symbol name, rhs] ->
+    Just (WithBinding name rhs True)
+  _ -> Nothing
 
 evaluateSessionBlock
   :: Text
@@ -1028,6 +1091,7 @@ isHeldSessionHead (Symbol name) =
            , "DownValues"
            , "Condition"
            , "Module"
+           , "With"
            , "Block"
            , "InheritedBlock"
            , "Internal`InheritedBlock"

@@ -13,6 +13,7 @@ module Tungsten.Evaluate
   , instantiatePatternMatch
   , matchesPattern
   , normalizeEvaluatedCall
+  , substituteNamedSymbols
   ) where
 
 import Control.Monad (foldM)
@@ -39,6 +40,7 @@ evaluateAt depth expression
   | depth > 1024 = Left (EvaluationError "the evaluation recursion limit was exceeded")
   | otherwise = case expression of
       Call (Symbol "Hold") _ -> Right expression
+      Call (Symbol "HoldComplete") _ -> Right expression
       Call (Symbol "HoldForm") _ -> Right expression
       Call (Symbol "Unevaluated") _ -> Right expression
       Call (Symbol "Function") _ -> Right expression
@@ -57,6 +59,7 @@ evaluateAt depth expression
       Call (Symbol "OwnValues") _ -> Right expression
       Call (Symbol "DownValues") _ -> Right expression
       Call (Symbol "Module") _ -> Right expression
+      Call (Symbol "With") _ -> Right expression
       Call (Symbol "Block") _ -> Right expression
       Call (Symbol "InheritedBlock") _ -> Right expression
       Call (Symbol "Internal`InheritedBlock") _ -> Right expression
@@ -3506,18 +3509,20 @@ rebuildWithSplicing expressionHead values =
     | expressionHead == Symbol "List" = filter (/= Symbol "Nothing")
     | otherwise = id
 
-replaceExpression :: [(Expr, Expr)] -> Expr -> Expr
-replaceExpression rules expression = case lookup expression rules of
-  Just replacement -> replacement
-  Nothing -> case expression of
-    Call expressionHead values ->
-      Call (replaceExpression rules expressionHead) (map (replaceExpression rules) values)
-    _ -> expression
-
 applyFunction :: [Expr] -> [Expr] -> Either EvaluationError Expr
 applyFunction [body] values = Right (substituteSlots values body)
-applyFunction [parameter, body] values =
-  Right (substituteParameters parameter values body)
+applyFunction [Symbol "Null", body] values =
+  Right (substituteSlots values body)
+applyFunction functionArguments@[parameter, body] values
+  | Just names <- namedParameterNames parameter
+  , length values >= length names =
+      Right
+        ( substituteNamedSymbols
+            (Map.fromList (zip names values))
+            body
+        )
+  | otherwise =
+      Right (Call (Call (Symbol "Function") functionArguments) values)
 applyFunction functionArguments values =
   Right (Call (Call (Symbol "Function") functionArguments) values)
 
@@ -3534,14 +3539,345 @@ substituteSlots values expression = case expression of
     Call (substituteSlots values expressionHead) (map (substituteSlots values) arguments')
   _ -> expression
 
-substituteParameters :: Expr -> [Expr] -> Expr -> Expr
-substituteParameters parameter values body =
-  let names = case parameter of
-        Symbol name -> [name]
-        Call (Symbol "List") parameters -> [name | Symbol name <- parameters]
-        _ -> []
-      replacements = zip (map Symbol names) values
-   in replaceExpression replacements body
+-- | Capture-aware simultaneous substitution for named Wolfram symbols.
+-- Binding right-hand sides remain in their outer scope, while named Function
+-- parameters and valid With/Module/Block locals shield their bodies.  When a
+-- substitution reaches a shielded body, its binders are alpha-renamed using
+-- the Python engine's deterministic @$@, @$1@, ... naming policy.
+substituteNamedSymbols :: Map.Map Text Expr -> Expr -> Expr
+substituteNamedSymbols substitutions expression =
+  fst (substituteNamedSymbolsAt substitutions unavailable expression)
+ where
+  unavailable =
+    Set.unions
+      ( Map.keysSet substitutions
+          : map collectSymbolNames (Map.elems substitutions)
+      )
+
+substituteNamedSymbolsAt
+  :: Map.Map Text Expr
+  -> Set.Set Text
+  -> Expr
+  -> (Expr, Bool)
+substituteNamedSymbolsAt substitutions unavailable expression
+  | Map.null substitutions = (expression, False)
+  | otherwise = case expression of
+      Symbol name -> case Map.lookup name substitutions of
+        Nothing -> (expression, False)
+        Just replacement -> (replacement, True)
+      Call {} ->
+        case localScopingCallParts expression of
+          Just (boundNames, bindingArguments, body) ->
+            substituteThroughLocalScoping
+              expression
+              boundNames
+              bindingArguments
+              body
+              substitutions
+              unavailable
+          Nothing -> case namedFunctionParts expression of
+            Just (parameter, parameterNames, body, remaining) ->
+              substituteThroughNamedFunction
+                expression
+                parameter
+                parameterNames
+                body
+                remaining
+                substitutions
+                unavailable
+            Nothing -> substituteThroughCall substitutions unavailable expression
+      _ -> (expression, False)
+
+substituteThroughCall
+  :: Map.Map Text Expr
+  -> Set.Set Text
+  -> Expr
+  -> (Expr, Bool)
+substituteThroughCall substitutions unavailable expression = case expression of
+  Call expressionHead values ->
+    let (substitutedHead, headChanged) =
+          substituteNamedSymbolsAt substitutions unavailable expressionHead
+        substitutedValues =
+          map (substituteNamedSymbolsAt substitutions unavailable) values
+        changed = headChanged || any snd substitutedValues
+     in if changed
+          then (Call substitutedHead (map fst substitutedValues), True)
+          else (expression, False)
+  _ -> (expression, False)
+
+substituteThroughNamedFunction
+  :: Expr
+  -> Expr
+  -> [Text]
+  -> Expr
+  -> [Expr]
+  -> Map.Map Text Expr
+  -> Set.Set Text
+  -> (Expr, Bool)
+substituteThroughNamedFunction
+  original
+  parameter
+  parameterNames
+  body
+  remaining
+  substitutions
+  unavailable =
+    let activeSubstitutions =
+          foldr Map.delete substitutions parameterNames
+     in if Map.null activeSubstitutions
+          then (original, False)
+          else
+            let (_, bodyChanged) =
+                  substituteNamedSymbolsAt
+                    activeSubstitutions
+                    (Set.union unavailable (Set.fromList parameterNames))
+                    body
+             in if not bodyChanged
+                  then (original, False)
+                  else
+                    let renameUnavailable =
+                          Set.unions
+                            ( [ unavailable
+                              , collectSymbolNames parameter
+                              , collectSymbolNames body
+                              ]
+                                <> map
+                                  collectSymbolNames
+                                  (Map.elems activeSubstitutions)
+                            )
+                        (freshNames, _) =
+                          freshSymbolNames parameterNames renameUnavailable
+                        renameMap = Map.fromList (zip parameterNames freshNames)
+                        renamedBody = renameBoundSymbolsInExpr renameMap body
+                        (substitutedBody, _) =
+                          substituteNamedSymbolsAt
+                            activeSubstitutions
+                            (Set.union unavailable (Set.fromList freshNames))
+                            renamedBody
+                     in ( rebuildNamedFunction
+                            parameter
+                            freshNames
+                            substitutedBody
+                            remaining
+                        , True
+                        )
+
+substituteThroughLocalScoping
+  :: Expr
+  -> [Text]
+  -> [Expr]
+  -> Expr
+  -> Map.Map Text Expr
+  -> Set.Set Text
+  -> (Expr, Bool)
+substituteThroughLocalScoping
+  original
+  boundNames
+  bindingArguments
+  body
+  substitutions
+  unavailable =
+    let substitutedBindings =
+          map (substituteBindingRhs substitutions unavailable) bindingArguments
+        newBindingArguments = map fst substitutedBindings
+        bindingsChanged = any snd substitutedBindings
+        activeSubstitutions = foldr Map.delete substitutions boundNames
+        rebuild bindings scopedBody = case original of
+          Call expressionHead _ ->
+            Call
+              expressionHead
+              [Call (Symbol "List") bindings, scopedBody]
+          _ -> original
+     in if Map.null activeSubstitutions
+          then
+            if bindingsChanged
+              then (rebuild newBindingArguments body, True)
+              else (original, False)
+          else
+            let (_, bodyChanged) =
+                  substituteNamedSymbolsAt
+                    activeSubstitutions
+                    (Set.union unavailable (Set.fromList boundNames))
+                    body
+             in if not bodyChanged
+                  then
+                    if bindingsChanged
+                      then (rebuild newBindingArguments body, True)
+                      else (original, False)
+                  else
+                    let renameUnavailable =
+                          Set.unions
+                            ( [ unavailable
+                              , Set.fromList boundNames
+                              , collectSymbolNames body
+                              ]
+                                <> map collectSymbolNames newBindingArguments
+                                <> map
+                                  collectSymbolNames
+                                  (Map.elems activeSubstitutions)
+                            )
+                        (freshNames, _) =
+                          freshSymbolNames boundNames renameUnavailable
+                        renameMap = Map.fromList (zip boundNames freshNames)
+                        renamedBindings =
+                          zipWith renameBindingName newBindingArguments freshNames
+                        renamedBody = renameBoundSymbolsInExpr renameMap body
+                        (substitutedBody, _) =
+                          substituteNamedSymbolsAt
+                            activeSubstitutions
+                            (Set.union unavailable (Set.fromList freshNames))
+                            renamedBody
+                     in (rebuild renamedBindings substitutedBody, True)
+
+substituteBindingRhs
+  :: Map.Map Text Expr
+  -> Set.Set Text
+  -> Expr
+  -> (Expr, Bool)
+substituteBindingRhs substitutions unavailable binding = case binding of
+  Symbol _ -> (binding, False)
+  Call bindingHead [name, rhs] ->
+    let (substitutedRhs, changed) =
+          substituteNamedSymbolsAt substitutions unavailable rhs
+     in if changed
+          then (Call bindingHead [name, substitutedRhs], True)
+          else (binding, False)
+  _ -> (binding, False)
+
+renameBindingName :: Expr -> Text -> Expr
+renameBindingName binding freshName = case binding of
+  Symbol _ -> Symbol freshName
+  Call bindingHead [_, rhs] ->
+    Call bindingHead [Symbol freshName, rhs]
+  _ -> binding
+
+renameBoundSymbolsInExpr :: Map.Map Text Text -> Expr -> Expr
+renameBoundSymbolsInExpr renameMap expression
+  | Map.null renameMap = expression
+  | otherwise = case expression of
+      Symbol name -> maybe expression Symbol (Map.lookup name renameMap)
+      Call expressionHead values ->
+        case localScopingCallParts expression of
+          Just (boundNames, bindingArguments, body) ->
+            let boundSet = Set.fromList boundNames
+                nestedRenameMap = foldr Map.delete renameMap boundNames
+                observedShadow =
+                  not
+                    ( Set.null
+                        (Set.intersection (Map.keysSet renameMap) boundSet)
+                    )
+             in if Map.null nestedRenameMap && not observedShadow
+                  then expression
+                  else
+                    Call
+                      expressionHead
+                      [ Call
+                          (Symbol "List")
+                          (map (renameBindingRhs renameMap) bindingArguments)
+                      , renameBoundSymbolsInExpr nestedRenameMap body
+                      ]
+          Nothing -> case namedFunctionParts expression of
+            Just (parameter, parameterNames, body, remaining) ->
+              let nestedRenameMap =
+                    foldr Map.delete renameMap parameterNames
+               in if Map.null nestedRenameMap
+                    then expression
+                    else
+                      rebuildNamedFunction
+                        parameter
+                        parameterNames
+                        (renameBoundSymbolsInExpr nestedRenameMap body)
+                        remaining
+            Nothing ->
+              Call
+                (renameBoundSymbolsInExpr renameMap expressionHead)
+                (map (renameBoundSymbolsInExpr renameMap) values)
+      _ -> expression
+
+renameBindingRhs :: Map.Map Text Text -> Expr -> Expr
+renameBindingRhs renameMap binding = case binding of
+  Symbol _ -> binding
+  Call bindingHead [name, rhs] ->
+    Call bindingHead [name, renameBoundSymbolsInExpr renameMap rhs]
+  _ -> binding
+
+localScopingCallParts :: Expr -> Maybe ([Text], [Expr], Expr)
+localScopingCallParts = \case
+  Call (Symbol headName) [Call (Symbol "List") bindings, body]
+    | headName `elem` ["With", "Module", "Block"] -> do
+        boundNames <- traverse localBindingName bindings
+        Just (boundNames, bindings, body)
+  _ -> Nothing
+ where
+  localBindingName = \case
+    Symbol name -> Just name
+    Call (Symbol bindingHead) [Symbol name, _]
+      | bindingHead `elem` ["Set", "SetDelayed"] -> Just name
+    _ -> Nothing
+
+namedFunctionParts :: Expr -> Maybe (Expr, [Text], Expr, [Expr])
+namedFunctionParts = \case
+  Call (Symbol "Function") (parameter : body : remaining)
+    | length remaining <= 1 -> do
+        names <- namedParameterNames parameter
+        Just (parameter, names, body, remaining)
+  _ -> Nothing
+
+namedParameterNames :: Expr -> Maybe [Text]
+namedParameterNames = \case
+  Symbol "Null" -> Nothing
+  Symbol name -> Just [name]
+  Call (Symbol "List") parameters -> traverse parameterName parameters
+  _ -> Nothing
+ where
+  parameterName = \case
+    Symbol name -> Just name
+    _ -> Nothing
+
+rebuildNamedFunction :: Expr -> [Text] -> Expr -> [Expr] -> Expr
+rebuildNamedFunction originalParameter parameterNames body remaining =
+  Call
+    (Symbol "Function")
+    ( rebuildParameter originalParameter parameterNames
+        : body
+        : remaining
+    )
+ where
+  rebuildParameter parameter names = case parameter of
+    Symbol _ -> case names of
+      [name] -> Symbol name
+      _ -> parameter
+    Call (Symbol "List") _ ->
+      Call (Symbol "List") (map Symbol names)
+    _ -> parameter
+
+collectSymbolNames :: Expr -> Set.Set Text
+collectSymbolNames = \case
+  Symbol name -> Set.singleton name
+  Call expressionHead values ->
+    Set.unions
+      (collectSymbolNames expressionHead : map collectSymbolNames values)
+  _ -> Set.empty
+
+freshSymbolNames :: [Text] -> Set.Set Text -> ([Text], Set.Set Text)
+freshSymbolNames names unavailable = go unavailable names []
+ where
+  go retained [] freshNames = (reverse freshNames, retained)
+  go retained (name : rest) freshNames =
+    let freshName = freshSymbolName name retained
+     in go (Set.insert freshName retained) rest (freshName : freshNames)
+
+freshSymbolName :: Text -> Set.Set Text -> Text
+freshSymbolName baseName unavailable
+  | Set.notMember firstCandidate unavailable = firstCandidate
+  | otherwise = choose (1 :: Integer)
+ where
+  firstCandidate = baseName <> "$"
+  choose index =
+    let candidate = baseName <> "$" <> T.pack (show index)
+     in if Set.member candidate unavailable
+          then choose (index + 1)
+          else candidate
 
 expressionDepth :: Expr -> Int
 expressionDepth expression
