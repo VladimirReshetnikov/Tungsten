@@ -716,6 +716,8 @@ checkEvaluator = do
         , ("key value pattern matching", "{MatchQ[<|a -> 1, b -> 2|>, KeyValuePattern[a -> _Integer]], MatchQ[<|a -> 1, b -> 2|>, KeyValuePattern[{b -> 2, a -> _}]], MatchQ[<|a -> 1|>, KeyValuePattern[b -> _]], MatchQ[<|a -> <|b -> 2|>|>, KeyValuePattern[b -> _]]}", "List[True, True, False, False]")
         , ("key value pattern bindings", "{Cases[{<|a -> 1|>, <|b -> x|>}, KeyValuePattern[k_ -> v_] :> {k, v}], Cases[<|x -> <|a -> 1|>, y -> <|b -> 2|>|>, KeyValuePattern[a -> _], {0, Infinity}]}", "List[List[List[a, 1], List[b, x]], List[Association[Rule[a, 1]]]]")
         , ("key value pattern rule structures", "{MatchQ[{a -> 1, b -> 2}, KeyValuePattern[b -> _Integer]], MatchQ[<|a :> 1|>, KeyValuePattern[a -> _]], MatchQ[<|a :> 1|>, KeyValuePattern[a :> _]], MatchQ[<|a -> 1|>, KeyValuePattern[{a -> _, a -> 1}]]}", "List[True, False, True, False]")
+        , ("ignoring inactive search", "{MatchQ[Inactive[f][1], IgnoringInactive[f[_]]], MatchQ[Inactive[Plus][1, 2], IgnoringInactive[HoldPattern[Plus[_, _]]]], FreeQ[{Inactive[Plus][1, 2]}, IgnoringInactive[HoldPattern[Plus[_, _]]]], Cases[{Inactive[Plus][1, 2], Inactive[f][1]}, IgnoringInactive[HoldPattern[Plus[_, _]]]]}", "List[True, True, False, List[Inactive[Plus][1, 2]]]")
+        , ("ignoring inactive original bindings", "{Inactive[f][1] /. IgnoringInactive[f[x_]] :> x, Inactive[f][Inactive[g][1]] /. IgnoringInactive[f[x_]] :> x, Inactive[f[1]] /. IgnoringInactive[f[x_]] :> x}", "List[1, Inactive[g][1], 1]")
         , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")

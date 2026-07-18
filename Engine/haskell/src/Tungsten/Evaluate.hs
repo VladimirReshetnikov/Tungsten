@@ -1439,6 +1439,8 @@ reduceMatchQ values = Call (Symbol "MatchQ") values
 
 matchPattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
 matchPattern bindings expression patternExpression = case patternExpression of
+  Call (Symbol "IgnoringInactive") [innerPattern] ->
+    matchIgnoringInactive bindings expression innerPattern
   Call (Symbol "Verbatim") [literal] ->
     if expression == literal then Just bindings else Nothing
   Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
@@ -1497,6 +1499,87 @@ matchPattern bindings expression patternExpression = case patternExpression of
   firstMatch (alternative : rest) = case matchPattern bindings expression alternative of
     Just matched -> Just matched
     Nothing -> firstMatch rest
+
+matchIgnoringInactive :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
+matchIgnoringInactive bindings expression patternExpression = case activeView patternExpression of
+  Call (Symbol "IgnoringInactive") [innerPattern] ->
+    matchIgnoringInactive bindings expression innerPattern
+  Call (Symbol "HoldPattern") [innerPattern] ->
+    matchIgnoringInactive bindings expression innerPattern
+  Call (Symbol "Verbatim") [literal] ->
+    if activeView expression == activeView literal then Just bindings else Nothing
+  Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
+    matched <- matchIgnoringInactive bindings expression innerPattern
+    bindScalar name expression matched
+  Call (Symbol "Blank") [] -> Just bindings
+  Call (Symbol "Blank") [requiredHead] ->
+    if headExpr (activeView expression) == activeView requiredHead then Just bindings else Nothing
+  Call (Symbol "Alternatives") alternatives -> firstMatch alternatives
+  Call (Symbol "Except") [excluded] ->
+    case matchIgnoringInactive bindings expression excluded of
+      Nothing -> Just bindings
+      Just _ -> Nothing
+  Call (Symbol "Except") [excluded, included] -> do
+    matched <- matchIgnoringInactive bindings expression included
+    case matchIgnoringInactive bindings expression excluded of
+      Nothing -> Just matched
+      Just _ -> Nothing
+  Call (Symbol "Condition") [innerPattern, condition] -> do
+    matched <- matchIgnoringInactive bindings expression innerPattern
+    conditionResult <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
+    if conditionResult == Symbol "True" then Just matched else Nothing
+  Call (Symbol "PatternTest") [innerPattern, test] -> do
+    matched <- matchIgnoringInactive bindings expression innerPattern
+    testResult <- either (const Nothing) Just (evaluate (Call test [expression]))
+    if testResult == Symbol "True" then Just matched else Nothing
+  Call patternHead patternArguments -> case activeView expression of
+    structuralExpression@(Call structuralHead structuralArguments) -> do
+      let candidateHead = inactiveMatchingHead expression structuralExpression structuralHead
+          candidateArguments = inactiveMatchingArguments expression structuralExpression structuralArguments
+      headBindings <- matchIgnoringInactive bindings candidateHead patternHead
+      matchIgnoringInactiveArguments headBindings candidateArguments patternArguments
+    _ -> Nothing
+  structuralPattern ->
+    if activeView expression == structuralPattern then Just bindings else Nothing
+ where
+  firstMatch [] = Nothing
+  firstMatch (alternative : rest) = case matchIgnoringInactive bindings expression alternative of
+    Just matched -> Just matched
+    Nothing -> firstMatch rest
+
+matchIgnoringInactiveArguments :: PatternBindings -> [Expr] -> [Expr] -> Maybe PatternBindings
+matchIgnoringInactiveArguments bindings [] [] = Just bindings
+matchIgnoringInactiveArguments bindings (expression : remainingExpressions) (patternExpression : remainingPatterns) = do
+  matched <- matchIgnoringInactive bindings expression patternExpression
+  matchIgnoringInactiveArguments matched remainingExpressions remainingPatterns
+matchIgnoringInactiveArguments _ _ _ = Nothing
+
+inactiveMatchingHead :: Expr -> Expr -> Expr -> Expr
+inactiveMatchingHead original structural structuralHead
+  | isInactiveWrapper original = case structural of
+      Call activeHead _ -> activeHead
+      _ -> structuralHead
+  | otherwise = headExpr original
+
+inactiveMatchingArguments :: Expr -> Expr -> [Expr] -> [Expr]
+inactiveMatchingArguments original structural structuralArguments = case (original, structural) of
+  (Call _ originalArguments, Call _ activeArguments)
+    | not (isInactiveWrapper original)
+    , length originalArguments == length activeArguments -> originalArguments
+  _ -> structuralArguments
+
+activeView :: Expr -> Expr
+activeView expression
+  | isInactiveWrapper expression = case expression of
+      Call _ [inner] -> activeView inner
+      _ -> expression
+activeView (Call expressionHead values) =
+  Call (activeView expressionHead) (map activeView values)
+activeView expression = expression
+
+isInactiveWrapper :: Expr -> Bool
+isInactiveWrapper (Call (Symbol "Inactive") [_]) = True
+isInactiveWrapper _ = False
 
 matchKeyValuePattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
 matchKeyValuePattern bindings expression specification = do
