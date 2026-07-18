@@ -551,6 +551,8 @@ checkEvaluator = do
         , ("negative rational power", "(2/3)^-3", "Rational[27, 8]")
         , ("symbolic coefficient collection", "2 x 3", "Times[6, x]")
         , ("symbolic constant collection", "x + 1 + 2", "Plus[3, x]")
+        , ("repeated symbolic collection", "{a + a + a, a*a*a, f[x] + f[x], f[x]*f[x]}", "List[Times[3, a], Power[a, 3], Times[2, f[x]], Power[f[x], 2]]")
+        , ("evaluated argument normalization", "{Nothing, Sequence[a, b], Splice[{c, d}]}", "List[a, b, c, d]")
         , ("factorials", "6! + 6!!", "768")
         , ("numeric comparison", "1 < 2 <= 2", "True")
         , ("numeric inequality", "Unequal[1, 2, 1]", "False")
@@ -1037,6 +1039,12 @@ checkEvaluationSession = do
         , ("sum and product interactions", "{Product[Sum[i, {i, 1, j}], {j, 1, 3}], Sum[Sum[i, {j, 1, i}], {i, 1, 3}], Product[2, {n, 0, 10}]}", "List[18, 14, 2048]")
         , ("iterator invalid forms preserve prior effects", "x = 0; Do[a, {i, x = x + 1, b}]; d = x; x = 0; Sum[a, {i, x = x + 1, b}]; s = x; x = 0; Product[a, {i, x = x + 1, b}]; {d, s, x}", "List[1, 1, 1]")
         , ("iterator evaluated-head aliases stay inert", "i = 99; d = Do; s = Sum; p = Product; {d[i, {i, 3}], s[i, {i, 3}], p[i, {i, 3}]}", "List[Do[i, List[i, 3]], Sum[i, List[i, 3]], Product[i, List[i, 3]]]")
+        , ("symbolic iterator accumulation", "{Sum[a, {3}], Product[a, {3}], Sum[f[x], {4}], Product[f[x], {4}]}", "List[Times[3, a], Power[a, 3], Times[4, f[x]], Power[f[x], 4]]")
+        , ("sequence iterator accumulation", "{Sum[Sequence[i, -i], {i, 2}], Product[Sequence[i, -i], {i, 2}], Sum[Sequence[Nothing, 1], {1}], Product[Sequence[Nothing, 2], {1}]}", "List[0, 4, Plus[1, Nothing], Times[2, Nothing]]")
+        , ("targeted splice iterator accumulation", "{Sum[Splice[{a, b}, Plus], {1}], Product[Splice[{a, b}, Times], {1}]}", "List[Plus[a, b], Times[a, b]]")
+        , ("nested sequence iterator domains", "x = 0; Do[x = x + 1, {i, {Sequence[Sequence[a, b]]}}]; d = x; x = 0; s = Sum[x = x + 1, {i, {Sequence[Sequence[a, b]]}}]; sx = x; x = 0; p = Product[x = x + 1, {i, {Sequence[Sequence[a, b]]}}]; {d, s, sx, p, x}", "List[2, 3, 2, 2, 2]")
+        , ("post-splice nothing iterator domains", "x = 0; Do[x = 1, {i, {Sequence[Sequence[Nothing]]}}]; d = x; x = 0; s = Sum[x = 1, {i, {Sequence[Sequence[Nothing]]}}]; sx = x; x = 0; p = Product[x = 1, {i, {Sequence[Sequence[Nothing]]}}]; {d, s, sx, p, x}", "List[0, 0, 0, 1, 0]")
+        , ("iterator normalization ordering", "x = 0; Do[x = x + 1, {i, {Splice[{Sequence[a, b]}]}}]; u = x; x = 0; Do[x = x + 1, {i, {Sequence[Splice[{a, b}]]}}]; {u, x, Table[Sequence[Sequence[i, -i]], {i, 1}]}", "List[2, 1, List[1, -1]]")
         ]
   and <$> traverse evaluateSessionCase cases
  where

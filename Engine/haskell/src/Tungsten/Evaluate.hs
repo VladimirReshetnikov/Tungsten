@@ -9,12 +9,15 @@ module Tungsten.Evaluate
   ( EvaluationError (..)
   , evaluate
   , exactRangeValues
+  , normalizeEvaluatedCall
   ) where
 
 import Control.Monad (foldM)
 import Data.Char (isDigit)
 import Data.List (permutations, sortBy, transpose)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
@@ -36,6 +39,7 @@ evaluateAt depth expression
       Call (Symbol "HoldForm") _ -> Right expression
       Call (Symbol "Unevaluated") _ -> Right expression
       Call (Symbol "Function") _ -> Right expression
+      Call (Symbol "HoldPattern") _ -> Right expression
       Call (Symbol "SetDelayed") _ -> Right expression
       Call (Symbol "RuleDelayed") _ -> Right expression
       Call (Symbol "Table") _ -> Right expression
@@ -48,7 +52,7 @@ evaluateAt depth expression
       Call expressionHead arguments' -> do
         evaluatedHead <- evaluateAt (depth + 1) expressionHead
         evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
-        let evaluatedCall = Call evaluatedHead evaluatedArguments
+        let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
         reduced <- reduceCall evaluatedCall
         -- Python's Sqrt helper deliberately returns a raw nested Times shape
         -- for negative composite radicands instead of re-entering evaluation.
@@ -56,6 +60,33 @@ evaluateAt depth expression
           then Right reduced
           else evaluateAt (depth + 1) reduced
       _ -> Right expression
+
+-- | Construct an ordinary evaluated call after applying the transparent
+-- argument normalization shared by Wolfram heads.  Each enclosing call gets
+-- one pass: nested calls have already normalized their own arguments.
+normalizeEvaluatedCall :: Expr -> [Expr] -> Expr
+normalizeEvaluatedCall expressionHead values =
+  Call expressionHead retained
+ where
+  spliced
+    | suppressesSequences expressionHead = values
+    | otherwise = concatMap spliceArgument values
+  retained
+    | expressionHead `elem` [Symbol "Association", Symbol "List"] =
+        filter (/= Symbol "Nothing") spliced
+    | otherwise = spliced
+  spliceArgument = \case
+    Call (Symbol "Sequence") sequenceValues -> sequenceValues
+    Call (Symbol "Splice") [Call (Symbol "List") spliceValues]
+      | expressionHead == Symbol "List" -> spliceValues
+    Call (Symbol "Splice") [Call (Symbol "List") spliceValues, target]
+      | target == expressionHead -> spliceValues
+    value -> [value]
+
+suppressesSequences :: Expr -> Bool
+suppressesSequences (Symbol name) =
+  name `elem` ["HoldComplete", "Rule", "RuleDelayed", "Unevaluated"]
+suppressesSequences _ = False
 
 evaluateIf :: Int -> [Expr] -> Either EvaluationError Expr
 evaluateIf depth = \case
@@ -606,25 +637,49 @@ reducePlus originalValues =
   let values = concatMap (flattenHead "Plus") originalValues
       exactSum = foldl' addExact (Exact 0 1) (mapMaybe toExact values)
       symbolic = filter (not . isExact) values
-      combined = (if exactSum == Exact 0 1 then [] else [fromExact exactSum]) <> symbolic
+      collected = collectRepeated collectTerm symbolic
+      combined = (if exactSum == Exact 0 1 then [] else [fromExact exactSum]) <> collected
    in case combined of
         [] -> Integer 0
         [single] -> single
         _ -> Call (Symbol "Plus") combined
+ where
+  collectTerm term count = reduceTimes [Integer count, term]
 
 reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =
   let values = concatMap (flattenHead "Times") originalValues
       exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
       symbolic = filter (not . isExact) values
+      collected = collectRepeated collectFactor symbolic
       combined
         | exactProduct == Exact 0 1 = [Integer 0]
-        | exactProduct == Exact 1 1 && not (null symbolic) = symbolic
-        | otherwise = fromExact exactProduct : symbolic
+        | exactProduct == Exact 1 1 && not (null collected) = collected
+        | otherwise = fromExact exactProduct : collected
    in case combined of
         [] -> Integer 1
         [single] -> single
         _ -> Call (Symbol "Times") combined
+ where
+  collectFactor factor count = reducePower [factor, Integer count]
+
+collectRepeated :: (Expr -> Integer -> Expr) -> [Expr] -> [Expr]
+collectRepeated combine values = retainFirst Set.empty values
+ where
+  counts =
+    foldl'
+      (\retained value -> Map.insertWith (+) (fullForm value) (1 :: Integer) retained)
+      Map.empty
+      values
+  retainFirst _ [] = []
+  retainFirst seen (value : rest)
+    | Set.member key seen = retainFirst seen rest
+    | otherwise =
+        let count = Map.findWithDefault 1 key counts
+            collected = if count == 1 then value else combine value count
+         in collected : retainFirst (Set.insert key seen) rest
+   where
+    key = fullForm value
 
 reducePower :: [Expr] -> Expr
 reducePower [] = Integer 1

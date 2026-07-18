@@ -80,7 +80,7 @@ evaluateSessionAt depth session expression
         | Just constructor <- Map.lookup headName updateConstructors ->
             evaluateUpdate depth session name constructor rhs
       Call (Symbol headName) _
-        | headName `elem` ["Hold", "HoldForm", "Unevaluated", "Function", "SetDelayed", "RuleDelayed"] ->
+        | headName `elem` ["Hold", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed"] ->
             Right (expression, session)
       Call expressionHead arguments' -> do
         (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
@@ -89,8 +89,9 @@ evaluateSessionAt depth session expression
           else do
             (evaluatedArguments, argumentsSession) <- evaluateArguments depth headSession arguments'
             let evaluatedCall = Call evaluatedHead evaluatedArguments
+                normalizedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
             reduced <- evaluate evaluatedCall
-            if reduced == evaluatedCall
+            if reduced == normalizedCall
               then Right (reduced, argumentsSession)
               else evaluateSessionAt (depth + 1) argumentsSession reduced
       _ -> Right (expression, session)
@@ -144,7 +145,10 @@ evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
               evaluateSessionAt
                 (depth + 1)
                 updated
-                (Call (Symbol accumulatorHead) terms)
+                ( Call
+                    (Symbol accumulatorHead)
+                    (accumulatorArguments accumulatorHead terms)
+                )
     _ -> inert session
  where
   inert updated = Right (Call (Symbol headName) arguments', updated)
@@ -271,7 +275,7 @@ resolveListIterator depth session = \case
       liftIterationEvaluation (evaluateSessionAt (depth + 1) session boundExpression)
     case bound of
       Call (Symbol "List") values ->
-        Right (Iterator (Just name) (evaluatedListArguments values), updated)
+        Right (Iterator (Just name) values, updated)
       _ -> do
         values <- numericIteratorValues updated (Integer 1) bound (Integer 1)
         Right (Iterator (Just name) values, updated)
@@ -349,6 +353,15 @@ isHeldIteratorHead _ = False
 isListIteratorSpec :: Expr -> Bool
 isListIteratorSpec (Call (Symbol "List") _) = True
 isListIteratorSpec _ = False
+
+accumulatorArguments :: Text -> [Expr] -> [Expr]
+accumulatorArguments accumulatorHead = concatMap spliceArgument
+ where
+  spliceArgument = \case
+    Call (Symbol "Sequence") values -> values
+    Call (Symbol "Splice") [Call (Symbol "List") values, target]
+      | target == Symbol accumulatorHead -> values
+    value -> [value]
 
 evaluateSequence
   :: Int
