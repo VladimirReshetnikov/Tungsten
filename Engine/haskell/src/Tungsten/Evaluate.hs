@@ -9,6 +9,8 @@ module Tungsten.Evaluate
   ( EvaluationError (..)
   , evaluate
   , exactRangeValues
+  , instantiateFunctionCall
+  , instantiatePatternMatch
   , matchesPattern
   , normalizeEvaluatedCall
   ) where
@@ -43,6 +45,7 @@ evaluateAt depth expression
       Call (Symbol "HoldPattern") _ -> Right expression
       Call (Symbol "SetDelayed") _ -> Right expression
       Call (Symbol "RuleDelayed") _ -> Right expression
+      Call (Symbol "Condition") _ -> Right expression
       Call (Symbol "Table") _ -> Right expression
       Call (Symbol "Do") _ -> Right expression
       Call (Symbol "Sum") _ -> Right expression
@@ -52,6 +55,7 @@ evaluateAt depth expression
       Call (Symbol "Break") _ -> Right expression
       Call (Symbol "Continue") _ -> Right expression
       Call (Symbol "OwnValues") _ -> Right expression
+      Call (Symbol "DownValues") _ -> Right expression
       Call (Symbol "Module") _ -> Right expression
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
@@ -2045,6 +2049,13 @@ matchesPattern :: Expr -> Expr -> Bool
 matchesPattern expression patternExpression =
   maybe False (const True) (matchPattern [] expression patternExpression)
 
+-- | Match a subject against a Wolfram pattern and substitute the resulting
+-- scalar or sequence bindings into a held template without evaluating it.
+instantiatePatternMatch :: Expr -> Expr -> Expr -> Maybe Expr
+instantiatePatternMatch expression patternExpression template = do
+  bindings <- matchPattern [] expression patternExpression
+  pure (substituteBindings bindings template)
+
 matchPattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
 matchPattern bindings expression patternExpression = case patternExpression of
   Call (Symbol "IgnoringInactive") [innerPattern] ->
@@ -3506,6 +3517,11 @@ applyFunction [parameter, body] values =
   Right (substituteParameters parameter values body)
 applyFunction functionArguments values =
   Right (Call (Call (Symbol "Function") functionArguments) values)
+
+-- | Substitute already prepared call arguments into a held pure Function
+-- body without evaluating that body.
+instantiateFunctionCall :: [Expr] -> [Expr] -> Either EvaluationError Expr
+instantiateFunctionCall = applyFunction
 
 substituteSlots :: [Expr] -> Expr -> Expr
 substituteSlots values expression = case expression of

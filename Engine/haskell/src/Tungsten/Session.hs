@@ -1,9 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Immutable evaluation sessions with symbol own-values.
+-- | Immutable evaluation sessions with ordered symbol value definitions.
 module Tungsten.Session
   ( Definition (..)
+  , DownValue (..)
   , EvaluationSession (..)
   , emptySession
   , evaluateInSession
@@ -21,19 +22,33 @@ data Definition
   | DelayedValue !Expr
   deriving (Eq, Show)
 
+data DownValue = DownValue
+  { downValuePattern :: !Expr
+  , downValueBody :: !Expr
+  , downValueDelayed :: !Bool
+  }
+  deriving (Eq, Show)
+
 data EvaluationSession = EvaluationSession
   { sessionDefinitions :: Map.Map Text Definition
+  , sessionDownValues :: Map.Map Text [DownValue]
   , sessionModuleCounter :: !Integer
   }
   deriving (Eq, Show)
 
 emptySession :: EvaluationSession
-emptySession = EvaluationSession Map.empty 0
+emptySession = EvaluationSession Map.empty Map.empty 0
 
 data Iterator = Iterator !(Maybe Text) ![Expr]
   deriving (Eq, Show)
 
 data ModuleBinding = ModuleBinding !Text !(Maybe Definition)
+  deriving (Eq, Show)
+
+data SymbolValueSnapshot = SymbolValueSnapshot
+  { snapshotOwnValue :: !(Maybe Definition)
+  , snapshotDownValues :: !(Maybe [DownValue])
+  }
   deriving (Eq, Show)
 
 data ControlSignal
@@ -104,14 +119,20 @@ evaluateSessionAt depth session expression
       Call (Symbol "Set") [Symbol name, rhs] -> do
         (value, updated) <- evaluateSessionAt (depth + 1) session rhs
         pure (value, define name (ImmediateValue value) updated)
+      Call (Symbol "Set") [lhs@Call {}, rhs] ->
+        evaluateDownValueAssignment False depth session lhs rhs
       Call (Symbol "SetDelayed") [Symbol name, rhs] ->
         Right (Symbol "Null", define name (DelayedValue rhs) session)
+      Call (Symbol "SetDelayed") [lhs@Call {}, rhs] ->
+        evaluateDownValueAssignment True depth session lhs rhs
       Call (Symbol "Unset") [Symbol name] ->
-        Right (Symbol "Null", removeDefinitions [name] session)
+        Right (Symbol "Null", removeOwnValues [name] session)
+      Call (Symbol "Unset") [lhs@Call {}] ->
+        evaluateDownValueUnset depth session lhs
       Call (Symbol headName) symbols
         | headName `elem` ["Clear", "ClearAll"]
         , Just names <- traverse symbolName symbols ->
-            Right (Symbol "Null", removeDefinitions names session)
+            Right (Symbol "Null", clearDefinitions names session)
       Call (Symbol "CompoundExpression") expressions ->
         evaluateSequence depth session expressions
       Call (Symbol "If") arguments' -> evaluateSessionIf depth session arguments'
@@ -127,6 +148,8 @@ evaluateSessionAt depth session expression
         evaluateLoopControl ContinueSignal "Continue" session arguments'
       Call (Symbol "OwnValues") arguments' ->
         evaluateSessionOwnValues session arguments'
+      Call (Symbol "DownValues") arguments' ->
+        evaluateSessionDownValues session arguments'
       Call (Symbol "Module") arguments' ->
         evaluateSessionModule depth session arguments'
       Call (Symbol "Table") arguments' ->
@@ -141,7 +164,7 @@ evaluateSessionAt depth session expression
         | Just constructor <- Map.lookup headName updateConstructors ->
             evaluateUpdate depth session name constructor rhs
       Call (Symbol headName) _
-        | headName `elem` ["Hold", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed"] ->
+        | headName `elem` ["Hold", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed", "Condition"] ->
             Right (expression, session)
       Call expressionHead arguments' -> do
         (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
@@ -151,10 +174,30 @@ evaluateSessionAt depth session expression
             (evaluatedArguments, argumentsSession) <- evaluateArguments depth headSession arguments'
             let evaluatedCall = Call evaluatedHead evaluatedArguments
                 normalizedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
-            reduced <- liftPureEvaluation argumentsSession (evaluate evaluatedCall)
-            if reduced == normalizedCall
-              then Right (reduced, argumentsSession)
-              else evaluateSessionAt (depth + 1) argumentsSession reduced
+                normalizedArguments = case normalizedCall of
+                  Call _ values -> values
+                  _ -> evaluatedArguments
+            case evaluatedHead of
+              Call (Symbol "Function") functionArguments -> do
+                instantiated <-
+                  liftPureEvaluation
+                    argumentsSession
+                    (instantiateFunctionCall functionArguments normalizedArguments)
+                if instantiated == normalizedCall
+                  then Right (instantiated, argumentsSession)
+                  else evaluateSessionAt (depth + 1) argumentsSession instantiated
+              _ -> do
+                (downValueReplacement, definitionSession) <-
+                  applySessionDownValue depth argumentsSession normalizedCall
+                case downValueReplacement of
+                  Just replacement ->
+                    Right (replacement, definitionSession)
+                  Nothing -> do
+                    reduced <-
+                      liftPureEvaluation definitionSession (evaluate evaluatedCall)
+                    if reduced == normalizedCall
+                      then Right (reduced, definitionSession)
+                      else evaluateSessionAt (depth + 1) definitionSession reduced
       _ -> Right (expression, session)
 
 evaluateSessionThrow
@@ -208,6 +251,241 @@ evaluateSessionOwnValues session = \case
     Call
       (Symbol "RuleDelayed")
       [Call (Symbol "HoldPattern") [symbol], value]
+
+evaluateSessionDownValues
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionDownValues session = \case
+  [Symbol name] ->
+    Right
+      ( Call
+          (Symbol "List")
+          (map downValueRule (Map.findWithDefault [] name (sessionDownValues session)))
+      , session
+      )
+  arguments' -> Right (Call (Symbol "DownValues") arguments', session)
+ where
+  downValueRule definition =
+    Call
+      (Symbol "RuleDelayed")
+      [ Call (Symbol "HoldPattern") [downValuePattern definition]
+      , downValueBody definition
+      ]
+
+evaluateDownValueAssignment
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateDownValueAssignment delayed depth session lhs rhs
+  | delayed = do
+      (normalizedLhs, normalizedSession) <-
+        normalizeAssignmentLhs depth session lhs
+      store normalizedSession normalizedLhs rhs
+  | otherwise = do
+      (value, valueSession) <- evaluateSessionAt (depth + 1) session rhs
+      (normalizedLhs, normalizedSession) <-
+        normalizeAssignmentLhs depth valueSession lhs
+      store normalizedSession normalizedLhs value
+ where
+  store updated normalizedLhs storedBody =
+    case downValueOwner normalizedLhs of
+      Just owner
+        | Set.notMember owner protectedDefinitionOwners ->
+            let definition = DownValue normalizedLhs storedBody delayed
+                result = if delayed then Symbol "Null" else storedBody
+             in Right (result, defineDownValue owner definition updated)
+      Just _
+        | delayed -> Right (Symbol "Null", updated)
+      _ ->
+        let assignmentHead = if delayed then "SetDelayed" else "Set"
+         in Right
+              ( Call (Symbol assignmentHead) [normalizedLhs, storedBody]
+              , updated
+              )
+
+evaluateDownValueUnset
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateDownValueUnset depth session lhs = do
+  (normalizedLhs, normalizedSession) <- normalizeAssignmentLhs depth session lhs
+  case downValueOwner normalizedLhs of
+    Just owner
+      | hasDownValue owner normalizedLhs normalizedSession ->
+          Right
+            ( Symbol "Null"
+            , removeDownValue owner normalizedLhs normalizedSession
+            )
+    _ -> Right (Symbol "$Failed", normalizedSession)
+
+normalizeAssignmentLhs
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+normalizeAssignmentLhs depth session expression = case expression of
+  Call (Symbol "Condition") [body, test] -> do
+    (normalizedBody, updated) <- normalizeAssignmentLhs depth session body
+    Right (Call (Symbol "Condition") [normalizedBody, test], updated)
+  Call (Symbol "HoldPattern") [_] -> Right (expression, session)
+  Call expressionHead arguments' -> do
+    (normalizedHead, headSession) <-
+      evaluateSessionAt (depth + 1) session expressionHead
+    (normalizedArguments, updated) <-
+      normalizeAssignmentArguments depth headSession arguments'
+    Right (Call normalizedHead normalizedArguments, updated)
+  _ -> Right (expression, session)
+
+normalizeAssignmentArguments
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult [Expr]
+normalizeAssignmentArguments _ session [] = Right ([], session)
+normalizeAssignmentArguments depth session (argument : rest)
+  | containsPatternSyntax argument = do
+      (remaining, updated) <-
+        normalizeAssignmentArguments depth session rest
+      Right (argument : remaining, updated)
+  | otherwise = do
+      (value, valueSession) <- evaluateSessionAt (depth + 1) session argument
+      (remaining, updated) <-
+        normalizeAssignmentArguments depth valueSession rest
+      Right (value : remaining, updated)
+
+containsPatternSyntax :: Expr -> Bool
+containsPatternSyntax = \case
+  Call (Symbol headName) _
+    | headName `elem` patternHeads -> True
+  Call expressionHead arguments' ->
+    containsPatternSyntax expressionHead || any containsPatternSyntax arguments'
+  _ -> False
+ where
+  patternHeads =
+    [ "Pattern"
+    , "Blank"
+    , "BlankSequence"
+    , "BlankNullSequence"
+    , "Optional"
+    , "PatternTest"
+    , "Alternatives"
+    , "Except"
+    , "Repeated"
+    , "RepeatedNull"
+    , "PatternSequence"
+    , "OrderlessPatternSequence"
+    , "Longest"
+    , "Shortest"
+    , "OptionsPattern"
+    , "Condition"
+    , "Verbatim"
+    ]
+
+downValueOwner :: Expr -> Maybe Text
+downValueOwner = \case
+  Call (Symbol wrapper) (body : _)
+    | wrapper `elem` ["Condition", "HoldPattern"] -> downValueOwner body
+  Call (Symbol name) _ -> Just name
+  _ -> Nothing
+
+-- These are the System-style heads implemented or structurally recognized by
+-- the Haskell evaluator. Until contexts and Attributes are ported, treating
+-- this explicit surface as protected prevents user downvalues from replacing
+-- core evaluation semantics while still allowing aliases between user heads.
+protectedDefinitionOwners :: Set.Set Text
+protectedDefinitionOwners =
+  Set.fromList
+    ( T.words
+        ( "Abs Accumulate AddTo AllTrue Alternatives And AnyTrue Append Apply Association AssociationMap "
+            <> "AssociationQ AssociationThread AtomQ Attributes Blank BlankNullSequence BlankSequence Block Boole Break "
+            <> "Cases Catch Catenate Ceiling Clear ClearAll ClearAttributes Complement CompoundExpression Condition "
+            <> "ContainsAll ContainsAny ContainsExactly ContainsNone Continue Count Counts Cycles Delete DeleteCases "
+            <> "Depth Differences Discard DivideBy Do DownValues Drop Equal EvenQ Except Extract Factorial Factorial2 "
+            <> "False First FirstCase FirstPosition Flatten Floor FractionalPart FreeQ Function Gather GatherBy Greater "
+            <> "GreaterEqual GroupBy Head Hold HoldForm HoldPattern Identity If IgnoringInactive Inactive Inequality "
+            <> "InheritedBlock Insert IntegerPart IntegerQ Internal`InheritedBlock Intersection Join Key KeyComplement "
+            <> "KeyDrop KeyExistsQ KeyIntersection KeyMap KeyMemberQ Keys KeySelect KeySort KeyTake KeyUnion KeyValueMap "
+            <> "KeyValuePattern Last Length LengthWhile Less LessEqual List ListQ Longest Lookup Map MapAt MatchQ Max "
+            <> "Mean Median MemberQ Merge Min Missing Module Most NValues NoneTrue Normal Not Null NumberQ OddQ Optional "
+            <> "OptionsPattern Or Order OrderedQ Ordering OrderlessPatternSequence OwnValues PadLeft PadRight Part Pattern "
+            <> "PatternSequence PatternTest Permutations Permute Pick Plus Position PositionIndex PositionLargest "
+            <> "PositionSmallest Power Prepend Product Protect Range Replace ReplaceAll ReplaceAt ReplacePart "
+            <> "ReplaceRepeated Rest Reverse ReverseSort ReverseSortBy Riffle RotateLeft RotateRight Round Rule "
+            <> "RuleDelayed SameQ Select SelectFirst Sequence Set SetAttributes SetDelayed Shortest Sign Slot Sort SortBy "
+            <> "Splice Sqrt StringQ Subsets SubtractFrom SubValues Sum Table Take TakeWhile Tally Throw Times TimesBy Total "
+            <> "True Unequal Unevaluated Union Unprotect UnsameQ Unset UpValues Values Verbatim With"
+        )
+    )
+
+applySessionDownValue
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult (Maybe Expr)
+applySessionDownValue depth session expression@(Call (Symbol name) _) =
+  applyDefinitions session (Map.findWithDefault [] name (sessionDownValues session))
+ where
+  applyDefinitions current [] = Right (Nothing, current)
+  applyDefinitions current (definition : rest) =
+    let (patternExpression, lhsCondition) =
+          downValueMatchPattern definition
+     in case
+          instantiatePatternMatch
+            expression
+            patternExpression
+            (downValueBody definition)
+        of
+          Nothing -> applyDefinitions current rest
+          Just replacement ->
+            case lhsCondition of
+              Nothing -> applyReplacement current definition replacement rest
+              Just condition ->
+                case
+                  instantiatePatternMatch
+                    expression
+                    patternExpression
+                    condition
+                of
+                  Nothing -> applyDefinitions current rest
+                  Just instantiatedCondition -> do
+                    (conditionResult, updated) <-
+                      evaluateSessionAt
+                        (depth + 1)
+                        current
+                        instantiatedCondition
+                    if conditionResult == Symbol "True"
+                      then applyReplacement updated definition replacement rest
+                      else applyDefinitions updated rest
+
+  applyReplacement current definition replacement rest =
+    case replacement of
+      Call (Symbol "Condition") [body, condition]
+        | downValueDelayed definition -> do
+            (conditionResult, updated) <-
+              evaluateSessionAt (depth + 1) current condition
+            if conditionResult == Symbol "True"
+              then evaluateReplacement updated body
+              else applyDefinitions updated rest
+      Call (Symbol "Condition") [_, _] ->
+        Right (Just replacement, current)
+      _ -> evaluateReplacement current replacement
+
+  evaluateReplacement current replacement = do
+    (result, updated) <-
+      evaluateSessionAt (depth + 1) current replacement
+    Right (Just result, updated)
+applySessionDownValue _ session _ = Right (Nothing, session)
+
+downValueMatchPattern :: DownValue -> (Expr, Maybe Expr)
+downValueMatchPattern definition = case downValuePattern definition of
+  Call (Symbol "Condition") [patternExpression, condition] ->
+    (patternExpression, Just condition)
+  patternExpression -> (patternExpression, Nothing)
 
 evaluateSessionCatch
   :: Int
@@ -471,12 +749,11 @@ flatIterationLoop retainValues depth session body iteratorSpecs = do
     case variable of
       Nothing -> collectWithoutVariable currentDepth resolvedSession values retained
       Just name ->
-        let previousDefinition =
-              Map.lookup name (sessionDefinitions resolvedSession)
+        let previousValues = snapshotSymbolValues name resolvedSession
          in collectWithVariable
               currentDepth
               name
-              previousDefinition
+              previousValues
               resolvedSession
               values
               retained
@@ -490,7 +767,7 @@ flatIterationLoop retainValues depth session body iteratorSpecs = do
     collectWithVariable _ name previous currentSession [] retainedValues =
       Right
         ( retainedValues
-        , restoreDefinition name previous currentSession
+        , restoreSymbolValues name previous currentSession
         )
     collectWithVariable nestedDepth name previous currentSession (value : rest) retainedValues =
       let bound = define name (ImmediateValue value) currentSession
@@ -519,8 +796,8 @@ tableLoop depth session body (iteratorSpec : remainingSpecs) = do
   case variable of
     Nothing -> collectWithoutVariable resolvedSession values []
     Just name ->
-      let previousDefinition = Map.lookup name (sessionDefinitions resolvedSession)
-       in collectWithVariable name previousDefinition resolvedSession values []
+      let previousValues = snapshotSymbolValues name resolvedSession
+       in collectWithVariable name previousValues resolvedSession values []
  where
   collectWithoutVariable current [] results =
     Right (evaluatedList (reverse results), current)
@@ -530,7 +807,7 @@ tableLoop depth session body (iteratorSpec : remainingSpecs) = do
   collectWithVariable name previous current [] results =
     Right
       ( evaluatedList (reverse results)
-      , restoreDefinition name previous current
+      , restoreSymbolValues name previous current
       )
   collectWithVariable name previous current (value : rest) results =
     let bound = define name (ImmediateValue value) current
@@ -623,16 +900,16 @@ liftIterationEvaluation =
 
 restoreIterationFailure
   :: Text
-  -> Maybe Definition
+  -> SymbolValueSnapshot
   -> IterationFailure
   -> IterationFailure
 restoreIterationFailure name previous = \case
   InvalidIterator failedSession ->
-    InvalidIterator (restoreDefinition name previous failedSession)
+    InvalidIterator (restoreSymbolValues name previous failedSession)
   IterationEvaluationFailure evaluationExit ->
     IterationEvaluationFailure
       ( mapEvaluationExitSession
-          (restoreDefinition name previous)
+          (restoreSymbolValues name previous)
           evaluationExit
       )
 
@@ -661,6 +938,8 @@ isHeldSessionHead (Symbol name) =
            , "Break"
            , "Continue"
            , "OwnValues"
+           , "DownValues"
+           , "Condition"
            , "Module"
            ]
 isHeldSessionHead _ = False
@@ -807,16 +1086,114 @@ define :: Text -> Definition -> EvaluationSession -> EvaluationSession
 define name value session =
   session {sessionDefinitions = Map.insert name value (sessionDefinitions session)}
 
-removeDefinitions :: [Text] -> EvaluationSession -> EvaluationSession
-removeDefinitions names session =
+defineDownValue :: Text -> DownValue -> EvaluationSession -> EvaluationSession
+defineDownValue name definition session =
+  session
+    { sessionDownValues =
+        Map.alter
+          (Just . insertDownValue definition . maybe [] id)
+          name
+          (sessionDownValues session)
+    }
+
+insertDownValue :: DownValue -> [DownValue] -> [DownValue]
+insertDownValue definition = replaceOrInsert
+ where
+  replaceOrInsert [] = [definition]
+  replaceOrInsert (existing : rest)
+    | downValuePattern existing == downValuePattern definition
+    , downValueConditionKey existing == downValueConditionKey definition =
+        definition : rest
+    | downValueSpecificity (downValuePattern definition)
+        < downValueSpecificity (downValuePattern existing) =
+        definition : existing : rest
+    | otherwise = existing : replaceOrInsert rest
+
+downValueConditionKey :: DownValue -> Maybe Expr
+downValueConditionKey definition = case downValueBody definition of
+  Call (Symbol "Condition") [_, condition] -> Just condition
+  _ -> Nothing
+
+downValueSpecificity :: Expr -> Int
+downValueSpecificity = \case
+  Call (Symbol "HoldPattern") [inner] -> downValueSpecificity inner
+  Call (Symbol "Pattern") [_, inner] -> downValueSpecificity inner
+  Call (Symbol "Blank") arguments' -> if null arguments' then 20 else 12
+  Call (Symbol "BlankSequence") arguments' ->
+    30 + sum (map downValueSpecificity arguments')
+  Call (Symbol "BlankNullSequence") arguments' ->
+    35 + sum (map downValueSpecificity arguments')
+  Call (Symbol "Condition") [inner, _] -> 2 + downValueSpecificity inner
+  Call (Symbol "PatternTest") [inner, _] -> 3 + downValueSpecificity inner
+  Call (Symbol "Optional") (inner : _) -> 5 + downValueSpecificity inner
+  Call (Symbol "Alternatives") alternatives ->
+    4 + minimumOrZero (map downValueSpecificity alternatives)
+  Call (Symbol repetitionHead) (inner : _)
+    | repetitionHead `elem` ["Repeated", "RepeatedNull"] ->
+        25 + downValueSpecificity inner
+  Call _ arguments' -> sum (map downValueSpecificity arguments')
+  _ -> 0
+ where
+  minimumOrZero [] = 0
+  minimumOrZero values = minimum values
+
+hasDownValue :: Text -> Expr -> EvaluationSession -> Bool
+hasDownValue name patternExpression session =
+  any
+    ((== patternExpression) . downValuePattern)
+    (Map.findWithDefault [] name (sessionDownValues session))
+
+removeDownValue :: Text -> Expr -> EvaluationSession -> EvaluationSession
+removeDownValue name patternExpression session =
+  session
+    { sessionDownValues =
+        Map.update removeMatching name (sessionDownValues session)
+    }
+ where
+  removeMatching definitions =
+    case filter ((/= patternExpression) . downValuePattern) definitions of
+      [] -> Nothing
+      retained -> Just retained
+
+removeOwnValues :: [Text] -> EvaluationSession -> EvaluationSession
+removeOwnValues names session =
   session
     { sessionDefinitions =
         foldl (flip Map.delete) (sessionDefinitions session) names
     }
 
+clearDefinitions :: [Text] -> EvaluationSession -> EvaluationSession
+clearDefinitions names session =
+  (removeOwnValues names session)
+    { sessionDownValues =
+        foldl (flip Map.delete) (sessionDownValues session) names
+    }
+
+snapshotSymbolValues :: Text -> EvaluationSession -> SymbolValueSnapshot
+snapshotSymbolValues name session =
+  SymbolValueSnapshot
+    { snapshotOwnValue = Map.lookup name (sessionDefinitions session)
+    , snapshotDownValues = Map.lookup name (sessionDownValues session)
+    }
+
+restoreSymbolValues
+  :: Text
+  -> SymbolValueSnapshot
+  -> EvaluationSession
+  -> EvaluationSession
+restoreSymbolValues name snapshot session =
+  let restoredOwn = restoreDefinition name (snapshotOwnValue snapshot) session
+   in restoredOwn
+        { sessionDownValues =
+            case snapshotDownValues snapshot of
+              Nothing -> Map.delete name (sessionDownValues restoredOwn)
+              Just definitions ->
+                Map.insert name definitions (sessionDownValues restoredOwn)
+        }
+
 restoreDefinition :: Text -> Maybe Definition -> EvaluationSession -> EvaluationSession
 restoreDefinition name = \case
-  Nothing -> removeDefinitions [name]
+  Nothing -> removeOwnValues [name]
   Just previous -> define name previous
 
 symbolName :: Expr -> Maybe Text

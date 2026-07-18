@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T21:47:09Z
-- Repository HEAD: 1247244815b5eb4ff7da89a09f83521b12063f9b
+- Updated (UTC): 2026-07-18T22:19:36Z
+- Repository HEAD: 2196eae9c542b96ac88dfb49b7dcacffb3bc442f
 
 ## Purpose
 
@@ -74,7 +74,7 @@ Haskell process clients.
 | FullForm parser | Calls and chained heads, exact and real atoms, shared Wolfram string decoding, nested comments, rationals, and complex atoms |
 | InputForm parser | Core calls, lists, associations, parts, blanks/named patterns/PatternTest, dotted and explicit-default optional patterns, named colon patterns, `..`/`...` repetition postfixes with precision-literal boundary handling, slots and pure functions, arithmetic, comparisons, Boolean operators, rules, replacements, conditions, assignments, application, and compound expressions |
 | Evaluator | Exact arithmetic with repeated symbolic term/factor collection, integer powers, exact rational-power radical extraction, explicit-number `Sqrt`, scalar and explicit-complex exact/source-real `Floor`/`Ceiling`/half-even `Round`/`IntegerPart`/`FractionalPart` with signed exact multiples, recursive-list `Min`/`Max` folding over explicit reals and symbolic residues, canonical ordering/sort-by/set operations, comparisons, Boolean control flow, structural and quantified collection predicates, predicate select/discard/first/while/pick operations over heads and associations, structural MatchQ blanks/typed and named bindings/PatternTest/alternatives/exceptions/conditions/backtracking sequence blanks, explicit optional defaults, bounded Repeated/RepeatedNull, named and orderless PatternSequence, Longest/Shortest allocation priorities, structural OptionsPattern capture, order-independent KeyValuePattern entry matching, and fixed-width IgnoringInactive structural views with original-value bindings plus level-aware traversal and binding/sequence-aware Cases/Replace/ReplaceAll/ReplaceRepeated/Position/FirstPosition transformations, canonical PositionLargest/PositionSmallest and grouped PositionIndex, exact-path pattern-aware ReplaceAt, numeric/key parts and extraction, ranges, multi-axis take/drop, append/prepend/join, rotation, bounded/named-head flattening, nested delete/insert/replace/map-at operations across list and association paths, mapping/application, association normalization/access/key transforms/value-aware structural operations/ordered grouping and key-set alignment, matrix totals, ordered tally/counts, catenation, differences, accumulation, riffle, containment, subsets/permutations, padding and exact mean/median, pure functions, exact replacement, held forms, bottom-up `Sequence`/`Splice`/`Nothing` argument normalization, and symbolic fallback |
-| Sessions | Immutable immediate/delayed symbol own-values with held `OwnValues` inspection, assignment and updates, unset/clear, sequential state, state-preserving internal evaluation exits, pattern-tagged non-local `Catch`/`Throw` with handlers, `Break`/`Continue` propagation with `Do` boundaries, held `Module` lexical scoping with monotone shared-suffix fresh symbols, independent eager/delayed initializers, capture-avoiding body renaming, persistent fresh definitions, and exit-safe initializer state, session-aware held control flow, Block-scoped held `Table`/`Do`/`Sum`/`Product` iteration over counts/exact ranges/value lists/nested dependent specifications with nested-list, side-effect-only, or flat arithmetic-fold results as appropriate, and fresh-session stateless command evaluation |
+| Sessions | Immutable immediate/delayed symbol own-values with held `OwnValues` inspection, ordered conditional downvalues with held `DownValues`, compound `Set`/`SetDelayed`/`Unset`, user-head alias retargeting and explicit protection for the implemented System-style head surface, exact-before-generic dispatch, recursive and memoizing rule bodies, session-native stateful pure functions, assignment and updates, unset/clear, sequential state, state-preserving internal evaluation exits, pattern-tagged non-local `Catch`/`Throw` with handlers, `Break`/`Continue` propagation with `Do` boundaries, held `Module` lexical scoping with monotone shared-suffix fresh symbols, independent eager/delayed initializers, capture-avoiding body renaming, persistent fresh definitions and closure rule tables, and exit-safe initializer state, session-aware held control flow, Block-scoped held `Table`/`Do`/`Sum`/`Product` iteration over counts/exact ranges/value lists/nested dependent specifications with complete own/down-value iterator snapshots and nested-list, side-effect-only, or flat arithmetic-fold results as appropriate, and fresh-session stateless command evaluation |
 | JSON | Deterministic codec, tagged expression round trips, arbitrary integer lexemes, protocol requests/responses, session-backed parse/evaluate source commands, and structured errors |
 | CLI | Expression, notebook, environment, kernel, FrontEnd, REPL, protocol, and inline-box command families with deterministic JSON, fresh evaluation sessions, and explicit exit behavior |
 | REPL | Persistent definitions, `In`/`InString`/`Out`, `%` output shorthand, `$Line`, Wolfram-style prompts, and `Exit`/`Quit` codes |
@@ -94,9 +94,9 @@ The following Engine areas still use the Python implementation and are not repre
 features yet:
 
 - the complete Wolfram tokenizer, box-language and StandardForm parser, including the broad named infix-operator precedence table;
-- downvalues/subvalues/upvalues, symbol attributes, remaining `With`/`Block` and `Return`/loop
-  scoping and control, real-valued iteration, polynomial/SymPy bridges, broad number theory, and
-  inexact numeric semantics;
+- subvalues/upvalues, symbol attributes, session-aware nested pattern tests, remaining `With`/`Block`
+  and `Return`/loop scoping and control, real-valued iteration, polynomial/SymPy bridges, broad
+  number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and byte-for-byte preservation of original box-expression formatting;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
