@@ -11,6 +11,7 @@ module Tungsten.InlineBoxes
   , composeInlineBoxPayload
   , extractBoxExpressions
   , extractInlineBoxesFromNotebookCell
+  , resolveNotebookCell
   ) where
 
 import qualified Data.Set as Set
@@ -114,7 +115,7 @@ extractInlineBoxesFromNotebookCell
   -> Bool
   -> Either InlineBoxError InlineBoxSelection
 extractInlineBoxesFromNotebookCell document selector prefix suffix objectIndex allObjects = do
-  record <- resolveCell document selector
+  record <- resolveNotebookCell document selector
   let boxExpressions = extractBoxExpressions (cellContent (cellRecordCell record))
       availableBoxes = zipWith boxRecord [0 ..] boxExpressions
   if null boxExpressions
@@ -171,8 +172,8 @@ selectOne record expressions boxes index
         , [boxes !! index]
         )
 
-resolveCell :: NotebookDocument -> CellSelector -> Either InlineBoxError CellRecord
-resolveCell document selector = case selector of
+resolveNotebookCell :: NotebookDocument -> CellSelector -> Either InlineBoxError CellRecord
+resolveNotebookCell document selector = case selector of
   SelectCellIndex index -> uniqueMatch [record | record <- rows, cellRecordIndex record == index]
   SelectCellPath path -> uniqueMatch [record | record <- rows, cellRecordPath record == path]
   SelectExpressionUuid uuid ->

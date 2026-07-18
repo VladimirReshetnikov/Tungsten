@@ -102,10 +102,35 @@ checkAssistant = do
               ]
           )
       finalized = finalizeAssistantAskPayload successfulPayload
+      cellPayload = case successfulPayload of
+        JsonObject values ->
+          JsonObject (Map.insert "source_cell" (JsonObject (Map.singleton "expression_uuid" (JsonString "abc"))) values)
+        _ -> successfulPayload
+      finalizedCell = finalizeAssistantAskCellPayload cellPayload
+      insertionPayload =
+        JsonObject
+          ( Map.fromList
+              [ ("inserted", JsonArray [JsonObject (Map.singleton "code" (JsonString "2 + 2"))])
+              , ("saved_notebook", JsonBool True)
+              , ("success", JsonBool True)
+              ]
+          )
+      finalizedInsertion =
+        finalizeAssistantAskCellPayloadWithInsertion cellPayload "first" (Just insertionPayload)
       script =
         buildAssistantAskScript
           "What is 2+2?" (Just "Answer Wolfram questions.")
           (Just "Use a fenced block.") Nothing Nothing Nothing
+      cellScript =
+        buildAssistantAskCellScript
+          "/tmp/example.nb" "Explain this cell."
+          (JsonObject (Map.singleton "expression_uuid" (JsonString "abc")))
+          Nothing Nothing Nothing
+      insertionScript =
+        buildAssistantInsertScript
+          "/tmp/example.nb"
+          (JsonObject (Map.singleton "expression_uuid" (JsonString "abc")))
+          ["2 + 2"] True
   installation <- discoverInstallation
   unavailable <- askAssistant installation {installationKernelCli = Nothing} "2+2" Nothing Nothing Nothing Nothing Nothing
   kernelUnavailable <- evaluateKernelText installation {installationKernelCli = Nothing} "2+2" Nothing False
@@ -121,6 +146,12 @@ checkAssistant = do
         JsonObject values -> values
         _ -> Map.empty
       unavailableMap = case assistantPayload unavailable of
+        JsonObject values -> values
+        _ -> Map.empty
+      finalizedCellMap = case finalizedCell of
+        JsonObject values -> values
+        _ -> Map.empty
+      finalizedInsertionMap = case finalizedInsertion of
         JsonObject values -> values
         _ -> Map.empty
       checks =
@@ -141,8 +172,32 @@ checkAssistant = do
         , assertEqual "assistant ask script loads Chatbook" True ("Needs[\"Wolfram`Chatbook`\" -> None]" `Text.isInfixOf` script)
         , assertEqual "assistant ask script evaluates chat cell" True ("tungstenChatCellEvaluate[chatCell, assistantNotebook]" `Text.isInfixOf` script)
         , assertEqual "assistant ask script has no notebook selector" False ("tungstenResolveCell" `Text.isInfixOf` script)
+        , assertEqual "assistant cell finalization mode" (Just (JsonString "none")) (Map.lookup "insert_mode" finalizedCellMap)
+        , assertEqual "assistant cell finalization insertion" (Just (JsonArray [])) (Map.lookup "inserted" finalizedCellMap)
+        , assertEqual "assistant cell finalization save" (Just (JsonBool False)) (Map.lookup "saved_notebook" finalizedCellMap)
+        , assertEqual "assistant cell script resolves notebook" True ("tungstenResolveNotebook" `Text.isInfixOf` cellScript)
+        , assertEqual "assistant cell script embeds selector" True ("expression_uuid" `Text.isInfixOf` cellScript)
+        , assertEqual "assistant cell script requests FrontEnd chat" True ("tungstenChatCellEvaluate" `Text.isInfixOf` cellScript)
+        , assertEqual "assistant insertion finalization mode" (Just (JsonString "first")) (Map.lookup "insert_mode" finalizedInsertionMap)
+        , assertEqual "assistant insertion finalization save" (Just (JsonBool True)) (Map.lookup "saved_notebook" finalizedInsertionMap)
+        , assertEqual "assistant insertion script writes input cells" True ("NotebookWrite[sourceNotebook, Cell[code, \"Input\"" `Text.isInfixOf` insertionScript)
+        , assertEqual "assistant insertion script saves notebook" True ("tungstenSaveNotebook = True" `Text.isInfixOf` insertionScript)
         ]
-  and <$> sequence checks
+  unitChecks <- and <$> sequence checks
+  cellRunCheck <- withTemporaryDirectory "tungsten-assistant" $ \temporary -> do
+    let notebookPath = temporary </> "assistant.nb"
+    TextIO.writeFile
+      notebookPath
+      "Notebook[{Cell[\"2+2\", \"Input\", ExpressionUUID -> \"assistant-cell\"]}]"
+    result <-
+      askAssistantCell
+        installation {installationKernelCli = Nothing}
+        notebookPath (SelectCellIndex 0) "Explain this." Nothing Nothing Nothing
+    assertEqual
+      "assistant selected-cell unavailable path"
+      (Right False)
+      (assistantSuccess <$> result)
+  pure (unitChecks && cellRunCheck)
 
 checkWolframStrings :: IO Bool
 checkWolframStrings = do
@@ -468,6 +523,22 @@ checkCliArguments = do
                 ]
             )
         , assertLeft "CLI Assistant request requires prompt" (parseCliArguments ["assistant", "ask"])
+        , assertEqual
+            "CLI selected-cell Assistant request"
+            ( Right
+                ( AssistantCliCommand
+                    ( AskCellAssistantCommand
+                        "demo.nb" (SelectCellPath [1, 0]) "Explain" "all" True True
+                        (Just "Be exact") Nothing Nothing True
+                    )
+                )
+            )
+            ( parseCliArguments
+                [ "assistant", "ask-cell", "--file", "demo.nb", "--cell-path", "1,0"
+                , "--question", "Explain", "--insert-all-wolfram-code-below", "--save"
+                , "--close-assistant-notebook", "--extra-instructions", "Be exact", "--require-success"
+                ]
+            )
         , assertEqual
             "CLI parser-corpus discover"
             ( Right
