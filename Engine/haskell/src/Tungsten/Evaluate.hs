@@ -200,6 +200,12 @@ reduceBuiltin headName values = case headName of
   "Pick" -> reducePick values
   "Boole" -> Right (reduceBoole values)
   "MatchQ" -> Right (reduceMatchQ values)
+  "FreeQ" -> reduceFreeQ values
+  "MemberQ" -> reduceMemberQ values
+  "Count" -> reduceCount values
+  "Cases" -> reduceCases values
+  "DeleteCases" -> reduceDeleteCases values
+  "FirstCase" -> reduceFirstCase values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -1551,6 +1557,218 @@ substituteBindings bindings expression = case expression of
     Just (SequenceBinding values) -> values
     Nothing -> [Symbol name]
   substituteArgument value = [substituteBindings bindings value]
+
+data LevelBounds = LevelBounds !Int !Int
+  deriving (Eq, Show)
+
+data PatternRecord = PatternRecord !Expr !Int !Int
+  deriving (Eq, Show)
+
+data PatternPathRecord = PatternPathRecord !Expr !Int !Int ![PathSelector]
+  deriving (Eq, Show)
+
+levelInfinity :: Int
+levelInfinity = maxBound `div` 4
+
+normalizeLevelSpec :: Expr -> Either EvaluationError LevelBounds
+normalizeLevelSpec = \case
+  Integer level
+    | level >= 0 -> Right (LevelBounds (if level == 0 then 0 else 1) (integerLevel level))
+    | otherwise -> Right (LevelBounds 1 (integerLevel level))
+  Symbol "Infinity" -> Right (LevelBounds 1 levelInfinity)
+  Call (Symbol "List") [bound] -> do
+    value <- normalizeLevelBound bound
+    Right (LevelBounds value value)
+  Call (Symbol "List") [lower, upper] ->
+    LevelBounds <$> normalizeLevelBound lower <*> normalizeLevelBound upper
+  _ -> Left (EvaluationError "an unsupported level specification was provided")
+ where
+  integerLevel value
+    | value > fromIntegral levelInfinity = levelInfinity
+    | value < fromIntegral (negate levelInfinity) = negate levelInfinity
+    | otherwise = fromIntegral value
+
+normalizeLevelBound :: Expr -> Either EvaluationError Int
+normalizeLevelBound (Integer value)
+  | value > fromIntegral levelInfinity = Right levelInfinity
+  | value < fromIntegral (negate levelInfinity) = Right (negate levelInfinity)
+  | otherwise = Right (fromIntegral value)
+normalizeLevelBound (Symbol "Infinity") = Right levelInfinity
+normalizeLevelBound _ = Left (EvaluationError "an unsupported level bound was provided")
+
+levelMatches :: LevelBounds -> Int -> Int -> Bool
+levelMatches (LevelBounds lower upper) positive negative
+  | lower >= 0 && upper >= 0 = lower <= positive && positive <= upper
+  | lower < 0 && upper < 0 = lower <= negative && negative <= upper
+  | lower >= 0 && upper < 0 = positive >= lower && negative <= upper
+  | otherwise = negative >= lower || positive <= upper
+
+collectPatternRecords :: Bool -> Int -> Expr -> [PatternRecord]
+collectPatternRecords includeHeads positive expression =
+  children <> [PatternRecord expression positive (negate (expressionDepth expression))]
+ where
+  children
+    | Just entries <- associationEntries expression =
+        headRecords <> concatMap (collectPatternRecords includeHeads (positive + 1) . associationEntryValue) entries
+    | Call expressionHead values <- expression =
+        headRecordsFor expressionHead <> concatMap (collectPatternRecords includeHeads (positive + 1)) values
+    | otherwise = []
+  headRecords =
+    if includeHeads
+      then collectPatternRecords includeHeads (positive + 1) (Symbol "Association")
+      else []
+  headRecordsFor expressionHead =
+    if includeHeads
+      then collectPatternRecords includeHeads (positive + 1) expressionHead
+      else []
+
+collectPatternPathRecords :: Int -> [PathSelector] -> Expr -> [PatternPathRecord]
+collectPatternPathRecords positive path expression =
+  children <> [PatternPathRecord expression positive (negate (expressionDepth expression)) path]
+ where
+  children
+    | Just entries <- associationEntries expression =
+        concat
+          [ collectPatternPathRecords
+              (positive + 1)
+              (path <> [KeySelector key])
+              value
+          | AssociationEntry _ key value <- entries
+          ]
+    | Call _ values <- expression =
+        concat
+          [ collectPatternPathRecords
+              (positive + 1)
+              (path <> [ArgumentSelector (fromIntegral index)])
+              value
+          | (index, value) <- zip [1 :: Int ..] values
+          ]
+    | otherwise = []
+
+patternMatches :: Expr -> Expr -> Bool
+patternMatches expression patternExpression =
+  maybe False (const True) (matchPattern [] expression patternExpression)
+
+matchingRecords :: LevelBounds -> Maybe Integer -> Expr -> [PatternRecord] -> [PatternRecord]
+matchingRecords bounds limit patternExpression = go limit
+ where
+  go _ [] = []
+  go (Just 0) _ = []
+  go remaining (record@(PatternRecord expression positive negative) : rest)
+    | levelMatches bounds positive negative
+    , patternMatches expression patternExpression =
+        record : go (subtractOne remaining) rest
+    | otherwise = go remaining rest
+  subtractOne Nothing = Nothing
+  subtractOne (Just count) = Just (count - 1)
+
+matchingPathRecords :: LevelBounds -> Maybe Integer -> Expr -> [PatternPathRecord] -> [PatternPathRecord]
+matchingPathRecords bounds limit patternExpression = go limit
+ where
+  go _ [] = []
+  go (Just 0) _ = []
+  go remaining (record@(PatternPathRecord expression positive negative _) : rest)
+    | levelMatches bounds positive negative
+    , patternMatches expression patternExpression =
+        record : go (subtractOne remaining) rest
+    | otherwise = go remaining rest
+  subtractOne Nothing = Nothing
+  subtractOne (Just count) = Just (count - 1)
+
+reduceFreeQ :: [Expr] -> Either EvaluationError Expr
+reduceFreeQ = \case
+  [expression, patternExpression] -> freeAtLevels expression patternExpression (Call (Symbol "List") [Integer 0, Symbol "Infinity"])
+  [expression, patternExpression, specification] -> freeAtLevels expression patternExpression specification
+  values -> Right (Call (Symbol "FreeQ") values)
+ where
+  freeAtLevels expression patternExpression specification = do
+    bounds <- normalizeLevelSpec specification
+    let matched =
+          matchingRecords bounds (Just 1) patternExpression (collectPatternRecords True 0 expression)
+    pure (boolean (null matched))
+
+reduceMemberQ :: [Expr] -> Either EvaluationError Expr
+reduceMemberQ = \case
+  [expression, patternExpression] -> memberAtLevels expression patternExpression (Call (Symbol "List") [Integer 1])
+  [expression, patternExpression, specification] -> memberAtLevels expression patternExpression specification
+  values -> Right (Call (Symbol "MemberQ") values)
+ where
+  memberAtLevels expression patternExpression specification = do
+    bounds <- normalizeLevelSpec specification
+    let matched =
+          matchingRecords bounds (Just 1) patternExpression (collectPatternRecords False 0 expression)
+    pure (boolean (not (null matched)))
+
+reduceCount :: [Expr] -> Either EvaluationError Expr
+reduceCount = \case
+  [expression, patternExpression] -> countAtLevels expression patternExpression (Call (Symbol "List") [Integer 1])
+  [expression, patternExpression, specification] -> countAtLevels expression patternExpression specification
+  values -> Right (Call (Symbol "Count") values)
+ where
+  countAtLevels expression patternExpression specification = do
+    bounds <- normalizeLevelSpec specification
+    let matched =
+          matchingRecords bounds Nothing patternExpression (collectPatternRecords False 0 expression)
+    pure (Integer (fromIntegral (length matched)))
+
+reduceCases :: [Expr] -> Either EvaluationError Expr
+reduceCases = \case
+  [expression, patternExpression] -> casesAtLevels expression patternExpression (Integer 1) Nothing
+  [expression, patternExpression, specification] -> casesAtLevels expression patternExpression specification Nothing
+  [expression, patternExpression, specification, limit] -> casesAtLevels expression patternExpression specification (Just limit)
+  values -> Right (Call (Symbol "Cases") values)
+ where
+  casesAtLevels expression patternExpression specification limit
+    | isPropertySelection patternExpression =
+        Right (Call (Symbol "Cases") (expression : patternExpression : specification : maybe [] pure limit))
+    | otherwise = do
+        bounds <- normalizeLevelSpec specification
+        normalizedLimit <- selectionLimit "Cases" limit
+        let matched =
+              matchingRecords bounds normalizedLimit patternExpression (collectPatternRecords False 0 expression)
+        pure (evaluatedList [value | PatternRecord value _ _ <- matched])
+
+reduceDeleteCases :: [Expr] -> Either EvaluationError Expr
+reduceDeleteCases = \case
+  [expression, patternExpression] -> deleteAtLevels expression patternExpression (Integer 1) Nothing
+  [expression, patternExpression, specification] -> deleteAtLevels expression patternExpression specification Nothing
+  [expression, patternExpression, specification, limit] -> deleteAtLevels expression patternExpression specification (Just limit)
+  values -> Right (Call (Symbol "DeleteCases") values)
+ where
+  deleteAtLevels expression patternExpression specification limit = do
+    bounds <- normalizeLevelSpec specification
+    normalizedLimit <- selectionLimit "DeleteCases" limit
+    let matched =
+          matchingPathRecords
+            bounds
+            normalizedLimit
+            patternExpression
+            (collectPatternPathRecords 0 [] expression)
+        paths = [path | PatternPathRecord _ _ _ path <- matched]
+    if [] `elem` paths
+      then Right (Call (Symbol "Sequence") [])
+      else foldM deletePath expression (sortOperationPaths paths)
+  deletePath expression path =
+    maybe
+      (Left (EvaluationError "DeleteCases encountered an invalid matched path"))
+      Right
+      (deleteAtPath path expression)
+
+reduceFirstCase :: [Expr] -> Either EvaluationError Expr
+reduceFirstCase = \case
+  [expression, patternExpression] -> firstAtLevels expression patternExpression Nothing (Integer 1)
+  [expression, patternExpression, defaultValue] -> firstAtLevels expression patternExpression (Just defaultValue) (Integer 1)
+  [expression, patternExpression, defaultValue, specification] ->
+    firstAtLevels expression patternExpression (Just defaultValue) specification
+  values -> Right (Call (Symbol "FirstCase") values)
+ where
+  firstAtLevels expression patternExpression defaultValue specification = do
+    bounds <- normalizeLevelSpec specification
+    let matched =
+          matchingRecords bounds (Just 1) patternExpression (collectPatternRecords False 0 expression)
+    case matched of
+      PatternRecord value _ _ : _ -> Right value
+      [] -> Right (maybe (Call (Symbol "Missing") [String "NotFound"]) id defaultValue)
 
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
