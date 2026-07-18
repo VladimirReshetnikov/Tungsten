@@ -1475,6 +1475,8 @@ matchPattern bindings expression patternExpression = case patternExpression of
     matched <- matchPattern bindings expression innerPattern
     testResult <- either (const Nothing) Just (evaluate (Call test [expression]))
     if testResult == Symbol "True" then Just matched else Nothing
+  Call (Symbol "KeyValuePattern") [specification] ->
+    matchKeyValuePattern bindings expression specification
   Call (Symbol "HoldPattern") [innerPattern] ->
     matchPattern bindings expression innerPattern
   Call (Symbol "Longest") (innerPattern : _) ->
@@ -1495,6 +1497,42 @@ matchPattern bindings expression patternExpression = case patternExpression of
   firstMatch (alternative : rest) = case matchPattern bindings expression alternative of
     Just matched -> Just matched
     Nothing -> firstMatch rest
+
+matchKeyValuePattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
+matchKeyValuePattern bindings expression specification = do
+  elements <- keyValuePatternElements expression
+  matchItems bindings elements (keyValuePatternItems specification) []
+ where
+  matchItems :: PatternBindings -> [Expr] -> [Expr] -> [Int] -> Maybe PatternBindings
+  matchItems current _ [] _ = Just current
+  matchItems current elements (patternExpression : remainingPatterns) usedIndices =
+    tryElements 0 elements
+   where
+    tryElements _ [] = Nothing
+    tryElements index (element : rest)
+      | index `elem` usedIndices = tryElements (index + 1) rest
+      | otherwise = case matchPattern current element patternExpression of
+          Nothing -> tryElements (index + 1) rest
+          Just matched ->
+            case matchItems matched elements remainingPatterns (index : usedIndices) of
+              Just completed -> Just completed
+              Nothing -> tryElements (index + 1) rest
+
+keyValuePatternElements :: Expr -> Maybe [Expr]
+keyValuePatternElements association
+  | Just entries <- associationEntries association =
+      Just
+        [ Call (Symbol ruleHead) [key, value]
+        | AssociationEntry ruleHead key value <- entries
+        ]
+keyValuePatternElements (Call (Symbol "List") values) = do
+  _ <- traverse ruleEntry values
+  Just values
+keyValuePatternElements _ = Nothing
+
+keyValuePatternItems :: Expr -> [Expr]
+keyValuePatternItems (Call (Symbol "List") values) = values
+keyValuePatternItems specification = [specification]
 
 matchPatternArguments :: PatternBindings -> [Expr] -> [Expr] -> Maybe PatternBindings
 matchPatternArguments bindings [] [] = Just bindings
