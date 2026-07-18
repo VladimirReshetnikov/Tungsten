@@ -6,6 +6,7 @@ module Tungsten.Cli
   ( CliCommand (..)
   , ExpressionCommand (..)
   , NotebookCommand (..)
+  , FrontEndCommand (..)
   , SourceSpec (..)
   , parseCliArguments
   , decodeNotebookPatches
@@ -33,6 +34,7 @@ import System.IO
 import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
 import Tungsten.Discovery
 import Tungsten.Expression
+import Tungsten.Frontend
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Licensing
@@ -43,8 +45,9 @@ import Tungsten.Repl (runRepl)
 data CliCommand
   = ProtocolCommand
   | ReplCommand !Bool
-  | EnvironmentCommand
+  | EnvironmentCommand !Bool
   | KernelCommand !SourceSpec !(Maybe FilePath) !Bool !Bool
+  | FrontEndCommand !FrontEndCommand
   | ExpressionCliCommand !ExpressionCommand !SourceSpec !Text
   | NotebookCliCommand !NotebookCommand
   | HelpCommand
@@ -62,18 +65,35 @@ data NotebookCommand
   | PatchNotebookCommand !FilePath !FilePath !(Maybe FilePath)
   deriving (Eq, Show)
 
+data FrontEndCommand
+  = ProbeFrontEndCommand !Bool
+  | RunFrontEndCommand !Text !Bool !Bool
+  | OpenFrontEndNotebookCommand !FilePath !Bool
+  | OpenFrontEndDocumentationCommand !Text !Bool
+  | ExecuteFrontEndTokenCommand !Text !(Maybe FilePath) !Bool
+  deriving (Eq, Show)
+
 parseCliArguments :: [String] -> Either Text CliCommand
 parseCliArguments = \case
   [] -> Right ProtocolCommand
   ["protocol"] -> Right ProtocolCommand
   ["repl"] -> Right (ReplCommand True)
   ["repl", "--no-banner"] -> Right (ReplCommand False)
-  ["env", "show"] -> Right EnvironmentCommand
+  ["env", "show"] -> Right (EnvironmentCommand False)
+  ["env", "show", "--probe"] -> Right (EnvironmentCommand True)
   ["--help"] -> Right HelpCommand
   ["-h"] -> Right HelpCommand
   "expr" : "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
   "expr" : "evaluate" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
   "kernel" : "eval" : arguments' -> parseKernelArguments arguments'
+  "frontend" : "probe" : arguments' ->
+    FrontEndCommand . ProbeFrontEndCommand <$> parseRequireSuccess arguments'
+  "frontend" : "run" : arguments' -> parseFrontEndRunArguments arguments'
+  "frontend" : "open-notebook" : arguments' -> parseFrontEndOpenNotebookArguments arguments'
+  "frontend" : "open-doc" : identifier : arguments' ->
+    FrontEndCommand . OpenFrontEndDocumentationCommand (T.pack identifier)
+      <$> parseRequireSuccess arguments'
+  "frontend" : "token" : token : arguments' -> parseFrontEndTokenArguments (T.pack token) arguments'
   "notebook" : "inspect" : arguments' -> parseNotebookInspectArguments arguments'
   "notebook" : "create" : arguments' -> parseNotebookCreateArguments arguments'
   "notebook" : "patch" : arguments' -> parseNotebookPatchArguments arguments'
@@ -105,6 +125,48 @@ parseKernelArguments = go Nothing Nothing False False
   go _ _ _ _ [flag]
     | flag `elem` ["--code", "--file", "--working-directory"] = Left (T.pack flag <> " requires a value")
   go _ _ _ _ (flag : _) = Left ("unknown kernel eval option: " <> T.pack flag)
+
+parseRequireSuccess :: [String] -> Either Text Bool
+parseRequireSuccess [] = Right False
+parseRequireSuccess ["--require-success"] = Right True
+parseRequireSuccess _ = Left "only --require-success is accepted for this FrontEnd command"
+
+parseFrontEndRunArguments :: [String] -> Either Text CliCommand
+parseFrontEndRunArguments = go Nothing True False
+ where
+  go (Just code) wrap requireSuccess [] =
+    Right (FrontEndCommand (RunFrontEndCommand code wrap requireSuccess))
+  go Nothing _ _ [] = Left "frontend run requires --code TEXT"
+  go Nothing wrap requireSuccess ("--code" : value : rest) =
+    go (Just (T.pack value)) wrap requireSuccess rest
+  go (Just _) _ _ ("--code" : _ : _) = Left "frontend run accepts --code only once"
+  go code _ requireSuccess ("--no-wrap" : rest) = go code False requireSuccess rest
+  go code wrap _ ("--require-success" : rest) = go code wrap True rest
+  go _ _ _ ["--code"] = Left "--code requires a value"
+  go _ _ _ (flag : _) = Left ("unknown frontend run option: " <> T.pack flag)
+
+parseFrontEndOpenNotebookArguments :: [String] -> Either Text CliCommand
+parseFrontEndOpenNotebookArguments = go Nothing False
+ where
+  go (Just path) requireSuccess [] =
+    Right (FrontEndCommand (OpenFrontEndNotebookCommand path requireSuccess))
+  go Nothing _ [] = Left "frontend open-notebook requires --file PATH"
+  go Nothing requireSuccess ("--file" : value : rest) = go (Just value) requireSuccess rest
+  go (Just _) _ ("--file" : _ : _) = Left "frontend open-notebook accepts --file only once"
+  go path _ ("--require-success" : rest) = go path True rest
+  go _ _ ["--file"] = Left "--file requires a value"
+  go _ _ (flag : _) = Left ("unknown frontend open-notebook option: " <> T.pack flag)
+
+parseFrontEndTokenArguments :: Text -> [String] -> Either Text CliCommand
+parseFrontEndTokenArguments token = go Nothing False
+ where
+  go notebookPath requireSuccess [] =
+    Right (FrontEndCommand (ExecuteFrontEndTokenCommand token notebookPath requireSuccess))
+  go Nothing requireSuccess ("--file" : value : rest) = go (Just value) requireSuccess rest
+  go (Just _) _ ("--file" : _ : _) = Left "frontend token accepts --file only once"
+  go path _ ("--require-success" : rest) = go path True rest
+  go _ _ ["--file"] = Left "--file requires a value"
+  go _ _ (flag : _) = Left ("unknown frontend token option: " <> T.pack flag)
 
 parseNotebookCreateArguments :: [String] -> Either Text CliCommand
 parseNotebookCreateArguments = go Nothing Nothing []
@@ -173,9 +235,15 @@ runCli arguments' = case parseCliArguments arguments' of
   Right HelpCommand -> TextIO.putStrLn usage *> pure 0
   Right ProtocolCommand -> configureHandles *> serveProtocol *> pure 0
   Right (ReplCommand showBanner) -> configureHandles *> runRepl showBanner
-  Right EnvironmentCommand -> do
+  Right (EnvironmentCommand includeProbe) -> do
     installation <- discoverInstallation
-    emitJson (installationPayload installation)
+    payload <- if includeProbe
+      then do
+        evaluation <- evaluateKernelText installation "2+2" Nothing False
+        frontEnd <- probeFrontEnd installation
+        pure (addEnvironmentProbe evaluation frontEnd (installationPayload installation))
+      else pure (installationPayload installation)
+    emitJson payload
     pure 0
   Right (KernelCommand sourceSpec workingDirectory requireFrontEnd requireSuccess) -> do
     installation <- discoverInstallation
@@ -186,6 +254,7 @@ runCli arguments' = case parseCliArguments arguments' of
     pure $ if requireSuccess && kernelSuccess result == Just False
       then 1
       else if kernelEvaluationAvailable result then 0 else 2
+  Right (FrontEndCommand command) -> runFrontEndCommand command
   Right (ExpressionCliCommand command sourceSpec form) ->
     runExpressionCommand command sourceSpec form
   Right (NotebookCliCommand command) -> runNotebookCommand command
@@ -507,6 +576,42 @@ jsonMaybeDouble = maybe JsonNull jsonDouble
 jsonDouble :: Double -> JsonValue
 jsonDouble = JsonNumber . T.pack . show
 
+addEnvironmentProbe :: KernelEvaluationResult -> KernelEvaluationResult -> JsonValue -> JsonValue
+addEnvironmentProbe evaluation frontEnd (JsonObject values) =
+  JsonObject
+    ( Map.insert
+        "probe"
+        ( JsonObject
+            ( Map.fromList
+                [ ("evaluation", kernelPayload evaluation)
+                , ("front_end", kernelPayload frontEnd)
+                ]
+            )
+        )
+        values
+    )
+addEnvironmentProbe _ _ payload = payload
+
+runFrontEndCommand :: FrontEndCommand -> IO Int
+runFrontEndCommand command = do
+  installation <- discoverInstallation
+  (result, requireSuccess) <- case command of
+    ProbeFrontEndCommand required -> (,required) <$> probeFrontEnd installation
+    RunFrontEndCommand code wrap required -> (,required) <$> runFrontEnd installation code wrap
+    OpenFrontEndNotebookCommand path required -> (,required) <$> openNotebook installation path
+    OpenFrontEndDocumentationCommand identifier required ->
+      (,required) <$> openDocumentation installation identifier
+    ExecuteFrontEndTokenCommand token notebookPath required ->
+      (,required) <$> executeFrontEndToken installation token notebookPath
+  emitJson (kernelPayload result)
+  pure (kernelCommandExit requireSuccess result)
+
+kernelCommandExit :: Bool -> KernelEvaluationResult -> Int
+kernelCommandExit requireSuccess result
+  | requireSuccess && kernelSuccess result == Just False = 1
+  | kernelEvaluationAvailable result = 0
+  | otherwise = 2
+
 parseSource :: Text -> Text -> Either Text (Text, Expr)
 parseSource requestedForm source = case T.toLower (T.strip requestedForm) of
   "input" -> parseWith "input" parseInputForm
@@ -600,6 +705,11 @@ usage =
     , "  tungsten-hs repl [--no-banner]"
     , "  tungsten-hs env show"
     , "  tungsten-hs kernel eval (--code TEXT | --file PATH) [--working-directory PATH] [--front-end] [--require-success]"
+    , "  tungsten-hs frontend probe [--require-success]"
+    , "  tungsten-hs frontend run --code TEXT [--no-wrap] [--require-success]"
+    , "  tungsten-hs frontend open-notebook --file PATH [--require-success]"
+    , "  tungsten-hs frontend open-doc IDENTIFIER [--require-success]"
+    , "  tungsten-hs frontend token TOKEN [--file PATH] [--require-success]"
     , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs notebook inspect --file PATH"

@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-07-18T14:32:01Z
-- Repository HEAD: 1f4051df6710e41e1dc465b6342140e8fca29ec1
+- Updated (UTC): 2026-07-18T14:36:26Z
+- Repository HEAD: 4aeb5b3642693b90ae6c95d6afa6943a2139d754
 - Related code:
   - `Engine/src/tungsten/`
   - `Engine/haskell/`
@@ -337,6 +337,7 @@ cabal run tungsten-hs -- notebook inspect --file example.nb
 cabal run tungsten-hs -- repl
 cabal run tungsten-hs -- env show
 cabal run tungsten-hs -- kernel eval --code '2+2'
+cabal run tungsten-hs -- frontend probe
 ```
 
 The Haskell port currently covers the kernel-free expression and structural notebook foundations. See

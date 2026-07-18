@@ -309,7 +309,8 @@ checkDiscovery = do
         , assertEqual "skip empty Wolfram version fragment" [15, 1] (parseVersion "15..1")
         , assertEqual "stop at nonnumeric Wolfram version fragment" [15] (parseVersion "15.preview.1")
         , assertEqual "rank desktop before engine and newer first" [desktop15, desktop14, engine16] (sortInstallations [engine16, desktop14, desktop15])
-        , assertEqual "CLI environment command" (Right EnvironmentCommand) (parseCliArguments ["env", "show"])
+        , assertEqual "CLI environment command" (Right (EnvironmentCommand False)) (parseCliArguments ["env", "show"])
+        , assertEqual "CLI environment probe" (Right (EnvironmentCommand True)) (parseCliArguments ["env", "show", "--probe"])
         , assertEqual
             "CLI kernel command"
             (Right (KernelCommand (InlineSource "2+2") (Just "/tmp") True True))
@@ -321,6 +322,22 @@ checkDiscovery = do
         , assertLeft
             "CLI kernel requires source"
             (parseCliArguments ["kernel", "eval", "--front-end"])
+        , assertEqual
+            "CLI FrontEnd run"
+            (Right (FrontEndCommand (RunFrontEndCommand "CreateDocument[]" False True)))
+            (parseCliArguments ["frontend", "run", "--require-success", "--no-wrap", "--code", "CreateDocument[]"])
+        , assertEqual
+            "CLI FrontEnd notebook"
+            (Right (FrontEndCommand (OpenFrontEndNotebookCommand "demo.nb" False)))
+            (parseCliArguments ["frontend", "open-notebook", "--file", "demo.nb"])
+        , assertEqual
+            "CLI FrontEnd documentation"
+            (Right (FrontEndCommand (OpenFrontEndDocumentationCommand "paclet:ref/NotebookGet" True)))
+            (parseCliArguments ["frontend", "open-doc", "paclet:ref/NotebookGet", "--require-success"])
+        , assertEqual
+            "CLI FrontEnd token"
+            (Right (FrontEndCommand (ExecuteFrontEndTokenCommand "EvaluateCells" (Just "demo.nb") False)))
+            (parseCliArguments ["frontend", "token", "EvaluateCells", "--file", "demo.nb"])
         ]
   and <$> sequence checks
 

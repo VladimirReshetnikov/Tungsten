@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-07-18T14:32:01Z
-- Repository HEAD: 1f4051df6710e41e1dc465b6342140e8fca29ec1
+- Updated (UTC): 2026-07-18T14:36:26Z
+- Repository HEAD: 4aeb5b3642693b90ae6c95d6afa6943a2139d754
 
 ## What this docs tree is for
 

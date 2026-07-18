@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T14:32:01Z
-- Repository HEAD: 1f4051df6710e41e1dc465b6342140e8fca29ec1
+- Updated (UTC): 2026-07-18T14:36:26Z
+- Repository HEAD: 4aeb5b3642693b90ae6c95d6afa6943a2139d754
 
 ## Purpose
 
@@ -31,6 +31,8 @@ cabal run tungsten-hs -- notebook patch --file example.nb --spec patch.json --ou
 cabal run tungsten-hs -- repl
 cabal run tungsten-hs -- env show
 cabal run tungsten-hs -- kernel eval --code '2+2'
+cabal run tungsten-hs -- env show --probe
+cabal run tungsten-hs -- frontend probe
 ```
 
 Parse a file or select FullForm explicitly:
@@ -67,6 +69,7 @@ Haskell process clients.
 | REPL | Persistent definitions, `In`/`InString`/`Out`, `%` output shorthand, `$Line`, Wolfram-style prompts, and `Exit`/`Quit` codes |
 | Discovery | Explicit `TUNGSTEN_WOLFRAM_HOME`, product-family selection, installed-version ranking, PATH fallback, executable/docs/license candidates, cache paths, and `env show` JSON |
 | Kernel runner | Temporary source/wrapper/result isolation, stable temporary mathpass deduplication, held parsing, `EvaluationData` metadata, evaluated `Print` capture, optional `UsingFrontEnd`, process output, JSON decoding, and `kernel eval` exit behavior |
+| FrontEnd | Hidden probing, wrapped/unwrapped code, notebook open, direct documentation locate, token execution, safely escaped code builders, and the `frontend` CLI family |
 | Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, typed immutable patches, and `notebook inspect`/`notebook create`/`notebook patch` CLI commands |
 
 ## Compatibility boundary
@@ -78,7 +81,7 @@ features yet:
 - downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and inline box object workflows;
-- cross-process license launch gates, stale-process cleanup, license-seat waiting, and general FrontEnd automation;
+- cross-process license launch gates, stale-process cleanup, license-seat waiting, documentation-index-backed identifier resolution, and Notebook Assistant automation;
 - local documentation indexing, parser-corpus orchestration, the REPL, and Notebook Assistant;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
