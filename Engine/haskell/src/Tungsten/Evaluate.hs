@@ -97,6 +97,10 @@ reduceCall expression = case expression of
     reduceBuiltin "SortBy" [subject, function]
   Call (Call (Symbol "ReverseSortBy") [function]) [subject] ->
     reduceBuiltin "ReverseSortBy" [subject, function]
+  Call (Call (Symbol "Select") [criterion]) [subject] ->
+    reduceBuiltin "Select" [subject, criterion]
+  Call (Call (Symbol "Discard") [criterion]) [subject] ->
+    reduceBuiltin "Discard" [subject, criterion]
   Call (Symbol headName) values -> reduceBuiltin headName values
   _ -> Right expression
 
@@ -188,6 +192,13 @@ reduceBuiltin headName values = case headName of
   "Union" -> reduceSetOperation SetUnion values
   "Intersection" -> reduceSetOperation SetIntersection values
   "Complement" -> reduceSetOperation SetComplement values
+  "Select" -> reduceSelect False values
+  "Discard" -> reduceSelect True values
+  "SelectFirst" -> reduceSelectFirst values
+  "TakeWhile" -> reduceTakeWhile values
+  "LengthWhile" -> reduceLengthWhile values
+  "Pick" -> reducePick values
+  "Boole" -> Right (reduceBoole values)
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -1280,6 +1291,112 @@ uniqueCanonical = foldl' appendUnique []
   appendUnique retained value
     | value `elem` retained = retained
     | otherwise = retained <> [value]
+
+predicateMatches :: Expr -> Expr -> Either EvaluationError Bool
+predicateMatches criterion value =
+  (== Symbol "True") <$> evaluate (Call criterion [value])
+
+selectionLimit :: Text -> Maybe Expr -> Either EvaluationError (Maybe Integer)
+selectionLimit _ Nothing = Right Nothing
+selectionLimit _ (Just (Symbol "Infinity")) = Right Nothing
+selectionLimit _ (Just (Integer limit))
+  | limit >= 0 = Right (Just limit)
+selectionLimit operation _ =
+  Left (EvaluationError (operation <> " expects a non-negative integer or Infinity limit"))
+
+reduceSelect :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceSelect discardMode = \case
+  [subject, criterion] -> selectSubject subject criterion Nothing
+  [subject, criterion, limit] -> selectSubject subject criterion (Just limit)
+  values -> Right (Call (Symbol operation) values)
+ where
+  selectSubject subject criterion limit
+    | isPropertySelection criterion =
+        Right (Call (Symbol operation) (subject : criterion : maybe [] pure limit))
+    | otherwise = do
+        items <- orderedItems operation subject
+        remaining <- selectionLimit operation limit
+        (_, selected) <- foldM (selectItem criterion) (remaining, []) items
+        pure (rebuildOrdered subject selected)
+  selectItem criterion (remaining, retained) item@(OrderedItem _ value _ _) = do
+    matches <- predicateMatches criterion value
+    let mayConsume = maybe True (> 0) remaining
+        consumes = matches && mayConsume
+        nextRemaining = case remaining of
+          Just count | consumes -> Just (count - 1)
+          _ -> remaining
+        keep = if discardMode then not consumes else consumes
+    pure (nextRemaining, if keep then retained <> [item] else retained)
+  operation = if discardMode then "Discard" else "Select"
+
+isPropertySelection :: Expr -> Bool
+isPropertySelection (Call (Symbol "Rule") [_, _]) = True
+isPropertySelection (Call (Symbol "RuleDelayed") [_, _]) = True
+isPropertySelection _ = False
+
+reduceSelectFirst :: [Expr] -> Either EvaluationError Expr
+reduceSelectFirst = \case
+  [subject, criterion] -> selectFirst subject criterion Nothing
+  [subject, criterion, defaultValue] -> selectFirst subject criterion (Just defaultValue)
+  values -> Right (Call (Symbol "SelectFirst") values)
+ where
+  selectFirst subject criterion defaultValue
+    | isPropertySelection criterion =
+        Right (Call (Symbol "SelectFirst") (subject : criterion : maybe [] pure defaultValue))
+    | otherwise = do
+        items <- orderedItems "SelectFirst" subject
+        findMatch criterion defaultValue items
+  findMatch _ defaultValue [] =
+    Right (maybe (Call (Symbol "Missing") [String "NotFound"]) id defaultValue)
+  findMatch criterion defaultValue (OrderedItem _ value _ _ : rest) = do
+    matches <- predicateMatches criterion value
+    if matches then Right value else findMatch criterion defaultValue rest
+
+reduceTakeWhile :: [Expr] -> Either EvaluationError Expr
+reduceTakeWhile [subject, criterion] = do
+  items <- orderedItems "TakeWhile" subject
+  retained <- takeMatching items
+  pure (rebuildOrdered subject retained)
+ where
+  takeMatching [] = Right []
+  takeMatching (item@(OrderedItem _ value _ _) : rest) = do
+    matches <- predicateMatches criterion value
+    if matches then (item :) <$> takeMatching rest else Right []
+reduceTakeWhile values = Right (Call (Symbol "TakeWhile") values)
+
+reduceLengthWhile :: [Expr] -> Either EvaluationError Expr
+reduceLengthWhile [subject, criterion] = do
+  items <- orderedItems "LengthWhile" subject
+  Integer . fromIntegral <$> matchingLength items
+ where
+  matchingLength [] = Right (0 :: Int)
+  matchingLength (OrderedItem _ value _ _ : rest) = do
+    matches <- predicateMatches criterion value
+    if matches then (1 +) <$> matchingLength rest else Right 0
+reduceLengthWhile values = Right (Call (Symbol "LengthWhile") values)
+
+reducePick :: [Expr] -> Either EvaluationError Expr
+reducePick = \case
+  [subject, selector] -> pickSubject subject selector (Symbol "True")
+  [subject, selector, pattern] -> pickSubject subject selector pattern
+  values -> Right (Call (Symbol "Pick") values)
+ where
+  pickSubject subject (Call (Symbol "List") selectors) pattern = do
+    items <- orderedItems "Pick" subject
+    if length items /= length selectors
+      then Left (EvaluationError "Pick expects one selector per first-level value")
+      else
+        pure
+          ( rebuildOrdered
+              subject
+              [item | (item, selector) <- zip items selectors, selector == pattern]
+          )
+  pickSubject _ _ _ = Left (EvaluationError "Pick expects a selector list")
+
+reduceBoole :: [Expr] -> Expr
+reduceBoole [Symbol "True"] = Integer 1
+reduceBoole [Symbol "False"] = Integer 0
+reduceBoole values = Call (Symbol "Boole") values
 
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
