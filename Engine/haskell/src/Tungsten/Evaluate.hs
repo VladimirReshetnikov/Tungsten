@@ -199,6 +199,7 @@ reduceBuiltin headName values = case headName of
   "LengthWhile" -> reduceLengthWhile values
   "Pick" -> reducePick values
   "Boole" -> Right (reduceBoole values)
+  "MatchQ" -> Right (reduceMatchQ values)
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -1397,6 +1398,159 @@ reduceBoole :: [Expr] -> Expr
 reduceBoole [Symbol "True"] = Integer 1
 reduceBoole [Symbol "False"] = Integer 0
 reduceBoole values = Call (Symbol "Boole") values
+
+data PatternBinding
+  = ScalarBinding !Expr
+  | SequenceBinding ![Expr]
+  deriving (Eq, Show)
+
+type PatternBindings = [(Text, PatternBinding)]
+
+data SequencePattern = SequencePattern
+  { sequenceMinimum :: !Int
+  , sequenceHead :: !(Maybe Expr)
+  , sequenceName :: !(Maybe Text)
+  , sequenceCondition :: !(Maybe Expr)
+  }
+  deriving (Eq, Show)
+
+reduceMatchQ :: [Expr] -> Expr
+reduceMatchQ [expression, patternExpression] =
+  boolean (maybe False (const True) (matchPattern [] expression patternExpression))
+reduceMatchQ values = Call (Symbol "MatchQ") values
+
+matchPattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
+matchPattern bindings expression patternExpression = case patternExpression of
+  Call (Symbol "Verbatim") [literal] ->
+    if expression == literal then Just bindings else Nothing
+  Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
+    matched <- matchPattern bindings expression innerPattern
+    bindScalar name expression matched
+  Call (Symbol "Blank") [] -> Just bindings
+  Call (Symbol "Blank") [requiredHead] ->
+    if headExpr expression == requiredHead then Just bindings else Nothing
+  Call (Symbol "BlankSequence") [] -> Just bindings
+  Call (Symbol "BlankSequence") [requiredHead] ->
+    if headExpr expression == requiredHead then Just bindings else Nothing
+  Call (Symbol "BlankNullSequence") [] -> Just bindings
+  Call (Symbol "BlankNullSequence") [requiredHead] ->
+    if headExpr expression == requiredHead then Just bindings else Nothing
+  Call (Symbol "Alternatives") alternatives -> firstMatch alternatives
+  Call (Symbol "Except") [excluded] ->
+    case matchPattern bindings expression excluded of
+      Nothing -> Just bindings
+      Just _ -> Nothing
+  Call (Symbol "Except") [excluded, included] -> do
+    matched <- matchPattern bindings expression included
+    case matchPattern bindings expression excluded of
+      Nothing -> Just matched
+      Just _ -> Nothing
+  Call (Symbol "Condition") [innerPattern, condition] -> do
+    matched <- matchPattern bindings expression innerPattern
+    conditionResult <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
+    if conditionResult == Symbol "True" then Just matched else Nothing
+  Call patternHead patternArguments -> case expression of
+    Call expressionHead expressionArguments -> do
+      headBindings <- matchPattern bindings expressionHead patternHead
+      matchPatternArguments headBindings expressionArguments patternArguments
+    _ -> Nothing
+  _ -> if expression == patternExpression then Just bindings else Nothing
+ where
+  firstMatch [] = Nothing
+  firstMatch (alternative : rest) = case matchPattern bindings expression alternative of
+    Just matched -> Just matched
+    Nothing -> firstMatch rest
+
+matchPatternArguments :: PatternBindings -> [Expr] -> [Expr] -> Maybe PatternBindings
+matchPatternArguments bindings [] [] = Just bindings
+matchPatternArguments _ [] patterns
+  | minimumPatternArguments patterns > 0 = Nothing
+matchPatternArguments bindings expressions (patternExpression : remainingPatterns)
+  | Just sequencePattern <- sequencePatternDescriptor patternExpression =
+      matchSequenceCounts sequencePattern (candidateCounts sequencePattern)
+ where
+  maximumCount = length expressions - minimumPatternArguments remainingPatterns
+  candidateCounts descriptor = [sequenceMinimum descriptor .. maximumCount]
+  matchSequenceCounts _ [] = Nothing
+  matchSequenceCounts descriptor (count : rest) =
+    let (segment, remainingExpressions) = splitAt count expressions
+     in case matchSequencePattern bindings descriptor segment of
+          Just matched -> case matchPatternArguments matched remainingExpressions remainingPatterns of
+            Just completed -> Just completed
+            Nothing -> matchSequenceCounts descriptor rest
+          Nothing -> matchSequenceCounts descriptor rest
+matchPatternArguments bindings (expression : remainingExpressions) (patternExpression : remainingPatterns) = do
+  matched <- matchPattern bindings expression patternExpression
+  matchPatternArguments matched remainingExpressions remainingPatterns
+matchPatternArguments _ _ _ = Nothing
+
+minimumPatternArguments :: [Expr] -> Int
+minimumPatternArguments = sum . map minimumForPattern
+ where
+  minimumForPattern expression =
+    maybe 1 sequenceMinimum (sequencePatternDescriptor expression)
+
+sequencePatternDescriptor :: Expr -> Maybe SequencePattern
+sequencePatternDescriptor = describe Nothing Nothing
+ where
+  describe name condition = \case
+    Call (Symbol "Pattern") [Symbol patternName, inner] ->
+      describe (Just patternName) condition inner
+    Call (Symbol "Condition") [inner, test] ->
+      describe name (Just test) inner
+    Call (Symbol "BlankSequence") [] ->
+      Just (SequencePattern 1 Nothing name condition)
+    Call (Symbol "BlankSequence") [requiredHead] ->
+      Just (SequencePattern 1 (Just requiredHead) name condition)
+    Call (Symbol "BlankNullSequence") [] ->
+      Just (SequencePattern 0 Nothing name condition)
+    Call (Symbol "BlankNullSequence") [requiredHead] ->
+      Just (SequencePattern 0 (Just requiredHead) name condition)
+    _ -> Nothing
+
+matchSequencePattern :: PatternBindings -> SequencePattern -> [Expr] -> Maybe PatternBindings
+matchSequencePattern bindings descriptor values
+  | length values < sequenceMinimum descriptor = Nothing
+  | maybe False (\requiredHead -> any ((/= requiredHead) . headExpr) values) (sequenceHead descriptor) = Nothing
+  | otherwise = do
+      bound <- case sequenceName descriptor of
+        Nothing -> Just bindings
+        Just name -> bindSequence name values bindings
+      case sequenceCondition descriptor of
+        Nothing -> Just bound
+        Just condition -> do
+          result <- either (const Nothing) Just (evaluate (substituteBindings bound condition))
+          if result == Symbol "True" then Just bound else Nothing
+
+bindScalar :: Text -> Expr -> PatternBindings -> Maybe PatternBindings
+bindScalar name value bindings = case lookup name bindings of
+  Nothing -> Just ((name, ScalarBinding value) : bindings)
+  Just (ScalarBinding existing) | existing == value -> Just bindings
+  _ -> Nothing
+
+bindSequence :: Text -> [Expr] -> PatternBindings -> Maybe PatternBindings
+bindSequence name values bindings = case lookup name bindings of
+  Nothing -> Just ((name, SequenceBinding values) : bindings)
+  Just (SequenceBinding existing) | existing == values -> Just bindings
+  _ -> Nothing
+
+substituteBindings :: PatternBindings -> Expr -> Expr
+substituteBindings bindings expression = case expression of
+  Symbol name -> case lookup name bindings of
+    Just (ScalarBinding value) -> value
+    Just (SequenceBinding values) -> Call (Symbol "Sequence") values
+    Nothing -> expression
+  Call expressionHead values ->
+    Call
+      (substituteBindings bindings expressionHead)
+      (concatMap substituteArgument values)
+  _ -> expression
+ where
+  substituteArgument (Symbol name) = case lookup name bindings of
+    Just (ScalarBinding value) -> [value]
+    Just (SequenceBinding values) -> values
+    Nothing -> [Symbol name]
+  substituteArgument value = [substituteBindings bindings value]
 
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
