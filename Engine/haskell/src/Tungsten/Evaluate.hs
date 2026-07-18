@@ -1358,7 +1358,9 @@ reducePad leftMode = \case
 
 reduceMinMax :: Bool -> Text -> [Expr] -> Expr
 reduceMinMax minimumMode headName originalValues =
-  let values = concatMap flattenMinMaxArgument originalValues
+  let values =
+        sortBy minMaxCanonicalCompare
+          (concatMap (flattenMinMaxArgument headName) originalValues)
       identity = if minimumMode then Symbol "Infinity" else Symbol "-Infinity"
       absorbing = if minimumMode then Symbol "-Infinity" else Symbol "Infinity"
    in if absorbing `elem` values
@@ -1380,9 +1382,11 @@ reduceMinMax minimumMode headName originalValues =
         || (not minimumMode && compareExact candidateValue bestValue == GT) = Just candidate
     | otherwise = current
 
-flattenMinMaxArgument :: Expr -> [Expr]
-flattenMinMaxArgument (Call (Symbol "List") values) = concatMap flattenMinMaxArgument values
-flattenMinMaxArgument value = [value]
+flattenMinMaxArgument :: Text -> Expr -> [Expr]
+flattenMinMaxArgument headName (Call (Symbol nestedHead) values)
+  | nestedHead == "List" || nestedHead == headName =
+      concatMap (flattenMinMaxArgument headName) values
+flattenMinMaxArgument _ value = [value]
 
 explicitRealExact :: Expr -> Maybe Exact
 explicitRealExact value
@@ -1391,6 +1395,15 @@ explicitRealExact (Real source) = do
   RealInfo exactValue _ _ _ _ <- parseRealInfo source
   pure exactValue
 explicitRealExact _ = Nothing
+
+minMaxCanonicalCompare :: Expr -> Expr -> Ordering
+minMaxCanonicalCompare left right
+  | Just leftExact <- explicitRealExact left
+  , Just rightExact <- explicitRealExact right =
+      case compareExact leftExact rightExact of
+        EQ -> compare (numericKindRank left, fullForm left) (numericKindRank right, fullForm right)
+        ordering -> ordering
+minMaxCanonicalCompare left right = canonicalCompare left right
 
 uniqueSortedCanonical :: [Expr] -> [Expr]
 uniqueSortedCanonical = deduplicate . sortBy canonicalCompare

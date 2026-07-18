@@ -647,6 +647,7 @@ checkEvaluator = do
         , ("left and right padding", "{PadLeft[{1, 2, 3}, 5], PadRight[{1, 2}, 5, x]}", "List[List[0, 0, 1, 2, 3], List[1, 2, x, x, x]]")
         , ("numeric min max list folding", "{Min[{1, 2, 3}], Max[{1, 2, 3}], Min[{1, 4}, {2, 3}], Max[{1, 4}, {2, 3}], Min[{1, x, 2}]}", "List[1, 3, 1, 4, Min[1, x]]")
         , ("min max identities and inexact ordering", "{Min[], Max[], Min[Infinity, 2], Max[Infinity, x], Min[1.2, 1.10], Max[{1, x, 2}], Min[x, x, 2]}", "List[Infinity, -Infinity, 2, Infinity, 1.10, Max[2, x], Min[2, x]]")
+        , ("min max flat and numeric ties", "{Min[Min[x, y], z], Max[Max[x, y], z], Min[.1, 1/10], Max[.1, 1/10], Min[1`20, 1.], Max[0., -0.], Min[Max[], x]}", "List[Min[x, y, z], Max[x, y, z], Rational[1, 10], Rational[1, 10], 1., -0., -Infinity]")
         , ("exact means", "{Mean[{1, 2, 3, 4, 5}], Mean[{1, 2, 3, 4}]}", "List[3, Rational[5, 2]]")
         , ("exact medians", "{Median[{1, 2, 3, 4, 5}], Median[{1, 2, 3, 4}]}", "List[3, Rational[5, 2]]")
         , ("canonical order signs", "{Order[1, 2], Order[2, 1], Order[a, a]}", "List[1, -1, 0]")
