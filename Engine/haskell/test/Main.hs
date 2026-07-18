@@ -745,6 +745,7 @@ checkEvaluator = do
         , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")
+        , ("held session forms", "{OwnValues[1 + 2], Module[{x = 1 + 2}, x]}", "List[OwnValues[Plus[1, 2]], Module[List[Set[x, Plus[1, 2]]], x]]")
         , ("unsupported remains symbolic", "UnknownBuiltin[1 + 2, x]", "UnknownBuiltin[3, x]")
         ]
       fullCases =
@@ -1013,6 +1014,7 @@ checkEvaluationSession = do
         , ("delayed value observes later result", "a = 1; x := a + 1; a = 4; x", "5")
         , ("unset removes a value", "x = 4; Unset[x]; x", "x")
         , ("clear removes several values", "x = 1; y = 2; Clear[x, y]; x + y", "Plus[x, y]")
+        , ("own values stay held", "x = 5; {OwnValues[x], OwnValues[y], OwnValues[1], OwnValues[x, y]}", "List[List[RuleDelayed[HoldPattern[x], 5]], List[], OwnValues[1], OwnValues[x, y]]")
         , ("held assignment remains inert", "Hold[x = 9]; x", "x")
         , ("If evaluates one stateful branch", "If[False, x = 1, x = 2]; x", "2")
         , ("And short circuits state", "False && (x = 1); x", "x")
@@ -1062,6 +1064,16 @@ checkEvaluationSession = do
         , ("do break exits all iterator levels", "x = 0; Do[x = x + 1; Break[]; x = 99, {i, 2}, {j, 3}]; x", "1")
         , ("do continue advances innermost iterator", "x = 0; Do[x = x + 1; Continue[]; x = 99, {i, 2}, {j, 3}]; x", "6")
         , ("do loop control restores bindings", "i = 99; x = 0; Do[x = x + 1; Break[], {i, 3}]; first = {i, x}; x = 0; Do[x = x + 1; Continue[], {i, 3}]; {first, i, x}", "List[List[99, 1], 99, 3]")
+        , ("module independent bindings", "x = 100; {Module[{x = 5, y = x + 1}, {x, y}], x}", "List[List[5, 101], 100]")
+        , ("module delayed values and fresh own values", "{Module[{x := a + b}, {x, x}], Module[{z}, Hold[z]], Module[{x = 5}, OwnValues[x]]}", "List[List[Plus[a, b], Plus[a, b]], Hold[z$2], List[RuleDelayed[HoldPattern[x$3], 5]]]")
+        , ("module capture avoiding rename", "Module[{x = 1}, Hold[{Function[x, x + 1], Function[y, x + y], Module[{x = 2}, x], Module[{y = x + 1}, x + y]}]]", "Hold[List[Function[x, Plus[x, 1]], Function[y, Plus[x$1, y]], Module[List[Set[x, 2]], x], Module[List[Set[y, Plus[x$1, 1]]], Plus[x$1, y]]]]")
+        , ("module malformed nested scopes rename generically", "Module[{x = 1}, Hold[{Module[{x, 3}, x], Function[{x, 3}, x], Function[y, y, x], InheritedBlock[{x = 2}, x]}]]", "Hold[List[Module[List[x$1, 3], x$1], Function[List[x$1, 3], x$1], Function[y, y, x], InheritedBlock[List[Set[x$1, 2]], x$1]]]")
+        , ("module initializer exits retain state", "Catch[Module[{x = 5, y = Throw[1]}, y]]; {x$1, Module[{z}, Hold[z]]}", "List[5, Hold[z$2]]")
+        , ("invalid module bindings do not allocate", "Module[{x = 1, x = 2}, x]; Module[{z}, Hold[z]]", "Hold[z$1]")
+        , ("delayed definitions allocate a module per read", "f := Module[{x}, Hold[x]]; {f, f}", "List[Hold[x$1], Hold[x$2]]")
+        , ("module locals compose with iterators", "{Table[Module[{x = i}, x^2], {i, 4}], Sum[Module[{x = i}, x^2], {i, 4}], Product[Module[{x = i}, x^2], {i, 4}]}", "List[List[1, 4, 9, 16], 30, 576]")
+        , ("bare module locals preserve existing fresh definitions", "x$1 = 9; Module[{x}, x]", "9")
+        , ("module initializer effects thread in outer scope", "x = 0; {Module[{a = x = x + 1, b = x = x + 1}, {a, b}], x}", "List[List[1, 2], 2]")
         ]
   and <$> traverse evaluateSessionCase cases
  where

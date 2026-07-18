@@ -51,6 +51,8 @@ evaluateAt depth expression
       Call (Symbol "Throw") _ -> Right expression
       Call (Symbol "Break") _ -> Right expression
       Call (Symbol "Continue") _ -> Right expression
+      Call (Symbol "OwnValues") _ -> Right expression
+      Call (Symbol "Module") _ -> Right expression
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'

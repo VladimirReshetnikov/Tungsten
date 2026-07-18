@@ -10,7 +10,9 @@ module Tungsten.Session
   ) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import Tungsten.Evaluate
 import Tungsten.Expression
 
@@ -19,15 +21,19 @@ data Definition
   | DelayedValue !Expr
   deriving (Eq, Show)
 
-newtype EvaluationSession = EvaluationSession
+data EvaluationSession = EvaluationSession
   { sessionDefinitions :: Map.Map Text Definition
+  , sessionModuleCounter :: !Integer
   }
   deriving (Eq, Show)
 
 emptySession :: EvaluationSession
-emptySession = EvaluationSession Map.empty
+emptySession = EvaluationSession Map.empty 0
 
 data Iterator = Iterator !(Maybe Text) ![Expr]
+  deriving (Eq, Show)
+
+data ModuleBinding = ModuleBinding !Text !(Maybe Definition)
   deriving (Eq, Show)
 
 data ControlSignal
@@ -119,6 +125,10 @@ evaluateSessionAt depth session expression
         evaluateLoopControl BreakSignal "Break" session arguments'
       Call (Symbol "Continue") arguments' ->
         evaluateLoopControl ContinueSignal "Continue" session arguments'
+      Call (Symbol "OwnValues") arguments' ->
+        evaluateSessionOwnValues session arguments'
+      Call (Symbol "Module") arguments' ->
+        evaluateSessionModule depth session arguments'
       Call (Symbol "Table") arguments' ->
         evaluateSessionTable depth session arguments'
       Call (Symbol "Do") arguments' ->
@@ -181,6 +191,24 @@ evaluateLoopControl controlSignal headName session = \case
   [] -> Left (SessionControl controlSignal session)
   arguments' -> Right (Call (Symbol headName) arguments', session)
 
+evaluateSessionOwnValues
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOwnValues session = \case
+  [symbol@(Symbol name)] ->
+    let rules = case Map.lookup name (sessionDefinitions session) of
+          Nothing -> []
+          Just (ImmediateValue value) -> [ownValueRule symbol value]
+          Just (DelayedValue value) -> [ownValueRule symbol value]
+     in Right (Call (Symbol "List") rules, session)
+  arguments' -> Right (Call (Symbol "OwnValues") arguments', session)
+ where
+  ownValueRule symbol value =
+    Call
+      (Symbol "RuleDelayed")
+      [Call (Symbol "HoldPattern") [symbol], value]
+
 evaluateSessionCatch
   :: Int
   -> EvaluationSession
@@ -229,6 +257,133 @@ catchMatches :: Maybe Expr -> Maybe Expr -> Bool
 catchMatches Nothing Nothing = True
 catchMatches (Just form) (Just tag) = matchesPattern tag form
 catchMatches _ _ = False
+
+evaluateSessionModule
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionModule depth session = \case
+  [Call (Symbol "List") [], body] ->
+    evaluateSessionAt (depth + 1) session body
+  originalArguments@[Call (Symbol "List") bindingExpressions, body]
+    | Just bindings <- parseModuleBindings bindingExpressions -> do
+        let nextCounter = sessionModuleCounter session + 1
+            allocatedSession =
+              session {sessionModuleCounter = nextCounter}
+            renameMap =
+              Map.fromList
+                [ (name, freshModuleName name nextCounter)
+                | ModuleBinding name _ <- bindings
+                ]
+        ((), bodySession) <-
+          initializeModuleBindings depth renameMap allocatedSession bindings
+        let renamedBody = renameBoundSymbols renameMap body
+        evaluateSessionAt (depth + 1) bodySession renamedBody
+    | otherwise ->
+        Right (Call (Symbol "Module") originalArguments, session)
+  arguments' -> Right (Call (Symbol "Module") arguments', session)
+
+parseModuleBindings :: [Expr] -> Maybe [ModuleBinding]
+parseModuleBindings expressions = do
+  bindings <- traverse parseBinding expressions
+  let names = [name | ModuleBinding name _ <- bindings]
+  if Set.size (Set.fromList names) == length names
+    then Just bindings
+    else Nothing
+ where
+  parseBinding = \case
+    Symbol name -> Just (ModuleBinding name Nothing)
+    Call (Symbol "Set") [Symbol name, rhs] ->
+      Just (ModuleBinding name (Just (ImmediateValue rhs)))
+    Call (Symbol "SetDelayed") [Symbol name, rhs] ->
+      Just (ModuleBinding name (Just (DelayedValue rhs)))
+    _ -> Nothing
+
+initializeModuleBindings
+  :: Int
+  -> Map.Map Text Text
+  -> EvaluationSession
+  -> [ModuleBinding]
+  -> SessionResult ()
+initializeModuleBindings depth renameMap = go
+ where
+  go session [] = Right ((), session)
+  go session (ModuleBinding _ Nothing : rest) =
+    go session rest
+  go session (ModuleBinding name (Just (DelayedValue rhs)) : rest) =
+    go (install name (DelayedValue rhs) session) rest
+  go session (ModuleBinding name (Just (ImmediateValue rhs)) : rest) = do
+    (value, updated) <- evaluateSessionAt (depth + 1) session rhs
+    go (install name (ImmediateValue value) updated) rest
+
+  install name storedDefinition session =
+    case Map.lookup name renameMap of
+      Just freshName -> define freshName storedDefinition session
+      Nothing -> session
+
+freshModuleName :: Text -> Integer -> Text
+freshModuleName name counter = name <> "$" <> T.pack (show counter)
+
+renameBoundSymbols :: Map.Map Text Text -> Expr -> Expr
+renameBoundSymbols renameMap expression = case expression of
+  Symbol name -> maybe expression Symbol (Map.lookup name renameMap)
+  Call (Symbol headName) [Call (Symbol "List") bindings, body]
+    | headName `elem` scopeHeads
+    , Just bindingNames <- traverse scopeBindingName bindings ->
+        let shadowedNames = Set.fromList bindingNames
+            bodyMap = Set.foldr Map.delete renameMap shadowedNames
+         in Call
+              (Symbol headName)
+              [ Call
+                  (Symbol "List")
+                  (map (renameNestedBinding renameMap) bindings)
+              , renameBoundSymbols bodyMap body
+              ]
+  Call (Symbol "Function") (parameters : body : remaining)
+    | length remaining <= 1
+    , Just parameterNames <- functionParameterNames parameters ->
+        let bodyMap =
+              foldr Map.delete renameMap parameterNames
+         in Call
+              (Symbol "Function")
+              ( parameters
+                  : renameBoundSymbols bodyMap body
+                  : remaining
+              )
+  Call expressionHead values ->
+    Call
+      (renameBoundSymbols renameMap expressionHead)
+      (map (renameBoundSymbols renameMap) values)
+  _ -> expression
+ where
+  scopeHeads =
+    ["Module", "With", "Block"]
+
+renameNestedBinding :: Map.Map Text Text -> Expr -> Expr
+renameNestedBinding renameMap = \case
+  binding@(Symbol _) -> binding
+  Call (Symbol headName) [name@(Symbol _), rhs]
+    | headName `elem` ["Set", "SetDelayed"] ->
+        Call
+          (Symbol headName)
+          [name, renameBoundSymbols renameMap rhs]
+  expression -> renameBoundSymbols renameMap expression
+
+scopeBindingName :: Expr -> Maybe Text
+scopeBindingName = \case
+  Symbol name -> Just name
+  Call (Symbol headName) [Symbol name, _]
+    | headName `elem` ["Set", "SetDelayed"] -> Just name
+  _ -> Nothing
+
+functionParameterNames :: Expr -> Maybe [Text]
+functionParameterNames = \case
+  Symbol "Null" -> Nothing
+  Symbol name -> Just [name]
+  Call (Symbol "List") parameters ->
+    traverse symbolName parameters
+  _ -> Nothing
 
 evaluateSessionTable
   :: Int
@@ -505,6 +660,8 @@ isHeldSessionHead (Symbol name) =
            , "Throw"
            , "Break"
            , "Continue"
+           , "OwnValues"
+           , "Module"
            ]
 isHeldSessionHead _ = False
 
