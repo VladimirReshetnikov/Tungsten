@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T14:13:09Z
-- Repository HEAD: 837c3ddd5bf05f7746ae06478211e8b7fc2bfaab
+- Updated (UTC): 2026-07-18T14:19:50Z
+- Repository HEAD: c5ce72ad6057b04938321663fe28b89301184ff6
 
 ## Purpose
 
@@ -28,6 +28,7 @@ cabal run tungsten-hs -- expr parse --code '1 + 2 x^3'
 cabal run tungsten-hs -- expr evaluate --code 'Total[Range[10]]'
 cabal run tungsten-hs -- notebook inspect --file example.nb
 cabal run tungsten-hs -- notebook patch --file example.nb --spec patch.json --out patched.nb
+cabal run tungsten-hs -- repl
 ```
 
 Parse a file or select FullForm explicitly:
@@ -58,8 +59,10 @@ Haskell process clients.
 | FullForm parser | Calls and chained heads, exact and real atoms, strings and character escapes, nested comments, rationals, and complex atoms |
 | InputForm parser | Core calls, lists, associations, parts, patterns, slots and pure functions, arithmetic, comparisons, Boolean operators, rules, replacements, conditions, assignments, application, and compound expressions |
 | Evaluator | Exact arithmetic and powers, comparisons, Boolean control flow, structural predicates, parts, ranges and core list transforms, mapping/application, pure functions, exact replacement, held forms, and symbolic fallback |
+| Sessions | Immutable immediate/delayed symbol own-values, assignment and updates, unset/clear, sequential state, and session-aware held control flow |
 | JSON | Deterministic codec, tagged expression round trips, arbitrary integer lexemes, protocol requests/responses, parse/evaluate source commands, and structured errors |
 | CLI | `expr parse`, `expr evaluate`, inline/file sources, InputForm/FullForm selection, JSON output, exit codes, and protocol serving |
+| REPL | Persistent definitions, `In`/`InString`/`Out`, `%` output shorthand, `$Line`, Wolfram-style prompts, and `Exit`/`Quit` codes |
 | Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, typed immutable patches, and `notebook inspect`/`notebook create`/`notebook patch` CLI commands |
 
 ## Compatibility boundary
@@ -68,8 +71,8 @@ The following Engine areas still use the Python implementation and are not repre
 features yet:
 
 - the complete Wolfram tokenizer, named-character catalog, box-language and StandardForm parser;
-- mutable evaluation sessions, symbol definitions and attributes, general pattern matching,
-  scoping, iteration, polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
+- downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
+  polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and inline box object workflows;
 - Wolfram installation discovery, licensing workarounds, kernel execution, process coordination,
   and FrontEnd automation;

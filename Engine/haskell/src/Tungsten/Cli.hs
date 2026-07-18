@@ -35,9 +35,11 @@ import Tungsten.Expression
 import Tungsten.Json
 import Tungsten.Notebook
 import Tungsten.Parser
+import Tungsten.Repl (runRepl)
 
 data CliCommand
   = ProtocolCommand
+  | ReplCommand !Bool
   | ExpressionCliCommand !ExpressionCommand !SourceSpec !Text
   | NotebookCliCommand !NotebookCommand
   | HelpCommand
@@ -59,6 +61,8 @@ parseCliArguments :: [String] -> Either Text CliCommand
 parseCliArguments = \case
   [] -> Right ProtocolCommand
   ["protocol"] -> Right ProtocolCommand
+  ["repl"] -> Right (ReplCommand True)
+  ["repl", "--no-banner"] -> Right (ReplCommand False)
   ["--help"] -> Right HelpCommand
   ["-h"] -> Right HelpCommand
   "expr" : "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
@@ -66,7 +70,7 @@ parseCliArguments = \case
   "notebook" : "inspect" : arguments' -> parseNotebookInspectArguments arguments'
   "notebook" : "create" : arguments' -> parseNotebookCreateArguments arguments'
   "notebook" : "patch" : arguments' -> parseNotebookPatchArguments arguments'
-  _ -> Left "expected 'protocol', an 'expr' command, or a 'notebook' command"
+  _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
 
 parseNotebookInspectArguments :: [String] -> Either Text CliCommand
 parseNotebookInspectArguments ["--file", path] =
@@ -140,6 +144,7 @@ runCli arguments' = case parseCliArguments arguments' of
     pure 2
   Right HelpCommand -> TextIO.putStrLn usage *> pure 0
   Right ProtocolCommand -> configureHandles *> serveProtocol *> pure 0
+  Right (ReplCommand showBanner) -> configureHandles *> runRepl showBanner
   Right (ExpressionCliCommand command sourceSpec form) ->
     runExpressionCommand command sourceSpec form
   Right (NotebookCliCommand command) -> runNotebookCommand command
@@ -457,6 +462,7 @@ usage =
   T.unlines
     [ "Usage:"
     , "  tungsten-hs protocol"
+    , "  tungsten-hs repl [--no-banner]"
     , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs notebook inspect --file PATH"

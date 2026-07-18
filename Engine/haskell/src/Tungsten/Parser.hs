@@ -250,11 +250,23 @@ inputAtomParser = lexeme $ choice
   , String <$> stringLiteralParser
   , listParser
   , associationParser
+  , percentHistoryParser
   , slotParser
   , blankShapeParser
   , Symbol <$> symbolParser
   , between (symbolChar '(') (symbolChar ')') inputExpressionParser
   ]
+
+percentHistoryParser :: Parser Expr
+percentHistoryParser = do
+  markers <- many1 (char '%')
+  if length markers == 1
+    then do
+      digits <- many (satisfy isDigit)
+      pure $ case digits of
+        [] -> Call (Symbol "Out") []
+        _ -> Call (Symbol "Out") [Integer (read digits)]
+    else pure (Call (Symbol "Out") [Integer (negate (fromIntegral (length markers)))])
 
 listParser :: Parser Expr
 listParser =

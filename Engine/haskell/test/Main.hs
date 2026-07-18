@@ -14,6 +14,7 @@ import Tungsten.Evaluate
 import Tungsten.Json
 import Tungsten.Notebook
 import Tungsten.Parser
+import Tungsten.Repl
 import Tungsten.Session
 
 main :: IO ()
@@ -38,6 +39,7 @@ tests =
   , checkNotebookPatches
   , checkNotebookPatchJson
   , checkEvaluationSession
+  , checkRepl
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -99,6 +101,7 @@ checkInputFormParser = do
         , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
         , ("association", "<|a -> 1, b :> 2|>", "Association[Rule[a, 1], RuleDelayed[b, 2]]")
         , ("compound expression", "x = 1; x + 1;", "CompoundExpression[Set[x, 1], Plus[x, 1], Null]")
+        , ("output history shorthand", "% + %% + %12", "Plus[Out[], Out[-2], Out[12]]")
         ]
   and
     <$> traverse
@@ -249,6 +252,40 @@ checkEvaluationSession = do
           (value, _) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
           pure (fullForm value)
     assertEqual ("evaluation session: " <> label) (Right expected) result
+
+checkRepl :: IO Bool
+checkRepl = do
+  let firstStep = evaluateReplLine initialReplState "x = 2"
+      firstState = replStateFrom firstStep
+      secondStep = evaluateReplLine firstState "x^3"
+      secondState = replStateFrom secondStep
+      thirdStep = evaluateReplLine secondState "% + %%"
+      thirdState = replStateFrom thirdStep
+      lineStep = evaluateReplLine thirdState "$Line"
+      historyStep = evaluateReplLine thirdState "{Out[1], InString[2]}"
+      exitStep = evaluateReplLine thirdState "Exit[7]"
+      checks =
+        [ assertEqual "REPL assignment result" (Just (Integer 2)) (replValueFrom firstStep)
+        , assertEqual "REPL persistent definition" (Just (Integer 8)) (replValueFrom secondStep)
+        , assertEqual "REPL percent history" (Just (Integer 10)) (replValueFrom thirdStep)
+        , assertEqual "REPL line counter" (Just (Integer 4)) (replValueFrom lineStep)
+        , assertEqual
+            "REPL explicit history"
+            (Just (Call (Symbol "List") [Integer 2, String "x^3"]))
+            (replValueFrom historyStep)
+        , assertEqual "REPL exit code" (Just 7) (replExitFrom exitStep)
+        , assertEqual "CLI REPL command" (Right (ReplCommand False)) (parseCliArguments ["repl", "--no-banner"])
+        ]
+  and <$> sequence checks
+ where
+  replStateFrom (ReplValue _ _ state) = state
+  replStateFrom (ReplFailure _ state) = state
+  replStateFrom (ReplExit _ state) = state
+  replStateFrom (ReplEmpty state) = state
+  replValueFrom (ReplValue _ value _) = Just value
+  replValueFrom _ = Nothing
+  replExitFrom (ReplExit code _) = Just code
+  replExitFrom _ = Nothing
 
 checkNotebookModel :: IO Bool
 checkNotebookModel = do
