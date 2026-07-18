@@ -1,0 +1,56 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if(NOT TARGET GMP::gmp OR NOT TARGET GMP::gmpxx)
+    # Use ordinary find_package rather than find_dependency here: the latter
+    # can return from this config file before the caller's module path is
+    # restored when GMP is unavailable.
+    set(_TungstenEngine_saved_module_path "${CMAKE_MODULE_PATH}")
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    find_package(GMP QUIET MODULE)
+    set(CMAKE_MODULE_PATH "${_TungstenEngine_saved_module_path}")
+    unset(_TungstenEngine_saved_module_path)
+endif()
+if(NOT TARGET GMP::gmp OR NOT TARGET GMP::gmpxx)
+    set(TungstenEngine_FOUND FALSE)
+    set(TungstenEngine_NOT_FOUND_MESSAGE
+        "TungstenEngine requires compatible GMP C and C++ libraries")
+    return()
+endif()
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/TungstenEngineTargets.cmake")
+
+# CMake writes an imported archive location to a configuration-specific
+# TungstenEngineTargets-<config>.cmake fragment.  A mismatched `cmake --install
+# --config` on a single-config tree can copy the archive while filtering out
+# that fragment.  Validate only a package-imported target: a consumer may have
+# deliberately supplied non-imported targets before including this config.
+get_target_property(_TungstenEngine_is_imported Tungsten::Engine IMPORTED)
+if(_TungstenEngine_is_imported)
+    get_target_property(
+        _TungstenEngine_imported_configurations
+        Tungsten::Engine IMPORTED_CONFIGURATIONS)
+    get_target_property(
+        _TungstenEngine_imported_location
+        Tungsten::Engine IMPORTED_LOCATION)
+    if((NOT _TungstenEngine_imported_configurations
+            OR _TungstenEngine_imported_configurations MATCHES "-NOTFOUND$")
+        AND (NOT _TungstenEngine_imported_location
+            OR _TungstenEngine_imported_location MATCHES "-NOTFOUND$"))
+        set(TungstenEngine_FOUND FALSE)
+        string(CONCAT TungstenEngine_NOT_FOUND_MESSAGE
+            "TungstenEngine was installed without configuration-specific target "
+            "metadata. For a single-config generator, configure with a concrete "
+            "CMAKE_BUILD_TYPE and pass the same value to cmake --install --config.")
+        unset(_TungstenEngine_is_imported)
+        unset(_TungstenEngine_imported_configurations)
+        unset(_TungstenEngine_imported_location)
+        return()
+    endif()
+endif()
+unset(_TungstenEngine_is_imported)
+unset(_TungstenEngine_imported_configurations)
+unset(_TungstenEngine_imported_location)
+
+check_required_components(TungstenEngine)

@@ -1,0 +1,36 @@
+#include "tungsten/bundled_data.hpp"
+
+#include <string>
+
+namespace tungsten {
+namespace {
+
+const std::string_view system_symbols_chunks[] = {
+@TUNGSTEN_SYSTEM_SYMBOLS_CPP_LITERAL@};
+const std::string_view named_characters_chunks[] = {
+@TUNGSTEN_NAMED_CHARACTERS_CPP_LITERAL@};
+
+template <std::size_t Size>
+std::string join_chunks(const std::string_view (&chunks)[Size]) {
+    std::size_t total = 0;
+    for (const auto chunk : chunks) total += chunk.size();
+    std::string result;
+    result.reserve(total);
+    for (const auto chunk : chunks) result.append(chunk);
+    return result;
+}
+
+const std::string system_symbols_json = join_chunks(system_symbols_chunks);
+const std::string named_characters_json = join_chunks(named_characters_chunks);
+
+} // namespace
+
+std::string_view bundled_system_symbols_json() noexcept {
+    return system_symbols_json;
+}
+
+std::string_view bundled_named_characters_json() noexcept {
+    return named_characters_json;
+}
+
+} // namespace tungsten

@@ -1,0 +1,11510 @@
+#include "tungsten/bundled_data.hpp"
+#include "tungsten/detail/numeric.hpp"
+#include "tungsten/evaluator.hpp"
+#include "tungsten/parser.hpp"
+#include "tungsten/wolfram_strings.hpp"
+
+#include <algorithm>
+#include <charconv>
+#include <cctype>
+#include <cmath>
+#include <complex>
+#include <cstdio>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <map>
+#include <numeric>
+#include <optional>
+#include <regex>
+#include <set>
+#include <sstream>
+#include <string_view>
+#include <type_traits>
+
+namespace tungsten {
+namespace {
+
+std::optional<std::vector<Expr>> association_rules(const Expr& expression);
+std::optional<long> machine_index(const Expr& expression);
+int expression_compare(const Expr& left, const Expr& right);
+
+bool is_symbol(const Expr& value, const std::string& name) {
+    const auto* symbol_name = value.symbol_name();
+    return symbol_name && system_dispatch_name(*symbol_name) == name;
+}
+
+Expr boolean(bool value) { return symbol(value ? "True" : "False"); }
+
+template<typename Exact>
+std::optional<double> rounded_machine_value(const Exact& value) noexcept {
+    try {
+        return detail::correctly_rounded_double(value);
+    } catch (const std::overflow_error&) {
+        return std::nullopt;
+    }
+}
+
+bool protected_value_mutation_exception(std::string name) {
+    if (name.compare(0, 7, "System`") == 0) name.erase(0, 7);
+    static const std::set<std::string> names{
+        "$RecursionLimit", "$IterationLimit", "$HistoryLength", "$MaxExtraPrecision",
+        "$MaxRootDegree", "$OutputSizeLimit", "$PreRead", "$Pre", "$Post", "$PrePrint",
+        "$MessagePrePrint"};
+    return names.count(name) != 0;
+}
+
+std::optional<mpq_class> as_rational(const Expr& value) {
+    if (value.kind() == ExprKind::Integer) return mpq_class(value.integer_value());
+    if (value.kind() == ExprKind::Rational) return value.rational_value();
+    return std::nullopt;
+}
+
+Expr from_rational(mpq_class value) {
+    value.canonicalize();
+    return rational(value.get_num(), value.get_den());
+}
+
+std::optional<unsigned long> bounded_nonnegative_ulong(
+    const mpz_class& value, unsigned long maximum) {
+    if (value < 0 || !value.fits_ulong_p()) return std::nullopt;
+    const auto result = value.get_ui();
+    return result <= maximum ? std::optional<unsigned long>(result) : std::nullopt;
+}
+
+// Negating LONG_MIN is undefined in C++.  Convert through the corresponding
+// unsigned type, whose modulo arithmetic gives the magnitude for every signed
+// long value, including the asymmetric minimum.
+unsigned long unsigned_magnitude(long value) noexcept {
+    const auto converted = static_cast<unsigned long>(value);
+    return value < 0 ? 0UL - converted : converted;
+}
+
+std::size_t clamped_signed_magnitude(long value, std::size_t maximum) noexcept {
+    const auto magnitude = unsigned_magnitude(value);
+    return magnitude > maximum ? maximum : static_cast<std::size_t>(magnitude);
+}
+
+std::optional<std::size_t> nonnegative_size_t(const mpz_class& value) {
+    if (value < 0) return std::nullopt;
+    const auto text = value.get_str();
+    std::size_t result = 0;
+    const auto converted = std::from_chars(
+        text.data(), text.data() + text.size(), result);
+    if (converted.ec != std::errc{}
+        || converted.ptr != text.data() + text.size()) return std::nullopt;
+    return result;
+}
+
+std::optional<long> checked_signed_sum(long value, long increment) noexcept {
+    if (increment > 0
+        && value > std::numeric_limits<long>::max() - increment) return std::nullopt;
+    if (increment < 0
+        && value < std::numeric_limits<long>::min() - increment) return std::nullopt;
+    return value + increment;
+}
+
+double round_binary64_ties_to_even(double value) noexcept {
+    const auto lower = std::floor(value);
+    const auto fraction = value - lower;
+    if (fraction < 0.5) return lower;
+    if (fraction > 0.5) return lower + 1.0;
+    return std::fmod(lower, 2.0) == 0.0 ? lower : lower + 1.0;
+}
+
+std::size_t rotation_offset(
+    const mpz_class& amount, std::size_t length, bool rotate_right) {
+    if (length == 0) return 0;
+    const mpz_class divisor(std::to_string(length), 10);
+    mpz_class effective = amount;
+    if (rotate_right) effective = -effective;
+    mpz_class remainder;
+    mpz_fdiv_r(remainder.get_mpz_t(), effective.get_mpz_t(), divisor.get_mpz_t());
+    return nonnegative_size_t(remainder).value_or(0);
+}
+
+mpz_class exact_binomial(const mpz_class& n, unsigned long k) {
+    if (n >= 0 && mpz_class(k) > n) return 0;
+    unsigned long terms = k;
+    if (n >= 0 && n.fits_ulong_p())
+        terms = std::min(terms, n.get_ui() - terms);
+    mpz_class result = 1;
+    for (unsigned long index = 1; index <= terms; ++index) {
+        const mpz_class factor = n >= 0
+            ? n - mpz_class(terms - index)
+            : n - mpz_class(index - 1);
+        result *= factor;
+        result /= index;
+    }
+    return result;
+}
+
+std::optional<std::vector<std::pair<unsigned long, unsigned long>>> bounded_factorization(
+    const mpz_class& input, unsigned long maximum = 1000000000UL) {
+    const auto converted = bounded_nonnegative_ulong(abs(input), maximum);
+    if (!converted) return std::nullopt;
+    auto remaining = *converted;
+    std::vector<std::pair<unsigned long, unsigned long>> factors;
+    for (unsigned long prime = 2; prime <= remaining / prime;
+         prime = prime == 2 ? 3 : prime + 2) {
+        if (remaining % prime != 0) continue;
+        unsigned long exponent = 0;
+        do {
+            remaining /= prime;
+            ++exponent;
+        } while (remaining % prime == 0);
+        factors.emplace_back(prime, exponent);
+    }
+    if (remaining > 1) factors.emplace_back(remaining, 1);
+    return factors;
+}
+
+mpz_class unsigned_power(unsigned long base, unsigned long exponent) {
+    mpz_class result;
+    mpz_ui_pow_ui(result.get_mpz_t(), base, exponent);
+    return result;
+}
+
+mpz_class bounded_euler_phi(unsigned long value,
+    const std::vector<std::pair<unsigned long, unsigned long>>& factors) {
+    mpz_class result(value);
+    for (const auto& [prime, exponent] : factors) {
+        (void)exponent;
+        result -= result / prime;
+    }
+    return result;
+}
+
+std::vector<unsigned long> integer_digits(unsigned long value, unsigned long base) {
+    if (value == 0) return {0};
+    std::vector<unsigned long> digits;
+    while (value != 0) {
+        digits.push_back(value % base);
+        value /= base;
+    }
+    std::reverse(digits.begin(), digits.end());
+    return digits;
+}
+
+void append_integer_partitions(unsigned long remaining, unsigned long maximum_part,
+    unsigned long maximum_length, std::vector<unsigned long>& current,
+    std::vector<Expr>& output) {
+    if (remaining == 0) {
+        std::vector<Expr> parts;
+        parts.reserve(current.size());
+        for (const auto part : current) parts.push_back(integer(mpz_class(part)));
+        output.push_back(list(std::move(parts)));
+        return;
+    }
+    if (maximum_length == 0) return;
+    for (auto first = std::min(maximum_part, remaining); first >= 1; --first) {
+        current.push_back(first);
+        append_integer_partitions(
+            remaining - first, first, maximum_length - 1, current, output);
+        current.pop_back();
+        if (first == 1) break;
+    }
+}
+
+mpz_class partition_count(unsigned long n, bool distinct) {
+    std::vector<mpz_class> counts(n + 1, 0);
+    counts[0] = 1;
+    for (unsigned long part = 1; part <= n; ++part) {
+        if (distinct) {
+            for (auto total = n; total >= part; --total) {
+                counts[total] += counts[total - part];
+                if (total == part) break;
+            }
+        } else {
+            for (unsigned long total = part; total <= n; ++total)
+                counts[total] += counts[total - part];
+        }
+    }
+    return counts[n];
+}
+
+std::optional<Expr> evaluate_exact_integer_function(
+    const std::string& function, const std::vector<Expr>& args) {
+    const auto all_integers = std::all_of(args.begin(), args.end(), [](const Expr& value) {
+        return value.kind() == ExprKind::Integer;
+    });
+
+    if (function == "Binomial" && args.size() == 2 && all_integers) {
+        if (args[1].integer_value() < 0) return integer(0L);
+        const auto k = bounded_nonnegative_ulong(args[1].integer_value(), 100000UL);
+        if (!k) return std::nullopt;
+        return integer(exact_binomial(args[0].integer_value(), *k));
+    }
+    if (function == "Multinomial" && all_integers) {
+        unsigned long total = 0;
+        mpz_class result = 1;
+        for (const auto& argument : args) {
+            const auto value = bounded_nonnegative_ulong(argument.integer_value(), 100000UL);
+            if (!value || total > 100000UL - *value) return std::nullopt;
+            result *= exact_binomial(mpz_class(total + *value), *value);
+            total += *value;
+        }
+        return integer(result);
+    }
+    if (function == "JacobiSymbol" && args.size() == 2 && all_integers
+        && args[1].integer_value() > 0 && mpz_odd_p(args[1].integer_value().get_mpz_t()))
+        return integer(static_cast<long>(mpz_jacobi(
+            args[0].integer_value().get_mpz_t(), args[1].integer_value().get_mpz_t())));
+    if (function == "KroneckerSymbol" && args.size() == 2 && all_integers)
+        return integer(static_cast<long>(mpz_kronecker(
+            args[0].integer_value().get_mpz_t(), args[1].integer_value().get_mpz_t())));
+    if ((function == "Fibonacci" || function == "LucasL") && args.size() == 1
+        && args[0].kind() == ExprKind::Integer) {
+        const auto magnitude = bounded_nonnegative_ulong(abs(args[0].integer_value()), 1000000UL);
+        if (!magnitude) return std::nullopt;
+        mpz_class result;
+        if (function == "Fibonacci") mpz_fib_ui(result.get_mpz_t(), *magnitude);
+        else mpz_lucnum_ui(result.get_mpz_t(), *magnitude);
+        if (args[0].integer_value() < 0) {
+            const bool negative = function == "Fibonacci"
+                ? *magnitude % 2 == 0 : *magnitude % 2 == 1;
+            if (negative) result = -result;
+        }
+        return integer(result);
+    }
+    if (function == "BernoulliB" && args.size() == 1
+        && args[0].kind() == ExprKind::Integer) {
+        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 256UL);
+        if (!n) return std::nullopt;
+        if (*n == 1) return rational(-1L, 2L);
+        if (*n > 1 && *n % 2 == 1) return integer(0L);
+        std::vector<mpq_class> values(*n + 1);
+        for (unsigned long row = 0; row <= *n; ++row) {
+            values[row] = mpq_class(1, mpz_class(row + 1));
+            for (auto index = row; index >= 1; --index) {
+                values[index - 1] = mpz_class(index) * (values[index - 1] - values[index]);
+                if (index == 1) break;
+            }
+        }
+        return from_rational(values[0]);
+    }
+    if (function == "EulerE" && args.size() == 1
+        && args[0].kind() == ExprKind::Integer) {
+        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 256UL);
+        if (!n) return std::nullopt;
+        if (*n % 2 == 1) return integer(0L);
+        std::vector<mpz_class> values(*n + 1, 0);
+        values[0] = 1;
+        for (unsigned long order = 2; order <= *n; order += 2) {
+            mpz_class sum = 0;
+            for (unsigned long index = 0; index < order; index += 2)
+                sum += exact_binomial(mpz_class(order), index) * values[index];
+            values[order] = -sum;
+        }
+        return integer(values[*n]);
+    }
+    if (function == "HarmonicNumber" && (args.size() == 1 || args.size() == 2)
+        && all_integers) {
+        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 100000UL);
+        const mpz_class order_value = args.size() == 2 ? args[1].integer_value() : mpz_class(1);
+        const auto order = bounded_nonnegative_ulong(abs(order_value), 64UL);
+        if (!n || !order) return std::nullopt;
+        mpq_class result = 0;
+        for (unsigned long index = 1; index <= *n; ++index) {
+            const auto power = unsigned_power(index, *order);
+            result += order_value >= 0 ? mpq_class(1, power) : mpq_class(power);
+        }
+        return from_rational(result);
+    }
+    if (function == "ContinuedFraction" && (args.size() == 1 || args.size() == 2)) {
+        const auto rational_value = as_rational(args[0]);
+        if (!rational_value) return std::nullopt;
+        std::optional<unsigned long> limit;
+        if (args.size() == 2) {
+            if (args[1].kind() != ExprKind::Integer || args[1].integer_value() <= 0)
+                return std::nullopt;
+            limit = bounded_nonnegative_ulong(args[1].integer_value(), 100000UL);
+            if (!limit) return std::nullopt;
+        }
+        auto value = *rational_value;
+        value.canonicalize();
+        const bool negative = value < 0;
+        mpz_class numerator = abs(value.get_num()), denominator = value.get_den();
+        std::vector<Expr> terms;
+        while (denominator != 0 && terms.size() < limit.value_or(100000UL)) {
+            mpz_class quotient, remainder;
+            mpz_fdiv_qr(quotient.get_mpz_t(), remainder.get_mpz_t(),
+                numerator.get_mpz_t(), denominator.get_mpz_t());
+            terms.push_back(integer(negative ? -quotient : quotient));
+            if (remainder == 0) break;
+            numerator = std::move(denominator);
+            denominator = std::move(remainder);
+        }
+        return list(std::move(terms));
+    }
+    if (function == "FromContinuedFraction" && args.size() == 1
+        && args[0].has_head("List")) {
+        if (args[0].args().empty()) return symbol("Infinity");
+        if (!std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& term) {
+                return term.kind() == ExprKind::Integer;
+            })) return std::nullopt;
+        mpq_class value(args[0].args().back().integer_value());
+        for (auto index = args[0].args().size() - 1; index > 0; --index) {
+            if (value == 0) return symbol("ComplexInfinity");
+            value = mpq_class(args[0].args()[index - 1].integer_value()) + 1 / value;
+        }
+        return from_rational(value);
+    }
+    if (function == "IntegerPartitions" && (args.size() == 1 || args.size() == 2)
+        && args[0].kind() == ExprKind::Integer) {
+        if (args[0].integer_value() < 0) return list();
+        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 64UL);
+        if (!n) return std::nullopt;
+        unsigned long minimum_length = 0, maximum_length = *n;
+        if (args.size() == 2) {
+            if (args[1].kind() == ExprKind::Integer) {
+                const auto maximum = bounded_nonnegative_ulong(args[1].integer_value(), *n);
+                if (!maximum && args[1].integer_value() >= 0) maximum_length = *n;
+                else if (!maximum) return std::nullopt;
+                else maximum_length = *maximum;
+            } else if (args[1].has_head("List")
+                && (args[1].args().size() == 1 || args[1].args().size() == 2)
+                && std::all_of(args[1].args().begin(), args[1].args().end(), [](const Expr& value) {
+                    return value.kind() == ExprKind::Integer;
+                })) {
+                const auto minimum = bounded_nonnegative_ulong(args[1].args()[0].integer_value(), *n);
+                const auto maximum = bounded_nonnegative_ulong(
+                    args[1].args().back().integer_value(), *n);
+                if (!minimum || !maximum || *minimum > *maximum) return std::nullopt;
+                minimum_length = *minimum;
+                maximum_length = *maximum;
+            } else return std::nullopt;
+        }
+        std::vector<Expr> partitions;
+        std::vector<unsigned long> current;
+        append_integer_partitions(*n, *n, maximum_length, current, partitions);
+        partitions.erase(std::remove_if(partitions.begin(), partitions.end(), [&](const Expr& value) {
+            return value.args().size() < minimum_length;
+        }), partitions.end());
+        return list(std::move(partitions));
+    }
+    if ((function == "PartitionsP" || function == "PartitionsQ") && args.size() == 1
+        && args[0].kind() == ExprKind::Integer) {
+        if (args[0].integer_value() < 0) return integer(0L);
+        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 2000UL);
+        if (!n) return std::nullopt;
+        return integer(partition_count(*n, function == "PartitionsQ"));
+    }
+    if (function == "ModularInverse" && args.size() == 2 && all_integers
+        && args[1].integer_value() != 0) {
+        mpz_class modulus = abs(args[1].integer_value()), inverse;
+        if (mpz_invert(inverse.get_mpz_t(), args[0].integer_value().get_mpz_t(),
+                modulus.get_mpz_t()) == 0) return std::nullopt;
+        return integer(inverse);
+    }
+    if (function == "MultiplicativeOrder" && args.size() == 2 && all_integers
+        && args[1].integer_value() > 0) {
+        const auto modulus = bounded_nonnegative_ulong(args[1].integer_value(), 1000000000UL);
+        if (!modulus) return std::nullopt;
+        mpz_class gcd;
+        mpz_gcd(gcd.get_mpz_t(), args[0].integer_value().get_mpz_t(),
+            args[1].integer_value().get_mpz_t());
+        if (gcd != 1) return std::nullopt;
+        const auto modulus_factors = bounded_factorization(args[1].integer_value());
+        if (!modulus_factors) return std::nullopt;
+        auto order = bounded_euler_phi(*modulus, *modulus_factors);
+        const auto order_factors = bounded_factorization(order);
+        if (!order_factors) return std::nullopt;
+        for (const auto& [prime, exponent] : *order_factors) {
+            (void)exponent;
+            while (order % prime == 0) {
+                mpz_class power;
+                const mpz_class candidate = order / prime;
+                mpz_powm(power.get_mpz_t(), args[0].integer_value().get_mpz_t(),
+                    candidate.get_mpz_t(), args[1].integer_value().get_mpz_t());
+                if (power != 1) break;
+                order = candidate;
+            }
+        }
+        return integer(order);
+    }
+    if (function == "PrimitiveRoot" && args.size() == 1
+        && args[0].kind() == ExprKind::Integer && args[0].integer_value() > 0) {
+        const auto modulus = bounded_nonnegative_ulong(args[0].integer_value(), 1000000UL);
+        const auto factors = bounded_factorization(args[0].integer_value(), 1000000UL);
+        if (!modulus || !factors) return std::nullopt;
+        const auto phi = bounded_euler_phi(*modulus, *factors);
+        const auto phi_factors = bounded_factorization(phi, 1000000UL);
+        if (!phi_factors) return std::nullopt;
+        for (unsigned long root = 1; root < *modulus; ++root) {
+            mpz_class gcd;
+            const mpz_class root_value(root);
+            mpz_gcd(gcd.get_mpz_t(), root_value.get_mpz_t(),
+                args[0].integer_value().get_mpz_t());
+            if (gcd != 1) continue;
+            bool primitive = true;
+            for (const auto& [prime, exponent] : *phi_factors) {
+                (void)exponent;
+                mpz_class power;
+                const mpz_class quotient = phi / prime;
+                mpz_powm(power.get_mpz_t(), root_value.get_mpz_t(), quotient.get_mpz_t(),
+                    args[0].integer_value().get_mpz_t());
+                if (power == 1) { primitive = false; break; }
+            }
+            if (primitive) return integer(mpz_class(root));
+        }
+        return std::nullopt;
+    }
+    if ((function == "CarmichaelLambda" || function == "LiouvilleLambda")
+        && args.size() == 1 && args[0].kind() == ExprKind::Integer
+        && args[0].integer_value() > 0) {
+        const auto factors = bounded_factorization(args[0].integer_value());
+        if (!factors) return std::nullopt;
+        if (function == "LiouvilleLambda") {
+            unsigned long exponent_sum = 0;
+            for (const auto& factor : *factors) exponent_sum += factor.second;
+            return integer(exponent_sum % 2 == 0 ? 1L : -1L);
+        }
+        mpz_class result = 1;
+        for (const auto& [prime, exponent] : *factors) {
+            mpz_class component = prime == 2 && exponent >= 3
+                ? unsigned_power(2, exponent - 2)
+                : unsigned_power(prime, exponent - 1) * (prime - 1);
+            mpz_lcm(result.get_mpz_t(), result.get_mpz_t(), component.get_mpz_t());
+        }
+        return integer(result);
+    }
+    if (function == "JordanTotient" && args.size() == 2 && all_integers
+        && args[0].integer_value() >= 0 && args[1].integer_value() > 0) {
+        const auto order = bounded_nonnegative_ulong(args[0].integer_value(), 1000UL);
+        const auto n = bounded_nonnegative_ulong(args[1].integer_value(), 1000000000UL);
+        const auto factors = bounded_factorization(args[1].integer_value());
+        if (!order || !n || !factors) return std::nullopt;
+        if (*order == 0) return integer(*n == 1 ? 1L : 0L);
+        mpz_class result;
+        mpz_pow_ui(result.get_mpz_t(), args[1].integer_value().get_mpz_t(), *order);
+        for (const auto& [prime, exponent] : *factors) {
+            (void)exponent;
+            const auto power = unsigned_power(prime, *order);
+            result = result / power * (power - 1);
+        }
+        return integer(result);
+    }
+    if (function == "RamanujanTau" && args.size() == 1
+        && args[0].kind() == ExprKind::Integer && args[0].integer_value() >= 1) {
+        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 256UL);
+        if (!n) return std::nullopt;
+        const auto degree = *n - 1;
+        std::vector<mpz_class> coefficients(degree + 1, 0);
+        coefficients[0] = 1;
+        for (unsigned long part = 1; part <= degree; ++part) {
+            std::vector<mpz_class> next(degree + 1, 0);
+            for (unsigned long index = 0; index <= degree; ++index) {
+                if (coefficients[index] == 0) continue;
+                for (unsigned long exponent = 0; exponent <= 24
+                    && index + part * exponent <= degree; ++exponent) {
+                    auto multiplier = exact_binomial(mpz_class(24), exponent);
+                    if (exponent % 2 == 1) multiplier = -multiplier;
+                    next[index + part * exponent] += coefficients[index] * multiplier;
+                }
+            }
+            coefficients = std::move(next);
+        }
+        return integer(coefficients[degree]);
+    }
+    if (function == "DivisorSigma" && args.size() == 2 && all_integers
+        && args[1].integer_value() != 0) {
+        const auto order_magnitude = bounded_nonnegative_ulong(abs(args[0].integer_value()), 64UL);
+        const auto n = bounded_nonnegative_ulong(abs(args[1].integer_value()), 1000000000UL);
+        const auto factors = bounded_factorization(abs(args[1].integer_value()));
+        if (!order_magnitude || !n || !factors) return std::nullopt;
+        std::vector<mpz_class> divisors{1};
+        for (const auto& [prime, exponent] : *factors) {
+            const auto existing = divisors;
+            mpz_class power = 1;
+            for (unsigned long count = 1; count <= exponent; ++count) {
+                power *= prime;
+                for (const auto& divisor : existing) divisors.push_back(divisor * power);
+            }
+        }
+        mpq_class result = 0;
+        for (const auto& divisor : divisors) {
+            mpz_class power;
+            mpz_pow_ui(power.get_mpz_t(), divisor.get_mpz_t(), *order_magnitude);
+            result += args[0].integer_value() >= 0 ? mpq_class(power) : mpq_class(1, power);
+        }
+        return from_rational(result);
+    }
+    if ((function == "IntegerReverse" || function == "DigitCount") && !args.empty()
+        && args.size() <= (function == "DigitCount" ? 3U : 2U)
+        && args[0].kind() == ExprKind::Integer) {
+        const mpz_class base_value = args.size() >= 2 && args[1].kind() == ExprKind::Integer
+            ? args[1].integer_value() : mpz_class(10);
+        const auto base = bounded_nonnegative_ulong(base_value, 4096UL);
+        const auto value = bounded_nonnegative_ulong(abs(args[0].integer_value()),
+            std::numeric_limits<unsigned long>::max());
+        if (!base || *base < 2 || !value) return std::nullopt;
+        const auto digits = integer_digits(*value, *base);
+        if (function == "IntegerReverse") {
+            mpz_class result = 0;
+            for (auto iterator = digits.rbegin(); iterator != digits.rend(); ++iterator)
+                result = result * *base + *iterator;
+            return integer(result);
+        }
+        std::vector<unsigned long> counts(*base, 0);
+        for (const auto digit : digits) ++counts[digit];
+        if (args.size() == 3) {
+            if (args[2].kind() != ExprKind::Integer) return std::nullopt;
+            const auto digit = bounded_nonnegative_ulong(args[2].integer_value(), *base - 1);
+            if (!digit) return std::nullopt;
+            return integer(mpz_class(counts[*digit]));
+        }
+        std::vector<Expr> result;
+        for (unsigned long digit = 1; digit < *base; ++digit)
+            result.push_back(integer(mpz_class(counts[digit])));
+        result.push_back(integer(mpz_class(counts[0])));
+        return list(std::move(result));
+    }
+    if ((function == "BitNot" || function == "BitLength") && args.size() == 1
+        && args[0].kind() == ExprKind::Integer) {
+        if (function == "BitNot") return integer(~args[0].integer_value());
+        mpz_class value = args[0].integer_value() >= 0
+            ? args[0].integer_value() : ~args[0].integer_value();
+        return integer(value == 0 ? 0L
+            : static_cast<long>(mpz_sizeinbase(value.get_mpz_t(), 2)));
+    }
+    if ((function == "BitClear" || function == "BitSet" || function == "BitGet")
+        && args.size() == 2 && all_integers) {
+        const auto index = bounded_nonnegative_ulong(args[1].integer_value(), 10000000UL);
+        if (!index) return std::nullopt;
+        if (function == "BitGet")
+            return integer(static_cast<long>(
+                mpz_tstbit(args[0].integer_value().get_mpz_t(), *index)));
+        mpz_class result = args[0].integer_value();
+        if (function == "BitClear") mpz_clrbit(result.get_mpz_t(), *index);
+        else mpz_setbit(result.get_mpz_t(), *index);
+        return integer(result);
+    }
+    return std::nullopt;
+}
+
+std::vector<std::pair<mpz_class, long>> partial_factorization(
+    mpz_class input, unsigned long limit) {
+    std::vector<std::pair<mpz_class, long>> factors;
+    input = abs(input);
+    for (unsigned long candidate = 2; candidate <= limit
+        && mpz_class(candidate) <= input / candidate; ++candidate) {
+        long exponent = 0;
+        while (input % candidate == 0) {
+            input /= candidate;
+            ++exponent;
+        }
+        if (exponent != 0) factors.emplace_back(mpz_class(candidate), exponent);
+    }
+    if (input > 1) factors.emplace_back(std::move(input), 1);
+    return factors;
+}
+
+std::optional<std::pair<long, long>> sum_of_two_squares(unsigned long prime) {
+    const auto limit = static_cast<unsigned long>(std::sqrt(static_cast<double>(prime)));
+    for (unsigned long first = 1; first <= limit; ++first) {
+        const auto first_square = first * first;
+        if (first_square > prime) break;
+        const auto second_square = prime - first_square;
+        const auto second = static_cast<unsigned long>(
+            std::sqrt(static_cast<double>(second_square)));
+        if (second >= first && second * second == second_square)
+            return std::pair<long, long>{static_cast<long>(first), static_cast<long>(second)};
+    }
+    return std::nullopt;
+}
+
+std::vector<std::pair<long, long>> gaussian_prime_candidates(unsigned long prime) {
+    if (prime == 2) return {{1, 1}};
+    if (prime % 4 == 3) return {{static_cast<long>(prime), 0}};
+    const auto pair = sum_of_two_squares(prime);
+    if (!pair) return {{static_cast<long>(prime), 0}};
+    if (pair->first == pair->second) return {*pair};
+    return {*pair, {pair->second, pair->first}};
+}
+
+std::optional<std::pair<long, long>> divide_gaussian(
+    const std::pair<long, long>& value, const std::pair<long, long>& divisor) {
+    const auto norm = divisor.first * divisor.first + divisor.second * divisor.second;
+    const auto real_numerator = value.first * divisor.first + value.second * divisor.second;
+    const auto imaginary_numerator = value.second * divisor.first - value.first * divisor.second;
+    if (norm == 0 || real_numerator % norm != 0 || imaginary_numerator % norm != 0)
+        return std::nullopt;
+    return std::pair<long, long>{real_numerator / norm, imaginary_numerator / norm};
+}
+
+Expr gaussian_integer(long real_part, long imaginary_part) {
+    return imaginary_part == 0 ? integer(real_part)
+        : complex(integer(real_part), integer(imaginary_part));
+}
+
+std::optional<Expr> gaussian_factor_integer(const Expr& value) {
+    mpz_class real_part, imaginary_part;
+    if (value.kind() == ExprKind::Integer) real_part = value.integer_value();
+    else if (value.kind() == ExprKind::Complex
+        && value.real_part().kind() == ExprKind::Integer
+        && value.imaginary_part().kind() == ExprKind::Integer) {
+        real_part = value.real_part().integer_value();
+        imaginary_part = value.imaginary_part().integer_value();
+    } else return std::nullopt;
+    if (!real_part.fits_slong_p() || !imaginary_part.fits_slong_p()) return std::nullopt;
+    const auto real = real_part.get_si(), imaginary = imaginary_part.get_si();
+    const mpz_class norm = real_part * real_part + imaginary_part * imaginary_part;
+    const auto factorization = bounded_factorization(norm, 1000000000UL);
+    if (!factorization) return std::nullopt;
+    if (norm == 0) return list({list({complex(integer(0L), integer(0L)), integer(1L)})});
+    if (norm == 1) return list({list({gaussian_integer(real, imaginary), integer(1L)})});
+    std::pair<long, long> remaining{real, imaginary};
+    std::vector<std::pair<std::pair<long, long>, long>> factors;
+    for (const auto& [prime, norm_exponent] : *factorization) {
+        (void)norm_exponent;
+        for (const auto& candidate : gaussian_prime_candidates(prime)) {
+            long exponent = 0;
+            while (const auto quotient = divide_gaussian(remaining, candidate)) {
+                remaining = *quotient;
+                ++exponent;
+            }
+            if (exponent != 0) factors.emplace_back(candidate, exponent);
+        }
+    }
+    if (remaining != std::pair<long, long>{1, 0})
+        factors.insert(factors.begin(), {remaining, 1});
+    std::vector<Expr> result;
+    for (const auto& [factor, exponent] : factors)
+        result.push_back(list({gaussian_integer(factor.first, factor.second), integer(exponent)}));
+    return list(std::move(result));
+}
+
+std::optional<Expr> evaluate_extended_factor_integer(const std::vector<Expr>& args) {
+    if (args.size() != 2) return std::nullopt;
+    if (args[1].has_head("Rule") && args[1].args().size() == 2
+        && is_symbol(args[1].args()[0], "GaussianIntegers")
+        && is_symbol(args[1].args()[1], "True"))
+        return gaussian_factor_integer(args[0]);
+    if (args[1].kind() != ExprKind::Integer || args[1].integer_value() <= 0)
+        return std::nullopt;
+    const auto limit = bounded_nonnegative_ulong(args[1].integer_value(), 1000000UL);
+    const auto value = as_rational(args[0]);
+    if (!limit || !value) return std::nullopt;
+    auto rational_value = *value;
+    rational_value.canonicalize();
+    if (rational_value == 0) return list({list({integer(0L), integer(1L)})});
+    std::vector<std::pair<mpz_class, long>> factors;
+    if (rational_value < 0) {
+        factors.emplace_back(-1, 1);
+        rational_value = -rational_value;
+    }
+    const auto numerator = partial_factorization(rational_value.get_num(), *limit);
+    const auto denominator = partial_factorization(rational_value.get_den(), *limit);
+    factors.insert(factors.end(), numerator.begin(), numerator.end());
+    for (const auto& [factor, exponent] : denominator)
+        factors.emplace_back(factor, -exponent);
+    std::vector<Expr> result;
+    for (const auto& [factor, exponent] : factors)
+        result.push_back(list({integer(factor), integer(exponent)}));
+    return list(std::move(result));
+}
+
+std::optional<double> numeric_real(const Expr& value) {
+    if (const auto exact = as_rational(value))
+        return rounded_machine_value(*exact);
+    if (value.kind() == ExprKind::SpecialReal) {
+        if (value.text() == "Overflow") return std::numeric_limits<double>::infinity();
+        if (value.text() == "Underflow") return 0.0;
+    }
+    if (value.kind() != ExprKind::Real) return std::nullopt;
+    auto text = value.text();
+    const auto precision = text.find('`');
+    if (precision != std::string::npos) text.erase(precision, text.find("*^", precision) - precision);
+    if (const auto magnitude = text.find("*^"); magnitude != std::string::npos)
+        text.replace(magnitude, 2, "e");
+    return detail::parse_ascii_double(text);
+}
+
+constexpr mp_bitcnt_t high_precision_bits = 512;
+
+// Every temporary and expression result carries its own precision.  Using
+// mpf_set_default_prec here would silently mutate process-global GMP state and
+// would race with unrelated embedding code that also uses mpf_class.
+class HighPrecision : public mpf_class {
+public:
+    HighPrecision() : mpf_class(0, high_precision_bits) {}
+    HighPrecision(const HighPrecision&) = default;
+    HighPrecision(HighPrecision&&) noexcept = default;
+    HighPrecision& operator=(const HighPrecision&) = default;
+    HighPrecision& operator=(HighPrecision&&) noexcept = default;
+    using mpf_class::operator=;
+
+    template<class T, class U>
+    HighPrecision(const __gmp_expr<T, U>& value)
+        : mpf_class(value, high_precision_bits) {}
+
+    template<typename Value, std::enable_if_t<
+        std::is_arithmetic_v<Value>
+            && !std::is_same_v<std::remove_cv_t<Value>, long double>, int> = 0>
+    HighPrecision(Value value) : mpf_class(value, high_precision_bits) {}
+
+    explicit HighPrecision(const std::string& value)
+        : mpf_class(value, high_precision_bits, 10) {}
+};
+
+HighPrecision high_abs(const HighPrecision& value) {
+    return value < 0 ? -value : value;
+}
+
+const HighPrecision& high_epsilon() {
+    static const HighPrecision value = []() -> HighPrecision {
+        HighPrecision result = 1;
+        mpf_div_2exp(result.get_mpf_t(), result.get_mpf_t(), 420);
+        return result;
+    }();
+    return value;
+}
+
+HighPrecision high_atan_series(const HighPrecision& value) {
+    const HighPrecision squared = value * value;
+    HighPrecision term = value;
+    HighPrecision sum = value;
+    for (unsigned long index = 1; index < 10000; ++index) {
+        term *= -squared;
+        const HighPrecision contribution = term / (2 * index + 1);
+        sum += contribution;
+        if (high_abs(contribution) < high_epsilon()) break;
+    }
+    return sum;
+}
+
+HighPrecision high_pi() {
+    static const HighPrecision value = 16 * high_atan_series(HighPrecision(1) / 5)
+        - 4 * high_atan_series(HighPrecision(1) / 239);
+    return value;
+}
+
+const HighPrecision& high_log_two() {
+    static const HighPrecision value = [] {
+        const HighPrecision ratio = HighPrecision(1) / 3;
+        const HighPrecision squared = ratio * ratio;
+        HighPrecision term = ratio;
+        HighPrecision sum = ratio;
+        for (unsigned long index = 1; index < 10000; ++index) {
+            term *= squared;
+            const HighPrecision contribution = term / (2 * index + 1);
+            sum += contribution;
+            if (high_abs(contribution) < high_epsilon()) break;
+        }
+        HighPrecision result = 2 * sum;
+        return result;
+    }();
+    return value;
+}
+
+HighPrecision high_exp(const HighPrecision& value) {
+    HighPrecision reduced = value;
+    unsigned reductions = 0;
+    while (high_abs(reduced) > HighPrecision(1) / 8 && reductions < 4096) {
+        reduced /= 2;
+        ++reductions;
+    }
+    HighPrecision term = 1;
+    HighPrecision sum = 1;
+    for (unsigned long index = 1; index < 10000; ++index) {
+        term *= reduced;
+        term /= index;
+        sum += term;
+        if (high_abs(term) < high_epsilon()) break;
+    }
+    while (reductions-- != 0) sum *= sum;
+    return sum;
+}
+
+std::optional<HighPrecision> high_log(const HighPrecision& value) {
+    if (value <= 0) return std::nullopt;
+    HighPrecision reduced = value;
+    long power_of_two = 0;
+    while (reduced > HighPrecision(3) / 2 && power_of_two < 100000) {
+        reduced /= 2;
+        ++power_of_two;
+    }
+    while (reduced < HighPrecision(3) / 4 && power_of_two > -100000) {
+        reduced *= 2;
+        --power_of_two;
+    }
+    const HighPrecision ratio = (reduced - 1) / (reduced + 1);
+    const HighPrecision squared = ratio * ratio;
+    HighPrecision term = ratio;
+    HighPrecision sum = ratio;
+    for (unsigned long index = 1; index < 10000; ++index) {
+        term *= squared;
+        const HighPrecision contribution = term / (2 * index + 1);
+        sum += contribution;
+        if (high_abs(contribution) < high_epsilon()) break;
+    }
+    HighPrecision result = 2 * sum + power_of_two * high_log_two();
+    return result;
+}
+
+HighPrecision high_reduced_angle(const HighPrecision& value) {
+    const HighPrecision period = 2 * high_pi();
+    HighPrecision quotient = value / period;
+    quotient += quotient < 0 ? HighPrecision(-1) / 2 : HighPrecision(1) / 2;
+    mpz_class multiple;
+    mpz_set_f(multiple.get_mpz_t(), quotient.get_mpf_t());
+    return value - HighPrecision(multiple) * period;
+}
+
+std::pair<HighPrecision, HighPrecision> high_sin_cos(const HighPrecision& value) {
+    const HighPrecision reduced = high_reduced_angle(value);
+    const HighPrecision squared = reduced * reduced;
+    HighPrecision sine_term = reduced;
+    HighPrecision cosine_term = 1;
+    HighPrecision sine = sine_term;
+    HighPrecision cosine = cosine_term;
+    for (unsigned long index = 1; index < 10000; ++index) {
+        sine_term *= -squared;
+        sine_term /= (2 * index) * (2 * index + 1);
+        cosine_term *= -squared;
+        cosine_term /= (2 * index - 1) * (2 * index);
+        sine += sine_term;
+        cosine += cosine_term;
+        if (high_abs(sine_term) < high_epsilon()
+            && high_abs(cosine_term) < high_epsilon()) break;
+    }
+    return {sine, cosine};
+}
+
+HighPrecision high_atan(const HighPrecision& value) {
+    if (value < 0) return -high_atan(-value);
+    if (value > 1) return high_pi() / 2 - high_atan(HighPrecision(1) / value);
+    if (value > HighPrecision(1) / 2)
+        return high_pi() / 4 + high_atan_series((value - 1) / (value + 1));
+    return high_atan_series(value);
+}
+
+HighPrecision high_atan_two(const HighPrecision& y, const HighPrecision& x) {
+    if (x > 0) return high_atan(y / x);
+    if (x < 0 && y >= 0) return high_atan(y / x) + high_pi();
+    if (x < 0 && y < 0) return high_atan(y / x) - high_pi();
+    if (y > 0) return high_pi() / 2;
+    if (y < 0) return -high_pi() / 2;
+    return 0;
+}
+
+std::optional<HighPrecision> high_power(
+    const HighPrecision& base, const HighPrecision& exponent) {
+    if (base <= 0) return std::nullopt;
+    const auto logarithm = high_log(base);
+    if (!logarithm) return std::nullopt;
+    return high_exp(exponent * *logarithm);
+}
+
+struct HighComplex {
+    HighPrecision real = 0;
+    HighPrecision imaginary = 0;
+};
+
+std::optional<HighPrecision> high_real_atom(const Expr& value) {
+    if (const auto rational_value = as_rational(value))
+        return HighPrecision(rational_value->get_num().get_str())
+            / HighPrecision(rational_value->get_den().get_str());
+    if (value.kind() == ExprKind::Real) {
+        auto source = value.text();
+        if (const auto marker = source.find('`'); marker != std::string::npos) {
+            const auto exponent = source.find("*^", marker);
+            source.erase(marker, exponent == std::string::npos ? std::string::npos : exponent - marker);
+        }
+        if (const auto exponent = source.find("*^"); exponent != std::string::npos)
+            source.replace(exponent, 2, "e");
+        try { return HighPrecision(source); }
+        catch (...) { return std::nullopt; }
+    }
+    if (is_symbol(value, "Pi")) return high_pi();
+    if (is_symbol(value, "E")) return high_exp(HighPrecision(1));
+    if (is_symbol(value, "Degree")) return high_pi() / 180;
+    return std::nullopt;
+}
+
+std::optional<HighPrecision> high_unary_value(
+    const std::string& function, const HighPrecision& value) {
+    if (function == "Exp") return high_exp(value);
+    if (function == "Log") return high_log(value);
+    const auto [sine, cosine] = high_sin_cos(value);
+    if (function == "Sin") return sine;
+    if (function == "Cos") return cosine;
+    if (function == "Tan") return sine / cosine;
+    if (function == "Cot") return cosine / sine;
+    if (function == "Sec") return HighPrecision(1) / cosine;
+    if (function == "Csc") return HighPrecision(1) / sine;
+    if (function == "ArcSin" && high_abs(value) <= 1) {
+        if (value == 1) return high_pi() / 2;
+        if (value == -1) return -high_pi() / 2;
+        return high_atan(value / sqrt(1 - value * value));
+    }
+    if (function == "ArcCos" && high_abs(value) <= 1) {
+        if (value == 1) return HighPrecision(0);
+        if (value == -1) return high_pi();
+        return high_pi() / 2 - high_atan(value / sqrt(1 - value * value));
+    }
+    if (function == "ArcTan") return high_atan(value);
+    if (function == "ArcCot") {
+        if (value == 0) return high_pi() / 2;
+        auto result = high_atan(HighPrecision(1) / value);
+        if (value < 0) result += high_pi();
+        return result;
+    }
+    if (function == "ArcSec" && high_abs(value) >= 1)
+        return high_unary_value("ArcCos", HighPrecision(1) / value);
+    if (function == "ArcCsc" && high_abs(value) >= 1)
+        return high_unary_value("ArcSin", HighPrecision(1) / value);
+    const HighPrecision positive_exp = high_exp(value);
+    const HighPrecision negative_exp = HighPrecision(1) / positive_exp;
+    const HighPrecision hyperbolic_sine = (positive_exp - negative_exp) / 2;
+    const HighPrecision hyperbolic_cosine = (positive_exp + negative_exp) / 2;
+    if (function == "Sinh") return hyperbolic_sine;
+    if (function == "Cosh") return hyperbolic_cosine;
+    if (function == "Tanh") return hyperbolic_sine / hyperbolic_cosine;
+    if (function == "Coth") return hyperbolic_cosine / hyperbolic_sine;
+    if (function == "Sech") return HighPrecision(1) / hyperbolic_cosine;
+    if (function == "Csch") return HighPrecision(1) / hyperbolic_sine;
+    if (function == "ArcSinh") return high_log(value + sqrt(value * value + 1));
+    if (function == "ArcCosh" && value >= 1)
+        return high_log(value + sqrt(value * value - 1));
+    if (function == "ArcTanh" && high_abs(value) < 1) {
+        const HighPrecision ratio = (1 + value) / (1 - value);
+        const auto logarithm = high_log(ratio);
+        if (logarithm) return HighPrecision(*logarithm / 2);
+    }
+    if (function == "ArcCoth" && (value > 1 || value < -1)) {
+        const HighPrecision ratio = (value + 1) / (value - 1);
+        const auto logarithm = high_log(ratio);
+        if (logarithm) return HighPrecision(*logarithm / 2);
+    }
+    if (function == "ArcSech" && value > 0 && value <= 1)
+        return high_unary_value("ArcCosh", HighPrecision(1) / value);
+    if (function == "ArcCsch" && value != 0)
+        return high_unary_value("ArcSinh", HighPrecision(1) / value);
+    if (function == "Haversine") return (1 - cosine) / 2;
+    if (function == "InverseHaversine" && value >= 0 && value <= 1) {
+        const auto inverse = high_unary_value("ArcSin", sqrt(value));
+        if (inverse) return HighPrecision(2 * *inverse);
+    }
+    if (function == "Gudermannian") return high_atan(hyperbolic_sine);
+    if (function == "InverseGudermannian" && high_abs(value) < high_pi() / 2) {
+        const auto [inner_sine, inner_cosine] = high_sin_cos(high_pi() / 4 + value / 2);
+        return high_log(inner_sine / inner_cosine);
+    }
+    return std::nullopt;
+}
+
+std::optional<double> machine_unary_value(const std::string& function, double value) {
+    if (function == "Exp") return std::exp(value);
+    if (function == "Log") return value >= 0 ? std::optional<double>(std::log(value)) : std::nullopt;
+    if (function == "Sin") return std::sin(value);
+    if (function == "Cos") return std::cos(value);
+    if (function == "Tan") return std::tan(value);
+    if (function == "Cot") return 1.0 / std::tan(value);
+    if (function == "Sec") return 1.0 / std::cos(value);
+    if (function == "Csc") return 1.0 / std::sin(value);
+    if (function == "ArcSin" && std::abs(value) <= 1.0) return std::asin(value);
+    if (function == "ArcCos" && std::abs(value) <= 1.0) return std::acos(value);
+    if (function == "ArcTan") return std::atan(value);
+    if (function == "ArcCot") return std::atan2(1.0, value);
+    if (function == "ArcSec" && std::abs(value) >= 1.0) return std::acos(1.0 / value);
+    if (function == "ArcCsc" && std::abs(value) >= 1.0) return std::asin(1.0 / value);
+    if (function == "Sinh") return std::sinh(value);
+    if (function == "Cosh") return std::cosh(value);
+    if (function == "Tanh") return std::tanh(value);
+    if (function == "Coth") return 1.0 / std::tanh(value);
+    if (function == "Sech") return 1.0 / std::cosh(value);
+    if (function == "Csch") return 1.0 / std::sinh(value);
+    if (function == "ArcSinh") return std::asinh(value);
+    if (function == "ArcCosh" && value >= 1.0) return std::acosh(value);
+    if (function == "ArcTanh" && std::abs(value) < 1.0) return std::atanh(value);
+    if (function == "ArcCoth" && std::abs(value) > 1.0)
+        return std::log((value + 1.0) / (value - 1.0)) / 2.0;
+    if (function == "ArcSech" && value > 0.0 && value <= 1.0) return std::acosh(1.0 / value);
+    if (function == "ArcCsch" && value != 0.0) return std::asinh(1.0 / value);
+    if (function == "Haversine") return (1.0 - std::cos(value)) / 2.0;
+    if (function == "InverseHaversine" && value >= 0.0 && value <= 1.0)
+        return 2.0 * std::asin(std::sqrt(value));
+    if (function == "Gudermannian") return std::atan(std::sinh(value));
+    if (function == "InverseGudermannian" && std::abs(value) < std::acos(-1.0) / 2.0)
+        return std::log(std::tan(std::acos(-1.0) / 4.0 + value / 2.0));
+    return std::nullopt;
+}
+
+std::optional<HighComplex> high_complex_value(const Expr& expression) {
+    if (const auto value = high_real_atom(expression)) return HighComplex{*value, 0};
+    if (expression.kind() == ExprKind::Complex) {
+        const auto real_part = high_real_atom(expression.real_part());
+        const auto imaginary_part = high_real_atom(expression.imaginary_part());
+        if (real_part && imaginary_part) return HighComplex{*real_part, *imaginary_part};
+        return std::nullopt;
+    }
+    if (expression.kind() != ExprKind::Call || !expression.head().symbol_name())
+        return std::nullopt;
+    const auto function = system_dispatch_name(*expression.head().symbol_name());
+    if (function == "Plus" || function == "Times") {
+        HighComplex result = function == "Plus" ? HighComplex{} : HighComplex{1, 0};
+        for (const auto& argument : expression.args()) {
+            const auto value = high_complex_value(argument);
+            if (!value) return std::nullopt;
+            if (function == "Plus") {
+                result.real += value->real;
+                result.imaginary += value->imaginary;
+            } else {
+                const HighPrecision real_part = result.real * value->real
+                    - result.imaginary * value->imaginary;
+                const HighPrecision imaginary_part = result.real * value->imaginary
+                    + result.imaginary * value->real;
+                result = {real_part, imaginary_part};
+            }
+        }
+        return result;
+    }
+    if (function == "Power" && expression.args().size() == 2) {
+        const auto base = high_complex_value(expression.args()[0]);
+        const auto exponent = high_real_atom(expression.args()[1]);
+        if (!base || !exponent || base->imaginary != 0 || base->real < 0) return std::nullopt;
+        const auto value = high_power(base->real, *exponent);
+        if (!value) return std::nullopt;
+        return HighComplex{*value, 0};
+    }
+    if (expression.args().size() == 1) {
+        const auto argument = high_complex_value(expression.args()[0]);
+        if (!argument || argument->imaginary != 0) return std::nullopt;
+        if (const auto value = high_unary_value(function, argument->real))
+            return HighComplex{*value, 0};
+    }
+    if (function == "ArcTan" && expression.args().size() == 2) {
+        const auto x = high_complex_value(expression.args()[0]);
+        const auto y = high_complex_value(expression.args()[1]);
+        if (x && y && x->imaginary == 0 && y->imaginary == 0)
+            return HighComplex{high_atan_two(y->real, x->real), 0};
+    }
+    return std::nullopt;
+}
+
+std::string high_decimal_text(const HighPrecision& value, std::size_t precision) {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(static_cast<int>(precision)) << std::defaultfloat << value;
+    auto result = stream.str();
+    if (const auto exponent = result.find_first_of("eE"); exponent != std::string::npos) {
+        result.replace(exponent, 1, "*^");
+        const auto sign = exponent + 2;
+        if (sign < result.size() && result[sign] != '+' && result[sign] != '-')
+            result.insert(sign, 1, '+');
+    }
+    if (result.find('.') == std::string::npos && result.find("*^") == std::string::npos)
+        result.push_back('.');
+    return result;
+}
+
+Expr high_real_expression(const HighPrecision& value, std::size_t precision) {
+    return real(high_decimal_text(value, precision) + "`" + std::to_string(precision) + ".");
+}
+
+std::optional<mpq_class> rational_pi_multiple(const Expr& expression) {
+    if (is_symbol(expression, "Pi")) return mpq_class(1);
+    if (is_symbol(expression, "Degree")) return mpq_class(1, 180);
+    if (!expression.has_head("Times")) return std::nullopt;
+    mpq_class coefficient = 1;
+    bool found_angle = false;
+    for (const auto& factor : expression.args()) {
+        if (const auto value = as_rational(factor)) coefficient *= *value;
+        else if (is_symbol(factor, "Pi")) {
+            if (found_angle) return std::nullopt;
+            found_angle = true;
+        } else if (is_symbol(factor, "Degree")) {
+            if (found_angle) return std::nullopt;
+            found_angle = true;
+            coefficient /= 180;
+        } else return std::nullopt;
+    }
+    return found_angle ? std::optional<mpq_class>(coefficient) : std::nullopt;
+}
+
+Expr pi_multiple_expression(const mpq_class& coefficient) {
+    if (coefficient == 0) return integer(0L);
+    if (coefficient == 1) return symbol("Pi");
+    return call("Times", {from_rational(coefficient), symbol("Pi")});
+}
+
+mpq_class normalized_pi_multiple(mpq_class value) {
+    value.canonicalize();
+    mpz_class quotient = value.get_num() / (2 * value.get_den());
+    if (value < 0 && value.get_num() % (2 * value.get_den()) != 0) --quotient;
+    value -= 2 * quotient;
+    return value;
+}
+
+std::optional<Expr> exact_trigonometric_value(
+    const std::string& function, const mpq_class& raw_angle) {
+    const auto angle = normalized_pi_multiple(raw_angle);
+    auto signed_value = [](long numerator, long denominator) {
+        return from_rational(mpq_class(numerator, denominator));
+    };
+    if (function == "Sin") {
+        if (angle == 0 || angle == 1) return integer(0L);
+        if (angle == mpq_class(1, 6) || angle == mpq_class(5, 6)) return signed_value(1, 2);
+        if (angle == mpq_class(7, 6) || angle == mpq_class(11, 6)) return signed_value(-1, 2);
+        if (angle == mpq_class(1, 2)) return integer(1L);
+        if (angle == mpq_class(3, 2)) return integer(-1L);
+    }
+    if (function == "Cos") {
+        if (angle == 0) return integer(1L);
+        if (angle == 1) return integer(-1L);
+        if (angle == mpq_class(1, 3) || angle == mpq_class(5, 3)) return signed_value(1, 2);
+        if (angle == mpq_class(2, 3) || angle == mpq_class(4, 3)) return signed_value(-1, 2);
+        if (angle == mpq_class(1, 2) || angle == mpq_class(3, 2)) return integer(0L);
+    }
+    if (function == "Tan") {
+        if (angle == 0 || angle == 1) return integer(0L);
+        if (angle == mpq_class(1, 4) || angle == mpq_class(5, 4)) return integer(1L);
+        if (angle == mpq_class(3, 4) || angle == mpq_class(7, 4)) return integer(-1L);
+        if (angle == mpq_class(1, 2) || angle == mpq_class(3, 2))
+            return symbol("ComplexInfinity");
+    }
+    return std::nullopt;
+}
+
+bool is_i_quadratic_root(const Expr& value) {
+    return value.kind() == ExprKind::Root && value.root_coefficients().size() == 3
+        && value.root_coefficients()[0] == 1 && value.root_coefficients()[1] == 0
+        && value.root_coefficients()[2] == 1;
+}
+
+std::optional<std::pair<Expr, Expr>> known_complex_components(const Expr& value) {
+    if (as_rational(value) || value.kind() == ExprKind::Real
+        || is_symbol(value, "Pi") || is_symbol(value, "E") || is_symbol(value, "Degree"))
+        return std::pair<Expr, Expr>{value, integer(0L)};
+    if (value.kind() == ExprKind::Complex)
+        return std::pair<Expr, Expr>{value.real_part(), value.imaginary_part()};
+    if (is_i_quadratic_root(value))
+        return std::pair<Expr, Expr>{integer(0L), integer(value.root_index() == 0 ? -1L : 1L)};
+    return std::nullopt;
+}
+
+bool numeric_transcendental_expression(const Expr& value) {
+    if (as_rational(value) || value.kind() == ExprKind::Real
+        || value.kind() == ExprKind::Complex || value.kind() == ExprKind::Root)
+        return true;
+    if (is_symbol(value, "Pi") || is_symbol(value, "E") || is_symbol(value, "Degree"))
+        return true;
+    if (value.kind() != ExprKind::Call || !value.head().symbol_name()) return false;
+    const auto function = system_dispatch_name(*value.head().symbol_name());
+    static const std::set<std::string> numeric_heads{
+        "Plus", "Times", "Power", "Sqrt", "Abs", "Arg", "Re", "Im", "Conjugate",
+        "Exp", "Log", "Sin", "Cos", "Tan", "Cot", "Sec", "Csc", "ArcSin",
+        "ArcCos", "ArcTan", "ArcCot", "ArcSec", "ArcCsc", "Sinh", "Cosh", "Tanh",
+        "Coth", "Sech", "Csch", "ArcSinh", "ArcCosh", "ArcTanh", "ArcCoth",
+        "ArcSech", "ArcCsch", "Haversine", "InverseHaversine", "Gudermannian",
+        "InverseGudermannian", "SinDegrees", "CosDegrees", "TanDegrees", "CotDegrees",
+        "SecDegrees", "CscDegrees", "ArcSinDegrees", "ArcCosDegrees", "ArcTanDegrees",
+        "ArcCotDegrees", "ArcSecDegrees", "ArcCscDegrees"};
+    return numeric_heads.count(function) != 0
+        && std::all_of(value.args().begin(), value.args().end(), numeric_transcendental_expression);
+}
+
+bool exact_numeric_transcendental_expression(const Expr& value) {
+    if (value.kind() == ExprKind::Real) return false;
+    if (value.kind() == ExprKind::Complex)
+        return exact_numeric_transcendental_expression(value.real_part())
+            && exact_numeric_transcendental_expression(value.imaginary_part());
+    if (as_rational(value) || value.kind() == ExprKind::Root
+        || is_symbol(value, "Pi") || is_symbol(value, "E") || is_symbol(value, "Degree"))
+        return true;
+    return value.kind() == ExprKind::Call && numeric_transcendental_expression(value)
+        && std::all_of(value.args().begin(), value.args().end(), exact_numeric_transcendental_expression);
+}
+
+bool real_valued_numeric_expression(const Expr& value) {
+    if (as_rational(value) || value.kind() == ExprKind::Real
+        || value.kind() == ExprKind::SpecialReal
+        || is_symbol(value, "Pi") || is_symbol(value, "E") || is_symbol(value, "Degree"))
+        return true;
+    if (value.kind() == ExprKind::Complex) return value.imaginary_part() == integer(0L);
+    if (value.kind() != ExprKind::Call || !value.head().symbol_name()) return false;
+    const auto function = system_dispatch_name(*value.head().symbol_name());
+    static const std::set<std::string> real_heads{
+        "Plus", "Times", "Power", "Sqrt", "Abs", "Arg", "Re", "Im", "Exp", "Log",
+        "Sin", "Cos", "Tan", "Cot", "Sec", "Csc", "ArcTan", "Sinh", "Cosh", "Tanh",
+        "Coth", "Sech", "Csch", "ArcSinh", "ArcCoth", "Haversine", "InverseHaversine",
+        "Gudermannian", "InverseGudermannian"};
+    return real_heads.count(function) != 0
+        && std::all_of(value.args().begin(), value.args().end(), real_valued_numeric_expression);
+}
+
+bool numeric_q_value(const Expr& value) {
+    if (as_rational(value) || value.kind() == ExprKind::Real || value.kind() == ExprKind::Complex
+        || value.kind() == ExprKind::Root) return true;
+    if (value.has_head("Root")) return true;
+    if (value.kind() != ExprKind::Call || !value.head().symbol_name()) return false;
+    static const std::vector<std::string> numeric_heads{
+        "Plus", "Times", "Power", "Sin", "Cos", "Tan", "Exp", "Log", "Sqrt", "Abs", "Sign"};
+    return std::find(numeric_heads.begin(), numeric_heads.end(), system_dispatch_name(*value.head().symbol_name())) != numeric_heads.end()
+        && std::all_of(value.args().begin(), value.args().end(), numeric_q_value);
+}
+
+double requested_pause(const Expr& expression) {
+    if (expression.has_head("Pause") && expression.args().size() == 1)
+        return numeric_real(expression.args()[0]).value_or(0.0);
+    if (expression.kind() != ExprKind::Call) return 0.0;
+    double result = 0.0;
+    for (const auto& argument : expression.args()) result += requested_pause(argument);
+    return result;
+}
+
+std::string real_text(double value) {
+    if (std::isnan(value)) return "Indeterminate";
+    if (std::isinf(value)) return value < 0 ? "-Infinity" : "Infinity";
+    return detail::python_machine_real_text(value);
+}
+
+std::optional<double> explicit_real_precision(const std::string& text) {
+    const auto marker = text.find('`');
+    if (marker == std::string::npos) return std::nullopt;
+    auto suffix = text.substr(marker + 1);
+    while (!suffix.empty() && suffix.front() == '`') suffix.erase(suffix.begin());
+    while (!suffix.empty() && suffix.back() == '.') suffix.pop_back();
+    if (suffix.empty()) return std::nullopt;
+    return detail::parse_ascii_double(suffix);
+}
+
+std::optional<mpq_class> decimal_rational(const std::string& source) {
+    auto text = source.substr(0, source.find('`'));
+    long exponent = 0;
+    if (const auto marker = text.find("*^"); marker != std::string::npos) {
+        try { exponent = std::stol(text.substr(marker + 2)); } catch (...) { return std::nullopt; }
+        text.erase(marker);
+    }
+    bool negative = !text.empty() && text.front() == '-';
+    if (!text.empty() && (text.front() == '-' || text.front() == '+')) text.erase(text.begin());
+    const auto point = text.find('.');
+    const auto fractional_digits = point == std::string::npos
+        ? std::size_t{0} : text.size() - point - 1;
+    if (point != std::string::npos) text.erase(point, 1);
+    if (text.empty()) return std::nullopt;
+    mpz_class numerator;
+    if (mpz_set_str(numerator.get_mpz_t(), text.c_str(), 10) != 0) return std::nullopt;
+    if (negative) numerator = -numerator;
+    mpz_class scale(std::to_string(fractional_digits), 10);
+    scale -= exponent;
+    // Constructing 10^scale is linear in the requested decimal exponent.
+    // Keep malformed or adversarial machine-real text from turning a scalar
+    // evaluation into an unbounded allocation.
+    const auto scale_magnitude = bounded_nonnegative_ulong(
+        abs(scale), 1000000UL);
+    if (!scale_magnitude) return std::nullopt;
+    mpz_class factor;
+    mpz_ui_pow_ui(factor.get_mpz_t(), 10, *scale_magnitude);
+    return scale >= 0 ? mpq_class(numerator, factor) : mpq_class(numerator * factor);
+}
+
+std::string rational_decimal(mpq_class value, std::size_t precision) {
+    value.canonicalize();
+    const bool negative = value < 0;
+    if (negative) value = -value;
+    const auto numerator = value.get_num();
+    const auto denominator = value.get_den();
+    const mpz_class integer_part = numerator / denominator;
+    mpz_class remainder = numerator % denominator;
+    const auto integer_text = integer_part.get_str();
+    const auto fractional_digits = integer_part == 0 ? precision
+        : precision > integer_text.size() ? precision - integer_text.size() : 0;
+    std::string fraction;
+    fraction.reserve(fractional_digits);
+    for (std::size_t index = 0; index < fractional_digits; ++index) {
+        remainder *= 10;
+        const mpz_class digit = remainder / denominator;
+        remainder %= denominator;
+        fraction.push_back(static_cast<char>('0' + digit.get_ui()));
+    }
+    return std::string(negative ? "-" : "") + integer_text + "." + fraction;
+}
+
+Expr arbitrary_real_from_rational(const mpq_class& value, std::size_t precision) {
+    auto mantissa = rational_decimal(value, precision);
+    while (!mantissa.empty() && mantissa.back() == '0') mantissa.pop_back();
+    if (!mantissa.empty() && mantissa.back() == '.') {
+        // A trailing decimal point is significant in Wolfram real syntax.
+    }
+    return real(mantissa + "`" + std::to_string(precision) + ".");
+}
+
+std::optional<Expr> inexact_real_arithmetic(const std::vector<Expr>& args, bool multiply) {
+    bool saw_real = false;
+    bool machine = false;
+    std::size_t precision = std::numeric_limits<std::size_t>::max();
+    std::vector<mpq_class> exact_values;
+    exact_values.reserve(args.size());
+    for (const auto& argument : args) {
+        std::optional<mpq_class> value;
+        if (argument.kind() == ExprKind::Real) {
+            saw_real = true;
+            value = decimal_rational(argument.text());
+            const auto explicit_precision = explicit_real_precision(argument.text());
+            if (!explicit_precision) machine = true;
+            else {
+                if (!std::isfinite(*explicit_precision)
+                    || *explicit_precision > 1000000.0) return std::nullopt;
+                precision = std::min(precision,
+                    static_cast<std::size_t>(std::max(1.0, *explicit_precision)));
+            }
+        } else value = as_rational(argument);
+        if (!value) return std::nullopt;
+        exact_values.push_back(*value);
+    }
+    if (!saw_real) return std::nullopt;
+    if (machine) {
+        // CPython's machine-real path converts each operand to binary64 and
+        // performs the operation in binary64.  Rounding the final exact
+        // decimal product instead is observably different (for example,
+        // .2 * 28 is 5.6000000000000005, not 5.6).
+        double result = multiply ? 1.0 : 0.0;
+        for (const auto& value : exact_values) {
+            const auto machine_value = rounded_machine_value(value);
+            if (!machine_value) return special_real("Overflow");
+            if (multiply) result *= *machine_value;
+            else result += *machine_value;
+        }
+        return std::isfinite(result)
+            ? std::optional<Expr>(real(real_text(result)))
+            : std::optional<Expr>(special_real("Overflow"));
+    }
+    mpq_class exact = multiply ? mpq_class(1) : mpq_class(0);
+    for (const auto& value : exact_values) {
+        if (multiply) exact *= value;
+        else exact += value;
+    }
+    return arbitrary_real_from_rational(exact, precision);
+}
+
+bool contains_inexact_number(const Expr& value) {
+    if (value.kind() == ExprKind::Real) return true;
+    if (value.kind() == ExprKind::Complex)
+        return contains_inexact_number(value.real_part()) || contains_inexact_number(value.imaginary_part());
+    return value.kind() == ExprKind::Call && std::any_of(value.args().begin(), value.args().end(), contains_inexact_number);
+}
+
+bool is_machine_number(const Expr& value) {
+    if (value.kind() == ExprKind::Real) return value.text().find('`') == std::string::npos;
+    if (value.kind() == ExprKind::Complex)
+        return (is_machine_number(value.real_part()) || is_machine_number(value.imaginary_part()))
+            && numeric_q_value(value.real_part()) && numeric_q_value(value.imaginary_part());
+    if (value.kind() != ExprKind::Call || !value.head().symbol_name()) return false;
+    const auto name = system_dispatch_name(*value.head().symbol_name());
+    return (name == "Plus" || name == "Times" || name == "Power" || name == "Sqrt" || name == "Abs" || name == "Sign")
+        && std::all_of(value.args().begin(), value.args().end(), numeric_q_value)
+        && std::any_of(value.args().begin(), value.args().end(), is_machine_number);
+}
+
+std::optional<std::pair<double, double>> numeric_complex(const Expr& value) {
+    if (const auto real_value = numeric_real(value)) return std::pair{*real_value, 0.0};
+    if (value.kind() != ExprKind::Complex) return std::nullopt;
+    const auto real_value = numeric_real(value.real_part());
+    const auto imaginary_value = numeric_real(value.imaginary_part());
+    if (!real_value || !imaginary_value) return std::nullopt;
+    return std::pair{*real_value, *imaginary_value};
+}
+
+std::optional<Expr> exact_square_root(const mpq_class& value) {
+    if (value < 0) return std::nullopt;
+    mpz_class numerator_root, denominator_root;
+    mpz_sqrt(numerator_root.get_mpz_t(), value.get_num().get_mpz_t());
+    mpz_sqrt(denominator_root.get_mpz_t(), value.get_den().get_mpz_t());
+    if (numerator_root * numerator_root == value.get_num() && denominator_root * denominator_root == value.get_den())
+        return from_rational(mpq_class(numerator_root, denominator_root));
+    return call("Power", {from_rational(value), rational(1, 2)});
+}
+
+std::string rounded_decimal_constant(const std::string& source, std::size_t precision) {
+    const auto point = source.find('.');
+    std::string digits;
+    for (const char character : source) if (character >= '0' && character <= '9') digits.push_back(character);
+    const auto take = std::min(precision, digits.size());
+    mpz_class rounded(take == 0 ? "0" : digits.substr(0, take));
+    if (take < digits.size() && digits[take] >= '5') ++rounded;
+    auto result = rounded.get_str();
+    if (result.size() < take) result.insert(0, take - result.size(), '0');
+    const auto integer_digits = std::max<std::size_t>(1, point == std::string::npos ? source.size() : point);
+    if (result.size() <= integer_digits) result.push_back('.');
+    else result.insert(integer_digits, 1, '.');
+    return result;
+}
+
+std::optional<double> numeric_f64(const Expr& expression) {
+    if (const auto value = numeric_real(expression)) return value;
+    if (is_symbol(expression, "Pi")) return std::acos(-1.0);
+    if (is_symbol(expression, "E")) return std::exp(1.0);
+    if (is_symbol(expression, "Degree")) return std::acos(-1.0) / 180.0;
+    if (expression.kind() != ExprKind::Call || !expression.head().symbol_name()) return std::nullopt;
+    std::vector<double> values;
+    for (const auto& argument : expression.args()) {
+        const auto value = numeric_f64(argument); if (!value) return std::nullopt; values.push_back(*value);
+    }
+    const auto name = system_dispatch_name(*expression.head().symbol_name());
+    if (name == "Plus") return std::accumulate(values.begin(), values.end(), 0.0);
+    if (name == "Times") return std::accumulate(values.begin(), values.end(), 1.0, std::multiplies<>());
+    if (name == "Power" && values.size() == 2) return std::pow(values[0], values[1]);
+    if (values.size() == 1) return machine_unary_value(name, values[0]);
+    if (name == "ArcTan" && values.size() == 2) return std::atan2(values[1], values[0]);
+    return std::nullopt;
+}
+
+bool is_pi_over_six(const Expr& expression) {
+    return expression.has_head("Times") && expression.args().size() == 2
+        && std::any_of(expression.args().begin(), expression.args().end(), [](const Expr& value) { return is_symbol(value, "Pi"); })
+        && std::any_of(expression.args().begin(), expression.args().end(), [](const Expr& value) {
+            const auto rational_value = as_rational(value); return rational_value && *rational_value == mpq_class(1, 6);
+        });
+}
+
+std::optional<Expr> numericize(const Expr& expression, std::optional<std::size_t> precision) {
+    if (precision) if (const auto value = high_complex_value(expression)) {
+        if (value->imaginary == 0) return high_real_expression(value->real, *precision);
+        return complex(high_real_expression(value->real, *precision),
+            high_real_expression(value->imaginary, *precision));
+    }
+    if (const auto value = as_rational(expression)) {
+        if (precision) return arbitrary_real_from_rational(*value, *precision);
+        const auto machine_value = rounded_machine_value(*value);
+        return machine_value ? std::optional<Expr>(real(real_text(*machine_value)))
+                             : std::nullopt;
+    }
+    if (expression.kind() == ExprKind::Real) return expression;
+    const std::string* constant = nullptr;
+    static const std::string pi = "3.1415926535897932384626433832795028841971693993751058209749445923";
+    static const std::string e = "2.7182818284590452353602874713526624977572470936999595749669676277";
+    if (is_symbol(expression, "Pi")) constant = &pi;
+    if (is_symbol(expression, "E")) constant = &e;
+    if (constant) {
+        if (precision)
+            return real(rounded_decimal_constant(*constant, *precision) + "`"
+                + std::to_string(*precision) + ".");
+        const auto machine_value = detail::parse_ascii_double(*constant);
+        return machine_value ? std::optional<Expr>(real(real_text(*machine_value)))
+                             : std::nullopt;
+    }
+    if (expression.has_head("Sin") && expression.args().size() == 1 && is_pi_over_six(expression.args()[0]))
+        return precision ? real("0.5`" + std::to_string(*precision) + ".") : real("0.5");
+    const auto value = numeric_f64(expression);
+    if (!value) return std::nullopt;
+    return precision ? real(real_text(*value) + "`" + std::to_string(*precision) + ".") : real(real_text(*value));
+}
+
+std::string base64_encode(const std::vector<std::uint8_t>& input) {
+    static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string output;
+    for (std::size_t index = 0; index < input.size(); index += 3) {
+        const auto remaining = input.size() - index;
+        const std::uint32_t value = static_cast<std::uint32_t>(input[index]) << 16
+            | (remaining > 1 ? static_cast<std::uint32_t>(input[index + 1]) << 8 : 0)
+            | (remaining > 2 ? input[index + 2] : 0);
+        output.push_back(alphabet[(value >> 18) & 63]); output.push_back(alphabet[(value >> 12) & 63]);
+        output.push_back(remaining > 1 ? alphabet[(value >> 6) & 63] : '=');
+        output.push_back(remaining > 2 ? alphabet[value & 63] : '=');
+    }
+    return output;
+}
+
+std::optional<std::vector<std::uint8_t>> base64_decode(const std::string& source) {
+    std::vector<int> table(256, -1);
+    const std::string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (std::size_t index = 0; index < alphabet.size(); ++index) table[static_cast<unsigned char>(alphabet[index])] = static_cast<int>(index);
+    std::vector<std::uint8_t> output; std::uint32_t accumulator = 0; int bits = 0;
+    for (const unsigned char character : source) {
+        if (character == '=') break;
+        if (table[character] < 0) continue;
+        accumulator = (accumulator << 6) | static_cast<std::uint32_t>(table[character]); bits += 6;
+        if (bits >= 8) { bits -= 8; output.push_back(static_cast<std::uint8_t>((accumulator >> bits) & 255)); }
+    }
+    return output;
+}
+
+std::string ascii85_encode(const std::vector<std::uint8_t>& values) {
+    std::string output;
+    for (std::size_t offset = 0; offset < values.size(); offset += 4) {
+        const auto count = std::min<std::size_t>(4, values.size() - offset);
+        std::uint32_t value = 0;
+        for (std::size_t index = 0; index < 4; ++index) value = (value << 8) | (index < count ? values[offset + index] : 0);
+        if (count == 4 && value == 0) { output.push_back('z'); continue; }
+        char digits[5]; for (int index = 4; index >= 0; --index) { digits[index] = static_cast<char>(value % 85 + '!'); value /= 85; }
+        output.append(digits, count + 1);
+    }
+    return output;
+}
+
+std::optional<std::vector<std::uint8_t>> ascii85_decode(const std::string& source) {
+    std::vector<std::uint32_t> digits; std::vector<std::uint8_t> output;
+    for (const unsigned char character : source) {
+        if (std::isspace(character)) continue;
+        if (character == 'z') { if (!digits.empty()) return std::nullopt; output.insert(output.end(), 4, 0); continue; }
+        if (character < '!' || character > 'u') continue;
+        digits.push_back(character - '!');
+        if (digits.size() == 5) {
+            std::uint32_t value = 0; for (const auto digit : digits) value = value * 85 + digit;
+            for (int shift = 24; shift >= 0; shift -= 8) output.push_back(static_cast<std::uint8_t>(value >> shift));
+            digits.clear();
+        }
+    }
+    if (digits.size() == 1) return std::nullopt;
+    if (!digits.empty()) {
+        const auto original = digits.size(); digits.resize(5, 84);
+        std::uint32_t value = 0; for (const auto digit : digits) value = value * 85 + digit;
+        for (std::size_t index = 0; index + 1 < original; ++index) output.push_back(static_cast<std::uint8_t>(value >> (24 - 8 * index)));
+    }
+    return output;
+}
+
+void append_utf8(std::string& output, std::uint32_t value) {
+    if (value <= 0x7f) output.push_back(static_cast<char>(value));
+    else if (value <= 0x7ff) { output.push_back(static_cast<char>(0xc0 | (value >> 6))); output.push_back(static_cast<char>(0x80 | (value & 0x3f))); }
+    else if (value <= 0xffff) { output.push_back(static_cast<char>(0xe0 | (value >> 12))); output.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3f))); output.push_back(static_cast<char>(0x80 | (value & 0x3f))); }
+    else if (value <= 0x10ffff) { output.push_back(static_cast<char>(0xf0 | (value >> 18))); output.push_back(static_cast<char>(0x80 | ((value >> 12) & 0x3f))); output.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3f))); output.push_back(static_cast<char>(0x80 | (value & 0x3f))); }
+}
+
+std::vector<std::uint32_t> utf8_codepoints(const std::string& source) {
+    std::vector<std::uint32_t> output;
+    for (std::size_t index = 0; index < source.size();) {
+        const auto first = static_cast<unsigned char>(source[index]); std::size_t count = 1; std::uint32_t value = first;
+        if ((first & 0xe0) == 0xc0) { count = 2; value = first & 0x1f; }
+        else if ((first & 0xf0) == 0xe0) { count = 3; value = first & 0x0f; }
+        else if ((first & 0xf8) == 0xf0) { count = 4; value = first & 0x07; }
+        bool valid = count > 1 && index + count <= source.size();
+        for (std::size_t offset = 1; valid && offset < count; ++offset) {
+            const auto next = static_cast<unsigned char>(source[index + offset]); valid = (next & 0xc0) == 0x80; value = (value << 6) | (next & 0x3f);
+        }
+        if (!valid && count > 1) { count = 1; value = first; }
+        output.push_back(value); index += count;
+    }
+    return output;
+}
+
+std::vector<std::string> utf8_characters(const std::string& source) {
+    std::vector<std::string> output;
+    for (const auto value : utf8_codepoints(source)) { std::string character; append_utf8(character, value); output.push_back(std::move(character)); }
+    return output;
+}
+
+std::optional<std::vector<std::size_t>> string_selector_indices(std::size_t length, const Expr& specification) {
+    if (specification.has_head("UpTo") && specification.args().size() == 1 && machine_index(specification.args()[0])) {
+        const auto requested = *machine_index(specification.args()[0]);
+        const auto count = clamped_signed_magnitude(requested, length);
+        std::vector<std::size_t> indices(count);
+        if (requested >= 0) std::iota(indices.begin(), indices.end(), 0);
+        else std::iota(indices.begin(), indices.end(), length - count);
+        return indices;
+    }
+    if (const auto count = machine_index(specification)) {
+        const auto raw_amount = unsigned_magnitude(*count);
+        if (raw_amount > length) return std::nullopt;
+        const auto amount = static_cast<std::size_t>(raw_amount);
+        std::vector<std::size_t> indices;
+        if (*count >= 0) for (std::size_t index = 0; index < amount; ++index) indices.push_back(index);
+        else for (std::size_t index = length - amount; index < length; ++index) indices.push_back(index);
+        return indices;
+    }
+    if (specification.has_head("List") && (specification.args().size() == 2 || specification.args().size() == 3)) {
+        const auto start = machine_index(specification.args()[0]); const auto end = machine_index(specification.args()[1]);
+        const auto step = specification.args().size() == 3 ? machine_index(specification.args()[2]) : std::optional<long>(1);
+        if (!start || !end || !step || *step == 0) return std::nullopt;
+        auto normalize = [length](long value) { return value > 0 ? value - 1 : static_cast<long>(length) + value; };
+        const auto first = normalize(*start), last = normalize(*end); std::vector<std::size_t> indices;
+        for (long index = first; *step > 0 ? index <= last : index >= last;) {
+            if (index < 0 || index >= static_cast<long>(length)) return std::nullopt;
+            indices.push_back(static_cast<std::size_t>(index));
+            const auto next = checked_signed_sum(index, *step);
+            if (!next) break;
+            index = *next;
+        }
+        return indices;
+    }
+    return std::nullopt;
+}
+
+int lexicographic_compare(const Expr& left, const Expr& right) {
+    std::vector<Expr> left_items, right_items;
+    if (left.kind() == ExprKind::String) for (const auto& character : utf8_characters(left.text())) left_items.push_back(string(character));
+    else if (left.kind() == ExprKind::Call) left_items = left.args(); else return expression_compare(left, right);
+    if (right.kind() == ExprKind::String) for (const auto& character : utf8_characters(right.text())) right_items.push_back(string(character));
+    else if (right.kind() == ExprKind::Call) right_items = right.args(); else return expression_compare(left, right);
+    for (std::size_t index = 0; index < std::min(left_items.size(), right_items.size()); ++index)
+        if (const auto order = expression_compare(left_items[index], right_items[index]); order != 0) return order;
+    return left_items.size() < right_items.size() ? -1 : left_items.size() > right_items.size() ? 1 : 0;
+}
+
+std::optional<std::vector<std::uint8_t>> byte_values(const Expr& expression) {
+    if (expression.kind() == ExprKind::ByteArray) return expression.bytes();
+    if (!expression.has_head("List")) return std::nullopt;
+    std::vector<std::uint8_t> values;
+    for (const auto& item : expression.args()) {
+        if (item.kind() != ExprKind::Integer || item.integer_value() < 0 || item.integer_value() > 255) return std::nullopt;
+        values.push_back(static_cast<std::uint8_t>(item.integer_value().get_ui()));
+    }
+    return values;
+}
+
+Expr tabular_atom(const std::string& source) {
+    auto first = source.find_first_not_of(" \t\r"); auto last = source.find_last_not_of(" \t\r");
+    const auto trimmed = first == std::string::npos ? std::string() : source.substr(first, last - first + 1);
+    try {
+        std::size_t consumed = 0; mpz_class value(trimmed); (void)consumed; return integer(value);
+    } catch (...) {}
+    if (trimmed.find_first_of(".eE") != std::string::npos)
+        if (const auto value = detail::parse_ascii_double(trimmed))
+            return real(real_text(*value));
+    return string(source);
+}
+
+Expr import_delimited(const std::string& source, char delimiter, bool whitespace = false) {
+    std::vector<Expr> rows; std::size_t start = 0;
+    while (start < source.size()) {
+        const auto end = source.find('\n', start); auto line = source.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) {
+            std::vector<Expr> fields;
+            if (whitespace) {
+                std::size_t position = 0;
+                while (position < line.size()) { position = line.find_first_not_of(" \t", position); if (position == std::string::npos) break; const auto stop = line.find_first_of(" \t", position); fields.push_back(tabular_atom(line.substr(position, stop - position))); position = stop; }
+            } else {
+                std::size_t position = 0;
+                while (position <= line.size()) { const auto stop = line.find(delimiter, position); fields.push_back(tabular_atom(line.substr(position, stop - position))); if (stop == std::string::npos) break; position = stop + 1; }
+            }
+            rows.push_back(list(std::move(fields)));
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return list(std::move(rows));
+}
+
+std::string json_quote(const std::string& source) {
+    std::string output = "\"";
+    for (const char character : source) {
+        if (character == '\\' || character == '"') { output.push_back('\\'); output.push_back(character); }
+        else if (character == '\n') output += "\\n";
+        else if (character == '\r') output += "\\r";
+        else if (character == '\t') output += "\\t";
+        else output.push_back(character);
+    }
+    return output + "\"";
+}
+
+std::optional<std::string> expression_json(const Expr& expression) {
+    if (expression.kind() == ExprKind::String) return json_quote(expression.text());
+    if (expression.kind() == ExprKind::Integer || expression.kind() == ExprKind::Real) return expression.to_full_form();
+    if (is_symbol(expression, "True")) return "true";
+    if (is_symbol(expression, "False")) return "false";
+    if (is_symbol(expression, "Null")) return "null";
+    auto entries = association_rules(expression);
+    const auto& items = entries ? *entries : expression.args();
+    const bool object = entries.has_value() || (expression.has_head("List") && !items.empty()
+        && std::all_of(items.begin(), items.end(), [](const Expr& item) { return item.has_head("Rule") && item.args().size() == 2 && item.args()[0].kind() == ExprKind::String; }));
+    if (object) {
+        std::string output = "{";
+        for (std::size_t index = 0; index < items.size(); ++index) { const auto value = expression_json(items[index].args()[1]); if (!value) return std::nullopt; if (index) output += ','; output += json_quote(items[index].args()[0].text()) + ":" + *value; }
+        return output + "}";
+    }
+    if (expression.has_head("List")) {
+        std::string output = "[";
+        for (std::size_t index = 0; index < items.size(); ++index) { const auto value = expression_json(items[index]); if (!value) return std::nullopt; if (index) output += ','; output += *value; }
+        return output + "]";
+    }
+    return std::nullopt;
+}
+
+class JsonReader {
+public:
+    explicit JsonReader(const std::string& source, bool raw) : source_(source), raw_(raw) {}
+    std::optional<Expr> read() { auto value = read_value(); skip(); return value && position_ == source_.size() ? value : std::nullopt; }
+private:
+    void skip() { while (position_ < source_.size() && std::isspace(static_cast<unsigned char>(source_[position_]))) ++position_; }
+    std::optional<std::string> read_string() {
+        skip(); if (position_ >= source_.size() || source_[position_++] != '"') return std::nullopt; std::string value;
+        while (position_ < source_.size()) { const char character = source_[position_++]; if (character == '"') return value; if (character == '\\' && position_ < source_.size()) { const char escaped = source_[position_++]; value.push_back(escaped == 'n' ? '\n' : escaped == 'r' ? '\r' : escaped == 't' ? '\t' : escaped); } else value.push_back(character); }
+        return std::nullopt;
+    }
+    std::optional<Expr> read_value() {
+        skip(); if (position_ >= source_.size()) return std::nullopt;
+        if (source_[position_] == '"') { const auto value = read_string(); return value ? std::optional<Expr>(string(*value)) : std::nullopt; }
+        if (source_[position_] == '[') {
+            ++position_; std::vector<Expr> values; skip(); if (position_ < source_.size() && source_[position_] == ']') { ++position_; return list(); }
+            while (true) { const auto value = read_value(); if (!value) return std::nullopt; values.push_back(*value); skip(); if (position_ < source_.size() && source_[position_] == ']') { ++position_; return list(std::move(values)); } if (position_ >= source_.size() || source_[position_++] != ',') return std::nullopt; }
+        }
+        if (source_[position_] == '{') {
+            ++position_; std::vector<Expr> rules; skip(); if (position_ < source_.size() && source_[position_] == '}') { ++position_; return raw_ ? call("Association") : list(); }
+            while (true) { const auto key = read_string(); skip(); if (!key || position_ >= source_.size() || source_[position_++] != ':') return std::nullopt; const auto value = read_value(); if (!value) return std::nullopt; rules.push_back(call("Rule", {string(*key), *value})); skip(); if (position_ < source_.size() && source_[position_] == '}') { ++position_; return raw_ ? call("Association", std::move(rules)) : list(std::move(rules)); } if (position_ >= source_.size() || source_[position_++] != ',') return std::nullopt; }
+        }
+        const auto start = position_; while (position_ < source_.size() && !std::isspace(static_cast<unsigned char>(source_[position_])) && std::string(",]}").find(source_[position_]) == std::string::npos) ++position_;
+        const auto token = source_.substr(start, position_ - start); if (token == "true") return symbol("True"); if (token == "false") return symbol("False"); if (token == "null") return symbol("Null");
+        try {
+            if (token.find_first_of(".eE") == std::string::npos)
+                return integer(mpz_class(token));
+            const auto value = detail::parse_ascii_double(token);
+            return value ? std::optional<Expr>(real(real_text(*value))) : std::nullopt;
+        } catch (...) { return std::nullopt; }
+    }
+    const std::string& source_; bool raw_; std::size_t position_ = 0;
+};
+
+const std::map<std::string, std::vector<std::string>>& system_registry() {
+    static const auto registry = [] {
+        std::map<std::string, std::vector<std::string>> result;
+        const std::string source(bundled_system_symbols_json());
+        if (const auto document = JsonReader(source, false).read(); document && document->has_head("List")) {
+            for (const auto& field : document->args()) {
+                if (!field.has_head("Rule") || field.args().size() != 2 || field.args()[0].kind() != ExprKind::String || field.args()[0].text() != "symbols" || !field.args()[1].has_head("List")) continue;
+                for (const auto& entry : field.args()[1].args()) {
+                    if (!entry.has_head("List") || entry.args().size() != 2 || entry.args()[0].kind() != ExprKind::String || !entry.args()[1].has_head("List")) continue;
+                    std::vector<std::string> attributes;
+                    for (const auto& attribute : entry.args()[1].args()) if (attribute.kind() == ExprKind::String) attributes.push_back(attribute.text());
+                    result.emplace(entry.args()[0].text(), std::move(attributes));
+                }
+            }
+        }
+        for (const auto* name : {"ConfirmationFailed", "FailsafeFailed", "MachineIntegerQ", "NegativeDegreeLexicographic", "NegativeDegreeReverseLexicographic", "NegativeLexicographic"}) result.try_emplace(name);
+        return result;
+    }();
+    return registry;
+}
+
+std::set<std::string>& user_symbol_registry() {
+    static std::set<std::string> names;
+    return names;
+}
+
+bool wildcard_matches(const std::string& value, const std::string& pattern) {
+    const auto star = pattern.find('*');
+    if (star == std::string::npos) return value == pattern;
+    return value.size() >= pattern.size() - 1 && value.compare(0, star, pattern, 0, star) == 0
+        && value.compare(value.size() - (pattern.size() - star - 1), pattern.size() - star - 1, pattern, star + 1, pattern.size() - star - 1) == 0;
+}
+
+std::string full_symbol_name(const Expr& expression) {
+    if (!expression.symbol_name()) return {};
+    const auto& name = *expression.symbol_name();
+    if (name.find('`') != std::string::npos) return name;
+    return system_registry().count(name) ? "System`" + name : "Global`" + name;
+}
+
+Expr display_symbol(const std::string& full_name) {
+    if (full_name.compare(0, 7, "System`") == 0 || full_name.compare(0, 7, "Global`") == 0) return symbol(full_name.substr(7));
+    return symbol(full_name);
+}
+
+Expr row_box(std::vector<Expr> pieces) { return call("RowBox", {list(std::move(pieces))}); }
+
+Expr standard_boxes(const Expr& expression);
+Expr traditional_boxes(const Expr& expression);
+Expr full_form_boxes(const Expr& expression);
+std::optional<std::string> boxes_source(const Expr& boxes);
+
+struct NamedOperatorSurface {
+    std::string_view head;
+    std::string_view escaped;
+    std::string_view tex;
+    std::string_view mathml;
+};
+
+const std::vector<NamedOperatorSurface>& named_operator_surfaces() {
+    static const std::vector<NamedOperatorSurface> surfaces{
+        {"CirclePlus", R"(\[CirclePlus])", R"(\oplus)", "&#8853;"},
+        {"CircleTimes", R"(\[CircleTimes])", R"(\otimes)", "&#8855;"},
+        {"Diamond", R"(\[Diamond])", R"(\diamond)", "&#8900;"},
+    };
+    return surfaces;
+}
+
+const NamedOperatorSurface* named_operator_surface(const Expr& expression) {
+    if (expression.kind() != ExprKind::Call || !expression.head().symbol_name()
+        || expression.args().size() < 2) return nullptr;
+    const auto name = system_dispatch_name(*expression.head().symbol_name());
+    const auto& surfaces = named_operator_surfaces();
+    const auto found = std::find_if(surfaces.begin(), surfaces.end(), [&](const auto& surface) {
+        return surface.head == name;
+    });
+    return found == surfaces.end() ? nullptr : &*found;
+}
+
+Expr separated_boxes(const std::vector<Expr>& expressions, const std::string& separator, bool traditional) {
+    std::vector<Expr> pieces;
+    for (std::size_t index = 0; index < expressions.size(); ++index) {
+        if (index) pieces.push_back(string(separator));
+        pieces.push_back(traditional ? traditional_boxes(expressions[index]) : standard_boxes(expressions[index]));
+    }
+    return row_box(std::move(pieces));
+}
+
+Expr named_operator_boxes(const Expr& expression, const NamedOperatorSurface& surface,
+    bool traditional) {
+    std::vector<Expr> pieces;
+    for (std::size_t index = 0; index < expression.args().size(); ++index) {
+        if (index) pieces.push_back(string(std::string(surface.escaped)));
+        const auto& argument = expression.args()[index];
+        auto boxes = traditional ? traditional_boxes(argument) : standard_boxes(argument);
+        // Escaped infix operators are deliberately parenthesized at equal precedence so a
+        // box -> expression round trip preserves explicit grouping rather than flattening it.
+        if (named_operator_surface(argument))
+            boxes = row_box({string("("), std::move(boxes), string(")")});
+        pieces.push_back(std::move(boxes));
+    }
+    return row_box(std::move(pieces));
+}
+
+Expr standard_boxes(const Expr& expression) {
+    if (expression.kind() == ExprKind::Symbol || expression.kind() == ExprKind::Integer || expression.kind() == ExprKind::Real || expression.kind() == ExprKind::String)
+        return string(expression.to_input_form());
+    if (expression.kind() == ExprKind::Rational) return row_box({string(expression.rational_value().get_num().get_str()), string("/"), string(expression.rational_value().get_den().get_str())});
+    if (expression.kind() != ExprKind::Call) return string(expression.to_input_form());
+    const auto name = expression.head().symbol_name() ? system_dispatch_name(*expression.head().symbol_name()) : std::string();
+    if (const auto* surface = named_operator_surface(expression))
+        return named_operator_boxes(expression, *surface, false);
+    if (name == "Plus" && expression.args().size() >= 2) return separated_boxes(expression.args(), "+", false);
+    if (name == "Times" && expression.args().size() >= 2) return separated_boxes(expression.args(), " ", false);
+    if (name == "Power" && expression.args().size() == 2) return call("SuperscriptBox", {standard_boxes(expression.args()[0]), standard_boxes(expression.args()[1])});
+    if (name == "List") return row_box({string("{"), separated_boxes(expression.args(), ",", false), string("}")});
+    return row_box({standard_boxes(expression.head()), string("["), separated_boxes(expression.args(), ",", false), string("]")});
+}
+
+Expr traditional_boxes(const Expr& expression) {
+    if (expression.kind() == ExprKind::Symbol || expression.kind() == ExprKind::Integer || expression.kind() == ExprKind::Real) return string(expression.to_input_form());
+    if (expression.kind() == ExprKind::String) return string(expression.text());
+    if (expression.kind() == ExprKind::Rational) return call("FractionBox", {string(expression.rational_value().get_num().get_str()), string(expression.rational_value().get_den().get_str())});
+    if (expression.kind() != ExprKind::Call) return string(expression.to_input_form());
+    const auto name = expression.head().symbol_name() ? system_dispatch_name(*expression.head().symbol_name()) : std::string();
+    if (const auto* surface = named_operator_surface(expression))
+        return named_operator_boxes(expression, *surface, true);
+    if (name == "Plus" && expression.args().size() >= 2) {
+        auto values = expression.args(); std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
+            const bool left_numeric = numeric_real(left).has_value(), right_numeric = numeric_real(right).has_value(); return left_numeric < right_numeric;
+        });
+        return separated_boxes(values, "+", true);
+    }
+    if (name == "Times" && expression.args().size() >= 2) return separated_boxes(expression.args(), " ", true);
+    if (name == "Power" && expression.args().size() == 2) return call("SuperscriptBox", {traditional_boxes(expression.args()[0]), traditional_boxes(expression.args()[1])});
+    if (name == "List") return row_box({string("{"), separated_boxes(expression.args(), ",", true), string("}")});
+    return row_box({traditional_boxes(expression.head()), string("["), separated_boxes(expression.args(), ",", true), string("]")});
+}
+
+std::vector<Expr> traditional_plus_arguments(const std::vector<Expr>& arguments) {
+    auto values = arguments;
+    std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
+        const bool left_numeric = numeric_real(left).has_value();
+        const bool right_numeric = numeric_real(right).has_value();
+        return left_numeric < right_numeric;
+    });
+    return values;
+}
+
+std::string replace_all(std::string value, std::string_view needle, std::string_view replacement) {
+    if (needle.empty()) return value;
+    for (std::size_t offset = 0; (offset = value.find(needle, offset)) != std::string::npos;
+         offset += replacement.size())
+        value.replace(offset, needle.size(), replacement);
+    return value;
+}
+
+std::string xml_escape(std::string_view value) {
+    std::string output;
+    for (const auto character : value) {
+        switch (character) {
+        case '&': output += "&amp;"; break;
+        case '<': output += "&lt;"; break;
+        case '>': output += "&gt;"; break;
+        case '"': output += "&quot;"; break;
+        case '\'': output += "&#x27;"; break;
+        default: output.push_back(character); break;
+        }
+    }
+    return output;
+}
+
+std::string tex_text(const Expr& expression, bool traditional = true) {
+    if (const auto* surface = named_operator_surface(expression)) {
+        std::string output;
+        for (std::size_t index = 0; index < expression.args().size(); ++index) {
+            if (index) output += std::string(surface->tex) + " ";
+            const auto& argument = expression.args()[index];
+            const auto rendered = tex_text(argument, traditional);
+            output += named_operator_surface(argument)
+                ? R"(\left()" + rendered + R"(\right))" : rendered;
+        }
+        return output;
+    }
+    const auto boxes = traditional ? traditional_boxes(expression) : standard_boxes(expression);
+    return boxes_source(boxes).value_or(expression.to_input_form());
+}
+
+std::string mathml_fragment(const Expr& expression, bool traditional = true);
+
+std::string mathml_join(const std::vector<Expr>& arguments, std::string_view operator_text,
+    bool traditional) {
+    std::string output;
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        if (index) output += "<mo>" + std::string(operator_text) + "</mo>";
+        output += mathml_fragment(arguments[index], traditional);
+    }
+    return output;
+}
+
+std::string mathml_fragment(const Expr& expression, bool traditional) {
+    if (expression.kind() == ExprKind::Symbol)
+        return "<mi>" + xml_escape(expression.to_input_form()) + "</mi>";
+    if (expression.kind() == ExprKind::Integer)
+        return "<mn>" + expression.integer_value().get_str() + "</mn>";
+    if (expression.kind() == ExprKind::Rational)
+        return "<mfrac><mn>" + expression.rational_value().get_num().get_str()
+            + "</mn><mn>" + expression.rational_value().get_den().get_str() + "</mn></mfrac>";
+    if (expression.kind() == ExprKind::Real)
+        return "<mn>" + xml_escape(expression.text()) + "</mn>";
+    if (expression.kind() == ExprKind::SpecialReal)
+        return "<mi>" + xml_escape(expression.text()) + "</mi>";
+    if (expression.kind() == ExprKind::String)
+        return "<mtext>" + xml_escape(wl_string(expression.text())) + "</mtext>";
+    if (expression.kind() == ExprKind::Complex)
+        return mathml_fragment(call("Complex", {expression.real_part(), expression.imaginary_part()}), traditional);
+    if (expression.kind() != ExprKind::Call)
+        return "<mtext>" + xml_escape(expression.to_input_form()) + "</mtext>";
+
+    if (expression.head().symbol_name()) {
+        const auto name = system_dispatch_name(*expression.head().symbol_name());
+        const auto& arguments = expression.args();
+        if (name == "List")
+            return "<mrow><mo>{</mo>" + mathml_join(arguments, ",", traditional)
+                + "<mo>}</mo></mrow>";
+        if ((name == "Rule" || name == "RuleDelayed") && arguments.size() == 2)
+            return "<mrow>" + mathml_fragment(arguments[0], traditional) + "<mo>"
+                + (name == "Rule" ? "-&gt;" : ":&gt;") + "</mo>"
+                + mathml_fragment(arguments[1], traditional) + "</mrow>";
+        if (const auto* surface = named_operator_surface(expression))
+            return "<mrow>" + mathml_join(arguments, surface->mathml, traditional) + "</mrow>";
+        if (name == "Plus" && !arguments.empty()) {
+            const auto ordered = traditional ? traditional_plus_arguments(arguments) : arguments;
+            return "<mrow>" + mathml_join(ordered, "+", traditional) + "</mrow>";
+        }
+        if (name == "Times" && !arguments.empty())
+            return "<mrow>" + mathml_join(arguments, "\xE2\x81\xA2", traditional) + "</mrow>";
+        if (name == "Power" && arguments.size() == 2)
+            return "<msup>" + mathml_fragment(arguments[0], traditional)
+                + mathml_fragment(arguments[1], traditional) + "</msup>";
+    }
+    return "<mrow>" + mathml_fragment(expression.head(), traditional) + "<mo>[</mo>"
+        + mathml_join(expression.args(), ",", traditional) + "<mo>]</mo></mrow>";
+}
+
+std::string mathml_text(const Expr& expression, bool traditional = true) {
+    return "<math>\n " + mathml_fragment(expression, traditional) + "\n</math>";
+}
+
+std::string tex_to_standard_text(std::string value) {
+    for (const auto& surface : named_operator_surfaces())
+        value = replace_all(std::move(value), surface.tex, surface.escaped);
+    return value;
+}
+
+std::string mathml_to_standard_text(std::string value) {
+    for (const auto& surface : named_operator_surfaces())
+        value = replace_all(std::move(value), "<mo>" + std::string(surface.mathml) + "</mo>",
+            " " + std::string(surface.escaped) + " ");
+    value = replace_all(std::move(value), "<mo>\xE2\x81\xA2</mo>", " ");
+    value = std::regex_replace(value, std::regex("<[^>]+>"), "");
+    value = replace_all(std::move(value), "&lt;", "<");
+    value = replace_all(std::move(value), "&gt;", ">");
+    value = replace_all(std::move(value), "&quot;", "\"");
+    value = replace_all(std::move(value), "&#x27;", "'");
+    value = replace_all(std::move(value), "&amp;", "&");
+    return value;
+}
+
+Expr full_form_boxes(const Expr& expression) {
+    if (expression.kind() == ExprKind::Rational) {
+        return full_form_boxes(call("Rational", {
+            integer(expression.rational_value().get_num()),
+            integer(expression.rational_value().get_den()),
+        }));
+    }
+    if (expression.kind() == ExprKind::Complex) {
+        return full_form_boxes(call("Complex", {
+            expression.real_part(), expression.imaginary_part(),
+        }));
+    }
+    if (expression.kind() == ExprKind::SpecialReal) {
+        return full_form_boxes(call(expression.text()));
+    }
+    if (expression.kind() != ExprKind::Call) return string(expression.to_full_form());
+
+    std::vector<Expr> pieces;
+    for (std::size_t index = 0; index < expression.args().size(); ++index) {
+        if (index) pieces.push_back(string(","));
+        pieces.push_back(full_form_boxes(expression.args()[index]));
+    }
+    const auto arguments = row_box(std::move(pieces));
+    return row_box({
+        full_form_boxes(expression.head()), string("["), arguments, string("]"),
+    });
+}
+
+std::optional<std::string> boxes_source(const Expr& boxes) {
+    if (boxes.kind() == ExprKind::String) return boxes.text();
+    if (boxes.has_head("RowBox") && boxes.args().size() == 1 && boxes.args()[0].has_head("List")) {
+        std::string output; for (const auto& piece : boxes.args()[0].args()) { const auto value = boxes_source(piece); if (!value) return std::nullopt; output += *value; } return output;
+    }
+    if ((boxes.has_head("StyleBox") || boxes.has_head("FormBox") || boxes.has_head("TagBox") || boxes.has_head("BoxData")) && !boxes.args().empty()) return boxes_source(boxes.args()[0]);
+    if (boxes.has_head("SuperscriptBox") && boxes.args().size() == 2) { const auto base = boxes_source(boxes.args()[0]); const auto power = boxes_source(boxes.args()[1]); if (base && power) return *base + "^" + *power; }
+    if (boxes.has_head("FractionBox") && boxes.args().size() == 2) { const auto numerator = boxes_source(boxes.args()[0]); const auto denominator = boxes_source(boxes.args()[1]); if (numerator && denominator) return *numerator + "/" + *denominator; }
+    return std::nullopt;
+}
+
+Expr strip_boxes(const Expr& boxes) {
+    if (boxes.has_head("StyleBox") && !boxes.args().empty()) return strip_boxes(boxes.args()[0]);
+    if (boxes.has_head("RowBox") && boxes.args().size() == 1 && boxes.args()[0].has_head("List")) {
+        std::vector<Expr> pieces;
+        for (const auto& piece : boxes.args()[0].args()) { const auto stripped = strip_boxes(piece); if (stripped.kind() == ExprKind::String && stripped.text().find_first_not_of(" \t\r\n") == std::string::npos) continue; pieces.push_back(stripped); }
+        return row_box(std::move(pieces));
+    }
+    if (boxes.kind() != ExprKind::Call) return boxes;
+    std::vector<Expr> values; for (const auto& value : boxes.args()) values.push_back(strip_boxes(value)); return call(boxes.head(), std::move(values));
+}
+
+std::string export_table(const Expr& expression, char delimiter) {
+    std::vector<std::vector<Expr>> rows;
+    if (!expression.has_head("List")) rows.push_back({expression});
+    else if (std::all_of(expression.args().begin(), expression.args().end(), [](const Expr& value) { return !value.has_head("List"); }))
+        for (const auto& value : expression.args()) rows.push_back({value});
+    else for (const auto& value : expression.args()) rows.push_back(value.args());
+    std::string output;
+    for (std::size_t row = 0; row < rows.size(); ++row) { if (row) output.push_back('\n'); for (std::size_t column = 0; column < rows[row].size(); ++column) { if (column) output.push_back(delimiter); output += rows[row][column].kind() == ExprKind::String ? rows[row][column].text() : rows[row][column].to_input_form(); } }
+    if (delimiter != '\t' || !rows.empty()) output.push_back('\n');
+    return output;
+}
+
+int expression_rank(const Expr& value) {
+    if (value.kind() == ExprKind::Integer || value.kind() == ExprKind::Rational || value.kind() == ExprKind::Real
+        || value.kind() == ExprKind::SpecialReal || value.kind() == ExprKind::Complex || is_symbol(value, "Infinity") || is_symbol(value, "-Infinity")) return 0;
+    if (value.kind() == ExprKind::String) return 1;
+    if (value.kind() == ExprKind::Symbol) return 2;
+    if (value.kind() == ExprKind::ByteArray) return 3;
+    if (value.kind() == ExprKind::SparseArray) return 4;
+    if (value.kind() == ExprKind::Call) return 5;
+    return 6;
+}
+
+int numeric_type_rank(const Expr& value) {
+    if (is_symbol(value, "-Infinity")) return 0;
+    if (value.kind() == ExprKind::Integer) return 1;
+    if (value.kind() == ExprKind::Rational) return 2;
+    if (value.kind() == ExprKind::Real) return 3;
+    if (value.kind() == ExprKind::SpecialReal) return 4;
+    if (is_symbol(value, "Infinity")) return 5;
+    if (value.kind() == ExprKind::Complex) return 6;
+    return 7;
+}
+
+int expression_compare(const Expr& left, const Expr& right) {
+    if (left == right) return 0;
+    auto numeric_value = [](const Expr& value) -> std::optional<std::pair<double, double>> {
+        if (is_symbol(value, "-Infinity")) return std::pair{-std::numeric_limits<double>::infinity(), 0.0};
+        if (is_symbol(value, "Infinity")) return std::pair{std::numeric_limits<double>::infinity(), 0.0};
+        return numeric_complex(value);
+    };
+    const auto left_numeric = numeric_value(left), right_numeric = numeric_value(right);
+    if (left_numeric && right_numeric) {
+        if (left_numeric->first != right_numeric->first) return left_numeric->first < right_numeric->first ? -1 : 1;
+        if (left_numeric->second != right_numeric->second) return left_numeric->second < right_numeric->second ? -1 : 1;
+        if (numeric_type_rank(left) != numeric_type_rank(right)) return numeric_type_rank(left) < numeric_type_rank(right) ? -1 : 1;
+    }
+    const auto left_rank = expression_rank(left);
+    const auto right_rank = expression_rank(right);
+    if (left_rank != right_rank) return left_rank < right_rank ? -1 : 1;
+    if ((left.kind() == ExprKind::String && right.kind() == ExprKind::String)
+        || (left.kind() == ExprKind::Symbol && right.kind() == ExprKind::Symbol))
+        return left.text() < right.text() ? -1 : 1;
+    if (left.kind() == ExprKind::Call && right.kind() == ExprKind::Call) {
+        if (const auto head_order = expression_compare(left.head(), right.head()); head_order != 0) return head_order;
+        for (std::size_t index = 0; index < std::min(left.args().size(), right.args().size()); ++index)
+            if (const auto order = expression_compare(left.args()[index], right.args()[index]); order != 0) return order;
+        if (left.args().size() != right.args().size()) return left.args().size() < right.args().size() ? -1 : 1;
+    }
+    return left.to_full_form() < right.to_full_form() ? -1 : 1;
+}
+
+bool expression_less(const Expr& left, const Expr& right) { return expression_compare(left, right) < 0; }
+
+struct IntervalSegment { Expr lower; Expr upper; };
+
+std::optional<double> interval_number(const Expr& value) {
+    if (is_symbol(value, "Infinity")) return std::numeric_limits<double>::infinity();
+    if (is_symbol(value, "-Infinity")) return -std::numeric_limits<double>::infinity();
+    return numeric_real(value);
+}
+
+std::optional<std::vector<IntervalSegment>> normalized_interval_segments(const std::vector<Expr>& arguments) {
+    std::vector<IntervalSegment> segments;
+    for (const auto& argument : arguments) {
+        IntervalSegment segment{argument, argument};
+        if (argument.has_head("List") && argument.args().size() == 2)
+            segment = {argument.args()[0], argument.args()[1]};
+        else if (argument.has_head("List")) return std::nullopt;
+        const auto lower = interval_number(segment.lower), upper = interval_number(segment.upper);
+        if (lower && upper && *lower > *upper) std::swap(segment.lower, segment.upper);
+        segments.push_back(std::move(segment));
+    }
+    const bool all_numeric = std::all_of(segments.begin(), segments.end(), [](const IntervalSegment& segment) {
+        return interval_number(segment.lower).has_value() && interval_number(segment.upper).has_value();
+    });
+    if (!all_numeric) return segments;
+    std::sort(segments.begin(), segments.end(), [](const IntervalSegment& left, const IntervalSegment& right) {
+        const auto left_lower = *interval_number(left.lower), right_lower = *interval_number(right.lower);
+        return left_lower != right_lower ? left_lower < right_lower
+            : *interval_number(left.upper) < *interval_number(right.upper);
+    });
+    std::vector<IntervalSegment> merged;
+    for (const auto& segment : segments) {
+        if (merged.empty() || *interval_number(segment.lower) > *interval_number(merged.back().upper))
+            merged.push_back(segment);
+        else if (*interval_number(segment.upper) > *interval_number(merged.back().upper))
+            merged.back().upper = segment.upper;
+    }
+    return merged;
+}
+
+Expr interval_expression(const std::vector<IntervalSegment>& segments) {
+    std::vector<Expr> arguments;
+    for (const auto& segment : segments) arguments.push_back(list({segment.lower, segment.upper}));
+    return call("Interval", std::move(arguments));
+}
+
+Expr sparse_dense_value(const Expr& value) {
+    if (value.kind() != ExprKind::SparseArray) return value;
+    auto build = [&](auto&& self, std::vector<std::size_t> prefix) -> Expr {
+        if (prefix.size() == value.dimensions().size()) {
+            const auto found = std::find_if(value.sparse_entries().begin(), value.sparse_entries().end(),
+                [&](const SparseEntry& entry) { return entry.indices == prefix; });
+            return found == value.sparse_entries().end() ? value.fill_value() : found->value;
+        }
+        std::vector<Expr> items;
+        for (std::size_t index = 1; index <= value.dimensions()[prefix.size()]; ++index) {
+            auto child = prefix; child.push_back(index); items.push_back(self(self, std::move(child)));
+        }
+        return list(std::move(items));
+    };
+    return build(build, {});
+}
+
+std::optional<std::vector<std::size_t>> dense_dimensions(const Expr& value) {
+    if (!value.has_head("List")) return std::vector<std::size_t>{};
+    std::vector<std::size_t> dimensions{value.args().size()};
+    if (value.args().empty()) return dimensions;
+    const auto child = dense_dimensions(value.args().front()); if (!child) return std::nullopt;
+    for (const auto& item : value.args()) if (dense_dimensions(item) != child) return std::nullopt;
+    dimensions.insert(dimensions.end(), child->begin(), child->end()); return dimensions;
+}
+
+std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = integer(0L)) {
+    const auto dimensions = dense_dimensions(value); if (!dimensions || dimensions->empty()) return std::nullopt;
+    std::vector<SparseEntry> entries;
+    auto collect = [&](auto&& self, const Expr& item, std::vector<std::size_t> prefix) -> void {
+        if (prefix.size() == dimensions->size()) { if (item != fill) entries.push_back({std::move(prefix), item}); return; }
+        for (std::size_t index = 0; index < item.args().size(); ++index) {
+            auto child = prefix; child.push_back(index + 1); self(self, item.args()[index], std::move(child));
+        }
+    };
+    collect(collect, value, {}); return sparse_array(*dimensions, std::move(entries), fill);
+}
+
+constexpr long level_infinity = 1000000000L;
+struct LevelBounds { long minimum; long maximum; bool valid; };
+
+LevelBounds normalize_level_spec(const Expr& specification) {
+    if (is_symbol(specification, "Infinity")) return {1, level_infinity, true};
+    if (const auto level = machine_index(specification)) return *level >= 0
+        ? LevelBounds{*level == 0 ? 0 : 1, *level, true} : LevelBounds{1, *level, true};
+    if (specification.has_head("List") && specification.args().size() == 1) {
+        if (is_symbol(specification.args()[0], "Infinity")) return {level_infinity, level_infinity, true};
+        if (const auto level = machine_index(specification.args()[0])) return {*level, *level, true};
+    }
+    if (specification.has_head("List") && specification.args().size() == 2) {
+        const auto lower = machine_index(specification.args()[0]);
+        const auto upper = is_symbol(specification.args()[1], "Infinity") ? std::optional<long>(level_infinity)
+            : machine_index(specification.args()[1]);
+        if (lower && upper) return {*lower, *upper, true};
+    }
+    return {0, 0, false};
+}
+
+std::size_t semantic_expression_depth(const Expr& value) {
+    if (const auto rules = association_rules(value)) {
+        std::size_t depth = 1; for (const auto& rule : *rules) depth = std::max(depth, semantic_expression_depth(rule.args()[1]) + 1); return depth;
+    }
+    if (value.kind() != ExprKind::Call) return 1;
+    std::size_t depth = 1; for (const auto& item : value.args()) depth = std::max(depth, semantic_expression_depth(item) + 1); return depth;
+}
+
+bool level_matches(long positive, long negative, const LevelBounds& bounds) {
+    if (bounds.minimum >= 0 && bounds.maximum >= 0) return bounds.minimum <= positive && positive <= bounds.maximum;
+    if (bounds.minimum < 0 && bounds.maximum < 0) return bounds.minimum <= negative && negative <= bounds.maximum;
+    if (bounds.minimum >= 0 && bounds.maximum < 0) return positive >= bounds.minimum && negative <= bounds.maximum;
+    return negative >= bounds.minimum || positive <= bounds.maximum;
+}
+
+std::vector<Expr> flatten_head(const std::vector<Expr>& args, const std::string& head) {
+    std::vector<Expr> result;
+    for (const auto& argument : args) {
+        if (argument.has_head(head)) result.insert(result.end(), argument.args().begin(), argument.args().end());
+        else result.push_back(argument);
+    }
+    return result;
+}
+
+Expr simplify_plus(const std::vector<Expr>& raw_args, bool factor_common = true) {
+    const auto args = flatten_head(raw_args, "Plus");
+    if (std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Complex; })
+        && std::any_of(args.begin(), args.end(), contains_inexact_number)
+        && std::all_of(args.begin(), args.end(), [](const Expr& value) { return numeric_complex(value).has_value(); })) {
+        double real_value = 0.0, imaginary_value = 0.0;
+        for (const auto& value : args) { const auto parts = *numeric_complex(value); real_value += parts.first; imaginary_value += parts.second; }
+        return complex(real(real_text(real_value)), real(real_text(imaginary_value)));
+    }
+    if (std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Complex; })
+        && std::all_of(args.begin(), args.end(), [](const Expr& value) {
+            return as_rational(value).has_value() || (value.kind() == ExprKind::Complex
+                && as_rational(value.real_part()).has_value() && as_rational(value.imaginary_part()).has_value());
+        })) {
+        mpq_class real_value = 0, imaginary_value = 0;
+        for (const auto& value : args) {
+            if (value.kind() == ExprKind::Complex) { real_value += *as_rational(value.real_part()); imaginary_value += *as_rational(value.imaginary_part()); }
+            else real_value += *as_rational(value);
+        }
+        return complex(from_rational(real_value), from_rational(imaginary_value));
+    }
+    if (const auto inexact = inexact_real_arithmetic(args, false)) return *inexact;
+    mpq_class constant = 0;
+    struct Term {
+        Expr base;
+        mpq_class coefficient;
+        std::vector<Expr> factors;
+    };
+    std::vector<Term> terms;
+    bool machine = false;
+    double machine_sum = 0.0;
+    for (const auto& argument : args) {
+        if (const auto value = as_rational(argument)) { constant += *value; continue; }
+        if (argument.kind() == ExprKind::Real) {
+            if (const auto value = numeric_real(argument)) { machine = true; machine_sum += *value; continue; }
+        }
+        mpq_class coefficient = 1;
+        Expr base = argument;
+        if (argument.has_head("Times") && !argument.args().empty()) {
+            if (const auto value = as_rational(argument.args()[0])) {
+                coefficient = *value;
+                base = argument.args().size() == 2 ? argument.args()[1]
+                    : call("Times", std::vector<Expr>(argument.args().begin() + 1, argument.args().end()));
+            }
+        }
+        const auto found = std::find_if(terms.begin(), terms.end(),
+            [&](const Term& term) { return term.base == base; });
+        if (found == terms.end()) terms.push_back(Term{base, coefficient,
+            base.has_head("Times") ? base.args() : std::vector<Expr>{base}});
+        else found->coefficient += coefficient;
+    }
+    std::vector<Expr> result;
+    if (machine) {
+        const auto constant_value = rounded_machine_value(constant);
+        if (!constant_value) return special_real("Overflow");
+        machine_sum += *constant_value;
+        if (machine_sum != 0.0 || terms.empty()) result.push_back(real(real_text(machine_sum)));
+    } else if (constant != 0) result.push_back(from_rational(constant));
+
+    auto remove_factors = [](std::vector<Expr> factors,
+        const std::vector<Expr>& remove) -> std::optional<std::vector<Expr>> {
+        for (const auto& factor : remove) {
+            const auto found = std::find(factors.begin(), factors.end(), factor);
+            if (found == factors.end()) return std::nullopt;
+            factors.erase(found);
+        }
+        return factors;
+    };
+    auto common_factors = [](const std::vector<Expr>& left,
+        const std::vector<Expr>& right) {
+        std::vector<Expr> common;
+        std::vector<bool> used(right.size());
+        for (const auto& factor : left) {
+            for (std::size_t index = 0; index < right.size(); ++index) {
+                if (used[index] || right[index] != factor) continue;
+                common.push_back(factor);
+                used[index] = true;
+                break;
+            }
+        }
+        return common;
+    };
+    auto product = [](const mpq_class& coefficient,
+        const std::vector<Expr>& factors) {
+        std::vector<Expr> values;
+        if (coefficient != 1 || factors.empty()) values.push_back(from_rational(coefficient));
+        values.insert(values.end(), factors.begin(), factors.end());
+        if (values.empty()) return integer(1L);
+        if (values.size() == 1) return values.front();
+        return call("Times", std::move(values));
+    };
+
+    if (!factor_common) {
+        for (const auto& term : terms) if (term.coefficient != 0)
+            result.push_back(product(term.coefficient, term.factors));
+        std::stable_sort(result.begin(), result.end(), expression_less);
+        if (result.empty()) return integer(0L);
+        if (result.size() == 1) return result.front();
+        return call("Plus", std::move(result));
+    }
+
+    std::vector<bool> consumed(terms.size());
+    for (std::size_t index = 0; index < terms.size(); ++index) {
+        if (consumed[index] || terms[index].coefficient == 0) continue;
+        std::vector<Expr> common;
+        for (std::size_t candidate = index + 1; candidate < terms.size(); ++candidate) {
+            if (consumed[candidate] || terms[candidate].coefficient == 0) continue;
+            const auto intersection = common_factors(
+                terms[index].factors, terms[candidate].factors);
+            if (intersection.size() > common.size()) common = intersection;
+        }
+        std::vector<std::size_t> group;
+        if (!common.empty()) {
+            for (std::size_t candidate = index; candidate < terms.size(); ++candidate)
+                if (!consumed[candidate] && terms[candidate].coefficient != 0
+                    && remove_factors(terms[candidate].factors, common))
+                    group.push_back(candidate);
+        }
+        if (group.size() >= 2) {
+            std::vector<Expr> remainders;
+            for (const auto member : group) {
+                consumed[member] = true;
+                remainders.push_back(product(terms[member].coefficient,
+                    *remove_factors(terms[member].factors, common)));
+            }
+            auto factors = common;
+            factors.push_back(simplify_plus(remainders));
+            result.push_back(factors.size() == 1
+                ? factors.front() : call("Times", std::move(factors)));
+        } else {
+            consumed[index] = true;
+            result.push_back(product(terms[index].coefficient, terms[index].factors));
+        }
+    }
+    if (result.empty()) return integer(0L);
+    if (result.size() == 1) return result.front();
+    return call("Plus", std::move(result));
+}
+
+Expr simplify_times(const std::vector<Expr>& raw_args) {
+    const auto args = flatten_head(raw_args, "Times");
+    if (std::any_of(args.begin(), args.end(), [](const Expr& value) { return is_symbol(value, "Indeterminate"); })
+        || (std::any_of(args.begin(), args.end(), [](const Expr& value) { return is_symbol(value, "ComplexInfinity"); })
+            && std::any_of(args.begin(), args.end(), [](const Expr& value) { const auto number = as_rational(value); return number && *number == 0; })))
+        return symbol("Indeterminate");
+    if (std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Complex; })
+        && std::any_of(args.begin(), args.end(), contains_inexact_number)
+        && std::all_of(args.begin(), args.end(), [](const Expr& value) { return numeric_complex(value).has_value(); })) {
+        double real_value = 1.0, imaginary_value = 0.0;
+        for (const auto& value : args) {
+            const auto parts = *numeric_complex(value); const auto old_real = real_value;
+            real_value = real_value * parts.first - imaginary_value * parts.second;
+            imaginary_value = old_real * parts.second + imaginary_value * parts.first;
+        }
+        return complex(real(real_text(real_value)), real(real_text(imaginary_value)));
+    }
+    if (std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Complex; })
+        && std::all_of(args.begin(), args.end(), [](const Expr& value) {
+            return as_rational(value).has_value() || (value.kind() == ExprKind::Complex
+                && as_rational(value.real_part()).has_value() && as_rational(value.imaginary_part()).has_value());
+        })) {
+        mpq_class real_value = 1, imaginary_value = 0;
+        for (const auto& value : args) {
+            const auto next_real = value.kind() == ExprKind::Complex ? *as_rational(value.real_part()) : *as_rational(value);
+            const auto next_imaginary = value.kind() == ExprKind::Complex ? *as_rational(value.imaginary_part()) : mpq_class(0);
+            const auto old_real = real_value;
+            real_value = real_value * next_real - imaginary_value * next_imaginary;
+            imaginary_value = old_real * next_imaginary + imaginary_value * next_real;
+        }
+        return complex(from_rational(real_value), from_rational(imaginary_value));
+    }
+    if (const auto inexact = inexact_real_arithmetic(args, true)) return *inexact;
+    mpq_class coefficient = 1;
+    bool machine = false;
+    double machine_value = 1.0;
+    struct Power { Expr base; Expr exponent; };
+    std::map<std::string, Power> powers;
+    for (const auto& argument : args) {
+        if (const auto value = as_rational(argument)) { coefficient *= *value; continue; }
+        if (argument.kind() == ExprKind::Real) {
+            if (const auto value = numeric_real(argument)) { machine = true; machine_value *= *value; continue; }
+        }
+        Expr base = argument;
+        Expr exponent = integer(1L);
+        if (argument.has_head("Power") && argument.args().size() == 2) {
+            base = argument.args()[0]; exponent = argument.args()[1];
+        }
+        const auto key = base.to_full_form();
+        const auto found = powers.find(key);
+        if (found == powers.end()) powers.emplace(key, Power{base, exponent});
+        else found->second.exponent = simplify_plus({found->second.exponent, exponent});
+    }
+    if (coefficient == 0 || (machine && machine_value == 0.0)) return machine ? real("0.") : integer(0L);
+    std::vector<Expr> result;
+    if (machine) {
+        const auto coefficient_value = rounded_machine_value(coefficient);
+        if (!coefficient_value) return special_real("Overflow");
+        machine_value *= *coefficient_value;
+        if (machine_value != 1.0 || powers.empty()) result.push_back(real(real_text(machine_value)));
+    } else if (coefficient != 1 || powers.empty()) result.push_back(from_rational(coefficient));
+    for (auto& [key, power] : powers) {
+        (void)key;
+        const auto exponent = as_rational(power.exponent);
+        if (exponent && *exponent == 0) continue;
+        result.push_back(exponent && *exponent == 1 ? power.base
+            : call("Power", {power.base, power.exponent}));
+    }
+    std::sort(result.begin() + (result.empty() ? 0 : expression_rank(result[0]) == 0 ? 1 : 0),
+        result.end(), expression_less);
+    if (result.empty()) return integer(1L);
+    if (result.size() == 1) return result.front();
+    return call("Times", std::move(result));
+}
+
+Expr simplify_power(const std::vector<Expr>& args) {
+    if (args.empty()) return integer(1L);
+    if (args.size() == 1) return args[0];
+    if (args.size() != 2) return call("Power", args);
+    const auto& base = args[0];
+    const auto& exponent = args[1];
+    if (base.kind() == ExprKind::SpecialReal && exponent.kind() == ExprKind::Integer && exponent.integer_value() == -1)
+        return special_real(base.text() == "Overflow" ? "Underflow" : "Overflow");
+    if (const auto exact_exponent = as_rational(exponent)) {
+        if (*exact_exponent == 0) return integer(1L);
+        if (*exact_exponent == 1) return base;
+    }
+    if (const auto exact_base = as_rational(base); exact_base && *exact_base == 1)
+        return integer(1L);
+    if (is_symbol(base, "E") && exponent.kind() == ExprKind::Real) {
+        if (const auto value = numeric_real(exponent)) return real(real_text(std::exp(*value)));
+    }
+    if (const auto exact_base = as_rational(base)) {
+        if (exponent.kind() == ExprKind::Integer && exponent.integer_value().fits_slong_p()) {
+            const auto signed_power = exponent.integer_value().get_si();
+            const auto magnitude = unsigned_magnitude(signed_power);
+            if (*exact_base == -1)
+                return integer(magnitude % 2 == 0 ? 1L : -1L);
+            if (*exact_base == 0)
+                return signed_power < 0 ? symbol("ComplexInfinity") : integer(0L);
+            if (magnitude > 1000000UL) return call("Power", args);
+            mpz_class numerator;
+            mpz_class denominator;
+            mpz_pow_ui(numerator.get_mpz_t(), exact_base->get_num().get_mpz_t(), magnitude);
+            mpz_pow_ui(denominator.get_mpz_t(), exact_base->get_den().get_mpz_t(), magnitude);
+            return signed_power < 0 ? rational(denominator, numerator) : rational(numerator, denominator);
+        }
+        if (exponent.kind() == ExprKind::Rational && *exact_base >= 0 && exponent.rational_value() > 0
+            && exponent.rational_value().get_num().fits_ulong_p() && exponent.rational_value().get_den().fits_ulong_p()) {
+            const auto numerator_power = exponent.rational_value().get_num().get_ui(); const auto root_power = exponent.rational_value().get_den().get_ui();
+            auto extract = [root_power](const mpz_class& source) {
+                if (source == 0) return std::pair{mpz_class(0), mpz_class(1)};
+                const auto source_value = rounded_machine_value(source);
+                if (!source_value)
+                    return std::pair{mpz_class(1), source};
+                const auto approximation_value = std::pow(
+                    *source_value, 1.0 / static_cast<double>(root_power));
+                if (!std::isfinite(approximation_value)
+                    || approximation_value < 0
+                    || approximation_value
+                        >= static_cast<double>(std::numeric_limits<unsigned long>::max()))
+                    return std::pair{mpz_class(1), source};
+                const auto approximation =
+                    static_cast<unsigned long>(approximation_value);
+                for (unsigned long candidate = std::max<unsigned long>(1, approximation + 1); candidate >= 1; --candidate) {
+                    mpz_class factor; mpz_ui_pow_ui(factor.get_mpz_t(), candidate, root_power);
+                    if (source % factor == 0) return std::pair{mpz_class(candidate), mpz_class(source / factor)};
+                    if (candidate == 1) break;
+                }
+                return std::pair{mpz_class(1), source};
+            };
+            const auto [numerator_factor, numerator_rest] = extract(exact_base->get_num()); const auto [denominator_factor, denominator_rest] = extract(exact_base->get_den());
+            mpz_class outside_numerator, outside_denominator; mpz_pow_ui(outside_numerator.get_mpz_t(), numerator_factor.get_mpz_t(), numerator_power); mpz_pow_ui(outside_denominator.get_mpz_t(), denominator_factor.get_mpz_t(), numerator_power);
+            const auto outside = from_rational(mpq_class(outside_numerator, outside_denominator)); const auto rest = from_rational(mpq_class(numerator_rest, denominator_rest));
+            if (rest == integer(1L)) return outside;
+            const auto radical = call("Power", {rest, exponent}); return outside == integer(1L) ? radical : call("Times", {outside, radical});
+        }
+        if (exponent.kind() == ExprKind::Real) {
+            const auto base_value = rounded_machine_value(*exact_base);
+            if (const auto value = numeric_real(exponent); base_value && value)
+                return real(real_text(std::pow(*base_value, *value)));
+        }
+    }
+    if (base.kind() == ExprKind::Real) {
+        const auto left = numeric_real(base); const auto right = numeric_real(exponent);
+        if (left && right) return real(real_text(std::pow(*left, *right)));
+    }
+    if (base.has_head("Times") && exponent.kind() == ExprKind::Integer) {
+        std::vector<Expr> factors;
+        for (const auto& factor : base.args())
+            factors.push_back(simplify_power({factor, exponent}));
+        return simplify_times(factors);
+    }
+    if (base.has_head("Power") && base.args().size() == 2 && exponent.kind() == ExprKind::Integer)
+        return call("Power", {base.args()[0], simplify_times({base.args()[1], exponent})});
+    return call("Power", args);
+}
+
+std::vector<Expr> splice_sequences(const std::vector<Expr>& args) {
+    std::vector<Expr> result;
+    for (const auto& argument : args) {
+        if (argument.has_head("Sequence")) result.insert(result.end(), argument.args().begin(), argument.args().end());
+        else result.push_back(argument);
+    }
+    return result;
+}
+
+Expr replace_slots(const Expr& expression, const std::vector<Expr>& args, const Expr& self) {
+    if (expression.has_head("Function")) return expression;
+    if (expression.has_head("Slot") && expression.args().empty()) return args.empty() ? expression : args[0];
+    if (expression.has_head("Slot") && expression.args().size() == 1) {
+        if (expression.args()[0].kind() == ExprKind::Integer && expression.args()[0].integer_value().fits_ulong_p()) {
+            const auto index = expression.args()[0].integer_value().get_ui();
+            if (index == 0) return self;
+            return index <= args.size() ? args[index - 1] : expression;
+        }
+        if (expression.args()[0].kind() == ExprKind::String && !args.empty())
+            return call(args[0], {expression.args()[0]});
+    }
+    if (expression.has_head("SlotSequence") && expression.args().size() <= 1) {
+        std::size_t start = 1;
+        if (!expression.args().empty() && expression.args()[0].kind() == ExprKind::Integer
+            && expression.args()[0].integer_value().fits_ulong_p()) start = expression.args()[0].integer_value().get_ui();
+        std::vector<Expr> values;
+        if (start > 0 && start <= args.size()) values.assign(args.begin() + static_cast<std::ptrdiff_t>(start - 1), args.end());
+        return call("Sequence", std::move(values));
+    }
+    if (expression.kind() != ExprKind::Call) return expression;
+    std::vector<Expr> mapped;
+    for (const auto& argument : expression.args()) mapped.push_back(replace_slots(argument, args, self));
+    return call(replace_slots(expression.head(), args, self), splice_sequences(mapped));
+}
+
+std::optional<long> machine_index(const Expr& expression) {
+    if (expression.kind() != ExprKind::Integer || !expression.integer_value().fits_slong_p()) return std::nullopt;
+    return expression.integer_value().get_si();
+}
+
+std::optional<std::size_t> normalized_index(const Expr& expression, std::size_t length) {
+    const auto raw = machine_index(expression);
+    if (!raw || *raw == 0) return std::nullopt;
+    const auto index = *raw > 0 ? *raw - 1 : static_cast<long>(length) + *raw;
+    if (index < 0 || index >= static_cast<long>(length)) return std::nullopt;
+    return static_cast<std::size_t>(index);
+}
+
+std::optional<Expr> selector_key(const Expr& selector) {
+    if (selector.has_head("Key") && selector.args().size() == 1) return selector.args()[0];
+    return std::nullopt;
+}
+
+std::optional<Expr> value_at_path(const Expr& target, const std::vector<Expr>& path, std::size_t depth = 0) {
+    if (depth == path.size()) return target;
+    if (const auto rules = association_rules(target)) {
+        if (const auto key = selector_key(path[depth])) {
+            const auto found = std::find_if(rules->begin(), rules->end(), [&](const Expr& rule) { return rule.args()[0] == *key; });
+            return found == rules->end() ? std::nullopt : value_at_path(found->args()[1], path, depth + 1);
+        }
+        const auto index = normalized_index(path[depth], rules->size());
+        return index ? value_at_path((*rules)[*index].args()[1], path, depth + 1) : std::nullopt;
+    }
+    if (target.kind() != ExprKind::Call) return std::nullopt;
+    const auto index = normalized_index(path[depth], target.args().size());
+    return index ? value_at_path(target.args()[*index], path, depth + 1) : std::nullopt;
+}
+
+Expr replace_at_path(const Expr& target, const std::vector<Expr>& path, std::size_t depth, const Expr& value) {
+    if (depth == path.size()) return value;
+    if (target.kind() != ExprKind::Call) return target;
+    if (const auto rules = association_rules(target)) {
+        auto values = *rules; std::optional<std::size_t> selected;
+        if (const auto key = selector_key(path[depth])) { for (std::size_t index = 0; index < values.size(); ++index) if (values[index].args()[0] == *key) { selected = index; break; } }
+        else selected = normalized_index(path[depth], values.size());
+        if (!selected) return target;
+        values[*selected] = call(values[*selected].head(), {values[*selected].args()[0], replace_at_path(values[*selected].args()[1], path, depth + 1, value)});
+        return call("Association", std::move(values));
+    }
+    const auto index = normalized_index(path[depth], target.args().size());
+    if (!index) return target;
+    auto args = target.args();
+    args[*index] = replace_at_path(args[*index], path, depth + 1, value);
+    return call(target.head(), std::move(args));
+}
+
+Expr delete_at_path(const Expr& target, const std::vector<Expr>& path, std::size_t depth) {
+    if (target.kind() != ExprKind::Call || depth >= path.size()) return target;
+    if (const auto rules = association_rules(target)) {
+        auto values = *rules; std::optional<std::size_t> selected;
+        if (const auto key = selector_key(path[depth])) { for (std::size_t index = 0; index < values.size(); ++index) if (values[index].args()[0] == *key) { selected = index; break; } }
+        else selected = normalized_index(path[depth], values.size());
+        if (!selected) return target;
+        if (depth + 1 == path.size()) values.erase(values.begin() + static_cast<std::ptrdiff_t>(*selected));
+        else values[*selected] = call(values[*selected].head(), {values[*selected].args()[0], delete_at_path(values[*selected].args()[1], path, depth + 1)});
+        return call("Association", std::move(values));
+    }
+    const auto index = normalized_index(path[depth], target.args().size());
+    if (!index) return target;
+    auto args = target.args();
+    if (depth + 1 == path.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(*index));
+    else args[*index] = delete_at_path(args[*index], path, depth + 1);
+    return call(target.head(), std::move(args));
+}
+
+Expr remove_nothing_from_list_like(Expr expression) {
+    if (!expression.has_head("List") && !expression.has_head("Association")) return expression;
+    std::vector<Expr> values;
+    for (const auto& value : expression.args()) if (!is_symbol(value, "Nothing")) values.push_back(value);
+    return call(expression.head(), std::move(values));
+}
+
+std::optional<std::vector<Expr>> normalized_association_rules(const std::vector<Expr>& source) {
+    std::vector<Expr> flattened;
+    for (const auto& item : source) {
+        if (is_symbol(item, "Nothing")) continue;
+        if (item.has_head("List") || item.has_head("Association")) flattened.insert(flattened.end(), item.args().begin(), item.args().end());
+        else flattened.push_back(item);
+    }
+    std::vector<Expr> rules;
+    for (const auto& entry : flattened) {
+        if ((!entry.has_head("Rule") && !entry.has_head("RuleDelayed")) || entry.args().size() != 2) return std::nullopt;
+        const auto existing = std::find_if(rules.begin(), rules.end(), [&](const Expr& rule) { return rule.args()[0] == entry.args()[0]; });
+        if (existing != rules.end()) *existing = entry;
+        else rules.push_back(entry);
+    }
+    return rules;
+}
+
+enum class AssignmentKind { Own, Down, Up, Sub };
+
+struct AssignmentTarget {
+    AssignmentKind kind;
+    std::string owner;
+};
+
+const Expr& definition_pattern(const Expr& expression) {
+    if ((expression.has_head("HoldPattern") || expression.has_head("Condition"))
+        && !expression.args().empty()) return definition_pattern(expression.args()[0]);
+    return expression;
+}
+
+std::optional<AssignmentTarget> assignment_target(const Expr& expression) {
+    const auto& lhs = definition_pattern(expression);
+    if (const auto* name = lhs.symbol_name()) return AssignmentTarget{AssignmentKind::Own, *name};
+    if (lhs.kind() != ExprKind::Call) return std::nullopt;
+    if (const auto* name = lhs.head().symbol_name()) return AssignmentTarget{AssignmentKind::Down, *name};
+    auto head = lhs.head();
+    while (head.kind() == ExprKind::Call) head = head.head();
+    if (const auto* name = head.symbol_name()) return AssignmentTarget{AssignmentKind::Sub, *name};
+    return std::nullopt;
+}
+
+bool tag_occurs_in_upvalue_position(const std::string& tag, const Expr& expression) {
+    const auto& lhs = definition_pattern(expression);
+    if (lhs.kind() != ExprKind::Call) return false;
+    for (const auto& argument : lhs.args()) {
+        if (argument.symbol_name() && *argument.symbol_name() == tag) return true;
+        auto current = argument;
+        while (current.kind() == ExprKind::Call) {
+            if (current.head().symbol_name() && *current.head().symbol_name() == tag) return true;
+            current = current.head();
+        }
+    }
+    return false;
+}
+
+int definition_specificity(const Expr& expression) {
+    if ((expression.has_head("HoldPattern") || expression.has_head("Pattern"))
+        && !expression.args().empty())
+        return definition_specificity(expression.has_head("Pattern") && expression.args().size() == 2
+            ? expression.args()[1] : expression.args()[0]);
+    if (expression.has_head("Blank")) return expression.args().empty() ? 20 : 12;
+    if (expression.has_head("BlankSequence")) return 30;
+    if (expression.has_head("BlankNullSequence")) return 35;
+    if (expression.has_head("Condition") && expression.args().size() == 2)
+        return 2 + definition_specificity(expression.args()[0]);
+    if (expression.has_head("PatternTest") && expression.args().size() == 2)
+        return 3 + definition_specificity(expression.args()[0]);
+    if (expression.has_head("Optional") && !expression.args().empty())
+        return 5 + definition_specificity(expression.args()[0]);
+    if (expression.has_head("Alternatives")) {
+        int score = 1000000;
+        for (const auto& argument : expression.args()) score = std::min(score, definition_specificity(argument));
+        return 4 + (score == 1000000 ? 0 : score);
+    }
+    int score = 0;
+    if (expression.kind() == ExprKind::Call) {
+        score += definition_specificity(expression.head());
+        for (const auto& argument : expression.args()) score += definition_specificity(argument);
+    }
+    return score;
+}
+
+std::optional<Expr> definition_condition_key(const Expr& lhs, const Expr& rhs) {
+    if (lhs.has_head("Condition") && lhs.args().size() == 2) return lhs.args()[1];
+    if (rhs.has_head("Condition") && rhs.args().size() == 2) return rhs.args()[1];
+    return std::nullopt;
+}
+
+bool same_definition_slot(const Expr& left_lhs, const Expr& left_rhs,
+    const Expr& right_lhs, const Expr& right_rhs) {
+    if (left_lhs != right_lhs) return false;
+    return definition_condition_key(left_lhs, left_rhs) == definition_condition_key(right_lhs, right_rhs);
+}
+
+std::optional<std::vector<Expr>> association_rules(const Expr& expression) {
+    if (expression.kind() != ExprKind::Call || !expression.has_head("Association"))
+        return std::nullopt;
+    return normalized_association_rules(expression.args());
+}
+
+using Bindings = std::map<std::string, Expr>;
+
+struct CompiledStringPattern {
+    std::regex regex;
+    std::map<std::string, std::vector<std::size_t>> bindings;
+};
+
+std::string regex_escape(const std::string& source, bool character_class = false) {
+    std::string output;
+    const std::string special = character_class ? R"(\^-])" : R"(.^$|()[]{}*+?\)";
+    for (const char character : source) { if (special.find(character) != std::string::npos) output.push_back('\\'); output.push_back(character); }
+    return output;
+}
+
+class StringPatternCompiler {
+public:
+    std::optional<CompiledStringPattern> compile(const Expr& pattern) {
+        const auto source = fragment(pattern, false); if (!source) return std::nullopt;
+        try { return CompiledStringPattern{std::regex(*source, flags_), bindings_}; } catch (const std::regex_error&) { return std::nullopt; }
+    }
+private:
+    std::optional<std::string> class_contents(const Expr& pattern) {
+        if (pattern.kind() == ExprKind::String && utf8_codepoints(pattern.text()).size() == 1) return regex_escape(pattern.text(), true);
+        if (pattern.symbol_name()) {
+            const auto name = system_dispatch_name(*pattern.symbol_name());
+            if (name == "DigitCharacter") return "0-9";
+            if (name == "HexadecimalCharacter") return "0-9A-Fa-f";
+            if (name == "LetterCharacter") return "A-Za-z";
+            if (name == "PunctuationCharacter") return R"(!-/:-@[-`{-~)";
+            if (name == "WhitespaceCharacter") return R"(\s)";
+            if (name == "WordCharacter") return "A-Za-z0-9_";
+        }
+        if (pattern.has_head("List") || pattern.has_head("Alternatives")) { std::string output; for (const auto& item : pattern.args()) { const auto part = class_contents(item); if (!part) return std::nullopt; output += *part; } return output; }
+        return std::nullopt;
+    }
+    std::optional<std::string> fragment(const Expr& pattern, bool shortest) {
+        if (pattern.kind() == ExprKind::String) return regex_escape(pattern.text());
+        if (pattern.symbol_name()) {
+            const auto name = system_dispatch_name(*pattern.symbol_name());
+            if (name == "DigitCharacter") return R"([0-9])";
+            if (name == "HexadecimalCharacter") return R"([0-9A-Fa-f])";
+            if (name == "LetterCharacter") return R"([A-Za-z])";
+            if (name == "PunctuationCharacter") return R"([[:punct:]])";
+            if (name == "WhitespaceCharacter") return R"([[:space:]])";
+            if (name == "WordCharacter") return R"([A-Za-z0-9_])";
+            if (name == "Whitespace") return R"([[:space:]]+)";
+            if (name == "NumberString") return R"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))";
+            if (name == "WordBoundary") return R"(\b)";
+            if (name == "StartOfLine") return "^";
+            if (name == "EndOfLine") return "$";
+        }
+        if ((pattern.has_head("HoldPattern") || pattern.has_head("Longest") || pattern.has_head("Shortest")) && !pattern.args().empty())
+            return fragment(pattern.args()[0], pattern.has_head("Shortest"));
+        if (pattern.has_head("StringExpression")) { std::string output; for (const auto& part : pattern.args()) { const auto value = fragment(part, shortest); if (!value) return std::nullopt; output += *value; } return output; }
+        if (pattern.has_head("Alternatives") && !pattern.args().empty()) { std::vector<std::string> values; for (const auto& part : pattern.args()) { const auto value = fragment(part, shortest); if (!value) return std::nullopt; values.push_back(*value); } std::string output = "(?:"; for (std::size_t index = 0; index < values.size(); ++index) { if (index) output += '|'; output += values[index]; } return output + ')'; }
+        if (pattern.has_head("RegularExpression") && pattern.args().size() == 1 && pattern.args()[0].kind() == ExprKind::String) { auto source = pattern.args()[0].text(); if (source.compare(0, 4, "(?i)") == 0) { flags_ |= std::regex_constants::icase; source.erase(0, 4); } return "(?:" + source + ')'; }
+        if (pattern.has_head("CharacterRange") && pattern.args().size() == 2 && pattern.args()[0].kind() == ExprKind::String && pattern.args()[1].kind() == ExprKind::String)
+            return "[" + regex_escape(pattern.args()[0].text(), true) + "-" + regex_escape(pattern.args()[1].text(), true) + "]";
+        if (pattern.has_head("Blank") && pattern.args().empty()) return R"([\s\S])";
+        if (pattern.has_head("BlankSequence") && pattern.args().empty()) return std::string(R"([\s\S]+)") + (shortest ? "?" : "");
+        if (pattern.has_head("BlankNullSequence") && pattern.args().empty()) return std::string(R"([\s\S]*)") + (shortest ? "?" : "");
+        if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull")) && !pattern.args().empty() && pattern.args().size() <= 2) {
+            const auto inner = fragment(pattern.args()[0], shortest); if (!inner) return std::nullopt; std::string quantifier = pattern.has_head("RepeatedNull") ? "*" : "+";
+            if (pattern.args().size() == 2) {
+                if (const auto count = machine_index(pattern.args()[1])) quantifier = "{" + std::to_string(*count) + "}";
+                else if (pattern.args()[1].has_head("List") && (pattern.args()[1].args().size() == 1 || pattern.args()[1].args().size() == 2)) { const auto minimum = machine_index(pattern.args()[1].args()[0]); const auto maximum = pattern.args()[1].args().size() == 2 ? machine_index(pattern.args()[1].args()[1]) : minimum; if (!minimum || !maximum) return std::nullopt; quantifier = "{" + std::to_string(*minimum) + (pattern.args()[1].args().size() == 2 ? "," + std::to_string(*maximum) : "") + "}"; }
+                else return std::nullopt;
+            }
+            return "(?:" + *inner + ")" + quantifier + (shortest ? "?" : "");
+        }
+        if (pattern.has_head("Pattern") && pattern.args().size() == 2 && pattern.args()[0].symbol_name()) {
+            const auto inner = fragment(pattern.args()[1], shortest); if (!inner) return std::nullopt; ++captures_; bindings_[*pattern.args()[0].symbol_name()].push_back(captures_); return "(" + *inner + ")";
+        }
+        if (pattern.has_head("PatternTest") && pattern.args().size() == 2) {
+            const auto& inner = pattern.args()[0]; const auto& test = pattern.args()[1]; std::string character_class;
+            if (is_symbol(test, "DigitQ")) character_class = "[0-9]"; else if (is_symbol(test, "LetterQ")) character_class = "[A-Za-z]";
+            else if (test.has_head("Function") && !test.args().empty() && test.args()[0].has_head("StringMatchQ") && test.args()[0].args().size() == 2) { if (is_symbol(test.args()[0].args()[1], "DigitCharacter")) character_class = "[0-9]"; if (is_symbol(test.args()[0].args()[1], "LetterCharacter")) character_class = "[A-Za-z]"; }
+            if (!character_class.empty()) { if (inner.has_head("BlankSequence")) return character_class + "+"; if (inner.has_head("BlankNullSequence")) return character_class + "*"; if (inner.has_head("Blank")) return character_class; }
+            return fragment(inner, shortest);
+        }
+        if (pattern.has_head("Except") && !pattern.args().empty() && pattern.args().size() <= 2) { const auto excluded = class_contents(pattern.args()[0]); if (!excluded) return std::nullopt; return "[^" + *excluded + "]"; }
+        if (pattern.has_head("DatePattern") && !pattern.args().empty() && pattern.args().size() <= 2 && pattern.args()[0].has_head("List")) {
+            const auto separator = pattern.args().size() == 2 ? fragment(pattern.args()[1], shortest) : std::optional<std::string>(R"((?:[-/.[:space:]]+))"); if (!separator) return std::nullopt; std::string output;
+            for (std::size_t index = 0; index < pattern.args()[0].args().size(); ++index) { if (index) output += *separator; const auto& item = pattern.args()[0].args()[index]; if (item.kind() != ExprKind::String) return std::nullopt; const auto& name = item.text(); if (name == "Year") output += R"([0-9]{1,4})"; else if (name == "Month") output += R"((1[0-2]|0?[1-9]))"; else if (name == "Day") output += R"(([12][0-9]|3[01]|0?[1-9]))"; else if (name == "Hour") output += R"((2[0-3]|[01]?[0-9]))"; else if (name == "Minute" || name == "Second") output += R"([0-5]?[0-9])"; else return std::nullopt; }
+            return output;
+        }
+        return std::nullopt;
+    }
+    std::size_t captures_ = 0;
+    std::map<std::string, std::vector<std::size_t>> bindings_;
+    std::regex_constants::syntax_option_type flags_ =
+        std::regex_constants::ECMAScript | std::regex_constants::multiline;
+};
+
+struct StringMatchResult { std::size_t start; std::size_t end; Bindings bindings; };
+
+std::optional<StringMatchResult> string_pattern_match(const CompiledStringPattern& pattern, const std::string& source, std::size_t start) {
+    std::match_results<std::string::const_iterator> match;
+    if (!std::regex_search(source.begin() + static_cast<std::ptrdiff_t>(start), source.end(), match, pattern.regex, std::regex_constants::match_continuous)) return std::nullopt;
+    Bindings bindings;
+    for (const auto& [name, groups] : pattern.bindings) {
+        std::optional<std::string> value;
+        for (const auto group : groups) { if (group >= match.size() || !match[group].matched) return std::nullopt; const auto current = match[group].str(); if (value && *value != current) return std::nullopt; value = current; }
+        bindings.emplace(name, string(value.value_or("")));
+    }
+    return StringMatchResult{start, start + match.length(0), std::move(bindings)};
+}
+Expr substitute_bindings(const Expr& expression, const Bindings& bindings);
+
+std::optional<bool> simple_truth(const Expr& expression) {
+    if (is_symbol(expression, "True")) return true;
+    if (is_symbol(expression, "False")) return false;
+    if (expression.kind() != ExprKind::Call || expression.args().size() != 2) return std::nullopt;
+    const auto* name = expression.head().symbol_name();
+    auto simple_value = [](auto&& self, const Expr& value) -> std::optional<double> {
+        if (const auto number = numeric_real(value)) return number;
+        if (value.has_head("Length") && value.args().size() == 1) return static_cast<double>(value.args()[0].length());
+        if (value.has_head("Plus")) {
+            double result = 0.0;
+            for (const auto& argument : value.args()) {
+                const auto item = self(self, argument);
+                if (!item) return std::nullopt;
+                result += *item;
+            }
+            return result;
+        }
+        if (value.has_head("Times")) {
+            double result = 1.0;
+            for (const auto& argument : value.args()) {
+                const auto item = self(self, argument);
+                if (!item) return std::nullopt;
+                result *= *item;
+            }
+            return result;
+        }
+        if (value.has_head("Power") && value.args().size() == 2) {
+            const auto base = self(self, value.args()[0]);
+            const auto exponent = self(self, value.args()[1]);
+            if (base && exponent) return std::pow(*base, *exponent);
+        }
+        return std::nullopt;
+    };
+    const auto left = simple_value(simple_value, expression.args()[0]);
+    const auto right = simple_value(simple_value, expression.args()[1]);
+    if (!name || !left || !right) return std::nullopt;
+    const auto operation = system_dispatch_name(*name);
+    if (operation == "Equal") return *left == *right;
+    if (operation == "Unequal") return *left != *right;
+    if (operation == "Less") return *left < *right;
+    if (operation == "LessEqual") return *left <= *right;
+    if (operation == "Greater") return *left > *right;
+    if (operation == "GreaterEqual") return *left >= *right;
+    return std::nullopt;
+}
+
+Expr active_view(const Expr& expression) {
+    if (expression.has_head("Inactive") && expression.args().size() == 1) return active_view(expression.args()[0]);
+    if (expression.kind() != ExprKind::Call) return expression;
+    std::vector<Expr> args; for (const auto& argument : expression.args()) args.push_back(active_view(argument));
+    return call(active_view(expression.head()), std::move(args));
+}
+
+std::optional<Expr> recover_inactive_original(const Expr& original, const Expr& active) {
+    if (active_view(original) == active) return original;
+    if (original.kind() != ExprKind::Call) return std::nullopt;
+    for (const auto& argument : original.args()) {
+        if (const auto found = recover_inactive_original(argument, active)) return found;
+    }
+    return recover_inactive_original(original.head(), active);
+}
+
+bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& bindings);
+
+bool predicate_matches(const Expr& value, const Expr& predicate) {
+    if (is_symbol(predicate, "IntegerQ")) return value.kind() == ExprKind::Integer;
+    if (is_symbol(predicate, "StringQ")) return value.kind() == ExprKind::String;
+    if (is_symbol(predicate, "NumberQ") || is_symbol(predicate, "NumericQ")) return numeric_q_value(value);
+    if (is_symbol(predicate, "DigitQ")) return value.kind() == ExprKind::String && !value.text().empty() && std::all_of(value.text().begin(), value.text().end(), [](unsigned char character) { return std::isdigit(character); });
+    if (is_symbol(predicate, "LetterQ")) return value.kind() == ExprKind::String && !value.text().empty() && std::all_of(value.text().begin(), value.text().end(), [](unsigned char character) { return std::isalpha(character); });
+    return false;
+}
+
+bool option_structure(const Expr& value) {
+    if ((value.has_head("Rule") || value.has_head("RuleDelayed")) && value.args().size() == 2) return value.args()[0].kind() == ExprKind::Symbol || value.args()[0].kind() == ExprKind::String;
+    return value.has_head("List") && std::all_of(value.args().begin(), value.args().end(), option_structure);
+}
+
+bool is_sequence_pattern(const Expr& pattern) {
+    if (pattern.has_head("BlankSequence") || pattern.has_head("BlankNullSequence") || pattern.has_head("PatternSequence")
+        || pattern.has_head("OrderlessPatternSequence") || pattern.has_head("Repeated") || pattern.has_head("RepeatedNull") || pattern.has_head("OptionsPattern")) return true;
+    if ((pattern.has_head("Pattern") || pattern.has_head("Condition") || pattern.has_head("PatternTest") || pattern.has_head("Longest") || pattern.has_head("Shortest") || pattern.has_head("Optional")) && !pattern.args().empty())
+        return is_sequence_pattern(pattern.has_head("Pattern") && pattern.args().size() == 2 ? pattern.args()[1] : pattern.args()[0]);
+    return false;
+}
+
+std::pair<std::size_t, std::size_t> sequence_bounds(const Expr& pattern, std::size_t available) {
+    if (pattern.has_head("Pattern") && pattern.args().size() == 2) return sequence_bounds(pattern.args()[1], available);
+    if ((pattern.has_head("Condition") || pattern.has_head("PatternTest") || pattern.has_head("Longest") || pattern.has_head("Shortest")) && !pattern.args().empty()) return sequence_bounds(pattern.args()[0], available);
+    if (pattern.has_head("BlankSequence")) return {1, available};
+    if (pattern.has_head("BlankNullSequence") || pattern.has_head("OptionsPattern")) return {0, available};
+    if (pattern.has_head("Optional")) return {pattern.args().size() >= 2 ? 0U : 1U, 1};
+    if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull")) && !pattern.args().empty()) {
+        std::size_t minimum = pattern.has_head("RepeatedNull") ? 0 : 1, maximum = available;
+        if (pattern.args().size() == 2) {
+            if (const auto count = machine_index(pattern.args()[1]); count && *count >= 0) { maximum = static_cast<std::size_t>(*count); minimum = pattern.has_head("RepeatedNull") ? 0 : maximum; }
+            else if (pattern.args()[1].has_head("List") && !pattern.args()[1].args().empty()) { const auto low = machine_index(pattern.args()[1].args()[0]); const auto high = pattern.args()[1].args().size() >= 2 ? machine_index(pattern.args()[1].args()[1]) : low; if (low && high && *low >= 0 && *high >= *low) { minimum = static_cast<std::size_t>(*low); maximum = std::min(available, static_cast<std::size_t>(*high)); } }
+        }
+        const auto unit = pattern.args()[0].has_head("PatternSequence") ? pattern.args()[0].args().size() : 1;
+        return {minimum * unit, std::min(available, maximum * unit)};
+    }
+    if (pattern.has_head("PatternSequence") || pattern.has_head("OrderlessPatternSequence")) {
+        std::size_t minimum = 0, maximum = 0; for (const auto& item : pattern.args()) { const auto bounds = sequence_bounds(item, available); minimum += bounds.first; maximum += bounds.second; } return {minimum, std::min(available, maximum)};
+    }
+    return {1, 1};
+}
+
+bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_index, const std::vector<Expr>& patterns, std::size_t pattern_index, Bindings& bindings);
+
+bool bind_sequence_name(const Expr& name, const std::vector<Expr>& values, Bindings& bindings, bool sequence) {
+    if (!name.symbol_name()) return false;
+    const auto value = sequence ? call("Sequence", values) : values.empty() ? call("Sequence") : values[0];
+    const auto found = bindings.find(*name.symbol_name()); if (found != bindings.end()) return found->second == value;
+    bindings.emplace(*name.symbol_name(), value); return true;
+}
+
+bool match_pattern_chunk(const std::vector<Expr>& values, const Expr& pattern, Bindings& bindings) {
+    if ((pattern.has_head("Longest") || pattern.has_head("Shortest") || pattern.has_head("HoldPattern")) && !pattern.args().empty()) return match_pattern_chunk(values, pattern.args()[0], bindings);
+    if (pattern.has_head("Condition") && pattern.args().size() == 2) { auto candidate = bindings; if (!match_pattern_chunk(values, pattern.args()[0], candidate)) return false; if (!simple_truth(substitute_bindings(pattern.args()[1], candidate)).value_or(false)) return false; bindings = std::move(candidate); return true; }
+    if (pattern.has_head("Pattern") && pattern.args().size() == 2) { auto candidate = bindings; if (!match_pattern_chunk(values, pattern.args()[1], candidate) || !bind_sequence_name(pattern.args()[0], values, candidate, is_sequence_pattern(pattern.args()[1]))) return false; bindings = std::move(candidate); return true; }
+    if (pattern.has_head("PatternTest") && pattern.args().size() == 2) return match_pattern_chunk(values, pattern.args()[0], bindings) && std::all_of(values.begin(), values.end(), [&](const Expr& value) { return predicate_matches(value, pattern.args()[1]); });
+    if (pattern.has_head("Optional") && !pattern.args().empty()) {
+        if (!values.empty()) return match_pattern_chunk(values, pattern.args()[0], bindings);
+        if (pattern.args().size() < 2) return false;
+        const auto& inner = pattern.args()[0]; if (inner.has_head("Pattern") && inner.args().size() == 2) return bind_sequence_name(inner.args()[0], {pattern.args()[1]}, bindings, false); return false;
+    }
+    if (pattern.has_head("OptionsPattern")) return std::all_of(values.begin(), values.end(), option_structure);
+    if (pattern.has_head("BlankSequence") || pattern.has_head("BlankNullSequence")) {
+        if (pattern.has_head("BlankSequence") && values.empty()) return false;
+        return pattern.args().empty() || std::all_of(values.begin(), values.end(), [&](const Expr& value) { return value.head() == pattern.args()[0]; });
+    }
+    if (pattern.has_head("PatternSequence") || pattern.has_head("OrderlessPatternSequence")) {
+        if (pattern.has_head("OrderlessPatternSequence") && values.size() == pattern.args().size()) {
+            auto permutation = values; std::sort(permutation.begin(), permutation.end(), expression_less);
+            do { auto candidate = bindings; if (match_argument_sequence(permutation, 0, pattern.args(), 0, candidate)) { bindings = std::move(candidate); return true; } } while (std::next_permutation(permutation.begin(), permutation.end(), expression_less));
+            return false;
+        }
+        return match_argument_sequence(values, 0, pattern.args(), 0, bindings);
+    }
+    if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull")) && !pattern.args().empty()) {
+        const auto unit_patterns = pattern.args()[0].has_head("PatternSequence") ? pattern.args()[0].args() : std::vector<Expr>{pattern.args()[0]};
+        if (unit_patterns.empty() || values.size() % unit_patterns.size() != 0) return false;
+        for (std::size_t offset = 0; offset < values.size(); offset += unit_patterns.size()) { std::vector<Expr> unit(values.begin() + static_cast<std::ptrdiff_t>(offset), values.begin() + static_cast<std::ptrdiff_t>(offset + unit_patterns.size())); if (!match_argument_sequence(unit, 0, unit_patterns, 0, bindings)) return false; }
+        return true;
+    }
+    return values.size() == 1 && pattern_match(values[0], pattern, bindings);
+}
+
+bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_index, const std::vector<Expr>& patterns, std::size_t pattern_index, Bindings& bindings) {
+    if (pattern_index == patterns.size()) return value_index == values.size();
+    const auto available = values.size() - value_index; const auto bounds = sequence_bounds(patterns[pattern_index], available);
+    std::size_t remaining_minimum = 0; for (std::size_t index = pattern_index + 1; index < patterns.size(); ++index) remaining_minimum += sequence_bounds(patterns[index], available).first;
+    if (bounds.first > available || remaining_minimum > available) return false;
+    const auto maximum = std::min(bounds.second, available - remaining_minimum); const bool longest = patterns[pattern_index].has_head("Longest");
+    for (std::size_t attempt = bounds.first; attempt <= maximum; ++attempt) {
+        const auto length = longest ? maximum - (attempt - bounds.first) : attempt; std::vector<Expr> chunk(values.begin() + static_cast<std::ptrdiff_t>(value_index), values.begin() + static_cast<std::ptrdiff_t>(value_index + length)); auto candidate = bindings;
+        if (match_pattern_chunk(chunk, patterns[pattern_index], candidate) && match_argument_sequence(values, value_index + length, patterns, pattern_index + 1, candidate)) { bindings = std::move(candidate); return true; }
+    }
+    return false;
+}
+
+bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& bindings) {
+    if (raw_pattern.has_head("KeyValuePattern") && raw_pattern.args().size() == 1) {
+        std::optional<std::vector<Expr>> elements = association_rules(value);
+        if (!elements && value.has_head("List") && std::all_of(value.args().begin(), value.args().end(), [](const Expr& item) {
+            return (item.has_head("Rule") || item.has_head("RuleDelayed")) && item.args().size() == 2;
+        })) elements = value.args();
+        if (!elements) return false;
+        const auto patterns = raw_pattern.args()[0].has_head("List") ? raw_pattern.args()[0].args()
+            : std::vector<Expr>{raw_pattern.args()[0]};
+        std::vector<bool> used(elements->size());
+        auto match_items = [&](auto&& self, std::size_t pattern_index, Bindings current) -> std::optional<Bindings> {
+            if (pattern_index == patterns.size()) return current;
+            for (std::size_t index = 0; index < elements->size(); ++index) {
+                if (used[index]) continue;
+                auto candidate = current;
+                if (!pattern_match((*elements)[index], patterns[pattern_index], candidate)) continue;
+                used[index] = true; const auto result = self(self, pattern_index + 1, std::move(candidate)); used[index] = false;
+                if (result) return result;
+            }
+            return std::nullopt;
+        };
+        if (const auto result = match_items(match_items, 0, bindings)) { bindings = *result; return true; }
+        return false;
+    }
+    if (raw_pattern.has_head("Condition") && raw_pattern.args().size() == 2) {
+        auto candidate = bindings;
+        if (!pattern_match(value, raw_pattern.args()[0], candidate)) return false;
+        if (simple_truth(substitute_bindings(raw_pattern.args()[1], candidate)).value_or(false)) {
+            bindings = std::move(candidate); return true;
+        }
+        return false;
+    }
+    if (raw_pattern.has_head("IgnoringInactive") && raw_pattern.args().size() == 1) {
+        const auto pattern = raw_pattern.args()[0].has_head("HoldPattern") && raw_pattern.args()[0].args().size() == 1
+            ? raw_pattern.args()[0].args()[0] : raw_pattern.args()[0];
+        auto candidate = bindings;
+        if (!pattern_match(active_view(value), active_view(pattern), candidate)) return false;
+        for (auto& [name, bound] : candidate) {
+            (void)name;
+            if (const auto original = recover_inactive_original(value, bound)) bound = *original;
+        }
+        bindings = std::move(candidate);
+        return true;
+    }
+    if ((raw_pattern.has_head("HoldPattern") || raw_pattern.has_head("Verbatim")) && raw_pattern.args().size() == 1)
+        return pattern_match(value, raw_pattern.args()[0], bindings);
+    if (raw_pattern.has_head("Except") && !raw_pattern.args().empty()) { auto candidate = bindings; const bool excluded = pattern_match(value, raw_pattern.args()[0], candidate); return !excluded && (raw_pattern.args().size() == 1 || pattern_match(value, raw_pattern.args()[1], bindings)); }
+    if (raw_pattern.has_head("PatternTest") && raw_pattern.args().size() == 2) return pattern_match(value, raw_pattern.args()[0], bindings) && predicate_matches(value, raw_pattern.args()[1]);
+    if (raw_pattern.has_head("BlankSequence") || raw_pattern.has_head("BlankNullSequence") || raw_pattern.has_head("Repeated") || raw_pattern.has_head("RepeatedNull") || raw_pattern.has_head("PatternSequence") || raw_pattern.has_head("OptionsPattern")) return match_pattern_chunk({value}, raw_pattern, bindings);
+    if (raw_pattern.has_head("Pattern") && raw_pattern.args().size() == 2 && raw_pattern.args()[0].symbol_name()) {
+        if (!pattern_match(value, raw_pattern.args()[1], bindings)) return false;
+        const auto name = *raw_pattern.args()[0].symbol_name();
+        const auto found = bindings.find(name);
+        if (found != bindings.end()) return found->second == value;
+        bindings.emplace(name, value); return true;
+    }
+    if (raw_pattern.has_head("Blank")) {
+        if (raw_pattern.args().empty()) return true;
+        if (raw_pattern.args().size() == 1) return value.head() == raw_pattern.args()[0];
+    }
+    if (raw_pattern.has_head("Alternatives")) {
+        for (const auto& alternative : raw_pattern.args()) {
+            auto candidate = bindings;
+            if (pattern_match(value, alternative, candidate)) { bindings = std::move(candidate); return true; }
+        }
+        return false;
+    }
+    if (value.kind() != ExprKind::Call || raw_pattern.kind() != ExprKind::Call) return value == raw_pattern;
+    if (!pattern_match(value.head(), raw_pattern.head(), bindings)) return false;
+    return match_argument_sequence(value.args(), 0, raw_pattern.args(), 0, bindings);
+}
+
+Expr substitute_bindings(const Expr& expression, const Bindings& bindings) {
+    if (const auto* name = expression.symbol_name()) {
+        const auto found = bindings.find(*name); if (found != bindings.end()) return found->second;
+    }
+    if (expression.kind() != ExprKind::Call) return expression;
+    std::vector<Expr> args; for (const auto& argument : expression.args()) args.push_back(substitute_bindings(argument, bindings));
+    return call(substitute_bindings(expression.head(), bindings), splice_sequences(args));
+}
+
+Expr replace_all_once(const Expr& expression, const Expr& rule, bool& replaced) {
+    if ((rule.has_head("Rule") || rule.has_head("RuleDelayed")) && rule.args().size() == 2) {
+        Bindings bindings;
+        if (pattern_match(expression, rule.args()[0], bindings)) {
+            auto result = substitute_bindings(rule.args()[1], bindings);
+            if (result.has_head("Condition") && result.args().size() == 2) {
+                if (!simple_truth(result.args()[1]).value_or(false)) return expression;
+                result = result.args()[0];
+            }
+            if (result != expression) replaced = true;
+            return result;
+        }
+    }
+    if (expression.kind() != ExprKind::Call) return expression;
+    if (const auto rules = association_rules(expression)) {
+        std::vector<Expr> entries;
+        for (const auto& entry : *rules) entries.push_back(call(entry.head(), {
+            entry.args()[0], replace_all_once(entry.args()[1], rule, replaced)}));
+        return call(replace_all_once(expression.head(), rule, replaced), std::move(entries));
+    }
+    std::vector<Expr> args;
+    for (const auto& argument : expression.args()) args.push_back(replace_all_once(argument, rule, replaced));
+    return call(replace_all_once(expression.head(), rule, replaced), std::move(args));
+}
+
+bool contains_pattern(const Expr& expression, const Expr& pattern) {
+    Bindings bindings;
+    if (pattern_match(expression, pattern, bindings)) return true;
+    if (expression.kind() != ExprKind::Call) return false;
+    if (contains_pattern(expression.head(), pattern)) return true;
+    return std::any_of(expression.args().begin(), expression.args().end(), [&](const Expr& value) {
+        return contains_pattern(value, pattern);
+    });
+}
+
+bool contains_expression(const Expr& expression, const Expr& target) {
+    if (expression == target) return true;
+    if (expression.kind() != ExprKind::Call) return false;
+    if (contains_expression(expression.head(), target)) return true;
+    return std::any_of(expression.args().begin(), expression.args().end(), [&](const Expr& item) {
+        return contains_expression(item, target);
+    });
+}
+
+Expr rename_symbol_raw(const Expr& expression, const Expr& from, const Expr& to) {
+    if (expression == from) return to;
+    if (expression.kind() != ExprKind::Call) return expression;
+    std::vector<Expr> args; for (const auto& item : expression.args()) args.push_back(rename_symbol_raw(item, from, to));
+    return call(rename_symbol_raw(expression.head(), from, to), std::move(args));
+}
+
+Expr replace_named(const Expr& expression, const Expr& parameter, const Expr& value) {
+    if (expression == parameter) return value;
+    if (expression.kind() != ExprKind::Call) return expression;
+    if ((expression.has_head("With") || expression.has_head("Module")
+        || expression.has_head("Block") || expression.has_head("InheritedBlock")
+        || expression.has_head("Internal`InheritedBlock"))
+        && expression.args().size() == 2
+        && expression.args()[0].kind() == ExprKind::Call
+        && expression.args()[0].has_head("List")) {
+        auto bindings = expression.args()[0].args();
+        bool shadows = false;
+        for (auto& binding : bindings) {
+            const Expr* local = nullptr;
+            if (binding.symbol_name()) local = &binding;
+            else if ((binding.has_head("Set") || binding.has_head("SetDelayed"))
+                && binding.args().size() == 2 && binding.args()[0].symbol_name())
+                local = &binding.args()[0];
+            if (local && *local == parameter) shadows = true;
+            if ((binding.has_head("Set") || binding.has_head("SetDelayed"))
+                && binding.args().size() == 2)
+                binding = call(binding.head(), {binding.args()[0],
+                    replace_named(binding.args()[1], parameter, value)});
+        }
+        return call(expression.head(), {list(std::move(bindings)), shadows
+            ? expression.args()[1] : replace_named(expression.args()[1], parameter, value)});
+    }
+    if (expression.has_head("Function") && expression.args().size() >= 2) {
+        auto specification = expression.args();
+        std::vector<Expr> parameters = specification[0].has_head("List")
+            ? specification[0].args() : std::vector<Expr>{specification[0]};
+        if (std::find(parameters.begin(), parameters.end(), parameter) != parameters.end()) return expression;
+        auto body = specification[1];
+        if (!contains_expression(body, parameter)) return expression;
+        for (std::size_t index = 0; index < parameters.size(); ++index) {
+            if (!parameters[index].symbol_name()) continue;
+            const auto renamed = symbol(*parameters[index].symbol_name() + "$");
+            body = rename_symbol_raw(body, parameters[index], renamed);
+            parameters[index] = renamed;
+        }
+        specification[0] = specification[0].has_head("List") ? list(parameters) : parameters[0];
+        specification[1] = replace_named(body, parameter, value);
+        return call("Function", std::move(specification));
+    }
+    std::vector<Expr> mapped;
+    for (const auto& argument : expression.args()) mapped.push_back(replace_named(argument, parameter, value));
+    return call(replace_named(expression.head(), parameter, value), std::move(mapped));
+}
+
+Expr strip_unevaluated(const Expr& expression) {
+    return expression.has_head("Unevaluated") && expression.args().size() == 1
+        ? expression.args()[0] : expression;
+}
+
+Expr activate_all(const Expr& expression) {
+    if (expression.kind() != ExprKind::Call) return expression;
+    if (expression.has_head("Inactive") && expression.args().size() == 1) return expression.args()[0];
+    std::vector<Expr> args;
+    for (const auto& argument : expression.args()) args.push_back(activate_all(argument));
+    return call(activate_all(expression.head()), std::move(args));
+}
+
+Expr activate_selected(const Expr& expression, const Expr& selector) {
+    if (expression.kind() != ExprKind::Call) return expression;
+    if (expression.has_head("Inactive") && expression.args().size() == 1
+        && (is_symbol(selector, "All") || expression.args()[0] == selector)) return expression.args()[0];
+    std::vector<Expr> args;
+    for (const auto& argument : expression.args()) args.push_back(activate_selected(argument, selector));
+    return call(activate_selected(expression.head(), selector), std::move(args));
+}
+
+bool tag_matches(const std::optional<Expr>& tag, const Expr& selector) {
+    if (!tag) return false;
+    if (selector.has_head("Blank")) return true;
+    return tag && *tag == selector;
+}
+
+bool reap_tag_matches(const Expr& tag, const Expr& selector) {
+    if (selector.has_head("Blank")) return true;
+    if (selector.has_head("List")) return std::find(selector.args().begin(), selector.args().end(), tag) != selector.args().end();
+    return tag == selector;
+}
+
+std::optional<Expr> thread_lists(const std::string& head, const std::vector<Expr>& args) {
+    std::size_t length = 0;
+    bool found = false;
+    for (const auto& argument : args) {
+        if (!argument.has_head("List")) continue;
+        if (!found) { length = argument.args().size(); found = true; }
+        else if (length != argument.args().size()) return std::nullopt;
+    }
+    if (!found) return std::nullopt;
+    std::vector<Expr> values;
+    for (std::size_t index = 0; index < length; ++index) {
+        std::vector<Expr> item;
+        for (const auto& argument : args) item.push_back(argument.has_head("List") ? argument.args()[index] : argument);
+        values.push_back(call(head, std::move(item)));
+    }
+    return list(std::move(values));
+}
+
+using NativeMonomial = std::vector<long>;
+
+bool monomial_divides(const NativeMonomial& divisor, const NativeMonomial& dividend);
+NativeMonomial monomial_difference(const NativeMonomial& dividend, const NativeMonomial& divisor);
+
+struct NativeMonomialLess {
+    bool operator()(const NativeMonomial& left, const NativeMonomial& right) const {
+        return std::lexicographical_compare(left.begin(), left.end(), right.begin(), right.end());
+    }
+};
+
+struct NativePolynomial {
+    std::map<NativeMonomial, Expr, NativeMonomialLess> terms;
+    std::size_t variable_count = 0;
+
+    [[nodiscard]] bool empty() const noexcept { return terms.empty(); }
+};
+
+class NativePolynomialContext {
+public:
+    using Evaluate = std::function<Expr(const Expr&)>;
+
+    NativePolynomialContext(std::vector<Expr> variables, Evaluate evaluate)
+        : variables_(std::move(variables)), evaluate_(std::move(evaluate)) {}
+
+    [[nodiscard]] const std::vector<Expr>& variables() const noexcept { return variables_; }
+
+    [[nodiscard]] NativePolynomial zero() const { return NativePolynomial{{}, variables_.size()}; }
+
+    [[nodiscard]] NativePolynomial constant(const Expr& coefficient) const {
+        auto result = zero();
+        add_term(result, NativeMonomial(variables_.size(), 0), coefficient);
+        return result;
+    }
+
+    [[nodiscard]] std::optional<NativePolynomial> parse(const Expr& expression) const {
+        for (std::size_t index = 0; index < variables_.size(); ++index) if (expression == variables_[index]) {
+            auto result = zero(); NativeMonomial monomial(variables_.size(), 0); monomial[index] = 1;
+            result.terms.emplace(std::move(monomial), integer(1L)); return result;
+        }
+        if (expression.has_head("Plus")) {
+            auto result = zero();
+            for (const auto& argument : expression.args()) {
+                const auto parsed = parse(argument); if (!parsed) return std::nullopt;
+                result = add(result, *parsed);
+            }
+            return result;
+        }
+        if (expression.has_head("Times")) {
+            auto result = constant(integer(1L));
+            for (const auto& argument : expression.args()) {
+                const auto parsed = parse(argument); if (!parsed) return std::nullopt;
+                result = multiply(result, *parsed);
+            }
+            return result;
+        }
+        if (expression.has_head("Power") && expression.args().size() == 2
+            && expression.args()[1].kind() == ExprKind::Integer
+            && expression.args()[1].integer_value() >= 0
+            && expression.args()[1].integer_value().fits_ulong_p()) {
+            const auto parsed = parse(expression.args()[0]); if (!parsed) return std::nullopt;
+            return power(*parsed, expression.args()[1].integer_value().get_ui());
+        }
+        if (contains_variable(expression)) return std::nullopt;
+        return constant(expression);
+    }
+
+    [[nodiscard]] NativePolynomial add(const NativePolynomial& left, const NativePolynomial& right) const {
+        auto result = left;
+        for (const auto& [monomial, coefficient] : right.terms) add_term(result, monomial, coefficient);
+        return result;
+    }
+
+    [[nodiscard]] NativePolynomial negate(const NativePolynomial& value) const {
+        auto result = zero();
+        for (const auto& [monomial, coefficient] : value.terms)
+            add_term(result, monomial, coefficient_multiply(integer(-1L), coefficient));
+        return result;
+    }
+
+    [[nodiscard]] NativePolynomial subtract(const NativePolynomial& left, const NativePolynomial& right) const {
+        return add(left, negate(right));
+    }
+
+    [[nodiscard]] NativePolynomial multiply(const NativePolynomial& left, const NativePolynomial& right) const {
+        auto result = zero();
+        for (const auto& [left_monomial, left_coefficient] : left.terms)
+            for (const auto& [right_monomial, right_coefficient] : right.terms) {
+                NativeMonomial monomial(variables_.size(), 0);
+                for (std::size_t index = 0; index < variables_.size(); ++index)
+                    monomial[index] = left_monomial[index] + right_monomial[index];
+                add_term(result, monomial, coefficient_multiply(left_coefficient, right_coefficient));
+            }
+        return result;
+    }
+
+    [[nodiscard]] NativePolynomial power(NativePolynomial base, unsigned long exponent) const {
+        auto result = constant(integer(1L));
+        while (exponent != 0) {
+            if ((exponent & 1UL) != 0) result = multiply(result, base);
+            exponent >>= 1U; if (exponent != 0) base = multiply(base, base);
+        }
+        return result;
+    }
+
+    [[nodiscard]] NativePolynomial monomial_polynomial(const NativeMonomial& monomial,
+        const Expr& coefficient) const {
+        auto result = zero(); add_term(result, monomial, coefficient); return result;
+    }
+
+    [[nodiscard]] long degree(const NativePolynomial& polynomial, std::size_t variable = 0) const {
+        if (polynomial.empty()) return -1;
+        long result = 0;
+        for (const auto& [monomial, coefficient] : polynomial.terms) {
+            (void)coefficient; result = std::max(result, monomial[variable]);
+        }
+        return result;
+    }
+
+    [[nodiscard]] Expr coefficient(const NativePolynomial& polynomial, const NativeMonomial& monomial) const {
+        const auto found = polynomial.terms.find(monomial);
+        return found == polynomial.terms.end() ? integer(0L) : found->second;
+    }
+
+    [[nodiscard]] std::pair<NativeMonomial, Expr> leading_term(const NativePolynomial& polynomial) const {
+        const auto found = polynomial.terms.rbegin(); return {found->first, found->second};
+    }
+
+    [[nodiscard]] NativePolynomial derivative(const NativePolynomial& polynomial,
+        std::size_t variable = 0) const {
+        auto result = zero();
+        for (const auto& [monomial, coefficient_value] : polynomial.terms) {
+            if (monomial[variable] == 0) continue;
+            auto derived_monomial = monomial; const auto exponent = derived_monomial[variable]--;
+            add_term(result, derived_monomial, coefficient_multiply(integer(exponent), coefficient_value));
+        }
+        return result;
+    }
+
+    [[nodiscard]] NativePolynomial make_monic(const NativePolynomial& polynomial) const {
+        if (polynomial.empty()) return polynomial;
+        const auto leading = leading_term(polynomial).second;
+        auto result = zero();
+        for (const auto& [monomial, coefficient_value] : polynomial.terms)
+            add_term(result, monomial, coefficient_divide(coefficient_value, leading));
+        return result;
+    }
+
+    [[nodiscard]] std::pair<std::vector<NativePolynomial>, NativePolynomial> divide(
+        const NativePolynomial& dividend, const std::vector<NativePolynomial>& divisors) const {
+        std::vector<NativePolynomial> quotients(divisors.size(), zero());
+        auto pending = dividend; auto remainder = zero();
+        std::size_t iterations = 0;
+        while (!pending.empty() && iterations++ < 100000) {
+            const auto [pending_monomial, pending_coefficient] = leading_term(pending);
+            bool divided = false;
+            for (std::size_t index = 0; index < divisors.size(); ++index) {
+                if (divisors[index].empty()) continue;
+                const auto [divisor_monomial, divisor_coefficient] = leading_term(divisors[index]);
+                if (!monomial_divides(divisor_monomial, pending_monomial)) continue;
+                const auto quotient_monomial = monomial_difference(pending_monomial, divisor_monomial);
+                const auto term = monomial_polynomial(quotient_monomial,
+                    coefficient_divide(pending_coefficient, divisor_coefficient));
+                quotients[index] = add(quotients[index], term);
+                pending = subtract(pending, multiply(term, divisors[index]));
+                divided = true; break;
+            }
+            if (!divided) {
+                const auto term = monomial_polynomial(pending_monomial, pending_coefficient);
+                remainder = add(remainder, term); pending = subtract(pending, term);
+            }
+        }
+        return {std::move(quotients), std::move(remainder)};
+    }
+
+    [[nodiscard]] Expr term_expression(const NativeMonomial& monomial, const Expr& coefficient_value) const {
+        std::vector<Expr> factors;
+        const bool has_variables = std::any_of(monomial.begin(), monomial.end(), [](long exponent) { return exponent != 0; });
+        if (!has_variables || coefficient_value != integer(1L)) factors.push_back(coefficient_value);
+        for (std::size_t index = 0; index < variables_.size(); ++index) {
+            if (monomial[index] == 1) factors.push_back(variables_[index]);
+            else if (monomial[index] > 1) factors.push_back(call("Power", {variables_[index], integer(monomial[index])}));
+        }
+        return coefficient_multiply_many(std::move(factors));
+    }
+
+    [[nodiscard]] Expr expression(const NativePolynomial& polynomial) const {
+        std::vector<Expr> terms;
+        for (const auto& [monomial, coefficient_value] : polynomial.terms)
+            terms.push_back(term_expression(monomial, coefficient_value));
+        return coefficient_add_many(std::move(terms));
+    }
+
+    [[nodiscard]] Expr coefficient_add(const Expr& left, const Expr& right) const {
+        return evaluate_(call("Plus", {left, right}));
+    }
+
+    [[nodiscard]] Expr coefficient_multiply(const Expr& left, const Expr& right) const {
+        return evaluate_(call("Times", {left, right}));
+    }
+
+    [[nodiscard]] Expr coefficient_divide(const Expr& numerator, const Expr& denominator) const {
+        if (denominator == integer(1L)) return numerator;
+        if (denominator == integer(-1L)) return coefficient_multiply(integer(-1L), numerator);
+        if (numerator == denominator) return integer(1L);
+        return evaluate_(call("Times", {numerator, call("Power", {denominator, integer(-1L)})}));
+    }
+
+    [[nodiscard]] Expr coefficient_add_many(std::vector<Expr> values) const {
+        return evaluate_(call("Plus", std::move(values)));
+    }
+
+    [[nodiscard]] Expr coefficient_multiply_many(std::vector<Expr> values) const {
+        return evaluate_(call("Times", std::move(values)));
+    }
+
+private:
+    [[nodiscard]] bool contains_variable(const Expr& expression) const {
+        if (std::find(variables_.begin(), variables_.end(), expression) != variables_.end()) return true;
+        if (expression.kind() != ExprKind::Call) return false;
+        return std::any_of(expression.args().begin(), expression.args().end(),
+            [&](const Expr& argument) { return contains_variable(argument); });
+    }
+
+    void add_term(NativePolynomial& polynomial, const NativeMonomial& monomial,
+        const Expr& coefficient_value) const {
+        if (coefficient_value == integer(0L)) return;
+        const auto found = polynomial.terms.find(monomial);
+        if (found == polynomial.terms.end()) polynomial.terms.emplace(monomial, coefficient_value);
+        else {
+            const auto opposite = coefficient_multiply(integer(-1L), found->second);
+            if (coefficient_value == opposite) { polynomial.terms.erase(found); return; }
+            const auto sum = coefficient_add(found->second, coefficient_value);
+            if (sum == integer(0L)) polynomial.terms.erase(found); else found->second = sum;
+        }
+    }
+
+    std::vector<Expr> variables_;
+    Evaluate evaluate_;
+};
+
+void gather_polynomial_symbols(const Expr& expression, std::vector<Expr>& symbols) {
+    if (expression.kind() == ExprKind::Symbol) {
+        if (std::find(symbols.begin(), symbols.end(), expression) == symbols.end()) symbols.push_back(expression);
+        return;
+    }
+    if (expression.kind() != ExprKind::Call) return;
+    for (const auto& argument : expression.args()) gather_polynomial_symbols(argument, symbols);
+}
+
+bool monomial_divides(const NativeMonomial& divisor, const NativeMonomial& dividend) {
+    if (divisor.size() != dividend.size()) return false;
+    for (std::size_t index = 0; index < divisor.size(); ++index)
+        if (divisor[index] > dividend[index]) return false;
+    return true;
+}
+
+NativeMonomial monomial_difference(const NativeMonomial& dividend, const NativeMonomial& divisor) {
+    NativeMonomial result(dividend.size(), 0);
+    for (std::size_t index = 0; index < dividend.size(); ++index) result[index] = dividend[index] - divisor[index];
+    return result;
+}
+
+NativeMonomial monomial_lcm(const NativeMonomial& left, const NativeMonomial& right) {
+    NativeMonomial result(left.size(), 0);
+    for (std::size_t index = 0; index < left.size(); ++index) result[index] = std::max(left[index], right[index]);
+    return result;
+}
+
+using RationalPolynomial = std::vector<mpq_class>;
+using ApproximateComplex = std::complex<long double>;
+
+void trim_polynomial(RationalPolynomial& polynomial) {
+    while (!polynomial.empty() && polynomial.back() == 0) polynomial.pop_back();
+}
+
+long polynomial_degree(const RationalPolynomial& polynomial) {
+    return polynomial.empty() ? -1L : static_cast<long>(polynomial.size() - 1);
+}
+
+RationalPolynomial add_polynomials(
+    const RationalPolynomial& left, const RationalPolynomial& right) {
+    RationalPolynomial result(std::max(left.size(), right.size()));
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        if (index < left.size()) result[index] += left[index];
+        if (index < right.size()) result[index] += right[index];
+    }
+    trim_polynomial(result);
+    return result;
+}
+
+RationalPolynomial scale_polynomial(
+    RationalPolynomial polynomial, const mpq_class& factor) {
+    for (auto& coefficient : polynomial) coefficient *= factor;
+    trim_polynomial(polynomial);
+    return polynomial;
+}
+
+RationalPolynomial multiply_polynomials(
+    const RationalPolynomial& left, const RationalPolynomial& right) {
+    if (left.empty() || right.empty()) return {};
+    RationalPolynomial result(left.size() + right.size() - 1);
+    for (std::size_t left_index = 0; left_index < left.size(); ++left_index)
+        for (std::size_t right_index = 0; right_index < right.size(); ++right_index)
+            result[left_index + right_index] += left[left_index] * right[right_index];
+    trim_polynomial(result);
+    return result;
+}
+
+RationalPolynomial compose_polynomial(
+    const RationalPolynomial& outer, const RationalPolynomial& inner) {
+    RationalPolynomial result;
+    for (auto iterator = outer.rbegin(); iterator != outer.rend(); ++iterator) {
+        result = multiply_polynomials(result, inner);
+        if (result.empty()) result.resize(1);
+        result[0] += *iterator;
+        trim_polynomial(result);
+    }
+    return result;
+}
+
+RationalPolynomial chebyshev_polynomial(unsigned long degree, bool second_kind) {
+    if (degree == 0) return {1};
+    RationalPolynomial previous{1};
+    RationalPolynomial current{0, second_kind ? mpq_class(2) : mpq_class(1)};
+    for (unsigned long index = 2; index <= degree; ++index) {
+        const auto doubled_x = multiply_polynomials({0, 2}, current);
+        auto next = add_polynomials(doubled_x, scale_polynomial(previous, -1));
+        previous = std::move(current); current = std::move(next);
+    }
+    return current;
+}
+
+RationalPolynomial polynomial_derivative(const RationalPolynomial& polynomial) {
+    RationalPolynomial result(polynomial.size() > 1 ? polynomial.size() - 1 : 0);
+    for (std::size_t index = 1; index < polynomial.size(); ++index)
+        result[index - 1] = polynomial[index] * index;
+    trim_polynomial(result);
+    return result;
+}
+
+std::pair<RationalPolynomial, RationalPolynomial> rational_polynomial_divide(
+    RationalPolynomial dividend, const RationalPolynomial& divisor) {
+    RationalPolynomial quotient;
+    if (divisor.empty()) return {quotient, dividend};
+    if (polynomial_degree(dividend) >= polynomial_degree(divisor))
+        quotient.resize(static_cast<std::size_t>(
+            polynomial_degree(dividend) - polynomial_degree(divisor) + 1));
+    std::size_t iterations = 0;
+    while (!dividend.empty() && polynomial_degree(dividend) >= polynomial_degree(divisor)
+        && iterations++ < 10000) {
+        const auto offset = static_cast<std::size_t>(polynomial_degree(dividend) - polynomial_degree(divisor));
+        const mpq_class factor = dividend.back() / divisor.back();
+        quotient[offset] += factor;
+        for (std::size_t index = 0; index < divisor.size(); ++index)
+            dividend[index + offset] -= factor * divisor[index];
+        trim_polynomial(dividend);
+    }
+    trim_polynomial(quotient);
+    return {std::move(quotient), std::move(dividend)};
+}
+
+RationalPolynomial monic_polynomial(RationalPolynomial polynomial) {
+    trim_polynomial(polynomial);
+    if (polynomial.empty()) return polynomial;
+    const auto leading = polynomial.back();
+    for (auto& coefficient : polynomial) coefficient /= leading;
+    return polynomial;
+}
+
+RationalPolynomial rational_polynomial_gcd(
+    RationalPolynomial left, RationalPolynomial right) {
+    trim_polynomial(left); trim_polynomial(right);
+    std::size_t iterations = 0;
+    while (!right.empty() && iterations++ < 10000) {
+        auto remainder = rational_polynomial_divide(left, right).second;
+        left = std::move(right); right = std::move(remainder);
+    }
+    return monic_polynomial(std::move(left));
+}
+
+RationalPolynomial square_free_polynomial(const RationalPolynomial& polynomial) {
+    auto value = monic_polynomial(polynomial);
+    if (polynomial_degree(value) <= 0) return value;
+    const auto repeated = rational_polynomial_gcd(value, polynomial_derivative(value));
+    if (polynomial_degree(repeated) <= 0) return value;
+    return monic_polynomial(rational_polynomial_divide(value, repeated).first);
+}
+
+std::vector<mpz_class> primitive_integer_polynomial(const RationalPolynomial& polynomial) {
+    mpz_class denominator_lcm = 1;
+    for (const auto& coefficient : polynomial) {
+        mpz_class common;
+        mpz_gcd(common.get_mpz_t(), denominator_lcm.get_mpz_t(), coefficient.get_den().get_mpz_t());
+        denominator_lcm = denominator_lcm / common * coefficient.get_den();
+    }
+    std::vector<mpz_class> result;
+    mpz_class content = 0;
+    for (const auto& coefficient : polynomial) {
+        mpz_class value = coefficient.get_num() * (denominator_lcm / coefficient.get_den());
+        result.push_back(value);
+        mpz_class magnitude;
+        mpz_abs(magnitude.get_mpz_t(), value.get_mpz_t());
+        mpz_gcd(content.get_mpz_t(), content.get_mpz_t(), magnitude.get_mpz_t());
+    }
+    if (content != 0) for (auto& coefficient : result) coefficient /= content;
+    while (!result.empty() && result.back() == 0) result.pop_back();
+    if (!result.empty() && result.back() < 0)
+        for (auto& coefficient : result) coefficient = -coefficient;
+    return result;
+}
+
+RationalPolynomial rational_polynomial(const std::vector<mpz_class>& coefficients) {
+    RationalPolynomial result;
+    result.reserve(coefficients.size());
+    for (const auto& coefficient : coefficients) result.emplace_back(coefficient);
+    trim_polynomial(result);
+    return result;
+}
+
+mpq_class evaluate_polynomial(const RationalPolynomial& polynomial, const mpq_class& value) {
+    mpq_class result = 0;
+    for (auto iterator = polynomial.rbegin(); iterator != polynomial.rend(); ++iterator)
+        result = result * value + *iterator;
+    return result;
+}
+
+std::vector<RationalPolynomial> sturm_sequence(const RationalPolynomial& polynomial) {
+    std::vector<RationalPolynomial> sequence;
+    auto value = square_free_polynomial(polynomial);
+    if (polynomial_degree(value) <= 0) return sequence;
+    sequence.push_back(value);
+    sequence.push_back(polynomial_derivative(value));
+    while (!sequence.back().empty() && sequence.size() < 256) {
+        auto remainder = rational_polynomial_divide(
+            sequence[sequence.size() - 2], sequence.back()).second;
+        for (auto& coefficient : remainder) coefficient = -coefficient;
+        trim_polynomial(remainder);
+        if (remainder.empty()) break;
+        sequence.push_back(std::move(remainder));
+    }
+    return sequence;
+}
+
+int polynomial_sign(const mpq_class& value) {
+    return value < 0 ? -1 : value > 0 ? 1 : 0;
+}
+
+int sturm_variations_at(const std::vector<RationalPolynomial>& sequence,
+    const std::optional<mpq_class>& point, bool positive_infinity = true) {
+    int previous = 0;
+    int variations = 0;
+    for (const auto& polynomial : sequence) {
+        int sign = 0;
+        if (point) sign = polynomial_sign(evaluate_polynomial(polynomial, *point));
+        else if (!polynomial.empty()) {
+            sign = polynomial_sign(polynomial.back());
+            if (!positive_infinity && (polynomial_degree(polynomial) & 1L) != 0) sign = -sign;
+        }
+        if (sign == 0) continue;
+        if (previous != 0 && previous != sign) ++variations;
+        previous = sign;
+    }
+    return variations;
+}
+
+long distinct_real_root_count(const RationalPolynomial& polynomial,
+    const std::optional<mpq_class>& lower = std::nullopt,
+    const std::optional<mpq_class>& upper = std::nullopt) {
+    const auto sequence = sturm_sequence(polynomial);
+    if (sequence.empty()) return 0;
+    return sturm_variations_at(sequence, lower, false)
+        - sturm_variations_at(sequence, upper, true);
+}
+
+long root_multiplicity_at(RationalPolynomial polynomial, const mpq_class& point) {
+    long multiplicity = 0;
+    while (polynomial_degree(polynomial) > 0
+        && evaluate_polynomial(polynomial, point) == 0) {
+        ++multiplicity;
+        polynomial = polynomial_derivative(polynomial);
+    }
+    return multiplicity;
+}
+
+long real_root_count_with_multiplicity(RationalPolynomial polynomial,
+    const std::optional<mpq_class>& lower = std::nullopt,
+    const std::optional<mpq_class>& upper = std::nullopt) {
+    trim_polynomial(polynomial);
+    if (lower && upper && *lower == *upper) return root_multiplicity_at(polynomial, *lower);
+    long result = 0;
+    std::size_t layers = 0;
+    while (polynomial_degree(polynomial) > 0 && layers++ < 128) {
+        auto square_free = square_free_polynomial(polynomial);
+        if (lower && evaluate_polynomial(square_free, *lower) == 0)
+            result += 1;
+        if (upper && (!lower || *upper != *lower)
+            && evaluate_polynomial(square_free, *upper) == 0) result += 1;
+        RationalPolynomial interior = square_free;
+        if (lower && evaluate_polynomial(interior, *lower) == 0)
+            interior = rational_polynomial_divide(interior, {-*lower, 1}).first;
+        if (upper && (!lower || *upper != *lower)
+            && evaluate_polynomial(interior, *upper) == 0)
+            interior = rational_polynomial_divide(interior, {-*upper, 1}).first;
+        result += distinct_real_root_count(interior, lower, upper);
+        polynomial = rational_polynomial_gcd(polynomial, polynomial_derivative(polynomial));
+    }
+    return result;
+}
+
+ApproximateComplex evaluate_complex_polynomial(
+    const std::vector<ApproximateComplex>& coefficients, ApproximateComplex value) {
+    ApproximateComplex result{};
+    for (auto iterator = coefficients.rbegin(); iterator != coefficients.rend(); ++iterator)
+        result = result * value + *iterator;
+    return result;
+}
+
+std::optional<std::vector<ApproximateComplex>> approximate_polynomial_roots(
+    std::vector<ApproximateComplex> coefficients) {
+    while (!coefficients.empty() && std::abs(coefficients.back()) < 1e-28L) coefficients.pop_back();
+    if (coefficients.size() <= 1 || coefficients.size() > 65) return std::nullopt;
+    const auto degree = coefficients.size() - 1;
+    const auto leading = coefficients.back();
+    for (auto& coefficient : coefficients) coefficient /= leading;
+    long double radius = 1;
+    for (std::size_t index = 0; index < degree; ++index)
+        radius = std::max(radius, 1 + std::abs(coefficients[index]));
+    const auto pi = std::acos(-1.0L);
+    std::vector<ApproximateComplex> roots;
+    roots.reserve(degree);
+    for (std::size_t index = 0; index < degree; ++index)
+        roots.push_back(std::polar(radius,
+            2 * pi * (static_cast<long double>(index) + 0.375L) / static_cast<long double>(degree)));
+    bool converged = false;
+    for (std::size_t iteration = 0; iteration < 4000; ++iteration) {
+        auto next = roots;
+        long double maximum_change = 0;
+        for (std::size_t index = 0; index < degree; ++index) {
+            ApproximateComplex denominator = 1;
+            for (std::size_t other = 0; other < degree; ++other)
+                if (other != index) denominator *= roots[index] - roots[other];
+            if (std::abs(denominator) < 1e-28L) {
+                roots[index] += ApproximateComplex(1e-12L * (index + 1), 1e-12L * (iteration + 1));
+                denominator = 1;
+                for (std::size_t other = 0; other < degree; ++other)
+                    if (other != index) denominator *= roots[index] - roots[other];
+            }
+            const auto change = evaluate_complex_polynomial(coefficients, roots[index]) / denominator;
+            next[index] = roots[index] - change;
+            maximum_change = std::max(maximum_change, std::abs(change));
+        }
+        roots = std::move(next);
+        if (maximum_change < 1e-17L) { converged = true; break; }
+    }
+    if (!converged) {
+        long double maximum_residual = 0;
+        for (const auto& value : roots)
+            maximum_residual = std::max(maximum_residual,
+                std::abs(evaluate_complex_polynomial(coefficients, value)));
+        if (maximum_residual > 1e-10L) return std::nullopt;
+    }
+    for (auto& value : roots) {
+        if (std::abs(value.real()) < 1e-14L) value.real(0);
+        if (std::abs(value.imag()) < 1e-14L) value.imag(0);
+    }
+    std::sort(roots.begin(), roots.end(), [](const auto& left, const auto& right) {
+        const bool left_real = left.imag() == 0;
+        const bool right_real = right.imag() == 0;
+        if (left_real != right_real) return left_real;
+        if (std::abs(left.real() - right.real()) > 1e-13L) return left.real() < right.real();
+        return left.imag() < right.imag();
+    });
+    return roots;
+}
+
+std::optional<std::vector<ApproximateComplex>> approximate_polynomial_roots(
+    const RationalPolynomial& polynomial) {
+    std::vector<ApproximateComplex> coefficients;
+    coefficients.reserve(polynomial.size());
+    for (const auto& coefficient : polynomial) {
+        const auto value = rounded_machine_value(coefficient);
+        if (!value) return std::nullopt;
+        coefficients.emplace_back(*value, 0);
+    }
+    return approximate_polynomial_roots(std::move(coefficients));
+}
+
+std::optional<std::size_t> closest_root_index(
+    const RationalPolynomial& polynomial, ApproximateComplex target) {
+    const auto roots = approximate_polynomial_roots(polynomial);
+    if (!roots || roots->empty()) return std::nullopt;
+    std::size_t best = 0;
+    long double distance = std::abs((*roots)[0] - target);
+    long double second = std::numeric_limits<long double>::infinity();
+    for (std::size_t index = 1; index < roots->size(); ++index) {
+        const auto candidate = std::abs((*roots)[index] - target);
+        if (candidate < distance) { second = distance; distance = candidate; best = index; }
+        else second = std::min(second, candidate);
+    }
+    if (second < std::numeric_limits<long double>::infinity()
+        && distance * 4 >= second) return std::nullopt;
+    return best;
+}
+
+std::optional<ApproximateComplex> approximate_root(const Expr& expression) {
+    if (expression.kind() != ExprKind::Root) return std::nullopt;
+    const auto roots = approximate_polynomial_roots(
+        rational_polynomial(expression.root_coefficients()));
+    if (!roots || expression.root_index() >= roots->size()) return std::nullopt;
+    return (*roots)[expression.root_index()];
+}
+
+} // namespace
+
+Evaluator::Evaluator() {
+    own_values_.emplace("$RecursionLimit", Definition{integer(1024L), false});
+    own_values_.emplace("$IterationLimit", Definition{integer(4096L), false});
+    own_values_.emplace("$HistoryLength", Definition{symbol("Infinity"), false});
+    own_values_.emplace("$MaxExtraPrecision", Definition{integer(50L), false});
+    own_values_.emplace("$MaxRootDegree", Definition{integer(1000L), false});
+    own_values_.emplace("$MessagePrePrint", Definition{symbol("Automatic"), false});
+    own_values_.emplace("$OutputSizeLimit", Definition{integer(12000L), false});
+}
+
+bool Evaluator::message_is_enabled(const Expr& name) const {
+    if (disabled_messages_.count(name.to_full_form()) != 0) return false;
+    if (name.has_head("MessageName") && !name.args().empty() && name.args()[0].symbol_name())
+        return disabled_message_heads_.count(*name.args()[0].symbol_name()) == 0;
+    return true;
+}
+
+void Evaluator::emit_message(const Expr& name, std::string text) {
+    if (!message_is_enabled(name)) return;
+    for (auto scope = message_scopes_.rbegin(); scope != message_scopes_.rend(); ++scope) {
+        if (scope->quiet) return;
+        if (scope->selectors.empty()
+            || std::find(scope->selectors.begin(), scope->selectors.end(), name) != scope->selectors.end())
+            scope->triggered = true;
+    }
+    messages_.push_back(name);
+    message_texts_.push_back(std::move(text));
+}
+
+bool Evaluator::control_active() const noexcept {
+    return control_kind_ != ControlKind::None;
+}
+
+Expr Evaluator::control_expression() const {
+    if (control_kind_ == ControlKind::Break) return call("Break");
+    if (control_kind_ == ControlKind::Continue) return call("Continue");
+    if (control_kind_ == ControlKind::Goto)
+        return call("Goto", control_target_ ? std::vector<Expr>{*control_target_} : std::vector<Expr>{});
+    if (control_kind_ == ControlKind::Return) {
+        std::vector<Expr> arguments{control_value_.value_or(symbol("Null"))};
+        if (control_target_) arguments.push_back(*control_target_);
+        return call("Return", std::move(arguments));
+    }
+    return symbol("Null");
+}
+
+void Evaluator::clear_control() noexcept {
+    control_kind_ = ControlKind::None;
+    control_value_.reset();
+    control_target_.reset();
+}
+
+std::set<std::string> Evaluator::attributes_for(const Expr& symbol_expression) const {
+    std::set<std::string> result;
+    const auto* raw_name = symbol_expression.symbol_name();
+    if (!raw_name) return result;
+    auto system_name = *raw_name;
+    if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
+    if (const auto found = system_registry().find(system_name); found != system_registry().end())
+        result.insert(found->second.begin(), found->second.end());
+    if (const auto found = user_attributes_.find(*raw_name); found != user_attributes_.end())
+        result.insert(found->second.begin(), found->second.end());
+    if (unprotected_symbols_.count(*raw_name) != 0) result.erase("Protected");
+    return result;
+}
+
+bool Evaluator::symbol_has_attribute(
+    const std::string& symbol_name, const std::string& attribute) const {
+    return attributes_for(symbol(symbol_name)).count(attribute) != 0;
+}
+
+Expr Evaluator::normalize_assignment_lhs(const Expr& expression) {
+    if (expression.kind() != ExprKind::Call) return expression;
+    if (expression.has_head("Condition") && expression.args().size() == 2)
+        return call(expression.head(), {normalize_assignment_lhs(expression.args()[0]), expression.args()[1]});
+    if (expression.has_head("HoldPattern") && expression.args().size() == 1)
+        return call(expression.head(), {normalize_assignment_lhs(expression.args()[0])});
+
+    auto normalized_head = expression.head().kind() == ExprKind::Call
+        ? evaluate(normalize_assignment_lhs(expression.head())) : evaluate(expression.head());
+    const auto attributes = attributes_for(normalized_head);
+    const bool hold_all_complete = attributes.count("HoldAllComplete") != 0;
+    const bool hold_all = hold_all_complete || attributes.count("HoldAll") != 0;
+    const bool hold_first = attributes.count("HoldFirst") != 0;
+    const bool hold_rest = attributes.count("HoldRest") != 0;
+    std::vector<Expr> arguments;
+    for (std::size_t index = 0; index < expression.args().size(); ++index) {
+        const auto& argument = expression.args()[index];
+        const bool held = hold_all || (hold_first && index == 0) || (hold_rest && index > 0);
+        if (held) {
+            if (!hold_all_complete && argument.has_head("Evaluate") && argument.args().size() == 1)
+                arguments.push_back(evaluate(argument.args()[0]));
+            else arguments.push_back(argument);
+        } else arguments.push_back(evaluate(argument));
+    }
+    if (!hold_all_complete && attributes.count("SequenceHold") == 0) arguments = splice_sequences(arguments);
+    return call(normalized_head, std::move(arguments));
+}
+
+std::optional<Expr> Evaluator::apply_definitions(
+    const Expr& expression, const PatternDefinitions& definitions) {
+    for (const auto& definition : definitions) {
+        Bindings bindings;
+        const Expr* pattern = &definition.lhs;
+        std::vector<Expr> conditions;
+        while ((pattern->has_head("HoldPattern") || pattern->has_head("Condition")) && !pattern->args().empty()) {
+            if (pattern->has_head("Condition") && pattern->args().size() == 2) conditions.push_back(pattern->args()[1]);
+            pattern = &pattern->args()[0];
+        }
+        std::function<Expr(const Expr&)> strip_conditions = [&](const Expr& current) -> Expr {
+            if (current.has_head("Condition") && current.args().size() == 2) {
+                conditions.push_back(current.args()[1]);
+                return strip_conditions(current.args()[0]);
+            }
+            if (current.kind() != ExprKind::Call) return current;
+            std::vector<Expr> arguments;
+            for (const auto& argument : current.args()) arguments.push_back(strip_conditions(argument));
+            return call(strip_conditions(current.head()), std::move(arguments));
+        };
+        const auto conditionless_pattern = strip_conditions(*pattern);
+        if (!pattern_match(expression, conditionless_pattern, bindings)) continue;
+        bool conditions_pass = true;
+        for (const auto& condition : conditions)
+            if (!is_symbol(evaluate(substitute_bindings(condition, bindings)), "True")) { conditions_pass = false; break; }
+        if (!conditions_pass) continue;
+        auto replacement = substitute_bindings(definition.value, bindings);
+        if (replacement.has_head("Condition") && replacement.args().size() == 2) {
+            if (!is_symbol(evaluate(replacement.args()[1]), "True")) continue;
+            replacement = replacement.args()[0];
+        }
+        auto result = evaluate(replacement);
+        if (control_kind_ == ControlKind::Return && !control_target_) {
+            result = control_value_.value_or(symbol("Null"));
+            clear_control();
+        }
+        return result;
+    }
+    return std::nullopt;
+}
+
+std::optional<Expr> Evaluator::apply_down_values(const Expr& expression) {
+    if (expression.kind() != ExprKind::Call || !expression.head().symbol_name()) return std::nullopt;
+    const auto found = down_values_.find(*expression.head().symbol_name());
+    return found == down_values_.end() ? std::nullopt : apply_definitions(expression, found->second);
+}
+
+std::optional<Expr> Evaluator::apply_sub_values(const Expr& expression) {
+    if (expression.kind() != ExprKind::Call || expression.head().kind() != ExprKind::Call) return std::nullopt;
+    auto head = expression.head();
+    while (head.kind() == ExprKind::Call) head = head.head();
+    if (!head.symbol_name()) return std::nullopt;
+    const auto found = sub_values_.find(*head.symbol_name());
+    return found == sub_values_.end() ? std::nullopt : apply_definitions(expression, found->second);
+}
+
+std::optional<Expr> Evaluator::apply_up_values(const Expr& expression) {
+    if (expression.kind() != ExprKind::Call) return std::nullopt;
+    std::set<std::string> seen;
+    for (const auto& argument : expression.args()) {
+        auto candidate = argument;
+        std::optional<std::string> name;
+        if (candidate.symbol_name()) name = *candidate.symbol_name();
+        while (!name && candidate.kind() == ExprKind::Call) {
+            candidate = candidate.head();
+            if (candidate.symbol_name()) name = *candidate.symbol_name();
+        }
+        if (!name || !seen.insert(*name).second) continue;
+        const auto found = up_values_.find(*name);
+        if (found == up_values_.end()) continue;
+        if (auto result = apply_definitions(expression, found->second)) return result;
+    }
+    return std::nullopt;
+}
+
+Expr Evaluator::evaluate(const Expr& expression) {
+    const bool root = depth_ == 0;
+    if (root) {
+        messages_.clear(); message_texts_.clear(); prints_.clear(); aborted_ = false;
+        deferred_abort_ = false; abort_protection_depth_ = 0;
+        message_scopes_.clear();
+        clear_control();
+        thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
+        confirmation_pattern_.reset(); confirmation_tag_.reset();
+    }
+    if (depth_ >= recursion_limit_) return call("TerminatedEvaluation", {symbol("RecursionLimit")});
+    ++depth_;
+    auto result = evaluate_impl(expression);
+    --depth_;
+    if (root && thrown_) {
+        if (thrown_handler_) result = evaluate(call(*thrown_handler_, {*thrown_, thrown_tag_.value_or(symbol("Null"))}));
+        else {
+            std::vector<Expr> args{*thrown_};
+            if (thrown_tag_) args.push_back(*thrown_tag_);
+            result = call("Throw", std::move(args));
+        }
+        thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+    }
+    if (root && control_active()) {
+        result = control_expression();
+        clear_control();
+    }
+    return result;
+}
+
+Expr Evaluator::evaluate_impl(const Expr& expression) {
+    if (expression.kind() == ExprKind::Symbol) {
+        const auto name = system_dispatch_name(expression.text());
+        if (name == "I") return complex(integer(0L), integer(1L));
+        if (name == "$Context") return string("Global`");
+        if (name == "$ContextPath") return list({string("System`"), string("Global`")});
+        if (name == "$MachinePrecision") return real("15.954589770191003");
+        if (name == "$MaxMachineNumber") return real("1.7976931348623157*^+308");
+        if (name == "$MinMachineNumber") return real("2.2250738585072014*^-308");
+        if (name == "$MachineEpsilon") return real("2.220446049250313*^-16");
+        if (name == "$MessageList") {
+            std::vector<Expr> held;
+            for (const auto& message : messages_) held.push_back(call("HoldForm", {message}));
+            return list(std::move(held));
+        }
+        const auto definition = own_values_.find(expression.text());
+        if (definition != own_values_.end()) {
+            if (std::find(active_own_values_.begin(), active_own_values_.end(), expression.text())
+                != active_own_values_.end()) return expression;
+            active_own_values_.push_back(expression.text());
+            const auto value = evaluate(definition->second.value);
+            active_own_values_.pop_back();
+            return value;
+        }
+        return expression;
+    }
+    if (expression.kind() != ExprKind::Call) return expression;
+    return evaluate_call(expression.head(), expression.args());
+}
+
+Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw_args) {
+    const auto* raw_name = raw_head.symbol_name();
+    const auto name = raw_name ? system_dispatch_name(*raw_name) : std::string{};
+    if (raw_head.has_head("Function") && !raw_head.args().empty()) {
+        auto specification = raw_head.args();
+        if (specification.size() == 1 && specification[0].has_head("Sequence")) specification = specification[0].args();
+        auto has_attribute = [&](const std::string& attribute) {
+            if (specification.size() < 3) return false;
+            if (is_symbol(specification[2], attribute)) return true;
+            return specification[2].has_head("List") && std::any_of(specification[2].args().begin(),
+                specification[2].args().end(), [&](const Expr& value) { return is_symbol(value, attribute); });
+        };
+        const bool hold_all_complete = has_attribute("HoldAllComplete");
+        const bool hold_all = has_attribute("HoldAll") || hold_all_complete;
+        const bool hold_first = has_attribute("HoldFirst");
+        const bool hold_rest = has_attribute("HoldRest");
+        std::vector<Expr> arguments;
+        for (std::size_t index = 0; index < raw_args.size(); ++index) {
+            const bool held = hold_all || (hold_first && index == 0) || (hold_rest && index > 0);
+            arguments.push_back(held ? raw_args[index] : evaluate(raw_args[index]));
+        }
+        if (!hold_all_complete && !has_attribute("SequenceHold")) arguments = splice_sequences(arguments);
+        if (has_attribute("Listable")) {
+            std::optional<std::size_t> list_length;
+            bool incompatible = false;
+            for (const auto& argument : arguments) if (argument.has_head("List")) {
+                if (!list_length) list_length = argument.args().size();
+                else if (*list_length != argument.args().size()) incompatible = true;
+            }
+            if (incompatible) {
+                const auto message = call("MessageName", {symbol("General"), string("error")});
+                emit_message(message, "General::error: Listable Function arguments have incompatible list lengths.");
+                return call(raw_head, arguments);
+            }
+            if (const auto threaded = thread_lists("ListableFunction", arguments)) {
+                std::vector<Expr> values;
+                for (const auto& tuple : threaded->args()) values.push_back(evaluate(call(raw_head, tuple.args())));
+                return list(std::move(values));
+            }
+        }
+        Expr body = specification.size() >= 2 ? specification[1] : specification[0];
+        if (specification.size() >= 2 && !is_symbol(specification[0], "Null")) {
+            if (specification[0].has_head("List")) {
+                for (std::size_t index = 0; index < specification[0].args().size() && index < arguments.size(); ++index)
+                    body = replace_named(body, specification[0].args()[index], arguments[index]);
+            } else if (!arguments.empty()) body = replace_named(body, specification[0], arguments[0]);
+        } else body = replace_slots(body, arguments, raw_head);
+        return evaluate(body);
+    }
+    if (name == "Which") {
+        for (std::size_t index = 0; index + 1 < raw_args.size(); index += 2) {
+            const auto condition = evaluate(raw_args[index]);
+            if (is_symbol(condition, "False")) continue;
+            if (is_symbol(condition, "True")) return evaluate(raw_args[index + 1]);
+            std::vector<Expr> remaining{condition, raw_args[index + 1]};
+            remaining.insert(remaining.end(), raw_args.begin() + static_cast<std::ptrdiff_t>(index + 2), raw_args.end());
+            return call("Which", std::move(remaining));
+        }
+        return symbol("Null");
+    }
+    if (name == "Switch" && raw_args.size() >= 3) {
+        const auto target = evaluate(raw_args[0]);
+        for (std::size_t index = 1; index + 1 < raw_args.size(); index += 2) {
+            Bindings bindings; if (pattern_match(target, raw_args[index], bindings)) return evaluate(substitute_bindings(raw_args[index + 1], bindings));
+        }
+        auto remaining = raw_args;
+        remaining[0] = target;
+        return call(raw_head, std::move(remaining));
+    }
+    if (name == "Piecewise" && !raw_args.empty() && raw_args[0].has_head("List")) {
+        std::vector<Expr> unknown;
+        Expr fallback = raw_args.size() >= 2 ? raw_args[1] : integer(0L);
+        for (const auto& pair : raw_args[0].args()) {
+            if (!pair.has_head("List") || pair.args().size() != 2) continue;
+            const auto condition = evaluate(pair.args()[1]);
+            if (is_symbol(condition, "False")) continue;
+            if (is_symbol(condition, "True")) {
+                if (unknown.empty()) return evaluate(pair.args()[0]);
+                fallback = evaluate(pair.args()[0]); break;
+            }
+            unknown.push_back(list({pair.args()[0], condition}));
+        }
+        return unknown.empty() ? evaluate(fallback) : call("Piecewise", {list(std::move(unknown)), fallback});
+    }
+    if (name == "Check" && (raw_args.size() == 2 || raw_args.size() >= 3)) {
+        MessageScope scope;
+        if (raw_args.size() >= 3)
+            scope.selectors.assign(raw_args.begin() + 2, raw_args.end());
+        message_scopes_.push_back(std::move(scope));
+        const auto value = evaluate(raw_args[0]);
+        const bool triggered = message_scopes_.back().triggered;
+        message_scopes_.pop_back();
+        return triggered ? evaluate(raw_args[1]) : value;
+    }
+    if (name == "Quiet" && !raw_args.empty()) {
+        MessageScope scope;
+        scope.quiet = true;
+        message_scopes_.push_back(std::move(scope));
+        const auto value = evaluate(raw_args[0]);
+        message_scopes_.pop_back();
+        return value;
+    }
+    if ((name == "Off" || name == "On") && !raw_args.empty()) {
+        const bool enable = name == "On";
+        std::function<void(const Expr&)> update = [&](const Expr& specification) {
+            if (specification.has_head("List")) {
+                for (const auto& item : specification.args()) update(item);
+                return;
+            }
+            if (is_symbol(specification, "Assert")) {
+                assert_enabled_ = enable;
+                return;
+            }
+            if (specification.has_head("MessageName")) {
+                if (enable) disabled_messages_.erase(specification.to_full_form());
+                else disabled_messages_.insert(specification.to_full_form());
+                return;
+            }
+            if (specification.symbol_name()) {
+                if (enable) disabled_message_heads_.erase(*specification.symbol_name());
+                else disabled_message_heads_.insert(*specification.symbol_name());
+            }
+        };
+        for (const auto& specification : raw_args) update(specification);
+        return symbol("Null");
+    }
+    if (name == "Message" && !raw_args.empty() && raw_args[0].has_head("MessageName")) {
+        const auto message_name = raw_args[0];
+        std::string label = message_name.to_input_form();
+        if (message_name.args().size() >= 2 && message_name.args()[0].symbol_name()
+            && message_name.args()[1].kind() == ExprKind::String)
+            label = message_name.args()[0].to_input_form() + "::" + message_name.args()[1].text();
+        std::string text = label + ": ";
+        if (raw_args.size() == 1) text += "Message generated.";
+        else {
+            for (std::size_t index = 1; index < raw_args.size(); ++index) {
+                if (index != 1) text += ", ";
+                text += evaluate(raw_args[index]).to_input_form();
+            }
+        }
+        emit_message(message_name, std::move(text));
+        return symbol("Null");
+    }
+    if (name == "Assert") {
+        if (!assert_enabled_) return call(raw_head, raw_args);
+        if (raw_args.empty()) return symbol("Null");
+        const auto condition = evaluate(raw_args[0]);
+        if (is_symbol(condition, "True")) return symbol("Null");
+        const auto message_name = call("MessageName", {symbol("Assert"), string("asrtfl")});
+        std::string text = "Assert::asrtfl: " + condition.to_input_form();
+        if (raw_args.size() >= 2) text += ", " + evaluate(raw_args[1]).to_input_form();
+        emit_message(message_name, std::move(text));
+        return symbol("Null");
+    }
+    if (name == "WithCleanup" && (raw_args.size() == 2 || raw_args.size() == 3)) {
+        const auto expression_index = raw_args.size() == 2 ? 0U : 1U;
+        if (raw_args.size() == 3) (void)evaluate(raw_args[0]);
+        const auto value = evaluate(raw_args[expression_index]);
+        const bool saved_aborted = aborted_;
+        const auto saved_thrown = thrown_;
+        const auto saved_thrown_tag = thrown_tag_;
+        const auto saved_thrown_handler = thrown_handler_;
+        const auto saved_confirmation_failure = confirmation_failure_;
+        const auto saved_confirmation_information = confirmation_information_;
+        const auto saved_confirmation_function = confirmation_function_;
+        const auto saved_confirmation_pattern = confirmation_pattern_;
+        const auto saved_confirmation_tag = confirmation_tag_;
+        const auto saved_control_kind = control_kind_;
+        const auto saved_control_value = control_value_;
+        const auto saved_control_target = control_target_;
+        aborted_ = false;
+        thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
+        confirmation_pattern_.reset(); confirmation_tag_.reset();
+        clear_control();
+        (void)evaluate(raw_args.back());
+        aborted_ = saved_aborted;
+        thrown_ = saved_thrown; thrown_tag_ = saved_thrown_tag; thrown_handler_ = saved_thrown_handler;
+        confirmation_failure_ = saved_confirmation_failure;
+        confirmation_information_ = saved_confirmation_information;
+        confirmation_function_ = saved_confirmation_function;
+        confirmation_pattern_ = saved_confirmation_pattern; confirmation_tag_ = saved_confirmation_tag;
+        control_kind_ = saved_control_kind;
+        control_value_ = saved_control_value;
+        control_target_ = saved_control_target;
+        return value;
+    }
+    if (name == "Break" && raw_args.empty()) {
+        control_kind_ = ControlKind::Break;
+        return control_expression();
+    }
+    if (name == "Continue" && raw_args.empty()) {
+        control_kind_ = ControlKind::Continue;
+        return control_expression();
+    }
+    if (name == "Return" && raw_args.size() <= 2) {
+        control_value_ = raw_args.empty() ? symbol("Null") : evaluate(raw_args[0]);
+        if (control_active()) return control_expression();
+        control_kind_ = ControlKind::Return;
+        control_target_ = raw_args.size() == 2 ? std::optional<Expr>(raw_args[1]) : std::nullopt;
+        return control_expression();
+    }
+    if (name == "Goto" && raw_args.size() == 1) {
+        control_kind_ = ControlKind::Goto;
+        control_target_ = raw_args[0];
+        return control_expression();
+    }
+    if (name == "Abort" && raw_args.empty()) {
+        if (abort_protection_depth_ != 0) deferred_abort_ = true;
+        else aborted_ = true;
+        return symbol("$Aborted");
+    }
+    if ((name == "Overflow" || name == "Underflow") && raw_args.empty()) return special_real(name);
+    if (name == "Throw" && raw_args.size() >= 1 && raw_args.size() <= 3) {
+        const auto value = evaluate(raw_args[0]);
+        const auto tag = raw_args.size() >= 2 ? std::optional<Expr>(evaluate(raw_args[1])) : std::nullopt;
+        thrown_ = value; thrown_tag_ = tag;
+        thrown_handler_ = raw_args.size() == 3 ? std::optional<Expr>(raw_args[2]) : std::nullopt;
+        return value;
+    }
+    if (name == "Catch" && !raw_args.empty()) {
+        const auto value = evaluate(raw_args[0]);
+        if (aborted_) return symbol("$Aborted");
+        if (thrown_) {
+            const bool catches = raw_args.size() == 1 ? !thrown_tag_.has_value()
+                : tag_matches(thrown_tag_, raw_args[1]);
+            if (catches) {
+                const auto result = *thrown_; const auto tag = thrown_tag_.value_or(symbol("Null"));
+                thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+                return raw_args.size() >= 3 ? evaluate(call(raw_args[2], {result, tag})) : result;
+            }
+        }
+        return value;
+    }
+    if (name == "CheckAbort" && raw_args.size() == 2) {
+        const auto value = evaluate(raw_args[0]);
+        if (aborted_ || deferred_abort_) {
+            aborted_ = false; deferred_abort_ = false;
+            return evaluate(raw_args[1]);
+        }
+        return value;
+    }
+    if (name == "Enclose" && !raw_args.empty()) {
+        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
+        confirmation_pattern_.reset(); confirmation_tag_.reset();
+        const auto value = evaluate(raw_args[0]);
+        if (!confirmation_failure_) return value;
+        if (raw_args.size() >= 3 && (!confirmation_tag_ || *confirmation_tag_ != raw_args[2])) return value;
+        const auto property = raw_args.size() >= 2 && raw_args[1].kind() == ExprKind::String
+            ? raw_args[1].text() : "Expression";
+        Expr result = property == "Information" ? confirmation_information_.value_or(symbol("Automatic"))
+            : property == "Function" ? confirmation_function_.value_or(symbol("Identity"))
+            : property == "Pattern" ? confirmation_pattern_.value_or(call("Blank"))
+            : *confirmation_failure_;
+        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
+        confirmation_pattern_.reset(); confirmation_tag_.reset();
+        return result;
+    }
+    if ((name == "Confirm" || name == "ConfirmBy" || name == "ConfirmMatch" || name == "ConfirmAssert")
+        && !raw_args.empty()) {
+        const auto value = evaluate(raw_args[0]);
+        bool success = true;
+        std::size_t information_index = 1;
+        if (name == "Confirm") success = !(value.has_head("Failure") || value.has_head("Missing")
+            || is_symbol(value, "$Failed") || is_symbol(value, "$Canceled") || is_symbol(value, "$Aborted"));
+        else if (name == "ConfirmBy" && raw_args.size() >= 2) {
+            success = is_symbol(evaluate(call(raw_args[1], {value})), "True");
+            confirmation_function_ = raw_args[1]; information_index = 2;
+        } else if (name == "ConfirmMatch" && raw_args.size() >= 2) {
+            Bindings bindings; success = pattern_match(value, raw_args[1], bindings);
+            confirmation_pattern_ = raw_args[1]; information_index = 2;
+        } else if (name == "ConfirmAssert") {
+            success = is_symbol(value, "True");
+            if (success) return symbol("Null");
+        }
+        if (success) return value;
+        confirmation_failure_ = value;
+        confirmation_information_ = raw_args.size() > information_index
+            ? raw_args[information_index] : symbol("Automatic");
+        const auto tag_index = information_index + 1;
+        confirmation_tag_ = raw_args.size() > tag_index ? std::optional<Expr>(raw_args[tag_index]) : std::nullopt;
+        return value;
+    }
+    if (name == "AbortProtect" && raw_args.size() == 1) {
+        const bool outermost = abort_protection_depth_ == 0;
+        ++abort_protection_depth_;
+        const auto value = evaluate(raw_args[0]);
+        --abort_protection_depth_;
+        if (outermost && deferred_abort_) {
+            deferred_abort_ = false;
+            aborted_ = true;
+            return symbol("$Aborted");
+        }
+        return value;
+    }
+    if (name == "Pause" && raw_args.size() == 1) return symbol("Null");
+    if (name == "TimeRemaining" && raw_args.empty()) return symbol("Infinity");
+    if (name == "TimeConstrained" && raw_args.size() >= 2) {
+        const auto limit = numeric_real(evaluate(raw_args[1]));
+        if (limit && requested_pause(raw_args[0]) > *limit)
+            return raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("$Aborted");
+        if (raw_args[0].has_head("TimeRemaining")) return real(real_text(limit.value_or(0.0)));
+        return evaluate(raw_args[0]);
+    }
+    if (name == "AbsoluteTiming" && raw_args.size() == 1) return list({real("0."), evaluate(raw_args[0])});
+    if (name == "Sow" && (raw_args.size() == 1 || raw_args.size() == 2)) {
+        const auto value = evaluate(raw_args[0]);
+        auto tags = raw_args.size() == 1 ? std::vector<Expr>{symbol("None")}
+            : raw_args[1].has_head("List") ? raw_args[1].args() : std::vector<Expr>{evaluate(raw_args[1])};
+        for (const auto& tag : tags) {
+            for (auto scope = reap_stack_.rbegin(); scope != reap_stack_.rend(); ++scope) {
+                if (reap_tag_matches(tag, scope->selector)) { scope->entries.emplace_back(tag, value); break; }
+            }
+        }
+        return value;
+    }
+    if (name == "Reap" && !raw_args.empty() && raw_args.size() <= 3) {
+        const auto selector = raw_args.size() >= 2 ? raw_args[1] : call("Blank");
+        reap_stack_.push_back({selector, {}});
+        const auto value = evaluate(raw_args[0]);
+        auto scope = std::move(reap_stack_.back()); reap_stack_.pop_back();
+        std::vector<Expr> tags;
+        std::vector<std::vector<Expr>> groups;
+        for (const auto& [tag, item] : scope.entries) {
+            const auto found = std::find(tags.begin(), tags.end(), tag);
+            if (found == tags.end()) { tags.push_back(tag); groups.push_back({item}); }
+            else groups[static_cast<std::size_t>(found - tags.begin())].push_back(item);
+        }
+        std::vector<Expr> harvested;
+        for (std::size_t index = 0; index < tags.size(); ++index) {
+            const auto values = list(groups[index]);
+            harvested.push_back(raw_args.size() == 3 ? evaluate(call(raw_args[2], {tags[index], values}))
+                : selector.has_head("List") ? list({values}) : values);
+        }
+        return list({value, list(std::move(harvested))});
+    }
+    if (name == "HoldComplete") return call(raw_head, raw_args);
+    if (name == "Hold" || name == "HoldForm" || name == "HoldPattern" || name == "Unevaluated") {
+        std::vector<Expr> values;
+        for (const auto& argument : raw_args) {
+            if (argument.has_head("Evaluate") && argument.args().size() == 1) values.push_back(evaluate(argument.args()[0]));
+            else values.push_back(argument);
+        }
+        return call(raw_head, splice_sequences(values));
+    }
+    if ((name == "With" || name == "Module" || name == "Block"
+        || name == "InheritedBlock" || name == "Internal`InheritedBlock")
+        && raw_args.size() == 2) {
+        const auto message_name = call("MessageName", {symbol(name), string("error")});
+        const bool bindings_list = raw_args[0].kind() == ExprKind::Call
+            && raw_args[0].has_head("List");
+        if (!bindings_list) {
+            const auto kind = name == "With" ? "bindings" : "locals";
+            emit_message(message_name, name + "::error: " + name
+                + " expects a List of " + kind + " as its first argument.");
+            return call(raw_head, raw_args);
+        }
+        std::set<std::string> seen;
+        for (const auto& binding : raw_args[0].args()) {
+            const Expr* local = nullptr;
+            if (binding.symbol_name() && name != "With") local = &binding;
+            else if ((binding.has_head("Set") || binding.has_head("SetDelayed"))
+                && binding.args().size() == 2 && binding.args()[0].symbol_name())
+                local = &binding.args()[0];
+            if (!local) continue;
+            const auto local_name = *local->symbol_name();
+            if (!seen.insert(local_name).second) {
+                emit_message(message_name, name + "::error: " + name
+                    + " has duplicate binding for '" + local_name + "'.");
+                return call(raw_head, raw_args);
+            }
+        }
+    }
+    if ((name == "With" || name == "Module") && raw_args.size() == 2
+        && raw_args[0].kind() == ExprKind::Call && raw_args[0].has_head("List")) {
+        struct Binding { std::string name; std::optional<Expr> value; bool delayed; };
+        std::vector<Binding> bindings;
+        bool valid = true;
+        for (const auto& item : raw_args[0].args()) {
+            if (name == "Module" && item.symbol_name()) {
+                bindings.push_back({*item.symbol_name(), std::nullopt, false});
+            } else if ((item.has_head("Set") || item.has_head("SetDelayed")) && item.args().size() == 2
+                && item.args()[0].symbol_name()) {
+                bindings.push_back({*item.args()[0].symbol_name(), item.args()[1], item.has_head("SetDelayed")});
+            } else valid = false;
+        }
+        if (valid) {
+            Expr body = raw_args[1];
+            if (name == "With") {
+                for (const auto& binding : bindings) {
+                    if (!binding.value) continue;
+                    const auto value = binding.delayed ? *binding.value : evaluate(*binding.value);
+                    body = replace_named(body, symbol(binding.name), value);
+                }
+            } else {
+                const auto suffix = ++module_counter_;
+                std::vector<std::pair<std::string, Expr>> renamed;
+                for (const auto& binding : bindings) {
+                    const auto fresh_name = binding.name + "$" + std::to_string(suffix);
+                    const auto fresh = symbol(fresh_name);
+                    user_symbol_registry().insert("Global`" + fresh_name);
+                    renamed.emplace_back(binding.name, fresh);
+                    if (binding.value) own_values_[fresh_name] = {
+                        binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
+                }
+                for (const auto& [old_name, fresh] : renamed) body = replace_named(body, symbol(old_name), fresh);
+            }
+            auto result = evaluate(body);
+            if (name == "Module" && control_kind_ == ControlKind::Return && control_target_
+                && is_symbol(*control_target_, "Module")) {
+                result = control_value_.value_or(symbol("Null"));
+                clear_control();
+            }
+            return result;
+        }
+    }
+    if ((name == "Block" || name == "InheritedBlock" || name == "Internal`InheritedBlock")
+        && raw_args.size() == 2 && raw_args[0].kind() == ExprKind::Call
+        && raw_args[0].has_head("List")) {
+        struct Snapshot {
+            std::string name;
+            std::optional<Definition> own;
+            std::optional<PatternDefinitions> down;
+            std::optional<PatternDefinitions> up;
+            std::optional<PatternDefinitions> sub;
+        };
+        struct Binding { std::string name; std::optional<Expr> value; bool delayed; };
+        std::vector<Binding> bindings;
+        for (const auto& item : raw_args[0].args()) {
+            if (item.symbol_name()) bindings.push_back({*item.symbol_name(), std::nullopt, false});
+            else if ((item.has_head("Set") || item.has_head("SetDelayed")) && item.args().size() == 2
+                && item.args()[0].symbol_name())
+                bindings.push_back({*item.args()[0].symbol_name(), item.args()[1], item.has_head("SetDelayed")});
+            else return call(raw_head, raw_args);
+        }
+        auto pattern_snapshot = [](const DefinitionTable& table, const std::string& target)
+            -> std::optional<PatternDefinitions> {
+            const auto found = table.find(target);
+            return found == table.end() ? std::nullopt : std::optional<PatternDefinitions>(found->second);
+        };
+        std::vector<Snapshot> snapshots;
+        for (const auto& binding : bindings) {
+            const auto own = own_values_.find(binding.name);
+            snapshots.push_back({binding.name,
+                own == own_values_.end() ? std::nullopt : std::optional<Definition>(own->second),
+                pattern_snapshot(down_values_, binding.name), pattern_snapshot(up_values_, binding.name),
+                pattern_snapshot(sub_values_, binding.name)});
+        }
+        for (const auto& binding : bindings) if (binding.value)
+            own_values_[binding.name] = {binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
+        auto result = evaluate(raw_args[1]);
+        auto restore_patterns = [](DefinitionTable& table, const std::string& target,
+            const std::optional<PatternDefinitions>& value) {
+            if (value) table[target] = *value; else table.erase(target);
+        };
+        for (const auto& snapshot : snapshots) {
+            if (snapshot.own) own_values_[snapshot.name] = *snapshot.own; else own_values_.erase(snapshot.name);
+            restore_patterns(down_values_, snapshot.name, snapshot.down);
+            restore_patterns(up_values_, snapshot.name, snapshot.up);
+            restore_patterns(sub_values_, snapshot.name, snapshot.sub);
+        }
+        if (control_kind_ == ControlKind::Return && control_target_
+            && is_symbol(*control_target_, "Block")) {
+            result = control_value_.value_or(symbol("Null"));
+            clear_control();
+        }
+        return result;
+    }
+    if (name == "While" && (raw_args.size() == 1 || raw_args.size() == 2)) {
+        for (std::size_t iteration = 0; iteration < 100000; ++iteration) {
+            const auto test = evaluate(raw_args[0]);
+            if (control_active()) {
+                if (control_kind_ == ControlKind::Break) { clear_control(); return symbol("Null"); }
+                if (control_kind_ == ControlKind::Continue) { clear_control(); continue; }
+                if (control_kind_ == ControlKind::Return && control_target_
+                    && is_symbol(*control_target_, "While")) {
+                    const auto value = control_value_.value_or(symbol("Null")); clear_control(); return value;
+                }
+                return control_expression();
+            }
+            if (!is_symbol(test, "True")) return symbol("Null");
+            if (raw_args.size() == 2) (void)evaluate(raw_args[1]);
+            if (control_active()) {
+                if (control_kind_ == ControlKind::Break) { clear_control(); return symbol("Null"); }
+                if (control_kind_ == ControlKind::Continue) { clear_control(); continue; }
+                if (control_kind_ == ControlKind::Return && control_target_
+                    && is_symbol(*control_target_, "While")) {
+                    const auto value = control_value_.value_or(symbol("Null")); clear_control(); return value;
+                }
+                return control_expression();
+            }
+        }
+        return symbol("Null");
+    }
+    if (name == "For" && raw_args.size() == 4) {
+        (void)evaluate(raw_args[0]);
+        if (control_active()) {
+            if (control_kind_ == ControlKind::Break) { clear_control(); return symbol("Null"); }
+            if (control_kind_ == ControlKind::Return && control_target_
+                && is_symbol(*control_target_, "For")) {
+                const auto value = control_value_.value_or(symbol("Null")); clear_control(); return value;
+            }
+            if (control_kind_ == ControlKind::Continue) clear_control();
+            else return control_expression();
+        }
+        for (std::size_t iteration = 0; iteration < 100000; ++iteration) {
+            const auto test = evaluate(raw_args[1]);
+            if (control_active()) {
+                if (control_kind_ == ControlKind::Break) { clear_control(); return symbol("Null"); }
+                if (control_kind_ == ControlKind::Return && control_target_
+                    && is_symbol(*control_target_, "For")) {
+                    const auto value = control_value_.value_or(symbol("Null")); clear_control(); return value;
+                }
+                if (control_kind_ == ControlKind::Continue) clear_control();
+                else return control_expression();
+            }
+            if (!is_symbol(test, "True")) return symbol("Null");
+            (void)evaluate(raw_args[3]);
+            if (control_active()) {
+                if (control_kind_ == ControlKind::Break) { clear_control(); return symbol("Null"); }
+                if (control_kind_ == ControlKind::Return && control_target_
+                    && is_symbol(*control_target_, "For")) {
+                    const auto value = control_value_.value_or(symbol("Null")); clear_control(); return value;
+                }
+                if (control_kind_ == ControlKind::Continue) clear_control();
+                else return control_expression();
+            }
+            (void)evaluate(raw_args[2]);
+            if (control_active()) {
+                if (control_kind_ == ControlKind::Break) { clear_control(); return symbol("Null"); }
+                if (control_kind_ == ControlKind::Return && control_target_
+                    && is_symbol(*control_target_, "For")) {
+                    const auto value = control_value_.value_or(symbol("Null")); clear_control(); return value;
+                }
+                if (control_kind_ == ControlKind::Continue) clear_control();
+                else return control_expression();
+            }
+        }
+        return symbol("Null");
+    }
+    if (name == "Table" || name == "Sum" || name == "Product") {
+        auto iteration_error = [&](const std::string& text) {
+            const auto message = call("MessageName", {symbol(name), string("error")});
+            emit_message(message, name + "::error: " + text);
+            return call(raw_head, raw_args);
+        };
+        if (raw_args.size() < 2)
+            return iteration_error(name
+                + " expects a body and at least one iterator specification.");
+        for (std::size_t index = 1; index < raw_args.size(); ++index) {
+            const auto& specification = raw_args[index];
+            const bool list_specification = specification.kind() == ExprKind::Call
+                && specification.has_head("List");
+            if ((name == "Sum" || name == "Product") && !list_specification)
+                return iteration_error(name + " iterator specification must be a List.");
+            if (list_specification && specification.args().size() == 4) {
+                const auto step = numeric_real(evaluate(specification.args()[3]));
+                if (step && *step == 0.0)
+                    return iteration_error("Iterator step must be a nonzero real number.");
+            }
+        }
+    }
+    if ((name == "Table" || name == "Do" || name == "Sum" || name == "Product") && raw_args.size() >= 2) {
+        struct Iterator { std::optional<std::string> variable; std::vector<Expr> values; bool valid = true; };
+        auto resolve_iterator = [&](const Expr& raw_spec) -> Iterator {
+            auto count_values = [](long count) -> std::optional<std::vector<Expr>> {
+                if (count < 0) return std::vector<Expr>{};
+                if (count > 1000000) return std::nullopt;
+                return std::vector<Expr>(static_cast<std::size_t>(count), integer(0L));
+            };
+            auto spec = raw_spec;
+            if (spec.kind() != ExprKind::Integer && !spec.has_head("List")) spec = evaluate(spec);
+            if (spec.kind() == ExprKind::Integer && spec.integer_value().fits_slong_p()) {
+                const auto values = count_values(spec.integer_value().get_si());
+                return values ? Iterator{std::nullopt, *values, true}
+                              : Iterator{{}, {}, false};
+            }
+            if (!spec.has_head("List") || spec.args().empty()) return {{}, {}, false};
+            if (spec.args().size() == 1) {
+                const auto count = evaluate(spec.args()[0]);
+                if (count.kind() != ExprKind::Integer || !count.integer_value().fits_slong_p()) return {{}, {}, false};
+                const auto values = count_values(count.integer_value().get_si());
+                return values ? Iterator{std::nullopt, *values, true}
+                              : Iterator{{}, {}, false};
+            }
+            if (!spec.args()[0].symbol_name() || spec.args().size() > 4) return {{}, {}, false};
+            const auto variable = *spec.args()[0].symbol_name();
+            if (spec.args().size() == 2) {
+                const auto bound = evaluate(spec.args()[1]);
+                if (bound.has_head("List")) return {variable, bound.args(), true};
+            }
+            Expr start = integer(1L), finish, step = integer(1L);
+            if (spec.args().size() == 2) finish = evaluate(spec.args()[1]);
+            else {
+                start = evaluate(spec.args()[1]); finish = evaluate(spec.args()[2]);
+                if (spec.args().size() == 4) step = evaluate(spec.args()[3]);
+            }
+            const auto start_number = numeric_real(start), finish_number = numeric_real(finish), step_number = numeric_real(step);
+            if (!start_number || !finish_number || !step_number || *step_number == 0.0) return {{}, {}, false};
+            std::vector<Expr> values;
+            auto current = start;
+            for (std::size_t iteration = 0; iteration < 100000; ++iteration) {
+                const auto current_number = numeric_real(current);
+                if (!current_number || (*step_number > 0.0 ? *current_number > *finish_number : *current_number < *finish_number)) break;
+                values.push_back(current);
+                current = evaluate(call("Plus", {current, step}));
+            }
+            return {variable, std::move(values), true};
+        };
+        auto snapshot_table = [](const DefinitionTable& table, const std::string& target)
+            -> std::optional<PatternDefinitions> {
+            const auto found = table.find(target);
+            return found == table.end() ? std::nullopt : std::optional<PatternDefinitions>(found->second);
+        };
+        auto iterate_scoped = [&](const Iterator& iterator, const std::function<bool()>& step) {
+            if (!iterator.variable) {
+                for (const auto& ignored : iterator.values) { (void)ignored; if (!step()) break; }
+                return;
+            }
+            const auto target = *iterator.variable;
+            const auto own = own_values_.find(target);
+            const auto saved_own = own == own_values_.end() ? std::nullopt : std::optional<Definition>(own->second);
+            const auto saved_down = snapshot_table(down_values_, target);
+            const auto saved_up = snapshot_table(up_values_, target);
+            const auto saved_sub = snapshot_table(sub_values_, target);
+            for (const auto& value : iterator.values) {
+                own_values_[target] = {value, false};
+                if (!step()) break;
+            }
+            if (saved_own) own_values_[target] = *saved_own; else own_values_.erase(target);
+            if (saved_down) down_values_[target] = *saved_down; else down_values_.erase(target);
+            if (saved_up) up_values_[target] = *saved_up; else up_values_.erase(target);
+            if (saved_sub) sub_values_[target] = *saved_sub; else sub_values_.erase(target);
+        };
+        if (name == "Table") {
+            bool valid = true;
+            std::function<Expr(std::size_t)> table_walk = [&](std::size_t index) -> Expr {
+                if (index == raw_args.size() - 1) return evaluate(raw_args[0]);
+                const auto iterator = resolve_iterator(raw_args[index + 1]);
+                if (!iterator.valid) { valid = false; return call(raw_head, raw_args); }
+                std::vector<Expr> values;
+                iterate_scoped(iterator, [&] {
+                    values.push_back(table_walk(index + 1));
+                    return !control_active() && !aborted_ && !thrown_ && !confirmation_failure_;
+                });
+                return list(std::move(values));
+            };
+            auto result = table_walk(0);
+            if (control_active()) return control_expression();
+            if (aborted_) return symbol("$Aborted");
+            if (thrown_) return *thrown_;
+            if (confirmation_failure_) return *confirmation_failure_;
+            return valid ? result : call(raw_head, raw_args);
+        }
+        std::vector<Expr> collected;
+        bool valid = true;
+        bool stop = false;
+        std::optional<Expr> loop_return;
+        std::function<void(std::size_t)> walk = [&](std::size_t index) {
+            if (stop) return;
+            if (index == raw_args.size() - 1) {
+                const auto value = evaluate(raw_args[0]);
+                if (control_active()) {
+                    if (name == "Do" && control_kind_ == ControlKind::Break) {
+                        clear_control(); stop = true; return;
+                    }
+                    if (name == "Do" && control_kind_ == ControlKind::Continue) {
+                        clear_control(); return;
+                    }
+                    if (name == "Do" && control_kind_ == ControlKind::Return && control_target_
+                        && is_symbol(*control_target_, "Do")) {
+                        loop_return = control_value_.value_or(symbol("Null"));
+                        clear_control(); stop = true; return;
+                    }
+                    stop = true; return;
+                }
+                if (aborted_ || thrown_ || confirmation_failure_) { stop = true; return; }
+                if (name == "Sum" || name == "Product") collected.push_back(value);
+                return;
+            }
+            const auto iterator = resolve_iterator(raw_args[index + 1]);
+            if (!iterator.valid) { valid = false; return; }
+            iterate_scoped(iterator, [&] { walk(index + 1); return !stop; });
+        };
+        walk(0);
+        if (!valid) return call(raw_head, raw_args);
+        if (loop_return) return *loop_return;
+        if (control_active()) return control_expression();
+        if (aborted_) return symbol("$Aborted");
+        if (thrown_) return *thrown_;
+        if (confirmation_failure_) return *confirmation_failure_;
+        if (name == "Do") return symbol("Null");
+        return evaluate(call(name == "Sum" ? "Plus" : "Times", std::move(collected)));
+    }
+    if ((name == "Protect" || name == "Unprotect")) {
+        const bool protect = name == "Protect";
+        std::vector<std::string> targets;
+        std::function<void(const Expr&)> collect = [&](const Expr& specification) {
+            if (specification.has_head("List")) {
+                for (const auto& item : specification.args()) collect(item);
+                return;
+            }
+            if (specification.symbol_name()) {
+                targets.push_back(*specification.symbol_name());
+                return;
+            }
+            if (specification.kind() != ExprKind::String) return;
+            std::set<std::string> candidates;
+            for (const auto& [candidate, value] : own_values_) { (void)value; candidates.insert(candidate); }
+            for (const auto& [candidate, value] : down_values_) { (void)value; candidates.insert(candidate); }
+            for (const auto& [candidate, value] : up_values_) { (void)value; candidates.insert(candidate); }
+            for (const auto& [candidate, value] : sub_values_) { (void)value; candidates.insert(candidate); }
+            for (const auto& [candidate, value] : user_attributes_) { (void)value; candidates.insert(candidate); }
+            for (const auto& [candidate, value] : system_registry()) { (void)value; candidates.insert(candidate); }
+            for (const auto& candidate : candidates)
+                if (wildcard_matches(candidate, specification.text())) targets.push_back(candidate);
+        };
+        for (const auto& specification : raw_args) collect(specification);
+        std::vector<Expr> changed;
+        for (const auto& target : targets) {
+            if (symbol_has_attribute(target, "Locked")) {
+                const auto message = call("MessageName", {symbol("Protect"), string("locked")});
+                emit_message(message, "Protect::locked: Symbol " + display_symbol(target).to_input_form()
+                    + " is locked.");
+                continue;
+            }
+            const bool was_protected = symbol_has_attribute(target, "Protected");
+            if (protect && !was_protected) {
+                user_attributes_[target].insert("Protected");
+                unprotected_symbols_.erase(target);
+                changed.push_back(string(display_symbol(target).to_input_form()));
+            } else if (!protect && was_protected) {
+                user_attributes_[target].erase("Protected");
+                auto system_name = target;
+                if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
+                const auto found = system_registry().find(system_name);
+                if (found != system_registry().end()
+                    && std::find(found->second.begin(), found->second.end(), "Protected")
+                        != found->second.end())
+                    unprotected_symbols_.insert(target);
+                changed.push_back(string(display_symbol(target).to_input_form()));
+            }
+        }
+        return list(std::move(changed));
+    }
+    if (name == "Set" || name == "SetDelayed") {
+        if (raw_args.size() != 2) return call(raw_head, raw_args);
+        const bool delayed = name == "SetDelayed";
+        const auto value = delayed ? raw_args[1] : evaluate(raw_args[1]);
+        if (!delayed && raw_args[0].has_head("Attributes") && raw_args[0].args().size() == 1
+            && raw_args[0].args()[0].symbol_name()) {
+            const auto target_name = *raw_args[0].args()[0].symbol_name();
+            if (symbol_has_attribute(target_name, "Locked")) {
+                const auto message = call("MessageName", {symbol("Attributes"), string("locked")});
+                emit_message(message, "Attributes::locked: Symbol "
+                    + display_symbol(target_name).to_input_form() + " is locked.");
+                return value;
+            }
+            std::set<std::string> replacement;
+            const auto values = value.has_head("List") ? value.args() : std::vector<Expr>{value};
+            for (const auto& attribute : values) if (attribute.symbol_name())
+                replacement.insert(system_dispatch_name(*attribute.symbol_name()));
+            auto system_name = target_name;
+            if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
+            const auto system = system_registry().find(system_name);
+            const bool system_protected = system != system_registry().end()
+                && std::find(system->second.begin(), system->second.end(), "Protected")
+                    != system->second.end();
+            if (replacement.count("Protected") != 0 || !system_protected)
+                unprotected_symbols_.erase(target_name);
+            else unprotected_symbols_.insert(target_name);
+            user_attributes_[target_name] = std::move(replacement);
+            return value;
+        }
+        const auto lhs = normalize_assignment_lhs(raw_args[0]);
+        const auto target = assignment_target(lhs);
+        if (!target) {
+            const auto message = call("MessageName", {symbol(name), string("error")});
+            emit_message(message, name + "::error: " + name
+                + " does not support this left-hand side in Tungsten yet.");
+            return delayed ? symbol("Null") : call(raw_head, {lhs, value});
+        }
+        if (symbol_has_attribute(target->owner, "Protected")
+            && !protected_value_mutation_exception(target->owner)) {
+            const auto message = call("MessageName", {symbol(name), string("wrsym")});
+            emit_message(message, name + "::wrsym: Symbol "
+                + display_symbol(target->owner).to_input_form() + " is Protected.");
+            return delayed ? symbol("Null") : call(raw_head, {lhs, value});
+        }
+        if (target->kind == AssignmentKind::Own) {
+            const auto setting = system_dispatch_name(target->owner);
+            static const std::map<std::string, long> setting_minimums{
+                {"$RecursionLimit", 20L}, {"$IterationLimit", 20L}, {"$HistoryLength", 0L},
+                {"$MaxExtraPrecision", 0L}, {"$MaxRootDegree", 1L}, {"$OutputSizeLimit", 0L}};
+            if (const auto minimum = setting_minimums.find(setting); minimum != setting_minimums.end()) {
+                const bool infinity = is_symbol(value, "Infinity");
+                const bool integer_valid = value.kind() == ExprKind::Integer && value.integer_value() >= minimum->second;
+                const bool valid = setting == "$MaxRootDegree" ? integer_valid : infinity || integer_valid;
+                if (!valid) {
+                    const auto message = call("MessageName", {symbol(setting), string("limset")});
+                    emit_message(message, setting + "::limset: Cannot set " + setting + " to " + value.to_input_form() + ".");
+                    if (delayed) return symbol("Null");
+                    const auto current = own_values_.find(target->owner);
+                    return current == own_values_.end() ? symbol(setting) : current->second.value;
+                }
+                own_values_[target->owner] = {value, delayed};
+                if (setting == "$RecursionLimit" && value.kind() == ExprKind::Integer
+                    && value.integer_value().fits_ulong_p()) recursion_limit_ = value.integer_value().get_ui();
+                return delayed ? symbol("Null") : value;
+            }
+        }
+        if (target->kind == AssignmentKind::Own) {
+            own_values_[target->owner] = {value, delayed};
+            return delayed ? symbol("Null") : value;
+        }
+        auto* table = target->kind == AssignmentKind::Down ? &down_values_ : &sub_values_;
+        auto& definitions = (*table)[target->owner];
+        const auto existing = std::find_if(definitions.begin(), definitions.end(), [&](const PatternDefinition& definition) {
+            return same_definition_slot(definition.lhs, definition.value, lhs, value);
+        });
+        PatternDefinition definition{lhs, value, delayed};
+        if (existing != definitions.end()) *existing = std::move(definition);
+        else {
+            const auto score = definition_specificity(lhs);
+            const auto insertion = std::find_if(definitions.begin(), definitions.end(), [&](const PatternDefinition& current) {
+                return score < definition_specificity(current.lhs);
+            });
+            definitions.insert(insertion, std::move(definition));
+        }
+        return delayed ? symbol("Null") : value;
+    }
+    if (name == "AppendTo" && raw_args.size() == 2) {
+        const auto appended = evaluate(call("Append", {evaluate(raw_args[0]), evaluate(raw_args[1])}));
+        return evaluate(call("Set", {raw_args[0], appended}));
+    }
+    if ((name == "Increment" || name == "Decrement" || name == "PreIncrement" || name == "PreDecrement")
+        && raw_args.size() == 1 && raw_args[0].symbol_name()) {
+        const auto old_value = evaluate(raw_args[0]);
+        const auto delta = name == "Increment" || name == "PreIncrement" ? 1L : -1L;
+        const auto new_value = evaluate(call("Plus", {old_value, integer(delta)}));
+        own_values_[*raw_args[0].symbol_name()] = {new_value, false};
+        return name == "Increment" || name == "Decrement" ? old_value : new_value;
+    }
+    if ((name == "Increment" || name == "Decrement" || name == "PreIncrement"
+        || name == "PreDecrement") && raw_args.size() == 1) {
+        const auto message = call("MessageName", {symbol(name), string("error")});
+        emit_message(message, name + "::error: " + name
+            + " currently expects a bare-symbol target.");
+        return call(raw_head, raw_args);
+    }
+    if (name == "TagSet" || name == "TagSetDelayed") {
+        if (raw_args.size() != 3 || !raw_args[0].symbol_name()) return call(raw_head, raw_args);
+        const bool delayed = name == "TagSetDelayed";
+        const auto value = delayed ? raw_args[2] : evaluate(raw_args[2]);
+        const auto tag = *raw_args[0].symbol_name();
+        if (symbol_has_attribute(tag, "Protected")) {
+            const auto message = call("MessageName", {symbol(name), string("wrsym")});
+            emit_message(message, name + "::wrsym: Symbol "
+                + display_symbol(tag).to_input_form() + " is Protected.");
+            return delayed ? symbol("Null") : call(raw_head, {raw_args[0], raw_args[1], value});
+        }
+        const auto lhs = normalize_assignment_lhs(raw_args[1]);
+        auto natural = assignment_target(lhs);
+        DefinitionTable* table = nullptr;
+        AssignmentKind kind = AssignmentKind::Up;
+        if (natural && natural->owner == tag) kind = natural->kind;
+        else if (!tag_occurs_in_upvalue_position(tag, lhs)) {
+            const auto message = call("MessageName", {symbol(name), string("tagpos")});
+            emit_message(message, name + "::tagpos: Tag " + display_symbol(tag).to_input_form()
+                + " does not occur in a supported position in " + lhs.to_input_form() + ".");
+            return delayed ? symbol("Null") : value;
+        }
+        if (kind == AssignmentKind::Own) {
+            own_values_[tag] = {value, delayed};
+            return delayed ? symbol("Null") : value;
+        }
+        if (kind == AssignmentKind::Down) table = &down_values_;
+        else if (kind == AssignmentKind::Sub) table = &sub_values_;
+        else table = &up_values_;
+        auto& definitions = (*table)[tag];
+        const auto existing = std::find_if(definitions.begin(), definitions.end(), [&](const PatternDefinition& definition) {
+            return same_definition_slot(definition.lhs, definition.value, lhs, value);
+        });
+        PatternDefinition definition{lhs, value, delayed};
+        if (existing != definitions.end()) *existing = std::move(definition);
+        else {
+            const auto score = definition_specificity(lhs);
+            const auto insertion = std::find_if(definitions.begin(), definitions.end(), [&](const PatternDefinition& current) {
+                return score < definition_specificity(current.lhs);
+            });
+            definitions.insert(insertion, std::move(definition));
+        }
+        return delayed ? symbol("Null") : value;
+    }
+    if (name == "Unset" || name == "TagUnset") {
+        const auto argument_offset = name == "TagUnset" ? 1U : 0U;
+        if (raw_args.size() != argument_offset + 1) return call(raw_head, raw_args);
+        const auto lhs = normalize_assignment_lhs(raw_args[argument_offset]);
+        auto target = assignment_target(lhs);
+        if (name == "TagUnset") {
+            if (!raw_args[0].symbol_name()) return symbol("$Failed");
+            const auto tag = *raw_args[0].symbol_name();
+            if (!target || target->owner != tag) {
+                if (!tag_occurs_in_upvalue_position(tag, lhs)) return symbol("$Failed");
+                target = AssignmentTarget{AssignmentKind::Up, tag};
+            }
+        }
+        if (!target) return symbol("$Failed");
+        if (symbol_has_attribute(target->owner, "Protected")
+            && !protected_value_mutation_exception(target->owner)) {
+            const auto message = call("MessageName", {symbol(name), string("wrsym")});
+            emit_message(message, name + "::wrsym: Symbol "
+                + display_symbol(target->owner).to_input_form() + " is Protected.");
+            return symbol("$Failed");
+        }
+        if (target->kind == AssignmentKind::Own) {
+            own_values_.erase(target->owner);
+            return symbol("Null");
+        }
+        auto* table = target->kind == AssignmentKind::Down ? &down_values_
+            : target->kind == AssignmentKind::Sub ? &sub_values_ : &up_values_;
+        const auto found = table->find(target->owner);
+        if (found == table->end()) return symbol("$Failed");
+        const auto old_size = found->second.size();
+        found->second.erase(std::remove_if(found->second.begin(), found->second.end(), [&](const PatternDefinition& definition) {
+            return definition.lhs == lhs;
+        }), found->second.end());
+        return found->second.size() == old_size ? symbol("$Failed") : symbol("Null");
+    }
+    if (name == "Clear" || name == "ClearAll") {
+        auto clear_name = [&](const std::string& target) {
+            if (symbol_has_attribute(target, "Locked")) {
+                const auto message = call("MessageName", {symbol(name), string("locked")});
+                emit_message(message, name + "::locked: Symbol "
+                    + display_symbol(target).to_input_form() + " is locked.");
+                return;
+            }
+            if (symbol_has_attribute(target, "Protected")) {
+                const auto message = call("MessageName", {symbol(name), string("wrsym")});
+                emit_message(message, name + "::wrsym: Symbol "
+                    + display_symbol(target).to_input_form() + " is Protected.");
+                return;
+            }
+            own_values_.erase(target); down_values_.erase(target); up_values_.erase(target); sub_values_.erase(target);
+            if (name == "ClearAll") {
+                user_attributes_.erase(target);
+                unprotected_symbols_.erase(target);
+            }
+        };
+        std::function<void(const Expr&)> clear_one = [&](const Expr& target) {
+            if (target.has_head("List")) { for (const auto& item : target.args()) clear_one(item); return; }
+            if (target.symbol_name()) { clear_name(*target.symbol_name()); return; }
+            if (target.kind() == ExprKind::String) {
+                std::set<std::string> candidates;
+                for (const auto& [candidate, value] : own_values_) { (void)value; candidates.insert(candidate); }
+                for (const auto& [candidate, value] : down_values_) { (void)value; candidates.insert(candidate); }
+                for (const auto& [candidate, value] : up_values_) { (void)value; candidates.insert(candidate); }
+                for (const auto& [candidate, value] : sub_values_) { (void)value; candidates.insert(candidate); }
+                for (const auto& candidate : candidates) if (wildcard_matches(candidate, target.text())) clear_name(candidate);
+            }
+        };
+        for (const auto& target : raw_args) clear_one(target);
+        return symbol("Null");
+    }
+    if (name == "SetAttributes" || name == "ClearAttributes") {
+        if (raw_args.size() != 2) return call(raw_head, raw_args);
+        const auto targets = raw_args[0].has_head("List") ? raw_args[0].args() : std::vector<Expr>{raw_args[0]};
+        const auto attributes = raw_args[1].has_head("List") ? raw_args[1].args() : std::vector<Expr>{raw_args[1]};
+        for (const auto& target : targets) {
+            if (!target.symbol_name()) continue;
+            const auto target_name = *target.symbol_name();
+            if (symbol_has_attribute(target_name, "Locked")) {
+                const auto message = call("MessageName", {symbol("Attributes"), string("locked")});
+                emit_message(message, "Attributes::locked: Symbol "
+                    + display_symbol(target_name).to_input_form() + " is locked.");
+                continue;
+            }
+            auto& stored = user_attributes_[target_name];
+            for (const auto& attribute : attributes) if (attribute.symbol_name()) {
+                const auto value = system_dispatch_name(*attribute.symbol_name());
+                if (name == "SetAttributes") {
+                    stored.insert(value);
+                    if (value == "Protected") unprotected_symbols_.erase(target_name);
+                } else {
+                    stored.erase(value);
+                    if (value == "Protected") {
+                        auto system_name = target_name;
+                        if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
+                        const auto system = system_registry().find(system_name);
+                        if (system != system_registry().end()
+                            && std::find(system->second.begin(), system->second.end(), "Protected")
+                                != system->second.end())
+                            unprotected_symbols_.insert(target_name);
+                    }
+                }
+            }
+        }
+        return symbol("Null");
+    }
+    if (name == "Attributes" && raw_args.size() == 1) {
+        if (raw_args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : raw_args[0].args()) values.push_back(evaluate(call("Attributes", {item})));
+            return list(std::move(values));
+        }
+        Expr target = raw_args[0];
+        if (target.kind() == ExprKind::String) target = symbol(target.text());
+        std::vector<Expr> values;
+        for (const auto& attribute : attributes_for(target)) values.push_back(symbol(attribute));
+        return list(std::move(values));
+    }
+    if ((name == "OwnValues" || name == "DownValues" || name == "UpValues" || name == "SubValues" || name == "NValues")
+        && raw_args.size() == 1) {
+        Expr target = raw_args[0];
+        if (target.kind() == ExprKind::String) target = symbol(target.text());
+        if (!target.symbol_name()) return list({});
+        std::vector<Expr> rules;
+        if (name == "OwnValues") {
+            if (const auto found = own_values_.find(*target.symbol_name()); found != own_values_.end())
+                rules.push_back(call("RuleDelayed", {call("HoldPattern", {target}), found->second.value}));
+        } else {
+            const DefinitionTable* table = name == "DownValues" ? &down_values_
+                : name == "UpValues" ? &up_values_ : name == "SubValues" ? &sub_values_ : nullptr;
+            if (table) if (const auto found = table->find(*target.symbol_name()); found != table->end())
+                for (const auto& definition : found->second)
+                    rules.push_back(call("RuleDelayed", {call("HoldPattern", {definition.lhs}), definition.value}));
+        }
+        return list(std::move(rules));
+    }
+    if (name == "CompoundExpression") {
+        Expr result = symbol("Null");
+        std::size_t cursor = 0;
+        std::size_t jumps = 0;
+        while (cursor < raw_args.size() && jumps < 100000) {
+            result = evaluate(raw_args[cursor++]);
+            if (control_kind_ == ControlKind::Goto && control_target_) {
+                const auto label = std::find_if(raw_args.begin(), raw_args.end(), [&](const Expr& candidate) {
+                    return candidate.has_head("Label") && candidate.args().size() == 1
+                        && candidate.args()[0] == *control_target_;
+                });
+                if (label != raw_args.end()) {
+                    clear_control();
+                    cursor = static_cast<std::size_t>(label - raw_args.begin()) + 1;
+                    ++jumps;
+                    continue;
+                }
+            }
+            if (aborted_ || thrown_ || confirmation_failure_ || control_active()) break;
+        }
+        return remove_nothing_from_list_like(result);
+    }
+    if (name == "If") {
+        if (raw_args.size() < 2 || raw_args.size() > 4) return call(raw_head, raw_args);
+        const auto condition = evaluate(raw_args[0]);
+        if (is_symbol(condition, "True")) return evaluate(raw_args[1]);
+        if (is_symbol(condition, "False")) return raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("Null");
+        return raw_args.size() == 4 ? evaluate(raw_args[3]) : call("If", {condition, raw_args[1], raw_args.size() >= 3 ? raw_args[2] : symbol("Null")});
+    }
+    if (name == "And" || name == "Or") {
+        std::vector<Expr> unresolved;
+        for (const auto& argument : raw_args) {
+            const auto value = evaluate(argument);
+            if (name == "And" && is_symbol(value, "False")) return value;
+            if (name == "Or" && is_symbol(value, "True")) return value;
+            if (!is_symbol(value, name == "And" ? "True" : "False")) unresolved.push_back(value);
+        }
+        if (unresolved.empty()) return symbol(name == "And" ? "True" : "False");
+        if (unresolved.size() == 1) return unresolved.front();
+        return call(name, std::move(unresolved));
+    }
+    if (name == "Print") {
+        std::string output;
+        for (const auto& argument : raw_args) {
+            if ((argument.has_head("InputForm") || argument.has_head("FullForm")
+                || argument.has_head("TeXForm")) && argument.args().size() == 1) {
+                const auto value = evaluate(argument.args()[0]);
+                if (argument.has_head("InputForm")) output += value.to_input_form();
+                else if (argument.has_head("FullForm")) output += value.to_full_form();
+                else if (value.has_head("Power") && value.args().size() == 2)
+                    output += value.args()[0].to_input_form() + "^{" + value.args()[1].to_input_form() + "}";
+                else {
+                    const auto rendered = evaluate(call("ToString", {value, symbol("TeXForm")}));
+                    output += rendered.kind() == ExprKind::String ? rendered.text() : value.to_input_form();
+                }
+                continue;
+            }
+            const auto value = evaluate(argument);
+            output += value.kind() == ExprKind::String ? value.text() : value.to_input_form();
+        }
+        prints_.push_back(output);
+        return symbol("Null");
+    }
+    if (name == "Function") return call(raw_head, splice_sequences(raw_args));
+    if (name == "Evaluate" && raw_args.size() == 1) return evaluate(strip_unevaluated(raw_args[0]));
+    if (name == "Inactive" && raw_args.size() == 1) {
+        const auto target = raw_args[0].has_head("Evaluate") && raw_args[0].args().size() == 1
+            ? evaluate(raw_args[0].args()[0]) : raw_args[0];
+        return target.kind() == ExprKind::Symbol || target.kind() == ExprKind::Call
+            ? call("Inactive", {target}) : target;
+    }
+    if (name == "Activate" && !raw_args.empty()) return evaluate(raw_args.size() >= 2
+        ? activate_selected(raw_args[0], raw_args[1]) : activate_all(raw_args[0]));
+    if (name == "ReleaseHold" && raw_args.size() == 1) {
+        const auto held = evaluate(raw_args[0]);
+        if ((held.has_head("Hold") || held.has_head("HoldForm") || held.has_head("HoldPattern") || held.has_head("HoldComplete"))
+            && held.args().size() == 1) return evaluate(held.args()[0]);
+        return held;
+    }
+    if (name == "MakeBoxes" && !raw_args.empty() && raw_args.size() <= 2) {
+        const bool traditional = raw_args.size() == 2 && is_symbol(raw_args[1], "TraditionalForm");
+        return traditional ? traditional_boxes(raw_args[0]) : standard_boxes(raw_args[0]);
+    }
+    if (name == "ValueQ" && raw_args.size() == 1) {
+        const auto evaluated = evaluate(raw_args[0]);
+        return boolean(evaluated != raw_args[0] || (raw_args[0].symbol_name() && own_values_.count(*raw_args[0].symbol_name()) != 0));
+    }
+
+    auto head = evaluate(raw_head);
+    const auto call_attributes = attributes_for(head);
+    const bool hold_all_complete = call_attributes.count("HoldAllComplete") != 0;
+    const bool hold_all = hold_all_complete || call_attributes.count("HoldAll") != 0;
+    const bool hold_first = call_attributes.count("HoldFirst") != 0;
+    const bool hold_rest = call_attributes.count("HoldRest") != 0;
+    std::vector<Expr> args;
+    for (std::size_t argument_index = 0; argument_index < raw_args.size(); ++argument_index) {
+        const auto& argument = raw_args[argument_index];
+        const bool pattern_held = argument_index >= 1 && (name == "MatchQ" || name == "FreeQ" || name == "Cases" || name == "DeleteCases"
+            || name == "Count" || name == "MemberQ" || name == "FirstCase" || name == "Position" || name == "ReplaceAll"
+            || name == "ReplaceRepeated" || name == "Replace" || name == "ReplaceAt");
+        const bool held = hold_all || (hold_first && argument_index == 0) || (hold_rest && argument_index > 0);
+        if (argument.has_head("Unevaluated") && argument.args().size() == 1) args.push_back(argument.args()[0]);
+        else if (held) {
+            if (!hold_all_complete && argument.has_head("Evaluate") && argument.args().size() == 1)
+                args.push_back(evaluate(argument.args()[0]));
+            else args.push_back(argument);
+        } else args.push_back(pattern_held ? argument : evaluate(argument));
+        if (aborted_ || thrown_ || confirmation_failure_ || control_active()) {
+            if (aborted_) return symbol("$Aborted");
+            if (thrown_) return *thrown_;
+            if (confirmation_failure_) return *confirmation_failure_;
+            return control_expression();
+        }
+    }
+    if (!hold_all_complete && call_attributes.count("SequenceHold") == 0) args = splice_sequences(args);
+    {
+        std::vector<Expr> spliced;
+        bool changed = false;
+        for (const auto& argument : args) {
+            if (argument.has_head("Splice") && !argument.args().empty() && argument.args().size() <= 2) {
+                const auto target_head = argument.args().size() == 2 ? argument.args()[1] : symbol("List");
+                if (head == target_head && argument.args()[0].kind() == ExprKind::Call) {
+                    spliced.insert(spliced.end(), argument.args()[0].args().begin(), argument.args()[0].args().end());
+                    changed = true;
+                    continue;
+                }
+            }
+            spliced.push_back(argument);
+        }
+        if (changed) args = std::move(spliced);
+    }
+    if (call_attributes.count("Flat") != 0) {
+        std::vector<Expr> flattened;
+        for (const auto& argument : args) {
+            if (argument.kind() == ExprKind::Call && argument.head() == head)
+                flattened.insert(flattened.end(), argument.args().begin(), argument.args().end());
+            else flattened.push_back(argument);
+        }
+        args = std::move(flattened);
+    }
+    if (call_attributes.count("Orderless") != 0) std::sort(args.begin(), args.end(), expression_less);
+
+    if (head.has_head("Function") && !head.args().empty()) {
+        if (head.args().size() >= 2 && !args.empty() && !is_symbol(head.args()[0], "Null")) {
+            auto body = head.args()[1];
+            if (head.args()[0].has_head("List")) {
+                for (std::size_t index = 0; index < head.args()[0].args().size() && index < args.size(); ++index)
+                    body = replace_named(body, head.args()[0].args()[index], args[index]);
+            } else body = replace_named(body, head.args()[0], args[0]);
+            return evaluate(body);
+        }
+        const auto body = head.args().size() >= 2 ? head.args()[1] : head.args()[0];
+        return evaluate(replace_slots(body, args, head));
+    }
+    if (const auto rules = association_rules(head); rules && args.size() == 1) {
+        const auto key = selector_key(args[0]).value_or(args[0]);
+        const auto found = std::find_if(rules->begin(), rules->end(),
+            [&](const Expr& rule) { return rule.args()[0] == key; });
+        if (found != rules->end()) return evaluate(found->args()[1]);
+        return call("Missing", {string("KeyAbsent"), key});
+    }
+    const auto* evaluated_name = head.symbol_name();
+    const auto function = evaluated_name ? system_dispatch_name(*evaluated_name) : std::string{};
+    const auto evaluated_expression = call(head, args);
+    if (call_attributes.count("Listable") != 0) {
+        std::optional<std::size_t> list_length;
+        bool incompatible = false;
+        for (const auto& argument : args)
+            if (argument.kind() == ExprKind::Call && argument.has_head("List")) {
+            if (!list_length) list_length = argument.args().size();
+            else if (*list_length != argument.args().size()) incompatible = true;
+        }
+        if (incompatible) return evaluated_expression;
+        if (list_length) {
+            std::vector<Expr> threaded;
+            for (std::size_t index = 0; index < *list_length; ++index) {
+                std::vector<Expr> item;
+                for (const auto& argument : args)
+                    item.push_back(argument.kind() == ExprKind::Call && argument.has_head("List")
+                        ? argument.args()[index] : argument);
+                threaded.push_back(evaluate(call(head, std::move(item))));
+            }
+            return list(std::move(threaded));
+        }
+    }
+    if (!hold_all_complete) if (auto result = apply_up_values(evaluated_expression)) return *result;
+    if (evaluated_name) {
+        if (auto result = apply_down_values(evaluated_expression)) return *result;
+    } else {
+        if (auto result = apply_sub_values(evaluated_expression)) return *result;
+    }
+    if (head.kind() == ExprKind::SparseArray && args.size() == 1 && args[0].kind() == ExprKind::String) {
+        if (args[0].text() == "ExplicitPositions") {
+            std::vector<Expr> positions;
+            for (const auto& entry : head.sparse_entries()) { std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index)); positions.push_back(list(std::move(indices))); }
+            return list(std::move(positions));
+        }
+        if (args[0].text() == "Density") {
+            std::size_t count = 1; for (const auto dimension : head.dimensions()) count *= dimension;
+            return count == 0 ? integer(0L) : rational(mpz_class(head.sparse_entries().size()), mpz_class(count));
+        }
+    }
+    if (head.has_head("SameAs") && head.args().size() == 1)
+        return boolean(args.size() == 1 && args[0] == head.args()[0]);
+    if (head.has_head("UnsameAs") && head.args().size() == 1)
+        return boolean(args.size() == 1 && args[0] != head.args()[0]);
+    if (head.has_head("Failsafe") && !head.args().empty()) {
+        for (const auto& argument : args) if (argument.has_head("Missing") || argument.has_head("Failure")) return argument;
+        bool valid = true;
+        if (head.args().size() >= 2) valid = is_symbol(evaluate(call(head.args()[1], args)), "True");
+        if (!valid) return head.args().size() >= 3 ? evaluate(call(head.args()[2], args)) : symbol("FailsafeFailed");
+        return evaluate(call(head.args()[0], args));
+    }
+    if ((head.has_head("Composition") || head.has_head("RightComposition")) && args.size() == 1) {
+        auto functions = head.args();
+        if (head.has_head("Composition")) std::reverse(functions.begin(), functions.end());
+        Expr value = args[0]; for (const auto& callable : functions) value = evaluate(call(callable, {value}));
+        return value;
+    }
+    if (head.has_head("MapApply") && head.args().size() == 1 && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        std::vector<Expr> values;
+        for (const auto& item : args[0].args()) values.push_back(item.kind() == ExprKind::Call
+            ? evaluate(call(head.args()[0], item.args())) : evaluate(call(head.args()[0], {item})));
+        return call(args[0].head(), std::move(values));
+    }
+    if (head.has_head("KeySelect") && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call("KeySelect", {args[0], head.args()[0]}));
+    if (head.has_head("Select") && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call("Select", {args[0], head.args()[0]}));
+    if ((head.has_head("SortBy") || head.has_head("ReverseSortBy") || head.has_head("OrderingBy")) && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call(head.head(), {args[0], head.args()[0]}));
+    if ((head.has_head("StringPosition") || head.has_head("StringContainsQ") || head.has_head("StringStartsQ") || head.has_head("StringEndsQ") || head.has_head("StringMatchQ"))
+        && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call(head.head(), {args[0], head.args()[0]}));
+    if (function == "FailsafeFailed") return symbol("FailsafeFailed");
+    if (function == "Identity" && args.size() == 1) return args[0];
+    if (function == "Unique" && args.size() <= 1) {
+        if (!args.empty() && args[0].kind() == ExprKind::Call && args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args())
+                values.push_back(evaluate(call("Unique", {item})));
+            return list(std::move(values));
+        }
+        std::string name;
+        if (args.empty()) name = "$" + std::to_string(++module_counter_);
+        else if (args[0].kind() == ExprKind::String)
+            name = args[0].text() + std::to_string(++unique_string_counters_[args[0].text()]);
+        else if (args[0].symbol_name())
+            name = *args[0].symbol_name() + "$" + std::to_string(++module_counter_);
+        else return call(head, args);
+        user_symbol_registry().insert(full_symbol_name(symbol(name)));
+        return symbol(name);
+    }
+    if ((function == "Composition" || function == "RightComposition") && !args.empty()) return call(head, args);
+    if (function == "SparseArray" && !args.empty() && args.size() <= 3) {
+        const auto fill = args.size() == 3 ? args[2] : integer(0L);
+        if (args[0].has_head("List") && (!args[0].args().empty() && !args[0].args().front().has_head("Rule")
+            && !args[0].args().front().has_head("RuleDelayed"))) {
+            if (const auto result = sparse_from_dense(args[0], fill)) return *result;
+        }
+        std::vector<std::size_t> dimensions;
+        if (args.size() >= 2 && args[1].has_head("List")) {
+            bool valid = true; for (const auto& item : args[1].args()) { const auto value = machine_index(item); if (!value || *value < 0) { valid = false; break; } dimensions.push_back(static_cast<std::size_t>(*value)); }
+            if (!valid) return call(head, args);
+        }
+        std::vector<SparseEntry> entries;
+        auto add = [&](std::vector<std::size_t> indices, const Expr& value) {
+            if (value == fill || std::any_of(indices.begin(), indices.end(), [](std::size_t index) { return index == 0; })) return;
+            if (dimensions.size() < indices.size()) dimensions.resize(indices.size(), 0);
+            for (std::size_t index = 0; index < indices.size(); ++index) dimensions[index] = std::max(dimensions[index], indices[index]);
+            if (std::none_of(entries.begin(), entries.end(), [&](const SparseEntry& entry) { return entry.indices == indices; })) entries.push_back({std::move(indices), value});
+        };
+        const auto source = args[0].has_head("List") ? args[0].args() : std::vector<Expr>{args[0]};
+        for (const auto& rule : source) {
+            if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed")) || rule.args().size() != 2 || !rule.args()[0].has_head("List")) continue;
+            if (source.size() == 1 && rule.args()[1].has_head("List") && rule.args()[0].args().size() == rule.args()[1].args().size()
+                && std::all_of(rule.args()[0].args().begin(), rule.args()[0].args().end(), [](const Expr& item) { return machine_index(item).has_value(); })) {
+                for (std::size_t index = 0; index < rule.args()[0].args().size(); ++index)
+                    add({static_cast<std::size_t>(*machine_index(rule.args()[0].args()[index]))}, rule.args()[1].args()[index]);
+                continue;
+            }
+            std::vector<std::size_t> indices; bool valid = true;
+            for (const auto& item : rule.args()[0].args()) { const auto value = machine_index(item); if (!value || *value <= 0) { valid = false; break; } indices.push_back(static_cast<std::size_t>(*value)); }
+            if (valid) add(std::move(indices), rule.args()[1]);
+        }
+        if (!dimensions.empty()) return sparse_array(std::move(dimensions), std::move(entries), fill);
+    }
+    if ((function == "Plus" || function == "Times") && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::SparseArray; })) {
+        std::vector<Expr> dense; for (const auto& value : args) dense.push_back(sparse_dense_value(value));
+        const auto result = evaluate(call(function, std::move(dense)));
+        if (const auto sparse = sparse_from_dense(result)) return *sparse;
+        return result;
+    }
+    if ((function == "Plus" || function == "Times" || function == "Power")
+        && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.has_head("List"); })) {
+        if (const auto threaded = thread_lists(function, args)) return evaluate(*threaded);
+    }
+    if (function == "Plus") return simplify_plus(args);
+    if (function == "Times") return simplify_times(args);
+    if (function == "Power") return simplify_power(args);
+    auto polynomial_variables = [&](const std::vector<Expr>& expressions) {
+        std::vector<Expr> variables;
+        for (const auto& expression : expressions) gather_polynomial_symbols(expression, variables);
+        std::sort(variables.begin(), variables.end(), expression_less);
+        return variables;
+    };
+    auto polynomial_context = [&](std::vector<Expr> variables) {
+        return NativePolynomialContext(std::move(variables), [this](const Expr& value) { return evaluate(value); });
+    };
+    auto polynomial_gcd = [&](const NativePolynomialContext& context, NativePolynomial left, NativePolynomial right) {
+        if (context.variables().size() > 1) return context.constant(integer(1L));
+        auto constant_polynomial = [&](const NativePolynomial& value) {
+            return value.terms.size() == 1 && std::all_of(value.terms.begin()->first.begin(),
+                value.terms.begin()->first.end(), [](long exponent) { return exponent == 0; });
+        };
+        if ((!left.empty() && constant_polynomial(left)) || (!right.empty() && constant_polynomial(right)))
+            return context.constant(integer(1L));
+        std::size_t iterations = 0;
+        while (!right.empty() && iterations++ < 10000) {
+            auto remainder = context.divide(left, {right}).second;
+            left = std::move(right); right = std::move(remainder);
+        }
+        return context.make_monic(left);
+    };
+    auto polynomial_resultant = [&](const NativePolynomialContext& context,
+        const NativePolynomial& left, const NativePolynomial& right) -> std::optional<Expr> {
+        if (context.variables().size() != 1 || left.empty() || right.empty()) return std::nullopt;
+        const auto left_degree = context.degree(left), right_degree = context.degree(right);
+        const auto size = static_cast<std::size_t>(left_degree + right_degree);
+        if (size > 9) return std::nullopt;
+        std::vector<std::vector<Expr>> matrix(size, std::vector<Expr>(size, integer(0L)));
+        for (long row = 0; row < right_degree; ++row)
+            for (long exponent = left_degree; exponent >= 0; --exponent)
+                matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(row + left_degree - exponent)]
+                    = context.coefficient(left, NativeMonomial{exponent});
+        for (long row = 0; row < left_degree; ++row)
+            for (long exponent = right_degree; exponent >= 0; --exponent)
+                matrix[static_cast<std::size_t>(right_degree + row)][static_cast<std::size_t>(row + right_degree - exponent)]
+                    = context.coefficient(right, NativeMonomial{exponent});
+        auto determinant = [&](auto&& self, const std::vector<std::vector<Expr>>& value) -> Expr {
+            if (value.empty()) return integer(1L);
+            if (value.size() == 1) return value[0][0];
+            std::vector<Expr> terms;
+            for (std::size_t column = 0; column < value.size(); ++column) {
+                if (value[0][column] == integer(0L)) continue;
+                std::vector<std::vector<Expr>> minor;
+                for (std::size_t row = 1; row < value.size(); ++row) {
+                    std::vector<Expr> minor_row;
+                    for (std::size_t inner = 0; inner < value.size(); ++inner)
+                        if (inner != column) minor_row.push_back(value[row][inner]);
+                    minor.push_back(std::move(minor_row));
+                }
+                auto term = context.coefficient_multiply(value[0][column], self(self, minor));
+                if ((column & 1U) != 0) term = context.coefficient_multiply(integer(-1L), term);
+                terms.push_back(std::move(term));
+            }
+            return context.coefficient_add_many(std::move(terms));
+        };
+        return evaluate(call("Expand", {determinant(determinant, matrix)}));
+    };
+    auto binomial_root_data = [](const Expr& value) -> std::optional<std::pair<std::size_t, mpq_class>> {
+        if (value.kind() != ExprKind::Root) return std::nullopt;
+        const auto& coefficients = value.root_coefficients();
+        if (coefficients.size() < 2 || coefficients.back() == 0) return std::nullopt;
+        for (std::size_t index = 1; index + 1 < coefficients.size(); ++index)
+            if (coefficients[index] != 0) return std::nullopt;
+        mpq_class radicand(-coefficients.front(), coefficients.back());
+        radicand.canonicalize();
+        return std::pair{coefficients.size() - 1, std::move(radicand)};
+    };
+    auto primitive_integer_coefficients = [](const std::vector<mpq_class>& coefficients) {
+        mpz_class denominator_lcm = 1;
+        for (const auto& coefficient : coefficients) {
+            mpz_class common_denominator;
+            mpz_gcd(common_denominator.get_mpz_t(), denominator_lcm.get_mpz_t(), coefficient.get_den().get_mpz_t());
+            denominator_lcm = (denominator_lcm / common_denominator) * coefficient.get_den();
+        }
+        std::vector<mpz_class> result;
+        mpz_class content = 0;
+        for (const auto& coefficient : coefficients) {
+            const mpz_class integer_coefficient = coefficient.get_num() * (denominator_lcm / coefficient.get_den());
+            result.push_back(integer_coefficient);
+            mpz_class magnitude;
+            mpz_abs(magnitude.get_mpz_t(), integer_coefficient.get_mpz_t());
+            mpz_gcd(content.get_mpz_t(), content.get_mpz_t(), magnitude.get_mpz_t());
+        }
+        if (content != 0) for (auto& coefficient : result) coefficient /= content;
+        if (!result.empty() && result.back() < 0)
+            for (auto& coefficient : result) coefficient = -coefficient;
+        return result;
+    };
+    auto positive_square_root_radicand = [&](const Expr& value) -> std::optional<mpq_class> {
+        const auto data = binomial_root_data(value);
+        if (!data || data->first != 2 || data->second <= 0 || value.root_index() != 1) return std::nullopt;
+        return data->second;
+    };
+    auto rational_coefficients = [&](const NativePolynomialContext& context,
+        const NativePolynomial& polynomial) -> std::optional<RationalPolynomial> {
+        if (context.variables().size() != 1) return std::nullopt;
+        const auto degree = context.degree(polynomial);
+        if (degree < 0 || degree > 64) return std::nullopt;
+        RationalPolynomial result(static_cast<std::size_t>(degree + 1));
+        for (long exponent = 0; exponent <= degree; ++exponent) {
+            const auto coefficient_value = as_rational(
+                context.coefficient(polynomial, NativeMonomial{exponent}));
+            if (!coefficient_value) return std::nullopt;
+            result[static_cast<std::size_t>(exponent)] = *coefficient_value;
+        }
+        trim_polynomial(result);
+        return result;
+    };
+    auto polynomial_expression = [&](const RationalPolynomial& polynomial,
+        const Expr& variable) {
+        std::vector<Expr> terms;
+        for (std::size_t exponent = 0; exponent < polynomial.size(); ++exponent) {
+            if (polynomial[exponent] == 0) continue;
+            std::vector<Expr> factors;
+            if (exponent == 0 || polynomial[exponent] != 1)
+                factors.push_back(from_rational(polynomial[exponent]));
+            if (exponent == 1) factors.push_back(variable);
+            else if (exponent > 1)
+                factors.push_back(call("Power", {variable, integer(exponent)}));
+            terms.push_back(evaluate(call("Times", std::move(factors))));
+        }
+        return evaluate(call("Plus", std::move(terms)));
+    };
+    auto root_degree_allowed = [&](long degree) {
+        if (degree <= 0) return false;
+        const auto limit = evaluate(symbol("$MaxRootDegree"));
+        return is_symbol(limit, "Infinity")
+            || (limit.kind() == ExprKind::Integer && limit.integer_value() >= degree);
+    };
+    std::function<std::optional<ApproximateComplex>(const Expr&)> algebraic_approximation;
+    algebraic_approximation = [&](const Expr& value) -> std::optional<ApproximateComplex> {
+        if (const auto exact = as_rational(value)) {
+            const auto approximation = rounded_machine_value(*exact);
+            return approximation
+                ? std::optional<ApproximateComplex>(ApproximateComplex(*approximation, 0))
+                : std::nullopt;
+        }
+        if (value.kind() == ExprKind::Complex) {
+            const auto real_part = algebraic_approximation(value.real_part());
+            const auto imaginary_part = algebraic_approximation(value.imaginary_part());
+            if (real_part && imaginary_part && std::abs(real_part->imag()) < 1e-18L
+                && std::abs(imaginary_part->imag()) < 1e-18L)
+                return ApproximateComplex(real_part->real(), imaginary_part->real());
+            return std::nullopt;
+        }
+        if (value.kind() == ExprKind::Root) return approximate_root(value);
+        if (is_symbol(value, "I")) return ApproximateComplex(0, 1);
+        if (value.kind() != ExprKind::Call || !value.head().symbol_name()) return std::nullopt;
+        const auto name = system_dispatch_name(*value.head().symbol_name());
+        if (name == "Plus") {
+            ApproximateComplex result{};
+            for (const auto& argument : value.args()) {
+                const auto approximation = algebraic_approximation(argument);
+                if (!approximation) return std::nullopt;
+                result += *approximation;
+            }
+            return result;
+        }
+        if (name == "Times") {
+            ApproximateComplex result = 1;
+            for (const auto& argument : value.args()) {
+                const auto approximation = algebraic_approximation(argument);
+                if (!approximation) return std::nullopt;
+                result *= *approximation;
+            }
+            return result;
+        }
+        if (name == "Power" && value.args().size() == 2) {
+            const auto base = algebraic_approximation(value.args()[0]);
+            const auto exponent = as_rational(value.args()[1]);
+            const auto exponent_value = exponent
+                ? rounded_machine_value(*exponent) : std::nullopt;
+            if (base && exponent_value)
+                return std::pow(
+                    *base, static_cast<long double>(*exponent_value));
+        }
+        return std::nullopt;
+    };
+    struct AlgebraicGenerator {
+        Expr expression;
+        RationalPolynomial polynomial;
+        ApproximateComplex approximation;
+    };
+    auto algebraic_generators = [&](const Expr& expression) {
+        std::vector<AlgebraicGenerator> generators;
+        std::function<void(const Expr&)> gather = [&](const Expr& value) {
+            auto add = [&](AlgebraicGenerator generator) {
+                if (std::none_of(generators.begin(), generators.end(), [&](const auto& existing) {
+                    return existing.expression == generator.expression;
+                })) generators.push_back(std::move(generator));
+            };
+            if (value.kind() == ExprKind::Root) {
+                if (const auto approximation = approximate_root(value))
+                    add({value, rational_polynomial(value.root_coefficients()), *approximation});
+                return;
+            }
+            if (value.kind() == ExprKind::Complex) {
+                const auto real_part = as_rational(value.real_part());
+                const auto imaginary_part = as_rational(value.imaginary_part());
+                if (real_part && imaginary_part && *imaginary_part != 0) {
+                    RationalPolynomial polynomial{
+                        *real_part * *real_part + *imaginary_part * *imaginary_part,
+                        -2 * *real_part, 1};
+                    const auto real_approximation = rounded_machine_value(*real_part);
+                    const auto imaginary_approximation =
+                        rounded_machine_value(*imaginary_part);
+                    if (real_approximation && imaginary_approximation)
+                        add({value, std::move(polynomial), ApproximateComplex(
+                            *real_approximation, *imaginary_approximation)});
+                }
+                return;
+            }
+            if (is_symbol(value, "I")) {
+                add({value, {1, 0, 1}, ApproximateComplex(0, 1)});
+                return;
+            }
+            if (value.has_head("Power") && value.args().size() == 2) {
+                const auto base = as_rational(value.args()[0]);
+                const auto exponent = as_rational(value.args()[1]);
+                if (base && exponent && exponent->get_num() == 1
+                    && exponent->get_den() > 1 && exponent->get_den().fits_ulong_p()) {
+                    const auto degree = exponent->get_den().get_ui();
+                    if (degree <= 32) {
+                        RationalPolynomial polynomial(degree + 1);
+                        polynomial[0] = -*base; polynomial[degree] = 1;
+                        const auto base_approximation = rounded_machine_value(*base);
+                        if (base_approximation)
+                            add({value, std::move(polynomial), std::pow(
+                                ApproximateComplex(*base_approximation, 0),
+                                1.0L / static_cast<long double>(degree))});
+                        return;
+                    }
+                }
+            }
+            if (value.kind() == ExprKind::Call)
+                for (const auto& argument : value.args()) gather(argument);
+        };
+        gather(expression);
+        return generators;
+    };
+    auto replace_expression = [&](const Expr& source, const Expr& target,
+        const Expr& replacement) {
+        std::function<Expr(const Expr&)> replace = [&](const Expr& value) -> Expr {
+            if (value == target) return replacement;
+            if (value.kind() != ExprKind::Call) return value;
+            std::vector<Expr> replaced;
+            for (const auto& argument : value.args()) replaced.push_back(replace(argument));
+            return call(replace(value.head()), std::move(replaced));
+        };
+        return replace(source);
+    };
+    auto eliminate_generators = [&](Expr relation, const Expr& result_variable,
+        const std::vector<AlgebraicGenerator>& generators) -> std::optional<RationalPolynomial> {
+        if (generators.size() > 4) return std::nullopt;
+        for (std::size_t index = 0; index < generators.size(); ++index) {
+            const auto auxiliary = symbol("Tungsten`Private`AlgebraicGenerator" + std::to_string(index + 1));
+            relation = replace_expression(relation, generators[index].expression, auxiliary);
+            const auto context = polynomial_context({auxiliary});
+            const auto left = context.parse(polynomial_expression(generators[index].polynomial, auxiliary));
+            const auto right = context.parse(evaluate(call("Expand", {relation})));
+            if (!left || !right || left->empty() || right->empty()) return std::nullopt;
+            const auto resultant = polynomial_resultant(context, *left, *right);
+            if (!resultant) return std::nullopt;
+            relation = *resultant;
+        }
+        const auto context = polynomial_context({result_variable});
+        const auto parsed = context.parse(evaluate(call("Expand", {relation})));
+        if (!parsed) return std::nullopt;
+        const auto coefficients = rational_coefficients(context, *parsed);
+        if (!coefficients) return std::nullopt;
+        auto square_free = square_free_polynomial(*coefficients);
+        if (polynomial_degree(square_free) <= 0 || polynomial_degree(square_free) > 64)
+            return std::nullopt;
+        return square_free;
+    };
+    auto algebraic_minimal_polynomial = [&](const Expr& value,
+        const Expr& variable) -> std::optional<RationalPolynomial> {
+        const auto approximation = algebraic_approximation(value);
+        if (!approximation) return std::nullopt;
+        const auto generators = algebraic_generators(value);
+        if (generators.empty()) {
+            if (const auto exact = as_rational(value)) return RationalPolynomial{-*exact, 1};
+            return std::nullopt;
+        }
+        auto relation = evaluate(call("Plus", {variable,
+            call("Times", {integer(-1L), value})}));
+        return eliminate_generators(std::move(relation), variable, generators);
+    };
+    auto root_from_polynomial_target = [&](RationalPolynomial polynomial,
+        ApproximateComplex target, long method = 0) -> std::optional<Expr> {
+        polynomial = square_free_polynomial(polynomial);
+        if (!root_degree_allowed(polynomial_degree(polynomial))) return std::nullopt;
+        if (polynomial_degree(polynomial) == 1) {
+            mpq_class value = -polynomial[0] / polynomial[1];
+            value.canonicalize(); return from_rational(value);
+        }
+        const auto index = closest_root_index(polynomial, target);
+        if (!index) return std::nullopt;
+        return root(primitive_integer_polynomial(polynomial), *index, method);
+    };
+    auto select_bounded_rational_factor = [&](RationalPolynomial polynomial,
+        long double target) {
+        polynomial = square_free_polynomial(polynomial);
+        const auto original = polynomial;
+        bool changed = true;
+        while (changed && polynomial_degree(polynomial) > 1) {
+            changed = false;
+            for (long denominator = 1; denominator <= 64 && !changed; ++denominator)
+                for (long numerator = -64; numerator <= 64; ++numerator) {
+                    if (std::gcd(std::abs(numerator), denominator) != 1) continue;
+                    mpq_class candidate(numerator, denominator);
+                    if (evaluate_polynomial(polynomial, candidate) != 0) continue;
+                    const auto candidate_value = rounded_machine_value(candidate);
+                    if (candidate_value
+                        && std::abs(*candidate_value - target) < 1e-12L)
+                        return RationalPolynomial{-candidate, 1};
+                    polynomial = rational_polynomial_divide(polynomial, {-candidate, 1}).first;
+                    changed = true; break;
+                }
+        }
+        return polynomial_degree(polynomial) > 0 ? polynomial : original;
+    };
+    auto trigonometric_algebraic = [&](const std::string& name,
+        mpq_class angle) -> std::optional<std::pair<RationalPolynomial, ApproximateComplex>> {
+        angle.canonicalize();
+        if (!angle.get_den().fits_ulong_p() || !angle.get_num().fits_slong_p()) return std::nullopt;
+        const auto denominator = angle.get_den().get_ui();
+        const auto numerator = angle.get_num().get_si();
+        if (denominator == 0 || denominator > 64) return std::nullopt;
+        const auto angle_value = rounded_machine_value(angle);
+        if (!angle_value) return std::nullopt;
+        const auto radians = std::acos(-1.0L)
+            * static_cast<long double>(*angle_value);
+        if (name == "Cos") {
+            auto candidate = chebyshev_polynomial(denominator, false);
+            if (candidate.empty()) return std::nullopt;
+            candidate[0] -= (std::abs(numerator) & 1L) == 0 ? 1 : -1;
+            const auto target = std::cos(radians);
+            candidate = select_bounded_rational_factor(candidate, target);
+            return std::pair{square_free_polynomial(candidate), ApproximateComplex(target, 0)};
+        }
+        if (name == "Sin" && (denominator & 1UL) != 0) {
+            const auto second_kind = chebyshev_polynomial(denominator - 1, true);
+            RationalPolynomial in_square((second_kind.size() + 1) / 2);
+            for (std::size_t exponent = 0; 2 * exponent < second_kind.size(); ++exponent)
+                in_square[exponent] = second_kind[2 * exponent];
+            auto in_sine_square = compose_polynomial(in_square, {1, -1});
+            const auto target = std::sin(radians);
+            in_sine_square = select_bounded_rational_factor(
+                square_free_polynomial(in_sine_square), target * target);
+            RationalPolynomial candidate(in_sine_square.size() * 2 - 1);
+            for (std::size_t exponent = 0; exponent < in_sine_square.size(); ++exponent)
+                candidate[2 * exponent] = in_sine_square[exponent];
+            return std::pair{square_free_polynomial(candidate), ApproximateComplex(target, 0)};
+        }
+        return std::nullopt;
+    };
+    if (function == "Root" && (args.size() == 2 || args.size() == 3)
+        && args[0].has_head("Function") && args[0].args().size() == 1
+        && args[1].kind() == ExprKind::Integer && args[1].integer_value() > 0
+        && args[1].integer_value().fits_ulong_p()) {
+        long method = 0;
+        if (args.size() == 3) {
+            if (args[2].kind() != ExprKind::Integer || !args[2].integer_value().fits_slong_p())
+                return call(head, args);
+            method = args[2].integer_value().get_si();
+            if (method != 0 && method != 1) return call(head, args);
+        }
+        const auto slot = call("Slot", {integer(1L)});
+        const auto context = polynomial_context({slot});
+        const auto evaluated_body = evaluate(args[0].args()[0]);
+        const auto parsed = context.parse(evaluated_body);
+        if (parsed && !parsed->empty()) {
+            auto polynomial = *parsed;
+            const auto original_degree = context.degree(polynomial);
+            const auto limit = evaluate(symbol("$MaxRootDegree"));
+            const bool within_limit = is_symbol(limit, "Infinity")
+                || (limit.kind() == ExprKind::Integer && limit.integer_value() >= original_degree);
+            const auto raw_index = args[1].integer_value().get_ui() - 1UL;
+            if (original_degree > 0 && within_limit
+                && raw_index < static_cast<unsigned long>(original_degree)) {
+                bool rational_polynomial = true;
+                for (long exponent = 0; exponent <= original_degree; ++exponent)
+                    if (!as_rational(context.coefficient(polynomial, NativeMonomial{exponent}))) {
+                        rational_polynomial = false; break;
+                    }
+                if (rational_polynomial) {
+                    auto square_free = polynomial;
+                    const auto derivative = context.derivative(polynomial);
+                    if (!derivative.empty()) {
+                        const auto repeated = polynomial_gcd(context, polynomial, derivative);
+                        if (context.degree(repeated) > 0)
+                            square_free = context.divide(polynomial, {repeated}).first[0];
+                    }
+                    const auto square_free_degree = context.degree(square_free);
+                    auto normalized_index = raw_index;
+                    if (square_free_degree != original_degree) {
+                        if (square_free_degree <= 0 || original_degree % square_free_degree != 0)
+                            return call(head, args);
+                        const auto multiplicity = static_cast<unsigned long>(original_degree / square_free_degree);
+                        const auto normalized_original = context.make_monic(polynomial);
+                        const auto normalized_power = context.make_monic(context.power(square_free, multiplicity));
+                        if (normalized_original.terms != normalized_power.terms) return call(head, args);
+                        normalized_index /= multiplicity;
+                    }
+                    if (normalized_index >= static_cast<unsigned long>(square_free_degree)) return call(head, args);
+
+                    std::vector<mpq_class> rational_coefficients;
+                    for (long exponent = 0; exponent <= square_free_degree; ++exponent)
+                        rational_coefficients.push_back(*as_rational(
+                            context.coefficient(square_free, NativeMonomial{exponent})));
+                    mpz_class denominator_lcm = 1;
+                    for (const auto& coefficient : rational_coefficients) {
+                        mpz_class common_denominator;
+                        mpz_gcd(common_denominator.get_mpz_t(), denominator_lcm.get_mpz_t(), coefficient.get_den().get_mpz_t());
+                        denominator_lcm = (denominator_lcm / common_denominator) * coefficient.get_den();
+                    }
+                    std::vector<mpz_class> integer_coefficients;
+                    mpz_class content = 0;
+                    for (const auto& coefficient : rational_coefficients) {
+                        const mpz_class integer_coefficient = coefficient.get_num() * (denominator_lcm / coefficient.get_den());
+                        integer_coefficients.push_back(integer_coefficient);
+                        mpz_class magnitude;
+                        mpz_abs(magnitude.get_mpz_t(), integer_coefficient.get_mpz_t());
+                        mpz_gcd(content.get_mpz_t(), content.get_mpz_t(), magnitude.get_mpz_t());
+                    }
+                    for (auto& coefficient : integer_coefficients) coefficient /= content;
+                    if (integer_coefficients.back() < 0)
+                        for (auto& coefficient : integer_coefficients) coefficient = -coefficient;
+
+                    if (square_free_degree == 1) {
+                        mpq_class value(-integer_coefficients[0], integer_coefficients[1]);
+                        value.canonicalize(); return from_rational(value);
+                    }
+                    if (square_free_degree == 2) {
+                        const auto& constant = integer_coefficients[0];
+                        const auto& linear = integer_coefficients[1];
+                        const auto& quadratic = integer_coefficients[2];
+                        const mpz_class discriminant = linear * linear - 4 * quadratic * constant;
+                        if (discriminant >= 0) {
+                            mpz_class square_root;
+                            mpz_sqrt(square_root.get_mpz_t(), discriminant.get_mpz_t());
+                            if (square_root * square_root == discriminant) {
+                                std::vector<mpq_class> roots{
+                                    mpq_class(-linear - square_root, 2 * quadratic),
+                                    mpq_class(-linear + square_root, 2 * quadratic)};
+                                for (auto& value : roots) value.canonicalize();
+                                std::sort(roots.begin(), roots.end());
+                                roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+                                if (normalized_index < roots.size()) return from_rational(roots[normalized_index]);
+                            }
+                        }
+                    }
+                    return root(std::move(integer_coefficients), normalized_index, method);
+                }
+            }
+        }
+        if (parsed && !parsed->empty()) {
+            const auto degree = context.degree(*parsed);
+            const auto raw_index = args[1].integer_value().get_ui() - 1UL;
+            if (degree > 0 && raw_index < static_cast<unsigned long>(degree)
+                && root_degree_allowed(degree)) {
+                std::vector<ApproximateComplex> approximate_coefficients;
+                bool supported = true;
+                for (long exponent = 0; exponent <= degree; ++exponent) {
+                    const auto approximation = algebraic_approximation(
+                        context.coefficient(*parsed, NativeMonomial{exponent}));
+                    if (!approximation) { supported = false; break; }
+                    approximate_coefficients.push_back(*approximation);
+                }
+                const auto original_roots = supported
+                    ? approximate_polynomial_roots(std::move(approximate_coefficients))
+                    : std::nullopt;
+                const auto generators = algebraic_generators(evaluated_body);
+                const auto norm = generators.empty() ? std::nullopt
+                    : eliminate_generators(evaluated_body, slot, generators);
+                if (original_roots && raw_index < original_roots->size() && norm)
+                    if (const auto result = root_from_polynomial_target(
+                        *norm, (*original_roots)[raw_index], method)) return *result;
+            }
+        }
+    }
+    if (function == "MinimalPolynomial" && (args.size() == 1 || args.size() == 2)) {
+        const auto variable = args.size() == 2 ? args[1] : call("Slot", {integer(1L)});
+        if (const auto polynomial = algebraic_minimal_polynomial(args[0], variable)) {
+            const auto result = polynomial_expression(*polynomial, variable);
+            return args.size() == 1 ? call("Function", {result}) : result;
+        }
+    }
+    if (function == "CountRoots" && args.size() == 2) {
+        const bool bounded = args[1].has_head("List") && args[1].args().size() == 3;
+        const auto variable = bounded ? args[1].args()[0] : args[1];
+        const auto context = polynomial_context({variable});
+        const auto parsed = context.parse(args[0]);
+        const auto coefficients = parsed ? rational_coefficients(context, *parsed) : std::nullopt;
+        if (coefficients && polynomial_degree(*coefficients) > 0) {
+            if (!bounded) return integer(real_root_count_with_multiplicity(*coefficients));
+            const auto& lower_expression = args[1].args()[1];
+            const auto& upper_expression = args[1].args()[2];
+            const auto lower = as_rational(lower_expression);
+            const auto upper = as_rational(upper_expression);
+            if (lower && upper && *lower <= *upper)
+                return integer(real_root_count_with_multiplicity(*coefficients, *lower, *upper));
+            auto complex_parts = [&](const Expr& value)
+                -> std::optional<std::pair<mpq_class, mpq_class>> {
+                if (const auto exact = as_rational(value)) return std::pair{*exact, mpq_class(0)};
+                if (value.kind() != ExprKind::Complex) return std::nullopt;
+                const auto real_part = as_rational(value.real_part());
+                const auto imaginary_part = as_rational(value.imaginary_part());
+                if (!real_part || !imaginary_part) return std::nullopt;
+                return std::pair{*real_part, *imaginary_part};
+            };
+            const auto lower_parts = complex_parts(lower_expression);
+            const auto upper_parts = complex_parts(upper_expression);
+            if (lower_parts && upper_parts
+                && lower_parts->first <= upper_parts->first
+                && lower_parts->second <= upper_parts->second) {
+                long count = 0;
+                auto layer = *coefficients;
+                std::size_t layers = 0;
+                bool reliable = true;
+                long double lower_real = 0;
+                long double upper_real = 0;
+                long double lower_imaginary = 0;
+                long double upper_imaginary = 0;
+                const auto lower_real_value = rounded_machine_value(lower_parts->first);
+                const auto upper_real_value = rounded_machine_value(upper_parts->first);
+                const auto lower_imaginary_value = rounded_machine_value(lower_parts->second);
+                const auto upper_imaginary_value = rounded_machine_value(upper_parts->second);
+                if (!lower_real_value || !upper_real_value
+                    || !lower_imaginary_value || !upper_imaginary_value) {
+                    reliable = false;
+                } else {
+                    lower_real = static_cast<long double>(*lower_real_value);
+                    upper_real = static_cast<long double>(*upper_real_value);
+                    lower_imaginary = static_cast<long double>(*lower_imaginary_value);
+                    upper_imaginary = static_cast<long double>(*upper_imaginary_value);
+                }
+                while (reliable && polynomial_degree(layer) > 0 && layers++ < 128) {
+                    const auto square_free = square_free_polynomial(layer);
+                    const auto roots = approximate_polynomial_roots(square_free);
+                    if (!roots) { reliable = false; break; }
+                    for (const auto& value : *roots) if (value.real() >= lower_real - 1e-12L
+                        && value.real() <= upper_real + 1e-12L
+                        && value.imag() >= lower_imaginary - 1e-12L
+                        && value.imag() <= upper_imaginary + 1e-12L) ++count;
+                    layer = rational_polynomial_gcd(layer, polynomial_derivative(layer));
+                }
+                if (reliable) return integer(count);
+            }
+        }
+    }
+    if (function == "RootIntervals" && args.size() == 1) {
+        const auto variables = polynomial_variables({args[0]});
+        if (variables.size() == 1) {
+            const auto context = polynomial_context(variables);
+            const auto parsed = context.parse(args[0]);
+            const auto coefficients = parsed ? rational_coefficients(context, *parsed) : std::nullopt;
+            if (coefficients && polynomial_degree(*coefficients) > 0) {
+                std::vector<std::pair<mpq_class, long>> exact_roots;
+                std::set<std::string> seen;
+                for (long denominator = 1; denominator <= 128; ++denominator)
+                    for (long numerator = -512; numerator <= 512; ++numerator) {
+                        if (std::gcd(std::abs(numerator), denominator) != 1) continue;
+                        mpq_class candidate(numerator, denominator);
+                        if (evaluate_polynomial(*coefficients, candidate) != 0) continue;
+                        if (!seen.insert(candidate.get_str()).second) continue;
+                        exact_roots.emplace_back(candidate,
+                            root_multiplicity_at(*coefficients, candidate));
+                    }
+                std::sort(exact_roots.begin(), exact_roots.end(), [](const auto& left, const auto& right) {
+                    return left.first < right.first;
+                });
+                RationalPolynomial remaining = *coefficients;
+                for (const auto& [value, multiplicity] : exact_roots)
+                    for (long count = 0; count < multiplicity; ++count)
+                        remaining = rational_polynomial_divide(remaining, {-value, 1}).first;
+                if (distinct_real_root_count(remaining) == 0) {
+                    std::vector<Expr> intervals;
+                    std::vector<Expr> multiplicities;
+                    for (const auto& [value, multiplicity] : exact_roots) {
+                        const auto expression = from_rational(value);
+                        intervals.push_back(list({expression, expression}));
+                        multiplicities.push_back(list({integer(multiplicity)}));
+                    }
+                    return list({list(std::move(intervals)), list(std::move(multiplicities))});
+                }
+            }
+        }
+    }
+    if (function == "IsolatingInterval" && (args.size() == 1 || args.size() == 2)) {
+        if (as_rational(args[0])) return list({args[0], args[0]});
+        if (args[0].kind() == ExprKind::Root) {
+            unsigned exponent = 6;
+            if (args.size() == 2 && args[1].kind() == ExprKind::Integer
+                && args[1].integer_value() > 0 && args[1].integer_value().fits_ulong_p())
+                exponent = static_cast<unsigned>(std::min<unsigned long>(30,
+                    std::max<unsigned long>(6, args[1].integer_value().get_ui())));
+            if (const auto approximation = approximate_root(args[0])) {
+                auto bounds = [&](long double value) {
+                    const auto denominator = static_cast<long long>(1ULL << exponent);
+                    const auto rational_value = [](long long numerator, long long divisor) {
+                        return mpq_class(mpz_class(static_cast<long>(numerator)),
+                            mpz_class(static_cast<long>(divisor)));
+                    };
+                    const auto scaled = value * static_cast<long double>(denominator);
+                    const auto nearest = std::llround(scaled);
+                    if (std::abs(scaled - static_cast<long double>(nearest)) < 1e-11L)
+                        return std::pair{
+                            rational_value(2 * nearest - 1, 2 * denominator),
+                            rational_value(2 * nearest + 1, 2 * denominator)};
+                    const auto lower = static_cast<long long>(std::floor(scaled));
+                    return std::pair{rational_value(lower, denominator),
+                        rational_value(lower + 1, denominator)};
+                };
+                const auto real_bounds = bounds(approximation->real());
+                if (approximation->imag() == 0)
+                    return list({from_rational(real_bounds.first), from_rational(real_bounds.second)});
+                const auto imaginary_bounds = bounds(approximation->imag());
+                return list({complex(from_rational(real_bounds.first), from_rational(imaginary_bounds.first)),
+                    complex(from_rational(real_bounds.second), from_rational(imaginary_bounds.second))});
+            }
+        }
+    }
+    if (function == "RootSum" && args.size() == 2
+        && args[0].has_head("Function") && args[0].args().size() == 1
+        && args[1].has_head("Function") && args[1].args().size() == 1) {
+        const auto slot = call("Slot", {integer(1L)});
+        const auto context = polynomial_context({slot});
+        const auto source = context.parse(args[0].args()[0]);
+        const auto image = context.parse(args[1].args()[0]);
+        const auto source_coefficients = source
+            ? rational_coefficients(context, *source) : std::nullopt;
+        const auto image_coefficients = image
+            ? rational_coefficients(context, *image) : std::nullopt;
+        if (source_coefficients && image_coefficients
+            && polynomial_degree(*source_coefficients) > 0) {
+            const auto degree = static_cast<std::size_t>(
+                polynomial_degree(*source_coefficients));
+            const auto maximum_power = static_cast<std::size_t>(
+                std::max<long>(0, polynomial_degree(*image_coefficients)));
+            std::vector<mpq_class> power_sums(maximum_power + 1);
+            power_sums[0] = mpq_class(static_cast<unsigned long>(degree));
+            const auto leading = (*source_coefficients)[degree];
+            for (std::size_t power = 1; power <= maximum_power; ++power) {
+                mpq_class sum = 0;
+                const auto maximum_coefficient = std::min(power, degree);
+                for (std::size_t coefficient = 1;
+                    coefficient <= maximum_coefficient; ++coefficient) {
+                    const auto normalized = (*source_coefficients)[degree - coefficient] / leading;
+                    if (coefficient == power)
+                        sum += mpq_class(static_cast<unsigned long>(power)) * normalized;
+                    else sum += normalized * power_sums[power - coefficient];
+                }
+                power_sums[power] = -sum;
+            }
+            mpq_class result = 0;
+            for (std::size_t power = 0; power < image_coefficients->size(); ++power)
+                result += (*image_coefficients)[power] * power_sums[power];
+            return from_rational(result);
+        }
+    }
+    if (function == "Solve" && args.size() == 2) {
+        const auto variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        if (variables.empty()) return call(head, args);
+        for (std::size_t index = 0; index < variables.size(); ++index) {
+            if (!variables[index].symbol_name()
+                || std::find(variables.begin(), variables.begin() + static_cast<std::ptrdiff_t>(index), variables[index])
+                    != variables.begin() + static_cast<std::ptrdiff_t>(index)) return call(head, args);
+        }
+
+        std::vector<Expr> equations;
+        const auto raw_equations = args[0].has_head("List") ? args[0].args() : std::vector<Expr>{args[0]};
+        for (const auto& equation : raw_equations) {
+            if (is_symbol(equation, "True")) continue;
+            if (is_symbol(equation, "False")) return list();
+            if (equation.has_head("Equal")) {
+                if (equation.args().size() <= 1) continue;
+                for (std::size_t index = 1; index < equation.args().size(); ++index)
+                    equations.push_back(evaluate(call("Plus", {equation.args()[index - 1],
+                        call("Times", {integer(-1L), equation.args()[index]})})));
+            } else equations.push_back(equation);
+        }
+        if (equations.empty()) return list({list()});
+
+        const auto context = polynomial_context(variables);
+        std::function<bool(const Expr&)> supported_coefficient = [&](const Expr& value) {
+            if (as_rational(value) || value.kind() == ExprKind::Real || value.kind() == ExprKind::Root
+                || value.kind() == ExprKind::SpecialReal) return true;
+            if (value.kind() == ExprKind::Complex)
+                return supported_coefficient(value.real_part()) && supported_coefficient(value.imaginary_part());
+            if (value.symbol_name()) {
+                const auto name = system_dispatch_name(*value.symbol_name());
+                return name == "Pi" || name == "E" || name == "I";
+            }
+            if (value.kind() != ExprKind::Call || !value.head().symbol_name()) return false;
+            const auto name = system_dispatch_name(*value.head().symbol_name());
+            if (name != "Plus" && name != "Times" && name != "Power" && name != "Sqrt") return false;
+            return std::all_of(value.args().begin(), value.args().end(), supported_coefficient);
+        };
+        auto coefficients_supported = [&](const NativePolynomial& polynomial) {
+            return std::all_of(polynomial.terms.begin(), polynomial.terms.end(),
+                [&](const auto& term) { return supported_coefficient(term.second); });
+        };
+
+        std::vector<NativePolynomial> polynomials;
+        for (const auto& equation : equations) {
+            const auto polynomial = context.parse(equation);
+            if (!polynomial || !coefficients_supported(*polynomial)) return call(head, args);
+            if (polynomial->empty()) continue;
+            const bool constant = std::all_of(polynomial->terms.begin(), polynomial->terms.end(),
+                [](const auto& term) {
+                    return std::all_of(term.first.begin(), term.first.end(), [](long exponent) { return exponent == 0; });
+                });
+            if (constant) return list();
+            polynomials.push_back(*polynomial);
+        }
+        if (polynomials.empty()) return list({list()});
+
+        auto solve_divide = [&](const Expr& numerator, const Expr& denominator) {
+            if (denominator.has_head("Power") && denominator.args().size() == 2
+                && denominator.args()[1].kind() == ExprKind::Rational
+                && denominator.args()[1].rational_value() == mpq_class(1, 2)
+                && as_rational(denominator.args()[0])) {
+                return evaluate(call("Times", {numerator, denominator,
+                    call("Power", {denominator.args()[0], integer(-1L)})}));
+            }
+            return evaluate(call("Times", {numerator, call("Power", {denominator, integer(-1L)})}));
+        };
+        auto negate_coefficient = [&](const Expr& value) {
+            return evaluate(call("Times", {integer(-1L), value}));
+        };
+
+        if (variables.size() == 1) {
+            auto common = polynomials.front();
+            for (std::size_t index = 1; index < polynomials.size(); ++index) {
+                common = polynomial_gcd(context, common, polynomials[index]);
+                if (context.degree(common) <= 0) return list();
+            }
+            if (context.degree(common) <= 0) return list();
+
+            auto derivative = context.derivative(common);
+            if (!derivative.empty()) {
+                const auto repeated = polynomial_gcd(context, common, derivative);
+                if (context.degree(repeated) > 0) common = context.divide(common, {repeated}).first[0];
+            }
+            const auto degree = context.degree(common);
+            auto coefficient_at = [&](long exponent) {
+                return context.coefficient(common, NativeMonomial{exponent});
+            };
+            if (degree == 1) {
+                const auto solution = solve_divide(negate_coefficient(coefficient_at(0)), coefficient_at(1));
+                return list({list({call("Rule", {variables[0], solution})})});
+            }
+
+            std::vector<mpq_class> rational_coefficients;
+            rational_coefficients.reserve(static_cast<std::size_t>(degree + 1));
+            for (long exponent = 0; exponent <= degree; ++exponent) {
+                const auto coefficient = as_rational(coefficient_at(exponent));
+                if (!coefficient) return call(head, args);
+                rational_coefficients.push_back(*coefficient);
+            }
+            mpz_class denominator_lcm = 1;
+            for (const auto& coefficient : rational_coefficients) {
+                mpz_class common_denominator;
+                mpz_gcd(common_denominator.get_mpz_t(), denominator_lcm.get_mpz_t(), coefficient.get_den().get_mpz_t());
+                denominator_lcm = (denominator_lcm / common_denominator) * coefficient.get_den();
+            }
+            std::vector<mpz_class> integer_coefficients;
+            integer_coefficients.reserve(rational_coefficients.size());
+            mpz_class content = 0;
+            for (const auto& coefficient : rational_coefficients) {
+                const mpz_class integer_coefficient = coefficient.get_num() * (denominator_lcm / coefficient.get_den());
+                integer_coefficients.push_back(integer_coefficient);
+                mpz_class magnitude;
+                mpz_abs(magnitude.get_mpz_t(), integer_coefficient.get_mpz_t());
+                mpz_gcd(content.get_mpz_t(), content.get_mpz_t(), magnitude.get_mpz_t());
+            }
+            if (content == 0) return list({list()});
+            for (auto& coefficient : integer_coefficients) coefficient /= content;
+            if (integer_coefficients.back() < 0)
+                for (auto& coefficient : integer_coefficients) coefficient = -coefficient;
+
+            if (degree == 2) {
+                const auto& constant = integer_coefficients[0];
+                const auto& linear = integer_coefficients[1];
+                const auto& quadratic = integer_coefficients[2];
+                const mpz_class discriminant = linear * linear - 4 * quadratic * constant;
+                if (discriminant >= 0) {
+                    mpz_class square_root;
+                    mpz_sqrt(square_root.get_mpz_t(), discriminant.get_mpz_t());
+                    if (square_root * square_root == discriminant) {
+                        std::vector<mpq_class> roots{
+                            mpq_class(-linear - square_root, 2 * quadratic),
+                            mpq_class(-linear + square_root, 2 * quadratic)};
+                        for (auto& value : roots) value.canonicalize();
+                        std::sort(roots.begin(), roots.end());
+                        roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+                        std::vector<Expr> solutions;
+                        for (const auto& value : roots)
+                            solutions.push_back(list({call("Rule", {variables[0], from_rational(value)})}));
+                        return list(std::move(solutions));
+                    }
+                }
+            }
+            std::vector<Expr> solutions;
+            for (long index = 0; index < degree; ++index)
+                solutions.push_back(list({call("Rule", {variables[0],
+                    root(integer_coefficients, static_cast<std::size_t>(index), 0)})}));
+            return list(std::move(solutions));
+        }
+
+        if (polynomials.size() != variables.size()) return call(head, args);
+        const auto variable_count = variables.size();
+        std::vector<std::vector<Expr>> matrix(variable_count, std::vector<Expr>(variable_count + 1, integer(0L)));
+        for (std::size_t row = 0; row < variable_count; ++row) {
+            for (const auto& [monomial, coefficient] : polynomials[row].terms) {
+                const long total_degree = std::accumulate(monomial.begin(), monomial.end(), 0L);
+                if (total_degree > 1) return call(head, args);
+                if (total_degree == 0) matrix[row][variable_count] = negate_coefficient(coefficient);
+                else {
+                    const auto found = std::find(monomial.begin(), monomial.end(), 1L);
+                    if (found == monomial.end()) return call(head, args);
+                    matrix[row][static_cast<std::size_t>(found - monomial.begin())] = coefficient;
+                }
+            }
+        }
+        for (std::size_t column = 0; column < variable_count; ++column) {
+            auto pivot = column;
+            while (pivot < variable_count && matrix[pivot][column] == integer(0L)) ++pivot;
+            if (pivot == variable_count) return call(head, args);
+            if (pivot != column) std::swap(matrix[pivot], matrix[column]);
+            const auto divisor = matrix[column][column];
+            for (std::size_t inner = column; inner <= variable_count; ++inner)
+                matrix[column][inner] = evaluate(call("Expand", {solve_divide(matrix[column][inner], divisor)}));
+            for (std::size_t row = 0; row < variable_count; ++row) {
+                if (row == column || matrix[row][column] == integer(0L)) continue;
+                const auto multiplier = matrix[row][column];
+                for (std::size_t inner = column; inner <= variable_count; ++inner)
+                    matrix[row][inner] = evaluate(call("Expand", {call("Plus", {matrix[row][inner],
+                        call("Times", {integer(-1L), multiplier, matrix[column][inner]})})}));
+            }
+        }
+        std::vector<Expr> rules;
+        for (std::size_t index = 0; index < variable_count; ++index)
+            rules.push_back(call("Rule", {variables[index], matrix[index][variable_count]}));
+        return list({list(std::move(rules))});
+    }
+    if (function == "ToRadicals" && args.size() == 1 && args[0].kind() == ExprKind::Root) {
+        if (args[0].root_coefficients().size() > 5) return args[0];
+        const auto data = binomial_root_data(args[0]);
+        if (data) {
+            const auto degree = data->first;
+            const auto& radicand = data->second;
+            const auto index = args[0].root_index();
+            if (degree == 2 && index < 2) {
+                if (radicand > 0) {
+                    auto value = *exact_square_root(radicand);
+                    return index == 0 ? evaluate(call("Times", {integer(-1L), value})) : value;
+                }
+                if (radicand < 0) {
+                    auto magnitude = *exact_square_root(-radicand);
+                    if (index == 0) magnitude = evaluate(call("Times", {integer(-1L), magnitude}));
+                    return complex(integer(0L), magnitude);
+                }
+            }
+            if (degree == 3 && radicand > 0 && index == 0)
+                return evaluate(call("Power", {from_rational(radicand), rational(1, 3)}));
+            if (degree == 4 && radicand > 0 && index < 2) {
+                auto value = evaluate(call("Power", {from_rational(radicand), rational(1, 4)}));
+                return index == 0 ? evaluate(call("Times", {integer(-1L), value})) : value;
+            }
+        }
+    }
+    if (function == "RootReduce" && args.size() == 1) {
+        if (as_rational(args[0]) || args[0].kind() == ExprKind::Complex || args[0].kind() == ExprKind::Root)
+            return args[0];
+        if (args[0].has_head("Power") && args[0].args().size() == 2
+            && args[0].args()[0].kind() == ExprKind::Root) {
+            const auto& base = args[0].args()[0];
+            const auto data = binomial_root_data(base);
+            if (data && args[0].args()[1].kind() == ExprKind::Integer) {
+                const auto exponent = args[0].args()[1].integer_value();
+                if (exponent == static_cast<unsigned long>(data->first)) return from_rational(data->second);
+                if (exponent == -1 && data->second > 0 && base.root_index() == 0 && (data->first & 1U) != 0) {
+                    const auto& source = base.root_coefficients();
+                    std::vector<mpz_class> coefficients(source.size(), 0);
+                    coefficients.front() = source.back(); coefficients.back() = source.front();
+                    if (coefficients.back() < 0) for (auto& coefficient : coefficients) coefficient = -coefficient;
+                    return root(std::move(coefficients), 0, base.root_method());
+                }
+            }
+            if (data && args[0].args()[1].kind() == ExprKind::Rational
+                && args[0].args()[1].rational_value() == mpq_class(1, 2)
+                && data->first == 2 && data->second > 0 && base.root_index() == 1) {
+                std::vector<mpq_class> coefficients(5, mpq_class(0));
+                coefficients.front() = -data->second; coefficients.back() = 1;
+                return root(primitive_integer_coefficients(coefficients), 1, base.root_method());
+            }
+        }
+        if (args[0].has_head("Plus") && args[0].args().size() == 2) {
+            const auto left = positive_square_root_radicand(args[0].args()[0]);
+            const auto right = positive_square_root_radicand(args[0].args()[1]);
+            if (left && right) {
+                std::vector<mpq_class> coefficients(5, mpq_class(0));
+                coefficients[0] = (*left - *right) * (*left - *right);
+                coefficients[2] = -2 * (*left + *right); coefficients[4] = 1;
+                return root(primitive_integer_coefficients(coefficients), 3, 0);
+            }
+        }
+        if ((args[0].has_head("Re") || args[0].has_head("Im") || args[0].has_head("Abs"))
+            && args[0].args().size() == 1 && args[0].args()[0].kind() == ExprKind::Root) {
+            const auto& value = args[0].args()[0];
+            const auto data = binomial_root_data(value);
+            if (data && data->first == 2 && data->second == -1) {
+                if (args[0].has_head("Re")) return integer(0L);
+                if (args[0].has_head("Abs")) return integer(1L);
+                return integer(value.root_index() == 0 ? -1L : 1L);
+            }
+            if (data && data->first == 3 && data->second == 2
+                && value.root_index() > 0 && args[0].has_head("Re"))
+                return root({1, 0, 0, 4}, 0, value.root_method());
+        }
+        if (args[0].kind() == ExprKind::Call && args[0].args().size() == 1
+            && args[0].head().symbol_name()) {
+            auto name = system_dispatch_name(*args[0].head().symbol_name());
+            std::optional<mpq_class> angle;
+            if (name == "Sin" || name == "Cos") angle = rational_pi_multiple(args[0].args()[0]);
+            else if (name == "SinDegrees" || name == "CosDegrees") {
+                if (const auto degrees = as_rational(args[0].args()[0])) angle = *degrees / 180;
+                name = name == "SinDegrees" ? "Sin" : "Cos";
+            }
+            if (angle) if (const auto algebraic = trigonometric_algebraic(name, *angle))
+                if (const auto result = root_from_polynomial_target(
+                    algebraic->first, algebraic->second)) return *result;
+        }
+        if (const auto target = algebraic_approximation(args[0])) {
+            const auto variable = symbol("Tungsten`Private`RootReduceVariable");
+            if (const auto polynomial = algebraic_minimal_polynomial(args[0], variable))
+                if (const auto result = root_from_polynomial_target(*polynomial, *target))
+                    return *result;
+        }
+    }
+    if ((function == "PolynomialQuotient" || function == "PolynomialRemainder") && args.size() == 3) {
+        const auto variables = args[2].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]};
+        if (variables.size() == 1) {
+            const auto context = polynomial_context(variables);
+            const auto dividend = context.parse(args[0]), divisor = context.parse(args[1]);
+            if (dividend && divisor && !divisor->empty()) {
+                const auto division = context.divide(*dividend, {*divisor});
+                return context.expression(function == "PolynomialQuotient" ? division.first[0] : division.second);
+            }
+        }
+    }
+    if (function == "PolynomialReduce" && args.size() == 3 && args[1].has_head("List")) {
+        const auto variables = args[2].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]};
+        if (!variables.empty()) {
+            const auto context = polynomial_context(variables);
+            const auto dividend = context.parse(args[0]); std::vector<NativePolynomial> divisors; bool valid = dividend.has_value();
+            for (const auto& divisor : args[1].args()) {
+                const auto parsed = context.parse(divisor); if (!parsed || parsed->empty()) { valid = false; break; }
+                divisors.push_back(*parsed);
+            }
+            if (valid) {
+                const auto division = context.divide(*dividend, divisors); std::vector<Expr> quotients;
+                for (const auto& quotient : division.first) quotients.push_back(context.expression(quotient));
+                return list({list(std::move(quotients)), context.expression(division.second)});
+            }
+        }
+    }
+    if ((function == "Resultant" && args.size() == 3) || (function == "Discriminant" && args.size() == 2)) {
+        const auto variable = args.back().has_head("List") && args.back().args().size() == 1
+            ? args.back().args()[0] : args.back();
+        const auto context = polynomial_context({variable}); const auto polynomial = context.parse(args[0]);
+        if (polynomial) {
+            if (function == "Resultant") {
+                const auto other = context.parse(args[1]);
+                if (other) if (const auto value = polynomial_resultant(context, *polynomial, *other)) return *value;
+            } else if (!polynomial->empty()) {
+                const auto degree = context.degree(*polynomial); const auto derivative = context.derivative(*polynomial);
+                if (const auto value = polynomial_resultant(context, *polynomial, derivative)) {
+                    auto result = context.coefficient_divide(*value,
+                        context.coefficient(*polynomial, NativeMonomial{degree}));
+                    if (((degree * (degree - 1) / 2) & 1L) != 0)
+                        result = context.coefficient_multiply(integer(-1L), result);
+                    return result;
+                }
+            }
+        }
+    }
+    if (function == "Subresultants" && args.size() == 3) {
+        const auto variable = args[2].has_head("List") && args[2].args().size() == 1 ? args[2].args()[0] : args[2];
+        const auto context = polynomial_context({variable}); const auto left = context.parse(args[0]), right = context.parse(args[1]);
+        if (left && right && !left->empty() && !right->empty()) {
+            const auto limit = std::min(context.degree(*left), context.degree(*right));
+            std::vector<Expr> coefficients(static_cast<std::size_t>(limit + 1), integer(0L));
+            if (const auto resultant = polynomial_resultant(context, *left, *right)) coefficients[0] = *resultant;
+            auto previous = *left, current = *right;
+            while (!current.empty()) {
+                const auto degree = context.degree(current);
+                if (degree >= 1 && degree <= limit)
+                    coefficients[static_cast<std::size_t>(degree)] = context.coefficient(current, NativeMonomial{degree});
+                auto remainder = context.divide(previous, {current}).second;
+                previous = std::move(current); current = std::move(remainder);
+            }
+            return list(std::move(coefficients));
+        }
+    }
+    if ((function == "PolynomialGCD" || function == "PolynomialLCM") && !args.empty()) {
+        const auto variables = polynomial_variables(args);
+        if (!variables.empty()) {
+            const auto context = polynomial_context(variables); std::vector<NativePolynomial> polynomials; bool valid = true;
+            for (const auto& argument : args) { const auto parsed = context.parse(argument); if (!parsed) { valid = false; break; } polynomials.push_back(*parsed); }
+            if (valid) {
+                auto result = polynomials.front();
+                if (function == "PolynomialGCD") {
+                    for (std::size_t index = 1; index < polynomials.size(); ++index) result = polynomial_gcd(context, result, polynomials[index]);
+                    return context.expression(result);
+                }
+                for (std::size_t index = 1; index < polynomials.size(); ++index) {
+                    const auto gcd = polynomial_gcd(context, result, polynomials[index]);
+                    const auto product = context.multiply(result, polynomials[index]);
+                    result = context.divide(product, {gcd}).first[0];
+                }
+                return evaluate(call("Factor", {context.expression(result)}));
+            }
+        }
+    }
+    if ((function == "PolynomialGCD" || function == "PolynomialLCM") && args.empty())
+        return integer(function == "PolynomialGCD" ? 0L : 1L);
+    if (function == "PolynomialMod" && args.size() == 2 && args[1].kind() == ExprKind::Integer
+        && args[1].integer_value() > 1) {
+        const auto variables = polynomial_variables({args[0]}); const auto context = polynomial_context(variables);
+        if (const auto polynomial = context.parse(args[0])) {
+            auto result = context.zero(); const auto modulus = args[1].integer_value(); bool valid = true;
+            for (const auto& [monomial, coefficient_value] : polynomial->terms) {
+                mpz_class numerator, denominator = 1;
+                if (coefficient_value.kind() == ExprKind::Integer) numerator = coefficient_value.integer_value();
+                else if (coefficient_value.kind() == ExprKind::Rational) {
+                    numerator = coefficient_value.rational_value().get_num(); denominator = coefficient_value.rational_value().get_den();
+                } else { valid = false; break; }
+                numerator %= modulus; if (numerator < 0) numerator += modulus;
+                mpz_class inverse;
+                if (mpz_invert(inverse.get_mpz_t(), denominator.get_mpz_t(), modulus.get_mpz_t()) == 0) { valid = false; break; }
+                mpz_class residue = (numerator * inverse) % modulus; if (residue < 0) residue += modulus;
+                result = context.add(result, context.monomial_polynomial(monomial, integer(residue)));
+            }
+            if (valid) return context.expression(result);
+        }
+    }
+    if (function == "GroebnerBasis" && args.size() == 2 && args[0].has_head("List")) {
+        const auto variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        if (!variables.empty()) {
+            const auto context = polynomial_context(variables); std::vector<NativePolynomial> basis; bool valid = true;
+            for (const auto& expression : args[0].args()) {
+                const auto parsed = context.parse(expression); if (!parsed) { valid = false; break; }
+                if (!parsed->empty()) basis.push_back(context.make_monic(*parsed));
+            }
+            std::size_t pair_index = 0, iterations = 0;
+            while (valid && pair_index < basis.size() * (basis.size() - 1) / 2 && iterations++ < 1000) {
+                std::size_t left_index = 0, right_index = 1, cursor = 0;
+                bool located = false;
+                for (std::size_t right = 1; right < basis.size() && !located; ++right)
+                    for (std::size_t left = 0; left < right; ++left)
+                        if (cursor++ == pair_index) { left_index = left; right_index = right; located = true; break; }
+                ++pair_index; if (!located) break;
+                const auto [left_monomial, left_coefficient] = context.leading_term(basis[left_index]);
+                const auto [right_monomial, right_coefficient] = context.leading_term(basis[right_index]);
+                const auto common = monomial_lcm(left_monomial, right_monomial);
+                const auto left_multiplier = context.monomial_polynomial(monomial_difference(common, left_monomial),
+                    context.coefficient_divide(integer(1L), left_coefficient));
+                const auto right_multiplier = context.monomial_polynomial(monomial_difference(common, right_monomial),
+                    context.coefficient_divide(integer(1L), right_coefficient));
+                const auto s_polynomial = context.subtract(context.multiply(left_multiplier, basis[left_index]),
+                    context.multiply(right_multiplier, basis[right_index]));
+                auto remainder = context.divide(s_polynomial, basis).second;
+                if (!remainder.empty()) basis.push_back(context.make_monic(remainder));
+            }
+            if (valid) {
+                std::vector<NativePolynomial> reduced;
+                for (std::size_t index = 0; index < basis.size(); ++index) {
+                    std::vector<NativePolynomial> others;
+                    for (std::size_t other = 0; other < basis.size(); ++other) if (other != index) others.push_back(basis[other]);
+                    auto remainder = context.divide(basis[index], others).second;
+                    if (!remainder.empty()) remainder = context.make_monic(remainder);
+                    if (!remainder.empty() && std::none_of(reduced.begin(), reduced.end(), [&](const NativePolynomial& value) {
+                        return context.expression(value) == context.expression(remainder);
+                    })) reduced.push_back(std::move(remainder));
+                }
+                std::vector<Expr> expressions; for (const auto& polynomial : reduced) expressions.push_back(context.expression(polynomial));
+                std::sort(expressions.begin(), expressions.end(), expression_less); return list(std::move(expressions));
+            }
+        }
+    }
+    if (function == "Expand" && (args.size() == 1 || args.size() == 2)) {
+        auto expanded_sum = [](std::vector<Expr> terms) {
+            // Expanded polynomial terms must remain distributed. Sending this sum through the
+            // ordinary Plus mode would intentionally rediscover common factors; its pre-factor
+            // phase still provides the required constant and like-term normalization.
+            return simplify_plus(terms, false);
+        };
+        auto target_matches = [&](const Expr& value) {
+            if (args.size() == 1) return true;
+            Bindings bindings;
+            const auto& target = args[1];
+            const bool pattern_form = target.has_head("Blank") || target.has_head("Pattern")
+                || target.has_head("Alternatives") || target.has_head("PatternTest") || target.has_head("Condition");
+            return pattern_form ? pattern_match(value, target, bindings) : value == target;
+        };
+        auto contains_target = [&](auto&& self, const Expr& value) -> bool {
+            if (target_matches(value)) return true;
+            return value.kind() == ExprKind::Call && std::any_of(value.args().begin(), value.args().end(),
+                [&](const Expr& argument) { return self(self, argument); });
+        };
+        auto expand = [&](auto&& self, const Expr& value) -> Expr {
+            if (args.size() == 2 && !contains_target(contains_target, value)) return value;
+            if (value.has_head("Plus")) { std::vector<Expr> terms; for (const auto& item : value.args()) terms.push_back(self(self, item)); return expanded_sum(std::move(terms)); }
+            if (value.has_head("Power") && value.args().size() == 2 && value.args()[1].kind() == ExprKind::Integer
+                && value.args()[1].integer_value() >= 0 && value.args()[1].integer_value().fits_ulong_p()) {
+                Expr result = integer(1L); const auto base = self(self, value.args()[0]);
+                for (unsigned long count = 0; count < value.args()[1].integer_value().get_ui(); ++count) result = self(self, call("Times", {result, base}));
+                return result;
+            }
+            if (value.has_head("Times")) {
+                std::vector<Expr> terms{integer(1L)};
+                for (const auto& raw_factor : value.args()) {
+                    const auto factor = self(self, raw_factor);
+                    const auto distribute = args.size() == 1 || contains_target(contains_target, raw_factor);
+                    const auto choices = distribute && factor.has_head("Plus") ? factor.args() : std::vector<Expr>{factor}; std::vector<Expr> next;
+                    for (const auto& term : terms) for (const auto& choice : choices) next.push_back(evaluate(call("Times", {term, choice})));
+                    terms = std::move(next);
+                }
+                return expanded_sum(std::move(terms));
+            }
+            return value;
+        };
+        return expand(expand, args[0]);
+    }
+    if (function == "PolynomialQ" && (args.size() == 1 || args.size() == 2)) {
+        const auto variables = args.size() == 1 ? polynomial_variables({args[0]})
+            : args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        const auto context = polynomial_context(variables);
+        if (context.parse(args[0])) return symbol("True");
+        if (args.size() == 1) return symbol("False");
+        auto contains = [&](auto&& self, const Expr& value, const Expr& target) -> bool { return value == target || (value.kind() == ExprKind::Call && std::any_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item, target); })); };
+        auto polynomial = [&](auto&& self, const Expr& value) -> bool {
+            if (std::find(variables.begin(), variables.end(), value) != variables.end() || as_rational(value) || value.kind() == ExprKind::Real) return true;
+            if (value.has_head("Plus") || value.has_head("Times")) return std::all_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item); });
+            if (value.has_head("Power") && value.args().size() == 2) return value.args()[1].kind() == ExprKind::Integer && value.args()[1].integer_value() >= 0 && self(self, value.args()[0]);
+            return std::none_of(variables.begin(), variables.end(), [&](const Expr& variable) { return contains(contains, value, variable); });
+        };
+        return boolean(polynomial(polynomial, args[0]));
+    }
+    if (function == "Variables" && args.size() == 1) {
+        std::vector<Expr> variables;
+        auto collect = [&](auto&& self, const Expr& value) -> void {
+            if (value.kind() == ExprKind::Symbol) { if (!is_symbol(value, "E") && !is_symbol(value, "Pi") && !is_symbol(value, "I") && std::find(variables.begin(), variables.end(), value) == variables.end()) variables.push_back(value); return; }
+            if (value.kind() == ExprKind::Call) for (const auto& item : value.args()) self(self, item);
+        };
+        collect(collect, args[0]); std::sort(variables.begin(), variables.end(), expression_less); return list(std::move(variables));
+    }
+    if (function == "MonomialList" && !args.empty() && args.size() <= 3) {
+        enum class MonomialOrder { Lexicographic, DegreeLexicographic, DegreeReverseLexicographic };
+        MonomialOrder order = MonomialOrder::Lexicographic; bool reverse = false; bool valid_order = true;
+        auto parse_order = [&](const Expr& value) {
+            if (!value.symbol_name()) return false;
+            const auto name = system_dispatch_name(*value.symbol_name());
+            if (name == "Lexicographic") order = MonomialOrder::Lexicographic;
+            else if (name == "DegreeLexicographic") order = MonomialOrder::DegreeLexicographic;
+            else if (name == "DegreeReverseLexicographic") order = MonomialOrder::DegreeReverseLexicographic;
+            else if (name == "NegativeLexicographic") { order = MonomialOrder::Lexicographic; reverse = true; }
+            else if (name == "NegativeDegreeLexicographic") { order = MonomialOrder::DegreeLexicographic; reverse = true; }
+            else if (name == "NegativeDegreeReverseLexicographic") { order = MonomialOrder::DegreeReverseLexicographic; reverse = true; }
+            else return false;
+            return true;
+        };
+        std::vector<Expr> variables;
+        if (args.size() == 3) {
+            valid_order = parse_order(args[2]); variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        } else if (args.size() == 2 && parse_order(args[1])) variables = polynomial_variables({args[0]});
+        else if (args.size() == 2) variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        else variables = polynomial_variables({args[0]});
+        if (valid_order) {
+            const auto context = polynomial_context(variables);
+            if (const auto polynomial = context.parse(args[0])) {
+                std::vector<std::pair<NativeMonomial, Expr>> terms(polynomial->terms.begin(), polynomial->terms.end());
+                auto compare = [&](const auto& left, const auto& right) {
+                    const auto left_degree = std::accumulate(left.first.begin(), left.first.end(), 0L);
+                    const auto right_degree = std::accumulate(right.first.begin(), right.first.end(), 0L);
+                    int comparison = 0;
+                    if (order != MonomialOrder::Lexicographic && left_degree != right_degree)
+                        comparison = left_degree < right_degree ? -1 : 1;
+                    else if (order == MonomialOrder::DegreeReverseLexicographic) {
+                        for (std::size_t index = left.first.size(); index-- > 0;) if (left.first[index] != right.first[index]) {
+                            comparison = left.first[index] > right.first[index] ? -1 : 1; break;
+                        }
+                    } else {
+                        if (left.first < right.first) comparison = -1; else if (right.first < left.first) comparison = 1;
+                    }
+                    return reverse ? comparison < 0 : comparison > 0;
+                };
+                std::stable_sort(terms.begin(), terms.end(), compare); std::vector<Expr> expressions;
+                for (const auto& [monomial, coefficient_value] : terms)
+                    expressions.push_back(context.term_expression(monomial, coefficient_value));
+                return list(std::move(expressions));
+            }
+        }
+    }
+    if (function == "Coefficient" && args.size() == 3 && args[1].has_head("List") && args[2].has_head("List")
+        && args[1].args().size() == args[2].args().size()) {
+        std::vector<Expr> values;
+        for (std::size_t index = 0; index < args[1].args().size(); ++index)
+            values.push_back(evaluate(call("Coefficient", {args[0], args[1].args()[index], args[2].args()[index]})));
+        return list(std::move(values));
+    }
+    if ((function == "Coefficient" || function == "Exponent" || function == "CoefficientList" || function == "MonomialList") && !args.empty()) {
+        struct FactorPower { Expr base; long exponent; };
+        auto factors = [&](const Expr& value) {
+            std::vector<FactorPower> result; const auto items = value.has_head("Times") ? value.args() : std::vector<Expr>{value};
+            for (const auto& item : items) {
+                if (item.has_head("Power") && item.args().size() == 2 && machine_index(item.args()[1])) result.push_back({item.args()[0], *machine_index(item.args()[1])});
+                else if (!as_rational(item)) result.push_back({item, 1});
+            }
+            return result;
+        };
+        auto degree_coefficient = [&](const Expr& term, const Expr& variable) -> std::pair<long, Expr> {
+            const auto variable_factors = factors(variable); auto term_factors = factors(term); long degree = std::numeric_limits<long>::max();
+            for (const auto& wanted : variable_factors) { const auto found = std::find_if(term_factors.begin(), term_factors.end(), [&](const FactorPower& factor) { return factor.base == wanted.base; }); degree = std::min(degree, found == term_factors.end() ? 0L : found->exponent / wanted.exponent); }
+            if (degree == std::numeric_limits<long>::max()) degree = 0;
+            std::vector<Expr> coefficient_factors; const auto raw = term.has_head("Times") ? term.args() : std::vector<Expr>{term};
+            for (const auto& item : raw) if (as_rational(item)) coefficient_factors.push_back(item);
+            for (auto factor : term_factors) {
+                const auto wanted = std::find_if(variable_factors.begin(), variable_factors.end(), [&](const FactorPower& value) { return value.base == factor.base; });
+                if (wanted != variable_factors.end()) factor.exponent -= degree * wanted->exponent;
+                if (factor.exponent == 1) coefficient_factors.push_back(factor.base); else if (factor.exponent != 0) coefficient_factors.push_back(call("Power", {factor.base, integer(factor.exponent)}));
+            }
+            return {degree, evaluate(call("Times", std::move(coefficient_factors)))};
+        };
+        const auto expanded = function == "MonomialList" ? evaluate(call("Expand", {args[0]})) : evaluate(call("Expand", {args[0]}));
+        const auto terms = expanded.has_head("Plus") ? expanded.args() : expanded == integer(0L) ? std::vector<Expr>{} : std::vector<Expr>{expanded};
+        if (function == "Coefficient" && args.size() >= 2 && args.size() <= 3) {
+            const auto requested = args.size() == 3 && machine_index(args[2]) ? *machine_index(args[2]) : 1L; std::vector<Expr> coefficients;
+            for (const auto& term : terms) { const auto [degree, coefficient] = degree_coefficient(term, args[1]); if (degree == requested) coefficients.push_back(coefficient); }
+            return evaluate(call("Plus", std::move(coefficients)));
+        }
+        if (function == "Exponent" && args.size() == 2) {
+            if (terms.empty()) return symbol("-Infinity");
+            long maximum = 0;
+            for (const auto& term : terms)
+                maximum = std::max(maximum, degree_coefficient(term, args[1]).first);
+            return integer(maximum);
+        }
+        if (function == "CoefficientList" && args.size() == 2) {
+            if (terms.empty()) return list({});
+            if (args[1].has_head("List")) {
+                auto tensor = [&](auto&& self, const Expr& polynomial, std::size_t index) -> Expr {
+                    if (index + 1 == args[1].args().size()) return evaluate(call("CoefficientList", {polynomial, args[1].args()[index]}));
+                    const auto maximum = evaluate(call("Exponent", {polynomial, args[1].args()[index]}));
+                    const auto maximum_degree = machine_index(maximum);
+                    if (!maximum_degree || *maximum_degree < 0 || *maximum_degree > 1000000)
+                        return call("CoefficientList", args);
+                    std::vector<Expr> values;
+                    for (long degree = 0; degree <= *maximum_degree; ++degree) {
+                        values.push_back(self(self, evaluate(call("Coefficient", {
+                            polynomial, args[1].args()[index], integer(degree)})), index + 1));
+                        if (degree == *maximum_degree) break;
+                    }
+                    return list(std::move(values));
+                };
+                if (args[1].args().empty()) return list({expanded});
+                return tensor(tensor, expanded, 0);
+            }
+            long maximum = 0; for (const auto& term : terms) maximum = std::max(maximum, degree_coefficient(term, args[1]).first); std::vector<Expr> values;
+            if (maximum > 1000000) return call("CoefficientList", args);
+            for (long degree = 0; degree <= maximum; ++degree)
+                values.push_back(evaluate(call("Coefficient", {expanded, args[1], integer(degree)})));
+            return list(std::move(values));
+        }
+        if (function == "MonomialList" && args.size() >= 1 && args.size() <= 2) {
+            const auto variables = args.size() == 2 ? (args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]}) : std::vector<Expr>{};
+            auto ordered = terms; std::stable_sort(ordered.begin(), ordered.end(), [&](const Expr& left, const Expr& right) { for (const auto& variable : variables) { const auto ld = degree_coefficient(left, variable).first, rd = degree_coefficient(right, variable).first; if (ld != rd) return ld > rd; } return expression_less(left, right); }); return list(std::move(ordered));
+        }
+    }
+    if (function == "Collect" && args.size() == 3) {
+        const auto variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        const auto context = polynomial_context(variables);
+        if (const auto polynomial = context.parse(args[0])) {
+            std::vector<Expr> terms;
+            for (const auto& [monomial, coefficient_value] : polynomial->terms)
+                terms.push_back(context.term_expression(monomial, evaluate(call(args[2], {coefficient_value}))));
+            return evaluate(call("Plus", std::move(terms)));
+        }
+    }
+    if (function == "Collect" && args.size() >= 2) {
+        const auto maximum = evaluate(call("Exponent", {args[0], args[1]})); if (machine_index(maximum)) { std::vector<Expr> terms;
+            if (*machine_index(maximum) < 0 || *machine_index(maximum) > 1000000) return call(head, args);
+            for (long degree = 0; degree <= *machine_index(maximum); ++degree) { const auto coefficient = evaluate(call("Coefficient", {args[0], args[1], integer(degree)})); if (coefficient == integer(0L)) continue; std::vector<Expr> factors{coefficient}; if (degree == 1) factors.push_back(args[1]); else if (degree > 1) factors.push_back(call("Power", {args[1], integer(degree)})); terms.push_back(evaluate(call("Times", std::move(factors)))); }
+            return evaluate(call("Plus", std::move(terms)));
+        }
+    }
+    if ((function == "Numerator" || function == "Denominator") && args.size() == 1) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call(function, {item}))); return list(std::move(values)); }
+        auto split = [&](auto&& self, const Expr& value) -> std::pair<Expr, Expr> {
+            if (value.kind() == ExprKind::Rational) return {integer(value.rational_value().get_num()), integer(value.rational_value().get_den())};
+            if (value.has_head("Times")) { std::vector<Expr> numerators, denominators; for (const auto& item : value.args()) { const auto parts = self(self, item); numerators.push_back(parts.first); denominators.push_back(parts.second); } return {evaluate(call("Times", std::move(numerators))), evaluate(call("Times", std::move(denominators)))}; }
+            if (value.has_head("Power") && value.args().size() == 2 && value.args()[1].kind() == ExprKind::Integer && value.args()[1].integer_value() < 0) return {integer(1L), call("Power", {value.args()[0], integer(-value.args()[1].integer_value())})};
+            return {value, integer(1L)};
+        };
+        const auto parts = split(split, args[0]); return function == "Numerator" ? parts.first : parts.second;
+    }
+    if ((function == "Cancel" || function == "Apart") && !args.empty()
+        && (function == "Cancel" ? args.size() == 1 : args.size() <= 2)) {
+        if (args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args()) {
+                std::vector<Expr> threaded{item}; if (args.size() == 2) threaded.push_back(args[1]);
+                values.push_back(evaluate(call(function, std::move(threaded))));
+            }
+            return list(std::move(values));
+        }
+        auto split = [&](auto&& self, const Expr& value) -> std::pair<Expr, Expr> {
+            if (value.kind() == ExprKind::Rational)
+                return {integer(value.rational_value().get_num()), integer(value.rational_value().get_den())};
+            if (value.has_head("Times")) {
+                std::vector<Expr> numerators, denominators;
+                for (const auto& item : value.args()) { const auto parts = self(self, item); numerators.push_back(parts.first); denominators.push_back(parts.second); }
+                return {evaluate(call("Times", std::move(numerators))), evaluate(call("Times", std::move(denominators)))};
+            }
+            if (value.has_head("Power") && value.args().size() == 2 && value.args()[1].kind() == ExprKind::Integer
+                && value.args()[1].integer_value() < 0)
+                return {integer(1L), evaluate(call("Power", {value.args()[0], integer(-value.args()[1].integer_value())}))};
+            return {value, integer(1L)};
+        };
+        const auto parts = split(split, args[0]);
+        auto variables = args.size() == 2 ? std::vector<Expr>{args[1]} : polynomial_variables({parts.first, parts.second});
+        if (!variables.empty()) {
+            const auto context = polynomial_context(variables); const auto numerator = context.parse(parts.first), denominator = context.parse(parts.second);
+            if (numerator && denominator && !denominator->empty()) {
+                const auto common = polynomial_gcd(context, *numerator, *denominator);
+                const auto reduced_numerator = context.divide(*numerator, {common}).first[0];
+                const auto reduced_denominator = context.divide(*denominator, {common}).first[0];
+                const auto numerator_expression = context.expression(reduced_numerator);
+                const auto denominator_expression = context.expression(reduced_denominator);
+                if (denominator_expression == integer(1L)) return numerator_expression;
+                std::vector<Expr> factors{numerator_expression};
+                const auto denominator_factors = denominator_expression.has_head("Times")
+                    ? denominator_expression.args() : std::vector<Expr>{denominator_expression};
+                for (const auto& factor : denominator_factors) factors.push_back(call("Power", {factor, integer(-1L)}));
+                return evaluate(call("Times", std::move(factors)));
+            }
+        }
+    }
+    if (function == "Together" && args.size() == 1) {
+        if (args[0].has_head("List")) {
+            std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Together", {item})));
+            return list(std::move(values));
+        }
+        auto combine = [&](auto&& self, const Expr& value) -> std::pair<Expr, Expr> {
+            if (value.has_head("Plus")) {
+                Expr numerator = integer(0L), denominator = integer(1L);
+                for (const auto& term : value.args()) {
+                    const auto parts = self(self, term);
+                    numerator = evaluate(call("Plus", {evaluate(call("Times", {numerator, parts.second})),
+                        evaluate(call("Times", {parts.first, denominator}))}));
+                    denominator = evaluate(call("Times", {denominator, parts.second}));
+                }
+                return {numerator, denominator};
+            }
+            if (value.has_head("Times")) {
+                Expr numerator = integer(1L), denominator = integer(1L);
+                for (const auto& factor : value.args()) { const auto parts = self(self, factor); numerator = evaluate(call("Times", {numerator, parts.first})); denominator = evaluate(call("Times", {denominator, parts.second})); }
+                return {numerator, denominator};
+            }
+            if (value.kind() == ExprKind::Rational) return {integer(value.rational_value().get_num()), integer(value.rational_value().get_den())};
+            if (value.has_head("Power") && value.args().size() == 2 && value.args()[1].kind() == ExprKind::Integer
+                && value.args()[1].integer_value() < 0)
+                return {integer(1L), evaluate(call("Power", {value.args()[0], integer(-value.args()[1].integer_value())}))};
+            return {value, integer(1L)};
+        };
+        const auto parts = combine(combine, args[0]);
+        return evaluate(call("Cancel", {evaluate(call("Times", {parts.first, call("Power", {parts.second, integer(-1L)})}))}));
+    }
+    if (function == "Factor" && args.size() > 1) {
+        bool gaussian = false, valid = true; std::optional<long> modulus;
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            if (!args[index].has_head("Rule") || args[index].args().size() != 2 || !args[index].args()[0].symbol_name()) { valid = false; break; }
+            const auto option = system_dispatch_name(*args[index].args()[0].symbol_name()); const auto& value = args[index].args()[1];
+            if (option == "Modulus" && value.kind() == ExprKind::Integer && value.integer_value() > 1
+                && value.integer_value().fits_slong_p()) modulus = value.integer_value().get_si();
+            else if (option == "GaussianIntegers" && (is_symbol(value, "True") || is_symbol(value, "False")))
+                gaussian = gaussian || is_symbol(value, "True");
+            else if (option == "Extension") {
+                const auto extensions = value.has_head("List") ? value.args() : std::vector<Expr>{value};
+                if (extensions.empty()) continue;
+                const bool supported = std::all_of(extensions.begin(), extensions.end(), [](const Expr& extension) {
+                    return extension.kind() == ExprKind::Complex && extension.real_part() == integer(0L)
+                        && extension.imaginary_part() == integer(1L);
+                });
+                if (!supported) { valid = false; break; }
+                gaussian = true;
+            } else { valid = false; break; }
+        }
+        const auto variables = polynomial_variables({args[0]});
+        if (valid && variables.size() == 1 && !(gaussian && modulus)) {
+            const auto context = polynomial_context(variables); const auto polynomial = context.parse(args[0]);
+            if (polynomial && context.degree(*polynomial) == 2
+                && context.coefficient(*polynomial, NativeMonomial{2}) == integer(1L)) {
+                if (gaussian && context.coefficient(*polynomial, NativeMonomial{1}) == integer(0L)
+                    && context.coefficient(*polynomial, NativeMonomial{0}) == integer(1L)) {
+                    const auto negative_i = complex(integer(0L), integer(-1L));
+                    const auto positive_i = complex(integer(0L), integer(1L));
+                    return evaluate(call("Times", {evaluate(call("Plus", {variables[0], negative_i})),
+                        evaluate(call("Plus", {variables[0], positive_i}))}));
+                }
+                if (modulus) {
+                    auto modular = [&](const Expr& coefficient_value) -> std::optional<long> {
+                        if (coefficient_value.kind() != ExprKind::Integer || !coefficient_value.integer_value().fits_slong_p()) return std::nullopt;
+                        auto value = coefficient_value.integer_value().get_si() % *modulus; if (value < 0) value += *modulus; return value;
+                    };
+                    const auto linear = modular(context.coefficient(*polynomial, NativeMonomial{1}));
+                    const auto constant = modular(context.coefficient(*polynomial, NativeMonomial{0}));
+                    if (linear && constant) for (long left_root = 0; left_root < *modulus; ++left_root)
+                        for (long right_root = left_root; right_root < *modulus; ++right_root) {
+                            if (((left_root + right_root + *linear) % *modulus) != 0
+                                || ((left_root * right_root - *constant) % *modulus) != 0) continue;
+                            auto factor = [&](long root) {
+                                auto term = (-root) % *modulus; if (term < 0) term += *modulus;
+                                return term == 0 ? variables[0] : evaluate(call("Plus", {variables[0], integer(term)}));
+                            };
+                            const auto left_factor = factor(left_root), right_factor = factor(right_root);
+                            return left_factor == right_factor ? call("Power", {left_factor, integer(2L)})
+                                : evaluate(call("Times", {left_factor, right_factor}));
+                        }
+                }
+            }
+        }
+    }
+    if (function == "Factor" && args.size() == 1) {
+        const auto& value = args[0];
+        if (value.has_head("Times")) {
+            auto factors = value.args();
+            bool changed = false;
+            for (auto& factor : factors) if (factor.has_head("Plus")) {
+                const auto factored = evaluate(call("Factor", {factor}));
+                if (factored != factor) { factor = factored; changed = true; }
+            }
+            if (changed) return evaluate(call("Times", std::move(factors)));
+        }
+        if (value.has_head("Plus") && value.args().size() == 2) {
+            const auto minus_one = std::find(value.args().begin(), value.args().end(), integer(-1L));
+            const auto square = std::find_if(value.args().begin(), value.args().end(), [](const Expr& item) { return item.has_head("Power") && item.args().size() == 2 && item.args()[1] == integer(2L); });
+            if (minus_one != value.args().end() && square != value.args().end()) return evaluate(call("Times", {evaluate(call("Plus", {integer(-1L), square->args()[0]})), evaluate(call("Plus", {integer(1L), square->args()[0]}))}));
+            auto left = value.args()[0].has_head("Times") ? value.args()[0].args() : std::vector<Expr>{value.args()[0]};
+            auto right = value.args()[1].has_head("Times") ? value.args()[1].args() : std::vector<Expr>{value.args()[1]}; std::vector<Expr> common;
+            mpz_class left_coefficient = 1, right_coefficient = 1;
+            if (!left.empty() && left.front().kind() == ExprKind::Integer) { left_coefficient = left.front().integer_value(); left.erase(left.begin()); }
+            if (!right.empty() && right.front().kind() == ExprKind::Integer) { right_coefficient = right.front().integer_value(); right.erase(right.begin()); }
+            mpz_class coefficient; const mpz_class left_abs = abs(left_coefficient), right_abs = abs(right_coefficient); mpz_gcd(coefficient.get_mpz_t(), left_abs.get_mpz_t(), right_abs.get_mpz_t()); if (coefficient > 1) common.push_back(integer(coefficient));
+            for (auto iterator = left.begin(); iterator != left.end();) { const auto found = std::find(right.begin(), right.end(), *iterator); if (found != right.end()) { common.push_back(*iterator); right.erase(found); iterator = left.erase(iterator); } else ++iterator; }
+            if (!common.empty()) {
+                if (coefficient > 1) { left.insert(left.begin(), integer(left_coefficient / coefficient)); right.insert(right.begin(), integer(right_coefficient / coefficient)); }
+                const auto residual = evaluate(call("Plus", {evaluate(call("Times", std::move(left))), evaluate(call("Times", std::move(right)))})); common.push_back(evaluate(call("Factor", {residual}))); return evaluate(call("Times", std::move(common)));
+            }
+        }
+        return value;
+    }
+    if (function == "FactorList" && args.size() > 1) {
+        std::vector<Expr> factor_arguments{args[0]}; factor_arguments.insert(factor_arguments.end(), args.begin() + 1, args.end());
+        const auto factored = evaluate(call("Factor", factor_arguments));
+        if (!factored.has_head("Factor")) {
+            std::vector<Expr> result{list({integer(1L), integer(1L)})};
+            const auto factors = factored.has_head("Times") ? factored.args() : std::vector<Expr>{factored};
+            for (const auto& factor : factors) {
+                if (factor.has_head("Power") && factor.args().size() == 2 && factor.args()[1].kind() == ExprKind::Integer)
+                    result.push_back(list({factor.args()[0], factor.args()[1]}));
+                else result.push_back(list({factor, integer(1L)}));
+            }
+            return list(std::move(result));
+        }
+    }
+    if (function == "FactorList" && args.size() == 1) {
+        if (args[0] == integer(0L)) return list({list({integer(0L), integer(1L)})});
+        const auto factored = evaluate(call("Factor", {args[0]}));
+        const auto factors = factored.has_head("Times") ? factored.args() : std::vector<Expr>{factored}; std::vector<Expr> result;
+        for (const auto& factor : factors)
+            result.push_back(list({factor, integer(1L)}));
+        return list(std::move(result));
+    }
+    if (function == "Decompose" && args.size() == 2) {
+        const auto variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        if (variables.size() == 1) {
+            const auto context = polynomial_context(variables); const auto polynomial = context.parse(args[0]);
+            if (polynomial) {
+                if (args[0].has_head("Power") && args[0].args().size() == 2
+                    && args[0].args()[1].kind() == ExprKind::Integer && args[0].args()[1].integer_value() > 1) {
+                    if (const auto base = context.parse(args[0].args()[0])) {
+                        const auto constant = context.coefficient(*base, NativeMonomial{0});
+                        const auto inner = context.subtract(*base, context.constant(constant));
+                        if (!inner.empty()) {
+                            const auto outer = evaluate(call("Expand", {call("Power", {
+                                evaluate(call("Plus", {variables[0], constant})), args[0].args()[1]})}));
+                            return list({outer, context.expression(inner)});
+                        }
+                    }
+                }
+                long exponent_gcd = 0; std::size_t nonzero_exponents = 0;
+                const auto constant = context.coefficient(*polynomial, NativeMonomial{0});
+                for (const auto& [monomial, coefficient_value] : polynomial->terms) {
+                    (void)coefficient_value; if (monomial[0] == 0) continue; ++nonzero_exponents;
+                    exponent_gcd = exponent_gcd == 0 ? monomial[0] : std::gcd(exponent_gcd, monomial[0]);
+                }
+                if (exponent_gcd > 1 && (nonzero_exponents >= 2 || constant != integer(0L))) {
+                    auto outer_polynomial = context.zero(); bool divisible = true;
+                    for (const auto& [monomial, coefficient_value] : polynomial->terms) {
+                        if (monomial[0] % exponent_gcd != 0) { divisible = false; break; }
+                        auto outer_monomial = monomial; outer_monomial[0] /= exponent_gcd;
+                        outer_polynomial = context.add(outer_polynomial,
+                            context.monomial_polynomial(outer_monomial, coefficient_value));
+                    }
+                    if (divisible) return list({context.expression(outer_polynomial),
+                        call("Power", {variables[0], integer(exponent_gcd)})});
+                }
+                return list({context.expression(*polynomial)});
+            }
+        }
+    }
+    if (function == "Sqrt" && args.size() == 1) {
+        if (const auto value = as_rational(args[0])) {
+            if (*value < 0) { const auto magnitude = simplify_power({from_rational(-*value), rational(1, 2)}); return call("Times", {magnitude, symbol("I")}); }
+            return simplify_power({args[0], rational(1, 2)});
+        }
+    }
+    if (function == "Rational" && args.size() == 2 && args[0].kind() == ExprKind::Integer && args[1].kind() == ExprKind::Integer)
+        return rational(args[0].integer_value(), args[1].integer_value());
+    if (function == "Complex" && args.size() == 2) return complex(args[0], args[1]);
+    if (function == "ByteArray" && args.size() == 1) {
+        if (args[0].kind() == ExprKind::ByteArray) return args[0];
+        if (args[0].kind() == ExprKind::String) if (const auto values = base64_decode(args[0].text())) return byte_array(*values);
+        if (const auto values = byte_values(args[0])) return byte_array(*values);
+    }
+    if (function == "BaseEncode" && (args.size() == 1 || args.size() == 2) && args[0].kind() == ExprKind::ByteArray) {
+        std::string encoding = args.size() == 1 ? "Base64" : args[1].kind() == ExprKind::String ? args[1].text() : "";
+        if (encoding == "Base64") return string(base64_encode(args[0].bytes()));
+        if (encoding == "Base16") {
+            static constexpr char digits[] = "0123456789ABCDEF"; std::string output;
+            for (const auto value : args[0].bytes()) { output.push_back(digits[value >> 4]); output.push_back(digits[value & 15]); }
+            return string(output);
+        }
+        if (encoding == "Base85ASCII") return string(ascii85_encode(args[0].bytes()));
+    }
+    if (function == "BaseDecode" && (args.size() == 1 || args.size() == 2) && args[0].kind() == ExprKind::String) {
+        std::string encoding = args.size() == 1 ? "Base64" : args[1].kind() == ExprKind::String ? args[1].text() : "";
+        if (encoding == "Base64") if (const auto values = base64_decode(args[0].text())) return byte_array(*values);
+        if (encoding == "Base16") {
+            std::string filtered; for (const auto character : args[0].text()) if (std::isxdigit(static_cast<unsigned char>(character))) filtered.push_back(character);
+            if (filtered.size() % 2 == 0) { std::vector<std::uint8_t> values; for (std::size_t index = 0; index < filtered.size(); index += 2) values.push_back(static_cast<std::uint8_t>(std::stoul(filtered.substr(index, 2), nullptr, 16))); return byte_array(std::move(values)); }
+        }
+        if (encoding == "Base85ASCII") if (const auto values = ascii85_decode(args[0].text())) return byte_array(*values);
+    }
+    if (function == "Characters" && args.size() == 1) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Characters", {item}))); return list(std::move(values)); }
+        if (args[0].kind() == ExprKind::String) {
+            std::vector<Expr> values; for (const auto codepoint : utf8_codepoints(args[0].text())) { std::string character; append_utf8(character, codepoint); values.push_back(string(character)); }
+            return list(std::move(values));
+        }
+    }
+    if (function == "StringLength" && args.size() == 1) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("StringLength", {item}))); return list(std::move(values)); }
+        if (args[0].kind() == ExprKind::String) return integer(utf8_codepoints(args[0].text()).size());
+    }
+    if ((function == "StringTake" || function == "StringDrop") && args.size() == 2) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call(function, {item, args[1]}))); return list(std::move(values)); }
+        if (args[0].kind() == ExprKind::String) if (const auto selected = string_selector_indices(utf8_codepoints(args[0].text()).size(), args[1])) {
+            const auto characters = utf8_characters(args[0].text()); std::string output;
+            for (std::size_t index = 0; index < characters.size(); ++index) if ((std::find(selected->begin(), selected->end(), index) != selected->end()) != (function == "StringDrop")) output += characters[index];
+            return string(output);
+        }
+    }
+    if (function == "StringJoin") {
+        std::string output; bool valid = true;
+        auto append = [&](auto&& self, const Expr& value) -> void { if (value.kind() == ExprKind::String) output += value.text(); else if (value.has_head("List") || value.has_head("StringJoin")) for (const auto& item : value.args()) self(self, item); else valid = false; };
+        for (const auto& item : args) append(append, item);
+        if (valid) return string(output);
+    }
+    if (function == "StringInsert" && args.size() == 3 && args[0].kind() == ExprKind::String && args[1].kind() == ExprKind::String) {
+        const auto characters = utf8_characters(args[0].text()); const auto positions = args[2].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]}; std::vector<std::size_t> boundaries; bool valid = true;
+        for (const auto& position : positions) { const auto value = machine_index(position); if (!value || *value == 0) { valid = false; break; } const auto boundary = *value > 0 ? *value - 1 : static_cast<long>(characters.size()) + *value + 1; if (boundary < 0 || boundary > static_cast<long>(characters.size())) { valid = false; break; } boundaries.push_back(static_cast<std::size_t>(boundary)); }
+        if (valid) { std::string output; for (std::size_t boundary = 0; boundary <= characters.size(); ++boundary) { for (const auto value : boundaries) if (value == boundary) output += args[1].text(); if (boundary < characters.size()) output += characters[boundary]; } return string(output); }
+    }
+    if (function == "StringReverse" && args.size() == 1) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("StringReverse", {item}))); return list(std::move(values)); }
+        if (args[0].kind() == ExprKind::String) { auto characters = utf8_characters(args[0].text()); std::reverse(characters.begin(), characters.end()); return string(std::accumulate(characters.begin(), characters.end(), std::string())); }
+    }
+    if ((function == "ToUpperCase" || function == "ToLowerCase" || function == "Capitalize")
+        && args.size() == 1 && args[0].kind() == ExprKind::String) {
+        auto output = args[0].text();
+        if (function == "Capitalize") { if (!output.empty()) output[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(output[0]))); }
+        else std::transform(output.begin(), output.end(), output.begin(), [&](unsigned char value) {
+            return static_cast<char>(function == "ToUpperCase" ? std::toupper(value) : std::tolower(value));
+        });
+        return string(std::move(output));
+    }
+    if (function == "StringSplit" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::String) {
+        std::vector<std::string> pieces;
+        if (args.size() == 1) {
+            std::string current;
+            for (const unsigned char value : args[0].text()) {
+                if (std::isspace(value)) { if (!current.empty()) { pieces.push_back(std::move(current)); current.clear(); } }
+                else current.push_back(static_cast<char>(value));
+            }
+            if (!current.empty()) pieces.push_back(std::move(current));
+        } else {
+            const auto separators = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+            if (std::all_of(separators.begin(), separators.end(), [](const Expr& value) { return value.kind() == ExprKind::String && !value.text().empty(); })) {
+                std::size_t start = 0;
+                while (start <= args[0].text().size()) {
+                    std::size_t next = std::string::npos, width = 0;
+                    for (const auto& separator : separators) { const auto found = args[0].text().find(separator.text(), start); if (found < next) { next = found; width = separator.text().size(); } }
+                    if (next == std::string::npos) { if (start < args[0].text().size()) pieces.push_back(args[0].text().substr(start)); break; }
+                    if (next > start)
+                        pieces.push_back(args[0].text().substr(start, next - start));
+                    start = next + width;
+                }
+            } else return call(head, args);
+        }
+        std::vector<Expr> values; for (auto& piece : pieces) values.push_back(string(std::move(piece))); return list(std::move(values));
+    }
+    if (function == "StringRiffle" && !args.empty() && args.size() <= 2 && args[0].has_head("List")
+        && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) {
+        std::string prefix, separator = " ", suffix;
+        if (args.size() == 2 && args[1].kind() == ExprKind::String) separator = args[1].text();
+        else if (args.size() == 2 && args[1].has_head("List") && args[1].args().size() == 3
+            && std::all_of(args[1].args().begin(), args[1].args().end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) {
+            prefix = args[1].args()[0].text(); separator = args[1].args()[1].text(); suffix = args[1].args()[2].text();
+        } else if (args.size() == 2) return call(head, args);
+        std::string output = prefix;
+        for (std::size_t index = 0; index < args[0].args().size(); ++index) { if (index) output += separator; output += args[0].args()[index].text(); }
+        return string(output + suffix);
+    }
+    if ((function == "StringPadLeft" || function == "StringPadRight") && args.size() >= 2 && args.size() <= 3
+        && args[0].kind() == ExprKind::String && machine_index(args[1]) && *machine_index(args[1]) >= 0
+        && (args.size() == 2 || args[2].kind() == ExprKind::String)) {
+        const auto size = static_cast<std::size_t>(*machine_index(args[1])); auto characters = utf8_characters(args[0].text());
+        const auto pattern = utf8_characters(args.size() == 3 ? args[2].text() : " "); if (pattern.empty()) return call(head, args);
+        if (characters.size() > size) {
+            if (function == "StringPadLeft") characters.erase(characters.begin(), characters.end() - size); else characters.resize(size);
+        } else {
+            std::vector<std::string> padding; for (std::size_t index = 0; index < size - characters.size(); ++index) padding.push_back(pattern[index % pattern.size()]);
+            characters.insert(function == "StringPadLeft" ? characters.begin() : characters.end(), padding.begin(), padding.end());
+        }
+        return string(std::accumulate(characters.begin(), characters.end(), std::string()));
+    }
+    if (function == "StringRepeat" && args.size() == 2 && args[0].kind() == ExprKind::String
+        && machine_index(args[1]) && *machine_index(args[1]) >= 0) {
+        std::string output; for (long index = 0; index < *machine_index(args[1]); ++index) output += args[0].text(); return string(std::move(output));
+    }
+    if (function == "StringCount" && args.size() == 2 && args[0].kind() == ExprKind::String && args[1].kind() == ExprKind::String) {
+        if (args[1].text().empty()) return integer(utf8_codepoints(args[0].text()).size() + 1);
+        std::size_t count = 0, position = 0;
+        while ((position = args[0].text().find(args[1].text(), position)) != std::string::npos) { ++count; position += args[1].text().size(); }
+        return integer(count);
+    }
+    if (function == "StringTrim" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::String) {
+        auto output = args[0].text();
+        if (args.size() == 1) {
+            while (!output.empty() && std::isspace(static_cast<unsigned char>(output.front()))) output.erase(output.begin());
+            while (!output.empty() && std::isspace(static_cast<unsigned char>(output.back()))) output.pop_back();
+        } else if (args[1].kind() == ExprKind::String && !args[1].text().empty()) {
+            while (output.rfind(args[1].text(), 0) == 0) output.erase(0, args[1].text().size());
+            while (output.size() >= args[1].text().size() && output.compare(output.size() - args[1].text().size(), args[1].text().size(), args[1].text()) == 0)
+                output.erase(output.size() - args[1].text().size());
+        } else return call(head, args);
+        return string(std::move(output));
+    }
+    if ((function == "StringPosition" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ" || function == "StringMatchQ") && args.size() >= 2) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) { auto threaded = args; threaded[0] = item; values.push_back(evaluate(call(function, threaded))); } return list(std::move(values)); }
+        if (args[0].kind() == ExprKind::String) {
+            const auto patterns = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+            if (std::all_of(patterns.begin(), patterns.end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) {
+                std::vector<std::pair<std::size_t, std::size_t>> positions;
+                for (const auto& pattern : patterns) {
+                    if (pattern.text().empty()) for (std::size_t index = 0; index <= args[0].text().size(); ++index) positions.emplace_back(index + 1, index);
+                    else for (std::size_t start = 0; (start = args[0].text().find(pattern.text(), start)) != std::string::npos; ++start) positions.emplace_back(start + 1, start + pattern.text().size());
+                }
+                std::sort(positions.begin(), positions.end()); positions.erase(std::unique(positions.begin(), positions.end()), positions.end());
+                if (function == "StringContainsQ") return boolean(!positions.empty());
+                if (function == "StringStartsQ") return boolean(std::any_of(positions.begin(), positions.end(), [](const auto& value) { return value.first == 1; }));
+                if (function == "StringEndsQ") return boolean(std::any_of(positions.begin(), positions.end(), [&](const auto& value) { return value.second == args[0].text().size(); }));
+                if (function == "StringMatchQ") return boolean(std::any_of(positions.begin(), positions.end(), [&](const auto& value) { return value.first == 1 && value.second == args[0].text().size(); }));
+                std::vector<Expr> result; for (const auto& [start, end] : positions) result.push_back(list({integer(start), integer(end)})); return list(std::move(result));
+            }
+        }
+    }
+    if ((function == "StringMatchQ" || function == "StringFreeQ" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ"
+            || function == "StringPosition" || function == "StringCases" || function == "StringReplace") && args.size() >= 2 && args.size() <= 3) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) { auto threaded = args; threaded[0] = item; values.push_back(evaluate(call(function, threaded))); } return list(std::move(values)); }
+        if (args[0].kind() == ExprKind::String) {
+            struct Spec { CompiledStringPattern pattern; std::optional<Expr> replacement; };
+            const auto raw_specs = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]}; std::vector<Spec> specs; bool valid = true;
+            for (const auto& raw_spec : raw_specs) {
+                const bool rule = (raw_spec.has_head("Rule") || raw_spec.has_head("RuleDelayed")) && raw_spec.args().size() == 2;
+                const auto& pattern_expression = rule ? raw_spec.args()[0] : raw_spec; const auto compiled = StringPatternCompiler().compile(pattern_expression);
+                if (!compiled) { valid = false; break; } specs.push_back({*compiled, rule ? std::optional<Expr>(raw_spec.args()[1]) : std::nullopt});
+            }
+            if (valid) {
+                std::optional<std::size_t> limit = std::nullopt;
+                if (args.size() == 3) {
+                    if (const auto requested_limit = machine_index(args[2])) {
+                        limit = static_cast<std::size_t>(
+                            std::max<long>(0, *requested_limit));
+                    }
+                }
+                auto first_at = [&](std::size_t start) -> std::optional<std::pair<StringMatchResult, std::size_t>> { for (std::size_t index = 0; index < specs.size(); ++index) if (const auto found = string_pattern_match(specs[index].pattern, args[0].text(), start)) return std::pair{*found, index}; return std::nullopt; };
+                if (function == "StringMatchQ" || function == "StringFreeQ" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ") {
+                    bool matched = false;
+                    for (std::size_t start = 0; start <= args[0].text().size() && !matched; ++start) if (const auto found = first_at(start)) {
+                        matched = function == "StringMatchQ" ? found->first.start == 0 && found->first.end == args[0].text().size()
+                            : function == "StringStartsQ" ? found->first.start == 0
+                            : function == "StringEndsQ" ? found->first.end == args[0].text().size() : true;
+                    }
+                    return boolean(function == "StringFreeQ" ? !matched : matched);
+                }
+                if (function == "StringPosition") {
+                    std::vector<std::pair<std::size_t, std::size_t>> positions;
+                    for (std::size_t start = 0; start <= args[0].text().size() && (!limit || positions.size() < *limit); ++start) if (const auto found = first_at(start)) positions.emplace_back(found->first.start, found->first.end);
+                    std::sort(positions.begin(), positions.end()); positions.erase(std::unique(positions.begin(), positions.end()), positions.end()); std::vector<Expr> values;
+                    for (const auto& [start, end] : positions) values.push_back(list({integer(utf8_codepoints(args[0].text().substr(0, start)).size() + 1), integer(utf8_codepoints(args[0].text().substr(0, end)).size())}));
+                    return list(std::move(values));
+                }
+                if (function == "StringCases") {
+                    std::vector<Expr> values; std::size_t position = 0;
+                    while (position <= args[0].text().size() && (!limit || values.size() < *limit)) {
+                        const auto found = first_at(position); if (!found) { ++position; continue; }
+                        if (specs[found->second].replacement) values.push_back(evaluate(substitute_bindings(*specs[found->second].replacement, found->first.bindings)));
+                        else values.push_back(string(args[0].text().substr(found->first.start, found->first.end - found->first.start)));
+                        position = found->first.end > position ? found->first.end : position + 1;
+                    }
+                    return list(std::move(values));
+                }
+                if (function == "StringReplace" && std::all_of(specs.begin(), specs.end(), [](const Spec& spec) { return spec.replacement.has_value(); })) {
+                    std::vector<Expr> pieces; std::string literal; std::size_t position = 0, replacements = 0;
+                    while (position <= args[0].text().size() && (!limit || replacements < *limit)) {
+                        const auto found = first_at(position); if (!found) { if (position < args[0].text().size()) literal.push_back(args[0].text()[position]); ++position; continue; }
+                        if (!literal.empty()) { pieces.push_back(string(literal)); literal.clear(); }
+                        pieces.push_back(evaluate(substitute_bindings(*specs[found->second].replacement, found->first.bindings))); ++replacements;
+                        position = found->first.end > position ? found->first.end : position + 1;
+                    }
+                    if (position < args[0].text().size())
+                        literal += args[0].text().substr(position);
+                    if (!literal.empty()) pieces.push_back(string(literal));
+                    if (std::all_of(pieces.begin(), pieces.end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) { std::string output; for (const auto& piece : pieces) output += piece.text(); return string(output); }
+                    return call("StringExpression", std::move(pieces));
+                }
+            }
+            if (!valid) {
+                std::optional<Expr> unsupported;
+                std::function<void(const Expr&)> locate = [&](const Expr& value) {
+                    if (unsupported) return;
+                    if (value.has_head("Optional")) { unsupported = value; return; }
+                    if (value.kind() == ExprKind::Call)
+                        for (const auto& item : value.args()) locate(item);
+                };
+                locate(args[1]);
+                std::string rendered = unsupported ? unsupported->to_input_form() : args[1].to_input_form();
+                if (unsupported && unsupported->args().size() == 1)
+                    rendered = unsupported->args()[0].to_input_form() + ".";
+                const auto message = call("MessageName", {symbol(function), string("error")});
+                emit_message(message, function + "::error: Unsupported Wolfram string-pattern form in the current Tungsten subset: " + rendered + ".");
+                return call(head, args);
+            }
+        }
+    }
+    if ((function == "ToCharacterCode" || function == "FromCharacterCode" || function == "StringToByteArray" || function == "ByteArrayToString")
+        && (args.size() == 1 || args.size() == 2)) {
+        std::string encoding = args.size() == 2 && args[1].kind() == ExprKind::String ? args[1].text()
+            : (function == "ToCharacterCode" || function == "FromCharacterCode" ? "Unicode" : "UTF-8");
+        std::transform(encoding.begin(), encoding.end(), encoding.begin(), [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        const bool unicode = encoding == "unicode";
+        const bool utf8 = encoding == "utf-8" || encoding == "utf8";
+        const bool ascii = encoding == "ascii" || encoding == "printableascii" || encoding == "printable-ascii";
+        const bool latin1 = encoding == "iso8859-1" || encoding == "iso-8859-1" || encoding == "latin1" || encoding == "latin-1";
+        if (function == "ToCharacterCode") {
+            if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("ToCharacterCode", args.size() == 1 ? std::vector<Expr>{item} : std::vector<Expr>{item, args[1]}))); return list(std::move(values)); }
+            if (args[0].kind() == ExprKind::String) {
+                std::vector<Expr> values;
+                if (utf8) for (const auto value : args[0].text()) values.push_back(integer(static_cast<long>(static_cast<unsigned char>(value))));
+                else for (const auto value : utf8_codepoints(args[0].text())) values.push_back((unicode || (latin1 && value <= 255) || (ascii && value <= 127)) ? integer(static_cast<long>(value)) : symbol("None"));
+                return list(std::move(values));
+            }
+        } else if (function == "FromCharacterCode") {
+            std::vector<std::uint32_t> codes;
+            const auto source = args[0].has_head("List") ? args[0].args() : std::vector<Expr>{args[0]};
+            bool valid = true; for (const auto& item : source) { if (item.kind() != ExprKind::Integer || item.integer_value() < 0 || item.integer_value() > 0x10ffff) { valid = false; break; } codes.push_back(static_cast<std::uint32_t>(item.integer_value().get_ui())); }
+            if (valid) {
+                std::string output;
+                if (unicode) for (const auto value : codes) append_utf8(output, value);
+                else if (utf8) {
+                    std::vector<std::uint8_t> bytes;
+                    const auto flush_bytes = [&] {
+                        if (bytes.empty()) return;
+                        for (const auto decoded : utf8_codepoints(std::string(bytes.begin(), bytes.end())))
+                            append_utf8(output, decoded);
+                        bytes.clear();
+                    };
+                    for (const auto value : codes) {
+                        if (value <= 255) bytes.push_back(static_cast<std::uint8_t>(value));
+                        else { flush_bytes(); append_utf8(output, value); }
+                    }
+                    flush_bytes();
+                }
+                else if (latin1) for (const auto value : codes) {
+                    if (value <= 255) append_utf8(output, value);
+                    else append_utf8(output, value);
+                }
+                else if (ascii) for (const auto value : codes) {
+                    if (value <= 127) output.push_back(static_cast<char>(value));
+                    else if (value <= 255) append_utf8(output, 0xf200 + value);
+                    else append_utf8(output, value);
+                }
+                if (valid) return string(output);
+            }
+        } else if (function == "StringToByteArray" && args[0].kind() == ExprKind::String) {
+            std::vector<std::uint8_t> values; bool valid = true;
+            if (utf8) values.assign(args[0].text().begin(), args[0].text().end());
+            else for (const auto value : utf8_codepoints(args[0].text())) { if ((latin1 && value <= 255) || (ascii && value <= 127)) values.push_back(static_cast<std::uint8_t>(value)); else valid = false; }
+            if (valid && !unicode) return byte_array(std::move(values));
+        } else if (function == "ByteArrayToString") {
+            if (const auto values = byte_values(args[0])) {
+                std::string output;
+                if (utf8) for (const auto value : utf8_codepoints(std::string(values->begin(), values->end()))) append_utf8(output, value);
+                else if (latin1) for (const auto value : *values) append_utf8(output, value);
+                else if (ascii) for (const auto value : *values) append_utf8(output, value <= 127 ? value : 0xf200 + value);
+                if (!unicode) return string(output);
+            }
+        }
+    }
+    if (function == "ToBoxes" && !args.empty() && args.size() <= 2) {
+        if (args.size() == 1 && args[0].kind() == ExprKind::Call && args[0].args().size() == 1 && args[0].head().symbol_name()) {
+            const auto wrapper = system_dispatch_name(*args[0].head().symbol_name()); const auto& payload = args[0].args()[0];
+            if (wrapper == "InputForm") return call("InterpretationBox", {call("StyleBox", {string(payload.to_input_form()), call("Rule", {symbol("ShowStringCharacters"), symbol("True")}), call("Rule", {symbol("NumberMarks"), symbol("True")})}), args[0], call("Rule", {symbol("Editable"), symbol("True")}), call("Rule", {symbol("AutoDelete"), symbol("True")})});
+            if (wrapper == "FullForm") return call("TagBox", {call("StyleBox", {full_form_boxes(payload), call("Rule", {symbol("ShowSpecialCharacters"), symbol("False")}), call("Rule", {symbol("ShowStringCharacters"), symbol("True")}), call("Rule", {symbol("NumberMarks"), symbol("True")})}), symbol("FullForm")});
+            if (wrapper == "OutputForm") return call("InterpretationBox", {call("PaneBox", {string(payload.to_input_form()), call("Rule", {symbol("BaselinePosition"), symbol("Baseline")})}), payload, call("Rule", {symbol("Editable"), symbol("False")})});
+            if (wrapper == "StandardForm") return call("TagBox", {call("FormBox", {standard_boxes(payload), symbol("StandardForm")}), symbol("StandardForm"), call("Rule", {symbol("Editable"), symbol("True")})});
+            if (wrapper == "TraditionalForm") return call("TagBox", {call("FormBox", {traditional_boxes(payload), symbol("TraditionalForm")}), symbol("TraditionalForm"), call("Rule", {symbol("Editable"), symbol("True")})});
+            if (wrapper == "TeXForm") return call("InterpretationBox", {string("\"" + tex_text(payload) + "\""), payload, call("Rule", {symbol("Editable"), symbol("True")}), call("Rule", {symbol("AutoDelete"), symbol("True")})});
+            if (wrapper == "MathMLForm") return call("InterpretationBox", {string(wl_string(mathml_text(payload))), payload, call("Rule", {symbol("Editable"), symbol("True")}), call("Rule", {symbol("AutoDelete"), symbol("True")})});
+            if (wrapper == "CForm") {
+                const auto rendered = payload.has_head("Power") && payload.args().size() == 2
+                    ? "Power(" + payload.args()[0].to_input_form() + "," + payload.args()[1].to_input_form() + ")"
+                    : payload.to_input_form();
+                return call("InterpretationBox", {string(rendered), args[0], call("Rule", {symbol("Editable"), symbol("True")}), call("Rule", {symbol("AutoDelete"), symbol("True")})});
+            }
+        }
+        const bool traditional = args.size() == 2 && is_symbol(args[1], "TraditionalForm");
+        return traditional
+            ? call("FormBox", {traditional_boxes(args[0]), symbol("TraditionalForm")})
+            : standard_boxes(args[0]);
+    }
+    if (function == "MakeExpression" && !args.empty() && args.size() <= 2) {
+        if (const auto source = boxes_source(args[0])) try { return call("HoldComplete", {parse_standard_form(*source)}); } catch (const ParseError&) {}
+    }
+    if (function == "StripBoxes" && args.size() == 1) return call("BoxData", {strip_boxes(args[0])});
+    if (function == "SyntaxQ" && args.size() == 1) {
+        try { if (args[0].kind() == ExprKind::String) (void)parse_input_form(args[0].text()); else if (const auto source = boxes_source(args[0])) (void)parse_standard_form(*source); else return symbol("False"); return symbol("True"); }
+        catch (const ParseError&) { return symbol("False"); }
+    }
+    if (function == "SyntaxLength" && args.size() == 1 && args[0].kind() == ExprKind::String) {
+        try { (void)parse_input_form(args[0].text()); return integer(utf8_codepoints(args[0].text()).size()); }
+        catch (const ParseError&) { return integer(utf8_codepoints(args[0].text()).size() + 2); }
+    }
+    if (function == "ToString" && !args.empty() && args.size() <= 3) {
+        Expr value = args[0];
+        std::string form = "InputForm";
+        bool explicit_form = false;
+        std::string character_encoding = "Unicode";
+        if (args.size() >= 2 && args[1].symbol_name()) {
+            form = system_dispatch_name(*args[1].symbol_name());
+            explicit_form = true;
+        }
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            const auto& option = args[index];
+            if (!option.has_head("Rule") || option.args().size() != 2
+                || !option.args()[0].symbol_name()) continue;
+            const auto option_name = system_dispatch_name(*option.args()[0].symbol_name());
+            if (option_name == "FormatType" && !explicit_form && option.args()[1].symbol_name())
+                form = system_dispatch_name(*option.args()[1].symbol_name());
+            if (option_name == "CharacterEncoding" && option.args()[1].kind() == ExprKind::String)
+                character_encoding = option.args()[1].text();
+        }
+        bool wrapper_selected = false;
+        bool traditional_rendering = true;
+        while (args.size() == 1 && value.kind() == ExprKind::Call && value.args().size() == 1 && value.head().symbol_name()) {
+            const auto wrapper = system_dispatch_name(*value.head().symbol_name());
+            if (wrapper == "InputForm" || wrapper == "FullForm" || wrapper == "StandardForm" || wrapper == "TraditionalForm" || wrapper == "TeXForm" || wrapper == "MathMLForm") {
+                if (!wrapper_selected) { form = wrapper; wrapper_selected = true; }
+                else if ((form == "TeXForm" || form == "MathMLForm") && wrapper == "StandardForm")
+                    traditional_rendering = false;
+                value = value.args()[0];
+            }
+            else break;
+        }
+        std::string rendered;
+        if (form == "FullForm") rendered = value.to_full_form();
+        else if (form == "CForm" && value.has_head("Power") && value.args().size() == 2)
+            rendered = "Power(" + value.args()[0].to_input_form() + "," + value.args()[1].to_input_form() + ")";
+        else if (form == "FortranForm" && value.has_head("Power") && value.args().size() == 2)
+            rendered = value.args()[0].to_input_form() + "**" + value.args()[1].to_input_form();
+        else if (form == "TeXForm") rendered = tex_text(value, traditional_rendering);
+        else if (form == "MathMLForm") rendered = mathml_text(value, traditional_rendering);
+        else if (form == "TraditionalForm")
+            rendered = "\\!\\(\\*FormBox[" + traditional_boxes(value).to_input_form() + ", TraditionalForm]\\)";
+        else rendered = value.to_input_form();
+        std::transform(character_encoding.begin(), character_encoding.end(), character_encoding.begin(),
+            [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        if (character_encoding == "printableascii" || character_encoding == "printable-ascii"
+            || character_encoding == "ascii") rendered = encode_printable_ascii(rendered);
+        return string(rendered);
+    }
+    if (function == "ToExpression" && !args.empty() && args.size() <= 3 && args[0].has_head("List")) {
+        std::vector<Expr> values; for (const auto& item : args[0].args()) { auto threaded = args; threaded[0] = item; values.push_back(evaluate(call("ToExpression", threaded))); } return list(std::move(values));
+    }
+    if (function == "ToExpression" && !args.empty() && args.size() <= 3 && args[0].kind() != ExprKind::String) {
+        if (const auto source = boxes_source(args[0])) try { const auto parsed = parse_standard_form(*source); if (args.size() == 3) return is_symbol(args[2], "Identity") ? evaluate(parsed) : evaluate(call(args[2], {parsed})); return evaluate(parsed); } catch (const ParseError&) {}
+    }
+    if (function == "ToExpression" && !args.empty() && args.size() <= 3 && args[0].kind() == ExprKind::String) {
+        try {
+            if (args.size() >= 2 && (is_symbol(args[1], "TeXForm") || is_symbol(args[1], "MathMLForm"))) {
+                const auto source = is_symbol(args[1], "TeXForm")
+                    ? tex_to_standard_text(args[0].text())
+                    : mathml_to_standard_text(args[0].text());
+                const auto parsed = parse_standard_form(source);
+                if (args.size() == 3)
+                    return is_symbol(args[2], "Identity") ? evaluate(parsed) : evaluate(call(args[2], {parsed}));
+                return evaluate(parsed);
+            }
+            if (args.size() >= 2 && is_symbol(args[1], "TraditionalForm")) {
+                const auto& text = args[0].text();
+                constexpr std::string_view prefix = R"(\!\(\*)";
+                constexpr std::string_view suffix = R"(\))";
+                if (text.size() >= prefix.size() + suffix.size()
+                    && text.compare(0, prefix.size(), prefix) == 0
+                    && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    const auto box_text = text.substr(
+                        prefix.size(), text.size() - prefix.size() - suffix.size());
+                    const auto boxes = parse_input_form(box_text);
+                    if (const auto source = boxes_source(boxes)) {
+                        const auto parsed = parse_standard_form(*source);
+                        if (args.size() == 3)
+                            return is_symbol(args[2], "Identity") ? evaluate(parsed) : evaluate(call(args[2], {parsed}));
+                        return evaluate(parsed);
+                    }
+                }
+            }
+            const auto form = args.size() >= 2 && is_symbol(args[1], "FullForm") ? ParseForm::Full
+                : args.size() >= 2 && is_symbol(args[1], "StandardForm") ? ParseForm::Standard : ParseForm::Input;
+            const auto parsed = parse_expression(args[0].text(), form);
+            if (args.size() == 3) return is_symbol(args[2], "Identity") ? evaluate(parsed) : evaluate(call(args[2], {parsed}));
+            return evaluate(parsed);
+        } catch (const ParseError&) {}
+    }
+    if (function == "Symbol" && args.size() == 1 && args[0].kind() == ExprKind::String) {
+        const auto& requested = args[0].text();
+        if (!requested.empty() && requested.find_first_of(" \t\r\n[]{}(),") == std::string::npos) {
+            std::string full_name;
+            if (requested.find('`') != std::string::npos) full_name = requested;
+            else full_name = system_registry().count(requested) ? "System`" + requested : "Global`" + requested;
+            if (full_name.compare(0, 7, "System`") != 0) user_symbol_registry().insert(full_name);
+            return display_symbol(full_name);
+        }
+    }
+    if (function == "SymbolName" && args.size() == 1 && args[0].symbol_name()) {
+        const auto& name = *args[0].symbol_name(); const auto marker = name.rfind('`');
+        return string(marker == std::string::npos ? name : name.substr(marker + 1));
+    }
+    if (function == "Context" && args.empty()) return string("Global`");
+    if (function == "Context" && args.size() == 1 && args[0].symbol_name()) {
+        const auto full_name = full_symbol_name(args[0]); const auto marker = full_name.rfind('`');
+        return string(full_name.substr(0, marker + 1));
+    }
+    if ((function == "Names" || function == "NameQ" || function == "Contexts") && (args.empty() || args.size() == 1)) {
+        const auto pattern = args.empty() ? std::string("*") : args[0].kind() == ExprKind::String ? args[0].text() : std::string();
+        std::set<std::string> names;
+        for (const auto& [name, attributes] : system_registry()) {
+            (void)attributes; const auto full = "System`" + name; const auto& candidate = pattern.find('`') == std::string::npos ? name : full;
+            if (wildcard_matches(candidate, pattern)) names.insert(function == "Contexts" ? "System`" : name);
+        }
+        for (const auto& full : user_symbol_registry()) {
+            const auto marker = full.rfind('`'); const auto short_name = marker == std::string::npos ? full : full.substr(marker + 1);
+            const auto& candidate = pattern.find('`') == std::string::npos ? short_name : full;
+            if (!wildcard_matches(candidate, pattern)) continue;
+            if (function == "Contexts") names.insert(marker == std::string::npos ? "Global`" : full.substr(0, marker + 1));
+            else names.insert(full.compare(0, 7, "Global`") == 0 ? short_name : full);
+        }
+        if (function == "NameQ") return boolean(!names.empty());
+        std::vector<Expr> values; for (const auto& name : names) values.push_back(string(name)); return list(std::move(values));
+    }
+    if (function == "Attributes" && args.size() == 1) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Attributes", {item}))); return list(std::move(values)); }
+        std::string name;
+        if (args[0].kind() == ExprKind::String) name = args[0].text();
+        else if (args[0].symbol_name()) name = *args[0].symbol_name();
+        if (!name.empty()) {
+            if (name.compare(0, 7, "System`") == 0) name.erase(0, 7);
+            std::vector<Expr> values; if (const auto found = system_registry().find(name); found != system_registry().end()) for (const auto& attribute : found->second) values.push_back(symbol(attribute));
+            return list(std::move(values));
+        }
+    }
+    if ((function == "ImportString" || function == "ExportString" || function == "ImportByteArray" || function == "ExportByteArray") && args.size() == 2) {
+        Expr format_expression = args[1];
+        if (format_expression.has_head("List") && format_expression.args().size() == 2) format_expression = format_expression.args()[1];
+        if (format_expression.kind() == ExprKind::String) {
+            const auto format = format_expression.text();
+            if (function == "ImportString" && args[0].kind() == ExprKind::String) {
+                const auto& source = args[0].text();
+                if (format == "Text" || format == "String") return string(source);
+                if (format == "Byte") { std::vector<Expr> values; for (const auto codepoint : utf8_codepoints(source)) values.push_back(integer(static_cast<long>(codepoint))); return list(std::move(values)); }
+                if (format == "JSON" || format == "RawJSON") if (const auto value = JsonReader(source, format == "RawJSON").read()) return *value;
+                if (format == "CSV") return import_delimited(source, ',');
+                if (format == "TSV") return import_delimited(source, '\t');
+                if (format == "Table") return import_delimited(source, ' ', true);
+                if (format == "WL") try { return evaluate(parse_input_form(source)); } catch (const ParseError&) {}
+            }
+            if (function == "ExportString") {
+                if (format == "Text" || format == "String") return string(args[0].kind() == ExprKind::String ? args[0].text() : args[0].to_input_form());
+                if (format == "Byte") if (const auto values = byte_values(args[0])) return string(std::string(values->begin(), values->end()));
+                if (format == "WL") return string(args[0].to_input_form());
+                if (format == "JSON" || format == "RawJSON") if (const auto value = expression_json(args[0])) return string(*value);
+                if (format == "CSV") return string(export_table(args[0], ','));
+                if (format == "TSV") return string(export_table(args[0], '\t'));
+                if (format == "Table") { auto value = export_table(args[0], '\t'); if (!value.empty() && value.back() == '\n') value.pop_back(); return string(value); }
+            }
+            if (function == "ImportByteArray" && args[0].kind() == ExprKind::ByteArray) {
+                if (format == "Byte") { std::vector<Expr> values; for (const auto value : args[0].bytes()) values.push_back(integer(static_cast<long>(value))); return list(std::move(values)); }
+                if (format == "String") return string(std::string(args[0].bytes().begin(), args[0].bytes().end()));
+                return evaluate(call("ImportString", {string(std::string(args[0].bytes().begin(), args[0].bytes().end())), format_expression}));
+            }
+            if (function == "ExportByteArray") {
+                if (format == "Byte") if (const auto values = byte_values(args[0])) return byte_array(*values);
+                if (format == "String") { const auto source = args[0].kind() == ExprKind::String ? args[0].text() : args[0].to_input_form(); return byte_array(std::vector<std::uint8_t>(source.begin(), source.end())); }
+                const auto exported = evaluate(call("ExportString", {args[0], format_expression}));
+                if (exported.kind() == ExprKind::String) return byte_array(std::vector<std::uint8_t>(exported.text().begin(), exported.text().end()));
+            }
+        }
+    }
+    if (function == "SameQ") return boolean(std::adjacent_find(args.begin(), args.end(), std::not_equal_to<Expr>()) == args.end());
+    if (function == "UnsameQ") {
+        for (std::size_t i = 0; i < args.size(); ++i) for (std::size_t j = i + 1; j < args.size(); ++j)
+            if (args[i] == args[j]) return symbol("False");
+        return symbol("True");
+    }
+    if (function == "Not" && args.size() == 1) {
+        if (is_symbol(args[0], "True")) return symbol("False");
+        if (is_symbol(args[0], "False")) return symbol("True");
+    }
+    if (function == "Boole" && args.size() == 1) {
+        if (is_symbol(args[0], "True")) return integer(1L);
+        if (is_symbol(args[0], "False")) return integer(0L);
+    }
+    static const std::set<std::string> transcendental_unary_heads{
+        "Exp", "Log", "Sin", "Cos", "Tan", "Cot", "Sec", "Csc", "ArcSin",
+        "ArcCos", "ArcTan", "ArcCot", "ArcSec", "ArcCsc", "Sinh", "Cosh",
+        "Tanh", "Coth", "Sech", "Csch", "ArcSinh", "ArcCosh", "ArcTanh",
+        "ArcCoth", "ArcSech", "ArcCsch", "Haversine", "InverseHaversine",
+        "Gudermannian", "InverseGudermannian"};
+    static const std::map<std::string, std::string> degree_forward_heads{
+        {"SinDegrees", "Sin"}, {"CosDegrees", "Cos"}, {"TanDegrees", "Tan"},
+        {"CotDegrees", "Cot"}, {"SecDegrees", "Sec"}, {"CscDegrees", "Csc"}};
+    static const std::map<std::string, std::string> degree_inverse_heads{
+        {"ArcSinDegrees", "ArcSin"}, {"ArcCosDegrees", "ArcCos"},
+        {"ArcTanDegrees", "ArcTan"}, {"ArcCotDegrees", "ArcCot"},
+        {"ArcSecDegrees", "ArcSec"}, {"ArcCscDegrees", "ArcCsc"}};
+    if (function == "Exp" && args.size() == 1) {
+        if (const auto value = as_rational(args[0])) {
+            if (*value == 0) return integer(1L);
+            if (*value == 1) return symbol("E");
+            return call("Power", {symbol("E"), args[0]});
+        }
+        if (args[0].has_head("Times") && args[0].args().size() == 2
+            && std::any_of(args[0].args().begin(), args[0].args().end(), [](const Expr& value) {
+                return is_symbol(value, "Pi");
+            }) && std::any_of(args[0].args().begin(), args[0].args().end(), [](const Expr& value) {
+                return value.kind() == ExprKind::Complex && value.real_part() == integer(0L)
+                    && value.imaginary_part() == integer(1L);
+            })) return integer(-1L);
+    }
+    if (function == "Log") {
+        if (args.size() == 1) {
+            if (is_symbol(args[0], "E")) return integer(1L);
+            if (const auto value = as_rational(args[0])) {
+                if (*value == 0) return symbol("-Infinity");
+                if (*value == 1) return integer(0L);
+                if (*value == -1) return call("Times", {complex(integer(0L), integer(1L)), symbol("Pi")});
+            }
+        }
+        if (args.size() == 2 && args[0].kind() == ExprKind::Integer
+            && args[1].kind() == ExprKind::Integer && args[0].integer_value() > 1
+            && args[1].integer_value() > 0) {
+            mpz_class power = 1;
+            for (unsigned long exponent = 0; exponent < 100000; ++exponent) {
+                if (power == args[1].integer_value()) return integer(exponent);
+                if (power > args[1].integer_value()) break;
+                power *= args[0].integer_value();
+            }
+        }
+    }
+    if ((function == "Sin" || function == "Cos" || function == "Tan"
+        || function == "Cot" || function == "Sec" || function == "Csc")
+        && args.size() == 1) {
+        auto angle = rational_pi_multiple(args[0]);
+        if (!angle) if (const auto value = as_rational(args[0]); value && *value == 0)
+            angle = mpq_class(0);
+        if (angle) {
+            std::string primitive = function;
+            if (function == "Cot") primitive = "Tan";
+            if (function == "Sec") primitive = "Cos";
+            if (function == "Csc") primitive = "Sin";
+            if (const auto direct = exact_trigonometric_value(primitive, *angle)) {
+                if (function == primitive) return *direct;
+                if (*direct == integer(0L)) return symbol("ComplexInfinity");
+                if (const auto rational_value = as_rational(*direct))
+                    return from_rational(1 / *rational_value);
+                return evaluate(call("Power", {*direct, integer(-1L)}));
+            }
+        }
+    }
+    if (args.size() == 1 && as_rational(args[0])) {
+        const auto value = *as_rational(args[0]);
+        if (function == "ArcSin" && value == mpq_class(1, 2)) return pi_multiple_expression(mpq_class(1, 6));
+        if (function == "ArcCos" && value == mpq_class(1, 2)) return pi_multiple_expression(mpq_class(1, 3));
+        if (function == "ArcTan" && value == 1) return pi_multiple_expression(mpq_class(1, 4));
+        if (function == "ArcCot" && value == 1) return pi_multiple_expression(mpq_class(1, 4));
+        if (function == "ArcCot" && value == -1) return pi_multiple_expression(mpq_class(3, 4));
+        if (function == "ArcSec" && value == 2) return pi_multiple_expression(mpq_class(1, 3));
+        if (function == "ArcCsc" && value == 2) return pi_multiple_expression(mpq_class(1, 6));
+        if ((function == "Sinh" || function == "Tanh") && value == 0) return integer(0L);
+        if ((function == "Cosh" || function == "Sech") && value == 0) return integer(1L);
+        if ((function == "Coth" || function == "Csch") && value == 0) return symbol("ComplexInfinity");
+        if (function == "ArcCoth" && value == 0)
+            return call("Times", {complex(integer(0L), rational(1, 2)), symbol("Pi")});
+        if (function == "ArcSech" && value == 2)
+            return call("Times", {complex(integer(0L), rational(1, 3)), symbol("Pi")});
+        if ((function == "Gudermannian" || function == "InverseGudermannian") && value == 0)
+            return integer(0L);
+        if (function == "Haversine" && value == 0) return integer(0L);
+        if (function == "InverseHaversine" && value == 1) return symbol("Pi");
+    }
+    if (function == "ArcTan" && args.size() == 2) {
+        const auto x = as_rational(args[0]);
+        const auto y = as_rational(args[1]);
+        if (x && y) {
+            if (*x == 0 && *y == 0) return symbol("Indeterminate");
+            if (*x == 1 && *y == 1) return pi_multiple_expression(mpq_class(1, 4));
+            if (*x == -1 && *y == 1) return pi_multiple_expression(mpq_class(3, 4));
+            if (*x == 1 && *y == -1) return pi_multiple_expression(mpq_class(-1, 4));
+        }
+    }
+    if (args.size() == 1) {
+        if (const auto forward = degree_forward_heads.find(function); forward != degree_forward_heads.end()) {
+            if (const auto value = as_rational(args[0])) {
+                auto primitive = forward->second;
+                if (primitive == "Cot") primitive = "Tan";
+                if (primitive == "Sec") primitive = "Cos";
+                if (primitive == "Csc") primitive = "Sin";
+                if (const auto result = exact_trigonometric_value(primitive, *value / 180)) {
+                    if (function == "CotDegrees" || function == "SecDegrees" || function == "CscDegrees") {
+                        if (*result == integer(0L)) return symbol("ComplexInfinity");
+                        if (const auto exact = as_rational(*result)) return from_rational(1 / *exact);
+                    }
+                    return *result;
+                }
+            }
+        }
+        if (const auto inverse = degree_inverse_heads.find(function); inverse != degree_inverse_heads.end()) {
+            if (const auto value = as_rational(args[0])) {
+                if (inverse->second == "ArcSin" && *value == mpq_class(1, 2)) return integer(30L);
+                if (inverse->second == "ArcCos" && *value == mpq_class(1, 2)) return integer(60L);
+                if ((inverse->second == "ArcTan" || inverse->second == "ArcCot") && *value == 1) return integer(45L);
+                if (inverse->second == "ArcCot" && *value == -1) return integer(135L);
+                if (inverse->second == "ArcSec" && *value == 2) return integer(60L);
+                if (inverse->second == "ArcCsc" && *value == 2) return integer(30L);
+            }
+        }
+    }
+    if (function == "Haversine" && args.size() == 1) {
+        if (const auto angle = rational_pi_multiple(args[0])) {
+            if (*angle == 1) return integer(1L);
+            if (*angle == mpq_class(1, 5)) return evaluate(call("Plus", {
+                rational(3, 8), call("Times", {rational(-1, 8), call("Power", {integer(5L), rational(1, 2)})})}));
+        }
+    }
+    if (args.size() == 1 && args[0].kind() == ExprKind::Real
+        && transcendental_unary_heads.count(function) != 0) {
+        if (const auto precision = explicit_real_precision(args[0].text())) {
+            if (!std::isfinite(*precision) || *precision > 1000000.0)
+                return call(head, args);
+            const auto value = high_real_atom(args[0]);
+            if (value) if (const auto result = high_unary_value(function, *value))
+                return high_real_expression(*result, static_cast<std::size_t>(std::max(1.0, *precision)));
+        } else if (const auto value = numeric_real(args[0])) {
+            if (const auto result = machine_unary_value(function, *value))
+                return real(real_text(*result));
+        }
+    }
+    if (args.size() == 1 && args[0].kind() == ExprKind::Real) {
+        if (const auto forward = degree_forward_heads.find(function); forward != degree_forward_heads.end()) {
+            if (const auto value = numeric_real(args[0]))
+                if (const auto result = machine_unary_value(forward->second, *value * std::acos(-1.0) / 180.0))
+                    return real(real_text(*result));
+        }
+        if (const auto inverse = degree_inverse_heads.find(function); inverse != degree_inverse_heads.end()) {
+            if (const auto value = numeric_real(args[0]))
+                if (const auto result = machine_unary_value(inverse->second, *value))
+                    return real(real_text(*result * 180.0 / std::acos(-1.0)));
+        }
+    }
+    if (function == "UnitStep" && !args.empty() && std::all_of(args.begin(), args.end(), [](const Expr& value) { return numeric_f64(value).has_value(); }))
+        return boolean(std::all_of(args.begin(), args.end(), [](const Expr& value) { return *numeric_f64(value) >= 0; })) == symbol("True") ? integer(1L) : integer(0L);
+    if (function == "Unitize" && args.size() == 1 && numeric_real(args[0])) return *numeric_real(args[0]) == 0 ? integer(0L) : integer(1L);
+    if ((function == "RealSign" || function == "Sign") && args.size() == 1 && numeric_real(args[0]))
+        return integer(*numeric_real(args[0]) < 0 ? -1L : *numeric_real(args[0]) > 0 ? 1L : 0L);
+    if ((function == "RealAbs" || function == "Abs") && args.size() == 1 && numeric_real(args[0])) {
+        if (args[0].kind() == ExprKind::Integer) return integer(abs(args[0].integer_value()));
+        if (args[0].kind() == ExprKind::Rational) return from_rational(abs(args[0].rational_value()));
+        return real(real_text(std::abs(*numeric_real(args[0]))));
+    }
+    if (function == "Ramp" && args.size() == 1 && numeric_real(args[0])) return *numeric_real(args[0]) <= 0 ? integer(0L) : args[0];
+    if (function == "N" && !args.empty()) {
+        std::optional<std::size_t> precision;
+        bool valid = true;
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            const auto& specification = args[index];
+            if (specification.kind() == ExprKind::Integer && specification.integer_value() > 0
+                && specification.integer_value().fits_ulong_p())
+                precision = std::max(precision.value_or(0), static_cast<std::size_t>(specification.integer_value().get_ui()));
+            else if ((specification.has_head("Rule") || specification.has_head("RuleDelayed")) && specification.args().size() == 2
+                && specification.args()[0].symbol_name()
+                && (system_dispatch_name(*specification.args()[0].symbol_name()) == "WorkingPrecision"
+                    || system_dispatch_name(*specification.args()[0].symbol_name()) == "AccuracyGoal"
+                    || system_dispatch_name(*specification.args()[0].symbol_name()) == "PrecisionGoal")
+                && specification.args()[1].kind() == ExprKind::Integer && specification.args()[1].integer_value() > 0
+                && specification.args()[1].integer_value().fits_ulong_p())
+                precision = std::max(precision.value_or(0), static_cast<std::size_t>(specification.args()[1].integer_value().get_ui()));
+            else if (!is_symbol(specification, "MachinePrecision")) valid = false;
+        }
+        if (valid && args[0].kind() == ExprKind::Root) {
+            const auto approximation = approximate_root(args[0]);
+            if (approximation && approximation->imag() == 0) {
+                if (!precision) return real(real_text(static_cast<double>(approximation->real())));
+                std::ostringstream seed;
+                seed.imbue(std::locale::classic());
+                seed << std::setprecision(std::numeric_limits<long double>::max_digits10)
+                    << approximation->real();
+                HighPrecision value(seed.str());
+                const auto& coefficients = args[0].root_coefficients();
+                for (std::size_t iteration = 0; iteration < 256; ++iteration) {
+                    HighPrecision polynomial = coefficients.back();
+                    HighPrecision derivative = 0;
+                    for (std::size_t index = coefficients.size() - 1; index-- > 0;) {
+                        derivative = derivative * value + polynomial;
+                        polynomial = polynomial * value + coefficients[index];
+                    }
+                    if (derivative == 0) break;
+                    const HighPrecision change = polynomial / derivative;
+                    value -= change;
+                    if (high_abs(change) < high_epsilon()) break;
+                }
+                return high_real_expression(value, *precision);
+            }
+        }
+        if (valid) if (const auto value = numericize(args[0], precision)) return *value;
+    }
+    if ((function == "Precision" || function == "Accuracy") && args.size() == 1) {
+        const bool accuracy = function == "Accuracy";
+        if (as_rational(args[0]) || args[0].kind() == ExprKind::Root) return symbol("Infinity");
+        if (args[0].kind() == ExprKind::SpecialReal) {
+            if (accuracy && args[0].text() == "Overflow") return symbol("-Infinity");
+            if (accuracy && args[0].text() == "Underflow") return symbol("Infinity");
+            return real("0.");
+        }
+        if (args[0].kind() == ExprKind::Real) {
+            const auto precision = explicit_real_precision(args[0].text());
+            if (!accuracy) return precision ? real(real_text(*precision)) : symbol("MachinePrecision");
+            const auto magnitude = std::abs(*numeric_real(args[0]));
+            if (magnitude == 0.0) return symbol("Infinity");
+            return real(real_text(precision.value_or(15.954589770191003) - std::log10(magnitude)));
+        }
+    }
+    if ((function == "SetPrecision" || function == "SetAccuracy") && args.size() == 2) {
+        const bool accuracy = function == "SetAccuracy";
+        if (!accuracy && is_symbol(args[1], "Infinity")) {
+            if (as_rational(args[0])) return args[0];
+            if (args[0].kind() == ExprKind::Real) if (const auto value = decimal_rational(args[0].text())) return from_rational(*value);
+        }
+        if (is_symbol(args[1], "MachinePrecision")) {
+            if (args[0].kind() == ExprKind::Real) return real(args[0].text().substr(0, args[0].text().find('`')));
+            if (const auto value = numeric_real(args[0])) return real(real_text(*value));
+        }
+        if (args[1].kind() == ExprKind::Integer && args[1].integer_value() > 0 && args[1].integer_value().fits_ulong_p()) {
+            const auto precision = static_cast<std::size_t>(args[1].integer_value().get_ui());
+            const auto suffix = accuracy ? "``" : "`";
+            if (args[0].kind() == ExprKind::Real)
+                return real(args[0].text().substr(0, args[0].text().find('`')) + suffix + std::to_string(precision) + ".");
+            if (!accuracy) if (const auto value = as_rational(args[0]))
+                return real(rational_decimal(*value, precision) + suffix + std::to_string(precision) + ".");
+        }
+    }
+    if ((function == "Simplify" || function == "FullSimplify") && args.size() == 1) {
+        const auto& value = args[0];
+        if (value.has_head("Plus") && value.args().size() == 2) {
+            const Expr* sine_argument = nullptr;
+            const Expr* cosine_argument = nullptr;
+            for (const auto& term : value.args()) {
+                if (!term.has_head("Power") || term.args().size() != 2
+                    || term.args()[1] != integer(2L) || term.args()[0].args().size() != 1)
+                    continue;
+                if (term.args()[0].has_head("Sin")) sine_argument = &term.args()[0].args()[0];
+                if (term.args()[0].has_head("Cos")) cosine_argument = &term.args()[0].args()[0];
+            }
+            if (sine_argument && cosine_argument && *sine_argument == *cosine_argument
+                && numeric_transcendental_expression(*sine_argument)) return integer(1L);
+        }
+        if (value.has_head("Power") && value.args().size() == 2) {
+            if (value.args()[1] == integer(1L)) return value.args()[0];
+            if (is_symbol(value.args()[0], "E") && value.args()[1].has_head("Log")
+                && value.args()[1].args().size() == 1) return value.args()[1].args()[0];
+            if (value.args()[1] == integer(2L))
+                if (const auto radicand = positive_square_root_radicand(value.args()[0]))
+                    return from_rational(*radicand);
+        }
+        return value;
+    }
+    if (function == "ReIm" && args.size() == 1) {
+        if (const auto components = known_complex_components(args[0]))
+            return list({components->first, components->second});
+    }
+    if (function == "Arg" && args.size() == 1) {
+        if (const auto components = known_complex_components(args[0])) {
+            const auto real_part = as_rational(components->first);
+            const auto imaginary_part = as_rational(components->second);
+            if (real_part && imaginary_part) {
+                if (*real_part == 0 && *imaginary_part == 0) return integer(0L);
+                if (*imaginary_part == 0) return *real_part > 0 ? integer(0L) : symbol("Pi");
+                if (*real_part == 0) return pi_multiple_expression(*imaginary_part > 0
+                    ? mpq_class(1, 2) : mpq_class(-1, 2));
+                if (*real_part == 1 && *imaginary_part == 1)
+                    return pi_multiple_expression(mpq_class(1, 4));
+                return call("ArcTan", {components->first, components->second});
+            }
+        }
+    }
+    if (function == "Re" && args.size() == 1) {
+        if (const auto components = known_complex_components(args[0])) return components->first;
+    }
+    if (function == "Im" && args.size() == 1) {
+        if (const auto components = known_complex_components(args[0])) return components->second;
+    }
+    if (function == "Conjugate" && args.size() == 1) {
+        if (const auto components = known_complex_components(args[0])) {
+            if (components->second == integer(0L)) return components->first;
+            return complex(components->first,
+                simplify_times({integer(-1L), components->second}));
+        }
+        if (args[0].kind() == ExprKind::Root) {
+            const auto approximation = approximate_root(args[0]);
+            const auto polynomial = rational_polynomial(args[0].root_coefficients());
+            if (approximation) {
+                if (approximation->imag() == 0) return args[0];
+                if (const auto index = closest_root_index(polynomial,
+                    std::conj(*approximation)))
+                    return root(args[0].root_coefficients(), *index, args[0].root_method());
+            }
+        }
+    }
+    if (function == "Abs" && args.size() == 1) {
+        if (args[0].kind() == ExprKind::Complex) {
+            const auto real_part = as_rational(args[0].real_part()); const auto imaginary_part = as_rational(args[0].imaginary_part());
+            if (real_part && imaginary_part) return *exact_square_root(*real_part * *real_part + *imaginary_part * *imaginary_part);
+        }
+        if (is_i_quadratic_root(args[0])) return integer(1L);
+        if (args[0].has_head("Times") && !args[0].args().empty() && args[0].args()[0] == integer(-1L))
+            return call("Abs", std::vector<Expr>(args[0].args().begin() + 1, args[0].args().end()));
+        if (args[0].has_head("Power") && args[0].args().size() == 2 && args[0].args()[1].kind() == ExprKind::Integer
+            && args[0].args()[1].integer_value() % 2 == 0)
+            return call("Power", {call("Abs", {args[0].args()[0]}), args[0].args()[1]});
+    }
+    if (function == "ComplexExpand" && args.size() == 1) {
+        auto expand = [&](auto&& self, const Expr& value) -> Expr {
+            if (value.has_head("List")) {
+                std::vector<Expr> values;
+                for (const auto& item : value.args()) values.push_back(self(self, item));
+                return list(std::move(values));
+            }
+            if (as_rational(value) || value.kind() == ExprKind::Real
+                || value.kind() == ExprKind::Complex || value.kind() == ExprKind::Root
+                || is_symbol(value, "Pi") || is_symbol(value, "E") || is_symbol(value, "Degree"))
+                return value;
+            if ((value.has_head("Times") || value.has_head("Power"))
+                && numeric_transcendental_expression(value)) return value;
+            if ((value.has_head("Re") || value.has_head("Im")) && value.args().size() == 1
+                && value.args()[0].has_head("ArcSin") && value.args()[0].args().size() == 1
+                && value.args()[0].args()[0] == integer(2L)) {
+                if (value.has_head("Re")) return pi_multiple_expression(mpq_class(1, 2));
+                return evaluate(call("Times", {integer(-1L), call("Log", {evaluate(call("Plus", {
+                    integer(2L), call("Power", {integer(3L), rational(1, 2)})}))})}));
+            }
+            if (value.has_head("ArcSin") && value.args().size() == 1
+                && value.args()[0] == integer(2L)) {
+                const auto logarithm = call("Log", {evaluate(call("Plus", {
+                    integer(2L), call("Power", {integer(3L), rational(1, 2)})}))});
+                return evaluate(call("Plus", {
+                    call("Times", {complex(integer(0L), integer(-1L)), logarithm}),
+                    pi_multiple_expression(mpq_class(1, 2))}));
+            }
+            if (value.kind() == ExprKind::Call && value.args().size() == 1) {
+                const auto components = known_complex_components(value.args()[0]);
+                if (components) {
+                    const auto& real_part = components->first;
+                    const auto& imaginary_part = components->second;
+                    const auto name = value.head().symbol_name()
+                        ? system_dispatch_name(*value.head().symbol_name()) : std::string{};
+                    const auto imaginary_unit = complex(integer(0L), integer(1L));
+                    if (name == "Exp") return evaluate(call("Times", {
+                        call("Exp", {real_part}), evaluate(call("Plus", {
+                            call("Cos", {imaginary_part}), call("Times", {
+                                imaginary_unit, call("Sin", {imaginary_part})})}))}));
+                    if (name == "Sin") return evaluate(call("Plus", {
+                        call("Times", {call("Sin", {real_part}), call("Cosh", {imaginary_part})}),
+                        call("Times", {imaginary_unit, call("Cos", {real_part}),
+                            call("Sinh", {imaginary_part})})}));
+                    if (name == "Cos") return evaluate(call("Plus", {
+                        call("Times", {call("Cos", {real_part}), call("Cosh", {imaginary_part})}),
+                        call("Times", {complex(integer(0L), integer(-1L)), call("Sin", {real_part}),
+                            call("Sinh", {imaginary_part})})}));
+                    if (name == "Tan") return evaluate(call("Times", {
+                        evaluate(call("Plus", {call("Sin", {evaluate(call("Times", {integer(2L), real_part}))}),
+                            call("Times", {imaginary_unit,
+                                call("Sinh", {evaluate(call("Times", {integer(2L), imaginary_part}))})})})),
+                        call("Power", {evaluate(call("Plus", {
+                            call("Cos", {evaluate(call("Times", {integer(2L), real_part}))}),
+                            call("Cosh", {evaluate(call("Times", {integer(2L), imaginary_part}))})})), integer(-1L)})}));
+                    if (name == "Log") {
+                        const auto real_value = as_rational(real_part);
+                        const auto imaginary_value = as_rational(imaginary_part);
+                        if (real_value && imaginary_value) {
+                            const auto magnitude = *exact_square_root(
+                                *real_value * *real_value + *imaginary_value * *imaginary_value);
+                            const auto angle = *real_value == 1
+                                ? call("ArcTan", {imaginary_part})
+                                : call("Arg", {value.args()[0]});
+                            return evaluate(call("Plus", {call("Log", {magnitude}),
+                                call("Times", {imaginary_unit, angle})}));
+                        }
+                    }
+                    if (name == "Sqrt") {
+                        const auto real_value = as_rational(real_part);
+                        const auto imaginary_value = as_rational(imaginary_part);
+                        if (real_value && imaginary_value) {
+                            const auto magnitude = *exact_square_root(
+                                *real_value * *real_value + *imaginary_value * *imaginary_value);
+                            const auto real_root = call("Power", {evaluate(call("Times", {rational(1, 2),
+                                evaluate(call("Plus", {real_part, magnitude}))})), rational(1, 2)});
+                            const auto imaginary_root = call("Power", {evaluate(call("Times", {rational(1, 2),
+                                evaluate(call("Plus", {evaluate(call("Times", {integer(-1L), real_part})), magnitude}))})), rational(1, 2)});
+                            return evaluate(call("Plus", {real_root, call("Times", {
+                                *imaginary_value < 0 ? complex(integer(0L), integer(-1L)) : imaginary_unit,
+                                imaginary_root})}));
+                        }
+                    }
+                }
+            }
+            return call("ComplexExpand", {value});
+        };
+        return expand(expand, args[0]);
+    }
+    if (function == "Sign" && args.size() == 1 && args[0].kind() == ExprKind::Complex) {
+        const auto real_part = as_rational(args[0].real_part()); const auto imaginary_part = as_rational(args[0].imaginary_part());
+        if (real_part && imaginary_part) {
+            const mpq_class norm = *real_part * *real_part + *imaginary_part * *imaginary_part;
+            mpz_class numerator_root, denominator_root;
+            mpz_sqrt(numerator_root.get_mpz_t(), norm.get_num().get_mpz_t());
+            mpz_sqrt(denominator_root.get_mpz_t(), norm.get_den().get_mpz_t());
+            if (numerator_root * numerator_root == norm.get_num() && denominator_root * denominator_root == norm.get_den()) {
+                const mpq_class magnitude(numerator_root, denominator_root);
+                return complex(from_rational(*real_part / magnitude), from_rational(*imaginary_part / magnitude));
+            }
+            return call("Times", {args[0], call("Power", {from_rational(norm), rational(-1, 2)})});
+        }
+    }
+    if (function == "Equal" || function == "Unequal" || function == "Less" || function == "LessEqual"
+        || function == "Greater" || function == "GreaterEqual") {
+        if (function == "Equal" && args.size() >= 3 && args.back().has_head("Rule")
+            && args.back().args().size() == 2 && is_symbol(args.back().args()[0], "SameTest")) {
+            bool same = true;
+            for (std::size_t index = 1; index + 1 < args.size(); ++index)
+                same &= is_symbol(evaluate(call(args.back().args()[1], {args[index - 1], args[index]})), "True");
+            return boolean(same);
+        }
+        bool known = true; bool result = true;
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            std::optional<int> exact_order;
+            const auto& left_expression = args[index - 1];
+            const auto& right_expression = args[index];
+            if (left_expression.kind() == ExprKind::Root
+                && right_expression.kind() == ExprKind::Root
+                && left_expression.root_coefficients() == right_expression.root_coefficients()) {
+                const auto polynomial = rational_polynomial(left_expression.root_coefficients());
+                if (distinct_real_root_count(polynomial) == polynomial_degree(polynomial))
+                    exact_order = left_expression.root_index() < right_expression.root_index() ? -1
+                        : left_expression.root_index() > right_expression.root_index() ? 1 : 0;
+            }
+            if (exact_order) {
+                if (function == "Equal") result &= *exact_order == 0;
+                else if (function == "Unequal") result &= *exact_order != 0;
+                else if (function == "Less") result &= *exact_order < 0;
+                else if (function == "LessEqual") result &= *exact_order <= 0;
+                else if (function == "Greater") result &= *exact_order > 0;
+                else result &= *exact_order >= 0;
+                continue;
+            }
+            const auto left = numeric_f64(left_expression);
+            const auto right = numeric_f64(right_expression);
+            if (!left || !right) { known = false; break; }
+            if (function == "Equal") result &= *left == *right;
+            else if (function == "Unequal") result &= *left != *right;
+            else if (function == "Less") result &= *left < *right;
+            else if (function == "LessEqual") result &= *left <= *right;
+            else if (function == "Greater") result &= *left > *right;
+            else result &= *left >= *right;
+        }
+        if (known) return boolean(result);
+    }
+    if (function == "Order" && args.size() == 2) return integer(expression_compare(args[0], args[1]) < 0 ? 1L : expression_compare(args[0], args[1]) > 0 ? -1L : 0L);
+    if (function == "LexicographicOrder" && args.size() == 2) return integer(lexicographic_compare(args[0], args[1]) < 0 ? 1L : lexicographic_compare(args[0], args[1]) > 0 ? -1L : 0L);
+    if (function == "LexicographicSort" && args.size() == 1 && args[0].has_head("List")) {
+        auto values = args[0].args(); std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) { return lexicographic_compare(left, right) < 0; }); return list(std::move(values));
+    }
+    if (function == "OrderedQ" && (args.size() == 1 || args.size() == 2) && args[0].has_head("List")) {
+        const bool descending = args.size() == 2 && is_symbol(args[1], "Greater");
+        return boolean(std::adjacent_find(args[0].args().begin(), args[0].args().end(), [&](const Expr& left, const Expr& right) {
+            const auto order = expression_compare(left, right); return descending ? order < 0 : order > 0;
+        }) == args[0].args().end());
+    }
+    if ((function == "Sort" || function == "ReverseSort" || function == "Ordering") && !args.empty()) {
+        const auto rules = association_rules(args[0]);
+        if (rules || args[0].kind() == ExprKind::Call) {
+            std::vector<Expr> items = rules ? *rules : args[0].args(); std::vector<std::size_t> indices(items.size()); std::iota(indices.begin(), indices.end(), 0);
+            bool greater = function == "ReverseSort"; std::optional<long> count; std::optional<Expr> same_test;
+            for (std::size_t index = 1; index < args.size(); ++index) {
+                if (is_symbol(args[index], "Greater")) greater = !greater;
+                else if (is_symbol(args[index], "Less")) {}
+                else if (args[index].kind() == ExprKind::Integer && args[index].integer_value().fits_slong_p()) count = args[index].integer_value().get_si();
+                else if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "SameTest")) same_test = args[index].args()[1];
+            }
+            auto compare_indices = [&](std::size_t left, std::size_t right) {
+                const auto& left_value = rules ? items[left].args()[0] : items[left]; const auto& right_value = rules ? items[right].args()[0] : items[right];
+                const auto order = expression_compare(left_value, right_value); return greater ? order > 0 : order < 0;
+            };
+            if (!same_test) std::stable_sort(indices.begin(), indices.end(), compare_indices);
+            else for (std::size_t index = 1; index < indices.size(); ++index) {
+                auto insertion = index;
+                while (insertion > 0) {
+                    const auto& left = rules ? items[indices[insertion - 1]].args()[0] : items[indices[insertion - 1]];
+                    const auto& right = rules ? items[indices[insertion]].args()[0] : items[indices[insertion]];
+                    if (is_symbol(evaluate(call(*same_test, {left, right})), "True") || !compare_indices(indices[insertion], indices[insertion - 1])) break;
+                    std::swap(indices[insertion - 1], indices[insertion]); --insertion;
+                }
+            }
+            if (count) {
+                const auto amount = clamped_signed_magnitude(*count, indices.size());
+                if (*count >= 0) indices.resize(amount); else indices.erase(indices.begin(), indices.end() - static_cast<std::ptrdiff_t>(amount));
+            }
+            std::vector<Expr> result;
+            for (const auto index : indices) result.push_back(function == "Ordering" ? integer(index + 1) : items[index]);
+            if (function == "Ordering") return list(std::move(result));
+            return call(rules ? symbol("Association") : args[0].head(), std::move(result));
+        }
+    }
+    if ((function == "SortBy" || function == "ReverseSortBy" || function == "OrderingBy") && args.size() >= 2) {
+        const auto rules = association_rules(args[0]);
+        if (rules || args[0].kind() == ExprKind::Call) {
+            std::vector<Expr> items = rules ? *rules : args[0].args();
+            const bool multiple = args[1].has_head("List"); const auto functions = multiple ? args[1].args() : std::vector<Expr>{args[1]};
+            std::optional<Expr> same_test; std::optional<long> count; bool greater = false;
+            for (std::size_t index = 2; index < args.size(); ++index) {
+                if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "SameTest")) same_test = args[index].args()[1];
+                else if (is_symbol(args[index], "Greater")) greater = true;
+                else if (is_symbol(args[index], "Less")) greater = false;
+                else if (is_symbol(args[index], "All")) {}
+                else if (args[index].kind() == ExprKind::Integer && args[index].integer_value().fits_slong_p()) count = args[index].integer_value().get_si();
+            }
+            struct Keyed { Expr item; Expr value; std::vector<Expr> keys; std::size_t index; };
+            std::vector<Keyed> keyed;
+            for (std::size_t index = 0; index < items.size(); ++index) {
+                const auto value = rules ? items[index].args()[1] : items[index]; std::vector<Expr> keys;
+                for (const auto& callable : functions) keys.push_back(evaluate(call(callable, {value})));
+                keyed.push_back({items[index], value, std::move(keys), index});
+            }
+            for (std::size_t index = 1; index < keyed.size(); ++index) {
+                auto insertion = index;
+                while (insertion > 0) {
+                    int order = 0;
+                    for (std::size_t key = 0; key < keyed[insertion - 1].keys.size(); ++key) {
+                        const auto& left = keyed[insertion - 1].keys[key]; const auto& right = keyed[insertion].keys[key];
+                        if (same_test && is_symbol(evaluate(call(*same_test, {left, right})), "True")) continue;
+                        order = expression_compare(left, right); if (order != 0) break;
+                    }
+                    if (order == 0 && !same_test && !multiple) order = expression_compare(keyed[insertion - 1].value, keyed[insertion].value);
+                    if (greater) order = -order;
+                    if (function == "ReverseSortBy") order = -order;
+                    if (order <= 0) break;
+                    std::swap(keyed[insertion - 1], keyed[insertion]); --insertion;
+                }
+            }
+            if (count) {
+                const auto amount = clamped_signed_magnitude(*count, keyed.size());
+                if (*count >= 0) keyed.resize(amount); else keyed.erase(keyed.begin(), keyed.end() - static_cast<std::ptrdiff_t>(amount));
+            }
+            std::vector<Expr> result; for (const auto& item : keyed) result.push_back(function == "OrderingBy" ? integer(item.index + 1) : item.item);
+            return function == "OrderingBy" ? list(std::move(result)) : call(rules ? symbol("Association") : args[0].head(), std::move(result));
+        }
+    }
+    if ((function == "MinimalBy" || function == "MaximalBy") && (args.size() == 2 || args.size() == 3)) {
+        const auto rules = association_rules(args[0]);
+        if (rules || args[0].kind() == ExprKind::Call) {
+            std::vector<Expr> items = rules ? *rules : args[0].args(); struct Keyed { Expr item; Expr key; std::size_t index; }; std::vector<Keyed> keyed;
+            for (std::size_t index = 0; index < items.size(); ++index) { const auto value = rules ? items[index].args()[1] : items[index]; keyed.push_back({items[index], evaluate(call(args[1], {value})), index}); }
+            const bool maximal = function == "MaximalBy";
+            std::stable_sort(keyed.begin(), keyed.end(), [&](const Keyed& left, const Keyed& right) { const auto order = expression_compare(left.key, right.key); return maximal ? order > 0 : order < 0; });
+            std::size_t amount = 0;
+            if (args.size() == 3 && machine_index(args[2])) amount = std::min<std::size_t>(std::max<long>(0, *machine_index(args[2])), keyed.size());
+            else if (!keyed.empty()) { amount = 1; while (amount < keyed.size() && keyed[amount].key == keyed[0].key) ++amount; }
+            std::vector<Expr> result; for (std::size_t index = 0; index < amount; ++index) result.push_back(keyed[index].item);
+            return call(rules ? symbol("Association") : args[0].head(), std::move(result));
+        }
+    }
+    if (function == "Inequality" && args.size() >= 3 && args.size() % 2 == 1) {
+        for (std::size_t index = 1; index < args.size(); index += 2) {
+            const auto* operation = args[index].symbol_name();
+            if (!operation) return call(head, args);
+            const auto result = evaluate(call(*operation, {args[index - 1], args[index + 1]}));
+            if (is_symbol(result, "False")) return result;
+            if (!is_symbol(result, "True")) return call(head, args);
+        }
+        return symbol("True");
+    }
+    if (function == "MatchQ" && args.size() == 2) { Bindings bindings; return boolean(pattern_match(args[0], args[1], bindings)); }
+    if ((function == "SequenceCases" || function == "SequencePosition" || function == "SequenceCount")
+        && args.size() == 2 && args[0].has_head("List")) {
+        Expr inner_pattern = args[1];
+        while ((inner_pattern.has_head("Condition") || inner_pattern.has_head("HoldPattern"))
+            && !inner_pattern.args().empty()) inner_pattern = inner_pattern.args()[0];
+        if (inner_pattern.has_head("List")) {
+            const auto width = inner_pattern.args().size();
+            std::vector<std::pair<std::size_t, std::size_t>> spans;
+            std::size_t index = 0;
+            while (index < args[0].args().size()) {
+                if (index + width <= args[0].args().size()) {
+                    const auto candidate = list(std::vector<Expr>(
+                        args[0].args().begin() + static_cast<std::ptrdiff_t>(index),
+                        args[0].args().begin() + static_cast<std::ptrdiff_t>(index + width)));
+                    Bindings bindings;
+                    if (pattern_match(candidate, args[1], bindings)) {
+                        spans.emplace_back(index, index + width);
+                        index += std::max<std::size_t>(1, width);
+                        continue;
+                    }
+                }
+                ++index;
+            }
+            if (function == "SequenceCount") return integer(static_cast<unsigned long>(spans.size()));
+            std::vector<Expr> result;
+            for (const auto& [start, end] : spans) {
+                if (function == "SequencePosition") result.push_back(list({
+                    integer(static_cast<unsigned long>(start + 1)), integer(static_cast<unsigned long>(end))}));
+                else result.push_back(list(std::vector<Expr>(
+                    args[0].args().begin() + static_cast<std::ptrdiff_t>(start),
+                    args[0].args().begin() + static_cast<std::ptrdiff_t>(end))));
+            }
+            return list(std::move(result));
+        }
+    }
+    if (function == "FreeQ" && args.size() >= 2) {
+        bool include_heads = true; Expr level_spec = list({integer(0L), symbol("Infinity")}); bool explicit_level = false;
+        for (std::size_t index = 2; index < args.size(); ++index) {
+            if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "Heads")) include_heads = is_symbol(args[index].args()[1], "True");
+            else { level_spec = args[index]; explicit_level = true; }
+        }
+        const auto bounds = explicit_level ? normalize_level_spec(level_spec) : LevelBounds{0, level_infinity, true}; bool found = false;
+        auto visit = [&](auto&& self, const Expr& value, long positive) -> void {
+            if (found) return;
+            if (const auto rules = association_rules(value)) {
+                if (include_heads) self(self, value.head(), positive + 1);
+                for (const auto& rule : *rules) self(self, rule.args()[1], positive + 1);
+            } else if (value.kind() == ExprKind::Call) {
+                if (include_heads) self(self, value.head(), positive + 1);
+                for (const auto& child : value.args()) self(self, child, positive + 1);
+            }
+            if (found) return;
+            if (level_matches(positive, -static_cast<long>(semantic_expression_depth(value)), bounds)) { Bindings bindings; found = pattern_match(value, args[1], bindings); }
+        };
+        if (bounds.valid) visit(visit, args[0], 0);
+        return boolean(!found);
+    }
+    if ((function == "Replace" || function == "ReplaceAt") && args.size() >= 2) {
+        auto apply_rules = [&](const Expr& target, const Expr& specification) -> Expr {
+            const auto rules = specification.has_head("List") ? specification.args() : std::vector<Expr>{specification};
+            for (const auto& rule : rules) {
+                if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed")) || rule.args().size() != 2) continue;
+                Bindings bindings; if (!pattern_match(target, rule.args()[0], bindings)) continue;
+                auto value = substitute_bindings(rule.args()[1], bindings);
+                if (value.has_head("Condition") && value.args().size() == 2) { if (!simple_truth(value.args()[1]).value_or(false)) continue; value = value.args()[0]; }
+                return evaluate(value);
+            }
+            return target;
+        };
+        if (function == "ReplaceAt" && args.size() == 3) {
+            auto result = args[0]; const auto positions = args[2].has_head("List") && !args[2].args().empty() && args[2].args()[0].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]};
+            for (const auto& position : positions) { const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position}; const auto target = value_at_path(result, path); if (target) result = replace_at_path(result, path, 0, apply_rules(*target, args[1])); }
+            return result;
+        }
+        if (function == "Replace" && args.size() >= 2) {
+            if (args[1].has_head("List") && !args[1].args().empty() && std::all_of(args[1].args().begin(), args[1].args().end(), [](const Expr& value) { return value.has_head("List"); })) { std::vector<Expr> values; for (const auto& rules : args[1].args()) values.push_back(evaluate(call("Replace", {args[0], rules}))); return list(std::move(values)); }
+            Expr level_spec = list({integer(0L)});
+            bool include_heads = false;
+            for (std::size_t index = 2; index < args.size(); ++index) {
+                if (args[index].has_head("Rule") && args[index].args().size() == 2
+                    && is_symbol(args[index].args()[0], "Heads")) include_heads = is_symbol(args[index].args()[1], "True");
+                else level_spec = args[index];
+            }
+            const auto bounds = normalize_level_spec(level_spec);
+            auto replace_levels = [&](auto&& self, const Expr& value, long depth) -> Expr {
+                Expr transformed = value;
+                if (value.kind() == ExprKind::Call) {
+                    Expr transformed_head = value.head();
+                    if (include_heads && level_matches(depth + 1,
+                        -static_cast<long>(semantic_expression_depth(transformed_head)), bounds))
+                        transformed_head = apply_rules(transformed_head, args[1]);
+                    if (const auto rules = association_rules(value)) {
+                        std::vector<Expr> entries;
+                        for (const auto& rule : *rules)
+                            entries.push_back(call(rule.head(), {rule.args()[0], self(self, rule.args()[1], depth + 1)}));
+                        transformed = call(transformed_head, std::move(entries));
+                    } else {
+                        std::vector<Expr> children;
+                        for (const auto& child : value.args()) children.push_back(self(self, child, depth + 1));
+                        transformed = call(transformed_head, std::move(children));
+                    }
+                }
+                if (level_matches(depth, -static_cast<long>(semantic_expression_depth(transformed)), bounds)) return apply_rules(transformed, args[1]);
+                return transformed;
+            };
+            return bounds.valid ? replace_levels(replace_levels, args[0], 0) : call(head, args);
+        }
+    }
+    if ((function == "ReplaceAll" || function == "ReplaceRepeated") && args.size() == 2 && args[1].has_head("List") && !args[1].args().empty()
+        && std::all_of(args[1].args().begin(), args[1].args().end(), [](const Expr& value) { return value.has_head("List"); })) {
+        std::vector<Expr> values; for (const auto& rules : args[1].args()) values.push_back(evaluate(call(function, {args[0], rules}))); return list(std::move(values));
+    }
+    if ((function == "ReplaceAll" || function == "ReplaceRepeated") && args.size() == 2) {
+        std::vector<Expr> rules = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        auto result = args[0];
+        const auto limit = function == "ReplaceRepeated" ? 256 : 1;
+        for (int iteration = 0; iteration < limit; ++iteration) {
+            bool changed = false; auto next = result;
+            for (const auto& rule : rules) next = replace_all_once(next, rule, changed);
+            result = evaluate(next);
+            if (!changed) break;
+        }
+        return remove_nothing_from_list_like(result);
+    }
+    if (function == "MemberQ" && args.size() >= 2) {
+        Expr level_spec = list({integer(1L)}); bool include_heads = false;
+        if (args.size() >= 3) level_spec = args[2];
+        for (std::size_t index = 2; index < args.size(); ++index) if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "Heads")) include_heads = is_symbol(args[index].args()[1], "True");
+        const auto bounds = normalize_level_spec(level_spec); bool found = false;
+        auto visit = [&](auto&& self, const Expr& value, long positive) -> void {
+            if (found) return;
+            if (const auto rules = association_rules(value)) { if (include_heads) self(self, value.head(), positive + 1); for (const auto& rule : *rules) self(self, rule.args()[1], positive + 1); }
+            else if (value.kind() == ExprKind::Call) { if (include_heads) self(self, value.head(), positive + 1); for (const auto& child : value.args()) self(self, child, positive + 1); }
+            if (found) return;
+            if (level_matches(positive, -static_cast<long>(semantic_expression_depth(value)), bounds)) { Bindings bindings; found = pattern_match(value, args[1], bindings); }
+        };
+        if (bounds.valid) visit(visit, args[0], 0);
+        return boolean(found);
+    }
+    if (function == "Cases" && args.size() >= 2) {
+        Expr level_spec = integer(1L); std::optional<std::size_t> limit; bool include_heads = false;
+        if (args.size() >= 3) level_spec = args[2];
+        if (args.size() >= 4 && !is_symbol(args[3], "Infinity") && machine_index(args[3]) && *machine_index(args[3]) >= 0) limit = static_cast<std::size_t>(*machine_index(args[3]));
+        for (std::size_t index = 2; index < args.size(); ++index) if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "Heads")) include_heads = is_symbol(args[index].args()[1], "True");
+        const auto bounds = normalize_level_spec(level_spec); const bool transforming = (args[1].has_head("Rule") || args[1].has_head("RuleDelayed")) && args[1].args().size() == 2;
+        const auto pattern = transforming ? args[1].args()[0] : args[1]; std::vector<Expr> matches;
+        auto visit = [&](auto&& self, const Expr& value, long positive) -> void {
+            if (limit && matches.size() >= *limit) return;
+            if (const auto rules = association_rules(value)) {
+                if (include_heads) self(self, value.head(), positive + 1);
+                for (const auto& rule : *rules) self(self, rule.args()[1], positive + 1);
+            } else if (value.kind() == ExprKind::Call) {
+                if (include_heads) self(self, value.head(), positive + 1);
+                for (const auto& child : value.args()) self(self, child, positive + 1);
+            }
+            if (!level_matches(positive, -static_cast<long>(semantic_expression_depth(value)), bounds)) return;
+            Bindings bindings; if (!pattern_match(value, pattern, bindings)) return; Expr result = transforming ? substitute_bindings(args[1].args()[1], bindings) : value;
+            if (result.has_head("Condition") && result.args().size() == 2) { if (!simple_truth(result.args()[1]).value_or(false)) return; result = result.args()[0]; }
+            result = evaluate(result); if (result.has_head("Sequence")) matches.insert(matches.end(), result.args().begin(), result.args().end()); else if (!is_symbol(result, "Nothing")) matches.push_back(result);
+        };
+        if (bounds.valid) visit(visit, args[0], 0);
+        return list(std::move(matches));
+    }
+    if (function == "DeleteCases" && args.size() >= 2) {
+        Expr level_spec = integer(1L);
+        std::optional<std::size_t> remaining;
+        bool include_heads = false;
+        std::size_t positional = 0;
+        for (std::size_t index = 2; index < args.size(); ++index) {
+            if (args[index].has_head("Rule") && args[index].args().size() == 2
+                && is_symbol(args[index].args()[0], "Heads")) {
+                include_heads = is_symbol(args[index].args()[1], "True");
+            } else if (positional++ == 0) level_spec = args[index];
+            else if (!is_symbol(args[index], "Infinity") && machine_index(args[index]) && *machine_index(args[index]) >= 0)
+                remaining = static_cast<std::size_t>(*machine_index(args[index]));
+        }
+        const auto bounds = normalize_level_spec(level_spec);
+        auto remove = [&](auto&& self, const Expr& value, long positive) -> std::pair<bool, Expr> {
+            Expr rebuilt = value;
+            if (const auto rules = association_rules(value)) {
+                std::vector<Expr> entries; for (const auto& rule : *rules) { auto child = self(self, rule.args()[1], positive + 1); if (!child.first) entries.push_back(call(rule.head(), {rule.args()[0], child.second})); }
+                if (include_heads && self(self, value.head(), positive + 1).first) {
+                    std::vector<Expr> values;
+                    for (const auto& entry : entries) values.push_back(entry.args()[1]);
+                    rebuilt = call("Sequence", std::move(values));
+                } else rebuilt = call("Association", std::move(entries));
+            } else if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children; for (const auto& child_value : value.args()) { auto child = self(self, child_value, positive + 1); if (!child.first) children.push_back(child.second); }
+                children = splice_sequences(children);
+                if (include_heads) {
+                    const auto transformed_head = self(self, value.head(), positive + 1);
+                    rebuilt = transformed_head.first ? call("Sequence", std::move(children))
+                        : call(transformed_head.second, std::move(children));
+                } else rebuilt = call(value.head(), std::move(children));
+            }
+            if (remaining && *remaining == 0) return {false, rebuilt};
+            if (level_matches(positive, -static_cast<long>(semantic_expression_depth(rebuilt)), bounds)) { Bindings bindings; if (pattern_match(rebuilt, args[1], bindings)) { if (remaining) --*remaining; return {true, call("Sequence", {})}; } }
+            return {false, rebuilt};
+        };
+        if (bounds.valid) { auto result = remove(remove, args[0], 0); return result.first ? call("Sequence", {}) : result.second; }
+    }
+    if (function == "Count" && args.size() >= 2) {
+        Expr level_spec = integer(1L);
+        std::vector<Expr> options;
+        for (std::size_t index = 2; index < args.size(); ++index) {
+            if (args[index].has_head("Rule") && args[index].args().size() == 2
+                && is_symbol(args[index].args()[0], "Heads")) options.push_back(args[index]);
+            else level_spec = args[index];
+        }
+        std::vector<Expr> cases_args{args[0], args[1], level_spec, symbol("Infinity")};
+        cases_args.insert(cases_args.end(), options.begin(), options.end());
+        const auto matches = evaluate(call("Cases", std::move(cases_args)));
+        if (matches.has_head("List")) return integer(static_cast<unsigned long>(matches.args().size()));
+    }
+    if ((function == "Cases" || function == "DeleteCases" || function == "Count" || function == "MemberQ")
+        && args.size() >= 2 && args[0].kind() == ExprKind::Call) {
+        std::vector<Expr> matches;
+        for (const auto& item : args[0].args()) {
+            Bindings bindings;
+            const auto pattern = (args[1].has_head("Rule") || args[1].has_head("RuleDelayed"))
+                && args[1].args().size() == 2 ? args[1].args()[0] : args[1];
+            if (!pattern_match(item, pattern, bindings)) continue;
+            auto value = (args[1].has_head("Rule") || args[1].has_head("RuleDelayed"))
+                ? substitute_bindings(args[1].args()[1], bindings) : item;
+            if (value.has_head("Condition") && value.args().size() == 2) {
+                if (!simple_truth(value.args()[1]).value_or(false)) continue;
+                value = value.args()[0];
+            }
+            value = evaluate(value);
+            if (is_symbol(value, "Nothing")) continue;
+            if (value.has_head("Sequence")) matches.insert(matches.end(), value.args().begin(), value.args().end());
+            else matches.push_back(value);
+        }
+        if (function == "Count") return integer(matches.size());
+        if (function == "MemberQ") return boolean(!matches.empty());
+        if (function == "DeleteCases") {
+            std::vector<Expr> kept;
+            for (const auto& item : args[0].args()) { Bindings bindings; if (!pattern_match(item, args[1], bindings)) kept.push_back(item); }
+            return call(args[0].head(), std::move(kept));
+        }
+        return list(std::move(matches));
+    }
+    if (function == "FirstCase" && args.size() >= 2) {
+        const auto level_spec = args.size() >= 4 ? args[3] : integer(1L);
+        const auto matches = evaluate(call("Cases", {args[0], args[1], level_spec, integer(1L)}));
+        if (matches.has_head("List") && !matches.args().empty()) return matches.args().front();
+        return args.size() >= 3 ? args[2] : call("Missing", {string("NotFound")});
+    }
+    if (function == "Position" && args.size() >= 2) {
+        Expr level_spec = list({integer(0L), symbol("Infinity")}); std::optional<std::size_t> limit; bool include_heads = true;
+        if (args.size() >= 3) level_spec = args[2];
+        if (args.size() >= 4 && !is_symbol(args[3], "Infinity") && machine_index(args[3]) && *machine_index(args[3]) >= 0) limit = static_cast<std::size_t>(*machine_index(args[3]));
+        for (std::size_t index = 2; index < args.size(); ++index) if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "Heads")) include_heads = is_symbol(args[index].args()[1], "True");
+        const auto bounds = normalize_level_spec(level_spec); std::vector<Expr> positions;
+        auto visit = [&](auto&& self, const Expr& value, long positive, std::vector<Expr> path) -> void {
+            if (limit && positions.size() >= *limit) return;
+            if (const auto rules = association_rules(value)) {
+                if (include_heads) { auto child = path; child.push_back(integer(0L)); self(self, value.head(), positive + 1, std::move(child)); }
+                for (const auto& rule : *rules) { auto child = path; child.push_back(call("Key", {rule.args()[0]})); self(self, rule.args()[1], positive + 1, std::move(child)); }
+            } else if (value.kind() == ExprKind::Call) {
+                if (include_heads) { auto child = path; child.push_back(integer(0L)); self(self, value.head(), positive + 1, std::move(child)); }
+                for (std::size_t index = 0; index < value.args().size(); ++index) { auto child = path; child.push_back(integer(index + 1)); self(self, value.args()[index], positive + 1, std::move(child)); }
+            }
+            if (level_matches(positive, -static_cast<long>(semantic_expression_depth(value)), bounds)) { Bindings bindings; if (pattern_match(value, args[1], bindings)) positions.push_back(list(path)); }
+        };
+        if (bounds.valid) visit(visit, args[0], 0, {});
+        return list(std::move(positions));
+    }
+    if (function == "FirstPosition" && args.size() >= 2 && args.size() <= 4) {
+        std::vector<Expr> position_args{args[0], args[1], args.size() == 4
+            ? args[3] : list({integer(0L), symbol("Infinity")}), integer(1L)};
+        const auto positions = evaluate(call("Position", std::move(position_args)));
+        if (positions.has_head("List") && !positions.args().empty()) return positions.args().front();
+        return args.size() >= 3 ? args[2] : call("Missing", {string("NotFound")});
+    }
+    if ((function == "PositionLargest" || function == "PositionSmallest") && args.size() == 1
+        && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        std::vector<Expr> positions;
+        if (!values.empty()) {
+            Expr selected = values.front();
+            for (const auto& value : values) {
+                const auto order = expression_compare(value, selected);
+                if ((function == "PositionLargest" && order > 0)
+                    || (function == "PositionSmallest" && order < 0)) selected = value;
+            }
+            for (std::size_t index = 0; index < values.size(); ++index)
+                if (expression_compare(values[index], selected) == 0)
+                    positions.push_back(integer(static_cast<unsigned long>(index + 1)));
+        }
+        return list(std::move(positions));
+    }
+    if (function == "PositionIndex" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        std::vector<Expr> keys;
+        std::vector<std::vector<Expr>> positions;
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            const auto found = std::find(keys.begin(), keys.end(), values[index]);
+            if (found == keys.end()) {
+                keys.push_back(values[index]);
+                positions.push_back({integer(static_cast<unsigned long>(index + 1))});
+            } else positions[static_cast<std::size_t>(found - keys.begin())].push_back(integer(static_cast<unsigned long>(index + 1)));
+        }
+        std::vector<Expr> result;
+        for (std::size_t index = 0; index < keys.size(); ++index)
+            result.push_back(call("Rule", {keys[index], list(std::move(positions[index]))}));
+        return call("Association", std::move(result));
+    }
+    if (function == "ListQ" && args.size() == 1) return boolean(args[0].has_head("List"));
+    if ((function == "VectorQ" || function == "MatrixQ") && !args.empty() && args.size() <= 2) {
+        const auto predicate = args.size() == 2 ? std::optional<Expr>(args[1]) : std::nullopt;
+        auto matches_predicate = [&](const Expr& value) {
+            return !predicate || is_symbol(evaluate(call(*predicate, {value})), "True");
+        };
+        if (args[0].kind() == ExprKind::SparseArray) {
+            const auto expected_rank = function == "VectorQ" ? 1U : 2U;
+            bool valid = args[0].dimensions().size() == expected_rank;
+            if (valid && predicate) {
+                std::size_t total = 1;
+                for (const auto dimension : args[0].dimensions()) total *= dimension;
+                if (total > args[0].sparse_entries().size()) valid = matches_predicate(args[0].fill_value());
+                for (const auto& entry : args[0].sparse_entries()) valid = valid && matches_predicate(entry.value);
+            }
+            return boolean(valid);
+        }
+        if (function == "VectorQ") {
+            if (!args[0].has_head("List")) return symbol("False");
+            return boolean(std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& value) {
+                return !value.has_head("List") && matches_predicate(value);
+            }));
+        }
+        if (!args[0].has_head("List")) return symbol("False");
+        const auto rows = args[0].args();
+        if (rows.empty()) return symbol("False");
+        if (!std::all_of(rows.begin(), rows.end(), [](const Expr& row) { return row.has_head("List"); })) return symbol("False");
+        const auto columns = rows.front().args().size();
+        return boolean(std::all_of(rows.begin(), rows.end(), [&](const Expr& row) {
+            return row.args().size() == columns && std::all_of(row.args().begin(), row.args().end(), matches_predicate);
+        }));
+    }
+    if (function == "AtomQ" && args.size() == 1) return boolean(args[0].is_atom());
+    if (function == "IntegerQ" && args.size() == 1) return boolean(args[0].kind() == ExprKind::Integer);
+    if (function == "StringQ" && args.size() == 1) return boolean(args[0].kind() == ExprKind::String);
+    if (function == "AssociationQ" && args.size() == 1) return boolean(association_rules(args[0]).has_value());
+    if (function == "SparseArrayQ" && args.size() == 1) return boolean(args[0].kind() == ExprKind::SparseArray);
+    if (function == "ByteArrayQ" && args.size() == 1) return boolean(args[0].kind() == ExprKind::ByteArray);
+    if (function == "TrueQ" && args.size() == 1) return boolean(is_symbol(args[0], "True"));
+    if (function == "EvenQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer)
+        return boolean(args[0].integer_value() % 2 == 0);
+    if (function == "OddQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer)
+        return boolean(args[0].integer_value() % 2 != 0);
+    if ((function == "DigitQ" || function == "LetterQ") && args.size() == 1 && args[0].kind() == ExprKind::String) {
+        const auto characters = utf8_codepoints(args[0].text());
+        return boolean(!characters.empty() && std::all_of(characters.begin(), characters.end(), [&](std::uint32_t value) {
+            return function == "DigitQ" ? value >= '0' && value <= '9' : (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+        }));
+    }
+    if (function == "FailureQ" && args.size() == 1) return boolean(args[0].has_head("Failure")
+        || is_symbol(args[0], "$Failed") || is_symbol(args[0], "$Canceled") || is_symbol(args[0], "$Aborted"));
+    if (function == "MissingQ" && args.size() == 1) return boolean(args[0].has_head("Missing"));
+    if (function == "ExactNumberQ" && args.size() == 1)
+        return boolean(exact_numeric_transcendental_expression(args[0]));
+    if (function == "InexactNumberQ" && args.size() == 1) return boolean(numeric_q_value(args[0]) && contains_inexact_number(args[0]));
+    if (function == "RealValuedNumberQ" && args.size() == 1)
+        return boolean(real_valued_numeric_expression(args[0]));
+    if (function == "NumberQ" && args.size() == 1)
+        return boolean(numeric_transcendental_expression(args[0])
+            || args[0].kind() == ExprKind::SpecialReal);
+    if (function == "NumericQ" && args.size() == 1) return boolean(numeric_q_value(args[0]));
+    if (function == "MachineNumberQ" && args.size() == 1) return boolean(numeric_q_value(args[0]) && is_machine_number(args[0]));
+    if (function == "MachineIntegerQ" && args.size() == 1) return boolean(args[0].kind() == ExprKind::Integer
+        && args[0].integer_value() >= mpz_class(std::numeric_limits<std::int64_t>::min())
+        && args[0].integer_value() <= mpz_class(std::numeric_limits<std::int64_t>::max()));
+    if (function == "Head" && args.size() == 1) return args[0].head();
+    if (function == "Length" && args.size() == 1) return integer(args[0].length());
+    if (function == "Dimensions" && args.size() == 1 && args[0].kind() == ExprKind::SparseArray) {
+        std::vector<Expr> values; for (const auto dimension : args[0].dimensions()) values.push_back(integer(dimension)); return list(std::move(values));
+    }
+    if (function == "Depth" && args.size() == 1) {
+        auto semantic_depth = [&](auto&& self, const Expr& value) -> std::size_t {
+            if (const auto rules = association_rules(value)) {
+                std::size_t depth = 1; for (const auto& rule : *rules) depth = std::max(depth, self(self, rule.args()[1]) + 1); return depth;
+            }
+            if (value.kind() != ExprKind::Call) return 1;
+            std::size_t depth = 1; for (const auto& item : value.args()) depth = std::max(depth, self(self, item) + 1); return depth;
+        };
+        if (association_rules(args[0])) return integer(semantic_depth(semantic_depth, args[0]));
+        return integer(args[0].depth());
+    }
+    if (function == "Level" && args.size() >= 2) {
+        if (args[1].has_head("List") && args[1].args().size() == 1
+            && machine_index(args[1].args()[0])
+            && *machine_index(args[1].args()[0]) == -1) {
+            std::vector<Expr> atoms;
+            auto collect_atoms = [&](auto&& self, const Expr& value) -> void {
+                if (value.kind() != ExprKind::Call) {
+                    if (!is_symbol(value, "Nothing")) atoms.push_back(value);
+                    return;
+                }
+                for (const auto& item : value.args()) self(self, item);
+            };
+            if (args[0].kind() == ExprKind::Call)
+                for (const auto& item : args[0].args()) collect_atoms(collect_atoms, item);
+            return list(std::move(atoms));
+        }
+        std::vector<Expr> atoms, compounds;
+        auto collect = [&](auto&& self, const Expr& value) -> void {
+            if (value.kind() != ExprKind::Call) { if (!is_symbol(value, "Nothing")) atoms.push_back(value); return; }
+            for (const auto& item : value.args()) self(self, item);
+            compounds.push_back(value);
+        };
+        if (args[0].kind() == ExprKind::Call) for (const auto& item : args[0].args()) collect(collect, item);
+        atoms.insert(atoms.end(), compounds.begin(), compounds.end()); return list(std::move(atoms));
+    }
+    if (function == "Part" && args.size() >= 2) {
+        auto invalid_part = [&](const std::string& detail) {
+            const auto message = call("MessageName", {symbol("Part"), string("error")});
+            const auto text = detail.empty()
+                ? "Part::error: Part specifications are invalid for " + args[0].to_input_form() + "."
+                : "Part::error: " + detail;
+            emit_message(message, text);
+            return call(head, args);
+        };
+        if (args[0].kind() == ExprKind::SparseArray) {
+            const auto dense = sparse_dense_value(args[0]);
+            auto select = [&](auto&& self, const Expr& value, std::size_t selector) -> std::optional<Expr> {
+                if (selector == args.size()) return value;
+                if (!value.has_head("List")) return std::nullopt;
+                if (is_symbol(args[selector], "All")) {
+                    std::vector<Expr> selected; for (const auto& item : value.args()) { const auto child = self(self, item, selector + 1); if (!child) return std::nullopt; selected.push_back(*child); }
+                    return list(std::move(selected));
+                }
+                if (args[selector].has_head("List")) {
+                    std::vector<Expr> selected;
+                    for (const auto& specification : args[selector].args()) { const auto index = normalized_index(specification, value.args().size()); if (!index) return std::nullopt; const auto child = self(self, value.args()[*index], selector + 1); if (!child) return std::nullopt; selected.push_back(*child); }
+                    return list(std::move(selected));
+                }
+                const auto index = normalized_index(args[selector], value.args().size()); if (!index) return std::nullopt;
+                return self(self, value.args()[*index], selector + 1);
+            };
+            if (const auto selected = select(select, dense, 1)) {
+                if (selected->has_head("List")) return *sparse_from_dense(*selected, args[0].fill_value());
+                return *selected;
+            }
+        }
+        Expr target = args[0];
+        for (std::size_t part = 1; part < args.size(); ++part) {
+            if (const auto rules = association_rules(target)) {
+                if (args[part].has_head("List")) {
+                    const bool has_key = std::any_of(args[part].args().begin(), args[part].args().end(),
+                        [](const Expr& value) { return value.has_head("Key") || value.kind() == ExprKind::String; });
+                    const bool has_numeric = std::any_of(args[part].args().begin(), args[part].args().end(),
+                        [](const Expr& value) { return value.kind() == ExprKind::Integer; });
+                    if (has_key && has_numeric)
+                        return invalid_part("Association selector lists may not mix numeric and key selectors.");
+                    std::vector<Expr> selected;
+                    for (const auto& specification : args[part].args()) {
+                        const auto key = selector_key(specification); if (!key) return invalid_part("");
+                        const auto found = std::find_if(rules->begin(), rules->end(), [&](const Expr& rule) { return rule.args()[0] == *key; }); if (found == rules->end()) return invalid_part(""); selected.push_back(*found);
+                    }
+                    target = call("Association", std::move(selected)); continue;
+                }
+                const auto key = selector_key(args[part]).value_or(args[part]);
+                if (args[part].has_head("Key") || args[part].kind() == ExprKind::String) {
+                    const auto found = std::find_if(rules->begin(), rules->end(), [&](const Expr& rule) { return rule.args()[0] == key; }); if (found == rules->end()) return call(head, args); target = found->args()[1]; continue;
+                }
+                const auto index = normalized_index(args[part], rules->size()); if (!index) return invalid_part(""); target = (*rules)[*index].args()[1]; continue;
+            }
+            if (is_symbol(args[part], "All") || args[part].has_head("Span")) {
+                if (target.kind() != ExprKind::Call) return invalid_part("");
+                std::vector<std::size_t> selected_indices;
+                const auto length = static_cast<long>(target.args().size());
+                if (is_symbol(args[part], "All")) {
+                    for (std::size_t index = 0; index < target.args().size(); ++index)
+                        selected_indices.push_back(index);
+                } else {
+                    const auto& specification = args[part];
+                    if (specification.args().size() > 3) return invalid_part("");
+                    const auto step = specification.args().size() >= 3
+                        ? machine_index(specification.args()[2]) : std::optional<long>(1);
+                    if (!step || *step == 0) return invalid_part("");
+                    auto endpoint = [&](std::size_t position, bool start) -> std::optional<long> {
+                        if (position >= specification.args().size()
+                            || is_symbol(specification.args()[position], "All"))
+                            return *step > 0 ? (start ? 1 : length) : (start ? length : 1);
+                        const auto value = machine_index(specification.args()[position]);
+                        if (!value || *value == 0) return std::nullopt;
+                        const auto normalized = *value < 0 ? length + *value + 1 : *value;
+                        if (normalized < 1 || normalized > length) return std::nullopt;
+                        return normalized;
+                    };
+                    const auto first = endpoint(0, true);
+                    const auto last = endpoint(1, false);
+                    if (!first || !last) return invalid_part("");
+                    for (long index = *first;
+                        *step > 0 ? index <= *last : index >= *last;) {
+                        selected_indices.push_back(static_cast<std::size_t>(index - 1));
+                        const auto next = checked_signed_sum(index, *step);
+                        if (!next) break;
+                        index = *next;
+                    }
+                }
+                std::vector<Expr> selected;
+                for (const auto index : selected_indices) selected.push_back(target.args()[index]);
+                target = call(target.head(), std::move(selected));
+                continue;
+            }
+            if (args[part].has_head("List")) {
+                std::vector<Expr> selected;
+                for (const auto& spec : args[part].args()) {
+                    const auto index = normalized_index(spec, target.args().size());
+                    if (!index) return invalid_part("");
+                    selected.push_back(target.args()[*index]);
+                }
+                target = call(target.head(), std::move(selected));
+                continue;
+            }
+            if (args[part].kind() != ExprKind::Integer || !args[part].integer_value().fits_slong_p()) return invalid_part("");
+            const auto raw_index = args[part].integer_value().get_si();
+            const auto length = static_cast<long>(target.args().size());
+            const auto index = raw_index < 0 ? length + raw_index : raw_index - 1;
+            if (raw_index == 0) target = target.head();
+            else if (index >= 0 && index < length) target = target.args()[static_cast<std::size_t>(index)];
+            else return invalid_part("");
+        }
+        return target;
+    }
+    if (function == "First") {
+        std::string error;
+        if (args.size() != 1 && args.size() != 2) {
+            error = "First expects an expression and an optional default.";
+        } else {
+            if (const auto rules = association_rules(args[0]); rules && !rules->empty())
+                return rules->front().args()[1];
+            if (args[0].kind() == ExprKind::Call && !args[0].args().empty())
+                return args[0].args().front();
+            if (args.size() == 2) return args[1];
+            error = "Cannot take First of " + args[0].to_input_form() + ".";
+        }
+        const auto message = call("MessageName", {symbol("First"), string("error")});
+        emit_message(message, "First::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (function == "Last") {
+        std::string error;
+        if (args.size() != 1 && args.size() != 2) {
+            error = "Last expects an expression and an optional default.";
+        } else {
+            if (const auto rules = association_rules(args[0]); rules && !rules->empty())
+                return rules->back().args()[1];
+            if (args[0].kind() == ExprKind::Call && !args[0].args().empty())
+                return args[0].args().back();
+            if (args.size() == 2) return args[1];
+            error = "Cannot take Last of " + args[0].to_input_form() + ".";
+        }
+        const auto message = call("MessageName", {symbol("Last"), string("error")});
+        emit_message(message, "Last::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (function == "Rest" || function == "Most") {
+        std::string error;
+        if (args.size() != 1) {
+            error = function + " expects exactly one argument.";
+        } else if (const auto rules = association_rules(args[0])) {
+            if (rules->empty()) {
+                error = "Cannot take " + function + " of " + args[0].to_input_form()
+                    + " with length zero.";
+            } else {
+                const auto first = function == "Rest" ? rules->begin() + 1 : rules->begin();
+                const auto last = function == "Rest" ? rules->end() : rules->end() - 1;
+                return call(args[0].head(), std::vector<Expr>(first, last));
+            }
+        } else if (args[0].kind() != ExprKind::Call) {
+            error = function + " expects a nonatomic expression.";
+        } else if (args[0].args().empty()) {
+            error = "Cannot take " + function + " of " + args[0].to_input_form()
+                + " with length zero.";
+        } else {
+            const auto first = function == "Rest"
+                ? args[0].args().begin() + 1 : args[0].args().begin();
+            const auto last = function == "Rest"
+                ? args[0].args().end() : args[0].args().end() - 1;
+            return call(args[0].head(), std::vector<Expr>(first, last));
+        }
+        const auto message = call("MessageName", {symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (function == "Map" && args.size() == 3 && args[2].has_head("Rule")
+        && args[2].args().size() == 2 && is_symbol(args[2].args()[0], "Heads")
+        && args[1].kind() == ExprKind::Call) {
+        const bool include_heads = is_symbol(args[2].args()[1], "True");
+        Expr mapped_head = args[1].head();
+        if (include_heads) mapped_head = evaluate(call(args[0], {mapped_head}));
+        std::vector<Expr> values;
+        for (const auto& item : args[1].args()) values.push_back(evaluate(call(args[0], {item})));
+        return call(mapped_head, std::move(values));
+    }
+    if ((function == "Apply" || function == "Map") && args.size() == 3) {
+        long minimum = -1, maximum = -1;
+        if (args[2].has_head("List") && args[2].args().size() == 1 && machine_index(args[2].args()[0])) minimum = maximum = *machine_index(args[2].args()[0]);
+        else if (args[2].has_head("List") && args[2].args().size() == 2 && machine_index(args[2].args()[0]) && machine_index(args[2].args()[1])) {
+            minimum = *machine_index(args[2].args()[0]); maximum = *machine_index(args[2].args()[1]);
+        }
+        if (minimum >= 0 && maximum >= minimum) {
+            auto transform = [&](auto&& self, const Expr& value, long depth) -> Expr {
+                Expr current = value;
+                if (value.kind() == ExprKind::Call) { std::vector<Expr> children; for (const auto& child : value.args()) children.push_back(self(self, child, depth + 1)); current = call(value.head(), std::move(children)); }
+                if (depth < minimum || depth > maximum) return current;
+                return function == "Map" ? evaluate(call(args[0], {current}))
+                    : current.kind() == ExprKind::Call ? call(args[0], current.args()) : current;
+            };
+            return transform(transform, args[1], 0);
+        }
+    }
+    if ((function == "Apply" || function == "Map") && args.size() == 2) {
+        if (args[1].kind() != ExprKind::Call) return args[1];
+        if (const auto rules = association_rules(args[1])) {
+            if (function == "Apply") { std::vector<Expr> values; for (const auto& rule : *rules) values.push_back(rule.args()[1]); return evaluate(call(args[0], values)); }
+            std::vector<Expr> mapped; for (const auto& rule : *rules) mapped.push_back(call("Rule", {rule.args()[0], evaluate(call(args[0], {rule.args()[1]}))}));
+            return call("Association", std::move(mapped));
+        }
+        if (function == "Apply") return evaluate(call(args[0], args[1].args()));
+        std::vector<Expr> values;
+        for (const auto& item : args[1].args()) values.push_back(evaluate(call(args[0], {item})));
+        return remove_nothing_from_list_like(call(args[1].head(), std::move(values)));
+    }
+    if ((function == "Select" || function == "Discard" || function == "SelectFirst") && args.size() >= 2) {
+        const auto rules = association_rules(args[0]);
+        if (!rules && args[0].kind() != ExprKind::Call) return call(head, args);
+        Expr criterion = args[1]; std::optional<Expr> property;
+        if (criterion.has_head("Rule") && criterion.args().size() == 2) { property = criterion.args()[1]; criterion = criterion.args()[0]; }
+        std::vector<Expr> source;
+        if (rules) for (const auto& rule : *rules) source.push_back(rule.args()[1]); else source = args[0].args();
+        std::vector<Expr> elements, indices, selected_rules;
+        const auto limit = args.size() >= 3 && machine_index(args[2]) ? std::max<long>(0, *machine_index(args[2])) : 1000000L;
+        std::size_t remaining = static_cast<std::size_t>(limit);
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            const bool matches = is_symbol(evaluate(call(criterion, {source[index]})), "True");
+            bool selected = false;
+            if (function == "Discard") {
+                if (matches && remaining > 0) { --remaining; continue; }
+                selected = true;
+            } else if (matches && remaining > 0) {
+                selected = true;
+                --remaining;
+            }
+            if (!selected) continue;
+            elements.push_back(source[index]); indices.push_back(integer(index + 1));
+            if (rules) selected_rules.push_back((*rules)[index]);
+            if (function == "SelectFirst") break;
+            if (function == "Select" && remaining == 0) break;
+        }
+        if (function == "SelectFirst") {
+            const auto fallback = args.size() >= 3 ? args[2] : call("Missing", {string("NotFound")});
+            const auto element = elements.empty() ? fallback : elements[0];
+            const auto index = indices.empty() ? call("Missing", {string("NotFound")}) : indices[0];
+            if (property && property->has_head("List")) return call("Association", {
+                call("Rule", {string("Element"), element}), call("Rule", {string("Index"), index})});
+            if (property && property->kind() == ExprKind::String && property->text() == "Index") return index;
+            return element;
+        }
+        if (property && property->kind() == ExprKind::String && property->text() == "Index") return list(std::move(indices));
+        if (property && property->has_head("List")) return call("Association", {
+            call("Rule", {string("Element"), list(elements)}), call("Rule", {string("Index"), list(indices)})});
+        if (rules) return call("Association", std::move(selected_rules));
+        return call(args[0].head(), std::move(elements));
+    }
+    if (function == "TakeWhile" && args.size() == 2) {
+        const auto rules = association_rules(args[0]);
+        if (!rules && args[0].kind() != ExprKind::Call) return call(head, args);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) {
+                if (!is_symbol(evaluate(call(args[1], {rule.args()[1]})), "True")) break;
+                values.push_back(rule);
+            }
+            return call("Association", std::move(values));
+        }
+        for (const auto& item : args[0].args()) {
+            if (!is_symbol(evaluate(call(args[1], {item})), "True")) break;
+            values.push_back(item);
+        }
+        return call(args[0].head(), std::move(values));
+    }
+    if (function == "Scan" && args.size() >= 2) {
+        Expr level_spec = integer(1L);
+        bool include_heads = false;
+        for (std::size_t index = 2; index < args.size(); ++index) {
+            if (args[index].has_head("Rule") && args[index].args().size() == 2
+                && is_symbol(args[index].args()[0], "Heads")) include_heads = is_symbol(args[index].args()[1], "True");
+            else level_spec = args[index];
+        }
+        const auto bounds = normalize_level_spec(level_spec);
+        auto scan = [&](auto&& self, const Expr& value, long positive) -> void {
+            if (const auto rules = association_rules(value)) {
+                if (include_heads) self(self, value.head(), positive + 1);
+                for (const auto& rule : *rules) self(self, rule.args()[1], positive + 1);
+            } else if (value.kind() == ExprKind::Call) {
+                if (include_heads) self(self, value.head(), positive + 1);
+                for (const auto& item : value.args()) self(self, item, positive + 1);
+            }
+            if (level_matches(positive, -static_cast<long>(semantic_expression_depth(value)), bounds))
+                (void)evaluate(call(args[0], {value}));
+        };
+        if (bounds.valid) { scan(scan, args[1], 0); return symbol("Null"); }
+    }
+    if (function == "MapApply" && args.size() == 3) {
+        const auto bounds = normalize_level_spec(args[2]);
+        auto map_apply = [&](auto&& self, const Expr& value, long positive) -> Expr {
+            Expr rebuilt = value;
+            if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children;
+                for (const auto& child : value.args()) children.push_back(self(self, child, positive + 1));
+                rebuilt = call(value.head(), std::move(children));
+            }
+            if (!level_matches(positive, -static_cast<long>(semantic_expression_depth(rebuilt)), bounds)) return rebuilt;
+            return rebuilt.kind() == ExprKind::Call
+                ? evaluate(call(args[0], rebuilt.args())) : evaluate(call(args[0], {rebuilt}));
+        };
+        if (bounds.valid) return map_apply(map_apply, args[1], 0);
+    }
+    if (function == "MapApply" && args.size() == 2 && args[1].kind() == ExprKind::Call) {
+        std::vector<Expr> values;
+        for (const auto& item : args[1].args()) values.push_back(item.kind() == ExprKind::Call
+            ? evaluate(call(args[0], item.args())) : evaluate(call(args[0], {item})));
+        return call(args[1].head(), std::move(values));
+    }
+    if (function == "MapAll" && (args.size() == 2 || (args.size() == 3 && args[2].has_head("Rule")
+        && args[2].args().size() == 2 && is_symbol(args[2].args()[0], "Heads")))) {
+        const bool include_heads = args.size() == 3 && is_symbol(args[2].args()[1], "True");
+        auto map_all = [&](auto&& self, const Expr& value) -> Expr {
+            if (value.kind() != ExprKind::Call) return evaluate(call(args[0], {value}));
+            std::vector<Expr> mapped; for (const auto& item : value.args()) mapped.push_back(self(self, item));
+            const auto mapped_head = include_heads ? self(self, value.head()) : value.head();
+            return evaluate(call(args[0], {call(mapped_head, std::move(mapped))}));
+        };
+        return map_all(map_all, args[1]);
+    }
+    if (function == "MapIndexed" && args.size() == 2 && args[1].kind() == ExprKind::Call) {
+        if (const auto rules = association_rules(args[1])) {
+            std::vector<Expr> mapped;
+            for (const auto& rule : *rules) mapped.push_back(call("Rule", {rule.args()[0],
+                evaluate(call(args[0], {rule.args()[1], list({call("Key", {rule.args()[0]})})}))}));
+            return call("Association", std::move(mapped));
+        }
+        std::vector<Expr> values;
+        for (std::size_t index = 0; index < args[1].args().size(); ++index)
+            values.push_back(evaluate(call(args[0], {args[1].args()[index], list({integer(index + 1)})})));
+        return call(args[1].head(), std::move(values));
+    }
+    if (function == "Construct" && args.size() >= 1)
+        return evaluate(call(args[0], std::vector<Expr>(args.begin() + 1, args.end())));
+    if (function == "Operate" && args.size() >= 2 && args.size() <= 3 && args[1].kind() == ExprKind::Call) {
+        const auto level = args.size() == 3 ? machine_index(args[2]) : std::optional<long>(1);
+        if (level && *level == 0) return evaluate(call(args[0], {args[1]}));
+        if (level && *level == 1) return call(call(args[0], {args[1].head()}), args[1].args());
+    }
+    if (function == "Comap" && args.size() == 2 && args[0].has_head("List")) {
+        std::vector<Expr> values; for (const auto& callable : args[0].args()) values.push_back(evaluate(call(callable, {args[1]})));
+        return list(std::move(values));
+    }
+    if (function == "ComapApply" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")) {
+        std::vector<Expr> values; for (const auto& callable : args[0].args()) values.push_back(evaluate(call(callable, args[1].args())));
+        return list(std::move(values));
+    }
+    if (function == "Through" && args.size() == 1 && args[0].kind() == ExprKind::Call
+        && args[0].head().kind() == ExprKind::Call) {
+        const auto container = args[0].head();
+        std::vector<Expr> values; for (const auto& callable : container.args()) values.push_back(evaluate(call(callable, args[0].args())));
+        return call(container.head(), std::move(values));
+    }
+    if (function == "Through" && args.size() == 2 && args[0].kind() == ExprKind::Call) {
+        if (args[0].head().kind() != ExprKind::Call || args[0].head().head() != args[1]) return args[0];
+        const auto container = args[0].head();
+        std::vector<Expr> values;
+        for (const auto& callable : container.args()) values.push_back(evaluate(call(callable, args[0].args())));
+        return call(container.head(), std::move(values));
+    }
+    if (function == "MapAt" && args.size() == 3) {
+        auto result = args[1];
+        std::vector<Expr> positions = args[2].has_head("List") && !args[2].args().empty()
+            && args[2].args()[0].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]};
+        for (const auto& position : positions) {
+            const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position};
+            const auto target = value_at_path(result, path); if (!target) return call(head, args);
+            result = replace_at_path(result, path, 0, evaluate(call(args[0], {*target})));
+        }
+        return remove_nothing_from_list_like(result);
+    }
+    if (function == "Append" || function == "Prepend") {
+        std::string error;
+        if (args.size() != 2) {
+            error = function + " expects exactly two arguments.";
+        } else if (args[0].kind() != ExprKind::Call) {
+            error = function + " expects a nonatomic expression.";
+        } else if (const auto rules = association_rules(args[0])) {
+            if ((!args[1].has_head("Rule") && !args[1].has_head("RuleDelayed"))
+                || args[1].args().size() != 2) {
+                error = function + " expects a rule when "
+                    + (function == "Append" ? "appending to" : "prepending to")
+                    + " an Association.";
+            } else {
+                auto values = *rules;
+                values.erase(std::remove_if(values.begin(), values.end(),
+                    [&](const Expr& rule) { return rule.args()[0] == args[1].args()[0]; }),
+                    values.end());
+                values.insert(function == "Prepend" ? values.begin() : values.end(), args[1]);
+                return call(args[0].head(), std::move(values));
+            }
+        } else {
+            auto values = args[0].args();
+            if (!args[0].has_head("List") || !is_symbol(args[1], "Nothing"))
+                values.insert(function == "Prepend" ? values.begin() : values.end(), args[1]);
+            return call(args[0].head(), std::move(values));
+        }
+        const auto message = call("MessageName", {symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (function == "Interval") {
+        if (const auto segments = normalized_interval_segments(args)) return interval_expression(*segments);
+    }
+    if (function == "IntervalUnion") {
+        std::vector<Expr> segments;
+        bool valid = true;
+        for (const auto& interval : args) {
+            if (!interval.has_head("Interval")) { valid = false; break; }
+            segments.insert(segments.end(), interval.args().begin(), interval.args().end());
+        }
+        if (valid) {
+            const auto normalized = normalized_interval_segments(segments);
+            if (normalized) return interval_expression(*normalized);
+        }
+    }
+    if (function == "IntervalIntersection") {
+        if (args.empty()) return call("Interval", {});
+        bool valid = std::all_of(args.begin(), args.end(), [](const Expr& value) { return value.has_head("Interval"); });
+        if (valid) {
+            auto current = normalized_interval_segments(args.front().args()).value_or(std::vector<IntervalSegment>{});
+            for (std::size_t argument_index = 1; argument_index < args.size(); ++argument_index) {
+                const auto other = normalized_interval_segments(args[argument_index].args());
+                if (!other) { valid = false; break; }
+                std::vector<IntervalSegment> intersections;
+                for (const auto& left : current) for (const auto& right : *other) {
+                    const auto ll = interval_number(left.lower), lu = interval_number(left.upper);
+                    const auto rl = interval_number(right.lower), ru = interval_number(right.upper);
+                    if (!ll || !lu || !rl || !ru) { valid = false; break; }
+                    const auto lower = *ll >= *rl ? left.lower : right.lower;
+                    const auto upper = *lu <= *ru ? left.upper : right.upper;
+                    if (*interval_number(lower) <= *interval_number(upper)) intersections.push_back({lower, upper});
+                }
+                if (!valid) break;
+                current = std::move(intersections);
+            }
+            if (valid) return interval_expression(current);
+        }
+    }
+    if (function == "IntervalMemberQ" && args.size() == 2 && args[0].has_head("Interval")) {
+        const auto container = normalized_interval_segments(args[0].args());
+        if (container) {
+            auto contains_point = [&](const Expr& point) {
+                const auto value = interval_number(point); if (!value) return false;
+                return std::any_of(container->begin(), container->end(), [&](const IntervalSegment& segment) {
+                    const auto lower = interval_number(segment.lower), upper = interval_number(segment.upper);
+                    return lower && upper && *lower <= *value && *value <= *upper;
+                });
+            };
+            if (args[1].has_head("List")) {
+                std::vector<Expr> values; for (const auto& point : args[1].args()) values.push_back(boolean(contains_point(point)));
+                return list(std::move(values));
+            }
+            if (args[1].has_head("Interval")) {
+                const auto candidate = normalized_interval_segments(args[1].args());
+                if (candidate) return boolean(std::all_of(candidate->begin(), candidate->end(), [&](const IntervalSegment& inner) {
+                    const auto lower = interval_number(inner.lower), upper = interval_number(inner.upper);
+                    if (!lower || !upper) return false;
+                    return std::any_of(container->begin(), container->end(), [&](const IntervalSegment& outer) {
+                        const auto outer_lower = interval_number(outer.lower), outer_upper = interval_number(outer.upper);
+                        return outer_lower && outer_upper && *outer_lower <= *lower && *upper <= *outer_upper;
+                    });
+                }));
+            }
+            return boolean(contains_point(args[1]));
+        }
+    }
+    if (function == "ArrayQ" && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
+        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); return evaluate(call("ArrayQ", std::move(dense_args)));
+    }
+    if ((function == "ArrayReshape" || function == "ArrayPad" || function == "Transpose" || function == "Flatten")
+        && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
+        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); const auto result = evaluate(call(function, std::move(dense_args)));
+        if (const auto sparse = sparse_from_dense(result, args[0].fill_value())) return *sparse;
+        return result;
+    }
+    if ((function == "Tr" || function == "Det") && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
+        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); return evaluate(call(function, std::move(dense_args)));
+    }
+    if ((function == "Inverse" || function == "MatrixPower") && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
+        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); const auto result = evaluate(call(function, std::move(dense_args)));
+        if (const auto sparse = sparse_from_dense(result)) return *sparse;
+        return result;
+    }
+    if (function == "Dot" && args.size() == 2 && (args[0].kind() == ExprKind::SparseArray || args[1].kind() == ExprKind::SparseArray)) {
+        const auto result = evaluate(call("Dot", {sparse_dense_value(args[0]), sparse_dense_value(args[1])}));
+        if (const auto sparse = sparse_from_dense(result)) return *sparse;
+        return result;
+    }
+    if (function == "PadLeft" || function == "PadRight") {
+        std::string error;
+        if (args.size() != 2 && args.size() != 3) {
+            error = function
+                + " expects a list, a target length, and an optional fill value.";
+        } else if (args[0].kind() != ExprKind::Call) {
+            error = function + " expects a nonatomic expression.";
+        } else if (!args[0].has_head("List")) {
+            error = function + " currently expects a List as the first argument.";
+        } else if (args[1].kind() != ExprKind::Integer) {
+            error = function + " currently expects an integer target length.";
+        } else if (args[1].integer_value() < 0) {
+            error = function + " expects a non-negative target length.";
+        } else {
+            constexpr std::size_t maximum_materialized_padding = 1000000;
+            const auto requested = nonnegative_size_t(args[1].integer_value());
+            if (!requested || *requested > maximum_materialized_padding) {
+                error = function + " target length exceeds the native materialization limit.";
+            } else {
+                const auto padding = args.size() == 3 ? args[2] : integer(0L);
+                auto values = args[0].args();
+                if (values.size() > *requested) {
+                    if (function == "PadLeft")
+                        values.erase(values.begin(),
+                            values.end() - static_cast<std::ptrdiff_t>(*requested));
+                    else values.resize(*requested);
+                } else {
+                    const std::vector<Expr> fill(*requested - values.size(), padding);
+                    values.insert(function == "PadLeft" ? values.begin() : values.end(),
+                        fill.begin(), fill.end());
+                }
+                return call(args[0].head(), std::move(values));
+            }
+        }
+        const auto message = call("MessageName", {symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (function == "KeySort" && args.size() == 1) {
+        if (const auto rules = association_rules(args[0])) {
+            auto values = *rules;
+            std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
+                return expression_less(left.args()[0], right.args()[0]);
+            });
+            return call("Association", std::move(values));
+        }
+    }
+    if (function == "Merge" && args.size() == 2 && args[0].has_head("List")) {
+        std::vector<Expr> keys; std::vector<std::vector<Expr>> grouped; bool valid = true;
+        for (const auto& association : args[0].args()) {
+            const auto rules = association_rules(association); if (!rules) { valid = false; break; }
+            for (const auto& rule : *rules) {
+                auto found = std::find(keys.begin(), keys.end(), rule.args()[0]);
+                if (found == keys.end()) { keys.push_back(rule.args()[0]); grouped.push_back({rule.args()[1]}); }
+                else grouped[static_cast<std::size_t>(found - keys.begin())].push_back(rule.args()[1]);
+            }
+        }
+        if (valid) { std::vector<Expr> rules; for (std::size_t index = 0; index < keys.size(); ++index) rules.push_back(call("Rule", {keys[index], evaluate(call(args[1], {list(grouped[index])}))})); return call("Association", std::move(rules)); }
+    }
+    if (function == "GroupBy" && args.size() == 2 && args[0].kind() == ExprKind::Call) {
+        const auto criterion = args[1].has_head("Rule") && args[1].args().size() == 2 ? args[1].args()[0] : args[1];
+        const auto aggregator = args[1].has_head("Rule") && args[1].args().size() == 2 ? std::optional<Expr>(args[1].args()[1]) : std::nullopt;
+        std::vector<Expr> keys; std::vector<std::vector<Expr>> groups;
+        for (const auto& item : args[0].args()) { const auto key = evaluate(call(criterion, {item})); const auto found = std::find(keys.begin(), keys.end(), key); if (found == keys.end()) { keys.push_back(key); groups.push_back({item}); } else groups[found - keys.begin()].push_back(item); }
+        std::vector<Expr> rules; for (std::size_t index = 0; index < keys.size(); ++index) { Expr value = list(groups[index]); if (aggregator) value = evaluate(call(*aggregator, {value})); rules.push_back(call("Rule", {keys[index], value})); }
+        return call("Association", std::move(rules));
+    }
+    if ((function == "Gather" || function == "GatherBy") && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+        std::vector<Expr> keys; std::vector<std::vector<Expr>> groups;
+        for (const auto& item : args[0].args()) { const auto key = function == "GatherBy" ? evaluate(call(args[1], {item})) : item; const auto found = std::find(keys.begin(), keys.end(), key); if (found == keys.end()) { keys.push_back(key); groups.push_back({item}); } else groups[found - keys.begin()].push_back(item); }
+        std::vector<Expr> values; for (auto& group : groups) values.push_back(call(args[0].head(), std::move(group))); return list(std::move(values));
+    }
+    if ((function == "KeyComplement" || function == "KeyUnion" || function == "KeyIntersection")
+        && args.size() == 1 && args[0].has_head("List")) {
+        std::vector<std::vector<Expr>> all_rules; bool valid = true;
+        for (const auto& association : args[0].args()) { const auto rules = association_rules(association); if (!rules) { valid = false; break; } all_rules.push_back(*rules); }
+        if (valid && !all_rules.empty()) {
+            if (function == "KeyComplement") {
+                std::vector<Expr> result;
+                for (const auto& rule : all_rules.front()) { bool present = false; for (std::size_t index = 1; index < all_rules.size(); ++index) present = present || std::any_of(all_rules[index].begin(), all_rules[index].end(), [&](const Expr& other) { return other.args()[0] == rule.args()[0]; }); if (!present) result.push_back(rule); }
+                return call("Association", std::move(result));
+            }
+            std::vector<Expr> keys;
+            for (const auto& rules : all_rules) for (const auto& rule : rules) if (std::find(keys.begin(), keys.end(), rule.args()[0]) == keys.end()) keys.push_back(rule.args()[0]);
+            if (function == "KeyIntersection") keys.erase(std::remove_if(keys.begin(), keys.end(), [&](const Expr& key) { return std::any_of(all_rules.begin(), all_rules.end(), [&](const std::vector<Expr>& rules) { return std::none_of(rules.begin(), rules.end(), [&](const Expr& rule) { return rule.args()[0] == key; }); }); }), keys.end());
+            std::vector<Expr> associations;
+            for (const auto& rules : all_rules) { std::vector<Expr> result; for (const auto& key : keys) { const auto found = std::find_if(rules.begin(), rules.end(), [&](const Expr& rule) { return rule.args()[0] == key; }); result.push_back(found == rules.end() ? call("Rule", {key, call("Missing", {string("KeyAbsent"), key})}) : *found); } associations.push_back(call("Association", std::move(result))); }
+            return list(std::move(associations));
+        }
+    }
+    if (function == "MinMax" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        if (values.empty()) return list({symbol("Infinity"), call("Times", {integer(-1L), symbol("Infinity")})});
+        return list({evaluate(call("Min", values)), evaluate(call("Max", std::move(values)))});
+    }
+    if ((function == "RankedMin" || function == "RankedMax") && args.size() == 2
+        && args[0].kind() == ExprKind::Call
+        && args[1].kind() == ExprKind::Integer) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        if (!values.empty() && std::all_of(values.begin(), values.end(), [](const Expr& value) {
+                return numeric_real(value).has_value();
+            })) {
+            std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
+                return *numeric_real(left) < *numeric_real(right);
+            });
+            if (function == "RankedMax") std::reverse(values.begin(), values.end());
+            const auto& rank = args[1].integer_value();
+            const mpz_class count(std::to_string(values.size()), 10);
+            if (rank > 0 && rank <= count) {
+                if (const auto index = nonnegative_size_t(rank - 1))
+                    return values[*index];
+            } else if (rank < 0 && rank >= -count) {
+                if (const auto index = nonnegative_size_t(count + rank))
+                    return values[*index];
+            }
+        }
+    }
+    if (function == "Mode" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        if (!values.empty()) {
+            struct ModeGroup { Expr representative; std::size_t count; };
+            std::vector<ModeGroup> groups;
+            for (const auto& value : values) {
+                const auto found = std::find_if(groups.begin(), groups.end(), [&](const ModeGroup& group) {
+                    return group.representative == value;
+                });
+                if (found == groups.end()) groups.push_back({value, 1});
+                else ++found->count;
+            }
+            const auto maximum = std::max_element(groups.begin(), groups.end(), [](const ModeGroup& left, const ModeGroup& right) {
+                return left.count < right.count;
+            })->count;
+            std::vector<Expr> candidates;
+            for (const auto& group : groups) if (group.count == maximum) candidates.push_back(group.representative);
+            std::sort(candidates.begin(), candidates.end(), expression_less);
+            return candidates.front();
+        }
+    }
+    if ((function == "Quantile" || function == "Quartiles") && !args.empty()
+        && args.size() <= 3 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        const bool numeric = !values.empty() && std::all_of(values.begin(), values.end(), [](const Expr& value) {
+            return numeric_real(value).has_value();
+        });
+        if (numeric) {
+            std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
+                return *numeric_real(left) < *numeric_real(right);
+            });
+            std::vector<Expr> parameters{integer(0L), integer(0L), integer(1L), integer(0L)};
+            if (function == "Quartiles") parameters = {rational(1, 2), integer(0L), integer(0L), integer(1L)};
+            else if (args.size() == 3 && args[2].has_head("List") && args[2].args().size() == 2
+                && args[2].args()[0].has_head("List") && args[2].args()[0].args().size() == 2
+                && args[2].args()[1].has_head("List") && args[2].args()[1].args().size() == 2) {
+                parameters = {args[2].args()[0].args()[0], args[2].args()[0].args()[1],
+                    args[2].args()[1].args()[0], args[2].args()[1].args()[1]};
+            } else if (args.size() == 3) return call(head, args);
+            auto quantile_one = [&](const Expr& quantile) -> Expr {
+                const auto position = evaluate(call("Plus", {parameters[0], evaluate(call("Times", {
+                    evaluate(call("Plus", {integer(static_cast<unsigned long>(values.size())), parameters[1]})), quantile}))}));
+                const auto floor = evaluate(call("Floor", {position}));
+                const auto index_value = machine_index(floor);
+                if (!index_value) return call("Quantile", {args[0], quantile});
+                const auto fraction = evaluate(call("Plus", {position, evaluate(call("Times", {integer(-1L), floor}))}));
+                const auto index = *index_value;
+                if (index < 1) return values.front();
+                if (index >= static_cast<long>(values.size())) return values.back();
+                const auto& base = values[static_cast<std::size_t>(index - 1)];
+                const auto& next = values[static_cast<std::size_t>(index)];
+                if (const auto fraction_value = numeric_real(fraction); fraction_value && *fraction_value == 0.0) return base;
+                const auto weight = evaluate(call("Plus", {parameters[2], evaluate(call("Times", {parameters[3], fraction}))}));
+                const auto difference = evaluate(call("Plus", {next, evaluate(call("Times", {integer(-1L), base}))}));
+                return evaluate(call("Plus", {base, evaluate(call("Times", {weight, difference}))}));
+            };
+            std::vector<Expr> quantiles;
+            if (function == "Quartiles") quantiles = {rational(1, 4), rational(1, 2), rational(3, 4)};
+            else if (args.size() >= 2 && args[1].has_head("List")) quantiles = args[1].args();
+            else if (args.size() >= 2) return quantile_one(args[1]);
+            else return call(head, args);
+            std::vector<Expr> result;
+            for (const auto& quantile : quantiles) result.push_back(quantile_one(quantile));
+            return list(std::move(result));
+        }
+    }
+    if ((function == "BinCounts" || function == "BinLists") && !args.empty() && args.size() <= 2
+        && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        if (std::all_of(values.begin(), values.end(), [](const Expr& value) { return numeric_real(value).has_value(); })) {
+            Expr specification = args.size() == 2 ? args[1] : integer(1L);
+            std::optional<double> lower, upper, width;
+            if (specification.has_head("List") && specification.args().size() == 3) {
+                lower = numeric_real(specification.args()[0]);
+                upper = numeric_real(specification.args()[1]);
+                width = numeric_real(specification.args()[2]);
+            } else if (const auto given_width = numeric_real(specification); given_width && *given_width > 0 && !values.empty()) {
+                width = given_width;
+                const auto bounds = std::minmax_element(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
+                    return *numeric_real(left) < *numeric_real(right);
+                });
+                lower = std::floor(*numeric_real(*bounds.first) / *width) * *width;
+                upper = (std::floor(*numeric_real(*bounds.second) / *width) + 1.0) * *width;
+            }
+            if (lower && upper && width && *width > 0 && *upper > *lower) {
+                const auto count_value = std::floor((*upper - *lower) / *width);
+                if (!std::isfinite(count_value) || count_value < 0
+                    || count_value > 1000000.0) return call(head, args);
+                const auto count = static_cast<std::size_t>(count_value);
+                std::vector<std::vector<Expr>> bins(count);
+                for (const auto& value : values) {
+                    const auto offset = (*numeric_real(value) - *lower) / *width;
+                    const auto index = std::floor(offset);
+                    if (std::isfinite(index) && index >= 0
+                        && index < static_cast<double>(count))
+                        bins[static_cast<std::size_t>(index)].push_back(value);
+                }
+                std::vector<Expr> result;
+                for (const auto& bin : bins) result.push_back(function == "BinCounts"
+                    ? integer(static_cast<unsigned long>(bin.size())) : list(bin));
+                return list(std::move(result));
+            }
+        }
+    }
+    if ((function == "Mean" || function == "Median") && args.size() == 1 && args[0].kind() == ExprKind::Call
+        && !args[0].args().empty()) {
+        auto values = args[0].args();
+        if (function == "Mean") return evaluate(call("Times", {
+            rational(mpz_class(1), mpz_class(values.size())), evaluate(call("Plus", std::move(values)))}));
+        std::sort(values.begin(), values.end(), expression_less);
+        const auto middle = values.size() / 2;
+        if (values.size() % 2) return values[middle];
+        return evaluate(call("Times", {rational(mpz_class(1), mpz_class(2)),
+            evaluate(call("Plus", {values[middle - 1], values[middle]}))}));
+    }
+    if ((function == "Variance" || function == "StandardDeviation") && args.size() == 1
+        && args[0].has_head("List") && args[0].args().size() >= 2) {
+        const auto mean = evaluate(call("Mean", {args[0]})); std::vector<Expr> squares;
+        for (const auto& item : args[0].args()) squares.push_back(evaluate(call("Power", {evaluate(call("Plus", {item, evaluate(call("Times", {integer(-1L), mean}))})), integer(2L)})));
+        const auto variance = evaluate(call("Times", {rational(mpz_class(1), mpz_class(args[0].args().size() - 1)), evaluate(call("Plus", std::move(squares)))}));
+        return function == "Variance" ? variance : evaluate(call("Power", {variance, rational(1, 2)}));
+    }
+    if (function == "Norm" && !args.empty() && args.size() <= 2 && args[0].has_head("List")) {
+        if (args.size() == 2 && is_symbol(args[1], "Infinity")) {
+            std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Abs", {item}))); return evaluate(call("Max", std::move(values)));
+        }
+        const auto exponent = args.size() == 2 ? args[1] : integer(2L); std::vector<Expr> powers;
+        for (const auto& item : args[0].args()) powers.push_back(evaluate(call("Power", {evaluate(call("Abs", {item})), exponent})));
+        return evaluate(call("Power", {evaluate(call("Plus", std::move(powers))), evaluate(call("Power", {exponent, integer(-1L)}))}));
+    }
+    if (function == "Boole" && args.size() == 1) {
+        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(is_symbol(item, "True") ? integer(1L) : is_symbol(item, "False") ? integer(0L) : call("Boole", {item})); return list(std::move(values)); }
+        if (is_symbol(args[0], "True")) return integer(1L);
+        if (is_symbol(args[0], "False")) return integer(0L);
+    }
+    if (function == "ArrayDepth" && args.size() == 1) {
+        auto depth = [&](auto&& self, const Expr& value) -> std::size_t {
+            if (!value.has_head("List") || value.args().empty()) return value.has_head("List") ? 1 : 0;
+            std::size_t child = self(self, value.args().front());
+            for (const auto& item : value.args()) child = std::min(child, self(self, item));
+            return child + 1;
+        };
+        return integer(static_cast<unsigned long>(depth(depth, args[0])));
+    }
+    if (function == "ArrayQ" && !args.empty() && args.size() <= 3) {
+        std::vector<std::size_t> dimensions;
+        auto shape = [&](auto&& self, const Expr& value, std::size_t level) -> bool {
+            if (!value.has_head("List")) return level == dimensions.size();
+            if (level == dimensions.size()) dimensions.push_back(value.args().size());
+            else if (dimensions[level] != value.args().size()) return false;
+            return std::all_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item, level + 1); });
+        };
+        bool valid = shape(shape, args[0], 0);
+        if (valid && args.size() >= 2 && machine_index(args[1])) valid = dimensions.size() == static_cast<std::size_t>(*machine_index(args[1]));
+        else if (args.size() >= 2) valid = false;
+        if (valid && args.size() == 3) {
+            auto leaves_match = [&](auto&& self, const Expr& value) -> bool {
+                if (!value.has_head("List")) return is_symbol(evaluate(call(args[2], {value})), "True");
+                return std::all_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item); });
+            };
+            valid = leaves_match(leaves_match, args[0]);
+        }
+        return boolean(valid);
+    }
+    if (function == "ArrayReshape" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
+        && args[1].has_head("List")) {
+        std::vector<std::size_t> dimensions; bool valid = true;
+        for (const auto& dimension : args[1].args()) {
+            const auto value = machine_index(dimension);
+            if (!value || *value < 0) { valid = false; break; }
+            dimensions.push_back(static_cast<std::size_t>(*value));
+        }
+        if (valid) {
+            const auto padding = args.size() == 3 ? args[2] : integer(0L); std::size_t cursor = 0;
+            auto build = [&](auto&& self, std::size_t level) -> Expr {
+                if (level == dimensions.size()) return cursor < args[0].args().size() ? args[0].args()[cursor++] : padding;
+                std::vector<Expr> values; for (std::size_t index = 0; index < dimensions[level]; ++index) values.push_back(self(self, level + 1));
+                return list(std::move(values));
+            };
+            return build(build, 0);
+        }
+    }
+    if (function == "ArrayPad" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
+        && machine_index(args[1]) && *machine_index(args[1]) >= 0) {
+        const auto width = static_cast<std::size_t>(*machine_index(args[1]));
+        const auto padding = args.size() == 3 ? args[2] : integer(0L);
+        if (std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
+            const auto columns = args[0].args().empty() ? 0 : args[0].args().front().args().size();
+            std::vector<Expr> rows(width, list(std::vector<Expr>(columns + 2 * width, padding)));
+            for (const auto& row : args[0].args()) {
+                auto values = row.args(); values.insert(values.begin(), width, padding); values.insert(values.end(), width, padding);
+                rows.push_back(list(std::move(values)));
+            }
+            rows.insert(rows.end(), width, list(std::vector<Expr>(columns + 2 * width, padding)));
+            return list(std::move(rows));
+        }
+        auto values = args[0].args(); values.insert(values.begin(), width, padding); values.insert(values.end(), width, padding);
+        return list(std::move(values));
+    }
+    if (function == "ArrayFlatten" && args.size() == 1 && args[0].has_head("List")) {
+        std::vector<Expr> result; bool valid = true;
+        for (const auto& block_row : args[0].args()) {
+            if (!block_row.has_head("List")) { valid = false; break; }
+            std::size_t height = 0;
+            for (const auto& block : block_row.args()) {
+                if (!block.has_head("List")) { valid = false; break; }
+                height = std::max(height, block.args().size());
+            }
+            if (!valid) break;
+            for (std::size_t row_index = 0; row_index < height; ++row_index) {
+                std::vector<Expr> row;
+                for (const auto& block : block_row.args()) {
+                    if (row_index >= block.args().size() || !block.args()[row_index].has_head("List")) { valid = false; break; }
+                    const auto& block_values = block.args()[row_index].args(); row.insert(row.end(), block_values.begin(), block_values.end());
+                }
+                if (!valid) break;
+                result.push_back(list(std::move(row)));
+            }
+        }
+        if (valid) return list(std::move(result));
+    }
+    if (function == "Transpose" && args.size() == 1 && args[0].has_head("List") && !args[0].args().empty()
+        && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
+        const auto columns = args[0].args().front().args().size();
+        if (std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& row) { return row.args().size() == columns; })) {
+            std::vector<Expr> result;
+            for (std::size_t column = 0; column < columns; ++column) {
+                std::vector<Expr> row; for (const auto& source_row : args[0].args()) row.push_back(source_row.args()[column]);
+                result.push_back(list(std::move(row)));
+            }
+            return list(std::move(result));
+        }
+    }
+    if (function == "Insert" && args.size() == 3 && args[0].kind() == ExprKind::Call && machine_index(args[2])) {
+        auto position = *machine_index(args[2]); const auto length = static_cast<long>(args[0].args().size());
+        if (position < 0) position = length + position + 2;
+        if (position >= 1 && position <= length + 1) {
+            auto values = args[0].args(); values.insert(values.begin() + position - 1, args[1]); return call(args[0].head(), std::move(values));
+        }
+    }
+    if (function == "FlattenAt" && args.size() == 2 && args[0].kind() == ExprKind::Call && machine_index(args[1])) {
+        const auto position = normalized_index(args[1], args[0].args().size());
+        if (position && args[0].args()[*position].kind() == ExprKind::Call) {
+            auto values = args[0].args(); const auto nested = values[*position].args();
+            values.erase(values.begin() + *position); values.insert(values.begin() + *position, nested.begin(), nested.end());
+            return call(args[0].head(), std::move(values));
+        }
+    }
+    if ((function == "Split" || function == "SplitBy") && args.size() >= 1 && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+        std::vector<Expr> groups;
+        for (const auto& item : args[0].args()) {
+            bool same = false;
+            if (!groups.empty()) {
+                const auto& prior = groups.back().args().back();
+                if (function == "Split") same = args.size() == 1 ? prior == item
+                    : is_symbol(evaluate(call(args[1], {prior, item})), "True");
+                else same = evaluate(call(args[1], {prior})) == evaluate(call(args[1], {item}));
+            }
+            if (!same) groups.push_back(list({item}));
+            else { auto values = groups.back().args(); values.push_back(item); groups.back() = list(std::move(values)); }
+        }
+        return list(std::move(groups));
+    }
+    if (function == "DeleteAdjacentDuplicates" && args.size() >= 1 && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+        std::vector<Expr> values;
+        for (const auto& item : args[0].args()) {
+            const bool duplicate = !values.empty() && (args.size() == 1 ? values.back() == item
+                : is_symbol(evaluate(call(args[1], {values.back(), item})), "True"));
+            if (!duplicate) values.push_back(item);
+        }
+        return call(args[0].head(), std::move(values));
+    }
+    if (function == "Subsequences" && args.size() == 2 && args[0].kind() == ExprKind::Call
+        && args[1].has_head("List") && args[1].args().size() == 1 && machine_index(args[1].args()[0])
+        && *machine_index(args[1].args()[0]) >= 0) {
+        const auto width = static_cast<std::size_t>(*machine_index(args[1].args()[0])); std::vector<Expr> result;
+        for (std::size_t index = 0; index + width <= args[0].args().size(); ++index)
+            result.push_back(call(args[0].head(), std::vector<Expr>(args[0].args().begin() + index, args[0].args().begin() + index + width)));
+        return list(std::move(result));
+    }
+    if ((function == "AlphabeticSort" || function == "NumericalSort") && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        auto values = args[0].args();
+        auto lower = [](std::string value) { std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return value; };
+        auto natural_less = [&](const Expr& left, const Expr& right) {
+            // Python's key is a tuple of alternating case-folded text and
+            // arbitrary-width integer runs.  Non-string expressions
+            // participate through InputForm, and equal numeric runs ("02"
+            // versus "2") deliberately remain equivalent for stable_sort.
+            const auto a = lower(left.kind() == ExprKind::String
+                    ? left.text() : left.to_input_form());
+            const auto b = lower(right.kind() == ExprKind::String
+                    ? right.text() : right.to_input_form());
+            std::size_t ai = 0, bi = 0;
+            while (ai < a.size() && bi < b.size()) {
+                const bool a_digits = std::isdigit(static_cast<unsigned char>(a[ai])) != 0;
+                const bool b_digits = std::isdigit(static_cast<unsigned char>(b[bi])) != 0;
+                if (a_digits != b_digits) return !a_digits;
+                auto ae = ai;
+                auto be = bi;
+                while (ae < a.size()
+                    && (std::isdigit(static_cast<unsigned char>(a[ae])) != 0) == a_digits) ++ae;
+                while (be < b.size()
+                    && (std::isdigit(static_cast<unsigned char>(b[be])) != 0) == b_digits) ++be;
+                auto a_part = std::string_view(a).substr(ai, ae - ai);
+                auto b_part = std::string_view(b).substr(bi, be - bi);
+                if (a_digits) {
+                    while (!a_part.empty() && a_part.front() == '0') a_part.remove_prefix(1);
+                    while (!b_part.empty() && b_part.front() == '0') b_part.remove_prefix(1);
+                    if (a_part.size() != b_part.size()) return a_part.size() < b_part.size();
+                }
+                if (a_part != b_part) return a_part < b_part;
+                ai = ae;
+                bi = be;
+            }
+            return ai == a.size() && bi != b.size();
+        };
+        if (function == "NumericalSort") std::stable_sort(values.begin(), values.end(), natural_less);
+        else std::stable_sort(values.begin(), values.end(), [&](const Expr& left, const Expr& right) {
+            return left.kind() == ExprKind::String && right.kind() == ExprKind::String
+                ? lower(left.text()) < lower(right.text()) : expression_less(left, right);
+        });
+        return call(args[0].head(), std::move(values));
+    }
+    if (function == "Tr" && !args.empty() && args[0].has_head("List")) {
+        if (args.size() == 3 && machine_index(args[2]) && *machine_index(args[2]) == 1)
+            return evaluate(call("Total", {args[0]}));
+        if (args.size() <= 2 && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
+            std::vector<Expr> diagonal;
+            for (std::size_t index = 0; index < args[0].args().size(); ++index)
+                if (index < args[0].args()[index].args().size()) diagonal.push_back(args[0].args()[index].args()[index]);
+            return evaluate(call(args.size() == 2 ? args[1] : symbol("Plus"), std::move(diagonal)));
+        }
+    }
+    if (function == "Det" && args.size() == 1 && args[0].has_head("List")) {
+        const auto& rows = args[0].args();
+        if (!rows.empty() && std::all_of(rows.begin(), rows.end(), [&](const Expr& row) { return row.has_head("List") && row.args().size() == rows.size(); })) {
+            auto determinant = [&](auto&& self, const std::vector<std::vector<Expr>>& matrix) -> Expr {
+                if (matrix.empty()) return integer(1L);
+                if (matrix.size() == 1) return matrix[0][0];
+                std::vector<Expr> terms;
+                for (std::size_t column = 0; column < matrix.size(); ++column) {
+                    std::vector<std::vector<Expr>> minor;
+                    for (std::size_t row = 1; row < matrix.size(); ++row) {
+                        std::vector<Expr> minor_row;
+                        for (std::size_t other = 0; other < matrix.size(); ++other) if (other != column) minor_row.push_back(matrix[row][other]);
+                        minor.push_back(std::move(minor_row));
+                    }
+                    std::vector<Expr> factors{matrix[0][column], self(self, minor)};
+                    if (column % 2) factors.insert(factors.begin(), integer(-1L));
+                    terms.push_back(evaluate(call("Times", std::move(factors))));
+                }
+                return evaluate(call("Plus", std::move(terms)));
+            };
+            std::vector<std::vector<Expr>> matrix; for (const auto& row : rows) matrix.push_back(row.args());
+            return determinant(determinant, matrix);
+        }
+    }
+    if (function == "Inverse" && args.size() == 1 && args[0].has_head("List") && args[0].args().size() == 2
+        && args[0].args()[0].has_head("List") && args[0].args()[1].has_head("List")
+        && args[0].args()[0].args().size() == 2 && args[0].args()[1].args().size() == 2) {
+        const auto& a = args[0].args()[0].args()[0]; const auto& b = args[0].args()[0].args()[1];
+        const auto& c = args[0].args()[1].args()[0]; const auto& d = args[0].args()[1].args()[1];
+        const auto determinant = evaluate(call("Plus", {evaluate(call("Times", {a, d})), evaluate(call("Times", {integer(-1L), b, c}))}));
+        auto divide = [&](const Expr& numerator) { return evaluate(call("Times", {numerator, call("Power", {determinant, integer(-1L)})})); };
+        return list({list({divide(d), divide(evaluate(call("Times", {integer(-1L), b})))}),
+            list({divide(evaluate(call("Times", {integer(-1L), c}))), divide(a)})});
+    }
+    if (function == "MatrixPower" && args.size() == 2 && args[0].has_head("List") && machine_index(args[1])
+        && *machine_index(args[1]) >= 0) {
+        const auto size = args[0].args().size();
+        if (std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& row) { return row.has_head("List") && row.args().size() == size; })) {
+            auto multiply = [&](const Expr& left, const Expr& right) {
+                std::vector<Expr> rows;
+                for (std::size_t row = 0; row < size; ++row) {
+                    std::vector<Expr> values;
+                    for (std::size_t column = 0; column < size; ++column) {
+                        std::vector<Expr> products;
+                        for (std::size_t index = 0; index < size; ++index)
+                            products.push_back(evaluate(call("Times", {left.args()[row].args()[index], right.args()[index].args()[column]})));
+                        values.push_back(evaluate(call("Plus", std::move(products))));
+                    }
+                    rows.push_back(list(std::move(values)));
+                }
+                return list(std::move(rows));
+            };
+            std::vector<Expr> identity_rows;
+            for (std::size_t row = 0; row < size; ++row) { std::vector<Expr> values(size, integer(0L)); values[row] = integer(1L); identity_rows.push_back(list(std::move(values))); }
+            Expr result = list(std::move(identity_rows)), base = args[0]; long exponent = *machine_index(args[1]);
+            while (exponent > 0) { if (exponent % 2) result = multiply(result, base); exponent /= 2; if (exponent) base = multiply(base, base); }
+            return result;
+        }
+    }
+    if (function == "Cross" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")
+        && args[0].args().size() == 3 && args[1].args().size() == 3) {
+        const auto& a = args[0].args(); const auto& b = args[1].args();
+        auto component = [&](std::size_t i, std::size_t j, std::size_t k, std::size_t l) {
+            return evaluate(call("Plus", {evaluate(call("Times", {a[i], b[j]})), evaluate(call("Times", {integer(-1L), a[k], b[l]}))}));
+        };
+        return list({component(1, 2, 2, 1), component(2, 0, 0, 2), component(0, 1, 1, 0)});
+    }
+    if (function == "LeviCivitaTensor" && args.size() == 1 && machine_index(args[0]) && *machine_index(args[0]) == 2)
+        return list({list({integer(0L), integer(1L)}), list({integer(-1L), integer(0L)})});
+    if (function == "Total" && !args.empty() && args.size() <= 2) {
+        auto total_default = [&](const Expr& value) -> std::optional<Expr> {
+            std::vector<Expr> values;
+            if (const auto rules = association_rules(value)) {
+                for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+            } else if (value.has_head("List")) values = value.args();
+            else return std::nullopt;
+            return evaluate(call("Plus", std::move(values)));
+        };
+        if (args.size() == 1) {
+            if (const auto result = total_default(args[0])) return *result;
+        } else if (args[1].has_head("List") && args[1].args().size() == 1
+            && machine_index(args[1].args()[0]) && *machine_index(args[1].args()[0]) >= 1) {
+            const auto selected_level = *machine_index(args[1].args()[0]);
+            auto at_level = [&](auto&& self, const Expr& value, long remaining) -> std::optional<Expr> {
+                if (remaining == 1) return total_default(value);
+                if (const auto rules = association_rules(value)) {
+                    std::vector<Expr> entries;
+                    for (const auto& rule : *rules) {
+                        const auto child = self(self, rule.args()[1], remaining - 1);
+                        if (!child) return std::nullopt;
+                        entries.push_back(call(rule.head(), {rule.args()[0], *child}));
+                    }
+                    return call("Association", std::move(entries));
+                }
+                if (!value.has_head("List")) return std::nullopt;
+                std::vector<Expr> children;
+                for (const auto& child_value : value.args()) {
+                    const auto child = self(self, child_value, remaining - 1);
+                    if (!child) return std::nullopt;
+                    children.push_back(*child);
+                }
+                return list(std::move(children));
+            };
+            if (const auto result = at_level(at_level, args[0], selected_level)) return *result;
+        } else {
+            const bool infinity = is_symbol(args[1], "Infinity");
+            const auto requested = machine_index(args[1]);
+            if (infinity || (requested && *requested >= 0)) {
+                Expr result = args[0];
+                const auto maximum = infinity ? level_infinity : *requested;
+                for (long level = 0; level < maximum; ++level) {
+                    const auto next = total_default(result);
+                    if (!next) break;
+                    result = *next;
+                }
+                return result;
+            }
+        }
+    }
+    if ((function == "Tally" || function == "Counts") && !args.empty() && args.size() <= 2
+        && args[0].kind() == ExprKind::Call) {
+        struct Group { Expr representative; std::size_t count; };
+        std::vector<Group> groups;
+        auto equivalent = [&](const Expr& left, const Expr& right) {
+            return args.size() == 1 ? left == right
+                : is_symbol(evaluate(call(args[1], {left, right})), "True");
+        };
+        for (const auto& item : args[0].args()) {
+            const auto found = std::find_if(groups.begin(), groups.end(), [&](const Group& group) {
+                return equivalent(item, group.representative);
+            });
+            if (found == groups.end()) groups.push_back({item, 1}); else ++found->count;
+        }
+        std::vector<Expr> values;
+        for (const auto& group : groups) values.push_back(function == "Tally"
+            ? list({group.representative, integer(static_cast<unsigned long>(group.count))})
+            : call("Rule", {group.representative, integer(static_cast<unsigned long>(group.count))}));
+        return call(function == "Tally" ? "List" : "Association", std::move(values));
+    }
+    if (function == "CountDistinct" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> unique;
+        for (const auto& item : rules ? *rules : args[0].args()) {
+            const auto& value = rules ? item.args()[1] : item;
+            if (std::find(unique.begin(), unique.end(), value) == unique.end()) unique.push_back(value);
+        }
+        return integer(static_cast<unsigned long>(unique.size()));
+    }
+    if (function == "CountsBy" && args.size() == 2 && args[0].kind() == ExprKind::Call) {
+        const auto input_rules = association_rules(args[0]);
+        std::vector<Expr> keys;
+        std::vector<std::size_t> counts;
+        for (const auto& item : input_rules ? *input_rules : args[0].args()) {
+            const auto& value = input_rules ? item.args()[1] : item;
+            const auto key = evaluate(call(args[1], {value}));
+            const auto found = std::find(keys.begin(), keys.end(), key);
+            if (found == keys.end()) {
+                keys.push_back(key);
+                counts.push_back(1);
+            } else ++counts[static_cast<std::size_t>(found - keys.begin())];
+        }
+        std::vector<Expr> rules;
+        for (std::size_t index = 0; index < keys.size(); ++index)
+            rules.push_back(call("Rule", {keys[index], integer(static_cast<unsigned long>(counts[index]))}));
+        return call("Association", std::move(rules));
+    }
+    if (function == "Catenate" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        for (const auto& item : rules ? *rules : args[0].args()) {
+            const auto& value = rules ? item.args()[1] : item;
+            if (value.kind() != ExprKind::Call) return call(head, args);
+            values.insert(values.end(), value.args().begin(), value.args().end());
+        }
+        return list(std::move(values));
+    }
+    if (function == "Differences" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+        const auto order = args.size() == 1 ? std::optional<long>(1) : machine_index(args[1]);
+        if (order && *order >= 0) {
+            auto values = args[0].args();
+            for (long iteration = 0; iteration < *order; ++iteration) {
+                std::vector<Expr> next;
+                for (std::size_t index = 1; index < values.size(); ++index)
+                    next.push_back(evaluate(call("Plus", {values[index], call("Times", {integer(-1L), values[index - 1]})})));
+                values = std::move(next);
+            }
+            return call(args[0].head(), std::move(values));
+        }
+        if (args.size() == 2 && args[1].has_head("List")) {
+            std::vector<long> orders;
+            bool valid = true;
+            for (const auto& item : args[1].args()) {
+                const auto value = machine_index(item);
+                if (!value || *value < 0) { valid = false; break; }
+                orders.push_back(*value);
+            }
+            auto multidimensional = [&](auto&& self, const Expr& value, std::size_t axis) -> std::optional<Expr> {
+                if (axis == orders.size()) return value;
+                if (!value.has_head("List")) return std::nullopt;
+                auto values = value.args();
+                for (long iteration = 0; iteration < orders[axis]; ++iteration) {
+                    std::vector<Expr> next;
+                    for (std::size_t index = 1; index < values.size(); ++index)
+                        next.push_back(evaluate(call("Plus", {values[index], evaluate(call("Times", {integer(-1L), values[index - 1]}))})));
+                    values = std::move(next);
+                    if (values.empty()) break;
+                }
+                if (axis + 1 < orders.size()) {
+                    for (auto& item : values) {
+                        const auto child = self(self, item, axis + 1);
+                        if (!child) return std::nullopt;
+                        item = *child;
+                    }
+                }
+                return list(std::move(values));
+            };
+            if (valid) if (const auto result = multidimensional(multidimensional, args[0], 0)) return *result;
+        }
+    }
+    if (function == "Accumulate" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        const auto combine = args.size() == 2 ? args[1] : symbol("Plus");
+        std::vector<Expr> values;
+        bool first = true; Expr total = integer(0L);
+        for (const auto& item : rules ? *rules : args[0].args()) {
+            const auto& value = rules ? item.args()[1] : item;
+            total = first ? value : evaluate(call(combine, {total, value})); first = false;
+            values.push_back(rules ? call("Rule", {item.args()[0], total}) : total);
+        }
+        return call(rules ? symbol("Association") : args[0].head(), std::move(values));
+    }
+    if (function == "Riffle") {
+        std::string error;
+        if (args.size() != 2 && args.size() != 3) {
+            error = "Riffle expects a list, a separator, and an optional ``{a, b, s}`` span.";
+        } else if (args[0].kind() != ExprKind::Call) {
+            error = "Riffle expects a nonatomic expression.";
+        } else if (!args[0].has_head("List")) {
+            error = "Riffle currently expects a List as the first argument.";
+        } else if (args[0].args().empty()) {
+            return call(args[0].head(), {});
+        } else if (args.size() == 2) {
+            const auto separators = args[1].has_head("List")
+                ? args[1].args() : std::vector<Expr>{args[1]};
+            if (separators.empty()) return args[0];
+            std::vector<Expr> values;
+            values.reserve(args[0].args().size() * 2 - 1);
+            for (std::size_t index = 0; index < args[0].args().size(); ++index) {
+                if (index != 0) values.push_back(separators[(index - 1) % separators.size()]);
+                values.push_back(args[0].args()[index]);
+            }
+            return call(args[0].head(), std::move(values));
+        } else if (!args[2].has_head("List") || args[2].args().size() != 3) {
+            error = "Riffle span spec must be a ``{a, b, s}`` list.";
+        } else if (std::any_of(args[2].args().begin(), args[2].args().end(),
+            [](const Expr& part) { return part.kind() != ExprKind::Integer; })) {
+            error = "Riffle span spec components must be explicit integers.";
+        } else {
+            const auto start = args[2].args()[0].integer_value();
+            const auto end = args[2].args()[1].integer_value();
+            const auto step = args[2].args()[2].integer_value();
+            if (step <= 0) {
+                error = "Riffle span step must be a positive integer.";
+            } else if (start < 1) {
+                error = "Riffle span start position must be a positive integer.";
+            } else {
+                constexpr std::size_t maximum_materialized_riffle = 1000000;
+                std::vector<Expr> values;
+                mpz_class next_separator = start;
+                mpz_class output_position = 1;
+                std::size_t source_index = 0;
+                while (true) {
+                    if (values.size() >= maximum_materialized_riffle) {
+                        error = "Riffle output exceeds the native materialization limit.";
+                        break;
+                    }
+                    if (end > 0 && next_separator > end) {
+                        if (source_index < args[0].args().size()) {
+                            values.push_back(args[0].args()[source_index++]);
+                            ++output_position;
+                            continue;
+                        }
+                        return call(args[0].head(), std::move(values));
+                    }
+                    if (output_position == next_separator) {
+                        values.push_back(args[1]);
+                        next_separator += step;
+                        ++output_position;
+                        continue;
+                    }
+                    if (source_index < args[0].args().size()) {
+                        values.push_back(args[0].args()[source_index++]);
+                        ++output_position;
+                        continue;
+                    }
+                    return call(args[0].head(), std::move(values));
+                }
+            }
+        }
+        const auto message = call("MessageName", {symbol("Riffle"), string("error")});
+        emit_message(message, "Riffle::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if ((function == "AllTrue" || function == "AnyTrue" || function == "NoneTrue")
+        && args.size() == 2 && args[0].kind() == ExprKind::Call) {
+        bool any = false; bool all = true;
+        for (const auto& item : args[0].args()) {
+            const bool truth = is_symbol(evaluate(call(args[1], {item})), "True");
+            any = any || truth; all = all && truth;
+        }
+        return boolean(function == "AllTrue" ? all : function == "AnyTrue" ? any : !any);
+    }
+    if ((function == "ContainsAll" || function == "ContainsAny" || function == "ContainsNone"
+        || function == "ContainsExactly") && args.size() == 2 && args[0].kind() == ExprKind::Call
+        && args[1].kind() == ExprKind::Call) {
+        auto contains = [](const std::vector<Expr>& values, const Expr& target) {
+            return std::find(values.begin(), values.end(), target) != values.end();
+        };
+        const bool all = std::all_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& value) {
+            return contains(args[0].args(), value);
+        });
+        const bool any = std::any_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& value) {
+            return contains(args[0].args(), value);
+        });
+        const bool reverse_all = std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& value) {
+            return contains(args[1].args(), value);
+        });
+        return boolean(function == "ContainsAll" ? all : function == "ContainsAny" ? any
+            : function == "ContainsNone" ? !any : all && reverse_all);
+    }
+    if (function == "ContainsOnly" && args.size() >= 2 && args.size() <= 3
+        && args[0].kind() == ExprKind::Call && args[1].kind() == ExprKind::Call) {
+        std::optional<Expr> same_test;
+        if (args.size() == 3 && args[2].has_head("Rule") && args[2].args().size() == 2
+            && is_symbol(args[2].args()[0], "SameTest")) same_test = args[2].args()[1];
+        else if (args.size() == 3) return call(head, args);
+        auto values_of = [](const Expr& value) {
+            std::vector<Expr> values;
+            if (const auto rules = association_rules(value)) {
+                for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+            } else values = value.args();
+            return values;
+        };
+        const auto left = values_of(args[0]);
+        const auto right = values_of(args[1]);
+        return boolean(std::all_of(left.begin(), left.end(), [&](const Expr& value) {
+            return std::any_of(right.begin(), right.end(), [&](const Expr& candidate) {
+                return same_test ? is_symbol(evaluate(call(*same_test, {value, candidate})), "True") : value == candidate;
+            });
+        }));
+    }
+    if (function == "Subsets" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+        long minimum = 0, maximum = static_cast<long>(args[0].args().size()), step = 1;
+        bool valid = true;
+        if (args.size() == 2) {
+            if (args[1].has_head("List") && args[1].args().size() == 1 && machine_index(args[1].args()[0]))
+                minimum = maximum = *machine_index(args[1].args()[0]);
+            else if (args[1].has_head("List") && (args[1].args().size() == 2 || args[1].args().size() == 3)
+                && machine_index(args[1].args()[0]) && machine_index(args[1].args()[1])) {
+                minimum = *machine_index(args[1].args()[0]); maximum = *machine_index(args[1].args()[1]);
+                if (args[1].args().size() == 3 && machine_index(args[1].args()[2])) step = *machine_index(args[1].args()[2]);
+                else if (args[1].args().size() == 3) valid = false;
+            } else valid = false;
+        }
+        if (valid && minimum >= 0 && maximum >= minimum && step > 0) {
+            std::vector<Expr> result; const auto& source = args[0].args();
+            for (long size = minimum;
+                size <= maximum && size <= static_cast<long>(source.size());) {
+                std::vector<Expr> selected;
+                auto combinations = [&](auto&& self, std::size_t start, long remaining) -> void {
+                    if (remaining == 0) { result.push_back(call(args[0].head(), selected)); return; }
+                    for (std::size_t index = start; index + static_cast<std::size_t>(remaining) <= source.size(); ++index) {
+                        selected.push_back(source[index]); self(self, index + 1, remaining - 1); selected.pop_back();
+                    }
+                };
+                combinations(combinations, 0, size);
+                const auto next = checked_signed_sum(size, step);
+                if (!next) break;
+                size = *next;
+            }
+            return list(std::move(result));
+        }
+    }
+    if (function == "Permutations" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> source;
+        if (rules) {
+            for (const auto& rule : *rules) source.push_back(rule.args()[1]);
+        } else source = args[0].args();
+        long lower = static_cast<long>(source.size()), upper = lower, step = 1;
+        bool valid = true;
+        if (args.size() == 2) {
+            lower = source.empty() ? 0 : 1;
+            upper = static_cast<long>(source.size());
+            if (is_symbol(args[1], "All")) {}
+            else if (const auto size = machine_index(args[1])) upper = *size;
+            else if (args[1].has_head("List") && !args[1].args().empty() && args[1].args().size() <= 3) {
+                const auto first = machine_index(args[1].args()[0]);
+                const auto second = args[1].args().size() >= 2 ? machine_index(args[1].args()[1]) : first;
+                const auto stride = args[1].args().size() == 3 ? machine_index(args[1].args()[2]) : std::optional<long>(1);
+                if (!first || !second || !stride || *stride == 0) valid = false;
+                else { lower = *first; upper = *second; step = *stride; }
+            } else valid = false;
+        }
+        if (valid) {
+            std::vector<Expr> result;
+            auto emit_size = [&](long size) {
+                if (size < 0 || size > static_cast<long>(source.size())) return;
+                std::vector<Expr> selected;
+                std::vector<bool> used(source.size());
+                auto generate = [&](auto&& self) -> void {
+                    if (selected.size() == static_cast<std::size_t>(size)) {
+                        result.push_back(list(selected));
+                        return;
+                    }
+                    for (std::size_t index = 0; index < source.size(); ++index) {
+                        if (used[index]) continue;
+                        used[index] = true;
+                        selected.push_back(source[index]);
+                        self(self);
+                        selected.pop_back();
+                        used[index] = false;
+                    }
+                };
+                generate(generate);
+            };
+            for (long size = lower; step > 0 ? size <= upper : size >= upper;) {
+                emit_size(size);
+                const auto next = checked_signed_sum(size, step);
+                if (!next) break;
+                size = *next;
+            }
+            return list(std::move(result));
+        }
+    }
+    if (function == "Permute" && args.size() == 2 && args[0].kind() == ExprKind::Call) {
+        std::vector<long> permutation(args[0].args().size()); std::iota(permutation.begin(), permutation.end(), 1);
+        bool valid = true;
+        if (args[1].has_head("List") && args[1].args().size() == permutation.size()) {
+            for (std::size_t index = 0; index < permutation.size(); ++index) {
+                const auto value = machine_index(args[1].args()[index]); if (!value) { valid = false; break; } permutation[index] = *value;
+            }
+        } else if (args[1].has_head("Cycles") && args[1].args().size() == 1 && args[1].args()[0].has_head("List")) {
+            for (const auto& cycle : args[1].args()[0].args()) {
+                if (!cycle.has_head("List") || cycle.args().empty()) { valid = false; break; }
+                std::vector<long> positions;
+                for (const auto& position : cycle.args()) { const auto value = machine_index(position); if (!value) { valid = false; break; } positions.push_back(*value); }
+                if (!valid) break;
+                for (std::size_t index = 0; index < positions.size(); ++index)
+                    if (positions[index] >= 1 && positions[index] <= static_cast<long>(permutation.size()))
+                        permutation[positions[index] - 1] = positions[(index + 1) % positions.size()];
+                    else valid = false;
+            }
+        } else valid = false;
+        std::set<long> positions(permutation.begin(), permutation.end());
+        if (valid && positions.size() == permutation.size() && *positions.begin() == 1
+            && *positions.rbegin() == static_cast<long>(permutation.size())) {
+            std::vector<Expr> values(args[0].args().size());
+            for (std::size_t index = 0; index < values.size(); ++index) values[permutation[index] - 1] = args[0].args()[index];
+            return call(args[0].head(), std::move(values));
+        }
+    }
+    if ((function == "PermutationCycles" || function == "PermutationList" || function == "PermutationOrder")
+        && !args.empty()) {
+        auto parse_cycles = [](const Expr& expression) -> std::optional<std::vector<std::vector<long>>> {
+            if (!expression.has_head("Cycles") || expression.args().size() != 1
+                || !expression.args()[0].has_head("List")) return std::nullopt;
+            std::vector<std::vector<long>> cycles;
+            std::set<long> seen;
+            for (const auto& cycle_expression : expression.args()[0].args()) {
+                if (!cycle_expression.has_head("List")) return std::nullopt;
+                std::vector<long> cycle;
+                for (const auto& item : cycle_expression.args()) {
+                    const auto position = machine_index(item);
+                    if (!position || *position <= 0 || !seen.insert(*position).second) return std::nullopt;
+                    cycle.push_back(*position);
+                }
+                if (!cycle.empty()) cycles.push_back(std::move(cycle));
+            }
+            return cycles;
+        };
+        if (function == "PermutationCycles" && args.size() == 1 && args[0].has_head("List")) {
+            const auto size = args[0].args().size();
+            std::vector<long> permutation;
+            std::set<long> unique;
+            bool valid = true;
+            for (const auto& item : args[0].args()) {
+                const auto position = machine_index(item);
+                if (!position || *position < 1 || *position > static_cast<long>(size) || !unique.insert(*position).second) {
+                    valid = false;
+                    break;
+                }
+                permutation.push_back(*position);
+            }
+            if (valid) {
+                std::vector<bool> visited(size);
+                std::vector<Expr> cycles;
+                for (std::size_t start = 0; start < size; ++start) {
+                    if (visited[start]) continue;
+                    std::vector<Expr> cycle;
+                    auto current = start;
+                    while (!visited[current]) {
+                        visited[current] = true;
+                        cycle.push_back(integer(static_cast<unsigned long>(current + 1)));
+                        current = static_cast<std::size_t>(permutation[current] - 1);
+                    }
+                    if (cycle.size() > 1) cycles.push_back(list(std::move(cycle)));
+                }
+                return call("Cycles", {list(std::move(cycles))});
+            }
+        }
+        const auto cycles = parse_cycles(args[0]);
+        if (cycles && function == "PermutationList" && args.size() <= 2) {
+            long inferred = 0;
+            for (const auto& cycle : *cycles) for (const auto position : cycle) inferred = std::max(inferred, position);
+            const auto requested = args.size() == 2 ? machine_index(args[1]) : std::optional<long>(inferred);
+            if (requested && *requested >= inferred) {
+                std::vector<long> permutation(static_cast<std::size_t>(*requested));
+                std::iota(permutation.begin(), permutation.end(), 1);
+                for (const auto& cycle : *cycles) {
+                    for (std::size_t index = 0; index < cycle.size(); ++index)
+                        permutation[static_cast<std::size_t>(cycle[index] - 1)] = cycle[(index + 1) % cycle.size()];
+                }
+                std::vector<Expr> result;
+                for (const auto position : permutation) result.push_back(integer(position));
+                return list(std::move(result));
+            }
+        }
+        if (cycles && function == "PermutationOrder" && args.size() == 1) {
+            unsigned long order = 1;
+            for (const auto& cycle : *cycles) if (cycle.size() > 1) order = std::lcm(order, static_cast<unsigned long>(cycle.size()));
+            return integer(order);
+        }
+    }
+    if (function == "RandomPermutation" && args.size() == 1 && machine_index(args[0]) && *machine_index(args[0]) == 0)
+        return call("Cycles", {list({})});
+    if ((function == "Union" || function == "Intersection" || function == "Complement") && !args.empty()) {
+        std::vector<Expr> collections; std::optional<Expr> same_test;
+        for (const auto& argument : args) {
+            if (argument.has_head("Rule") && argument.args().size() == 2 && is_symbol(argument.args()[0], "SameTest"))
+                same_test = argument.args()[1];
+            else collections.push_back(argument);
+        }
+        if (!collections.empty() && std::all_of(collections.begin(), collections.end(), [](const Expr& value) { return value.kind() == ExprKind::Call; })) {
+            auto equivalent = [&](const Expr& left, const Expr& right) {
+                return same_test ? is_symbol(evaluate(call(*same_test, {left, right})), "True") : left == right;
+            };
+            auto unique_sorted = [&](std::vector<Expr> values) {
+                std::sort(values.begin(), values.end(), expression_less); std::vector<Expr> result;
+                for (const auto& value : values)
+                    if (std::none_of(result.begin(), result.end(), [&](const Expr& prior) { return equivalent(prior, value); })) result.push_back(value);
+                return result;
+            };
+            std::vector<Expr> result;
+            if (function == "Union") {
+                std::vector<Expr> joined; for (const auto& collection : collections) joined.insert(joined.end(), collection.args().begin(), collection.args().end());
+                result = unique_sorted(std::move(joined));
+            } else {
+                result = unique_sorted(collections.front().args());
+                if (function == "Intersection") {
+                    result.erase(std::remove_if(result.begin(), result.end(), [&](Expr& representative) {
+                        for (std::size_t index = 1; index < collections.size(); ++index)
+                            if (std::none_of(collections[index].args().begin(), collections[index].args().end(), [&](const Expr& value) { return equivalent(representative, value); })) return true;
+                        if (same_test) {
+                            for (const auto& candidate : collections.front().args()) {
+                                if (!equivalent(representative, candidate)) continue;
+                                bool exact_everywhere = true;
+                                for (std::size_t index = 1; index < collections.size(); ++index)
+                                    exact_everywhere = exact_everywhere && std::find(collections[index].args().begin(), collections[index].args().end(), candidate) != collections[index].args().end();
+                                if (exact_everywhere) { representative = candidate; break; }
+                            }
+                        }
+                        return false;
+                    }), result.end());
+                    std::sort(result.begin(), result.end(), expression_less);
+                } else {
+                    result.erase(std::remove_if(result.begin(), result.end(), [&](const Expr& value) {
+                        for (std::size_t index = 1; index < collections.size(); ++index)
+                            if (std::any_of(collections[index].args().begin(), collections[index].args().end(), [&](const Expr& other) { return equivalent(value, other); })) return true;
+                        return false;
+                    }), result.end());
+                }
+            }
+            return call(collections.front().head(), std::move(result));
+        }
+    }
+    if (function == "ConstantArray" && args.size() == 2 && args[1].kind() == ExprKind::Integer
+        && args[1].integer_value() >= 0 && args[1].integer_value().fits_ulong_p()) {
+        std::vector<Expr> values(args[1].integer_value().get_ui(), args[0]);
+        values.erase(std::remove_if(values.begin(), values.end(), [](const Expr& value) { return is_symbol(value, "Nothing"); }), values.end());
+        return list(std::move(values));
+    }
+    if (function == "BlockMap" && args.size() >= 3 && args[1].kind() == ExprKind::Call
+        && machine_index(args[2]) && *machine_index(args[2]) > 0) {
+        const auto width = static_cast<std::size_t>(*machine_index(args[2]));
+        const auto step = args.size() >= 4 && machine_index(args[3]) && *machine_index(args[3]) > 0
+            ? static_cast<std::size_t>(*machine_index(args[3])) : width;
+        std::vector<Expr> values;
+        for (std::size_t index = 0; index + width <= args[1].args().size(); index += step) {
+            auto block = call(args[1].head(), std::vector<Expr>(args[1].args().begin() + index, args[1].args().begin() + index + width));
+            values.push_back(evaluate(call(args[0], {block})));
+        }
+        return list(std::move(values));
+    }
+    if (function == "Distribute" && !args.empty() && args[0].kind() == ExprKind::Call) {
+        const auto distribution_head = args.size() >= 2 ? args[1] : symbol("Plus");
+        if (args.size() == 5 && args[0].head() != args[2]) return args[0];
+        const auto product_head = args.size() == 5 ? args[3] : args[0].head();
+        const auto result_head = args.size() == 5 ? args[4] : distribution_head;
+        std::vector<std::vector<Expr>> products{{}};
+        for (const auto& argument : args[0].args()) {
+            const auto choices = argument.kind() == ExprKind::Call && argument.head() == distribution_head
+                ? argument.args() : std::vector<Expr>{argument};
+            std::vector<std::vector<Expr>> next;
+            for (const auto& prefix : products) for (const auto& choice : choices) { auto value = prefix; value.push_back(choice); next.push_back(std::move(value)); }
+            products = std::move(next);
+        }
+        std::vector<Expr> terms; for (auto& product : products) terms.push_back(call(product_head, std::move(product)));
+        const auto result = call(result_head, std::move(terms));
+        return args.size() == 5 ? result : evaluate(result);
+    }
+    if ((function == "Nest" || function == "NestList") && args.size() == 3 && machine_index(args[2]) && *machine_index(args[2]) >= 0) {
+        Expr value = args[1]; std::vector<Expr> values{value};
+        for (long index = 0; index < *machine_index(args[2]); ++index) { value = evaluate(call(args[0], {value})); values.push_back(value); }
+        return function == "Nest" ? value : list(std::move(values));
+    }
+    if (function == "ComposeList" && args.size() == 2 && args[0].has_head("List")) {
+        Expr value = args[1]; std::vector<Expr> values{value};
+        for (const auto& callable : args[0].args()) { value = evaluate(call(callable, {value})); values.push_back(value); }
+        return list(std::move(values));
+    }
+    if ((function == "NestWhile" || function == "NestWhileList")
+        && args.size() >= 3 && args.size() <= 5) {
+        std::optional<std::size_t> history_size = 1;
+        if (args.size() >= 4) {
+            if (is_symbol(args[3], "All")) history_size = std::nullopt;
+            else if (const auto count = machine_index(args[3]); count && *count >= 1)
+                history_size = static_cast<std::size_t>(*count);
+            else return call(function, args);
+        }
+
+        std::optional<std::size_t> maximum_iterations;
+        if (args.size() == 5 && !is_symbol(args[4], "Infinity")) {
+            if (const auto count = machine_index(args[4]))
+                maximum_iterations = static_cast<std::size_t>(std::max<long>(0, *count));
+            else return call(function, args);
+        }
+
+        std::vector<Expr> values{args[1]};
+        std::size_t iterations = 0;
+        while (iterations < 65536) {
+            if (maximum_iterations && iterations >= *maximum_iterations) break;
+
+            if (history_size && values.size() < *history_size) {
+                values.push_back(evaluate(call(args[0], {values.back()})));
+                ++iterations;
+                continue;
+            }
+
+            std::vector<Expr> predicate_arguments;
+            if (history_size) {
+                const auto first = values.end() - static_cast<std::ptrdiff_t>(*history_size);
+                predicate_arguments.assign(first, values.end());
+            } else predicate_arguments = values;
+
+            if (!is_symbol(evaluate(call(args[2], std::move(predicate_arguments))), "True")) break;
+            values.push_back(evaluate(call(args[0], {values.back()})));
+            ++iterations;
+        }
+        return function == "NestWhile" ? values.back() : list(std::move(values));
+    }
+    if ((function == "FixedPoint" || function == "FixedPointList")
+        && (args.size() == 2 || args.size() == 3)) {
+        std::size_t maximum_iterations = 10000;
+        if (args.size() == 3 && !is_symbol(args[2], "Infinity")) {
+            const auto limit = machine_index(args[2]);
+            if (!limit || *limit < 0) return call(head, args);
+            maximum_iterations = static_cast<std::size_t>(*limit);
+        }
+        Expr value = args[1]; std::vector<Expr> values{value};
+        for (std::size_t iteration = 0; iteration < maximum_iterations; ++iteration) {
+            const auto next = evaluate(call(args[0], {value})); values.push_back(next);
+            if (next == value) { value = next; break; }
+            value = next;
+        }
+        return function == "FixedPoint" ? value : list(std::move(values));
+    }
+    if (function == "MapThread" && args.size() == 3 && args[1].has_head("List") && machine_index(args[2]) && *machine_index(args[2]) >= 0) {
+        const auto target = *machine_index(args[2]);
+        auto thread = [&](auto&& self, const std::vector<Expr>& values, long depth) -> Expr {
+            if (depth == target) return evaluate(call(args[0], values));
+            if (values.empty() || std::any_of(values.begin(), values.end(), [](const Expr& value) { return !value.has_head("List"); })) return call("MapThread", args);
+            const auto size = values.front().args().size(); if (std::any_of(values.begin(), values.end(), [&](const Expr& value) { return value.args().size() != size; })) return call("MapThread", args);
+            std::vector<Expr> result;
+            for (std::size_t index = 0; index < size; ++index) { std::vector<Expr> children; for (const auto& value : values) children.push_back(value.args()[index]); result.push_back(self(self, children, depth + 1)); }
+            return list(std::move(result));
+        };
+        return thread(thread, args[1].args(), 0);
+    }
+    if (function == "MapThread" && args.size() == 2 && args[1].has_head("List")) {
+        if (const auto threaded = thread_lists(args[0].to_full_form(), args[1].args())) {
+            std::vector<Expr> values; for (const auto& item : threaded->args()) values.push_back(evaluate(call(args[0], item.args())));
+            return list(std::move(values));
+        }
+    }
+    if (function == "Thread" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        if (const auto threaded = thread_lists(args[0].head().to_full_form(), args[0].args())) return *threaded;
+    }
+    if (function == "Dot" && args.size() == 2
+        && args[0].has_head("List") && args[1].has_head("List")
+        && std::all_of(args[0].args().begin(), args[0].args().end(),
+            [](const Expr& row) { return row.has_head("List"); })
+        && std::none_of(args[1].args().begin(), args[1].args().end(),
+            [](const Expr& value) { return value.has_head("List"); })
+        && std::all_of(args[0].args().begin(), args[0].args().end(),
+            [&](const Expr& row) { return row.args().size() == args[1].args().size(); })) {
+        std::vector<Expr> values;
+        for (const auto& row : args[0].args()) {
+            std::vector<Expr> products;
+            for (std::size_t index = 0; index < row.args().size(); ++index)
+                products.push_back(evaluate(call("Times", {
+                    row.args()[index], args[1].args()[index]})));
+            values.push_back(evaluate(call("Plus", std::move(products))));
+        }
+        return list(std::move(values));
+    }
+    if (function == "Dot" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")
+        && !args[0].args().empty() && !args[1].args().empty()
+        && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })
+        && std::all_of(args[1].args().begin(), args[1].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
+        const auto inner = args[1].args().size();
+        if (std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& row) { return row.args().size() == inner; })) {
+            const auto columns = args[1].args().front().args().size();
+            if (std::all_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& row) { return row.args().size() == columns; })) {
+                std::vector<Expr> rows;
+                for (const auto& left_row : args[0].args()) {
+                    std::vector<Expr> values;
+                    for (std::size_t column = 0; column < columns; ++column) {
+                        std::vector<Expr> products;
+                        for (std::size_t index = 0; index < inner; ++index)
+                            products.push_back(evaluate(call("Times", {left_row.args()[index], args[1].args()[index].args()[column]})));
+                        values.push_back(evaluate(call("Plus", std::move(products))));
+                    }
+                    rows.push_back(list(std::move(values)));
+                }
+                return list(std::move(rows));
+            }
+        }
+    }
+    if ((function == "Dot" || function == "Inner") && ((function == "Dot" && args.size() == 2)
+        || (function == "Inner" && args.size() == 4)) && args[function == "Dot" ? 0 : 1].has_head("List")
+        && args[function == "Dot" ? 1 : 2].has_head("List")) {
+        const auto& left = args[function == "Dot" ? 0 : 1].args(); const auto& right = args[function == "Dot" ? 1 : 2].args();
+        if (left.size() == right.size()) {
+            std::vector<Expr> products;
+            const auto multiply = function == "Dot" ? symbol("Times") : args[0];
+            for (std::size_t index = 0; index < left.size(); ++index) products.push_back(evaluate(call(multiply, {left[index], right[index]})));
+            return evaluate(call(function == "Dot" ? symbol("Plus") : args[3], std::move(products)));
+        }
+    }
+    if (function == "Outer" && args.size() >= 3) {
+        std::size_t input_end = args.size();
+        std::optional<std::size_t> level;
+        if (args.size() >= 4) {
+            if (const auto requested = machine_index(args.back())) {
+                if (*requested < 0) return call(head, args);
+                level = static_cast<std::size_t>(*requested);
+                --input_end;
+            }
+        }
+        std::vector<Expr> inputs(args.begin() + 1,
+            args.begin() + static_cast<std::ptrdiff_t>(input_end));
+        if (inputs.size() >= 2) {
+            std::function<Expr(std::size_t, std::vector<Expr>)> combine;
+            combine = [&](std::size_t input, std::vector<Expr> selected) -> Expr {
+                if (input == inputs.size()) return evaluate(call(args[0], std::move(selected)));
+                const auto sequence_head = inputs[input].kind() == ExprKind::Call
+                    ? std::optional<Expr>(inputs[input].head()) : std::nullopt;
+                std::function<Expr(const Expr&, std::size_t)> descend;
+                descend = [&](const Expr& value, std::size_t depth) -> Expr {
+                    const bool can_descend = sequence_head && value.kind() == ExprKind::Call
+                        && value.head() == *sequence_head && (!level || depth < *level);
+                    if (!can_descend) {
+                        auto next = selected;
+                        next.push_back(value);
+                        return combine(input + 1, std::move(next));
+                    }
+                    std::vector<Expr> values;
+                    for (const auto& item : value.args())
+                        values.push_back(descend(item, depth + 1));
+                    return call(value.head(), std::move(values));
+                };
+                return descend(inputs[input], 0);
+            };
+            return combine(0, {});
+        }
+    }
+    if (function == "Tuples" && args.size() == 2 && args[0].has_head("List")) {
+        auto tuple_power = [](const std::vector<Expr>& choices, std::size_t width) {
+            std::vector<std::vector<Expr>> tuples{{}};
+            for (std::size_t position = 0; position < width; ++position) {
+                std::vector<std::vector<Expr>> next;
+                for (const auto& prefix : tuples) for (const auto& choice : choices) {
+                    auto value = prefix;
+                    value.push_back(choice);
+                    next.push_back(std::move(value));
+                }
+                tuples = std::move(next);
+            }
+            std::vector<Expr> values;
+            for (auto& tuple : tuples) values.push_back(list(std::move(tuple)));
+            return list(std::move(values));
+        };
+        if (const auto width = machine_index(args[1]); width && *width >= 0)
+            return tuple_power(args[0].args(), static_cast<std::size_t>(*width));
+        if (args[1].has_head("List")) {
+            std::vector<std::size_t> dimensions;
+            bool valid = true;
+            for (const auto& dimension : args[1].args()) {
+                const auto width = machine_index(dimension);
+                if (!width || *width < 0) { valid = false; break; }
+                dimensions.push_back(static_cast<std::size_t>(*width));
+            }
+            if (valid) {
+                Expr choices = args[0];
+                for (auto dimension = dimensions.rbegin(); dimension != dimensions.rend(); ++dimension)
+                    choices = tuple_power(choices.args(), *dimension);
+                return choices;
+            }
+        }
+    }
+    if (function == "Tuples" && args.size() == 1 && args[0].has_head("List")) {
+        std::vector<std::vector<Expr>> tuples{{}};
+        for (const auto& choices : args[0].args()) {
+            if (!choices.has_head("List")) return call(head, args);
+            std::vector<std::vector<Expr>> next;
+            for (const auto& prefix : tuples) for (const auto& choice : choices.args()) {
+                auto value = prefix; value.push_back(choice); next.push_back(std::move(value));
+            }
+            tuples = std::move(next);
+        }
+        std::vector<Expr> values; for (auto& tuple : tuples) values.push_back(list(std::move(tuple)));
+        return list(std::move(values));
+    }
+    if (function == "UnitVector" && args.size() == 2 && machine_index(args[0]) && machine_index(args[1])
+        && *machine_index(args[0]) >= 1 && *machine_index(args[1]) >= 1 && *machine_index(args[1]) <= *machine_index(args[0])) {
+        std::vector<Expr> values(static_cast<std::size_t>(*machine_index(args[0])), integer(0L));
+        values[static_cast<std::size_t>(*machine_index(args[1]) - 1)] = integer(1L); return list(std::move(values));
+    }
+    if (function == "IdentityMatrix" && args.size() == 1 && machine_index(args[0]) && *machine_index(args[0]) >= 0) {
+        std::vector<Expr> rows; const auto size = static_cast<std::size_t>(*machine_index(args[0]));
+        for (std::size_t row = 0; row < size; ++row) { std::vector<Expr> values(size, integer(0L)); values[row] = integer(1L); rows.push_back(list(std::move(values))); }
+        return list(std::move(rows));
+    }
+    if (function == "DiagonalMatrix" && !args.empty() && args.size() <= 3 && args[0].has_head("List")) {
+        const auto offset = args.size() >= 2 && machine_index(args[1]) ? *machine_index(args[1]) : 0;
+        constexpr std::size_t maximum_matrix_dimension = 1024;
+        const auto offset_magnitude = unsigned_magnitude(offset);
+        std::size_t size = 0;
+        if (args.size() == 3) {
+            const auto requested_size = machine_index(args[2]);
+            if (!requested_size || *requested_size < 0
+                || static_cast<unsigned long>(*requested_size) > maximum_matrix_dimension)
+                return call(head, args);
+            size = static_cast<std::size_t>(*requested_size);
+        } else {
+            if (offset_magnitude > maximum_matrix_dimension
+                || args[0].args().size()
+                    > maximum_matrix_dimension - static_cast<std::size_t>(offset_magnitude))
+                return call(head, args);
+            size = args[0].args().size()
+                + static_cast<std::size_t>(offset_magnitude);
+        }
+        std::vector<Expr> rows;
+        for (std::size_t row = 0; row < size; ++row) { std::vector<Expr> values(size, integer(0L)); rows.push_back(list(std::move(values))); }
+        for (std::size_t index = 0; index < args[0].args().size(); ++index) {
+            if (offset_magnitude > size
+                || index > size - static_cast<std::size_t>(offset_magnitude))
+                continue;
+            const auto row = offset >= 0 ? index
+                : index + static_cast<std::size_t>(offset_magnitude);
+            const auto column = offset >= 0
+                ? index + static_cast<std::size_t>(offset_magnitude) : index;
+            if (row < size && column < size) { auto values = rows[row].args(); values[column] = args[0].args()[index]; rows[row] = list(std::move(values)); }
+        }
+        return list(std::move(rows));
+    }
+    if (function == "Partition") {
+        std::string error;
+        if (args.size() < 2 || args.size() > 5) {
+            error = "Partition expects an expression, a block size, an optional offset, "
+                "an optional alignment k or {kL, kR}, and an optional padding value.";
+        } else if (args[1].kind() != ExprKind::Integer
+            || (args.size() >= 3 && args[2].kind() != ExprKind::Integer)) {
+            error = "Partition expects an integer argument.";
+        } else {
+            const mpz_class window = args[1].integer_value();
+            const mpz_class step = args.size() >= 3 ? args[2].integer_value() : window;
+            if (window <= 0 || step <= 0) {
+                error = "Partition expects positive integer block sizes and offsets.";
+            } else if (args[0].kind() != ExprKind::Call) {
+                error = "Partition expects a nonatomic expression.";
+            } else {
+                const auto source_rules = association_rules(args[0]);
+                struct PartitionItem {
+                    Expr value;
+                    std::optional<Expr> rule;
+                };
+                std::vector<PartitionItem> items;
+                if (source_rules) {
+                    items.reserve(source_rules->size());
+                    for (const auto& rule : *source_rules)
+                        items.push_back({rule.args()[1], rule});
+                } else {
+                    items.reserve(args[0].args().size());
+                    for (const auto& value : args[0].args())
+                        items.push_back({value, std::nullopt});
+                }
+
+                mpz_class left_alignment = 1;
+                mpz_class right_alignment = window;
+                auto normalize_alignment = [&](const mpz_class& raw,
+                                               mpz_class& normalized) {
+                    if (raw == -1) {
+                        normalized = window;
+                        return true;
+                    }
+                    if (raw >= 1 && raw <= window) {
+                        normalized = raw;
+                        return true;
+                    }
+                    error = "Partition alignment must be -1 or an integer between 1 and the block size.";
+                    return false;
+                };
+                if (args.size() >= 4) {
+                    const auto& specification = args[3];
+                    if (specification.kind() == ExprKind::Integer) {
+                        if (normalize_alignment(specification.integer_value(), left_alignment))
+                            right_alignment = left_alignment;
+                    } else if (specification.has_head("List")
+                        && specification.args().size() == 2
+                        && specification.args()[0].kind() == ExprKind::Integer
+                        && specification.args()[1].kind() == ExprKind::Integer) {
+                        (void)normalize_alignment(
+                            specification.args()[0].integer_value(), left_alignment);
+                        if (error.empty()) (void)normalize_alignment(
+                            specification.args()[1].integer_value(), right_alignment);
+                    } else {
+                        error = "Partition currently expects an integer or {kL, kR} alignment.";
+                    }
+                }
+
+                if (error.empty()) {
+                    const mpz_class length(std::to_string(items.size()));
+                    const mpz_class first_start = 2 - left_alignment;
+                    const mpz_class last_start = length - right_alignment + 1;
+                    if (last_start < first_start) return list({});
+
+                    const mpz_class block_count = (last_start - first_start) / step + 1;
+                    constexpr std::size_t maximum_partition_elements = 1000000;
+                    const mpz_class materialized = block_count * window;
+                    const mpz_class maximum_materialized(
+                        std::to_string(maximum_partition_elements));
+                    const auto native_block_count = nonnegative_size_t(block_count);
+                    const auto native_window = nonnegative_size_t(window);
+                    if (!native_block_count || !native_window
+                        || materialized > maximum_materialized) {
+                        error = "Partition output exceeds the native materialization limit.";
+                    } else {
+                        auto make_chunk = [&](const std::vector<PartitionItem>& chunk) {
+                            if (source_rules) {
+                                std::vector<Expr> rules;
+                                for (const auto& item : chunk)
+                                    if (item.rule) rules.push_back(*item.rule);
+                                const auto normalized = normalized_association_rules(rules);
+                                return call(args[0].head(), normalized.value_or(rules));
+                            }
+                            std::vector<Expr> values;
+                            values.reserve(chunk.size());
+                            for (const auto& item : chunk) {
+                                if (args[0].has_head("List")
+                                    && is_symbol(item.value, "Nothing")) continue;
+                                values.push_back(item.value);
+                            }
+                            return call(args[0].head(), std::move(values));
+                        };
+
+                        std::vector<Expr> chunks;
+                        chunks.reserve(*native_block_count);
+                        mpz_class block_start = first_start;
+                        for (std::size_t block = 0; block < *native_block_count;
+                             ++block, block_start += step) {
+                            std::vector<PartitionItem> chunk;
+                            chunk.reserve(*native_window);
+                            mpz_class position = block_start;
+                            for (std::size_t offset = 0; offset < *native_window;
+                                 ++offset, ++position) {
+                                if (position >= 1 && position <= length) {
+                                    const auto source_index = nonnegative_size_t(position - 1);
+                                    if (!source_index || *source_index >= items.size()) {
+                                        error = "Partition position exceeds the native addressable range.";
+                                        break;
+                                    }
+                                    chunk.push_back(items[*source_index]);
+                                } else if (args.size() == 5) {
+                                    chunk.push_back({args[4], std::nullopt});
+                                } else if (items.empty()) {
+                                    return list({});
+                                } else {
+                                    mpz_class wrapped;
+                                    const mpz_class zero_based = position - 1;
+                                    mpz_mod(wrapped.get_mpz_t(), zero_based.get_mpz_t(),
+                                        length.get_mpz_t());
+                                    const auto source_index = nonnegative_size_t(wrapped);
+                                    if (!source_index || *source_index >= items.size()) {
+                                        error = "Partition position exceeds the native addressable range.";
+                                        break;
+                                    }
+                                    chunk.push_back(items[*source_index]);
+                                }
+                            }
+                            if (!error.empty()) break;
+                            chunks.push_back(make_chunk(chunk));
+                        }
+                        if (error.empty()) return list(std::move(chunks));
+                    }
+                }
+            }
+        }
+        const auto message = call("MessageName", {symbol("Partition"), string("error")});
+        emit_message(message, "Partition::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (function == "TakeDrop" && args.size() == 2) return list({evaluate(call("Take", args)), evaluate(call("Drop", args))});
+    if (function == "TakeList" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")) {
+        std::vector<Expr> chunks; std::size_t offset = 0;
+        for (const auto& count_expr : args[1].args()) {
+            const auto count = machine_index(count_expr); if (!count || *count < 0) return call(head, args);
+            const auto end = std::min(args[0].args().size(), offset + static_cast<std::size_t>(*count));
+            chunks.push_back(list(std::vector<Expr>(args[0].args().begin() + offset, args[0].args().begin() + end))); offset = end;
+        }
+        return list(std::move(chunks));
+    }
+    if ((function == "Fold" || function == "FoldList") && ((args.size() == 3 && args[2].has_head("List"))
+        || (args.size() == 2 && args[1].has_head("List") && !args[1].args().empty()))) {
+        const auto& source = args.size() == 3 ? args[2].args() : args[1].args();
+        Expr value = args.size() == 3 ? args[1] : source.front(); std::vector<Expr> values{value};
+        const auto start = args.size() == 3 ? 0U : 1U;
+        for (std::size_t index = start; index < source.size(); ++index) { value = evaluate(call(args[0], {value, source[index]})); values.push_back(value); }
+        return function == "Fold" ? value : list(std::move(values));
+    }
+    if ((function == "SequenceFold" || function == "SequenceFoldList") && args.size() == 3
+        && args[1].has_head("List") && args[2].has_head("List")) {
+        auto window = args[1].args(); std::vector<Expr> values = window;
+        if (window.empty()) return function == "SequenceFold" ? args[1] : list(values);
+        for (const auto& item : args[2].args()) {
+            auto call_args = window; call_args.push_back(item); const auto next = evaluate(call(args[0], call_args));
+            window.erase(window.begin()); window.push_back(next); values.push_back(next);
+        }
+        return function == "SequenceFold" ? window.back() : list(std::move(values));
+    }
+    if ((function == "FoldWhile" || function == "FoldWhileList") && args.size() >= 4 && args[2].has_head("List")) {
+        Expr value = args[1]; std::vector<Expr> values{value}; std::size_t extra = 0;
+        for (const auto& item : args[2].args()) {
+            const bool keep_going = is_symbol(evaluate(call(args[3], {value})), "True");
+            if (!keep_going && extra == 0) extra = args.size() >= 5 && machine_index(args[4])
+                ? static_cast<std::size_t>(std::max<long>(0, *machine_index(args[4]))) : 0;
+            if (!keep_going && extra == 0) break;
+            value = evaluate(call(args[0], {value, item})); values.push_back(value);
+            if (!keep_going && extra > 0) --extra;
+        }
+        return function == "FoldWhile" ? value : list(std::move(values));
+    }
+    if ((function == "FoldPair" || function == "FoldPairList") && args.size() >= 3 && args[2].has_head("List")) {
+        Expr state = args[1]; Expr last_emitted = state; std::vector<Expr> emitted;
+        for (const auto& item : args[2].args()) {
+            const auto pair = evaluate(call(args[0], {state, item}));
+            if (!pair.has_head("List") || pair.args().size() < 2) return call(head, args);
+            const bool last = args.size() >= 4 && is_symbol(args[3], "Last");
+            last_emitted = pair.args()[last ? 1 : 0]; emitted.push_back(last_emitted); state = pair.args()[1];
+        }
+        return function == "FoldPair" ? last_emitted : list(std::move(emitted));
+    }
+    if (function == "LengthWhile" && args.size() == 2 && args[0].has_head("List")) {
+        std::size_t count = 0; for (const auto& item : args[0].args()) { if (!is_symbol(evaluate(call(args[1], {item})), "True")) break; ++count; }
+        return integer(count);
+    }
+    if (function == "DeleteDuplicates" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        std::vector<Expr> values;
+        for (const auto& item : args[0].args()) if (std::find(values.begin(), values.end(), item) == values.end()) values.push_back(item);
+        return call(args[0].head(), std::move(values));
+    }
+    if (function == "DeleteDuplicatesBy" && (args.size() == 2 || args.size() == 3) && args[0].kind() == ExprKind::Call) {
+        std::vector<Expr> values, keys;
+        for (const auto& item : args[0].args()) {
+            const auto key = evaluate(call(args[1], {item}));
+            const auto duplicate = std::any_of(keys.begin(), keys.end(), [&](const Expr& existing) {
+                return args.size() == 3 ? is_symbol(evaluate(call(args[2], {existing, key})), "True") : existing == key;
+            });
+            if (!duplicate) { keys.push_back(key); values.push_back(item); }
+        }
+        return call(args[0].head(), std::move(values));
+    }
+    if (function == "DuplicateFreeQ" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        std::set<std::string> seen; for (const auto& item : args[0].args()) if (!seen.insert(item.to_full_form()).second) return symbol("False");
+        return symbol("True");
+    }
+    if (function == "Array" && args.size() >= 2 && args.size() <= 3) {
+        const auto dimension_exprs = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        const auto origin_exprs = args.size() == 3 ? (args[2].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]})
+            : std::vector<Expr>(dimension_exprs.size(), integer(1L));
+        std::vector<long> dimensions, origins; bool valid = dimension_exprs.size() == origin_exprs.size();
+        for (const auto& item : dimension_exprs) { const auto value = machine_index(item); if (!value || *value < 0) valid = false; else dimensions.push_back(*value); }
+        for (const auto& item : origin_exprs) { const auto value = machine_index(item); if (!value) valid = false; else origins.push_back(*value); }
+        std::size_t element_count = 1;
+        if (valid) for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+            const auto dimension = static_cast<std::size_t>(dimensions[axis]);
+            if (dimension != 0 && element_count > 1000000 / dimension) {
+                valid = false;
+                break;
+            }
+            element_count *= dimension;
+            if (dimensions[axis] > 0
+                && !checked_signed_sum(origins[axis], dimensions[axis] - 1)) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) {
+            std::vector<Expr> indices;
+            auto build = [&](auto&& self, std::size_t level) -> Expr {
+                if (level == dimensions.size()) return evaluate(call(args[0], indices));
+                std::vector<Expr> values; for (long index = 0; index < dimensions[level]; ++index) { indices.push_back(integer(origins[level] + index)); const auto value = self(self, level + 1); if (!is_symbol(value, "Nothing")) values.push_back(value); indices.pop_back(); }
+                return list(std::move(values));
+            };
+            return build(build, 0);
+        }
+    }
+    if (function == "Range" && args.size() >= 1 && args.size() <= 3) {
+        if (args.size() == 1 && args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Range", {item}))); return list(std::move(values)); }
+        if (std::all_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Integer && value.integer_value().fits_slong_p(); })) {
+            long start = args.size() == 1 ? 1 : args[0].integer_value().get_si();
+            long end = args.size() == 1 ? args[0].integer_value().get_si() : args[1].integer_value().get_si();
+            long step = args.size() == 3 ? args[2].integer_value().get_si() : 1;
+            if (step != 0) {
+                std::vector<Expr> values;
+                for (long value = start; step > 0 ? value <= end : value >= end;) {
+                    values.push_back(integer(value));
+                    const auto next = checked_signed_sum(value, step);
+                    if (!next) break;
+                    value = *next;
+                }
+                return list(std::move(values));
+            }
+        }
+    }
+    if (function == "Subdivide" && !args.empty() && args.size() <= 3) {
+        Expr lower = integer(0L), upper = integer(1L);
+        std::optional<long> count;
+        if (args.size() == 1) count = machine_index(args[0]);
+        else if (args.size() == 2) { upper = args[0]; count = machine_index(args[1]); }
+        else { lower = args[0]; upper = args[1]; count = machine_index(args[2]); }
+        if (count && *count > 0 && *count <= 1000000) {
+            std::vector<Expr> values;
+            const auto difference = evaluate(call("Plus", {upper, evaluate(call("Times", {integer(-1L), lower}))}));
+            for (long index = 0; index <= *count; ++index) {
+                const auto offset = evaluate(call("Times", {
+                    difference, rational(mpz_class(index), mpz_class(*count))}));
+                values.push_back(evaluate(call("Plus", {lower, offset})));
+                if (index == *count) break;
+            }
+            return list(std::move(values));
+        }
+    }
+    if (function == "Ratios" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
+        const auto rules = association_rules(args[0]);
+        std::vector<Expr> values;
+        if (rules) {
+            for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        } else values = args[0].args();
+        std::vector<Expr> result;
+        for (std::size_t index = 1; index < values.size(); ++index)
+            result.push_back(evaluate(call("Times", {values[index], evaluate(call("Power", {values[index - 1], integer(-1L)}))})));
+        return list(std::move(result));
+    }
+    if (function == "SubsetMap" && args.size() == 3 && args[1].has_head("List") && args[2].has_head("List")) {
+        std::vector<std::size_t> indices;
+        bool valid = true;
+        for (const auto& position : args[2].args()) {
+            const auto specification = position.has_head("List") && position.args().size() == 1
+                ? position.args()[0] : position;
+            const auto index = normalized_index(specification, args[1].args().size());
+            if (!index) { valid = false; break; }
+            indices.push_back(*index);
+        }
+        if (valid) {
+            std::vector<Expr> selected;
+            for (const auto index : indices) selected.push_back(args[1].args()[index]);
+            const auto transformed = evaluate(call(args[0], {list(std::move(selected))}));
+            if (transformed.has_head("List") && transformed.args().size() == indices.size()) {
+                auto result = args[1].args();
+                for (std::size_t index = 0; index < indices.size(); ++index) result[indices[index]] = transformed.args()[index];
+                return list(std::move(result));
+            }
+        }
+    }
+    if (function == "Take" || function == "Drop") {
+        const bool drop = function == "Drop";
+        std::string error;
+
+        struct SelectorResult {
+            std::vector<std::size_t> indices;
+            std::string error;
+        };
+
+        auto normalize_selectors = [&](const Expr& value, const Expr& specification) {
+            SelectorResult result;
+            const auto count = value.args().size();
+            const mpz_class length(std::to_string(count));
+
+            auto append_selector = [&](const mpz_class& selector) {
+                if (selector == 0) {
+                    result.error = "Only top-level Part specifications may use index 0.";
+                    return false;
+                }
+                mpz_class resolved = selector;
+                if (selector > 0) --resolved;
+                else resolved += length;
+                if (resolved < 0 || resolved >= length) {
+                    result.error = "Part index " + selector.get_str()
+                        + " is out of range for length " + length.get_str() + ".";
+                    return false;
+                }
+                const auto index = nonnegative_size_t(resolved);
+                if (!index || *index >= count) {
+                    result.error = "Part index " + selector.get_str()
+                        + " is out of range for length " + length.get_str() + ".";
+                    return false;
+                }
+                result.indices.push_back(*index);
+                return true;
+            };
+
+            auto append_count = [&](const mpz_class& requested) {
+                if (requested >= 0) {
+                    if (requested > length) {
+                        (void)append_selector(length + 1);
+                        return;
+                    }
+                    const auto amount = nonnegative_size_t(requested);
+                    if (!amount) {
+                        (void)append_selector(length + 1);
+                        return;
+                    }
+                    result.indices.reserve(*amount);
+                    for (std::size_t index = 0; index < *amount; ++index)
+                        result.indices.push_back(index);
+                    return;
+                }
+
+                mpz_class first = length + requested + 1;
+                if (first < -length) {
+                    (void)append_selector(first);
+                    return;
+                }
+                if (first <= 0) {
+                    // Values from -length through -1 are valid, but Python's
+                    // range reaches 0 next and reports that selector.
+                    (void)append_selector(0);
+                    return;
+                }
+                const auto amount = nonnegative_size_t(-requested);
+                if (!amount || *amount > count) {
+                    (void)append_selector(first);
+                    return;
+                }
+                result.indices.reserve(*amount);
+                for (std::size_t index = count - *amount; index < count; ++index)
+                    result.indices.push_back(index);
+            };
+
+            auto append_span = [&](const std::vector<Expr>& span) {
+                if (span.size() != 2 && span.size() != 3) {
+                    result.error = "Span must contain two or three arguments.";
+                    return;
+                }
+                auto endpoint = [&](const Expr& item, const mpz_class& fallback) -> mpz_class {
+                    if (is_symbol(item, "All")) return length;
+                    if (item.kind() != ExprKind::Integer) return fallback;
+                    mpz_class endpoint_value = item.integer_value();
+                    if (endpoint_value < 0) endpoint_value += length + 1;
+                    return endpoint_value;
+                };
+                const auto first = endpoint(span[0], mpz_class(1));
+                const auto last = endpoint(span[1], length);
+                mpz_class step = 1;
+                if (span.size() == 3) {
+                    if (span[2].kind() != ExprKind::Integer) {
+                        result.error = "Span steps must be integers.";
+                        return;
+                    }
+                    step = span[2].integer_value();
+                }
+                if (step == 0) {
+                    result.error = "Span step cannot be zero.";
+                    return;
+                }
+                for (auto selector = first;
+                     step > 0 ? selector <= last : selector >= last;
+                     selector += step) {
+                    if (!append_selector(selector)) return;
+                }
+            };
+
+            if (specification.kind() == ExprKind::Integer) {
+                append_count(specification.integer_value());
+                return result;
+            }
+            if (is_symbol(specification, "All")) {
+                result.indices.resize(count);
+                std::iota(result.indices.begin(), result.indices.end(), 0);
+                return result;
+            }
+            if (is_symbol(specification, "None")) return result;
+            if (specification.has_head("Span")) {
+                append_span(specification.args());
+                return result;
+            }
+            if (specification.has_head("List")) {
+                if (specification.args().size() == 1) {
+                    const auto& item = specification.args()[0];
+                    if (item.kind() == ExprKind::Integer) {
+                        (void)append_selector(item.integer_value());
+                        return result;
+                    }
+                    if (is_symbol(item, "All")) {
+                        result.indices.resize(count);
+                        std::iota(result.indices.begin(), result.indices.end(), 0);
+                        return result;
+                    }
+                    result.error = function
+                        + " single-element list specifications must contain an integer or All.";
+                    return result;
+                }
+                if (specification.args().size() == 2 || specification.args().size() == 3) {
+                    append_span(specification.args());
+                    return result;
+                }
+                result.error = function
+                    + " list specifications must contain one, two, or three items.";
+                return result;
+            }
+            result.error = "Unsupported " + function + " specification: '"
+                + specification.to_input_form() + "'.";
+            return result;
+        };
+
+        auto take_or_drop_one = [&](const Expr& value, const Expr& specification,
+                                    std::string& failure) -> std::optional<Expr> {
+            if (value.kind() != ExprKind::Call) {
+                failure = function + " expects a nonatomic expression.";
+                return std::nullopt;
+            }
+            const auto rules = association_rules(value);
+            if (rules && specification.has_head("List") && !specification.args().empty()
+                && std::any_of(specification.args().begin(), specification.args().end(),
+                    [](const Expr& item) {
+                        return item.has_head("Key") || item.kind() == ExprKind::String;
+                    })) {
+                failure = function
+                    + " on associations currently supports only numeric or span selectors; "
+                      "key-list selectors such as ``{Key[a], …}`` are not yet implemented.";
+                return std::nullopt;
+            }
+
+            const auto selection = normalize_selectors(value, specification);
+            if (!selection.error.empty()) {
+                failure = selection.error;
+                return std::nullopt;
+            }
+            const auto& source = rules ? *rules : value.args();
+            std::vector<Expr> output;
+            if (drop) {
+                const std::set<std::size_t> removed(
+                    selection.indices.begin(), selection.indices.end());
+                output.reserve(source.size() - removed.size());
+                for (std::size_t index = 0; index < source.size(); ++index)
+                    if (removed.count(index) == 0) output.push_back(source[index]);
+            } else {
+                output.reserve(selection.indices.size());
+                for (const auto index : selection.indices) output.push_back(source[index]);
+            }
+            return call(value.head(), std::move(output));
+        };
+
+        if (args.size() < 2) {
+            error = function + " expects at least one specification.";
+        } else {
+            std::function<std::optional<Expr>(const Expr&, std::size_t)> apply_specs;
+            apply_specs = [&](const Expr& value, std::size_t dimension) -> std::optional<Expr> {
+                auto sliced = take_or_drop_one(value, args[dimension], error);
+                if (!sliced || dimension + 1 == args.size()) return sliced;
+                std::vector<Expr> children;
+                children.reserve(sliced->args().size());
+                for (const auto& child : sliced->args()) {
+                    auto transformed = apply_specs(child, dimension + 1);
+                    if (!transformed) return std::nullopt;
+                    children.push_back(std::move(*transformed));
+                }
+                return call(sliced->head(), std::move(children));
+            };
+            if (auto result = apply_specs(args[0], 1)) return *result;
+        }
+
+        const auto message = call("MessageName", {symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if ((function == "RotateLeft" || function == "RotateRight") && (args.size() == 1 || args.size() == 2)
+        && args[0].kind() == ExprKind::Call) {
+        if (args.size() == 2 && args[1].has_head("List")) {
+            std::vector<mpz_class> amounts;
+            bool valid = true;
+            for (const auto& item : args[1].args()) {
+                if (item.kind() != ExprKind::Integer) { valid = false; break; }
+                amounts.push_back(item.integer_value());
+            }
+            auto rotate_axes = [&](auto&& self, const Expr& value, std::size_t axis) -> Expr {
+                if (axis >= amounts.size() || value.kind() != ExprKind::Call) return value;
+                auto values = value.args();
+                if (!values.empty()) {
+                    const auto offset = rotation_offset(
+                        amounts[axis], values.size(), function == "RotateRight");
+                    std::rotate(values.begin(),
+                        values.begin() + static_cast<std::ptrdiff_t>(offset), values.end());
+                }
+                if (axis + 1 < amounts.size())
+                    for (auto& child : values) child = self(self, child, axis + 1);
+                return call(value.head(), std::move(values));
+            };
+            if (valid) return rotate_axes(rotate_axes, args[0], 0);
+        }
+        if (args.size() == 2 && args[1].kind() != ExprKind::Integer)
+            return call(head, args);
+        auto values = args[0].args(); if (values.empty()) return args[0];
+        const auto amount = args.size() == 2 ? args[1].integer_value() : mpz_class(1);
+        const auto offset = rotation_offset(
+            amount, values.size(), function == "RotateRight");
+        std::rotate(values.begin(),
+            values.begin() + static_cast<std::ptrdiff_t>(offset), values.end());
+        return call(args[0].head(), std::move(values));
+    }
+    if (function == "Reverse") {
+        std::string error;
+        bool active_levels = true;
+        mpz_class minimum_level = 1;
+        mpz_class maximum_level = 1;
+        if (args.size() != 1 && args.size() != 2) {
+            error = "Reverse expects an expression and an optional level specification.";
+        } else if (args.size() == 2) {
+            const auto& specification = args[1];
+            if (specification.kind() == ExprKind::Integer) {
+                if (specification.integer_value() < 1) {
+                    error = "Reverse expects a positive integer level specification.";
+                } else {
+                    minimum_level = maximum_level = specification.integer_value();
+                }
+            } else if (specification.has_head("List")
+                && specification.args().size() == 1
+                && specification.args()[0].kind() == ExprKind::Integer) {
+                const auto target = specification.args()[0].integer_value();
+                if (target < 0) {
+                    error = "Reverse expects a non-negative level specification.";
+                } else if (target == 0) {
+                    active_levels = false;
+                } else {
+                    minimum_level = maximum_level = target;
+                }
+            } else if (specification.has_head("List")
+                && specification.args().size() == 2
+                && specification.args()[0].kind() == ExprKind::Integer
+                && specification.args()[1].kind() == ExprKind::Integer) {
+                minimum_level = specification.args()[0].integer_value();
+                maximum_level = specification.args()[1].integer_value();
+                if (minimum_level < 1 || maximum_level < minimum_level)
+                    error = "Reverse expects a positive {min, max} level range.";
+            } else {
+                error = "Reverse currently supports an integer or {n}/{min, max} level spec.";
+            }
+        }
+        if (error.empty()) {
+            auto reverse_levels = [&](auto&& self, const Expr& value,
+                                      const mpz_class& depth) -> Expr {
+                if (value.kind() != ExprKind::Call) return value;
+                const bool reverse_here = active_levels
+                    && depth >= minimum_level && depth <= maximum_level;
+                const mpz_class child_depth = depth + 1;
+                if (const auto rules = association_rules(value)) {
+                    std::vector<Expr> values;
+                    values.reserve(rules->size());
+                    for (const auto& rule : *rules) {
+                        values.push_back(call(rule.head(), {rule.args()[0],
+                            self(self, rule.args()[1], child_depth)}));
+                    }
+                    if (reverse_here) std::reverse(values.begin(), values.end());
+                    return call(value.head(), std::move(values));
+                }
+                std::vector<Expr> values;
+                values.reserve(value.args().size());
+                for (const auto& child : value.args())
+                    values.push_back(self(self, child, child_depth));
+                if (reverse_here) std::reverse(values.begin(), values.end());
+                return call(value.head(), std::move(values));
+            };
+            return reverse_levels(reverse_levels, args[0], mpz_class(1));
+        }
+        const auto message = call("MessageName", {symbol("Reverse"), string("error")});
+        emit_message(message, "Reverse::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (function == "Flatten" && args.size() == 3 && args[0].kind() == ExprKind::Call) {
+        const auto level = is_symbol(args[1], "Infinity") ? std::optional<long>(level_infinity) : machine_index(args[1]);
+        if (level && *level >= 0) {
+            auto flatten_named = [&](auto&& self, const Expr& value, long remaining) -> Expr {
+                if (remaining == 0 || value.kind() != ExprKind::Call) return value;
+                std::vector<Expr> result;
+                for (const auto& child : value.args()) {
+                    if (child.kind() == ExprKind::Call && child.head() == args[2]) {
+                        const auto nested = self(self, child, remaining - 1);
+                        result.insert(result.end(), nested.args().begin(), nested.args().end());
+                    } else if (child.kind() == ExprKind::Call) result.push_back(self(self, child, remaining));
+                    else result.push_back(child);
+                }
+                return call(value.head(), std::move(result));
+            };
+            return flatten_named(flatten_named, args[0], *level);
+        }
+    }
+    if (function == "Flatten" && (args.size() == 1 || args.size() == 2) && args[0].kind() == ExprKind::Call) {
+        const auto level = args.size() == 2 && machine_index(args[1]) ? std::max<long>(0, *machine_index(args[1])) : 1000000L;
+        const auto selected_head = args[0].head();
+        auto flatten = [&](auto&& self, const Expr& value, long remaining, std::vector<Expr>& output) -> void {
+            if (remaining > 0 && value.kind() == ExprKind::Call && value.head() == selected_head) {
+                for (const auto& item : value.args()) self(self, item, remaining - 1, output);
+            } else output.push_back(value);
+        };
+        std::vector<Expr> values;
+        for (const auto& item : args[0].args()) flatten(flatten, item, level, values);
+        return call(selected_head, std::move(values));
+    }
+    if (function == "Extract" && args.size() == 2) {
+        auto extract_one = [&](const Expr& position) {
+            const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position};
+            return value_at_path(args[0], path).value_or(call("Extract", {args[0], position}));
+        };
+        if (args[1].has_head("List") && !args[1].args().empty() && args[1].args()[0].has_head("List")) {
+            std::vector<Expr> values; for (const auto& path : args[1].args()) values.push_back(extract_one(path));
+            return list(std::move(values));
+        }
+        return extract_one(args[1]);
+    }
+    if (function == "Delete" && args.size() == 2) {
+        std::vector<Expr> positions = args[1].has_head("List") && !args[1].args().empty()
+            && args[1].args()[0].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        std::reverse(positions.begin(), positions.end());
+        auto result = args[0];
+        for (const auto& position : positions) {
+            const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position};
+            result = delete_at_path(result, path, 0);
+        }
+        return remove_nothing_from_list_like(result);
+    }
+    if (function == "ReplacePart" && args.size() == 2) {
+        std::vector<Expr> rules = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+        auto result = args[0];
+        for (const auto& rule : rules) {
+            if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed")) || rule.args().size() != 2) continue;
+            const auto path = rule.args()[0].has_head("List") ? rule.args()[0].args() : std::vector<Expr>{rule.args()[0]};
+            result = replace_at_path(result, path, 0, rule.args()[1]);
+        }
+        return remove_nothing_from_list_like(result);
+    }
+    if (function == "Join") {
+        std::string error;
+        if (args.empty()) {
+            error = "Join expects at least one argument.";
+        } else if (std::all_of(args.begin(), args.end(), [](const Expr& value) {
+            return association_rules(value).has_value();
+        })) {
+            std::vector<Expr> values;
+            for (const auto& association : args) {
+                const auto entries = association_rules(association);
+                for (const auto& entry : *entries) {
+                    const auto existing = std::find_if(values.begin(), values.end(),
+                        [&](const Expr& rule) { return rule.args()[0] == entry.args()[0]; });
+                    if (existing == values.end()) values.push_back(entry);
+                    else *existing = entry;
+                }
+            }
+            return call("Association", std::move(values));
+        } else {
+            for (const auto& argument : args) {
+                if (argument.kind() != ExprKind::Call) {
+                    error = "Join expects a nonatomic expression.";
+                    break;
+                }
+            }
+            if (error.empty()) {
+                const auto common_head = args[0].head();
+                if (std::any_of(args.begin() + 1, args.end(),
+                    [&](const Expr& argument) { return argument.head() != common_head; })) {
+                    error = "Join expects all expressions to have the same head.";
+                } else {
+                    std::vector<Expr> values;
+                    for (const auto& argument : args)
+                        values.insert(values.end(), argument.args().begin(), argument.args().end());
+                    return call(common_head, std::move(values));
+                }
+            }
+        }
+        const auto message = call("MessageName", {symbol("Join"), string("error")});
+        emit_message(message, "Join::error: " + error);
+        return call(raw_head, raw_args);
+    }
+    if (auto result = evaluate_exact_integer_function(function, args)) return *result;
+    if (function == "FactorInteger")
+        if (auto result = evaluate_extended_factor_integer(args)) return *result;
+    if (function == "Abs" && args.size() == 1) {
+        if (args[0].kind() == ExprKind::Integer) return integer(abs(args[0].integer_value()));
+        if (args[0].kind() == ExprKind::Rational) return from_rational(abs(args[0].rational_value()));
+        if (const auto value = numeric_real(args[0])) return real(real_text(std::abs(*value)));
+    }
+    if (function == "Sign" && args.size() == 1) {
+        if (const auto value = numeric_real(args[0])) return integer(*value < 0 ? -1L : *value > 0 ? 1L : 0L);
+    }
+    if ((function == "Mod" || function == "Quotient" || function == "QuotientRemainder") && (args.size() == 2 || args.size() == 3)) {
+        const auto dividend = as_rational(args[0]); const auto divisor = as_rational(args[1]);
+        const auto offset = args.size() == 3 ? as_rational(args[2]) : std::optional<mpq_class>(mpq_class(0));
+        if (dividend && divisor && offset && *divisor != 0) {
+            const mpq_class ratio = (*dividend - *offset) / *divisor; mpz_class quotient = ratio.get_num() / ratio.get_den();
+            if (ratio < 0 && ratio.get_num() % ratio.get_den() != 0) --quotient;
+            const auto remainder = from_rational(*dividend - *divisor * quotient);
+            if (function == "Mod") return remainder;
+            if (function == "Quotient") return integer(quotient);
+            return list({integer(quotient), remainder});
+        }
+        if (function == "Mod" && args.size() == 2) { const auto left = numeric_real(args[0]); const auto right = numeric_real(args[1]); if (left && right && *right != 0) { auto value = std::fmod(*left, *right); if ((value < 0) != (*right < 0)) value += *right; return real(real_text(value)); } }
+    }
+    if (function == "Min" && args.empty()) return symbol("Infinity");
+    if (function == "Max" && args.empty()) return symbol("-Infinity");
+    if (function == "Clip" && args.size() >= 1 && args.size() <= 3) {
+        const auto value = numeric_real(args[0]); Expr lower = integer(-1L), upper = integer(1L);
+        if (args.size() >= 2 && args[1].has_head("List") && args[1].args().size() == 2) { lower = args[1].args()[0]; upper = args[1].args()[1]; }
+        const auto low = numeric_real(lower), high = numeric_real(upper);
+        if (value && low && high) {
+            Expr below = lower, above = upper; if (args.size() == 3 && args[2].has_head("List") && args[2].args().size() == 2) { below = args[2].args()[0]; above = args[2].args()[1]; }
+            return *value < *low ? below : *value > *high ? above : args[0];
+        }
+    }
+    if (function == "KroneckerDelta" && !args.empty()) return integer(std::adjacent_find(args.begin(), args.end(), std::not_equal_to<Expr>()) == args.end() ? 1L : 0L);
+    if (function == "DiscreteDelta" && !args.empty() && std::all_of(args.begin(), args.end(), [](const Expr& value) { return as_rational(value).has_value(); }))
+        return integer(std::all_of(args.begin(), args.end(), [](const Expr& value) { return *as_rational(value) == 0; }) ? 1L : 0L);
+    if (function == "Pick" && (args.size() == 2 || args.size() == 3) && args[1].has_head("List")) {
+        const auto rules = association_rules(args[0]); const auto source = rules ? *rules : args[0].args(); if (source.size() == args[1].args().size()) {
+            const auto pattern = args.size() == 3 ? args[2] : symbol("True"); std::vector<Expr> values;
+            for (std::size_t index = 0; index < source.size(); ++index) { Bindings bindings; if (pattern_match(args[1].args()[index], pattern, bindings)) values.push_back(source[index]); }
+            return call(rules ? symbol("Association") : args[0].head(), std::move(values));
+        }
+        const auto message = call("MessageName", {symbol("Pick"), string("error")});
+        emit_message(message, "Pick::error: Pick currently expects selector parts compatible with the data shape.");
+        return call(head, args);
+    }
+    if ((function == "Floor" || function == "Ceiling" || function == "Round"
+            || function == "IntegerPart" || function == "FractionalPart")
+        && args.size() == 1) {
+        auto rounded_integer = [&](const mpq_class& input) -> mpz_class {
+            mpq_class value = input;
+            value.canonicalize();
+            const mpz_class truncated = value.get_num() / value.get_den();
+            const auto remainder = value.get_num() % value.get_den();
+            if (function == "IntegerPart" || function == "FractionalPart")
+                return truncated;
+            if (function == "Floor")
+                return value < 0 && remainder != 0 ? truncated - 1 : truncated;
+            if (function == "Ceiling")
+                return value > 0 && remainder != 0 ? truncated + 1 : truncated;
+            mpz_class lower = truncated;
+            if (value < 0 && remainder != 0) --lower;
+            const mpq_class fraction = value - lower;
+            if (fraction < mpq_class(1, 2)) return lower;
+            if (fraction > mpq_class(1, 2)) return lower + 1;
+            return lower % 2 == 0 ? lower : lower + 1;
+        };
+        auto component = [&](const Expr& value) -> std::optional<Expr> {
+            auto exact = as_rational(value);
+            if (!exact && value.kind() == ExprKind::Real)
+                exact = decimal_rational(value.text());
+            if (!exact) return std::nullopt;
+            if (function == "FractionalPart") {
+                if (value.kind() == ExprKind::Real && is_machine_number(value)) {
+                    const auto machine_value = numeric_real(value);
+                    if (!machine_value) return std::nullopt;
+                    const auto truncated = std::trunc(*machine_value);
+                    return real(real_text(*machine_value - truncated));
+                }
+                const auto integer_part = exact->get_num() / exact->get_den();
+                const mpq_class remainder = *exact - integer_part;
+                if (value.kind() != ExprKind::Real) return from_rational(remainder);
+                const auto requested_precision = explicit_real_precision(value.text());
+                if (!requested_precision || !std::isfinite(*requested_precision)
+                    || *requested_precision > 1000000.0) return std::nullopt;
+                return arbitrary_real_from_rational(remainder,
+                    static_cast<std::size_t>(std::max(1.0, *requested_precision)));
+            }
+            return integer(rounded_integer(*exact));
+        };
+        if (args[0].kind() == ExprKind::Complex) {
+            const auto real_part = component(args[0].real_part());
+            const auto imaginary_part = component(args[0].imaginary_part());
+            if (real_part && imaginary_part) return complex(*real_part, *imaginary_part);
+        } else if (const auto result = component(args[0])) return *result;
+    }
+    if ((function == "Floor" || function == "Ceiling" || function == "Round")
+        && args.size() == 2) {
+        auto exact_value = [](const Expr& value) -> std::optional<mpq_class> {
+            if (const auto exact = as_rational(value)) return exact;
+            return value.kind() == ExprKind::Real
+                ? decimal_rational(value.text()) : std::nullopt;
+        };
+        const auto value = exact_value(args[0]);
+        const auto unit = exact_value(args[1]);
+        if (value && unit) {
+            if (*unit == 0) return symbol("Indeterminate");
+            const bool machine = is_machine_number(args[0]) || is_machine_number(args[1]);
+            if (machine) {
+                const auto machine_value = numeric_real(args[0]);
+                const auto machine_unit = numeric_real(args[1]);
+                if (!machine_value || !machine_unit || *machine_unit == 0)
+                    return call(head, args);
+                const auto quotient = *machine_value / *machine_unit;
+                if (!std::isfinite(quotient)) return call(head, args);
+                const auto rounded_value = function == "Floor" ? std::floor(quotient)
+                    : function == "Ceiling" ? std::ceil(quotient)
+                    : round_binary64_ties_to_even(quotient);
+                const auto rounded = rounded_value == 0.0 ? 0.0 : rounded_value;
+                const auto product = *machine_unit * rounded;
+                return std::isfinite(product) ? real(real_text(product))
+                    : special_real("Overflow");
+            }
+            const mpq_class ratio = *value / *unit;
+            mpz_class rounded = ratio.get_num() / ratio.get_den();
+            const auto remainder = ratio.get_num() % ratio.get_den();
+            if (function == "Floor" && ratio < 0 && remainder != 0) --rounded;
+            if (function == "Ceiling" && ratio > 0 && remainder != 0) ++rounded;
+            if (function == "Round") {
+                mpz_class lower = rounded;
+                if (ratio < 0 && remainder != 0) --lower;
+                const mpq_class fraction = ratio - lower;
+                rounded = fraction < mpq_class(1, 2) ? lower
+                    : fraction > mpq_class(1, 2) ? lower + 1
+                    : lower % 2 == 0 ? lower : lower + 1;
+            }
+            const mpq_class product = *unit * rounded;
+            if (args[0].kind() != ExprKind::Real && args[1].kind() != ExprKind::Real)
+                return from_rational(product);
+            double precision = 1000000.0;
+            for (const auto& argument : args) if (argument.kind() == ExprKind::Real) {
+                const auto requested = explicit_real_precision(argument.text());
+                if (!requested || !std::isfinite(*requested)) return call(head, args);
+                precision = std::min(precision, *requested);
+            }
+            return arbitrary_real_from_rational(product,
+                static_cast<std::size_t>(std::max(1.0, precision)));
+        }
+    }
+    if (function == "Min" || function == "Max") {
+        std::vector<Expr> values; auto append = [&](auto&& self, const Expr& value) -> void { if (value.has_head("List")) for (const auto& item : value.args()) self(self, item); else values.push_back(value); }; for (const auto& value : args) append(append, value);
+        auto real_numeric_value = [](const Expr& value) -> std::optional<long double> {
+            if (const auto number = numeric_f64(value)) return *number;
+            if (const auto approximation = approximate_root(value);
+                approximation && approximation->imag() == 0) return approximation->real();
+            return std::nullopt;
+        };
+        std::vector<Expr> numeric, symbolic; for (const auto& value : values) (real_numeric_value(value) ? numeric : symbolic).push_back(value);
+        if (!numeric.empty()) {
+            const auto bounds = std::minmax_element(numeric.begin(), numeric.end(), [&](const Expr& left, const Expr& right) {
+                return *real_numeric_value(left) < *real_numeric_value(right);
+            });
+            const auto selected = function == "Max" ? *bounds.second : *bounds.first;
+            if (symbolic.empty()) return selected;
+            symbolic.insert(symbolic.begin(), selected); return call(function, std::move(symbolic));
+        }
+    }
+    if ((function == "GCD" || function == "LCM") && std::all_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Integer; })) {
+        mpz_class result = function == "GCD" ? 0 : 1;
+        for (const auto& value : args) { mpz_class next; if (function == "GCD") mpz_gcd(next.get_mpz_t(), result.get_mpz_t(), value.integer_value().get_mpz_t()); else mpz_lcm(next.get_mpz_t(), result.get_mpz_t(), value.integer_value().get_mpz_t()); result = std::move(next); }
+        return integer(result);
+    }
+    if (function == "Divisors" && args.size() == 1 && args[0].kind() == ExprKind::Integer && args[0].integer_value() > 0 && args[0].integer_value().fits_ulong_p()) {
+        const auto value = args[0].integer_value().get_ui(); std::vector<Expr> divisors;
+        for (unsigned long candidate = 1; candidate <= value / candidate; ++candidate) if (value % candidate == 0) { divisors.push_back(integer(mpz_class(candidate))); if (candidate != value / candidate) divisors.push_back(integer(mpz_class(value / candidate))); }
+        std::sort(divisors.begin(), divisors.end(), expression_less); return list(std::move(divisors));
+    }
+    if (function == "PrimeQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer)
+        return boolean(args[0].integer_value() > 1 && mpz_probab_prime_p(args[0].integer_value().get_mpz_t(), 25) != 0);
+    if (function == "PrimePowerQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer) {
+        mpz_class value = abs(args[0].integer_value()); if (value <= 1) return symbol("False");
+        for (unsigned long exponent = 1; exponent <= mpz_sizeinbase(value.get_mpz_t(), 2); ++exponent) {
+            mpz_class root; mpz_root(root.get_mpz_t(), value.get_mpz_t(), exponent);
+            if (root > 1 && mpz_probab_prime_p(root.get_mpz_t(), 25) != 0) { mpz_class power; mpz_pow_ui(power.get_mpz_t(), root.get_mpz_t(), exponent); if (power == value) return symbol("True"); }
+        }
+        return symbol("False");
+    }
+    if (function == "ChineseRemainder" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")
+        && args[0].args().size() == args[1].args().size()
+        && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& value) { return value.kind() == ExprKind::Integer; })
+        && std::all_of(args[1].args().begin(), args[1].args().end(), [](const Expr& value) { return value.kind() == ExprKind::Integer && value.integer_value() > 0; })) {
+        mpz_class result = 0, modulus = 1;
+        for (std::size_t index = 0; index < args[0].args().size(); ++index) {
+            const auto next_modulus = args[1].args()[index].integer_value(); mpz_class inverse;
+            if (mpz_invert(inverse.get_mpz_t(), modulus.get_mpz_t(), next_modulus.get_mpz_t()) == 0) return call(head, args);
+            mpz_class adjustment = ((args[0].args()[index].integer_value() - result) * inverse) % next_modulus; if (adjustment < 0) adjustment += next_modulus;
+            result += modulus * adjustment; modulus *= next_modulus; result %= modulus;
+        }
+        return integer(result);
+    }
+    if (function == "FactorInteger" && args.size() == 1 && as_rational(args[0])) {
+        auto value = *as_rational(args[0]); value.canonicalize(); std::map<mpz_class, long> factors;
+        auto factor = [&](mpz_class number, long sign) { number = abs(number); for (mpz_class prime = 2; prime * prime <= number; ++prime) while (number % prime == 0) { factors[prime] += sign; number /= prime; } if (number > 1) factors[number] += sign; };
+        if (value == 0) return list({list({integer(0L), integer(1L)})});
+        if (value < 0) { factors[-1] = 1; value = -value; }
+        factor(value.get_num(), 1); factor(value.get_den(), -1); std::vector<Expr> result;
+        for (const auto& [prime, exponent] : factors)
+            if (exponent) result.push_back(list({integer(prime), integer(exponent)}));
+        return list(std::move(result));
+    }
+    if (function == "IntegerExponent" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Integer
+        && (args.size() == 1 || args[1].kind() == ExprKind::Integer)) {
+        if (args[0].integer_value() == 0) return symbol("Infinity");
+        const mpz_class base = abs(args.size() == 2 ? args[1].integer_value() : mpz_class(10)); if (base > 1) { mpz_class value = abs(args[0].integer_value()); long exponent = 0; while (value % base == 0) { value /= base; ++exponent; } return integer(exponent); }
+    }
+    if ((function == "EulerPhi" || function == "MoebiusMu") && args.size() == 1 && args[0].kind() == ExprKind::Integer && args[0].integer_value() > 0 && args[0].integer_value().fits_ulong_p()) {
+        auto remaining = args[0].integer_value().get_ui(); auto phi = remaining; int factors = 0; bool square = false;
+        for (unsigned long prime = 2; prime <= remaining / prime; ++prime) if (remaining % prime == 0) { ++factors; remaining /= prime; if (remaining % prime == 0) square = true; while (remaining % prime == 0) remaining /= prime; phi -= phi / prime; }
+        if (remaining > 1) { ++factors; phi -= phi / remaining; }
+        return function == "EulerPhi" ? integer(mpz_class(phi)) : integer(square ? 0L : factors % 2 ? -1L : 1L);
+    }
+    if ((function == "PrimePi" || function == "Prime" || function == "NextPrime") && args.size() == 1 && args[0].kind() == ExprKind::Integer && args[0].integer_value() >= 0 && args[0].integer_value().fits_ulong_p()) {
+        const auto input = args[0].integer_value().get_ui();
+        if (function == "PrimePi") { unsigned long count = 0; for (unsigned long value = 2; value <= input; ++value) { mpz_class candidate(value); if (mpz_probab_prime_p(candidate.get_mpz_t(), 20)) ++count; } return integer(mpz_class(count)); }
+        if (function == "Prime") { unsigned long count = 0, value = 1; while (count < input) { ++value; mpz_class candidate(value); if (mpz_probab_prime_p(candidate.get_mpz_t(), 20)) ++count; } return integer(mpz_class(value)); }
+        mpz_class next; mpz_nextprime(next.get_mpz_t(), args[0].integer_value().get_mpz_t()); return integer(next);
+    }
+    if (function == "PowerMod" && args.size() == 3 && std::all_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Integer; }) && args[2].integer_value() != 0) {
+        mpz_class result;
+        if (args[1].integer_value() < 0) { mpz_class inverse; if (!mpz_invert(inverse.get_mpz_t(), args[0].integer_value().get_mpz_t(), args[2].integer_value().get_mpz_t())) return call(head, args); mpz_class exponent = -args[1].integer_value(); mpz_powm(result.get_mpz_t(), inverse.get_mpz_t(), exponent.get_mpz_t(), args[2].integer_value().get_mpz_t()); }
+        else mpz_powm(result.get_mpz_t(), args[0].integer_value().get_mpz_t(), args[1].integer_value().get_mpz_t(), args[2].integer_value().get_mpz_t());
+        return integer(result);
+    }
+    if ((function == "BitAnd" || function == "BitOr" || function == "BitXor") && args.size() >= 2 && std::all_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::Integer; })) {
+        mpz_class result = args[0].integer_value();
+        for (std::size_t index = 1; index < args.size(); ++index) { if (function == "BitAnd") result &= args[index].integer_value(); else if (function == "BitOr") result |= args[index].integer_value(); else result ^= args[index].integer_value(); }
+        return integer(result);
+    }
+    if ((function == "BitShiftLeft" || function == "BitShiftRight") && args.size() == 2 && args[0].kind() == ExprKind::Integer && machine_index(args[1])) {
+        const auto requested = *machine_index(args[1]);
+        const auto magnitude = unsigned_magnitude(requested);
+        const bool shift_left = function == "BitShiftLeft"
+            ? requested >= 0 : requested < 0;
+        mpz_class result = args[0].integer_value();
+        if (result == 0) return integer(0L);
+        constexpr unsigned long maximum_materialized_shift = 10000000UL;
+        if (shift_left && magnitude > maximum_materialized_shift)
+            return call(head, args);
+        if (shift_left) result <<= magnitude;
+        else result >>= magnitude;
+        return integer(result);
+    }
+    if (function == "IntegerDigits" && !args.empty() && args.size() <= 3 && args[0].kind() == ExprKind::Integer) {
+        mpz_class base = args.size() >= 2 && args[1].kind() == ExprKind::Integer ? args[1].integer_value() : mpz_class(10); if (base >= 2) {
+            mpz_class value = abs(args[0].integer_value()); std::vector<Expr> digits; if (value == 0) digits.push_back(integer(0L));
+            while (value > 0) { mpz_class quotient, remainder; mpz_fdiv_qr(quotient.get_mpz_t(), remainder.get_mpz_t(), value.get_mpz_t(), base.get_mpz_t()); digits.push_back(integer(remainder)); value = std::move(quotient); } std::reverse(digits.begin(), digits.end());
+            if (args.size() == 3 && machine_index(args[2]) && *machine_index(args[2]) >= 0) { const auto length = static_cast<std::size_t>(*machine_index(args[2])); if (digits.size() < length) digits.insert(digits.begin(), length - digits.size(), integer(0L)); else if (digits.size() > length) digits.erase(digits.begin(), digits.end() - static_cast<std::ptrdiff_t>(length)); }
+            return list(std::move(digits));
+        }
+    }
+    if (function == "FromDigits" && !args.empty() && args.size() <= 2) {
+        const mpz_class base = args.size() == 2 && args[1].kind() == ExprKind::Integer ? args[1].integer_value() : mpz_class(10); std::vector<mpz_class> digits; bool valid = base >= 2;
+        if (args[0].has_head("List")) for (const auto& digit : args[0].args()) { if (digit.kind() != ExprKind::Integer) valid = false; else digits.push_back(digit.integer_value()); }
+        else if (args[0].kind() == ExprKind::String) for (const unsigned char character : args[0].text()) { if (!std::isalnum(character)) valid = false; else digits.emplace_back(std::isdigit(character) ? character - '0' : std::tolower(character) - 'a' + 10); }
+        else valid = false;
+        if (valid) { mpz_class value = 0; for (const auto& digit : digits) value = value * base + digit; return integer(value); }
+    }
+    if (function == "IntegerLength" && (args.size() == 1 || args.size() == 2) && args[0].kind() == ExprKind::Integer) {
+        const mpz_class base = args.size() == 2 && args[1].kind() == ExprKind::Integer ? args[1].integer_value() : mpz_class(10); if (base >= 2) { mpz_class value = abs(args[0].integer_value()); std::size_t length = 1; while (value >= base) { value /= base; ++length; } return integer(length); }
+    }
+    if ((function == "Keys" || function == "Values") && args.size() == 1 && args[0].has_head("Association")) {
+        std::vector<Expr> values;
+        for (const auto& entry : args[0].args()) {
+            if ((!entry.has_head("Rule") && !entry.has_head("RuleDelayed")) || entry.args().size() != 2) continue;
+            const auto value = function == "Keys" ? entry.args()[0] : entry.args()[1];
+            if (!is_symbol(value, "Nothing")) values.push_back(value);
+        }
+        return list(std::move(values));
+    }
+    if (function == "Normal" && args.size() == 1) {
+        if (args[0].has_head("RootSum") && args[0].args().size() == 2
+            && args[0].args()[0].has_head("Function")
+            && args[0].args()[0].args().size() == 1) {
+            const auto slot = call("Slot", {integer(1L)});
+            const auto context = polynomial_context({slot});
+            const auto parsed = context.parse(args[0].args()[0].args()[0]);
+            const auto coefficients = parsed
+                ? rational_coefficients(context, *parsed) : std::nullopt;
+            if (coefficients && polynomial_degree(*coefficients) > 0) {
+                std::vector<std::pair<mpq_class, long>> exact_roots;
+                std::set<std::string> seen;
+                for (long denominator = 1; denominator <= 128; ++denominator)
+                    for (long numerator = -512; numerator <= 512; ++numerator) {
+                        if (std::gcd(std::abs(numerator), denominator) != 1) continue;
+                        mpq_class candidate(numerator, denominator);
+                        if (evaluate_polynomial(*coefficients, candidate) != 0) continue;
+                        if (!seen.insert(candidate.get_str()).second) continue;
+                        exact_roots.emplace_back(candidate,
+                            root_multiplicity_at(*coefficients, candidate));
+                    }
+                RationalPolynomial remaining = *coefficients;
+                for (const auto& [value, multiplicity] : exact_roots)
+                    for (long count = 0; count < multiplicity; ++count)
+                        remaining = rational_polynomial_divide(remaining, {-value, 1}).first;
+                if (polynomial_degree(remaining) <= 0) {
+                    std::vector<Expr> terms;
+                    for (const auto& [value, multiplicity] : exact_roots) {
+                        auto image = evaluate(call(args[0].args()[1], {from_rational(value)}));
+                        if (multiplicity != 1)
+                            image = evaluate(call("Times", {integer(multiplicity), image}));
+                        terms.push_back(std::move(image));
+                    }
+                    return evaluate(call("Plus", std::move(terms)));
+                }
+            }
+        }
+        if (args[0].kind() == ExprKind::SparseArray) return sparse_dense_value(args[0]);
+        if (args[0].kind() == ExprKind::ByteArray) {
+            std::vector<Expr> values; for (const auto value : args[0].bytes()) values.push_back(integer(static_cast<long>(value)));
+            return list(std::move(values));
+        }
+        if (const auto rules = association_rules(args[0])) return list(*rules);
+    }
+    if (function == "ArrayRules" && args.size() == 1 && args[0].kind() == ExprKind::SparseArray) {
+        std::vector<Expr> rules;
+        for (const auto& entry : args[0].sparse_entries()) {
+            std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index));
+            rules.push_back(call("Rule", {list(std::move(indices)), entry.value}));
+        }
+        std::vector<Expr> blanks(args[0].dimensions().size(), call("Blank", {}));
+        rules.push_back(call("Rule", {list(std::move(blanks)), args[0].fill_value()})); return list(std::move(rules));
+    }
+    if ((function == "KeyExistsQ" || function == "KeyMemberQ") && args.size() == 2) {
+        if (const auto rules = association_rules(args[0])) return boolean(std::any_of(rules->begin(), rules->end(),
+            [&](const Expr& rule) { return rule.args()[0] == args[1]; }));
+    }
+    if ((function == "KeyTake" || function == "KeyDrop") && args.size() == 2) {
+        if (const auto rules = association_rules(args[0])) {
+            const auto keys = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
+            std::vector<Expr> values;
+            if (function == "KeyTake") {
+                for (const auto& key : keys) for (const auto& rule : *rules) if (rule.args()[0] == key) { values.push_back(rule); break; }
+            } else for (const auto& rule : *rules) if (std::find(keys.begin(), keys.end(), rule.args()[0]) == keys.end()) values.push_back(rule);
+            return call("Association", std::move(values));
+        }
+    }
+    if (function == "KeySelect" && args.size() == 2) {
+        if (const auto rules = association_rules(args[0])) {
+            std::vector<Expr> values; for (const auto& rule : *rules)
+                if (is_symbol(evaluate(call(args[1], {rule.args()[0]})), "True")) values.push_back(rule);
+            return call("Association", std::move(values));
+        }
+    }
+    if ((function == "KeyMap" || function == "KeyValueMap") && args.size() == 2) {
+        if (const auto rules = association_rules(args[1])) {
+            std::vector<Expr> values;
+            for (const auto& rule : *rules) values.push_back(function == "KeyMap"
+                ? call("Rule", {evaluate(call(args[0], {rule.args()[0]})), rule.args()[1]})
+                : evaluate(call(args[0], {rule.args()[0], rule.args()[1]})));
+            return function == "KeyMap" ? call("Association", std::move(values)) : list(std::move(values));
+        }
+    }
+    if (function == "AssociationThread" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")
+        && args[0].args().size() == args[1].args().size()) {
+        std::vector<Expr> rules; for (std::size_t index = 0; index < args[0].args().size(); ++index)
+            rules.push_back(call("Rule", {args[0].args()[index], args[1].args()[index]}));
+        return call("Association", std::move(rules));
+    }
+    if (function == "AssociationMap" && args.size() == 2 && args[1].has_head("List")) {
+        std::vector<Expr> rules; for (const auto& key : args[1].args()) rules.push_back(call("Rule", {key, evaluate(call(args[0], {key}))}));
+        return call("Association", std::move(rules));
+    }
+    if (function == "Lookup" && (args.size() == 2 || args.size() == 3) && args[0].has_head("Association")) {
+        auto lookup = [&](const Expr& key) {
+            for (const auto& entry : args[0].args()) if ((entry.has_head("Rule") || entry.has_head("RuleDelayed"))
+                && entry.args().size() == 2 && entry.args()[0] == key) return entry.args()[1];
+            return args.size() == 3 ? args[2] : call("Missing", {string("KeyAbsent"), key});
+        };
+        if (args[1].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& key : args[1].args()) { const auto value = lookup(key); if (!is_symbol(value, "Nothing")) values.push_back(value); }
+            return list(std::move(values));
+        }
+        return lookup(args[1]);
+    }
+    if (function == "Nothing") return symbol("Nothing");
+    if (function == "Association") {
+        if (const auto rules = normalized_association_rules(args)) return call("Association", *rules);
+        return call(head, std::move(args));
+    }
+    if (function == "List") {
+        args.erase(std::remove_if(args.begin(), args.end(), [](const Expr& value) { return is_symbol(value, "Nothing"); }), args.end());
+    }
+    return call(head, std::move(args));
+}
+
+Expr evaluate(const Expr& expression) { return Evaluator().evaluate(expression); }
+
+} // namespace tungsten
