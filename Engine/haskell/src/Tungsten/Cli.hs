@@ -122,6 +122,7 @@ data AssistantCommand
       !(Maybe Text)
       !(Maybe Text)
       !Bool
+  | PrepareInlineAssistantCommand !FilePath !CellSelector !Bool
   deriving (Eq, Show)
 
 data FrontEndCommand
@@ -165,6 +166,7 @@ parseCliArguments = \case
   "parser-corpus" : "compare" : arguments' -> parseParserCorpusCompareArguments arguments'
   "assistant" : "ask" : arguments' -> parseAssistantAskArguments arguments'
   "assistant" : "ask-cell" : arguments' -> parseAssistantAskCellArguments arguments'
+  "assistant" : "prepare-inline" : arguments' -> parseAssistantPrepareInlineArguments arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
 
 parseAssistantAskArguments :: [String] -> Either Text CliCommand
@@ -270,6 +272,43 @@ parseAssistantAskCellArguments = go Nothing Nothing Nothing False False False Fa
 
   addSelector Nothing value = Right value
   addSelector (Just _) _ = Left "assistant ask-cell accepts exactly one cell selector"
+
+parseAssistantPrepareInlineArguments :: [String] -> Either Text CliCommand
+parseAssistantPrepareInlineArguments = go Nothing Nothing False
+ where
+  go (Just file) (Just selector) requireSuccess [] =
+    Right (AssistantCliCommand (PrepareInlineAssistantCommand file selector requireSuccess))
+  go Nothing _ _ [] = Left "assistant prepare-inline requires --file PATH"
+  go _ Nothing _ [] = Left "assistant prepare-inline requires exactly one cell selector"
+  go Nothing selector requireSuccess ("--file" : value : rest) =
+    go (Just value) selector requireSuccess rest
+  go (Just _) _ _ ("--file" : _ : _) = Left "assistant prepare-inline accepts --file only once"
+  go file selector requireSuccess ("--cell-index" : value : rest) = do
+    index <- parseIntegerOption "--cell-index" value
+    next <- addSelector selector (SelectCellIndex index)
+    go file (Just next) requireSuccess rest
+  go file selector requireSuccess ("--cell-path" : value : rest) = do
+    path <- parseCellPath (T.pack value)
+    next <- addSelector selector (SelectCellPath path)
+    go file (Just next) requireSuccess rest
+  go file selector requireSuccess ("--expression-uuid" : value : rest) = do
+    next <- addSelector selector (SelectExpressionUuid (T.pack value))
+    go file (Just next) requireSuccess rest
+  go file selector requireSuccess ("--cell-id" : value : rest) = do
+    identifier <- parseIntegerOption "--cell-id" value
+    next <- addSelector selector (SelectCellId identifier)
+    go file (Just next) requireSuccess rest
+  go file selector requireSuccess ("--cell-tag" : value : rest) = do
+    next <- addSelector selector (SelectCellTag (T.pack value))
+    go file (Just next) requireSuccess rest
+  go file selector _ ("--require-success" : rest) = go file selector True rest
+  go _ _ _ [flag]
+    | flag `elem` ["--file", "--cell-index", "--cell-path", "--expression-uuid", "--cell-id", "--cell-tag"] =
+        Left (T.pack flag <> " requires a value")
+  go _ _ _ (flag : _) = Left ("unknown assistant prepare-inline option: " <> T.pack flag)
+
+  addSelector Nothing value = Right value
+  addSelector (Just _) _ = Left "assistant prepare-inline accepts exactly one cell selector"
 
 parseParserCorpusDiscoverArguments :: [String] -> Either Text CliCommand
 parseParserCorpusDiscoverArguments = go defaultOptions 20
@@ -727,6 +766,14 @@ runAssistantCommand = \case
         extraInstructions modelService modelName
     case result of
       Left message -> emitAssistantInputError "ask-cell" message
+      Right assistantResult -> do
+        emitJson (assistantResultPayload assistantResult)
+        pure (if requireSuccess && not (assistantSuccess assistantResult) then 1 else 0)
+  PrepareInlineAssistantCommand path selector requireSuccess -> do
+    installation <- discoverInstallation
+    result <- prepareInlineAssistant installation path selector
+    case result of
+      Left message -> emitAssistantInputError "prepare-inline" message
       Right assistantResult -> do
         emitJson (assistantResultPayload assistantResult)
         pure (if requireSuccess && not (assistantSuccess assistantResult) then 1 else 0)
@@ -1428,6 +1475,7 @@ usage =
     , "    DISCOVERY OPTIONS: --corpus-root PATH [--extension EXT ...] [--include-glob GLOB ...] [--exclude-glob GLOB ...] [--max-files N] [--shuffle] [--seed N]"
     , "  tungsten-hs assistant ask --prompt TEXT [--system-prompt TEXT] [--extra-instructions TEXT] [--tool NAME ...] [--model-service NAME] [--model-name NAME] [--require-success]"
     , "  tungsten-hs assistant ask-cell --file PATH SELECTOR --question TEXT [--insert-wolfram-code-below | --insert-all-wolfram-code-below] [--save] [--close-assistant-notebook] [--require-success]"
+    , "  tungsten-hs assistant prepare-inline --file PATH SELECTOR [--require-success]"
     , "  tungsten-hs notebook inspect --file PATH"
     , "  tungsten-hs notebook create --file PATH [--title TEXT] [--cell STYLE:TEXT ...]"
     , "  tungsten-hs notebook patch --file PATH --spec PATH [--out PATH]"

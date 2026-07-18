@@ -17,9 +17,11 @@ module Tungsten.Assistant
   , buildAssistantAskScript
   , buildAssistantAskCellScript
   , buildAssistantInsertScript
+  , buildAssistantPrepareInlineScript
   , askAssistant
   , askAssistantCell
   , askAssistantCellWithOptions
+  , prepareInlineAssistant
   ) where
 
 import Control.Exception (IOException, try)
@@ -460,6 +462,38 @@ buildAssistantInsertScript notebookPath selector codes saveNotebook =
   slash '\\' = '/'
   slash character = character
 
+buildAssistantPrepareInlineScript :: FilePath -> JsonValue -> Text
+buildAssistantPrepareInlineScript notebookPath selector =
+  T.unlines
+    [ "Needs[\"Wolfram`Chatbook`\" -> None];"
+    , "tungstenSelector = ImportString[" <> wlString (encodeJson selector) <> ", \"RawJSON\"];"
+    , "tungstenNotebookPath = " <> wlString (T.pack (map slash notebookPath)) <> ";"
+    , "tungstenShowNotebookAssistance = Symbol[\"Wolfram`Chatbook`ShowNotebookAssistance\"];"
+    , "tungstenCellToString = Symbol[\"Wolfram`Chatbook`CellToString\"];"
+    , assistantHelperBlock "tungstenCellToString @ cellExpr" []
+    , "tungstenResult = Module[{sourceNotebook, sourceCell, attachedCell},"
+    , "  sourceNotebook = tungstenResolveNotebook @ tungstenNotebookPath;"
+    , "  If[AssociationQ @ sourceNotebook, sourceNotebook,"
+    , "    SetSelectedNotebook @ sourceNotebook;"
+    , "    sourceCell = tungstenResolveCell[sourceNotebook, tungstenSelector];"
+    , "    If[AssociationQ @ sourceCell, sourceCell,"
+    , "      SelectionMove[sourceCell, All, Cell, AutoScroll -> True];"
+    , "      attachedCell = Quiet @ Check[tungstenShowNotebookAssistance[sourceCell, \"Inline\", EvaluateInput -> False], $Failed];"
+    , "      If[! MatchQ[attachedCell, _CellObject],"
+    , "        tungstenError[\"InlineAssistantOpenFailed\", \"Notebook Assistant inline input was not created.\"],"
+    , "        SelectionMove[attachedCell, Before, Cell, AutoScroll -> True];"
+    , "        FrontEnd`MoveCursorToInputField[sourceNotebook, \"AttachedChatInputField\"];"
+    , "        <|\"success\" -> True, \"notebook_path\" -> tungstenNotebookPath, \"window_title\" -> Replace[Quiet @ Check[CurrentValue[sourceNotebook, WindowTitle], None], {s_String :> s, _ :> Null}], \"source_cell\" -> tungstenCellMetadata @ sourceCell, \"inline_cell_style\" -> tungstenStringValue @ CurrentValue[attachedCell, CellStyle]|>"
+    , "      ]"
+    , "    ]"
+    , "  ]"
+    , "];"
+    , "ExportString[tungstenResult, \"RawJSON\"]"
+    ]
+ where
+  slash '\\' = '/'
+  slash character = character
+
 assistantHelperBlock :: Text -> [Text] -> Text
 assistantHelperBlock previewExpression extraNames =
   T.unlines
@@ -588,6 +622,43 @@ chatResponseFromPayload (JsonObject payload) = case Map.lookup "assistant_chat_o
      in if T.null response then Nothing else Just response
   _ -> Nothing
 chatResponseFromPayload _ = Nothing
+
+prepareInlineAssistant
+  :: WolframInstallation
+  -> FilePath
+  -> CellSelector
+  -> IO (Either Text NotebookAssistantResult)
+prepareInlineAssistant installation requestedPath selector = do
+  resolved <- resolveAssistantCell requestedPath selector
+  case resolved of
+    Left message -> pure (Left message)
+    Right (notebookPath, record) -> do
+      evaluation <-
+        evaluateKernelText
+          installation
+          (buildAssistantPrepareInlineScript notebookPath (selectorFromCellRecord record))
+          Nothing
+          True
+      pure
+        ( Right
+            NotebookAssistantResult
+              { assistantEvaluation = evaluation
+              , assistantPayload = parseAssistantPayload evaluation
+              }
+        )
+
+resolveAssistantCell :: FilePath -> CellSelector -> IO (Either Text (FilePath, CellRecord))
+resolveAssistantCell requestedPath selector = do
+  sourceResult <- try (TextIO.readFile requestedPath)
+  case (sourceResult :: Either IOException Text) of
+    Left exception -> pure (Left (T.pack (show exception)))
+    Right source -> case parseNotebook source of
+      Left notebookError -> pure (Left (notebookErrorMessage notebookError))
+      Right document -> case resolveNotebookCell document selector of
+        Left inlineError -> pure (Left (inlineBoxErrorMessage inlineError))
+        Right record -> do
+          notebookPath <- makeAbsolute requestedPath
+          pure (Right (notebookPath, record))
 
 selectorFromCellRecord :: CellRecord -> JsonValue
 selectorFromCellRecord record =

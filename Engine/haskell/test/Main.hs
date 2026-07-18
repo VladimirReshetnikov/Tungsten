@@ -131,6 +131,10 @@ checkAssistant = do
           "/tmp/example.nb"
           (JsonObject (Map.singleton "expression_uuid" (JsonString "abc")))
           ["2 + 2"] True
+      prepareInlineScript =
+        buildAssistantPrepareInlineScript
+          "/tmp/example.nb"
+          (JsonObject (Map.singleton "expression_uuid" (JsonString "abc")))
   installation <- discoverInstallation
   unavailable <- askAssistant installation {installationKernelCli = Nothing} "2+2" Nothing Nothing Nothing Nothing Nothing
   kernelUnavailable <- evaluateKernelText installation {installationKernelCli = Nothing} "2+2" Nothing False
@@ -182,6 +186,8 @@ checkAssistant = do
         , assertEqual "assistant insertion finalization save" (Just (JsonBool True)) (Map.lookup "saved_notebook" finalizedInsertionMap)
         , assertEqual "assistant insertion script writes input cells" True ("NotebookWrite[sourceNotebook, Cell[code, \"Input\"" `Text.isInfixOf` insertionScript)
         , assertEqual "assistant insertion script saves notebook" True ("tungstenSaveNotebook = True" `Text.isInfixOf` insertionScript)
+        , assertEqual "assistant inline preparation opens assistant" True ("tungstenShowNotebookAssistance[sourceCell, \"Inline\"" `Text.isInfixOf` prepareInlineScript)
+        , assertEqual "assistant inline preparation focuses input" True ("AttachedChatInputField" `Text.isInfixOf` prepareInlineScript)
         ]
   unitChecks <- and <$> sequence checks
   cellRunCheck <- withTemporaryDirectory "tungsten-assistant" $ \temporary -> do
@@ -193,10 +199,19 @@ checkAssistant = do
       askAssistantCell
         installation {installationKernelCli = Nothing}
         notebookPath (SelectCellIndex 0) "Explain this." Nothing Nothing Nothing
-    assertEqual
+    prepared <-
+      prepareInlineAssistant
+        installation {installationKernelCli = Nothing}
+        notebookPath (SelectExpressionUuid "assistant-cell")
+    selected <- assertEqual
       "assistant selected-cell unavailable path"
       (Right False)
       (assistantSuccess <$> result)
+    preparedCheck <- assertEqual
+      "assistant inline preparation unavailable path"
+      (Right False)
+      (assistantSuccess <$> prepared)
+    pure (selected && preparedCheck)
   pure (unitChecks && cellRunCheck)
 
 checkWolframStrings :: IO Bool
@@ -537,6 +552,18 @@ checkCliArguments = do
                 [ "assistant", "ask-cell", "--file", "demo.nb", "--cell-path", "1,0"
                 , "--question", "Explain", "--insert-all-wolfram-code-below", "--save"
                 , "--close-assistant-notebook", "--extra-instructions", "Be exact", "--require-success"
+                ]
+            )
+        , assertEqual
+            "CLI inline Assistant preparation"
+            ( Right
+                ( AssistantCliCommand
+                    (PrepareInlineAssistantCommand "demo.nb" (SelectExpressionUuid "cell-1") True)
+                )
+            )
+            ( parseCliArguments
+                [ "assistant", "prepare-inline", "--file", "demo.nb"
+                , "--expression-uuid", "cell-1", "--require-success"
                 ]
             )
         , assertEqual
