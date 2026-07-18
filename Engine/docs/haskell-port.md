@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T15:24:20Z
-- Repository HEAD: 2939ffaf5548f089aea8facc47bc9217b6192cb7
+- Updated (UTC): 2026-07-18T15:35:37Z
+- Repository HEAD: 4fa8f25acd5c2e271857628aa6af1d21316ecacf
 
 ## Purpose
 
@@ -35,6 +35,7 @@ cabal run tungsten-hs -- env show --probe
 cabal run tungsten-hs -- frontend probe
 cabal run tungsten-hs -- inline-box compose --prefix 'icon: ' --box-expr 'GraphicsBox[{CircleBox[]}]'
 cabal run tungsten-hs -- inline-box from-cell --file example.nb --cell-index 0 --all-objects
+cabal run tungsten-hs -- docs search NotebookGet
 ```
 
 Parse a file or select FullForm explicitly:
@@ -76,6 +77,7 @@ Haskell process clients.
 | FrontEnd | Hidden probing, wrapped/unwrapped code, notebook open, direct documentation locate, token execution, safely escaped code builders, and the `frontend` CLI family |
 | Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, typed immutable patches, and `notebook inspect`/`notebook create`/`notebook patch` CLI commands |
 | Inline boxes | Typed composition records, `BoxData` and box-bearing string extraction, stable deduplication, flat-index/path/UUID/ID/tag selectors, object selection, and `inline-box compose`/`inline-box from-cell` JSON commands |
+| Documentation | Kernel-free notebook text/title extraction, Python-compatible SQLite/FTS5 schema, filename and full-text search, page reads, paclet resolution, and the `docs` CLI family |
 
 ## Compatibility boundary
 
@@ -86,8 +88,8 @@ features yet:
 - downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and byte-for-byte preservation of original box-expression formatting;
-- cross-process license launch gates, stale-process cleanup, license-seat waiting, documentation-index-backed identifier resolution, and Notebook Assistant automation;
-- local documentation indexing, parser-corpus orchestration, and Notebook Assistant;
+- cross-process license launch gates, stale-process cleanup, license-seat waiting, and Notebook Assistant automation;
+- parser-corpus orchestration and Notebook Assistant;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
 Do not redirect an existing Python, PowerShell, or .NET production caller to `tungsten-hs` unless
@@ -101,10 +103,13 @@ The next useful port slices are:
 1. grow parser and evaluator parity from the Python corpus and the local Wolfram held-parser oracle;
 2. port source-preserving notebook spans and broader box-language interpretation;
 3. port definitions, attributes, pattern matching, scoping, and iteration on the immutable session;
-4. port documentation indexing, parser-corpus orchestration, and Notebook Assistant workflows;
+4. port parser-corpus orchestration and Notebook Assistant workflows;
 5. complete kernel licensing/concurrency behavior and broad Python CLI payload parity;
 6. move the PowerShell and .NET projections only after their JSON contract tests pass against the
    Haskell executable.
 
 Each slice should keep the Python behavior as an oracle where possible and should be committed only
 with focused Haskell tests plus an end-to-end JSON smoke check.
+
+Documentation index builds and full-text queries currently invoke the local `sqlite3` executable;
+filename-fast-path search and record extraction remain available through the library without it.

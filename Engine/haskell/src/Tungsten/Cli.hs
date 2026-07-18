@@ -7,6 +7,7 @@ module Tungsten.Cli
   , ExpressionCommand (..)
   , NotebookCommand (..)
   , InlineBoxCommand (..)
+  , DocumentationCommand (..)
   , FrontEndCommand (..)
   , SourceSpec (..)
   , parseCliArguments
@@ -35,6 +36,7 @@ import System.IO
   )
 import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
 import Tungsten.Discovery
+import Tungsten.DocsIndex
 import Tungsten.Expression
 import Tungsten.Frontend
 import Tungsten.InlineBoxes
@@ -55,6 +57,7 @@ data CliCommand
   | ExpressionCliCommand !ExpressionCommand !SourceSpec !Text
   | NotebookCliCommand !NotebookCommand
   | InlineBoxCliCommand !InlineBoxCommand
+  | DocumentationCliCommand !DocumentationCommand
   | HelpCommand
   deriving (Eq, Show)
 
@@ -82,11 +85,18 @@ data InlineBoxCommand
       !Bool
   deriving (Eq, Show)
 
+data DocumentationCommand
+  = BuildDocumentationIndexCommand !(Maybe FilePath)
+  | SearchDocumentationCommand !Text !Int !(Maybe FilePath) !Bool
+  | ReadDocumentationCommand !Text !(Maybe FilePath) !Bool
+  | OpenDocumentationCommand !Text !(Maybe FilePath)
+  deriving (Eq, Show)
+
 data FrontEndCommand
   = ProbeFrontEndCommand !Bool
   | RunFrontEndCommand !Text !Bool !Bool
   | OpenFrontEndNotebookCommand !FilePath !Bool
-  | OpenFrontEndDocumentationCommand !Text !Bool
+  | OpenFrontEndDocumentationCommand !Text !(Maybe FilePath) !Bool
   | ExecuteFrontEndTokenCommand !Text !(Maybe FilePath) !Bool
   deriving (Eq, Show)
 
@@ -108,15 +118,61 @@ parseCliArguments = \case
   "frontend" : "run" : arguments' -> parseFrontEndRunArguments arguments'
   "frontend" : "open-notebook" : arguments' -> parseFrontEndOpenNotebookArguments arguments'
   "frontend" : "open-doc" : identifier : arguments' ->
-    FrontEndCommand . OpenFrontEndDocumentationCommand (T.pack identifier)
-      <$> parseRequireSuccess arguments'
+    parseFrontEndOpenDocumentationArguments (T.pack identifier) arguments'
   "frontend" : "token" : token : arguments' -> parseFrontEndTokenArguments (T.pack token) arguments'
   "notebook" : "inspect" : arguments' -> parseNotebookInspectArguments arguments'
   "notebook" : "create" : arguments' -> parseNotebookCreateArguments arguments'
   "notebook" : "patch" : arguments' -> parseNotebookPatchArguments arguments'
   "inline-box" : "compose" : arguments' -> parseInlineBoxComposeArguments arguments'
   "inline-box" : "from-cell" : arguments' -> parseInlineBoxFromCellArguments arguments'
+  "docs" : "index" : arguments' -> parseDocumentationIndexArguments arguments'
+  "docs" : "search" : query : arguments' -> parseDocumentationSearchArguments (T.pack query) arguments'
+  "docs" : "read" : identifier : arguments' -> parseDocumentationReadArguments (T.pack identifier) arguments'
+  "docs" : "open" : identifier : arguments' -> parseDocumentationOpenArguments (T.pack identifier) arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
+
+parseDocumentationIndexArguments :: [String] -> Either Text CliCommand
+parseDocumentationIndexArguments [] =
+  Right (DocumentationCliCommand (BuildDocumentationIndexCommand Nothing))
+parseDocumentationIndexArguments ["--path", path] =
+  Right (DocumentationCliCommand (BuildDocumentationIndexCommand (Just path)))
+parseDocumentationIndexArguments ["--path"] = Left "--path requires a value"
+parseDocumentationIndexArguments _ = Left "usage: docs index [--path PATH]"
+
+parseDocumentationSearchArguments :: Text -> [String] -> Either Text CliCommand
+parseDocumentationSearchArguments query = go 10 Nothing False
+ where
+  go limit indexPath rebuild [] =
+    Right (DocumentationCliCommand (SearchDocumentationCommand query limit indexPath rebuild))
+  go _ indexPath rebuild ("--limit" : value : rest) = do
+    limit <- parseIntegerOption "--limit" value
+    go limit indexPath rebuild rest
+  go limit Nothing rebuild ("--index-path" : value : rest) =
+    go limit (Just value) rebuild rest
+  go _ (Just _) _ ("--index-path" : _ : _) = Left "--index-path may be supplied only once"
+  go limit indexPath _ ("--rebuild" : rest) = go limit indexPath True rest
+  go _ _ _ [flag]
+    | flag `elem` ["--limit", "--index-path"] = Left (T.pack flag <> " requires a value")
+  go _ _ _ (flag : _) = Left ("unknown docs search option: " <> T.pack flag)
+
+parseDocumentationReadArguments :: Text -> [String] -> Either Text CliCommand
+parseDocumentationReadArguments identifier = go Nothing False
+ where
+  go indexPath rebuild [] =
+    Right (DocumentationCliCommand (ReadDocumentationCommand identifier indexPath rebuild))
+  go Nothing rebuild ("--index-path" : value : rest) = go (Just value) rebuild rest
+  go (Just _) _ ("--index-path" : _ : _) = Left "--index-path may be supplied only once"
+  go indexPath _ ("--rebuild" : rest) = go indexPath True rest
+  go _ _ ["--index-path"] = Left "--index-path requires a value"
+  go _ _ (flag : _) = Left ("unknown docs read option: " <> T.pack flag)
+
+parseDocumentationOpenArguments :: Text -> [String] -> Either Text CliCommand
+parseDocumentationOpenArguments identifier [] =
+  Right (DocumentationCliCommand (OpenDocumentationCommand identifier Nothing))
+parseDocumentationOpenArguments identifier ["--index-path", path] =
+  Right (DocumentationCliCommand (OpenDocumentationCommand identifier (Just path)))
+parseDocumentationOpenArguments _ ["--index-path"] = Left "--index-path requires a value"
+parseDocumentationOpenArguments _ _ = Left "usage: docs open IDENTIFIER [--index-path PATH]"
 
 parseInlineBoxComposeArguments :: [String] -> Either Text CliCommand
 parseInlineBoxComposeArguments = go "" [] ""
@@ -268,6 +324,21 @@ parseFrontEndOpenNotebookArguments = go Nothing False
   go _ _ ["--file"] = Left "--file requires a value"
   go _ _ (flag : _) = Left ("unknown frontend open-notebook option: " <> T.pack flag)
 
+parseFrontEndOpenDocumentationArguments :: Text -> [String] -> Either Text CliCommand
+parseFrontEndOpenDocumentationArguments identifier = go Nothing False
+ where
+  go indexPath requireSuccess [] =
+    Right
+      ( FrontEndCommand
+          (OpenFrontEndDocumentationCommand identifier indexPath requireSuccess)
+      )
+  go Nothing requireSuccess ("--index-path" : value : rest) =
+    go (Just value) requireSuccess rest
+  go (Just _) _ ("--index-path" : _ : _) = Left "frontend open-doc accepts --index-path only once"
+  go indexPath _ ("--require-success" : rest) = go indexPath True rest
+  go _ _ ["--index-path"] = Left "--index-path requires a value"
+  go _ _ (flag : _) = Left ("unknown frontend open-doc option: " <> T.pack flag)
+
 parseFrontEndTokenArguments :: Text -> [String] -> Either Text CliCommand
 parseFrontEndTokenArguments token = go Nothing False
  where
@@ -370,6 +441,7 @@ runCli arguments' = case parseCliArguments arguments' of
     runExpressionCommand command sourceSpec form
   Right (NotebookCliCommand command) -> runNotebookCommand command
   Right (InlineBoxCliCommand command) -> runInlineBoxCommand command
+  Right (DocumentationCliCommand command) -> runDocumentationCommand command
 
 configureHandles :: IO ()
 configureHandles = do
@@ -586,6 +658,87 @@ wolframStringSegmentPayload = \case
           , ("kind", JsonString "inline_box")
           ]
       )
+
+runDocumentationCommand :: DocumentationCommand -> IO Int
+runDocumentationCommand command = do
+  installation <- discoverInstallation
+  case command of
+    BuildDocumentationIndexCommand path -> do
+      result <- buildDocumentationIndex installation path
+      case result of
+        Left documentationError -> emitDocumentationError "index" documentationError
+        Right indexPath -> do
+          emitJson
+            ( JsonObject
+                (Map.singleton "index_path" (JsonString (T.pack indexPath)))
+            )
+          pure 0
+    SearchDocumentationCommand query limit indexPath rebuild -> do
+      result <- searchDocumentation installation query indexPath limit rebuild
+      case result of
+        Left documentationError -> emitDocumentationError "search" documentationError
+        Right hits -> do
+          emitJson
+            ( JsonObject
+                (Map.singleton "hits" (JsonArray (map documentationHitPayload hits)))
+            )
+          pure 0
+    ReadDocumentationCommand identifier indexPath rebuild -> do
+      result <- readDocumentation installation identifier indexPath rebuild
+      case result of
+        Left documentationError -> emitDocumentationError "read" documentationError
+        Right record -> emitJson (documentationRecordPayload record) *> pure 0
+    OpenDocumentationCommand identifier indexPath -> do
+      resolved <- resolveDocumentationIdentifier installation identifier indexPath
+      case resolved of
+        Left documentationError -> emitDocumentationError "open" documentationError
+        Right paclet -> do
+          result <- openDocumentation installation paclet
+          emitJson (kernelPayload result)
+          pure 0
+
+emitDocumentationError :: Text -> DocumentationError -> IO Int
+emitDocumentationError command documentationError = do
+  emitJson
+    ( JsonObject
+        ( Map.fromList
+            [ ("command", JsonString command)
+            , ("error", JsonString (documentationErrorMessage documentationError))
+            , ("error_type", JsonString "DocumentationError")
+            , ("success", JsonBool False)
+            ]
+        )
+    )
+  pure 1
+
+documentationRecordPayload :: DocumentationRecord -> JsonValue
+documentationRecordPayload record =
+  JsonObject
+    ( Map.fromList
+        [ ("category", JsonString (documentationCategory record))
+        , ("kind", JsonString (documentationKind record))
+        , ("paclet", JsonString (documentationPaclet record))
+        , ("path", JsonString (T.pack (documentationPath record)))
+        , ("preview", JsonString (documentationPreview record))
+        , ("text", JsonString (documentationText record))
+        , ("title", JsonString (documentationTitle record))
+        ]
+    )
+
+documentationHitPayload :: DocumentationHit -> JsonValue
+documentationHitPayload hit =
+  JsonObject
+    ( Map.fromList
+        [ ("category", JsonString (documentationHitCategory hit))
+        , ("kind", JsonString (documentationHitKind hit))
+        , ("paclet", JsonString (documentationHitPaclet hit))
+        , ("path", JsonString (T.pack (documentationHitPath hit)))
+        , ("preview", JsonString (documentationHitPreview hit))
+        , ("score", JsonNumber (documentationHitScore hit))
+        , ("snippet", JsonString (documentationHitSnippet hit))
+        , ("title", JsonString (documentationHitTitle hit))
+        ]
+    )
 
 decodeNotebookPatches :: JsonValue -> Either Text [NotebookPatch]
 decodeNotebookPatches (JsonObject specification) = case Map.lookup "operations" specification of
@@ -836,16 +989,22 @@ addEnvironmentProbe _ _ payload = payload
 runFrontEndCommand :: FrontEndCommand -> IO Int
 runFrontEndCommand command = do
   installation <- discoverInstallation
-  (result, requireSuccess) <- case command of
-    ProbeFrontEndCommand required -> (,required) <$> probeFrontEnd installation
-    RunFrontEndCommand code wrap required -> (,required) <$> runFrontEnd installation code wrap
-    OpenFrontEndNotebookCommand path required -> (,required) <$> openNotebook installation path
-    OpenFrontEndDocumentationCommand identifier required ->
-      (,required) <$> openDocumentation installation identifier
+  outcome <- case command of
+    ProbeFrontEndCommand required -> Right . (,required) <$> probeFrontEnd installation
+    RunFrontEndCommand code wrap required -> Right . (,required) <$> runFrontEnd installation code wrap
+    OpenFrontEndNotebookCommand path required -> Right . (,required) <$> openNotebook installation path
+    OpenFrontEndDocumentationCommand identifier indexPath required -> do
+      resolved <- resolveDocumentationIdentifier installation identifier indexPath
+      case resolved of
+        Left documentationError -> pure (Left documentationError)
+        Right paclet -> Right . (,required) <$> openDocumentation installation paclet
     ExecuteFrontEndTokenCommand token notebookPath required ->
-      (,required) <$> executeFrontEndToken installation token notebookPath
-  emitJson (kernelPayload result)
-  pure (kernelCommandExit requireSuccess result)
+      Right . (,required) <$> executeFrontEndToken installation token notebookPath
+  case outcome of
+    Left documentationError -> emitDocumentationError "frontend open-doc" documentationError
+    Right (result, requireSuccess) -> do
+      emitJson (kernelPayload result)
+      pure (kernelCommandExit requireSuccess result)
 
 kernelCommandExit :: Bool -> KernelEvaluationResult -> Int
 kernelCommandExit requireSuccess result
@@ -949,7 +1108,7 @@ usage =
     , "  tungsten-hs frontend probe [--require-success]"
     , "  tungsten-hs frontend run --code TEXT [--no-wrap] [--require-success]"
     , "  tungsten-hs frontend open-notebook --file PATH [--require-success]"
-    , "  tungsten-hs frontend open-doc IDENTIFIER [--require-success]"
+    , "  tungsten-hs frontend open-doc IDENTIFIER [--index-path PATH] [--require-success]"
     , "  tungsten-hs frontend token TOKEN [--file PATH] [--require-success]"
     , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
     , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
@@ -959,6 +1118,10 @@ usage =
     , "  tungsten-hs inline-box compose [--prefix TEXT] [--box-expr EXPR ...] [--suffix TEXT]"
     , "  tungsten-hs inline-box from-cell --file PATH SELECTOR [--prefix TEXT] [--suffix TEXT] [--object-index N | --all-objects] [--require-success]"
     , "    SELECTOR: --cell-index N | --cell-path PATH | --expression-uuid UUID | --cell-id N | --cell-tag TAG"
+    , "  tungsten-hs docs index [--path PATH]"
+    , "  tungsten-hs docs search QUERY [--limit N] [--index-path PATH] [--rebuild]"
+    , "  tungsten-hs docs read IDENTIFIER [--index-path PATH] [--rebuild]"
+    , "  tungsten-hs docs open IDENTIFIER [--index-path PATH]"
     , ""
     , "With no arguments, tungsten-hs serves the JSON-lines protocol for backward compatibility."
     ]

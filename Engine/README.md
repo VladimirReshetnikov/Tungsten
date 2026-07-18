@@ -340,10 +340,12 @@ cabal run tungsten-hs -- kernel eval --code '2+2'
 cabal run tungsten-hs -- frontend probe
 cabal run tungsten-hs -- inline-box compose --prefix 'icon: ' --box-expr 'GraphicsBox[{CircleBox[]}]'
 cabal run tungsten-hs -- inline-box from-cell --file example.nb --cell-index 0 --all-objects
+cabal run tungsten-hs -- docs search NotebookGet
 ```
 
 The Haskell port currently covers the kernel-free expression, structural notebook, Wolfram-string,
-and inline-box foundations, plus typed discovery, kernel, and FrontEnd operations. See
+inline-box, and documentation-index foundations, plus typed discovery, kernel, and FrontEnd
+operations. See
 [Haskell Port](./docs/haskell-port.md) for its exact compatibility boundary and migration order.
 
 ### PowerShell

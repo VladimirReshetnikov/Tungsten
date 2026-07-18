@@ -9,11 +9,22 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import System.Directory (executable, getPermissions, getTemporaryDirectory, removeFile, setPermissions)
+import System.Directory
+  ( createDirectory
+  , createDirectoryIfMissing
+  , executable
+  , getPermissions
+  , getTemporaryDirectory
+  , removeDirectoryRecursive
+  , removeFile
+  , setPermissions
+  )
 import System.Exit (exitFailure)
 import System.Info (os)
 import System.IO (hClose, hSetEncoding, openTempFile, utf8)
+import System.FilePath ((</>))
 import Tungsten.Cli
+import Tungsten.DocsIndex
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
@@ -56,6 +67,7 @@ tests =
   , checkEvaluationSession
   , checkRepl
   , checkDiscovery
+  , checkDocumentationIndex
   , checkLicensing
   , checkKernelRunner
   , checkFrontEndBuilders
@@ -443,6 +455,30 @@ checkCliArguments = do
                 , "--cell-path", "[1, \"bad\"]"
                 ]
             )
+        , assertEqual
+            "CLI documentation index"
+            (Right (DocumentationCliCommand (BuildDocumentationIndexCommand (Just "docs.sqlite3"))))
+            (parseCliArguments ["docs", "index", "--path", "docs.sqlite3"])
+        , assertEqual
+            "CLI documentation search"
+            ( Right
+                ( DocumentationCliCommand
+                    (SearchDocumentationCommand "symbolic computation" 4 (Just "docs.sqlite3") True)
+                )
+            )
+            ( parseCliArguments
+                [ "docs", "search", "symbolic computation", "--limit", "4"
+                , "--index-path", "docs.sqlite3", "--rebuild"
+                ]
+            )
+        , assertEqual
+            "CLI documentation read"
+            (Right (DocumentationCliCommand (ReadDocumentationCommand "Foo" Nothing False)))
+            (parseCliArguments ["docs", "read", "Foo"])
+        , assertEqual
+            "CLI documentation open"
+            (Right (DocumentationCliCommand (OpenDocumentationCommand "Foo" (Just "docs.sqlite3"))))
+            (parseCliArguments ["docs", "open", "Foo", "--index-path", "docs.sqlite3"])
         ]
   and <$> sequence checks
 
@@ -557,14 +593,72 @@ checkDiscovery = do
             (parseCliArguments ["frontend", "open-notebook", "--file", "demo.nb"])
         , assertEqual
             "CLI FrontEnd documentation"
-            (Right (FrontEndCommand (OpenFrontEndDocumentationCommand "paclet:ref/NotebookGet" True)))
+            (Right (FrontEndCommand (OpenFrontEndDocumentationCommand "paclet:ref/NotebookGet" Nothing True)))
             (parseCliArguments ["frontend", "open-doc", "paclet:ref/NotebookGet", "--require-success"])
+        , assertEqual
+            "CLI FrontEnd documentation index"
+            (Right (FrontEndCommand (OpenFrontEndDocumentationCommand "Foo" (Just "docs.sqlite3") False)))
+            (parseCliArguments ["frontend", "open-doc", "Foo", "--index-path", "docs.sqlite3"])
         , assertEqual
             "CLI FrontEnd token"
             (Right (FrontEndCommand (ExecuteFrontEndTokenCommand "EvaluateCells" (Just "demo.nb") False)))
             (parseCliArguments ["frontend", "token", "EvaluateCells", "--file", "demo.nb"])
         ]
   and <$> sequence checks
+
+checkDocumentationIndex :: IO Bool
+checkDocumentationIndex = withTemporaryDirectory "tungsten-docs" $ \temporary -> do
+  installation <- discoverInstallation
+  let docsRoot = temporary </> "ReferencePages" </> "Symbols"
+      fooPath = docsRoot </> "Foo.nb"
+      barPath = docsRoot </> "Bar.nb"
+      indexPath = temporary </> "docs.sqlite3"
+      configured =
+        installation
+          { installationDocsRoots = [temporary]
+          , installationDefaultIndexPath = indexPath
+          }
+  createDirectoryIfMissing True docsRoot
+  TextIO.writeFile
+    fooPath
+    "Notebook[{Cell[\"Foo\", \"ObjectName\"], Cell[\"Foo computes a symbolic bar.\", \"Usage\"]}, WindowTitle->Foo]\n"
+  TextIO.writeFile
+    barPath
+    "Notebook[{Cell[\"Bar\", \"ObjectName\"], Cell[\"Bar transforms a notebook.\", \"Usage\"]}, WindowTitle->Bar]\n"
+  built <- buildDocumentationIndex configured Nothing
+  filenameHits <- searchDocumentation configured "Foo" (Just indexPath) 5 False
+  contentHits <- searchDocumentation configured "symbolic" (Just indexPath) 5 False
+  bar <- readDocumentation configured "paclet:ref/Bar" (Just indexPath) False
+  resolved <- resolveDocumentationIdentifier configured "Foo" (Just indexPath)
+  checks <- sequence
+    [ assertEqual "documentation index destination" (Right indexPath) built
+    , assertEqual
+        "documentation filename search"
+        (Right ["paclet:ref/Foo"])
+        (map documentationHitPaclet <$> filenameHits)
+    , assertEqual
+        "documentation FTS content search"
+        (Right ["paclet:ref/Foo"])
+        (map documentationHitPaclet <$> contentHits)
+    , assertEqual "documentation read title" (Right "Bar") (documentationTitle <$> bar)
+    , assertEqual
+        "documentation read body"
+        (Right True)
+        ((Text.isInfixOf "notebook" . Text.toLower . documentationText) <$> bar)
+    , assertEqual "documentation identifier resolution" (Right "paclet:ref/Foo") resolved
+    ]
+  pure (and checks)
+
+withTemporaryDirectory :: String -> (FilePath -> IO value) -> IO value
+withTemporaryDirectory prefix = bracket create removeDirectoryRecursive
+ where
+  create = do
+    directory <- getTemporaryDirectory
+    (path, handle) <- openTempFile directory prefix
+    hClose handle
+    removeFile path
+    createDirectory path
+    pure path
 
 checkLicensing :: IO Bool
 checkLicensing = do
