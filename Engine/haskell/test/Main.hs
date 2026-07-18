@@ -9,6 +9,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import System.Exit (exitFailure)
 import Tungsten.Expression
+import Tungsten.Evaluate
 import Tungsten.Json
 import Tungsten.Parser
 
@@ -26,10 +27,13 @@ tests =
   , checkFullFormParserErrors
   , checkInputFormParser
   , checkInputFormParserErrors
+  , checkEvaluator
+  , checkEvaluatorErrors
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
   , checkProtocol
+  , checkParserEvaluatorProtocol
   , checkProtocolErrors
   ]
 
@@ -98,6 +102,54 @@ checkInputFormParserErrors = do
   second <- assertLeft "reject incomplete InputForm operator" (parseInputForm "1 +")
   third <- assertLeft "reject malformed InputForm part" (parseInputForm "x[[1]")
   pure (and [first, second, third])
+
+checkEvaluator :: IO Bool
+checkEvaluator = do
+  let inputCases =
+        [ ("integer arithmetic", "1 + 2*3", "7")
+        , ("exact rational arithmetic", "1/6 + 1/3", "Rational[1, 2]")
+        , ("negative rational power", "(2/3)^-3", "Rational[27, 8]")
+        , ("symbolic coefficient collection", "2 x 3", "Times[6, x]")
+        , ("symbolic constant collection", "x + 1 + 2", "Plus[3, x]")
+        , ("factorials", "6! + 6!!", "768")
+        , ("numeric comparison", "1 < 2 <= 2", "True")
+        , ("numeric inequality", "Unequal[1, 2, 1]", "False")
+        , ("Boolean reduction", "True && !False", "True")
+        , ("conditional branch", "If[2 > 1, 20 + 22, 0]", "42")
+        , ("range", "Range[-2, 4, 2]", "List[-2, 0, 2, 4]")
+        , ("total", "Total[{1, 2, 3, 4}]", "10")
+        , ("accumulate", "Accumulate[{1, 2, 3, 4}]", "List[1, 3, 6, 10]")
+        , ("list structure", "{First[{a, b}], Last[{a, b}], Rest[{a, b}], Most[{a, b}]} ", "List[a, b, List[b], List[a]]")
+        , ("part", "{{a, b}, {c, d}}[[2, 1]]", "c")
+        , ("head and predicates", "{Head[1/2], AtomQ[1/2], ListQ[{x}], IntegerQ[2], NumberQ[2/3], StringQ[\"x\"]}", "List[Rational, True, True, True, True, True]")
+        , ("map", "Map[f, {1, 2, 3}]", "List[f[1], f[2], f[3]]")
+        , ("apply", "Apply[f, {1, 2, 3}]", "f[1, 2, 3]")
+        , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
+        , ("compound result", "1 + 1; 3 + 4", "7")
+        , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")
+        , ("unsupported remains symbolic", "UnknownBuiltin[1 + 2, x]", "UnknownBuiltin[3, x]")
+        ]
+      fullCases =
+        [ ("slot function", "Function[Power[Slot[1], 2]][5]", "25")
+        , ("named function", "Function[x, Plus[x, 1]][41]", "42")
+        ]
+  inputResults <- traverse (evaluateCase parseInputForm) inputCases
+  fullResults <- traverse (evaluateCase parseFullForm) fullCases
+  pure (and (inputResults <> fullResults))
+ where
+  evaluateCase parser (label, source, expected) =
+    assertEqual
+      ("evaluator: " <> label)
+      (Right expected)
+      (fullForm <$> (parser source >>= mapLeftEvaluation . evaluate))
+  mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
+
+checkEvaluatorErrors :: IO Bool
+checkEvaluatorErrors = do
+  let result = parseInputForm "{a, b}[[3]]" >>= mapLeftEvaluation . evaluate
+  assertLeft "reject out-of-range Part during evaluation" result
+ where
+  mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
 
 checkFullForms :: IO Bool
 checkFullForms = do
@@ -213,15 +265,49 @@ checkProtocol = do
 checkProtocolErrors :: IO Bool
 checkProtocolErrors = do
   first <- assertLeft "protocol command must be a string" (decodeRequestLine "{\"command\":42}")
-  let request = ProtocolRequest (Just (JsonNumber "9")) "evaluate" Nothing
+  let request =
+        ProtocolRequest
+          { protocolRequestId = Just (JsonNumber "9")
+          , protocolCommand = "unknown"
+          , protocolExpression = Nothing
+          , protocolSource = Nothing
+          , protocolForm = Nothing
+          }
       expected =
         ProtocolFailure
           { protocolResponseId = Just (JsonNumber "9")
-          , protocolResponseCommand = "evaluate"
-          , protocolError = "unsupported command: evaluate"
+          , protocolResponseCommand = "unknown"
+          , protocolError = "unsupported command: unknown"
           }
   second <- assertEqual "unknown protocol command" expected (handleProtocolRequest request)
+  third <- assertLeft "protocol source must be a string" (decodeRequestLine "{\"command\":\"parse\",\"source\":42}")
+  pure (first && second && third)
+
+checkParserEvaluatorProtocol :: IO Bool
+checkParserEvaluatorProtocol = do
+  let parseRequest = expectRight (decodeRequestLine "{\"id\":1,\"command\":\"parse\",\"form\":\"input\",\"source\":\"1 + 2 x\"}")
+      evaluateRequest = expectRight (decodeRequestLine "{\"id\":2,\"command\":\"evaluate\",\"source\":\"Total[Range[5]]\"}")
+      parseResponse = handleProtocolRequest parseRequest
+      evaluateResponse = handleProtocolRequest evaluateRequest
+  first <- case parseResponse of
+    ProtocolSuccess {protocolResult = JsonObject result} ->
+      case Map.lookup "full_form" result of
+        Just (JsonString value) -> assertEqual "protocol parse result" "Plus[1, Times[2, x]]" value
+        other -> assertEqual "protocol parse result shape" (Just (JsonString "expected")) other
+    other -> assertEqual "protocol parse response" True (isSuccess other)
+  second <- case evaluateResponse of
+    ProtocolSuccess {protocolResult = JsonObject outer} ->
+      case Map.lookup "result" outer of
+        Just (JsonObject result) ->
+          case Map.lookup "full_form" result of
+            Just (JsonString value) -> assertEqual "protocol evaluation result" "15" value
+            other -> assertEqual "protocol evaluation result shape" (Just (JsonString "expected")) other
+        other -> assertEqual "protocol evaluation outer shape" (Just (JsonString "expected")) other
+    other -> assertEqual "protocol evaluate response" True (isSuccess other)
   pure (first && second)
+ where
+  isSuccess ProtocolSuccess {} = True
+  isSuccess ProtocolFailure {} = False
 
 withoutNewline :: Text -> Text
 withoutNewline value = case Text.unsnoc value of

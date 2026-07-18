@@ -52,7 +52,9 @@ import Text.Parsec
 import qualified Text.Parsec as Parsec
 import Text.Parsec.String (Parser)
 import Text.Read (readMaybe)
+import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
 import Tungsten.Expression
+import Tungsten.Parser (parseErrorMessage, parseFullForm, parseInputForm)
 
 -- | JSON numbers retain their source lexeme.  This avoids silently rounding
 -- arbitrary integers or decimal reals before the evaluator sees them.
@@ -306,6 +308,8 @@ data ProtocolRequest = ProtocolRequest
   { protocolRequestId :: !(Maybe JsonValue)
   , protocolCommand :: !Text
   , protocolExpression :: !(Maybe Expr)
+  , protocolSource :: !(Maybe Text)
+  , protocolForm :: !(Maybe Text)
   }
   deriving (Eq, Show)
 
@@ -327,11 +331,15 @@ protocolRequestFromJson payload = do
   values <- expectObject "protocol request" payload
   command <- requireString "command" values
   expression <- traverse exprFromJson (Map.lookup "expression" values)
+  source <- optionalString "source" values
+  form <- optionalString "form" values
   pure
     ProtocolRequest
       { protocolRequestId = Map.lookup "id" values
       , protocolCommand = command
       , protocolExpression = expression
+      , protocolSource = source
+      , protocolForm = form
       }
 
 protocolResponseToJson :: ProtocolResponse -> JsonValue
@@ -387,10 +395,56 @@ handleProtocolRequest request = case protocolCommand request of
             )
         )
     Nothing -> failure "full_form requires an expression"
+  "parse" -> case requestExpression request of
+    Left message -> failure message
+    Right expression ->
+      ProtocolSuccess
+        (protocolRequestId request)
+        "parse"
+        (expressionResult expression)
+  "evaluate" -> case requestExpression request of
+    Left message -> failure message
+    Right expression -> case evaluate expression of
+      Left evaluationError -> failure (evaluationErrorMessage evaluationError)
+      Right result ->
+        ProtocolSuccess
+          (protocolRequestId request)
+          "evaluate"
+          ( JsonObject
+              ( Map.fromList
+                  [ ("input", expressionResult expression)
+                  , ("result", expressionResult result)
+                  ]
+              )
+          )
   command -> failure ("unsupported command: " <> command)
  where
   failure message =
     ProtocolFailure (protocolRequestId request) (protocolCommand request) message
+
+requestExpression :: ProtocolRequest -> Either Text Expr
+requestExpression request = case protocolExpression request of
+  Just expression -> Right expression
+  Nothing -> case protocolSource request of
+    Nothing -> Left (protocolCommand request <> " requires an expression or source")
+    Just source -> case normalizedForm of
+      "input" -> parseWith parseInputForm source
+      "inputform" -> parseWith parseInputForm source
+      "full" -> parseWith parseFullForm source
+      "fullform" -> parseWith parseFullForm source
+      other -> Left ("unsupported expression form: " <> other)
+ where
+  normalizedForm = T.toLower (T.strip (maybe "input" id (protocolForm request)))
+  parseWith parser source = first parseErrorMessage (parser source)
+
+expressionResult :: Expr -> JsonValue
+expressionResult expression =
+  JsonObject
+    ( Map.fromList
+        [ ("expression", exprToJson expression)
+        , ("full_form", JsonString (fullForm expression))
+        ]
+    )
 
 expectObject :: Text -> JsonValue -> Either JsonError (Map Text JsonValue)
 expectObject _ (JsonObject values) = Right values
@@ -404,6 +458,12 @@ requireString :: Text -> Map Text JsonValue -> Either JsonError Text
 requireString key values = requireValue key values >>= \case
   JsonString value -> Right value
   _ -> Left (JsonError ("JSON field must be a string: " <> key))
+
+optionalString :: Text -> Map Text JsonValue -> Either JsonError (Maybe Text)
+optionalString key values = case Map.lookup key values of
+  Nothing -> Right Nothing
+  Just (JsonString value) -> Right (Just value)
+  Just _ -> Left (JsonError ("JSON field must be a string: " <> key))
 
 requireArray :: Text -> Map Text JsonValue -> Either JsonError [JsonValue]
 requireArray key values = requireValue key values >>= \case

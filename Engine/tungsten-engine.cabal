@@ -26,6 +26,7 @@ library
   import:          common-settings
   hs-source-dirs:  haskell/src
   exposed-modules:
+    Tungsten.Evaluate
     Tungsten.Expression
     Tungsten.Json
     Tungsten.Parser

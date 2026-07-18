@@ -379,7 +379,7 @@ numberLexeme = do
   sign <- optionText (char '-')
   mantissa <- try leadingPoint <|> digitsWithOptionalPoint
   precision <- optionalText precisionParser
-  magnitude <- optionalText magnitudeParser
+  magnitude <- optionalText (try magnitudeParser)
   let source = sign <> mantissa <> precision <> magnitude
   notFollowedBy (satisfy isSymbolContinuation)
   pure source
