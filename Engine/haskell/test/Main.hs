@@ -24,6 +24,8 @@ tests =
   [ checkFullForms
   , checkFullFormParser
   , checkFullFormParserErrors
+  , checkInputFormParser
+  , checkInputFormParserErrors
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -57,6 +59,45 @@ checkFullFormParserErrors = do
   third <- assertLeft "reject malformed real exponent" (parseFullForm "1.2*^3.5")
   fourth <- assertLeft "reject unterminated comment" (parseFullForm "f[1] (* open")
   pure (and [first, second, third, fourth])
+
+checkInputFormParser :: IO Bool
+checkInputFormParser = do
+  let cases =
+        [ ("implicit multiplication and power", "1 + 2 x^3", "Plus[1, Times[2, Power[x, 3]]]")
+        , ("exact division", "1/6 + 1/3", "Plus[Rational[1, 6], Rational[1, 3]]")
+        , ("right associative power", "a^b^c", "Power[a, Power[b, c]]")
+        , ("unary minus precedence", "-x^2", "Times[-1, Power[x, 2]]")
+        , ("lists and calls", "f[{a, b}, g[x]]", "f[List[a, b], g[x]]")
+        , ("uniform comparison", "a < b < c", "Less[a, b, c]")
+        , ("mixed comparison", "a < b <= c", "Inequality[a, Less, b, LessEqual, c]")
+        , ("Boolean operators", "a && b || c", "Or[And[a, b], c]")
+        , ("rule", "a -> b + 1", "Rule[a, Plus[b, 1]]")
+        , ("replacement", "f[a] /. a -> b", "ReplaceAll[f[a], Rule[a, b]]")
+        , ("condition", "x_ /; x > 0", "Condition[Pattern[x, Blank[]], Greater[x, 0]]")
+        , ("typed patterns", "f[x_Integer, y_]", "f[Pattern[x, Blank[Integer]], Pattern[y, Blank[]]]")
+        , ("sequence blanks", "f[__, ___Symbol]", "f[BlankSequence[], BlankNullSequence[Symbol]]")
+        , ("alternatives", "a | b | c", "Alternatives[a, b, c]")
+        , ("slots and pure function", "#1 + #name &", "Function[Plus[Slot[1], Slot[\"name\"]]]")
+        , ("slot sequence", "f[##2] &", "Function[f[SlotSequence[2]]]")
+        , ("prefix and postfix application", "f @ x // g", "g[f[x]]")
+        , ("part", "expr[[1, 2]]", "Part[expr, 1, 2]")
+        , ("right associative assignment", "a = b = 2", "Set[a, Set[b, 2]]")
+        , ("delayed assignment", "f[x_] := x^2", "SetDelayed[f[Pattern[x, Blank[]]], Power[x, 2]]")
+        , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
+        , ("association", "<|a -> 1, b :> 2|>", "Association[Rule[a, 1], RuleDelayed[b, 2]]")
+        , ("compound expression", "x = 1; x + 1;", "CompoundExpression[Set[x, 1], Plus[x, 1], Null]")
+        ]
+  and
+    <$> traverse
+      (\(label, source, expected) -> assertEqual ("InputForm parser: " <> label) (Right expected) (fullForm <$> parseInputForm source))
+      cases
+
+checkInputFormParserErrors :: IO Bool
+checkInputFormParserErrors = do
+  first <- assertLeft "reject incomplete InputForm call" (parseInputForm "f[1")
+  second <- assertLeft "reject incomplete InputForm operator" (parseInputForm "1 +")
+  third <- assertLeft "reject malformed InputForm part" (parseInputForm "x[[1]")
+  pure (and [first, second, third])
 
 checkFullForms :: IO Bool
 checkFullForms = do
