@@ -1095,6 +1095,7 @@ checkEvaluationSession = do
         , ("module initializers do not catch return", "Module[{a = 1, b = Return[stop, Module]}, never]", "Return[stop, Module]")
         , ("block initializer return restores localized state", "x = 100; {Module[{}, Block[{x = Return[stop, Module]}, never]; after], x}", "List[stop, 100]")
         , ("return target aliases evaluate", "h = Module; Module[{}, Return[v, h]]", "v")
+        , ("evaluated return heads evaluate ordinary arguments", "x = 0; r = Return; r[x = x + 1]; x", "1")
         , ("block initializers use dynamic left-to-right scope", "x = 100; y = 200; {Block[{x = 5, y = x + 1}, {x, y}], x, y}", "List[List[5, 6], 100, 200]")
         , ("block restores own and down values", "x = 100; f[1] = 99; {Block[{x, f}, {x, f[1], x = 5, f[2] = 88}], x, f[1], f[2]}", "List[List[100, 99, 5, 88], 100, 99, f[2]]")
         , ("block own value bypasses downvalue dispatch", "f[x_] := x^2; {Block[{f = 7}, f[3]], f[3]}", "List[7[3], 9]")

@@ -1141,7 +1141,6 @@ isHeldSessionHead (Symbol name) =
            , "Throw"
            , "Break"
            , "Continue"
-           , "Return"
            , "OwnValues"
            , "DownValues"
            , "Condition"
