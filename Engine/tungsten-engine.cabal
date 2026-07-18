@@ -1,0 +1,57 @@
+cabal-version:      3.12
+name:               tungsten-engine
+version:            0.1.0.0
+synopsis:           Haskell port of the Tungsten Wolfram expression engine
+description:
+  An incremental Haskell port of Tungsten Engine.  The initial package provides
+  immutable Wolfram expressions, FullForm rendering, and a JSON-lines protocol.
+license:            MIT
+author:             Tungsten contributors
+maintainer:         Tungsten contributors
+category:           Language
+build-type:         Simple
+extra-source-files: README.md
+tested-with:        GHC == 9.12.4
+
+common common-settings
+  default-language: GHC2021
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+
+library
+  import:          common-settings
+  hs-source-dirs:  haskell/src
+  exposed-modules:
+    Tungsten.Expression
+    Tungsten.Json
+  build-depends:
+    base       >= 4.21 && < 4.22,
+    bytestring >= 0.12 && < 0.13,
+    containers >= 0.7  && < 0.8,
+    parsec     >= 3.1  && < 3.2,
+    text       >= 2.1  && < 2.2
+
+executable tungsten-hs
+  import:          common-settings
+  hs-source-dirs:  haskell/app
+  main-is:         Main.hs
+  build-depends:
+    base            >= 4.21 && < 4.22,
+    text            >= 2.1  && < 2.2,
+    tungsten-engine
+
+test-suite tungsten-engine-test
+  import:          common-settings
+  type:            exitcode-stdio-1.0
+  hs-source-dirs:  haskell/test
+  main-is:         Main.hs
+  build-depends:
+    base            >= 4.21 && < 4.22,
+    bytestring      >= 0.12 && < 0.13,
+    containers      >= 0.7  && < 0.8,
+    text            >= 2.1  && < 2.2,
+    tungsten-engine
