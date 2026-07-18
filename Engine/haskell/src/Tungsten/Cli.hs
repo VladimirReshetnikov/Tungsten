@@ -6,6 +6,7 @@ module Tungsten.Cli
   ( CliCommand (..)
   , ExpressionCommand (..)
   , NotebookCommand (..)
+  , InlineBoxCommand (..)
   , FrontEndCommand (..)
   , SourceSpec (..)
   , parseCliArguments
@@ -20,6 +21,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TextIO
+import System.Directory (makeAbsolute)
 import Text.Read (readMaybe)
 import System.IO
   ( BufferMode (LineBuffering)
@@ -35,12 +37,14 @@ import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
 import Tungsten.Discovery
 import Tungsten.Expression
 import Tungsten.Frontend
+import Tungsten.InlineBoxes
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Licensing
 import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.Repl (runRepl)
+import Tungsten.WolframString (WolframStringSegment (..))
 
 data CliCommand
   = ProtocolCommand
@@ -50,6 +54,7 @@ data CliCommand
   | FrontEndCommand !FrontEndCommand
   | ExpressionCliCommand !ExpressionCommand !SourceSpec !Text
   | NotebookCliCommand !NotebookCommand
+  | InlineBoxCliCommand !InlineBoxCommand
   | HelpCommand
   deriving (Eq, Show)
 
@@ -63,6 +68,18 @@ data NotebookCommand
   = InspectNotebookCommand !FilePath
   | CreateNotebookCommand !FilePath !(Maybe Text) ![(Text, Text)]
   | PatchNotebookCommand !FilePath !FilePath !(Maybe FilePath)
+  deriving (Eq, Show)
+
+data InlineBoxCommand
+  = ComposeInlineBoxCommand ![Text] !Text !Text
+  | InlineBoxFromCellCommand
+      !FilePath
+      !CellSelector
+      !Text
+      !Text
+      !Int
+      !Bool
+      !Bool
   deriving (Eq, Show)
 
 data FrontEndCommand
@@ -97,7 +114,101 @@ parseCliArguments = \case
   "notebook" : "inspect" : arguments' -> parseNotebookInspectArguments arguments'
   "notebook" : "create" : arguments' -> parseNotebookCreateArguments arguments'
   "notebook" : "patch" : arguments' -> parseNotebookPatchArguments arguments'
+  "inline-box" : "compose" : arguments' -> parseInlineBoxComposeArguments arguments'
+  "inline-box" : "from-cell" : arguments' -> parseInlineBoxFromCellArguments arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
+
+parseInlineBoxComposeArguments :: [String] -> Either Text CliCommand
+parseInlineBoxComposeArguments = go "" [] ""
+ where
+  go prefix boxes suffix [] =
+    Right (InlineBoxCliCommand (ComposeInlineBoxCommand (reverse boxes) prefix suffix))
+  go _ boxes suffix ("--prefix" : value : rest) = go (T.pack value) boxes suffix rest
+  go prefix boxes suffix ("--box-expr" : value : rest) =
+    go prefix (T.pack value : boxes) suffix rest
+  go prefix boxes _ ("--suffix" : value : rest) = go prefix boxes (T.pack value) rest
+  go _ _ _ [flag]
+    | flag `elem` ["--prefix", "--box-expr", "--suffix"] = Left (T.pack flag <> " requires a value")
+  go _ _ _ (flag : _) = Left ("unknown inline-box compose option: " <> T.pack flag)
+
+parseInlineBoxFromCellArguments :: [String] -> Either Text CliCommand
+parseInlineBoxFromCellArguments = go Nothing Nothing "" "" 0 False False
+ where
+  go file selector prefix suffix objectIndex allObjects requireSuccess [] =
+    case (file, selector) of
+      (Just path, Just cellSelector) ->
+        Right
+          ( InlineBoxCliCommand
+              ( InlineBoxFromCellCommand
+                  path cellSelector prefix suffix objectIndex allObjects requireSuccess
+              )
+          )
+      (Nothing, _) -> Left "inline-box from-cell requires --file PATH"
+      (_, Nothing) -> Left "inline-box from-cell requires exactly one cell selector"
+  go Nothing selector prefix suffix objectIndex allObjects requireSuccess ("--file" : value : rest) =
+    go (Just value) selector prefix suffix objectIndex allObjects requireSuccess rest
+  go (Just _) _ _ _ _ _ _ ("--file" : _ : _) = Left "inline-box from-cell accepts --file only once"
+  go file selector prefix suffix objectIndex allObjects requireSuccess ("--cell-index" : value : rest) = do
+    index <- parseIntegerOption "--cell-index" value
+    nextSelector <- addCellSelector selector (SelectCellIndex index)
+    go file (Just nextSelector) prefix suffix objectIndex allObjects requireSuccess rest
+  go file selector prefix suffix objectIndex allObjects requireSuccess ("--cell-path" : value : rest) = do
+    path <- parseCellPath (T.pack value)
+    nextSelector <- addCellSelector selector (SelectCellPath path)
+    go file (Just nextSelector) prefix suffix objectIndex allObjects requireSuccess rest
+  go file selector prefix suffix objectIndex allObjects requireSuccess ("--expression-uuid" : value : rest) = do
+    nextSelector <- addCellSelector selector (SelectExpressionUuid (T.pack value))
+    go file (Just nextSelector) prefix suffix objectIndex allObjects requireSuccess rest
+  go file selector prefix suffix objectIndex allObjects requireSuccess ("--cell-id" : value : rest) = do
+    identifier <- parseIntegerOption "--cell-id" value
+    nextSelector <- addCellSelector selector (SelectCellId identifier)
+    go file (Just nextSelector) prefix suffix objectIndex allObjects requireSuccess rest
+  go file selector prefix suffix objectIndex allObjects requireSuccess ("--cell-tag" : value : rest) = do
+    nextSelector <- addCellSelector selector (SelectCellTag (T.pack value))
+    go file (Just nextSelector) prefix suffix objectIndex allObjects requireSuccess rest
+  go file selector _ suffix objectIndex allObjects requireSuccess ("--prefix" : value : rest) =
+    go file selector (T.pack value) suffix objectIndex allObjects requireSuccess rest
+  go file selector prefix _ objectIndex allObjects requireSuccess ("--suffix" : value : rest) =
+    go file selector prefix (T.pack value) objectIndex allObjects requireSuccess rest
+  go file selector prefix suffix _ allObjects requireSuccess ("--object-index" : value : rest) = do
+    index <- parseIntegerOption "--object-index" value
+    go file selector prefix suffix index allObjects requireSuccess rest
+  go file selector prefix suffix objectIndex _ requireSuccess ("--all-objects" : rest) =
+    go file selector prefix suffix objectIndex True requireSuccess rest
+  go file selector prefix suffix objectIndex allObjects _ ("--require-success" : rest) =
+    go file selector prefix suffix objectIndex allObjects True rest
+  go _ _ _ _ _ _ _ [flag]
+    | flag
+        `elem` [ "--file", "--cell-index", "--cell-path", "--expression-uuid"
+               , "--cell-id", "--cell-tag", "--prefix", "--suffix", "--object-index"
+               ] = Left (T.pack flag <> " requires a value")
+  go _ _ _ _ _ _ _ (flag : _) = Left ("unknown inline-box from-cell option: " <> T.pack flag)
+
+  addCellSelector Nothing value = Right value
+  addCellSelector (Just _) _ = Left "inline-box from-cell accepts exactly one cell selector"
+
+parseIntegerOption :: Read value => Text -> String -> Either Text value
+parseIntegerOption name value =
+  maybe (Left (name <> " requires an integer")) Right (readMaybe value)
+
+parseCellPath :: Text -> Either Text [Int]
+parseCellPath source
+  | "[" `T.isPrefixOf` stripped && "]" `T.isSuffixOf` stripped = do
+      payload <- first jsonErrorMessage (parseJson stripped)
+      case payload of
+        JsonArray values -> traverse pathComponent values >>= requireNonempty
+        _ -> Left "JSON cell paths must be arrays of integers"
+  | otherwise =
+      traverse parseComponent parts >>= requireNonempty
+ where
+  stripped = T.strip source
+  parts = filter (not . T.null) (map T.strip (T.splitOn "," stripped))
+  parseComponent value =
+    maybe (Left ("invalid cell path component: " <> value)) Right (readMaybe (T.unpack value))
+  pathComponent (JsonNumber value) = parseComponent value
+  pathComponent _ = Left "JSON cell paths must be arrays of integers"
+  requireNonempty [] = Left "cell paths must contain at least one integer"
+  requireNonempty values = Right values
 
 parseNotebookInspectArguments :: [String] -> Either Text CliCommand
 parseNotebookInspectArguments ["--file", path] =
@@ -258,6 +369,7 @@ runCli arguments' = case parseCliArguments arguments' of
   Right (ExpressionCliCommand command sourceSpec form) ->
     runExpressionCommand command sourceSpec form
   Right (NotebookCliCommand command) -> runNotebookCommand command
+  Right (InlineBoxCliCommand command) -> runInlineBoxCommand command
 
 configureHandles :: IO ()
 configureHandles = do
@@ -345,6 +457,135 @@ runNotebookCommand = \case
                 case (writeResult :: Either IOException ()) of
                   Left exception -> emitNotebookError "patch" "OutputError" (T.pack (show exception))
                   Right () -> emitJson (notebookPayload patched) *> pure 0
+
+runInlineBoxCommand :: InlineBoxCommand -> IO Int
+runInlineBoxCommand = \case
+  ComposeInlineBoxCommand boxExpressions prefix suffix -> do
+    emitJson (inlineBoxCompositionPayload (composeInlineBoxPayload boxExpressions prefix suffix))
+    pure 0
+  InlineBoxFromCellCommand path selector prefix suffix objectIndex allObjects requireSuccess -> do
+    sourceResult <- readSource (FileSource path)
+    case sourceResult of
+      Left message -> emitInlineBoxInputError "InputError" message
+      Right source -> case parseNotebook source of
+        Left notebookError ->
+          emitInlineBoxInputError "NotebookError" (notebookErrorMessage notebookError)
+        Right document -> do
+          absolutePath <- makeAbsolute path
+          case extractInlineBoxesFromNotebookCell
+            document selector prefix suffix objectIndex allObjects of
+              Left inlineError -> do
+                emitJson (inlineBoxErrorPayload inlineError)
+                pure (if requireSuccess then 1 else 0)
+              Right selection -> do
+                emitJson (inlineBoxSelectionPayload absolutePath selection)
+                pure 0
+
+emitInlineBoxInputError :: Text -> Text -> IO Int
+emitInlineBoxInputError errorType message = do
+  emitJson
+    ( JsonObject
+        ( Map.fromList
+            [ ("error", JsonString message)
+            , ("error_type", JsonString errorType)
+            , ("success", JsonBool False)
+            ]
+        )
+    )
+  pure 1
+
+inlineBoxCompositionPayload :: InlineBoxComposition -> JsonValue
+inlineBoxCompositionPayload composition =
+  JsonObject
+    ( Map.fromList
+        [ ("box_count", jsonInteger (fromIntegral (length boxes)))
+        , ("boxes", JsonArray (map inlineBoxRecordPayload boxes))
+        , ("prefix", JsonString (inlineBoxCompositionPrefix composition))
+        , ("string_literal", JsonString (inlineBoxCompositionStringLiteral composition))
+        , ("string_segments", JsonArray (map wolframStringSegmentPayload (inlineBoxCompositionSegments composition)))
+        , ("string_value", JsonString (inlineBoxCompositionStringValue composition))
+        , ("success", JsonBool True)
+        , ("suffix", JsonString (inlineBoxCompositionSuffix composition))
+        ]
+    )
+ where
+  boxes = inlineBoxCompositionBoxes composition
+
+inlineBoxSelectionPayload :: FilePath -> InlineBoxSelection -> JsonValue
+inlineBoxSelectionPayload notebookPath selection =
+  JsonObject
+    ( Map.fromList
+        [ ("available_box_count", jsonInteger (fromIntegral (length availableBoxes)))
+        , ("available_boxes", JsonArray (map inlineBoxRecordPayload availableBoxes))
+        , ("notebook_path", JsonString (T.pack notebookPath))
+        , ("object_index", maybe JsonNull (jsonInteger . fromIntegral) (inlineBoxSelectionObjectIndex selection))
+        , ("prefix", JsonString (inlineBoxCompositionPrefix composition))
+        , ("selected_box_count", jsonInteger (fromIntegral (length selectedBoxes)))
+        , ("selected_boxes", JsonArray (map inlineBoxRecordPayload selectedBoxes))
+        , ("selection_mode", JsonString (inlineBoxSelectionMode selection))
+        , ("source_cell", cellRecordPayload (inlineBoxSelectionSourceCell selection))
+        , ("string_literal", JsonString (inlineBoxCompositionStringLiteral composition))
+        , ("string_segments", JsonArray (map wolframStringSegmentPayload (inlineBoxCompositionSegments composition)))
+        , ("string_value", JsonString (inlineBoxCompositionStringValue composition))
+        , ("success", JsonBool True)
+        , ("suffix", JsonString (inlineBoxCompositionSuffix composition))
+        ]
+    )
+ where
+  availableBoxes = inlineBoxSelectionAvailableBoxes selection
+  selectedBoxes = inlineBoxSelectionSelectedBoxes selection
+  composition = inlineBoxSelectionComposition selection
+
+inlineBoxErrorPayload :: InlineBoxError -> JsonValue
+inlineBoxErrorPayload inlineError =
+  JsonObject
+    ( addAvailableCount
+        ( addSourceCell
+            ( Map.fromList
+                [ ("error", JsonString (inlineBoxErrorMessage inlineError))
+                , ("error_type", JsonString (inlineBoxErrorType inlineError))
+                , ("success", JsonBool False)
+                ]
+            )
+        )
+    )
+ where
+  addSourceCell = case inlineBoxErrorSourceCell inlineError of
+    Nothing -> id
+    Just record -> Map.insert "source_cell" (cellRecordPayload record)
+  addAvailableCount = case inlineBoxErrorAvailableBoxCount inlineError of
+    Nothing -> id
+    Just count -> Map.insert "available_box_count" (jsonInteger (fromIntegral count))
+
+inlineBoxRecordPayload :: InlineBoxRecord -> JsonValue
+inlineBoxRecordPayload record =
+  JsonObject
+    ( Map.fromList
+        [ ("box_expression", JsonString (inlineBoxRecordExpression record))
+        , ("head", maybe JsonNull JsonString (inlineBoxRecordHead record))
+        , ("index", jsonInteger (fromIntegral (inlineBoxRecordIndex record)))
+        , ("inline_box_escape", JsonString (inlineBoxRecordEscape record))
+        , ("string_literal", JsonString (inlineBoxRecordStringLiteral record))
+        ]
+    )
+
+wolframStringSegmentPayload :: WolframStringSegment -> JsonValue
+wolframStringSegmentPayload = \case
+  StringTextSegment value ->
+    JsonObject
+      ( Map.fromList
+          [ ("kind", JsonString "text")
+          , ("text", JsonString value)
+          ]
+      )
+  StringInlineBoxSegment boxExpression source ->
+    JsonObject
+      ( Map.fromList
+          [ ("box_expression", JsonString boxExpression)
+          , ("inline_box_escape", JsonString source)
+          , ("kind", JsonString "inline_box")
+          ]
+      )
 
 decodeNotebookPatches :: JsonValue -> Either Text [NotebookPatch]
 decodeNotebookPatches (JsonObject specification) = case Map.lookup "operations" specification of
@@ -715,6 +956,9 @@ usage =
     , "  tungsten-hs notebook inspect --file PATH"
     , "  tungsten-hs notebook create --file PATH [--title TEXT] [--cell STYLE:TEXT ...]"
     , "  tungsten-hs notebook patch --file PATH --spec PATH [--out PATH]"
+    , "  tungsten-hs inline-box compose [--prefix TEXT] [--box-expr EXPR ...] [--suffix TEXT]"
+    , "  tungsten-hs inline-box from-cell --file PATH SELECTOR [--prefix TEXT] [--suffix TEXT] [--object-index N | --all-objects] [--require-success]"
+    , "    SELECTOR: --cell-index N | --cell-path PATH | --expression-uuid UUID | --cell-id N | --cell-tag TAG"
     , ""
     , "With no arguments, tungsten-hs serves the JSON-lines protocol for backward compatibility."
     ]

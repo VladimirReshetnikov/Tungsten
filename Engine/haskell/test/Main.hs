@@ -18,6 +18,7 @@ import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
 import Tungsten.Frontend
+import Tungsten.InlineBoxes
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Licensing
@@ -38,6 +39,7 @@ tests :: [IO Bool]
 tests =
   [ checkFullForms
   , checkWolframStrings
+  , checkInlineBoxes
   , checkFullFormParser
   , checkFullFormParserErrors
   , checkInputFormParser
@@ -117,6 +119,80 @@ checkWolframStrings = do
             _ -> assertEqual "string JSON object shape" True False
         ]
   and <$> sequence checks
+
+checkInlineBoxes :: IO Bool
+checkInlineBoxes = do
+  let source =
+        "Notebook[{"
+          <> "Cell[BoxData[GraphicsBox[{CircleBox[]}]], \"Output\", ExpressionUUID->\"uuid-graphic\"],"
+          <> "Cell[\"prefix \\!\\(\\*StyleBox[\\\"Hello\\\", FontWeight->Bold]\\) suffix\", \"Text\", CellID->2001]"
+          <> "}]"
+      document = expectRight (parseNotebook source)
+      extracted =
+        map
+          (extractBoxExpressions . cellContent . cellRecordCell)
+          (flattenCells document)
+      composition = composeInlineBoxPayload ["GraphicsBox[{CircleBox[]}]"] "icon: " "."
+      byUuid =
+        extractInlineBoxesFromNotebookCell
+          document
+          (SelectExpressionUuid "uuid-graphic")
+          "icon: "
+          ""
+          0
+          False
+      byCellId =
+        extractInlineBoxesFromNotebookCell
+          document
+          (SelectCellId 2001)
+          "rendered: "
+          ""
+          0
+          True
+      checks =
+        [ assertEqual
+            "extract BoxData and string inline boxes"
+            [ ["GraphicsBox[List[CircleBox[]]]"]
+            , ["StyleBox[\"Hello\", FontWeight->Bold]"]
+            ]
+            extracted
+        , assertEqual "inline-box composition count" 1 (length (inlineBoxCompositionBoxes composition))
+        , assertEqual
+            "inline-box composition value"
+            "icon: \\!\\(\\*GraphicsBox[{CircleBox[]}]\\)."
+            (inlineBoxCompositionStringValue composition)
+        , assertEqual
+            "inline-box composition head"
+            (Just "GraphicsBox")
+            (inlineBoxRecordHead =<< firstBox (inlineBoxCompositionBoxes composition))
+        , assertEqual
+            "select notebook box by ExpressionUUID"
+            (Right ["GraphicsBox[List[CircleBox[]]]"])
+            (map inlineBoxRecordExpression . inlineBoxSelectionSelectedBoxes <$> byUuid)
+        , assertEqual
+            "select all notebook boxes by CellID"
+            (Right ["StyleBox[\"Hello\", FontWeight->Bold]"])
+            (map inlineBoxRecordExpression . inlineBoxSelectionSelectedBoxes <$> byCellId)
+        , assertEqual
+            "reject an out-of-range inline-box object"
+            (Left "InlineBoxObjectIndexOutOfRange" :: Either Text ())
+            ( inlineErrorType
+                ( extractInlineBoxesFromNotebookCell
+                  document
+                  (SelectCellIndex 0)
+                  ""
+                  ""
+                  4
+                  False
+                )
+            )
+        ]
+  and <$> sequence checks
+ where
+  firstBox (box : _) = Just box
+  firstBox [] = Nothing
+  inlineErrorType (Left inlineError) = Left (inlineBoxErrorType inlineError)
+  inlineErrorType (Right _) = Right ()
 
 checkFullFormParser :: IO Bool
 checkFullFormParser = do
@@ -276,6 +352,47 @@ checkCliArguments = do
         , assertLeft
             "CLI notebook patch requires spec"
             (parseCliArguments ["notebook", "patch", "--file", "demo.nb"])
+        , assertEqual
+            "CLI inline-box composition"
+            ( Right
+                ( InlineBoxCliCommand
+                    (ComposeInlineBoxCommand ["GraphicsBox[{}]"] "icon: " ".")
+                )
+            )
+            ( parseCliArguments
+                [ "inline-box", "compose", "--prefix", "icon: "
+                , "--box-expr", "GraphicsBox[{}]", "--suffix", "."
+                ]
+            )
+        , assertEqual
+            "CLI inline-box notebook extraction"
+            ( Right
+                ( InlineBoxCliCommand
+                    ( InlineBoxFromCellCommand
+                        "demo.nb" (SelectCellPath [1, 0]) "rendered: " "" 2 True True
+                    )
+                )
+            )
+            ( parseCliArguments
+                [ "inline-box", "from-cell", "--file", "demo.nb"
+                , "--cell-path", "[1, 0]", "--prefix", "rendered: "
+                , "--object-index", "2", "--all-objects", "--require-success"
+                ]
+            )
+        , assertLeft
+            "CLI inline-box extraction requires one selector"
+            ( parseCliArguments
+                [ "inline-box", "from-cell", "--file", "demo.nb"
+                , "--cell-index", "0", "--cell-tag", "tag"
+                ]
+            )
+        , assertLeft
+            "CLI rejects malformed inline-box cell paths"
+            ( parseCliArguments
+                [ "inline-box", "from-cell", "--file", "demo.nb"
+                , "--cell-path", "[1, \"bad\"]"
+                ]
+            )
         ]
   and <$> sequence checks
 
