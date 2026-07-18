@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T16:23:46Z
-- Repository HEAD: a320caacf553778945391747c7b4ea23ab038f68
+- Updated (UTC): 2026-07-18T16:27:10Z
+- Repository HEAD: de0a5f18cbc4a178808485e9698e3cc8e66430b6
 
 ## Purpose
 
@@ -79,7 +79,7 @@ Haskell process clients.
 | CLI | Expression, notebook, environment, kernel, FrontEnd, REPL, protocol, and inline-box command families with deterministic JSON and explicit exit behavior |
 | REPL | Persistent definitions, `In`/`InString`/`Out`, `%` output shorthand, `$Line`, Wolfram-style prompts, and `Exit`/`Quit` codes |
 | Discovery | Explicit `TUNGSTEN_WOLFRAM_HOME`, product-family selection, installed-version ranking, PATH fallback, executable/docs/license candidates, cache paths, and `env show` JSON |
-| Kernel runner | Temporary source/wrapper/result isolation, stable temporary mathpass deduplication, held parsing, `EvaluationData` metadata, evaluated `Print` capture, optional `UsingFrontEnd`, process output, JSON decoding, and `kernel eval` exit behavior |
+| Kernel runner | Temporary source/wrapper/result isolation, stable temporary mathpass deduplication, held parsing, `EvaluationData` metadata, evaluated `Print` capture, optional `UsingFrontEnd`, cross-process launch gating, stale batch cleanup, cached license-seat waiting, process snapshots, process output, JSON decoding, and `kernel eval` exit behavior |
 | Wolfram processes | Windows process discovery/classification, helper-process exclusion, portable cached license limits, stale Tungsten batch cleanup, bounded license-seat polling, cross-process launch gating, and structured snapshots |
 | FrontEnd | Hidden probing, wrapped/unwrapped code, notebook open, direct documentation locate, token execution, safely escaped code builders, and the `frontend` CLI family |
 | Notebooks | Structural `Notebook`/`Cell`/`CellGroupData` parsing, nested group traversal, cell metadata and previews, deterministic creation/rendering, typed immutable patches, and `notebook inspect`/`notebook create`/`notebook patch` CLI commands |
@@ -97,7 +97,6 @@ features yet:
 - downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and byte-for-byte preservation of original box-expression formatting;
-- kernel-runner wiring of the new launch gate, stale-process cleanup, and license-seat wait state;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
 Do not redirect an existing Python, PowerShell, or .NET production caller to `tungsten-hs` unless
@@ -111,7 +110,7 @@ The next useful port slices are:
 1. grow parser and evaluator parity from the Python corpus and the local Wolfram held-parser oracle;
 2. port source-preserving notebook spans and broader box-language interpretation;
 3. port definitions, attributes, pattern matching, scoping, and iteration on the immutable session;
-4. complete kernel licensing/concurrency behavior and broad Python CLI payload parity;
+4. complete broad Python CLI payload parity;
 5. move the PowerShell and .NET projections only after their JSON contract tests pass against the
    Haskell executable.
 

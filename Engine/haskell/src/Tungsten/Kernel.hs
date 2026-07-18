@@ -9,7 +9,9 @@ module Tungsten.Kernel
   , kernelEvaluationPayload
   ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, bracket, try)
+import Control.Monad (when)
 import Data.Bifunctor (first)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -32,6 +34,7 @@ import Tungsten.Discovery
 import Tungsten.Expression (Expr (String), fullForm)
 import Tungsten.Json
 import Tungsten.Licensing
+import Tungsten.WolframProcesses
 
 data KernelEvaluationResult = KernelEvaluationResult
   { kernelCommand :: ![Text]
@@ -54,6 +57,12 @@ data KernelEvaluationResult = KernelEvaluationResult
   , kernelLicenseProcesses :: !(Maybe Int)
   , kernelMaxLicenseProcesses :: !(Maybe Int)
   , kernelElapsedSeconds :: !Double
+  , kernelLaunchGateWaitSeconds :: !Double
+  , kernelLicenseWaitSeconds :: !Double
+  , kernelLicenseWaitSatisfied :: !(Maybe Bool)
+  , kernelCachedMaxLicenseProcesses :: !(Maybe Int)
+  , kernelCleanedTungstenProcesses :: ![Int]
+  , kernelObservedWolframProcesses :: ![JsonValue]
   }
   deriving (Eq, Show)
 
@@ -75,12 +84,13 @@ evaluateKernelFile
   -> IO KernelEvaluationResult
 evaluateKernelFile installation codePath requestedWorkingDirectory requireFrontEnd = do
   inspection <- inspectMathpass (installationMathpass installation)
+  cachedMaximum <- readCachedMaxLicenseProcesses
   case installationKernelCli installation of
-    Nothing -> pure (kernelUnavailable inspection)
+    Nothing -> pure (kernelUnavailable inspection cachedMaximum)
     Just kernelPath -> do
       kernelExists <- doesFileExist kernelPath
       if not kernelExists
-        then pure (kernelUnavailable inspection)
+        then pure (kernelUnavailable inspection cachedMaximum)
         else do
           workingDirectory <- maybe getCurrentDirectory makeAbsolute requestedWorkingDirectory
           absoluteCodePath <- makeAbsolute codePath
@@ -109,6 +119,58 @@ runKernel
   -> MathpassInspection
   -> IO KernelEvaluationResult
 runKernel kernelPath wrapperPath resultPath workingDirectory mathpassPath usedMathpass inspection = do
+  cachedMaximum <- readCachedMaxLicenseProcesses
+  gated <-
+    withWolframLaunchGate 900 0.2 $ \gateWait -> do
+      cleaned <- cleanupStaleTungstenProcesses 30
+      when (not (null cleaned)) (threadDelay 500000)
+      (_, licenseWait, licenseSatisfied) <-
+        waitForWolframLicenseSlot cachedMaximum 15 0.5
+      base <-
+        runKernelProcess
+          kernelPath wrapperPath resultPath workingDirectory mathpassPath usedMathpass inspection
+      case kernelMaxLicenseProcesses base of
+        Just maximumProcesses | maximumProcesses > 0 ->
+          writeCachedMaxLicenseProcesses maximumProcesses
+        _ -> pure ()
+      snapshot <- snapshotWolframProcesses
+      now <- getCurrentTime
+      pure
+        base
+          { kernelLaunchGateWaitSeconds = gateWait
+          , kernelLicenseWaitSeconds = licenseWait
+          , kernelLicenseWaitSatisfied = Just licenseSatisfied
+          , kernelCachedMaxLicenseProcesses = cachedMaximum
+          , kernelCleanedTungstenProcesses = cleaned
+          , kernelObservedWolframProcesses =
+              map (wolframProcessPayload now) (wolframSnapshotProcesses snapshot)
+          }
+  case gated of
+    Right result -> pure result
+    Left message -> do
+      snapshot <- snapshotWolframProcesses
+      now <- getCurrentTime
+      pure
+        ( (emptyKernelResult inspection)
+            { kernelExitCode = 124
+            , kernelFailureType = Just "LaunchGateTimeout"
+            , kernelStderr = message
+            , kernelCachedMaxLicenseProcesses = cachedMaximum
+            , kernelObservedWolframProcesses =
+                map (wolframProcessPayload now) (wolframSnapshotProcesses snapshot)
+            }
+        )
+
+runKernelProcess
+  :: FilePath
+  -> FilePath
+  -> FilePath
+  -> FilePath
+  -> Maybe FilePath
+  -> Bool
+  -> MathpassInspection
+  -> IO KernelEvaluationResult
+runKernelProcess kernelPath wrapperPath resultPath workingDirectory mathpassPath usedMathpass inspection = do
   environment <- getEnvironment
   let arguments =
         ["-noprompt"]
@@ -203,12 +265,13 @@ resultFromPayload command exitCode stdoutText stderrText jsonPath usedMathpass i
     Right _ ->
       resultFromPayload command exitCode stdoutText stderrText jsonPath usedMathpass inspection elapsed (Left "the kernel result payload is not a JSON object")
 
-kernelUnavailable :: MathpassInspection -> KernelEvaluationResult
-kernelUnavailable inspection =
+kernelUnavailable :: MathpassInspection -> Maybe Int -> KernelEvaluationResult
+kernelUnavailable inspection cachedMaximum =
   (emptyKernelResult inspection)
     { kernelExitCode = 127
     , kernelFailureType = Just "KernelNotFound"
     , kernelStderr = "No local Wolfram kernel installation was discovered."
+    , kernelCachedMaxLicenseProcesses = cachedMaximum
     }
 
 emptyKernelResult :: MathpassInspection -> KernelEvaluationResult
@@ -234,6 +297,12 @@ emptyKernelResult inspection =
     , kernelLicenseProcesses = Nothing
     , kernelMaxLicenseProcesses = Nothing
     , kernelElapsedSeconds = 0
+    , kernelLaunchGateWaitSeconds = 0
+    , kernelLicenseWaitSeconds = 0
+    , kernelLicenseWaitSatisfied = Nothing
+    , kernelCachedMaxLicenseProcesses = Nothing
+    , kernelCleanedTungstenProcesses = []
+    , kernelObservedWolframProcesses = []
     }
 
 buildWrapperScript :: FilePath -> FilePath -> FilePath -> Bool -> Text
@@ -263,23 +332,27 @@ kernelEvaluationPayload result =
   JsonObject
     ( Map.fromList
         [ ("absolute_timing", maybe JsonNull jsonDouble (kernelAbsoluteTiming result))
-        , ("cached_max_license_processes", JsonNull)
-        , ("cleaned_tungsten_processes", JsonArray [])
+        , ( "cached_max_license_processes"
+          , maybe JsonNull (jsonInteger . fromIntegral) (kernelCachedMaxLicenseProcesses result)
+          )
+        , ( "cleaned_tungsten_processes"
+          , JsonArray (map (jsonInteger . fromIntegral) (kernelCleanedTungstenProcesses result))
+          )
         , ("command", JsonArray (map JsonString (kernelCommand result)))
         , ("elapsed_seconds", jsonDouble (kernelElapsedSeconds result))
         , ("evaluation_available", JsonBool (kernelEvaluationAvailable result))
         , ("exit_code", jsonInteger (fromIntegral (kernelExitCode result)))
         , ("failure_type", maybe JsonNull JsonString (kernelFailureType result))
         , ("json_path", maybe JsonNull (JsonString . T.pack) (kernelJsonPath result))
-        , ("launch_gate_wait_seconds", JsonNumber "0")
+        , ("launch_gate_wait_seconds", jsonDouble (kernelLaunchGateWaitSeconds result))
         , ("license_processes", maybe JsonNull (jsonInteger . fromIntegral) (kernelLicenseProcesses result))
-        , ("license_wait_satisfied", JsonNull)
-        , ("license_wait_seconds", JsonNumber "0")
+        , ("license_wait_satisfied", maybe JsonNull JsonBool (kernelLicenseWaitSatisfied result))
+        , ("license_wait_seconds", jsonDouble (kernelLicenseWaitSeconds result))
         , ("mathpass", mathpassPayload (kernelMathpass result))
         , ("max_license_processes", maybe JsonNull (jsonInteger . fromIntegral) (kernelMaxLicenseProcesses result))
         , ("messages", JsonArray (map JsonString (kernelMessages result)))
         , ("messages_text", JsonArray (map JsonString (kernelMessagesText result)))
-        , ("observed_wolfram_processes", JsonArray [])
+        , ("observed_wolfram_processes", JsonArray (kernelObservedWolframProcesses result))
         , ("output", JsonArray (map JsonString (kernelOutput result)))
         , ("result", maybe JsonNull JsonString (kernelResult result))
         , ("result_head", maybe JsonNull JsonString (kernelResultHead result))

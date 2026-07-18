@@ -110,6 +110,9 @@ checkWolframProcesses = withTemporaryDirectory "tungsten-processes" $ \temporary
   (finalSnapshot, _, satisfied) <-
     waitForWolframLicenseSlotWith nextSnapshot (Just 2) 1 0
   gateResult <- withWolframLaunchGate 1 0 (\waited -> pure (waited >= 0))
+  timeoutResult <-
+    withWolframLaunchGate 1 0 $ \_ ->
+      withWolframLaunchGate 0 0 (\_ -> pure True)
   checks <- sequence
     [ assertEqual "Wolfram process cache initially absent" Nothing before
     , assertEqual "Wolfram process cache round trip" (Just 2) after
@@ -119,6 +122,10 @@ checkWolframProcesses = withTemporaryDirectory "tungsten-processes" $ \temporary
     , assertEqual "Wolfram license wait becomes satisfied" True satisfied
     , assertEqual "Wolfram license wait returns free snapshot" free finalSnapshot
     , assertEqual "Wolfram launch gate acquisition" (Right True) gateResult
+    , assertEqual
+        "Wolfram launch gate timeout"
+        (Right (Left "Timed out waiting for the Tungsten Wolfram launch gate."))
+        timeoutResult
     ]
   pure (and checks)
 
@@ -1092,7 +1099,11 @@ checkKernelRunner = do
       fifth <- assertEqual "fake kernel stdout" "fake stdout" (kernelStdout result)
       sixth <- assertEqual "fake kernel stderr" "fake stderr" (kernelStderr result)
       seventh <- assertEqual "fake kernel payload availability" True (kernelEvaluationAvailable result)
-      pure (and [first, second, third, fourth, fifth, sixth, seventh])
+      eighth <- assertEqual "fake kernel license wait" (Just True) (kernelLicenseWaitSatisfied result)
+      ninth <- assertEqual "fake kernel cleaned-process payload" [] (kernelCleanedTungstenProcesses result)
+      tenth <- assertEqual "fake kernel observed-process payload" [] (kernelObservedWolframProcesses result)
+      eleventh <- assertEqual "fake kernel launch gate measured" True (kernelLaunchGateWaitSeconds result >= 0)
+      pure (and [first, second, third, fourth, fifth, sixth, seventh, eighth, ninth, tenth, eleventh])
   pure (missingCheck && wrapperCheck && processCheck)
 
 withFakeKernel :: (FilePath -> IO value) -> IO value
