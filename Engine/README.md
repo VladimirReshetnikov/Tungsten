@@ -4,10 +4,11 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-04-29T00:49:16Z
-- Repository HEAD: b3d0d7929b6a5927bfde9adb364f07616565d3e3
+- Updated (UTC): 2026-07-18T14:01:03Z
+- Repository HEAD: 531e58b42dce9db7dd9025e1014cedf3f1528d62
 - Related code:
   - `Engine/src/tungsten/`
+  - `Engine/haskell/`
   - `Engine/Nummy/`
   - `Engine/pwsh/`
   - `Engine/dotnet/`
@@ -19,6 +20,7 @@
   - [Usage Reference](./docs/usage-reference.md)
   - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
+  - [Haskell Port](./docs/haskell-port.md)
   - [REPL](./docs/repl.md)
   - [Large-Number Fallback Design](./docs/overflow-underflow-large-number-fallback.md)
   - [Symbol and Context Registry](./docs/symbol-context-registry.md)
@@ -28,8 +30,10 @@
 
 ## Summary
 
-Tungsten is a Python-first automation workspace for a local Wolfram installation, with thin
-PowerShell and .NET projection layers for script and application callers. It exists for the
+Tungsten is an automation workspace for a local Wolfram installation. The Python implementation
+remains the broad compatibility reference, while an active Haskell port provides the new typed
+expression, parser, evaluator, CLI, and JSON protocol foundation. Thin PowerShell and .NET
+projection layers continue to use the Python command surface. Tungsten exists for the
 workflows that are awkward in the traditional Mathematica GUI but natural for agents, scripts, and
 typed host applications:
 
@@ -322,6 +326,18 @@ python -m tungsten expr evaluate --code '{Symbol["TungstenReadme`alpha"], Names[
 python -m tungsten parser-corpus compare --max-files 25 --max-file-mb 2 --tungsten-workers 8
 ```
 
+### Haskell CLI
+
+```bash
+cd Engine
+cabal test all --ghc-options=-Werror
+cabal run tungsten-hs -- expr parse --code '1 + 2 x^3'
+cabal run tungsten-hs -- expr evaluate --code 'Total[Range[10]]'
+```
+
+The Haskell port currently covers the kernel-free expression foundation. See
+[Haskell Port](./docs/haskell-port.md) for its exact compatibility boundary and migration order.
+
 ### PowerShell
 
 ```powershell
@@ -430,6 +446,8 @@ The current documentation should state these boundaries plainly:
 | Path | Purpose |
 |------|---------|
 | `Engine/pyproject.toml` | Python package metadata |
+| `Engine/tungsten-engine.cabal` | Haskell package, executable, and test-suite metadata |
+| `Engine/haskell/` | Haskell expression model, parsers, evaluator, JSON protocol, CLI, and tests |
 | `Engine/src/tungsten/discovery.py` | Installation, docs-root, and path discovery |
 | `Engine/src/tungsten/licensing.py` | `mathpass` inspection and deduplication helpers |
 | `Engine/src/tungsten/kernel.py` | Structured kernel execution wrapper |
@@ -469,6 +487,15 @@ try {
 finally {
     Pop-Location
 }
+```
+
+Run the Haskell build and tests from the same workspace:
+
+```bash
+cd Engine
+cabal build all
+cabal test all --ghc-options=-Werror
+cabal check
 ```
 
 Run the repository-local smoke:

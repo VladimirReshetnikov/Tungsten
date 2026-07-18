@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-07-03T17:10:00Z
-- Repository HEAD: e16db62ae188dbe7df0a3e0cd417e027122b0ebf
+- Updated (UTC): 2026-07-18T14:01:03Z
+- Repository HEAD: 531e58b42dce9db7dd9025e1014cedf3f1528d62
 
 ## What this docs tree is for
 
@@ -62,26 +62,27 @@ The docs are split so readers can choose the right depth:
 1. [../README.md](../README.md)
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
-4. [expression-parser.md](./expression-parser.md)
-5. [symbol-context-registry.md](./symbol-context-registry.md)
-6. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
-7. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
-8. [import-export-formats.md](./import-export-formats.md)
-9. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
-10. [expression-function-support.md](./expression-function-support.md)
-11. [list-association-complexity.md](./list-association-complexity.md)
-12. [list-association-parity-proposal.md](./list-association-parity-proposal.md)
-13. [reports/2026-07-03-list-association-persistent-backends.md](./reports/2026-07-03-list-association-persistent-backends.md)
+4. [haskell-port.md](./haskell-port.md) when changing or integrating the Haskell implementation
+5. [expression-parser.md](./expression-parser.md)
+6. [symbol-context-registry.md](./symbol-context-registry.md)
+7. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
+8. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
+9. [import-export-formats.md](./import-export-formats.md)
+10. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
+11. [expression-function-support.md](./expression-function-support.md)
+12. [list-association-complexity.md](./list-association-complexity.md)
+13. [list-association-parity-proposal.md](./list-association-parity-proposal.md)
+14. [reports/2026-07-03-list-association-persistent-backends.md](./reports/2026-07-03-list-association-persistent-backends.md)
     if you are choosing the Stage B substrate or need the kernel-verified `Association` semantics
-14. [numeric-simplification.md](./numeric-simplification.md)
-14. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
-15. [pattern-matching-plan.md](./pattern-matching-plan.md)
-16. [parser-corpus.md](./parser-corpus.md)
-17. [inline-box-strings.md](./inline-box-strings.md)
-18. [notebook-assistant.md](./notebook-assistant.md)
-19. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+15. [numeric-simplification.md](./numeric-simplification.md)
+16. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
+17. [pattern-matching-plan.md](./pattern-matching-plan.md)
+18. [parser-corpus.md](./parser-corpus.md)
+19. [inline-box-strings.md](./inline-box-strings.md)
+20. [notebook-assistant.md](./notebook-assistant.md)
+21. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
     if you are planning a GUI notebook FrontEnd or StandardForm renderer
-20. [troubleshooting.md](./troubleshooting.md)
+22. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -93,6 +94,7 @@ The docs are split so readers can choose the right depth:
 | [dotnet-api.md](dotnet-api.md) | Typed C#/.NET client guide with repository setup, API map, examples, and failure-model notes. |
 | [architecture.md](architecture.md) | Current architecture reference: layer ownership, execution model, and subsystem boundaries. |
 | [implementation-details.md](implementation-details.md) | Environment-specific findings and the reasoning behind important implementation choices. |
+| [haskell-port.md](haskell-port.md) | Haskell build/run guide, implemented compatibility surface, current Python boundary, and migration order. |
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and inert evaluator. |

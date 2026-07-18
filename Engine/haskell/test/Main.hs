@@ -8,6 +8,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import System.Exit (exitFailure)
+import Tungsten.Cli
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Json
@@ -29,6 +30,7 @@ tests =
   , checkInputFormParserErrors
   , checkEvaluator
   , checkEvaluatorErrors
+  , checkCliArguments
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -150,6 +152,26 @@ checkEvaluatorErrors = do
   assertLeft "reject out-of-range Part during evaluation" result
  where
   mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
+
+checkCliArguments :: IO Bool
+checkCliArguments = do
+  let checks =
+        [ assertEqual "CLI defaults to protocol" (Right ProtocolCommand) (parseCliArguments [])
+        , assertEqual
+            "CLI inline parse"
+            (Right (ExpressionCliCommand ParseCommand (InlineSource "1+2") "input"))
+            (parseCliArguments ["expr", "parse", "--code", "1+2"])
+        , assertEqual
+            "CLI file evaluation and form"
+            (Right (ExpressionCliCommand EvaluateCommand (FileSource "input.wl") "fullform"))
+            (parseCliArguments ["expr", "evaluate", "--form", "fullform", "--file", "input.wl"])
+        , assertLeft "CLI requires a source" (parseCliArguments ["expr", "parse"])
+        , assertLeft
+            "CLI rejects two sources"
+            (parseCliArguments ["expr", "parse", "--code", "1", "--file", "input.wl"])
+        , assertLeft "CLI rejects unknown commands" (parseCliArguments ["kernel", "eval"])
+        ]
+  and <$> sequence checks
 
 checkFullForms :: IO Bool
 checkFullForms = do
