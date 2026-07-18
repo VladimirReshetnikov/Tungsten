@@ -645,6 +645,8 @@ checkEvaluator = do
         , ("positional permute", "Permute[{a, b, c}, {2, 3, 1}]", "List[c, a, b]")
         , ("cycle permute", "Permute[f[a, b, c], Cycles[{{1, 2, 3}}]]", "f[c, a, b]")
         , ("left and right padding", "{PadLeft[{1, 2, 3}, 5], PadRight[{1, 2}, 5, x]}", "List[List[0, 0, 1, 2, 3], List[1, 2, x, x, x]]")
+        , ("numeric min max list folding", "{Min[{1, 2, 3}], Max[{1, 2, 3}], Min[{1, 4}, {2, 3}], Max[{1, 4}, {2, 3}], Min[{1, x, 2}]}", "List[1, 3, 1, 4, Min[1, x]]")
+        , ("min max identities and inexact ordering", "{Min[], Max[], Min[Infinity, 2], Max[Infinity, x], Min[1.2, 1.10], Max[{1, x, 2}], Min[x, x, 2]}", "List[Infinity, -Infinity, 2, Infinity, 1.10, Max[2, x], Min[2, x]]")
         , ("exact means", "{Mean[{1, 2, 3, 4, 5}], Mean[{1, 2, 3, 4}]}", "List[3, Rational[5, 2]]")
         , ("exact medians", "{Median[{1, 2, 3, 4, 5}], Median[{1, 2, 3, 4}]}", "List[3, Rational[5, 2]]")
         , ("canonical order signs", "{Order[1, 2], Order[2, 1], Order[a, a]}", "List[1, -1, 0]")

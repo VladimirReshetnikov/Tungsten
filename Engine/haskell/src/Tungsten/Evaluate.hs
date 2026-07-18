@@ -188,6 +188,8 @@ reduceBuiltin headName values = case headName of
   "Permute" -> reducePermute values
   "PadLeft" -> reducePad True values
   "PadRight" -> reducePad False values
+  "Min" -> Right (reduceMinMax True headName values)
+  "Max" -> Right (reduceMinMax False headName values)
   "Mean" -> reduceMean values
   "Median" -> reduceMedian values
   "Order" -> Right (reduceOrder values)
@@ -1353,6 +1355,48 @@ reducePad leftMode = \case
     | otherwise = Right (list (values <> replicate (targetLength - length values) fill))
    where
     targetLength = fromIntegral target
+
+reduceMinMax :: Bool -> Text -> [Expr] -> Expr
+reduceMinMax minimumMode headName originalValues =
+  let values = concatMap flattenMinMaxArgument originalValues
+      identity = if minimumMode then Symbol "Infinity" else Symbol "-Infinity"
+      absorbing = if minimumMode then Symbol "-Infinity" else Symbol "Infinity"
+   in if absorbing `elem` values
+        then absorbing
+        else
+          let candidates = filter (/= identity) values
+              numeric = [(value, exactValue) | value <- candidates, Just exactValue <- [explicitRealExact value]]
+              symbolic = [value | value <- candidates, explicitRealExact value == Nothing]
+              best = foldl' chooseBetter Nothing numeric
+              resultValues = uniqueSortedCanonical (maybe symbolic ((: symbolic) . fst) best)
+           in case resultValues of
+                [] -> identity
+                [single] -> single
+                _ -> Call (Symbol headName) resultValues
+ where
+  chooseBetter Nothing candidate = Just candidate
+  chooseBetter current@(Just (_, bestValue)) candidate@(_, candidateValue)
+    | (minimumMode && compareExact candidateValue bestValue == LT)
+        || (not minimumMode && compareExact candidateValue bestValue == GT) = Just candidate
+    | otherwise = current
+
+flattenMinMaxArgument :: Expr -> [Expr]
+flattenMinMaxArgument (Call (Symbol "List") values) = concatMap flattenMinMaxArgument values
+flattenMinMaxArgument value = [value]
+
+explicitRealExact :: Expr -> Maybe Exact
+explicitRealExact value
+  | Just exactValue <- toExact value = Just exactValue
+explicitRealExact (Real source) = do
+  RealInfo exactValue _ _ _ _ <- parseRealInfo source
+  pure exactValue
+explicitRealExact _ = Nothing
+
+uniqueSortedCanonical :: [Expr] -> [Expr]
+uniqueSortedCanonical = deduplicate . sortBy canonicalCompare
+ where
+  deduplicate [] = []
+  deduplicate (value : rest) = value : deduplicate (dropWhile (== value) rest)
 
 reduceMean :: [Expr] -> Either EvaluationError Expr
 reduceMean [dataExpression] = do
