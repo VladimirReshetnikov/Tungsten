@@ -14,6 +14,7 @@ import Tungsten.Evaluate
 import Tungsten.Json
 import Tungsten.Notebook
 import Tungsten.Parser
+import Tungsten.Session
 
 main :: IO ()
 main = do
@@ -36,6 +37,7 @@ tests =
   , checkNotebookErrors
   , checkNotebookPatches
   , checkNotebookPatchJson
+  , checkEvaluationSession
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -222,6 +224,31 @@ checkNotebookPatchJson = do
   second <- assertLeft "reject non-array notebook patch operations" (decodeNotebookPatches (JsonObject (Map.singleton "operations" JsonNull)))
   third <- assertLeft "reject unknown notebook patch operation" (decodeNotebookPatches (expectRight (parseJson "{\"operations\":[{\"op\":\"unknown\"}]}")))
   pure (and [first, second, third])
+
+checkEvaluationSession :: IO Bool
+checkEvaluationSession = do
+  let cases =
+        [ ("immediate assignment", "x = 1 + 2; x^3", "27")
+        , ("right-associated assignment", "a = b = 5; a + b", "10")
+        , ("immediate value captures current result", "a = 1; x = a; a = 2; x", "1")
+        , ("immediate symbolic value reevaluates", "x = y; y = 3; x", "3")
+        , ("delayed value observes later result", "a = 1; x := a + 1; a = 4; x", "5")
+        , ("unset removes a value", "x = 4; Unset[x]; x", "x")
+        , ("clear removes several values", "x = 1; y = 2; Clear[x, y]; x + y", "Plus[x, y]")
+        , ("held assignment remains inert", "Hold[x = 9]; x", "x")
+        , ("If evaluates one stateful branch", "If[False, x = 1, x = 2]; x", "2")
+        , ("And short circuits state", "False && (x = 1); x", "x")
+        , ("Or short circuits state", "True || (x = 1); x", "x")
+        , ("assignment update", "x = 10; AddTo[x, 5]; x", "15")
+        ]
+  and <$> traverse evaluateSessionCase cases
+ where
+  evaluateSessionCase (label, source, expected) = do
+    let result = do
+          expression <- parseInputForm source
+          (value, _) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
+          pure (fullForm value)
+    assertEqual ("evaluation session: " <> label) (Right expected) result
 
 checkNotebookModel :: IO Bool
 checkNotebookModel = do
