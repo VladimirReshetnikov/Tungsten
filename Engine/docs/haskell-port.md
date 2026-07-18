@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T15:53:48Z
-- Repository HEAD: 96e404a1dca4f591a2b2a3f12a2f0a3f4d7fa155
+- Updated (UTC): 2026-07-18T16:04:12Z
+- Repository HEAD: 315a79c26fc75c9488c30d3bdfcc5569f6c7190a
 
 ## Purpose
 
@@ -38,6 +38,7 @@ cabal run tungsten-hs -- inline-box from-cell --file example.nb --cell-index 0 -
 cabal run tungsten-hs -- docs search NotebookGet
 cabal run tungsten-hs -- parser-corpus discover --corpus-root ./corpus --sample 20
 cabal run tungsten-hs -- parser-corpus compare --corpus-root ./corpus --skip-wolfram --no-write --include-results
+cabal run tungsten-hs -- assistant ask --prompt 'Explain FullForm[1 + x]'
 ```
 
 Parse a file or select FullForm explicitly:
@@ -81,6 +82,7 @@ Haskell process clients.
 | Inline boxes | Typed composition records, `BoxData` and box-bearing string extraction, stable deduplication, flat-index/path/UUID/ID/tag selectors, object selection, and `inline-box compose`/`inline-box from-cell` JSON commands |
 | Documentation | Kernel-free notebook text/title extraction, Python-compatible SQLite/FTS5 schema, filename and full-text search, page reads, paclet resolution, and the `docs` CLI family |
 | Parser corpora | Deterministic recursive discovery, extension/include/exclude filtering, byte-budget skips, bounded local workers, held Wolfram kernel batches, outcome classification, summary/JSONL/Markdown reports, failure-policy exits, and the `parser-corpus` CLI family |
+| Notebook Assistant | Free-form hidden Chatbook requests, model/tool settings, structured kernel failures, assistant text extraction, fenced-code classification, and `assistant ask` |
 
 ## Compatibility boundary
 
@@ -91,8 +93,8 @@ features yet:
 - downvalues/subvalues/upvalues, symbol attributes, general pattern matching, scoping, iteration,
   polynomial/SymPy bridges, broad number theory, and inexact numeric semantics;
 - source-span-preserving notebook edits and byte-for-byte preservation of original box-expression formatting;
-- cross-process license launch gates, stale-process cleanup, license-seat waiting, and Notebook Assistant automation;
-- Notebook Assistant automation;
+- cross-process license launch gates, stale-process cleanup, and license-seat waiting;
+- cell-scoped Notebook Assistant requests, inline preparation/capture, and generated-code insertion;
 - the PowerShell and .NET projections, which continue to call the Python JSON CLI.
 
 Do not redirect an existing Python, PowerShell, or .NET production caller to `tungsten-hs` unless
@@ -106,7 +108,7 @@ The next useful port slices are:
 1. grow parser and evaluator parity from the Python corpus and the local Wolfram held-parser oracle;
 2. port source-preserving notebook spans and broader box-language interpretation;
 3. port definitions, attributes, pattern matching, scoping, and iteration on the immutable session;
-4. port Notebook Assistant workflows;
+4. complete cell-scoped Notebook Assistant and inline workflows;
 5. complete kernel licensing/concurrency behavior and broad Python CLI payload parity;
 6. move the PowerShell and .NET projections only after their JSON contract tests pass against the
    Haskell executable.

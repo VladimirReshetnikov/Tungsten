@@ -6,6 +6,7 @@ module Tungsten.Kernel
   , evaluateKernelText
   , evaluateKernelFile
   , buildWrapperScript
+  , kernelEvaluationPayload
   ) where
 
 import Control.Exception (IOException, bracket, try)
@@ -256,6 +257,57 @@ buildWrapperScript codePath resultPath workingDirectory requireFrontEnd =
     , "Export[" <> pathLiteral resultPath <> ", payload, \"RawJSON\"];"
     , "Exit[0];"
     ]
+
+kernelEvaluationPayload :: KernelEvaluationResult -> JsonValue
+kernelEvaluationPayload result =
+  JsonObject
+    ( Map.fromList
+        [ ("absolute_timing", maybe JsonNull jsonDouble (kernelAbsoluteTiming result))
+        , ("cached_max_license_processes", JsonNull)
+        , ("cleaned_tungsten_processes", JsonArray [])
+        , ("command", JsonArray (map JsonString (kernelCommand result)))
+        , ("elapsed_seconds", jsonDouble (kernelElapsedSeconds result))
+        , ("evaluation_available", JsonBool (kernelEvaluationAvailable result))
+        , ("exit_code", jsonInteger (fromIntegral (kernelExitCode result)))
+        , ("failure_type", maybe JsonNull JsonString (kernelFailureType result))
+        , ("json_path", maybe JsonNull (JsonString . T.pack) (kernelJsonPath result))
+        , ("launch_gate_wait_seconds", JsonNumber "0")
+        , ("license_processes", maybe JsonNull (jsonInteger . fromIntegral) (kernelLicenseProcesses result))
+        , ("license_wait_satisfied", JsonNull)
+        , ("license_wait_seconds", JsonNumber "0")
+        , ("mathpass", mathpassPayload (kernelMathpass result))
+        , ("max_license_processes", maybe JsonNull (jsonInteger . fromIntegral) (kernelMaxLicenseProcesses result))
+        , ("messages", JsonArray (map JsonString (kernelMessages result)))
+        , ("messages_text", JsonArray (map JsonString (kernelMessagesText result)))
+        , ("observed_wolfram_processes", JsonArray [])
+        , ("output", JsonArray (map JsonString (kernelOutput result)))
+        , ("result", maybe JsonNull JsonString (kernelResult result))
+        , ("result_head", maybe JsonNull JsonString (kernelResultHead result))
+        , ("stderr", JsonString (kernelStderr result))
+        , ("stdout", JsonString (kernelStdout result))
+        , ("success", maybe JsonNull JsonBool (kernelSuccess result))
+        , ("timing", maybe JsonNull jsonDouble (kernelTiming result))
+        , ("used_mathpass_workaround", JsonBool (kernelUsedMathpassWorkaround result))
+        ]
+    )
+
+mathpassPayload :: MathpassInspection -> JsonValue
+mathpassPayload inspection =
+  JsonObject
+    ( Map.fromList
+        [ ("duplicate_entry_count", jsonInteger (fromIntegral (mathpassDuplicateEntryCount inspection)))
+        , ("header_present", JsonBool (mathpassHeaderPresent inspection))
+        , ("original_line_count", jsonInteger (fromIntegral (mathpassOriginalLineCount inspection)))
+        , ("path", maybe JsonNull (JsonString . T.pack) (mathpassPath inspection))
+        , ("unique_entry_count", jsonInteger (fromIntegral (mathpassUniqueEntryCount inspection)))
+        ]
+    )
+
+jsonInteger :: Integer -> JsonValue
+jsonInteger = JsonNumber . T.pack . show
+
+jsonDouble :: Double -> JsonValue
+jsonDouble = JsonNumber . T.pack . show
 
 withMathpass
   :: Maybe FilePath

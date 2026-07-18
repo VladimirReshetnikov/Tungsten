@@ -25,6 +25,7 @@ import System.Info (os)
 import System.IO (hClose, hSetEncoding, openTempFile, utf8)
 import System.FilePath ((</>))
 import Tungsten.Cli
+import Tungsten.Assistant
 import Tungsten.DocsIndex
 import Tungsten.Expression
 import Tungsten.Evaluate
@@ -52,6 +53,7 @@ main = do
 tests :: [IO Bool]
 tests =
   [ checkFullForms
+  , checkAssistant
   , checkWolframStrings
   , checkNamedCharacters
   , checkInlineBoxes
@@ -81,6 +83,66 @@ tests =
   , checkParserEvaluatorProtocol
   , checkProtocolErrors
   ]
+
+checkAssistant :: IO Bool
+checkAssistant = do
+  let raw =
+        "ChatObject[<|\"Messages\" -> {"
+          <> "<|\"Role\" -> \"System\", \"Content\" -> {<|\"Type\" -> \"Text\", \"Data\" -> \"ignore\"|>}, \"Metadata\" -> <||>|>, "
+          <> "<|\"Role\" -> \"Assistant\", \"Content\" -> {<|\"Type\" -> \"Text\", \"Data\" -> \"Use Plus.\\\\n```wolfram\\\\n2 + 2\\\\n```\"|>}, \"Metadata\" -> <||>|>"
+          <> "}|>]"
+      response = extractAssistantText raw
+      blocks = extractAssistantCodeBlocks response
+      successfulPayload =
+        JsonObject
+          ( Map.fromList
+              [ ("assistant_chat_object_string", JsonString raw)
+              , ("prompt", JsonString "add")
+              , ("success", JsonBool True)
+              ]
+          )
+      finalized = finalizeAssistantAskPayload successfulPayload
+      script =
+        buildAssistantAskScript
+          "What is 2+2?" (Just "Answer Wolfram questions.")
+          (Just "Use a fenced block.") Nothing Nothing Nothing
+  installation <- discoverInstallation
+  unavailable <- askAssistant installation {installationKernelCli = Nothing} "2+2" Nothing Nothing Nothing Nothing Nothing
+  kernelUnavailable <- evaluateKernelText installation {installationKernelCli = Nothing} "2+2" Nothing False
+  let encodedPayload = wlString (encodeJson successfulPayload)
+      parsedPayload =
+        parseAssistantPayload
+          kernelUnavailable
+            { kernelEvaluationAvailable = True
+            , kernelSuccess = Just True
+            , kernelResult = Just encodedPayload
+            }
+      finalizedMap = case finalized of
+        JsonObject values -> values
+        _ -> Map.empty
+      unavailableMap = case assistantPayload unavailable of
+        JsonObject values -> values
+        _ -> Map.empty
+      checks =
+        [ assertEqual "assistant response extraction" "Use Plus.\n```wolfram\n2 + 2\n```" response
+        , assertEqual
+            "assistant fenced code extraction"
+            [AssistantCodeBlock 0 "wolfram" "2 + 2" True]
+            blocks
+        , assertEqual "assistant finalized response" (Just (JsonString response)) (Map.lookup "response_text" finalizedMap)
+        , assertEqual "assistant finalized prompt" (Just (JsonString "add")) (Map.lookup "prompt" finalizedMap)
+        , assertEqual "assistant strips raw chat object" Nothing (Map.lookup "assistant_chat_object_string" finalizedMap)
+        , assertEqual "assistant payload JSON decoding" successfulPayload parsedPayload
+        , assertEqual "assistant unavailable result" False (assistantSuccess unavailable)
+        , assertEqual
+            "assistant unavailable error type"
+            (Just (JsonString "EvaluationUnavailable"))
+            (Map.lookup "error_type" unavailableMap)
+        , assertEqual "assistant ask script loads Chatbook" True ("Needs[\"Wolfram`Chatbook`\" -> None]" `Text.isInfixOf` script)
+        , assertEqual "assistant ask script evaluates chat cell" True ("tungstenChatCellEvaluate[chatCell, assistantNotebook]" `Text.isInfixOf` script)
+        , assertEqual "assistant ask script has no notebook selector" False ("tungstenResolveCell" `Text.isInfixOf` script)
+        ]
+  and <$> sequence checks
 
 checkWolframStrings :: IO Bool
 checkWolframStrings = do
@@ -391,6 +453,21 @@ checkCliArguments = do
             "CLI rejects two sources"
             (parseCliArguments ["expr", "parse", "--code", "1", "--file", "input.wl"])
         , assertLeft "CLI rejects unknown commands" (parseCliArguments ["kernel", "eval"])
+        , assertEqual
+            "CLI bare Assistant request"
+            ( Right
+                ( AssistantCliCommand
+                    ( AskAssistantCommand
+                        "2+2" (Just "Be concise") Nothing Nothing Nothing ["DocumentationSearcher"] True
+                    )
+                )
+            )
+            ( parseCliArguments
+                [ "assistant", "ask", "--prompt", "2+2", "--system-prompt", "Be concise"
+                , "--tool", "DocumentationSearcher", "--require-success"
+                ]
+            )
+        , assertLeft "CLI Assistant request requires prompt" (parseCliArguments ["assistant", "ask"])
         , assertEqual
             "CLI parser-corpus discover"
             ( Right

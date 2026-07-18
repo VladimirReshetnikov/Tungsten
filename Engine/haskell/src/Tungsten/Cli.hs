@@ -4,6 +4,7 @@
 -- | JSON-first command-line entry points for the Haskell engine.
 module Tungsten.Cli
   ( CliCommand (..)
+  , AssistantCommand (..)
   , ExpressionCommand (..)
   , NotebookCommand (..)
   , InlineBoxCommand (..)
@@ -36,6 +37,7 @@ import System.IO
   , utf8
   )
 import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
+import Tungsten.Assistant
 import Tungsten.Discovery
 import Tungsten.DocsIndex
 import Tungsten.Expression
@@ -43,7 +45,6 @@ import Tungsten.Frontend
 import Tungsten.InlineBoxes
 import Tungsten.Json
 import Tungsten.Kernel
-import Tungsten.Licensing
 import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.ParserCorpus
@@ -61,6 +62,7 @@ data CliCommand
   | InlineBoxCliCommand !InlineBoxCommand
   | DocumentationCliCommand !DocumentationCommand
   | ParserCorpusCliCommand !ParserCorpusCommand
+  | AssistantCliCommand !AssistantCommand
   | HelpCommand
   deriving (Eq, Show)
 
@@ -98,6 +100,17 @@ data DocumentationCommand
 data ParserCorpusCommand
   = DiscoverParserCorpusCommand !ParserCorpusOptions !Int
   | CompareParserCorpusCommand !ParserCorpusOptions !Bool !Bool !Bool
+  deriving (Eq, Show)
+
+data AssistantCommand
+  = AskAssistantCommand
+      !Text
+      !(Maybe Text)
+      !(Maybe Text)
+      !(Maybe Text)
+      !(Maybe Text)
+      ![Text]
+      !Bool
   deriving (Eq, Show)
 
 data FrontEndCommand
@@ -139,7 +152,43 @@ parseCliArguments = \case
   "docs" : "open" : identifier : arguments' -> parseDocumentationOpenArguments (T.pack identifier) arguments'
   "parser-corpus" : "discover" : arguments' -> parseParserCorpusDiscoverArguments arguments'
   "parser-corpus" : "compare" : arguments' -> parseParserCorpusCompareArguments arguments'
+  "assistant" : "ask" : arguments' -> parseAssistantAskArguments arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
+
+parseAssistantAskArguments :: [String] -> Either Text CliCommand
+parseAssistantAskArguments = go Nothing Nothing Nothing Nothing Nothing [] False
+ where
+  go (Just prompt) systemPrompt extraInstructions modelService modelName tools requireSuccess [] =
+    Right
+      ( AssistantCliCommand
+          ( AskAssistantCommand
+              prompt systemPrompt extraInstructions modelService modelName tools requireSuccess
+          )
+      )
+  go Nothing _ _ _ _ _ _ [] = Left "assistant ask requires --prompt TEXT"
+  go Nothing systemPrompt extraInstructions modelService modelName tools requireSuccess ("--prompt" : value : rest) =
+    go (Just (T.pack value)) systemPrompt extraInstructions modelService modelName tools requireSuccess rest
+  go (Just _) _ _ _ _ _ _ ("--prompt" : _ : _) = Left "assistant ask accepts --prompt only once"
+  go prompt Nothing extraInstructions modelService modelName tools requireSuccess ("--system-prompt" : value : rest) =
+    go prompt (Just (T.pack value)) extraInstructions modelService modelName tools requireSuccess rest
+  go _ (Just _) _ _ _ _ _ ("--system-prompt" : _ : _) = Left "assistant ask accepts --system-prompt only once"
+  go prompt systemPrompt Nothing modelService modelName tools requireSuccess ("--extra-instructions" : value : rest) =
+    go prompt systemPrompt (Just (T.pack value)) modelService modelName tools requireSuccess rest
+  go _ _ (Just _) _ _ _ _ ("--extra-instructions" : _ : _) = Left "assistant ask accepts --extra-instructions only once"
+  go prompt systemPrompt extraInstructions Nothing modelName tools requireSuccess ("--model-service" : value : rest) =
+    go prompt systemPrompt extraInstructions (Just (T.pack value)) modelName tools requireSuccess rest
+  go _ _ _ (Just _) _ _ _ ("--model-service" : _ : _) = Left "assistant ask accepts --model-service only once"
+  go prompt systemPrompt extraInstructions modelService Nothing tools requireSuccess ("--model-name" : value : rest) =
+    go prompt systemPrompt extraInstructions modelService (Just (T.pack value)) tools requireSuccess rest
+  go _ _ _ _ (Just _) _ _ ("--model-name" : _ : _) = Left "assistant ask accepts --model-name only once"
+  go prompt systemPrompt extraInstructions modelService modelName tools requireSuccess ("--tool" : value : rest) =
+    go prompt systemPrompt extraInstructions modelService modelName (tools <> [T.pack value]) requireSuccess rest
+  go prompt systemPrompt extraInstructions modelService modelName tools _ ("--require-success" : rest) =
+    go prompt systemPrompt extraInstructions modelService modelName tools True rest
+  go _ _ _ _ _ _ _ [flag]
+    | flag `elem` ["--prompt", "--system-prompt", "--extra-instructions", "--model-service", "--model-name", "--tool"] =
+        Left (T.pack flag <> " requires a value")
+  go _ _ _ _ _ _ _ (flag : _) = Left ("unknown assistant ask option: " <> T.pack flag)
 
 parseParserCorpusDiscoverArguments :: [String] -> Either Text CliCommand
 parseParserCorpusDiscoverArguments = go defaultOptions 20
@@ -571,12 +620,24 @@ runCli arguments' = case parseCliArguments arguments' of
   Right (InlineBoxCliCommand command) -> runInlineBoxCommand command
   Right (DocumentationCliCommand command) -> runDocumentationCommand command
   Right (ParserCorpusCliCommand command) -> runParserCorpusCommand command
+  Right (AssistantCliCommand command) -> runAssistantCommand command
 
 configureHandles :: IO ()
 configureHandles = do
   hSetEncoding stdin utf8
   hSetEncoding stdout utf8
   hSetBuffering stdout LineBuffering
+
+runAssistantCommand :: AssistantCommand -> IO Int
+runAssistantCommand = \case
+  AskAssistantCommand prompt systemPrompt extraInstructions modelService modelName tools requireSuccess -> do
+    installation <- discoverInstallation
+    result <-
+      askAssistant
+        installation prompt systemPrompt extraInstructions modelService modelName
+        (if null tools then Nothing else Just tools)
+    emitJson (assistantResultPayload result)
+    pure (if requireSuccess && not (assistantSuccess result) then 1 else 0)
 
 runParserCorpusCommand :: ParserCorpusCommand -> IO Int
 runParserCorpusCommand = \case
@@ -1105,58 +1166,7 @@ jsonMaybeString :: Maybe FilePath -> JsonValue
 jsonMaybeString = maybe JsonNull (JsonString . T.pack)
 
 kernelPayload :: KernelEvaluationResult -> JsonValue
-kernelPayload result =
-  JsonObject
-    ( Map.fromList
-        [ ("absolute_timing", jsonMaybeDouble (kernelAbsoluteTiming result))
-        , ("cached_max_license_processes", JsonNull)
-        , ("cleaned_tungsten_processes", JsonArray [])
-        , ("command", JsonArray (map JsonString (kernelCommand result)))
-        , ("elapsed_seconds", jsonDouble (kernelElapsedSeconds result))
-        , ("evaluation_available", JsonBool (kernelEvaluationAvailable result))
-        , ("exit_code", jsonInteger (fromIntegral (kernelExitCode result)))
-        , ("failure_type", maybe JsonNull JsonString (kernelFailureType result))
-        , ("json_path", jsonMaybeString (kernelJsonPath result))
-        , ("launch_gate_wait_seconds", JsonNumber "0")
-        , ("license_processes", jsonMaybeInt (kernelLicenseProcesses result))
-        , ("license_wait_satisfied", JsonNull)
-        , ("license_wait_seconds", JsonNumber "0")
-        , ("mathpass", mathpassPayload (kernelMathpass result))
-        , ("max_license_processes", jsonMaybeInt (kernelMaxLicenseProcesses result))
-        , ("messages", JsonArray (map JsonString (kernelMessages result)))
-        , ("messages_text", JsonArray (map JsonString (kernelMessagesText result)))
-        , ("observed_wolfram_processes", JsonArray [])
-        , ("output", JsonArray (map JsonString (kernelOutput result)))
-        , ("result", maybe JsonNull JsonString (kernelResult result))
-        , ("result_head", maybe JsonNull JsonString (kernelResultHead result))
-        , ("stderr", JsonString (kernelStderr result))
-        , ("stdout", JsonString (kernelStdout result))
-        , ("success", maybe JsonNull JsonBool (kernelSuccess result))
-        , ("timing", jsonMaybeDouble (kernelTiming result))
-        , ("used_mathpass_workaround", JsonBool (kernelUsedMathpassWorkaround result))
-        ]
-    )
-
-mathpassPayload :: MathpassInspection -> JsonValue
-mathpassPayload inspection =
-  JsonObject
-    ( Map.fromList
-        [ ("duplicate_entry_count", jsonInteger (fromIntegral (mathpassDuplicateEntryCount inspection)))
-        , ("header_present", JsonBool (mathpassHeaderPresent inspection))
-        , ("original_line_count", jsonInteger (fromIntegral (mathpassOriginalLineCount inspection)))
-        , ("path", jsonMaybeString (mathpassPath inspection))
-        , ("unique_entry_count", jsonInteger (fromIntegral (mathpassUniqueEntryCount inspection)))
-        ]
-    )
-
-jsonMaybeInt :: Maybe Int -> JsonValue
-jsonMaybeInt = maybe JsonNull (jsonInteger . fromIntegral)
-
-jsonMaybeDouble :: Maybe Double -> JsonValue
-jsonMaybeDouble = maybe JsonNull jsonDouble
-
-jsonDouble :: Double -> JsonValue
-jsonDouble = JsonNumber . T.pack . show
+kernelPayload = kernelEvaluationPayload
 
 addEnvironmentProbe :: KernelEvaluationResult -> KernelEvaluationResult -> JsonValue -> JsonValue
 addEnvironmentProbe evaluation frontEnd (JsonObject values) =
@@ -1303,6 +1313,7 @@ usage =
     , "  tungsten-hs parser-corpus discover [DISCOVERY OPTIONS] [--sample N]"
     , "  tungsten-hs parser-corpus compare [DISCOVERY OPTIONS] [--skip-wolfram] [--no-write] [--include-results]"
     , "    DISCOVERY OPTIONS: --corpus-root PATH [--extension EXT ...] [--include-glob GLOB ...] [--exclude-glob GLOB ...] [--max-files N] [--shuffle] [--seed N]"
+    , "  tungsten-hs assistant ask --prompt TEXT [--system-prompt TEXT] [--extra-instructions TEXT] [--tool NAME ...] [--model-service NAME] [--model-name NAME] [--require-success]"
     , "  tungsten-hs notebook inspect --file PATH"
     , "  tungsten-hs notebook create --file PATH [--title TEXT] [--cell STYLE:TEXT ...]"
     , "  tungsten-hs notebook patch --file PATH --spec PATH [--out PATH]"

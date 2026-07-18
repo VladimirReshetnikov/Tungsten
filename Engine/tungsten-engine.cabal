@@ -31,6 +31,7 @@ library
   import:          common-settings
   hs-source-dirs:  haskell/src
   exposed-modules:
+    Tungsten.Assistant
     Tungsten.Cli
     Tungsten.Discovery
     Tungsten.DocsIndex
