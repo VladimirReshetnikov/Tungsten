@@ -508,6 +508,10 @@ checkInputFormParser = do
         , ("pattern test", "x_?IntegerQ", "PatternTest[Pattern[x, Blank[]], IntegerQ]")
         , ("optional pattern default", "f[x_Integer:7]", "f[Optional[Pattern[x, Blank[Integer]], 7]]")
         , ("named pattern sequence", "x:PatternSequence[a_, b_]", "Pattern[x, PatternSequence[Pattern[a, Blank[]], Pattern[b, Blank[]]]]")
+        , ("repeated postfix", "patt..", "Repeated[patt]")
+        , ("repeated null postfix", "patt...", "RepeatedNull[patt]")
+        , ("greedy optional repeated postfix", "x_...", "Repeated[Optional[Pattern[x, Blank[]]]]")
+        , ("precision before repeated postfix", "1.2`3..", "Repeated[1.2`3]")
         , ("compound expression", "x = 1; x + 1;", "CompoundExpression[Set[x, 1], Plus[x, 1], Null]")
         , ("output history shorthand", "% + %% + %12", "Plus[Out[], Out[-2], Out[12]]")
         ]

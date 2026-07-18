@@ -248,11 +248,26 @@ postfixParser = inputAtomParser >>= postfixes
           optionalPattern <- option patternExpression (operator "." "." *> pure (Call (Symbol "Optional") [patternExpression]))
           postfixes optionalPattern
       , do
+          repetitionHead <- choice
+            [ "RepeatedNull" <$ operator "..." ""
+            , "Repeated" <$ operator ".." ""
+            ]
+          let repeatedExpression = case (repetitionHead, optionalDotCandidate expression) of
+                ("RepeatedNull", True) ->
+                  Call (Symbol "Repeated") [Call (Symbol "Optional") [expression]]
+                _ -> Call (Symbol repetitionHead) [expression]
+          postfixes repeatedExpression
+      , do
           _ <- operator "?" ""
           test <- inputAtomParser >>= postfixes
           postfixes (Call (Symbol "PatternTest") [expression, test])
       , pure expression
       ]
+
+optionalDotCandidate :: Expr -> Bool
+optionalDotCandidate (Call (Symbol "Blank") []) = True
+optionalDotCandidate (Call (Symbol "Pattern") [Symbol _, Call (Symbol "Blank") []]) = True
+optionalDotCandidate _ = False
 
 inputArgumentsParser :: Parser [Expr]
 inputArgumentsParser =
@@ -449,7 +464,7 @@ precisionParser = do
  where
   decimalPrecision = do
     whole <- T.pack <$> many (satisfy isDigit)
-    fraction <- optionalText $ do
+    fraction <- optionalText $ try $ do
       point <- char '.'
       digits <- T.pack <$> many1 (satisfy isDigit)
       pure (T.cons point digits)
