@@ -1045,6 +1045,15 @@ checkEvaluationSession = do
         , ("nested sequence iterator domains", "x = 0; Do[x = x + 1, {i, {Sequence[Sequence[a, b]]}}]; d = x; x = 0; s = Sum[x = x + 1, {i, {Sequence[Sequence[a, b]]}}]; sx = x; x = 0; p = Product[x = x + 1, {i, {Sequence[Sequence[a, b]]}}]; {d, s, sx, p, x}", "List[2, 3, 2, 2, 2]")
         , ("post-splice nothing iterator domains", "x = 0; Do[x = 1, {i, {Sequence[Sequence[Nothing]]}}]; d = x; x = 0; s = Sum[x = 1, {i, {Sequence[Sequence[Nothing]]}}]; sx = x; x = 0; p = Product[x = 1, {i, {Sequence[Sequence[Nothing]]}}]; {d, s, sx, p, x}", "List[0, 0, 0, 1, 0]")
         , ("iterator normalization ordering", "x = 0; Do[x = x + 1, {i, {Splice[{Sequence[a, b]}]}}]; u = x; x = 0; Do[x = x + 1, {i, {Sequence[Splice[{a, b}]]}}]; {u, x, Table[Sequence[Sequence[i, -i]], {i, 1}]}", "List[2, 1, List[1, -1]]")
+        , ("catch and throw control", "{Catch[1 + Throw[x] + 3], Catch[Throw[1 + 2]], Catch[Throw[x, tag], tag], Catch[Throw[x, tag], _Symbol]}", "List[x, 3, x, x]")
+        , ("catch handlers", "{Catch[Throw[x, tag], tag, h], Catch[Throw[x, tag], tag, Function[{v, t}, h[v, t]]], Catch[Throw[x, tag], tag, Hold]}", "List[h[x, tag], h[x, tag], Hold[x, tag]]")
+        , ("catch setup effects", "x = 0; {Catch[Throw[v, tag], (x = x + 1; tag), (x = x + 1; h)], x}", "List[h[v, tag], 2]")
+        , ("throw argument effects", "x = 0; Catch[Throw[x = x + 1, tag, x = x + 1], tag]; x", "2")
+        , ("uncaught throw handler", "Throw[x, tag, h]", "h[x, tag]")
+        , ("caught throw ignores throw handler", "Catch[Throw[x, tag, h], tag]", "x")
+        , ("unmatched throw stays inert", "Catch[Throw[x, tag], other]", "Throw[x, tag]")
+        , ("do throw restoration", "i = 99; x = 0; {Catch[Do[x = x + 1; Throw[i], {i, 5}, {j, 5}]], i, x}", "List[1, 99, 1]")
+        , ("accumulator throw restoration", "i = 99; {Catch[Sum[Throw[s], {i, 1, 5}]], i, Catch[Product[Throw[p], {i, 1, 5}]], i}", "List[s, 99, p, 99]")
         ]
   and <$> traverse evaluateSessionCase cases
  where

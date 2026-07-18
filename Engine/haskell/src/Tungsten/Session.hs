@@ -30,8 +30,13 @@ emptySession = EvaluationSession Map.empty
 data Iterator = Iterator !(Maybe Text) ![Expr]
   deriving (Eq, Show)
 
+data ControlSignal
+  = Thrown !Expr !(Maybe Expr) !(Maybe Expr)
+  deriving (Eq, Show)
+
 data EvaluationExit
   = SessionEvaluationFailure !EvaluationError !EvaluationSession
+  | SessionControl !ControlSignal !EvaluationSession
   deriving (Eq, Show)
 
 type SessionResult value =
@@ -44,8 +49,29 @@ data IterationFailure
 
 evaluateInSession :: EvaluationSession -> Expr -> Either EvaluationError (Expr, EvaluationSession)
 evaluateInSession session expression =
-  case evaluateSessionAt 0 session expression of
+  finalizeSessionResult (evaluateSessionAt 0 session expression)
+
+finalizeSessionResult
+  :: SessionResult Expr
+  -> Either EvaluationError (Expr, EvaluationSession)
+finalizeSessionResult = \case
     Left (SessionEvaluationFailure evaluationFailure _) -> Left evaluationFailure
+    Left (SessionControl (Thrown value tag handler) stoppedSession) ->
+      case (tag, handler) of
+        (Nothing, _) ->
+          Right (Call (Symbol "Throw") [value], stoppedSession)
+        (Just evaluatedTag, Nothing) ->
+          Right
+            ( Call (Symbol "Throw") [value, evaluatedTag]
+            , stoppedSession
+            )
+        (Just evaluatedTag, Just evaluatedHandler) ->
+          finalizeSessionResult
+            ( evaluateSessionAt
+                0
+                stoppedSession
+                (Call evaluatedHandler [value, evaluatedTag])
+            )
     Right result -> Right result
 
 evaluateSessionAt
@@ -79,6 +105,10 @@ evaluateSessionAt depth session expression
       Call (Symbol "If") arguments' -> evaluateSessionIf depth session arguments'
       Call (Symbol "And") arguments' -> evaluateSessionAnd depth session arguments'
       Call (Symbol "Or") arguments' -> evaluateSessionOr depth session arguments'
+      Call (Symbol "Catch") arguments' ->
+        evaluateSessionCatch depth session arguments'
+      Call (Symbol "Throw") arguments' ->
+        evaluateSessionThrow depth session arguments'
       Call (Symbol "Table") arguments' ->
         evaluateSessionTable depth session arguments'
       Call (Symbol "Do") arguments' ->
@@ -95,7 +125,7 @@ evaluateSessionAt depth session expression
             Right (expression, session)
       Call expressionHead arguments' -> do
         (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
-        if isHeldIteratorHead evaluatedHead
+        if isHeldSessionHead evaluatedHead
           then Right (Call evaluatedHead arguments', headSession)
           else do
             (evaluatedArguments, argumentsSession) <- evaluateArguments depth headSession arguments'
@@ -106,6 +136,78 @@ evaluateSessionAt depth session expression
               then Right (reduced, argumentsSession)
               else evaluateSessionAt (depth + 1) argumentsSession reduced
       _ -> Right (expression, session)
+
+evaluateSessionThrow
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionThrow depth session arguments' =
+  case arguments' of
+    [_] -> throwEvaluated
+    [_, _] -> throwEvaluated
+    [_, _, _] -> throwEvaluated
+    _ -> Right (Call (Symbol "Throw") arguments', session)
+ where
+  throwEvaluated = do
+    (evaluatedArguments, updated) <-
+      evaluateArguments depth session arguments'
+    case evaluatedArguments of
+      [value] ->
+        Left (SessionControl (Thrown value Nothing Nothing) updated)
+      [value, tag] ->
+        Left (SessionControl (Thrown value (Just tag) Nothing) updated)
+      [value, tag, handler] ->
+        Left (SessionControl (Thrown value (Just tag) (Just handler)) updated)
+      _ -> Right (Call (Symbol "Throw") arguments', updated)
+
+evaluateSessionCatch
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCatch depth session = \case
+  [body] -> catchBody depth session body Nothing Nothing
+  [body, formExpression] -> do
+    (form, updated) <-
+      evaluateSessionAt (depth + 1) session formExpression
+    catchBody depth updated body (Just form) Nothing
+  [body, formExpression, handlerExpression] -> do
+    (form, formSession) <-
+      evaluateSessionAt (depth + 1) session formExpression
+    (handler, handlerSession) <-
+      evaluateSessionAt (depth + 1) formSession handlerExpression
+    catchBody depth handlerSession body (Just form) (Just handler)
+  arguments' -> Right (Call (Symbol "Catch") arguments', session)
+
+catchBody
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Maybe Expr
+  -> Maybe Expr
+  -> SessionResult Expr
+catchBody depth session body form handler =
+  case evaluateSessionAt (depth + 1) session body of
+    Left evaluationExit@(SessionEvaluationFailure _ _) ->
+      Left evaluationExit
+    Left evaluationExit@(SessionControl (Thrown value tag _) stoppedSession)
+      | catchMatches form tag ->
+          case (handler, tag) of
+            (Nothing, _) -> Right (value, stoppedSession)
+            (Just evaluatedHandler, Just evaluatedTag) ->
+              evaluateSessionAt
+                (depth + 1)
+                stoppedSession
+                (Call evaluatedHandler [value, evaluatedTag])
+            _ -> Left evaluationExit
+      | otherwise -> Left evaluationExit
+    Right result -> Right result
+
+catchMatches :: Maybe Expr -> Maybe Expr -> Bool
+catchMatches Nothing Nothing = True
+catchMatches (Just form) (Just tag) = matchesPattern tag form
+catchMatches _ _ = False
 
 evaluateSessionTable
   :: Int
@@ -364,10 +466,10 @@ evaluatedListArguments = filter (/= Symbol "Nothing") . concatMap spliceArgument
       | target == Symbol "List" -> values
     value -> [value]
 
-isHeldIteratorHead :: Expr -> Bool
-isHeldIteratorHead (Symbol name) =
-  name `elem` ["Table", "Do", "Sum", "Product"]
-isHeldIteratorHead _ = False
+isHeldSessionHead :: Expr -> Bool
+isHeldSessionHead (Symbol name) =
+  name `elem` ["Table", "Do", "Sum", "Product", "Catch", "Throw"]
+isHeldSessionHead _ = False
 
 isListIteratorSpec :: Expr -> Bool
 isListIteratorSpec (Call (Symbol "List") _) = True
@@ -499,6 +601,8 @@ mapEvaluationExitSession
 mapEvaluationExitSession updateSession = \case
   SessionEvaluationFailure evaluationFailure failedSession ->
     SessionEvaluationFailure evaluationFailure (updateSession failedSession)
+  SessionControl controlSignal stoppedSession ->
+    SessionControl controlSignal (updateSession stoppedSession)
 
 logicalResult :: Text -> Expr -> [Expr] -> Expr
 logicalResult _ identity [] = identity

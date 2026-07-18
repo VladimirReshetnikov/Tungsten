@@ -9,6 +9,7 @@ module Tungsten.Evaluate
   ( EvaluationError (..)
   , evaluate
   , exactRangeValues
+  , matchesPattern
   , normalizeEvaluatedCall
   ) where
 
@@ -46,6 +47,8 @@ evaluateAt depth expression
       Call (Symbol "Do") _ -> Right expression
       Call (Symbol "Sum") _ -> Right expression
       Call (Symbol "Product") _ -> Right expression
+      Call (Symbol "Catch") _ -> Right expression
+      Call (Symbol "Throw") _ -> Right expression
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'
@@ -2033,6 +2036,10 @@ reduceMatchQ :: [Expr] -> Expr
 reduceMatchQ [expression, patternExpression] =
   boolean (maybe False (const True) (matchPattern [] expression patternExpression))
 reduceMatchQ values = Call (Symbol "MatchQ") values
+
+matchesPattern :: Expr -> Expr -> Bool
+matchesPattern expression patternExpression =
+  maybe False (const True) (matchPattern [] expression patternExpression)
 
 matchPattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
 matchPattern bindings expression patternExpression = case patternExpression of
