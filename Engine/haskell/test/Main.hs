@@ -1054,6 +1054,14 @@ checkEvaluationSession = do
         , ("unmatched throw stays inert", "Catch[Throw[x, tag], other]", "Throw[x, tag]")
         , ("do throw restoration", "i = 99; x = 0; {Catch[Do[x = x + 1; Throw[i], {i, 5}, {j, 5}]], i, x}", "List[1, 99, 1]")
         , ("accumulator throw restoration", "i = 99; {Catch[Sum[Throw[s], {i, 1, 5}]], i, Catch[Product[Throw[p], {i, 1, 5}]], i}", "List[s, 99, p, 99]")
+        , ("bare break stays inert", "Break[]", "Break[]")
+        , ("bare continue stays inert", "Continue[]", "Continue[]")
+        , ("invalid loop control stays inert", "{Break[x], Continue[x]}", "List[Break[x], Continue[x]]")
+        , ("table does not catch break", "Table[Break[], {i, 1, 3}]", "Break[]")
+        , ("accumulators do not catch loop control", "Sum[Break[], {i, 1, 3}]", "Break[]")
+        , ("do break exits all iterator levels", "x = 0; Do[x = x + 1; Break[]; x = 99, {i, 2}, {j, 3}]; x", "1")
+        , ("do continue advances innermost iterator", "x = 0; Do[x = x + 1; Continue[]; x = 99, {i, 2}, {j, 3}]; x", "6")
+        , ("do loop control restores bindings", "i = 99; x = 0; Do[x = x + 1; Break[], {i, 3}]; first = {i, x}; x = 0; Do[x = x + 1; Continue[], {i, 3}]; {first, i, x}", "List[List[99, 1], 99, 3]")
         ]
   and <$> traverse evaluateSessionCase cases
  where

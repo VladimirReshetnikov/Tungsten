@@ -32,6 +32,8 @@ data Iterator = Iterator !(Maybe Text) ![Expr]
 
 data ControlSignal
   = Thrown !Expr !(Maybe Expr) !(Maybe Expr)
+  | BreakSignal
+  | ContinueSignal
   deriving (Eq, Show)
 
 data EvaluationExit
@@ -72,6 +74,10 @@ finalizeSessionResult = \case
                 stoppedSession
                 (Call evaluatedHandler [value, evaluatedTag])
             )
+    Left (SessionControl BreakSignal stoppedSession) ->
+      Right (Call (Symbol "Break") [], stoppedSession)
+    Left (SessionControl ContinueSignal stoppedSession) ->
+      Right (Call (Symbol "Continue") [], stoppedSession)
     Right result -> Right result
 
 evaluateSessionAt
@@ -109,6 +115,10 @@ evaluateSessionAt depth session expression
         evaluateSessionCatch depth session arguments'
       Call (Symbol "Throw") arguments' ->
         evaluateSessionThrow depth session arguments'
+      Call (Symbol "Break") arguments' ->
+        evaluateLoopControl BreakSignal "Break" session arguments'
+      Call (Symbol "Continue") arguments' ->
+        evaluateLoopControl ContinueSignal "Continue" session arguments'
       Call (Symbol "Table") arguments' ->
         evaluateSessionTable depth session arguments'
       Call (Symbol "Do") arguments' ->
@@ -161,6 +171,16 @@ evaluateSessionThrow depth session arguments' =
         Left (SessionControl (Thrown value (Just tag) (Just handler)) updated)
       _ -> Right (Call (Symbol "Throw") arguments', updated)
 
+evaluateLoopControl
+  :: ControlSignal
+  -> Text
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateLoopControl controlSignal headName session = \case
+  [] -> Left (SessionControl controlSignal session)
+  arguments' -> Right (Call (Symbol headName) arguments', session)
+
 evaluateSessionCatch
   :: Int
   -> EvaluationSession
@@ -202,6 +222,7 @@ catchBody depth session body form handler =
                 (Call evaluatedHandler [value, evaluatedTag])
             _ -> Left evaluationExit
       | otherwise -> Left evaluationExit
+    Left evaluationExit -> Left evaluationExit
     Right result -> Right result
 
 catchMatches :: Maybe Expr -> Maybe Expr -> Bool
@@ -234,6 +255,11 @@ evaluateSessionDo depth session arguments' = case arguments' of
     case flatIterationLoop False depth session body iteratorSpecs of
       Left (InvalidIterator updated) ->
         Right (Call (Symbol "Do") arguments', updated)
+      Left
+        ( IterationEvaluationFailure
+            (SessionControl BreakSignal stoppedSession)
+          ) ->
+          Right (Symbol "Null", stoppedSession)
       Left (IterationEvaluationFailure evaluationExit) ->
         Left evaluationExit
       Right (_, updated) -> Right (Symbol "Null", updated)
@@ -278,10 +304,12 @@ flatIterationLoop retainValues depth session body iteratorSpecs = do
   Right (reverse reversed, updated)
  where
   collect currentDepth current [] retained = do
-    (value, updated) <-
-      liftIterationEvaluation
-        (evaluateSessionAt (currentDepth + 1) current body)
-    Right (if retainValues then value : retained else retained, updated)
+    case evaluateSessionAt (currentDepth + 1) current body of
+      Left (SessionControl ContinueSignal stoppedSession)
+        | not retainValues -> Right (retained, stoppedSession)
+      evaluationResult -> do
+        (value, updated) <- liftIterationEvaluation evaluationResult
+        Right (if retainValues then value : retained else retained, updated)
   collect currentDepth current (iteratorSpec : remainingSpecs) retained = do
     (Iterator variable values, resolvedSession) <-
       resolveIterator currentDepth current iteratorSpec
@@ -468,7 +496,16 @@ evaluatedListArguments = filter (/= Symbol "Nothing") . concatMap spliceArgument
 
 isHeldSessionHead :: Expr -> Bool
 isHeldSessionHead (Symbol name) =
-  name `elem` ["Table", "Do", "Sum", "Product", "Catch", "Throw"]
+  name
+    `elem` [ "Table"
+           , "Do"
+           , "Sum"
+           , "Product"
+           , "Catch"
+           , "Throw"
+           , "Break"
+           , "Continue"
+           ]
 isHeldSessionHead _ = False
 
 isListIteratorSpec :: Expr -> Bool

@@ -49,6 +49,8 @@ evaluateAt depth expression
       Call (Symbol "Product") _ -> Right expression
       Call (Symbol "Catch") _ -> Right expression
       Call (Symbol "Throw") _ -> Right expression
+      Call (Symbol "Break") _ -> Right expression
+      Call (Symbol "Continue") _ -> Right expression
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'
