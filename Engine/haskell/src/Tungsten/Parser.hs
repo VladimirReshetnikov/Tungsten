@@ -231,6 +231,10 @@ postfixParser = inputAtomParser >>= postfixes
           let patternExpression = Call (Symbol "Pattern") [expression, blank]
           optionalPattern <- option patternExpression (operator "." "." *> pure (Call (Symbol "Optional") [patternExpression]))
           postfixes optionalPattern
+      , do
+          _ <- operator "?" ""
+          test <- inputAtomParser >>= postfixes
+          postfixes (Call (Symbol "PatternTest") [expression, test])
       , pure expression
       ]
 

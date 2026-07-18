@@ -1419,6 +1419,7 @@ data SequencePattern = SequencePattern
   , sequenceHead :: !(Maybe Expr)
   , sequenceName :: !(Maybe Text)
   , sequenceCondition :: !(Maybe Expr)
+  , sequenceTest :: !(Maybe Expr)
   }
   deriving (Eq, Show)
 
@@ -1457,6 +1458,10 @@ matchPattern bindings expression patternExpression = case patternExpression of
     matched <- matchPattern bindings expression innerPattern
     conditionResult <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
     if conditionResult == Symbol "True" then Just matched else Nothing
+  Call (Symbol "PatternTest") [innerPattern, test] -> do
+    matched <- matchPattern bindings expression innerPattern
+    testResult <- either (const Nothing) Just (evaluate (Call test [expression]))
+    if testResult == Symbol "True" then Just matched else Nothing
   Call patternHead patternArguments -> case expression of
     Call expressionHead expressionArguments -> do
       headBindings <- matchPattern bindings expressionHead patternHead
@@ -1499,27 +1504,30 @@ minimumPatternArguments = sum . map minimumForPattern
     maybe 1 sequenceMinimum (sequencePatternDescriptor expression)
 
 sequencePatternDescriptor :: Expr -> Maybe SequencePattern
-sequencePatternDescriptor = describe Nothing Nothing
+sequencePatternDescriptor = describe Nothing Nothing Nothing
  where
-  describe name condition = \case
+  describe name condition test = \case
     Call (Symbol "Pattern") [Symbol patternName, inner] ->
-      describe (Just patternName) condition inner
-    Call (Symbol "Condition") [inner, test] ->
-      describe name (Just test) inner
+      describe (Just patternName) condition test inner
+    Call (Symbol "Condition") [inner, conditionExpression] ->
+      describe name (Just conditionExpression) test inner
+    Call (Symbol "PatternTest") [inner, predicate] ->
+      describe name condition (Just predicate) inner
     Call (Symbol "BlankSequence") [] ->
-      Just (SequencePattern 1 Nothing name condition)
+      Just (SequencePattern 1 Nothing name condition test)
     Call (Symbol "BlankSequence") [requiredHead] ->
-      Just (SequencePattern 1 (Just requiredHead) name condition)
+      Just (SequencePattern 1 (Just requiredHead) name condition test)
     Call (Symbol "BlankNullSequence") [] ->
-      Just (SequencePattern 0 Nothing name condition)
+      Just (SequencePattern 0 Nothing name condition test)
     Call (Symbol "BlankNullSequence") [requiredHead] ->
-      Just (SequencePattern 0 (Just requiredHead) name condition)
+      Just (SequencePattern 0 (Just requiredHead) name condition test)
     _ -> Nothing
 
 matchSequencePattern :: PatternBindings -> SequencePattern -> [Expr] -> Maybe PatternBindings
 matchSequencePattern bindings descriptor values
   | length values < sequenceMinimum descriptor = Nothing
   | maybe False (\requiredHead -> any ((/= requiredHead) . headExpr) values) (sequenceHead descriptor) = Nothing
+  | maybe False (\test -> any (not . predicateMatchesPure test) values) (sequenceTest descriptor) = Nothing
   | otherwise = do
       bound <- case sequenceName descriptor of
         Nothing -> Just bindings
@@ -1529,6 +1537,11 @@ matchSequencePattern bindings descriptor values
         Just condition -> do
           result <- either (const Nothing) Just (evaluate (substituteBindings bound condition))
           if result == Symbol "True" then Just bound else Nothing
+
+predicateMatchesPure :: Expr -> Expr -> Bool
+predicateMatchesPure test value = case evaluate (Call test [value]) of
+  Right (Symbol "True") -> True
+  _ -> False
 
 bindScalar :: Text -> Expr -> PatternBindings -> Maybe PatternBindings
 bindScalar name value bindings = case lookup name bindings of

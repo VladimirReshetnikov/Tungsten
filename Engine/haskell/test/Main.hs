@@ -505,6 +505,7 @@ checkInputFormParser = do
         , ("delayed assignment", "f[x_] := x^2", "SetDelayed[f[Pattern[x, Blank[]]], Power[x, 2]]")
         , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
         , ("association", "<|a -> 1, b :> 2|>", "Association[Rule[a, 1], RuleDelayed[b, 2]]")
+        , ("pattern test", "x_?IntegerQ", "PatternTest[Pattern[x, Blank[]], IntegerQ]")
         , ("compound expression", "x = 1; x + 1;", "CompoundExpression[Set[x, 1], Plus[x, 1], Null]")
         , ("output history shorthand", "% + %% + %12", "Plus[Out[], Out[-2], Out[12]]")
         ]
@@ -690,6 +691,9 @@ checkEvaluator = do
         , ("association pattern replacement", "{Replace[<|a -> 1|>, _Association -> x], Replace[<|a -> 1|>, _Integer -> x, Infinity], <|a -> 1|> /. _Association -> z, <|a -> 1|> /. _Integer -> x}", "List[x, Association[Rule[a, x]], z, Association[Rule[a, x]]]")
         , ("association head replacement", "<|a -> 1|> /. _Symbol -> s", "s[Rule[a, 1]]")
         , ("replace all sequence splicing", "{f[g[a, b]] /. g[x__] :> x, f[g[a, b]] /. g[x__] :> HoldComplete[x]}", "List[f[a, b], f[HoldComplete[a, b]]]")
+        , ("scalar pattern tests", "{MatchQ[1, _?IntegerQ], MatchQ[a, _?IntegerQ]}", "List[True, False]")
+        , ("sequence pattern tests", "{Cases[{f[1, 2], f[1, a], f[]}, f[__?IntegerQ]], MatchQ[f[1, 2], f[x__?IntegerQ]], MatchQ[f[1, a], f[x__?IntegerQ]]}", "List[List[f[1, 2]], True, False]")
+        , ("pattern test delayed template", "Cases[{1, a, 2}, x_?IntegerQ :> x + 10]", "List[11, 12]")
         , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")
