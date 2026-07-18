@@ -8,14 +8,14 @@ namespace Tungsten.DotNet;
 public sealed record TungstenClientOptions
 {
     /// <summary>
-    /// Gets the executable path used to launch Tungsten. Defaults to <c>python</c>.
+    /// Gets the executable path used to launch native Tungsten. Defaults to <c>tungsten-cpp</c> on <c>PATH</c>.
     /// </summary>
-    public string ExecutablePath { get; init; } = "python";
+    public string ExecutablePath { get; init; } = "tungsten-cpp";
 
     /// <summary>
-    /// Gets launcher arguments that appear before the Tungsten command arguments. The default is <c>-m tungsten</c>.
+    /// Gets optional launcher arguments that appear before the Tungsten command arguments.
     /// </summary>
-    public IReadOnlyList<string> LauncherArguments { get; init; } = ["-m", "tungsten"];
+    public IReadOnlyList<string> LauncherArguments { get; init; } = [];
 
     /// <summary>
     /// Gets the working directory for launched commands.
@@ -23,7 +23,8 @@ public sealed record TungstenClientOptions
     public string? WorkingDirectory { get; init; }
 
     /// <summary>
-    /// Gets the source root containing the Python <c>tungsten</c> package. When set, the client prepends it to <c>PYTHONPATH</c>.
+    /// Gets an optional legacy source root to prepend to <c>PYTHONPATH</c> for custom launchers.
+    /// Native Tungsten does not require Python or this setting.
     /// </summary>
     public string? TungstenSourceRoot { get; init; }
 
@@ -48,43 +49,42 @@ public sealed record TungstenClientOptions
     };
 
     /// <summary>
-    /// Builds client options for this repository's checked-out Tungsten layout.
+    /// Builds client options for this repository's checked-out C++ Tungsten engine layout.
     /// </summary>
-    public static TungstenClientOptions CreateForRepositoryRoot(string repositoryRoot, string executablePath = "python")
+    public static TungstenClientOptions CreateForRepositoryRoot(string repositoryRoot, string? executablePath = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
         var fullRoot = Path.GetFullPath(repositoryRoot);
         var tungstenRoot = Path.Combine(fullRoot, "Engine");
-        var sourceRoot = Path.Combine(tungstenRoot, "src");
-        var packageRoot = Path.Combine(sourceRoot, "tungsten");
-
-        if (!File.Exists(Path.Combine(tungstenRoot, "pyproject.toml")) || !Directory.Exists(packageRoot))
+        if (!File.Exists(Path.Combine(tungstenRoot, "CMakeLists.txt")) ||
+            !File.Exists(Path.Combine(tungstenRoot, "cpp", "src", "main.cpp")))
         {
             throw new DirectoryNotFoundException(
-                $"Could not find a Tungsten repository layout under '{fullRoot}'. Expected '{tungstenRoot}'.");
+                $"Could not find a Tungsten C++ engine under '{tungstenRoot}'. " +
+                "Expected CMakeLists.txt and cpp/src/main.cpp.");
         }
 
         return new TungstenClientOptions
         {
-            ExecutablePath = executablePath,
-            WorkingDirectory = fullRoot,
-            TungstenSourceRoot = sourceRoot,
+            ExecutablePath = executablePath ?? ResolveRepositoryExecutable(tungstenRoot),
+            WorkingDirectory = tungstenRoot,
         };
     }
 
     /// <summary>
-    /// Discovers a repository root by walking parent directories and then builds Tungsten client options for it.
+    /// Discovers a repository root containing the C++ Tungsten engine and then builds client options for it.
     /// </summary>
-    public static TungstenClientOptions CreateForDiscoveredRepository(string? startDirectory = null, string executablePath = "python")
+    public static TungstenClientOptions CreateForDiscoveredRepository(string? startDirectory = null, string? executablePath = null)
     {
         var repositoryRoot = TryFindRepositoryRoot(startDirectory)
             ?? throw new DirectoryNotFoundException(
-                $"Could not discover a repository root containing Engine.");
+                "Could not discover a repository root containing " +
+                "Engine/CMakeLists.txt and Engine/cpp/src/main.cpp.");
         return CreateForRepositoryRoot(repositoryRoot, executablePath);
     }
 
     /// <summary>
-    /// Tries to discover a repository root containing the Tungsten workspace.
+    /// Tries to discover a repository root containing the C++ Tungsten engine workspace.
     /// </summary>
     public static string? TryFindRepositoryRoot(string? startDirectory = null)
     {
@@ -94,8 +94,8 @@ public sealed record TungstenClientOptions
         {
             var tungstenRoot = Path.Combine(current.FullName, "Engine");
             if (
-                File.Exists(Path.Combine(tungstenRoot, "pyproject.toml")) &&
-                File.Exists(Path.Combine(tungstenRoot, "src", "tungsten", "cli.py")))
+                File.Exists(Path.Combine(tungstenRoot, "CMakeLists.txt")) &&
+                File.Exists(Path.Combine(tungstenRoot, "cpp", "src", "main.cpp")))
             {
                 return current.FullName;
             }
@@ -104,5 +104,34 @@ public sealed record TungstenClientOptions
         }
 
         return null;
+    }
+
+    private static string ResolveRepositoryExecutable(string tungstenRoot)
+    {
+        var configured = Environment.GetEnvironmentVariable("TUNGSTEN_EXECUTABLE");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return configured;
+        }
+
+        var executableName = OperatingSystem.IsWindows() ? "tungsten-cpp.exe" : "tungsten-cpp";
+        var buildRoot = Path.Combine(tungstenRoot, "build", "cpp");
+        foreach (var relativeCandidate in new[]
+        {
+            executableName,
+            Path.Combine("Release", executableName),
+            Path.Combine("Debug", executableName),
+            Path.Combine("RelWithDebInfo", executableName),
+            Path.Combine("MinSizeRel", executableName),
+        })
+        {
+            var candidate = Path.Combine(buildRoot, relativeCandidate);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return "tungsten-cpp";
     }
 }

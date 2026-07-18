@@ -1,6 +1,57 @@
 Set-StrictMode -Version Latest
 
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
+$script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
+
+function ConvertTo-TungstenInvariantString {
+    param(
+        [Parameter(Mandatory)]
+        $Value
+    )
+
+    if ($Value -is [IFormattable]) {
+        return $Value.ToString($null, $script:InvariantCulture)
+    }
+    return [string] $Value
+}
+
+function Resolve-TungstenNativeExecutable {
+    [CmdletBinding()]
+    param()
+
+    if (-not [string]::IsNullOrWhiteSpace($env:TUNGSTEN_EXECUTABLE)) {
+        $configured = Get-Command $env:TUNGSTEN_EXECUTABLE -ErrorAction SilentlyContinue
+        if ($null -ne $configured) {
+            return $configured.Source
+        }
+        if (Test-Path -LiteralPath $env:TUNGSTEN_EXECUTABLE -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $env:TUNGSTEN_EXECUTABLE).Path
+        }
+        throw "TUNGSTEN_EXECUTABLE points to '$env:TUNGSTEN_EXECUTABLE', but that executable was not found."
+    }
+
+    $executableName = if ($IsWindows) { "tungsten-cpp.exe" } else { "tungsten-cpp" }
+    $relativeCandidates = @(
+        $executableName,
+        "Release/$executableName",
+        "Debug/$executableName",
+        "RelWithDebInfo/$executableName",
+        "MinSizeRel/$executableName"
+    )
+    foreach ($relativeCandidate in $relativeCandidates) {
+        $candidate = Join-Path $script:ProjectRoot "build/cpp/$relativeCandidate"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    $onPath = Get-Command tungsten-cpp -ErrorAction SilentlyContinue
+    if ($null -ne $onPath) {
+        return $onPath.Source
+    }
+
+    throw "The native Tungsten executable was not found. Build it with 'cmake --build build/cpp --target tungsten-cpp --config Release' or set TUNGSTEN_EXECUTABLE."
+}
 
 function Invoke-TungstenCliJson {
     [CmdletBinding()]
@@ -11,33 +62,19 @@ function Invoke-TungstenCliJson {
         [switch] $AllowFailure
     )
 
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($null -eq $python) {
-        throw "python was not found on PATH."
-    }
-
-    $previousPythonPath = $env:PYTHONPATH
-    $sourceRoot = Join-Path $script:ProjectRoot "src"
-    $separator = [System.IO.Path]::PathSeparator
-    $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
-        $sourceRoot
-    }
-    else {
-        "$sourceRoot$separator$previousPythonPath"
-    }
+    $tungstenExecutable = Resolve-TungstenNativeExecutable
 
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
 
     try {
-        & $python.Source -m tungsten @Arguments > $stdoutFile 2> $stderrFile
+        # Keep nonzero native exits as data until the structured payload and
+        # -AllowFailure policy have been applied below.  This also prevents a
+        # caller's native-command preference from bypassing temp-file cleanup.
+        $PSNativeCommandUseErrorActionPreference = $false
+        & $tungstenExecutable @Arguments > $stdoutFile 2> $stderrFile
         $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $env:PYTHONPATH = $previousPythonPath
-    }
 
-    try {
         $stdout = if (Test-Path -LiteralPath $stdoutFile) {
             Get-Content -LiteralPath $stdoutFile -Raw
         }
@@ -55,7 +92,9 @@ function Invoke-TungstenCliJson {
         Remove-Item -LiteralPath $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
     }
 
-    if (-not $AllowFailure -and $exitCode -ne 0) {
+    if ($exitCode -ne 0 -and (
+        -not $AllowFailure -or [string]::IsNullOrWhiteSpace($stdout)
+    )) {
         $details = @()
         if (-not [string]::IsNullOrWhiteSpace($stderr)) {
             $details += "stderr:`n$stderr"
@@ -101,16 +140,19 @@ function Get-TungstenNotebookAssistantSelectorArguments {
 
     switch ($ParameterSetName) {
         "CellIndex" {
-            return @("--cell-index", $CellIndex.ToString())
+            return @("--cell-index", (ConvertTo-TungstenInvariantString $CellIndex))
         }
         "CellPath" {
-            return @("--cell-path", ($CellPath -join ","))
+            $pathText = ($CellPath | ForEach-Object {
+                ConvertTo-TungstenInvariantString $_
+            }) -join ","
+            return @("--cell-path", $pathText)
         }
         "ExpressionUuid" {
             return @("--expression-uuid", $ExpressionUuid)
         }
         "CellId" {
-            return @("--cell-id", $CellId.ToString())
+            return @("--cell-id", (ConvertTo-TungstenInvariantString $CellId))
         }
         "CellTag" {
             return @("--cell-tag", $CellTag)
@@ -335,16 +377,21 @@ function Get-TungstenParserCorpus {
 
         [string[]] $ExcludeGlob = @(),
 
-        [Nullable[int]] $MaxFiles = $null,
+        [Nullable[long]] $MaxFiles = $null,
 
         [switch] $Shuffle,
 
-        [int] $Seed = 0,
+        [string] $Seed = "0",
 
         [int] $Sample = 20
     )
 
-    $cliArgs = @("parser-corpus", "discover", "--corpus-root", $CorpusRoot, "--sample", $Sample, "--seed", $Seed)
+    $cliArgs = @(
+        "parser-corpus", "discover",
+        "--corpus-root", $CorpusRoot,
+        "--sample", (ConvertTo-TungstenInvariantString $Sample),
+        "--seed", $Seed
+    )
     foreach ($item in $Extension) {
         $cliArgs += @("--extension", $item)
     }
@@ -355,7 +402,7 @@ function Get-TungstenParserCorpus {
         $cliArgs += @("--exclude-glob", $item)
     }
     if ($null -ne $MaxFiles) {
-        $cliArgs += @("--max-files", $MaxFiles)
+        $cliArgs += @("--max-files", (ConvertTo-TungstenInvariantString $MaxFiles))
     }
     if ($Shuffle) {
         $cliArgs += "--shuffle"
@@ -377,11 +424,11 @@ function Compare-TungstenParserCorpus {
 
         [string[]] $ExcludeGlob = @(),
 
-        [Nullable[int]] $MaxFiles = $null,
+        [Nullable[long]] $MaxFiles = $null,
 
         [double] $MaxFileMB = 2.0,
 
-        [Nullable[int]] $MaxBytes = $null,
+        [string] $MaxBytes,
 
         [switch] $NoMaxBytes,
 
@@ -402,7 +449,7 @@ function Compare-TungstenParserCorpus {
 
         [switch] $Shuffle,
 
-        [int] $Seed = 0,
+        [string] $Seed = "0",
 
         [switch] $FailOnTungstenGap,
 
@@ -413,11 +460,11 @@ function Compare-TungstenParserCorpus {
         "parser-corpus",
         "compare",
         "--corpus-root", $CorpusRoot,
-        "--max-file-mb", $MaxFileMB,
+        "--max-file-mb", (ConvertTo-TungstenInvariantString $MaxFileMB),
         "--form", $Form,
-        "--kernel-batch-size", $KernelBatchSize,
-        "--tungsten-workers", $TungstenWorkers,
-        "--preview-chars", $PreviewChars,
+        "--kernel-batch-size", (ConvertTo-TungstenInvariantString $KernelBatchSize),
+        "--tungsten-workers", (ConvertTo-TungstenInvariantString $TungstenWorkers),
+        "--preview-chars", (ConvertTo-TungstenInvariantString $PreviewChars),
         "--seed", $Seed
     )
 
@@ -434,9 +481,9 @@ function Compare-TungstenParserCorpus {
         $cliArgs += @("--exclude-glob", $item)
     }
     if ($null -ne $MaxFiles) {
-        $cliArgs += @("--max-files", $MaxFiles)
+        $cliArgs += @("--max-files", (ConvertTo-TungstenInvariantString $MaxFiles))
     }
-    if ($null -ne $MaxBytes) {
+    if (-not [string]::IsNullOrWhiteSpace($MaxBytes)) {
         $cliArgs += @("--max-bytes", $MaxBytes)
     }
     if ($NoMaxBytes) {
@@ -540,7 +587,7 @@ function Get-TungstenNotebookCellInlineBoxes {
         $cliArgs += "--all-objects"
     }
     else {
-        $cliArgs += @("--object-index", $ObjectIndex.ToString())
+        $cliArgs += @("--object-index", (ConvertTo-TungstenInvariantString $ObjectIndex))
     }
     if ($RequireSuccess) {
         $cliArgs += "--require-success"
@@ -614,7 +661,10 @@ function Find-TungstenDocumentation {
         [switch] $Rebuild
     )
 
-    $cliArgs = @("docs", "search", $Query, "--limit", $Limit.ToString())
+    $cliArgs = @(
+        "docs", "search", $Query,
+        "--limit", (ConvertTo-TungstenInvariantString $Limit)
+    )
     if ($IndexPath) {
         $cliArgs += @("--index-path", $IndexPath)
     }

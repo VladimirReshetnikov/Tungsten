@@ -1,7 +1,8 @@
 param(
     [switch] $IncludeFrontEnd,
     [switch] $UseWinDesk,
-    [switch] $IncludeAssistant
+    [switch] $IncludeAssistant,
+    [switch] $RequireWolframRuntime
 )
 
 Set-StrictMode -Version Latest
@@ -22,9 +23,74 @@ try {
 
     Push-Location $projectRoot
     try {
-        python -m unittest discover -s tests -t .
+        cmake -S . -B build/cpp -DCMAKE_BUILD_TYPE=Release
+        if ($LASTEXITCODE -ne 0) {
+            throw "Native C++ configuration failed."
+        }
+
+        cmake --build build/cpp --config Release --parallel
+        if ($LASTEXITCODE -ne 0) {
+            throw "Native C++ build failed."
+        }
+
+        ctest --test-dir build/cpp -C Release --output-on-failure
+        if ($LASTEXITCODE -ne 0) {
+            throw "Native C++ tests failed."
+        }
+
+        dotnet test .\dotnet\Tungsten.DotNet.slnx --no-restore --verbosity minimal
+        if ($LASTEXITCODE -ne 0) {
+            throw ".NET projection tests failed."
+        }
+
+        uv run python -m unittest discover -s tests -t .
         if ($LASTEXITCODE -ne 0) {
             throw "Python unit tests failed."
+        }
+
+        $nativeName = if ($IsWindows) { "tungsten-cpp.exe" } else { "tungsten-cpp" }
+        $nativeCandidates = @(
+            (Join-Path $projectRoot "build/cpp/$nativeName"),
+            (Join-Path $projectRoot "build/cpp/Release/$nativeName"),
+            (Join-Path $projectRoot "build/cpp/Debug/$nativeName"),
+            (Join-Path $projectRoot "build/cpp/RelWithDebInfo/$nativeName"),
+            (Join-Path $projectRoot "build/cpp/MinSizeRel/$nativeName")
+        )
+        $nativeExecutable = $nativeCandidates |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+        if ($null -eq $nativeExecutable) {
+            throw "The freshly built tungsten-cpp executable was not found."
+        }
+
+        uv run python scripts/check_cpp_parser_parity.py `
+            --no-build `
+            --native-binary $nativeExecutable
+        if ($LASTEXITCODE -ne 0) {
+            throw "Python/C++ parser parity failed."
+        }
+
+        uv run python scripts/check_cpp_stateful_evaluator_parity.py `
+            --no-build `
+            --native-binary $nativeExecutable `
+            --require-perfect
+        if ($LASTEXITCODE -ne 0) {
+            throw "Stateful Python/C++ evaluator parity failed."
+        }
+
+        uv run python scripts/check_cpp_recorded_evaluator_parity.py `
+            --no-build `
+            --native-binary $nativeExecutable `
+            --workers 4 `
+            --require-perfect
+        if ($LASTEXITCODE -ne 0) {
+            throw "Recorded Python/C++ evaluator parity failed."
+        }
+
+        uv run python scripts/check_cpp_cli_parity.py `
+            --native-binary $nativeExecutable
+        if ($LASTEXITCODE -ne 0) {
+            throw "Python/C++ CLI parity failed."
         }
     }
     finally {
@@ -34,13 +100,21 @@ try {
     Import-Module (Join-Path $projectRoot "pwsh\Tungsten.psd1") -Force
 
     $environment = Get-TungstenEnvironment -Probe
-    if (-not $environment.probe.evaluation.evaluation_available) {
+    if ($null -eq $environment.probe -or $null -eq $environment.probe.evaluation) {
         throw "Kernel probe did not produce a structured result."
     }
-
-    $evaluation = Invoke-TungstenKernel -Code "2+2" -RequireSuccess
-    if ($evaluation.result -ne "4") {
-        throw "Expected Tungsten evaluation result 4, got $($evaluation.result)."
+    $wolframAvailable = [bool] $environment.probe.evaluation.evaluation_available
+    if ($RequireWolframRuntime -and -not $wolframAvailable) {
+        throw "A local Wolfram runtime was required but none was discovered."
+    }
+    if ($wolframAvailable) {
+        $evaluation = Invoke-TungstenKernel -Code "2+2" -RequireSuccess
+        if ($evaluation.result -ne "4") {
+            throw "Expected Tungsten evaluation result 4, got $($evaluation.result)."
+        }
+    }
+    else {
+        Write-Host "Skipping local Wolfram kernel smoke: no runtime was discovered."
     }
 
     $parsedExpression = Convert-TungstenExpression -Code "1 + 2 x^3"
@@ -48,17 +122,23 @@ try {
         throw "Expression parse smoke returned unexpected FullForm: $($parsedExpression.full_form)"
     }
 
-    $evaluatedExpression = Invoke-TungstenExpression -Code "Level[f[a, g[b]], -1]"
+    $evaluatedExpression = Invoke-TungstenExpression -Code "Level[f[a, g[b]], {-1}]"
     if ($evaluatedExpression.result.full_form -ne "List[a, b]") {
         throw "Expression evaluation smoke returned unexpected result: $($evaluatedExpression.result.full_form)"
     }
 
-    $hits = Find-TungstenDocumentation -Query "NotebookGet" -Limit 3
-    if ($null -eq $hits -or $hits.Count -lt 1) {
-        throw "Documentation search did not return NotebookGet."
+    if ($environment.docs_roots.Count -gt 0) {
+        $hits = Find-TungstenDocumentation -Query "NotebookGet" -Limit 3
+        if ($null -eq $hits -or $hits.Count -lt 1) {
+            throw "Documentation search did not return NotebookGet."
+        }
+    }
+    else {
+        Write-Host "Skipping Wolfram documentation smoke: no documentation roots were discovered."
     }
 
-    $tempNotebook = Join-Path $env:TEMP "tungsten-smoke.nb"
+    $tempDirectory = [System.IO.Path]::GetTempPath()
+    $tempNotebook = Join-Path $tempDirectory "tungsten-smoke.nb"
     $null = New-TungstenNotebook -Path $tempNotebook -Title "Tungsten Smoke" -Cell @(
         "Text:Hello from Tungsten",
         "Input:2+2"
@@ -69,7 +149,7 @@ try {
         throw "Expected at least 2 cells in the smoke notebook."
     }
 
-    $inlineBoxNotebook = Join-Path $env:TEMP "tungsten-inline-box-smoke.nb"
+    $inlineBoxNotebook = Join-Path $tempDirectory "tungsten-inline-box-smoke.nb"
     @'
 Notebook[{
 Cell[BoxData[GraphicsBox[{CircleBox[]}]], "Output", ExpressionUUID->"uuid-inline-box"],
@@ -100,6 +180,9 @@ Cell["hello \!\(\*StyleBox[\"Hi\", FontWeight->Bold]\)", "Text", CellID->2001]
     }
 
     if ($IncludeAssistant) {
+        if (-not $wolframAvailable) {
+            throw "Notebook Assistant smoke requires a local Wolfram runtime."
+        }
         $assistant = Invoke-TungstenNotebookAssistant `
             -Path $tempNotebook `
             -CellIndex 1 `
@@ -122,6 +205,9 @@ Cell["hello \!\(\*StyleBox[\"Hi\", FontWeight->Bold]\)", "Text", CellID->2001]
     }
 
     if ($IncludeFrontEnd) {
+        if (-not $wolframAvailable) {
+            throw "FrontEnd smoke requires a local Wolfram runtime."
+        }
         $null = Open-TungstenNotebook -Path $tempNotebook -RequireSuccess
         $null = Open-TungstenDocumentation -Identifier "paclet:ref/NotebookGet" -RequireSuccess
         Start-Sleep -Seconds 2
@@ -136,7 +222,7 @@ Cell["hello \!\(\*StyleBox[\"Hi\", FontWeight->Bold]\)", "Text", CellID->2001]
                 Import-TungstenWinDeskModule
                 $window = Get-WinDeskWindow -VisibleOnly | Where-Object { $_.Title -like "*Wolfram*" } | Select-Object -First 1
                 if ($null -ne $window) {
-                    $capturePath = Join-Path $env:TEMP "tungsten-front-end-smoke.png"
+                    $capturePath = Join-Path $tempDirectory "tungsten-front-end-smoke.png"
                     Get-WinDeskScreenshot -WindowHandle $window.Handle -OutFile $capturePath | Out-Null
                     Write-Host "WinDesk capture written to $capturePath"
                 }

@@ -36,7 +36,11 @@ public sealed class TungstenClientTests
             Assert.Equal(
                 ["env", "show", "--probe"],
                 response.ExtensionData["forwarded_args"].Deserialize<string[]>()!);
-            Assert.Equal(@"C:\fake\tungsten\src", response.ExtensionData["pythonpath"].GetString());
+            var ambientPythonPath = Environment.GetEnvironmentVariable("PYTHONPATH");
+            var expectedPythonPath = string.IsNullOrWhiteSpace(ambientPythonPath)
+                ? @"C:\fake\tungsten\src"
+                : string.Join(Path.PathSeparator, @"C:\fake\tungsten\src", ambientPythonPath);
+            Assert.Equal(expectedPythonPath, response.ExtensionData["pythonpath"].GetString());
             Assert.Equal(workingDirectory, response.ExtensionData["cwd"].GetString());
         }
         finally
@@ -268,6 +272,88 @@ public sealed class TungstenClientTests
     }
 
     [Fact]
+    public void DefaultOptions_UseCppExecutableFromPath()
+    {
+        var options = new TungstenClientOptions();
+
+        Assert.Equal("tungsten-cpp", options.ExecutablePath);
+        Assert.Empty(options.LauncherArguments);
+    }
+
+    [Fact]
+    public void NotebookCellSelector_RejectsEmptyPath()
+    {
+        Assert.Throws<ArgumentException>(() => TungstenNotebookCellSelector.ByPath());
+    }
+
+    [Fact]
+    public void RepositoryOptions_DiscoverCppLayoutAndBuildArtifacts()
+    {
+        var tempRoot = CreateTempDirectory();
+        var previousExecutable = Environment.GetEnvironmentVariable("TUNGSTEN_EXECUTABLE");
+        try
+        {
+            Environment.SetEnvironmentVariable("TUNGSTEN_EXECUTABLE", null);
+            var tungstenRoot = CreateCppRepositoryLayout(tempRoot);
+            var executableName = OperatingSystem.IsWindows() ? "tungsten-cpp.exe" : "tungsten-cpp";
+            var releaseExecutable = Path.Combine(
+                tungstenRoot,
+                "build",
+                "cpp",
+                "Release",
+                executableName);
+            Directory.CreateDirectory(Path.GetDirectoryName(releaseExecutable)!);
+            File.WriteAllText(releaseExecutable, string.Empty);
+
+            var releaseOptions = TungstenClientOptions.CreateForRepositoryRoot(tempRoot);
+
+            Assert.Equal(releaseExecutable, releaseOptions.ExecutablePath);
+            Assert.Equal(tungstenRoot, releaseOptions.WorkingDirectory);
+
+            var directExecutable = Path.Combine(tungstenRoot, "build", "cpp", executableName);
+            File.WriteAllText(directExecutable, string.Empty);
+            var directOptions = TungstenClientOptions.CreateForRepositoryRoot(tempRoot);
+            Assert.Equal(directExecutable, directOptions.ExecutablePath);
+
+            var nestedDirectory = Path.Combine(tungstenRoot, "dotnet", "tests", "nested");
+            Directory.CreateDirectory(nestedDirectory);
+            Assert.Equal(
+                tempRoot,
+                TungstenClientOptions.TryFindRepositoryRoot(nestedDirectory));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TUNGSTEN_EXECUTABLE", previousExecutable);
+            DeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
+    public void RepositoryOptions_RetainEnvironmentOverrideAndCustomLauncher()
+    {
+        var tempRoot = CreateTempDirectory();
+        var previousExecutable = Environment.GetEnvironmentVariable("TUNGSTEN_EXECUTABLE");
+        try
+        {
+            CreateCppRepositoryLayout(tempRoot);
+            Environment.SetEnvironmentVariable("TUNGSTEN_EXECUTABLE", "custom-tungsten-launcher");
+
+            var configured = TungstenClientOptions.CreateForRepositoryRoot(tempRoot);
+            var explicitLauncher = TungstenClientOptions.CreateForRepositoryRoot(
+                tempRoot,
+                executablePath: "pwsh");
+
+            Assert.Equal("custom-tungsten-launcher", configured.ExecutablePath);
+            Assert.Equal("pwsh", explicitLauncher.ExecutablePath);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TUNGSTEN_EXECUTABLE", previousExecutable);
+            DeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
     public async Task RealRepositoryExpressionEvaluation_WorksAsync()
     {
         var repositoryRoot = TungstenClientOptions.TryFindRepositoryRoot(AppContext.BaseDirectory);
@@ -280,11 +366,56 @@ public sealed class TungstenClientTests
         Assert.Equal("f[a, x, c]", response.Result?.FullForm);
     }
 
+    [Fact]
+    public async Task RealRepositoryNotebookPatch_WritesNativeCompatibleUtf8Async()
+    {
+        var repositoryRoot = TungstenClientOptions.TryFindRepositoryRoot(AppContext.BaseDirectory);
+        Assert.False(string.IsNullOrWhiteSpace(repositoryRoot));
+
+        var tempRoot = CreateTempDirectory();
+        try
+        {
+            var client = TungstenClient.CreateForRepositoryRoot(repositoryRoot!);
+            var notebookPath = Path.Combine(tempRoot, "unicode notebook.nb");
+            await client.CreateNotebookAsync(
+                notebookPath,
+                title: "Projection notebook",
+                cells: [new TungstenNotebookCellSpec("Text", "first")]);
+
+            var patched = await client.PatchNotebookAsync(
+                notebookPath,
+                new
+                {
+                    operations = new[]
+                    {
+                        new { op = "append_cell", style = "Text", text = "café λ" },
+                    },
+                });
+
+            Assert.Equal(2, patched.CellCount);
+            Assert.Equal("café λ", patched.Cells[1].Preview);
+        }
+        finally
+        {
+            DeleteDirectory(tempRoot);
+        }
+    }
+
     private static string CreateTempDirectory()
     {
         var root = Path.Combine(Path.GetTempPath(), $"tungsten-dotnet-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         return root;
+    }
+
+    private static string CreateCppRepositoryLayout(string repositoryRoot)
+    {
+        var tungstenRoot = Path.Combine(repositoryRoot, "Engine");
+        var cppSourceRoot = Path.Combine(tungstenRoot, "cpp", "src");
+        Directory.CreateDirectory(cppSourceRoot);
+        File.WriteAllText(Path.Combine(tungstenRoot, "CMakeLists.txt"), string.Empty);
+        File.WriteAllText(Path.Combine(cppSourceRoot, "main.cpp"), string.Empty);
+        return tungstenRoot;
     }
 
     private static void DeleteDirectory(string path)

@@ -10,6 +10,9 @@ namespace Tungsten.DotNet;
 /// </summary>
 public sealed class TungstenClient
 {
+    private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(
+        encoderShouldEmitUTF8Identifier: false);
+
     /// <summary>
     /// Initializes a new instance of the <see cref="TungstenClient"/> class.
     /// </summary>
@@ -26,13 +29,13 @@ public sealed class TungstenClient
     /// <summary>
     /// Creates a Tungsten client configured for this repository's checked-out Tungsten layout.
     /// </summary>
-    public static TungstenClient CreateForRepositoryRoot(string repositoryRoot, string executablePath = "python") =>
+    public static TungstenClient CreateForRepositoryRoot(string repositoryRoot, string? executablePath = null) =>
         new(TungstenClientOptions.CreateForRepositoryRoot(repositoryRoot, executablePath));
 
     /// <summary>
     /// Discovers a repository root containing Tungsten and creates a client configured for it.
     /// </summary>
-    public static TungstenClient CreateForDiscoveredRepository(string? startDirectory = null, string executablePath = "python") =>
+    public static TungstenClient CreateForDiscoveredRepository(string? startDirectory = null, string? executablePath = null) =>
         new(TungstenClientOptions.CreateForDiscoveredRepository(startDirectory, executablePath));
 
     /// <summary>
@@ -160,7 +163,7 @@ public sealed class TungstenClient
         try
         {
             var json = JsonSerializer.Serialize(patchSpec, Options.JsonSerializerOptions);
-            await File.WriteAllTextAsync(tempFile, json, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(tempFile, json, Utf8WithoutBom, cancellationToken).ConfigureAwait(false);
             return await PatchNotebookFromFileAsync(notebookPath, tempFile, outputPath, cancellationToken).ConfigureAwait(false);
         }
         finally

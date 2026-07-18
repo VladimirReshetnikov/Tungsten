@@ -1,59 +1,62 @@
 using System.Diagnostics;
 
-static string? FindTungstenPythonSource()
+static string? FindTungstenNativeExecutable()
 {
+    var configured = Environment.GetEnvironmentVariable("TUNGSTEN_EXECUTABLE");
+    if (!string.IsNullOrWhiteSpace(configured))
+    {
+        return configured;
+    }
+
+    var executableName = OperatingSystem.IsWindows() ? "tungsten-cpp.exe" : "tungsten-cpp";
+    var relativeCandidates = new[]
+    {
+        executableName,
+        Path.Combine("Release", executableName),
+        Path.Combine("Debug", executableName),
+        Path.Combine("RelWithDebInfo", executableName),
+        Path.Combine("MinSizeRel", executableName),
+    };
     var directory = new DirectoryInfo(AppContext.BaseDirectory);
     while (directory is not null)
     {
-        var candidate = Path.Combine(directory.FullName, "src", "tungsten", "__init__.py");
-        if (File.Exists(candidate))
+        foreach (var relativeCandidate in relativeCandidates)
         {
-            return Path.Combine(directory.FullName, "src");
-        }
-
-        var siblingCandidate = Path.Combine(directory.FullName, "Engine", "src", "tungsten", "__init__.py");
-        if (File.Exists(siblingCandidate))
-        {
-            return Path.Combine(directory.FullName, "Engine", "src");
+            var candidate = Path.Combine(
+                directory.FullName,
+                "build",
+                "cpp",
+                relativeCandidate);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+            var siblingCandidate = Path.Combine(
+                directory.FullName,
+                "Engine",
+                "build",
+                "cpp",
+                relativeCandidate);
+            if (File.Exists(siblingCandidate))
+            {
+                return siblingCandidate;
+            }
         }
 
         directory = directory.Parent;
     }
 
-    var currentDirectoryCandidate = Path.Combine(Environment.CurrentDirectory, "Engine", "src", "tungsten", "__init__.py");
-    if (File.Exists(currentDirectoryCandidate))
-    {
-        return Path.Combine(Environment.CurrentDirectory, "Engine", "src");
-    }
-
-    return null;
-}
-
-static string FindPythonExecutable()
-{
-    var configured = Environment.GetEnvironmentVariable("TUNGSTEN_PYTHON");
-    return string.IsNullOrWhiteSpace(configured) ? "python" : configured;
+    return "tungsten-cpp";
 }
 
 var startInfo = new ProcessStartInfo
 {
-    FileName = FindPythonExecutable(),
+    FileName = FindTungstenNativeExecutable(),
     UseShellExecute = false,
 };
-startInfo.ArgumentList.Add("-m");
-startInfo.ArgumentList.Add("tungsten");
 foreach (var argument in args)
 {
     startInfo.ArgumentList.Add(argument);
-}
-
-var sourceRoot = FindTungstenPythonSource();
-if (sourceRoot is not null)
-{
-    var existingPythonPath = Environment.GetEnvironmentVariable("PYTHONPATH");
-    startInfo.Environment["PYTHONPATH"] = string.IsNullOrWhiteSpace(existingPythonPath)
-        ? sourceRoot
-        : sourceRoot + Path.PathSeparator + existingPythonPath;
 }
 
 try
@@ -61,7 +64,7 @@ try
     using var process = Process.Start(startInfo);
     if (process is null)
     {
-        Console.Error.WriteLine("tungsten.exe could not start Python.");
+        Console.Error.WriteLine("tungsten.exe could not start the native Tungsten engine.");
         return 2;
     }
 
@@ -70,7 +73,7 @@ try
 }
 catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
 {
-    Console.Error.WriteLine("tungsten.exe could not start Python. Set TUNGSTEN_PYTHON to a Python executable that can run Tungsten.");
+    Console.Error.WriteLine("tungsten.exe could not start the native Tungsten engine. Build tungsten-cpp with CMake or set TUNGSTEN_EXECUTABLE.");
     Console.Error.WriteLine(ex.Message);
     return 2;
 }

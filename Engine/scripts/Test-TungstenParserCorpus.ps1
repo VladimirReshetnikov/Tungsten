@@ -6,7 +6,7 @@ Runs Tungsten parser corpus checks against the local Wolfram parser corpus.
 .DESCRIPTION
 This is a Windows-friendly wrapper around:
 
-    python -m tungsten parser-corpus compare
+    tungsten-cpp parser-corpus compare
 
 By default it parses a bounded sample from
 `C:\TestData\wolfram\tungsten-wolfram-parser-corpus`, compares Tungsten parse acceptance with the local
@@ -36,13 +36,13 @@ param(
     [string[]] $ExcludeGlob = @(),
 
     [Parameter()]
-    [Nullable[int]] $MaxFiles = 100,
+    [Nullable[long]] $MaxFiles = 100,
 
     [Parameter()]
     [double] $MaxFileMB = 2.0,
 
     [Parameter()]
-    [Nullable[int]] $MaxBytes = $null,
+    [string] $MaxBytes,
 
     [Parameter()]
     [switch] $NoMaxBytes,
@@ -67,7 +67,7 @@ param(
     [switch] $Shuffle,
 
     [Parameter()]
-    [int] $Seed = 0,
+    [string] $Seed = '0',
 
     [Parameter()]
     [switch] $NoWrite,
@@ -85,28 +85,42 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Assert-Tool([string] $Name) {
-    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "Required tool '$Name' was not found on PATH."
+function Resolve-TungstenExecutable {
+    if (-not [string]::IsNullOrWhiteSpace($env:TUNGSTEN_EXECUTABLE)) {
+        return $env:TUNGSTEN_EXECUTABLE
     }
+    $name = if ($IsWindows) { 'tungsten-cpp.exe' } else { 'tungsten-cpp' }
+    foreach ($relativePath in @(
+        "build/cpp/$name",
+        "build/cpp/Release/$name",
+        "build/cpp/Debug/$name",
+        "build/cpp/RelWithDebInfo/$name",
+        "build/cpp/MinSizeRel/$name"
+    )) {
+        $candidate = Join-Path $projectRoot $relativePath
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    $command = Get-Command tungsten-cpp -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+    throw "The native Tungsten executable was not found. Build tungsten-cpp or set TUNGSTEN_EXECUTABLE."
 }
 
-Assert-Tool python
-
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
-$sourceRoot = Join-Path $projectRoot 'src'
-$previousPythonPath = $env:PYTHONPATH
-$separator = [System.IO.Path]::PathSeparator
+$tungsten = Resolve-TungstenExecutable
+$invariantCulture = [Globalization.CultureInfo]::InvariantCulture
 
 $arguments = @(
-    '-m', 'tungsten',
     'parser-corpus', 'compare',
     '--corpus-root', $CorpusRoot,
-    '--max-file-mb', $MaxFileMB,
+    '--max-file-mb', $MaxFileMB.ToString($null, $invariantCulture),
     '--form', $Form,
-    '--kernel-batch-size', $KernelBatchSize,
-    '--tungsten-workers', $TungstenWorkers,
-    '--preview-chars', $PreviewChars,
+    '--kernel-batch-size', $KernelBatchSize.ToString($invariantCulture),
+    '--tungsten-workers', $TungstenWorkers.ToString($invariantCulture),
+    '--preview-chars', $PreviewChars.ToString($invariantCulture),
     '--seed', $Seed
 )
 
@@ -123,9 +137,9 @@ foreach ($item in $ExcludeGlob) {
     $arguments += @('--exclude-glob', $item)
 }
 if ($null -ne $MaxFiles) {
-    $arguments += @('--max-files', $MaxFiles)
+    $arguments += @('--max-files', $MaxFiles.ToString($invariantCulture))
 }
-if ($null -ne $MaxBytes) {
+if (-not [string]::IsNullOrWhiteSpace($MaxBytes)) {
     $arguments += @('--max-bytes', $MaxBytes)
 }
 if ($NoMaxBytes) {
@@ -150,19 +164,7 @@ if ($FailOnMismatch) {
     $arguments += '--fail-on-mismatch'
 }
 
-try {
-    $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
-        $sourceRoot
-    }
-    else {
-        "$sourceRoot$separator$previousPythonPath"
-    }
-
-    & python @arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Tungsten parser corpus comparison failed with exit code $LASTEXITCODE."
-    }
-}
-finally {
-    $env:PYTHONPATH = $previousPythonPath
+& $tungsten @arguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Tungsten parser corpus comparison failed with exit code $LASTEXITCODE."
 }

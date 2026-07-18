@@ -72,6 +72,10 @@ public sealed record TungstenNotebookCellSelector
     public static TungstenNotebookCellSelector ByPath(params int[] path)
     {
         ArgumentNullException.ThrowIfNull(path);
+        if (path.Length == 0)
+        {
+            throw new ArgumentException("Notebook cell paths must not be empty.", nameof(path));
+        }
         return new(cellIndex: null, cellPath: path, expressionUuid: null, cellId: null, cellTag: null);
     }
 
