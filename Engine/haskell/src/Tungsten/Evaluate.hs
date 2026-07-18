@@ -11,9 +11,12 @@ module Tungsten.Evaluate
   ) where
 
 import Control.Monad (foldM)
+import Data.Char (isDigit)
 import Data.List (permutations, sortBy, transpose)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
+import qualified Data.Text as T
+import Text.Read (readMaybe)
 import Tungsten.Expression
 
 newtype EvaluationError = EvaluationError {evaluationErrorMessage :: Text}
@@ -113,6 +116,11 @@ reduceBuiltin headName values = case headName of
   "Factorial2" -> Right (reduceFactorial2 values)
   "Abs" -> Right (reduceAbs values)
   "Sign" -> Right (reduceSign values)
+  "Floor" -> Right (reduceRounding RoundFloor headName values)
+  "Ceiling" -> Right (reduceRounding RoundCeiling headName values)
+  "Round" -> Right (reduceRounding RoundNearest headName values)
+  "IntegerPart" -> Right (reduceRounding RoundIntegerPart headName values)
+  "FractionalPart" -> Right (reduceRounding RoundFractionalPart headName values)
   "Not" -> Right (reduceNot values)
   "Equal" -> Right (reduceEquality True values)
   "Unequal" -> Right (reduceEquality False values)
@@ -239,6 +247,22 @@ reduceBuiltin headName values = case headName of
 data Exact = Exact !Integer !Integer
   deriving (Eq, Ord, Show)
 
+data RoundingOperation
+  = RoundFloor
+  | RoundCeiling
+  | RoundNearest
+  | RoundIntegerPart
+  | RoundFractionalPart
+  deriving (Eq, Show)
+
+data RealKind
+  = MachineReal
+  | MarkedReal !Integer
+  deriving (Eq, Show)
+
+data RealInfo = RealInfo !Exact !RealKind !Int !Bool !Text
+  deriving (Eq, Show)
+
 toExact :: Expr -> Maybe Exact
 toExact (Integer value) = Just (Exact value 1)
 toExact (Rational numerator denominator) = Just (normalizeExact numerator denominator)
@@ -264,6 +288,225 @@ addExact (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenomi
 multiplyExact :: Exact -> Exact -> Exact
 multiplyExact (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
   normalizeExact (leftNumerator * rightNumerator) (leftDenominator * rightDenominator)
+
+divideExact :: Exact -> Exact -> Maybe Exact
+divideExact _ (Exact 0 _) = Nothing
+divideExact (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
+  Just (normalizeExact (leftNumerator * rightDenominator) (leftDenominator * rightNumerator))
+
+reduceRounding :: RoundingOperation -> Text -> [Expr] -> Expr
+reduceRounding operation headName values =
+  case values of
+    [value]
+      | Just result <- roundScalar operation value -> result
+    [value, multiple]
+      | operation `elem` [RoundFloor, RoundCeiling, RoundNearest]
+      , Just exactValue <- toExact value
+      , Just exactMultiple@(Exact multipleNumerator _) <- toExact multiple ->
+          if multipleNumerator == 0
+            then Symbol "Indeterminate"
+            else case divideExact exactValue exactMultiple of
+              Just quotient ->
+                fromExact
+                  (multiplyExact exactMultiple (Exact (roundExact operation quotient) 1))
+              Nothing -> Call (Symbol headName) values
+    _ -> Call (Symbol headName) values
+
+roundScalar :: RoundingOperation -> Expr -> Maybe Expr
+roundScalar operation value
+  | Just exactValue <- toExact value = Just (roundExactExpr operation exactValue)
+roundScalar operation (Real source) = do
+  info <- parseRealInfo source
+  roundReal operation info
+roundScalar _ _ = Nothing
+
+roundExactExpr :: RoundingOperation -> Exact -> Expr
+roundExactExpr RoundFractionalPart value = fromExact (fractionalExact value)
+roundExactExpr operation value = Integer (roundExact operation value)
+
+roundExact :: RoundingOperation -> Exact -> Integer
+roundExact RoundFloor (Exact numerator denominator) = numerator `div` denominator
+roundExact RoundCeiling (Exact numerator denominator) = negate ((negate numerator) `div` denominator)
+roundExact RoundNearest (Exact numerator denominator) =
+  let (quotient, remainder) = numerator `quotRem` denominator
+      comparison = compare (2 * abs remainder) denominator
+      awayFromZero = quotient + signum numerator
+   in case comparison of
+        LT -> quotient
+        GT -> awayFromZero
+        EQ -> if even quotient then quotient else awayFromZero
+roundExact RoundIntegerPart (Exact numerator denominator) = numerator `quot` denominator
+roundExact RoundFractionalPart _ = 0
+
+fractionalExact :: Exact -> Exact
+fractionalExact value@(Exact numerator denominator) =
+  addExact value (Exact (negate (numerator `quot` denominator)) 1)
+
+roundReal :: RoundingOperation -> RealInfo -> Maybe Expr
+roundReal RoundFractionalPart (RealInfo _ MachineReal _ _ machineSource) = do
+  machineValue <- readMaybe (T.unpack machineSource) :: Maybe Double
+  if isInfinite machineValue || isNaN machineValue
+    then Nothing
+    else
+      let remainder = machineValue - fromInteger (truncate machineValue)
+       in Just (Real (formatMachineReal remainder))
+roundReal RoundFractionalPart (RealInfo value (MarkedReal precision) scale negativeZero _) =
+  Just
+    ( Real
+        ( formatFixedExact (fractionalExact value) scale negativeZero
+            <> "`" <> T.pack (show precision) <> "."
+        )
+    )
+roundReal operation (RealInfo value _ _ _ _) = Just (Integer (roundExact operation value))
+
+parseRealInfo :: Text -> Maybe RealInfo
+parseRealInfo source = do
+  (literal, magnitudePower, exponentSource) <- splitRealMagnitude source
+  let (numberSource, markerSource) = T.breakOn "`" literal
+  (baseValue, baseScale, negativeZero) <- parseDecimalExact numberSource
+  let maximumMagnitude = 100000 :: Integer
+  if abs magnitudePower > maximumMagnitude
+    then Nothing
+    else do
+      let exponentMagnitude = fromInteger (abs magnitudePower)
+          value =
+            if magnitudePower >= 0
+              then multiplyExact baseValue (Exact (10 ^ exponentMagnitude) 1)
+              else multiplyExact baseValue (Exact 1 (10 ^ exponentMagnitude))
+          scale = baseScale + if magnitudePower < 0 then exponentMagnitude else 0
+          kind = parseRealKind markerSource
+          machineSource = normalizeDoubleMantissa numberSource <> exponentSource
+      pure (RealInfo value kind scale negativeZero machineSource)
+
+splitRealMagnitude :: Text -> Maybe (Text, Integer, Text)
+splitRealMagnitude source =
+  case T.breakOn "*^" source of
+    (literal, marker)
+      | T.null marker -> Just (literal, 0, "")
+      | otherwise -> do
+          let exponentSource = T.drop 2 marker
+          if T.null exponentSource || T.isInfixOf "*^" exponentSource
+            then Nothing
+            else do
+              magnitudePower <- readMaybe (T.unpack exponentSource)
+              pure (literal, magnitudePower, "e" <> exponentSource)
+
+parseDecimalExact :: Text -> Maybe (Exact, Int, Bool)
+parseDecimalExact source = do
+  let (sign, unsigned) = case T.uncons source of
+        Just ('-', rest) -> (-1, rest)
+        Just ('+', rest) -> (1, rest)
+        _ -> (1, source)
+      pieces = T.splitOn "." unsigned
+  (whole, fraction) <- case pieces of
+    [wholePart] -> Just (wholePart, "")
+    [wholePart, fractionPart] -> Just (wholePart, fractionPart)
+    _ -> Nothing
+  if (T.null whole && T.null fraction)
+      || not (T.all isDigit whole)
+      || not (T.all isDigit fraction)
+    then Nothing
+    else do
+      coefficient <- readMaybe (T.unpack (if T.null (whole <> fraction) then "0" else whole <> fraction))
+      let scale = T.length fraction
+          signedCoefficient = sign * coefficient
+      pure
+        ( normalizeExact signedCoefficient (10 ^ scale)
+        , scale
+        , sign < 0 && coefficient == 0
+        )
+
+parseRealKind :: Text -> RealKind
+parseRealKind markerSource
+  | T.null markerSource = MachineReal
+  | T.null specification = MachineReal
+  | isAccuracy = MarkedReal 0
+  | otherwise = MarkedReal (parseMarkerValue specification)
+ where
+  afterFirst = T.drop 1 markerSource
+  isAccuracy = T.isPrefixOf "`" afterFirst
+  specification = if isAccuracy then T.drop 1 afterFirst else afterFirst
+
+parseMarkerValue :: Text -> Integer
+parseMarkerValue source =
+  case parseDecimalExact source of
+    Just (Exact numerator denominator, _, _) -> max 0 (numerator `quot` denominator)
+    Nothing -> 0
+
+normalizeDoubleMantissa :: Text -> Text
+normalizeDoubleMantissa source
+  | T.isPrefixOf "-." source = "-0" <> T.drop 1 source
+  | T.isPrefixOf "+." source = "+0" <> T.drop 1 source
+  | T.isPrefixOf "." source = "0" <> source
+  | T.isSuffixOf "." source = source <> "0"
+  | otherwise = source
+
+formatMachineReal :: Double -> Text
+formatMachineReal value =
+  case splitScientific (T.pack (show value)) of
+    Just (mantissa, magnitudePower)
+      | magnitudePower >= -4 && magnitudePower < 16 ->
+          ensureMachinePoint (scientificToFixed mantissa magnitudePower)
+      | otherwise ->
+          stripTerminalZero mantissa <> "*^" <> formatExponent magnitudePower
+    Nothing -> ensureMachinePoint (T.pack (show value))
+
+splitScientific :: Text -> Maybe (Text, Int)
+splitScientific source =
+  case T.break (`elem` ("eE" :: String)) source of
+    (mantissa, exponentSource)
+      | T.null exponentSource -> Nothing
+      | otherwise -> (,) mantissa <$> readMaybe (T.unpack (T.drop 1 exponentSource))
+
+scientificToFixed :: Text -> Int -> Text
+scientificToFixed mantissa magnitudePower =
+  let (sign, unsigned) = case T.uncons mantissa of
+        Just ('-', rest) -> ("-", rest)
+        Just ('+', rest) -> ("", rest)
+        _ -> ("", mantissa)
+      (whole, fractionWithPoint) = T.breakOn "." unsigned
+      fraction = if T.null fractionWithPoint then "" else T.drop 1 fractionWithPoint
+      digits = whole <> fraction
+      decimalPosition = T.length whole + magnitudePower
+      fixed
+        | decimalPosition <= 0 = "0." <> T.replicate (negate decimalPosition) "0" <> digits
+        | decimalPosition >= T.length digits = digits <> T.replicate (decimalPosition - T.length digits) "0" <> ".0"
+        | otherwise = T.take decimalPosition digits <> "." <> T.drop decimalPosition digits
+   in sign <> trimFractionZeros fixed
+
+trimFractionZeros :: Text -> Text
+trimFractionZeros source
+  | not (T.isInfixOf "." source) = source
+  | otherwise =
+      let trimmed = T.dropWhileEnd (== '0') source
+       in if T.isSuffixOf "." trimmed then trimmed <> "0" else trimmed
+
+stripTerminalZero :: Text -> Text
+stripTerminalZero source = maybe source id (T.stripSuffix ".0" source)
+
+formatExponent :: Int -> Text
+formatExponent magnitudePower =
+  let magnitude = T.pack (show (abs magnitudePower))
+      padded = if T.length magnitude < 2 then "0" <> magnitude else magnitude
+   in (if magnitudePower < 0 then "-" else "+") <> padded
+
+ensureMachinePoint :: Text -> Text
+ensureMachinePoint source
+  | Just withoutZero <- T.stripSuffix ".0" source = withoutZero <> "."
+  | T.isInfixOf "." source = source
+  | otherwise = source <> "."
+
+formatFixedExact :: Exact -> Int -> Bool -> Text
+formatFixedExact (Exact numerator denominator) scale negativeZero =
+  let scaled = numerator * (10 ^ scale) `div` denominator
+      sign = if scaled < 0 || (scaled == 0 && negativeZero) then "-" else ""
+      digits = T.pack (show (abs scaled))
+   in if scale == 0
+        then sign <> digits <> "."
+        else
+          let padded = T.replicate (max 0 (scale + 1 - T.length digits)) "0" <> digits
+              decimalPosition = T.length padded - scale
+           in sign <> T.take decimalPosition padded <> "." <> T.drop decimalPosition padded
 
 reducePlus :: [Expr] -> Expr
 reducePlus originalValues =

@@ -464,13 +464,14 @@ precisionParser = do
  where
   decimalPrecision = do
     whole <- T.pack <$> many (satisfy isDigit)
-    fraction <- optionalText $ try $ do
+    fraction <- optionMaybe $ try $ do
       point <- char '.'
-      digits <- T.pack <$> many1 (satisfy isDigit)
+      digits <- T.pack <$> many (satisfy isDigit)
+      if T.null digits then notFollowedBy (char '.') else pure ()
       pure (T.cons point digits)
-    if T.null whole && T.null fraction
+    if T.null whole && maybe True (T.null . T.drop 1) fraction
       then unexpected "empty precision value"
-      else pure (whole <> fraction)
+      else pure (whole <> maybe "" id fraction)
 
 magnitudeParser :: Parser Text
 magnitudeParser = do
