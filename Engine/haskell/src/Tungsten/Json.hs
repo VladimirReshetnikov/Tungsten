@@ -54,6 +54,7 @@ import Text.Parsec.String (Parser)
 import Text.Read (readMaybe)
 import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
 import Tungsten.Expression
+import Tungsten.WolframString
 import Tungsten.Parser (parseErrorMessage, parseFullForm, parseInputForm)
 
 -- | JSON numbers retain their source lexeme.  This avoids silently rounding
@@ -216,7 +217,7 @@ exprToJson expression = JsonObject $ case expression of
       , ("real", exprToJson realPart)
       , ("imaginary", exprToJson imaginaryPart)
       ]
-  String value -> object [text "type" "string", text "value" value]
+  String value -> object (stringFields value)
   ByteArray values ->
     object
       [ text "type" "byte_array"
@@ -249,6 +250,20 @@ exprToJson expression = JsonObject $ case expression of
   object = Map.fromList
   text key value = (key, JsonString value)
   number key value = (key, JsonNumber (T.pack (show value)))
+  stringFields value =
+    [text "type" "string", text "value" value]
+      <> if hasInlineBoxes value
+        then [("inline_boxes", JsonArray (map inlineBoxSegmentToJson (inlineBoxSegments value)))]
+        else []
+  inlineBoxSegmentToJson (StringInlineBoxSegment boxExpression source) =
+    JsonObject
+      ( Map.fromList
+          [ ("box_expression", JsonString boxExpression)
+          , ("inline_box_escape", JsonString source)
+          , ("kind", JsonString "inline_box")
+          ]
+      )
+  inlineBoxSegmentToJson (StringTextSegment value) = JsonString value
   sparseEntryToJson (SparseEntry indices value) =
     JsonObject
       ( Map.fromList

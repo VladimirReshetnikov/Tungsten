@@ -4,6 +4,7 @@ module Main (main) where
 
 import Control.Exception (bracket)
 import qualified Data.ByteString as BS
+import Data.Char (chr)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,6 +25,7 @@ import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.Repl
 import Tungsten.Session
+import Tungsten.WolframString
 
 main :: IO ()
 main = do
@@ -35,6 +37,7 @@ main = do
 tests :: [IO Bool]
 tests =
   [ checkFullForms
+  , checkWolframStrings
   , checkFullFormParser
   , checkFullFormParserErrors
   , checkInputFormParser
@@ -59,6 +62,61 @@ tests =
   , checkParserEvaluatorProtocol
   , checkProtocolErrors
   ]
+
+checkWolframStrings :: IO Bool
+checkWolframStrings = do
+  let boxExpression = "GraphicsBox[{CircleBox[]}]"
+      rawEscape = "\\!\\(\\*" <> boxExpression <> "\\)"
+      decodedEscape = Text.pack (map chr [0xf7c1, 0xf7c9, 0xf7c8]) <> boxExpression <> Text.singleton (chr 0xf7c0)
+      decoded = "hello " <> decodedEscape
+      expectedSegments =
+        [ StringTextSegment "hello "
+        , StringInlineBoxSegment boxExpression decodedEscape
+        ]
+      nestedExpression = "RowBox[{\"\\(ignored\\)\", (* \\(ignored\\) *) \\(x\\)}]"
+      nestedEscape = inlineBoxEscape nestedExpression
+      checks =
+        [ assertEqual
+            "decode inline-box string markers"
+            decoded
+            (parseWolframStringLiteral ("\"hello \\!\\(\\*" <> boxExpression <> "\\)\""))
+        , assertEqual "segment decoded inline boxes" expectedSegments (splitInlineBoxes decoded)
+        , assertEqual
+            "segment raw inline boxes"
+            [StringTextSegment "hello ", StringInlineBoxSegment boxExpression rawEscape]
+            (splitInlineBoxes ("hello " <> rawEscape))
+        , assertEqual
+            "respect strings and comments while matching nested boxes"
+            [StringInlineBoxSegment nestedExpression nestedEscape]
+            (splitInlineBoxes nestedEscape)
+        , assertEqual
+            "compose inline-box source"
+            ("icon: " <> rawEscape <> ".")
+            (composeInlineBoxString "icon: " [boxExpression] ".")
+        , assertEqual
+            "compose inline-box literal"
+            ("\"icon: \\\\!\\\\(\\\\*GraphicsBox[{CircleBox[]}]\\\\).\"")
+            (composeInlineBoxStringLiteral "icon: " [boxExpression] ".")
+        , assertEqual "replace boxes in display text" "hello [InlineBox]" (displayText "[InlineBox]" decoded)
+        , assertEqual
+            "decode Wolfram character escape families"
+            "AαAAB\\q"
+            (parseWolframStringLiteral "\"\\.41\\[Alpha]\\:0041\\101\\<B\\>\\q\"")
+        , assertEqual
+            "FullForm parser shares string decoding"
+            (Right (String decoded))
+            (parseFullForm ("\"hello \\!\\(\\*" <> boxExpression <> "\\)\""))
+        , case exprToJson (String decoded) of
+            JsonObject fields -> case Map.lookup "inline_boxes" fields of
+              Just (JsonArray [JsonObject boxFields]) ->
+                assertEqual
+                  "string JSON exposes inline boxes"
+                  (Just (JsonString boxExpression))
+                  (Map.lookup "box_expression" boxFields)
+              _ -> assertEqual "string JSON inline-box array shape" True False
+            _ -> assertEqual "string JSON object shape" True False
+        ]
+  and <$> sequence checks
 
 checkFullFormParser :: IO Bool
 checkFullFormParser = do

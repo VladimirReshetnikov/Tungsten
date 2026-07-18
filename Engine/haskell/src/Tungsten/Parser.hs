@@ -14,10 +14,9 @@ module Tungsten.Parser
 
 import Control.Monad (void)
 import Data.Bifunctor (first)
-import Data.Char (chr, digitToInt, isAlpha, isAlphaNum, isDigit, isHexDigit, isSpace, ord)
+import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace, ord)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Numeric (readOct)
 import Text.Parsec
   ( Parsec
   , anyChar
@@ -26,7 +25,6 @@ import Text.Parsec
   , chainl1
   , chainr1
   , choice
-  , count
   , eof
   , getInput
   , many
@@ -45,6 +43,7 @@ import Text.Parsec
   )
 import qualified Text.Parsec as Parsec
 import Tungsten.Expression
+import Tungsten.WolframString (parseWolframStringLiteral)
 
 newtype ParseError = ParseError {parseErrorMessage :: Text}
   deriving (Eq, Show)
@@ -443,50 +442,16 @@ magnitudeParser = do
   pure (T.pack marker <> sign <> exponentDigits)
 
 stringLiteralParser :: Parser Text
-stringLiteralParser = between (char '"') (char '"') (T.concat <$> many stringChunk)
+stringLiteralParser =
+  parseWolframStringLiteral . T.concat
+    <$> between (char '"') (char '"') (many stringSourceChunk)
  where
-  stringChunk =
+  stringSourceChunk =
     (T.singleton <$> satisfy (\character -> character /= '"' && character /= '\\'))
-      <|> escapedStringChunk
-
-escapedStringChunk :: Parser Text
-escapedStringChunk = do
-  _ <- char '\\'
-  choice
-    [ "\"" <$ char '"'
-    , "\\" <$ char '\\'
-    , "\b" <$ char 'b'
-    , "\f" <$ char 'f'
-    , "\n" <$ char 'n'
-    , "\r" <$ char 'r'
-    , "\t" <$ char 't'
-    , "" <$ char '\n'
-    , T.singleton . chr . hexadecimalValue <$> (char ':' *> count 4 hexDigit)
-    , T.singleton . chr . hexadecimalValue <$> (char '|' *> count 6 hexDigit)
-    , T.singleton . octalValue <$> count 3 (oneOf ['0' .. '7'])
-    , namedCharacter
-    , T.singleton <$> anyChar
-    ]
- where
-  hexDigit = satisfy isHexDigit
-  hexadecimalValue = foldl' (\value character -> value * 16 + digitToInt character) 0
-  octalValue characters = case readOct characters of
-    [(value, "")] -> chr value
-    _ -> error "the parser accepted a malformed octal escape"
-
-namedCharacter :: Parser Text
-namedCharacter = do
-  name <- between (char '[') (char ']') (many1 (satisfy isAlpha))
-  pure $ case name of
-    "Alpha" -> "α"
-    "Beta" -> "β"
-    "Gamma" -> "γ"
-    "Delta" -> "δ"
-    "Pi" -> "π"
-    "Infinity" -> "∞"
-    "Degree" -> "°"
-    "ImaginaryI" -> "ⅈ"
-    _ -> "\\[" <> T.pack name <> "]"
+      <|> do
+        slash <- char '\\'
+        escaped <- anyChar
+        pure (T.pack [slash, escaped])
 
 symbolParser :: Parser Text
 symbolParser = do

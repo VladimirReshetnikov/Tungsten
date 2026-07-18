@@ -21,6 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Set as Set
 import Numeric (showHex, showOct)
+import Tungsten.WolframString (wlString)
 
 -- | The kernel-free expression model.  Every constructor is immutable, and
 -- arbitrary-sized 'Integer' values are retained without conversion through a
@@ -128,8 +129,8 @@ fullForm expression = case expression of
   Real source -> source
   Complex realPart imaginaryPart ->
     apply "Complex" [fullForm realPart, fullForm imaginaryPart]
-  String value -> wolframString value
-  ByteArray values -> apply "ByteArray" [wolframString (base64Encode values)]
+  String value -> wlString value
+  ByteArray values -> apply "ByteArray" [wlString (base64Encode values)]
   Call expressionHead values -> apply (fullForm expressionHead) (map fullForm values)
   Root coefficients index method ->
     apply
@@ -184,16 +185,6 @@ sparseConstructor dimensions entries fill =
   arguments'
     | fill == Integer 0 = [rules, shape]
     | otherwise = [rules, shape, fill]
-
-wolframString :: Text -> Text
-wolframString value = "\"" <> T.concatMap escape value <> "\""
- where
-  escape '\\' = "\\\\"
-  escape '"' = "\\\""
-  escape '\r' = "\\r"
-  escape '\n' = "\\n"
-  escape '\t' = "\\t"
-  escape character = T.singleton character
 
 encodeSymbol :: Text -> Text
 encodeSymbol = T.concatMap encodeCharacter
