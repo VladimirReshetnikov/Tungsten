@@ -709,6 +709,8 @@ checkEvaluator = do
         , ("top-level repeated and pattern sequence", "{MatchQ[1, Repeated[_Integer]], MatchQ[1, PatternSequence[_Integer]]}", "List[True, True]")
         , ("bounded repeated patterns", "{Cases[{f[1], f[1, 2], f[1, 2, 3], f[1, 2, 3, 4]}, f[Repeated[_Integer, {2, 3}]]], Cases[{f[], f[1], f[1, 2], f[1, 2, 3]}, f[RepeatedNull[_Integer, 2]]]}", "List[List[f[1, 2], f[1, 2, 3]], List[f[], f[1], f[1, 2]]]")
         , ("repeated and named pattern sequences", "{Cases[{f[a, b, a, b], f[a, b, a]}, f[Repeated[PatternSequence[a, b]]] :> ok], Cases[{f[1, 2], f[1, 2, 3]}, f[x:PatternSequence[_Integer, _Integer]] :> HoldComplete[x]]}", "List[List[ok], List[HoldComplete[1, 2]]]")
+        , ("orderless pattern sequence capture", "Cases[{f[1, 2], f[2, 1]}, f[x:OrderlessPatternSequence[1, 2]] :> HoldComplete[x]]", "List[HoldComplete[1, 2], HoldComplete[2, 1]]")
+        , ("longest sequence priorities", "{Cases[{f[a, b, c, d]}, f[Longest[x__], y__] :> HoldComplete[{x}, {y}]], Cases[{f[a, b, c, d]}, f[x__, Longest[y__]] :> HoldComplete[{x}, {y}]]}", "List[List[HoldComplete[List[a, b, c], List[d]]], List[HoldComplete[List[a], List[b, c, d]]]]")
         , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")

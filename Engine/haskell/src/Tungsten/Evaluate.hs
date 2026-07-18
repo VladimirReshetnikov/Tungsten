@@ -11,7 +11,7 @@ module Tungsten.Evaluate
   ) where
 
 import Control.Monad (foldM)
-import Data.List (sortBy, transpose)
+import Data.List (permutations, sortBy, transpose)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Tungsten.Expression
@@ -1477,6 +1477,10 @@ matchPattern bindings expression patternExpression = case patternExpression of
     if testResult == Symbol "True" then Just matched else Nothing
   Call (Symbol "HoldPattern") [innerPattern] ->
     matchPattern bindings expression innerPattern
+  Call (Symbol "Longest") (innerPattern : _) ->
+    matchPattern bindings expression innerPattern
+  Call (Symbol "Shortest") (innerPattern : _) ->
+    matchPattern bindings expression innerPattern
   _
     | Just _ <- sequencePatternBounds patternExpression ->
         matchSequencePatternElements bindings patternExpression [expression]
@@ -1518,7 +1522,10 @@ matchPatternArguments bindings expressions (patternExpression : remainingPattern
  where
   availableCount = length expressions - minimumPatternArguments remainingPatterns
   candidateCounts minimumCount patternMaximum =
-    [minimumCount .. min patternMaximum availableCount]
+    let maximumCount = min patternMaximum availableCount
+     in if sequencePrefersLongest patternExpression
+          then [maximumCount, maximumCount - 1 .. minimumCount]
+          else [minimumCount .. maximumCount]
   matchSequenceCounts [] = Nothing
   matchSequenceCounts (count : rest) =
     let (segment, remainingExpressions) = splitAt count expressions
@@ -1549,6 +1556,8 @@ sequencePatternBounds expression = case expression of
   Call (Symbol "PatternTest") [inner, _] -> sequencePatternBounds inner
   Call (Symbol "Condition") [inner, _] -> sequencePatternBounds inner
   Call (Symbol "HoldPattern") [inner] -> sequencePatternBounds inner
+  Call (Symbol priority) (inner : _)
+    | priority `elem` ["Longest", "Shortest"] -> sequencePatternBounds inner
   Call (Symbol "Pattern") [_, inner] -> sequencePatternBounds inner
   Call (Symbol repetitionHead) patternArguments
     | repetitionHead `elem` ["Repeated", "RepeatedNull"] -> do
@@ -1563,7 +1572,19 @@ sequencePatternBounds expression = case expression of
           )
   Call (Symbol "PatternSequence") patterns ->
     Just (addPatternWidths (map patternWidthBounds patterns))
+  Call (Symbol "OrderlessPatternSequence") patterns ->
+    Just (addPatternWidths (map patternWidthBounds patterns))
   _ -> Nothing
+
+sequencePrefersLongest :: Expr -> Bool
+sequencePrefersLongest expression = case expression of
+  Call (Symbol "Longest") (_ : _) -> True
+  Call (Symbol "Shortest") (_ : _) -> False
+  Call (Symbol wrapper) (inner : _)
+    | wrapper `elem` ["PatternTest", "Condition", "HoldPattern"] ->
+        sequencePrefersLongest inner
+  Call (Symbol "Pattern") [_, inner] -> sequencePrefersLongest inner
+  _ -> False
 
 patternWidthBounds :: Expr -> (Int, Int)
 patternWidthBounds expression = case optionalPatternDescriptor expression of
@@ -1694,6 +1715,9 @@ matchSequencePatternElements :: PatternBindings -> Expr -> [Expr] -> Maybe Patte
 matchSequencePatternElements bindings patternExpression values = case patternExpression of
   Call (Symbol "HoldPattern") [innerPattern] ->
     matchSequencePatternElements bindings innerPattern values
+  Call (Symbol priority) (innerPattern : _)
+    | priority `elem` ["Longest", "Shortest"] ->
+        matchSequencePatternElements bindings innerPattern values
   Call (Symbol "Condition") [innerPattern, condition] -> do
     matched <- matchSequencePatternElements bindings innerPattern values
     result <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
@@ -1706,6 +1730,8 @@ matchSequencePatternElements bindings patternExpression values = case patternExp
     bindSequence name values matched
   Call (Symbol "PatternSequence") patterns ->
     matchPatternArguments bindings values patterns
+  Call (Symbol "OrderlessPatternSequence") patterns ->
+    matchOrderlessPatternSequence bindings values (permutations patterns)
   repeated@(Call (Symbol repetitionHead) _)
     | repetitionHead `elem` ["Repeated", "RepeatedNull"] ->
         matchRepeatedPattern bindings repeated values
@@ -1744,8 +1770,17 @@ matchRepeatedPattern bindings (Call (Symbol repetitionHead) patternArguments) va
     let (itemMinimum, itemMaximum) = patternWidthBounds itemPattern
         concreteMinimum = max 1 itemMinimum
         concreteMaximum = min itemMaximum (length remaining)
-     in [concreteMinimum .. concreteMaximum]
+     in if sequencePrefersLongest itemPattern
+          then [concreteMaximum, concreteMaximum - 1 .. concreteMinimum]
+          else [concreteMinimum .. concreteMaximum]
 matchRepeatedPattern _ _ _ = Nothing
+
+matchOrderlessPatternSequence :: PatternBindings -> [Expr] -> [[Expr]] -> Maybe PatternBindings
+matchOrderlessPatternSequence _ _ [] = Nothing
+matchOrderlessPatternSequence bindings values (patterns : rest) =
+  case matchPatternArguments bindings values patterns of
+    Just matched -> Just matched
+    Nothing -> matchOrderlessPatternSequence bindings values rest
 
 predicateMatchesPure :: Expr -> Expr -> Bool
 predicateMatchesPure test value = case evaluate (Call test [value]) of
