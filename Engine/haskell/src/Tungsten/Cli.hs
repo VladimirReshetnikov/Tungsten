@@ -1512,6 +1512,15 @@ commandName ParseCommand = "parse"
 commandName EvaluateCommand = "evaluate"
 
 expressionDepth :: Expr -> Int
+expressionDepth (Call (Symbol "Association") entries)
+  | Just values <- traverse associationValue entries =
+      case values of
+        [] -> 1
+        _ -> 1 + maximum (map expressionDepth values)
+ where
+  associationValue (Call (Symbol ruleHead) [_, value])
+    | ruleHead `elem` ["Rule", "RuleDelayed"] = Just value
+  associationValue _ = Nothing
 expressionDepth expression = case arguments expression of
   [] -> 1
   values -> 1 + maximum (map expressionDepth values)

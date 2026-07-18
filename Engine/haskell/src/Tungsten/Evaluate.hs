@@ -91,6 +91,8 @@ reduceCall :: Expr -> Either EvaluationError Expr
 reduceCall expression = case expression of
   Call (Call (Symbol "Function") functionArguments) values ->
     applyFunction functionArguments values
+  Call (Call (Symbol "KeySelect") [criterion]) [association] ->
+    reduceBuiltin "KeySelect" [association, criterion]
   Call (Symbol headName) values -> reduceBuiltin headName values
   _ -> Right expression
 
@@ -118,6 +120,8 @@ reduceBuiltin headName values = case headName of
   "Depth" -> Right (unary headName (Integer . fromIntegral . expressionDepth) values)
   "AtomQ" -> Right (unary headName (boolean . isAtom) values)
   "ListQ" -> Right (unary headName (boolean . hasHead "List") values)
+  "Association" -> Right (reduceAssociation values)
+  "AssociationQ" -> Right (unary headName (boolean . isAssociation) values)
   "IntegerQ" -> Right (unary headName (boolean . isInteger) values)
   "NumberQ" -> Right (unary headName (boolean . isNumber) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
@@ -126,6 +130,20 @@ reduceBuiltin headName values = case headName of
   "Rest" -> Right (reduceRestMost True headName values)
   "Most" -> Right (reduceRestMost False headName values)
   "Part" -> reducePart values
+  "Keys" -> reduceKeys values
+  "Values" -> reduceValues values
+  "Normal" -> reduceNormal values
+  "Lookup" -> reduceLookup values
+  "KeyExistsQ" -> reduceKeyExistsQ headName values
+  "KeyMemberQ" -> reduceKeyExistsQ headName values
+  "KeyTake" -> reduceKeyTakeDrop True values
+  "KeyDrop" -> reduceKeyTakeDrop False values
+  "KeySelect" -> reduceKeySelect values
+  "KeyMap" -> reduceKeyMap values
+  "KeyValueMap" -> reduceKeyValueMap values
+  "AssociationThread" -> reduceAssociationThread values
+  "AssociationMap" -> reduceAssociationMap values
+  "KeySort" -> reduceKeySort values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -304,11 +322,18 @@ unaryCallArguments _ function [Call expressionHead values] = Call expressionHead
 unaryCallArguments headName _ values = Call (Symbol headName) values
 
 reduceFirstLast :: Bool -> Text -> [Expr] -> Expr
+reduceFirstLast first _ [association]
+  | Just entries <- associationEntries association
+  , AssociationEntry _ _ value : remaining <- entries =
+      if first then value else foldl' (\_ (AssociationEntry _ _ next) -> next) value remaining
 reduceFirstLast first _ [Call _ (value : remaining)] =
   if first then value else foldl' (\_ next -> next) value remaining
 reduceFirstLast _ headName values = Call (Symbol headName) values
 
 reduceRestMost :: Bool -> Text -> [Expr] -> Expr
+reduceRestMost rest _ [association]
+  | Just entries@(_ : _) <- associationEntries association =
+      associationExpr (if rest then drop 1 entries else reverse (drop 1 (reverse entries)))
 reduceRestMost rest _ [Call expressionHead values@(_ : _)] =
   Call expressionHead (if rest then drop 1 values else reverse (drop 1 (reverse values)))
 reduceRestMost _ headName values = Call (Symbol headName) values
@@ -325,6 +350,213 @@ reducePart (target : indices) = foldM selectPart target indices
           else Left (EvaluationError "a Part index is out of range")
   selectPart expression index = Right (Call (Symbol "Part") [expression, index])
 
+data AssociationEntry = AssociationEntry !Text !Expr !Expr
+  deriving (Eq, Show)
+
+ruleEntry :: Expr -> Maybe AssociationEntry
+ruleEntry (Call (Symbol ruleHead) [key, value])
+  | ruleHead `elem` ["Rule", "RuleDelayed"] =
+      Just (AssociationEntry ruleHead key value)
+ruleEntry _ = Nothing
+
+associationEntries :: Expr -> Maybe [AssociationEntry]
+associationEntries (Call (Symbol "Association") values) = traverse ruleEntry values
+associationEntries _ = Nothing
+
+isAssociation :: Expr -> Bool
+isAssociation = maybe False (const True) . associationEntries
+
+associationExpr :: [AssociationEntry] -> Expr
+associationExpr entries =
+  Call (Symbol "Association") (map entryExpression (normalizeAssociationEntries entries))
+ where
+  entryExpression (AssociationEntry ruleHead key value) =
+    Call (Symbol ruleHead) [key, value]
+
+normalizeAssociationEntries :: [AssociationEntry] -> [AssociationEntry]
+normalizeAssociationEntries = foldl' insertEntry [] . filter retainedEntry
+ where
+  retainedEntry (AssociationEntry _ key _) = key /= Symbol "Nothing"
+  insertEntry retained entry@(AssociationEntry _ key _) =
+    case matchingIndex key retained of
+      Just index -> replaceListIndex index entry retained
+      Nothing -> retained <> [entry]
+  matchingIndex key = go 0
+   where
+    go _ [] = Nothing
+    go index (AssociationEntry _ candidate _ : rest)
+      | key == candidate = Just index
+      | otherwise = go (index + 1) rest
+
+reduceAssociation :: [Expr] -> Expr
+reduceAssociation values = case associationFromArguments values of
+  Just entries -> associationExpr entries
+  Nothing -> Call (Symbol "Association") values
+
+associationFromArguments :: [Expr] -> Maybe [AssociationEntry]
+associationFromArguments [Call (Symbol "List") values] =
+  traverse ruleEntry (filter (/= Symbol "Nothing") values)
+associationFromArguments values =
+  concat <$> traverse entriesFromArgument (filter (/= Symbol "Nothing") values)
+ where
+  entriesFromArgument argument =
+    case associationEntries argument of
+      Just entries -> Just entries
+      Nothing -> pure <$> ruleEntry argument
+
+requireAssociation :: Text -> Expr -> Either EvaluationError [AssociationEntry]
+requireAssociation operation expression =
+  maybe
+    (Left (EvaluationError (operation <> " expects an Association")))
+    Right
+    (associationEntries expression)
+
+evaluatedList :: [Expr] -> Expr
+evaluatedList = list . filter (/= Symbol "Nothing")
+
+reduceKeys :: [Expr] -> Either EvaluationError Expr
+reduceKeys [association] = do
+  entries <- requireAssociation "Keys" association
+  pure (evaluatedList [key | AssociationEntry _ key _ <- entries])
+reduceKeys values = Right (Call (Symbol "Keys") values)
+
+reduceValues :: [Expr] -> Either EvaluationError Expr
+reduceValues [association] = do
+  entries <- requireAssociation "Values" association
+  pure (evaluatedList [value | AssociationEntry _ _ value <- entries])
+reduceValues values = Right (Call (Symbol "Values") values)
+
+reduceNormal :: [Expr] -> Either EvaluationError Expr
+reduceNormal [association] = case associationEntries association of
+  Just entries ->
+    pure
+      ( list
+          [ Call (Symbol ruleHead) [key, value]
+          | AssociationEntry ruleHead key value <- entries
+          ]
+      )
+  Nothing -> Right (Call (Symbol "Normal") [association])
+reduceNormal values = Right (Call (Symbol "Normal") values)
+
+reduceLookup :: [Expr] -> Either EvaluationError Expr
+reduceLookup = \case
+  [association, keySpecification] -> lookupWithDefault association keySpecification Nothing
+  [association, keySpecification, defaultValue] ->
+    lookupWithDefault association keySpecification (Just defaultValue)
+  values -> Right (Call (Symbol "Lookup") values)
+ where
+  lookupWithDefault association keySpecification defaultValue = do
+    entries <- requireAssociation "Lookup" association
+    let lookupOne key = case findAssociationEntry key entries of
+          Just (AssociationEntry _ _ value) -> value
+          Nothing -> case defaultValue of
+            Just value -> value
+            Nothing -> Call (Symbol "Missing") [String "KeyAbsent", key]
+    pure $ case keySpecification of
+      Call (Symbol "List") keys -> evaluatedList (map lookupOne keys)
+      key -> lookupOne key
+
+findAssociationEntry :: Expr -> [AssociationEntry] -> Maybe AssociationEntry
+findAssociationEntry _ [] = Nothing
+findAssociationEntry key (entry@(AssociationEntry _ candidate _) : rest)
+  | key == candidate = Just entry
+  | otherwise = findAssociationEntry key rest
+
+reduceKeyExistsQ :: Text -> [Expr] -> Either EvaluationError Expr
+reduceKeyExistsQ _ [association, key] = do
+  entries <- requireAssociation "KeyExistsQ" association
+  pure (boolean (maybe False (const True) (findAssociationEntry key entries)))
+reduceKeyExistsQ headName values = Right (Call (Symbol headName) values)
+
+keySpecificationItems :: Expr -> [Expr]
+keySpecificationItems (Call (Symbol "List") values) = values
+keySpecificationItems value = [value]
+
+reduceKeyTakeDrop :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceKeyTakeDrop takeMode [association, keySpecification] = do
+  entries <- requireAssociation operationName association
+  let keys = keySpecificationItems keySpecification
+      selected
+        | takeMode = mapMaybe (`findAssociationEntry` entries) keys
+        | otherwise =
+            [ entry
+            | entry@(AssociationEntry _ key _) <- entries
+            , key `notElem` keys
+            ]
+  pure (associationExpr selected)
+ where
+  operationName = if takeMode then "KeyTake" else "KeyDrop"
+reduceKeyTakeDrop takeMode values =
+  Right (Call (Symbol (if takeMode then "KeyTake" else "KeyDrop")) values)
+
+reduceKeySelect :: [Expr] -> Either EvaluationError Expr
+reduceKeySelect [association, criterion] = do
+  entries <- requireAssociation "KeySelect" association
+  retained <- traverse retain entries
+  pure (associationExpr [entry | (True, entry) <- retained])
+ where
+  retain entry@(AssociationEntry _ key _) = do
+    result <- evaluate (Call criterion [key])
+    pure (result == Symbol "True", entry)
+reduceKeySelect values = Right (Call (Symbol "KeySelect") values)
+
+reduceKeyMap :: [Expr] -> Either EvaluationError Expr
+reduceKeyMap [function, association] = do
+  entries <- requireAssociation "KeyMap" association
+  pure
+    ( associationExpr
+        [ AssociationEntry ruleHead (Call function [key]) value
+        | AssociationEntry ruleHead key value <- entries
+        ]
+    )
+reduceKeyMap values = Right (Call (Symbol "KeyMap") values)
+
+reduceKeyValueMap :: [Expr] -> Either EvaluationError Expr
+reduceKeyValueMap [function, association] = do
+  entries <- requireAssociation "KeyValueMap" association
+  pure
+    ( evaluatedList
+        [ Call function [key, value]
+        | AssociationEntry _ key value <- entries
+        ]
+    )
+reduceKeyValueMap values = Right (Call (Symbol "KeyValueMap") values)
+
+reduceAssociationThread :: [Expr] -> Either EvaluationError Expr
+reduceAssociationThread [Call (Symbol "List") keys, Call (Symbol "List") values]
+  | length keys == length values =
+      Right
+        ( associationExpr
+            (zipWith (AssociationEntry "Rule") keys values)
+        )
+  | otherwise = Left (EvaluationError "AssociationThread expects key and value lists of equal length")
+reduceAssociationThread values = Right (Call (Symbol "AssociationThread") values)
+
+reduceAssociationMap :: [Expr] -> Either EvaluationError Expr
+reduceAssociationMap [function, Call (Symbol "List") keys] =
+  Right
+    ( associationExpr
+        [AssociationEntry "Rule" key (Call function [key]) | key <- keys]
+    )
+reduceAssociationMap values = Right (Call (Symbol "AssociationMap") values)
+
+reduceKeySort :: [Expr] -> Either EvaluationError Expr
+reduceKeySort [association] = do
+  entries <- requireAssociation "KeySort" association
+  pure (associationExpr (sortBy compareKey entries))
+ where
+  compareKey (AssociationEntry _ left _) (AssociationEntry _ right _) =
+    compare (canonicalKey left) (canonicalKey right)
+  canonicalKey expression = (canonicalRank expression, fullForm expression)
+  canonicalRank = \case
+    Integer {} -> 0 :: Int
+    Rational {} -> 0
+    Real {} -> 0
+    String {} -> 1
+    Symbol {} -> 2
+    _ -> 3
+reduceKeySort values = Right (Call (Symbol "KeySort") values)
+
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
   Just [end] -> list (integerRange 1 end 1)
@@ -339,6 +571,9 @@ reduceRange values = case traverse integerValue values of
 
 reduceTotal :: [Expr] -> Expr
 reduceTotal [Call (Symbol "List") values] = reducePlus values
+reduceTotal [association]
+  | Just entries <- associationEntries association =
+      reducePlus [value | AssociationEntry _ _ value <- entries]
 reduceTotal values = Call (Symbol "Total") values
 
 reduceAccumulate :: [Expr] -> Expr
@@ -347,6 +582,11 @@ reduceAccumulate [Call (Symbol "List") values] =
 reduceAccumulate values = Call (Symbol "Accumulate") values
 
 reduceAppendPrepend :: Bool -> Text -> [Expr] -> Expr
+reduceAppendPrepend prepend _ [association, item]
+  | Just entries <- associationEntries association
+  , Just newEntry@(AssociationEntry _ newKey _) <- ruleEntry item =
+      let retained = [entry | entry@(AssociationEntry _ key _) <- entries, key /= newKey]
+       in associationExpr (if prepend then newEntry : retained else retained <> [newEntry])
 reduceAppendPrepend prepend _ [Call expressionHead values, item] =
   Call expressionHead (if prepend then item : values else values <> [item])
 reduceAppendPrepend _ headName values = Call (Symbol headName) values
@@ -429,6 +669,9 @@ resolvePosition count position
   valid index = if index >= 0 && index < count then Just index else Nothing
 
 reduceJoin :: [Expr] -> Expr
+reduceJoin values
+  | Just entryLists <- traverse associationEntries values =
+      associationExpr (concat entryLists)
 reduceJoin values = case values of
   Call expressionHead _ : _ ->
     case traverse (matchingArguments expressionHead) values of
@@ -596,11 +839,20 @@ replaceListIndex index replacement values =
   take index values <> [replacement] <> drop (index + 1) values
 
 reduceMap :: [Expr] -> Expr
+reduceMap [function, association]
+  | Just entries <- associationEntries association =
+      associationExpr
+        [ AssociationEntry ruleHead key (Call function [value])
+        | AssociationEntry ruleHead key value <- entries
+        ]
 reduceMap [function, Call expressionHead values] =
   Call expressionHead [Call function [value] | value <- values]
 reduceMap values = Call (Symbol "Map") values
 
 reduceApply :: [Expr] -> Expr
+reduceApply [newHead, association]
+  | Just entries <- associationEntries association =
+      Call newHead [value | AssociationEntry _ _ value <- entries]
 reduceApply [newHead, Call _ values] = Call newHead values
 reduceApply values = Call (Symbol "Apply") values
 
@@ -647,6 +899,11 @@ substituteParameters parameter values body =
    in replaceExpression replacements body
 
 expressionDepth :: Expr -> Int
+expressionDepth expression
+  | Just entries <- associationEntries expression =
+      case [value | AssociationEntry _ _ value <- entries] of
+        [] -> 1
+        values -> 1 + maximum (map expressionDepth values)
 expressionDepth expression = case arguments expression of
   [] -> 1
   values -> 1 + maximum (map expressionDepth values)
