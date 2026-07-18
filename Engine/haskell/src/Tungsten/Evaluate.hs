@@ -11,7 +11,7 @@ module Tungsten.Evaluate
   ) where
 
 import Control.Monad (foldM)
-import Data.List (sortBy)
+import Data.List (sortBy, transpose)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Tungsten.Expression
@@ -155,6 +155,11 @@ reduceBuiltin headName values = case headName of
   "KeyComplement" -> reduceKeyComplement values
   "KeyUnion" -> reduceKeyUnion values
   "KeyIntersection" -> reduceKeyIntersection values
+  "Tally" -> reduceTally values
+  "Counts" -> reduceCounts values
+  "Catenate" -> reduceCatenate values
+  "Differences" -> reduceDifferences values
+  "Riffle" -> reduceRiffle values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -790,6 +795,68 @@ reduceKeyIntersection [associations] = do
     [] -> Left (EvaluationError "KeyIntersection expects a non-empty list of Associations")
 reduceKeyIntersection values = Right (Call (Symbol "KeyIntersection") values)
 
+reduceTally :: [Expr] -> Either EvaluationError Expr
+reduceTally [dataExpression] = do
+  values <- listOrAssociationValues "Tally" dataExpression
+  let groups = foldl' (\retained value -> addValueGroup value value retained) [] values
+  pure
+    ( list
+        [ list [key, Integer (fromIntegral (length groupedValues))]
+        | ValueGroup key groupedValues <- groups
+        ]
+    )
+reduceTally values = Right (Call (Symbol "Tally") values)
+
+reduceCounts :: [Expr] -> Either EvaluationError Expr
+reduceCounts [dataExpression] = do
+  values <- listOrAssociationValues "Counts" dataExpression
+  let groups = foldl' (\retained value -> addValueGroup value value retained) [] values
+  pure
+    ( associationExpr
+        [ AssociationEntry "Rule" key (Integer (fromIntegral (length groupedValues)))
+        | ValueGroup key groupedValues <- groups
+        ]
+    )
+reduceCounts values = Right (Call (Symbol "Counts") values)
+
+reduceCatenate :: [Expr] -> Either EvaluationError Expr
+reduceCatenate [dataExpression] = do
+  values <- listOrAssociationValues "Catenate" dataExpression
+  nested <-
+    maybe
+      (Left (EvaluationError "Catenate expects lists as its first-level values"))
+      Right
+      (traverse listArguments values)
+  pure (list (concat nested))
+reduceCatenate values = Right (Call (Symbol "Catenate") values)
+
+reduceDifferences :: [Expr] -> Either EvaluationError Expr
+reduceDifferences [Call (Symbol "List") values] =
+  Right
+    ( list
+        ( zipWith
+            (\left right -> reducePlus [right, reduceTimes [Integer (-1), left]])
+            values
+            (drop 1 values)
+        )
+    )
+reduceDifferences values = Right (Call (Symbol "Differences") values)
+
+reduceRiffle :: [Expr] -> Either EvaluationError Expr
+reduceRiffle [Call (Symbol "List") values, separator] = case separator of
+  Call (Symbol "List") [] -> Left (EvaluationError "Riffle expects a non-empty separator list")
+  Call (Symbol "List") separators -> Right (list (interleave separators values))
+  _ -> Right (list (interleave [separator] values))
+ where
+  interleave separators values' = go 0 values'
+   where
+    separatorCount = length separators
+    go _ [] = []
+    go _ [single] = [single]
+    go index (value : rest) =
+      value : separators !! (index `mod` separatorCount) : go (index + 1) rest
+reduceRiffle values = Right (Call (Symbol "Riffle") values)
+
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
   Just [end] -> list (integerRange 1 end 1)
@@ -803,6 +870,10 @@ reduceRange values = case traverse integerValue values of
     | otherwise = []
 
 reduceTotal :: [Expr] -> Expr
+reduceTotal [Call (Symbol "List") values]
+  | Just rows@(firstRow : _) <- traverse listArguments values
+  , all ((== length firstRow) . length) rows =
+      list (map reducePlus (transpose rows))
 reduceTotal [Call (Symbol "List") values] = reducePlus values
 reduceTotal [association]
   | Just entries <- associationEntries association =
@@ -810,6 +881,19 @@ reduceTotal [association]
 reduceTotal values = Call (Symbol "Total") values
 
 reduceAccumulate :: [Expr] -> Expr
+reduceAccumulate [association]
+  | Just entries@(AssociationEntry _ _ firstValue : remaining) <- associationEntries association =
+      let accumulatedValues =
+            scanl
+              (\accumulator (AssociationEntry _ _ value) -> reducePlus [accumulator, value])
+              firstValue
+              remaining
+       in associationExpr
+            ( zipWith
+                (\(AssociationEntry ruleHead key _) value -> AssociationEntry ruleHead key value)
+                entries
+                accumulatedValues
+            )
 reduceAccumulate [Call (Symbol "List") values] =
   list (drop 1 (scanl (\acc value -> reducePlus [acc, value]) (Integer 0) values))
 reduceAccumulate values = Call (Symbol "Accumulate") values
@@ -1241,6 +1325,10 @@ isString _ = False
 integerValue :: Expr -> Maybe Integer
 integerValue (Integer value) = Just value
 integerValue _ = Nothing
+
+listArguments :: Expr -> Maybe [Expr]
+listArguments (Call (Symbol "List") values) = Just values
+listArguments _ = Nothing
 
 list :: [Expr] -> Expr
 list = Call (Symbol "List")
