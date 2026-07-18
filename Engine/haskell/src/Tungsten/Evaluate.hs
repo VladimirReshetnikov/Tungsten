@@ -1423,6 +1423,14 @@ data SequencePattern = SequencePattern
   }
   deriving (Eq, Show)
 
+data OptionalPattern = OptionalPattern
+  { optionalInner :: !Expr
+  , optionalDefault :: !(Maybe Expr)
+  , optionalConditions :: ![Expr]
+  , optionalTests :: ![Expr]
+  }
+  deriving (Eq, Show)
+
 reduceMatchQ :: [Expr] -> Expr
 reduceMatchQ [expression, patternExpression] =
   boolean (maybe False (const True) (matchPattern [] expression patternExpression))
@@ -1435,6 +1443,10 @@ matchPattern bindings expression patternExpression = case patternExpression of
   Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
     matched <- matchPattern bindings expression innerPattern
     bindScalar name expression matched
+  Call (Symbol "Optional") [innerPattern] ->
+    matchPattern bindings expression innerPattern
+  Call (Symbol "Optional") [innerPattern, _] ->
+    matchPattern bindings expression innerPattern
   Call (Symbol "Blank") [] -> Just bindings
   Call (Symbol "Blank") [requiredHead] ->
     if headExpr expression == requiredHead then Just bindings else Nothing
@@ -1479,6 +1491,22 @@ matchPatternArguments bindings [] [] = Just bindings
 matchPatternArguments _ [] patterns
   | minimumPatternArguments patterns > 0 = Nothing
 matchPatternArguments bindings expressions (patternExpression : remainingPatterns)
+  | Just optionalPattern <- optionalPatternDescriptor patternExpression =
+      matchPresent optionalPattern `orElse` matchOmitted optionalPattern
+ where
+  remainingMinimum = minimumPatternArguments remainingPatterns
+  matchPresent descriptor = case expressions of
+    expression : remainingExpressions
+      | length remainingExpressions >= remainingMinimum -> do
+          matched <- matchOptionalPresent bindings descriptor expression
+          matchPatternArguments matched remainingExpressions remainingPatterns
+    _ -> Nothing
+  matchOmitted descriptor = do
+    matched <- matchOptionalOmitted bindings descriptor
+    matchPatternArguments matched expressions remainingPatterns
+  orElse (Just result) _ = Just result
+  orElse Nothing alternative = alternative
+matchPatternArguments bindings expressions (patternExpression : remainingPatterns)
   | Just sequencePattern <- sequencePatternDescriptor patternExpression =
       matchSequenceCounts sequencePattern (candidateCounts sequencePattern)
  where
@@ -1501,7 +1529,51 @@ minimumPatternArguments :: [Expr] -> Int
 minimumPatternArguments = sum . map minimumForPattern
  where
   minimumForPattern expression =
-    maybe 1 sequenceMinimum (sequencePatternDescriptor expression)
+    case optionalPatternDescriptor expression of
+      Just descriptor -> maybe 1 (const 0) (optionalDefault descriptor)
+      Nothing -> maybe 1 sequenceMinimum (sequencePatternDescriptor expression)
+
+optionalPatternDescriptor :: Expr -> Maybe OptionalPattern
+optionalPatternDescriptor = describe [] []
+ where
+  describe conditions tests = \case
+    Call (Symbol "Condition") [inner, condition] ->
+      describe (condition : conditions) tests inner
+    Call (Symbol "PatternTest") [inner, test] ->
+      describe conditions (test : tests) inner
+    Call (Symbol "Optional") [inner] ->
+      Just (OptionalPattern inner Nothing conditions tests)
+    Call (Symbol "Optional") [inner, defaultValue] ->
+      Just (OptionalPattern inner (Just defaultValue) conditions tests)
+    _ -> Nothing
+
+matchOptionalPresent :: PatternBindings -> OptionalPattern -> Expr -> Maybe PatternBindings
+matchOptionalPresent bindings descriptor value = do
+  matched <- matchPattern bindings value (optionalInner descriptor)
+  validateOptionalPattern descriptor matched value
+
+matchOptionalOmitted :: PatternBindings -> OptionalPattern -> Maybe PatternBindings
+matchOptionalOmitted bindings descriptor = do
+  defaultValue <- optionalDefault descriptor
+  matched <- matchPattern bindings defaultValue (relaxOptionalBlanks (optionalInner descriptor))
+  validateOptionalPattern descriptor matched defaultValue
+
+validateOptionalPattern :: OptionalPattern -> PatternBindings -> Expr -> Maybe PatternBindings
+validateOptionalPattern descriptor bindings value
+  | any (not . (`predicateMatchesPure` value)) (optionalTests descriptor) = Nothing
+  | otherwise = validateConditions (optionalConditions descriptor)
+ where
+  validateConditions [] = Just bindings
+  validateConditions (condition : rest) = do
+    result <- either (const Nothing) Just (evaluate (substituteBindings bindings condition))
+    if result == Symbol "True" then validateConditions rest else Nothing
+
+relaxOptionalBlanks :: Expr -> Expr
+relaxOptionalBlanks expression = case expression of
+  Call (Symbol "Blank") [_] -> Call (Symbol "Blank") []
+  Call expressionHead values ->
+    Call (relaxOptionalBlanks expressionHead) (map relaxOptionalBlanks values)
+  _ -> expression
 
 sequencePatternDescriptor :: Expr -> Maybe SequencePattern
 sequencePatternDescriptor = describe Nothing Nothing Nothing

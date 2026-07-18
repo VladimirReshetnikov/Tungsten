@@ -506,6 +506,8 @@ checkInputFormParser = do
         , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
         , ("association", "<|a -> 1, b :> 2|>", "Association[Rule[a, 1], RuleDelayed[b, 2]]")
         , ("pattern test", "x_?IntegerQ", "PatternTest[Pattern[x, Blank[]], IntegerQ]")
+        , ("optional pattern default", "f[x_Integer:7]", "f[Optional[Pattern[x, Blank[Integer]], 7]]")
+        , ("named pattern sequence", "x:PatternSequence[a_, b_]", "Pattern[x, PatternSequence[Pattern[a, Blank[]], Pattern[b, Blank[]]]]")
         , ("compound expression", "x = 1; x + 1;", "CompoundExpression[Set[x, 1], Plus[x, 1], Null]")
         , ("output history shorthand", "% + %% + %12", "Plus[Out[], Out[-2], Out[12]]")
         ]
@@ -694,6 +696,9 @@ checkEvaluator = do
         , ("scalar pattern tests", "{MatchQ[1, _?IntegerQ], MatchQ[a, _?IntegerQ]}", "List[True, False]")
         , ("sequence pattern tests", "{Cases[{f[1, 2], f[1, a], f[]}, f[__?IntegerQ]], MatchQ[f[1, 2], f[x__?IntegerQ]], MatchQ[f[1, a], f[x__?IntegerQ]]}", "List[List[f[1, 2]], True, False]")
         , ("pattern test delayed template", "Cases[{1, a, 2}, x_?IntegerQ :> x + 10]", "List[11, 12]")
+        , ("optional pattern defaults", "{Cases[{f[], f[2], f[a]}, f[x_:7] :> x], Cases[{f[], f[2]}, f[x_.] :> HoldComplete[x]], Cases[{f[], f[2], f[a]}, f[x_Integer:7] :> x]}", "List[List[7, 2, a], List[HoldComplete[2]], List[7, 2]]")
+        , ("optional pattern validation", "{Cases[{f[]}, f[x_?IntegerQ:foo] :> x], Cases[{f[]}, f[x_Integer:foo] :> x]}", "List[List[], List[foo]]")
+        , ("optional pattern backtracking", "{Cases[{f[a], f[a, b]}, f[x_:7, y_] :> {x, y}], Cases[{f[], f[a]}, f[x_:7, y_:8] :> {x, y}]}", "List[List[List[7, a], List[a, b]], List[List[7, 8], List[a, 8]]]")
         , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")

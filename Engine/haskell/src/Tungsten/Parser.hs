@@ -116,7 +116,23 @@ ruleParser = chainr1 conditionParser ruleOperator
     ]
 
 conditionParser :: Parser Expr
-conditionParser = chainl1 alternativesParser (binary "/;" (call2 "Condition"))
+conditionParser = chainl1 patternDefaultParser (binary "/;" (call2 "Condition"))
+
+patternDefaultParser :: Parser Expr
+patternDefaultParser = do
+  lhs <- alternativesParser
+  option lhs $ do
+    _ <- operator ":" "=>"
+    rhs <- patternDefaultParser
+    pure (patternColonExpression lhs rhs)
+
+patternColonExpression :: Expr -> Expr -> Expr
+patternColonExpression lhs@(Call (Symbol "Pattern") [_, _]) defaultValue =
+  Call (Symbol "Optional") [lhs, defaultValue]
+patternColonExpression (Symbol name) patternExpression =
+  Call (Symbol "Pattern") [Symbol name, patternExpression]
+patternColonExpression patternExpression defaultValue =
+  Call (Symbol "Optional") [patternExpression, defaultValue]
 
 alternativesParser :: Parser Expr
 alternativesParser = chainl1 orParser (binaryExcept "|" ">" (flatCall2 "Alternatives"))
