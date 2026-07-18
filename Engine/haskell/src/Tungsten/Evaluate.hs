@@ -45,7 +45,9 @@ evaluateAt depth expression
         evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
         let evaluatedCall = Call evaluatedHead evaluatedArguments
         reduced <- reduceCall evaluatedCall
-        if reduced == evaluatedCall
+        -- Python's Sqrt helper deliberately returns a raw nested Times shape
+        -- for negative composite radicands instead of re-entering evaluation.
+        if reduced == evaluatedCall || evaluatedHead == Symbol "Sqrt"
           then Right reduced
           else evaluateAt (depth + 1) reduced
       _ -> Right expression
@@ -121,6 +123,7 @@ reduceBuiltin headName values = case headName of
   "Round" -> Right (reduceRounding RoundNearest headName values)
   "IntegerPart" -> Right (reduceRounding RoundIntegerPart headName values)
   "FractionalPart" -> Right (reduceRounding RoundFractionalPart headName values)
+  "Sqrt" -> Right (reduceSqrt values)
   "Not" -> Right (reduceNot values)
   "Equal" -> Right (reduceEquality True values)
   "Unequal" -> Right (reduceEquality False values)
@@ -595,7 +598,11 @@ reduceTimes originalValues =
         _ -> Call (Symbol "Times") combined
 
 reducePower :: [Expr] -> Expr
+reducePower [] = Integer 1
+reducePower [base] = base
 reducePower [base, Integer exponentValue]
+  | exponentValue == 0
+  , isExplicitZero base = Symbol "Indeterminate"
   | exponentValue == 0 = Integer 1
   | exponentValue == 1 = base
   | Just (Exact numerator denominator) <- toExact base =
@@ -603,14 +610,156 @@ reducePower [base, Integer exponentValue]
         then fromExact (normalizeExact (numerator ^ exponentValue) (denominator ^ exponentValue))
         else
           if numerator == 0
-            then Call (Symbol "Power") [base, Integer exponentValue]
+            then Symbol "ComplexInfinity"
             else
               fromExact
                 ( normalizeExact
                     (denominator ^ abs exponentValue)
                     (numerator ^ abs exponentValue)
                 )
+reducePower [base, exponentValue]
+  | Just result <- reduceExactFractionalPower base exponentValue = result
+  | Just (Exact 1 1) <- toExact base = Integer 1
 reducePower values = Call (Symbol "Power") values
+
+reduceExactFractionalPower :: Expr -> Expr -> Maybe Expr
+reduceExactFractionalPower base exponentValue = do
+  baseExact@(Exact baseNumerator _) <- toExact base
+  Exact exponentNumerator exponentDenominator <- toExact exponentValue
+  if exponentDenominator == 1
+    then Nothing
+    else
+      if baseNumerator == 0
+        then
+          Just
+            ( if exponentNumerator > 0
+                then Integer 0
+                else Symbol "ComplexInfinity"
+            )
+        else
+          if baseNumerator < 0
+            then
+              if exponentNumerator == 1 && exponentDenominator == 2
+                then
+                  let positiveBase = fromExact (negateExact baseExact)
+                      positivePower =
+                        maybe
+                          (Call (Symbol "Power") [positiveBase, exponentValue])
+                          id
+                          (reduceExactFractionalPower positiveBase exponentValue)
+                   in Just (multiplyByImaginaryUnit positivePower)
+                else Nothing
+            else
+              reducePositiveExactFractionalPower
+                baseExact exponentNumerator exponentDenominator
+
+reducePositiveExactFractionalPower :: Exact -> Integer -> Integer -> Maybe Expr
+reducePositiveExactFractionalPower baseExact exponentNumerator exponentDenominator =
+  let absoluteNumerator = abs exponentNumerator
+      (outside, inside) =
+        extractExactPowerRoot baseExact absoluteNumerator exponentDenominator
+   in if outside == Exact 1 1
+        && inside == baseExact
+        && absoluteNumerator == 1
+        then Nothing
+        else
+          let outsideFactor =
+                if exponentNumerator < 0
+                  then reciprocalExact outside
+                  else outside
+              radicalExponent =
+                normalizeExact
+                  (if exponentNumerator < 0 then -1 else 1)
+                  exponentDenominator
+              factors =
+                (if outsideFactor == Exact 1 1 then [] else [fromExact outsideFactor])
+                  <> ( if inside == Exact 1 1
+                        then []
+                        else [Call (Symbol "Power") [fromExact inside, fromExact radicalExponent]]
+                     )
+           in Just $ case factors of
+                [] -> Integer 1
+                [single] -> single
+                _ -> reduceTimes factors
+
+extractExactPowerRoot :: Exact -> Integer -> Integer -> (Exact, Exact)
+extractExactPowerRoot (Exact numerator denominator) powerNumerator rootDegree =
+  let (numeratorOutside, numeratorInside) =
+        extractIntegerPowerRoot numerator powerNumerator rootDegree
+      (denominatorOutside, denominatorInside) =
+        extractIntegerPowerRoot denominator powerNumerator rootDegree
+   in ( normalizeExact numeratorOutside denominatorOutside
+      , normalizeExact numeratorInside denominatorInside
+      )
+
+extractIntegerPowerRoot :: Integer -> Integer -> Integer -> (Integer, Integer)
+extractIntegerPowerRoot value powerNumerator rootDegree =
+  foldl' collect (1, 1) (primeFactorization value)
+ where
+  collect (outside, inside) (prime, multiplicity) =
+    let totalMultiplicity = multiplicity * powerNumerator
+        (outsideMultiplicity, insideMultiplicity) = totalMultiplicity `divMod` rootDegree
+     in ( outside * prime ^ outsideMultiplicity
+        , inside * prime ^ insideMultiplicity
+        )
+
+primeFactorization :: Integer -> [(Integer, Integer)]
+primeFactorization value = factor (abs value) 2
+ where
+  factor 1 _ = []
+  factor remaining candidate
+    | candidate * candidate > remaining = [(remaining, 1)]
+    | otherwise =
+        let (multiplicity, quotient) = divideRepeatedly remaining candidate 0
+            nextCandidate = if candidate == 2 then 3 else candidate + 2
+         in (if multiplicity == 0 then [] else [(candidate, multiplicity)])
+              <> factor quotient nextCandidate
+  divideRepeatedly remaining candidate multiplicity
+    | remaining `mod` candidate == 0 =
+        divideRepeatedly (remaining `div` candidate) candidate (multiplicity + 1)
+    | otherwise = (multiplicity, remaining)
+
+negateExact :: Exact -> Exact
+negateExact (Exact numerator denominator) = Exact (negate numerator) denominator
+
+reciprocalExact :: Exact -> Exact
+reciprocalExact (Exact numerator denominator) = normalizeExact denominator numerator
+
+multiplyByImaginaryUnit :: Expr -> Expr
+multiplyByImaginaryUnit value
+  | Just _ <- toExact value = Complex (Integer 0) value
+multiplyByImaginaryUnit (Call (Symbol "Times") (coefficient : factors))
+  | Just _ <- toExact coefficient =
+      case Complex (Integer 0) coefficient : factors of
+        [single] -> single
+        values -> Call (Symbol "Times") values
+multiplyByImaginaryUnit value =
+  Call (Symbol "Times") [Complex (Integer 0) (Integer 1), value]
+
+reduceSqrt :: [Expr] -> Expr
+reduceSqrt [Integer value]
+  | value < 0 =
+      Call (Symbol "Times") [reduceSqrt [Integer (negate value)], Symbol "I"]
+reduceSqrt [value]
+  | Just _ <- toExact value =
+      let exponentValue = Rational 1 2
+       in maybe
+            (Call (Symbol "Power") [value, exponentValue])
+            id
+            (reduceExactFractionalPower value exponentValue)
+reduceSqrt [Real source]
+  | Just (RealInfo (Exact numerator denominator) _ _ _ _) <- parseRealInfo source
+  , numerator >= 0 =
+      let result = sqrt (fromInteger numerator / fromInteger denominator)
+       in if isInfinite result || isNaN result
+            then Call (Symbol "Sqrt") [Real source]
+            else Real (formatMachineReal result)
+reduceSqrt values = Call (Symbol "Sqrt") values
+
+isExplicitZero :: Expr -> Bool
+isExplicitZero value = case explicitRealExact value of
+  Just (Exact 0 _) -> True
+  _ -> False
 
 reduceFactorial :: [Expr] -> Expr
 reduceFactorial [Integer value]
