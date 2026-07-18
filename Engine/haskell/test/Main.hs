@@ -683,6 +683,9 @@ checkEvaluator = do
         , ("cases sequence template splicing", "{Cases[{f[a, b]}, f[x__] :> x], Cases[{f[a, b]}, f[x__] :> HoldComplete[x]]}", "List[List[a, b], List[HoldComplete[a, b]]]")
         , ("replace root pattern", "Replace[f[a], f[x_] :> x]", "a")
         , ("replace level traversal", "{Replace[f[g[a]], _ -> z, 2], Replace[f[g[a]], _Symbol -> s, -1], Replace[f[g[a]], x_ :> p[x], {0, Infinity}]}", "List[f[z], f[g[s]], p[f[p[g[p[a]]]]]]")
+        , ("replace at exact paths", "{ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}], ReplaceAt[f[g[a], h[a]], a -> x, {{1, 1}, {2, 1}}]}", "List[f[g[a], h[x]], f[g[x], h[x]]]")
+        , ("replace at ruleset and no match", "{ReplaceAt[f[g[a]], {g[x_] :> x, a -> x}, {1}], ReplaceAt[f[a, b, c], a -> x, 2]}", "List[f[a], f[a, b, c]]")
+        , ("replace at association paths", "{ReplaceAt[<|a -> 1, b -> 2|>, _Integer -> x, Key[b]], ReplaceAt[{<|a -> 1|>, 2}, _Integer -> x, {1, Key[a]}]}", "List[Association[Rule[a, 1], Rule[b, x]], List[Association[Rule[a, x]], 2]]")
         , ("replace lhs conditions", "{Replace[2, x_ /; x > 0 :> x + 1], Replace[-1, x_ /; x > 0 :> x + 1]}", "List[3, -1]")
         , ("replace rhs conditions and fallback", "{Replace[2, x_ :> x + 1 /; x > 0], Replace[-1, x_ :> x + 1 /; x > 0], Replace[1, {x_ :> x + 1 /; x < 0, x_ :> x + 2}]}", "List[3, -1, 3]")
         , ("replace all top-down", "{f[g[a]] /. g[x_] :> x, f[g[a]] /. x_ :> p[x]}", "List[f[a], p[f[g[a]]]]")
@@ -727,7 +730,15 @@ checkEvaluatorErrors = do
           >>= mapLeftEvaluation . evaluate
   first <- assertLeft "reject out-of-range Part during evaluation" outOfRange
   second <- assertLeft "reject mixed Association Part selectors" mixedAssociationSelectors
-  pure (first && second)
+  third <-
+    assertLeft
+      "reject invalid ReplaceAt path"
+      (parseInputForm "ReplaceAt[f[a], a -> x, {2}]" >>= mapLeftEvaluation . evaluate)
+  fourth <-
+    assertLeft
+      "reject nested ReplaceAt rulesets"
+      (parseInputForm "ReplaceAt[f[a], {{a -> x}}, {1}]" >>= mapLeftEvaluation . evaluate)
+  pure (and [first, second, third, fourth])
  where
   mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
 

@@ -225,6 +225,7 @@ reduceBuiltin headName values = case headName of
   "MapAt" -> Right (reduceMapAt values)
   "Apply" -> Right (reduceApply values)
   "Replace" -> reduceReplace values
+  "ReplaceAt" -> reduceReplaceAt values
   "ReplaceAll" -> reduceReplaceAll values
   "ReplaceRepeated" -> reduceReplaceRepeated values
   "CompoundExpression" -> Right (if null values then Symbol "Null" else last values)
@@ -2104,6 +2105,18 @@ positionPaths (Call (Symbol "List") values)
   listPath _ = []
 positionPaths _ = []
 
+operationPositionPaths :: Expr -> Maybe [[PathSelector]]
+operationPositionPaths expression
+  | Just selector <- pathSelector expression = Just [[selector]]
+operationPositionPaths (Call (Symbol "List") values)
+  | Just path <- traverse pathSelector values = Just [path]
+  | otherwise = traverse explicitPath values
+ where
+  explicitPath (Call (Symbol "List") components) =
+    traverse pathSelector components
+  explicitPath _ = Nothing
+operationPositionPaths _ = Nothing
+
 pathSelector :: Expr -> Maybe PathSelector
 pathSelector (Integer position) = Just (ArgumentSelector position)
 pathSelector selector
@@ -2293,6 +2306,32 @@ reduceReplace = \case
     pure $ case replacement of
       Nothing -> current
       Just value -> maybe current id (replaceAtPath path value current)
+
+reduceReplaceAt :: [Expr] -> Either EvaluationError Expr
+reduceReplaceAt [expression, rules, positions] = do
+  ruleset <- requirePatternRuleSet "ReplaceAt" rules
+  paths <-
+    maybe
+      (Left (EvaluationError "ReplaceAt received an invalid position specification"))
+      Right
+      (operationPositionPaths positions)
+  foldM (replaceSelected ruleset) expression (sortOperationPaths paths)
+ where
+  replaceSelected ruleset current path = do
+    selected <-
+      maybe
+        (Left (EvaluationError "ReplaceAt encountered an invalid selected path"))
+        Right
+        (selectAtPath path current)
+    replacement <- applyPatternRules ruleset selected
+    case replacement of
+      Nothing -> Right current
+      Just value ->
+        maybe
+          (Left (EvaluationError "ReplaceAt encountered an invalid selected path"))
+          Right
+          (replaceAtPath path value current)
+reduceReplaceAt _ = Left (EvaluationError "ReplaceAt expects exactly three arguments")
 
 reduceReplaceAll :: [Expr] -> Either EvaluationError Expr
 reduceReplaceAll [expression, rules]
