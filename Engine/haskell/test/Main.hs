@@ -711,6 +711,8 @@ checkEvaluator = do
         , ("repeated and named pattern sequences", "{Cases[{f[a, b, a, b], f[a, b, a]}, f[Repeated[PatternSequence[a, b]]] :> ok], Cases[{f[1, 2], f[1, 2, 3]}, f[x:PatternSequence[_Integer, _Integer]] :> HoldComplete[x]]}", "List[List[ok], List[HoldComplete[1, 2]]]")
         , ("orderless pattern sequence capture", "Cases[{f[1, 2], f[2, 1]}, f[x:OrderlessPatternSequence[1, 2]] :> HoldComplete[x]]", "List[HoldComplete[1, 2], HoldComplete[2, 1]]")
         , ("longest sequence priorities", "{Cases[{f[a, b, c, d]}, f[Longest[x__], y__] :> HoldComplete[{x}, {y}]], Cases[{f[a, b, c, d]}, f[x__, Longest[y__]] :> HoldComplete[{x}, {y}]]}", "List[List[HoldComplete[List[a, b, c], List[d]]], List[HoldComplete[List[a], List[b, c, d]]]]")
+        , ("options pattern matching", "{MatchQ[a -> 1, OptionsPattern[]], MatchQ[1, OptionsPattern[]], Cases[{f[], f[a -> 1], f[{a -> 1}], f[{{}}], f[a], f[1 -> 2]}, f[OptionsPattern[]]]}", "List[True, False, List[f[], f[Rule[a, 1]], f[List[Rule[a, 1]]], f[List[List[]]]]]")
+        , ("named options pattern capture", "Cases[{f[], f[a -> 1]}, f[x:OptionsPattern[]] :> HoldComplete[x]]", "List[HoldComplete[], HoldComplete[Rule[a, 1]]]")
         , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")

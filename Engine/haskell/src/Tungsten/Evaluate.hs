@@ -1574,6 +1574,8 @@ sequencePatternBounds expression = case expression of
     Just (addPatternWidths (map patternWidthBounds patterns))
   Call (Symbol "OrderlessPatternSequence") patterns ->
     Just (addPatternWidths (map patternWidthBounds patterns))
+  Call (Symbol "OptionsPattern") patternArguments
+    | length patternArguments <= 1 -> Just (0, levelInfinity)
   _ -> Nothing
 
 sequencePrefersLongest :: Expr -> Bool
@@ -1732,6 +1734,9 @@ matchSequencePatternElements bindings patternExpression values = case patternExp
     matchPatternArguments bindings values patterns
   Call (Symbol "OrderlessPatternSequence") patterns ->
     matchOrderlessPatternSequence bindings values (permutations patterns)
+  Call (Symbol "OptionsPattern") patternArguments
+    | length patternArguments <= 1 ->
+        if all isOptionExpression values then Just bindings else Nothing
   repeated@(Call (Symbol repetitionHead) _)
     | repetitionHead `elem` ["Repeated", "RepeatedNull"] ->
         matchRepeatedPattern bindings repeated values
@@ -1781,6 +1786,15 @@ matchOrderlessPatternSequence bindings values (patterns : rest) =
   case matchPatternArguments bindings values patterns of
     Just matched -> Just matched
     Nothing -> matchOrderlessPatternSequence bindings values rest
+
+isOptionExpression :: Expr -> Bool
+isOptionExpression (Call (Symbol ruleHead) [key, _])
+  | ruleHead `elem` ["Rule", "RuleDelayed"] = case key of
+      Symbol {} -> True
+      String {} -> True
+      _ -> False
+isOptionExpression (Call (Symbol "List") values) = all isOptionExpression values
+isOptionExpression _ = False
 
 predicateMatchesPure :: Expr -> Expr -> Bool
 predicateMatchesPure test value = case evaluate (Call test [value]) of
