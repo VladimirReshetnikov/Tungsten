@@ -39,6 +39,9 @@ evaluateAt depth expression
       Call (Symbol "SetDelayed") _ -> Right expression
       Call (Symbol "RuleDelayed") _ -> Right expression
       Call (Symbol "Table") _ -> Right expression
+      Call (Symbol "Do") _ -> Right expression
+      Call (Symbol "Sum") _ -> Right expression
+      Call (Symbol "Product") _ -> Right expression
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'

@@ -1026,6 +1026,17 @@ checkEvaluationSession = do
         , ("table invalid forms remain held when nested", "{Table[1 + 2], f[Table[1 + 2]]}", "List[Table[Plus[1, 2]], f[Table[Plus[1, 2]]]]")
         , ("table evaluated-head aliases remain inert and held", "i = 99; f = Table; f[i, {i, 3}]", "Table[i, List[i, 3]]")
         , ("table evaluated list normalization", "{Table[Nothing, {3}], Table[Sequence[i, -i], {i, 2}], Table[f[i], {i, {Nothing, Sequence[a, b]}}], Table[i, {i, {Splice[{a, b}]}}]}", "List[List[], List[1, -1, 2, -2], List[f[a], f[b]], List[a, b]]")
+        , ("do held iterations", "{Do[Print[i], {i, 3}], Do[i + 1, {3}]}", "List[Null, Null]")
+        , ("do state and scoping", "i = 99; x = 0; {Do[x = x + i*j, {i, 1, 3}, {j, 1, 2}], x, i}", "List[Null, 18, 99]")
+        , ("sum exact iterators", "{Sum[i, {i, 1, 5}], Sum[i^2, {i, 1, 5}], Sum[i, {i, 2, 8, 2}], Sum[i, {i, 0, 1, 1/4}]}", "List[15, 55, 20, Rational[5, 2]]")
+        , ("sum values and nested iterators", "{Sum[Sqrt[i], {i, {1, 4, 9, 16}}], Sum[i, {i, {a, b, c}}], Sum[i + j, {i, 3}, {j, 2}], Sum[i*j, {i, 1, 3}, {j, 1, 2}]}", "List[10, Plus[a, b, c], 21, 18]")
+        , ("sum scoping and inert forms", "i = 99; x = 100; {Sum[i, {i, 1, 3}], i, Sum[x + j, {j, 1, 3}], Sum[a, 3], Sum[a], Sum[], Sum[j, {j, 1, 5, 0}]}", "List[6, 99, 306, Sum[a, 3], Sum[a], Sum[], Sum[j, List[j, 1, 5, 0]]]")
+        , ("product exact iterators", "{Product[i, {i, 1, 5}], Product[i^2, {i, 1, 4}], Product[i, {i, 2, 8, 2}], Product[i, {i, 0, 1, 1/4}]}", "List[120, 576, 384, 0]")
+        , ("product values and nested iterators", "{Product[Sqrt[i], {i, {1, 4, 9, 16}}], Product[i, {i, {a, b, c}}], Product[i + j, {i, 3}, {j, 2}], Product[i*j, {i, 1, 3}, {j, 1, 2}]}", "List[24, Times[a, b, c], 1440, 288]")
+        , ("product scoping and inert forms", "i = 99; x = 2; {Product[i, {i, 1, 3}], i, Product[x + j, {j, 1, 3}], Product[a, 3], Product[a], Product[], Product[j, {j, 1, 5, 0}]}", "List[6, 99, 60, Product[a, 3], Product[a], Product[], Product[j, List[j, 1, 5, 0]]]")
+        , ("sum and product interactions", "{Product[Sum[i, {i, 1, j}], {j, 1, 3}], Sum[Sum[i, {j, 1, i}], {i, 1, 3}], Product[2, {n, 0, 10}]}", "List[18, 14, 2048]")
+        , ("iterator invalid forms preserve prior effects", "x = 0; Do[a, {i, x = x + 1, b}]; d = x; x = 0; Sum[a, {i, x = x + 1, b}]; s = x; x = 0; Product[a, {i, x = x + 1, b}]; {d, s, x}", "List[1, 1, 1]")
+        , ("iterator evaluated-head aliases stay inert", "i = 99; d = Do; s = Sum; p = Product; {d[i, {i, 3}], s[i, {i, 3}], p[i, {i, 3}]}", "List[Do[i, List[i, 3]], Sum[i, List[i, 3]], Product[i, List[i, 3]]]")
         ]
   and <$> traverse evaluateSessionCase cases
  where

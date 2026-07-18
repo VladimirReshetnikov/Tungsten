@@ -70,6 +70,12 @@ evaluateSessionAt depth session expression
       Call (Symbol "Or") arguments' -> evaluateSessionOr depth session arguments'
       Call (Symbol "Table") arguments' ->
         evaluateSessionTable depth session arguments'
+      Call (Symbol "Do") arguments' ->
+        evaluateSessionDo depth session arguments'
+      Call (Symbol "Sum") arguments' ->
+        evaluateSessionAccumulator "Sum" "Plus" depth session arguments'
+      Call (Symbol "Product") arguments' ->
+        evaluateSessionAccumulator "Product" "Times" depth session arguments'
       Call (Symbol headName) [Symbol name, rhs]
         | Just constructor <- Map.lookup headName updateConstructors ->
             evaluateUpdate depth session name constructor rhs
@@ -78,7 +84,7 @@ evaluateSessionAt depth session expression
             Right (expression, session)
       Call expressionHead arguments' -> do
         (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
-        if evaluatedHead == Symbol "Table"
+        if isHeldIteratorHead evaluatedHead
           then Right (Call evaluatedHead arguments', headSession)
           else do
             (evaluatedArguments, argumentsSession) <- evaluateArguments depth headSession arguments'
@@ -103,6 +109,101 @@ evaluateSessionTable depth session arguments' = case arguments' of
         Left evaluationFailure
       Right result -> Right result
   _ -> Right (Call (Symbol "Table") arguments', session)
+
+evaluateSessionDo
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> Either EvaluationError (Expr, EvaluationSession)
+evaluateSessionDo depth session arguments' = case arguments' of
+  body : iteratorSpecs@(_ : _) ->
+    case flatIterationLoop False depth session body iteratorSpecs of
+      Left (InvalidIterator updated) ->
+        Right (Call (Symbol "Do") arguments', updated)
+      Left (IterationEvaluationFailure evaluationFailure) ->
+        Left evaluationFailure
+      Right (_, updated) -> Right (Symbol "Null", updated)
+  _ -> Right (Call (Symbol "Do") arguments', session)
+
+evaluateSessionAccumulator
+  :: Text
+  -> Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> Either EvaluationError (Expr, EvaluationSession)
+evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
+  case arguments' of
+    body : iteratorSpecs@(_ : _)
+      | all isListIteratorSpec iteratorSpecs ->
+          case flatIterationLoop True depth session body iteratorSpecs of
+            Left (InvalidIterator updated) -> inert updated
+            Left (IterationEvaluationFailure evaluationFailure) ->
+              Left evaluationFailure
+            Right (terms, updated) ->
+              evaluateSessionAt
+                (depth + 1)
+                updated
+                (Call (Symbol accumulatorHead) terms)
+    _ -> inert session
+ where
+  inert updated = Right (Call (Symbol headName) arguments', updated)
+
+flatIterationLoop
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> Either IterationFailure ([Expr], EvaluationSession)
+flatIterationLoop retainValues depth session body iteratorSpecs = do
+  (reversed, updated) <- collect depth session iteratorSpecs []
+  Right (reverse reversed, updated)
+ where
+  collect currentDepth current [] retained = do
+    (value, updated) <-
+      liftIterationEvaluation
+        (evaluateSessionAt (currentDepth + 1) current body)
+    Right (if retainValues then value : retained else retained, updated)
+  collect currentDepth current (iteratorSpec : remainingSpecs) retained = do
+    (Iterator variable values, resolvedSession) <-
+      resolveIterator currentDepth current iteratorSpec
+    case variable of
+      Nothing -> collectWithoutVariable currentDepth resolvedSession values retained
+      Just name ->
+        let previousDefinition =
+              Map.lookup name (sessionDefinitions resolvedSession)
+         in collectWithVariable
+              currentDepth
+              name
+              previousDefinition
+              resolvedSession
+              values
+              retained
+   where
+    collectWithoutVariable _ currentSession [] retainedValues =
+      Right (retainedValues, currentSession)
+    collectWithoutVariable nestedDepth currentSession (_ : rest) retainedValues = do
+      (nextRetained, updated) <-
+        collect (nestedDepth + 1) currentSession remainingSpecs retainedValues
+      collectWithoutVariable nestedDepth updated rest nextRetained
+    collectWithVariable _ name previous currentSession [] retainedValues =
+      Right
+        ( retainedValues
+        , restoreDefinition name previous currentSession
+        )
+    collectWithVariable nestedDepth name previous currentSession (value : rest) retainedValues =
+      let bound = define name (ImmediateValue value) currentSession
+       in case collect (nestedDepth + 1) bound remainingSpecs retainedValues of
+            Left failure -> Left (restoreIterationFailure name previous failure)
+            Right (nextRetained, updated) ->
+              collectWithVariable
+                nestedDepth
+                name
+                previous
+                updated
+                rest
+                nextRetained
 
 tableLoop
   :: Int
@@ -239,6 +340,15 @@ evaluatedListArguments = filter (/= Symbol "Nothing") . concatMap spliceArgument
     Call (Symbol "Splice") [Call (Symbol "List") values, target]
       | target == Symbol "List" -> values
     value -> [value]
+
+isHeldIteratorHead :: Expr -> Bool
+isHeldIteratorHead (Symbol name) =
+  name `elem` ["Table", "Do", "Sum", "Product"]
+isHeldIteratorHead _ = False
+
+isListIteratorSpec :: Expr -> Bool
+isListIteratorSpec (Call (Symbol "List") _) = True
+isListIteratorSpec _ = False
 
 evaluateSequence
   :: Int
