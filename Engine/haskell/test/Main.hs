@@ -1550,8 +1550,12 @@ checkParserEvaluatorProtocol :: IO Bool
 checkParserEvaluatorProtocol = do
   let parseRequest = expectRight (decodeRequestLine "{\"id\":1,\"command\":\"parse\",\"form\":\"input\",\"source\":\"1 + 2 x\"}")
       evaluateRequest = expectRight (decodeRequestLine "{\"id\":2,\"command\":\"evaluate\",\"source\":\"Total[Range[5]]\"}")
+      sessionEvaluateRequest = expectRight (decodeRequestLine "{\"id\":3,\"command\":\"evaluate\",\"source\":\"x = 2; x^3\"}")
+      isolatedEvaluateRequest = expectRight (decodeRequestLine "{\"id\":4,\"command\":\"evaluate\",\"source\":\"x\"}")
       parseResponse = handleProtocolRequest parseRequest
       evaluateResponse = handleProtocolRequest evaluateRequest
+      sessionEvaluateResponse = handleProtocolRequest sessionEvaluateRequest
+      isolatedEvaluateResponse = handleProtocolRequest isolatedEvaluateRequest
   first <- case parseResponse of
     ProtocolSuccess {protocolResult = JsonObject result} ->
       case Map.lookup "full_form" result of
@@ -1567,8 +1571,19 @@ checkParserEvaluatorProtocol = do
             other -> assertEqual "protocol evaluation result shape" (Just (JsonString "expected")) other
         other -> assertEqual "protocol evaluation outer shape" (Just (JsonString "expected")) other
     other -> assertEqual "protocol evaluate response" True (isSuccess other)
-  pure (first && second)
+  third <- assertProtocolEvaluation "protocol session-backed evaluation" "8" sessionEvaluateResponse
+  fourth <- assertProtocolEvaluation "protocol request session isolation" "x" isolatedEvaluateResponse
+  pure (and [first, second, third, fourth])
  where
+  assertProtocolEvaluation label expected response = case response of
+    ProtocolSuccess {protocolResult = JsonObject outer} ->
+      case Map.lookup "result" outer of
+        Just (JsonObject result) ->
+          case Map.lookup "full_form" result of
+            Just (JsonString value) -> assertEqual label expected value
+            other -> assertEqual (label <> " result shape") (Just (JsonString "expected")) other
+        other -> assertEqual (label <> " outer shape") (Just (JsonString "expected")) other
+    other -> assertEqual (label <> " response") True (isSuccess other)
   isSuccess ProtocolSuccess {} = True
   isSuccess ProtocolFailure {} = False
 

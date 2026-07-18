@@ -52,8 +52,9 @@ import Text.Parsec
 import qualified Text.Parsec as Parsec
 import Text.Parsec.String (Parser)
 import Text.Read (readMaybe)
-import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
+import Tungsten.Evaluate (evaluationErrorMessage)
 import Tungsten.Expression
+import Tungsten.Session (emptySession, evaluateInSession)
 import Tungsten.WolframString
 import Tungsten.Parser (parseErrorMessage, parseFullForm, parseInputForm)
 
@@ -419,9 +420,9 @@ handleProtocolRequest request = case protocolCommand request of
         (expressionResult expression)
   "evaluate" -> case requestExpression request of
     Left message -> failure message
-    Right expression -> case evaluate expression of
+    Right expression -> case evaluateInSession emptySession expression of
       Left evaluationError -> failure (evaluationErrorMessage evaluationError)
-      Right result ->
+      Right (result, _) ->
         ProtocolSuccess
           (protocolRequestId request)
           "evaluate"

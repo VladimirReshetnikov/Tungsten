@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T20:19:54Z
-- Repository HEAD: f5db190e4fa610a2d593147ace6228ee3ab056fa
+- Updated (UTC): 2026-07-18T20:26:47Z
+- Repository HEAD: 5580f641021187e86fa7b7d9f33d2eae38658aa0
 
 ## Purpose
 
@@ -74,9 +74,9 @@ Haskell process clients.
 | FullForm parser | Calls and chained heads, exact and real atoms, shared Wolfram string decoding, nested comments, rationals, and complex atoms |
 | InputForm parser | Core calls, lists, associations, parts, blanks/named patterns/PatternTest, dotted and explicit-default optional patterns, named colon patterns, `..`/`...` repetition postfixes with precision-literal boundary handling, slots and pure functions, arithmetic, comparisons, Boolean operators, rules, replacements, conditions, assignments, application, and compound expressions |
 | Evaluator | Exact arithmetic, integer powers, exact rational-power radical extraction, explicit-number `Sqrt`, scalar and explicit-complex exact/source-real `Floor`/`Ceiling`/half-even `Round`/`IntegerPart`/`FractionalPart` with signed exact multiples, recursive-list `Min`/`Max` folding over explicit reals and symbolic residues, canonical ordering/sort-by/set operations, comparisons, Boolean control flow, structural and quantified collection predicates, predicate select/discard/first/while/pick operations over heads and associations, structural MatchQ blanks/typed and named bindings/PatternTest/alternatives/exceptions/conditions/backtracking sequence blanks, explicit optional defaults, bounded Repeated/RepeatedNull, named and orderless PatternSequence, Longest/Shortest allocation priorities, structural OptionsPattern capture, order-independent KeyValuePattern entry matching, and fixed-width IgnoringInactive structural views with original-value bindings plus level-aware traversal and binding/sequence-aware Cases/Replace/ReplaceAll/ReplaceRepeated/Position/FirstPosition transformations, canonical PositionLargest/PositionSmallest and grouped PositionIndex, exact-path pattern-aware ReplaceAt, numeric/key parts and extraction, ranges, multi-axis take/drop, append/prepend/join, rotation, bounded/named-head flattening, nested delete/insert/replace/map-at operations across list and association paths, mapping/application, association normalization/access/key transforms/value-aware structural operations/ordered grouping and key-set alignment, matrix totals, ordered tally/counts, catenation, differences, accumulation, riffle, containment, subsets/permutations, padding and exact mean/median, pure functions, exact replacement, held forms, and symbolic fallback |
-| Sessions | Immutable immediate/delayed symbol own-values, assignment and updates, unset/clear, sequential state, and session-aware held control flow |
-| JSON | Deterministic codec, tagged expression round trips, arbitrary integer lexemes, protocol requests/responses, parse/evaluate source commands, and structured errors |
-| CLI | Expression, notebook, environment, kernel, FrontEnd, REPL, protocol, and inline-box command families with deterministic JSON and explicit exit behavior |
+| Sessions | Immutable immediate/delayed symbol own-values, assignment and updates, unset/clear, sequential state, session-aware held control flow, and fresh-session stateless command evaluation |
+| JSON | Deterministic codec, tagged expression round trips, arbitrary integer lexemes, protocol requests/responses, session-backed parse/evaluate source commands, and structured errors |
+| CLI | Expression, notebook, environment, kernel, FrontEnd, REPL, protocol, and inline-box command families with deterministic JSON, fresh evaluation sessions, and explicit exit behavior |
 | REPL | Persistent definitions, `In`/`InString`/`Out`, `%` output shorthand, `$Line`, Wolfram-style prompts, and `Exit`/`Quit` codes |
 | Discovery | Explicit `TUNGSTEN_WOLFRAM_HOME`, product-family selection, installed-version ranking, PATH fallback, executable/docs/license candidates, cache paths, and `env show` JSON |
 | Kernel runner | Temporary source/wrapper/result isolation, stable temporary mathpass deduplication, held parsing, `EvaluationData` metadata, evaluated `Print` capture, optional `UsingFrontEnd`, cross-process launch gating, stale batch cleanup, cached license-seat waiting, process snapshots, process output, JSON decoding, and `kernel eval` exit behavior |

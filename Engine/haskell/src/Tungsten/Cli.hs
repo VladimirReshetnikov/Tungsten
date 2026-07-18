@@ -36,7 +36,7 @@ import System.IO
   , stdout
   , utf8
   )
-import Tungsten.Evaluate (evaluate, evaluationErrorMessage)
+import Tungsten.Evaluate (evaluationErrorMessage)
 import Tungsten.Assistant
 import Tungsten.Discovery
 import Tungsten.DocsIndex
@@ -49,6 +49,7 @@ import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.ParserCorpus
 import Tungsten.Repl (runRepl)
+import Tungsten.Session (emptySession, evaluateInSession)
 import Tungsten.WolframString (WolframStringSegment (..))
 
 data CliCommand
@@ -943,7 +944,7 @@ runExpressionCommand command sourceSpec requestedForm = do
         ParseCommand -> do
           emitJson (parsePayload normalizedForm source expression)
           pure 0
-        EvaluateCommand -> case evaluate expression of
+        EvaluateCommand -> case evaluateInSession emptySession expression of
           Left evaluationError ->
             emitError
               command
@@ -951,7 +952,7 @@ runExpressionCommand command sourceSpec requestedForm = do
               "EvaluationError"
               (evaluationErrorMessage evaluationError)
               (Just expression)
-          Right result -> do
+          Right (result, _) -> do
             emitJson (evaluationPayload normalizedForm source expression result)
             pure 0
 
