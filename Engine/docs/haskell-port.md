@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-18T16:42:54Z
-- Repository HEAD: 42475871e088272bc73d62acf97260e4d7dd02ee
+- Updated (UTC): 2026-07-18T16:50:19Z
+- Repository HEAD: ac25962e1ca5239e51df754c8aa408bf6f45d5ca
 
 ## Purpose
 
@@ -73,7 +73,7 @@ Haskell process clients.
 | Named characters | Build-time embedding of all 1,100 Wolfram 15.0 kernel-accepted names, canonical symbol rendering, strict identifier escapes, single-character aliases, and core escaped operator spellings |
 | FullForm parser | Calls and chained heads, exact and real atoms, shared Wolfram string decoding, nested comments, rationals, and complex atoms |
 | InputForm parser | Core calls, lists, associations, parts, patterns, slots and pure functions, arithmetic, comparisons, Boolean operators, rules, replacements, conditions, assignments, application, and compound expressions |
-| Evaluator | Exact arithmetic and powers, comparisons, Boolean control flow, structural predicates, parts, ranges, multi-axis take/drop, append/prepend/join, rotation, bounded/named-head flattening, nested delete/insert/replace/map-at operations, mapping/application, association normalization/access/key transforms/value-aware structural operations, pure functions, exact replacement, held forms, and symbolic fallback |
+| Evaluator | Exact arithmetic and powers, comparisons, Boolean control flow, structural predicates, numeric/key parts and extraction, ranges, multi-axis take/drop, append/prepend/join, rotation, bounded/named-head flattening, nested delete/insert/replace/map-at operations across list and association paths, mapping/application, association normalization/access/key transforms/value-aware structural operations, pure functions, exact replacement, held forms, and symbolic fallback |
 | Sessions | Immutable immediate/delayed symbol own-values, assignment and updates, unset/clear, sequential state, and session-aware held control flow |
 | JSON | Deterministic codec, tagged expression round trips, arbitrary integer lexemes, protocol requests/responses, parse/evaluate source commands, and structured errors |
 | CLI | Expression, notebook, environment, kernel, FrontEnd, REPL, protocol, and inline-box command families with deterministic JSON and explicit exit behavior |

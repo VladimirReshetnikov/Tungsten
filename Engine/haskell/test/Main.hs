@@ -588,6 +588,18 @@ checkEvaluator = do
         , ("association append positioning", "{Append[<|a -> 1, b -> 2|>, a -> 9], Prepend[<|a -> 1, b -> 2|>, a -> 9]}", "List[Association[Rule[b, 2], Rule[a, 9]], Association[Rule[a, 9], Rule[b, 2]]]")
         , ("association join and map", "{Join[<|a -> 1, b -> 2|>, <|a -> 9, c -> 3|>], Map[g, <|a -> 1, b -> 2|>]}", "List[Association[Rule[a, 9], Rule[b, 2], Rule[c, 3]], Association[Rule[a, g[1]], Rule[b, g[2]]]]")
         , ("association Nothing filtering", "{<|Nothing, a -> 1|>, Keys[<|Nothing -> 1, a -> 2|>], Values[<|a -> Nothing, b -> 1|>]}", "List[Association[Rule[a, 1]], List[a], List[1]]")
+        , ("association part by key", "Part[<|a -> x, b -> y, c -> z|>, Key[b]]", "y")
+        , ("association part by direct string key", "Part[<|\"a\" -> x, \"b\" -> {y, z}|>, \"b\", 2]", "z")
+        , ("association part by index", "Part[<|a -> x, b -> y, c -> z|>, 2]", "y")
+        , ("association part key projection", "Part[<|a -> 1, b -> 2, c -> 3, d -> 4|>, {Key[a], Key[c]}]", "Association[Rule[a, 1], Rule[c, 3]]")
+        , ("association extract keys", "Extract[<|a -> 1, b -> 2, c -> 3|>, {{Key[a]}, {Key[c]}}]", "List[1, 3]")
+        , ("association extract nested path", "Extract[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]", "3")
+        , ("association delete keys", "Delete[<|a -> 1, b -> 2, c -> 3|>, {{Key[a]}, {Key[c]}}]", "Association[Rule[b, 2]]")
+        , ("association delete nested path", "Delete[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]", "List[Association[Rule[a, 1], Rule[b, List[2]]], 9]")
+        , ("association replace keys", "ReplacePart[<|a -> 1, b -> 2, c -> 3|>, {{Key[a]} -> x, {Key[c]} -> z}]", "Association[Rule[a, x], Rule[b, 2], Rule[c, z]]")
+        , ("association replace nested path", "ReplacePart[{<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2} -> x]", "List[Association[Rule[a, 1], Rule[b, List[2, x]]], 9]")
+        , ("association map at keys", "MapAt[f, <|a -> 1, b -> 2, c -> 3|>, {{Key[a]}, {Key[c]}}]", "Association[Rule[a, f[1]], Rule[b, 2], Rule[c, f[3]]]")
+        , ("association map at nested path", "MapAt[f, {<|a -> 1, b -> {2, 3}|>, 9}, {1, Key[b], 2}]", "List[Association[Rule[a, 1], Rule[b, List[2, f[3]]]], 9]")
         , ("exact replacement", "f[a, g[a]] /. a -> 9", "f[9, g[9]]")
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")
@@ -610,8 +622,13 @@ checkEvaluator = do
 
 checkEvaluatorErrors :: IO Bool
 checkEvaluatorErrors = do
-  let result = parseInputForm "{a, b}[[3]]" >>= mapLeftEvaluation . evaluate
-  assertLeft "reject out-of-range Part during evaluation" result
+  let outOfRange = parseInputForm "{a, b}[[3]]" >>= mapLeftEvaluation . evaluate
+      mixedAssociationSelectors =
+        parseInputForm "Part[<|a -> 1, b -> 2, c -> 3, d -> 4|>, {2, Key[d]}]"
+          >>= mapLeftEvaluation . evaluate
+  first <- assertLeft "reject out-of-range Part during evaluation" outOfRange
+  second <- assertLeft "reject mixed Association Part selectors" mixedAssociationSelectors
+  pure (first && second)
  where
   mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
 

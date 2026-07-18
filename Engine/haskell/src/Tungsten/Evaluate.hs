@@ -130,6 +130,7 @@ reduceBuiltin headName values = case headName of
   "Rest" -> Right (reduceRestMost True headName values)
   "Most" -> Right (reduceRestMost False headName values)
   "Part" -> reducePart values
+  "Extract" -> reduceExtract values
   "Keys" -> reduceKeys values
   "Values" -> reduceValues values
   "Normal" -> reduceNormal values
@@ -343,6 +344,20 @@ reducePart [] = Right (Call (Symbol "Part") [])
 reducePart (target : indices) = foldM selectPart target indices
  where
   selectPart expression (Integer 0) = Right (headExpr expression)
+  selectPart association (Call (Symbol "List") selectors)
+    | Just entries <- associationEntries association
+    , Just keys <- traverse keySelectorValue selectors =
+        Right (associationExpr (mapMaybe (`findAssociationEntry` entries) keys))
+    | Just _ <- associationEntries association
+    , any isKeySelector selectors =
+        Left (EvaluationError "an Association Part selector list cannot mix keys with other selectors")
+  selectPart association selector
+    | Just entries <- associationEntries association
+    , Just selectorPath <- associationPartSelector selector =
+        maybe
+          (Left (EvaluationError "an Association Part selector is out of range or absent"))
+          (Right . associationEntryValue)
+          (associationEntryForSelector selectorPath entries)
   selectPart (Call _ values) (Integer index) =
     let resolved = if index > 0 then index - 1 else fromIntegral (length values) + index
      in if resolved >= 0 && resolved < fromIntegral (length values)
@@ -350,8 +365,64 @@ reducePart (target : indices) = foldM selectPart target indices
           else Left (EvaluationError "a Part index is out of range")
   selectPart expression index = Right (Call (Symbol "Part") [expression, index])
 
+reduceExtract :: [Expr] -> Either EvaluationError Expr
+reduceExtract [subject, positions] = do
+  let paths = positionPaths positions
+  if null paths
+    then Left (EvaluationError "Extract received an invalid position specification")
+    else do
+      selected <- traverse extractPath paths
+      case selected of
+        firstSelected : _ ->
+          pure (if hasMultiplePositionPaths positions then evaluatedList selected else firstSelected)
+        [] -> Left (EvaluationError "Extract received an empty internal position set")
+ where
+  extractPath path =
+    maybe
+      (Left (EvaluationError "Extract received an invalid position"))
+      Right
+      (selectAtPath path subject)
+reduceExtract values = Right (Call (Symbol "Extract") values)
+
 data AssociationEntry = AssociationEntry !Text !Expr !Expr
   deriving (Eq, Show)
+
+data PathSelector
+  = ArgumentSelector !Integer
+  | KeySelector !Expr
+  deriving (Eq, Show)
+
+keySelectorValue :: Expr -> Maybe Expr
+keySelectorValue (Call (Symbol "Key") [key]) = Just key
+keySelectorValue _ = Nothing
+
+isKeySelector :: Expr -> Bool
+isKeySelector = maybe False (const True) . keySelectorValue
+
+associationPartSelector :: Expr -> Maybe PathSelector
+associationPartSelector (Integer position) = Just (ArgumentSelector position)
+associationPartSelector selector
+  | Just key <- keySelectorValue selector = Just (KeySelector key)
+associationPartSelector key@String {} = Just (KeySelector key)
+associationPartSelector _ = Nothing
+
+associationEntryValue :: AssociationEntry -> Expr
+associationEntryValue (AssociationEntry _ _ value) = value
+
+associationEntryForSelector :: PathSelector -> [AssociationEntry] -> Maybe AssociationEntry
+associationEntryForSelector selector entries = do
+  index <- associationEntryIndex selector entries
+  pure (entries !! index)
+
+associationEntryIndex :: PathSelector -> [AssociationEntry] -> Maybe Int
+associationEntryIndex (ArgumentSelector position) entries =
+  resolvePosition (length entries) position
+associationEntryIndex (KeySelector key) entries = go 0 entries
+ where
+  go _ [] = Nothing
+  go index (AssociationEntry _ candidate _ : rest)
+    | key == candidate = Just index
+    | otherwise = go (index + 1) rest
 
 ruleEntry :: Expr -> Maybe AssociationEntry
 ruleEntry (Call (Symbol ruleHead) [key, value])
@@ -757,70 +828,140 @@ reduceMapAt [function, subject, positions] =
     maybe expression id (mapAtPath path function expression)
 reduceMapAt values = Call (Symbol "MapAt") values
 
-positionPaths :: Expr -> [[Integer]]
-positionPaths (Integer position) = [[position]]
+positionPaths :: Expr -> [[PathSelector]]
+positionPaths expression
+  | Just selector <- pathSelector expression = [[selector]]
 positionPaths (Call (Symbol "List") values)
-  | Just path <- traverse integerValue values = [path]
+  | Just path <- traverse pathSelector values = [path]
   | otherwise = concatMap listPath values
  where
-  listPath (Call (Symbol "List") components) = maybe [] pure (traverse integerValue components)
+  listPath (Call (Symbol "List") components) = maybe [] pure (traverse pathSelector components)
   listPath _ = []
 positionPaths _ = []
 
-replacePartRules :: Expr -> [([Integer], Expr)]
+pathSelector :: Expr -> Maybe PathSelector
+pathSelector (Integer position) = Just (ArgumentSelector position)
+pathSelector selector
+  | Just key <- keySelectorValue selector = Just (KeySelector key)
+pathSelector _ = Nothing
+
+hasMultiplePositionPaths :: Expr -> Bool
+hasMultiplePositionPaths (Call (Symbol "List") values) =
+  case traverse pathSelector values of
+    Just _ -> False
+    Nothing -> any isExplicitPath values
+ where
+  isExplicitPath (Call (Symbol "List") components) =
+    maybe False (const True) (traverse pathSelector components)
+  isExplicitPath _ = False
+hasMultiplePositionPaths _ = False
+
+replacePartRules :: Expr -> [([PathSelector], Expr)]
 replacePartRules (Call (Symbol "List") rules) = concatMap replacePartRules rules
 replacePartRules (Call (Symbol ruleHead) [position, replacement])
   | ruleHead `elem` ["Rule", "RuleDelayed"] =
       [(path, replacement) | path <- positionPaths position]
 replacePartRules _ = []
 
-sortOperationPaths :: [[Integer]] -> [[Integer]]
-sortOperationPaths = sortBy comparePath
- where
-  comparePath left right = case compare (length right) (length left) of
-    EQ -> compare right left
-    ordering -> ordering
+sortOperationPaths :: [[PathSelector]] -> [[PathSelector]]
+sortOperationPaths = sortBy compareOperationPath
 
-sortReplacementRules :: [([Integer], Expr)] -> [([Integer], Expr)]
-sortReplacementRules = sortBy (\(left, _) (right, _) -> comparePath left right)
- where
-  comparePath left right = case compare (length right) (length left) of
-    EQ -> compare right left
-    ordering -> ordering
+sortReplacementRules :: [([PathSelector], Expr)] -> [([PathSelector], Expr)]
+sortReplacementRules = sortBy (\(left, _) (right, _) -> compareOperationPath left right)
 
-deleteAtPath :: [Integer] -> Expr -> Maybe Expr
+compareOperationPath :: [PathSelector] -> [PathSelector] -> Ordering
+compareOperationPath left right = case compare (length right) (length left) of
+  EQ -> compareSelectors right left
+  ordering -> ordering
+ where
+  compareSelectors [] [] = EQ
+  compareSelectors [] (_ : _) = LT
+  compareSelectors (_ : _) [] = GT
+  compareSelectors (leftSelector : leftRest) (rightSelector : rightRest) =
+    case compareSelector leftSelector rightSelector of
+      EQ -> compareSelectors leftRest rightRest
+      ordering -> ordering
+  compareSelector (ArgumentSelector leftPosition) (ArgumentSelector rightPosition) =
+    compare leftPosition rightPosition
+  compareSelector (KeySelector leftKey) (KeySelector rightKey) =
+    compare (fullForm leftKey) (fullForm rightKey)
+  compareSelector ArgumentSelector {} KeySelector {} = LT
+  compareSelector KeySelector {} ArgumentSelector {} = GT
+
+selectAtPath :: [PathSelector] -> Expr -> Maybe Expr
+selectAtPath [] expression = Just expression
+selectAtPath (selector : remaining) association
+  | Just entries <- associationEntries association = do
+      entry <- associationEntryForSelector selector entries
+      selectAtPath remaining (associationEntryValue entry)
+selectAtPath (ArgumentSelector position : remaining) (Call _ values) = do
+  index <- resolvePosition (length values) position
+  selectAtPath remaining (values !! index)
+selectAtPath _ _ = Nothing
+
+deleteAtPath :: [PathSelector] -> Expr -> Maybe Expr
 deleteAtPath [] _ = Nothing
-deleteAtPath [position] (Call expressionHead values) = do
+deleteAtPath [selector] association
+  | Just entries <- associationEntries association = do
+      index <- associationEntryIndex selector entries
+      pure (associationExpr (take index entries <> drop (index + 1) entries))
+deleteAtPath (selector : remaining) association
+  | Just entries <- associationEntries association = do
+      index <- associationEntryIndex selector entries
+      updated <- deleteAtPath remaining (associationEntryValue (entries !! index))
+      pure (associationExpr (replaceAssociationEntryValue index updated entries))
+deleteAtPath [ArgumentSelector position] (Call expressionHead values) = do
   index <- resolvePosition (length values) position
   pure (Call expressionHead (take index values <> drop (index + 1) values))
-deleteAtPath (position : remaining) (Call expressionHead values) = do
+deleteAtPath (ArgumentSelector position : remaining) (Call expressionHead values) = do
   index <- resolvePosition (length values) position
   updated <- deleteAtPath remaining (values !! index)
   pure (Call expressionHead (replaceListIndex index updated values))
 deleteAtPath _ _ = Nothing
 
-replaceAtPath :: [Integer] -> Expr -> Expr -> Maybe Expr
+replaceAtPath :: [PathSelector] -> Expr -> Expr -> Maybe Expr
 replaceAtPath [] replacement _ = Just replacement
-replaceAtPath (position : remaining) replacement (Call expressionHead values) = do
+replaceAtPath (selector : remaining) replacement association
+  | Just entries <- associationEntries association = do
+      index <- associationEntryIndex selector entries
+      updated <- replaceAtPath remaining replacement (associationEntryValue (entries !! index))
+      pure (associationExpr (replaceAssociationEntryValue index updated entries))
+replaceAtPath (ArgumentSelector position : remaining) replacement (Call expressionHead values) = do
   index <- resolvePosition (length values) position
   updated <- replaceAtPath remaining replacement (values !! index)
   pure (Call expressionHead (replaceListIndex index updated values))
 replaceAtPath _ _ _ = Nothing
 
-mapAtPath :: [Integer] -> Expr -> Expr -> Maybe Expr
+mapAtPath :: [PathSelector] -> Expr -> Expr -> Maybe Expr
 mapAtPath [] function expression = Just (Call function [expression])
-mapAtPath (position : remaining) function (Call expressionHead values) = do
+mapAtPath (selector : remaining) function association
+  | Just entries <- associationEntries association = do
+      index <- associationEntryIndex selector entries
+      updated <- mapAtPath remaining function (associationEntryValue (entries !! index))
+      pure (associationExpr (replaceAssociationEntryValue index updated entries))
+mapAtPath (ArgumentSelector position : remaining) function (Call expressionHead values) = do
   index <- resolvePosition (length values) position
   updated <- mapAtPath remaining function (values !! index)
   pure (Call expressionHead (replaceListIndex index updated values))
 mapAtPath _ _ _ = Nothing
 
-insertAtPath :: [Integer] -> Expr -> Expr -> Maybe Expr
+replaceAssociationEntryValue :: Int -> Expr -> [AssociationEntry] -> [AssociationEntry]
+replaceAssociationEntryValue index replacement entries =
+  case entries !! index of
+    AssociationEntry ruleHead key _ ->
+      replaceListIndex index (AssociationEntry ruleHead key replacement) entries
+
+insertAtPath :: [PathSelector] -> Expr -> Expr -> Maybe Expr
 insertAtPath [] _ _ = Nothing
-insertAtPath [position] item (Call expressionHead values) = do
+insertAtPath (selector : remaining@(_ : _)) item association
+  | Just entries <- associationEntries association = do
+      index <- associationEntryIndex selector entries
+      updated <- insertAtPath remaining item (associationEntryValue (entries !! index))
+      pure (associationExpr (replaceAssociationEntryValue index updated entries))
+insertAtPath [ArgumentSelector position] item (Call expressionHead values) = do
   index <- insertOffset (length values) position
   pure (Call expressionHead (take index values <> [item] <> drop index values))
-insertAtPath (position : remaining) item (Call expressionHead values) = do
+insertAtPath (ArgumentSelector position : remaining) item (Call expressionHead values) = do
   index <- resolvePosition (length values) position
   updated <- insertAtPath remaining item (values !! index)
   pure (Call expressionHead (replaceListIndex index updated values))
