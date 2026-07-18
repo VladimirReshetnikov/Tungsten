@@ -206,6 +206,11 @@ reduceBuiltin headName values = case headName of
   "Cases" -> reduceCases values
   "DeleteCases" -> reduceDeleteCases values
   "FirstCase" -> reduceFirstCase values
+  "Position" -> reducePosition values
+  "FirstPosition" -> reduceFirstPosition values
+  "PositionLargest" -> reducePositionExtrema True values
+  "PositionSmallest" -> reducePositionExtrema False values
+  "PositionIndex" -> reducePositionIndex values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
@@ -2039,6 +2044,41 @@ collectPatternPathRecords positive path expression =
           ]
     | otherwise = []
 
+collectPositionPathRecords :: Bool -> Int -> [PathSelector] -> Expr -> [PatternPathRecord]
+collectPositionPathRecords includeHeads positive path expression =
+  children <> [PatternPathRecord expression positive (negate (expressionDepth expression)) path]
+ where
+  children
+    | Just entries <- associationEntries expression =
+        associationHeadRecords
+          <> concat
+            [ collectPositionPathRecords
+                includeHeads
+                (positive + 1)
+                (path <> [KeySelector key])
+                value
+            | AssociationEntry _ key value <- entries
+            ]
+    | Call expressionHead values <- expression =
+        callHeadRecords expressionHead
+          <> concat
+            [ collectPositionPathRecords
+                includeHeads
+                (positive + 1)
+                (path <> [ArgumentSelector (fromIntegral index)])
+                value
+            | (index, value) <- zip [1 :: Int ..] values
+            ]
+    | otherwise = []
+  associationHeadRecords =
+    if includeHeads
+      then collectPositionPathRecords includeHeads (positive + 1) (path <> [ArgumentSelector 0]) (Symbol "Association")
+      else []
+  callHeadRecords expressionHead =
+    if includeHeads
+      then collectPositionPathRecords includeHeads (positive + 1) (path <> [ArgumentSelector 0]) expressionHead
+      else []
+
 patternMatches :: Expr -> Expr -> Bool
 patternMatches expression patternExpression =
   maybe False (const True) (matchPattern [] expression patternExpression)
@@ -2182,6 +2222,102 @@ reduceFirstCase = \case
     case matched of
       PatternRecord value _ _ : _ -> Right value
       [] -> Right (maybe (Call (Symbol "Missing") [String "NotFound"]) id defaultValue)
+
+reducePosition :: [Expr] -> Either EvaluationError Expr
+reducePosition values = case stripHeadsOption values of
+  (includeHeads, [expression, patternExpression]) ->
+    positionAtLevels includeHeads expression patternExpression (Call (Symbol "List") [Integer 0, Symbol "Infinity"]) Nothing
+  (includeHeads, [expression, patternExpression, specification]) ->
+    positionAtLevels includeHeads expression patternExpression specification Nothing
+  (includeHeads, [expression, patternExpression, specification, limit]) ->
+    positionAtLevels includeHeads expression patternExpression specification (Just limit)
+  _ -> Left (EvaluationError "Position expects an expression, a pattern, and optional level and result limits")
+
+positionAtLevels :: Bool -> Expr -> Expr -> Expr -> Maybe Expr -> Either EvaluationError Expr
+positionAtLevels includeHeads expression patternExpression specification limit = do
+  bounds <- normalizeLevelSpec specification
+  normalizedLimit <- selectionLimit "Position" limit
+  let matched =
+        matchingPathRecords
+          bounds
+          normalizedLimit
+          patternExpression
+          (collectPositionPathRecords includeHeads 0 [] expression)
+  pure
+    ( list
+        [ pathExpression path
+        | PatternPathRecord _ _ _ path <- matched
+        ]
+    )
+
+reduceFirstPosition :: [Expr] -> Either EvaluationError Expr
+reduceFirstPosition = \case
+  [expression, patternExpression] ->
+    firstPositionAtLevels expression patternExpression Nothing (Call (Symbol "List") [Integer 0, Symbol "Infinity"])
+  [expression, patternExpression, defaultValue] ->
+    firstPositionAtLevels expression patternExpression (Just defaultValue) (Call (Symbol "List") [Integer 0, Symbol "Infinity"])
+  [expression, patternExpression, defaultValue, specification] ->
+    firstPositionAtLevels expression patternExpression (Just defaultValue) specification
+  _ -> Left (EvaluationError "FirstPosition expects an expression, a pattern, and optional default and level specification")
+ where
+  firstPositionAtLevels expression patternExpression defaultValue specification = do
+    positions <- positionAtLevels True expression patternExpression specification (Just (Integer 1))
+    case positions of
+      Call (Symbol "List") (firstPosition : _) -> Right firstPosition
+      _ -> Right (maybe (Call (Symbol "Missing") [String "NotFound"]) id defaultValue)
+
+reducePositionExtrema :: Bool -> [Expr] -> Either EvaluationError Expr
+reducePositionExtrema largest [dataExpression] = do
+  values <- listOrAssociationValues operation dataExpression
+  pure (list (map Integer (extremePositions values)))
+ where
+  operation = if largest then "PositionLargest" else "PositionSmallest"
+  desiredOrdering = if largest then GT else LT
+  extremePositions :: [Expr] -> [Integer]
+  extremePositions [] = []
+  extremePositions (firstValue : remaining) = go 2 firstValue [1] remaining
+  go _ _ retained [] = retained
+  go index extreme retained (value : rest) = case canonicalCompare value extreme of
+    ordering | ordering == desiredOrdering -> go (index + 1) value [index] rest
+    EQ -> go (index + 1) extreme (retained <> [index]) rest
+    _ -> go (index + 1) extreme retained rest
+reducePositionExtrema largest _ =
+  Left (EvaluationError (if largest then "PositionLargest expects exactly one argument" else "PositionSmallest expects exactly one argument"))
+
+reducePositionIndex :: [Expr] -> Either EvaluationError Expr
+reducePositionIndex [dataExpression] = do
+  values <- listOrAssociationValues "PositionIndex" dataExpression
+  pure (associationExpr (positionEntries values))
+ where
+  positionEntries values =
+    [ AssociationEntry "Rule" key (list (map Integer positions))
+    | (key, positions) <- foldl addPosition [] (zip [1 :: Integer ..] values)
+    ]
+  addPosition groups (position, value) = case matchingGroup value groups of
+    Nothing -> groups <> [(value, [position])]
+    Just index ->
+      let (key, positions) = groups !! index
+       in replaceListIndex index (key, positions <> [position]) groups
+  matchingGroup value = go 0
+   where
+    go _ [] = Nothing
+    go index ((key, _) : rest)
+      | key == value = Just index
+      | otherwise = go (index + 1) rest
+reducePositionIndex _ = Left (EvaluationError "PositionIndex expects exactly one argument")
+
+stripHeadsOption :: [Expr] -> (Bool, [Expr])
+stripHeadsOption values = case reverse values of
+  Call (Symbol ruleHead) [Symbol "Heads", Symbol value] : rest
+    | ruleHead `elem` ["Rule", "RuleDelayed"]
+    , value `elem` ["True", "False"] -> (value == "True", reverse rest)
+  _ -> (True, values)
+
+pathExpression :: [PathSelector] -> Expr
+pathExpression = list . map selectorExpression
+ where
+  selectorExpression (ArgumentSelector position) = Integer position
+  selectorExpression (KeySelector key) = Call (Symbol "Key") [key]
 
 reduceRange :: [Expr] -> Expr
 reduceRange values = case traverse integerValue values of
