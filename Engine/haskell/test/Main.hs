@@ -10,6 +10,7 @@ import qualified Data.Text.IO as TextIO
 import System.Exit (exitFailure)
 import Tungsten.Expression
 import Tungsten.Json
+import Tungsten.Parser
 
 main :: IO ()
 main = do
@@ -21,12 +22,41 @@ main = do
 tests :: [IO Bool]
 tests =
   [ checkFullForms
+  , checkFullFormParser
+  , checkFullFormParserErrors
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
   , checkProtocol
   , checkProtocolErrors
   ]
+
+checkFullFormParser :: IO Bool
+checkFullFormParser = do
+  let cases =
+        [ ("nested calls", "Plus[1, Times[2, x]]", Call (Symbol "Plus") [Integer 1, Call (Symbol "Times") [Integer 2, Symbol "x"]])
+        , ("chained heads", "Derivative[2][f][x]", Call (Call (Call (Symbol "Derivative") [Integer 2]) [Symbol "f"]) [Symbol "x"])
+        , ("nested comments", "Plus[1, (* outer (* inner *) end *) 2]", Call (Symbol "Plus") [Integer 1, Integer 2])
+        , ("arbitrary integer", "999999999999999999999999999999999999", Integer 999999999999999999999999999999999999)
+        , ("leading-point real", ".5`30", Real ".5`30")
+        , ("precision real", "6.02214076`8*^23", Real "6.02214076`8*^23")
+        , ("normalized rational", "Rational[-6, -8]", Rational 3 4)
+        , ("complex atom", "Complex[Rational[1, 2], -3]", Complex (Rational 1 2) (Integer (-3)))
+        , ("escaped string", "\"line\\n snowman \\:2603 face \\|01f600\"", String "line\n snowman ☃ face 😀")
+        , ("parenthesized head", "(f)[x]", Call (Symbol "f") [Symbol "x"])
+        ]
+  and
+    <$> traverse
+      (\(label, source, expected) -> assertEqual ("FullForm parser: " <> label) (Right expected) (parseFullForm source))
+      cases
+
+checkFullFormParserErrors :: IO Bool
+checkFullFormParserErrors = do
+  first <- assertLeft "reject trailing FullForm input" (parseFullForm "f[x] trailing")
+  second <- assertLeft "reject invalid rational" (parseFullForm "Rational[1, 0]")
+  third <- assertLeft "reject malformed real exponent" (parseFullForm "1.2*^3.5")
+  fourth <- assertLeft "reject unterminated comment" (parseFullForm "f[1] (* open")
+  pure (and [first, second, third, fourth])
 
 checkFullForms :: IO Bool
 checkFullForms = do

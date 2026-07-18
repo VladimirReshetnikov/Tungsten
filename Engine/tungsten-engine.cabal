@@ -28,6 +28,7 @@ library
   exposed-modules:
     Tungsten.Expression
     Tungsten.Json
+    Tungsten.Parser
   build-depends:
     base       >= 4.21 && < 4.22,
     bytestring >= 0.12 && < 0.13,
