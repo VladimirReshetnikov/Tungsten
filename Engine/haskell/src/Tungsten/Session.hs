@@ -61,6 +61,7 @@ data ControlSignal
   = Thrown !Expr !(Maybe Expr) !(Maybe Expr)
   | BreakSignal
   | ContinueSignal
+  | Returned !Expr !(Maybe Text)
   deriving (Eq, Show)
 
 data EvaluationExit
@@ -105,6 +106,13 @@ finalizeSessionResult = \case
       Right (Call (Symbol "Break") [], stoppedSession)
     Left (SessionControl ContinueSignal stoppedSession) ->
       Right (Call (Symbol "Continue") [], stoppedSession)
+    Left (SessionControl (Returned value target) stoppedSession) ->
+      Right
+        ( Call
+            (Symbol "Return")
+            (value : maybe [] (pure . Symbol) target)
+        , stoppedSession
+        )
     Right result -> Right result
 
 evaluateSessionAt
@@ -152,6 +160,8 @@ evaluateSessionAt depth session expression
         evaluateLoopControl BreakSignal "Break" session arguments'
       Call (Symbol "Continue") arguments' ->
         evaluateLoopControl ContinueSignal "Continue" session arguments'
+      Call (Symbol "Return") arguments' ->
+        evaluateSessionReturn depth session arguments'
       Call (Symbol "OwnValues") arguments' ->
         evaluateSessionOwnValues session arguments'
       Call (Symbol "DownValues") arguments' ->
@@ -235,6 +245,28 @@ evaluateSessionThrow depth session arguments' =
       [value, tag, handler] ->
         Left (SessionControl (Thrown value (Just tag) (Just handler)) updated)
       _ -> Right (Call (Symbol "Throw") arguments', updated)
+
+evaluateSessionReturn
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionReturn depth session = \case
+  [] -> Left (SessionControl (Returned (Symbol "Null") Nothing) session)
+  [valueExpression] -> do
+    (value, updated) <-
+      evaluateSessionAt (depth + 1) session valueExpression
+    Left (SessionControl (Returned value Nothing) updated)
+  arguments'@[valueExpression, headExpression] -> do
+    (evaluatedHead, headSession) <-
+      evaluateSessionAt (depth + 1) session headExpression
+    case evaluatedHead of
+      Symbol headName -> do
+        (value, updated) <-
+          evaluateSessionAt (depth + 1) headSession valueExpression
+        Left (SessionControl (Returned value (Just headName)) updated)
+      _ -> Right (Call (Symbol "Return") arguments', headSession)
+  arguments' -> Right (Call (Symbol "Return") arguments', session)
 
 evaluateLoopControl
   :: ControlSignal
@@ -427,7 +459,7 @@ protectedDefinitionOwners =
             <> "OptionsPattern Or Order OrderedQ Ordering OrderlessPatternSequence OwnValues PadLeft PadRight Part Pattern "
             <> "PatternSequence PatternTest Permutations Permute Pick Plus Position PositionIndex PositionLargest "
             <> "PositionSmallest Power Prepend Product Protect Range Replace ReplaceAll ReplaceAt ReplacePart "
-            <> "ReplaceRepeated Rest Reverse ReverseSort ReverseSortBy Riffle RotateLeft RotateRight Round Rule "
+            <> "ReplaceRepeated Rest Return Reverse ReverseSort ReverseSortBy Riffle RotateLeft RotateRight Round Rule "
             <> "RuleDelayed SameQ Select SelectFirst Sequence Set SetAttributes SetDelayed Shortest Sign Slot Sort SortBy "
             <> "Splice Sqrt StringQ Subsets SubtractFrom SubValues Sum Table Take TakeWhile Tally Throw Times TimesBy Total "
             <> "True Unequal Unevaluated Union Unprotect UnsameQ Unset UpValues Values Verbatim With"
@@ -455,7 +487,8 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
           Nothing -> applyDefinitions current rest
           Just replacement ->
             case lhsCondition of
-              Nothing -> applyReplacement current definition replacement rest
+              Nothing ->
+                applyReplacement current definition replacement rest
               Just condition ->
                 case
                   instantiatePatternMatch
@@ -477,15 +510,23 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
   applyReplacement current definition replacement rest =
     case replacement of
       Call (Symbol "Condition") [body, condition]
-        | downValueDelayed definition -> do
-            (conditionResult, updated) <-
-              evaluateSessionAt (depth + 1) current condition
-            if conditionResult == Symbol "True"
-              then evaluateReplacement updated body
-              else applyDefinitions updated rest
+        | downValueDelayed definition ->
+            case evaluateSessionAt (depth + 1) current condition of
+              Left (SessionControl (Returned value Nothing) updated) ->
+                Right (Just value, updated)
+              Left evaluationExit -> Left evaluationExit
+              Right (conditionResult, updated)
+                | conditionResult == Symbol "True" ->
+                    catchBareReturn (evaluateReplacement updated body)
+                | otherwise -> applyDefinitions updated rest
       Call (Symbol "Condition") [_, _] ->
         Right (Just replacement, current)
-      _ -> evaluateReplacement current replacement
+      _ -> catchBareReturn (evaluateReplacement current replacement)
+
+  catchBareReturn = \case
+    Left (SessionControl (Returned value Nothing) updated) ->
+      Right (Just value, updated)
+    result -> result
 
   evaluateReplacement current replacement = do
     (result, updated) <-
@@ -555,7 +596,7 @@ evaluateSessionModule
   -> SessionResult Expr
 evaluateSessionModule depth session = \case
   [Call (Symbol "List") [], body] ->
-    evaluateSessionAt (depth + 1) session body
+    evaluateTargetedReturn "Module" depth session body
   originalArguments@[Call (Symbol "List") bindingExpressions, body]
     | Just bindings <- parseModuleBindings bindingExpressions -> do
         let nextCounter = sessionModuleCounter session + 1
@@ -569,7 +610,7 @@ evaluateSessionModule depth session = \case
         ((), bodySession) <-
           initializeModuleBindings depth renameMap allocatedSession bindings
         let renamedBody = renameBoundSymbols renameMap body
-        evaluateSessionAt (depth + 1) bodySession renamedBody
+        evaluateTargetedReturn "Module" depth bodySession renamedBody
     | otherwise ->
         Right (Call (Symbol "Module") originalArguments, session)
   arguments' -> Right (Call (Symbol "Module") arguments', session)
@@ -640,7 +681,7 @@ evaluateSessionBlock
   -> SessionResult Expr
 evaluateSessionBlock headName depth session = \case
   [Call (Symbol "List") [], body] ->
-    evaluateSessionAt (depth + 1) session body
+    evaluateTargetedReturn (blockReturnTarget headName) depth session body
   originalArguments@[Call (Symbol "List") bindingExpressions, body]
     | Just bindings <- parseBlockBindings bindingExpressions ->
         let snapshots =
@@ -650,11 +691,19 @@ evaluateSessionBlock headName depth session = \case
             scopedResult = do
               ((), initialized) <-
                 initializeBlockBindings depth session bindings
-              evaluateSessionAt (depth + 1) initialized body
+              evaluateTargetedReturn
+                (blockReturnTarget headName)
+                depth
+                initialized
+                body
          in restoreScopedResult snapshots scopedResult
     | otherwise ->
         Right (Call (Symbol headName) originalArguments, session)
   arguments' -> Right (Call (Symbol headName) arguments', session)
+
+blockReturnTarget :: Text -> Text
+blockReturnTarget "Internal`InheritedBlock" = "InheritedBlock"
+blockReturnTarget headName = headName
 
 parseBlockBindings :: [Expr] -> Maybe [BlockBinding]
 parseBlockBindings expressions = do
@@ -843,6 +892,11 @@ evaluateSessionDo depth session arguments' = case arguments' of
             (SessionControl BreakSignal stoppedSession)
           ) ->
           Right (Symbol "Null", stoppedSession)
+      Left
+        ( IterationEvaluationFailure
+            (SessionControl (Returned value (Just "Do")) stoppedSession)
+          ) ->
+          Right (value, stoppedSession)
       Left (IterationEvaluationFailure evaluationExit) ->
         Left evaluationExit
       Right (_, updated) -> Right (Symbol "Null", updated)
@@ -1087,6 +1141,7 @@ isHeldSessionHead (Symbol name) =
            , "Throw"
            , "Break"
            , "Continue"
+           , "Return"
            , "OwnValues"
            , "DownValues"
            , "Condition"
@@ -1230,6 +1285,18 @@ mapEvaluationExitSession updateSession = \case
     SessionEvaluationFailure evaluationFailure (updateSession failedSession)
   SessionControl controlSignal stoppedSession ->
     SessionControl controlSignal (updateSession stoppedSession)
+
+evaluateTargetedReturn
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateTargetedReturn target depth session body =
+  case evaluateSessionAt (depth + 1) session body of
+    Left (SessionControl (Returned value (Just actualTarget)) stoppedSession)
+      | actualTarget == target -> Right (value, stoppedSession)
+    result -> result
 
 logicalResult :: Text -> Expr -> [Expr] -> Expr
 logicalResult _ identity [] = identity

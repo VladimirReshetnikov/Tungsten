@@ -56,6 +56,7 @@ evaluateAt depth expression
       Call (Symbol "Throw") _ -> Right expression
       Call (Symbol "Break") _ -> Right expression
       Call (Symbol "Continue") _ -> Right expression
+      Call (Symbol "Return") _ -> Right expression
       Call (Symbol "OwnValues") _ -> Right expression
       Call (Symbol "DownValues") _ -> Right expression
       Call (Symbol "Module") _ -> Right expression
