@@ -34,6 +34,7 @@ library
     Tungsten.Discovery
     Tungsten.Evaluate
     Tungsten.Expression
+    Tungsten.Frontend
     Tungsten.Json
     Tungsten.Kernel
     Tungsten.Licensing

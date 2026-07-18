@@ -16,6 +16,7 @@ import Tungsten.Cli
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
+import Tungsten.Frontend
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Licensing
@@ -50,6 +51,7 @@ tests =
   , checkDiscovery
   , checkLicensing
   , checkKernelRunner
+  , checkFrontEndBuilders
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -392,6 +394,29 @@ withFakeKernel = bracket create removeFile
     permissions <- getPermissions path
     setPermissions path permissions {executable = True}
     pure path
+
+checkFrontEndBuilders :: IO Bool
+checkFrontEndBuilders = do
+  let checks =
+        [ assertEqual
+            "FrontEnd notebook path escaping"
+            "NotebookOpen[\"C:/Users/A\\\"B/demo.nb\"]"
+            (openNotebookCode "C:\\Users\\A\"B\\demo.nb")
+        , assertEqual
+            "FrontEnd documentation escaping"
+            "NotebookLocate[\"paclet:ref/NotebookGet\"]"
+            (openDocumentationCode "paclet:ref/NotebookGet")
+        , assertEqual
+            "FrontEnd token without notebook"
+            "FrontEndTokenExecute[\"EvaluateCells\"]"
+            (frontEndTokenCode "EvaluateCells" Nothing)
+        , assertEqual
+            "FrontEnd token with notebook"
+            "nb = NotebookOpen[\"C:/demo.nb\"]; FrontEndTokenExecute[nb, \"Evaluator`EvaluateNotebook\"]; nb"
+            (frontEndTokenCode "Evaluator`EvaluateNotebook" (Just "C:\\demo.nb"))
+        , assertEqual "FrontEnd probe closes hidden notebook" True ("NotebookClose" `Text.isInfixOf` frontEndProbeCode)
+        ]
+  and <$> sequence checks
 
 checkNotebookModel :: IO Bool
 checkNotebookModel = do
