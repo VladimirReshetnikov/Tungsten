@@ -11,6 +11,7 @@ module Tungsten.Evaluate
   ) where
 
 import Control.Monad (foldM)
+import Data.List (sortBy)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Tungsten.Expression
@@ -129,8 +130,19 @@ reduceBuiltin headName values = case headName of
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
   "Reverse" -> Right (unaryCallArguments headName reverse values)
+  "RotateLeft" -> Right (reduceRotate True headName values)
+  "RotateRight" -> Right (reduceRotate False headName values)
+  "Take" -> reduceTakeDrop True values
+  "Drop" -> reduceTakeDrop False values
+  "Append" -> Right (reduceAppendPrepend False headName values)
+  "Prepend" -> Right (reduceAppendPrepend True headName values)
   "Join" -> Right (reduceJoin values)
+  "Flatten" -> Right (reduceFlatten values)
+  "Delete" -> reduceDelete values
+  "Insert" -> reduceInsert values
+  "ReplacePart" -> Right (reduceReplacePart values)
   "Map" -> Right (reduceMap values)
+  "MapAt" -> Right (reduceMapAt values)
   "Apply" -> Right (reduceApply values)
   "ReplaceAll" -> Right (reduceReplaceAll values)
   "CompoundExpression" -> Right (if null values then Symbol "Null" else last values)
@@ -334,10 +346,254 @@ reduceAccumulate [Call (Symbol "List") values] =
   list (drop 1 (scanl (\acc value -> reducePlus [acc, value]) (Integer 0) values))
 reduceAccumulate values = Call (Symbol "Accumulate") values
 
+reduceAppendPrepend :: Bool -> Text -> [Expr] -> Expr
+reduceAppendPrepend prepend _ [Call expressionHead values, item] =
+  Call expressionHead (if prepend then item : values else values <> [item])
+reduceAppendPrepend _ headName values = Call (Symbol headName) values
+
+reduceRotate :: Bool -> Text -> [Expr] -> Expr
+reduceRotate left headName = \case
+  [subject] -> rotate subject 1
+  [subject, Integer amount] -> rotate subject amount
+  values -> Call (Symbol headName) values
+ where
+  rotate (Call expressionHead arguments') amount
+    | null arguments' = Call expressionHead []
+    | otherwise =
+        let count = length arguments'
+            signed = if left then amount else negate amount
+            offset = fromIntegral (signed `mod` fromIntegral count)
+         in Call expressionHead (drop offset arguments' <> take offset arguments')
+  rotate subject amount = Call (Symbol headName) [subject, Integer amount]
+
+reduceTakeDrop :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
+  applySpecifications subject specifications
+ where
+  operationName = if takeMode then "Take" else "Drop"
+  applySpecifications expression [] = Right expression
+  applySpecifications expression (specification : remaining) = do
+    sliced <- applySpecification expression specification
+    if null remaining
+      then Right sliced
+      else case sliced of
+        Call expressionHead values ->
+          Call expressionHead <$> traverse (`applySpecifications` remaining) values
+        _ -> Left (EvaluationError (operationName <> " encountered an atom before consuming every specification"))
+  applySpecification (Call expressionHead values) specification = do
+    selected <- specificationIndices takeMode (length values) specification
+    pure (Call expressionHead [value | (index, value) <- zip [0 ..] values, index `elem` selected])
+  applySpecification _ _ = Left (EvaluationError (operationName <> " expects an expression with arguments"))
+reduceTakeDrop takeMode values =
+  Right (Call (Symbol (if takeMode then "Take" else "Drop")) values)
+
+specificationIndices :: Bool -> Int -> Expr -> Either EvaluationError [Int]
+specificationIndices takeMode count specification = do
+  selected <- case specification of
+    Symbol "All" -> Right [0 .. count - 1]
+    Symbol "None" -> Right []
+    Integer amount
+      | amount >= 0 -> Right [0 .. min count (fromIntegral amount) - 1]
+      | otherwise -> Right [max 0 (count - fromIntegral (abs amount)) .. count - 1]
+    Call (Symbol "List") [Integer position] ->
+      maybe (Left invalid) (Right . pure) (resolvePosition count position)
+    Call (Symbol "List") [Integer first, Integer last'] ->
+      rangePositions first last' 1
+    Call (Symbol "List") [Integer first, Integer last', Integer step]
+      | step /= 0 -> rangePositions first last' step
+    _ -> Left invalid
+  pure
+    ( if takeMode
+        then selected
+        else [index | index <- [0 .. count - 1], index `notElem` selected]
+    )
+ where
+  invalid = EvaluationError "Take/Drop received an unsupported or out-of-range specification"
+  rangePositions :: Integer -> Integer -> Integer -> Either EvaluationError [Int]
+  rangePositions first last' step = do
+    start <- maybe (Left invalid) Right (resolvePosition count first)
+    finish <- maybe (Left invalid) Right (resolvePosition count last')
+    let stepValue = fromIntegral step
+        indices
+          | stepValue > 0 && start <= finish = [start, start + stepValue .. finish]
+          | stepValue < 0 && start >= finish = [start, start + stepValue .. finish]
+          | otherwise = []
+    pure indices
+
+resolvePosition :: Int -> Integer -> Maybe Int
+resolvePosition count position
+  | position > 0 = valid (fromIntegral position - 1)
+  | position < 0 = valid (count + fromIntegral position)
+  | otherwise = Nothing
+ where
+  valid index = if index >= 0 && index < count then Just index else Nothing
+
 reduceJoin :: [Expr] -> Expr
-reduceJoin values = case traverse listArguments values of
-  Just argumentLists -> list (concat argumentLists)
-  Nothing -> Call (Symbol "Join") values
+reduceJoin values = case values of
+  Call expressionHead _ : _ ->
+    case traverse (matchingArguments expressionHead) values of
+      Just argumentLists -> Call expressionHead (concat argumentLists)
+      Nothing -> Call (Symbol "Join") values
+   where
+    matchingArguments expected (Call actual arguments')
+      | actual == expected = Just arguments'
+    matchingArguments _ _ = Nothing
+  _ -> Call (Symbol "Join") values
+
+reduceFlatten :: [Expr] -> Expr
+reduceFlatten = \case
+  [subject@(Call expressionHead _)] -> flattenSameHead expressionHead Nothing subject
+  [subject@(Call expressionHead _), Symbol "Infinity"] -> flattenSameHead expressionHead Nothing subject
+  [subject@(Call expressionHead _), Integer level]
+    | level >= 0 -> flattenSameHead expressionHead (Just (fromIntegral level)) subject
+  [subject@(Call _ _), levelSpecification, targetHead]
+    | Just level <- flattenLevel levelSpecification -> flattenNamedHead targetHead level subject
+  values -> Call (Symbol "Flatten") values
+ where
+  flattenLevel (Symbol "Infinity") = Just Nothing
+  flattenLevel (Integer level) | level >= 0 = Just (Just (fromIntegral level))
+  flattenLevel _ = Nothing
+
+flattenSameHead :: Expr -> Maybe Int -> Expr -> Expr
+flattenSameHead target remaining expression@(Call expressionHead values)
+  | remaining == Just 0 = expression
+  | expressionHead /= target = expression
+  | otherwise = Call expressionHead (concatMap expand values)
+ where
+  next = fmap (subtract 1) remaining
+  expand child@(Call childHead _)
+    | childHead == target = arguments (flattenSameHead target next child)
+  expand child = [child]
+flattenSameHead _ _ expression = expression
+
+flattenNamedHead :: Expr -> Maybe Int -> Expr -> Expr
+flattenNamedHead _ (Just 0) expression = expression
+flattenNamedHead target remaining (Call expressionHead values) =
+  Call expressionHead (concatMap expand values)
+ where
+  next = fmap (subtract 1) remaining
+  expand child@(Call childHead _)
+    | childHead == target = arguments (flattenNamedHead target next child)
+    | otherwise = [flattenNamedHead target remaining child]
+  expand child = [child]
+flattenNamedHead _ _ expression = expression
+
+reduceDelete :: [Expr] -> Either EvaluationError Expr
+reduceDelete [subject, positions] =
+  foldM deleteOne subject (sortOperationPaths (positionPaths positions))
+ where
+  deleteOne expression path = case deleteAtPath path expression of
+    Just result -> Right result
+    Nothing -> Left (EvaluationError "Delete received an invalid position")
+reduceDelete values = Right (Call (Symbol "Delete") values)
+
+reduceInsert :: [Expr] -> Either EvaluationError Expr
+reduceInsert [subject, item, positions] =
+  foldM insertOne subject (sortOperationPaths (positionPaths positions))
+ where
+  insertOne expression path = case insertAtPath path item expression of
+    Just result -> Right result
+    Nothing -> Left (EvaluationError "Insert received an invalid position")
+reduceInsert values = Right (Call (Symbol "Insert") values)
+
+reduceReplacePart :: [Expr] -> Expr
+reduceReplacePart [subject, replacements] =
+  foldl applyReplacement subject (sortReplacementRules (replacePartRules replacements))
+ where
+  applyReplacement expression (path, Symbol "Nothing") =
+    maybe expression id (deleteAtPath path expression)
+  applyReplacement expression (path, replacement) =
+    maybe expression id (replaceAtPath path replacement expression)
+reduceReplacePart values = Call (Symbol "ReplacePart") values
+
+reduceMapAt :: [Expr] -> Expr
+reduceMapAt [function, subject, positions] =
+  foldl applyAt subject (sortOperationPaths (positionPaths positions))
+ where
+  applyAt expression path =
+    maybe expression id (mapAtPath path function expression)
+reduceMapAt values = Call (Symbol "MapAt") values
+
+positionPaths :: Expr -> [[Integer]]
+positionPaths (Integer position) = [[position]]
+positionPaths (Call (Symbol "List") values)
+  | Just path <- traverse integerValue values = [path]
+  | otherwise = concatMap listPath values
+ where
+  listPath (Call (Symbol "List") components) = maybe [] pure (traverse integerValue components)
+  listPath _ = []
+positionPaths _ = []
+
+replacePartRules :: Expr -> [([Integer], Expr)]
+replacePartRules (Call (Symbol "List") rules) = concatMap replacePartRules rules
+replacePartRules (Call (Symbol ruleHead) [position, replacement])
+  | ruleHead `elem` ["Rule", "RuleDelayed"] =
+      [(path, replacement) | path <- positionPaths position]
+replacePartRules _ = []
+
+sortOperationPaths :: [[Integer]] -> [[Integer]]
+sortOperationPaths = sortBy comparePath
+ where
+  comparePath left right = case compare (length right) (length left) of
+    EQ -> compare right left
+    ordering -> ordering
+
+sortReplacementRules :: [([Integer], Expr)] -> [([Integer], Expr)]
+sortReplacementRules = sortBy (\(left, _) (right, _) -> comparePath left right)
+ where
+  comparePath left right = case compare (length right) (length left) of
+    EQ -> compare right left
+    ordering -> ordering
+
+deleteAtPath :: [Integer] -> Expr -> Maybe Expr
+deleteAtPath [] _ = Nothing
+deleteAtPath [position] (Call expressionHead values) = do
+  index <- resolvePosition (length values) position
+  pure (Call expressionHead (take index values <> drop (index + 1) values))
+deleteAtPath (position : remaining) (Call expressionHead values) = do
+  index <- resolvePosition (length values) position
+  updated <- deleteAtPath remaining (values !! index)
+  pure (Call expressionHead (replaceListIndex index updated values))
+deleteAtPath _ _ = Nothing
+
+replaceAtPath :: [Integer] -> Expr -> Expr -> Maybe Expr
+replaceAtPath [] replacement _ = Just replacement
+replaceAtPath (position : remaining) replacement (Call expressionHead values) = do
+  index <- resolvePosition (length values) position
+  updated <- replaceAtPath remaining replacement (values !! index)
+  pure (Call expressionHead (replaceListIndex index updated values))
+replaceAtPath _ _ _ = Nothing
+
+mapAtPath :: [Integer] -> Expr -> Expr -> Maybe Expr
+mapAtPath [] function expression = Just (Call function [expression])
+mapAtPath (position : remaining) function (Call expressionHead values) = do
+  index <- resolvePosition (length values) position
+  updated <- mapAtPath remaining function (values !! index)
+  pure (Call expressionHead (replaceListIndex index updated values))
+mapAtPath _ _ _ = Nothing
+
+insertAtPath :: [Integer] -> Expr -> Expr -> Maybe Expr
+insertAtPath [] _ _ = Nothing
+insertAtPath [position] item (Call expressionHead values) = do
+  index <- insertOffset (length values) position
+  pure (Call expressionHead (take index values <> [item] <> drop index values))
+insertAtPath (position : remaining) item (Call expressionHead values) = do
+  index <- resolvePosition (length values) position
+  updated <- insertAtPath remaining item (values !! index)
+  pure (Call expressionHead (replaceListIndex index updated values))
+insertAtPath _ _ _ = Nothing
+
+insertOffset :: Int -> Integer -> Maybe Int
+insertOffset count position
+  | position == 0 = Just 0
+  | position > 0 = valid (fromIntegral position - 1)
+  | otherwise = valid (count + fromIntegral position + 1)
+ where
+  valid index = if index >= 0 && index <= count then Just index else Nothing
+
+replaceListIndex :: Int -> value -> [value] -> [value]
+replaceListIndex index replacement values =
+  take index values <> [replacement] <> drop (index + 1) values
 
 reduceMap :: [Expr] -> Expr
 reduceMap [function, Call expressionHead values] =
@@ -425,10 +681,6 @@ isString _ = False
 integerValue :: Expr -> Maybe Integer
 integerValue (Integer value) = Just value
 integerValue _ = Nothing
-
-listArguments :: Expr -> Maybe [Expr]
-listArguments (Call (Symbol "List") values) = Just values
-listArguments _ = Nothing
 
 list :: [Expr] -> Expr
 list = Call (Symbol "List")
