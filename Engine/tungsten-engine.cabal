@@ -35,6 +35,7 @@ library
     Tungsten.Evaluate
     Tungsten.Expression
     Tungsten.Json
+    Tungsten.Licensing
     Tungsten.Notebook
     Tungsten.Parser
     Tungsten.Repl

@@ -13,6 +13,7 @@ import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
 import Tungsten.Json
+import Tungsten.Licensing
 import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.Repl
@@ -42,6 +43,7 @@ tests =
   , checkEvaluationSession
   , checkRepl
   , checkDiscovery
+  , checkLicensing
   , checkSmartConstructors
   , checkExpressionJsonRoundTrips
   , checkJsonCodec
@@ -300,6 +302,24 @@ checkDiscovery = do
         , assertEqual "stop at nonnumeric Wolfram version fragment" [15] (parseVersion "15.preview.1")
         , assertEqual "rank desktop before engine and newer first" [desktop15, desktop14, engine16] (sortInstallations [engine16, desktop14, desktop15])
         , assertEqual "CLI environment command" (Right EnvironmentCommand) (parseCliArguments ["env", "show"])
+        ]
+  and <$> sequence checks
+
+checkLicensing :: IO Bool
+checkLicensing = do
+  let source = "% Wolfram mathpass\nentry-a\nentry-b\nentry-a\nentry-b\nentry-c\n"
+      inspection = inspectMathpassText (Just "mathpass") source
+      checks =
+        [ assertEqual "mathpass path" (Just "mathpass") (mathpassPath inspection)
+        , assertEqual "mathpass header" True (mathpassHeaderPresent inspection)
+        , assertEqual "mathpass original lines" 6 (mathpassOriginalLineCount inspection)
+        , assertEqual "mathpass unique entries" 3 (mathpassUniqueEntryCount inspection)
+        , assertEqual "mathpass duplicates" 2 (mathpassDuplicateEntryCount inspection)
+        , assertEqual
+            "stable mathpass deduplication"
+            "% Wolfram mathpass\nentry-a\nentry-b\nentry-c\n"
+            (deduplicateMathpassText source)
+        , assertEqual "missing mathpass inspection" emptyMathpassInspection (inspectMathpassText Nothing "")
         ]
   and <$> sequence checks
 
