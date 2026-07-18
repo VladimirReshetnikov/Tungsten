@@ -224,7 +224,9 @@ reduceBuiltin headName values = case headName of
   "Map" -> Right (reduceMap values)
   "MapAt" -> Right (reduceMapAt values)
   "Apply" -> Right (reduceApply values)
-  "ReplaceAll" -> Right (reduceReplaceAll values)
+  "Replace" -> reduceReplace values
+  "ReplaceAll" -> reduceReplaceAll values
+  "ReplaceRepeated" -> reduceReplaceRepeated values
   "CompoundExpression" -> Right (if null values then Symbol "Null" else last values)
   _ -> Right (Call (Symbol headName) values)
 
@@ -1718,15 +1720,34 @@ reduceCases = \case
   [expression, patternExpression, specification, limit] -> casesAtLevels expression patternExpression specification (Just limit)
   values -> Right (Call (Symbol "Cases") values)
  where
-  casesAtLevels expression patternExpression specification limit
-    | isPropertySelection patternExpression =
-        Right (Call (Symbol "Cases") (expression : patternExpression : specification : maybe [] pure limit))
-    | otherwise = do
-        bounds <- normalizeLevelSpec specification
-        normalizedLimit <- selectionLimit "Cases" limit
-        let matched =
-              matchingRecords bounds normalizedLimit patternExpression (collectPatternRecords False 0 expression)
-        pure (evaluatedList [value | PatternRecord value _ _ <- matched])
+  casesAtLevels expression patternExpression specification limit = do
+    bounds <- normalizeLevelSpec specification
+    normalizedLimit <- selectionLimit "Cases" limit
+    let (matchExpression, template) = case patternRule patternExpression of
+          Just (PatternRule pattern' template') -> (pattern', Just template')
+          Nothing -> (patternExpression, Nothing)
+    results <- collectCases bounds normalizedLimit matchExpression template (collectPatternRecords False 0 expression)
+    pure (evaluatedList results)
+  collectCases _ _ _ _ [] = Right []
+  collectCases _ (Just 0) _ _ _ = Right []
+  collectCases bounds remaining patternExpression template (PatternRecord value positive negative : rest)
+    | not (levelMatches bounds positive negative) =
+        collectCases bounds remaining patternExpression template rest
+    | otherwise = case matchPattern [] value patternExpression of
+        Nothing -> collectCases bounds remaining patternExpression template rest
+        Just bindings -> do
+          transformed <- case template of
+            Nothing -> Right (Just value)
+            Just templateExpression -> instantiatePatternTemplate bindings templateExpression
+          case transformed of
+            Nothing -> collectCases bounds remaining patternExpression template rest
+            Just result -> do
+              following <- collectCases bounds (subtractOne remaining) patternExpression template rest
+              pure (spliceCaseResult result <> following)
+  subtractOne Nothing = Nothing
+  subtractOne (Just count) = Just (count - 1)
+  spliceCaseResult (Call (Symbol "Sequence") values) = values
+  spliceCaseResult value = [value]
 
 reduceDeleteCases :: [Expr] -> Either EvaluationError Expr
 reduceDeleteCases = \case
@@ -2156,15 +2177,151 @@ reduceApply [newHead, association]
 reduceApply [newHead, Call _ values] = Call newHead values
 reduceApply values = Call (Symbol "Apply") values
 
-reduceReplaceAll :: [Expr] -> Expr
-reduceReplaceAll [expression, rules] = replaceExpression (replacementRules rules) expression
-reduceReplaceAll values = Call (Symbol "ReplaceAll") values
+data PatternRule = PatternRule !Expr !Expr
+  deriving (Eq, Show)
 
-replacementRules :: Expr -> [(Expr, Expr)]
-replacementRules (Call (Symbol "List") values) = concatMap replacementRules values
-replacementRules (Call (Symbol "Rule") [lhs, rhs]) = [(lhs, rhs)]
-replacementRules (Call (Symbol "RuleDelayed") [lhs, rhs]) = [(lhs, rhs)]
-replacementRules _ = []
+reduceReplace :: [Expr] -> Either EvaluationError Expr
+reduceReplace = \case
+  [expression, rules] -> replaceAtLevels expression rules (Call (Symbol "List") [Integer 0])
+  [expression, rules, specification] -> replaceAtLevels expression rules specification
+  values -> Right (Call (Symbol "Replace") values)
+ where
+  replaceAtLevels expression rules specification
+    | Just nested <- nestedPatternRuleSets rules =
+        evaluatedList <$> traverse (\ruleset -> replaceAtLevels expression ruleset specification) nested
+    | otherwise = do
+        ruleset <- requirePatternRuleSet "Replace" rules
+        bounds <- normalizeLevelSpec specification
+        let records =
+              [ record
+              | record@(PatternPathRecord _ positive negative _) <- collectPatternPathRecords 0 [] expression
+              , levelMatches bounds positive negative
+              ]
+        foldM (replaceRecord ruleset) expression records
+  replaceRecord ruleset current (PatternPathRecord _ _ _ path) = do
+    selected <-
+      maybe
+        (Left (EvaluationError "Replace encountered an invalid selected path"))
+        Right
+        (selectAtPath path current)
+    replacement <- applyPatternRules ruleset selected
+    pure $ case replacement of
+      Nothing -> current
+      Just value -> maybe current id (replaceAtPath path value current)
+
+reduceReplaceAll :: [Expr] -> Either EvaluationError Expr
+reduceReplaceAll [expression, rules]
+  | Just nested <- nestedPatternRuleSets rules =
+      evaluatedList <$> traverse (reduceReplaceAll . (expression :) . pure) nested
+  | otherwise = do
+      ruleset <- requirePatternRuleSet "ReplaceAll" rules
+      replaceAllWithRules ruleset expression
+reduceReplaceAll values = Right (Call (Symbol "ReplaceAll") values)
+
+reduceReplaceRepeated :: [Expr] -> Either EvaluationError Expr
+reduceReplaceRepeated [expression, rules]
+  | Just nested <- nestedPatternRuleSets rules =
+      evaluatedList <$> traverse (reduceReplaceRepeated . (expression :) . pure) nested
+ | otherwise = do
+      ruleset <- requirePatternRuleSet "ReplaceRepeated" rules
+      iterateReplacement 0 ruleset expression
+ where
+  iterateReplacement :: Int -> [PatternRule] -> Expr -> Either EvaluationError Expr
+  iterateReplacement iterations ruleset current
+    | iterations >= 1024 = Left (EvaluationError "ReplaceRepeated exceeded its iteration safety limit")
+    | otherwise = do
+        updated <- replaceAllWithRules ruleset current
+        if updated == current
+          then Right current
+          else iterateReplacement (iterations + 1) ruleset updated
+reduceReplaceRepeated values = Right (Call (Symbol "ReplaceRepeated") values)
+
+requirePatternRuleSet :: Text -> Expr -> Either EvaluationError [PatternRule]
+requirePatternRuleSet operation expression =
+  maybe
+    (Left (EvaluationError (operation <> " expects a rule or flat list of rules")))
+    Right
+    (patternRuleSet expression)
+
+patternRuleSet :: Expr -> Maybe [PatternRule]
+patternRuleSet (Call (Symbol "List") values) = traverse patternRule values
+patternRuleSet expression = pure <$> patternRule expression
+
+patternRule :: Expr -> Maybe PatternRule
+patternRule (Call (Symbol ruleHead) [patternExpression, template])
+  | ruleHead `elem` ["Rule", "RuleDelayed"] = Just (PatternRule patternExpression template)
+patternRule _ = Nothing
+
+nestedPatternRuleSets :: Expr -> Maybe [Expr]
+nestedPatternRuleSets (Call (Symbol "List") values@(_ : _))
+  | all isRuleList values = Just values
+ where
+  isRuleList expression@(Call (Symbol "List") _) = maybe False (const True) (patternRuleSet expression)
+  isRuleList _ = False
+nestedPatternRuleSets _ = Nothing
+
+applyPatternRules :: [PatternRule] -> Expr -> Either EvaluationError (Maybe Expr)
+applyPatternRules [] _ = Right Nothing
+applyPatternRules (PatternRule patternExpression template : rest) expression =
+  case matchPattern [] expression patternExpression of
+    Nothing -> applyPatternRules rest expression
+    Just bindings -> do
+      instantiated <- instantiatePatternTemplate bindings template
+      case instantiated of
+        Just value -> Right (Just value)
+        Nothing -> applyPatternRules rest expression
+
+instantiatePatternTemplate :: PatternBindings -> Expr -> Either EvaluationError (Maybe Expr)
+instantiatePatternTemplate bindings (Call (Symbol "Condition") [template, condition]) = do
+  conditionResult <- evaluate (substituteBindings bindings condition)
+  if conditionResult == Symbol "True"
+    then Just <$> evaluate (substituteBindings bindings template)
+    else Right Nothing
+instantiatePatternTemplate bindings template =
+  Just <$> evaluate (substituteBindings bindings template)
+
+replaceAllWithRules :: [PatternRule] -> Expr -> Either EvaluationError Expr
+replaceAllWithRules rules expression = do
+  rootReplacement <- applyPatternRules rules expression
+  case rootReplacement of
+    Just replacement -> Right replacement
+    Nothing -> descend expression
+ where
+  descend association
+    | Just entries <- associationEntries association = do
+        headReplacement <- applyPatternRules rules (Symbol "Association")
+        case headReplacement of
+          Just replacementHead ->
+            Right
+              ( Call
+                  replacementHead
+                  [Call (Symbol ruleHead) [key, value] | AssociationEntry ruleHead key value <- entries]
+              )
+          Nothing -> do
+            updated <- traverse replaceEntry entries
+            pure (associationExpr [entry | Just entry <- updated])
+  descend (Call expressionHead values) = do
+    updatedHead <- replaceAllWithRules rules expressionHead
+    updatedValues <- traverse (replaceAllWithRules rules) values
+    pure (rebuildWithSplicing updatedHead updatedValues)
+  descend value = Right value
+  replaceEntry (AssociationEntry ruleHead key value) = do
+    updated <- replaceAllWithRules rules value
+    pure
+      ( if updated == Symbol "Nothing"
+          then Nothing
+          else Just (AssociationEntry ruleHead key updated)
+      )
+
+rebuildWithSplicing :: Expr -> [Expr] -> Expr
+rebuildWithSplicing expressionHead values =
+  Call expressionHead (filterNothing (concatMap splice values))
+ where
+  splice (Call (Symbol "Sequence") sequenceValues) = sequenceValues
+  splice value = [value]
+  filterNothing
+    | expressionHead == Symbol "List" = filter (/= Symbol "Nothing")
+    | otherwise = id
 
 replaceExpression :: [(Expr, Expr)] -> Expr -> Expr
 replaceExpression rules expression = case lookup expression rules of
