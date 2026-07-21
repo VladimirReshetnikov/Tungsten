@@ -592,6 +592,15 @@ checkEvaluator = do
         , ("association list constructor", "Association[{a -> 1, a -> 2, b -> 3}]", "Association[Rule[a, 2], Rule[b, 3]]")
         , ("association predicate", "{AssociationQ[<|a -> 1|>], AssociationQ[Association[a]]}", "List[True, False]")
         , ("association depth follows values", "Depth[<|a -> <|b -> 1|>, c -> {2, 3}|>]", "3")
+        , ("zero-argument call depth and negative level", "{Depth[f[]], Level[f[], {-2}], Depth[<||>], Level[<||>, {-2}]}", "List[2, List[f[]], 2, List[Association[]]]")
+        , ("level negative and positive traversal", "{Level[f[a, g[b]], -1], Level[f[a, g[b]], 2]}", "List[List[a, b, g[b]], List[a, b, g[b]]]")
+        , ("level infinity and exact leaves", "{Level[f[a, g[b, c]], Infinity], Level[f[a, g[b]], {-1}]}", "List[List[a, b, c, g[b, c]], List[a, b]]")
+        , ("level exact roots and ranges", "{Level[f[a, g[b]], {0}], Level[f[a, g[b]], {1, 2}], Level[f[a, g[b]], {2, -2}]}", "List[List[f[a, g[b]]], List[a, b, g[b]], List[]]")
+        , ("level association values and false heads", "{Level[<|a -> x, b -> {y, z}|>, Infinity], Level[f[a, g[b]], 2, False]}", "List[List[x, y, z, List[y, z]], List[a, b, g[b]]]")
+        , ("level list results remove nothing", "Level[Hold[Nothing], {-1}]", "List[]")
+        , ("level exposes held expressions without reentry", "{Level[Hold[1 + 1], {1}], Level[Hold[f[1 + 1]], Infinity]}", "List[List[Plus[1, 1]], List[1, 1, Plus[1, 1], f[Plus[1, 1]]]]")
+        , ("level structurally normalizes selected sequence", "{Level[HoldComplete[Sequence[a, b]], {1}], Level[HoldComplete[Nothing], {1}]}", "List[List[a, b], List[]]")
+        , ("level strips direct unevaluated arguments", "{Level[Unevaluated[f[1 + 1]], Infinity], Level[f[a], Unevaluated[1]], Level[f[a], 1, Unevaluated[False]]}", "List[List[1, 1, Plus[1, 1]], List[a], List[a]]")
         , ("association keys", "Keys[<|a -> x, b -> y, c -> z|>]", "List[a, b, c]")
         , ("association values", "Values[<|a -> x, b -> y, c -> z|>]", "List[x, y, z]")
         , ("association normal form", "Normal[<|a -> x, b -> y|>]", "List[Rule[a, x], Rule[b, y]]")
@@ -781,7 +790,19 @@ checkEvaluatorErrors = do
     assertLeft
       "reject nested ReplaceAt rulesets"
       (parseInputForm "ReplaceAt[f[a], {{a -> x}}, {1}]" >>= mapLeftEvaluation . evaluate)
-  pure (and [first, second, third, fourth])
+  fifth <-
+    assertLeft
+      "reject unsupported Level heads traversal"
+      (parseInputForm "Level[f[a], Infinity, True]" >>= mapLeftEvaluation . evaluate)
+  sixth <-
+    assertLeft
+      "reject invalid Level specification"
+      (parseInputForm "Level[f[a], bad]" >>= mapLeftEvaluation . evaluate)
+  seventh <-
+    assertLeft
+      "reject invalid Level arity"
+      (parseInputForm "Level[f[a]]" >>= mapLeftEvaluation . evaluate)
+  pure (and [first, second, third, fourth, fifth, sixth, seventh])
  where
   mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
 
@@ -1097,6 +1118,9 @@ checkEvaluationSession = do
         , ("invalid loop arities hold every operand", "x = 0; {For[x = 1, True, Null], While[x = 2, Null, extra], While[], x}", "List[For[Set[x, 1], True, Null], While[Set[x, 2], Null, extra], While[], 0]")
         , ("evaluated loop heads remain held", "x = 0; f = For; w = While; f[x = 1, True, Null, Null]; w[False, x = 2]; x", "0")
         , ("loop safety cap matches python boundary", "n = 0; For[Null, n <= 65536, n = n + 1, Null]; f = n; n = 0; While[n <= 65536, n = n + 1]; {f, n}", "List[65537, 65537]")
+        , ("level session output does not reevaluate held selections", "x = 7; Level[Hold[x], {1}]", "List[x]")
+        , ("level session strips unevaluated without payload evaluation", "x = 7; Level[Unevaluated[f[x]], Infinity]", "List[x]")
+        , ("evaluated level aliases preserve selected held symbols", "x = 7; l = Level; l[Hold[x], {1}]", "List[x]")
         , ("uncaught return remains inert", "Return[5]", "Return[5]")
         , ("empty return carries null", "Return[]", "Return[Null]")
         , ("catch does not intercept return", "Catch[Return[6]]", "Return[6]")
@@ -1583,6 +1607,27 @@ checkFullForms = do
 checkSmartConstructors :: IO Bool
 checkSmartConstructors = do
   let normalized = expectRight (rational (-6) (-8))
+      rootValue = expectRight (root [-2, 0, 1] 0 0)
+      sparseValue = expectRight (sparseArray [3] [] (Integer 0))
+      rootDepthAndLevel =
+        fullForm
+          <$> evaluate
+            ( Call
+                (Symbol "List")
+                [ Call (Symbol "Depth") [rootValue]
+                , Call (Symbol "Level") [rootValue, Call (Symbol "List") [Integer (-1)]]
+                ]
+            )
+      sparseDepthAndLevels =
+        fullForm
+          <$> evaluate
+            ( Call
+                (Symbol "List")
+                [ Call (Symbol "Depth") [sparseValue]
+                , Call (Symbol "Level") [sparseValue, Call (Symbol "List") [Integer (-2)]]
+                , Call (Symbol "Level") [sparseValue, Symbol "Infinity"]
+                ]
+            )
       checks =
         [ assertEqual "rational normalization" (Rational 3 4) normalized
         , assertLeft "zero denominator" (rational 1 0)
@@ -1591,6 +1636,14 @@ checkSmartConstructors = do
         , assertLeft "duplicate sparse coordinate" (sparseArray [2] [SparseEntry [1] (Integer 1), SparseEntry [1] (Integer 2)] (Integer 0))
         , assertEqual "complex is atomic" [] (arguments (Complex (Integer 1) (Integer 2)))
         , assertEqual "root arguments" [Call (Symbol "Function") [Call (Symbol "Plus") [Integer (-2), Call (Symbol "Slot") [Integer 1]]], Integer 1, Integer 0] (arguments (expectRight (root [-2, 1] 0 0)))
+        , assertEqual
+            "root depth and exact negative level"
+            (Right ("List[1, List[" <> fullForm rootValue <> "]]"))
+            rootDepthAndLevel
+        , assertEqual
+            "sparse depth and untraversed negative level"
+            (Right ("List[2, List[" <> fullForm sparseValue <> "], List[]]"))
+            sparseDepthAndLevels
         ]
   and <$> sequence checks
 

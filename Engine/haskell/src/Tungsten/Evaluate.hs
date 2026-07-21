@@ -74,9 +74,11 @@ evaluateAt depth expression
         evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
         let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
         reduced <- reduceCall evaluatedCall
-        -- Python's Sqrt helper deliberately returns a raw nested Times shape
-        -- for negative composite radicands instead of re-entering evaluation.
-        if reduced == evaluatedCall || evaluatedHead == Symbol "Sqrt"
+        -- Some Python reducers deliberately return a final structural value:
+        -- Sqrt preserves its raw nested Times shape for negative composite
+        -- radicands, while Level exposes selected held subexpressions without
+        -- evaluating them again.
+        if reduced == evaluatedCall || evaluatedHead `elem` [Symbol "Sqrt", Symbol "Level"]
           then Right reduced
           else evaluateAt (depth + 1) reduced
       _ -> Right expression
@@ -209,6 +211,7 @@ reduceBuiltin headName values = case headName of
   "Most" -> Right (reduceRestMost False headName values)
   "Part" -> reducePart values
   "Extract" -> reduceExtract values
+  "Level" -> reduceLevel values
   "Keys" -> reduceKeys values
   "Values" -> reduceValues values
   "Normal" -> reduceNormal values
@@ -2618,6 +2621,38 @@ normalizeLevelBound (Integer value)
 normalizeLevelBound (Symbol "Infinity") = Right levelInfinity
 normalizeLevelBound _ = Left (EvaluationError "an unsupported level bound was provided")
 
+reduceLevel :: [Expr] -> Either EvaluationError Expr
+reduceLevel arguments' = case map stripUnevaluated arguments' of
+  [expression, specification] ->
+    levelAtSpecification expression specification
+  [expression, specification, Symbol "False"] ->
+    levelAtSpecification expression specification
+  [_, _, Symbol "True"] ->
+    Left (EvaluationError "Level[..., ..., True] is not implemented yet")
+  [_, _, _] ->
+    Left (EvaluationError "the optional third Level argument must be True or False")
+  _ ->
+    Left
+      ( EvaluationError
+          "Level expects an expression, a level specification, and an optional heads flag"
+      )
+ where
+  stripUnevaluated (Call (Symbol "Unevaluated") [value]) = value
+  stripUnevaluated value = value
+
+levelAtSpecification :: Expr -> Expr -> Either EvaluationError Expr
+levelAtSpecification expression specification = do
+  bounds <- normalizeLevelSpec specification
+  Right
+    ( normalizeEvaluatedCall
+        (Symbol "List")
+        [ value
+        | PatternRecord value positive negative <-
+            collectPatternRecords False 0 expression
+        , levelMatches bounds positive negative
+        ]
+    )
+
 levelMatches :: LevelBounds -> Int -> Int -> Bool
 levelMatches (LevelBounds lower upper) positive negative
   | lower >= 0 && upper >= 0 = lower <= positive && positive <= upper
@@ -3883,11 +3918,14 @@ freshSymbolName baseName unavailable
           else candidate
 
 expressionDepth :: Expr -> Int
+expressionDepth Root {} = 1
+expressionDepth (SparseArray dimensions _ _) = length dimensions + 1
 expressionDepth expression
   | Just entries <- associationEntries expression =
       case [value | AssociationEntry _ _ value <- entries] of
-        [] -> 1
+        [] -> 2
         values -> 1 + maximum (map expressionDepth values)
+expressionDepth (Call _ []) = 2
 expressionDepth expression = case arguments expression of
   [] -> 1
   values -> 1 + maximum (map expressionDepth values)

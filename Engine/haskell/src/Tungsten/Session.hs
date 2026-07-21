@@ -162,6 +162,8 @@ evaluateSessionAt depth session expression
         evaluateLoopControl ContinueSignal "Continue" session arguments'
       Call (Symbol "Return") arguments' ->
         evaluateSessionReturn depth session arguments'
+      Call (Symbol "Level") arguments' ->
+        evaluateSessionLevel depth session arguments'
       Call (Symbol "OwnValues") arguments' ->
         evaluateSessionOwnValues session arguments'
       Call (Symbol "DownValues") arguments' ->
@@ -221,7 +223,7 @@ evaluateSessionAt depth session expression
                   Nothing -> do
                     reduced <-
                       liftPureEvaluation definitionSession (evaluate evaluatedCall)
-                    if reduced == normalizedCall
+                    if reduced == normalizedCall || evaluatedHead == Symbol "Level"
                       then Right (reduced, definitionSession)
                       else evaluateSessionAt (depth + 1) definitionSession reduced
       _ -> Right (expression, session)
@@ -271,6 +273,20 @@ evaluateSessionReturn depth session = \case
         Left (SessionControl (Returned value (Just headName)) updated)
       _ -> Right (Call (Symbol "Return") arguments', headSession)
   arguments' -> Right (Call (Symbol "Return") arguments', session)
+
+evaluateSessionLevel
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionLevel depth session arguments' = do
+  (evaluatedArguments, updated) <-
+    evaluateArguments depth session arguments'
+  result <-
+    liftPureEvaluation
+      updated
+      (evaluate (Call (Symbol "Level") evaluatedArguments))
+  Right (result, updated)
 
 evaluateLoopControl
   :: ControlSignal
@@ -458,7 +474,7 @@ protectedDefinitionOwners =
             <> "GreaterEqual GroupBy Head Hold HoldForm HoldPattern Identity If IgnoringInactive Inactive Inequality "
             <> "InheritedBlock Insert IntegerPart IntegerQ Internal`InheritedBlock Intersection Join Key KeyComplement "
             <> "KeyDrop KeyExistsQ KeyIntersection KeyMap KeyMemberQ Keys KeySelect KeySort KeyTake KeyUnion KeyValueMap "
-            <> "KeyValuePattern Last Length LengthWhile Less LessEqual List ListQ Longest Lookup Map MapAt MatchQ Max "
+            <> "KeyValuePattern Last Length LengthWhile Level Less LessEqual List ListQ Longest Lookup Map MapAt MatchQ Max "
             <> "Mean Median MemberQ Merge Min Missing Module Most NValues NoneTrue Normal Not Null NumberQ OddQ Optional "
             <> "OptionsPattern Or Order OrderedQ Ordering OrderlessPatternSequence OwnValues PadLeft PadRight Part Pattern "
             <> "PatternSequence PatternTest Permutations Permute Pick Plus Position PositionIndex PositionLargest "
