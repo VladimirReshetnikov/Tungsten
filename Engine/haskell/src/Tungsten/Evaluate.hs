@@ -50,6 +50,8 @@ evaluateAt depth expression
       Call (Symbol "Condition") _ -> Right expression
       Call (Symbol "Table") _ -> Right expression
       Call (Symbol "Do") _ -> Right expression
+      Call (Symbol "For") _ -> Right expression
+      Call (Symbol "While") _ -> Right expression
       Call (Symbol "Sum") _ -> Right expression
       Call (Symbol "Product") _ -> Right expression
       Call (Symbol "Catch") _ -> Right expression

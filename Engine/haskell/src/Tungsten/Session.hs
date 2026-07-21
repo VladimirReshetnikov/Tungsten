@@ -178,6 +178,10 @@ evaluateSessionAt depth session expression
         evaluateSessionTable depth session arguments'
       Call (Symbol "Do") arguments' ->
         evaluateSessionDo depth session arguments'
+      Call (Symbol "For") arguments' ->
+        evaluateSessionFor depth session arguments'
+      Call (Symbol "While") arguments' ->
+        evaluateSessionWhile depth session arguments'
       Call (Symbol "Sum") arguments' ->
         evaluateSessionAccumulator "Sum" "Plus" depth session arguments'
       Call (Symbol "Product") arguments' ->
@@ -450,7 +454,7 @@ protectedDefinitionOwners =
             <> "Cases Catch Catenate Ceiling Clear ClearAll ClearAttributes Complement CompoundExpression Condition "
             <> "ContainsAll ContainsAny ContainsExactly ContainsNone Continue Count Counts Cycles Delete DeleteCases "
             <> "Depth Differences Discard DivideBy Do DownValues Drop Equal EvenQ Except Extract Factorial Factorial2 "
-            <> "False First FirstCase FirstPosition Flatten Floor FractionalPart FreeQ Function Gather GatherBy Greater "
+            <> "False First FirstCase FirstPosition Flatten Floor For FractionalPart FreeQ Function Gather GatherBy Greater "
             <> "GreaterEqual GroupBy Head Hold HoldForm HoldPattern Identity If IgnoringInactive Inactive Inequality "
             <> "InheritedBlock Insert IntegerPart IntegerQ Internal`InheritedBlock Intersection Join Key KeyComplement "
             <> "KeyDrop KeyExistsQ KeyIntersection KeyMap KeyMemberQ Keys KeySelect KeySort KeyTake KeyUnion KeyValueMap "
@@ -462,7 +466,7 @@ protectedDefinitionOwners =
             <> "ReplaceRepeated Rest Return Reverse ReverseSort ReverseSortBy Riffle RotateLeft RotateRight Round Rule "
             <> "RuleDelayed SameQ Select SelectFirst Sequence Set SetAttributes SetDelayed Shortest Sign Slot Sort SortBy "
             <> "Splice Sqrt StringQ Subsets SubtractFrom SubValues Sum Table Take TakeWhile Tally Throw Times TimesBy Total "
-            <> "True Unequal Unevaluated Union Unprotect UnsameQ Unset UpValues Values Verbatim With"
+            <> "True Unequal Unevaluated Union Unprotect UnsameQ Unset UpValues Values Verbatim While With"
         )
     )
 
@@ -902,6 +906,91 @@ evaluateSessionDo depth session arguments' = case arguments' of
       Right (_, updated) -> Right (Symbol "Null", updated)
   _ -> Right (Call (Symbol "Do") arguments', session)
 
+evaluateSessionFor
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFor depth session arguments' =
+  catchLoopBoundary "For" (runFor arguments')
+ where
+  runFor [initialization, test, increment, body] = do
+    (_, initialized) <-
+      evaluateSessionAt (depth + 1) session initialization
+    loop 0 initialized
+   where
+    loop iteration current
+      | iteration > iterationSafetyLimit =
+          Right (Call (Symbol "For") arguments', current)
+      | otherwise = do
+          (testResult, tested) <-
+            evaluateSessionAt (depth + 1) current test
+          if testResult /= Symbol "True"
+            then Right (Symbol "Null", tested)
+            else do
+              ((), bodySession) <-
+                evaluateContinuableBody depth tested body
+              (_, incremented) <-
+                evaluateSessionAt (depth + 1) bodySession increment
+              loop (iteration + 1) incremented
+  runFor _ = Right (Call (Symbol "For") arguments', session)
+
+evaluateSessionWhile
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionWhile depth session arguments' =
+  catchLoopBoundary "While" (runWhile arguments')
+ where
+  runWhile [test] = loop test Nothing 0 session
+  runWhile [test, body] = loop test (Just body) 0 session
+  runWhile _ = Right (Call (Symbol "While") arguments', session)
+
+  loop test body iteration current
+    | iteration > iterationSafetyLimit =
+        Right (Call (Symbol "While") arguments', current)
+    | otherwise = do
+        (testResult, tested) <-
+          evaluateSessionAt (depth + 1) current test
+        if testResult /= Symbol "True"
+          then Right (Symbol "Null", tested)
+          else do
+            bodySession <- case body of
+              Nothing -> Right tested
+              Just expression -> do
+                ((), updated) <-
+                  evaluateContinuableBody depth tested expression
+                Right updated
+            loop test body (iteration + 1) bodySession
+
+iterationSafetyLimit :: Int
+iterationSafetyLimit = 65536
+
+evaluateContinuableBody
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult ()
+evaluateContinuableBody depth session body =
+  case evaluateSessionAt (depth + 1) session body of
+    Left (SessionControl ContinueSignal stoppedSession) ->
+      Right ((), stoppedSession)
+    Left evaluationExit -> Left evaluationExit
+    Right (_, updated) -> Right ((), updated)
+
+catchLoopBoundary :: Text -> SessionResult Expr -> SessionResult Expr
+catchLoopBoundary target = \case
+  Left (SessionControl BreakSignal stoppedSession) ->
+    Right (Symbol "Null", stoppedSession)
+  Left
+    ( SessionControl
+        (Returned value (Just actualTarget))
+        stoppedSession
+      )
+    | actualTarget == target -> Right (value, stoppedSession)
+  result -> result
+
 evaluateSessionAccumulator
   :: Text
   -> Text
@@ -1135,6 +1224,8 @@ isHeldSessionHead (Symbol name) =
   name
     `elem` [ "Table"
            , "Do"
+           , "For"
+           , "While"
            , "Sum"
            , "Product"
            , "Catch"
