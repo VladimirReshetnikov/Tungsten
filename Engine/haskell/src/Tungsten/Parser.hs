@@ -50,13 +50,25 @@ import Tungsten.WolframString (parseWolframStringLiteral)
 newtype ParseError = ParseError {parseErrorMessage :: Text}
   deriving (Eq, Show)
 
-type Parser = Parsec Text ()
+newtype ParserContext = ParserContext
+  { suppressTaggedUnset :: Bool
+  }
+
+type Parser = Parsec Text ParserContext
+
+initialParserContext :: ParserContext
+initialParserContext = ParserContext False
 
 -- | Parse one complete Wolfram FullForm expression.
 parseFullForm :: Text -> Either ParseError Expr
 parseFullForm source =
   first (ParseError . T.pack . show)
-    (Parsec.parse (ignored *> option (Symbol "Null") expressionParser <* eof) "Wolfram FullForm" source)
+    ( Parsec.runParser
+        (ignored *> option (Symbol "Null") expressionParser <* eof)
+        initialParserContext
+        "Wolfram FullForm"
+        source
+    )
 
 -- | Parse the most common Wolfram InputForm surface syntax.  This slice covers
 -- calls, lists, patterns, slots, arithmetic, comparisons, Boolean operators,
@@ -64,10 +76,19 @@ parseFullForm source =
 parseInputForm :: Text -> Either ParseError Expr
 parseInputForm source =
   first (ParseError . T.pack . show)
-    (Parsec.parse (ignored *> option (Symbol "Null") inputExpressionParser <* eof) "Wolfram InputForm" source)
+    ( Parsec.runParser
+        (ignored *> option (Symbol "Null") inputExpressionParser <* eof)
+        initialParserContext
+        "Wolfram InputForm"
+        source
+    )
 
 inputExpressionParser :: Parser Expr
-inputExpressionParser = namedFunctionParser
+inputExpressionParser = do
+  expression <- namedFunctionParser
+  case tagSetPrefixParts expression of
+    Just _ -> fail "Expected '=', ':=', or '=.' after '/:'."
+    Nothing -> pure expression
 
 namedFunctionParser :: Parser Expr
 namedFunctionParser = do
@@ -117,17 +138,82 @@ functionParser = assignmentParser >>= functionPostfixes
 
 assignmentParser :: Parser Expr
 assignmentParser = do
-  lhs <- compositionParser
-  option lhs $ choice
-    [ do
-        _ <- operator ":=" ""
-        rhs <- assignmentParser
-        pure (Call (Symbol "SetDelayed") [lhs, rhs])
-    , do
-        _ <- operator "=" "=.!"
-        rhs <- assignmentParser
-        pure (Call (Symbol "Set") [lhs, rhs])
-    ]
+  lhs <- taggedAssignmentPrefixParser
+  option lhs (assignmentSuffix lhs)
+
+taggedAssignmentPrefixParser :: Parser Expr
+taggedAssignmentPrefixParser = compositionParser >>= gatherPrefixes
+ where
+  gatherPrefixes lhs =
+    option lhs $ do
+      _ <- operator "/:" ""
+      target <- withTaggedUnsetSuppression True compositionParser
+      gatherPrefixes (Call (Symbol "TagSetPrefix") [lhs, target])
+
+assignmentSuffix :: Expr -> Parser Expr
+assignmentSuffix lhs = choice
+  [ do
+      _ <- operator ":=" ""
+      rhs <- assignmentParser
+      pure (taggedAssignment "TagSetDelayed" "SetDelayed" lhs rhs)
+  , do
+      _ <- operator "=." ""
+      continueAfterTaggedUnset (taggedUnset lhs)
+  , try $ do
+      _ <- operator "=" "=.!"
+      _ <- operator "." ".0123456789"
+      continueAfterTaggedUnset (taggedUnset lhs)
+  , do
+      _ <- operator "=" "=.!"
+      rhs <- assignmentParser
+      pure (taggedAssignment "TagSet" "Set" lhs rhs)
+  ]
+
+taggedAssignment :: Text -> Text -> Expr -> Expr -> Expr
+taggedAssignment taggedHead ordinaryHead lhs rhs =
+  case tagSetPrefixParts lhs of
+    Just (tag, target) -> Call (Symbol taggedHead) [tag, target, rhs]
+    Nothing -> Call (Symbol ordinaryHead) [lhs, rhs]
+
+taggedUnset :: Expr -> Expr
+taggedUnset lhs = case tagSetPrefixParts lhs of
+  Just (tag, target) -> Call (Symbol "TagUnset") [tag, target]
+  Nothing -> Call (Symbol "Unset") [lhs]
+
+-- In Wolfram syntax @=.@ is a postfix operator even when it closes a tagged
+-- assignment.  The surrounding recursive-descent layer has already returned
+-- from the higher-precedence parser at this point, so reparse only a genuine
+-- continuation with the completed tagged unset parenthesized as its left side.
+continueAfterTaggedUnset :: Expr -> Parser Expr
+continueAfterTaggedUnset expression = do
+  remaining <- getInput
+  if endsCurrentExpression remaining
+    then pure expression
+    else do
+      Parsec.setInput ("(" <> inputForm expression <> ")" <> remaining)
+      inputExpressionParser
+ where
+  endsCurrentExpression remaining =
+    T.null remaining
+      || maybe False (`elem` (",;)]}" :: String)) (fst <$> T.uncons remaining)
+      || "|>" `T.isPrefixOf` remaining
+
+tagSetPrefixParts :: Expr -> Maybe (Expr, Expr)
+tagSetPrefixParts = \case
+  Call (Symbol "TagSetPrefix") [tag, target] -> Just (tag, target)
+  _ -> Nothing
+
+withTaggedUnsetSuppression :: Bool -> Parser value -> Parser value
+withTaggedUnsetSuppression suppressed parser = do
+  previous <- Parsec.getState
+  Parsec.putState (ParserContext suppressed)
+  result <- parser
+  Parsec.putState previous
+  pure result
+
+nestedInputExpressionParser :: Parser Expr
+nestedInputExpressionParser =
+  withTaggedUnsetSuppression False inputExpressionParser
 
 compositionParser :: Parser Expr
 compositionParser =
@@ -240,7 +326,7 @@ timesParser = do
  where
   timesTail = choice
     [ (,) Multiply <$> (operator "*" "*^*=" *> unaryParser)
-    , (,) Divide <$> (operator "/" "/;.@=*" *> unaryParser)
+    , (,) Divide <$> (operator "/" "/:;.@=*" *> unaryParser)
     , try $ do
         notFollowedBy (char '-')
         (,) Multiply <$> powerParser
@@ -304,7 +390,11 @@ postfixesParser allowPatternTest expression =
         updateHead <- choice
           [ "Increment" <$ operator "++" ""
           , "Decrement" <$ operator "--" ""
-          , "Unset" <$ operator "=." ""
+          , do
+              context <- Parsec.getState
+              if suppressTaggedUnset context
+                then Parsec.parserZero
+                else "Unset" <$ operator "=." ""
           ]
         postfixesParser allowPatternTest (Call (Symbol updateHead) [expression])
     , do
@@ -356,12 +446,17 @@ optionalDotCandidate _ = False
 
 inputArgumentsParser :: Parser [Expr]
 inputArgumentsParser =
-  lexeme (between (char '[' <* notFollowedBy (char '[')) (char ']') (inputExpressionParser `sepBy` symbolChar ','))
+  lexeme
+    ( between
+        (char '[' <* notFollowedBy (char '['))
+        (char ']')
+        (nestedInputExpressionParser `sepBy` symbolChar ',')
+    )
 
 partArgumentsParser :: Parser [Expr]
 partArgumentsParser = do
   _ <- lexeme (try (string "[["))
-  indices <- inputExpressionParser `sepBy` symbolChar ','
+  indices <- nestedInputExpressionParser `sepBy` symbolChar ','
   _ <- lexeme (try (string "]]"))
   pure indices
 
@@ -375,7 +470,7 @@ inputAtomParser = lexeme $ choice
   , slotParser
   , blankShapeParser
   , Symbol <$> symbolParser
-  , between (symbolChar '(') (symbolChar ')') inputExpressionParser
+  , between (symbolChar '(') (symbolChar ')') nestedInputExpressionParser
   ]
 
 percentHistoryParser :: Parser Expr
@@ -392,12 +487,15 @@ percentHistoryParser = do
 listParser :: Parser Expr
 listParser =
   Call (Symbol "List")
-    <$> between (symbolChar '{') (symbolChar '}') (inputExpressionParser `sepBy` symbolChar ',')
+    <$> between
+      (symbolChar '{')
+      (symbolChar '}')
+      (nestedInputExpressionParser `sepBy` symbolChar ',')
 
 associationParser :: Parser Expr
 associationParser = do
   _ <- operator "<|" ""
-  entries <- inputExpressionParser `sepBy` symbolChar ','
+  entries <- nestedInputExpressionParser `sepBy` symbolChar ','
   _ <- operator "|>" ""
   pure (Call (Symbol "Association") entries)
 
