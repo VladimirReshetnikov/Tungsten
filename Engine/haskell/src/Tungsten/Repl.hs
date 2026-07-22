@@ -14,7 +14,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TextIO
-import System.IO (hFlush, isEOF, stdout)
+import System.IO (hFlush, isEOF, stderr, stdout)
 import Tungsten.Evaluate (evaluationErrorMessage)
 import Tungsten.Expression
 import Tungsten.Parser
@@ -50,16 +50,16 @@ evaluateReplLine :: ReplState -> Text -> ReplStep
 evaluateReplLine state source
   | T.null (T.strip source) = ReplEmpty state
   | otherwise = case parseInputForm source of
-      Left parseError -> ReplFailure (parseErrorMessage parseError) state
+      Left parseError -> ReplFailure (parseErrorMessage parseError) transientState
       Right parsed ->
         let line = replNextLine state
             withInput =
-              state
+              transientState
                 { replInputHistory = Map.insert line parsed (replInputHistory state)
                 , replInputStrings = Map.insert line source (replInputStrings state)
                 }
             resolved = resolveHistory withInput parsed
-         in case evaluateInSession (replSession state) resolved of
+         in case evaluateInSession transientSession resolved of
               Left evaluationError ->
                 ReplFailure
                   (evaluationErrorMessage evaluationError)
@@ -74,6 +74,14 @@ evaluateReplLine state source
                           , replOutputHistory = Map.insert line result (replOutputHistory state)
                           }
                    in ReplValue line result updated
+ where
+  transientSession =
+    (replSession state)
+      { sessionGeneratedMessages = []
+      , sessionVisibleMessages = []
+      , sessionPrints = []
+      }
+  transientState = state {replSession = transientSession}
 
 resolveHistory :: ReplState -> Expr -> Expr
 resolveHistory state expression = case expression of
@@ -122,7 +130,15 @@ runRepl showBanner = do
         case evaluateReplLine state source of
           ReplEmpty updated -> loop updated
           ReplFailure message updated -> TextIO.putStrLn ("Error: " <> message) *> loop updated
-          ReplExit code _ -> pure code
+          ReplExit code updated -> emitSessionStreams updated *> pure code
           ReplValue line value updated -> do
+            emitSessionStreams updated
             TextIO.putStrLn ("Out[" <> T.pack (show line) <> "]= " <> fullForm value)
             loop updated
+
+  emitSessionStreams updated = do
+    mapM_ TextIO.putStrLn (sessionPrints (replSession updated))
+    mapM_
+      (TextIO.hPutStrLn stderr . evaluationMessageText)
+      (sessionVisibleMessages (replSession updated))
+    hFlush stderr

@@ -5,6 +5,7 @@
 module Tungsten.Session
   ( Definition (..)
   , DownValue (..)
+  , EvaluationMessage (..)
   , EvaluationSession (..)
   , emptySession
   , evaluateInSession
@@ -12,6 +13,7 @@ module Tungsten.Session
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.List (sortBy)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tungsten.Evaluate
@@ -29,15 +31,25 @@ data DownValue = DownValue
   }
   deriving (Eq, Show)
 
+data EvaluationMessage = EvaluationMessage
+  { evaluationMessageName :: !Text
+  , evaluationMessageFullName :: !Expr
+  , evaluationMessageText :: !Text
+  }
+  deriving (Eq, Show)
+
 data EvaluationSession = EvaluationSession
   { sessionDefinitions :: Map.Map Text Definition
   , sessionDownValues :: Map.Map Text [DownValue]
   , sessionModuleCounter :: !Integer
+  , sessionGeneratedMessages :: ![EvaluationMessage]
+  , sessionVisibleMessages :: ![EvaluationMessage]
+  , sessionPrints :: ![Text]
   }
   deriving (Eq, Show)
 
 emptySession :: EvaluationSession
-emptySession = EvaluationSession Map.empty Map.empty 0
+emptySession = EvaluationSession Map.empty Map.empty 0 [] [] []
 
 data Iterator = Iterator !(Maybe Text) ![Expr]
   deriving (Eq, Show)
@@ -79,7 +91,16 @@ data IterationFailure
 
 evaluateInSession :: EvaluationSession -> Expr -> Either EvaluationError (Expr, EvaluationSession)
 evaluateInSession session expression =
-  finalizeSessionResult (evaluateSessionAt 0 session expression)
+  finalizeSessionResult
+    ( evaluateSessionAt
+        0
+        session
+          { sessionGeneratedMessages = []
+          , sessionVisibleMessages = []
+          , sessionPrints = []
+          }
+        expression
+    )
 
 finalizeSessionResult
   :: SessionResult Expr
@@ -123,7 +144,17 @@ evaluateSessionAt
 evaluateSessionAt depth session expression
   | depth > 1024 =
       sessionFailure session "the session evaluation recursion limit was exceeded"
-  | otherwise = case expression of
+  | otherwise =
+      recoverEvaluationFailure
+        expression
+        (evaluateSessionAtRaw depth session expression)
+
+evaluateSessionAtRaw
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionAtRaw depth session expression = case expression of
       Symbol name -> case Map.lookup name (sessionDefinitions session) of
         Nothing -> Right (expression, session)
         Just (ImmediateValue value)
@@ -162,6 +193,14 @@ evaluateSessionAt depth session expression
         evaluateLoopControl ContinueSignal "Continue" session arguments'
       Call (Symbol "Return") arguments' ->
         evaluateSessionReturn depth session arguments'
+      Call (Symbol "Print") arguments' ->
+        evaluateSessionPrint depth session arguments'
+      Call (Symbol "Select") [criterion] ->
+        evaluateSessionSelectionOperator "Select" depth session criterion
+      Call (Symbol "Discard") [criterion] ->
+        evaluateSessionSelectionOperator "Discard" depth session criterion
+      Call (Symbol "SelectFirst") [criterion] ->
+        evaluateSessionSelectionOperator "SelectFirst" depth session criterion
       Call (Symbol "Level") arguments' ->
         evaluateSessionLevel depth session arguments'
       Call (Symbol "OwnValues") arguments' ->
@@ -190,18 +229,26 @@ evaluateSessionAt depth session expression
         evaluateSessionAccumulator "Product" "Times" depth session arguments'
       Call (Symbol headName) [Symbol name, rhs]
         | Just constructor <- Map.lookup headName updateConstructors ->
-            evaluateUpdate depth session name constructor rhs
+            evaluateUpdate headName depth session name constructor rhs
       Call (Symbol headName) _
         | headName `elem` ["Hold", "HoldComplete", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed", "Condition"] ->
             Right (expression, session)
       Call expressionHead arguments' -> do
         (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
-        if isHeldSessionHead evaluatedHead
-          then Right (Call evaluatedHead arguments', headSession)
+        if evaluatedHead == Symbol "Association"
+          then do
+            reduced <-
+              liftPureEvaluation
+                headSession
+                (reduceEvaluatedCall (Call evaluatedHead arguments'))
+            Right (reduced, headSession)
+          else if isHeldSessionHead evaluatedHead
+            then Right (Call evaluatedHead arguments', headSession)
+          else if evaluatedHead == Symbol "SelectFirst"
+            then evaluateHeldSessionSelectFirst depth headSession arguments'
           else do
             (evaluatedArguments, argumentsSession) <- evaluateArguments depth headSession arguments'
-            let evaluatedCall = Call evaluatedHead evaluatedArguments
-                normalizedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
+            let normalizedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
                 normalizedArguments = case normalizedCall of
                   Call _ values -> values
                   _ -> evaluatedArguments
@@ -220,13 +267,1105 @@ evaluateSessionAt depth session expression
                 case downValueReplacement of
                   Just replacement ->
                     Right (replacement, definitionSession)
-                  Nothing -> do
-                    reduced <-
-                      liftPureEvaluation definitionSession (evaluate evaluatedCall)
-                    if reduced == normalizedCall || evaluatedHead == Symbol "Level"
-                      then Right (reduced, definitionSession)
-                      else evaluateSessionAt (depth + 1) definitionSession reduced
+                  Nothing ->
+                    case reduceSessionEvaluatedCall depth definitionSession normalizedCall of
+                      Just sessionReduction -> sessionReduction
+                      Nothing -> do
+                        reduced <-
+                          liftPureEvaluation
+                            definitionSession
+                            (reduceEvaluatedCall normalizedCall)
+                        Right (reduced, definitionSession)
       _ -> Right (expression, session)
+
+reduceSessionEvaluatedCall
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Maybe (SessionResult Expr)
+reduceSessionEvaluatedCall depth session = \case
+  Call (Call (Symbol "SortBy") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionSortBy False depth session [subject, function]
+      _ ->
+        sessionFailure
+          session
+          "SortBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "ReverseSortBy") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionSortBy True depth session [subject, function]
+      _ ->
+        sessionFailure
+          session
+          "ReverseSortBy[f] expects exactly one argument when used as an operator."
+  Call (Symbol "AssociationMap") values ->
+    Just (evaluateSessionAssociationMap depth session values)
+  Call (Symbol "Apply") values ->
+    Just (evaluateSessionApply depth session values)
+  Call (Symbol "KeyMap") values ->
+    Just (evaluateSessionKeyMap depth session values)
+  Call (Symbol "KeyValueMap") values ->
+    Just (evaluateSessionKeyValueMap depth session values)
+  Call (Symbol "Map") values ->
+    Just (evaluateSessionMap depth session values)
+  Call (Symbol "MapAt") values ->
+    Just (evaluateSessionMapAt depth session values)
+  Call (Symbol "Total") values ->
+    Just (evaluateSessionTotal depth session values)
+  Call (Symbol "Select") values ->
+    Just (evaluateSessionSelect False depth session values)
+  Call (Symbol "Discard") values ->
+    Just (evaluateSessionSelect True depth session values)
+  Call (Symbol "SelectFirst") values ->
+    Just (evaluateSessionSelectFirst depth session values)
+  Call (Symbol "SortBy") values ->
+    Just (evaluateSessionSortBy False depth session values)
+  Call (Symbol "ReverseSortBy") values ->
+    Just (evaluateSessionSortBy True depth session values)
+  Call (Symbol "TakeWhile") values ->
+    Just (evaluateSessionTakeWhile depth session values)
+  Call (Symbol "LengthWhile") values ->
+    Just (evaluateSessionLengthWhile depth session values)
+  Call (Symbol "KeySelect") values ->
+    Just (evaluateSessionKeySelect depth session values)
+  _ -> Nothing
+
+evaluateSessionPrint
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionPrint depth session values = do
+  (evaluatedValues, updated) <- evaluateArguments depth session values
+  Right
+    ( Symbol "Null"
+    , updated
+        { sessionPrints =
+            sessionPrints updated <> [T.concat (map renderPrintValue evaluatedValues)]
+        }
+    )
+
+renderPrintValue :: Expr -> Text
+renderPrintValue (String value) = value
+renderPrintValue expression = inputForm expression
+
+evaluateSessionSelectionOperator
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionSelectionOperator headName depth session criterion = do
+  (evaluatedCriterion, updated) <-
+    evaluateSessionAt (depth + 1) session criterion
+  Right
+    ( Call
+        (Symbol "Function")
+        [ Call
+            (Symbol headName)
+            [Call (Symbol "Slot") [], evaluatedCriterion]
+        ]
+    , updated
+    )
+
+evaluateHeldSessionSelectFirst
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateHeldSessionSelectFirst depth session values = case values of
+  [subject, criterion] -> prepare subject criterion Nothing
+  [subject, criterion, defaultValue] ->
+    prepare subject criterion (Just defaultValue)
+  _ ->
+    sessionFailure
+      session
+      "SelectFirst expects an expression, a criterion or property specification, and an optional default."
+ where
+  prepare subject criterion defaultValue = do
+    (evaluatedSubject, subjectSession) <-
+      evaluateSessionAt (depth + 1) session subject
+    (evaluatedCriterion, criterionSession) <-
+      evaluateSessionAt (depth + 1) subjectSession criterion
+    evaluateSessionSelectFirst
+      depth
+      criterionSession
+      ( [evaluatedSubject, evaluatedCriterion]
+          <> maybe [] pure defaultValue
+      )
+
+evaluateSessionCallable
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCallable depth session function arguments' = case function of
+  Symbol "Nothing" -> Right (Symbol "Nothing", session)
+  association@(Call (Symbol "Association") _)
+    | [key] <- arguments'
+    , Just collection <- sessionOrderedCollection association
+    , sessionCollectionAssociation collection ->
+        case sessionAssociationItemIndex
+          (SessionKeySelector key)
+          (sessionCollectionItems collection) of
+          Nothing ->
+            Right
+              (Call (Symbol "Missing") [String "KeyAbsent", key], session)
+          Just index -> case sessionListItemAt index (sessionCollectionItems collection) of
+            Nothing ->
+              Right
+                (Call (Symbol "Missing") [String "KeyAbsent", key], session)
+            Just selected ->
+              evaluateSessionAt
+                (depth + 1)
+                session
+                (sessionItemValue selected)
+  Call (Symbol "Function") functionArguments -> do
+    instantiated <-
+      liftPureEvaluation
+        session
+        (instantiateFunctionCall functionArguments arguments')
+    evaluateSessionAt (depth + 1) session instantiated
+  _ ->
+    evaluateSessionAt
+      (depth + 1)
+      session
+      (Call function arguments')
+
+evaluateSessionAssociationMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAssociationMap depth session = \case
+  [function, Call (Symbol "List") keys] -> do
+    (rules, updated) <- mapKeys function [] session keys
+    Right (normalizedSessionAssociation rules, updated)
+  [_, _] ->
+    sessionFailure
+      session
+      "AssociationMap currently supports only the key-list form."
+  _ -> sessionFailure session "AssociationMap expects exactly two arguments."
+ where
+  mapKeys _ retained currentSession [] = Right (retained, currentSession)
+  mapKeys function retained currentSession (key : rest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth currentSession function [key]
+    mapKeys
+      function
+      (retained <> [Call (Symbol "Rule") [key, value]])
+      updated
+      rest
+
+evaluateSessionMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMap depth session = \case
+  [function, subject] -> case sessionOrderedCollection subject of
+    Nothing -> Right (subject, session)
+    Just collection -> do
+      (mapped, updated) <- mapItems function [] session (sessionCollectionItems collection)
+      Right (rebuildSessionCollection collection mapped, updated)
+  values@[_, _, _] -> Right (Call (Symbol "Map") values, session)
+  _ ->
+    sessionFailure
+      session
+      "Map expects a function, an expression, and an optional level specification."
+ where
+  mapItems _ retained currentSession [] = Right (retained, currentSession)
+  mapItems function retained currentSession (item : rest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth currentSession function [sessionItemValue item]
+    mapItems
+      function
+      (retained <> [replaceSessionItemValue item value])
+      updated
+      rest
+
+evaluateSessionKeyMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionKeyMap depth session = \case
+  [function, association] -> case sessionOrderedCollection association of
+    Just collection
+      | sessionCollectionAssociation collection -> do
+          (rules, updated) <- mapKeys function [] session (sessionCollectionItems collection)
+          Right (normalizedSessionAssociation rules, updated)
+    _ -> sessionFailure session "KeyMap expects an Association."
+  _ -> sessionFailure session "KeyMap expects exactly two arguments."
+ where
+  mapKeys _ retained currentSession [] = Right (retained, currentSession)
+  mapKeys function retained currentSession (item : rest) = case sessionItemKey item of
+    Nothing -> sessionFailure currentSession "KeyMap expects an Association."
+    Just key -> do
+      (mappedKey, updated) <-
+        evaluateSessionCallable depth currentSession function [key]
+      let ruleHead = sessionItemRuleHead item
+      mapKeys
+        function
+        ( retained
+            <> [ Call
+                   (Symbol ruleHead)
+                   [mappedKey, sessionItemValue item]
+               ]
+        )
+        updated
+        rest
+
+evaluateSessionKeyValueMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionKeyValueMap depth session = \case
+  [function, association] -> case sessionOrderedCollection association of
+    Just collection
+      | sessionCollectionAssociation collection -> do
+          (values, updated) <- mapEntries function [] session (sessionCollectionItems collection)
+          Right (evaluatedList values, updated)
+    _ -> sessionFailure session "KeyValueMap expects an Association."
+  _ -> sessionFailure session "KeyValueMap expects exactly two arguments."
+ where
+  mapEntries _ retained currentSession [] = Right (retained, currentSession)
+  mapEntries function retained currentSession (item : rest) = case sessionItemKey item of
+    Nothing -> sessionFailure currentSession "KeyValueMap expects an Association."
+    Just key -> do
+      (mapped, updated) <-
+        evaluateSessionCallable
+          depth
+          currentSession
+          function
+          [key, sessionItemValue item]
+      mapEntries function (retained <> [mapped]) updated rest
+
+evaluateSessionApply
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionApply depth session = \case
+  [function, subject] -> case sessionOrderedCollection subject of
+    Nothing -> Right (subject, session)
+    Just collection ->
+      evaluateSessionCallable
+        depth
+        session
+        function
+        (map sessionItemValue (sessionCollectionItems collection))
+  values@[_, _, _] -> Right (Call (Symbol "Apply") values, session)
+  _ ->
+    sessionFailure
+      session
+      "Apply expects a head, an expression, and an optional level specification."
+
+evaluateSessionTotal
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTotal depth session = \case
+  [subject] -> totalSubject subject
+  values@[_, _] -> Right (Call (Symbol "Total") values, session)
+  _ ->
+    sessionFailure
+      session
+      "Total expects an expression and an optional level specification."
+ where
+  totalSubject (Call (Symbol "List") values)
+    | Just rows <- traverse listValues values
+    , equalRowLengths rows =
+        case rows of
+          [] -> Right (Integer 0, session)
+          firstRow : _ -> do
+            (columns, updated) <-
+              totalColumns [] session rows [0 .. length firstRow - 1]
+            Right (evaluatedList columns, updated)
+    | otherwise = evaluateSum session values
+  totalSubject association = case sessionOrderedCollection association of
+    Just collection
+      | sessionCollectionAssociation collection ->
+          evaluateSum
+            session
+            (map sessionItemValue (sessionCollectionItems collection))
+    _ -> sessionFailure session "Total expects a list or association."
+
+  listValues (Call (Symbol "List") values) = Just values
+  listValues _ = Nothing
+
+  equalRowLengths [] = True
+  equalRowLengths (firstRow : remaining) =
+    all ((== length firstRow) . length) remaining
+
+  totalColumns retained currentSession _ [] = Right (retained, currentSession)
+  totalColumns retained currentSession rows (index : rest) = do
+    let values = mapMaybeSession (sessionListItemAt index) rows
+    (totalValue, updated) <- evaluateSum currentSession values
+    totalColumns (retained <> [totalValue]) updated rows rest
+
+  evaluateSum currentSession values =
+    evaluateSessionAt
+      (depth + 1)
+      currentSession
+      (Call (Symbol "Plus") values)
+
+mapMaybeSession :: (value -> Maybe result) -> [value] -> [result]
+mapMaybeSession function = foldr retain []
+ where
+  retain value results = case function value of
+    Just result -> result : results
+    Nothing -> results
+
+data SessionPathSelector
+  = SessionArgumentSelector !Integer
+  | SessionKeySelector !Expr
+  deriving (Eq, Show)
+
+evaluateSessionMapAt
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapAt depth session = \case
+  [function, subject, positions] -> case sessionPositionPaths positions of
+    Nothing ->
+      sessionFailure
+        session
+        ("Unsupported position specification: " <> inputForm positions <> ".")
+    Just rawPaths -> case traverse (resolveSessionPath subject) rawPaths of
+      Nothing -> invalidPositions session subject
+      Just resolvedPaths ->
+        mapPaths
+          subject
+          function
+          subject
+          session
+          (sortSessionPaths resolvedPaths)
+  _ -> sessionFailure session "MapAt currently supports exactly three arguments."
+ where
+  mapPaths _ _ result currentSession [] = Right (result, currentSession)
+  mapPaths originalSubject function result currentSession (path : rest) = do
+    (mapped, updated) <-
+      evaluateSessionMapAtPath depth function currentSession result path
+    case mapped of
+      Nothing -> invalidPositions updated originalSubject
+      Just value ->
+        mapPaths originalSubject function value updated rest
+
+  invalidPositions currentSession subject =
+    sessionFailure
+      currentSession
+      ("MapAt positions are invalid for " <> inputForm subject <> ".")
+
+evaluateSessionMapAtPath
+  :: Int
+  -> Expr
+  -> EvaluationSession
+  -> Expr
+  -> [SessionPathSelector]
+  -> SessionResult (Maybe Expr)
+evaluateSessionMapAtPath depth function session expression = \case
+  [] -> do
+    (mapped, updated) <-
+      evaluateSessionCallable depth session function [expression]
+    Right (Just mapped, updated)
+  selector : remaining -> case sessionOrderedCollection expression of
+    Just collection
+      | sessionCollectionAssociation collection ->
+          case sessionAssociationItemIndex selector (sessionCollectionItems collection) of
+            Nothing -> Right (Nothing, session)
+            Just index -> case sessionListItemAt index (sessionCollectionItems collection) of
+              Nothing -> Right (Nothing, session)
+              Just selected -> do
+                let items = sessionCollectionItems collection
+                (mapped, updated) <-
+                  evaluateSessionMapAtPath
+                    depth
+                    function
+                    session
+                    (sessionItemValue selected)
+                    remaining
+                Right
+                  ( fmap
+                      ( \value ->
+                          rebuildSessionCollection
+                            collection
+                            (replaceSessionListIndex index (replaceSessionItemValue selected value) items)
+                      )
+                      mapped
+                  , updated
+                  )
+    Just collection -> case selector of
+      SessionArgumentSelector position ->
+        case resolveSessionPosition (length (sessionCollectionItems collection)) position of
+          Nothing -> Right (Nothing, session)
+          Just index -> case sessionListItemAt index (sessionCollectionItems collection) of
+            Nothing -> Right (Nothing, session)
+            Just selected -> do
+              let items = sessionCollectionItems collection
+              (mapped, updated) <-
+                evaluateSessionMapAtPath
+                  depth
+                  function
+                  session
+                  (sessionItemValue selected)
+                  remaining
+              Right
+                ( fmap
+                    ( \value ->
+                        rebuildSessionCollection
+                          collection
+                          (replaceSessionListIndex index (replaceSessionItemValue selected value) items)
+                    )
+                    mapped
+                , updated
+                )
+      SessionKeySelector _ -> Right (Nothing, session)
+    Nothing -> Right (Nothing, session)
+
+sessionPositionPaths :: Expr -> Maybe [[SessionPathSelector]]
+sessionPositionPaths expression
+  | Just selector <- sessionPathSelector expression = Just [[selector]]
+sessionPositionPaths (Call (Symbol "List") values)
+  | Just path <- traverse sessionPathSelector values = Just [path]
+  | otherwise = traverse explicitPath values
+ where
+  explicitPath (Call (Symbol "List") components) =
+    traverse sessionPathSelector components
+  explicitPath _ = Nothing
+sessionPositionPaths _ = Nothing
+
+sessionPathSelector :: Expr -> Maybe SessionPathSelector
+sessionPathSelector (Integer position) = Just (SessionArgumentSelector position)
+sessionPathSelector (String key) = Just (SessionKeySelector (String key))
+sessionPathSelector (Call (Symbol "Key") [key]) = Just (SessionKeySelector key)
+sessionPathSelector _ = Nothing
+
+resolveSessionPath
+  :: Expr
+  -> [SessionPathSelector]
+  -> Maybe [SessionPathSelector]
+resolveSessionPath _ [] = Just []
+resolveSessionPath expression (selector : remaining) = do
+  collection <- sessionOrderedCollection expression
+  index <- case (sessionCollectionAssociation collection, selector) of
+    (True, _) ->
+      sessionAssociationItemIndex selector (sessionCollectionItems collection)
+    (False, SessionArgumentSelector position) ->
+      resolveSessionPosition (length (sessionCollectionItems collection)) position
+    (False, SessionKeySelector _) -> Nothing
+  selected <- sessionListItemAt index (sessionCollectionItems collection)
+  resolvedRemaining <- resolveSessionPath (sessionItemValue selected) remaining
+  let resolvedSelector = case selector of
+        SessionArgumentSelector _ ->
+          SessionArgumentSelector (fromIntegral index + 1)
+        SessionKeySelector key -> SessionKeySelector key
+  Just (resolvedSelector : resolvedRemaining)
+
+sessionAssociationItemIndex
+  :: SessionPathSelector
+  -> [SessionOrderedItem]
+  -> Maybe Int
+sessionAssociationItemIndex (SessionArgumentSelector position) items =
+  resolveSessionPosition (length items) position
+sessionAssociationItemIndex (SessionKeySelector key) items = go 0 items
+ where
+  go _ [] = Nothing
+  go index (item : rest)
+    | sessionItemKey item == Just key = Just index
+    | otherwise = go (index + 1) rest
+
+resolveSessionPosition :: Int -> Integer -> Maybe Int
+resolveSessionPosition count position
+  | position > 0
+  , position <= fromIntegral count = Just (fromIntegral position - 1)
+  | position < 0
+  , position >= negate (fromIntegral count) = Just (count + fromIntegral position)
+  | otherwise = Nothing
+
+sortSessionPaths :: [[SessionPathSelector]] -> [[SessionPathSelector]]
+sortSessionPaths = sortBy compareSessionPath
+
+compareSessionPath :: [SessionPathSelector] -> [SessionPathSelector] -> Ordering
+compareSessionPath left right = case compare (length right) (length left) of
+  EQ -> compareSelectors right left
+  ordering -> ordering
+ where
+  compareSelectors [] [] = EQ
+  compareSelectors [] (_ : _) = LT
+  compareSelectors (_ : _) [] = GT
+  compareSelectors (leftSelector : leftRest) (rightSelector : rightRest) =
+    case compareSelector leftSelector rightSelector of
+      EQ -> compareSelectors leftRest rightRest
+      ordering -> ordering
+  compareSelector (SessionArgumentSelector leftPosition) (SessionArgumentSelector rightPosition) =
+    compare leftPosition rightPosition
+  compareSelector (SessionKeySelector leftKey) (SessionKeySelector rightKey) =
+    compare (inputForm leftKey) (inputForm rightKey)
+  compareSelector SessionArgumentSelector {} SessionKeySelector {} = LT
+  compareSelector SessionKeySelector {} SessionArgumentSelector {} = GT
+
+replaceSessionListIndex :: Int -> value -> [value] -> [value]
+replaceSessionListIndex index replacement values =
+  take index values <> [replacement] <> drop (index + 1) values
+
+sessionListItemAt :: Int -> [value] -> Maybe value
+sessionListItemAt 0 (value : _) = Just value
+sessionListItemAt index (_ : rest)
+  | index > 0 = sessionListItemAt (index - 1) rest
+sessionListItemAt _ _ = Nothing
+
+replaceSessionItemValue :: SessionOrderedItem -> Expr -> SessionOrderedItem
+replaceSessionItemValue item value =
+  item
+    { sessionItemValue = value
+    , sessionItemOriginal = case sessionItemKey item of
+        Just key ->
+          Call (Symbol (sessionItemRuleHead item)) [key, value]
+        Nothing -> value
+    }
+
+sessionItemRuleHead :: SessionOrderedItem -> Text
+sessionItemRuleHead item = case sessionItemOriginal item of
+  Call (Symbol ruleHead) [_, _]
+    | ruleHead `elem` ["Rule", "RuleDelayed"] -> ruleHead
+  _ -> "Rule"
+
+data SessionDecoratedItem = SessionDecoratedItem
+  { decoratedSessionItem :: !SessionOrderedItem
+  , decoratedSessionKeys :: ![Expr]
+  }
+  deriving (Eq, Show)
+
+evaluateSessionSortBy
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSortBy reverseMode depth session values = case values of
+  [_] -> Right (Call (Symbol operation) values, session)
+  [subject, functions] -> sortSubject subject functions Nothing
+  [subject, functions, orderingFunction] ->
+    sortSubject subject functions (Just orderingFunction)
+  _ ->
+    sessionFailure
+      session
+      ( operation
+          <> " expects an expression, functions, optional ordering function, and optional SameTest rule."
+      )
+ where
+  operation = if reverseMode then "ReverseSortBy" else "SortBy"
+
+  sortSubject subject functions orderingFunction =
+    case sessionOrderedCollection subject of
+      Nothing -> sessionFailure session "SortBy expects a nonatomic expression."
+      Just collection -> do
+        let (keyFunctions, stableTies) = case functions of
+              Call (Symbol "List") functionList -> (functionList, True)
+              _ -> ([functions], False)
+        (decorated, keySession) <-
+          decorateSessionItems
+            depth
+            keyFunctions
+            session
+            (sessionCollectionItems collection)
+        (sorted, updated) <-
+          case orderingFunction of
+            Nothing ->
+              Right
+                ( sortBy
+                    (compareDecoratedSessionItems reverseMode stableTies)
+                    decorated
+                , keySession
+                )
+            Just function ->
+              monadicSessionSort
+                (compareDecoratedWithFunction reverseMode stableTies depth function)
+                keySession
+                decorated
+        Right
+          ( rebuildSessionCollection
+              collection
+              (map decoratedSessionItem sorted)
+          , updated
+          )
+
+decorateSessionItems
+  :: Int
+  -> [Expr]
+  -> EvaluationSession
+  -> [SessionOrderedItem]
+  -> SessionResult [SessionDecoratedItem]
+decorateSessionItems depth functions = go []
+ where
+  go retained session [] = Right (retained, session)
+  go retained session (item : rest) = do
+    (keys, updated) <- decorateKeys [] session functions
+    go (retained <> [SessionDecoratedItem item keys]) updated rest
+   where
+    decorateKeys keys currentSession [] = Right (keys, currentSession)
+    decorateKeys keys currentSession (function : remaining) = do
+      (key, updated) <-
+        evaluateSessionCallable
+          depth
+          currentSession
+          function
+          [sessionItemValue item]
+      decorateKeys (keys <> [key]) updated remaining
+
+compareDecoratedSessionItems
+  :: Bool
+  -> Bool
+  -> SessionDecoratedItem
+  -> SessionDecoratedItem
+  -> Ordering
+compareDecoratedSessionItems reverseMode stableTies left right =
+  reverseIfNeeded result
+ where
+  keyOrdering = compareSessionKeyLists (decoratedSessionKeys left) (decoratedSessionKeys right)
+  result
+    | keyOrdering /= EQ = keyOrdering
+    | stableTies = EQ
+    | otherwise =
+        canonicalCompare
+          (sessionItemValue (decoratedSessionItem left))
+          (sessionItemValue (decoratedSessionItem right))
+  reverseIfNeeded ordering
+    | reverseMode = invertSessionOrdering ordering
+    | otherwise = ordering
+
+compareSessionKeyLists :: [Expr] -> [Expr] -> Ordering
+compareSessionKeyLists [] [] = EQ
+compareSessionKeyLists [] (_ : _) = LT
+compareSessionKeyLists (_ : _) [] = GT
+compareSessionKeyLists (left : leftRest) (right : rightRest) =
+  case canonicalCompare left right of
+    EQ -> compareSessionKeyLists leftRest rightRest
+    ordering -> ordering
+
+compareDecoratedWithFunction
+  :: Bool
+  -> Bool
+  -> Int
+  -> Expr
+  -> EvaluationSession
+  -> SessionDecoratedItem
+  -> SessionDecoratedItem
+  -> SessionResult Ordering
+compareDecoratedWithFunction reverseMode stableTies depth function session left right = do
+  (keyOrdering, updated) <-
+    compareKeys
+      session
+      (decoratedSessionKeys left)
+      (decoratedSessionKeys right)
+  let tieOrdering
+        | stableTies = EQ
+        | otherwise =
+            canonicalCompare
+              (sessionItemValue (decoratedSessionItem left))
+              (sessionItemValue (decoratedSessionItem right))
+      result = if keyOrdering == EQ then tieOrdering else keyOrdering
+  Right
+    ( if reverseMode
+        then invertSessionOrdering result
+        else result
+    , updated
+    )
+ where
+  compareKeys currentSession [] [] = Right (EQ, currentSession)
+  compareKeys currentSession [] (_ : _) = Right (LT, currentSession)
+  compareKeys currentSession (_ : _) [] = Right (GT, currentSession)
+  compareKeys currentSession (leftKey : leftRest) (rightKey : rightRest) = do
+    (ordering, updated) <-
+      evaluateSessionOrderingCompare depth function currentSession leftKey rightKey
+    if ordering == EQ
+      then compareKeys updated leftRest rightRest
+      else Right (ordering, updated)
+
+evaluateSessionOrderingCompare
+  :: Int
+  -> Expr
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Ordering
+evaluateSessionOrderingCompare depth function session left right = do
+  (firstValue, firstSession) <-
+    evaluateSessionCallable depth session function [left, right]
+  (firstResult, evaluatedSession) <-
+    evaluateSessionAt (depth + 1) firstSession firstValue
+  case firstResult of
+    Symbol "True" -> Right (LT, evaluatedSession)
+    Symbol "False" -> do
+      (reverseValue, reverseSession) <-
+        evaluateSessionCallable depth evaluatedSession function [right, left]
+      (reverseResult, finalSession) <-
+        evaluateSessionAt (depth + 1) reverseSession reverseValue
+      Right (reverseOrdering reverseResult, finalSession)
+    Integer value -> Right (integerOrdering (negate value), evaluatedSession)
+    _ -> Right (canonicalCompare left right, evaluatedSession)
+ where
+  reverseOrdering (Symbol "True") = GT
+  reverseOrdering (Symbol "False") = EQ
+  reverseOrdering (Integer value) = integerOrdering value
+  reverseOrdering _ = EQ
+  integerOrdering value
+    | value < 0 = LT
+    | value > 0 = GT
+    | otherwise = EQ
+
+monadicSessionSort
+  :: (EvaluationSession -> value -> value -> SessionResult Ordering)
+  -> EvaluationSession
+  -> [value]
+  -> SessionResult [value]
+monadicSessionSort compareValues = foldItems []
+ where
+  foldItems retained session [] = Right (retained, session)
+  foldItems retained session (value : rest) = do
+    (inserted, updated) <- insertValue session value retained
+    foldItems inserted updated rest
+
+  insertValue session value [] = Right ([value], session)
+  insertValue session value items@(candidate : rest) = do
+    (ordering, updated) <- compareValues session value candidate
+    if ordering == LT
+      then Right (value : items, updated)
+      else do
+        (remaining, finalSession) <- insertValue updated value rest
+        Right (candidate : remaining, finalSession)
+
+invertSessionOrdering :: Ordering -> Ordering
+invertSessionOrdering LT = GT
+invertSessionOrdering EQ = EQ
+invertSessionOrdering GT = LT
+
+data SessionOrderedItem = SessionOrderedItem
+  { sessionItemIndex :: !Integer
+  , sessionItemValue :: !Expr
+  , sessionItemKey :: !(Maybe Expr)
+  , sessionItemOriginal :: !Expr
+  }
+  deriving (Eq, Show)
+
+data SessionOrderedCollection = SessionOrderedCollection
+  { sessionCollectionOriginal :: !Expr
+  , sessionCollectionAssociation :: !Bool
+  , sessionCollectionItems :: ![SessionOrderedItem]
+  }
+  deriving (Eq, Show)
+
+sessionOrderedCollection :: Expr -> Maybe SessionOrderedCollection
+sessionOrderedCollection expression@(Call (Symbol "Association") rules)
+  | Just items <- traverse (uncurry associationItem) (zip [1 ..] rules) =
+      Just (SessionOrderedCollection expression True items)
+sessionOrderedCollection expression@(Call _ values) =
+  Just
+    ( SessionOrderedCollection
+        expression
+        False
+        [ SessionOrderedItem index value Nothing value
+        | (index, value) <- zip [1 ..] values
+        ]
+    )
+sessionOrderedCollection _ = Nothing
+
+associationItem :: Integer -> Expr -> Maybe SessionOrderedItem
+associationItem index rule@(Call (Symbol ruleHead) [key, value])
+  | ruleHead `elem` ["Rule", "RuleDelayed"] =
+      Just (SessionOrderedItem index value (Just key) rule)
+associationItem _ _ = Nothing
+
+rebuildSessionCollection
+  :: SessionOrderedCollection
+  -> [SessionOrderedItem]
+  -> Expr
+rebuildSessionCollection collection retained =
+  case sessionCollectionOriginal collection of
+    Call expressionHead _
+      | sessionCollectionAssociation collection ->
+          normalizedSessionAssociation (map sessionItemOriginal retained)
+      | otherwise ->
+          normalizeEvaluatedCall expressionHead (map sessionItemValue retained)
+    expression -> expression
+
+data SessionSelectionProperty
+  = SelectionElement
+  | SelectionIndex
+  deriving (Eq, Show)
+
+data SessionSelectionPropertySpec
+  = SingleSelectionProperty !SessionSelectionProperty
+  | MultipleSelectionProperties ![SessionSelectionProperty]
+  deriving (Eq, Show)
+
+parseSessionSelectionSpec
+  :: Text
+  -> Expr
+  -> Either Text (Expr, Maybe SessionSelectionPropertySpec)
+parseSessionSelectionSpec operation criterion = case criterion of
+  Call (Symbol "Rule") [selector, propertyExpression] -> do
+    propertySpec <- parsePropertyExpression propertyExpression
+    Right (selector, Just propertySpec)
+  Call (Symbol "Rule") _ ->
+    Left (operation <> " property specifications must contain exactly two arguments.")
+  _ -> Right (criterion, Nothing)
+ where
+  parsePropertyExpression (String "Element") =
+    Right (SingleSelectionProperty SelectionElement)
+  parsePropertyExpression (String "Index") =
+    Right (SingleSelectionProperty SelectionIndex)
+  parsePropertyExpression (Call (Symbol "List") properties) =
+    MultipleSelectionProperties <$> traverse parseProperty properties
+  parsePropertyExpression _ = unsupportedProperties
+  parseProperty (String "Element") = Right SelectionElement
+  parseProperty (String "Index") = Right SelectionIndex
+  parseProperty _ = unsupportedProperties
+  unsupportedProperties =
+    Left
+      ( operation
+          <> " currently supports only \"Element\" and \"Index\" properties."
+      )
+
+projectSessionSelection
+  :: SessionOrderedCollection
+  -> [SessionOrderedItem]
+  -> Maybe SessionSelectionPropertySpec
+  -> Expr
+projectSessionSelection collection retained = \case
+  Nothing -> elements
+  Just (SingleSelectionProperty SelectionElement) -> elements
+  Just (SingleSelectionProperty SelectionIndex) -> indices
+  Just (MultipleSelectionProperties properties) ->
+    normalizedSessionAssociation
+      [ Call
+          (Symbol "Rule")
+          [String (selectionPropertyName property), project property]
+      | property <- properties
+      ]
+ where
+  elements = rebuildSessionCollection collection retained
+  indices = Call (Symbol "List") (map (Integer . sessionItemIndex) retained)
+  project SelectionElement = elements
+  project SelectionIndex = indices
+
+projectSessionSelectFirst
+  :: Maybe SessionOrderedItem
+  -> Maybe Expr
+  -> Maybe SessionSelectionPropertySpec
+  -> Expr
+projectSessionSelectFirst selected defaultValue = \case
+  Nothing -> element
+  Just (SingleSelectionProperty SelectionElement) -> element
+  Just (SingleSelectionProperty SelectionIndex) -> index
+  Just (MultipleSelectionProperties properties) ->
+    normalizedSessionAssociation
+      [ Call
+          (Symbol "Rule")
+          [String (selectionPropertyName property), project property]
+      | property <- properties
+      ]
+ where
+  missing = Call (Symbol "Missing") [String "NotFound"]
+  element = maybe (maybe missing id defaultValue) sessionItemValue selected
+  index = maybe missing (Integer . sessionItemIndex) selected
+  project SelectionElement = element
+  project SelectionIndex = index
+
+selectionPropertyName :: SessionSelectionProperty -> Text
+selectionPropertyName SelectionElement = "Element"
+selectionPropertyName SelectionIndex = "Index"
+
+normalizedSessionAssociation :: [Expr] -> Expr
+normalizedSessionAssociation rules =
+  let expression = Call (Symbol "Association") rules
+   in either (const expression) id (reduceEvaluatedCall expression)
+
+evaluateSessionPredicate
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Bool
+evaluateSessionPredicate depth session criterion value = do
+  (firstResult, firstSession) <-
+    evaluateSessionAt (depth + 1) session (Call criterion [value])
+  (finalResult, finalSession) <-
+    evaluateSessionAt (depth + 1) firstSession firstResult
+  Right (finalResult == Symbol "True", finalSession)
+
+evaluateSessionSelect
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSelect discardMode depth session values =
+  case values of
+    [subject, criterion] -> select subject criterion Nothing
+    [subject, criterion, limit] -> select subject criterion (Just limit)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " expects an expression, a criterion or property specification, and an optional limit."
+        )
+ where
+  operation = if discardMode then "Discard" else "Select"
+  select subject criterion limitExpression =
+    case parseSessionSelectionSpec operation criterion of
+      Left message -> sessionFailure session message
+      Right (selector, propertySpec) -> case sessionOrderedCollection subject of
+        Nothing -> sessionFailure session (operation <> " expects a nonatomic expression.")
+        Just collection -> case sessionSelectionLimit limitExpression of
+          Nothing ->
+            sessionFailure
+              session
+              "Match limits must be non-negative integers or Infinity."
+          Just remaining -> do
+            (retained, updated) <-
+              if discardMode
+                then discardItems selector remaining [] session (sessionCollectionItems collection)
+                else selectItems selector remaining [] session (sessionCollectionItems collection)
+            Right (projectSessionSelection collection retained propertySpec, updated)
+
+  selectItems _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  selectItems criterion remaining retained currentSession (item : rest) = do
+    (matches, updated) <-
+      evaluateSessionPredicate depth currentSession criterion (sessionItemValue item)
+    if matches
+      then case remaining of
+        Just 0 -> Right (retained, updated)
+        Just count ->
+          selectItems criterion (Just (count - 1)) (retained <> [item]) updated rest
+        Nothing -> selectItems criterion Nothing (retained <> [item]) updated rest
+      else selectItems criterion remaining retained updated rest
+
+  discardItems _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  discardItems criterion remaining retained currentSession items@(item : rest) =
+    case remaining of
+      Just 0 -> Right (retained <> items, currentSession)
+      _ -> do
+        (matches, updated) <-
+          evaluateSessionPredicate depth currentSession criterion (sessionItemValue item)
+        if matches
+          then case remaining of
+            Just count -> discardItems criterion (Just (count - 1)) retained updated rest
+            Nothing -> discardItems criterion Nothing retained updated rest
+          else discardItems criterion remaining (retained <> [item]) updated rest
+
+evaluateSessionSelectFirst
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSelectFirst depth session values = case values of
+  [subject, criterion] -> selectFirst subject criterion Nothing
+  [subject, criterion, defaultValue] -> selectFirst subject criterion (Just defaultValue)
+  _ ->
+    sessionFailure
+      session
+      "SelectFirst expects an expression, a criterion or property specification, and an optional default."
+ where
+  selectFirst subject criterion defaultValue =
+    case parseSessionSelectionSpec "SelectFirst" criterion of
+      Left message -> sessionFailure session message
+      Right (selector, propertySpec) -> case sessionOrderedCollection subject of
+        Nothing -> sessionFailure session "SelectFirst expects a nonatomic expression."
+        Just collection ->
+          findMatch
+            selector
+            defaultValue
+            propertySpec
+            (sessionCollectionItems collection)
+            session
+
+  findMatch _ defaultValue propertySpec [] currentSession =
+    Right (projectSessionSelectFirst Nothing defaultValue propertySpec, currentSession)
+  findMatch criterion defaultValue propertySpec (item : rest) currentSession = do
+    (matches, updated) <-
+      evaluateSessionPredicate depth currentSession criterion (sessionItemValue item)
+    if matches
+      then Right (projectSessionSelectFirst (Just item) defaultValue propertySpec, updated)
+      else findMatch criterion defaultValue propertySpec rest updated
+
+evaluateSessionTakeWhile
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTakeWhile depth session values = case values of
+  [subject, criterion] -> case sessionOrderedCollection subject of
+    Nothing -> sessionFailure session "TakeWhile expects a nonatomic expression."
+    Just collection -> do
+      (retained, updated) <- retainWhile criterion [] session (sessionCollectionItems collection)
+      Right (rebuildSessionCollection collection retained, updated)
+  _ -> sessionFailure session "TakeWhile expects exactly two arguments."
+ where
+  retainWhile _ retained currentSession [] = Right (retained, currentSession)
+  retainWhile criterion retained currentSession (item : rest) = do
+    (matches, updated) <-
+      evaluateSessionPredicate depth currentSession criterion (sessionItemValue item)
+    if matches
+      then retainWhile criterion (retained <> [item]) updated rest
+      else Right (retained, updated)
+
+evaluateSessionLengthWhile
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionLengthWhile depth session values = case values of
+  [subject, criterion] -> case sessionOrderedCollection subject of
+    Nothing -> sessionFailure session "LengthWhile expects a nonatomic expression."
+    Just collection -> do
+      (count, updated) <- matchingLength criterion 0 session (sessionCollectionItems collection)
+      Right (Integer count, updated)
+  _ -> sessionFailure session "LengthWhile expects exactly two arguments."
+ where
+  matchingLength _ count currentSession [] = Right (count, currentSession)
+  matchingLength criterion count currentSession (item : rest) = do
+    (matches, updated) <-
+      evaluateSessionPredicate depth currentSession criterion (sessionItemValue item)
+    if matches
+      then matchingLength criterion (count + 1) updated rest
+      else Right (count, updated)
+
+evaluateSessionKeySelect
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionKeySelect depth session values = case values of
+  [association, criterion] -> case sessionOrderedCollection association of
+    Just collection
+      | sessionCollectionAssociation collection -> do
+          (retained, updated) <- retainKeys criterion [] session (sessionCollectionItems collection)
+          Right (rebuildSessionCollection collection retained, updated)
+    _ -> sessionFailure session "KeySelect expects an Association."
+  [_] -> Right (Call (Symbol "KeySelect") values, session)
+  _ -> sessionFailure session "KeySelect expects an association and a criterion."
+ where
+  retainKeys _ retained currentSession [] = Right (retained, currentSession)
+  retainKeys criterion retained currentSession (item : rest) = case sessionItemKey item of
+    Nothing -> sessionFailure currentSession "KeySelect expects an Association."
+    Just key -> do
+      (matches, updated) <- evaluateSessionPredicate depth currentSession criterion key
+      retainKeys criterion (if matches then retained <> [item] else retained) updated rest
+
+sessionSelectionLimit :: Maybe Expr -> Maybe (Maybe Integer)
+sessionSelectionLimit Nothing = Just Nothing
+sessionSelectionLimit (Just (Symbol "Infinity")) = Just Nothing
+sessionSelectionLimit (Just (Integer limit))
+  | limit >= 0 = Just (Just limit)
+sessionSelectionLimit _ = Nothing
 
 evaluateSessionThrow
   :: Int
@@ -1343,17 +2482,26 @@ evaluateArguments depth = go []
     go (retained <> [evaluated]) updated rest
 
 evaluateUpdate
-  :: Int
+  :: Text
+  -> Int
   -> EvaluationSession
   -> Text
   -> (Expr -> Expr -> Expr)
   -> Expr
   -> SessionResult Expr
-evaluateUpdate depth session name constructor rhs = do
+evaluateUpdate headName depth session name constructor rhs = do
+  let initialMessageCount = length (sessionGeneratedMessages session)
   (current, currentSession) <- evaluateSessionAt (depth + 1) session (Symbol name)
   (value, valueSession) <- evaluateSessionAt (depth + 1) currentSession rhs
-  result <- liftPureEvaluation valueSession (evaluate (constructor current value))
-  pure (result, define name (ImmediateValue result) valueSession)
+  if length (sessionGeneratedMessages valueSession) > initialMessageCount
+    then Right (Call (Symbol headName) [Symbol name, rhs], valueSession)
+    else do
+      let beforeResultCount = length (sessionGeneratedMessages valueSession)
+      (result, resultSession) <-
+        evaluateSessionAt (depth + 1) valueSession (constructor current value)
+      if length (sessionGeneratedMessages resultSession) > beforeResultCount
+        then Right (Call (Symbol headName) [Symbol name, rhs], resultSession)
+        else Right (result, define name (ImmediateValue result) resultSession)
 
 updateConstructors :: Map.Map Text (Expr -> Expr -> Expr)
 updateConstructors =
@@ -1370,6 +2518,43 @@ call2 headName lhs rhs = Call (Symbol headName) [lhs, rhs]
 sessionFailure :: EvaluationSession -> Text -> SessionResult value
 sessionFailure session message =
   Left (SessionEvaluationFailure (EvaluationError message) session)
+
+recoverEvaluationFailure :: Expr -> SessionResult Expr -> SessionResult Expr
+recoverEvaluationFailure expression = \case
+  Left (SessionEvaluationFailure evaluationError stoppedSession) ->
+    Right
+      ( expression
+      , appendEvaluationMessage expression evaluationError stoppedSession
+      )
+  result -> result
+
+appendEvaluationMessage
+  :: Expr
+  -> EvaluationError
+  -> EvaluationSession
+  -> EvaluationSession
+appendEvaluationMessage expression (EvaluationError messageText) session =
+  session
+    { sessionGeneratedMessages =
+        sessionGeneratedMessages session <> [message]
+    , sessionVisibleMessages =
+        sessionVisibleMessages session <> [message]
+    }
+ where
+  headName = case expression of
+    Call (Symbol symbolName') _ -> symbolName'
+    Symbol symbolName' -> symbolName'
+    _ -> "General"
+  messageName = headName <> "::error"
+  message =
+    EvaluationMessage
+      { evaluationMessageName = messageName
+      , evaluationMessageFullName =
+          Call
+            (Symbol "MessageName")
+            [Symbol headName, String "error"]
+      , evaluationMessageText = messageName <> ": " <> messageText
+      }
 
 liftPureEvaluation
   :: EvaluationSession

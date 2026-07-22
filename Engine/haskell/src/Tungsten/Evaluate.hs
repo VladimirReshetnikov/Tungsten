@@ -7,12 +7,14 @@
 -- remain symbolic, which makes partial evaluation safe for automation clients.
 module Tungsten.Evaluate
   ( EvaluationError (..)
+  , canonicalCompare
   , evaluate
   , exactRangeValues
   , instantiateFunctionCall
   , instantiatePatternMatch
   , matchesPattern
   , normalizeEvaluatedCall
+  , reduceEvaluatedCall
   , substituteNamedSymbols
   ) where
 
@@ -71,16 +73,19 @@ evaluateAt depth expression
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'
       Call expressionHead arguments' -> do
         evaluatedHead <- evaluateAt (depth + 1) expressionHead
-        evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
-        let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
-        reduced <- reduceCall evaluatedCall
-        -- Some Python reducers deliberately return a final structural value:
-        -- Sqrt preserves its raw nested Times shape for negative composite
-        -- radicands, while Level exposes selected held subexpressions without
-        -- evaluating them again.
-        if reduced == evaluatedCall || evaluatedHead `elem` [Symbol "Sqrt", Symbol "Level"]
-          then Right reduced
-          else evaluateAt (depth + 1) reduced
+        if evaluatedHead == Symbol "Association"
+          then reduceCall (Call evaluatedHead arguments')
+          else do
+            evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
+            let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
+            reduced <- reduceCall evaluatedCall
+            -- Some Python reducers deliberately return a final structural value:
+            -- Sqrt preserves its raw nested Times shape for negative composite
+            -- radicands, while Level exposes selected held subexpressions without
+            -- evaluating them again.
+            if reduced == evaluatedCall || evaluatedHead `elem` [Symbol "Sqrt", Symbol "Level"]
+              then Right reduced
+              else evaluateAt (depth + 1) reduced
       _ -> Right expression
 
 -- | Construct an ordinary evaluated call after applying the transparent
@@ -107,7 +112,7 @@ normalizeEvaluatedCall expressionHead values =
 
 suppressesSequences :: Expr -> Bool
 suppressesSequences (Symbol name) =
-  name `elem` ["HoldComplete", "Rule", "RuleDelayed", "Unevaluated"]
+  name `elem` ["HoldComplete", "Print", "Rule", "RuleDelayed", "Unevaluated"]
 suppressesSequences _ = False
 
 evaluateIf :: Int -> [Expr] -> Either EvaluationError Expr
@@ -166,6 +171,12 @@ reduceCall expression = case expression of
     reduceBuiltin "Discard" [subject, criterion]
   Call (Symbol headName) values -> reduceBuiltin headName values
   _ -> Right expression
+
+-- | Reduce one call whose head and arguments have already been evaluated and
+-- normalized by the session evaluator.  Unlike 'evaluate', this does not
+-- recursively revisit children or chase the reducer result to a fixed point.
+reduceEvaluatedCall :: Expr -> Either EvaluationError Expr
+reduceEvaluatedCall = reduceCall
 
 reduceBuiltin :: Text -> [Expr] -> Either EvaluationError Expr
 reduceBuiltin headName values = case headName of
@@ -851,7 +862,7 @@ reduceSqrt [value]
   | Just _ <- toExact value =
       let exponentValue = Rational 1 2
        in maybe
-            (Call (Symbol "Power") [value, exponentValue])
+            (reducePower [value, exponentValue])
             id
             (reduceExactFractionalPower value exponentValue)
 reduceSqrt [Real source]
@@ -892,7 +903,6 @@ reduceSign values = Call (Symbol "Sign") values
 reduceNot :: [Expr] -> Expr
 reduceNot [Symbol "True"] = Symbol "False"
 reduceNot [Symbol "False"] = Symbol "True"
-reduceNot [Call (Symbol "Not") [value]] = value
 reduceNot values = Call (Symbol "Not") values
 
 reduceEquality :: Bool -> [Expr] -> Expr
@@ -973,30 +983,215 @@ reduceRestMost rest _ [Call expressionHead values@(_ : _)] =
 reduceRestMost _ headName values = Call (Symbol headName) values
 
 reducePart :: [Expr] -> Either EvaluationError Expr
-reducePart [] = Right (Call (Symbol "Part") [])
-reducePart (target : indices) = foldM selectPart target indices
+reducePart values@[] = invalidPartArity values
+reducePart values@[_] = invalidPartArity values
+reducePart (target : specifications) = selectRecursively target specifications
  where
-  selectPart expression (Integer 0) = Right (headExpr expression)
-  selectPart association (Call (Symbol "List") selectors)
-    | Just entries <- associationEntries association
-    , Just keys <- traverse keySelectorValue selectors =
-        Right (associationExpr (mapMaybe (`findAssociationEntry` entries) keys))
-    | Just _ <- associationEntries association
-    , any isKeySelector selectors =
-        Left (EvaluationError "an Association Part selector list cannot mix keys with other selectors")
-  selectPart association selector
-    | Just entries <- associationEntries association
-    , Just selectorPath <- associationPartSelector selector =
-        maybe
-          (Left (EvaluationError "an Association Part selector is out of range or absent"))
-          (Right . associationEntryValue)
-          (associationEntryForSelector selectorPath entries)
-  selectPart (Call _ values) (Integer index) =
-    let resolved = if index > 0 then index - 1 else fromIntegral (length values) + index
-     in if resolved >= 0 && resolved < fromIntegral (length values)
-          then Right (values !! fromIntegral resolved)
-          else Left (EvaluationError "a Part index is out of range")
-  selectPart expression index = Right (Call (Symbol "Part") [expression, index])
+  selectRecursively expression [] = Right expression
+  selectRecursively expression (specification : remaining) = do
+    (selected, multiple) <- resolvePartSelections expression specification
+    case (multiple, selected) of
+      (False, [selection]) ->
+        selectRecursively (selectedPartValue selection) remaining
+      (False, _) -> invalidPartSelection expression
+      (True, _) -> do
+        transformed <-
+          traverse
+            (\selection -> selectRecursively (selectedPartValue selection) remaining)
+            selected
+        rebuildPartSelections expression selected transformed
+
+resolvePartSelections :: Expr -> Expr -> Either EvaluationError ([SelectedPart], Bool)
+resolvePartSelections expression (Integer 0) =
+  Right ([SelectedExpression (headExpr expression)], False)
+resolvePartSelections expression specification
+  | Just entries <- associationEntries expression =
+      resolveAssociationPartSelections expression entries specification
+resolvePartSelections expression@(Call _ values) specification = do
+  (indices, invalid) <- resolveNumericPartSelectors (length values) specification
+  if invalid
+    then invalidPartSelection expression
+    else
+      Right
+        ( [SelectedExpression (values !! index) | index <- indices]
+        , isMultiplePartSpecification specification
+        )
+resolvePartSelections expression _ = invalidPartSelection expression
+
+resolveAssociationPartSelections
+  :: Expr
+  -> [AssociationEntry]
+  -> Expr
+  -> Either EvaluationError ([SelectedPart], Bool)
+resolveAssociationPartSelections expression entries specification =
+  case specification of
+    Call (Symbol "List") selectors -> resolveSelectorList selectors
+    _
+      | Just selector <- associationPartSelector specification ->
+          selectAssociation False [selector]
+      | otherwise -> do
+          (indices, invalid) <- resolveNumericPartSelectors (length entries) specification
+          if invalid
+            then invalidPartSelection expression
+            else selectAssociation (isMultiplePartSpecification specification) (map indexSelector indices)
+ where
+  resolveSelectorList selectors =
+    case traverse associationSelectorKind selectors of
+      Nothing -> unsupportedSelectorInside (Call (Symbol "List") selectors)
+      Just kinds
+        | any id kinds && any not kinds ->
+            Left
+              ( EvaluationError
+                  "Association selector lists may not mix numeric and key selectors."
+              )
+        | any id kinds ->
+            selectAssociation True (mapMaybe associationPartSelector selectors)
+        | otherwise -> do
+            (indices, invalid) <- resolveNumericPartSelectors (length entries) (Call (Symbol "List") selectors)
+            if invalid
+              then invalidPartSelection expression
+              else selectAssociation True (map indexSelector indices)
+
+  selectAssociation multiple selectors =
+    case traverse (`associationEntryForSelector` entries) selectors of
+      Nothing -> invalidPartSelection expression
+      Just selected -> Right (map SelectedAssociation selected, multiple)
+
+  indexSelector index = ArgumentSelector (fromIntegral index + 1)
+
+resolveNumericPartSelectors :: Int -> Expr -> Either EvaluationError ([Int], Bool)
+resolveNumericPartSelectors count specification = case specification of
+  Integer 0 ->
+    Left (EvaluationError "Part does not support index 0 in this position.")
+  Integer position ->
+    Right (maybe [] pure resolved, maybe True (const False) resolved)
+   where
+    resolved = resolvePosition count position
+  Symbol "All" -> Right ([0 .. count - 1], False)
+  spanSpecification@(Call (Symbol "Span") _) -> do
+    positions <- expandPartSpan count spanSpecification
+    let resolved = map (resolvePosition count) positions
+    Right (mapMaybe id resolved, any (maybe True (const False)) resolved)
+  Call (Symbol "List") selectors -> foldM appendSelector ([], False) selectors
+  selector
+    | isPartKeySelector selector -> unsupportedSelectorInside selector
+    | otherwise -> unsupportedPartSpecification selector
+ where
+  appendSelector (selected, invalid) selector
+    | isPartKeySelector selector = unsupportedSelectorInside selector
+    | otherwise = do
+        (nested, nestedInvalid) <- resolveNumericPartSelectors count selector
+        Right (selected <> nested, invalid || nestedInvalid)
+
+expandPartSpan :: Int -> Expr -> Either EvaluationError [Integer]
+expandPartSpan count (Call (Symbol "Span") arguments') = case arguments' of
+  [startExpression, endExpression] ->
+    expand startExpression endExpression (Integer 1)
+  [startExpression, endExpression, stepExpression] ->
+    expand startExpression endExpression stepExpression
+  _ -> Left (EvaluationError "Span must contain two or three arguments.")
+ where
+  expand startExpression endExpression stepExpression = do
+    step <- case stepExpression of
+      Integer value -> Right value
+      _ -> Left (EvaluationError "Span steps must be integers.")
+    if step == 0
+      then Left (EvaluationError "Span step cannot be zero.")
+      else
+        let start = spanEndpoint startExpression 1
+            end = spanEndpoint endExpression (fromIntegral count)
+         in Right
+              ( if step > 0 && start <= end || step < 0 && start >= end
+                  then [start, start + step .. end]
+                  else []
+              )
+  spanEndpoint endpoint defaultValue = case endpoint of
+    Symbol "All" -> fromIntegral count
+    Integer value
+      | value < 0 -> fromIntegral count + value + 1
+      | otherwise -> value
+    _ -> defaultValue
+expandPartSpan _ _ = Left (EvaluationError "Span must contain two or three arguments.")
+
+rebuildPartSelections
+  :: Expr
+  -> [SelectedPart]
+  -> [Expr]
+  -> Either EvaluationError Expr
+rebuildPartSelections expression selected transformed
+  | Just _ <- associationEntries expression =
+      associationExpr
+        <$> traverse
+          (uncurry replaceSelectedAssociationValue)
+          (zip selected transformed)
+rebuildPartSelections (Call expressionHead _) _ transformed =
+  Right (Call expressionHead transformed)
+rebuildPartSelections expression _ _ = invalidPartSelection expression
+
+selectedPartValue :: SelectedPart -> Expr
+selectedPartValue (SelectedExpression expression) = expression
+selectedPartValue (SelectedAssociation entry) = associationEntryValue entry
+
+replaceSelectedAssociationValue
+  :: SelectedPart
+  -> Expr
+  -> Either EvaluationError AssociationEntry
+replaceSelectedAssociationValue (SelectedAssociation (AssociationEntry ruleHead key _)) value =
+  Right (AssociationEntry ruleHead key value)
+replaceSelectedAssociationValue (SelectedExpression _) _ =
+  Left (EvaluationError "Part encountered an invalid internal Association selection")
+
+associationSelectorKind :: Expr -> Maybe Bool
+associationSelectorKind selector
+  | isPartKeySelector selector = Just True
+associationSelectorKind Integer {} = Just False
+associationSelectorKind (Symbol "All") = Just False
+associationSelectorKind (Call (Symbol "Span") _) = Just False
+associationSelectorKind _ = Nothing
+
+isPartKeySelector :: Expr -> Bool
+isPartKeySelector String {} = True
+isPartKeySelector selector = maybe False (const True) (keySelectorValue selector)
+
+isMultiplePartSpecification :: Expr -> Bool
+isMultiplePartSpecification (Symbol "All") = True
+isMultiplePartSpecification (Call (Symbol "Span") _) = True
+isMultiplePartSpecification (Call (Symbol "List") _) = True
+isMultiplePartSpecification _ = False
+
+invalidPartSelection :: Expr -> Either EvaluationError value
+invalidPartSelection expression =
+  Left
+    ( EvaluationError
+        ("Part specifications are invalid for " <> partDiagnosticForm expression <> ".")
+    )
+
+unsupportedPartSpecification :: Expr -> Either EvaluationError value
+unsupportedPartSpecification selector =
+  Left
+    ( EvaluationError
+        ("Unsupported Part specification: " <> partDiagnosticForm selector <> ".")
+    )
+
+unsupportedSelectorInside :: Expr -> Either EvaluationError value
+unsupportedSelectorInside selector =
+  Left
+    ( EvaluationError
+        ( "Unsupported selector inside Part specification: "
+            <> partDiagnosticForm selector
+            <> "."
+        )
+    )
+
+partDiagnosticForm :: Expr -> Text
+partDiagnosticForm = inputForm
+
+invalidPartArity :: [Expr] -> Either EvaluationError Expr
+invalidPartArity _ =
+  Left
+    ( EvaluationError
+        "Part expects an expression and at least one part specification."
+    )
 
 reduceExtract :: [Expr] -> Either EvaluationError Expr
 reduceExtract [subject, positions] = do
@@ -1020,6 +1215,11 @@ reduceExtract values = Right (Call (Symbol "Extract") values)
 data AssociationEntry = AssociationEntry !Text !Expr !Expr
   deriving (Eq, Show)
 
+data SelectedPart
+  = SelectedExpression !Expr
+  | SelectedAssociation !AssociationEntry
+  deriving (Eq, Show)
+
 data PathSelector
   = ArgumentSelector !Integer
   | KeySelector !Expr
@@ -1028,9 +1228,6 @@ data PathSelector
 keySelectorValue :: Expr -> Maybe Expr
 keySelectorValue (Call (Symbol "Key") [key]) = Just key
 keySelectorValue _ = Nothing
-
-isKeySelector :: Expr -> Bool
-isKeySelector = maybe False (const True) . keySelectorValue
 
 associationPartSelector :: Expr -> Maybe PathSelector
 associationPartSelector (Integer position) = Just (ArgumentSelector position)
@@ -1078,9 +1275,8 @@ associationExpr entries =
     Call (Symbol ruleHead) [key, value]
 
 normalizeAssociationEntries :: [AssociationEntry] -> [AssociationEntry]
-normalizeAssociationEntries = foldl' insertEntry [] . filter retainedEntry
+normalizeAssociationEntries = foldl' insertEntry []
  where
-  retainedEntry (AssociationEntry _ key _) = key /= Symbol "Nothing"
   insertEntry retained entry@(AssociationEntry _ key _) =
     case matchingIndex key retained of
       Just index -> replaceListIndex index entry retained
@@ -3099,11 +3295,11 @@ specificationIndices takeMode count specification = do
 
 resolvePosition :: Int -> Integer -> Maybe Int
 resolvePosition count position
-  | position > 0 = valid (fromIntegral position - 1)
-  | position < 0 = valid (count + fromIntegral position)
+  | position > 0
+  , position <= fromIntegral count = Just (fromIntegral position - 1)
+  | position < 0
+  , position >= negate (fromIntegral count) = Just (count + fromIntegral position)
   | otherwise = Nothing
- where
-  valid index = if index >= 0 && index < count then Just index else Nothing
 
 reduceJoin :: [Expr] -> Expr
 reduceJoin values
@@ -3567,9 +3763,24 @@ applyFunction functionArguments values =
 -- | Substitute already prepared call arguments into a held pure Function
 -- body without evaluating that body.
 instantiateFunctionCall :: [Expr] -> [Expr] -> Either EvaluationError Expr
-instantiateFunctionCall = applyFunction
+instantiateFunctionCall functionArguments@[parameter, _] values
+  | Just names <- namedParameterNames parameter
+  , length values < length names =
+      Left
+        ( EvaluationError
+            ( "Function expects "
+                <> T.pack (show (length names))
+                <> " named argument(s), but only "
+                <> T.pack (show (length values))
+                <> " were supplied."
+            )
+        )
+  | otherwise = applyFunction functionArguments values
+instantiateFunctionCall functionArguments values =
+  applyFunction functionArguments values
 
 substituteSlots :: [Expr] -> Expr -> Expr
+substituteSlots (value : _) (Call (Symbol "Slot") []) = value
 substituteSlots values expression = case expression of
   Call (Symbol "Slot") [Integer index]
     | index > 0 && index <= fromIntegral (length values) -> values !! fromIntegral (index - 1)

@@ -67,17 +67,44 @@ parseInputForm source =
     (Parsec.parse (ignored *> inputExpressionParser <* eof) "Wolfram InputForm" source)
 
 inputExpressionParser :: Parser Expr
-inputExpressionParser = compoundExpressionParser
+inputExpressionParser = namedFunctionParser
+
+namedFunctionParser :: Parser Expr
+namedFunctionParser = do
+  parameters <- compoundExpressionParser
+  option parameters $ do
+    _ <- operator "|->" ""
+    body <- namedFunctionParser
+    pure (Call (Symbol "Function") [parameters, body])
 
 compoundExpressionParser :: Parser Expr
 compoundExpressionParser = do
   firstExpression <- functionParser
   remaining <- many $ do
-    _ <- operator ";" ""
+    _ <- operator ";" ";"
     option (Symbol "Null") functionParser
   pure $ case remaining of
     [] -> firstExpression
     values -> Call (Symbol "CompoundExpression") (firstExpression : values)
+
+spanParser :: Parser Expr
+spanParser = do
+  firstSpan <- try leadingSpan <|> do
+    start <- plusParser
+    option start (spanFrom start)
+  remainingSpans <- many (try leadingSpan)
+  pure (foldl' (flatCall2 "Times") firstSpan remainingSpans)
+ where
+  leadingSpan = spanFrom (Integer 1)
+  spanFrom start = do
+    _ <- operator ";;" ""
+    end <- option (Symbol "All") (try plusParser)
+    step <- optionMaybe (try (operator ";;" "" *> plusParser))
+    pure
+      ( Call
+          (Symbol "Span")
+          (start : end : maybe [] pure step)
+      )
 
 functionParser :: Parser Expr
 functionParser = do
@@ -87,7 +114,7 @@ functionParser = do
 
 assignmentParser :: Parser Expr
 assignmentParser = do
-  lhs <- replacementParser
+  lhs <- compositionParser
   option lhs $ choice
     [ do
         _ <- operator ":=" ""
@@ -98,6 +125,23 @@ assignmentParser = do
         rhs <- assignmentParser
         pure (Call (Symbol "Set") [lhs, rhs])
     ]
+
+compositionParser :: Parser Expr
+compositionParser =
+  chainl1 compositionTermParser (binary "/*" (flatCall2 "RightComposition"))
+ where
+  compositionTermParser =
+    chainl1 applyOperatorParser (binary "@*" (flatCall2 "Composition"))
+
+applyOperatorParser :: Parser Expr
+applyOperatorParser = chainr1 mapOperatorParser applyOperator
+ where
+  applyOperator = binary "@@" (call2 "Apply")
+
+mapOperatorParser :: Parser Expr
+mapOperatorParser = chainr1 replacementParser mapOperator
+ where
+  mapOperator = binary "/@" (call2 "Map")
 
 replacementParser :: Parser Expr
 replacementParser = chainl1 ruleParser replacementOperator
@@ -135,7 +179,7 @@ patternColonExpression patternExpression defaultValue =
   Call (Symbol "Optional") [patternExpression, defaultValue]
 
 alternativesParser :: Parser Expr
-alternativesParser = chainl1 orParser (binaryExcept "|" ">" (flatCall2 "Alternatives"))
+alternativesParser = chainl1 orParser (binaryExcept "|" ">-" (flatCall2 "Alternatives"))
 
 orParser :: Parser Expr
 orParser = chainl1 andParser (binary "||" (call2 "Or"))
@@ -173,16 +217,9 @@ comparisonExpression firstExpression comparisons = case comparisons of
 
 applyParser :: Parser Expr
 applyParser = do
-  firstExpression <- prefixApplyParser
-  functions <- many (operator "//" ".=@" *> prefixApplyParser)
+  firstExpression <- spanParser
+  functions <- many (operator "//" ".=@" *> spanParser)
   pure (foldl' (\argument function -> Call function [argument]) firstExpression functions)
- where
-  prefixApplyParser = do
-    function <- plusParser
-    rightApplication <- optionMaybe (operator "@" "@*")
-    case rightApplication of
-      Just _ -> Call function . pure <$> prefixApplyParser
-      Nothing -> pure function
 
 plusParser :: Parser Expr
 plusParser = chainl1 timesParser plusOperator
@@ -200,8 +237,10 @@ timesParser = do
  where
   timesTail = choice
     [ (,) Multiply <$> (operator "*" "*^*=" *> unaryParser)
-    , (,) Divide <$> (operator "/" "/;.@=" *> unaryParser)
-    , try ((,) Multiply <$> powerParser)
+    , (,) Divide <$> (operator "/" "/;.@=*" *> unaryParser)
+    , try $ do
+        notFollowedBy (char '-')
+        (,) Multiply <$> powerParser
     ]
   applyTimes lhs (Multiply, rhs) = flatCall2 "Times" lhs rhs
   applyTimes lhs (Divide, rhs) = divideExpression lhs rhs
@@ -212,17 +251,32 @@ unaryParser :: Parser Expr
 unaryParser = choice
   [ operator "+" "+=" *> unaryParser
   , negateExpression <$> (operator "-" "-=>" *> unaryParser)
-  , Call (Symbol "Not") . pure <$> (operator "!" "!=" *> unaryParser)
+  , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
   , powerParser
   ]
 
 powerParser :: Parser Expr
 powerParser = do
-  base <- postfixParser
+  base <- prefixUpdateParser
   option base $ do
     _ <- operator "^" "^:="
     exponentValue <- unaryParser
     pure (Call (Symbol "Power") [base, exponentValue])
+
+prefixUpdateParser :: Parser Expr
+prefixUpdateParser = choice
+  [ Call (Symbol "PreIncrement") . pure <$> (operator "++" "" *> prefixUpdateParser)
+  , Call (Symbol "PreDecrement") . pure <$> (operator "--" "" *> prefixUpdateParser)
+  , prefixApplicationParser
+  ]
+
+prefixApplicationParser :: Parser Expr
+prefixApplicationParser = do
+  function <- postfixParser
+  option function $ do
+    _ <- operator "@" "@*"
+    argument <- prefixUpdateParser
+    pure (Call function [argument])
 
 postfixParser :: Parser Expr
 postfixParser = inputAtomParser >>= postfixes
@@ -242,6 +296,21 @@ postfixParser = inputAtomParser >>= postfixes
       , do
           _ <- operator "!" "!="
           postfixes (Call (Symbol "Factorial") [expression])
+      , do
+          updateHead <- choice
+            [ "Increment" <$ operator "++" ""
+            , "Decrement" <$ operator "--" ""
+            , "Unset" <$ operator "=." ""
+            ]
+          postfixes (Call (Symbol updateHead) [expression])
+      , do
+          _ <- operator "::" ""
+          tag <- messageTagParser
+          let messageName = case expression of
+                Call (Symbol "MessageName") values@(_ : _ : _) ->
+                  Call (Symbol "MessageName") (values <> [tag])
+                _ -> Call (Symbol "MessageName") [expression, tag]
+          postfixes messageName
       , do
           blank <- lexeme blankShapeParser
           let patternExpression = Call (Symbol "Pattern") [expression, blank]
@@ -263,6 +332,10 @@ postfixParser = inputAtomParser >>= postfixes
           postfixes (Call (Symbol "PatternTest") [expression, test])
       , pure expression
       ]
+
+messageTagParser :: Parser Expr
+messageTagParser =
+  String <$> lexeme (stringLiteralParser <|> symbolParser)
 
 optionalDotCandidate :: Expr -> Bool
 optionalDotCandidate (Call (Symbol "Blank") []) = True

@@ -56,6 +56,7 @@ main = do
 tests :: [IO Bool]
 tests =
   [ checkFullForms
+  , checkInputForms
   , checkAssistant
   , checkWolframStrings
   , checkNamedCharacters
@@ -504,6 +505,10 @@ checkInputFormParser = do
         , ("slot sequence", "f[##2] &", "Function[f[SlotSequence[2]]]")
         , ("prefix and postfix application", "f @ x // g", "g[f[x]]")
         , ("part", "expr[[1, 2]]", "Part[expr, 1, 2]")
+        , ("span assignment rhs", "x = 1 ;; 3", "Set[x, Span[1, 3]]")
+        , ("span assignment lhs", "a ;; b = 3", "Set[Span[a, b], 3]")
+        , ("span pure function", "a ;; b &", "Function[Span[a, b]]")
+        , ("completed span adjacency", "a ;; b ;; c ;; d", "Times[Span[a, b, c], Span[1, d]]")
         , ("right associative assignment", "a = b = 2", "Set[a, Set[b, 2]]")
         , ("delayed assignment", "f[x_] := x^2", "SetDelayed[f[Pattern[x, Blank[]]], Power[x, 2]]")
         , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
@@ -563,6 +568,8 @@ checkEvaluator = do
         , ("accumulate", "Accumulate[{1, 2, 3, 4}]", "List[1, 3, 6, 10]")
         , ("list structure", "{First[{a, b}], Last[{a, b}], Rest[{a, b}], Most[{a, b}]} ", "List[a, b, List[b], List[a]]")
         , ("part", "{{a, b}, {c, d}}[[2, 1]]", "c")
+        , ("part selector lists preserve heads", "{Part[f[a,b,c],{1,3}], Part[<|a->1,b->2,c->3|>,{2,1}]}", "List[f[a, c], Association[Rule[b, 2], Rule[a, 1]]]")
+        , ("part nested all span and recursive selectors", "{Part[f[a,b],{{1},2}], Part[f[a,b,c],All], Part[f[a,b,c,d],2;;4;;2], Part[f[g[a,b],h[c,d]],All,2], Part[<|a->1,b->2,c->3|>,Span[1,2]]}", "List[f[a, b], f[a, b, c], f[b, d], f[b, d], Association[Rule[a, 1], Rule[b, 2]]]")
         , ("head and predicates", "{Head[1/2], AtomQ[1/2], ListQ[{x}], IntegerQ[2], NumberQ[2/3], StringQ[\"x\"]}", "List[Rational, True, True, True, True, True]")
         , ("map", "Map[f, {1, 2, 3}]", "List[f[1], f[2], f[3]]")
         , ("apply", "Apply[f, {1, 2, 3}]", "f[1, 2, 3]")
@@ -757,6 +764,7 @@ checkEvaluator = do
         , ("held condition", "Condition[x, 1 < 2]", "Condition[x, Less[1, 2]]")
         , ("held session forms", "{OwnValues[1 + 2], With[{x = 1 + 2}, x], Module[{x = 1 + 2}, x], Block[{x = 1 + 2}, x], InheritedBlock[{x = 1 + 2}, x], Internal`InheritedBlock[{x = 1 + 2}, x], Return[1 + 2], Return[1 + 2, Module], For[x = 1, x < 2, x = x + 1, x], While[x < 2, x = x + 1]}", "List[OwnValues[Plus[1, 2]], With[List[Set[x, Plus[1, 2]]], x], Module[List[Set[x, Plus[1, 2]]], x], Block[List[Set[x, Plus[1, 2]]], x], InheritedBlock[List[Set[x, Plus[1, 2]]], x], Internal`InheritedBlock[List[Set[x, Plus[1, 2]]], x], Return[Plus[1, 2]], Return[Plus[1, 2], Module], For[Set[x, 1], Less[x, 2], Set[x, Plus[x, 1]], x], While[Less[x, 2], Set[x, Plus[x, 1]]]]")
         , ("capture-aware named functions", "{Function[x, Function[y, x + y]][a], Function[x, Function[y, x + y]][y], Function[x, Function[y, y]][a], Function[{x, y}, x + y][1], Function[{x, y}, x + y][1, 2, 3], Function[5, x][1], Function[{}, 7][1]}", "List[Function[y$, Plus[a, y$]], Function[y$, Plus[y, y$]], Function[y, y], Function[List[x, y], Plus[x, y]][1], 3, Function[5, x][1], 7]")
+        , ("symbolic double negation remains inert", "{!!a, !!1, !!True}", "List[Not[Not[a]], Not[Not[1]], True]")
         , ("unsupported remains symbolic", "UnknownBuiltin[1 + 2, x]", "UnknownBuiltin[3, x]")
         ]
       fullCases =
@@ -767,11 +775,27 @@ checkEvaluator = do
   fullResults <- traverse (evaluateCase parseFullForm) fullCases
   pure (and (inputResults <> fullResults))
  where
-  evaluateCase parser (label, source, expected) =
-    assertEqual
-      ("evaluator: " <> label)
-      (Right expected)
-      (fullForm <$> (parser source >>= mapLeftEvaluation . evaluate))
+  evaluateCase parser (label, source, expected) = do
+    let parsed = parser source
+        pureResult = fullForm <$> (parsed >>= mapLeftEvaluation . evaluate)
+        sessionResult = do
+          expression <- parsed
+          (value, _) <- mapLeftEvaluation (evaluateInSession emptySession expression)
+          pure (fullForm value)
+    pureCheck <-
+      assertEqual
+        ("evaluator: " <> label)
+        (Right expected)
+        pureResult
+    sessionCheck <-
+      if label == "held session forms"
+        then pure True
+        else
+          assertEqual
+            ("session evaluator: " <> label)
+            (Right expected)
+            sessionResult
+    pure (pureCheck && sessionCheck)
   mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
 
 checkEvaluatorErrors :: IO Bool
@@ -1053,6 +1077,23 @@ checkEvaluationSession = do
         , ("If evaluates one stateful branch", "If[False, x = 1, x = 2]; x", "2")
         , ("And short circuits state", "False && (x = 1); x", "x")
         , ("Or short circuits state", "True || (x = 1); x", "x")
+        , ("selection predicates thread session state", "y = 0; {Select[{a, b}, Function[x, y = y + 1; True]], y}", "List[List[a, b], 2]")
+        , ("selection property projections", "{Select[{a, b}, Function[x, True] -> \"Index\"], Select[{a, b}, Function[x, True] -> {\"Element\", \"Index\"}], SelectFirst[{a, b}, Function[x, True] -> \"Index\", none]}", "List[List[1, 2], Association[Rule[\"Element\", List[a, b]], Rule[\"Index\", List[1, 2]]], 1]")
+        , ("selection property duplicate normalization", "Select[{a, b}, Function[x, True] -> {\"Index\", \"Index\"}]", "Association[Rule[\"Index\", List[1, 2]]]")
+        , ("selection operator forms", "{Select[EvenQ][{1,2,3,4}], Discard[EvenQ][{1,2,3,4}], SelectFirst[EvenQ][{1,2,3,4}]}", "List[List[2, 4], List[1, 3], 2]")
+        , ("SelectFirst holds an unused default", "y = 0; {SelectFirst[{a}, True &, y = y + 1], y}", "List[a, 0]")
+        , ("SelectFirst returns an unevaluated default", "y = 0; {SelectFirst[{a}, False &, y = y + 1], y, SelectFirst[{a}, False &, 1 + 2]}", "List[Set[y, Plus[y, 1]], 0, Plus[1, 2]]")
+        , ("map callbacks thread session state", "y = 0; {Map[Function[x, y = y + 1; x], {a, b}], y}", "List[List[a, b], 2]")
+        , ("map normalizes generated Nothing", "Map[Nothing &, {a, b}]", "List[]")
+        , ("Nothing is callable during mapping", "Map[Nothing, {a, b}]", "List[]")
+        , ("associations are callable during mapping", "Map[<|a -> 1, b -> 2|>, {a, b, c}]", "List[1, 2, Missing[\"KeyAbsent\", c]]")
+        , ("map normalizes generated Sequence", "f[x_] := Sequence[x, q]; Map[f, {a, b}]", "List[a, q, b, q]")
+        , ("map at normalizes generated Nothing", "MapAt[Nothing &, {a, b}, 1]", "List[b]")
+        , ("map at resolves negative positions before ordering callbacks", "y = 0; {MapAt[Function[x, y = y + 1], {a, b}, {{-1}, {1}}], y}", "List[List[2, 1], 2]")
+        , ("association callbacks thread session state", "y = 0; {KeyValueMap[Function[{k, v}, y = y + 1; HoldComplete[k, v]], <|a -> 1, b -> 2|>], y}", "List[List[HoldComplete[a, 1], HoldComplete[b, 2]], 2]")
+        , ("association Nothing keys normalize by last value", "{<|Nothing -> 1, Nothing -> 2|>, KeyMap[Nothing &, <|a -> 1, b -> 2|>]}", "List[Association[Rule[Nothing, 2]], Association[Rule[Nothing, 2]]]")
+        , ("sort keys thread session state", "y = 0; {SortBy[{b, a}, Function[x, y = y + 1; x]], y}", "List[List[a, b], 2]")
+        , ("sort by operator form threads session state", "y = 0; {SortBy[Function[x, y = y + 1; x]][{b, a}], y}", "List[List[a, b], 2]")
         , ("assignment update", "x = 10; AddTo[x, 5]; x", "15")
         , ("table count iterators", "{Table[a, 3], Table[a, {3}], Table[i, {i, 5}]}", "List[List[a, a, a], List[a, a, a], List[1, 2, 3, 4, 5]]")
         , ("table exact ranges", "{Table[i^2, {i, 1, 5}], Table[i, {i, 2, 8, 2}], Table[i, {i, 5, 1, -1}], Table[i, {i, 0, 1, 1/4}]}", "List[List[1, 4, 9, 16, 25], List[2, 4, 6, 8], List[5, 4, 3, 2, 1], List[0, Rational[1, 4], Rational[1, 2], Rational[3, 4], 1]]")
@@ -1182,7 +1223,319 @@ checkEvaluationSession = do
         , ("module immediate recursive dispatch", "Module[{f}, f[0] := 1; f[n_] := n + f[n - 1]; f[10]]", "56")
         , ("module closure multiple arguments", "bin = Module[{f}, f[x_, y_] := x + y; f]; {bin[3, 4], bin[a, b]}", "List[7, Plus[a, b]]")
         ]
-  and <$> traverse evaluateSessionCase cases
+      partArityMessage =
+        ( "Part::error"
+        , "MessageName[Part, \"error\"]"
+        , "Part::error: Part expects an expression and at least one part specification."
+        )
+      messageCases =
+        [ ( "basic nonfatal Part message"
+          , "Part[f[a], 2]"
+          , "Part[f[a], 2]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "nested recovery emits only nearest message"
+          , "g[Part[f[a], 2]]"
+          , "g[Part[f[a], 2]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "evaluated head alias names raw call"
+          , "h = Part; h[f[a], 2]"
+          , "h[f[a], 2]"
+          , [ ( "h::error"
+              , "MessageName[h, \"error\"]"
+              , "h::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "message uses evaluated subject but returns raw call"
+          , "Part[f[1 + 2], 2]"
+          , "Part[f[Plus[1, 2]], 2]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[3]."
+              )
+            ]
+          )
+        , ( "unsupported Part selector remains nonfatal"
+          , "Part[f[a], x]"
+          , "Part[f[a], x]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Unsupported Part specification: x."
+              )
+            ]
+          )
+        , ( "missing Association key uses input form in message"
+          , "Part[<|a -> 1|>, Key[b]]"
+          , "Part[Association[Rule[a, 1]], Key[b]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for <|a -> 1|>."
+              )
+            ]
+          )
+        , ( "mixed Association selectors report their specific failure"
+          , "Part[<|a -> 1, b -> 2|>, {1, Key[a]}]"
+          , "Part[Association[Rule[a, 1], Rule[b, 2]], List[1, Key[a]]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Association selector lists may not mix numeric and key selectors."
+              )
+            ]
+          )
+        , ( "key selector in ordinary selector list is rejected"
+          , "Part[f[a, b], {1, Key[a]}]"
+          , "Part[f[a, b], List[1, Key[a]]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Unsupported selector inside Part specification: Key[a]."
+              )
+            ]
+          )
+        , ( "zero inside a Part selector list is rejected"
+          , "Part[f[a, b], {0, 1}]"
+          , "Part[f[a, b], List[0, 1]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part does not support index 0 in this position."
+              )
+            ]
+          )
+        , ( "oversized Part indices do not overflow machine integers"
+          , "Part[f[a, b], 18446744073709551617]"
+          , "Part[f[a, b], 18446744073709551617]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a, b]."
+              )
+            ]
+          )
+        , ( "structural reducers do not revisit recovered children"
+          , "{Reverse[{Part[]}], Part[{Part[]}, All]}"
+          , "List[List[Part[]], List[Part[]]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part expects an expression and at least one part specification."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part expects an expression and at least one part specification."
+              )
+            ]
+          )
+        , ( "Map evaluates generated calls and recovered children"
+          , "Map[f, {Part[]}]"
+          , "List[f[Part[]]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part expects an expression and at least one part specification."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part expects an expression and at least one part specification."
+              )
+            ]
+          )
+        , ( "Total reevaluates only its fresh sum"
+          , "Total[{Part[]}]"
+          , "Part[]"
+          , [partArityMessage, partArityMessage]
+          )
+        , ( "Total preserves per-term failure multiplicity"
+          , "Total[{Part[], Part[]}]"
+          , "Times[2, Part[]]"
+          , replicate 4 partArityMessage
+          )
+        , ( "Association holds rule values"
+          , "<|a -> Part[]|>"
+          , "Association[Rule[a, Part[]]]"
+          , []
+          )
+        , ( "AssociationMap evaluates only generated values"
+          , "AssociationMap[f, {Part[]}]"
+          , "Association[Rule[Part[], f[Part[]]]]"
+          , [partArityMessage, partArityMessage]
+          )
+        , ( "MapAt leaves unselected recovered values alone"
+          , "MapAt[f, {Part[], b}, 2]"
+          , "List[Part[], f[b]]"
+          , [partArityMessage]
+          )
+        , ( "MapAt reevaluates selected recovered values"
+          , "MapAt[f, {Part[], b}, 1]"
+          , "List[f[Part[]], b]"
+          , [partArityMessage, partArityMessage]
+          )
+        , ( "pure mapping callbacks receive prepared arguments"
+          , "Map[Function[x, HoldComplete[x]], {Part[]}]"
+          , "List[HoldComplete[Part[]]]"
+          , [partArityMessage]
+          )
+        , ( "SortBy evaluates keys without revisiting its result"
+          , "SortBy[{Part[]}, f]"
+          , "List[Part[]]"
+          , [partArityMessage, partArityMessage]
+          )
+        , ( "MapAt validates every path before invoking callbacks"
+          , "y = 0; {MapAt[Function[x, y = y + 1], {a, b}, {{2}, {-9}}], y}"
+          , "List[MapAt[Function[x, Set[y, Plus[y, 1]]], List[a, b], List[List[2], List[-9]]], 0]"
+          , [ ( "MapAt::error"
+              , "MessageName[MapAt, \"error\"]"
+              , "MapAt::error: MapAt positions are invalid for {a, b}."
+              )
+            ]
+          )
+        , ( "MapAt distinguishes unsupported position syntax"
+          , "MapAt[f, <|a -> 1|>, a]"
+          , "MapAt[f, Association[Rule[a, 1]], a]"
+          , [ ( "MapAt::error"
+              , "MessageName[MapAt, \"error\"]"
+              , "MapAt::error: Unsupported position specification: a."
+              )
+            ]
+          )
+        , ( "Map attributes named Function arity failures to itself"
+          , "Map[Function[{x, y}, x], {a, b}]"
+          , "Map[Function[List[x, y], x], List[a, b]]"
+          , [ ( "Map::error"
+              , "MessageName[Map, \"error\"]"
+              , "Map::error: Function expects 2 named argument(s), but only 1 were supplied."
+              )
+            ]
+          )
+        , ( "SortBy reports Python's nonatomic diagnostic"
+          , "SortBy[a, f]"
+          , "SortBy[a, f]"
+          , [ ( "SortBy::error"
+              , "MessageName[SortBy, \"error\"]"
+              , "SortBy::error: SortBy expects a nonatomic expression."
+              )
+            ]
+          )
+        , ( "ReverseSortBy preserves Python's SortBy diagnostic body"
+          , "ReverseSortBy[a, f]"
+          , "ReverseSortBy[a, f]"
+          , [ ( "ReverseSortBy::error"
+              , "MessageName[ReverseSortBy, \"error\"]"
+              , "ReverseSortBy::error: SortBy expects a nonatomic expression."
+              )
+            ]
+          )
+        , ( "invalid selection arity is nonfatal"
+          , "Select[]"
+          , "Select[]"
+          , [ ( "Select::error"
+              , "MessageName[Select, \"error\"]"
+              , "Select::error: Select expects an expression, a criterion or property specification, and an optional limit."
+              )
+            ]
+          )
+        , ( "invalid TakeWhile arity is nonfatal"
+          , "TakeWhile[]"
+          , "TakeWhile[]"
+          , [ ( "TakeWhile::error"
+              , "MessageName[TakeWhile, \"error\"]"
+              , "TakeWhile::error: TakeWhile expects exactly two arguments."
+              )
+            ]
+          )
+        , ( "invalid KeySelect arity is nonfatal"
+          , "KeySelect[]"
+          , "KeySelect[]"
+          , [ ( "KeySelect::error"
+              , "MessageName[KeySelect, \"error\"]"
+              , "KeySelect::error: KeySelect expects an association and a criterion."
+              )
+            ]
+          )
+        , ( "Select attributes callback failures to the callback"
+          , "Select[{a}, Function[x, Part[f[x], 2]]]"
+          , "List[]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "invalid Select property reports a nonfatal Select message"
+          , "Select[{a, b}, x -> y]"
+          , "Select[List[a, b], Rule[x, y]]"
+          , [ ( "Select::error"
+              , "MessageName[Select, \"error\"]"
+              , "Select::error: Select currently supports only \"Element\" and \"Index\" properties."
+              )
+            ]
+          )
+        , ( "KeySelect attributes callback failures to the callback"
+          , "KeySelect[<|a -> 1|>, Function[x, Part[f[x], 2]]]"
+          , "Association[]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "Select does not reevaluate a recovered structural subject"
+          , "Select[Part[f[a], 2], True]"
+          , "Part[]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "argument effects survive nonfatal recovery"
+          , "x = 5; {Part[f[x = x + 1], 2], x}"
+          , "List[Part[f[Set[x, Plus[x, 1]]], 2], 6]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[6]."
+              )
+            ]
+          )
+        , ( "update assignment stays inert after a recovered operand"
+          , "x = 1; {AddTo[x, Part[f[a], 2]], x}"
+          , "List[AddTo[x, Part[f[a], 2]], 1]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "multiple messages retain argument order"
+          , "{Part[f[a], 2], Part[g[b], 3]}"
+          , "List[Part[f[a], 2], Part[g[b], 3]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for g[b]."
+              )
+            ]
+          )
+        ]
+  caseResults <- traverse evaluateSessionCase cases
+  messageResults <- traverse evaluateMessageCase messageCases
+  pure (and (caseResults <> messageResults))
  where
   evaluateSessionCase (label, source, expected) = do
     let result = do
@@ -1190,6 +1543,29 @@ checkEvaluationSession = do
           (value, _) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
           pure (fullForm value)
     assertEqual ("evaluation session: " <> label) (Right expected) result
+
+  evaluateMessageCase (label, source, expectedValue, expectedMessages) = do
+    let result = do
+          expression <- parseInputForm source
+          (value, updated) <-
+            either
+              (Left . ParseError . evaluationErrorMessage)
+              Right
+              (evaluateInSession emptySession expression)
+          pure
+            ( fullForm value
+            , map messageTuple (sessionVisibleMessages updated)
+            , map messageTuple (sessionGeneratedMessages updated)
+            )
+        expected =
+          Right (expectedValue, expectedMessages, expectedMessages)
+    assertEqual ("evaluation session messages: " <> label) expected result
+
+  messageTuple message =
+    ( evaluationMessageName message
+    , fullForm (evaluationMessageFullName message)
+    , evaluationMessageText message
+    )
 
 checkRepl :: IO Bool
 checkRepl = do
@@ -1199,6 +1575,17 @@ checkRepl = do
       secondState = replStateFrom secondStep
       thirdStep = evaluateReplLine secondState "% + %%"
       thirdState = replStateFrom thirdStep
+      messageStep =
+        evaluateReplLine
+          thirdState
+          "x = 5; {Part[f[x = x + 1], 2], x}"
+      messageState = replStateFrom messageStep
+      persistedAfterMessageStep = evaluateReplLine messageState "x"
+      parseFailureAfterMessage = evaluateReplLine messageState "1 +"
+      printStep = evaluateReplLine thirdState "Print[\"x\", 2]; 1"
+      printSequenceStep = evaluateReplLine thirdState "Print[Sequence[1, 2]]"
+      printRationalStep = evaluateReplLine thirdState "Print[1/2]"
+      printAliasStep = evaluateReplLine thirdState "p = Print; p[1/2]"
       lineStep = evaluateReplLine thirdState "$Line"
       historyStep = evaluateReplLine thirdState "{Out[1], InString[2]}"
       exitStep = evaluateReplLine thirdState "Exit[7]"
@@ -1206,6 +1593,70 @@ checkRepl = do
         [ assertEqual "REPL assignment result" (Just (Integer 2)) (replValueFrom firstStep)
         , assertEqual "REPL persistent definition" (Just (Integer 8)) (replValueFrom secondStep)
         , assertEqual "REPL percent history" (Just (Integer 10)) (replValueFrom thirdStep)
+        , assertEqual
+            "REPL nonfatal message result"
+            ( Just
+                ( Call
+                    (Symbol "List")
+                    [ Call
+                        (Symbol "Part")
+                        [ Call
+                            (Symbol "f")
+                            [ Call
+                                (Symbol "Set")
+                                [ Symbol "x"
+                                , Call (Symbol "Plus") [Symbol "x", Integer 1]
+                                ]
+                            ]
+                        , Integer 2
+                        ]
+                    , Integer 6
+                    ]
+                )
+            )
+            (replValueFrom messageStep)
+        , assertEqual
+            "REPL exposes visible message"
+            ["Part::error: Part specifications are invalid for f[6]."]
+            ( map evaluationMessageText
+                (sessionVisibleMessages (replSession messageState))
+            )
+        , assertEqual
+            "REPL retains state after message"
+            (Just (Integer 6))
+            (replValueFrom persistedAfterMessageStep)
+        , assertEqual
+            "REPL clears prior input messages"
+            []
+            ( sessionVisibleMessages
+                (replSession (replStateFrom persistedAfterMessageStep))
+            )
+        , assertEqual
+            "REPL parse failures clear transient messages"
+            []
+            ( sessionVisibleMessages
+                (replSession (replStateFrom parseFailureAfterMessage))
+            )
+        , assertEqual
+            "REPL captures Print output"
+            ["x2"]
+            (sessionPrints (replSession (replStateFrom printStep)))
+        , assertEqual
+            "REPL Print preserves Sequence"
+            ["Sequence[1, 2]"]
+            (sessionPrints (replSession (replStateFrom printSequenceStep)))
+        , assertEqual
+            "REPL Print uses InputForm"
+            ["1/2"]
+            (sessionPrints (replSession (replStateFrom printRationalStep)))
+        , assertEqual
+            "REPL Print aliases remain inert"
+            (Just (Call (Symbol "Print") [Rational 1 2]))
+            (replValueFrom printAliasStep)
+        , assertEqual
+            "REPL Print aliases do not capture output"
+            []
+            (sessionPrints (replSession (replStateFrom printAliasStep)))
         , assertEqual "REPL line counter" (Just (Integer 4)) (replValueFrom lineStep)
         , assertEqual
             "REPL explicit history"
@@ -1604,6 +2055,40 @@ checkFullForms = do
         ]
   and <$> traverse (\(label, expected, actual) -> assertEqual label expected actual) cases
 
+checkInputForms :: IO Bool
+checkInputForms = do
+  let cases =
+        [ ("list and association", "{a, <|x -> 1/2|>}", "{a, <|x -> 1/2|>}")
+        , ("operator precedence", "(a + b) * c^(-2)", "(a + b) * c^(-2)")
+        , ("singleton negative Times", "Times[-1]", "-Times[]")
+        , ("slots", "{#, #2, ##, ##3}", "{#, #2, ##, ##3}")
+        , ("blank patterns", "{x_, x__Integer, x___}", "{x_, x__Integer, x___}")
+        , ("pattern operators", "{x_?p, x_:1, p.., p...}", "{x_?p, x_:1, p.., p...}")
+        , ("condition", "x_ /; p[x]", "x_ /; p[x]")
+        , ("mapping operators", "{f /@ x, f @@ x, x /. r, x //. r}", "{f /@ x, f @@ x, x /. r, x //. r}")
+        , ("composition", "{f @* g, f /* g}", "{f @* g, f /* g}")
+        , ("updates", "{x++, ++x, x =.}", "{x++, ++x, x =.}")
+        , ("message name", "a::b", "a::b")
+        , ("nested prefix not", "!!a", "!!a")
+        , ("span shorthand", "1 ;; 3", ";; 3")
+        , ("part shorthand", "Part[f[a], 1]", "f[a][[1]]")
+        , ("explicit System operator", "System`Plus[a, b]", "a + b")
+        , ("explicit System collection", "System`List[a, b]", "{a, b}")
+        , ("explicit System slots", "System`Function[System`Slot[1]]", "# &")
+        , ("explicit System part", "System`Part[f[a], 1]", "f[a][[1]]")
+        , ("non-System operator name", "Global`Plus[a, b]", "Global`Plus[a, b]")
+        , ("Unicode symbol", "\\[Alpha]", "α")
+        ]
+  and
+    <$> traverse
+      ( \(label, source, expected) ->
+          assertEqual
+            ("InputForm renderer: " <> label)
+            (Right expected)
+            (inputForm <$> parseInputForm source)
+      )
+      cases
+
 checkSmartConstructors :: IO Bool
 checkSmartConstructors = do
   let normalized = expectRight (rational (-6) (-8))
@@ -1746,10 +2231,14 @@ checkParserEvaluatorProtocol = do
       evaluateRequest = expectRight (decodeRequestLine "{\"id\":2,\"command\":\"evaluate\",\"source\":\"Total[Range[5]]\"}")
       sessionEvaluateRequest = expectRight (decodeRequestLine "{\"id\":3,\"command\":\"evaluate\",\"source\":\"x = 2; x^3\"}")
       isolatedEvaluateRequest = expectRight (decodeRequestLine "{\"id\":4,\"command\":\"evaluate\",\"source\":\"x\"}")
+      messageEvaluateRequest = expectRight (decodeRequestLine "{\"id\":5,\"command\":\"evaluate\",\"source\":\"Part[f[a], 2]\"}")
+      printEvaluateRequest = expectRight (decodeRequestLine "{\"id\":6,\"command\":\"evaluate\",\"source\":\"Print[\\\"x\\\"]; 1\"}")
       parseResponse = handleProtocolRequest parseRequest
       evaluateResponse = handleProtocolRequest evaluateRequest
       sessionEvaluateResponse = handleProtocolRequest sessionEvaluateRequest
       isolatedEvaluateResponse = handleProtocolRequest isolatedEvaluateRequest
+      messageEvaluateResponse = handleProtocolRequest messageEvaluateRequest
+      printEvaluateResponse = handleProtocolRequest printEvaluateRequest
   first <- case parseResponse of
     ProtocolSuccess {protocolResult = JsonObject result} ->
       case Map.lookup "full_form" result of
@@ -1767,7 +2256,34 @@ checkParserEvaluatorProtocol = do
     other -> assertEqual "protocol evaluate response" True (isSuccess other)
   third <- assertProtocolEvaluation "protocol session-backed evaluation" "8" sessionEvaluateResponse
   fourth <- assertProtocolEvaluation "protocol request session isolation" "x" isolatedEvaluateResponse
-  pure (and [first, second, third, fourth])
+  fifth <- case messageEvaluateResponse of
+    ProtocolSuccess {protocolResult = JsonObject outer} ->
+      assertEqual
+        "protocol nonfatal evaluation messages"
+        ( Just
+            ( JsonArray
+                [ JsonObject
+                    ( Map.fromList
+                        [ ("full_name", JsonString "MessageName[Part, \"error\"]")
+                        , ("name", JsonString "Part::error")
+                        , ("text", JsonString "Part::error: Part specifications are invalid for f[a].")
+                        ]
+                    )
+                ]
+            )
+        )
+        (Map.lookup "messages" outer)
+    other -> assertEqual "protocol message response" True (isSuccess other)
+  sixth <- assertProtocolEvaluation "protocol nonfatal inert result" "Part[f[a], 2]" messageEvaluateResponse
+  seventh <- case printEvaluateResponse of
+    ProtocolSuccess {protocolResult = JsonObject outer} ->
+      assertEqual
+        "protocol Print capture"
+        (Just (JsonArray [JsonString "x"]))
+        (Map.lookup "prints" outer)
+    other -> assertEqual "protocol Print response" True (isSuccess other)
+  eighth <- assertProtocolEvaluation "protocol Print result" "1" printEvaluateResponse
+  pure (and [first, second, third, fourth, fifth, sixth, seventh, eighth])
  where
   assertProtocolEvaluation label expected response = case response of
     ProtocolSuccess {protocolResult = JsonObject outer} ->

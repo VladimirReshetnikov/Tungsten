@@ -49,7 +49,13 @@ import Tungsten.Notebook
 import Tungsten.Parser
 import Tungsten.ParserCorpus
 import Tungsten.Repl (runRepl)
-import Tungsten.Session (emptySession, evaluateInSession)
+import Tungsten.Session
+  ( EvaluationMessage (..)
+  , emptySession
+  , evaluateInSession
+  , sessionPrints
+  , sessionVisibleMessages
+  )
 import Tungsten.WolframString (WolframStringSegment (..))
 
 data CliCommand
@@ -952,8 +958,16 @@ runExpressionCommand command sourceSpec requestedForm = do
               "EvaluationError"
               (evaluationErrorMessage evaluationError)
               (Just expression)
-          Right (result, _) -> do
-            emitJson (evaluationPayload normalizedForm source expression result)
+          Right (result, updatedSession) -> do
+            emitJson
+              ( evaluationPayload
+                  normalizedForm
+                  source
+                  expression
+                  result
+                  (sessionVisibleMessages updatedSession)
+                  (sessionPrints updatedSession)
+              )
             pure 0
 
 readSource :: SourceSpec -> IO (Either Text Text)
@@ -1450,6 +1464,7 @@ parsePayload form source expression =
         , ("depth", JsonNumber (T.pack (show (expressionDepth expression))))
         , ("form", JsonString form)
         , ("full_form", JsonString (fullForm expression))
+        , ("input_form", JsonString (inputForm expression))
         , ("length", JsonNumber (T.pack (show (length (arguments expression)))))
         , ("source", JsonString source)
         , ("success", JsonBool True)
@@ -1457,17 +1472,36 @@ parsePayload form source expression =
         ]
     )
 
-evaluationPayload :: Text -> Text -> Expr -> Expr -> JsonValue
-evaluationPayload form source parsed result =
+evaluationPayload
+  :: Text
+  -> Text
+  -> Expr
+  -> Expr
+  -> [EvaluationMessage]
+  -> [Text]
+  -> JsonValue
+evaluationPayload form source parsed result messages prints =
   JsonObject
     ( Map.fromList
         [ ("command", JsonString "evaluate")
         , ("form", JsonString form)
+        , ("messages", JsonArray (map evaluationMessagePayload messages))
         , ("parsed_full_form", JsonString (fullForm parsed))
+        , ("parsed_input_form", JsonString (inputForm parsed))
         , ("parsed_tree", exprToJson parsed)
+        , ("prints", JsonArray (map JsonString prints))
         , ("result", expressionPayload result)
         , ("source", JsonString source)
-        , ("success", JsonBool True)
+        ]
+    )
+
+evaluationMessagePayload :: EvaluationMessage -> JsonValue
+evaluationMessagePayload message =
+  JsonObject
+    ( Map.fromList
+        [ ("full_name", JsonString (fullForm (evaluationMessageFullName message)))
+        , ("name", JsonString (evaluationMessageName message))
+        , ("text", JsonString (evaluationMessageText message))
         ]
     )
 
@@ -1477,6 +1511,7 @@ expressionPayload expression =
     ( Map.fromList
         [ ("depth", JsonNumber (T.pack (show (expressionDepth expression))))
         , ("full_form", JsonString (fullForm expression))
+        , ("input_form", JsonString (inputForm expression))
         , ("length", JsonNumber (T.pack (show (length (arguments expression)))))
         , ("tree", exprToJson expression)
         ]
@@ -1503,6 +1538,7 @@ emitError command form errorType message parsed = do
     Nothing -> id
     Just expression ->
       Map.insert "parsed_full_form" (JsonString (fullForm expression))
+        . Map.insert "parsed_input_form" (JsonString (inputForm expression))
         . Map.insert "parsed_tree" (exprToJson expression)
 
 emitJson :: JsonValue -> IO ()

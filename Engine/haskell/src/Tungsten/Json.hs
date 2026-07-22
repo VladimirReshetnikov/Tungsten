@@ -54,7 +54,13 @@ import Text.Parsec.String (Parser)
 import Text.Read (readMaybe)
 import Tungsten.Evaluate (evaluationErrorMessage)
 import Tungsten.Expression
-import Tungsten.Session (emptySession, evaluateInSession)
+import Tungsten.Session
+  ( EvaluationMessage (..)
+  , emptySession
+  , evaluateInSession
+  , sessionPrints
+  , sessionVisibleMessages
+  )
 import Tungsten.WolframString
 import Tungsten.Parser (parseErrorMessage, parseFullForm, parseInputForm)
 
@@ -422,13 +428,18 @@ handleProtocolRequest request = case protocolCommand request of
     Left message -> failure message
     Right expression -> case evaluateInSession emptySession expression of
       Left evaluationError -> failure (evaluationErrorMessage evaluationError)
-      Right (result, _) ->
+      Right (result, updatedSession) ->
         ProtocolSuccess
           (protocolRequestId request)
           "evaluate"
           ( JsonObject
               ( Map.fromList
                   [ ("input", expressionResult expression)
+                  , ( "messages"
+                    , JsonArray
+                        (map evaluationMessageResult (sessionVisibleMessages updatedSession))
+                    )
+                  , ("prints", JsonArray (map JsonString (sessionPrints updatedSession)))
                   , ("result", expressionResult result)
                   ]
               )
@@ -459,6 +470,17 @@ expressionResult expression =
     ( Map.fromList
         [ ("expression", exprToJson expression)
         , ("full_form", JsonString (fullForm expression))
+        , ("input_form", JsonString (inputForm expression))
+        ]
+    )
+
+evaluationMessageResult :: EvaluationMessage -> JsonValue
+evaluationMessageResult message =
+  JsonObject
+    ( Map.fromList
+        [ ("full_name", JsonString (fullForm (evaluationMessageFullName message)))
+        , ("name", JsonString (evaluationMessageName message))
+        , ("text", JsonString (evaluationMessageText message))
         ]
     )
 
