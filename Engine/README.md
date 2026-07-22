@@ -4,11 +4,12 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-07-18T04:31:20Z
-- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
+- Updated (UTC): 2026-07-22T19:25:35Z
+- Repository HEAD: b6e36d4fcd683cb312b5bf4000be5da0205356cf
 - Related code:
   - `Engine/cpp/`
   - `Engine/src/tungsten/`
+  - `Engine/haskell/`
   - `Engine/Nummy/`
   - `Engine/pwsh/`
   - `Engine/dotnet/`
@@ -21,6 +22,7 @@
   - [C#/.NET API](./docs/dotnet-api.md)
   - [Architecture](./docs/architecture.md)
   - [C++ Runtime and Verification](./docs/cpp-port.md)
+  - [Haskell Port](./docs/haskell-port.md)
   - [REPL](./docs/repl.md)
   - [Large-Number Fallback Design](./docs/overflow-underflow-large-number-fallback.md)
   - [Symbol and Context Registry](./docs/symbol-context-registry.md)
@@ -30,10 +32,12 @@
 
 ## Summary
 
-Tungsten is a native C++17 automation and symbolic-computation engine for a local Wolfram
-installation, with PowerShell and .NET projection layers for script and application callers. The
-Python implementation remains in-tree as the executable compatibility oracle and does not participate
-in the native runtime. Tungsten exists for the
+Tungsten is a multi-runtime automation and symbolic-computation workspace for a local Wolfram
+installation. The Python implementation remains the broad executable compatibility reference. An
+in-progress C++17 runtime provides an installable native library and CLI and is the target of the
+PowerShell and .NET projections, while the active Haskell port provides an independent typed
+expression, parser, evaluator, structural-notebook, CLI, and JSON-protocol foundation. Tungsten
+exists for the
 workflows that are awkward in the traditional Mathematica GUI but natural for agents, scripts, and
 typed host applications:
 
@@ -297,7 +301,7 @@ This is not a side detail. It is part of Tungsten's core execution model.
 
 ## Quick start
 
-### Native CLI
+### C++ CLI
 
 ```powershell
 Push-Location .\Engine
@@ -323,6 +327,28 @@ Pop-Location
 Single-configuration generators normally write `build/cpp/tungsten-cpp` (or `.exe` on Windows).
 Visual Studio and other multi-configuration generators normally write
 `build/cpp/Release/tungsten-cpp.exe`. The PowerShell and .NET projections check both layouts.
+
+### Haskell CLI
+
+```bash
+cd Engine
+cabal test all --ghc-options=-Werror
+cabal run tungsten-hs -- expr parse --code '1 + 2 x^3'
+cabal run tungsten-hs -- expr evaluate --code 'Total[Range[10]]'
+cabal run tungsten-hs -- notebook inspect --file example.nb
+cabal run tungsten-hs -- repl
+cabal run tungsten-hs -- env show
+cabal run tungsten-hs -- kernel eval --code '2+2'
+cabal run tungsten-hs -- frontend probe
+cabal run tungsten-hs -- inline-box compose --prefix 'icon: ' --box-expr 'GraphicsBox[{CircleBox[]}]'
+cabal run tungsten-hs -- inline-box from-cell --file example.nb --cell-index 0 --all-objects
+cabal run tungsten-hs -- docs search NotebookGet
+```
+
+The Haskell port currently covers the kernel-free expression, structural notebook, Wolfram-string,
+inline-box, and documentation-index foundations, plus typed discovery, kernel, and FrontEnd
+operations. See
+[Haskell Port](./docs/haskell-port.md) for its exact compatibility boundary and migration order.
 
 ### PowerShell
 
@@ -434,11 +460,28 @@ The current documentation should state these boundaries plainly:
 |------|---------|
 | `Engine/CMakeLists.txt` | Native C++ library/CLI build, tests, install rules, and package export |
 | `Engine/cpp/include/tungsten/` | Installed C++ public headers |
-| `Engine/cpp/src/` | Native Engine implementation: CLI, evaluator, parser, notebooks, and Wolfram automation |
+| `Engine/cpp/src/` | C++ Engine implementation: CLI, evaluator, parser, notebooks, and Wolfram automation |
 | `Engine/cpp/tests/` | Native unit, component, and CLI smoke coverage |
-| `Engine/pyproject.toml` | Python reference-oracle metadata and differential tooling |
-| `Engine/src/tungsten/` | Python reference implementation and executable compatibility specification; it is not loaded by the native runtime |
-| `Engine/src/tungsten/cli.py` | Python reference JSON CLI used for differential validation |
+| `Engine/tungsten-engine.cabal` | Haskell package, executable, and test-suite metadata |
+| `Engine/haskell/` | Haskell expression model, parsers, evaluator, JSON protocol, CLI, and tests |
+| `Engine/pyproject.toml` | Python compatibility-reference metadata and differential tooling |
+| `Engine/src/tungsten/` | Python reference implementation and executable compatibility specification |
+| `Engine/src/tungsten/discovery.py` | Installation, docs-root, and path discovery |
+| `Engine/src/tungsten/licensing.py` | `mathpass` inspection and deduplication helpers |
+| `Engine/src/tungsten/kernel.py` | Structured kernel execution wrapper |
+| `Engine/src/tungsten/notebook.py` | Structural notebook parser, renderer, and patch support |
+| `Engine/src/tungsten/inline_boxes.py` | Inline-box string composition and notebook-cell object extraction |
+| `Engine/src/tungsten/expression.py` | Kernel-free expression model, session runtime, structural helpers, and built-in families |
+| `Engine/src/tungsten/expression_parser.py` | Wolfram text tokenizer/parser and StandardForm box-to-expression interpretation |
+| `Engine/src/tungsten/expression_evaluator.py` | Single-step evaluator dispatch table |
+| `Engine/src/tungsten/expression_arithmetic.py` | Arithmetic, numeric, relational, Boolean, predicate, and number-theory rules |
+| `Engine/src/tungsten/expression_patterns.py` | Pattern matching, replacement rules, and pattern-backed control helpers |
+| `Engine/src/tungsten/parser_corpus.py` | Local parser corpus discovery and Wolfram held-parser comparison |
+| `Engine/src/tungsten/wolfram_strings.py` | Shared Wolfram string literal and inline-box escape handling |
+| `Engine/src/tungsten/docs_index.py` | Offline documentation indexing/search |
+| `Engine/src/tungsten/frontend.py` | Programmatic FrontEnd actions |
+| `Engine/src/tungsten/assistant.py` | Notebook Assistant automation |
+| `Engine/src/tungsten/cli.py` | Python reference JSON-first CLI entrypoint |
 | `Engine/Nummy/` | Tungsten-owned large-number arithmetic research corpus, prior-art snapshots, and alpha/beta/gamma prototype implementations |
 | `Engine/Nummy/docs/` | Nummy theory corpus, reports, and archived standalone design proposals |
 | `Engine/Nummy/prior-art/` | Source-study reference implementations for very-large-number arithmetic |
@@ -485,7 +528,16 @@ is 119/119. The standalone evaluator extractor loses setup state; use the record
 harness with `--require-perfect` for the authoritative broad comparison. See
 [C++ Runtime and Verification](./docs/cpp-port.md) for the measured record.
 
-Install the native library, headers, CMake package, and CLI under a staging prefix when needed:
+Run the Haskell build and tests from the same workspace:
+
+```bash
+cd Engine
+cabal build all
+cabal test all --ghc-options=-Werror
+cabal check
+```
+
+Install the native C++ library, headers, CMake package, and CLI under a staging prefix when needed:
 
 ```powershell
 cmake --install .\Engine\build\cpp --config Release --prefix .\Engine\build\install
@@ -504,7 +556,8 @@ If you are new to Tungsten, this reading order works well:
 4. [Usage Reference](./docs/usage-reference.md) for the full command surface.
 5. [Architecture](./docs/architecture.md) for the detailed component model and execution flow.
 6. [C++ Runtime and Verification](./docs/cpp-port.md) for parity status and validation limits.
-7. Focused guides as needed:
+7. [Haskell Port](./docs/haskell-port.md) for the independent typed port and its compatibility boundary.
+8. Focused guides as needed:
    - [Notebook Assistant](./docs/notebook-assistant.md)
    - [Inline Box Strings](./docs/inline-box-strings.md)
    - [Expression Parser](./docs/expression-parser.md)

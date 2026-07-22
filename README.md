@@ -5,16 +5,16 @@
 - Created (UTC): 2026-07-16T23:45:44Z
 - Extraction source: [`VladimirReshetnikov/Smithereens`](https://github.com/VladimirReshetnikov/Smithereens) at `94fc0c18b538a191192a0da658e66528940438c6`
 
-Tungsten collects a native C++17 Wolfram automation engine and three focused Wolfram Language
-packages. The Engine retains its Python implementation as a development-only behavioral oracle;
-the projects share a repository and runtime context, but each top-level directory is an independent
-workspace.
+Tungsten collects a multi-runtime Wolfram automation engine and three focused Wolfram Language
+packages. The Engine retains its Python implementation as the executable compatibility reference
+alongside independently buildable C++17 and Haskell ports. The projects share a repository and
+runtime context, but each top-level directory is an independent workspace.
 
 ## Projects
 
 | Directory | Purpose |
 |---|---|
-| [`Engine/`](Engine/) | Native C++17 automation over a local Wolfram installation, kernel-free Wolfram expression and notebook tooling, PowerShell and .NET projections, a Python compatibility oracle, and the Nummy large-number research workspace. This directory was formerly `src/Tungsten/`. |
+| [`Engine/`](Engine/) | Automation over a local Wolfram installation, with a Python compatibility reference, C++17 and Haskell ports, kernel-free expression and notebook tooling, PowerShell and .NET projections, and the Nummy large-number research workspace. This directory was formerly `src/Tungsten/`. |
 | [`CommonFactor/`](CommonFactor/) | Heuristic discovery of large symbolic common factors in finite exact integer or rational sequences. |
 | [`InverseAsymptotic/`](InverseAsymptotic/) | Real-branch inverse-function asymptotics in generalized power-logarithm scales. |
 | [`Optimized/`](Optimized/) | DAG-preserving arithmetic and substitution for ``Experimental`OptimizedExpression`` values. |
@@ -35,7 +35,11 @@ ctest --test-dir build/cpp -C Release --output-on-failure
 cmake --install build/cpp --config Release --prefix build/install
 ./build/install/bin/tungsten-cpp kernel eval --code '2+2'
 
-# Engine compatibility oracle (development only)
+# Engine: Haskell build, tests, and CLI
+cabal test all --ghc-options=-Werror
+cabal run tungsten-hs -- kernel eval --code '2+2'
+
+# Engine: Python compatibility reference
 uv run python -m unittest discover -s tests -t .
 
 # Wolfram Language packages, from the repository root

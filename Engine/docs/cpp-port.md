@@ -1,15 +1,15 @@
 # Tungsten Engine C++ Runtime and Verification
 
-- Status: Current native-runtime and verification record
+- Status: Active incomplete native-port and verification record
 - Audience: Tungsten maintainers, reviewers, projection authors, and contributors
 - Scope: `Engine/CMakeLists.txt`, `Engine/cpp/`, native projections, and Python-oracle parity tooling
 - Created (UTC): 2026-07-18T01:44:22Z
-- Updated (UTC): 2026-07-18T04:31:20Z
-- Repository HEAD: `64a65f4894ba14a84b73917bc595b7e1779703f7`
+- Updated (UTC): 2026-07-22T19:30:17Z
+- Repository HEAD: `b6e36d4fcd683cb312b5bf4000be5da0205356cf`
 
-## Current authority
+## C++ port boundary
 
-The active Tungsten runtime is the C++17 library and CLI built by CMake:
+The C++ port is an independently buildable C++17 library and CLI built by CMake:
 
 - `tungsten_cpp` is the native library;
 - `tungsten-cpp` is the JSON-first CLI and kernel-free REPL;
@@ -20,8 +20,10 @@ The active Tungsten runtime is the C++17 library and CLI built by CMake:
 
 The Python package under `src/tungsten/` remains the executable compatibility specification and is
 used by development-only differential tools. It is not loaded by `tungsten-cpp` and is not a
-production fallback. The former Rust port is superseded; [rust-port.md](./rust-port.md) and the
-Rust source tree are retained only as historical migration records.
+production fallback. The Haskell port under `haskell/` remains an independent typed implementation
+with its own Cabal build and compatibility boundary. The former Rust port is superseded;
+[rust-port.md](./rust-port.md) and the Rust source tree are retained only as historical migration
+records.
 
 ## Build, test, and install
 
@@ -99,6 +101,27 @@ working tree based on the repository HEAD above:
 | .NET projection suite | 14/14 tests passed; the added native integration case round-trips a Unicode notebook patch and guards BOM-less UTF-8 patch-spec output |
 | Python compatibility-oracle suite | 846 tests passed, with 4 skipped and 2 expected failures |
 | Recorded evaluator differential | 2,499/2,499 top-level calls matched across 585 Python tests; zero mismatches |
+
+### 2026-07-22 integration build
+
+The C++ branch at `b6e36d4fcd683cb312b5bf4000be5da0205356cf` was integrated with `main` at
+`d15988af27446b547fe5e465bb2a765c305bce7f` and validated on Linux before publication:
+
+| Gate | Result |
+|---|---|
+| GCC 12.3 strict Release | 52/52 Ninja steps completed with `-Werror -Wall -Wextra -Wpedantic`; zero warnings and zero errors |
+| GCC CTest | 16/16 passed |
+| Clang 21.1.8 Release | 52/52 Ninja steps completed; all project warnings remained fatal, with only libstdc++ 12's internal deprecated `std::get_temporary_buffer` diagnostic exempted from `-Werror` |
+| Clang CTest | 16/16 passed |
+| Native CLI smoke | `tungsten-cpp expr evaluate --code '2+2'` returned the exact integer `4` |
+| Install/export consumer | Staged install completed; an external CMake project found `TungstenEngine`, linked `Tungsten::Engine`, built, and ran successfully |
+| .NET projection suite | 14/14 Release tests passed |
+| Coexisting Haskell suite | Warning-as-error Cabal test passed after integration |
+
+The Clang exception is a host-toolchain interaction inside libstdc++'s implementation of
+`std::stable_sort`, not a warning in Tungsten source. A normal Clang build completes without any
+special option; the exemption is needed only when globally promoting every deprecation from the
+host standard library to an error.
 
 Run the compatibility gates from `Engine/` with:
 

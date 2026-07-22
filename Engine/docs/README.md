@@ -4,8 +4,8 @@
 - Audience: Tungsten users, automation authors, maintainers, reviewers, and future contributors
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T15:36:45Z
-- Updated (UTC): 2026-07-18T04:31:20Z
-- Repository HEAD: 64a65f4894ba14a84b73917bc595b7e1779703f7
+- Updated (UTC): 2026-07-22T19:25:35Z
+- Repository HEAD: b6e36d4fcd683cb312b5bf4000be5da0205356cf
 
 ## What this docs tree is for
 
@@ -63,26 +63,27 @@ The docs are split so readers can choose the right depth:
 2. [architecture.md](./architecture.md)
 3. [implementation-details.md](./implementation-details.md)
 4. [cpp-port.md](./cpp-port.md)
-5. [expression-parser.md](./expression-parser.md)
-6. [symbol-context-registry.md](./symbol-context-registry.md)
-7. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
-8. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
-9. [import-export-formats.md](./import-export-formats.md)
-10. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
-11. [expression-function-support.md](./expression-function-support.md)
-12. [list-association-complexity.md](./list-association-complexity.md)
-13. [list-association-parity-proposal.md](./list-association-parity-proposal.md)
-14. [reports/2026-07-03-list-association-persistent-backends.md](./reports/2026-07-03-list-association-persistent-backends.md)
+5. [haskell-port.md](./haskell-port.md)
+6. [expression-parser.md](./expression-parser.md)
+7. [symbol-context-registry.md](./symbol-context-registry.md)
+8. [sequence-nothing-evaluation.md](./sequence-nothing-evaluation.md)
+9. [sequence-pattern-matching.md](./sequence-pattern-matching.md)
+10. [import-export-formats.md](./import-export-formats.md)
+11. [named-pure-functions-spec.md](./named-pure-functions-spec.md)
+12. [expression-function-support.md](./expression-function-support.md)
+13. [list-association-complexity.md](./list-association-complexity.md)
+14. [list-association-parity-proposal.md](./list-association-parity-proposal.md)
+15. [reports/2026-07-03-list-association-persistent-backends.md](./reports/2026-07-03-list-association-persistent-backends.md)
     if you are choosing the Stage B substrate or need the kernel-verified `Association` semantics
-15. [numeric-simplification.md](./numeric-simplification.md)
-16. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
-17. [pattern-matching-plan.md](./pattern-matching-plan.md)
-18. [parser-corpus.md](./parser-corpus.md)
-19. [inline-box-strings.md](./inline-box-strings.md)
-20. [notebook-assistant.md](./notebook-assistant.md)
-21. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
+16. [numeric-simplification.md](./numeric-simplification.md)
+17. [overflow-underflow-large-number-fallback.md](./overflow-underflow-large-number-fallback.md)
+18. [pattern-matching-plan.md](./pattern-matching-plan.md)
+19. [parser-corpus.md](./parser-corpus.md)
+20. [inline-box-strings.md](./inline-box-strings.md)
+21. [notebook-assistant.md](./notebook-assistant.md)
+22. [reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md](./reports/2026-04-27-tungsten-notebook-frontend-alternatives__47d1f0f5e114.md)
     if you are planning a GUI notebook FrontEnd or StandardForm renderer
-22. [troubleshooting.md](./troubleshooting.md)
+23. [troubleshooting.md](./troubleshooting.md)
 
 ## Documents in this folder
 
@@ -96,6 +97,7 @@ The docs are split so readers can choose the right depth:
 | [implementation-details.md](implementation-details.md) | Environment-specific findings and the reasoning behind important implementation choices. |
 | [cpp-port.md](cpp-port.md) | Current native C++ runtime layout, verification record, parity gates, and known validation limits. |
 | [rust-port.md](rust-port.md) | Historical record of the superseded Rust migration phase; not current build or runtime guidance. |
+| [haskell-port.md](haskell-port.md) | Haskell build/run guide, implemented compatibility surface, current Python boundary, and migration order. |
 | [inline-box-strings.md](inline-box-strings.md) | Focused guide for Wolfram string literals that embed notebook objects through inline box escapes. |
 | [notebook-assistant.md](notebook-assistant.md) | Focused guide for automating Mathematica's built-in Notebook Assistant against a selected source cell. |
 | [expression-parser.md](expression-parser.md) | Focused guide for the kernel-free Wolfram expression parser and bounded native evaluator. |
