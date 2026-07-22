@@ -1590,6 +1590,11 @@ checkEvaluationSession = do
           , "AppendTo[x, Print[\"item\"]]"
           , ["item"]
           )
+        , ( "association calls expose delayed values without a second evaluation"
+          , "ClearAll[x]; x = <|a -> 1|>; {AppendTo[x, b :> Print[\"late\"]], x, x[b]}"
+          , "List[Association[Rule[a, 1], RuleDelayed[b, Print[\"late\"]]], Association[Rule[a, 1], RuleDelayed[b, Print[\"late\"]]], Print[\"late\"]]"
+          , []
+          )
         ]
       partArityMessage =
         ( "Part::error"

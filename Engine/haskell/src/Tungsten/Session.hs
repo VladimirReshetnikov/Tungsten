@@ -2370,11 +2370,7 @@ evaluateSessionCallable depth session function arguments' = case function of
             Nothing ->
               Right
                 (Call (Symbol "Missing") [String "KeyAbsent", key], session)
-            Just selected ->
-              evaluateSessionAt
-                (depth + 1)
-                session
-                (sessionItemValue selected)
+            Just selected -> Right (sessionItemValue selected, session)
   Call (Symbol functionHead) functionArguments
     | isSessionSystemHead "Function" functionHead -> do
         instantiated <-

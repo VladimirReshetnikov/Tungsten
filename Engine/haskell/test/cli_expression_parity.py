@@ -751,7 +751,8 @@ CASES = (
             "SetAttributes[q, SequenceHold]; held = q[a]; "
             "{AppendTo[x, 3], x, AppendTo[y, b], y, "
             "AppendTo[z, b -> 9], z, AppendTo[f[q], 7], f[q], "
-            "DownValues[f], AppendTo[held, Sequence[b, c]], held}",
+            "DownValues[f], AppendTo[held, Sequence[b, c]], held, "
+            "AppendTo[z, c :> Print[\"late\"]], z[c]}",
             "--form",
             "input",
         ),
