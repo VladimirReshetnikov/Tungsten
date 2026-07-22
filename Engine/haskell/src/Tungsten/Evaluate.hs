@@ -7,14 +7,33 @@
 -- remain symbolic, which makes partial evaluation safe for automation clients.
 module Tungsten.Evaluate
   ( EvaluationError (..)
+  , LevelBounds (..)
+  , PathSelector (..)
+  , PatternPathRecord (..)
+  , PatternRecord (..)
   , canonicalCompare
+  , collectPatternPathRecords
+  , collectPatternRecords
+  , collectPositionPathRecords
+  , deleteAtPath
   , evaluate
   , exactRangeValues
   , instantiateFunctionCall
   , instantiatePatternMatch
+  , instantiatePatternMatchWith
+  , instantiatePatternMatchManyWith
+  , levelMatches
   , matchesPattern
   , normalizeEvaluatedCall
+  , normalizeLevelSpec
+  , operationPositionPaths
+  , pathExpression
+  , rebuildWithSplicing
   , reduceEvaluatedCall
+  , replaceAtPath
+  , selectAtPath
+  , selectionLimit
+  , sortOperationPaths
   , substituteNamedSymbols
   ) where
 
@@ -22,6 +41,7 @@ import Control.Monad ((<=<), foldM)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import Data.Char (chr, isDigit, ord, toUpper)
+import Data.Functor.Identity (Identity (..))
 import Data.List (permutations, sortBy, transpose)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
@@ -3189,122 +3209,225 @@ instantiatePatternMatch expression patternExpression template = do
   bindings <- matchPattern [] expression patternExpression
   pure (substituteBindings bindings template)
 
+-- | Match and instantiate a held template while delegating Condition and
+-- PatternTest evaluation to the caller.  The callback lives in an arbitrary
+-- monad so a session evaluator can thread definitions, messages, prints, and
+-- other observable state through every attempted match in traversal order.
+instantiatePatternMatchWith
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> Expr
+  -> Expr
+  -> Expr
+  -> monad (Maybe Expr)
+instantiatePatternMatchWith evaluator expression patternExpression template = do
+  matched <- matchPatternM evaluator [] expression patternExpression
+  pure (fmap (`substituteBindings` template) matched)
+
+-- | Variant of 'instantiatePatternMatchWith' that keeps template boundaries
+-- intact.  It is useful for a rule whose body and trailing Condition must be
+-- instantiated from one match without running matcher callbacks twice.
+instantiatePatternMatchManyWith
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> monad (Maybe [Expr])
+instantiatePatternMatchManyWith evaluator expression patternExpression templates = do
+  matched <- matchPatternM evaluator [] expression patternExpression
+  pure (fmap (\bindings -> map (substituteBindings bindings) templates) matched)
+
 matchPattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
-matchPattern bindings expression patternExpression = case patternExpression of
+matchPattern bindings expression patternExpression =
+  runIdentity
+    (matchPatternM purePatternEvaluator bindings expression patternExpression)
+
+purePatternEvaluator :: Expr -> Identity (Maybe Expr)
+purePatternEvaluator expression =
+  Identity (either (const Nothing) Just (evaluate expression))
+
+matchPatternM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> Expr
+  -> Expr
+  -> monad (Maybe PatternBindings)
+matchPatternM evaluator bindings expression patternExpression = case patternExpression of
   Call (Symbol "IgnoringInactive") [innerPattern] ->
-    matchIgnoringInactive bindings expression innerPattern
+    matchIgnoringInactiveM evaluator bindings expression innerPattern
   Call (Symbol "Verbatim") [literal] ->
-    if expression == literal then Just bindings else Nothing
+    pure (if expression == literal then Just bindings else Nothing)
   Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
-    matched <- matchPattern bindings expression innerPattern
-    bindScalar name expression matched
+    matched <- matchPatternM evaluator bindings expression innerPattern
+    pure (matched >>= bindScalar name expression)
   Call (Symbol "Optional") [innerPattern] ->
-    matchPattern bindings expression innerPattern
+    matchPatternM evaluator bindings expression innerPattern
   Call (Symbol "Optional") [innerPattern, _] ->
-    matchPattern bindings expression innerPattern
-  Call (Symbol "Blank") [] -> Just bindings
+    matchPatternM evaluator bindings expression innerPattern
+  Call (Symbol "Blank") [] -> pure (Just bindings)
   Call (Symbol "Blank") [requiredHead] ->
-    if headExpr expression == requiredHead then Just bindings else Nothing
-  Call (Symbol "BlankSequence") [] -> Just bindings
+    pure (if headExpr expression == requiredHead then Just bindings else Nothing)
+  Call (Symbol "BlankSequence") [] -> pure (Just bindings)
   Call (Symbol "BlankSequence") [requiredHead] ->
-    if headExpr expression == requiredHead then Just bindings else Nothing
-  Call (Symbol "BlankNullSequence") [] -> Just bindings
+    pure (if headExpr expression == requiredHead then Just bindings else Nothing)
+  Call (Symbol "BlankNullSequence") [] -> pure (Just bindings)
   Call (Symbol "BlankNullSequence") [requiredHead] ->
-    if headExpr expression == requiredHead then Just bindings else Nothing
+    pure (if headExpr expression == requiredHead then Just bindings else Nothing)
   Call (Symbol "Alternatives") alternatives -> firstMatch alternatives
-  Call (Symbol "Except") [excluded] ->
-    case matchPattern bindings expression excluded of
-      Nothing -> Just bindings
-      Just _ -> Nothing
+  Call (Symbol "Except") [excluded] -> do
+    excludedMatch <- matchPatternM evaluator bindings expression excluded
+    pure (case excludedMatch of Nothing -> Just bindings; Just _ -> Nothing)
   Call (Symbol "Except") [excluded, included] -> do
-    matched <- matchPattern bindings expression included
-    case matchPattern bindings expression excluded of
-      Nothing -> Just matched
-      Just _ -> Nothing
+    allowed <- matchPatternM evaluator bindings expression included
+    case allowed of
+      Nothing -> pure Nothing
+      Just matched -> do
+        excludedMatch <- matchPatternM evaluator bindings expression excluded
+        pure (case excludedMatch of Nothing -> Just matched; Just _ -> Nothing)
   Call (Symbol "Condition") [innerPattern, condition] -> do
-    matched <- matchPattern bindings expression innerPattern
-    conditionResult <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
-    if conditionResult == Symbol "True" then Just matched else Nothing
+    innerMatch <- matchPatternM evaluator bindings expression innerPattern
+    case innerMatch of
+      Nothing -> pure Nothing
+      Just matched -> do
+        conditionResult <- evaluator (substituteBindings matched condition)
+        pure
+          ( if conditionResult == Just (Symbol "True")
+              then Just matched
+              else Nothing
+          )
   Call (Symbol "PatternTest") [innerPattern, test] -> do
-    matched <- matchPattern bindings expression innerPattern
-    testResult <- either (const Nothing) Just (evaluate (Call test [expression]))
-    if testResult == Symbol "True" then Just matched else Nothing
+    innerMatch <- matchPatternM evaluator bindings expression innerPattern
+    case innerMatch of
+      Nothing -> pure Nothing
+      Just matched -> do
+        testResult <- evaluator (Call test [expression])
+        pure
+          ( if testResult == Just (Symbol "True")
+              then Just matched
+              else Nothing
+          )
   Call (Symbol "KeyValuePattern") [specification] ->
-    matchKeyValuePattern bindings expression specification
+    matchKeyValuePatternM evaluator bindings expression specification
   Call (Symbol "HoldPattern") [innerPattern] ->
-    matchPattern bindings expression innerPattern
+    matchPatternM evaluator bindings expression innerPattern
   Call (Symbol "Longest") (innerPattern : _) ->
-    matchPattern bindings expression innerPattern
+    matchPatternM evaluator bindings expression innerPattern
   Call (Symbol "Shortest") (innerPattern : _) ->
-    matchPattern bindings expression innerPattern
+    matchPatternM evaluator bindings expression innerPattern
   _
     | Just _ <- sequencePatternBounds patternExpression ->
-        matchSequencePatternElements bindings patternExpression [expression]
+        matchSequencePatternElementsM evaluator bindings patternExpression [expression]
   Call patternHead patternArguments -> case expression of
     Call expressionHead expressionArguments -> do
-      headBindings <- matchPattern bindings expressionHead patternHead
-      matchPatternArguments headBindings expressionArguments patternArguments
-    _ -> Nothing
-  _ -> if expression == patternExpression then Just bindings else Nothing
+      headMatch <- matchPatternM evaluator bindings expressionHead patternHead
+      case headMatch of
+        Nothing -> pure Nothing
+        Just headBindings ->
+          matchPatternArgumentsM evaluator headBindings expressionArguments patternArguments
+    _ -> pure Nothing
+  _ -> pure (if expression == patternExpression then Just bindings else Nothing)
  where
-  firstMatch [] = Nothing
-  firstMatch (alternative : rest) = case matchPattern bindings expression alternative of
-    Just matched -> Just matched
-    Nothing -> firstMatch rest
+  firstMatch [] = pure Nothing
+  firstMatch (alternative : rest) = do
+    matched <- matchPatternM evaluator bindings expression alternative
+    case matched of
+      Just _ -> pure matched
+      Nothing -> firstMatch rest
 
-matchIgnoringInactive :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
-matchIgnoringInactive bindings expression patternExpression = case activeView patternExpression of
+matchIgnoringInactiveM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> Expr
+  -> Expr
+  -> monad (Maybe PatternBindings)
+matchIgnoringInactiveM evaluator bindings expression patternExpression = case activeView patternExpression of
   Call (Symbol "IgnoringInactive") [innerPattern] ->
-    matchIgnoringInactive bindings expression innerPattern
+    matchIgnoringInactiveM evaluator bindings expression innerPattern
   Call (Symbol "HoldPattern") [innerPattern] ->
-    matchIgnoringInactive bindings expression innerPattern
+    matchIgnoringInactiveM evaluator bindings expression innerPattern
   Call (Symbol "Verbatim") [literal] ->
-    if activeView expression == activeView literal then Just bindings else Nothing
+    pure (if activeView expression == activeView literal then Just bindings else Nothing)
   Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
-    matched <- matchIgnoringInactive bindings expression innerPattern
-    bindScalar name expression matched
-  Call (Symbol "Blank") [] -> Just bindings
+    matched <- matchIgnoringInactiveM evaluator bindings expression innerPattern
+    pure (matched >>= bindScalar name expression)
+  Call (Symbol "Blank") [] -> pure (Just bindings)
   Call (Symbol "Blank") [requiredHead] ->
-    if headExpr (activeView expression) == activeView requiredHead then Just bindings else Nothing
+    pure
+      ( if headExpr (activeView expression) == activeView requiredHead
+          then Just bindings
+          else Nothing
+      )
   Call (Symbol "Alternatives") alternatives -> firstMatch alternatives
-  Call (Symbol "Except") [excluded] ->
-    case matchIgnoringInactive bindings expression excluded of
-      Nothing -> Just bindings
-      Just _ -> Nothing
+  Call (Symbol "Except") [excluded] -> do
+    excludedMatch <- matchIgnoringInactiveM evaluator bindings expression excluded
+    pure (case excludedMatch of Nothing -> Just bindings; Just _ -> Nothing)
   Call (Symbol "Except") [excluded, included] -> do
-    matched <- matchIgnoringInactive bindings expression included
-    case matchIgnoringInactive bindings expression excluded of
-      Nothing -> Just matched
-      Just _ -> Nothing
+    allowed <- matchIgnoringInactiveM evaluator bindings expression included
+    case allowed of
+      Nothing -> pure Nothing
+      Just matched -> do
+        excludedMatch <- matchIgnoringInactiveM evaluator bindings expression excluded
+        pure (case excludedMatch of Nothing -> Just matched; Just _ -> Nothing)
   Call (Symbol "Condition") [innerPattern, condition] -> do
-    matched <- matchIgnoringInactive bindings expression innerPattern
-    conditionResult <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
-    if conditionResult == Symbol "True" then Just matched else Nothing
+    innerMatch <- matchIgnoringInactiveM evaluator bindings expression innerPattern
+    case innerMatch of
+      Nothing -> pure Nothing
+      Just matched -> do
+        conditionResult <- evaluator (substituteBindings matched condition)
+        pure
+          ( if conditionResult == Just (Symbol "True")
+              then Just matched
+              else Nothing
+          )
   Call (Symbol "PatternTest") [innerPattern, test] -> do
-    matched <- matchIgnoringInactive bindings expression innerPattern
-    testResult <- either (const Nothing) Just (evaluate (Call test [expression]))
-    if testResult == Symbol "True" then Just matched else Nothing
+    innerMatch <- matchIgnoringInactiveM evaluator bindings expression innerPattern
+    case innerMatch of
+      Nothing -> pure Nothing
+      Just matched -> do
+        testResult <- evaluator (Call test [expression])
+        pure
+          ( if testResult == Just (Symbol "True")
+              then Just matched
+              else Nothing
+          )
   Call patternHead patternArguments -> case activeView expression of
     structuralExpression@(Call structuralHead structuralArguments) -> do
       let candidateHead = inactiveMatchingHead expression structuralExpression structuralHead
           candidateArguments = inactiveMatchingArguments expression structuralExpression structuralArguments
-      headBindings <- matchIgnoringInactive bindings candidateHead patternHead
-      matchIgnoringInactiveArguments headBindings candidateArguments patternArguments
-    _ -> Nothing
+      headMatch <- matchIgnoringInactiveM evaluator bindings candidateHead patternHead
+      case headMatch of
+        Nothing -> pure Nothing
+        Just headBindings ->
+          matchIgnoringInactiveArgumentsM evaluator headBindings candidateArguments patternArguments
+    _ -> pure Nothing
   structuralPattern ->
-    if activeView expression == structuralPattern then Just bindings else Nothing
+    pure (if activeView expression == structuralPattern then Just bindings else Nothing)
  where
-  firstMatch [] = Nothing
-  firstMatch (alternative : rest) = case matchIgnoringInactive bindings expression alternative of
-    Just matched -> Just matched
-    Nothing -> firstMatch rest
+  firstMatch [] = pure Nothing
+  firstMatch (alternative : rest) = do
+    matched <- matchIgnoringInactiveM evaluator bindings expression alternative
+    case matched of
+      Just _ -> pure matched
+      Nothing -> firstMatch rest
 
-matchIgnoringInactiveArguments :: PatternBindings -> [Expr] -> [Expr] -> Maybe PatternBindings
-matchIgnoringInactiveArguments bindings [] [] = Just bindings
-matchIgnoringInactiveArguments bindings (expression : remainingExpressions) (patternExpression : remainingPatterns) = do
-  matched <- matchIgnoringInactive bindings expression patternExpression
-  matchIgnoringInactiveArguments matched remainingExpressions remainingPatterns
-matchIgnoringInactiveArguments _ _ _ = Nothing
+matchIgnoringInactiveArgumentsM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> [Expr]
+  -> [Expr]
+  -> monad (Maybe PatternBindings)
+matchIgnoringInactiveArgumentsM _ bindings [] [] = pure (Just bindings)
+matchIgnoringInactiveArgumentsM evaluator bindings (expression : remainingExpressions) (patternExpression : remainingPatterns) = do
+  matched <- matchIgnoringInactiveM evaluator bindings expression patternExpression
+  case matched of
+    Nothing -> pure Nothing
+    Just updated ->
+      matchIgnoringInactiveArgumentsM evaluator updated remainingExpressions remainingPatterns
+matchIgnoringInactiveArgumentsM _ _ _ _ = pure Nothing
 
 inactiveMatchingHead :: Expr -> Expr -> Expr -> Expr
 inactiveMatchingHead original structural structuralHead
@@ -3333,25 +3456,40 @@ isInactiveWrapper :: Expr -> Bool
 isInactiveWrapper (Call (Symbol "Inactive") [_]) = True
 isInactiveWrapper _ = False
 
-matchKeyValuePattern :: PatternBindings -> Expr -> Expr -> Maybe PatternBindings
-matchKeyValuePattern bindings expression specification = do
-  elements <- keyValuePatternElements expression
-  matchItems bindings elements (keyValuePatternItems specification) []
+matchKeyValuePatternM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> Expr
+  -> Expr
+  -> monad (Maybe PatternBindings)
+matchKeyValuePatternM evaluator bindings expression specification =
+  case keyValuePatternElements expression of
+    Nothing -> pure Nothing
+    Just elements ->
+      matchItems bindings elements (keyValuePatternItems specification) ([] :: [Int])
  where
-  matchItems :: PatternBindings -> [Expr] -> [Expr] -> [Int] -> Maybe PatternBindings
-  matchItems current _ [] _ = Just current
+  matchItems current _ [] _ = pure (Just current)
   matchItems current elements (patternExpression : remainingPatterns) usedIndices =
     tryElements 0 elements
    where
-    tryElements _ [] = Nothing
+    tryElements _ [] = pure Nothing
     tryElements index (element : rest)
       | index `elem` usedIndices = tryElements (index + 1) rest
-      | otherwise = case matchPattern current element patternExpression of
-          Nothing -> tryElements (index + 1) rest
-          Just matched ->
-            case matchItems matched elements remainingPatterns (index : usedIndices) of
-              Just completed -> Just completed
-              Nothing -> tryElements (index + 1) rest
+      | otherwise = do
+          matched <- matchPatternM evaluator current element patternExpression
+          case matched of
+            Nothing -> tryElements (index + 1) rest
+            Just updated -> do
+              completed <-
+                matchItems
+                  updated
+                  elements
+                  remainingPatterns
+                  (index : usedIndices)
+              case completed of
+                Just _ -> pure completed
+                Nothing -> tryElements (index + 1) rest
 
 keyValuePatternElements :: Expr -> Maybe [Expr]
 keyValuePatternElements association
@@ -3369,27 +3507,42 @@ keyValuePatternItems :: Expr -> [Expr]
 keyValuePatternItems (Call (Symbol "List") values) = values
 keyValuePatternItems specification = [specification]
 
-matchPatternArguments :: PatternBindings -> [Expr] -> [Expr] -> Maybe PatternBindings
-matchPatternArguments bindings [] [] = Just bindings
-matchPatternArguments _ [] patterns
-  | minimumPatternArguments patterns > 0 = Nothing
-matchPatternArguments bindings expressions (patternExpression : remainingPatterns)
+matchPatternArgumentsM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> [Expr]
+  -> [Expr]
+  -> monad (Maybe PatternBindings)
+matchPatternArgumentsM _ bindings [] [] = pure (Just bindings)
+matchPatternArgumentsM _ _ [] patterns
+  | minimumPatternArguments patterns > 0 = pure Nothing
+matchPatternArgumentsM evaluator bindings expressions (patternExpression : remainingPatterns)
   | Just optionalPattern <- optionalPatternDescriptor patternExpression =
-      matchPresent optionalPattern `orElse` matchOmitted optionalPattern
+      tryPresentThenOmitted optionalPattern
  where
   remainingMinimum = minimumPatternArguments remainingPatterns
   matchPresent descriptor = case expressions of
     expression : remainingExpressions
       | length remainingExpressions >= remainingMinimum -> do
-          matched <- matchOptionalPresent bindings descriptor expression
-          matchPatternArguments matched remainingExpressions remainingPatterns
-    _ -> Nothing
+          matched <- matchOptionalPresentM evaluator bindings descriptor expression
+          case matched of
+            Nothing -> pure Nothing
+            Just updated ->
+              matchPatternArgumentsM evaluator updated remainingExpressions remainingPatterns
+    _ -> pure Nothing
   matchOmitted descriptor = do
-    matched <- matchOptionalOmitted bindings descriptor
-    matchPatternArguments matched expressions remainingPatterns
-  orElse (Just result) _ = Just result
-  orElse Nothing alternative = alternative
-matchPatternArguments bindings expressions (patternExpression : remainingPatterns)
+    matched <- matchOptionalOmittedM evaluator bindings descriptor
+    case matched of
+      Nothing -> pure Nothing
+      Just updated ->
+        matchPatternArgumentsM evaluator updated expressions remainingPatterns
+  tryPresentThenOmitted descriptor = do
+    present <- matchPresent descriptor
+    case present of
+      Just _ -> pure present
+      Nothing -> matchOmitted descriptor
+matchPatternArgumentsM evaluator bindings expressions (patternExpression : remainingPatterns)
   | Just (minimumCount, patternMaximum) <- sequencePatternBounds patternExpression =
       matchSequenceCounts (candidateCounts minimumCount patternMaximum)
  where
@@ -3399,18 +3552,29 @@ matchPatternArguments bindings expressions (patternExpression : remainingPattern
      in if sequencePrefersLongest patternExpression
           then [maximumCount, maximumCount - 1 .. minimumCount]
           else [minimumCount .. maximumCount]
-  matchSequenceCounts [] = Nothing
-  matchSequenceCounts (count : rest) =
+  matchSequenceCounts [] = pure Nothing
+  matchSequenceCounts (count : rest) = do
     let (segment, remainingExpressions) = splitAt count expressions
-     in case matchSequencePatternElements bindings patternExpression segment of
-          Just matched -> case matchPatternArguments matched remainingExpressions remainingPatterns of
-            Just completed -> Just completed
-            Nothing -> matchSequenceCounts rest
+    matched <- matchSequencePatternElementsM evaluator bindings patternExpression segment
+    case matched of
+      Nothing -> matchSequenceCounts rest
+      Just updated -> do
+        completed <-
+          matchPatternArgumentsM
+            evaluator
+            updated
+            remainingExpressions
+            remainingPatterns
+        case completed of
+          Just _ -> pure completed
           Nothing -> matchSequenceCounts rest
-matchPatternArguments bindings (expression : remainingExpressions) (patternExpression : remainingPatterns) = do
-  matched <- matchPattern bindings expression patternExpression
-  matchPatternArguments matched remainingExpressions remainingPatterns
-matchPatternArguments _ _ _ = Nothing
+matchPatternArgumentsM evaluator bindings (expression : remainingExpressions) (patternExpression : remainingPatterns) = do
+  matched <- matchPatternM evaluator bindings expression patternExpression
+  case matched of
+    Nothing -> pure Nothing
+    Just updated ->
+      matchPatternArgumentsM evaluator updated remainingExpressions remainingPatterns
+matchPatternArgumentsM _ _ _ _ = pure Nothing
 
 minimumPatternArguments :: [Expr] -> Int
 minimumPatternArguments = sum . map minimumForPattern
@@ -3523,26 +3687,61 @@ optionalPatternDescriptor = describe [] []
       Just (OptionalPattern inner (Just defaultValue) conditions tests)
     _ -> Nothing
 
-matchOptionalPresent :: PatternBindings -> OptionalPattern -> Expr -> Maybe PatternBindings
-matchOptionalPresent bindings descriptor value = do
-  matched <- matchPattern bindings value (optionalInner descriptor)
-  validateOptionalPattern descriptor matched value
+matchOptionalPresentM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> OptionalPattern
+  -> Expr
+  -> monad (Maybe PatternBindings)
+matchOptionalPresentM evaluator bindings descriptor value = do
+  matched <- matchPatternM evaluator bindings value (optionalInner descriptor)
+  case matched of
+    Nothing -> pure Nothing
+    Just updated -> validateOptionalPatternM evaluator descriptor updated value
 
-matchOptionalOmitted :: PatternBindings -> OptionalPattern -> Maybe PatternBindings
-matchOptionalOmitted bindings descriptor = do
-  defaultValue <- optionalDefault descriptor
-  matched <- matchPattern bindings defaultValue (relaxOptionalBlanks (optionalInner descriptor))
-  validateOptionalPattern descriptor matched defaultValue
+matchOptionalOmittedM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> OptionalPattern
+  -> monad (Maybe PatternBindings)
+matchOptionalOmittedM evaluator bindings descriptor = case optionalDefault descriptor of
+  Nothing -> pure Nothing
+  Just defaultValue -> do
+    matched <-
+      matchPatternM
+        evaluator
+        bindings
+        defaultValue
+        (relaxOptionalBlanks (optionalInner descriptor))
+    case matched of
+      Nothing -> pure Nothing
+      Just updated ->
+        validateOptionalPatternM evaluator descriptor updated defaultValue
 
-validateOptionalPattern :: OptionalPattern -> PatternBindings -> Expr -> Maybe PatternBindings
-validateOptionalPattern descriptor bindings value
-  | any (not . (`predicateMatchesPure` value)) (optionalTests descriptor) = Nothing
-  | otherwise = validateConditions (optionalConditions descriptor)
+validateOptionalPatternM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> OptionalPattern
+  -> PatternBindings
+  -> Expr
+  -> monad (Maybe PatternBindings)
+validateOptionalPatternM evaluator descriptor bindings value =
+  validateTests (optionalTests descriptor)
  where
-  validateConditions [] = Just bindings
+  validateTests [] = validateConditions (optionalConditions descriptor)
+  validateTests (test : rest) = do
+    result <- evaluator (Call test [value])
+    if result == Just (Symbol "True")
+      then validateTests rest
+      else pure Nothing
+  validateConditions [] = pure (Just bindings)
   validateConditions (condition : rest) = do
-    result <- either (const Nothing) Just (evaluate (substituteBindings bindings condition))
-    if result == Symbol "True" then validateConditions rest else Nothing
+    result <- evaluator (substituteBindings bindings condition)
+    if result == Just (Symbol "True")
+      then validateConditions rest
+      else pure Nothing
 
 relaxOptionalBlanks :: Expr -> Expr
 relaxOptionalBlanks expression = case expression of
@@ -3571,79 +3770,143 @@ sequencePatternDescriptor = describe Nothing Nothing Nothing
       Just (SequencePattern 0 (Just requiredHead) name condition test)
     _ -> Nothing
 
-matchSequencePattern :: PatternBindings -> SequencePattern -> [Expr] -> Maybe PatternBindings
-matchSequencePattern bindings descriptor values
-  | length values < sequenceMinimum descriptor = Nothing
-  | maybe False (\requiredHead -> any ((/= requiredHead) . headExpr) values) (sequenceHead descriptor) = Nothing
-  | maybe False (\test -> any (not . predicateMatchesPure test) values) (sequenceTest descriptor) = Nothing
-  | otherwise = do
-      bound <- case sequenceName descriptor of
-        Nothing -> Just bindings
-        Just name -> bindSequence name values bindings
-      case sequenceCondition descriptor of
-        Nothing -> Just bound
-        Just condition -> do
-          result <- either (const Nothing) Just (evaluate (substituteBindings bound condition))
-          if result == Symbol "True" then Just bound else Nothing
+matchSequencePatternM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> SequencePattern
+  -> [Expr]
+  -> monad (Maybe PatternBindings)
+matchSequencePatternM evaluator bindings descriptor values
+  | length values < sequenceMinimum descriptor = pure Nothing
+  | maybe False (\requiredHead -> any ((/= requiredHead) . headExpr) values) (sequenceHead descriptor) = pure Nothing
+  | otherwise = validateSequenceTests
+ where
+  validateSequenceTests = case sequenceTest descriptor of
+    Nothing -> bindAndValidateCondition
+    Just test -> validateValues test values
+  validateValues _ [] = bindAndValidateCondition
+  validateValues test (value : rest) = do
+    result <- evaluator (Call test [value])
+    if result == Just (Symbol "True")
+      then validateValues test rest
+      else pure Nothing
+  bindAndValidateCondition = case sequenceName descriptor of
+    Nothing -> validateCondition bindings
+    Just name -> case bindSequence name values bindings of
+      Nothing -> pure Nothing
+      Just bound -> validateCondition bound
+  validateCondition bound = case sequenceCondition descriptor of
+    Nothing -> pure (Just bound)
+    Just condition -> do
+      result <- evaluator (substituteBindings bound condition)
+      pure
+        ( if result == Just (Symbol "True")
+            then Just bound
+            else Nothing
+        )
 
-matchSequencePatternElements :: PatternBindings -> Expr -> [Expr] -> Maybe PatternBindings
-matchSequencePatternElements bindings patternExpression values = case patternExpression of
+matchSequencePatternElementsM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> Expr
+  -> [Expr]
+  -> monad (Maybe PatternBindings)
+matchSequencePatternElementsM evaluator bindings patternExpression values = case patternExpression of
   Call (Symbol "HoldPattern") [innerPattern] ->
-    matchSequencePatternElements bindings innerPattern values
+    matchSequencePatternElementsM evaluator bindings innerPattern values
   Call (Symbol priority) (innerPattern : _)
     | priority `elem` ["Longest", "Shortest"] ->
-        matchSequencePatternElements bindings innerPattern values
+        matchSequencePatternElementsM evaluator bindings innerPattern values
   Call (Symbol "Condition") [innerPattern, condition] -> do
-    matched <- matchSequencePatternElements bindings innerPattern values
-    result <- either (const Nothing) Just (evaluate (substituteBindings matched condition))
-    if result == Symbol "True" then Just matched else Nothing
+    matched <- matchSequencePatternElementsM evaluator bindings innerPattern values
+    case matched of
+      Nothing -> pure Nothing
+      Just updated -> do
+        result <- evaluator (substituteBindings updated condition)
+        pure
+          ( if result == Just (Symbol "True")
+              then Just updated
+              else Nothing
+          )
   Call (Symbol "PatternTest") [innerPattern, test] -> do
-    matched <- matchSequencePatternElements bindings innerPattern values
-    if all (predicateMatchesPure test) values then Just matched else Nothing
+    matched <- matchSequencePatternElementsM evaluator bindings innerPattern values
+    case matched of
+      Nothing -> pure Nothing
+      Just updated -> validateValues updated test values
   Call (Symbol "Pattern") [Symbol name, innerPattern] -> do
-    matched <- matchSequencePatternElements bindings innerPattern values
-    bindSequence name values matched
+    matched <- matchSequencePatternElementsM evaluator bindings innerPattern values
+    pure (matched >>= bindSequence name values)
   Call (Symbol "PatternSequence") patterns ->
-    matchPatternArguments bindings values patterns
+    matchPatternArgumentsM evaluator bindings values patterns
   Call (Symbol "OrderlessPatternSequence") patterns ->
-    matchOrderlessPatternSequence bindings values (permutations patterns)
+    matchOrderlessPatternSequenceM evaluator bindings values (permutations patterns)
   Call (Symbol "OptionsPattern") patternArguments
     | length patternArguments <= 1 ->
-        if all isOptionExpression values then Just bindings else Nothing
+        pure (if all isOptionExpression values then Just bindings else Nothing)
   repeated@(Call (Symbol repetitionHead) _)
     | repetitionHead `elem` ["Repeated", "RepeatedNull"] ->
-        matchRepeatedPattern bindings repeated values
+        matchRepeatedPatternM evaluator bindings repeated values
   _
     | Just descriptor <- sequencePatternDescriptor patternExpression ->
-        matchSequencePattern bindings descriptor values
+        matchSequencePatternM evaluator bindings descriptor values
   _ -> case values of
-    [value] -> matchPattern bindings value patternExpression
-    _ -> Nothing
+    [value] -> matchPatternM evaluator bindings value patternExpression
+    _ -> pure Nothing
+ where
+  validateValues updated _ [] = pure (Just updated)
+  validateValues updated test (value : rest) = do
+    result <- evaluator (Call test [value])
+    if result == Just (Symbol "True")
+      then validateValues updated test rest
+      else pure Nothing
 
-matchRepeatedPattern :: PatternBindings -> Expr -> [Expr] -> Maybe PatternBindings
-matchRepeatedPattern bindings (Call (Symbol repetitionHead) patternArguments) values = do
-  itemPattern <- case patternArguments of
-    item : _ -> Just item
-    [] -> Nothing
-  (countMinimum, countMaximum) <- repetitionCountBounds repetitionHead patternArguments
-  if countMinimum > countMaximum
-    then Nothing
-    else matchFrom itemPattern countMinimum countMaximum values 0 bindings
+matchRepeatedPatternM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> Expr
+  -> [Expr]
+  -> monad (Maybe PatternBindings)
+matchRepeatedPatternM evaluator bindings (Call (Symbol repetitionHead) patternArguments) values =
+  case patternArguments of
+    [] -> pure Nothing
+    itemPattern : _ -> case repetitionCountBounds repetitionHead patternArguments of
+      Nothing -> pure Nothing
+      Just (countMinimum, countMaximum)
+        | countMinimum > countMaximum -> pure Nothing
+        | otherwise ->
+            matchFrom itemPattern countMinimum countMaximum values 0 bindings
  where
   matchFrom itemPattern countMinimum countMaximum remaining count current
     | null remaining =
-        if count >= countMinimum && count <= countMaximum then Just current else Nothing
-    | count >= countMaximum = Nothing
+        pure
+          ( if count >= countMinimum && count <= countMaximum
+              then Just current
+              else Nothing
+          )
+    | count >= countMaximum = pure Nothing
     | otherwise = matchLengths (candidateLengths itemPattern remaining)
    where
-    matchLengths [] = Nothing
-    matchLengths (width : rest) =
+    matchLengths [] = pure Nothing
+    matchLengths (width : rest) = do
       let (segment, suffix) = splitAt width remaining
-       in case matchSequencePatternElements current itemPattern segment of
+      matched <- matchSequencePatternElementsM evaluator current itemPattern segment
+      case matched of
+        Nothing -> matchLengths rest
+        Just updated -> do
+          completed <-
+            matchFrom
+              itemPattern
+              countMinimum
+              countMaximum
+              suffix
+              (count + 1)
+              updated
+          case completed of
+            Just _ -> pure completed
             Nothing -> matchLengths rest
-            Just matched -> case matchFrom itemPattern countMinimum countMaximum suffix (count + 1) matched of
-              Just completed -> Just completed
-              Nothing -> matchLengths rest
   candidateLengths itemPattern remaining =
     let (itemMinimum, itemMaximum) = patternWidthBounds itemPattern
         concreteMinimum = max 1 itemMinimum
@@ -3651,14 +3914,21 @@ matchRepeatedPattern bindings (Call (Symbol repetitionHead) patternArguments) va
      in if sequencePrefersLongest itemPattern
           then [concreteMaximum, concreteMaximum - 1 .. concreteMinimum]
           else [concreteMinimum .. concreteMaximum]
-matchRepeatedPattern _ _ _ = Nothing
+matchRepeatedPatternM _ _ _ _ = pure Nothing
 
-matchOrderlessPatternSequence :: PatternBindings -> [Expr] -> [[Expr]] -> Maybe PatternBindings
-matchOrderlessPatternSequence _ _ [] = Nothing
-matchOrderlessPatternSequence bindings values (patterns : rest) =
-  case matchPatternArguments bindings values patterns of
-    Just matched -> Just matched
-    Nothing -> matchOrderlessPatternSequence bindings values rest
+matchOrderlessPatternSequenceM
+  :: Monad monad
+  => (Expr -> monad (Maybe Expr))
+  -> PatternBindings
+  -> [Expr]
+  -> [[Expr]]
+  -> monad (Maybe PatternBindings)
+matchOrderlessPatternSequenceM _ _ _ [] = pure Nothing
+matchOrderlessPatternSequenceM evaluator bindings values (patterns : rest) = do
+  matched <- matchPatternArgumentsM evaluator bindings values patterns
+  case matched of
+    Just _ -> pure matched
+    Nothing -> matchOrderlessPatternSequenceM evaluator bindings values rest
 
 isOptionExpression :: Expr -> Bool
 isOptionExpression (Call (Symbol ruleHead) [key, _])
@@ -3668,11 +3938,6 @@ isOptionExpression (Call (Symbol ruleHead) [key, _])
       _ -> False
 isOptionExpression (Call (Symbol "List") values) = all isOptionExpression values
 isOptionExpression _ = False
-
-predicateMatchesPure :: Expr -> Expr -> Bool
-predicateMatchesPure test value = case evaluate (Call test [value]) of
-  Right (Symbol "True") -> True
-  _ -> False
 
 bindScalar :: Text -> Expr -> PatternBindings -> Maybe PatternBindings
 bindScalar name value bindings = case lookup name bindings of
@@ -4389,6 +4654,8 @@ compareOperationPath left right = case compare (length right) (length left) of
 
 selectAtPath :: [PathSelector] -> Expr -> Maybe Expr
 selectAtPath [] expression = Just expression
+selectAtPath (ArgumentSelector 0 : remaining) (Call expressionHead _) =
+  selectAtPath remaining expressionHead
 selectAtPath (selector : remaining) association
   | Just entries <- associationEntries association = do
       entry <- associationEntryForSelector selector entries
@@ -4400,6 +4667,11 @@ selectAtPath _ _ = Nothing
 
 deleteAtPath :: [PathSelector] -> Expr -> Maybe Expr
 deleteAtPath [] _ = Nothing
+deleteAtPath [ArgumentSelector 0] (Call _ values) =
+  Just (Call (Symbol "Sequence") values)
+deleteAtPath (ArgumentSelector 0 : remaining) (Call expressionHead values) = do
+  updatedHead <- deleteAtPath remaining expressionHead
+  Just (Call updatedHead values)
 deleteAtPath [selector] association
   | Just entries <- associationEntries association = do
       index <- associationEntryIndex selector entries
@@ -4420,6 +4692,9 @@ deleteAtPath _ _ = Nothing
 
 replaceAtPath :: [PathSelector] -> Expr -> Expr -> Maybe Expr
 replaceAtPath [] replacement _ = Just replacement
+replaceAtPath (ArgumentSelector 0 : remaining) replacement (Call expressionHead values) = do
+  updatedHead <- replaceAtPath remaining replacement expressionHead
+  Just (Call updatedHead values)
 replaceAtPath (selector : remaining) replacement association
   | Just entries <- associationEntries association = do
       index <- associationEntryIndex selector entries

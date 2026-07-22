@@ -1103,6 +1103,22 @@ checkEvaluationSession = do
         , ("selection operator forms", "{Select[EvenQ][{1,2,3,4}], Discard[EvenQ][{1,2,3,4}], SelectFirst[EvenQ][{1,2,3,4}]}", "List[List[2, 4], List[1, 3], 2]")
         , ("SelectFirst holds an unused default", "y = 0; {SelectFirst[{a}, True &, y = y + 1], y}", "List[a, 0]")
         , ("SelectFirst returns an unevaluated default", "y = 0; {SelectFirst[{a}, False &, y = y + 1], y, SelectFirst[{a}, False &, 1 + 2]}", "List[Set[y, Plus[y, 1]], 0, Plus[1, 2]]")
+        , ("pattern operands stay held across own values", "x = 1; {Cases[{a}, x_], MatchQ[a, x_], a /. x_ -> Hold[x]}", "List[List[a], True, Hold[a]]")
+        , ("condition patterns call delayed session definitions", "p[x_] := x > 1; Cases[{1, 2, 3}, x_ /; p[x]]", "List[2, 3]")
+        , ("condition callbacks thread state in traversal order", "c = 0; {Cases[{1, 2, 3}, x_ /; (c = c + 1; x > 1)], c}", "List[List[2, 3], 3]")
+        , ("pattern test callbacks thread state in traversal order", "c = 0; {Cases[{1, 2, 3}, x_?(Function[y, c = c + 1; y > 1])], c}", "List[List[2, 3], 3]")
+        , ("pattern subjects evaluate before callbacks", "c = 0; Cases[(c = 10; {1, 2}), x_ /; (c = c + 1; True)]; c", "12")
+        , ("pattern rules distinguish eager and delayed templates", "c = 0; first = f[a, a] /. a -> (c = c + 1; b); eager = c; c = 0; second = f[a, a] /. a :> (c = c + 1; b); {first, eager, second, c}", "List[f[b, b], 1, f[b, b], 2]")
+        , ("failed pattern alternatives preserve callback effects", "c = 0; {MatchQ[a, (x_ /; (c = c + 1; False)) | (x_ /; (c = c + 1; True))], c}", "List[True, 2]")
+        , ("effectful key value patterns share the matcher", "c = 0; {Cases[{<|a -> 1|>}, KeyValuePattern[a -> (x_ /; (c = c + 1; True))]], c}", "List[List[Association[Rule[a, 1]]], 1]")
+        , ("pattern search family threads callbacks and short circuits", "c = 0; deleted = DeleteCases[{1, 2, 3}, x_ /; (c = c + 1; x > 1)]; dc = c; c = 0; first = FirstCase[{1, 2, 3}, x_ /; (c = c + 1; x > 1)]; fc = c; c = 0; member = MemberQ[{1, 2, 3}, x_ /; (c = c + 1; x > 1)]; {deleted, dc, first, fc, member, c}", "List[List[1], 3, 2, 2, True, 2]")
+        , ("position count and free searches preserve callback order", "c = 0; positions = Position[{1, 2, 3}, x_ /; (c = c + 1; x > 1)]; pc = c; c = 0; counted = Count[{1, 2, 3}, x_ /; (c = c + 1; x > 1)]; cc = c; c = 0; free = FreeQ[{1, 2, 3}, x_ /; (c = c + 1; x > 5)]; {positions, pc, counted, cc, free, c}", "List[List[List[2], List[3]], 5, 2, 3, True, 5]")
+        , ("replacement family shares effectful pattern matching", "c = 0; replaced = Replace[{1, 2, 3}, (x_ /; (c = c + 1; x > 1)) -> z, {1}]; rc = c; c = 0; at = ReplaceAt[{1, 2, 3}, (x_ /; (c = c + 1; x > 1)) :> z, {{1}, {2}, {3}}]; ac = c; c = 0; all = ReplaceAll[f[1, 2, 3], (x_ /; (c = c + 1; x > 1)) :> z]; {replaced, rc, at, ac, all, c}", "List[List[1, z, z], 3, List[1, z, z], 3, f[1, z, z], 5]")
+        , ("pattern Heads options match traversal semantics", "{Cases[f[a], _, Heads -> True], Cases[f[a], _, {0, Infinity}, 2, Heads -> True], DeleteCases[f[a], _, Heads -> True], DeleteCases[f[a], _, {0, Infinity}, 1, Heads -> True], Replace[f[a], x_ -> h[x], {0, Infinity}, Heads -> True], FreeQ[f[a], f, Heads -> False], Position[f[a], f, Heads -> False], Position[f[a], f, Heads -> True]}", "List[List[f, a], List[f, a], a, h[h[f][h[a]]], True, List[], List[List[0]]]")
+        , ("nested head deletion splices surviving arguments", "DeleteCases[f[1, g[2, g], 3], g, {0, Infinity}, Heads -> True]", "f[1, 2, 3]")
+        , ("FirstCase prepares rules once and keeps defaults held", "c = 0; first = FirstCase[{a}, x_ -> (c = c + 1; x)]; eager = c; x = 0; {first, eager, FirstCase[{a}, _Integer, (x = 1; none)], x}", "List[a, 1, CompoundExpression[Set[x, 1], none], 0]")
+        , ("downvalue pattern callbacks share one effectful match", "c = 0; q[x_] := (c = c + 1; x > 1); f[x_ /; q[x]] := x; {f[1], f[2], c}", "List[f[1], 2, 2]")
+        , ("downvalue PatternTest and Condition callbacks run once", "c = 0; f[(x_?(c = c + 1; IntegerQ)) /; (c = c + 10; True)] := x; {f[1], c}", "List[1, 11]")
         , ("map callbacks thread session state", "y = 0; {Map[Function[x, y = y + 1; x], {a, b}], y}", "List[List[a, b], 2]")
         , ("map level specifications", "{Map[f, {a, b}, {0}], Map[f, {a, {b, c}}, {2}], Map[f, {a, {b, c}}, {1, 2}]}", "List[f[List[a, b]], List[a, List[f[b], f[c]]], List[f[a], f[List[f[b], f[c]]]]]")
         , ("apply level specifications", "{Apply[f, {a, b}, {0}], Apply[f, {a, {b, c}}, {2}], Apply[f, {a, {b, c}}, {1, 2}]}", "List[f[a, b], List[a, List[b, c]], List[a, f[b, c]]]")
@@ -1252,13 +1268,34 @@ checkEvaluationSession = do
         , ("module immediate recursive dispatch", "Module[{f}, f[0] := 1; f[n_] := n + f[n - 1]; f[10]]", "56")
         , ("module closure multiple arguments", "bin = Module[{f}, f[x_, y_] := x + y; f]; {bin[3, 4], bin[a, b]}", "List[7, Plus[a, b]]")
         ]
+      printCases =
+        [ ( "pattern callbacks preserve prints in traversal order"
+          , "p[x_] := (Print[x]; x > 1); Cases[{1, 2, 3}, x_ /; p[x]]"
+          , "List[2, 3]"
+          , ["1", "2", "3"]
+          )
+        ]
       partArityMessage =
         ( "Part::error"
         , "MessageName[Part, \"error\"]"
         , "Part::error: Part expects an expression and at least one part specification."
         )
       messageCases =
-        [ ( "basic nonfatal Part message"
+        [ ( "invalid held pattern arity is nonfatal"
+          , "MatchQ[1]"
+          , "MatchQ[1]"
+          , [ ( "MatchQ::error"
+              , "MessageName[MatchQ, \"error\"]"
+              , "MatchQ::error: MatchQ expects exactly two arguments."
+              )
+            ]
+          )
+        , ( "pattern callbacks preserve generated messages"
+          , "Cases[{1}, x_ /; (Part[]; True)]"
+          , "List[1]"
+          , [partArityMessage]
+          )
+        , ( "basic nonfatal Part message"
           , "Part[f[a], 2]"
           , "Part[f[a], 2]"
           , [ ( "Part::error"
@@ -1572,8 +1609,9 @@ checkEvaluationSession = do
           )
         ]
   caseResults <- traverse evaluateSessionCase cases
+  printResults <- traverse evaluatePrintCase printCases
   messageResults <- traverse evaluateMessageCase messageCases
-  pure (and (caseResults <> messageResults))
+  pure (and (caseResults <> printResults <> messageResults))
  where
   evaluateSessionCase (label, source, expected) = do
     let result = do
@@ -1581,6 +1619,20 @@ checkEvaluationSession = do
           (value, _) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
           pure (fullForm value)
     assertEqual ("evaluation session: " <> label) (Right expected) result
+
+  evaluatePrintCase (label, source, expectedValue, expectedPrints) = do
+    let result = do
+          expression <- parseInputForm source
+          (value, updated) <-
+            either
+              (Left . ParseError . evaluationErrorMessage)
+              Right
+              (evaluateInSession emptySession expression)
+          pure (fullForm value, sessionPrints updated)
+    assertEqual
+      ("evaluation session prints: " <> label)
+      (Right (expectedValue, expectedPrints))
+      result
 
   evaluateMessageCase (label, source, expectedValue, expectedMessages) = do
     let result = do

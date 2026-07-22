@@ -85,6 +85,160 @@ data EvaluationExit
 type SessionResult value =
   Either EvaluationExit (value, EvaluationSession)
 
+-- Pattern matching can invoke arbitrary Condition and PatternTest callbacks.
+-- This small state monad lets the shared matcher thread the same immutable
+-- EvaluationSession used by ordinary evaluation, including effects from
+-- failed alternatives and backtracking attempts.
+newtype PatternSession value = PatternSession
+  { runPatternSession :: EvaluationSession -> SessionResult value
+  }
+
+instance Functor PatternSession where
+  fmap function action = PatternSession $ \session -> do
+    (value, updated) <- runPatternSession action session
+    Right (function value, updated)
+
+instance Applicative PatternSession where
+  pure value = PatternSession (\session -> Right (value, session))
+  functionAction <*> valueAction = PatternSession $ \session -> do
+    (function, functionSession) <- runPatternSession functionAction session
+    (value, updated) <- runPatternSession valueAction functionSession
+    Right (function value, updated)
+
+instance Monad PatternSession where
+  action >>= continuation = PatternSession $ \session -> do
+    (value, updated) <- runPatternSession action session
+    runPatternSession (continuation value) updated
+
+heldPatternBuiltinHeads :: [Text]
+heldPatternBuiltinHeads =
+  [ "MatchQ"
+  , "Cases"
+  , "DeleteCases"
+  , "FirstCase"
+  , "Replace"
+  , "ReplaceAll"
+  , "ReplaceRepeated"
+  , "ReplaceAt"
+  , "Position"
+  , "FirstPosition"
+  , "Count"
+  , "FreeQ"
+  , "MemberQ"
+  ]
+
+evaluatePatternCallback :: Int -> Expr -> PatternSession (Maybe Expr)
+evaluatePatternCallback depth expression = PatternSession $ \session -> do
+  (value, updated) <- evaluateSessionAt (depth + 1) session expression
+  Right (Just value, updated)
+
+instantiateSessionPattern
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult (Maybe [Expr])
+instantiateSessionPattern depth session expression patternExpression templates =
+  runPatternSession
+    ( instantiatePatternMatchManyWith
+        (evaluatePatternCallback depth)
+        expression
+        patternExpression
+        templates
+    )
+    session
+
+sessionPatternMatches
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Bool
+sessionPatternMatches depth session expression patternExpression = do
+  (matched, updated) <-
+    instantiateSessionPattern depth session expression patternExpression []
+  Right (maybe False (const True) matched, updated)
+
+data SessionPatternRule = SessionPatternRule !Expr !Expr
+  deriving (Eq, Show)
+
+sessionPatternRule :: Expr -> Maybe SessionPatternRule
+sessionPatternRule = \case
+  Call (Symbol "Rule") [patternExpression, template] ->
+    Just (SessionPatternRule patternExpression template)
+  Call (Symbol "RuleDelayed") [patternExpression, template] ->
+    Just (SessionPatternRule patternExpression template)
+  _ -> Nothing
+
+sessionPatternRuleSet :: Expr -> Maybe [SessionPatternRule]
+sessionPatternRuleSet (Call (Symbol "List") values) =
+  traverse sessionPatternRule values
+sessionPatternRuleSet expression = pure <$> sessionPatternRule expression
+
+nestedSessionPatternRuleSets :: Expr -> Maybe [Expr]
+nestedSessionPatternRuleSets (Call (Symbol "List") values@(_ : _))
+  | all isRuleList values = Just values
+ where
+  isRuleList expression@(Call (Symbol "List") _) =
+    maybe False (const True) (sessionPatternRuleSet expression)
+  isRuleList _ = False
+nestedSessionPatternRuleSets _ = Nothing
+
+prepareSessionPatternRules
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+prepareSessionPatternRules depth session = \case
+  Call (Symbol "List") rules -> do
+    (prepared, updated) <- prepareRules session rules
+    Right (Call (Symbol "List") prepared, updated)
+  Call (Symbol "Rule") [patternExpression, template] -> do
+    (preparedTemplate, updated) <-
+      evaluateRuleTemplate depth session patternExpression template
+    Right
+      ( Call (Symbol "Rule") [patternExpression, preparedTemplate]
+      , updated
+      )
+  delayedRule@(Call (Symbol "RuleDelayed") [_, _]) ->
+    Right (delayedRule, session)
+  expression -> Right (expression, session)
+ where
+  prepareRules current [] = Right ([], current)
+  prepareRules current (rule : rest) = do
+    (preparedRule, ruleSession) <-
+      prepareSessionPatternRules depth current rule
+    (preparedRest, updated) <- prepareRules ruleSession rest
+    Right (preparedRule : preparedRest, updated)
+
+evaluateRuleTemplate
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateRuleTemplate depth session patternExpression template =
+  let names = Set.toList (patternBindingNames patternExpression)
+      snapshots =
+        [ (name, snapshotSymbolValues name session)
+        | name <- names
+        ]
+      scopedSession = clearDefinitions names session
+   in restoreScopedResult
+        snapshots
+        (evaluateSessionAt (depth + 1) scopedSession template)
+
+patternBindingNames :: Expr -> Set.Set Text
+patternBindingNames = \case
+  Call (Symbol "Verbatim") [_] -> Set.empty
+  Call (Symbol "Pattern") [Symbol name, innerPattern] ->
+    Set.insert name (patternBindingNames innerPattern)
+  Call expressionHead values ->
+    Set.unions
+      (patternBindingNames expressionHead : map patternBindingNames values)
+  _ -> Set.empty
+
 data IterationFailure
   = InvalidIterator !EvaluationSession
   | IterationEvaluationFailure !EvaluationExit
@@ -228,6 +382,9 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionAccumulator "Sum" "Plus" depth session arguments'
       Call (Symbol "Product") arguments' ->
         evaluateSessionAccumulator "Product" "Times" depth session arguments'
+      Call (Symbol headName) arguments'
+        | headName `elem` heldPatternBuiltinHeads ->
+            evaluateHeldSessionPatternBuiltin headName depth session arguments'
       Call (Symbol headName) [Symbol name, rhs]
         | Just constructor <- Map.lookup headName updateConstructors ->
             evaluateUpdate headName depth session name constructor rhs
@@ -284,6 +441,1007 @@ evaluateSessionAtRaw depth session expression = case expression of
                         Right (reduced, definitionSession)
       _ -> Right (expression, session)
 
+evaluateHeldSessionPatternBuiltin
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateHeldSessionPatternBuiltin headName depth session arguments' =
+  case (headName, arguments') of
+    ("MatchQ", [subjectExpression, patternExpression]) -> do
+      (subject, subjectSession) <-
+        evaluateSessionAt (depth + 1) session subjectExpression
+      (matches, updated) <-
+        sessionPatternMatches depth subjectSession subject patternExpression
+      Right (sessionBoolean matches, updated)
+    ("Cases", subjectExpression : patternExpression : extras)
+      | length extras <= 3 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (preparedPattern, patternSession) <-
+            prepareCasePattern depth subjectSession patternExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth patternSession extras
+          evaluateSessionCases
+            depth
+            updated
+            subject
+            preparedPattern
+            evaluatedExtras
+    ("DeleteCases", subjectExpression : patternExpression : extras)
+      | length extras <= 3 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth subjectSession extras
+          evaluateSessionDeleteCases
+            depth
+            updated
+            subject
+            patternExpression
+            evaluatedExtras
+    ("FirstCase", subjectExpression : patternExpression : extras)
+      | length extras <= 2 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (preparedPattern, updated) <-
+            prepareCasePattern depth subjectSession patternExpression
+          evaluateSessionFirstCase
+            depth
+            updated
+            subject
+            preparedPattern
+            extras
+    ("Position", subjectExpression : patternExpression : extras)
+      | length extras <= 3 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth subjectSession extras
+          evaluateSessionPosition
+            depth
+            updated
+            subject
+            patternExpression
+            evaluatedExtras
+    ("FirstPosition", subjectExpression : patternExpression : extras)
+      | length extras <= 2 -> do
+          (subject, updated) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          evaluateSessionFirstPosition
+            depth
+            updated
+            subject
+            patternExpression
+            extras
+    ("Count", subjectExpression : patternExpression : extras)
+      | length extras <= 2 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth subjectSession extras
+          evaluateSessionCount
+            depth
+            updated
+            subject
+            patternExpression
+            evaluatedExtras
+    ("FreeQ", subjectExpression : patternExpression : extras)
+      | length extras <= 2 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth subjectSession extras
+          evaluateSessionFreeQ
+            depth
+            updated
+            subject
+            patternExpression
+            evaluatedExtras
+    ("MemberQ", subjectExpression : patternExpression : extras)
+      | length extras <= 1 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth subjectSession extras
+          evaluateSessionMemberQ
+            depth
+            updated
+            subject
+            patternExpression
+            evaluatedExtras
+    ("Replace", subjectExpression : rulesExpression : extras)
+      | length extras <= 2 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (rules, rulesSession) <-
+            prepareSessionPatternRules depth subjectSession rulesExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth rulesSession extras
+          evaluateSessionReplace depth updated subject rules evaluatedExtras
+    ("ReplaceAll", [subjectExpression, rulesExpression]) -> do
+      (subject, subjectSession) <-
+        evaluateSessionAt (depth + 1) session subjectExpression
+      (rules, updated) <-
+        prepareSessionPatternRules depth subjectSession rulesExpression
+      evaluateSessionReplaceAll depth updated subject rules
+    ("ReplaceRepeated", [subjectExpression, rulesExpression]) -> do
+      (subject, subjectSession) <-
+        evaluateSessionAt (depth + 1) session subjectExpression
+      (rules, updated) <-
+        prepareSessionPatternRules depth subjectSession rulesExpression
+      evaluateSessionReplaceRepeated depth updated subject rules
+    ("ReplaceAt", [subjectExpression, rulesExpression, positionsExpression]) -> do
+      (subject, subjectSession) <-
+        evaluateSessionAt (depth + 1) session subjectExpression
+      (rules, rulesSession) <-
+        prepareSessionPatternRules depth subjectSession rulesExpression
+      (positions, updated) <-
+        evaluateSessionAt (depth + 1) rulesSession positionsExpression
+      evaluateSessionReplaceAt depth updated subject rules positions
+    _ -> sessionFailure session (heldPatternArityMessage headName)
+
+prepareCasePattern
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+prepareCasePattern depth session expression =
+  case sessionPatternRule expression of
+    Just _ -> prepareSessionPatternRules depth session expression
+    Nothing -> Right (expression, session)
+
+sessionBoolean :: Bool -> Expr
+sessionBoolean True = Symbol "True"
+sessionBoolean False = Symbol "False"
+
+heldPatternArityMessage :: Text -> Text
+heldPatternArityMessage = \case
+  "MatchQ" -> "MatchQ expects exactly two arguments."
+  "FreeQ" ->
+    "FreeQ expects an expression, a pattern, and an optional level specification."
+  "Cases" ->
+    "Cases expects an expression, a pattern or transformation rule, and optional level and match limits."
+  "DeleteCases" ->
+    "DeleteCases expects an expression, a pattern, and optional level and match limits."
+  "FirstCase" ->
+    "FirstCase expects an expression, a pattern, and optional default and level specification."
+  "Replace" ->
+    "Replace expects an expression, replacement rules, and an optional level specification."
+  "ReplaceAll" -> "ReplaceAll expects exactly two arguments."
+  "ReplaceRepeated" -> "ReplaceRepeated expects exactly two arguments."
+  "ReplaceAt" -> "ReplaceAt expects exactly three arguments."
+  "Position" ->
+    "Position expects an expression, a pattern, and optional level and result limits."
+  "FirstPosition" ->
+    "FirstPosition expects an expression, a pattern, and optional default and level specification."
+  "Count" -> "Count expects an expression, a pattern, and an optional levelspec."
+  "MemberQ" ->
+    "MemberQ expects an expression, a pattern, and an optional level specification."
+  headName -> headName <> " received an unsupported argument list."
+
+patternFailure :: EvaluationSession -> Text -> Either EvaluationExit value
+patternFailure session message =
+  Left (SessionEvaluationFailure (EvaluationError message) session)
+
+sessionLevelBounds
+  :: EvaluationSession
+  -> Expr
+  -> Either EvaluationExit LevelBounds
+sessionLevelBounds session specification =
+  case normalizeLevelSpec specification of
+    Left (EvaluationError message) ->
+      Left (SessionEvaluationFailure (EvaluationError message) session)
+    Right bounds -> Right bounds
+
+patternSelectionLimit
+  :: Text
+  -> EvaluationSession
+  -> Maybe Expr
+  -> Either EvaluationExit (Maybe Integer)
+patternSelectionLimit operation session limit =
+  case selectionLimit operation limit of
+    Left (EvaluationError message) ->
+      Left (SessionEvaluationFailure (EvaluationError message) session)
+    Right normalized -> Right normalized
+
+evaluateSessionCount
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCount depth session subject patternExpression extras = do
+  let (includeHeads, positionalExtras) =
+        stripSessionHeadsOption False extras
+  bounds <- case positionalExtras of
+    [] -> sessionLevelBounds session (Call (Symbol "List") [Integer 1])
+    [specification] -> sessionLevelBounds session specification
+    _ -> patternFailure session "Count expects two or three arguments."
+  (count, updated) <-
+    countSessionMatches
+      depth
+      session
+      bounds
+      patternExpression
+      (collectPatternRecords includeHeads 0 subject)
+  Right (Integer count, updated)
+
+evaluateSessionFreeQ
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFreeQ depth session subject patternExpression extras = do
+  let (includeHeads, positionalExtras) =
+        stripSessionHeadsOption True extras
+  bounds <- case positionalExtras of
+    [] ->
+      sessionLevelBounds
+        session
+        (Call (Symbol "List") [Integer 0, Symbol "Infinity"])
+    [specification] -> sessionLevelBounds session specification
+    _ -> patternFailure session "FreeQ expects two or three arguments."
+  (found, updated) <-
+    firstSessionMatch
+      depth
+      session
+      bounds
+      patternExpression
+      (collectPatternRecords includeHeads 0 subject)
+  Right (sessionBoolean (not found), updated)
+
+evaluateSessionMemberQ
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMemberQ depth session subject patternExpression extras = do
+  bounds <- case extras of
+    [] -> sessionLevelBounds session (Call (Symbol "List") [Integer 1])
+    [specification] -> sessionLevelBounds session specification
+    _ -> patternFailure session "MemberQ expects two or three arguments."
+  (found, updated) <-
+    firstSessionMatch
+      depth
+      session
+      bounds
+      patternExpression
+      (collectPatternRecords False 0 subject)
+  Right (sessionBoolean found, updated)
+
+countSessionMatches
+  :: Int
+  -> EvaluationSession
+  -> LevelBounds
+  -> Expr
+  -> [PatternRecord]
+  -> SessionResult Integer
+countSessionMatches depth = go 0
+ where
+  go count session _ _ [] = Right (count, session)
+  go count session bounds patternExpression (PatternRecord value positive negative : rest)
+    | not (levelMatches bounds positive negative) =
+        go count session bounds patternExpression rest
+    | otherwise = do
+        (matches, updated) <-
+          sessionPatternMatches depth session value patternExpression
+        go
+          (if matches then count + 1 else count)
+          updated
+          bounds
+          patternExpression
+          rest
+
+firstSessionMatch
+  :: Int
+  -> EvaluationSession
+  -> LevelBounds
+  -> Expr
+  -> [PatternRecord]
+  -> SessionResult Bool
+firstSessionMatch depth = go
+ where
+  go session _ _ [] = Right (False, session)
+  go session bounds patternExpression (PatternRecord value positive negative : rest)
+    | not (levelMatches bounds positive negative) =
+        go session bounds patternExpression rest
+    | otherwise = do
+        (matches, updated) <-
+          sessionPatternMatches depth session value patternExpression
+        if matches
+          then Right (True, updated)
+          else go updated bounds patternExpression rest
+
+evaluateSessionCases
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCases depth session subject patternOrRule extras = do
+  let (includeHeads, positionalExtras) =
+        stripSessionHeadsOption False extras
+  (bounds, limit) <- case positionalExtras of
+    [] -> do
+      normalized <- sessionLevelBounds session (Integer 1)
+      Right (normalized, Nothing)
+    [specification] -> do
+      normalized <- sessionLevelBounds session specification
+      Right (normalized, Nothing)
+    [specification, limitExpression] -> do
+      normalized <- sessionLevelBounds session specification
+      normalizedLimit <-
+        patternSelectionLimit "Cases" session (Just limitExpression)
+      Right (normalized, normalizedLimit)
+    _ -> patternFailure session "Cases expects between two and four arguments."
+  let rule = sessionPatternRule patternOrRule
+      patternExpression =
+        case rule of
+          Just (SessionPatternRule pattern' _) -> pattern'
+          Nothing -> patternOrRule
+  (results, updated) <-
+    collectSessionCases
+      depth
+      session
+      bounds
+      limit
+      patternExpression
+      rule
+      (collectPatternRecords includeHeads 0 subject)
+  Right (Call (Symbol "List") results, updated)
+
+collectSessionCases
+  :: Int
+  -> EvaluationSession
+  -> LevelBounds
+  -> Maybe Integer
+  -> Expr
+  -> Maybe SessionPatternRule
+  -> [PatternRecord]
+  -> SessionResult [Expr]
+collectSessionCases depth = go
+ where
+  go session _ (Just 0) _ _ _ = Right ([], session)
+  go session _ _ _ _ [] = Right ([], session)
+  go session bounds remaining patternExpression rule (PatternRecord value positive negative : rest)
+    | not (levelMatches bounds positive negative) =
+        go session bounds remaining patternExpression rule rest
+    | otherwise = do
+        (transformed, updated) <- case rule of
+          Nothing -> do
+            (matches, matchedSession) <-
+              sessionPatternMatches depth session value patternExpression
+            Right (if matches then Just value else Nothing, matchedSession)
+          Just patternRule ->
+            applySessionPatternRule depth session value patternRule
+        case transformed of
+          Nothing ->
+            go updated bounds remaining patternExpression rule rest
+          Just result -> do
+            (following, completed) <-
+              go
+                updated
+                bounds
+                (subtractSessionLimit remaining)
+                patternExpression
+                rule
+                rest
+            Right (spliceSessionCaseResult result <> following, completed)
+
+subtractSessionLimit :: Maybe Integer -> Maybe Integer
+subtractSessionLimit Nothing = Nothing
+subtractSessionLimit (Just value) = Just (value - 1)
+
+spliceSessionCaseResult :: Expr -> [Expr]
+spliceSessionCaseResult (Call (Symbol "Sequence") values) = values
+spliceSessionCaseResult (Symbol "Nothing") = []
+spliceSessionCaseResult value = [value]
+
+evaluateSessionFirstCase
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFirstCase depth session subject patternOrRule extras = do
+  let (defaultValue, specification) = case extras of
+        [] -> (Nothing, Integer 1)
+        [defaultExpression] -> (Just defaultExpression, Integer 1)
+        [defaultExpression, levelSpecification] ->
+          (Just defaultExpression, levelSpecification)
+        _ -> (Nothing, Integer 1)
+  bounds <- sessionLevelBounds session specification
+  let rule = sessionPatternRule patternOrRule
+      patternExpression =
+        case rule of
+          Just (SessionPatternRule pattern' _) -> pattern'
+          Nothing -> patternOrRule
+  (matched, updated) <-
+    firstSessionCase
+      depth
+      session
+      bounds
+      patternExpression
+      rule
+      (collectPatternRecords False 0 subject)
+  case matched of
+    Just value -> Right (value, updated)
+    Nothing -> case defaultValue of
+      Nothing -> Right (Call (Symbol "Missing") [String "NotFound"], updated)
+      Just defaultExpression -> Right (defaultExpression, updated)
+
+firstSessionCase
+  :: Int
+  -> EvaluationSession
+  -> LevelBounds
+  -> Expr
+  -> Maybe SessionPatternRule
+  -> [PatternRecord]
+  -> SessionResult (Maybe Expr)
+firstSessionCase depth = go
+ where
+  go session _ _ _ [] = Right (Nothing, session)
+  go session bounds patternExpression rule (PatternRecord value positive negative : rest)
+    | not (levelMatches bounds positive negative) =
+        go session bounds patternExpression rule rest
+    | otherwise = do
+        (transformed, updated) <- case rule of
+          Nothing -> do
+            (matches, matchedSession) <-
+              sessionPatternMatches depth session value patternExpression
+            Right (if matches then Just value else Nothing, matchedSession)
+          Just patternRule ->
+            applySessionPatternRule depth session value patternRule
+        case transformed of
+          Just _ -> Right (transformed, updated)
+          Nothing -> go updated bounds patternExpression rule rest
+
+applySessionPatternRule
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionPatternRule
+  -> SessionResult (Maybe Expr)
+applySessionPatternRule depth session expression (SessionPatternRule patternExpression template) =
+  case template of
+    Call (Symbol "Condition") [body, condition] -> do
+      (instantiated, matchedSession) <-
+        instantiateSessionPattern
+          depth
+          session
+          expression
+          patternExpression
+          [body, condition]
+      case instantiated of
+        Just [instantiatedBody, instantiatedCondition] -> do
+          (conditionResult, conditionSession) <-
+            evaluateSessionAt
+              (depth + 1)
+              matchedSession
+              instantiatedCondition
+          if conditionResult == Symbol "True"
+            then do
+              (result, updated) <-
+                evaluateSessionAt
+                  (depth + 1)
+                  conditionSession
+                  instantiatedBody
+              Right (Just result, updated)
+            else Right (Nothing, conditionSession)
+        _ -> Right (Nothing, matchedSession)
+    _ -> do
+      (instantiated, matchedSession) <-
+        instantiateSessionPattern
+          depth
+          session
+          expression
+          patternExpression
+          [template]
+      case instantiated of
+        Just [instantiatedTemplate] -> do
+          (result, updated) <-
+            evaluateSessionAt
+              (depth + 1)
+              matchedSession
+              instantiatedTemplate
+          Right (Just result, updated)
+        _ -> Right (Nothing, matchedSession)
+
+evaluateSessionDeleteCases
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionDeleteCases depth session subject patternExpression extras = do
+  let (includeHeads, positionalExtras) =
+        stripSessionHeadsOption False extras
+  (bounds, limit) <- case positionalExtras of
+    [] -> do
+      normalized <- sessionLevelBounds session (Integer 1)
+      Right (normalized, Nothing)
+    [specification] -> do
+      normalized <- sessionLevelBounds session specification
+      Right (normalized, Nothing)
+    [specification, limitExpression] -> do
+      normalized <- sessionLevelBounds session specification
+      normalizedLimit <-
+        patternSelectionLimit "DeleteCases" session (Just limitExpression)
+      Right (normalized, normalizedLimit)
+    _ ->
+      patternFailure
+        session
+        "DeleteCases expects between two and four arguments."
+  (paths, updated) <-
+    collectSessionMatchingPaths
+      depth
+      session
+      bounds
+      limit
+      patternExpression
+      (collectPositionPathRecords includeHeads 0 [] subject)
+  if [] `elem` paths
+    then Right (Call (Symbol "Sequence") [], updated)
+    else do
+      result <- deleteSessionPaths updated subject (sortOperationPaths paths)
+      finishSessionRewrite depth updated subject result
+
+deleteSessionPaths
+  :: EvaluationSession
+  -> Expr
+  -> [[PathSelector]]
+  -> Either EvaluationExit Expr
+deleteSessionPaths _ expression [] = Right expression
+deleteSessionPaths session expression (path : rest) =
+  case deleteAtPath path expression of
+    Nothing ->
+      Left
+        ( SessionEvaluationFailure
+            (EvaluationError "DeleteCases encountered an invalid matched path")
+            session
+        )
+    Just updated -> deleteSessionPaths session updated rest
+
+evaluateSessionPosition
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionPosition depth session subject patternExpression extras = do
+  let (includeHeads, positionalExtras) =
+        stripSessionHeadsOption True extras
+  (bounds, limit) <- case positionalExtras of
+    [] -> do
+      normalized <-
+        sessionLevelBounds
+          session
+          (Call (Symbol "List") [Integer 0, Symbol "Infinity"])
+      Right (normalized, Nothing)
+    [specification] -> do
+      normalized <- sessionLevelBounds session specification
+      Right (normalized, Nothing)
+    [specification, limitExpression] -> do
+      normalized <- sessionLevelBounds session specification
+      normalizedLimit <-
+        patternSelectionLimit "Position" session (Just limitExpression)
+      Right (normalized, normalizedLimit)
+    _ ->
+      patternFailure
+        session
+        "Position expects an expression, a pattern, and optional level and result limits"
+  (paths, updated) <-
+    collectSessionMatchingPaths
+      depth
+      session
+      bounds
+      limit
+      patternExpression
+      (collectPositionPathRecords includeHeads 0 [] subject)
+  Right
+    ( Call (Symbol "List") (map pathExpression paths)
+    , updated
+    )
+
+stripSessionHeadsOption :: Bool -> [Expr] -> (Bool, [Expr])
+stripSessionHeadsOption defaultValue values = case reverse values of
+  Call (Symbol ruleHead) [Symbol "Heads", Symbol value] : rest
+    | ruleHead `elem` ["Rule", "RuleDelayed"]
+    , value `elem` ["True", "False"] ->
+        (value == "True", reverse rest)
+  _ -> (defaultValue, values)
+
+evaluateSessionFirstPosition
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFirstPosition depth session subject patternExpression extras = do
+  let (defaultValue, specification) = case extras of
+        [] ->
+          ( Nothing
+          , Call (Symbol "List") [Integer 0, Symbol "Infinity"]
+          )
+        [defaultExpression] ->
+          ( Just defaultExpression
+          , Call (Symbol "List") [Integer 0, Symbol "Infinity"]
+          )
+        [defaultExpression, levelSpecification] ->
+          (Just defaultExpression, levelSpecification)
+        _ ->
+          ( Nothing
+          , Call (Symbol "List") [Integer 0, Symbol "Infinity"]
+          )
+  bounds <- sessionLevelBounds session specification
+  (paths, updated) <-
+    collectSessionMatchingPaths
+      depth
+      session
+      bounds
+      (Just 1)
+      patternExpression
+      (collectPositionPathRecords True 0 [] subject)
+  case paths of
+    firstPath : _ -> Right (pathExpression firstPath, updated)
+    [] -> case defaultValue of
+      Nothing -> Right (Call (Symbol "Missing") [String "NotFound"], updated)
+      Just defaultExpression -> Right (defaultExpression, updated)
+
+collectSessionMatchingPaths
+  :: Int
+  -> EvaluationSession
+  -> LevelBounds
+  -> Maybe Integer
+  -> Expr
+  -> [PatternPathRecord]
+  -> SessionResult [[PathSelector]]
+collectSessionMatchingPaths depth = go
+ where
+  go session _ (Just 0) _ _ = Right ([], session)
+  go session _ _ _ [] = Right ([], session)
+  go session bounds remaining patternExpression (PatternPathRecord value positive negative path : rest)
+    | not (levelMatches bounds positive negative) =
+        go session bounds remaining patternExpression rest
+    | otherwise = do
+        (matches, updated) <-
+          sessionPatternMatches depth session value patternExpression
+        if matches
+          then do
+            (following, completed) <-
+              go
+                updated
+                bounds
+                (subtractSessionLimit remaining)
+                patternExpression
+                rest
+            Right (path : following, completed)
+          else go updated bounds remaining patternExpression rest
+
+requireSessionPatternRules
+  :: Text
+  -> EvaluationSession
+  -> Expr
+  -> Either EvaluationExit [SessionPatternRule]
+requireSessionPatternRules operation session expression =
+  case sessionPatternRuleSet expression of
+    Just rules -> Right rules
+    Nothing ->
+      Left
+        ( SessionEvaluationFailure
+            ( EvaluationError
+                (operation <> " expects a rule or flat list of rules")
+            )
+            session
+        )
+
+applySessionPatternRules
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [SessionPatternRule]
+  -> SessionResult (Maybe Expr)
+applySessionPatternRules _ session _ [] = Right (Nothing, session)
+applySessionPatternRules depth session expression (rule : rest) = do
+  (replacement, updated) <-
+    applySessionPatternRule depth session expression rule
+  case replacement of
+    Just _ -> Right (replacement, updated)
+    Nothing -> applySessionPatternRules depth updated expression rest
+
+evaluateSessionReplace
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionReplace depth session subject rulesExpression extras =
+  case nestedSessionPatternRuleSets rulesExpression of
+    Just nested ->
+      evaluateNestedSessionReplacements
+        (\current rules -> evaluateSessionReplace depth current subject rules extras)
+        session
+        nested
+    Nothing -> do
+      rules <-
+        requireSessionPatternRules "Replace" session rulesExpression
+      let (includeHeads, positionalExtras) =
+            stripSessionHeadsOption False extras
+      bounds <- case positionalExtras of
+        [] -> sessionLevelBounds session (Call (Symbol "List") [Integer 0])
+        [specification] -> sessionLevelBounds session specification
+        _ -> patternFailure session "Replace expects two or three arguments."
+      (result, updated) <-
+        replaceSessionRecords
+          depth
+          session
+          rules
+          subject
+          [ record
+          | record@(PatternPathRecord _ positive negative _) <-
+              collectPositionPathRecords includeHeads 0 [] subject
+          , levelMatches bounds positive negative
+          ]
+      finishSessionRewrite depth updated subject result
+
+replaceSessionRecords
+  :: Int
+  -> EvaluationSession
+  -> [SessionPatternRule]
+  -> Expr
+  -> [PatternPathRecord]
+  -> SessionResult Expr
+replaceSessionRecords _ session _ current [] = Right (current, session)
+replaceSessionRecords depth session rules current (PatternPathRecord _ _ _ path : rest) =
+  case selectAtPath path current of
+    Nothing ->
+      sessionFailure session "Replace encountered an invalid selected path"
+    Just selected -> do
+      (replacement, updated) <-
+        applySessionPatternRules depth session selected rules
+      let next = case replacement of
+            Nothing -> current
+            Just value -> maybe current id (replaceAtPath path value current)
+      replaceSessionRecords depth updated rules next rest
+
+evaluateSessionReplaceAt
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionReplaceAt depth session subject rulesExpression positions = do
+  rules <- requireSessionPatternRules "ReplaceAt" session rulesExpression
+  paths <- case operationPositionPaths positions of
+    Nothing ->
+      patternFailure
+        session
+        "ReplaceAt received an invalid position specification"
+    Just validPaths -> Right validPaths
+  (result, updated) <-
+    replaceSessionPaths
+      depth
+      session
+      rules
+      subject
+      (sortOperationPaths paths)
+  finishSessionRewrite depth updated subject result
+
+replaceSessionPaths
+  :: Int
+  -> EvaluationSession
+  -> [SessionPatternRule]
+  -> Expr
+  -> [[PathSelector]]
+  -> SessionResult Expr
+replaceSessionPaths _ session _ current [] = Right (current, session)
+replaceSessionPaths depth session rules current (path : rest) =
+  case selectAtPath path current of
+    Nothing ->
+      sessionFailure session "ReplaceAt encountered an invalid selected path"
+    Just selected -> do
+      (replacement, updated) <-
+        applySessionPatternRules depth session selected rules
+      next <- case replacement of
+        Nothing -> Right current
+        Just value -> case replaceAtPath path value current of
+          Nothing ->
+            patternFailure
+              updated
+              "ReplaceAt encountered an invalid selected path"
+          Just replaced -> Right replaced
+      replaceSessionPaths depth updated rules next rest
+
+evaluateSessionReplaceAll
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionReplaceAll depth session subject rulesExpression =
+  case nestedSessionPatternRuleSets rulesExpression of
+    Just nested ->
+      evaluateNestedSessionReplacements
+        (evaluateSessionReplaceAll depth `flip` subject)
+        session
+        nested
+    Nothing -> do
+      rules <-
+        requireSessionPatternRules "ReplaceAll" session rulesExpression
+      (result, updated) <- replaceAllSessionTree depth session rules subject
+      finishSessionRewrite depth updated subject result
+
+evaluateNestedSessionReplacements
+  :: (EvaluationSession -> Expr -> SessionResult Expr)
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateNestedSessionReplacements operation = go []
+ where
+  go results session [] =
+    Right (Call (Symbol "List") (reverse results), session)
+  go results session (rules : rest) = do
+    (result, updated) <- operation session rules
+    go (result : results) updated rest
+
+replaceAllSessionTree
+  :: Int
+  -> EvaluationSession
+  -> [SessionPatternRule]
+  -> Expr
+  -> SessionResult Expr
+replaceAllSessionTree depth session rules expression = do
+  (rootReplacement, matchedSession) <-
+    applySessionPatternRules depth session expression rules
+  case rootReplacement of
+    Just replacement -> Right (replacement, matchedSession)
+    Nothing -> descend matchedSession expression
+ where
+  descend current association
+    | Just entries <- sessionAssociationEntries association = do
+        (headReplacement, headSession) <-
+          applySessionPatternRules
+            depth
+            current
+            (Symbol "Association")
+            rules
+        case headReplacement of
+          Just replacementHead ->
+            Right
+              ( Call replacementHead (map sessionAssociationEntryExpr entries)
+              , headSession
+              )
+          Nothing -> do
+            (updatedEntries, completed) <-
+              replaceSessionAssociationEntries depth headSession rules entries
+            Right
+              ( Call
+                  (Symbol "Association")
+                  (map sessionAssociationEntryExpr updatedEntries)
+              , completed
+              )
+  descend current (Call expressionHead values) = do
+    (updatedHead, headSession) <-
+      replaceAllSessionTree depth current rules expressionHead
+    (updatedValues, completed) <-
+      replaceAllSessionValues depth headSession rules values
+    Right (rebuildWithSplicing updatedHead updatedValues, completed)
+  descend current value = Right (value, current)
+
+data SessionAssociationEntry =
+  SessionAssociationEntry !Text !Expr !Expr
+  deriving (Eq, Show)
+
+sessionAssociationEntries :: Expr -> Maybe [SessionAssociationEntry]
+sessionAssociationEntries (Call (Symbol "Association") values) =
+  traverse entry values
+ where
+  entry (Call (Symbol ruleHead) [key, value])
+    | ruleHead `elem` ["Rule", "RuleDelayed"] =
+        Just (SessionAssociationEntry ruleHead key value)
+  entry _ = Nothing
+sessionAssociationEntries _ = Nothing
+
+sessionAssociationEntryExpr :: SessionAssociationEntry -> Expr
+sessionAssociationEntryExpr (SessionAssociationEntry ruleHead key value) =
+  Call (Symbol ruleHead) [key, value]
+
+replaceSessionAssociationEntries
+  :: Int
+  -> EvaluationSession
+  -> [SessionPatternRule]
+  -> [SessionAssociationEntry]
+  -> SessionResult [SessionAssociationEntry]
+replaceSessionAssociationEntries depth = go []
+ where
+  go retained session _ [] = Right (reverse retained, session)
+  go retained session rules (SessionAssociationEntry ruleHead key value : rest) = do
+    (updatedValue, updated) <-
+      replaceAllSessionTree depth session rules value
+    let nextRetained =
+          if updatedValue == Symbol "Nothing"
+            then retained
+            else SessionAssociationEntry ruleHead key updatedValue : retained
+    go nextRetained updated rules rest
+
+replaceAllSessionValues
+  :: Int
+  -> EvaluationSession
+  -> [SessionPatternRule]
+  -> [Expr]
+  -> SessionResult [Expr]
+replaceAllSessionValues depth = go []
+ where
+  go retained session _ [] = Right (reverse retained, session)
+  go retained session rules (value : rest) = do
+    (updatedValue, updated) <-
+      replaceAllSessionTree depth session rules value
+    go (updatedValue : retained) updated rules rest
+
+finishSessionRewrite
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+finishSessionRewrite depth session original result
+  | result == original = Right (result, session)
+  | otherwise = evaluateSessionAt (depth + 1) session result
+
+evaluateSessionReplaceRepeated
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionReplaceRepeated depth session subject rulesExpression =
+  case nestedSessionPatternRuleSets rulesExpression of
+    Just nested ->
+      evaluateNestedSessionReplacements
+        (evaluateSessionReplaceRepeated depth `flip` subject)
+        session
+        nested
+    Nothing -> do
+      rules <-
+        requireSessionPatternRules
+          "ReplaceRepeated"
+          session
+          rulesExpression
+      iterateReplacement 0 session rules subject
+ where
+  iterateReplacement :: Int -> EvaluationSession -> [SessionPatternRule] -> Expr -> SessionResult Expr
+  iterateReplacement iterations currentSession rules current
+    | iterations >= 1024 =
+        sessionFailure
+          currentSession
+          "ReplaceRepeated exceeded its iteration safety limit"
+    | otherwise = do
+        (rewritten, rewrittenSession) <-
+          replaceAllSessionTree depth currentSession rules current
+        (updated, evaluatedSession) <-
+          finishSessionRewrite depth rewrittenSession current rewritten
+        if updated == current
+          then Right (current, evaluatedSession)
+          else
+            iterateReplacement
+              (iterations + 1)
+              evaluatedSession
+              rules
+              updated
 reduceSessionEvaluatedCall
   :: Int
   -> EvaluationSession
@@ -972,11 +2130,11 @@ expandSessionPositionPaths expression specification
   | otherwise = unsupportedPositionSpecification specification
  where
   expandPaths retained invalid [] = Right (retained, invalid)
-  expandPaths retained invalid (pathExpression : rest) = do
+  expandPaths retained invalid (pathSpecification : rest) = do
     (paths, pathInvalid) <-
       expandSessionExactPath
         expression
-        (sessionPositionComponents pathExpression)
+        (sessionPositionComponents pathSpecification)
     expandPaths (retained <> paths) (invalid || pathInvalid) rest
 
 expandSessionExactPath
@@ -2131,37 +3289,31 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
   applyDefinitions session (Map.findWithDefault [] name (sessionDownValues session))
  where
   applyDefinitions current [] = Right (Nothing, current)
-  applyDefinitions current (definition : rest) =
+  applyDefinitions current (definition : rest) = do
     let (patternExpression, lhsCondition) =
           downValueMatchPattern definition
-     in case
-          instantiatePatternMatch
-            expression
-            patternExpression
-            (downValueBody definition)
-        of
-          Nothing -> applyDefinitions current rest
-          Just replacement ->
-            case lhsCondition of
-              Nothing ->
-                applyReplacement current definition replacement rest
-              Just condition ->
-                case
-                  instantiatePatternMatch
-                    expression
-                    patternExpression
-                    condition
-                of
-                  Nothing -> applyDefinitions current rest
-                  Just instantiatedCondition -> do
-                    (conditionResult, updated) <-
-                      evaluateSessionAt
-                        (depth + 1)
-                        current
-                        instantiatedCondition
-                    if conditionResult == Symbol "True"
-                      then applyReplacement updated definition replacement rest
-                      else applyDefinitions updated rest
+        templates = downValueBody definition : maybe [] pure lhsCondition
+    (instantiated, matchedSession) <-
+      instantiateSessionPattern
+        depth
+        current
+        expression
+        patternExpression
+        templates
+    case (lhsCondition, instantiated) of
+      (_, Nothing) -> applyDefinitions matchedSession rest
+      (Nothing, Just [replacement]) ->
+        applyReplacement matchedSession definition replacement rest
+      (Just _, Just [replacement, instantiatedCondition]) -> do
+        (conditionResult, updated) <-
+          evaluateSessionAt
+            (depth + 1)
+            matchedSession
+            instantiatedCondition
+        if conditionResult == Symbol "True"
+          then applyReplacement updated definition replacement rest
+          else applyDefinitions updated rest
+      _ -> applyDefinitions matchedSession rest
 
   applyReplacement current definition replacement rest =
     case replacement of
