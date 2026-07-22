@@ -569,6 +569,8 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionSelectionOperator "Discard" depth session criterion
       Call (Symbol "SelectFirst") [criterion] ->
         evaluateSessionSelectionOperator "SelectFirst" depth session criterion
+      Call (Symbol "ValueQ") arguments' ->
+        evaluateSessionValueQ depth session arguments'
       Call (Symbol "OwnValues") arguments' ->
         evaluateSessionOwnValues session arguments'
       Call (Symbol "DownValues") arguments' ->
@@ -862,6 +864,7 @@ directSessionDispatchHead name =
              , "Select"
              , "Discard"
              , "SelectFirst"
+             , "ValueQ"
              , "OwnValues"
              , "DownValues"
              , "UpValues"
@@ -3758,6 +3761,34 @@ evaluateLoopControl
 evaluateLoopControl controlSignal headName session = \case
   [] -> Left (SessionControl controlSignal session)
   arguments' -> Right (Call (Symbol headName) arguments', session)
+
+evaluateSessionValueQ
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionValueQ depth session = \case
+  [Symbol name] ->
+    let updated = registerSymbol name session
+     in Right
+          ( sessionBoolean
+              ( isImplicitContextValue name updated
+                  || case symbolOwnValueFor name updated of
+                    Just _ -> True
+                    Nothing -> False
+              )
+          , updated
+          )
+  [expression] -> do
+    (evaluated, updated) <-
+      evaluateSessionAt (depth + 1) session expression
+    Right (sessionBoolean (evaluated /= expression), updated)
+  _ -> sessionFailure session "ValueQ expects exactly one argument."
+
+isImplicitContextValue :: Text -> EvaluationSession -> Bool
+isImplicitContextValue name session =
+  resolvedSymbolStorageName name session
+    `elem` ["$Context", "$ContextPath"]
 
 evaluateSessionOwnValues
   :: EvaluationSession

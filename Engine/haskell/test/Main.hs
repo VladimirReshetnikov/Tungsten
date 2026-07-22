@@ -1207,6 +1207,16 @@ checkEvaluationSession = do
         , ("unqualified name patterns resolve System collisions first", "Global`Plus = 1; ClearAll[\"Plus\"]; Global`Plus", "1")
         , ("explicit Global symbol keeps independent attributes", "ClearAll[Global`Plus]; SetAttributes[Global`Plus, HoldAll]; {Attributes[Global`Plus], Global`Plus[1 + 2]}", "List[List[HoldAll], Global`Plus[Plus[1, 2]]]")
         , ("own values stay held", "x = 5; {OwnValues[x], OwnValues[y], OwnValues[1], OwnValues[x, y]}", "List[List[RuleDelayed[HoldPattern[x], 5]], List[], OwnValues[1], OwnValues[x, y]]")
+        , ("ValueQ holds its argument and distinguishes symbols from atoms", "ClearAll[x]; {Attributes[ValueQ], ValueQ[x], x = 1, ValueQ[x], ValueQ[x + 1], ValueQ[1], ValueQ[\"x\"], ValueQ[I], ValueQ[$MachinePrecision]}", "List[List[HoldAll, Protected, ReadProtected], False, 1, True, True, False, False, False, False]")
+        , ("ValueQ recognizes implicit context symbols only", "{ValueQ[$Context], ValueQ[System`$Context], ValueQ[Global`$Context], ValueQ[$ContextPath], ValueQ[System`$ContextPath], ValueQ[Global`$ContextPath]}", "List[True, True, False, True, True, False]")
+        , ("ValueQ probes down sub and up definitions", "ClearAll[f, g, h, k, t, x, y]; f[1] = a; g[x_][y_] := {x, y}; TagSetDelayed[t, h[t[x_]], x]; k[x_] := x /; False; {ValueQ[f[1]], ValueQ[f[2]], ValueQ[g[1][2]], ValueQ[g[1]], ValueQ[h[t[3]]], ValueQ[h[t]], ValueQ[k[1]], ValueQ[f], ValueQ[g], ValueQ[t]}", "List[True, False, True, False, True, False, False, False, False, False]")
+        , ("ValueQ retains held assignment and definition effects", "ClearAll[f, x]; {ValueQ[x = 1], x, ValueQ[f[x_] := x], ValueQ[f[2]], DownValues[f]}", "List[True, 1, True, True, List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], x]]]")
+        , ("ValueQ retains effects from false definition conditions", "ClearAll[c, f, x]; c = 0; f[x_ /; (c = c + 1; False)] := x; {ValueQ[f[1]], c}", "List[False, 1]")
+        , ("ValueQ raw dispatch ignores mutable attributes and Sequence", "ClearAll[x]; Unprotect[ValueQ]; ClearAttributes[ValueQ, HoldAll]; x = 1; {ValueQ[x], ValueQ[Sequence[x]]}", "List[True, True]")
+        , ("ValueQ aliases differ from raw qualified and Sequence dispatch", "ClearAll[x, q]; x = 7; q = ValueQ; {ValueQ[x], System`ValueQ[x], q[x], ValueQ[Sequence[x, x]], q[Sequence[x, x]]}", "List[True, True, ValueQ[x], True, ValueQ[x, x]]")
+        , ("ValueQ propagates bare Return", "ValueQ[Return[1]]", "Return[1]")
+        , ("ValueQ propagates uncaught Throw", "ValueQ[Throw[1]]", "Throw[1]")
+        , ("ValueQ Throw remains catchable by an outer scope", "Catch[ValueQ[Throw[1]]]", "1")
         , ("value getters register and resolve symbol names", "OwnValues[x]; f[t_] := t; {Attributes[\"x\"], DownValues[\"f\"], DownValues[\"missing\"], UpValues[\"missing\"], SubValues[\"missing\"], NValues[\"missing\"]}", "List[List[], List[RuleDelayed[HoldPattern[f[Pattern[t, Blank[]]]], t]], List[], List[], List[], List[]]")
         , ("own values use canonical Global display", "Global`x = 1; OwnValues[Global`x]", "List[RuleDelayed[HoldPattern[x], 1]]")
         , ("value getters and Protect use visible-context display", "System`dynamicDisplay = 1; {OwnValues[System`dynamicDisplay], Protect[System`dynamicDisplay]}", "List[List[RuleDelayed[HoldPattern[dynamicDisplay], 1]], List[\"dynamicDisplay\"]]")
@@ -1439,6 +1449,16 @@ checkEvaluationSession = do
           , "List[2, 3]"
           , ["1", "2", "3"]
           )
+        , ( "ValueQ preserves prints from its held probe"
+          , "ValueQ[Print[\"hello\"]]"
+          , "True"
+          , ["hello"]
+          )
+        , ( "ValueQ does not evaluate bare symbol own values"
+          , "ClearAll[x]; x := Print[\"not evaluated\"]; ValueQ[x]"
+          , "True"
+          , []
+          )
         ]
       partArityMessage =
         ( "Part::error"
@@ -1446,7 +1466,52 @@ checkEvaluationSession = do
         , "Part::error: Part expects an expression and at least one part specification."
         )
       messageCases =
-        [ ( "tagged delayed assignments reject deep tag positions"
+        [ ( "ValueQ validates held arity"
+          , "ValueQ[]"
+          , "ValueQ[]"
+          , [ ( "ValueQ::error"
+              , "MessageName[ValueQ, \"error\"]"
+              , "ValueQ::error: ValueQ expects exactly one argument."
+              )
+            ]
+          )
+        , ( "ValueQ arity does not splice Sequence"
+          , "ValueQ[a, Sequence[b, c]]"
+          , "ValueQ[a, Sequence[b, c]]"
+          , [ ( "ValueQ::error"
+              , "MessageName[ValueQ, \"error\"]"
+              , "ValueQ::error: ValueQ expects exactly one argument."
+              )
+            ]
+          )
+        , ( "ValueQ preserves recovered evaluation errors"
+          , "ValueQ[Part[{1}, 2]]"
+          , "False"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for {1}."
+              )
+            ]
+          )
+        , ( "ValueQ preserves nonfatal session diagnostics"
+          , "ValueQ[$RecursionLimit = 1]"
+          , "True"
+          , [ ( "$RecursionLimit::limset"
+              , "MessageName[$RecursionLimit, \"limset\"]"
+              , "$RecursionLimit::limset: Cannot set $RecursionLimit to 1."
+              )
+            ]
+          )
+        , ( "ValueQ preserves invalid Function diagnostics"
+          , "ValueQ[Function[f[x], x][a]]"
+          , "False"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Unsupported Function parameter specification."
+              )
+            ]
+          )
+        , ( "tagged delayed assignments reject deep tag positions"
           , "ClearAll[f, h, x]; TagSetDelayed[f, h[deep[f[x_]]], x]"
           , "Null"
           , [ ( "TagSetDelayed::tagpos"

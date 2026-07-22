@@ -320,6 +320,47 @@ CASES = (
         ),
         0,
     ),
+    (
+        "ValueQ definitions and effects",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, g, h, q, c]; c = 0; "
+            "f[x_] := (c = c + 1; x); h[x_][y_] := {x, y}; "
+            "g /: q[g] := up; "
+            "{ValueQ[f[2]], ValueQ[h[1][2]], ValueQ[q[g]], "
+            "ValueQ[q[z]], c}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ValueQ atoms contexts and failure",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ValueQ[1], ValueQ[1 + 1], ValueQ[$Context], "
+            "ValueQ[Global`$Context], ValueQ[Part[{1}, 2]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ValueQ print effect",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'ValueQ[Print["valueq"]]',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
