@@ -56,6 +56,8 @@ import Text.Read (readMaybe)
 import Tungsten.Expression
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
+  , isSystemSymbol
+  , normalizeSystemSymbolName
   , systemSymbolAttributes
   )
 
@@ -117,6 +119,24 @@ evaluateAt depth expression
       Call (Symbol "Block") _ -> Right expression
       Call (Symbol "InheritedBlock") _ -> Right expression
       Call (Symbol "Internal`InheritedBlock") _ -> Right expression
+      Call (Symbol headName) arguments'
+        | systemHeadIn ["Which"] headName ->
+            evaluateWhich depth arguments'
+      Call (Symbol headName) arguments'
+        | systemHeadIn ["Switch"] headName ->
+            evaluateSwitch depth arguments'
+      Call (Symbol headName) arguments'
+        | systemHeadIn ["Piecewise"] headName ->
+            evaluatePiecewise depth arguments'
+      Call (Symbol headName) arguments'
+        | systemHeadIn ["ReleaseHold"] headName ->
+            evaluateReleaseHold depth arguments'
+      Call (Symbol headName) arguments'
+        | systemHeadIn ["Inactive"] headName ->
+            evaluateInactive depth headName arguments'
+      Call (Symbol headName) arguments'
+        | systemHeadIn ["Activate"] headName ->
+            evaluateActivate depth arguments'
       Call (Symbol "If") arguments' -> evaluateIf depth arguments'
       Call (Symbol "And") arguments' -> evaluateAnd depth arguments'
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'
@@ -135,12 +155,12 @@ evaluateAt depth expression
           _ -> do
             evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
             let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
-            reduced <- reduceCall evaluatedCall
+            reduced <- reducePureCallForDispatch evaluatedCall
             -- Some Python reducers deliberately return a final structural value:
             -- Sqrt preserves its raw nested Times shape for negative composite
             -- radicands, while Level exposes selected held subexpressions without
             -- evaluating them again.
-            if reduced == evaluatedCall || evaluatedHead `elem` [Symbol "Sqrt", Symbol "Level"]
+            if reduced == evaluatedCall || preservesFinalReducerResult evaluatedHead
               then Right reduced
               else evaluateAt (depth + 1) reduced
       _ -> Right expression
@@ -187,6 +207,200 @@ suppressesSequences (Symbol name) =
     ]
     name
 suppressesSequences _ = False
+
+evaluateWhich :: Int -> [Expr] -> Either EvaluationError Expr
+evaluateWhich depth arguments'
+  | null arguments' || odd (length arguments') =
+      Left (EvaluationError "Which expects condition-value pairs.")
+  | otherwise = select arguments'
+ where
+  select [] = Right (Symbol "Null")
+  select (condition : value : remaining) = do
+    evaluatedCondition <- evaluateAt (depth + 1) condition
+    case evaluatedCondition of
+      Symbol "True" -> evaluateAt (depth + 1) value
+      Symbol "False" -> select remaining
+      _ ->
+        Right
+          ( Call
+              (Symbol "Which")
+              (evaluatedCondition : value : remaining)
+          )
+  select _ = Left (EvaluationError "Which expects condition-value pairs.")
+
+evaluateSwitch :: Int -> [Expr] -> Either EvaluationError Expr
+evaluateSwitch depth arguments'
+  | length arguments' < 3 || even (length arguments') =
+      Left
+        ( EvaluationError
+            "Switch expects an expression followed by form-value pairs."
+        )
+  | subject : formValues <- arguments' = do
+      evaluatedSubject <- evaluateAt (depth + 1) subject
+      select evaluatedSubject formValues formValues
+  | otherwise =
+      Left
+        ( EvaluationError
+            "Switch expects an expression followed by form-value pairs."
+        )
+ where
+  select subject original [] =
+    Right (Call (Symbol "Switch") (subject : original))
+  select subject original (form : value : remaining)
+    | matchesPattern subject form = evaluateAt (depth + 1) value
+    | otherwise = select subject original remaining
+  select subject original _ =
+    Right (Call (Symbol "Switch") (subject : original))
+
+evaluatePiecewise :: Int -> [Expr] -> Either EvaluationError Expr
+evaluatePiecewise depth = \case
+  [casesExpression] -> evaluateCases casesExpression Nothing
+  [casesExpression, defaultExpression] ->
+    evaluateCases casesExpression (Just defaultExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          "Piecewise expects a case list and an optional default value."
+      )
+ where
+  evaluateCases casesExpression defaultExpression = case casesExpression of
+    Call (Symbol listHead) cases
+      | systemHeadIn ["List"] listHead ->
+          select [] cases defaultExpression
+    _ ->
+      Left
+        ( EvaluationError
+            "Piecewise expects its first argument to be a list of {value, condition} pairs."
+        )
+
+  select retained [] defaultExpression = do
+    defaultValue <- case defaultExpression of
+      Just value -> evaluateAt (depth + 1) value
+      Nothing -> Right (Integer 0)
+    Right
+      ( if null retained
+          then defaultValue
+          else piecewiseResult (reverse retained) defaultValue
+      )
+  select retained (item : remaining) defaultExpression = case item of
+    Call (Symbol listHead) [value, condition]
+      | systemHeadIn ["List"] listHead -> do
+          evaluatedCondition <- evaluateAt (depth + 1) condition
+          case evaluatedCondition of
+            Symbol "True" -> do
+              selectedValue <- evaluateAt (depth + 1) value
+              Right
+                ( if null retained
+                    then selectedValue
+                    else piecewiseResult (reverse retained) selectedValue
+                )
+            Symbol "False" -> select retained remaining defaultExpression
+            _ -> do
+              evaluatedValue <- evaluateAt (depth + 1) value
+              select
+                ((evaluatedValue, evaluatedCondition) : retained)
+                remaining
+                defaultExpression
+    _ ->
+      Left
+        ( EvaluationError
+            "Piecewise cases must be two-element lists of {value, condition}."
+        )
+
+  piecewiseResult retained defaultValue =
+    Call
+      (Symbol "Piecewise")
+      [ Call
+          (Symbol "List")
+          [ Call (Symbol "List") [value, condition]
+          | (value, condition) <- retained
+          ]
+      , defaultValue
+      ]
+
+evaluateReleaseHold :: Int -> [Expr] -> Either EvaluationError Expr
+evaluateReleaseHold depth = \case
+  [argument] -> do
+    evaluated <- evaluateAt (depth + 1) argument
+    case evaluated of
+      Call (Symbol heldHead) heldArguments
+        | heldHead `elem` ["Hold", "HoldComplete", "HoldForm", "Unevaluated"] ->
+            evaluateAt
+              (depth + 1)
+              ( case heldArguments of
+                  [single] -> single
+                  values -> Call (Symbol "Sequence") values
+              )
+      _ -> Right evaluated
+  _ -> Left (EvaluationError "ReleaseHold expects exactly one argument.")
+
+evaluateInactive
+  :: Int
+  -> Text
+  -> [Expr]
+  -> Either EvaluationError Expr
+evaluateInactive depth originalHead = \case
+  [argument] -> do
+    prepared <- case argument of
+      Call (Symbol evaluateHead) [payload]
+        | systemHeadIn ["Evaluate"] evaluateHead ->
+            case payload of
+              Call (Symbol unevaluatedHead) [_]
+                | systemHeadIn ["Unevaluated"] unevaluatedHead ->
+                    Right payload
+              _ -> evaluateAt (depth + 1) payload
+      _ -> Right argument
+    case normalizeEvaluatedCall (Symbol "Inactive") [prepared] of
+      Call _ [target]
+        | inactiveAtomicTarget target -> Right target
+        | otherwise -> Right (Call (Symbol originalHead) [target])
+      _ ->
+        Left
+          ( EvaluationError
+              "Inactive expects exactly one argument after Sequence splicing."
+          )
+  _ -> Left (EvaluationError "Inactive expects exactly one argument.")
+
+inactiveAtomicTarget :: Expr -> Bool
+inactiveAtomicTarget = \case
+  Integer _ -> True
+  Rational _ _ -> True
+  Real _ -> True
+  Complex _ _ -> True
+  String _ -> True
+  ByteArray _ -> True
+  _ -> False
+
+evaluateActivate :: Int -> [Expr] -> Either EvaluationError Expr
+evaluateActivate depth = \case
+  [source] -> do
+    evaluatedSource <- evaluateAt (depth + 1) source
+    evaluateAt (depth + 1) (activateInactiveTree Nothing evaluatedSource)
+  [source, patternExpression] -> do
+    evaluatedSource <- evaluateAt (depth + 1) source
+    evaluatedPattern <- evaluateAt (depth + 1) patternExpression
+    evaluateAt
+      (depth + 1)
+      (activateInactiveTree (Just evaluatedPattern) evaluatedSource)
+  _ ->
+    Left
+      ( EvaluationError
+          "Activate expects an expression and an optional pattern."
+      )
+
+activateInactiveTree :: Maybe Expr -> Expr -> Expr
+activateInactiveTree patternExpression expression = case expression of
+  Call wrapperHead@(Symbol inactiveHead) [target]
+    | systemHeadIn ["Inactive"] inactiveHead ->
+        let activatedTarget = activateInactiveTree patternExpression target
+         in if maybe True (matchesPattern target) patternExpression
+              then activatedTarget
+              else Call wrapperHead [activatedTarget]
+  Call expressionHead values ->
+    Call
+      (activateInactiveTree patternExpression expressionHead)
+      (map (activateInactiveTree patternExpression) values)
+  _ -> expression
 
 evaluateIf :: Int -> [Expr] -> Either EvaluationError Expr
 evaluateIf depth = \case
@@ -257,6 +471,115 @@ reduceCall expression = case expression of
     reduceBuiltin "StringPosition" [subject, patternExpression]
   Call (Symbol headName) values -> reduceBuiltin headName values
   _ -> Right expression
+
+-- Explicit System heads share their bare reducer while retaining qualified
+-- spelling whenever the reduction remains structural.  Direct bare calls do
+-- not need this projection, and Global heads intentionally stay inert.
+reducePureCallForDispatch :: Expr -> Either EvaluationError Expr
+reducePureCallForDispatch expression =
+  case pureReducerDispatchView expression of
+    Nothing -> reduceCall expression
+    Just (dispatched, restore) -> restore <$> reduceCall dispatched
+
+pureReducerDispatchView :: Expr -> Maybe (Expr, Expr -> Expr)
+pureReducerDispatchView expression = case expression of
+  Call (Symbol originalHead) values
+    | isSystemSymbol originalHead
+    , Just shortName <- normalizeSystemSymbolName originalHead
+    , originalHead /= shortName ->
+        let barrierName = pureReducerBarrierName shortName expression
+            dispatchedValues =
+              map (shieldPureReducerArgument shortName barrierName) values
+            restore =
+              restorePureReducerBarrier barrierName shortName
+                . restorePureQualifiedHead originalHead shortName
+         in Just (Call (Symbol shortName) dispatchedValues, restore)
+  Call (Call (Symbol originalHead) operatorArguments) values
+    | isSystemSymbol originalHead
+    , Just shortName <- normalizeSystemSymbolName originalHead
+    , originalHead /= shortName ->
+        Just
+          ( Call
+              (Call (Symbol shortName) operatorArguments)
+              values
+          , restorePureQualifiedOperatorHead originalHead shortName
+          )
+  _ -> Nothing
+
+pureReducerBarrierName :: Text -> Expr -> Text
+pureReducerBarrierName shortName expression = choose 0
+ where
+  baseName = "Tungsten`Private`QualifiedDispatchBarrier$" <> shortName
+  choose suffix =
+    let candidate =
+          if suffix == (0 :: Integer)
+            then baseName
+            else baseName <> "$" <> T.pack (show suffix)
+     in if pureExpressionContainsSymbol candidate expression
+          then choose (suffix + 1)
+          else candidate
+
+pureExpressionContainsSymbol :: Text -> Expr -> Bool
+pureExpressionContainsSymbol target = \case
+  Symbol name -> name == target
+  Call expressionHead values ->
+    pureExpressionContainsSymbol target expressionHead
+      || any (pureExpressionContainsSymbol target) values
+  Complex realPart imaginaryPart ->
+    pureExpressionContainsSymbol target realPart
+      || pureExpressionContainsSymbol target imaginaryPart
+  SparseArray _ entries fill ->
+    any
+      (\(SparseEntry _ value) -> pureExpressionContainsSymbol target value)
+      entries
+      || pureExpressionContainsSymbol target fill
+  _ -> False
+
+shieldPureReducerArgument :: Text -> Text -> Expr -> Expr
+shieldPureReducerArgument shortName barrierName = \case
+  Call (Symbol nestedHead) values
+    | nestedHead == shortName -> Call (Symbol barrierName) values
+  value -> value
+
+restorePureReducerBarrier :: Text -> Text -> Expr -> Expr
+restorePureReducerBarrier barrierName shortName = go
+ where
+  go = \case
+    Symbol name
+      | name == barrierName -> Symbol shortName
+    Call expressionHead values ->
+      let restoredHead = case expressionHead of
+            Symbol name
+              | name == barrierName -> Symbol shortName
+            _ -> go expressionHead
+       in Call restoredHead (map go values)
+    Complex realPart imaginaryPart -> Complex (go realPart) (go imaginaryPart)
+    SparseArray dimensions entries fill ->
+      SparseArray
+        dimensions
+        [ SparseEntry indices (go value)
+        | SparseEntry indices value <- entries
+        ]
+        (go fill)
+    value -> value
+
+restorePureQualifiedHead :: Text -> Text -> Expr -> Expr
+restorePureQualifiedHead qualifiedName shortName = \case
+  Call (Symbol resultHead) values
+    | resultHead == shortName -> Call (Symbol qualifiedName) values
+  result -> result
+
+restorePureQualifiedOperatorHead :: Text -> Text -> Expr -> Expr
+restorePureQualifiedOperatorHead qualifiedName shortName = \case
+  Call (Call (Symbol resultHead) operatorArguments) values
+    | resultHead == shortName ->
+        Call (Call (Symbol qualifiedName) operatorArguments) values
+  result -> result
+
+preservesFinalReducerResult :: Expr -> Bool
+preservesFinalReducerResult = \case
+  Symbol headName -> systemHeadIn ["Sqrt", "Level"] headName
+  _ -> False
 
 -- | Reduce one call whose head and arguments have already been evaluated and
 -- normalized by the session evaluator.  Unlike 'evaluate', this does not
@@ -3594,7 +3917,8 @@ activeView (Call expressionHead values) =
 activeView expression = expression
 
 isInactiveWrapper :: Expr -> Bool
-isInactiveWrapper (Call (Symbol "Inactive") [_]) = True
+isInactiveWrapper (Call (Symbol inactiveHead) [_]) =
+  systemHeadIn ["Inactive"] inactiveHead
 isInactiveWrapper _ = False
 
 matchKeyValuePatternM

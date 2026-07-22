@@ -623,6 +623,14 @@ checkEvaluator = do
         , ("numeric inequality", "Unequal[1, 2, 1]", "False")
         , ("Boolean reduction", "True && !False", "True")
         , ("conditional branch", "If[2 > 1, 20 + 22, 0]", "42")
+        , ("Which selects held branches and retains unknown tails", "{Which[False, a, True, 1+2], Which[False, a, False, b], Which[x, 1+2, True, 3+4]}", "List[3, Null, Which[x, Plus[1, 2], True, Plus[3, 4]]]")
+        , ("Switch matches held forms and retains unmatched syntax", "{Switch[1+2, 3, a, _, b], Switch[a, _Integer, 1, _Symbol, 2], Switch[1+2, 4, a]}", "List[a, 2, Switch[3, 4, a]]")
+        , ("Piecewise evaluates unknown values and reconstructs raw cases", "{Piecewise[{{1+2, True}, {bad, True}}], Piecewise[{{1, False}, {2, False}}], Piecewise[{{1+2, x}, {3+4, y}}, 5+6], Piecewise[{{1, False}, {2, x}, {2+2, True}}]}", "List[3, 0, Piecewise[List[List[3, x], List[7, y]], 11], Piecewise[List[List[2, x]], 4]]")
+        , ("ReleaseHold removes exactly one supported wrapper", "{ReleaseHold[Hold[1+2]], ReleaseHold[HoldComplete[1+2]], ReleaseHold[HoldForm[1+2]], ReleaseHold[Unevaluated[1+2]], ReleaseHold[Hold[Hold[1+2]]]}", "List[3, 3, 3, 3, Hold[Plus[1, 2]]]")
+        , ("Inactive holds designators and collapses scalar atoms", "{Inactive[Plus], Inactive[Plus][1+2, 3+4], Inactive[3], Inactive[1+2], Inactive[Evaluate[1+2]]}", "List[Inactive[Plus], Inactive[Plus][3, 7], 3, Inactive[Plus[1, 2]], 3]")
+        , ("Activate traverses holds and selectively removes wrappers", "{Activate[Inactive[Plus][1,2]], Activate[Hold[Inactive[Plus][1,2]]], Activate[Inactive[Plus][Inactive[Times][2,3],4], Times], Activate[Inactive[Plus][Inactive[Times][2,3],4], Plus], Activate[Inactive[Plus][Inactive[Times][2,3],4], _Symbol]}", "List[3, Hold[Plus[1, 2]], Inactive[Plus][6, 4], Plus[4, Inactive[Times][2, 3]], 10]")
+        , ("IgnoringInactive recognizes qualified inactive wrappers", "{Switch[System`Inactive[f], IgnoringInactive[f], a, _, b], Activate[Inactive[System`Inactive[f]], IgnoringInactive[f]]}", "List[a, f]")
+        , ("held builtin evaluation slots reduce qualified System calls", "{Which[System`Equal[1,1], a], Switch[System`Plus[1,2], 3, a], Piecewise[{{a, System`Equal[1,1]}}], ReleaseHold[Hold[System`Plus[1,2]]], Inactive[Evaluate[System`Plus[1,2]]], Activate[System`Inactive[System`Plus][1,2]]}", "List[a, a, a, 3, 3, 3]")
         , ("range", "Range[-2, 4, 2]", "List[-2, 0, 2, 4]")
         , ("total", "Total[{1, 2, 3, 4}]", "10")
         , ("accumulate", "Accumulate[{1, 2, 3, 4}]", "List[1, 3, 6, 10]")
@@ -902,7 +910,47 @@ checkEvaluatorErrors = do
     assertLeft
       "reject invalid Level arity"
       (parseInputForm "Level[f[a]]" >>= mapLeftEvaluation . evaluate)
-  pure (and [first, second, third, fourth, fifth, sixth, seventh])
+  eighth <-
+    assertLeft
+      "reject invalid Which pair arity"
+      (parseInputForm "Which[True]" >>= mapLeftEvaluation . evaluate)
+  ninth <-
+    assertLeft
+      "reject invalid Switch pair arity"
+      (parseInputForm "Switch[x, _]" >>= mapLeftEvaluation . evaluate)
+  tenth <-
+    assertLeft
+      "reject non-list Piecewise cases"
+      (parseInputForm "Piecewise[bad]" >>= mapLeftEvaluation . evaluate)
+  eleventh <-
+    assertLeft
+      "reject invalid ReleaseHold arity"
+      (parseInputForm "ReleaseHold[]" >>= mapLeftEvaluation . evaluate)
+  twelfth <-
+    assertLeft
+      "reject Inactive post-splice arity"
+      (parseInputForm "Inactive[Sequence[f, g]]" >>= mapLeftEvaluation . evaluate)
+  thirteenth <-
+    assertLeft
+      "reject invalid Activate arity"
+      (parseInputForm "Activate[]" >>= mapLeftEvaluation . evaluate)
+  pure
+    ( and
+        [ first
+        , second
+        , third
+        , fourth
+        , fifth
+        , sixth
+        , seventh
+        , eighth
+        , ninth
+        , tenth
+        , eleventh
+        , twelfth
+        , thirteenth
+        ]
+    )
  where
   mapLeftEvaluation = either (Left . ParseError . evaluationErrorMessage) Right
 
@@ -1229,6 +1277,8 @@ checkEvaluationSession = do
         , ("composition constructors alone strip direct Unevaluated operands", "{Composition[Unevaluated[f], g], RightComposition[Unevaluated[f], g], Composition[Unevaluated[f], g][x], SameAs[Unevaluated[x]][x], Composition[f, g][Unevaluated[x]]}", "List[Composition[f, g], RightComposition[f, g], f[g[x]], False, f[g[Unevaluated[x]]]]")
         , ("composition Unevaluated operand stripping does not evaluate payloads", "ClearAll[z]; z = 0; Composition[Unevaluated[z = z + 1; f], g]; z", "0")
         , ("composition callable order threads effects and control", "ClearAll[x, f, g]; x = 0; f[t_] := (x = x + 1; t); g[t_] := (x = x + 10; t); result = Composition[f, g][x = 100]; {result, x, Catch[Composition[f, Function[x, Throw[x]]][3]]}", "List[100, 111, 3]")
+        , ("held builtin spellings dispatch directly while evaluated aliases remain inert", "ClearAll[qw, qs, qp, qr, qi, qa]; qw = Which; qs = Switch; qp = Piecewise; qr = ReleaseHold; qi = Inactive; qa = Activate; {System`Which[False, a, True, b], qw[False, 1+2, True, 3+4], Global`Which[False, 1+2, True, 3+4], System`Switch[x, x, a], qs[1+2, 3, a], Global`Switch[1+2, 3, a], System`Piecewise[{{1+2, True}}], qp[{{1+2, True}}], Global`Piecewise[{{1+2, True}}], System`ReleaseHold[Hold[1+2]], qr[Hold[1+2]], Global`ReleaseHold[Hold[1+2]], System`Inactive[Plus][1+2], qi[3], Global`Inactive[1+2], System`Activate[System`Inactive[Plus][1,2]], qa[Inactive[Plus][1,2]], Global`Activate[Inactive[Plus][1+2,3+4]]}", "List[b, Which[False, Plus[1, 2], True, Plus[3, 4]], Global`Which[False, 3, True, 7], a, Switch[3, 3, a], Global`Switch[3, 3, a], 3, Piecewise[List[List[Plus[1, 2], True]]], Global`Piecewise[List[List[3, True]]], 3, ReleaseHold[Hold[Plus[1, 2]]], Global`ReleaseHold[Hold[Plus[1, 2]]], System`Inactive[Plus][3], Inactive[3], Global`Inactive[3], 3, Activate[Inactive[Plus][1, 2]], Global`Activate[Inactive[Plus][3, 7]]]")
+        , ("held condition release and activation propagate only selected control", "{Catch[Which[False, Throw[1], True, a]], Catch[Switch[x, y, Throw[2], _, a]], Catch[Piecewise[{{Throw[3], False}, {b, True}}]], Catch[ReleaseHold[Hold[Throw[4]]]], Catch[Inactive[Throw[5]]], Catch[Inactive[f][Throw[6]]], Catch[Activate[Inactive[Function[x, Throw[x]]][7]]]}", "List[a, a, b, 4, Inactive[Throw[5]], 6, 7]")
         , ("Unique shares its symbol counter with Module", "{Unique[], Module[{x}, Hold[x]], Unique[x]}", "List[$1, Hold[x$2], x$3]")
         , ("counter Unique intentionally reuses registered candidate names", "Symbol[\"Global`$1\"]; Symbol[\"Global`x$2\"]; {Unique[], Unique[x], Names[{\"Global`$1\", \"Global`x$2\"}]}", "List[$1, x$2, List[\"$1\", \"x$2\"]]")
         , ("string Unique scans Global collisions without sharing module state", "Symbol[\"Global`p1\"]; {Unique[], Unique[\"p\"], Unique[p], Unique[\"p\"], Names[\"Global`p*\"]}", "List[$1, p2, p$2, p3, List[\"p\", \"p$2\", \"p1\", \"p2\", \"p3\"]]")
@@ -1498,6 +1548,26 @@ checkEvaluationSession = do
           , "Nothing"
           , ["a", "b"]
           )
+        , ( "held builtins preserve direct effect timing"
+          , "probe[Which[False, Print[\"which-skip\"], True, Print[\"which\"]], Switch[(Print[\"switch-subject\"]; x), x, Print[\"switch\"], _, Print[\"switch-late\"]], Piecewise[{{Print[\"piece-false\"], False}, {Print[\"piece-unknown\"], u}, {Print[\"piece-true\"], True}}, Print[\"piece-default\"]], ReleaseHold[Hold[Print[\"release\"]]], Inactive[Print[\"inactive-held\"]], Inactive[Evaluate[Print[\"inactive-forced\"]]], Activate[Inactive[Print][\"activate\"]]]"
+          , "probe[Null, Null, Piecewise[List[List[Null, u]], Null], Null, Inactive[Print[\"inactive-held\"]], Inactive[Null], Null]"
+          , ["which", "switch-subject", "switch", "piece-unknown", "piece-true", "release", "inactive-forced", "activate"]
+          )
+        , ( "held builtin aliases apply attributes without direct dispatch"
+          , "ClearAll[qw, qs, qp, qr, qi, qa]; qw = Which; qs = Switch; qp = Piecewise; qr = ReleaseHold; qi = Inactive; qa = Activate; probe[qw[False, Print[\"which-held\"], True, Print[\"which-held-2\"]], qs[(Print[\"switch-subject\"]; x), x, Print[\"switch-held\"]], qp[{{Print[\"piece-held\"], True}}, Print[\"piece-default-held\"]], qr[Print[\"release-1\"], Print[\"release-2\"]], qi[Print[\"inactive-held\"], Print[\"inactive-second\"]], qa[Print[\"activate-1\"], Print[\"activate-2\"], Print[\"activate-3\"]]]"
+          , "probe[Which[False, Print[\"which-held\"], True, Print[\"which-held-2\"]], Switch[x, x, Print[\"switch-held\"]], Piecewise[List[List[Print[\"piece-held\"], True]], Print[\"piece-default-held\"]], ReleaseHold[Null, Null], Inactive[Print[\"inactive-held\"], Null], Activate[Null, Null, Null]]"
+          , ["switch-subject", "release-1", "release-2", "inactive-second", "activate-1", "activate-2", "activate-3"]
+          )
+        , ( "malformed held builtins suppress all argument effects"
+          , "probe[Which[Print[\"w\"]], Switch[Print[\"s\"], x], Piecewise[Print[\"p\"]], ReleaseHold[Print[\"r1\"], Print[\"r2\"]], Inactive[Print[\"i1\"], Print[\"i2\"]], Activate[Print[\"a1\"], Print[\"a2\"], Print[\"a3\"]]]"
+          , "probe[Which[Print[\"w\"]], Switch[Print[\"s\"], x], Piecewise[Print[\"p\"]], ReleaseHold[Print[\"r1\"], Print[\"r2\"]], Inactive[Print[\"i1\"], Print[\"i2\"]], Activate[Print[\"a1\"], Print[\"a2\"], Print[\"a3\"]]]"
+          , []
+          )
+        , ( "Piecewise preserves early effects before later malformed cases"
+          , "Piecewise[{{Print[\"early\"], x}, bad, {2, True}}]"
+          , "Piecewise[List[List[Print[\"early\"], x], bad, List[2, True]]]"
+          , ["early"]
+          )
         ]
       partArityMessage =
         ( "Part::error"
@@ -1542,6 +1612,57 @@ checkEvaluationSession = do
             , ( "Part::error"
               , "MessageName[Part, \"error\"]"
               , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "held builtins validate malformed direct calls before effects"
+          , "probe[Which[Print[\"w\"]], Switch[Print[\"s\"], x], Piecewise[Print[\"p\"]], ReleaseHold[Print[\"r1\"], Print[\"r2\"]], Inactive[Print[\"i1\"], Print[\"i2\"]], Activate[Print[\"a1\"], Print[\"a2\"], Print[\"a3\"]]]"
+          , "probe[Which[Print[\"w\"]], Switch[Print[\"s\"], x], Piecewise[Print[\"p\"]], ReleaseHold[Print[\"r1\"], Print[\"r2\"]], Inactive[Print[\"i1\"], Print[\"i2\"]], Activate[Print[\"a1\"], Print[\"a2\"], Print[\"a3\"]]]"
+          , [ ( "Which::error"
+              , "MessageName[Which, \"error\"]"
+              , "Which::error: Which expects condition-value pairs."
+              )
+            , ( "Switch::error"
+              , "MessageName[Switch, \"error\"]"
+              , "Switch::error: Switch expects an expression followed by form-value pairs."
+              )
+            , ( "Piecewise::error"
+              , "MessageName[Piecewise, \"error\"]"
+              , "Piecewise::error: Piecewise expects its first argument to be a list of {value, condition} pairs."
+              )
+            , ( "ReleaseHold::error"
+              , "MessageName[ReleaseHold, \"error\"]"
+              , "ReleaseHold::error: ReleaseHold expects exactly one argument."
+              )
+            , ( "Inactive::error"
+              , "MessageName[Inactive, \"error\"]"
+              , "Inactive::error: Inactive expects exactly one argument."
+              )
+            , ( "Activate::error"
+              , "MessageName[Activate, \"error\"]"
+              , "Activate::error: Activate expects an expression and an optional pattern."
+              )
+            ]
+          )
+        , ( "Piecewise retains progressive effects before later shape failure"
+          , "Piecewise[{{Print[\"early\"], x}, bad, {2, True}}]"
+          , "Piecewise[List[List[Print[\"early\"], x], bad, List[2, True]]]"
+          , [ ( "Piecewise::error"
+              , "MessageName[Piecewise, \"error\"]"
+              , "Piecewise::error: Piecewise cases must be two-element lists of {value, condition}."
+              )
+            ]
+          )
+        , ( "Activate reevaluates newly exposed diagnostic arguments"
+          , "Activate[Inactive[Plus][Part[{1}, 2], 1]]"
+          , "Plus[1, Part[List[1], 2]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for {1}."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for {1}."
               )
             ]
           )

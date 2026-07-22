@@ -580,6 +580,149 @@ CASES = (
         ),
         0,
     ),
+    (
+        "Which held branches and unknown residual",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[u]; "
+            "{Which[Print[\"c1\"]; False, Print[\"v1\"], "
+            "Print[\"c2\"]; True, Print[\"v2\"], "
+            "Print[\"c3\"]; True, Print[\"v3\"]], "
+            "Which[False, a, u, 1/0, True, 2+2], "
+            "Which[False, 1, False, 2]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Switch stateful pattern selection and control",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x]; "
+            "{Switch[Print[\"subject\"]; 3, "
+            "x_Integer /; (Print[x]; x > 3), a, "
+            "y_Integer /; (Print[y]; y > 2), b], "
+            "Switch[3, x_, x], "
+            "Catch[Switch[1, _?(Function[t, Throw[tag]]), a, _, b]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Piecewise condition value and default timing",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Piecewise[{{Print[\"vf\"], Print[\"cf\"]; False}, "
+            "{Print[\"vu\"], Print[\"cu\"]; u}, "
+            "{Print[\"vt\"], Print[\"ct\"]; True}, "
+            "{Print[\"later\"], True}}, Print[\"default\"]]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ReleaseHold exact one-layer behavior",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ReleaseHold[Hold[Hold[1+2]]], ReleaseHold[Hold[]], "
+            "ReleaseHold[Hold[1, 2]], ReleaseHold[HoldPattern[1+2]], "
+            "ReleaseHold[System`Hold[1+2]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Inactive holding application and atom behavior",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, i]; x = 0; i = Inactive; "
+            "{Inactive[3], Inactive[f[x = x + 1]], x, "
+            "Inactive[Evaluate[1+2]], Inactive[Plus][1, 2], "
+            "System`Inactive[f], Global`Inactive[1+2], "
+            "i[Sequence[Plus, Times]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Activate recursive selective traversal",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Activate[HoldComplete[Inactive[Plus][1, 2]]], "
+            "Activate[Inactive[Plus][Inactive[Times][2, 3], 4], Times], "
+            "Activate[Inactive[Plus][Inactive[Times][2, 3], 4], Plus], "
+            "Activate[Inactive[f][Inactive[g][1], Inactive[h][2]], "
+            "p_ /; (Print[p]; SameQ[p, g])], "
+            "Switch[System`Inactive[f], IgnoringInactive[f], a, _, b], "
+            "Activate[Inactive[System`Inactive[f]], IgnoringInactive[f]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "held head alias qualification and arity barriers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, w, s, p, r, a, i]; x = 0; "
+            "w = Which; s = Switch; p = Piecewise; "
+            "r = ReleaseHold; a = Activate; i = Inactive; "
+            "{w[False, 1, True, 2], s[3, _, 4], p[{{1, True}}], "
+            "r[Hold[1+2]], a[Inactive[Plus][1, 2]], i[3], "
+            "System`Which[True, 7], Global`Which[True, 8], "
+            "Which[x = x + 1], Switch[x = x + 1, _], "
+            "Piecewise[x = x + 1, 0, 1], "
+            "ReleaseHold[x = x + 1, x = x + 1], Activate[], "
+            "Inactive[x = x + 1, x = x + 1], x}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "held head direct and alias Sequence boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[qw, qs, qp, qr, qi, qa]; "
+            "qw = Which; qs = Switch; qp = Piecewise; "
+            "qr = ReleaseHold; qi = Inactive; qa = Activate; "
+            "{Which[Sequence[False, a], True, b], "
+            "Switch[Sequence[x], x, a], "
+            "Piecewise[Sequence[{{1, True}}]], "
+            "{ReleaseHold[Sequence[Hold[1+2]]]}, "
+            "Inactive[Sequence[f]], Inactive[Sequence[f, g]], "
+            "{Activate[Sequence[Inactive[Plus][1, 2]]]}, "
+            "probe[qw[Sequence[False, a], True, b], "
+            "qs[Sequence[x], x, a], "
+            "qp[Sequence[{{1, True}}, 9]], "
+            "qr[Sequence[Hold[1+2]]], qi[Sequence[f, g]], "
+            "qa[Sequence[Inactive[Plus][1, 2]]]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

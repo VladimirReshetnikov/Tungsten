@@ -460,6 +460,7 @@ evaluateSessionAtRaw depth session expression = case expression of
                   (Call (Symbol shortName) arguments')
                 Right
                   ( if shortName `elem` staticHeldHeadNames
+                        || shortName == "Inactive"
                       then restoreQualifiedSystemHead qualifiedName shortName result
                       else result
                   , updated
@@ -558,6 +559,12 @@ evaluateSessionAtRaw depth session expression = case expression of
       Call (Symbol "CompoundExpression") expressions ->
         evaluateSequence depth session expressions
       Call (Symbol "If") arguments' -> evaluateSessionIf depth session arguments'
+      Call (Symbol "Which") arguments' ->
+        evaluateSessionWhich depth session arguments'
+      Call (Symbol "Switch") arguments' ->
+        evaluateSessionSwitch depth session arguments'
+      Call (Symbol "Piecewise") arguments' ->
+        evaluateSessionPiecewise depth session arguments'
       Call (Symbol "And") arguments' -> evaluateSessionAnd depth session arguments'
       Call (Symbol "Or") arguments' -> evaluateSessionOr depth session arguments'
       Call (Symbol "Catch") arguments' ->
@@ -574,6 +581,12 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionPrint depth session arguments'
       Call (Symbol "Evaluate") arguments' ->
         evaluateSessionEvaluate depth session arguments'
+      Call (Symbol "ReleaseHold") arguments' ->
+        evaluateSessionReleaseHold depth session arguments'
+      Call (Symbol "Inactive") arguments' ->
+        evaluateSessionInactive depth session arguments'
+      Call (Symbol "Activate") arguments' ->
+        evaluateSessionActivate depth session arguments'
       Call (Symbol "Select") [criterion] ->
         evaluateSessionSelectionOperator "Select" depth session criterion
       Call (Symbol "Discard") [criterion] ->
@@ -904,6 +917,9 @@ directSessionDispatchHead name =
              , "Unprotect"
              , "CompoundExpression"
              , "If"
+             , "Which"
+             , "Switch"
+             , "Piecewise"
              , "And"
              , "Or"
              , "Catch"
@@ -913,6 +929,9 @@ directSessionDispatchHead name =
              , "Return"
              , "Print"
              , "Evaluate"
+             , "ReleaseHold"
+             , "Inactive"
+             , "Activate"
              , "Select"
              , "Discard"
              , "SelectFirst"
@@ -5843,6 +5862,269 @@ evaluateSessionIf depth session = \case
         [] -> Right (Symbol "Null", updated)
       _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining), updated)
   arguments' -> Right (Call (Symbol "If") arguments', session)
+
+evaluateSessionWhich
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionWhich depth session arguments'
+  | null arguments' || odd (length arguments') =
+      sessionFailure session "Which expects condition-value pairs."
+  | otherwise = select session arguments'
+ where
+  select current [] = Right (Symbol "Null", current)
+  select current (conditionExpression : valueExpression : remaining) = do
+    (condition, updated) <-
+      evaluateSessionAt (depth + 1) current conditionExpression
+    case condition of
+      Symbol "True" ->
+        evaluateSessionAt (depth + 1) updated valueExpression
+      Symbol "False" -> select updated remaining
+      _ ->
+        Right
+          ( Call
+              (Symbol "Which")
+              (condition : valueExpression : remaining)
+          , updated
+          )
+  select current remaining =
+    Right (Call (Symbol "Which") remaining, current)
+
+evaluateSessionSwitch
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSwitch depth session arguments'
+  | length arguments' < 3 || even (length arguments') =
+      sessionFailure
+        session
+        "Switch expects an expression followed by form-value pairs."
+  | subjectExpression : formsAndValues <- arguments' = do
+      (subject, subjectSession) <-
+        evaluateSessionAt (depth + 1) session subjectExpression
+      select subject formsAndValues subjectSession formsAndValues
+  | otherwise =
+      sessionFailure
+        session
+        "Switch expects an expression followed by form-value pairs."
+ where
+  select subject original current [] =
+    Right (Call (Symbol "Switch") (subject : original), current)
+  select subject original current (form : valueExpression : remaining) = do
+    (matches, updated) <-
+      sessionPatternMatches depth current subject form
+    if matches
+      then evaluateSessionAt (depth + 1) updated valueExpression
+      else select subject original updated remaining
+  select subject original current _ =
+    Right (Call (Symbol "Switch") (subject : original), current)
+
+evaluateSessionPiecewise
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionPiecewise depth session = \case
+  [casesExpression] -> evaluateCases casesExpression Nothing
+  [casesExpression, defaultExpression] ->
+    evaluateCases casesExpression (Just defaultExpression)
+  _ ->
+    sessionFailure
+      session
+      "Piecewise expects a case list and an optional default value."
+ where
+  evaluateCases casesExpression defaultExpression =
+    case casesExpression of
+      Call (Symbol listHead) cases
+        | isSessionSystemHead "List" listHead ->
+            select [] session cases defaultExpression
+      _ ->
+        sessionFailure
+          session
+          "Piecewise expects its first argument to be a list of {value, condition} pairs."
+
+  select retained current [] defaultExpression = do
+    (defaultValue, updated) <- case defaultExpression of
+      Nothing -> Right (Integer 0, current)
+      Just expression -> evaluateSessionAt (depth + 1) current expression
+    Right (retainedPiecewise retained defaultValue, updated)
+  select retained current (caseExpression : remaining) defaultExpression =
+    case caseExpression of
+      Call (Symbol listHead) [valueExpression, conditionExpression]
+        | isSessionSystemHead "List" listHead -> do
+            (condition, conditionSession) <-
+              evaluateSessionAt (depth + 1) current conditionExpression
+            case condition of
+              Symbol "True" -> do
+                (selectedValue, updated) <-
+                  evaluateSessionAt
+                    (depth + 1)
+                    conditionSession
+                    valueExpression
+                Right (retainedPiecewise retained selectedValue, updated)
+              Symbol "False" ->
+                select retained conditionSession remaining defaultExpression
+              _ -> do
+                (value, updated) <-
+                  evaluateSessionAt
+                    (depth + 1)
+                    conditionSession
+                    valueExpression
+                select
+                  (retained <> [(value, condition)])
+                  updated
+                  remaining
+                  defaultExpression
+      _ ->
+        sessionFailure
+          current
+          "Piecewise cases must be two-element lists of {value, condition}."
+
+  retainedPiecewise [] defaultValue = defaultValue
+  retainedPiecewise retained defaultValue =
+    Call
+      (Symbol "Piecewise")
+      [ Call
+          (Symbol "List")
+          [ Call (Symbol "List") [value, condition]
+          | (value, condition) <- retained
+          ]
+      , defaultValue
+      ]
+
+evaluateSessionReleaseHold
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionReleaseHold depth session = \case
+  [expression] -> do
+    (heldExpression, updated) <-
+      evaluateSessionAt (depth + 1) session expression
+    case heldExpression of
+      Call (Symbol wrapperHead) values
+        | wrapperHead `elem` ["Hold", "HoldComplete", "HoldForm", "Unevaluated"] ->
+            evaluateSessionAt
+              (depth + 1)
+              updated
+              ( case values of
+                  [value] -> value
+                  _ -> Call (Symbol "Sequence") values
+              )
+      _ -> Right (heldExpression, updated)
+  _ -> sessionFailure session "ReleaseHold expects exactly one argument."
+
+evaluateSessionInactive
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionInactive depth session = \case
+  [argument] -> do
+    (prepared, preparedSession) <- prepareHeldArgument argument
+    let normalized = normalizeSessionSequenceCall (Symbol "Inactive") [prepared]
+        normalizedArguments = case normalized of
+          Call _ values -> values
+          _ -> [prepared]
+    case normalizedArguments of
+      [target]
+        | inactiveScalar target -> Right (target, preparedSession)
+        | otherwise ->
+            Right (Call (Symbol "Inactive") [target], preparedSession)
+      _ ->
+        sessionFailure
+          preparedSession
+          "Inactive expects exactly one argument after Sequence splicing."
+  _ -> sessionFailure session "Inactive expects exactly one argument."
+ where
+  prepareHeldArgument argument = case argument of
+    Call (Symbol evaluateHead) [payload]
+      | isSessionSystemHead "Evaluate" evaluateHead ->
+          case payload of
+            Call (Symbol unevaluatedHead) [_]
+              | isSessionSystemHead "Unevaluated" unevaluatedHead ->
+                  Right (payload, session)
+            _ -> evaluateSessionAt (depth + 1) session payload
+    _ -> Right (argument, session)
+
+  inactiveScalar = \case
+    Integer {} -> True
+    Rational {} -> True
+    Real {} -> True
+    Complex {} -> True
+    String {} -> True
+    ByteArray {} -> True
+    _ -> False
+
+evaluateSessionActivate
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionActivate depth session = \case
+  [sourceExpression] -> do
+    (source, sourceSession) <-
+      evaluateSessionAt (depth + 1) session sourceExpression
+    (activated, updated) <-
+      activateSessionTree depth Nothing sourceSession source
+    evaluateSessionAt (depth + 1) updated activated
+  [sourceExpression, patternExpression] -> do
+    (source, sourceSession) <-
+      evaluateSessionAt (depth + 1) session sourceExpression
+    (patternExpression', patternSession) <-
+      evaluateSessionAt (depth + 1) sourceSession patternExpression
+    (activated, updated) <-
+      activateSessionTree
+        depth
+        (Just patternExpression')
+        patternSession
+        source
+    evaluateSessionAt (depth + 1) updated activated
+  _ ->
+    sessionFailure
+      session
+      "Activate expects an expression and an optional pattern."
+
+activateSessionTree
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+activateSessionTree depth patternExpression session expression =
+  case expression of
+    Call inactiveHead@(Symbol inactiveName) [target]
+      | isSessionSystemHead "Inactive" inactiveName -> do
+          (activatedTarget, targetSession) <-
+            activateSessionTree depth patternExpression session target
+          (matches, updated) <- case patternExpression of
+            Nothing -> Right (True, targetSession)
+            Just patternExpression' ->
+              sessionPatternMatches
+                depth
+                targetSession
+                target
+                patternExpression'
+          Right
+            ( if matches
+                then activatedTarget
+                else Call inactiveHead [activatedTarget]
+            , updated
+            )
+    Call expressionHead values -> do
+      (activatedHead, headSession) <-
+        activateSessionTree depth patternExpression session expressionHead
+      (activatedValues, updated) <- activateValues [] headSession values
+      Right (Call activatedHead activatedValues, updated)
+    _ -> Right (expression, session)
+ where
+  activateValues retained current [] = Right (retained, current)
+  activateValues retained current (value : remaining) = do
+    (activated, updated) <-
+      activateSessionTree depth patternExpression current value
+    activateValues (retained <> [activated]) updated remaining
 
 evaluateSessionAnd
   :: Int
