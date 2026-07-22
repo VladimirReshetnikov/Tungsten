@@ -15,10 +15,11 @@ module Tungsten.Session
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Char (isAlpha, isAlphaNum)
+import Data.Char (isAlpha, isAlphaNum, isPrint, ord)
 import Data.List (sortBy)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Numeric (showHex)
 import Tungsten.Evaluate
 import Tungsten.Expression
 import Tungsten.PythonSort (pythonStableSortByState)
@@ -571,6 +572,8 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionReturn depth session arguments'
       Call (Symbol "Print") arguments' ->
         evaluateSessionPrint depth session arguments'
+      Call (Symbol "Evaluate") arguments' ->
+        evaluateSessionEvaluate depth session arguments'
       Call (Symbol "Select") [criterion] ->
         evaluateSessionSelectionOperator "Select" depth session criterion
       Call (Symbol "Discard") [criterion] ->
@@ -847,6 +850,7 @@ qualifiedAliasDispatchHeads =
   , "SymbolName"
   , "Times"
   , "Unequal"
+  , "Unique"
   ]
 
 directSessionDispatchHead :: Text -> Bool
@@ -875,6 +879,7 @@ directSessionDispatchHead name =
              , "Continue"
              , "Return"
              , "Print"
+             , "Evaluate"
              , "Select"
              , "Discard"
              , "SelectFirst"
@@ -2033,6 +2038,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionSymbol session values)
   Call (Symbol "SymbolName") values ->
     Just (evaluateSessionSymbolName session values)
+  Call (Symbol "Unique") values ->
+    Just (evaluateSessionUnique session values)
   Call (Symbol "Names") values ->
     Just (evaluateSessionNames session values)
   Call (Symbol "NameQ") values ->
@@ -3857,6 +3864,100 @@ evaluateSessionSymbolName session = \case
   [_] -> sessionFailure session "SymbolName expects a symbol or an existing symbol name."
   _ -> sessionFailure session "SymbolName expects exactly one argument."
 
+evaluateSessionUnique
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionUnique session = \case
+  [] -> allocateSessionCounterUnique currentSessionContext "$" session
+  [Call (Symbol listHead) specifications]
+    | isSessionSystemHead "List" listHead ->
+        allocateList [] session specifications
+  [specification] -> allocateSessionUniqueItem session specification
+  _ ->
+    sessionFailure
+      session
+      "Unique currently expects zero arguments or one symbol, string, or list argument."
+ where
+  allocateList retained current [] =
+    Right (evaluatedList (reverse retained), current)
+  allocateList retained current (specification : rest) = do
+    (generated, updated) <-
+      allocateSessionUniqueItem current specification
+    allocateList (generated : retained) updated rest
+
+evaluateSessionEvaluate
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionEvaluate depth session = \case
+  [Call (Symbol unevaluatedHead) [payload]]
+    | isSessionSystemHead "Unevaluated" unevaluatedHead ->
+        evaluateSessionAt (depth + 1) session payload
+  [payload] -> evaluateSessionAt (depth + 1) session payload
+  _ -> sessionFailure session "Evaluate expects exactly one argument."
+
+allocateSessionUniqueItem
+  :: EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+allocateSessionUniqueItem session = \case
+  Symbol name ->
+    case resolvedSessionSymbolFullName name session of
+      Just fullName
+        | Just (context, shortName) <- splitSessionSymbolFullName fullName ->
+            allocateSessionCounterUnique
+              context
+              (shortName <> "$")
+              (registerSymbol fullName session)
+      _ -> sessionFailure session (invalidSessionSymbolNameMessage name)
+  String prefix
+    | validSessionSymbolShortName (prefix <> "1") ->
+        allocateStringPrefix 1
+    | otherwise ->
+        sessionFailure
+          session
+          "Unique expects a valid symbol or symbol-name prefix."
+   where
+    allocateStringPrefix :: Integer -> SessionResult Expr
+    allocateStringPrefix index =
+      let fullName =
+            currentSessionContext
+              <> prefix
+              <> T.pack (show index)
+       in if isKnownSessionFullName fullName session
+            then allocateStringPrefix (index + 1)
+            else
+              Right
+                ( Symbol (displaySessionSymbolName fullName)
+                , registerSymbol fullName session
+                )
+  _ ->
+    sessionFailure
+      session
+      "Unique expects no argument, a symbol, a string prefix, or a list of those forms."
+
+allocateSessionCounterUnique
+  :: Text
+  -> Text
+  -> EvaluationSession
+  -> SessionResult Expr
+allocateSessionCounterUnique context prefix session =
+  let nextCounter = sessionModuleCounter session + 1
+      fullName = context <> prefix <> T.pack (show nextCounter)
+      allocated = session {sessionModuleCounter = nextCounter}
+   in if validSessionSymbolName fullName
+        then
+          Right
+            ( Symbol (displaySessionSymbolName fullName)
+            , registerSymbol fullName allocated
+            )
+        else
+          sessionFailure
+            allocated
+            (invalidSessionSymbolNameMessage fullName)
+
 evaluateSessionNames
   :: EvaluationSession
   -> [Expr]
@@ -3943,7 +4044,7 @@ evaluateSessionContext session = \case
         sessionFailure
           session
           ( "Context could not find a symbol named "
-              <> singleQuotedName name
+              <> pythonReprName name
               <> "."
           )
       Just fullName ->
@@ -6537,17 +6638,35 @@ matchingSessionDisplayNames patterns session =
 
 invalidSessionSymbolNameMessage :: Text -> Text
 invalidSessionSymbolNameMessage name =
-  "Invalid Wolfram symbol name: " <> singleQuotedName name <> "."
+  "Invalid Wolfram symbol name: " <> pythonReprName name <> "."
 
-singleQuotedName :: Text -> Text
-singleQuotedName name = "'" <> T.concatMap escape name <> "'"
+pythonReprName :: Text -> Text
+pythonReprName name =
+  T.singleton quote
+    <> T.concatMap (escape quote) name
+    <> T.singleton quote
  where
-  escape '\\' = "\\\\"
-  escape '\'' = "\\'"
-  escape '\n' = "\\n"
-  escape '\r' = "\\r"
-  escape '\t' = "\\t"
-  escape character = T.singleton character
+  quote
+    | "'" `T.isInfixOf` name
+    , not ("\"" `T.isInfixOf` name) = '"'
+    | otherwise = '\''
+
+  escape selectedQuote character
+    | character == '\\' = "\\\\"
+    | character == selectedQuote = "\\" <> T.singleton character
+    | character == '\n' = "\\n"
+    | character == '\r' = "\\r"
+    | character == '\t' = "\\t"
+    | isPrint character = T.singleton character
+    | codePoint <= 0xff = "\\x" <> paddedHex 2 codePoint
+    | codePoint <= 0xffff = "\\u" <> paddedHex 4 codePoint
+    | otherwise = "\\U" <> paddedHex 8 codePoint
+   where
+    codePoint = ord character
+
+  paddedHex width value =
+    let digits = T.pack (showHex value "")
+     in T.replicate (width - T.length digits) "0" <> digits
 
 registerSymbol :: Text -> EvaluationSession -> EvaluationSession
 registerSymbol name =

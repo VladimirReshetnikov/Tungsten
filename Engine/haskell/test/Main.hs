@@ -1209,6 +1209,15 @@ checkEvaluationSession = do
         , ("qualified and evaluated name-query aliases dispatch", "ClearAll[q, s]; q = Names; s = Symbol; {System`Names[\"System`Plus\"], q[\"System`Times\"], s[\"OtherRegistry`made\"], System`SymbolName[System`Plus]}", "List[List[\"Plus\"], List[\"Times\"], OtherRegistry`made, \"Plus\"]")
         , ("System name catalog remains complete through Names", "{Length[Names[\"System`*\"]], NameQ[\"System`AASTriangle\"], NameQ[\"AASTriangle\"]}", "List[7941, True, True]")
         , ("catalog formal symbols bypass user-name validation", "{Symbol[\"System`\\[FormalA]\"], SymbolName[\"System`\\[FormalA]\"], Context[\"System`\\[FormalA]\"]}", "List[\\[FormalA], \"\xF800\", \"System`\"]")
+        , ("Unique counter allocation preserves resolved contexts", "{Unique[], Unique[x], Unique[OtherUnique`x], Unique[System`Plus]}", "List[$1, x$2, OtherUnique`x$3, Plus$4]")
+        , ("Unique string prefixes have independent next-free sequences", "{Unique[\"p\"], Unique[\"p\"], Unique[\"q\"], Unique[\"p\"]}", "List[p1, p2, q1, p3]")
+        , ("Unique list allocation threads both counter families", "Unique[{x, \"p\", OtherUnique`y, \"p\"}]", "List[x$1, p1, OtherUnique`y$2, p2]")
+        , ("qualified and evaluated Unique aliases dispatch", "{System`Unique[], (q = Unique; q[x]), (r = System`Unique; r[\"p\"])}", "List[$1, x$2, p1]")
+        , ("Unique has ordinary evaluated argument and mutable attribute semantics", "ClearAll[x]; x = \"p\"; first = {Unique[x], Unique[(x = \"q\"; x)], x}; Unprotect[Unique]; SetAttributes[Unique, HoldAll]; {first, Unique[x], Unique[Sequence[]]}", "List[List[p1, q1, \"q\"], x$1, $2]")
+        , ("Evaluate transparently prepares direct ordinary arguments", "ClearAll[x, e]; x = y; e = Evaluate; {Evaluate[x], System`Evaluate[x], Evaluate[Unevaluated[x]], e[x], Unique[Evaluate[x]]}", "List[y, y, y, Evaluate[y], y$1]")
+        , ("Unique shares its symbol counter with Module", "{Unique[], Module[{x}, Hold[x]], Unique[x]}", "List[$1, Hold[x$2], x$3]")
+        , ("counter Unique intentionally reuses registered candidate names", "Symbol[\"Global`$1\"]; Symbol[\"Global`x$2\"]; {Unique[], Unique[x], Names[{\"Global`$1\", \"Global`x$2\"}]}", "List[$1, x$2, List[\"$1\", \"x$2\"]]")
+        , ("string Unique scans Global collisions without sharing module state", "Symbol[\"Global`p1\"]; {Unique[], Unique[\"p\"], Unique[p], Unique[\"p\"], Names[\"Global`p*\"]}", "List[$1, p2, p$2, p3, List[\"p\", \"p$2\", \"p1\", \"p2\", \"p3\"]]")
         , ("bare and explicit Global symbols share values", "ClearAll[Global`ctxX, ctxY]; Global`ctxX = 1; ctxY = 2; {ctxX, Global`ctxY, Attributes[\"ctxX\"]}", "List[1, 2, List[]]")
         , ("explicit unknown System symbols keep separate context identity", "ClearAll[Global`ctxCollision, System`ctxCollision]; Global`ctxCollision = 1; System`ctxCollision = 2; {Global`ctxCollision, System`ctxCollision, ctxCollision}", "List[1, 2, 2]")
         , ("whole-expression registration resolves future System symbols", "ClearAll[Global`ctxFutureSysA]; ctxFutureSysA = 1; Hold[System`ctxFutureSysA]; {ctxFutureSysA, Global`ctxFutureSysA, System`ctxFutureSysA, OwnValues[Global`ctxFutureSysA], OwnValues[System`ctxFutureSysA]}", "List[1, Global`ctxFutureSysA, 1, List[], List[RuleDelayed[HoldPattern[ctxFutureSysA], 1]]]")
@@ -1477,7 +1486,61 @@ checkEvaluationSession = do
         , "Part::error: Part expects an expression and at least one part specification."
         )
       messageCases =
-        [ ( "Symbol validates constructed names"
+        [ ( "Unique validates string prefixes"
+          , "Unique[\"Other`prefix\"]"
+          , "Unique[\"Other`prefix\"]"
+          , [ ( "Unique::error"
+              , "MessageName[Unique, \"error\"]"
+              , "Unique::error: Unique expects a valid symbol or symbol-name prefix."
+              )
+            ]
+          )
+        , ( "Unique ordinary Sequence splicing validates arity"
+          , "Unique[Sequence[x, y]]"
+          , "Unique[Sequence[x, y]]"
+          , [ ( "Unique::error"
+              , "MessageName[Unique, \"error\"]"
+              , "Unique::error: Unique currently expects zero arguments or one symbol, string, or list argument."
+              )
+            ]
+          )
+        , ( "Unique list failures retain earlier allocations"
+          , "Unique[{a, 1, b}]; {Names[\"a$*\"], Names[\"b$*\"]}"
+          , "List[List[\"a$1\"], List[]]"
+          , [ ( "Unique::error"
+              , "MessageName[Unique, \"error\"]"
+              , "Unique::error: Unique expects no argument, a symbol, a string prefix, or a list of those forms."
+              )
+            ]
+          )
+        , ( "Unique validates evaluated specifications"
+          , "x = 1; Unique[x]"
+          , "Unique[x]"
+          , [ ( "Unique::error"
+              , "MessageName[Unique, \"error\"]"
+              , "Unique::error: Unique expects no argument, a symbol, a string prefix, or a list of those forms."
+              )
+            ]
+          )
+        , ( "Unique invalid generated names still consume the shared counter"
+          , "Unique[{\\[FormalA], x}]; Unique[]"
+          , "$2"
+          , [ ( "Unique::error"
+              , "MessageName[Unique, \"error\"]"
+              , "Unique::error: Invalid Wolfram symbol name: 'System`\\uf800$1'."
+              )
+            ]
+          )
+        , ( "Evaluate validates raw arity before argument effects"
+          , "ClearAll[x]; x = 0; Evaluate[x = x + 1, x = x + 1]; x"
+          , "0"
+          , [ ( "Evaluate::error"
+              , "MessageName[Evaluate, \"error\"]"
+              , "Evaluate::error: Evaluate expects exactly one argument."
+              )
+            ]
+          )
+        , ( "Symbol validates constructed names"
           , "Symbol[\"not a symbol\"]"
           , "Symbol[\"not a symbol\"]"
           , [ ( "Symbol::error"

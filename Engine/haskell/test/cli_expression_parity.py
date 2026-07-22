@@ -435,6 +435,76 @@ CASES = (
         ),
         0,
     ),
+    (
+        "Unique forms and independent counters",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Unique[], Unique[x], Unique[FreshContext`x], "
+            "Unique[\"x\"], Unique[\"x\"], Unique[\"y\"], "
+            "Unique[{x, \"x\", FreshContext`x}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Unique shares Module counter and skips string collisions",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Symbol[\"pre1\"]; Symbol[\"pre3\"]; "
+            "{Unique[], Module[{a, b}, {a, b}], Unique[z], "
+            "Unique[\"pre\"], Unique[\"pre\"], Unique[\"pre\"], "
+            "Module[{q}, q], Unique[]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Unique retains partial allocation and evaluated effects",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Unique[{\"partial\", 1}]; "
+            "{Names[\"partial*\"], Unique[\"partial\"], "
+            "Unique[Print[\"unique-effect\"]], "
+            "Unique[Sequence[x, y]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Unique rejects invalid generated formal names after counting",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Unique[{\\[FormalA], x}]; Unique[]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Evaluate transparently prepares ordinary arguments",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, e]; x = y; e = Evaluate; "
+            "{Evaluate[x], System`Evaluate[x], "
+            "Evaluate[Unevaluated[x]], e[x], Unique[Evaluate[x]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
