@@ -87,6 +87,11 @@ data EvaluationSession = EvaluationSession
   { sessionSymbols :: Map.Map Text SymbolState
   , sessionModuleCounter :: !Integer
   , sessionActiveOwnValues :: !(Set.Set Text)
+  -- Update operators use attempted diagnostics as a recovery barrier even
+  -- when Off prevents those diagnostics from entering either message list.
+  , sessionMessageAttemptCount :: !Integer
+  , sessionDisabledMessages :: !(Set.Set Text)
+  , sessionAssertEnabled :: !Bool
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
@@ -94,7 +99,18 @@ data EvaluationSession = EvaluationSession
   deriving (Eq, Show)
 
 emptySession :: EvaluationSession
-emptySession = EvaluationSession initialSessionSymbols 0 Set.empty [] [] []
+emptySession =
+  EvaluationSession
+    { sessionSymbols = initialSessionSymbols
+    , sessionModuleCounter = 0
+    , sessionActiveOwnValues = Set.empty
+    , sessionMessageAttemptCount = 0
+    , sessionDisabledMessages = Set.empty
+    , sessionAssertEnabled = False
+    , sessionGeneratedMessages = []
+    , sessionVisibleMessages = []
+    , sessionPrints = []
+    }
 
 initialSessionSymbols :: Map.Map Text SymbolState
 initialSessionSymbols =
@@ -329,7 +345,8 @@ evaluateInSession session expression =
         ( evaluateSessionAt
             0
             registeredSession
-              { sessionGeneratedMessages = []
+              { sessionMessageAttemptCount = 0
+              , sessionGeneratedMessages = []
               , sessionVisibleMessages = []
               , sessionPrints = []
               }
@@ -411,6 +428,8 @@ evaluateSessionAtRaw
   -> SessionResult Expr
 evaluateSessionAtRaw depth session expression = case expression of
       Symbol name
+        | resolvedSymbolStorageName name session == "$MessageList" ->
+            Right (currentSessionMessageList session, session)
         | resolvedSymbolStorageName name session == "$Context" ->
             Right (String currentSessionContext, session)
         | resolvedSymbolStorageName name session == "$ContextPath" ->
@@ -584,6 +603,12 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionLabel session arguments'
       Call (Symbol "Goto") arguments' ->
         evaluateSessionGoto depth session arguments'
+      Call (Symbol "Message") arguments' ->
+        evaluateSessionMessage depth session arguments'
+      Call (Symbol "Off") arguments' ->
+        evaluateSessionMessageControl "Off" False depth session arguments'
+      Call (Symbol "On") arguments' ->
+        evaluateSessionMessageControl "On" True depth session arguments'
       Call (Symbol "AppendTo") arguments' ->
         evaluateSessionAppendTo depth session arguments'
       Call (Symbol headName) arguments'
@@ -947,6 +972,9 @@ directSessionDispatchHead name =
              , "Return"
              , "Label"
              , "Goto"
+             , "Message"
+             , "Off"
+             , "On"
              , "AppendTo"
              , "Print"
              , "Evaluate"
@@ -2301,6 +2329,117 @@ mapSessionResultValue
 mapSessionResultValue update = \case
   Right (value, session) -> Right (update value, session)
   Left evaluationExit -> Left evaluationExit
+
+evaluateSessionMessage
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMessage depth session = \case
+  [] -> sessionFailure session "Message expects a message name."
+  messageName : insertionExpressions
+    | isSessionMessageName messageName -> do
+        (insertions, updated) <-
+          evaluateArguments depth session insertionExpressions
+        Right
+          ( Symbol "Null"
+          , appendSessionMessage
+              messageName
+              ( if null insertions
+                  then "Message generated."
+                  else T.intercalate ", " (map renderMessageInsertion insertions)
+              )
+              updated
+          )
+    | otherwise ->
+        sessionFailure
+          session
+          "Message expects a message name of the form symbol::tag."
+
+evaluateSessionMessageControl
+  :: Text
+  -> Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMessageControl _ enabled depth = go
+ where
+  go session [] = Right (Symbol "Null", session)
+  go session (specificationExpression : rest) = do
+    (specification, evaluated) <-
+      evaluateSessionAt (depth + 1) session specificationExpression
+    controlled <- setSessionMessageEnabled enabled evaluated specification
+    go controlled rest
+
+setSessionMessageEnabled
+  :: Bool
+  -> EvaluationSession
+  -> Expr
+  -> Either EvaluationExit EvaluationSession
+setSessionMessageEnabled enabled session = \case
+  Call (Symbol listHead) specifications
+    | isSessionSystemHead "List" listHead ->
+        setList session specifications
+  Symbol name
+    | isSessionSystemHead "Assert" name ->
+        Right (session {sessionAssertEnabled = enabled})
+  specification@(Symbol _) ->
+    setSessionMessageEnabled
+      enabled
+      session
+      (Call (Symbol "MessageName") [specification, String "trace"])
+  specification@(Call (Symbol messageHead) _)
+    | isSessionSystemHead "MessageName" messageHead ->
+        Right
+          session
+            { sessionDisabledMessages =
+                updateDisabledMessageKey
+                  enabled
+                  (fullForm specification)
+                  (sessionDisabledMessages session)
+            }
+  _ -> invalid
+ where
+  setList current [] = Right current
+  setList current (specification : rest) = do
+    updated <- setSessionMessageEnabled enabled current specification
+    setList updated rest
+
+  invalid =
+    Left
+      ( SessionEvaluationFailure
+          ( EvaluationError
+              "On and Off expect message names, symbols, or lists of message names."
+          )
+          session
+      )
+
+updateDisabledMessageKey :: Bool -> Text -> Set.Set Text -> Set.Set Text
+updateDisabledMessageKey True = Set.delete
+updateDisabledMessageKey False = Set.insert
+
+currentSessionMessageList :: EvaluationSession -> Expr
+currentSessionMessageList session =
+  Call
+    (Symbol "List")
+    [ Call (Symbol "HoldForm") [evaluationMessageFullName message]
+    | message <- sessionGeneratedMessages session
+    ]
+
+isSessionMessageName :: Expr -> Bool
+isSessionMessageName = \case
+  Call (Symbol messageHead) _ -> isSessionSystemHead "MessageName" messageHead
+  _ -> False
+
+renderMessageInsertion :: Expr -> Text
+renderMessageInsertion = \case
+  Call (Symbol formHead) (payload : _)
+    | isSessionSystemHead "FullForm" formHead -> fullForm payload
+    | any (`isSessionSystemHead` formHead) ["InputForm", "StandardForm"] ->
+        inputForm payload
+  String value -> value
+  expression -> inputForm expression
 
 evaluateSessionPrint
   :: Int
@@ -6513,16 +6652,16 @@ evaluateUpdate headName depth session name _ rhs
       (value, updated) <- evaluateSessionAt (depth + 1) session rhs
       Right (Call (Symbol headName) [Symbol name, value], updated)
 evaluateUpdate headName depth session name constructor rhs = do
-  let initialMessageCount = length (sessionGeneratedMessages session)
+  let initialMessageCount = sessionMessageAttemptCount session
   (current, currentSession) <- evaluateSessionAt (depth + 1) session (Symbol name)
   (value, valueSession) <- evaluateSessionAt (depth + 1) currentSession rhs
-  if length (sessionGeneratedMessages valueSession) > initialMessageCount
+  if sessionMessageAttemptCount valueSession > initialMessageCount
     then Right (Call (Symbol headName) [Symbol name, rhs], valueSession)
     else do
-      let beforeResultCount = length (sessionGeneratedMessages valueSession)
+      let beforeResultCount = sessionMessageAttemptCount valueSession
       (result, resultSession) <-
         evaluateSessionAt (depth + 1) valueSession (constructor current value)
-      if length (sessionGeneratedMessages resultSession) > beforeResultCount
+      if sessionMessageAttemptCount resultSession > beforeResultCount
         then Right (Call (Symbol headName) [Symbol name, rhs], resultSession)
         else Right (result, define name (ImmediateValue result) resultSession)
 
@@ -6693,23 +6832,74 @@ appendEvaluationMessage expression (EvaluationError messageText) session =
 
 appendNamedMessage :: Text -> Text -> Text -> EvaluationSession -> EvaluationSession
 appendNamedMessage headName tag messageText session =
-  session
-    { sessionGeneratedMessages =
-        sessionGeneratedMessages session <> [message]
-    , sessionVisibleMessages =
-        sessionVisibleMessages session <> [message]
-    }
+  appendSessionMessage
+    ( Call
+        (Symbol "MessageName")
+        [Symbol headName, String tag]
+    )
+    messageText
+    session
+
+appendSessionMessage :: Expr -> Text -> EvaluationSession -> EvaluationSession
+appendSessionMessage fullName messageText session =
+  if sessionMessageIsDisabled fullName attempted
+    then attempted
+    else
+      attempted
+        { sessionGeneratedMessages =
+            sessionGeneratedMessages attempted <> [message]
+        , sessionVisibleMessages =
+            sessionVisibleMessages attempted <> [message]
+        }
  where
-  messageName = headName <> "::" <> tag
+  attempted =
+    session
+      { sessionMessageAttemptCount = sessionMessageAttemptCount session + 1
+      }
+  messageName = sessionMessageDisplayName fullName
   message =
     EvaluationMessage
       { evaluationMessageName = messageName
-      , evaluationMessageFullName =
-          Call
-            (Symbol "MessageName")
-            [Symbol headName, String tag]
+      , evaluationMessageFullName = fullName
       , evaluationMessageText = messageName <> ": " <> messageText
       }
+
+sessionMessageIsDisabled :: Expr -> EvaluationSession -> Bool
+sessionMessageIsDisabled messageName session =
+  Set.member (fullForm messageName) disabled
+    || maybe False generalTagIsDisabled (messageNameComponents messageName)
+ where
+  disabled = sessionDisabledMessages session
+  generalTagIsDisabled (_, []) = False
+  generalTagIsDisabled (_, tags) =
+    Set.member
+      ( fullForm
+          ( Call
+              (Symbol "MessageName")
+              [Symbol "General", String (last tags)]
+          )
+      )
+      disabled
+
+messageNameComponents :: Expr -> Maybe (Text, [Text])
+messageNameComponents = \case
+  Call (Symbol messageHead) (base : tags@(_ : _))
+    | isSessionSystemHead "MessageName" messageHead -> do
+        tagNames <- traverse messageTagName tags
+        Just (fullForm base, tagNames)
+  _ -> Nothing
+ where
+  messageTagName (String value) = Just value
+  messageTagName (Symbol value) = Just value
+  messageTagName _ = Nothing
+
+sessionMessageDisplayName :: Expr -> Text
+sessionMessageDisplayName expression = case expression of
+  Call (Symbol messageHead) values
+    | isSessionSystemHead "MessageName" messageHead
+    , Just _ <- messageNameComponents expression ->
+        inputForm (Call (Symbol "MessageName") values)
+  _ -> inputForm expression
 
 appendSymbolMessage
   :: Text

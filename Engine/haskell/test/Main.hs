@@ -1614,6 +1614,16 @@ checkEvaluationSession = do
           , "probe[Label[Print[\"l1\"], Print[\"l2\"]], Goto[Print[\"g1\"], Print[\"g2\"]]]"
           , []
           )
+        , ( "disabled messages still evaluate insertions"
+          , "Off[f::tag]; Message[f::tag, Print[\"still\"]]; $MessageList"
+          , "List[]"
+          , ["still"]
+          )
+        , ( "invalid message names block insertion effects"
+          , "x = f::tag; probe[Message[], Message[x, Print[\"bad\"]]]"
+          , "probe[Message[], Message[x, Print[\"bad\"]]]"
+          , []
+          )
         ]
       partArityMessage =
         ( "Part::error"
@@ -2518,6 +2528,79 @@ checkEvaluationSession = do
           , "reached"
           , [partArityMessage]
           )
+        , ( "explicit messages preserve ordering and current-list snapshots"
+          , "Message[f::tag, Part[], Print[\"insert\"]]; first = $MessageList; Message[g::other]; {first, $MessageList}"
+          , "List[List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[f, \"tag\"]]], List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[f, \"tag\"]], HoldForm[MessageName[g, \"other\"]]]]"
+          , [ partArityMessage
+            , ( "f::tag"
+              , "MessageName[f, \"tag\"]"
+              , "f::tag: Part[], Null"
+              )
+            , ( "g::other"
+              , "MessageName[g, \"other\"]"
+              , "g::other: Message generated."
+              )
+            ]
+          )
+        , ( "message controls suppress diagnostics and reactivate exact names"
+          , "Off[{f::tag, General::error}]; Message[f::tag, Print[\"suppressed\"]]; Part[f[a], 2]; Append[1, 2]; before = $MessageList; On[{f::tag, General::error}]; Message[f::tag]; {before, $MessageList}"
+          , "List[List[], List[HoldForm[MessageName[f, \"tag\"]]]]"
+          , [ ( "f::tag"
+              , "MessageName[f, \"tag\"]"
+              , "f::tag: Message generated."
+              )
+            ]
+          )
+        , ( "message controls retain partial mutations before invalid specs"
+          , "Off[f::a, Part[], g::b]; Message[f::a]; Message[g::b]; $MessageList"
+          , "List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Off, \"error\"]], HoldForm[MessageName[g, \"b\"]]]"
+          , [ partArityMessage
+            , ( "Off::error"
+              , "MessageName[Off, \"error\"]"
+              , "Off::error: On and Off expect message names, symbols, or lists of message names."
+              )
+            , ( "g::b"
+              , "MessageName[g, \"b\"]"
+              , "g::b: Message generated."
+              )
+            ]
+          )
+        , ( "message validates held names before insertion effects"
+          , "x = f::tag; probe[Message[], Message[x, Print[\"bad\"]]]"
+          , "probe[Message[], Message[x, Print[\"bad\"]]]"
+          , [ ( "Message::error"
+              , "MessageName[Message, \"error\"]"
+              , "Message::error: Message expects a message name."
+              )
+            , ( "Message::error"
+              , "MessageName[Message, \"error\"]"
+              , "Message::error: Message expects a message name of the form symbol::tag."
+              )
+            ]
+          )
+        , ( "disabled diagnostics still stop assignment updates"
+          , "x = 1; Off[Part::error]; {AddTo[x, Part[f[a], 2]], x, $MessageList}"
+          , "List[AddTo[x, Part[f[a], 2]], 1, List[]]"
+          , []
+          )
+        , ( "qualified message names retain structure but canonicalize display"
+          , "Message[System`MessageName[f, \"tag\"]]"
+          , "Null"
+          , [ ( "f::tag"
+              , "System`MessageName[f, \"tag\"]"
+              , "f::tag: Message generated."
+              )
+            ]
+          )
+        , ( "message insertions honor supported display wrappers"
+          , "Message[f::forms, InputForm[{1, 2/3}], FullForm[{1, 2/3}], System`FullForm[1 + 2], StandardForm[\"x\"]]"
+          , "Null"
+          , [ ( "f::forms"
+              , "MessageName[f, \"forms\"]"
+              , "f::forms: {1, 2/3}, List[1, Rational[2, 3]], 3, \"x\""
+              )
+            ]
+          )
         ]
   caseResults <- traverse evaluateSessionCase cases
   printResults <- traverse evaluatePrintCase printCases
@@ -2583,6 +2666,18 @@ checkRepl = do
       messageState = replStateFrom messageStep
       persistedAfterMessageStep = evaluateReplLine messageState "x"
       parseFailureAfterMessage = evaluateReplLine messageState "1 +"
+      offStep = evaluateReplLine initialReplState "Off[f::tag]"
+      suppressedMessageStep =
+        evaluateReplLine
+          (replStateFrom offStep)
+          "Message[f::tag]; $MessageList"
+      onStep = evaluateReplLine (replStateFrom suppressedMessageStep) "On[f::tag]"
+      enabledMessageStep =
+        evaluateReplLine
+          (replStateFrom onStep)
+          "Message[f::tag]; $MessageList"
+      resetMessageListStep =
+        evaluateReplLine (replStateFrom enabledMessageStep) "$MessageList"
       printStep = evaluateReplLine thirdState "Print[\"x\", 2]; 1"
       printSequenceStep = evaluateReplLine thirdState "Print[Sequence[1, 2]]"
       printRationalStep = evaluateReplLine thirdState "Print[1/2]"
@@ -2638,6 +2733,37 @@ checkRepl = do
             ( sessionVisibleMessages
                 (replSession (replStateFrom parseFailureAfterMessage))
             )
+        , assertEqual
+            "REPL message disabling persists across inputs"
+            (Just (Call (Symbol "List") []))
+            (replValueFrom suppressedMessageStep)
+        , assertEqual
+            "REPL disabled messages are neither generated nor visible"
+            ([], [])
+            ( let messageSession = replSession (replStateFrom suppressedMessageStep)
+               in ( sessionGeneratedMessages messageSession
+                  , sessionVisibleMessages messageSession
+                  )
+            )
+        , assertEqual
+            "REPL message enabling persists across inputs"
+            ( Just
+                ( Call
+                    (Symbol "List")
+                    [ Call
+                        (Symbol "HoldForm")
+                        [ Call
+                            (Symbol "MessageName")
+                            [Symbol "f", String "tag"]
+                        ]
+                    ]
+                )
+            )
+            (replValueFrom enabledMessageStep)
+        , assertEqual
+            "REPL current message list resets on the next input"
+            (Just (Call (Symbol "List") []))
+            (replValueFrom resetMessageListStep)
         , assertEqual
             "REPL captures Print output"
             ["x2"]

@@ -897,6 +897,97 @@ CASES = (
         ),
         0,
     ),
+    (
+        "message ordering insertions and current-list snapshots",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Message[f::tag, Part[], Print[\"insert\"]]; "
+            "first = $MessageList; Message[g::other]; "
+            "{first, $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "message suppression general tags and reactivation",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Off[{f::tag, General::error}]; "
+            "Message[f::tag, Print[\"suppressed\"]]; "
+            "Part[f[a], 2]; Append[1, 2]; before = $MessageList; "
+            "On[{f::tag, General::error}]; Message[f::tag]; "
+            "{before, $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "message control partial mutations and update barrier",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x]; x = 1; Off[f::a, Part[], g::b]; "
+            "Message[f::a]; Message[g::b]; Off[Part::error]; "
+            "update = AddTo[x, Part[f[a], 2]]; "
+            "{update, x, $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "message held-name validation and qualified display",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x]; x = f::tag; "
+            "probe[Message[], Message[x, Print[\"bad\"]], "
+            "Message[System`MessageName[f, \"tag\"]], "
+            "Message[f::forms, InputForm[{1, 2}], FullForm[{1, 2}]], "
+            "$MessageList]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "message qualification and alias dispatch boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[m, o]; m = Message; o = Off; "
+            "{System`Message[f::one], Global`Message[f::two], "
+            "m[f::three], System`Off[f::four], o[f::five], "
+            "Message[f::four], Message[f::five], $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "message exact evaluated specs and final-tag suppression",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[t]; t = \"tag\"; Off[MessageName[f, t]]; "
+            "Message[f::tag]; Message[MessageName[f, t]]; "
+            "Off[General::other]; Message[g::x::other]; "
+            "Message[g::kept]; $MessageList",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
