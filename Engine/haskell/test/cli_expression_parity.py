@@ -505,6 +505,81 @@ CASES = (
         ),
         0,
     ),
+    (
+        "callable Nothing retains effects across spellings",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, n]; x = 0; n = Nothing; "
+            "{Nothing[x = x + 1, Print[\"nothing\"]], "
+            "System`Nothing[x = x + 1], n[x = x + 1], "
+            "Global`Nothing[x = x + 1], x}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "SameAs callable target and arity behavior",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x]; x = 1; "
+            "{SameAs[1][], SameAs[1][1], SameAs[1][1, 1], "
+            "SameAs[x][1], System`SameAs[1][1], "
+            "SameAs[1, 2][1], SameAs[Sequence[1, 1]][1]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Composition callable direction and empty identity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Composition[][x], Composition[][x, y], "
+            "Composition[f][x, y], Composition[f, g][x, y], "
+            "RightComposition[][x, y], "
+            "RightComposition[f, g][x, y], "
+            "Composition[Nothing, f][x], "
+            "Composition[f, Nothing][x]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "empty Composition qualified Sequence and Splice normalization",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Composition[][System`Sequence[a, b], x], "
+            "Composition[][System`Splice[{a, b}], x], "
+            "Composition[][Splice[System`List[a, b]], x], "
+            "RightComposition[][System`Splice[System`List[a, b]], x]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Composition named Function arity failure boundary",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[z, f]; z = 0; f[t_] := (z = 1; t); "
+            "RightComposition[Function[{x, y}, x + y], f][1]; z",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

@@ -694,25 +694,58 @@ evaluateSessionGenericCall
 evaluateSessionGenericCall depth session expressionHead arguments' = do
   (evaluatedHead, headSession) <-
     evaluateSessionAt (depth + 1) session expressionHead
+  case evaluatedHead of
+    Symbol nothingHead
+      | isSessionSystemHead "Nothing" nothingHead -> do
+          (_, updated) <- evaluateArguments depth headSession arguments'
+          Right (Symbol "Nothing", updated)
+    _ ->
+      evaluateSessionPreparedGenericCall
+        depth
+        headSession
+        expressionHead
+        evaluatedHead
+        arguments'
+
+evaluateSessionPreparedGenericCall
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionPreparedGenericCall depth session expressionHead evaluatedHead arguments' = do
   (preparedArguments, argumentsSession) <-
     evaluateCallArgumentsWithAttributes
       depth
-      headSession
+      session
       evaluatedHead
       arguments'
-  let normalizedCall =
+  let attributeNormalizedCall =
         normalizeSessionAttributeCall
           argumentsSession
           evaluatedHead
           preparedArguments
-      normalizedArguments = case normalizedCall of
+      attributeNormalizedArguments = case attributeNormalizedCall of
         Call _ values -> values
         _ -> preparedArguments
+      normalizedArguments =
+        stripSessionCompositionUnevaluatedArguments
+          evaluatedHead
+          attributeNormalizedArguments
+      normalizedCall = Call evaluatedHead normalizedArguments
       allowSystemDispatch =
         evaluatedHeadAllowsDispatch expressionHead evaluatedHead
   case threadSessionListableCall depth argumentsSession normalizedCall of
     Just sessionResult -> sessionResult
     Nothing -> case evaluatedHead of
+      callable
+        | isSessionStructuralCallable callable ->
+            evaluateSessionCallable
+              depth
+              argumentsSession
+              callable
+              normalizedArguments
       association@(Call (Symbol associationHead) _)
         | allowSystemDispatch
         , isSessionSystemHead "Association" associationHead ->
@@ -2273,7 +2306,22 @@ evaluateSessionCallable
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionCallable depth session function arguments' = case function of
-  Symbol "Nothing" -> Right (Symbol "Nothing", session)
+  Symbol nothingHead
+    | isSessionSystemHead "Nothing" nothingHead -> do
+        (_, updated) <- evaluateArguments depth session arguments'
+        Right (Symbol "Nothing", updated)
+  Call (Symbol sameAsHead) [comparison]
+    | isSessionSystemHead "SameAs" sameAsHead ->
+        Right
+          ( sessionBoolean (all (== comparison) arguments')
+          , session
+          )
+  Call (Symbol compositionHead) functions
+    | isSessionSystemHead "Composition" compositionHead ->
+        evaluateSessionComposition False depth session functions arguments'
+  Call (Symbol compositionHead) functions
+    | isSessionSystemHead "RightComposition" compositionHead ->
+        evaluateSessionComposition True depth session functions arguments'
   Call (Symbol associationHead) associationValues
     | isSessionSystemHead "Association" associationHead
     , [key] <- arguments'
@@ -2311,6 +2359,69 @@ evaluateSessionCallable depth session function arguments' = case function of
       (depth + 1)
       session
       (Call function arguments')
+
+isSessionStructuralCallable :: Expr -> Bool
+isSessionStructuralCallable = \case
+  Call (Symbol sameAsHead) [_]
+    | isSessionSystemHead "SameAs" sameAsHead -> True
+  Call (Symbol compositionHead) _ ->
+    isSessionSystemHead "Composition" compositionHead
+      || isSessionSystemHead "RightComposition" compositionHead
+  _ -> False
+
+evaluateSessionComposition
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionComposition rightComposition depth session functions arguments' =
+  case if rightComposition then functions else reverse functions of
+    [] ->
+      Right
+        ( case arguments' of
+            [argument] -> argument
+            _ -> evaluatedList arguments'
+        , session
+        )
+    firstFunction : remainingFunctions -> do
+      (initial, initialSession) <-
+        applyCompositionFunction session firstFunction arguments'
+      applyUnary remainingFunctions initial initialSession
+ where
+  applyCompositionFunction currentSession function functionArguments =
+    case function of
+      Call (Symbol functionHead) _
+        | isSessionSystemHead "Function" functionHead ->
+            let stageResult =
+                  evaluateSessionCallable
+                    depth
+                    currentSession
+                    function
+                    functionArguments
+             in case stageResult of
+                  Left failure@(SessionEvaluationFailure (EvaluationError message) _)
+                    | message == "Unsupported Function parameter specification." ->
+                        -- Python recovers malformed Function specifications at
+                        -- the staged application. Valid named functions with
+                        -- too few arguments instead abort the whole composition.
+                        recoverEvaluationFailure
+                          (Call function functionArguments)
+                          (Left failure)
+                  _ -> stageResult
+      _ ->
+        evaluateSessionCallable
+          depth
+          currentSession
+          function
+          functionArguments
+
+  applyUnary [] current currentSession = Right (current, currentSession)
+  applyUnary (function : rest) current currentSession = do
+    (updatedValue, updatedSession) <-
+      applyCompositionFunction currentSession function [current]
+    applyUnary rest updatedValue updatedSession
 
 evaluateSessionAssociationMap
   :: Int
@@ -5680,10 +5791,15 @@ evaluatedListArguments :: [Expr] -> [Expr]
 evaluatedListArguments = filter (/= Symbol "Nothing") . concatMap spliceArgument
  where
   spliceArgument = \case
-    Call (Symbol "Sequence") values -> values
-    Call (Symbol "Splice") [Call (Symbol "List") values] -> values
-    Call (Symbol "Splice") [Call (Symbol "List") values, target]
-      | target == Symbol "List" -> values
+    Call (Symbol sequenceHead) values
+      | isSessionSystemHead "Sequence" sequenceHead -> values
+    Call (Symbol spliceHead) [Call (Symbol listHead) values]
+      | isSessionSystemHead "Splice" spliceHead
+      , isSessionSystemHead "List" listHead -> values
+    Call (Symbol spliceHead) [Call (Symbol listHead) values, target]
+      | isSessionSystemHead "Splice" spliceHead
+      , isSessionSystemHead "List" listHead
+      , target == Symbol "List" -> values
     value -> [value]
 
 isListIteratorSpec :: Expr -> Bool
@@ -5933,6 +6049,17 @@ normalizeSessionSequenceCall expressionHead values =
       , isSessionSystemHead "List" listHead
       , target == expressionHead -> spliceValues
     value -> [value]
+
+stripSessionCompositionUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
+stripSessionCompositionUnevaluatedArguments expressionHead
+  | sessionHeadExpressionIsAny ["Composition", "RightComposition"] expressionHead =
+      map stripDirectUnevaluated
+  | otherwise = id
+ where
+  stripDirectUnevaluated = \case
+    Call (Symbol unevaluatedHead) [value]
+      | isSessionSystemHead "Unevaluated" unevaluatedHead -> value
+    value -> value
 
 threadSessionListableCall
   :: Int

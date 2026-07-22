@@ -1215,6 +1215,20 @@ checkEvaluationSession = do
         , ("qualified and evaluated Unique aliases dispatch", "{System`Unique[], (q = Unique; q[x]), (r = System`Unique; r[\"p\"])}", "List[$1, x$2, p1]")
         , ("Unique has ordinary evaluated argument and mutable attribute semantics", "ClearAll[x]; x = \"p\"; first = {Unique[x], Unique[(x = \"q\"; x)], x}; Unprotect[Unique]; SetAttributes[Unique, HoldAll]; {first, Unique[x], Unique[Sequence[]]}", "List[List[p1, q1, \"q\"], x$1, $2]")
         , ("Evaluate transparently prepares direct ordinary arguments", "ClearAll[x, e]; x = y; e = Evaluate; {Evaluate[x], System`Evaluate[x], Evaluate[Unevaluated[x]], e[x], Unique[Evaluate[x]]}", "List[y, y, y, Evaluate[y], y$1]")
+        , ("Nothing callable evaluates arbitrary arguments through aliases", "ClearAll[n, x]; n = Nothing; x = 0; probe[Nothing[], System`Nothing[1 + 1], n[x = x + 1], x]", "probe[Nothing, Nothing, Nothing, 1]")
+        , ("Nothing callable ignores mutable hold attributes", "Unprotect[Nothing]; SetAttributes[Nothing, HoldAllComplete]; x = 0; Nothing[x = 1]; x", "1")
+        , ("Nothing callable propagates throws to Catch", "Catch[Nothing[Throw[1]]]", "1")
+        , ("Nothing callable propagates bare returns", "Nothing[Return[1]]", "Return[1]")
+        , ("SameAs callable covers arity identity and Sequence", "{SameAs[y][], SameAs[y][y], SameAs[y][x, y], SameAs[f[a]][f[a]], SameAs[Sequence[y, z]][y]}", "List[True, True, False, True, SameAs[y, z][y]]")
+        , ("SameAs callable aliases and mutable holds retain structural identity", "ClearAll[x, s]; x = 1; s = SameAs[y]; first = {s[], s[y], System`SameAs[y][y], SameAs[Unevaluated[x]][x]}; Unprotect[SameAs]; SetAttributes[SameAs, HoldAll]; {first, SameAs[x][x]}", "List[List[True, True, True, False], False]")
+        , ("composition callables cover zero one and many functions", "{Composition[][x], Composition[][], Composition[][x, y, Nothing], Composition[f][x, y], Composition[f, g, h][x, y], RightComposition[f, g, h][x, y]}", "List[x, List[], List[x, y], f[x, y], f[g[h[x, y]]], h[g[f[x, y]]]]")
+        , ("empty composition uses qualified Sequence and Splice list normalization", "{Composition[][System`Sequence[a, b], x], Composition[][System`Splice[{a, b}], x], Composition[][Splice[System`List[a, b]], x], RightComposition[][System`Splice[System`List[a, b]], x]}", "List[List[a, b, x], List[a, b, x], List[a, b, x], List[a, b, x]]")
+        , ("composition callables splice Sequence and nest structurally", "{Composition[Sequence[f, g], h][x], Composition[f, g][Sequence[x, y]], Composition[Composition[f, g], h][x], RightComposition[RightComposition[f, g], h][x], Composition[RightComposition[f, g], h][x]}", "List[f[g[h[x]]], f[g[x, y]], f[g[h[x]]], h[g[f[x]]], g[f[h[x]]]]")
+        , ("composition callable aliases and qualified heads dispatch", "ClearAll[c, r, q]; c = Composition[f, g]; r = RightComposition[f, g]; q = Composition; {c[x], r[x], q[f, g][x], System`Composition[f, g][x], System`RightComposition[f, g][x]}", "List[f[g[x]], g[f[x]], f[g[x]], f[g[x]], g[f[x]]]")
+        , ("composition callables accept nested callables and pure functions", "probe[Composition[SameAs[y]][y], Composition[Nothing, f][x], Composition[f, Nothing][x], Composition[Function[x, x + 1], Function[x, x*2]][3], RightComposition[Function[x, x + 1], Function[x, x*2]][3]]", "probe[True, Nothing, f[Nothing], 7, 8]")
+        , ("composition constructors alone strip direct Unevaluated operands", "{Composition[Unevaluated[f], g], RightComposition[Unevaluated[f], g], Composition[Unevaluated[f], g][x], SameAs[Unevaluated[x]][x], Composition[f, g][Unevaluated[x]]}", "List[Composition[f, g], RightComposition[f, g], f[g[x]], False, f[g[Unevaluated[x]]]]")
+        , ("composition Unevaluated operand stripping does not evaluate payloads", "ClearAll[z]; z = 0; Composition[Unevaluated[z = z + 1; f], g]; z", "0")
+        , ("composition callable order threads effects and control", "ClearAll[x, f, g]; x = 0; f[t_] := (x = x + 1; t); g[t_] := (x = x + 10; t); result = Composition[f, g][x = 100]; {result, x, Catch[Composition[f, Function[x, Throw[x]]][3]]}", "List[100, 111, 3]")
         , ("Unique shares its symbol counter with Module", "{Unique[], Module[{x}, Hold[x]], Unique[x]}", "List[$1, Hold[x$2], x$3]")
         , ("counter Unique intentionally reuses registered candidate names", "Symbol[\"Global`$1\"]; Symbol[\"Global`x$2\"]; {Unique[], Unique[x], Names[{\"Global`$1\", \"Global`x$2\"}]}", "List[$1, x$2, List[\"$1\", \"x$2\"]]")
         , ("string Unique scans Global collisions without sharing module state", "Symbol[\"Global`p1\"]; {Unique[], Unique[\"p\"], Unique[p], Unique[\"p\"], Names[\"Global`p*\"]}", "List[$1, p2, p$2, p3, List[\"p\", \"p$2\", \"p1\", \"p2\", \"p3\"]]")
@@ -1479,6 +1493,11 @@ checkEvaluationSession = do
           , "True"
           , []
           )
+        , ( "Nothing callable preserves Sequence effect order"
+          , "Nothing[Sequence[Print[\"a\"], Print[\"b\"]]]"
+          , "Nothing"
+          , ["a", "b"]
+          )
         ]
       partArityMessage =
         ( "Part::error"
@@ -1486,7 +1505,47 @@ checkEvaluationSession = do
         , "Part::error: Part expects an expression and at least one part specification."
         )
       messageCases =
-        [ ( "Unique validates string prefixes"
+        [ ( "Composition preserves invalid Function diagnostics"
+          , "Composition[Function[f[x], x]][a]"
+          , "Function[f[x], x][a]"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Unsupported Function parameter specification."
+              )
+            ]
+          )
+        , ( "Composition propagates valid named Function arity failures"
+          , "Composition[f, Function[{x, y}, x + y]][1]"
+          , "Composition[f, Function[List[x, y], Plus[x, y]]][1]"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Function expects 2 named argument(s), but only 1 were supplied."
+              )
+            ]
+          )
+        , ( "RightComposition stops before later stages after Function arity failure"
+          , "ClearAll[z, f]; z = 0; f[t_] := (z = 1; t); RightComposition[Function[{x, y}, x + y], f][1]; z"
+          , "0"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Function expects 2 named argument(s), but only 1 were supplied."
+              )
+            ]
+          )
+        , ( "Composition Nothing stage reevaluates inert diagnostic arguments"
+          , "Composition[Nothing][Part[f[a], 2]]"
+          , "Nothing"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "Unique validates string prefixes"
           , "Unique[\"Other`prefix\"]"
           , "Unique[\"Other`prefix\"]"
           , [ ( "Unique::error"
