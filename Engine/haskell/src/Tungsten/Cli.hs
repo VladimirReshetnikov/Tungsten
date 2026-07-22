@@ -20,7 +20,9 @@ module Tungsten.Cli
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
+import Data.Char (isAlphaNum, isDigit)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TextIO
@@ -943,9 +945,16 @@ runExpressionCommand :: ExpressionCommand -> SourceSpec -> Text -> IO Int
 runExpressionCommand command sourceSpec requestedForm = do
   sourceResult <- readSource sourceSpec
   case sourceResult of
-    Left message -> emitError command requestedForm "InputError" message Nothing
+    Left message -> emitError command requestedForm Nothing "InputError" message Nothing
     Right source -> case parseSource requestedForm source of
-      Left message -> emitError command requestedForm "ParseError" message Nothing
+      Left message ->
+        emitError
+          command
+          requestedForm
+          (Just source)
+          "WolframSyntaxError"
+          (cliSyntaxErrorMessage source message)
+          Nothing
       Right (normalizedForm, expression) -> case command of
         ParseCommand -> do
           emitJson (parsePayload normalizedForm source expression)
@@ -955,7 +964,8 @@ runExpressionCommand command sourceSpec requestedForm = do
             emitError
               command
               normalizedForm
-              "EvaluationError"
+              (Just source)
+              "WolframEvaluationError"
               (evaluationErrorMessage evaluationError)
               (Just expression)
           Right (result, updatedSession) -> do
@@ -1467,7 +1477,6 @@ parsePayload form source expression =
         , ("input_form", JsonString (inputForm expression))
         , ("length", JsonNumber (T.pack (show (length (arguments expression)))))
         , ("source", JsonString source)
-        , ("success", JsonBool True)
         , ("tree", exprToJson expression)
         ]
     )
@@ -1488,7 +1497,6 @@ evaluationPayload form source parsed result messages prints =
         , ("messages", JsonArray (map evaluationMessagePayload messages))
         , ("parsed_full_form", JsonString (fullForm parsed))
         , ("parsed_input_form", JsonString (inputForm parsed))
-        , ("parsed_tree", exprToJson parsed)
         , ("prints", JsonArray (map JsonString prints))
         , ("result", expressionPayload result)
         , ("source", JsonString source)
@@ -1517,11 +1525,12 @@ expressionPayload expression =
         ]
     )
 
-emitError :: ExpressionCommand -> Text -> Text -> Text -> Maybe Expr -> IO Int
-emitError command form errorType message parsed = do
+emitError :: ExpressionCommand -> Text -> Maybe Text -> Text -> Text -> Maybe Expr -> IO Int
+emitError command form source errorType message parsed = do
   emitJson
     ( JsonObject
-        ( withParsed
+        ( withSource
+            ( withParsed
             ( Map.fromList
                 [ ("command", JsonString (commandName command))
                 , ("error", JsonString message)
@@ -1529,6 +1538,7 @@ emitError command form errorType message parsed = do
                 , ("form", JsonString form)
                 , ("success", JsonBool False)
                 ]
+            )
             )
         )
     )
@@ -1540,6 +1550,93 @@ emitError command form errorType message parsed = do
       Map.insert "parsed_full_form" (JsonString (fullForm expression))
         . Map.insert "parsed_input_form" (JsonString (inputForm expression))
         . Map.insert "parsed_tree" (exprToJson expression)
+  withSource = case source of
+    Nothing -> id
+    Just sourceText -> Map.insert "source" (JsonString sourceText)
+
+-- Parsec exposes a precise line and column but renders them in a diagnostic
+-- intended for humans.  The Python CLI's public JSON contract instead reports
+-- the unexpected token and its zero-based source offset.  Keep that translation
+-- at the CLI boundary so the parser's richer internal diagnostic remains intact.
+cliSyntaxErrorMessage :: Text -> Text -> Text
+cliSyntaxErrorMessage source diagnostic =
+  case (parseUnexpectedToken diagnostic, parseErrorOffset source diagnostic) of
+    (Just Nothing, Just offset)
+      | Just delimiter <- expectedClosingDelimiter source diagnostic ->
+          "Expected " <> pythonQuoted delimiter <> ", found '' at offset " <> decimal offset <> "."
+    (Just Nothing, Just offset) ->
+      "Unexpected '' at offset " <> decimal offset <> "."
+    (Just (Just token), Just offset) ->
+      "Unexpected token " <> pythonQuoted token <> " at offset " <> decimal offset <> "."
+    _ -> diagnostic
+ where
+  decimal = T.pack . show
+
+expectedClosingDelimiter :: Text -> Text -> Maybe Text
+expectedClosingDelimiter source diagnostic
+  | T.null stripped = Nothing
+  | not (canEndExpression (T.last stripped)) = Nothing
+  | "\"]\"" `T.isInfixOf` diagnostic
+  , "[" `T.isInfixOf` stripped = Just "]"
+  | "\"}\"" `T.isInfixOf` diagnostic
+  , "{" `T.isInfixOf` stripped = Just "}"
+  | "\")\"" `T.isInfixOf` diagnostic
+  , "(" `T.isInfixOf` stripped = Just ")"
+  | otherwise = Nothing
+ where
+  stripped = T.stripEnd source
+  canEndExpression character =
+    isAlphaNum character
+      || character `elem` ("`_$%\"'])}" :: String)
+
+parseUnexpectedToken :: Text -> Maybe (Maybe Text)
+parseUnexpectedToken diagnostic =
+  listToMaybe
+    [ if payload == "end of input"
+        then Nothing
+        else Just (stripParsecQuotes payload)
+    | line <- T.lines diagnostic
+    , Just payload <- [T.stripPrefix "unexpected " (T.strip line)]
+    ]
+
+stripParsecQuotes :: Text -> Text
+stripParsecQuotes value
+  | T.length value >= 2
+  , let firstCharacter = T.head value
+  , let lastCharacter = T.last value
+  , (firstCharacter == '\'' && lastCharacter == '\'')
+      || (firstCharacter == '"' && lastCharacter == '"') =
+      T.init (T.tail value)
+  | otherwise = value
+
+parseErrorOffset :: Text -> Text -> Maybe Int
+parseErrorOffset source diagnostic = do
+  location <- nonemptySuffix "(line " diagnostic
+  let (lineText, columnSuffix) = T.breakOn ", column " location
+  columnText <- nonemptySuffix ", column " columnSuffix
+  lineNumber <- readMaybe (T.unpack lineText)
+  columnNumber <- readMaybe (T.unpack (T.takeWhile isDigit columnText))
+  if lineNumber < 1 || columnNumber < 1
+    then Nothing
+    else
+      let precedingLines = take (lineNumber - 1) (T.splitOn "\n" source)
+       in Just (sum (map ((+ 1) . T.length) precedingLines) + columnNumber - 1)
+ where
+  nonemptySuffix marker text =
+    case T.breakOn marker text of
+      (_, suffix)
+        | T.null suffix -> Nothing
+        | otherwise -> Just (T.drop (T.length marker) suffix)
+
+pythonQuoted :: Text -> Text
+pythonQuoted token = "'" <> T.concatMap escape token <> "'"
+ where
+  escape '\\' = "\\\\"
+  escape '\'' = "\\'"
+  escape '\n' = "\\n"
+  escape '\r' = "\\r"
+  escape '\t' = "\\t"
+  escape character = T.singleton character
 
 emitJson :: JsonValue -> IO ()
 emitJson = TextIO.putStrLn . encodeJson
