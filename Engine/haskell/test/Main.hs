@@ -1198,6 +1198,17 @@ checkEvaluationSession = do
         , ("ordinary seeded system own values can be unset", "$MessagePrePrint =.; {$MessagePrePrint, OwnValues[$MessagePrePrint]}", "List[$MessagePrePrint, List[]]")
         , ("protected session hooks allow direct value mutation", "ClearAll[$Pre]; Protect[$Pre]; $Pre = 1; {$Pre, OwnValues[$Pre], Attributes[$Pre]}", "List[1, List[RuleDelayed[HoldPattern[$Pre], 1]], List[Protected]]")
         , ("Clear removes protected hook values but keeps attributes", "ClearAll[$Pre]; $Pre = 1; Protect[$Pre]; Clear[$Pre]; {$Pre, OwnValues[$Pre], Attributes[$Pre]}", "List[$Pre, List[], List[Protected]]")
+        , ("fixed context values and initial context registry", "{$Context, System`$Context, $ContextPath, System`$ContextPath, Context[], Contexts[]}", "List[\"Global`\", \"Global`\", List[\"System`\", \"Global`\"], List[\"System`\", \"Global`\"], \"Global`\", List[\"Global`\", \"System`\"]]")
+        , ("context values precede stored own values", "$Context = \"Foo`\"; $ContextPath = {\"Other`\"}; {$Context, $ContextPath, OwnValues[$Context], OwnValues[$ContextPath]}", "List[\"Global`\", List[\"System`\", \"Global`\"], List[RuleDelayed[HoldPattern[$Context], \"Foo`\"]], List[RuleDelayed[HoldPattern[$ContextPath], List[\"Other`\"]]]]")
+        , ("Context holds symbols and resolves visible contexts", "ClearAll[x, c]; x = 9; c = Context; {Context[x], c[x], System`Context[System`Plus], Context[Global`x]}", "List[\"Global`\", \"Global`\", \"System`\", \"Global`\"]")
+        , ("Symbol constructs and displays qualified names", "{Symbol[\"TungstenRegistryTest`alpha\"], Symbol[\"Global`tungstenGlobalSymbol\"], System`Symbol[\"Global`tungstenQualifiedSymbol\"], Symbol[\"System`Plus\"]}", "List[TungstenRegistryTest`alpha, tungstenGlobalSymbol, tungstenQualifiedSymbol, Plus]")
+        , ("SymbolName accepts symbols existing strings and explicit string names", "Symbol[\"TungstenRegistryTest`alpha\"]; {SymbolName[TungstenRegistryTest`alpha], SymbolName[\"TungstenRegistryTest`alpha\"], SymbolName[\"arbitrary context text`shortName\"]}", "List[\"alpha\", \"alpha\", \"shortName\"]")
+        , ("Contexts and Names discover registered nonvisible symbols", "Symbol[\"TungstenRegistryTest`alpha\"]; Symbol[\"TungstenRegistryTest`beta\"]; {Contexts[\"TungstenRegistryTest`*\"], Names[\"TungstenRegistryTest`*\"], Names[\"System`Plus\"], NameQ[\"TungstenRegistryTest`alpha\"], NameQ[\"TungstenRegistryMissing`*\"]}", "List[List[\"TungstenRegistryTest`\"], List[\"TungstenRegistryTest`alpha\", \"TungstenRegistryTest`beta\"], List[\"Plus\"], True, False]")
+        , ("Names handles pattern lists visibility and display collisions", "Global`Plus; OtherRegistry`alpha; OtherRegistry`beta; {Names[{\"System`Plus\", \"Global`Plus\", \"OtherRegistry`a*\"}], Names[\"Plus\"], Names[\"OtherRegistry`*\"], NameQ[{\"missing*\", \"OtherRegistry`b*\"}]}", "List[List[\"OtherRegistry`alpha\", \"Plus\"], List[\"Plus\"], List[\"OtherRegistry`alpha\", \"OtherRegistry`beta\"], True]")
+        , ("whole-expression registration is visible to earlier name queries", "{Contexts[\"LaterRegistry`*\"], Names[\"LaterRegistry`*\"], LaterRegistry`symbol}", "List[List[\"LaterRegistry`\"], List[\"LaterRegistry`symbol\"], LaterRegistry`symbol]")
+        , ("qualified and evaluated name-query aliases dispatch", "ClearAll[q, s]; q = Names; s = Symbol; {System`Names[\"System`Plus\"], q[\"System`Times\"], s[\"OtherRegistry`made\"], System`SymbolName[System`Plus]}", "List[List[\"Plus\"], List[\"Times\"], OtherRegistry`made, \"Plus\"]")
+        , ("System name catalog remains complete through Names", "{Length[Names[\"System`*\"]], NameQ[\"System`AASTriangle\"], NameQ[\"AASTriangle\"]}", "List[7941, True, True]")
+        , ("catalog formal symbols bypass user-name validation", "{Symbol[\"System`\\[FormalA]\"], SymbolName[\"System`\\[FormalA]\"], Context[\"System`\\[FormalA]\"]}", "List[\\[FormalA], \"\xF800\", \"System`\"]")
         , ("bare and explicit Global symbols share values", "ClearAll[Global`ctxX, ctxY]; Global`ctxX = 1; ctxY = 2; {ctxX, Global`ctxY, Attributes[\"ctxX\"]}", "List[1, 2, List[]]")
         , ("explicit unknown System symbols keep separate context identity", "ClearAll[Global`ctxCollision, System`ctxCollision]; Global`ctxCollision = 1; System`ctxCollision = 2; {Global`ctxCollision, System`ctxCollision, ctxCollision}", "List[1, 2, 2]")
         , ("whole-expression registration resolves future System symbols", "ClearAll[Global`ctxFutureSysA]; ctxFutureSysA = 1; Hold[System`ctxFutureSysA]; {ctxFutureSysA, Global`ctxFutureSysA, System`ctxFutureSysA, OwnValues[Global`ctxFutureSysA], OwnValues[System`ctxFutureSysA]}", "List[1, Global`ctxFutureSysA, 1, List[], List[RuleDelayed[HoldPattern[ctxFutureSysA], 1]]]")
@@ -1466,7 +1477,51 @@ checkEvaluationSession = do
         , "Part::error: Part expects an expression and at least one part specification."
         )
       messageCases =
-        [ ( "ValueQ validates held arity"
+        [ ( "Symbol validates constructed names"
+          , "Symbol[\"not a symbol\"]"
+          , "Symbol[\"not a symbol\"]"
+          , [ ( "Symbol::error"
+              , "MessageName[Symbol, \"error\"]"
+              , "Symbol::error: Invalid Wolfram symbol name: 'not a symbol'."
+              )
+            ]
+          )
+        , ( "Context rejects missing string names"
+          , "Context[\"TungstenRegistryMissing`symbol\"]"
+          , "Context[\"TungstenRegistryMissing`symbol\"]"
+          , [ ( "Context::error"
+              , "MessageName[Context, \"error\"]"
+              , "Context::error: Context could not find a symbol named 'TungstenRegistryMissing`symbol'."
+              )
+            ]
+          )
+        , ( "SymbolName rejects unregistered unqualified strings"
+          , "SymbolName[\"tungstenRegistryMissing\"]"
+          , "SymbolName[\"tungstenRegistryMissing\"]"
+          , [ ( "SymbolName::error"
+              , "MessageName[SymbolName, \"error\"]"
+              , "SymbolName::error: SymbolName expects a symbol or an existing symbol name."
+              )
+            ]
+          )
+        , ( "name queries validate evaluated specifications"
+          , "{Names[1], NameQ[1], Contexts[1]}"
+          , "List[Names[1], NameQ[1], Contexts[1]]"
+          , [ ( "Names::error"
+              , "MessageName[Names, \"error\"]"
+              , "Names::error: Names expects a string pattern or a list of string patterns."
+              )
+            , ( "NameQ::error"
+              , "MessageName[NameQ, \"error\"]"
+              , "NameQ::error: Names expects a string pattern or a list of string patterns."
+              )
+            , ( "Contexts::error"
+              , "MessageName[Contexts, \"error\"]"
+              , "Contexts::error: Contexts expects an optional string pattern."
+              )
+            ]
+          )
+        , ( "ValueQ validates held arity"
           , "ValueQ[]"
           , "ValueQ[]"
           , [ ( "ValueQ::error"

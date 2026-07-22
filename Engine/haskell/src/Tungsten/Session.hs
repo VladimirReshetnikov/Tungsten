@@ -15,6 +15,7 @@ module Tungsten.Session
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Char (isAlpha, isAlphaNum)
 import Data.List (sortBy)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -406,6 +407,13 @@ evaluateSessionAtRaw
   -> SessionResult Expr
 evaluateSessionAtRaw depth session expression = case expression of
       Symbol name
+        | resolvedSymbolStorageName name session == "$Context" ->
+            Right (String currentSessionContext, session)
+        | resolvedSymbolStorageName name session == "$ContextPath" ->
+            Right
+              ( evaluatedList (map String currentSessionContextPath)
+              , session
+              )
         | isSystemSymbol name
         , displaySessionSymbolName name == "I" ->
             Right (Complex (Integer 0) (Integer 1), session)
@@ -811,6 +819,8 @@ qualifiedAliasDispatchHeads =
   , "And"
   , "AtomQ"
   , "ByteArrayQ"
+  , "Context"
+  , "Contexts"
   , "Equal"
   , "EvenQ"
   , "Greater"
@@ -822,6 +832,8 @@ qualifiedAliasDispatchHeads =
   , "Max"
   , "Min"
   , "N"
+  , "NameQ"
+  , "Names"
   , "Not"
   , "NumberQ"
   , "OddQ"
@@ -831,6 +843,8 @@ qualifiedAliasDispatchHeads =
   , "Sign"
   , "Sqrt"
   , "StringQ"
+  , "Symbol"
+  , "SymbolName"
   , "Times"
   , "Unequal"
   ]
@@ -2015,6 +2029,18 @@ reduceSessionEvaluatedCall
   -> Expr
   -> Maybe (SessionResult Expr)
 reduceSessionEvaluatedCall depth session = \case
+  Call (Symbol "Symbol") values ->
+    Just (evaluateSessionSymbol session values)
+  Call (Symbol "SymbolName") values ->
+    Just (evaluateSessionSymbolName session values)
+  Call (Symbol "Names") values ->
+    Just (evaluateSessionNames session values)
+  Call (Symbol "NameQ") values ->
+    Just (evaluateSessionNameQ session values)
+  Call (Symbol "Contexts") values ->
+    Just (evaluateSessionContexts session values)
+  Call (Symbol "Context") values ->
+    Just (evaluateSessionContext session values)
   Call (Call (Symbol "SortBy") [function]) values ->
     Just $ case values of
       [subject] -> evaluateSessionSortBy False depth session [subject, function]
@@ -3789,6 +3815,159 @@ isImplicitContextValue :: Text -> EvaluationSession -> Bool
 isImplicitContextValue name session =
   resolvedSymbolStorageName name session
     `elem` ["$Context", "$ContextPath"]
+
+evaluateSessionSymbol
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSymbol session = \case
+  [String name] ->
+    case resolvedSessionSymbolFullName name session of
+      Just fullName ->
+        Right
+          ( Symbol (displaySessionSymbolName fullName)
+          , registerSymbol fullName session
+          )
+      Nothing -> sessionFailure session (invalidSessionSymbolNameMessage name)
+  [_] -> sessionFailure session "Symbol expects a string symbol name."
+  _ -> sessionFailure session "Symbol expects exactly one string argument."
+
+evaluateSessionSymbolName
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSymbolName session = \case
+  [Symbol name] ->
+    case resolvedSessionSymbolFullName name session of
+      Just fullName
+        | Just (_, shortName) <- splitSessionSymbolFullName fullName ->
+            Right (String shortName, registerSymbol fullName session)
+      _ -> sessionFailure session "SymbolName expects a symbol or an existing symbol name."
+  [String name] ->
+    case existingSessionSymbolFullName name session of
+      Just fullName
+        | Just (_, shortName) <- splitSessionSymbolFullName fullName ->
+            Right (String shortName, session)
+      _ ->
+        case splitSessionSymbolFullName name of
+          Just (_, shortName)
+            | validSessionSymbolShortName shortName ->
+                Right (String shortName, session)
+          _ -> sessionFailure session "SymbolName expects a symbol or an existing symbol name."
+  [_] -> sessionFailure session "SymbolName expects a symbol or an existing symbol name."
+  _ -> sessionFailure session "SymbolName expects exactly one argument."
+
+evaluateSessionNames
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionNames session = \case
+  [] -> namesForPatterns ["*"]
+  [specification] ->
+    case sessionNamePatterns specification of
+      Just patterns -> namesForPatterns patterns
+      Nothing ->
+        sessionFailure
+          session
+          "Names expects a string pattern or a list of string patterns."
+  _ ->
+    sessionFailure
+      session
+      "Names expects zero arguments or one string pattern/list of string patterns."
+ where
+  namesForPatterns patterns =
+    Right
+      ( evaluatedList
+          (map String (matchingSessionDisplayNames patterns session))
+      , session
+      )
+
+evaluateSessionNameQ
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionNameQ session = \case
+  [specification] ->
+    case sessionNamePatterns specification of
+      Just patterns ->
+        Right
+          ( sessionBoolean
+              (not (null (matchingSessionDisplayNames patterns session)))
+          , session
+          )
+      Nothing ->
+        sessionFailure
+          session
+          "Names expects a string pattern or a list of string patterns."
+  _ -> sessionFailure session "NameQ expects exactly one string pattern."
+
+evaluateSessionContexts
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionContexts session = \case
+  [] -> contextsMatching (const True)
+  [String patternText] ->
+    contextsMatching (wildcardSymbolNameMatches patternText)
+  [_] -> sessionFailure session "Contexts expects an optional string pattern."
+  _ ->
+    sessionFailure
+      session
+      "Contexts expects zero arguments or one string pattern."
+ where
+  contextsMatching predicate =
+    Right
+      ( evaluatedList
+          [ String context
+          | context <- knownSessionContexts session
+          , predicate context
+          ]
+      , session
+      )
+
+evaluateSessionContext
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionContext session = \case
+  [] -> Right (String currentSessionContext, session)
+  [Symbol name] -> case registerResolvedSymbol name of
+    Just resolved ->
+      contextForFullName
+        (Just resolved)
+        "Context expects zero arguments, a symbol, or an existing symbol name."
+    Nothing -> sessionFailure session (invalidSessionSymbolNameMessage name)
+  [String name] ->
+    case existingSessionSymbolFullName name session of
+      Nothing ->
+        sessionFailure
+          session
+          ( "Context could not find a symbol named "
+              <> singleQuotedName name
+              <> "."
+          )
+      Just fullName ->
+        contextForFullName
+          (Just (fullName, session))
+          "Context expects zero arguments, a symbol, or an existing symbol name."
+  [_] ->
+    sessionFailure
+      session
+      "Context expects zero arguments, a symbol, or an existing symbol name."
+  _ ->
+    sessionFailure
+      session
+      "Context expects zero arguments or one symbol/name argument."
+ where
+  registerResolvedSymbol name = do
+    fullName <- resolvedSessionSymbolFullName name session
+    pure (fullName, registerSymbol fullName session)
+
+  contextForFullName resolved errorMessage = case resolved of
+    Just (fullName, updated)
+      | Just (context, _) <- splitSessionSymbolFullName fullName ->
+          Right (String context, updated)
+    _ -> sessionFailure session errorMessage
 
 evaluateSessionOwnValues
   :: EvaluationSession
@@ -6219,6 +6398,156 @@ setSymbolValues name values =
   modifySymbolState
     name
     (\state -> state {symbolKnown = True, symbolValues = values})
+
+currentSessionContext :: Text
+currentSessionContext = "Global`"
+
+currentSessionContextPath :: [Text]
+currentSessionContextPath = ["System`", currentSessionContext]
+
+validSessionSymbolShortName :: Text -> Bool
+validSessionSymbolShortName name = case T.uncons name of
+  Just (first, remaining) ->
+    (isAlpha first || first == '$')
+      && T.all
+        (\character -> isAlphaNum character || character == '$')
+        remaining
+  Nothing -> False
+
+validSessionContextName :: Text -> Bool
+validSessionContextName context
+  | not ("`" `T.isSuffixOf` context) = False
+  | otherwise =
+      let components = T.splitOn "`" (T.dropEnd 1 context)
+       in not (null components)
+            && all validSessionSymbolShortName components
+
+splitSessionSymbolFullName :: Text -> Maybe (Text, Text)
+splitSessionSymbolFullName name =
+  let (context, shortName) = T.breakOnEnd "`" name
+   in if T.null context
+        then Nothing
+        else Just (context, shortName)
+
+validSessionSymbolName :: Text -> Bool
+validSessionSymbolName name =
+  case splitSessionSymbolFullName name of
+    Just (context, shortName) ->
+      validSessionContextName context
+        && validSessionSymbolShortName shortName
+    Nothing -> validSessionSymbolShortName name
+
+sessionStorageFullName :: Text -> Maybe Text
+sessionStorageFullName storageName
+  | not (validSessionSymbolName storageName) = Nothing
+  | "`" `T.isInfixOf` storageName = Just storageName
+  | isSystemSymbol storageName = Just ("System`" <> storageName)
+  | otherwise = Just (currentSessionContext <> storageName)
+
+resolvedSessionSymbolFullName
+  :: Text
+  -> EvaluationSession
+  -> Maybe Text
+resolvedSessionSymbolFullName name session
+  | isSystemSymbol name
+  , Just shortName <- normalizeSystemSymbolName name =
+      Just ("System`" <> shortName)
+  | validSessionSymbolName name =
+      sessionStorageFullName (resolvedSymbolStorageName name session)
+  | otherwise = Nothing
+
+existingSessionSymbolFullName
+  :: Text
+  -> EvaluationSession
+  -> Maybe Text
+existingSessionSymbolFullName name session = do
+  fullName <- resolvedSessionSymbolFullName name session
+  if isKnownSessionFullName fullName session
+    then Just fullName
+    else Nothing
+
+isKnownSessionFullName :: Text -> EvaluationSession -> Bool
+isKnownSessionFullName fullName session =
+  case splitSessionSymbolFullName fullName of
+    Just ("System`", shortName)
+      | isSystemSymbol shortName -> True
+    _ -> symbolKnown (symbolStateFor fullName session)
+
+knownSessionFullNames :: EvaluationSession -> [Text]
+knownSessionFullNames session =
+  Set.toAscList
+    ( Map.foldrWithKey
+        addRegistered
+        catalogNames
+        (sessionSymbols session)
+    )
+ where
+  catalogNames =
+    Set.fromList ["System`" <> name | name <- systemSymbolNames]
+
+  addRegistered storageName state retained
+    | symbolKnown state =
+        case sessionStorageFullName storageName of
+          Just fullName -> Set.insert fullName retained
+          Nothing -> retained
+    | otherwise = retained
+
+knownSessionContexts :: EvaluationSession -> [Text]
+knownSessionContexts session =
+  Set.toAscList
+    ( Set.fromList
+        ( currentSessionContextPath
+            <> [ context
+               | fullName <- knownSessionFullNames session
+               , Just (context, _) <- [splitSessionSymbolFullName fullName]
+               ]
+        )
+    )
+
+sessionNamePatterns :: Expr -> Maybe [Text]
+sessionNamePatterns = \case
+  String patternText -> Just [patternText]
+  Call (Symbol listHead) values
+    | isSessionSystemHead "List" listHead ->
+        traverse stringPattern values
+  _ -> Nothing
+ where
+  stringPattern (String patternText) = Just patternText
+  stringPattern _ = Nothing
+
+matchingSessionDisplayNames :: [Text] -> EvaluationSession -> [Text]
+matchingSessionDisplayNames patterns session =
+  Set.toAscList
+    ( Set.unions
+        [ matchingNames patternText
+        | patternText <- patterns
+        ]
+    )
+ where
+  matchingNames patternText =
+    Set.fromList
+      [ displaySessionSymbolName fullName
+      | fullName <- knownSessionFullNames session
+      , Just (context, shortName) <- [splitSessionSymbolFullName fullName]
+      , let hasExplicitContext = "`" `T.isInfixOf` patternText
+      , hasExplicitContext || context `elem` currentSessionContextPath
+      , let candidate = if hasExplicitContext then fullName else shortName
+      , wildcardSymbolNameMatches patternText candidate
+      ]
+
+invalidSessionSymbolNameMessage :: Text -> Text
+invalidSessionSymbolNameMessage name =
+  "Invalid Wolfram symbol name: " <> singleQuotedName name <> "."
+
+singleQuotedName :: Text -> Text
+singleQuotedName name = "'" <> T.concatMap escape name <> "'"
+ where
+  escape '\\' = "\\\\"
+  escape '\'' = "\\'"
+  escape '\n' = "\\n"
+  escape '\r' = "\\r"
+  escape '\t' = "\\t"
+  escape character = T.singleton character
 
 registerSymbol :: Text -> EvaluationSession -> EvaluationSession
 registerSymbol name =

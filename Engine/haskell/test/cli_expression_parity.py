@@ -361,6 +361,80 @@ CASES = (
         ),
         0,
     ),
+    (
+        "context registry construction and queries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{$Context, $ContextPath, Context[], Context[Plus], Context[user], "
+            "Symbol[\"PortContext`alpha\"], SymbolName[PortContext`alpha], "
+            "Contexts[\"PortContext`*\"], "
+            "Names[{\"PortContext`*\", \"System`Plus\"}], "
+            "NameQ[\"PortContext`alpha\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "name visibility patterns and catalog",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Length[Names[\"System`*\"]], "
+            "Names[{\"System`Plus\", \"System`Times\"}], "
+            "NameQ[{\"Plus\", \"missing\"}], Context[Global`Plus], "
+            "SymbolName[\"GhostContext`x\"], Names[\"GhostContext`*\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "context holding aliases and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, n]; x = Plus; n = Names; "
+            "{Context[x], Context[Evaluate[x]], "
+            "System`Symbol[\"Global`qualifiedName\"], "
+            "n[\"System`Plus\"], Global`Names[\"*\"], "
+            "Context[x, Print[\"context-extra\"]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "context own value remains observationally implicit",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[$Context]; $Context = \"FakeContext`\"; "
+            "{$Context, OwnValues[$Context], ValueQ[$Context]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "catalog formal symbol name resolution",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Symbol[\"System`\\[FormalA]\"], "
+            "SymbolName[\"System`\\[FormalA]\"], "
+            "Context[\"System`\\[FormalA]\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
