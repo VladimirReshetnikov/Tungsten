@@ -19,6 +19,7 @@ module Tungsten.Evaluate
   , evaluate
   , exactRangeValues
   , instantiateFunctionCall
+  , instantiateFunctionCallWithHead
   , instantiatePatternMatch
   , instantiatePatternMatchWith
   , instantiatePatternMatchManyWith
@@ -65,18 +66,34 @@ evaluateAt :: Int -> Expr -> Either EvaluationError Expr
 evaluateAt depth expression
   | depth > 1024 = Left (EvaluationError "the evaluation recursion limit was exceeded")
   | otherwise = case expression of
-      Call (Symbol "Hold") _ -> Right expression
-      Call (Symbol "HoldComplete") _ -> Right expression
-      Call (Symbol "HoldForm") _ -> Right expression
-      Call (Symbol "Unevaluated") _ -> Right expression
+      Call (Symbol headName) _
+        | systemHeadIn ["HoldComplete", "Unevaluated"] headName ->
+            Right expression
+      Call (Symbol ruleHead) (leftHandSide : heldArguments)
+        | systemHeadIn ["RuleDelayed"] ruleHead -> do
+            evaluatedLeft <- evaluateAt (depth + 1) leftHandSide
+            Right
+              ( normalizeEvaluatedCall
+                  (Symbol ruleHead)
+                  (evaluatedLeft : heldArguments)
+              )
+      Call (Symbol ruleHead) []
+        | systemHeadIn ["RuleDelayed"] ruleHead -> Right expression
+      Call (Symbol headName) arguments'
+        | systemHeadIn
+            [ "Hold"
+            , "HoldForm"
+            , "HoldPattern"
+            , "SetDelayed"
+            , "Condition"
+            ]
+            headName ->
+            Right (normalizeEvaluatedCall (Symbol headName) arguments')
       -- Function holds its arguments, but Sequence still participates in the
       -- enclosing argument-list normalization before the function is called.
-      Call (Symbol "Function") arguments' ->
-        Right (normalizeEvaluatedCall (Symbol "Function") arguments')
-      Call (Symbol "HoldPattern") _ -> Right expression
-      Call (Symbol "SetDelayed") _ -> Right expression
-      Call (Symbol "RuleDelayed") _ -> Right expression
-      Call (Symbol "Condition") _ -> Right expression
+      Call (Symbol functionHead) arguments'
+        | systemHeadIn ["Function"] functionHead ->
+            Right (normalizeEvaluatedCall (Symbol functionHead) arguments')
       Call (Symbol "Table") _ -> Right expression
       Call (Symbol "Do") _ -> Right expression
       Call (Symbol "For") _ -> Right expression
@@ -100,9 +117,17 @@ evaluateAt depth expression
       Call (Symbol "Or") arguments' -> evaluateOr depth arguments'
       Call expressionHead arguments' -> do
         evaluatedHead <- evaluateAt (depth + 1) expressionHead
-        if evaluatedHead == Symbol "Association"
-          then reduceCall (Call evaluatedHead arguments')
-          else do
+        case evaluatedHead of
+          Symbol associationHead
+            | associationHead == "Association" ->
+                reduceCall (Call evaluatedHead arguments')
+            | associationHead == "System`Association" ->
+                Right
+                  ( Call
+                      evaluatedHead
+                      (filter (/= Symbol "Nothing") arguments')
+                  )
+          _ -> do
             evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
             let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
             reduced <- reduceCall evaluatedCall
@@ -126,20 +151,36 @@ normalizeEvaluatedCall expressionHead values =
     | suppressesSequences expressionHead = values
     | otherwise = concatMap spliceArgument values
   retained
-    | expressionHead `elem` [Symbol "Association", Symbol "List"] =
+    | expressionHeadIsAny ["Association", "List"] =
         filter (/= Symbol "Nothing") spliced
     | otherwise = spliced
   spliceArgument = \case
-    Call (Symbol "Sequence") sequenceValues -> sequenceValues
-    Call (Symbol "Splice") [Call (Symbol "List") spliceValues]
-      | expressionHead == Symbol "List" -> spliceValues
-    Call (Symbol "Splice") [Call (Symbol "List") spliceValues, target]
-      | target == expressionHead -> spliceValues
+    Call (Symbol sequenceHead) sequenceValues
+      | systemHeadIn ["Sequence"] sequenceHead -> sequenceValues
+    Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues]
+      | systemHeadIn ["Splice"] spliceHead
+      , systemHeadIn ["List"] listHead
+      , expressionHead == Symbol "List" -> spliceValues
+    Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues, target]
+      | systemHeadIn ["Splice"] spliceHead
+      , systemHeadIn ["List"] listHead
+      , target == expressionHead -> spliceValues
     value -> [value]
+  expressionHeadIsAny names = case expressionHead of
+    Symbol name -> systemHeadIn names name
+    _ -> False
 
 suppressesSequences :: Expr -> Bool
 suppressesSequences (Symbol name) =
-  name `elem` ["HoldComplete", "Print", "Rule", "RuleDelayed", "Unevaluated"]
+  systemHeadIn
+    [ "HoldComplete"
+    , "Print"
+    , "Rule"
+    , "RuleDelayed"
+    , "SetDelayed"
+    , "Unevaluated"
+    ]
+    name
 suppressesSequences _ = False
 
 evaluateIf :: Int -> [Expr] -> Either EvaluationError Expr
@@ -184,8 +225,9 @@ evaluateOr depth = go []
 
 reduceCall :: Expr -> Either EvaluationError Expr
 reduceCall expression = case expression of
-  Call (Call (Symbol "Function") functionArguments) values ->
-    applyFunction functionArguments values
+  Call (Call functionHead@(Symbol functionName) functionArguments) values
+    | systemHeadIn ["Function"] functionName ->
+        applyFunctionWithHead functionHead functionArguments values
   Call (Call (Symbol "KeySelect") [criterion]) [association] ->
     reduceBuiltin "KeySelect" [association, criterion]
   Call (Call (Symbol "SortBy") [function]) [subject] ->
@@ -2252,12 +2294,13 @@ associationEntryIndex (KeySelector key) entries = go 0 entries
 
 ruleEntry :: Expr -> Maybe AssociationEntry
 ruleEntry (Call (Symbol ruleHead) [key, value])
-  | ruleHead `elem` ["Rule", "RuleDelayed"] =
+  | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
       Just (AssociationEntry ruleHead key value)
 ruleEntry _ = Nothing
 
 associationEntries :: Expr -> Maybe [AssociationEntry]
-associationEntries (Call (Symbol "Association") values) = traverse ruleEntry values
+associationEntries (Call (Symbol associationHead) values)
+  | systemHeadIn ["Association"] associationHead = traverse ruleEntry values
 associationEntries _ = Nothing
 
 isAssociation :: Expr -> Bool
@@ -2290,8 +2333,9 @@ reduceAssociation values = case associationFromArguments values of
   Nothing -> Call (Symbol "Association") values
 
 associationFromArguments :: [Expr] -> Maybe [AssociationEntry]
-associationFromArguments [Call (Symbol "List") values] =
-  traverse ruleEntry (filter (/= Symbol "Nothing") values)
+associationFromArguments [Call (Symbol listHead) values]
+  | systemHeadIn ["List"] listHead =
+      traverse ruleEntry values
 associationFromArguments values =
   concat <$> traverse entriesFromArgument (filter (/= Symbol "Nothing") values)
  where
@@ -4276,7 +4320,8 @@ reduceCases = \case
               pure (spliceCaseResult result <> following)
   subtractOne Nothing = Nothing
   subtractOne (Just count) = Just (count - 1)
-  spliceCaseResult (Call (Symbol "Sequence") values) = values
+  spliceCaseResult (Call (Symbol sequenceHead) values)
+    | systemHeadIn ["Sequence"] sequenceHead = values
   spliceCaseResult value = [value]
 
 reduceDeleteCases :: [Expr] -> Either EvaluationError Expr
@@ -5982,151 +6027,327 @@ requirePatternRuleSet operation expression =
     (patternRuleSet expression)
 
 patternRuleSet :: Expr -> Maybe [PatternRule]
-patternRuleSet (Call (Symbol "List") values) = traverse patternRule values
+patternRuleSet (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = traverse patternRule values
 patternRuleSet expression = pure <$> patternRule expression
 
 patternRule :: Expr -> Maybe PatternRule
 patternRule (Call (Symbol ruleHead) [patternExpression, template])
-  | ruleHead `elem` ["Rule", "RuleDelayed"] = Just (PatternRule patternExpression template)
+  | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+      Just (PatternRule patternExpression template)
 patternRule _ = Nothing
 
 nestedPatternRuleSets :: Expr -> Maybe [Expr]
-nestedPatternRuleSets (Call (Symbol "List") values@(_ : _))
-  | all isRuleList values = Just values
+nestedPatternRuleSets (Call (Symbol listHead) values@(_ : _))
+  | systemHeadIn ["List"] listHead
+  , all isRuleList values = Just values
  where
-  isRuleList expression@(Call (Symbol "List") _) = maybe False (const True) (patternRuleSet expression)
+  isRuleList expression@(Call (Symbol nestedListHead) _)
+    | systemHeadIn ["List"] nestedListHead =
+        maybe False (const True) (patternRuleSet expression)
   isRuleList _ = False
 nestedPatternRuleSets _ = Nothing
 
 applyPatternRules :: [PatternRule] -> Expr -> Either EvaluationError (Maybe Expr)
-applyPatternRules [] _ = Right Nothing
-applyPatternRules (PatternRule patternExpression template : rest) expression =
+applyPatternRules = applyPatternRulesInContext False
+
+applyPatternRulesInContext
+  :: Bool
+  -> [PatternRule]
+  -> Expr
+  -> Either EvaluationError (Maybe Expr)
+applyPatternRulesInContext _ [] _ = Right Nothing
+applyPatternRulesInContext heldContext (PatternRule patternExpression template : rest) expression =
   case matchPattern [] expression patternExpression of
-    Nothing -> applyPatternRules rest expression
-    Just bindings -> do
-      instantiated <- instantiatePatternTemplate bindings template
-      case instantiated of
-        Just value -> Right (Just value)
-        Nothing -> applyPatternRules rest expression
+    Nothing -> applyPatternRulesInContext heldContext rest expression
+    Just bindings
+      | heldContext -> do
+          instantiated <- instantiateHeldPatternTemplate bindings template
+          case instantiated of
+            Just value -> Right (Just value)
+            Nothing -> applyPatternRulesInContext heldContext rest expression
+      | otherwise -> do
+          instantiated <- instantiatePatternTemplate bindings template
+          case instantiated of
+            Just value -> Right (Just value)
+            Nothing -> applyPatternRulesInContext heldContext rest expression
 
 instantiatePatternTemplate :: PatternBindings -> Expr -> Either EvaluationError (Maybe Expr)
-instantiatePatternTemplate bindings (Call (Symbol "Condition") [template, condition]) = do
-  conditionResult <- evaluate (substituteBindings bindings condition)
-  if conditionResult == Symbol "True"
-    then Just <$> evaluate (substituteBindings bindings template)
-    else Right Nothing
+instantiatePatternTemplate bindings (Call (Symbol conditionHead) [template, condition])
+  | systemHeadIn ["Condition"] conditionHead = do
+      conditionResult <- evaluate (substituteBindings bindings condition)
+      if conditionResult == Symbol "True"
+        then Just <$> evaluate (substituteBindings bindings template)
+        else Right Nothing
 instantiatePatternTemplate bindings template =
   Just <$> evaluate (substituteBindings bindings template)
 
+instantiateHeldPatternTemplate
+  :: PatternBindings
+  -> Expr
+  -> Either EvaluationError (Maybe Expr)
+instantiateHeldPatternTemplate bindings (Call (Symbol conditionHead) [template, condition])
+  | systemHeadIn ["Condition"] conditionHead = do
+      conditionResult <- evaluate (substituteBindings bindings condition)
+      if conditionResult == Symbol "True"
+        then Right (Just (substituteBindings bindings template))
+        else Right Nothing
+instantiateHeldPatternTemplate bindings template =
+  Right (Just (substituteBindings bindings template))
+
 replaceAllWithRules :: [PatternRule] -> Expr -> Either EvaluationError Expr
-replaceAllWithRules rules expression = do
-  rootReplacement <- applyPatternRules rules expression
-  case rootReplacement of
-    Just replacement -> Right replacement
-    Nothing -> descend expression
+replaceAllWithRules rules = descendWithContext False
  where
-  descend association
+  descendWithContext heldContext expression = do
+    rootReplacement <- applyPatternRulesInContext heldContext rules expression
+    case rootReplacement of
+      Just replacement -> Right replacement
+      Nothing -> descend heldContext expression
+
+  descend heldContext association@(Call associationHead@(Symbol _) _)
     | Just entries <- associationEntries association = do
-        headReplacement <- applyPatternRules rules (Symbol "Association")
-        case headReplacement of
-          Just replacementHead ->
-            Right
-              ( Call
-                  replacementHead
-                  [Call (Symbol ruleHead) [key, value] | AssociationEntry ruleHead key value <- entries]
-              )
-          Nothing -> do
-            updated <- traverse replaceEntry entries
-            pure (associationExpr [entry | Just entry <- updated])
-  descend (Call expressionHead values) = do
-    updatedHead <- replaceAllWithRules rules expressionHead
-    updatedValues <- traverse (replaceAllWithRules rules) values
-    pure (rebuildWithSplicing updatedHead updatedValues)
-  descend value = Right value
-  replaceEntry (AssociationEntry ruleHead key value) = do
-    updated <- replaceAllWithRules rules value
+        headReplacement <- descendWithContext heldContext associationHead
+        updated <- traverse (replaceEntry heldContext) entries
+        pure
+          ( if headReplacement == associationHead && updated == entries
+              then association
+              else if headReplacement == Symbol "Association"
+              then associationExpr updated
+              else
+                Call
+                  headReplacement
+                  [ Call (Symbol ruleHead) [key, value]
+                  | AssociationEntry ruleHead key value <- updated
+                  ]
+          )
+  descend heldContext (Call expressionHead values) = do
+    updatedHead <- descendWithContext heldContext expressionHead
+    let childHeldContext =
+          heldContext || replacementHeldArgumentHead expressionHead
+    updatedValues <-
+      traverse (descendWithContext childHeldContext) values
     pure
-      ( if updated == Symbol "Nothing"
-          then Nothing
-          else Just (AssociationEntry ruleHead key updated)
+      ( if updatedHead == expressionHead && updatedValues == values
+          then Call expressionHead values
+          else if heldContext
+          then Call updatedHead updatedValues
+          else rebuildWithSplicing updatedHead updatedValues
       )
+  descend _ value = Right value
+
+  replaceEntry heldContext (AssociationEntry ruleHead key value) = do
+    updated <- descendWithContext heldContext value
+    pure (AssociationEntry ruleHead key updated)
+
+replacementHeldArgumentHead :: Expr -> Bool
+replacementHeldArgumentHead (Symbol name) =
+  name
+    `elem` [ "Function"
+           , "Hold"
+           , "HoldComplete"
+           , "HoldForm"
+           , "HoldPattern"
+           , "Unevaluated"
+           ]
+replacementHeldArgumentHead _ = False
 
 rebuildWithSplicing :: Expr -> [Expr] -> Expr
 rebuildWithSplicing expressionHead values =
-  Call expressionHead (filterNothing (concatMap splice values))
+  Call expressionHead (filterNothing spliced)
  where
-  splice (Call (Symbol "Sequence") sequenceValues) = sequenceValues
+  spliced
+    | replacementSuppressesSequences expressionHead = values
+    | otherwise = concatMap splice values
+  splice (Call (Symbol sequenceHead) sequenceValues)
+    | systemHeadIn ["Sequence"] sequenceHead = sequenceValues
   splice value = [value]
   filterNothing
-    | expressionHead == Symbol "List" = filter (/= Symbol "Nothing")
+    | expressionHead `elem` [Symbol "Association", Symbol "List"] =
+        filter (/= Symbol "Nothing")
     | otherwise = id
 
-applyFunction :: [Expr] -> [Expr] -> Either EvaluationError Expr
-applyFunction [body] values = Right (substituteSlots values body)
-applyFunction [Symbol "Null", body] values =
-  Right (substituteSlots values body)
-applyFunction functionArguments@[parameter, body] values
-  | Just names <- namedParameterNames parameter
-  , length values >= length names =
-      Right
-        ( substituteNamedSymbols
-            (Map.fromList (zip names values))
-            body
-        )
-  | otherwise =
-      Right (Call (Call (Symbol "Function") functionArguments) values)
-applyFunction [parameter, body, _attributes] values =
-  applyFunction [parameter, body] values
-applyFunction functionArguments values =
-  Right (Call (Call (Symbol "Function") functionArguments) values)
+replacementSuppressesSequences :: Expr -> Bool
+replacementSuppressesSequences (Symbol name) =
+  name
+    `elem` [ "HoldComplete"
+           , "Rule"
+           , "RuleDelayed"
+           , "Unevaluated"
+           ]
+replacementSuppressesSequences _ = False
+
+applyFunctionWithHead
+  :: Expr
+  -> [Expr]
+  -> [Expr]
+  -> Either EvaluationError Expr
+applyFunctionWithHead functionHead functionArguments values = case functionArguments of
+  [body] -> applyPositional body
+  [parameter, body]
+    | isNullFunctionParameter parameter -> applyPositional body
+    | otherwise -> applyNamed parameter body
+  [parameter, body, _]
+    | isNullFunctionParameter parameter -> applyPositional body
+    | otherwise -> applyNamed parameter body
+  _ -> unsupported
+ where
+  selfFunction = Call functionHead functionArguments
+  applyPositional = substituteSlots selfFunction values
+  applyNamed parameter body = case namedParameterNames parameter of
+    Just names
+      | length values >= length names ->
+          Right
+            ( substituteNamedSymbols
+                (Map.fromList (zip names values))
+                body
+            )
+      | otherwise -> unsupported
+    Nothing -> unsupported
+  unsupported = Right (Call selfFunction values)
 
 -- | Substitute already prepared call arguments into a held pure Function
 -- body without evaluating that body.
 instantiateFunctionCall :: [Expr] -> [Expr] -> Either EvaluationError Expr
-instantiateFunctionCall functionArguments@[parameter, _] values
-  | Just names <- namedParameterNames parameter
-  , length values < length names =
+instantiateFunctionCall = instantiateFunctionCallWithHead (Symbol "Function")
+
+instantiateFunctionCallWithHead
+  :: Expr
+  -> [Expr]
+  -> [Expr]
+  -> Either EvaluationError Expr
+instantiateFunctionCallWithHead functionHead functionArguments values = case functionArguments of
+  [_] -> apply functionArguments values
+  [parameter, _] -> validateParameter parameter
+  [parameter, _, _] -> validateParameter parameter
+  _ -> apply functionArguments values
+ where
+  apply = applyFunctionWithHead functionHead
+  validateParameter parameter
+    | isNullFunctionParameter parameter = apply functionArguments values
+    | Just names <- namedParameterNames parameter =
+        if length values < length names
+          then
+            Left
+              ( EvaluationError
+                  ( "Function expects "
+                      <> T.pack (show (length names))
+                      <> " named argument(s), but only "
+                      <> T.pack (show (length values))
+                      <> " were supplied."
+                  )
+              )
+          else apply functionArguments values
+    | otherwise =
+        Left (EvaluationError "Unsupported Function parameter specification.")
+
+substituteSlots :: Expr -> [Expr] -> Expr -> Either EvaluationError Expr
+substituteSlots selfFunction values expression
+  | Just slotResult <- positionalSlotValue expression = slotResult
+  | otherwise = case slotSequenceValues expression of
+      Left evaluationError -> Left evaluationError
+      Right (Just replacements) -> Right (Call (Symbol "Sequence") replacements)
+      Right Nothing -> case expression of
+        nestedFunction@(Call (Symbol functionHead) functionArguments)
+          | isFunctionHead functionHead
+          , positionalFunctionArguments functionArguments -> Right nestedFunction
+        Call expressionHead arguments' -> do
+          substitutedHead <- substituteSlots selfFunction values expressionHead
+          substitutedArguments <- concat <$> traverse substituteArgument arguments'
+          Right (Call substitutedHead substitutedArguments)
+        _ -> Right expression
+ where
+  positionalSlotValue :: Expr -> Maybe (Either EvaluationError Expr)
+  positionalSlotValue (Call (Symbol slotHead) [])
+    | systemHeadIn ["Slot"] slotHead = fillSlot 1
+  positionalSlotValue (Call (Symbol slotHead) [Integer 0])
+    | systemHeadIn ["Slot"] slotHead =
+        Just (Right selfFunction)
+  positionalSlotValue (Call (Symbol slotHead) [Integer index])
+    | systemHeadIn ["Slot"] slotHead
+    , index < 0 =
+        Just (Left (EvaluationError "Slot indices must be non-negative integers."))
+    | systemHeadIn ["Slot"] slotHead = fillSlot index
+  positionalSlotValue (Call (Symbol slotHead) [String key])
+    | systemHeadIn ["Slot"] slotHead =
+        Just (namedSlotValue key)
+  positionalSlotValue (Call (Symbol slotHead) arguments')
+    | systemHeadIn ["Slot"] slotHead =
+        Just
+          ( Left
+              ( EvaluationError
+                  ( if length arguments' <= 1
+                      then "Slot expects an integer index or a string name."
+                      else "Slot expects zero arguments or a single index."
+                  )
+              )
+          )
+  positionalSlotValue _ = Nothing
+
+  fillSlot :: Integer -> Maybe (Either EvaluationError Expr)
+  fillSlot index
+    | index > 0
+    , index <= fromIntegral (length values) =
+        Just (Right (values !! fromIntegral (index - 1)))
+    | otherwise =
+        Just
+          ( Left
+              ( EvaluationError
+                  ( "Slot "
+                      <> T.pack (show index)
+                      <> " cannot be filled from "
+                      <> T.pack (show (length values))
+                      <> " argument(s)."
+                  )
+              )
+          )
+
+  namedSlotValue :: Text -> Either EvaluationError Expr
+  namedSlotValue key = case values of
+    [] ->
       Left
         ( EvaluationError
-            ( "Function expects "
-                <> T.pack (show (length names))
-                <> " named argument(s), but only "
-                <> T.pack (show (length values))
-                <> " were supplied."
+            ( "Named Slot '"
+                <> key
+                <> "' cannot be filled from zero argument(s)."
             )
         )
-  | otherwise = applyFunction functionArguments values
-instantiateFunctionCall functionArguments values =
-  applyFunction functionArguments values
+    first : _ -> case associationEntries first of
+      Just _ -> reduceLookup [first, String key]
+      Nothing -> Right (Call first [String key])
 
-substituteSlots :: [Expr] -> Expr -> Expr
-substituteSlots (value : _) (Call (Symbol "Slot") []) = value
-substituteSlots values (Call (Symbol "SlotSequence") []) =
-  Call (Symbol "Sequence") (concatMap flattenSequenceArgument values)
-substituteSlots values expression = case expression of
-  Call (Symbol "Slot") [Integer index]
-    | index > 0 && index <= fromIntegral (length values) -> values !! fromIntegral (index - 1)
-  Call (Symbol "SlotSequence") [Integer index]
-    | index > 0 ->
-        Call
-          (Symbol "Sequence")
-          ( concatMap
-              flattenSequenceArgument
-              (dropInteger (index - 1) values)
+  slotSequenceValues :: Expr -> Either EvaluationError (Maybe [Expr])
+  slotSequenceValues (Call (Symbol slotHead) [])
+    | systemHeadIn ["SlotSequence"] slotHead = Right (Just values)
+  slotSequenceValues (Call (Symbol slotHead) [Integer index])
+    | systemHeadIn ["SlotSequence"] slotHead
+    , index > 0 = Right (Just (dropInteger (index - 1) values))
+    | systemHeadIn ["SlotSequence"] slotHead =
+        Left
+          (EvaluationError "SlotSequence indices must be positive integers.")
+  slotSequenceValues (Call (Symbol slotHead) _)
+    | systemHeadIn ["SlotSequence"] slotHead =
+        Left
+          ( EvaluationError
+              "SlotSequence expects zero arguments or a single positive integer index."
           )
-  Call expressionHead arguments' ->
-    Call
-      (substituteSlots values expressionHead)
-      ( concatMap
-          (flattenSequenceArgument . substituteSlots values)
-          arguments'
-      )
-  _ -> expression
+  slotSequenceValues _ = Right Nothing
 
-flattenSequenceArgument :: Expr -> [Expr]
-flattenSequenceArgument (Call (Symbol "Sequence") values) =
-  concatMap flattenSequenceArgument values
-flattenSequenceArgument value = [value]
+  substituteArgument :: Expr -> Either EvaluationError [Expr]
+  substituteArgument argument = do
+    sequenceValues <- slotSequenceValues argument
+    case sequenceValues of
+      Just replacements -> Right replacements
+      Nothing -> pure <$> substituteSlots selfFunction values argument
+
+  positionalFunctionArguments :: [Expr] -> Bool
+  positionalFunctionArguments = \case
+    [_] -> True
+    [parameter, _] -> isNullFunctionParameter parameter
+    [parameter, _, _] -> isNullFunctionParameter parameter
+    _ -> False
+
+  isFunctionHead :: Text -> Bool
+  isFunctionHead name = name == "Function" || name == "System`Function"
 
 dropInteger :: Integer -> [value] -> [value]
 dropInteger count values
@@ -6249,7 +6470,8 @@ substituteThroughNamedFunction
                             activeSubstitutions
                             (Set.union unavailable (Set.fromList freshNames))
                             renamedBody
-                     in ( rebuildNamedFunction
+                     in ( rebuildNamedFunctionLike
+                            original
                             parameter
                             freshNames
                             substitutedBody
@@ -6378,7 +6600,8 @@ renameBoundSymbolsInExpr renameMap expression
                in if Map.null nestedRenameMap
                     then expression
                     else
-                      rebuildNamedFunction
+                      rebuildNamedFunctionLike
+                        expression
                         parameter
                         parameterNames
                         (renameBoundSymbolsInExpr nestedRenameMap body)
@@ -6398,8 +6621,9 @@ renameBindingRhs renameMap binding = case binding of
 
 localScopingCallParts :: Expr -> Maybe ([Text], [Expr], Expr)
 localScopingCallParts = \case
-  Call (Symbol headName) [Call (Symbol "List") bindings, body]
-    | headName `elem` ["With", "Module", "Block"] -> do
+  Call (Symbol headName) [Call (Symbol listHead) bindings, body]
+    | systemHeadIn ["With", "Module", "Block"] headName
+    , systemHeadIn ["List"] listHead -> do
         boundNames <- traverse localBindingName bindings
         Just (boundNames, bindings, body)
   _ -> Nothing
@@ -6407,44 +6631,61 @@ localScopingCallParts = \case
   localBindingName = \case
     Symbol name -> Just name
     Call (Symbol bindingHead) [Symbol name, _]
-      | bindingHead `elem` ["Set", "SetDelayed"] -> Just name
+      | systemHeadIn ["Set", "SetDelayed"] bindingHead -> Just name
     _ -> Nothing
 
 namedFunctionParts :: Expr -> Maybe (Expr, [Text], Expr, [Expr])
 namedFunctionParts = \case
-  Call (Symbol "Function") (parameter : body : remaining)
-    | length remaining <= 1 -> do
+  Call (Symbol functionHead) (parameter : body : remaining)
+    | systemHeadIn ["Function"] functionHead
+    , length remaining <= 1 -> do
         names <- namedParameterNames parameter
         Just (parameter, names, body, remaining)
   _ -> Nothing
 
 namedParameterNames :: Expr -> Maybe [Text]
 namedParameterNames = \case
-  Symbol "Null" -> Nothing
+  parameter
+    | isNullFunctionParameter parameter -> Nothing
   Symbol name -> Just [name]
-  Call (Symbol "List") parameters -> traverse parameterName parameters
+  Call (Symbol listHead) parameters
+    | systemHeadIn ["List"] listHead -> traverse parameterName parameters
   _ -> Nothing
  where
   parameterName = \case
     Symbol name -> Just name
     _ -> Nothing
 
-rebuildNamedFunction :: Expr -> [Text] -> Expr -> [Expr] -> Expr
-rebuildNamedFunction originalParameter parameterNames body remaining =
+isNullFunctionParameter :: Expr -> Bool
+isNullFunctionParameter (Symbol name) =
+  name `elem` ["Null", "System`Null"]
+isNullFunctionParameter _ = False
+
+rebuildNamedFunctionLike :: Expr -> Expr -> [Text] -> Expr -> [Expr] -> Expr
+rebuildNamedFunctionLike original originalParameter parameterNames body remaining =
   Call
-    (Symbol "Function")
+    functionHead
     ( rebuildParameter originalParameter parameterNames
         : body
         : remaining
     )
  where
+  functionHead = case original of
+    Call headExpression _ -> headExpression
+    _ -> Symbol "Function"
   rebuildParameter parameter names = case parameter of
     Symbol _ -> case names of
       [name] -> Symbol name
       _ -> parameter
-    Call (Symbol "List") _ ->
-      Call (Symbol "List") (map Symbol names)
+    Call (Symbol listName) _
+      | systemHeadIn ["List"] listName ->
+          Call (Symbol "List") (map Symbol names)
     _ -> parameter
+
+systemHeadIn :: [Text] -> Text -> Bool
+systemHeadIn names name =
+  name `elem` names
+    || maybe False (`elem` names) (T.stripPrefix "System`" name)
 
 collectSymbolNames :: Expr -> Set.Set Text
 collectSymbolNames = \case

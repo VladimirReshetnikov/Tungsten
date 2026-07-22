@@ -610,6 +610,8 @@ checkEvaluator = do
         , ("repeated symbolic collection", "{a + a + a, a*a*a, f[x] + f[x], f[x]*f[x]}", "List[Times[3, a], Power[a, 3], Times[2, f[x]], Power[f[x], 2]]")
         , ("evaluated argument normalization", "{Nothing, Sequence[a, b], Splice[{c, d}]}", "List[a, b, c, d]")
         , ("held function sequence normalization", "{Function[Sequence[x, x + x]][a], Function[x, Sequence[x, x]][a]}", "List[Times[2, a], a]")
+        , ("qualified held construction metadata", "{System`Hold[System`Sequence[a, b]], System`HoldComplete[Head[x]], System`RuleDelayed[Head[1], Head[x], Head[y]]}", "List[System`Hold[a, b], System`HoldComplete[Head[x]], System`RuleDelayed[Integer, Head[x], Head[y]]]")
+        , ("qualified function bodies stay held until application", "System`Function[Head[#]][1]", "Integer")
         , ("SequenceHold slot sequence substitution", "Function[Null, Hold[##], SequenceHold][a, Sequence[b, c]]", "Hold[a, b, c]")
         , ("factorials", "6! + 6!!", "768")
         , ("numeric comparison", "1 < 2 <= 2", "True")
@@ -786,6 +788,7 @@ checkEvaluator = do
         , ("cases replacement template", "Cases[{f[a], f[b]}, f[x_] :> {x, x}]", "List[List[a, a], List[b, b]]")
         , ("cases guarded pattern and template", "{Cases[{1, -2, 3}, x_ /; x > 0], Cases[{1, -2, 3}, x_ :> x + 1 /; x > 0]}", "List[List[1, 3], List[2, 4]]")
         , ("cases sequence template splicing", "{Cases[{f[a, b]}, f[x__] :> x], Cases[{f[a, b]}, f[x__] :> HoldComplete[x]]}", "List[List[a, b], List[HoldComplete[a, b]]]")
+        , ("cases qualified sequence template splicing", "Cases[{a}, x_ :> System`Sequence[x, x]]", "List[a, a]")
         , ("replace root pattern", "Replace[f[a], f[x_] :> x]", "a")
         , ("replace level traversal", "{Replace[f[g[a]], _ -> z, 2], Replace[f[g[a]], _Symbol -> s, -1], Replace[f[g[a]], x_ :> p[x], {0, Infinity}]}", "List[f[z], f[g[s]], p[f[p[g[p[a]]]]]]")
         , ("replace at exact paths", "{ReplaceAt[f[g[a], h[a]], a -> x, {2, 1}], ReplaceAt[f[g[a], h[a]], a -> x, {{1, 1}, {2, 1}}]}", "List[f[g[a], h[x]], f[g[x], h[x]]]")
@@ -801,6 +804,9 @@ checkEvaluator = do
         , ("association pattern replacement", "{Replace[<|a -> 1|>, _Association -> x], Replace[<|a -> 1|>, _Integer -> x, Infinity], <|a -> 1|> /. _Association -> z, <|a -> 1|> /. _Integer -> x}", "List[x, Association[Rule[a, x]], z, Association[Rule[a, x]]]")
         , ("association head replacement", "<|a -> 1|> /. _Symbol -> s", "s[Rule[a, 1]]")
         , ("replace all sequence splicing", "{f[g[a, b]] /. g[x__] :> x, f[g[a, b]] /. g[x__] :> HoldComplete[x]}", "List[f[a, b], f[HoldComplete[a, b]]]")
+        , ("replace all propagates exact held context", "{ReplaceAll[HoldComplete[System`HoldComplete[a]], a -> System`Sequence[b, c]], ReplaceAll[HoldComplete[1], 1 :> y /; False], ReplaceAll[HoldComplete[1], 1 :> y /; True]}", "List[HoldComplete[System`HoldComplete[System`Sequence[b, c]]], HoldComplete[1], HoldComplete[y]]")
+        , ("unchanged replacement trees preserve qualified normalization state", "{ReplaceAll[System`HoldComplete[System`Sequence[a, b]], z -> q], ReplaceRepeated[System`HoldComplete[System`Sequence[a, b]], z -> q], ReplaceAll[System`Rule[x, System`Sequence[a, b]], z -> q]}", "List[System`HoldComplete[System`Sequence[a, b]], System`HoldComplete[System`Sequence[a, b]], System`Rule[x, System`Sequence[a, b]]]")
+        , ("replace all preserves qualified association structure", "{ReplaceAll[System`Association[System`Rule[a, 1]], a -> b], ReplaceAll[System`Association[System`Rule[a, 1]], 1 -> 2], ReplaceAll[System`Association[System`Rule[a, 1]], System`Rule -> foo]}", "List[System`Association[System`Rule[a, 1]], System`Association[System`Rule[a, 2]], System`Association[System`Rule[a, 1]]]")
         , ("scalar pattern tests", "{MatchQ[1, _?IntegerQ], MatchQ[a, _?IntegerQ]}", "List[True, False]")
         , ("sequence pattern tests", "{Cases[{f[1, 2], f[1, a], f[]}, f[__?IntegerQ]], MatchQ[f[1, 2], f[x__?IntegerQ]], MatchQ[f[1, a], f[x__?IntegerQ]]}", "List[List[f[1, 2]], True, False]")
         , ("pattern test delayed template", "Cases[{1, a, 2}, x_?IntegerQ :> x + 10]", "List[11, 12]")
@@ -1122,10 +1128,73 @@ checkEvaluationSession = do
         , ("delayed value observes later result", "a = 1; x := a + 1; a = 4; x", "5")
         , ("unset removes a value", "x = 4; Unset[x]; x", "x")
         , ("clear removes several values", "x = 1; y = 2; Clear[x, y]; x + y", "Plus[x, y]")
+        , ("catalog attributes are visible", "{Attributes[Plus], Attributes[System`Function]}", "List[List[Flat, Listable, NumericFunction, OneIdentity, Orderless, Protected], List[HoldAll, Protected]]")
+        , ("qualified System heads dispatch canonically", "{System`Plus[1, 2], System`Attributes[System`Times]}", "List[3, List[Flat, Listable, NumericFunction, OneIdentity, Orderless, Protected]]")
+        , ("qualified inert and held heads preserve their spelling", "{System`AASTriangle[1 + 2], System`Hold[1 + 2]}", "List[System`AASTriangle[3], System`Hold[Plus[1, 2]]]")
+        , ("qualified held constructors honor sequence and hold-rest metadata", "{System`Hold[System`Sequence[a, b]], System`HoldComplete[System`Sequence[a, b]], System`RuleDelayed[Head[1], Head[x]]}", "List[System`Hold[a, b], System`HoldComplete[System`Sequence[a, b]], System`RuleDelayed[Integer, Head[x]]]")
+        , ("qualified Evaluate escapes held arguments", "ClearAll[f]; SetAttributes[f, HoldAll]; {Hold[System`Evaluate[1 + 1]], f[System`Evaluate[1 + 1]]}", "List[Hold[2], f[2]]")
+        , ("evaluated Boolean aliases dispatch while held sequence aliases stay inert", "f = And; g = Or; h = CompoundExpression; x = 0; {f[True, False], g[False, True], h[x = 1, x = 2], x}", "List[False, True, CompoundExpression[Set[x, 1], Set[x, 2]], 0]")
+        , ("evaluated Boolean aliases do not gain syntactic short circuiting", "ClearAll[f, g, x]; f = And; g = Or; x = 0; {f[False, x = 1], g[True, x = 2], x}", "List[And[False, Set[x, 1]], Or[True, Set[x, 2]], 0]")
+        , ("qualified held and control heads restore selectively", "{System`If[a, b, c], System`If[True, If[a, b, c]], System`Hold[Hold[x]]}", "List[If[a, b, c], If[a, b, c], System`Hold[Hold[x]]]")
+        , ("qualified listable and flat heads retain structural identity", "{System`Sin[{a, b}], System`Plus[System`Plus[a, b], c], System`Plus[Plus[a, b], c]}", "List[List[System`Sin[a], System`Sin[b]], System`Plus[a, b, c], System`Plus[c, Plus[a, b]]]")
+        , ("qualified structural constructors are consumed contextually", "{Sin[System`List[a, b]], System`Sin[System`List[a, b]], f[System`Sequence[a, b]], System`List[System`Nothing, a], System`List[System`Sequence[a, b]], System`List[System`Splice[System`List[a, b]]]}", "List[List[Sin[a], Sin[b]], List[System`Sin[a], System`Sin[b]], f[a, b], System`List[System`Nothing, a], System`List[a, b], System`List[System`Splice[System`List[a, b]]]]")
+        , ("qualified associations and rules work at consumer boundaries", "{System`Association[System`Rule[a, 1]][a], Association[System`Rule[a, 1]][a], ReplaceAll[x, System`Rule[x, y]], ReplaceAll[x, System`RuleDelayed[x, y]]}", "List[1, 1, y, y]")
+        , ("bare associations consume qualified lists while qualified associations stay held", "{Association[System`List[a -> 1, b -> 2]], System`Association[System`List[a -> 1, b -> 2]], System`Association[System`Rule[a, Head[x]]]}", "List[Association[Rule[a, 1], Rule[b, 2]], System`Association[System`List[Rule[a, 1], Rule[b, 2]]], System`Association[System`Rule[a, Head[x]]]]")
+        , ("qualified collection rebuilding retains exact Nothing boundaries", "{Association[System`List[Nothing, a -> 1]], ReplaceAll[System`List[a], a -> Nothing], ReplaceAll[List[a], a -> Nothing]}", "List[Association[System`List[Nothing, Rule[a, 1]]], System`List[Nothing], List[]]")
+        , ("qualified association replacement remains structural", "{ReplaceAll[System`Association[System`Rule[a, 1]], Association -> foo], ReplaceAll[System`Association[System`Rule[a, 1]], System`Association -> foo], ReplaceAll[System`Association[System`Rule[a, 1]], 1 -> Nothing], ReplaceAll[Association[a -> 1], 1 -> Nothing]}", "List[System`Association[System`Rule[a, 1]], foo[System`Rule[a, 1]], System`Association[System`Rule[a, Nothing]], Association[Rule[a, Nothing]]]")
+        , ("replacement rebuilding respects exact sequence-holding heads", "{ReplaceAll[HoldComplete[qa], qa -> System`Sequence[qb, qc]], ReplaceAll[System`HoldComplete[qa], qa -> System`Sequence[qb, qc]], ReplaceAll[RuleDelayed[qa, qx], qx -> System`Sequence[qb, qc]], ReplaceAll[System`Rule[qa, qx], qx -> Sequence[qb, qc]]}", "List[HoldComplete[System`Sequence[qb, qc]], System`HoldComplete[qb, qc], RuleDelayed[qa, System`Sequence[qb, qc]], System`Rule[qa, qb, qc]]")
+        , ("qualified delayed rules and conditions retain held bodies", "{ReplaceAll[qf[1], System`RuleDelayed[qf[qx_], Head[qx]]], ReplaceAll[qf[1], System`RuleDelayed[qf[qx_], System`Condition[Head[qx], False]]]}", "List[Integer, qf[1]]")
+        , ("Cases splices qualified Sequence results", "Cases[{a}, x_ :> System`Sequence[x, x]]", "List[a, a]")
+        , ("qualified immediate and delayed rules keep timing semantics", "ClearAll[i]; i = 0; first = ReplaceAll[{a, a}, System`Rule[a, (i = i + 1)]]; i = 0; second = ReplaceAll[{a, a}, System`RuleDelayed[a, (i = i + 1)]]; {first, second, i}", "List[List[1, 1], List[1, 2], 2]")
+        , ("qualified and bare downvalue patterns remain distinct", "Unprotect[AASTriangle]; ClearAll[AASTriangle]; AASTriangle[x_] := foo; System`AASTriangle[x_] := bar; {AASTriangle[a], System`AASTriangle[a]}", "List[foo, bar]")
+        , ("evaluated qualified aliases use the Python dispatch boundary", "p = System`Part; l = System`Length; q = System`Plus; e = System`Equal; {p[{a, b}, 1], l[{a, b}], q[1, 2], e[1, 1]}", "List[System`Part[List[a, b], 1], System`Length[List[a, b]], 3, True]")
+        , ("mutable flat and orderless attributes normalize calls", "ClearAll[f]; SetAttributes[f, {Flat, Orderless, OneIdentity}]; {Attributes[f], f[b, f[c, a], a], Cases[{f[c, b, a]}, f[a, x__] :> HoldComplete[x]]}", "List[List[Flat, OneIdentity, Orderless], f[a, a, b, c], List[HoldComplete[b, c]]]")
+        , ("mutable hold attributes prepare arguments", "ClearAll[f]; Attributes[f] = HoldAll; f[1 + 2, Sequence[a, b], Evaluate[3 + 4]]", "f[Plus[1, 2], a, b, 7]")
+        , ("qualified Attributes assignment mutates metadata", "ClearAll[f]; System`Attributes[f] = HoldAll; {Attributes[f], f[1 + 2]}", "List[List[HoldAll], f[Plus[1, 2]]]")
+        , ("qualified attribute names remain held metadata", "ClearAll[f]; SetAttributes[f, System`HoldAll]; {Attributes[f], f[1 + 2]}", "List[List[HoldAll], f[Plus[1, 2]]]")
+        , ("listable and held attributes compose", "ClearAll[f]; SetAttributes[f, {Listable, HoldAll}]; f[{1 + 2, 3 + 4}]", "List[f[Plus[1, 2]], f[Plus[3, 4]]]")
+        , ("hold all complete suppresses evaluate and sequence", "ClearAll[f]; SetAttributes[f, HoldAllComplete]; f[1 + 2, Sequence[a, b], Evaluate[3 + 4]]", "f[Plus[1, 2], Sequence[a, b], Evaluate[Plus[3, 4]]]")
+        , ("RuleDelayed uses catalog hold-rest metadata", "ClearAll[x]; x = 1; RuleDelayed[x, x]", "RuleDelayed[1, x]")
+        , ("RuleDelayed follows mutable attributes", "ClearAll[x]; x = 1; Unprotect[RuleDelayed]; ClearAttributes[RuleDelayed, {HoldRest, SequenceHold}]; RuleDelayed[x, x]", "RuleDelayed[1, 1]")
+        , ("Rule sequence splicing follows mutable attributes", "Unprotect[Rule, RuleDelayed]; ClearAttributes[{Rule, RuleDelayed}, SequenceHold]; {Rule[a, Sequence[b, c]], RuleDelayed[a, Sequence[b, c]]}", "List[Rule[a, b, c], RuleDelayed[a, b, c]]")
+        , ("Condition uses catalog hold-all metadata", "ClearAll[x]; x = 1; Condition[x, x]", "Condition[x, x]")
+        , ("Condition follows mutable attributes", "ClearAll[x]; x = 1; Unprotect[Condition]; ClearAttributes[Condition, HoldAll]; Condition[x, x]", "Condition[1, 1]")
+        , ("held aliases prepare arguments from current attributes", "f = OwnValues; Unprotect[OwnValues]; ClearAttributes[OwnValues, HoldAll]; x = 1; f[x]", "OwnValues[1]")
+        , ("held aliases apply user downvalues after preparation", "Unprotect[OwnValues]; ClearAll[OwnValues]; OwnValues[x_] := foo; {OwnValues[a], (f = OwnValues; f[a])}", "List[List[], foo]")
+        , ("Association preparation follows mutable attributes", "Unprotect[Association]; ClearAttributes[Association, HoldAllComplete]; x = 1; Association[x]", "Association[1]")
+        , ("Level preparation follows mutable attributes", "Unprotect[Level]; SetAttributes[Level, HoldAll]; x = 1; Level[f[x], {1}]", "List[x]")
+        , ("SelectFirst default preparation follows mutable attributes", "x = 0; Unprotect[SelectFirst]; ClearAttributes[SelectFirst, HoldRest]; {SelectFirst[{a}, True &, x = 1], x}", "List[a, 1]")
+        , ("held definition left-hand side respects attributes", "ClearAll[f, x]; SetAttributes[f, HoldAll]; x = 1; f[x] = 9; {f[x], f[1], DownValues[f]}", "List[9, f[1], List[RuleDelayed[HoldPattern[f[x]], 9]]]")
+        , ("HoldPattern assignment normalization follows mutable attributes", "ClearAll[f, g, x]; x = 1; HoldPattern[f[x]] = 9; Unprotect[HoldPattern]; ClearAttributes[HoldPattern, HoldAll]; HoldPattern[g[x]] = 8; {DownValues[f], DownValues[g]}", "List[List[RuleDelayed[HoldPattern[HoldPattern[f[x]]], 9]], List[RuleDelayed[HoldPattern[HoldPattern[g[1]]], 8]]]")
+        , ("qualified definition wrappers resolve canonically", "ClearAll[f]; System`Condition[f[x_], True] := x; {f[1], DownValues[f]}", "List[1, List[RuleDelayed[HoldPattern[Condition[f[Pattern[x, Blank[]]], True]], x]]]")
+        , ("qualified delayed-body conditions remain distinct guards", "ClearAll[f]; f[x_] := System`Condition[a, x > 0]; f[x_] := System`Condition[b, x < 0]; {f[1], f[-1], DownValues[f]}", "List[a, b, List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], System`Condition[a, Greater[x, 0]]], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], System`Condition[b, Less[x, 0]]]]]")
+        , ("block restores values while attribute mutations escape", "ClearAll[f]; f = 7; Block[{f}, SetAttributes[f, HoldAll]; f = 1]; {Attributes[f], f}", "List[List[HoldAll], 7]")
+        , ("intrinsic imaginary unit has no own value", "{I, System`I, OwnValues[I]}", "List[Complex[0, 1], Complex[0, 1], List[]]")
+        , ("system settings expose seeded own values", "{$RecursionLimit, $IterationLimit, $HistoryLength, $MaxExtraPrecision, $MaxRootDegree, $OutputSizeLimit, $MessagePrePrint, $MachinePrecision}", "List[1024, 4096, Infinity, 50, 1000, 12000, Automatic, 15.954589770191003]")
+        , ("valid system setting assignments update own values", "$RecursionLimit = 20; {$RecursionLimit, OwnValues[$RecursionLimit]}", "List[20, List[RuleDelayed[HoldPattern[$RecursionLimit], 20]]]")
+        , ("qualified Infinity is a valid unbounded setting", "$RecursionLimit = System`Infinity; {$RecursionLimit, OwnValues[$RecursionLimit]}", "List[System`Infinity, List[RuleDelayed[HoldPattern[$RecursionLimit], System`Infinity]]]")
+        , ("ordinary seeded system own values can be unset", "$MessagePrePrint =.; {$MessagePrePrint, OwnValues[$MessagePrePrint]}", "List[$MessagePrePrint, List[]]")
+        , ("protected session hooks allow direct value mutation", "ClearAll[$Pre]; Protect[$Pre]; $Pre = 1; {$Pre, OwnValues[$Pre], Attributes[$Pre]}", "List[1, List[RuleDelayed[HoldPattern[$Pre], 1]], List[Protected]]")
+        , ("Clear removes protected hook values but keeps attributes", "ClearAll[$Pre]; $Pre = 1; Protect[$Pre]; Clear[$Pre]; {$Pre, OwnValues[$Pre], Attributes[$Pre]}", "List[$Pre, List[], List[Protected]]")
+        , ("bare and explicit Global symbols share values", "ClearAll[Global`ctxX, ctxY]; Global`ctxX = 1; ctxY = 2; {ctxX, Global`ctxY, Attributes[\"ctxX\"]}", "List[1, 2, List[]]")
+        , ("explicit unknown System symbols keep separate context identity", "ClearAll[Global`ctxCollision, System`ctxCollision]; Global`ctxCollision = 1; System`ctxCollision = 2; {Global`ctxCollision, System`ctxCollision, ctxCollision}", "List[1, 2, 2]")
+        , ("whole-expression registration resolves future System symbols", "ClearAll[Global`ctxFutureSysA]; ctxFutureSysA = 1; Hold[System`ctxFutureSysA]; {ctxFutureSysA, Global`ctxFutureSysA, System`ctxFutureSysA, OwnValues[Global`ctxFutureSysA], OwnValues[System`ctxFutureSysA]}", "List[1, Global`ctxFutureSysA, 1, List[], List[RuleDelayed[HoldPattern[ctxFutureSysA], 1]]]")
+        , ("held symbols are registered for string metadata lookup", "Hold[System`heldRegistryA, Other`heldRegistryC]; {OwnValues[\"System`heldRegistryA\"], Attributes[\"Other`heldRegistryC\"]}", "List[List[], List[]]")
+        , ("qualified Global wildcard clears bare symbols", "ctxX = 1; ClearAll[\"Global`*\"]; ctxX", "ctxX")
+        , ("unqualified name patterns skip nonvisible contexts", "TungstenOther`ctxHidden = 1; ClearAll[\"ctxHidden\"]; TungstenOther`ctxHidden", "1")
+        , ("unqualified name patterns resolve System collisions first", "Global`Plus = 1; ClearAll[\"Plus\"]; Global`Plus", "1")
+        , ("explicit Global symbol keeps independent attributes", "ClearAll[Global`Plus]; SetAttributes[Global`Plus, HoldAll]; {Attributes[Global`Plus], Global`Plus[1 + 2]}", "List[List[HoldAll], Global`Plus[Plus[1, 2]]]")
         , ("own values stay held", "x = 5; {OwnValues[x], OwnValues[y], OwnValues[1], OwnValues[x, y]}", "List[List[RuleDelayed[HoldPattern[x], 5]], List[], OwnValues[1], OwnValues[x, y]]")
+        , ("value getters register and resolve symbol names", "OwnValues[x]; f[t_] := t; {Attributes[\"x\"], DownValues[\"f\"], DownValues[\"missing\"], UpValues[\"missing\"], SubValues[\"missing\"], NValues[\"missing\"]}", "List[List[], List[RuleDelayed[HoldPattern[f[Pattern[t, Blank[]]]], t]], List[], List[], List[], List[]]")
+        , ("own values use canonical Global display", "Global`x = 1; OwnValues[Global`x]", "List[RuleDelayed[HoldPattern[x], 1]]")
+        , ("value getters and Protect use visible-context display", "System`dynamicDisplay = 1; {OwnValues[System`dynamicDisplay], Protect[System`dynamicDisplay]}", "List[List[RuleDelayed[HoldPattern[dynamicDisplay], 1]], List[\"dynamicDisplay\"]]")
+        , ("colliding Global value getters still use short display", "Global`Plus = 1; OwnValues[Global`Plus]", "List[RuleDelayed[HoldPattern[Plus], 1]]")
+        , ("metadata parsers consume qualified List and Evaluate wrappers", "ClearAll[f, g, x]; SetAttributes[System`List[f, g], HoldAll]; SetAttributes[f, System`List[HoldAll, Listable]]; x = f; {Attributes[System`List[f, g]], Attributes[System`Evaluate[x]], Protect[System`List[f, g]]}", "List[List[List[HoldAll, Listable], List[HoldAll]], List[HoldAll, Listable], List[\"f\", \"g\"]]")
         , ("downvalue delayed dispatch", "f[x_] := x^2; {f[3], f[a + b], DownValues[f]}", "List[9, Power[Plus[a, b], 2], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], Power[x, 2]]]]")
         , ("immediate downvalue evaluates rhs before lhs", "x = 10; f[x_] = x + 1; {f[3], DownValues[f]}", "List[11, List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], 11]]]")
         , ("delayed downvalue observes later own values", "y = 5; f[x_] := x + y; first = f[3]; y = 10; {first, f[3], DownValues[f]}", "List[8, 13, List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], Plus[x, y]]]]")
+        , ("mutual own-value cycles stop without messages", "ClearAll[x, y]; x := y; y := x; {x, y, OwnValues[x], OwnValues[y]}", "List[x, y, List[RuleDelayed[HoldPattern[x], y]], List[RuleDelayed[HoldPattern[y], x]]]")
+        , ("own-value cycles use resolved context identity", "ClearAll[x]; x := Global`x; {x, Global`x, OwnValues[x]}", "List[Global`x, Global`x, List[RuleDelayed[HoldPattern[x], Global`x]]]")
         , ("user head aliases retarget downvalues", "f = g; f[x_] := x + 1; {g[2], DownValues[g], DownValues[f]}", "List[3, List[RuleDelayed[HoldPattern[g[Pattern[x, Blank[]]]], Plus[x, 1]]], List[]]")
         , ("retargeted system head assignment stays inert", "f = List; {f[1] = 2, DownValues[f], List[1]}", "List[Set[List[1], 2], List[], List[1]]")
         , ("raw protected head assignment stays inert", "{List[1] = 2, List[1], DownValues[List]}", "List[Set[List[1], 2], List[1], List[]]")
@@ -1181,6 +1250,9 @@ checkEvaluationSession = do
         , ("sort by last SameTest option wins", "c = 0; {SortBy[{2, 1}, Identity, SameTest -> (c = c + 1; (True &)), SameTest :> (c = c + 10; (False &))], c}", "List[List[1, 2], 11]")
         , ("reverse sort by preserves SameTest ties", "ReverseSortBy[{2, 1}, Identity, SameTest -> (True &)]", "List[2, 1]")
         , ("assignment update", "x = 10; AddTo[x, 5]; x", "15")
+        , ("assignment updates cannot bypass protection", "protectedUpdateX = 2; Protect[protectedUpdateX]; {AddTo[protectedUpdateX, 1 + 2], protectedUpdateX}", "List[AddTo[protectedUpdateX, 3], 2]")
+        , ("assignment updates leave special settings unchanged", "AddTo[$RecursionLimit, -1000]; $RecursionLimit", "1024")
+        , ("qualified ByteArrayQ aliases retain scalar dispatch", "f = System`ByteArrayQ; f[ByteArray[{1}]]", "True")
         , ("table count iterators", "{Table[a, 3], Table[a, {3}], Table[i, {i, 5}]}", "List[List[a, a, a], List[a, a, a], List[1, 2, 3, 4, 5]]")
         , ("table exact ranges", "{Table[i^2, {i, 1, 5}], Table[i, {i, 2, 8, 2}], Table[i, {i, 5, 1, -1}], Table[i, {i, 0, 1, 1/4}]}", "List[List[1, 4, 9, 16, 25], List[2, 4, 6, 8], List[5, 4, 3, 2, 1], List[0, Rational[1, 4], Rational[1, 2], Rational[3, 4], 1]]")
         , ("table explicit values", "{Table[Sqrt[i], {i, {1, 4, 9, 16}}], Table[i, {i, {a, b, c}}], Table[i, {i, {i}}]}", "List[List[1, 2, 3, 4], List[a, b, c], List[i]]")
@@ -1261,6 +1333,18 @@ checkEvaluationSession = do
         , ("invalid return forms preserve value operands", "x = 0; {Return[x = 1, a, b], x}", "List[Return[Set[x, 1], a, b], 0]")
         , ("do return restores iterator bindings", "i = 99; {Do[If[i == 3, Return[i, Do]], {i, 1, 5}], i}", "List[3, 99]")
         , ("pure functions do not catch return", "Function[x, Return[x]][5]", "Return[5]")
+        , ("nested positional functions keep independent slots", "Function[Function[#1]][a][b]", "b")
+        , ("qualified nested positional functions shield outer slots", "Function[System`Function[#1]][a][b]", "b")
+        , ("qualified named functions and scopes shield bindings", "{Function[x, System`Function[x, x]][1][b], With[{x = 1}, System`Function[x, x]][b], Function[x, System`With[{x = b}, x]][a]}", "List[b, b, b]")
+        , ("qualified scoping and iterator constructors are consumed", "{Module[System`List[System`Set[x, 1]], x], System`Module[System`List[System`Set[x, 1]], x], With[System`List[System`Set[x, 2]], x], Block[System`List[System`Set[x, 3]], x], Table[i, System`List[i, 2]], System`Table[i, System`List[i, 2]]}", "List[1, 1, 2, 3, List[1, 2], List[1, 2]]")
+        , ("module renaming canonicalizes qualified binding lists", "{Module[{x}, HoldComplete[System`With[System`List[System`Set[y, x]], y]]], Module[{x}, HoldComplete[System`Function[System`List[y], x + y]]]}", "List[HoldComplete[System`With[List[System`Set[y, x$1]], y]], HoldComplete[System`Function[List[y], Plus[x$2, y]]]]")
+        , ("qualified slots and function self preserve spelling", "{Function[System`Slot[1]][x], Function[System`SlotSequence[1]][a, b], System`Function[Slot[0]][x], System`Function[System`Slot[0]][x]}", "List[x, a, b, System`Function[Slot[0]], System`Function[System`Slot[0]]]")
+        , ("qualified functions hold bodies and canonicalize parameter lists", "{System`Function[Head[#]][1], Function[x, HoldComplete[System`Function[System`List[y], x + y]]][y]}", "List[Integer, HoldComplete[System`Function[List[y$], Plus[y, y$]]]]")
+        , ("Slot zero returns the pure function itself", "(#0 &)[x]", "Function[Slot[0]]")
+        , ("qualified Null marks positional functions", "Function[System`Null, #1 + #2][a, b]", "Plus[a, b]")
+        , ("named slots project associations and callable arguments", "{(#name &)[<|\"name\" -> 7|>], (#name &)[x]}", "List[7, x[\"name\"]]")
+        , ("SequenceHold preserves Sequence values through SlotSequence", "Function[Null, HoldComplete[##], SequenceHold][Sequence[a, b]]", "HoldComplete[Sequence[a, b]]")
+        , ("HoldAllComplete preserves held Sequence values through SlotSequence", "Function[Null, HoldComplete[##], HoldAllComplete][Sequence[1 + 2, 3 + 4]]", "HoldComplete[Sequence[Plus[1, 2], Plus[3, 4]]]")
         , ("definition catches return through pure function", "f[x_] := Function[y, Return[x]][y]; f[7]", "7")
         , ("definition catches return through with", "q[x_] := With[{y = x + 1}, Return[y]]; q[5]", "6")
         , ("module initializers do not catch return", "Module[{a = 1, b = Return[stop, Module]}, never]", "Return[stop, Module]")
@@ -1322,7 +1406,150 @@ checkEvaluationSession = do
         , "Part::error: Part expects an expression and at least one part specification."
         )
       messageCases =
-        [ ( "invalid held pattern arity is nonfatal"
+        [ ( "attribute specifications remain held"
+          , "ClearAll[a, f]; a = HoldAll; SetAttributes[f, a]; {Attributes[f], f[1 + 2]}"
+          , "List[List[], f[3]]"
+          , [ ( "Attributes::attnf"
+              , "MessageName[Attributes, \"attnf\"]"
+              , "Attributes::attnf: a is not a known attribute."
+              )
+            ]
+          )
+        , ( "Global attribute names do not alias System metadata"
+          , "ClearAll[f]; SetAttributes[f, Global`HoldAll]; Attributes[f]"
+          , "List[]"
+          , [ ( "Attributes::attnf"
+              , "MessageName[Attributes, \"attnf\"]"
+              , "Attributes::attnf: Global`HoldAll is not a known attribute."
+              )
+            ]
+          )
+        , ( "Attributes assignment rejects list targets"
+          , "ClearAll[f]; Attributes[{f}] = HoldAll; Attributes[f]"
+          , "List[]"
+          , [ ( "Attributes::sym"
+              , "MessageName[Attributes, \"sym\"]"
+              , "Attributes::sym: Argument {f} is expected to be a symbol."
+              )
+            ]
+          )
+        , ( "protected system own-value assignment is inert"
+          , "Plus = 5"
+          , "Set[Plus, 5]"
+          , [ ( "Set::wrsym"
+              , "MessageName[Set, \"wrsym\"]"
+              , "Set::wrsym: Symbol Plus is Protected."
+              )
+            ]
+          )
+        , ( "Global hook names do not receive System mutation exemptions"
+          , "ClearAll[Global`$Pre]; Global`$Pre = 1; Protect[Global`$Pre]; Global`$Pre = 2; Clear[Global`$Pre]; {Global`$Pre, OwnValues[Global`$Pre], Attributes[Global`$Pre]}"
+          , "List[1, List[RuleDelayed[HoldPattern[$Pre], 1]], List[Protected]]"
+          , [ ( "Set::wrsym"
+              , "MessageName[Set, \"wrsym\"]"
+              , "Set::wrsym: Symbol $Pre is Protected."
+              )
+            , ( "Clear::wrsym"
+              , "MessageName[Clear, \"wrsym\"]"
+              , "Clear::wrsym: Symbol $Pre is Protected."
+              )
+            ]
+          )
+        , ( "Clear emits target diagnostics in mutation order"
+          , "ClearAll[x]; x = 1; Protect[x]; Clear[x, 1]"
+          , "Null"
+          , [ ( "Clear::wrsym"
+              , "MessageName[Clear, \"wrsym\"]"
+              , "Clear::wrsym: Symbol x is Protected."
+              )
+            , ( "Clear::ssym"
+              , "MessageName[Clear, \"ssym\"]"
+              , "Clear::ssym: 1 is not a symbol or a valid string pattern."
+              )
+            ]
+          )
+        , ( "locked attributes reject mutation"
+          , "ClearAll[f]; SetAttributes[f, Locked]; SetAttributes[f, HoldAll]; Attributes[f]"
+          , "List[Locked]"
+          , [ ( "Attributes::locked"
+              , "MessageName[Attributes, \"locked\"]"
+              , "Attributes::locked: Symbol f is locked."
+              )
+            ]
+          )
+        , ( "Function validates held construction arity"
+          , "Function[]"
+          , "Function[]"
+          , [ ( "Function::error"
+              , "MessageName[Function, \"error\"]"
+              , "Function::error: Function expects one, two, or three arguments."
+              )
+            ]
+          )
+        , ( "qualified System failures use canonical message names"
+          , "System`Function[]"
+          , "System`Function[]"
+          , [ ( "Function::error"
+              , "MessageName[Function, \"error\"]"
+              , "Function::error: Function expects one, two, or three arguments."
+              )
+            ]
+          )
+        , ( "qualified HoldPattern remains a protected assignment owner"
+          , "ClearAll[f]; System`HoldPattern[f[x_]] := x; {f[1], DownValues[f]}"
+          , "List[f[1], List[]]"
+          , [ ( "SetDelayed::wrsym"
+              , "MessageName[SetDelayed, \"wrsym\"]"
+              , "SetDelayed::wrsym: Symbol HoldPattern is Protected."
+              )
+            ]
+          )
+        , ( "OwnValues distinguishes an unknown string name"
+          , "OwnValues[\"missing\"]"
+          , "OwnValues[\"missing\"]"
+          , [ ( "OwnValues::error"
+              , "MessageName[OwnValues, \"error\"]"
+              , "OwnValues::error: OwnValues could not find a symbol named 'missing'."
+              )
+            ]
+          )
+        , ( "missing pure-function slots recover at General"
+          , "(#2 &)[a]"
+          , "Function[Slot[2]][a]"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Slot 2 cannot be filled from 1 argument(s)."
+              )
+            ]
+          )
+        , ( "invalid Function parameters recover at General"
+          , "Function[f[x], x][a]"
+          , "Function[f[x], x][a]"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Unsupported Function parameter specification."
+              )
+            ]
+          )
+        , ( "invalid system setting assignment preserves its default"
+          , "$RecursionLimit = 1; $RecursionLimit"
+          , "1024"
+          , [ ( "$RecursionLimit::limset"
+              , "MessageName[$RecursionLimit, \"limset\"]"
+              , "$RecursionLimit::limset: Cannot set $RecursionLimit to 1."
+              )
+            ]
+          )
+        , ( "special system settings reject ClearAll"
+          , "$RecursionLimit = 200; ClearAll[$RecursionLimit]; $RecursionLimit"
+          , "200"
+          , [ ( "ClearAll::spsym"
+              , "MessageName[ClearAll, \"spsym\"]"
+              , "ClearAll::spsym: Symbol $RecursionLimit is a special system symbol."
+              )
+            ]
+          )
+        , ( "invalid held pattern arity is nonfatal"
           , "MatchQ[1]"
           , "MatchQ[1]"
           , [ ( "MatchQ::error"

@@ -6,6 +6,7 @@
 -- | Immutable metadata for the visible @System`@ symbol catalog.
 module Tungsten.SystemSymbols
   ( SymbolAttribute (..)
+  , symbolAttributeFromName
   , symbolAttributeName
   , normalizeSystemSymbolName
   , systemSymbolAttributes
@@ -15,6 +16,7 @@ module Tungsten.SystemSymbols
   ) where
 
 import Data.Bits (testBit)
+import Data.List (find)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -73,6 +75,11 @@ symbolAttributeName = \case
   SequenceHold -> "SequenceHold"
   Stub -> "Stub"
   Temporary -> "Temporary"
+
+-- | Parse a canonical Wolfram attribute spelling.
+symbolAttributeFromName :: Text -> Maybe SymbolAttribute
+symbolAttributeFromName name =
+  find ((== name) . symbolAttributeName) [minBound .. maxBound]
 
 -- | Normalize either an unqualified name or an explicitly @System`@-qualified
 -- name. Names in @Global`@ or any other context are not System names.

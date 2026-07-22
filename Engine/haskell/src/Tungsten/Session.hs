@@ -7,6 +7,8 @@ module Tungsten.Session
   , DownValue (..)
   , EvaluationMessage (..)
   , EvaluationSession (..)
+  , SymbolState (..)
+  , SymbolValues (..)
   , emptySession
   , evaluateInSession
   ) where
@@ -19,6 +21,15 @@ import qualified Data.Text as T
 import Tungsten.Evaluate
 import Tungsten.Expression
 import Tungsten.PythonSort (pythonStableSortByState)
+import Tungsten.SystemSymbols
+  ( SymbolAttribute (..)
+  , isSystemSymbol
+  , normalizeSystemSymbolName
+  , symbolAttributeFromName
+  , symbolAttributeName
+  , systemSymbolAttributes
+  , systemSymbolNames
+  )
 
 data Definition
   = ImmediateValue !Expr
@@ -39,10 +50,26 @@ data EvaluationMessage = EvaluationMessage
   }
   deriving (Eq, Show)
 
+data SymbolValues = SymbolValues
+  { symbolOwnValue :: !(Maybe Definition)
+  , symbolDownValues :: ![DownValue]
+  , symbolUpValues :: ![DownValue]
+  , symbolSubValues :: ![DownValue]
+  , symbolNValues :: ![DownValue]
+  }
+  deriving (Eq, Show)
+
+data SymbolState = SymbolState
+  { symbolKnown :: !Bool
+  , symbolAttributeOverride :: !(Maybe (Set.Set SymbolAttribute))
+  , symbolValues :: !SymbolValues
+  }
+  deriving (Eq, Show)
+
 data EvaluationSession = EvaluationSession
-  { sessionDefinitions :: Map.Map Text Definition
-  , sessionDownValues :: Map.Map Text [DownValue]
+  { sessionSymbols :: Map.Map Text SymbolState
   , sessionModuleCounter :: !Integer
+  , sessionActiveOwnValues :: !(Set.Set Text)
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
@@ -50,7 +77,22 @@ data EvaluationSession = EvaluationSession
   deriving (Eq, Show)
 
 emptySession :: EvaluationSession
-emptySession = EvaluationSession Map.empty Map.empty 0 [] [] []
+emptySession = EvaluationSession initialSessionSymbols 0 Set.empty [] [] []
+
+initialSessionSymbols :: Map.Map Text SymbolState
+initialSessionSymbols =
+  Map.fromList
+    [ ( name
+      , emptySymbolState
+          { symbolKnown = True
+          , symbolValues =
+              emptySymbolValues
+                { symbolOwnValue = Just (ImmediateValue value)
+                }
+          }
+      )
+    | (name, value) <- specialSessionOwnValueDefaults
+    ]
 
 data Iterator = Iterator !(Maybe Text) ![Expr]
   deriving (Eq, Show)
@@ -65,8 +107,7 @@ data WithBinding = WithBinding !Text !Expr !Bool
   deriving (Eq, Show)
 
 data SymbolValueSnapshot = SymbolValueSnapshot
-  { snapshotOwnValue :: !(Maybe Definition)
-  , snapshotDownValues :: !(Maybe [DownValue])
+  { snapshotValues :: !SymbolValues
   }
   deriving (Eq, Show)
 
@@ -165,23 +206,27 @@ data SessionPatternRule = SessionPatternRule !Expr !Expr
 
 sessionPatternRule :: Expr -> Maybe SessionPatternRule
 sessionPatternRule = \case
-  Call (Symbol "Rule") [patternExpression, template] ->
-    Just (SessionPatternRule patternExpression template)
-  Call (Symbol "RuleDelayed") [patternExpression, template] ->
-    Just (SessionPatternRule patternExpression template)
+  Call (Symbol ruleHead) [patternExpression, template]
+    | isSessionSystemHead "Rule" ruleHead ->
+        Just (SessionPatternRule patternExpression template)
+  Call (Symbol ruleHead) [patternExpression, template]
+    | isSessionSystemHead "RuleDelayed" ruleHead ->
+        Just (SessionPatternRule patternExpression template)
   _ -> Nothing
 
 sessionPatternRuleSet :: Expr -> Maybe [SessionPatternRule]
-sessionPatternRuleSet (Call (Symbol "List") values) =
-  traverse sessionPatternRule values
+sessionPatternRuleSet (Call (Symbol listHead) values)
+  | isSessionSystemHead "List" listHead = traverse sessionPatternRule values
 sessionPatternRuleSet expression = pure <$> sessionPatternRule expression
 
 nestedSessionPatternRuleSets :: Expr -> Maybe [Expr]
-nestedSessionPatternRuleSets (Call (Symbol "List") values@(_ : _))
-  | all isRuleList values = Just values
+nestedSessionPatternRuleSets (Call (Symbol listHead) values@(_ : _))
+  | isSessionSystemHead "List" listHead
+  , all isRuleList values = Just values
  where
-  isRuleList expression@(Call (Symbol "List") _) =
-    maybe False (const True) (sessionPatternRuleSet expression)
+  isRuleList expression@(Call (Symbol nestedListHead) _)
+    | isSessionSystemHead "List" nestedListHead =
+        maybe False (const True) (sessionPatternRuleSet expression)
   isRuleList _ = False
 nestedSessionPatternRuleSets _ = Nothing
 
@@ -191,18 +236,21 @@ prepareSessionPatternRules
   -> Expr
   -> SessionResult Expr
 prepareSessionPatternRules depth session = \case
-  Call (Symbol "List") rules -> do
-    (prepared, updated) <- prepareRules session rules
-    Right (Call (Symbol "List") prepared, updated)
-  Call (Symbol "Rule") [patternExpression, template] -> do
-    (preparedTemplate, updated) <-
-      evaluateRuleTemplate depth session patternExpression template
-    Right
-      ( Call (Symbol "Rule") [patternExpression, preparedTemplate]
-      , updated
-      )
-  delayedRule@(Call (Symbol "RuleDelayed") [_, _]) ->
-    Right (delayedRule, session)
+  Call listHead@(Symbol listName) rules
+    | isSessionSystemHead "List" listName -> do
+        (prepared, updated) <- prepareRules session rules
+        Right (Call listHead prepared, updated)
+  Call ruleHead@(Symbol ruleName) [patternExpression, template]
+    | isSessionSystemHead "Rule" ruleName -> do
+        (preparedTemplate, updated) <-
+          evaluateRuleTemplate depth session patternExpression template
+        Right
+          ( Call ruleHead [patternExpression, preparedTemplate]
+          , updated
+          )
+  delayedRule@(Call (Symbol ruleName) [_, _])
+    | isSessionSystemHead "RuleDelayed" ruleName ->
+        Right (delayedRule, session)
   expression -> Right (expression, session)
  where
   prepareRules current [] = Right ([], current)
@@ -246,16 +294,36 @@ data IterationFailure
 
 evaluateInSession :: EvaluationSession -> Expr -> Either EvaluationError (Expr, EvaluationSession)
 evaluateInSession session expression =
-  finalizeSessionResult
-    ( evaluateSessionAt
-        0
-        session
-          { sessionGeneratedMessages = []
-          , sessionVisibleMessages = []
-          , sessionPrints = []
-          }
-        expression
-    )
+  let registeredSession = registerExpressionSymbols expression session
+   in finalizeSessionResult
+        ( evaluateSessionAt
+            0
+            registeredSession
+              { sessionGeneratedMessages = []
+              , sessionVisibleMessages = []
+              , sessionPrints = []
+              }
+            expression
+        )
+
+registerExpressionSymbols :: Expr -> EvaluationSession -> EvaluationSession
+registerExpressionSymbols expression session = case expression of
+  Symbol name -> registerSymbol name session
+  Call expressionHead values ->
+    foldl
+      (flip registerExpressionSymbols)
+      (registerExpressionSymbols expressionHead session)
+      values
+  Complex realPart imaginaryPart ->
+    registerExpressionSymbols
+      imaginaryPart
+      (registerExpressionSymbols realPart session)
+  SparseArray _ entries fill ->
+    foldl
+      (\current (SparseEntry _ value) -> registerExpressionSymbols value current)
+      (registerExpressionSymbols fill session)
+      entries
+  _ -> session
 
 finalizeSessionResult
   :: SessionResult Expr
@@ -297,7 +365,7 @@ evaluateSessionAt
   -> Expr
   -> SessionResult Expr
 evaluateSessionAt depth session expression
-  | depth > 1024 =
+  | exceedsSessionRecursionLimit depth session =
       sessionFailure session "the session evaluation recursion limit was exceeded"
   | otherwise =
       recoverEvaluationFailure
@@ -310,29 +378,141 @@ evaluateSessionAtRaw
   -> Expr
   -> SessionResult Expr
 evaluateSessionAtRaw depth session expression = case expression of
-      Symbol name -> case Map.lookup name (sessionDefinitions session) of
-        Nothing -> Right (expression, session)
-        Just (ImmediateValue value)
-          | value == expression -> Right (expression, session)
-        Just (ImmediateValue value) -> evaluateSessionAt (depth + 1) session value
-        Just (DelayedValue value) -> evaluateSessionAt (depth + 1) session value
+      Symbol name
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "I" ->
+            Right (Complex (Integer 0) (Integer 1), session)
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "$MachinePrecision" ->
+            Right (Real "15.954589770191003", session)
+        | otherwise -> case symbolOwnValueFor name session of
+            Nothing ->
+              Right
+                ( expression
+                , registerSymbol name session
+                )
+            Just (ImmediateValue value)
+              | value == expression -> Right (expression, session)
+            Just (ImmediateValue value) ->
+              evaluateSessionOwnValue depth session name expression value
+            Just (DelayedValue value) ->
+              evaluateSessionOwnValue depth session name expression value
+      Call (Symbol qualifiedName) arguments'
+        | Just shortName <- T.stripPrefix "System`" qualifiedName
+        , isSystemSymbol qualifiedName -> do
+            case shortName of
+              "And" ->
+                evaluateSessionLogical
+                  qualifiedName
+                  (Symbol "True")
+                  (Symbol "False")
+                  depth
+                  session
+                  arguments'
+              "Or" ->
+                evaluateSessionLogical
+                  qualifiedName
+                  (Symbol "False")
+                  (Symbol "True")
+                  depth
+                  session
+                  arguments'
+              _ | directSessionDispatchHead shortName -> do
+                (result, updated) <- evaluateSessionAtRaw
+                  depth
+                  session
+                  (Call (Symbol shortName) arguments')
+                Right
+                  ( if shortName `elem` staticHeldHeadNames
+                      then restoreQualifiedSystemHead qualifiedName shortName result
+                      else result
+                  , updated
+                  )
+              _ ->
+                evaluateSessionGenericCall
+                  depth
+                  session
+                  (Symbol qualifiedName)
+                  arguments'
+      Call (Symbol "Set") [Call (Symbol attributesHead) targets, rhs]
+        | isSessionSystemHead "Attributes" attributesHead ->
+            evaluateSessionAttributesAssignment depth session targets rhs
       Call (Symbol "Set") [Symbol name, rhs] -> do
         (value, updated) <- evaluateSessionAt (depth + 1) session rhs
-        pure (value, define name (ImmediateValue value) updated)
+        case specialSessionSettingName name of
+          Just settingName
+            | not (validSpecialSessionSetting settingName value) ->
+                Right
+                  ( currentSpecialSessionSettingValue settingName updated
+                  , appendSpecialSettingLimitMessage settingName value updated
+                  )
+          Just _ -> pure (value, define name (ImmediateValue value) updated)
+          Nothing
+            | not (symbolAllowsValueMutation name updated) ->
+                Right
+                  ( Call (Symbol "Set") [Symbol name, value]
+                  , appendSymbolMessage "Set" "wrsym" name "is Protected." updated
+                  )
+            | otherwise -> pure (value, define name (ImmediateValue value) updated)
       Call (Symbol "Set") [lhs@Call {}, rhs] ->
         evaluateDownValueAssignment False depth session lhs rhs
-      Call (Symbol "SetDelayed") [Symbol name, rhs] ->
-        Right (Symbol "Null", define name (DelayedValue rhs) session)
+      Call (Symbol "SetDelayed") [Symbol name, rhs]
+        | Just settingName <- specialSessionSettingName name
+        , not (validSpecialSessionSetting settingName rhs) ->
+            Right
+              ( Symbol "Null"
+              , appendSpecialSettingLimitMessage settingName rhs session
+              )
+        | Just _ <- specialSessionSettingName name ->
+            Right (Symbol "Null", define name (DelayedValue rhs) session)
+        | not (symbolAllowsValueMutation name session) ->
+            Right
+              ( Symbol "Null"
+              , appendSymbolMessage
+                  "SetDelayed"
+                  "wrsym"
+                  name
+                  "is Protected."
+                  session
+              )
+        | otherwise ->
+            Right (Symbol "Null", define name (DelayedValue rhs) session)
       Call (Symbol "SetDelayed") [lhs@Call {}, rhs] ->
         evaluateDownValueAssignment True depth session lhs rhs
-      Call (Symbol "Unset") [Symbol name] ->
-        Right (Symbol "Null", removeOwnValues [name] session)
+      Call (Symbol "Unset") [Symbol name]
+        | Just _ <- specialSessionSettingName name ->
+            Right
+              ( Symbol "$Failed"
+              , appendSymbolMessage
+                  "Unset"
+                  "spsym"
+                  name
+                  "is a special system symbol."
+                  session
+              )
+        | not (symbolAllowsValueMutation name session) ->
+            Right
+              ( Symbol "$Failed"
+              , appendSymbolMessage "Unset" "wrsym" name "is Protected." session
+              )
+        | otherwise ->
+            Right (Symbol "Null", removeOwnValues [name] session)
       Call (Symbol "Unset") [lhs@Call {}] ->
         evaluateDownValueUnset depth session lhs
-      Call (Symbol headName) symbols
-        | headName `elem` ["Clear", "ClearAll"]
-        , Just names <- traverse symbolName symbols ->
-            Right (Symbol "Null", clearDefinitions names session)
+      Call (Symbol "Clear") targets ->
+        evaluateSessionClear False session targets
+      Call (Symbol "ClearAll") targets ->
+        evaluateSessionClear True session targets
+      Call (Symbol "Attributes") arguments' ->
+        evaluateSessionAttributes depth session arguments'
+      Call (Symbol "SetAttributes") arguments' ->
+        evaluateSessionSetAttributes True depth session arguments'
+      Call (Symbol "ClearAttributes") arguments' ->
+        evaluateSessionSetAttributes False depth session arguments'
+      Call (Symbol "Protect") targets ->
+        evaluateSessionProtect True session targets
+      Call (Symbol "Unprotect") targets ->
+        evaluateSessionProtect False session targets
       Call (Symbol "CompoundExpression") expressions ->
         evaluateSequence depth session expressions
       Call (Symbol "If") arguments' -> evaluateSessionIf depth session arguments'
@@ -356,12 +536,32 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionSelectionOperator "Discard" depth session criterion
       Call (Symbol "SelectFirst") [criterion] ->
         evaluateSessionSelectionOperator "SelectFirst" depth session criterion
-      Call (Symbol "Level") arguments' ->
-        evaluateSessionLevel depth session arguments'
       Call (Symbol "OwnValues") arguments' ->
         evaluateSessionOwnValues session arguments'
       Call (Symbol "DownValues") arguments' ->
-        evaluateSessionDownValues session arguments'
+        evaluateSessionDefinitionValues
+          "DownValues"
+          symbolDownValues
+          session
+          arguments'
+      Call (Symbol "UpValues") arguments' ->
+        evaluateSessionDefinitionValues
+          "UpValues"
+          symbolUpValues
+          session
+          arguments'
+      Call (Symbol "SubValues") arguments' ->
+        evaluateSessionDefinitionValues
+          "SubValues"
+          symbolSubValues
+          session
+          arguments'
+      Call (Symbol "NValues") arguments' ->
+        evaluateSessionDefinitionValues
+          "NValues"
+          symbolNValues
+          session
+          arguments'
       Call (Symbol "Module") arguments' ->
         evaluateSessionModule depth session arguments'
       Call (Symbol "With") arguments' ->
@@ -388,58 +588,246 @@ evaluateSessionAtRaw depth session expression = case expression of
       Call (Symbol headName) [Symbol name, rhs]
         | Just constructor <- Map.lookup headName updateConstructors ->
             evaluateUpdate headName depth session name constructor rhs
-      Call expressionHead@(Symbol headName) arguments'
-        | headName `elem` ["Hold", "HoldComplete", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed", "Condition"] ->
-            Right
-              ( if headName == "Function"
-                  then normalizeEvaluatedCall expressionHead arguments'
-                  else expression
-              , session
-              )
-      Call expressionHead arguments' -> do
-        (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
-        if evaluatedHead == Symbol "Association"
-          then do
-            reduced <-
-              liftPureEvaluation
-                headSession
-                (reduceEvaluatedCall (Call evaluatedHead arguments'))
-            Right (reduced, headSession)
-          else if isHeldSessionHead evaluatedHead
-            then Right (Call evaluatedHead arguments', headSession)
-          else if evaluatedHead == Symbol "SelectFirst"
-            then evaluateHeldSessionSelectFirst depth headSession arguments'
-          else do
-            (evaluatedArguments, argumentsSession) <- evaluateArguments depth headSession arguments'
-            let normalizedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
-                normalizedArguments = case normalizedCall of
-                  Call _ values -> values
-                  _ -> evaluatedArguments
-            case evaluatedHead of
-              Call (Symbol "Function") functionArguments -> do
-                instantiated <-
-                  liftPureEvaluation
-                    argumentsSession
-                    (instantiateFunctionCall functionArguments normalizedArguments)
-                if instantiated == normalizedCall
-                  then Right (instantiated, argumentsSession)
-                  else evaluateSessionAt (depth + 1) argumentsSession instantiated
-              _ -> do
-                (downValueReplacement, definitionSession) <-
-                  applySessionDownValue depth argumentsSession normalizedCall
-                case downValueReplacement of
-                  Just replacement ->
-                    Right (replacement, definitionSession)
-                  Nothing ->
-                    case reduceSessionEvaluatedCall depth definitionSession normalizedCall of
-                      Just sessionReduction -> sessionReduction
-                      Nothing -> do
-                        reduced <-
-                          liftPureEvaluation
-                            definitionSession
-                            (reduceEvaluatedCall normalizedCall)
-                        Right (reduced, definitionSession)
+      Call (Symbol "Function") arguments'
+        | length arguments' `notElem` [1, 2, 3] ->
+            sessionFailure
+              session
+              "Function expects one, two, or three arguments."
+      Call (Symbol "SetDelayed") _ ->
+        sessionFailure session "SetDelayed expects exactly two arguments."
+      Call (Symbol headName) arguments'
+        | headName `elem` staticHeldHeadNames ->
+            evaluateStaticHeldCall depth session headName arguments'
+      Call expressionHead arguments' ->
+        evaluateSessionGenericCall depth session expressionHead arguments'
       _ -> Right (expression, session)
+
+evaluateSessionOwnValue
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionOwnValue depth session name expression value =
+  let storageName = resolvedSymbolStorageName name session
+      active = sessionActiveOwnValues session
+   in if Set.member storageName active
+        then Right (expression, session)
+        else
+          restoreActiveOwnValues
+            active
+            ( evaluateSessionAt
+                (depth + 1)
+                session
+                  { sessionActiveOwnValues = Set.insert storageName active
+                  }
+                value
+            )
+
+restoreActiveOwnValues
+  :: Set.Set Text
+  -> SessionResult value
+  -> SessionResult value
+restoreActiveOwnValues active = \case
+  Right (value, session) ->
+    Right (value, session {sessionActiveOwnValues = active})
+  Left evaluationExit ->
+    Left
+      ( mapEvaluationExitSession
+          (\session -> session {sessionActiveOwnValues = active})
+          evaluationExit
+      )
+
+evaluateSessionGenericCall
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionGenericCall depth session expressionHead arguments' = do
+  (evaluatedHead, headSession) <-
+    evaluateSessionAt (depth + 1) session expressionHead
+  (preparedArguments, argumentsSession) <-
+    evaluateCallArgumentsWithAttributes
+      depth
+      headSession
+      evaluatedHead
+      arguments'
+  let normalizedCall =
+        normalizeSessionAttributeCall
+          argumentsSession
+          evaluatedHead
+          preparedArguments
+      normalizedArguments = case normalizedCall of
+        Call _ values -> values
+        _ -> preparedArguments
+      allowSystemDispatch =
+        evaluatedHeadAllowsDispatch expressionHead evaluatedHead
+  case threadSessionListableCall depth argumentsSession normalizedCall of
+    Just sessionResult -> sessionResult
+    Nothing -> case evaluatedHead of
+      Symbol logicalHead
+        | allowSystemDispatch
+        , isSessionSystemHead "And" logicalHead ->
+            Right
+              ( reduceHeldLogicalAlias
+                  logicalHead
+                  (Symbol "True")
+                  (Symbol "False")
+                  normalizedArguments
+              , argumentsSession
+              )
+      Symbol logicalHead
+        | allowSystemDispatch
+        , isSessionSystemHead "Or" logicalHead ->
+            Right
+              ( reduceHeldLogicalAlias
+                  logicalHead
+                  (Symbol "False")
+                  (Symbol "True")
+                  normalizedArguments
+              , argumentsSession
+              )
+      association@(Call (Symbol associationHead) _)
+        | allowSystemDispatch
+        , isSessionSystemHead "Association" associationHead ->
+            evaluateSessionCallable
+              depth
+              argumentsSession
+              association
+              normalizedArguments
+      Call (Symbol functionHead) functionArguments
+        | isSessionSystemHead "Function" functionHead -> do
+            instantiated <-
+              liftPureEvaluation
+                argumentsSession
+                ( instantiateFunctionCallWithHead
+                    (Symbol functionHead)
+                    functionArguments
+                    normalizedArguments
+                )
+            if instantiated == normalizedCall
+              then Right (instantiated, argumentsSession)
+              else evaluateSessionAt (depth + 1) argumentsSession instantiated
+      _ -> do
+        (downValueReplacement, definitionSession) <-
+          applySessionDownValue depth argumentsSession normalizedCall
+        case downValueReplacement of
+          Just replacement -> Right (replacement, definitionSession)
+          Nothing ->
+            if expressionHead /= evaluatedHead
+                && evaluatedHead == Symbol "CompoundExpression"
+              then Right (normalizedCall, definitionSession)
+              else
+                case reduceSessionEvaluatedCallForDispatch
+                  allowSystemDispatch
+                  depth
+                  definitionSession
+                  normalizedCall of
+                  Just sessionReduction -> sessionReduction
+                  Nothing -> do
+                    reduced <-
+                      liftPureEvaluation
+                        definitionSession
+                        ( reduceEvaluatedCallForDispatch
+                            allowSystemDispatch
+                            definitionSession
+                            normalizedCall
+                        )
+                    Right (reduced, definitionSession)
+
+reduceHeldLogicalAlias :: Text -> Expr -> Expr -> [Expr] -> Expr
+reduceHeldLogicalAlias headName identity decisive values
+  | all isBoolean values =
+      if decisive `elem` values then decisive else identity
+  | otherwise = Call (Symbol headName) values
+ where
+  isBoolean value = value `elem` [Symbol "False", Symbol "True"]
+
+evaluatedHeadAllowsDispatch :: Expr -> Expr -> Bool
+evaluatedHeadAllowsDispatch _ evaluatedHead = case evaluatedHead of
+  Symbol evaluatedName
+    | Just shortName <- T.stripPrefix "System`" evaluatedName ->
+        shortName `elem` qualifiedAliasDispatchHeads
+  _ -> True
+
+qualifiedAliasDispatchHeads :: [Text]
+qualifiedAliasDispatchHeads =
+  [ "Abs"
+  , "And"
+  , "AtomQ"
+  , "ByteArrayQ"
+  , "Equal"
+  , "EvenQ"
+  , "Greater"
+  , "GreaterEqual"
+  , "IntegerQ"
+  , "Inequality"
+  , "Less"
+  , "LessEqual"
+  , "Max"
+  , "Min"
+  , "N"
+  , "Not"
+  , "NumberQ"
+  , "OddQ"
+  , "Or"
+  , "Plus"
+  , "Power"
+  , "Sign"
+  , "Sqrt"
+  , "StringQ"
+  , "Times"
+  , "Unequal"
+  ]
+
+directSessionDispatchHead :: Text -> Bool
+directSessionDispatchHead name =
+  name
+    `elem` ( [ "Set"
+             , "SetDelayed"
+             , "Unset"
+             , "Clear"
+             , "ClearAll"
+             , "Attributes"
+             , "SetAttributes"
+             , "ClearAttributes"
+             , "Protect"
+             , "Unprotect"
+             , "CompoundExpression"
+             , "If"
+             , "And"
+             , "Or"
+             , "Catch"
+             , "Throw"
+             , "Break"
+             , "Continue"
+             , "Return"
+             , "Print"
+             , "Select"
+             , "Discard"
+             , "SelectFirst"
+             , "OwnValues"
+             , "DownValues"
+             , "UpValues"
+             , "SubValues"
+             , "NValues"
+             , "Module"
+             , "With"
+             , "Block"
+             , "InheritedBlock"
+             , "Table"
+             , "Do"
+             , "For"
+             , "While"
+             , "Sum"
+             , "Product"
+             ]
+               <> heldPatternBuiltinHeads
+               <> Map.keys updateConstructors
+               <> staticHeldHeadNames
+           )
 
 evaluateHeldSessionPatternBuiltin
   :: Text
@@ -841,7 +1229,8 @@ subtractSessionLimit Nothing = Nothing
 subtractSessionLimit (Just value) = Just (value - 1)
 
 spliceSessionCaseResult :: Expr -> [Expr]
-spliceSessionCaseResult (Call (Symbol "Sequence") values) = values
+spliceSessionCaseResult (Call (Symbol sequenceHead) values)
+  | isSessionSystemHead "Sequence" sequenceHead = values
 spliceSessionCaseResult (Symbol "Nothing") = []
 spliceSessionCaseResult value = [value]
 
@@ -913,31 +1302,32 @@ applySessionPatternRule
   -> SessionResult (Maybe Expr)
 applySessionPatternRule depth session expression (SessionPatternRule patternExpression template) =
   case template of
-    Call (Symbol "Condition") [body, condition] -> do
-      (instantiated, matchedSession) <-
-        instantiateSessionPattern
-          depth
-          session
-          expression
-          patternExpression
-          [body, condition]
-      case instantiated of
-        Just [instantiatedBody, instantiatedCondition] -> do
-          (conditionResult, conditionSession) <-
-            evaluateSessionAt
-              (depth + 1)
-              matchedSession
-              instantiatedCondition
-          if conditionResult == Symbol "True"
-            then do
-              (result, updated) <-
+    Call (Symbol conditionHead) [body, condition]
+      | isSessionSystemHead "Condition" conditionHead -> do
+          (instantiated, matchedSession) <-
+            instantiateSessionPattern
+              depth
+              session
+              expression
+              patternExpression
+              [body, condition]
+          case instantiated of
+            Just [instantiatedBody, instantiatedCondition] -> do
+              (conditionResult, conditionSession) <-
                 evaluateSessionAt
                   (depth + 1)
-                  conditionSession
-                  instantiatedBody
-              Right (Just result, updated)
-            else Right (Nothing, conditionSession)
-        _ -> Right (Nothing, matchedSession)
+                  matchedSession
+                  instantiatedCondition
+              if conditionResult == Symbol "True"
+                then do
+                  (result, updated) <-
+                    evaluateSessionAt
+                      (depth + 1)
+                      conditionSession
+                      instantiatedBody
+                  Right (Just result, updated)
+                else Right (Nothing, conditionSession)
+            _ -> Right (Nothing, matchedSession)
     _ -> do
       (instantiated, matchedSession) <-
         instantiateSessionPattern
@@ -1153,13 +1543,73 @@ applySessionPatternRules
   -> Expr
   -> [SessionPatternRule]
   -> SessionResult (Maybe Expr)
-applySessionPatternRules _ session _ [] = Right (Nothing, session)
-applySessionPatternRules depth session expression (rule : rest) = do
+applySessionPatternRules = applySessionPatternRulesInContext False
+
+applySessionPatternRulesInContext
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> [SessionPatternRule]
+  -> SessionResult (Maybe Expr)
+applySessionPatternRulesInContext _ _ session _ [] = Right (Nothing, session)
+applySessionPatternRulesInContext heldContext depth session expression (rule : rest) = do
   (replacement, updated) <-
-    applySessionPatternRule depth session expression rule
+    if heldContext
+      then applyHeldSessionPatternRule depth session expression rule
+      else applySessionPatternRule depth session expression rule
   case replacement of
     Just _ -> Right (replacement, updated)
-    Nothing -> applySessionPatternRules depth updated expression rest
+    Nothing ->
+      applySessionPatternRulesInContext
+        heldContext
+        depth
+        updated
+        expression
+        rest
+
+applyHeldSessionPatternRule
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionPatternRule
+  -> SessionResult (Maybe Expr)
+applyHeldSessionPatternRule depth session expression (SessionPatternRule patternExpression template) =
+  case template of
+    Call (Symbol conditionHead) [body, condition]
+      | isSessionSystemHead "Condition" conditionHead -> do
+          (instantiated, matchedSession) <-
+            instantiateSessionPattern
+              depth
+              session
+              expression
+              patternExpression
+              [body, condition]
+          case instantiated of
+            Just [instantiatedBody, instantiatedCondition] -> do
+              (conditionResult, updated) <-
+                evaluateSessionAt
+                  (depth + 1)
+                  matchedSession
+                  instantiatedCondition
+              Right
+                ( if conditionResult == Symbol "True"
+                    then Just instantiatedBody
+                    else Nothing
+                , updated
+                )
+            _ -> Right (Nothing, matchedSession)
+    _ -> do
+      (instantiated, updated) <-
+        instantiateSessionPattern
+          depth
+          session
+          expression
+          patternExpression
+          [template]
+      case instantiated of
+        Just [result] -> Right (Just result, updated)
+        _ -> Right (Nothing, updated)
 
 evaluateSessionReplace
   :: Int
@@ -1282,8 +1732,7 @@ evaluateSessionReplaceAll depth session subject rulesExpression =
     Nothing -> do
       rules <-
         requireSessionPatternRules "ReplaceAll" session rulesExpression
-      (result, updated) <- replaceAllSessionTree depth session rules subject
-      finishSessionRewrite depth updated subject result
+      replaceAllSessionTree depth session rules subject
 
 evaluateNestedSessionReplacements
   :: (EvaluationSession -> Expr -> SessionResult Expr)
@@ -1304,54 +1753,105 @@ replaceAllSessionTree
   -> [SessionPatternRule]
   -> Expr
   -> SessionResult Expr
-replaceAllSessionTree depth session rules expression = do
+replaceAllSessionTree = replaceAllSessionTreeInContext False
+
+replaceAllSessionTreeInContext
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [SessionPatternRule]
+  -> Expr
+  -> SessionResult Expr
+replaceAllSessionTreeInContext heldContext depth session rules expression = do
   (rootReplacement, matchedSession) <-
-    applySessionPatternRules depth session expression rules
+    applySessionPatternRulesInContext
+      heldContext
+      depth
+      session
+      expression
+      rules
   case rootReplacement of
     Just replacement -> Right (replacement, matchedSession)
     Nothing -> descend matchedSession expression
  where
-  descend current association
+  descend current association@(Call associationHead@(Symbol _) _)
     | Just entries <- sessionAssociationEntries association = do
-        (headReplacement, headSession) <-
-          applySessionPatternRules
+        (updatedHead, headSession) <-
+          replaceAllSessionTreeInContext
+            heldContext
             depth
             current
-            (Symbol "Association")
             rules
-        case headReplacement of
-          Just replacementHead ->
-            Right
-              ( Call replacementHead (map sessionAssociationEntryExpr entries)
-              , headSession
-              )
-          Nothing -> do
-            (updatedEntries, completed) <-
-              replaceSessionAssociationEntries depth headSession rules entries
-            Right
-              ( Call
-                  (Symbol "Association")
+            associationHead
+        (updatedEntries, completed) <-
+          replaceSessionAssociationEntries
+            heldContext
+            depth
+            headSession
+            rules
+            entries
+        Right
+          ( if updatedHead == associationHead && updatedEntries == entries
+              then association
+              else if updatedHead == Symbol "Association"
+              then
+                normalizedSessionAssociation
                   (map sessionAssociationEntryExpr updatedEntries)
-              , completed
-              )
+              else
+                Call updatedHead (map sessionAssociationEntryExpr updatedEntries)
+          , completed
+          )
   descend current (Call expressionHead values) = do
     (updatedHead, headSession) <-
-      replaceAllSessionTree depth current rules expressionHead
+      replaceAllSessionTreeInContext
+        heldContext
+        depth
+        current
+        rules
+        expressionHead
+    let childHeldContext =
+          heldContext || sessionReplacementHeldArgumentHead expressionHead
     (updatedValues, completed) <-
-      replaceAllSessionValues depth headSession rules values
-    Right (rebuildWithSplicing updatedHead updatedValues, completed)
+      replaceAllSessionValues
+        childHeldContext
+        depth
+        headSession
+        rules
+        values
+    Right
+      ( if updatedHead == expressionHead && updatedValues == values
+          then Call expressionHead values
+          else if heldContext
+          then Call updatedHead updatedValues
+          else rebuildWithSplicing updatedHead updatedValues
+      , completed
+      )
   descend current value = Right (value, current)
+
+sessionReplacementHeldArgumentHead :: Expr -> Bool
+sessionReplacementHeldArgumentHead (Symbol name) =
+  name
+    `elem` [ "Function"
+           , "Hold"
+           , "HoldComplete"
+           , "HoldForm"
+           , "HoldPattern"
+           , "Unevaluated"
+           ]
+sessionReplacementHeldArgumentHead _ = False
 
 data SessionAssociationEntry =
   SessionAssociationEntry !Text !Expr !Expr
   deriving (Eq, Show)
 
 sessionAssociationEntries :: Expr -> Maybe [SessionAssociationEntry]
-sessionAssociationEntries (Call (Symbol "Association") values) =
-  traverse entry values
+sessionAssociationEntries (Call (Symbol associationHead) values)
+  | isSessionSystemHead "Association" associationHead =
+      traverse entry values
  where
   entry (Call (Symbol ruleHead) [key, value])
-    | ruleHead `elem` ["Rule", "RuleDelayed"] =
+    | isSessionSystemHead "Rule" ruleHead
+        || isSessionSystemHead "RuleDelayed" ruleHead =
         Just (SessionAssociationEntry ruleHead key value)
   entry _ = Nothing
 sessionAssociationEntries _ = Nothing
@@ -1361,35 +1861,47 @@ sessionAssociationEntryExpr (SessionAssociationEntry ruleHead key value) =
   Call (Symbol ruleHead) [key, value]
 
 replaceSessionAssociationEntries
-  :: Int
+  :: Bool
+  -> Int
   -> EvaluationSession
   -> [SessionPatternRule]
   -> [SessionAssociationEntry]
   -> SessionResult [SessionAssociationEntry]
-replaceSessionAssociationEntries depth = go []
+replaceSessionAssociationEntries heldContext depth = go []
  where
   go retained session _ [] = Right (reverse retained, session)
   go retained session rules (SessionAssociationEntry ruleHead key value : rest) = do
     (updatedValue, updated) <-
-      replaceAllSessionTree depth session rules value
-    let nextRetained =
-          if updatedValue == Symbol "Nothing"
-            then retained
-            else SessionAssociationEntry ruleHead key updatedValue : retained
-    go nextRetained updated rules rest
+      replaceAllSessionTreeInContext
+        heldContext
+        depth
+        session
+        rules
+        value
+    go
+      (SessionAssociationEntry ruleHead key updatedValue : retained)
+      updated
+      rules
+      rest
 
 replaceAllSessionValues
-  :: Int
+  :: Bool
+  -> Int
   -> EvaluationSession
   -> [SessionPatternRule]
   -> [Expr]
   -> SessionResult [Expr]
-replaceAllSessionValues depth = go []
+replaceAllSessionValues heldContext depth = go []
  where
   go retained session _ [] = Right (reverse retained, session)
   go retained session rules (value : rest) = do
     (updatedValue, updated) <-
-      replaceAllSessionTree depth session rules value
+      replaceAllSessionTreeInContext
+        heldContext
+        depth
+        session
+        rules
+        value
     go (updatedValue : retained) updated rules rest
 
 finishSessionRewrite
@@ -1432,16 +1944,14 @@ evaluateSessionReplaceRepeated depth session subject rulesExpression =
     | otherwise = do
         (rewritten, rewrittenSession) <-
           replaceAllSessionTree depth currentSession rules current
-        (updated, evaluatedSession) <-
-          finishSessionRewrite depth rewrittenSession current rewritten
-        if updated == current
-          then Right (current, evaluatedSession)
+        if rewritten == current
+          then Right (current, rewrittenSession)
           else
             iterateReplacement
               (iterations + 1)
-              evaluatedSession
+              rewrittenSession
               rules
-              updated
+              rewritten
 reduceSessionEvaluatedCall
   :: Int
   -> EvaluationSession
@@ -1494,6 +2004,140 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionKeySelect depth session values)
   _ -> Nothing
 
+reduceSessionEvaluatedCallForDispatch
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> Maybe (SessionResult Expr)
+reduceSessionEvaluatedCallForDispatch allowQualified depth session expression =
+  case reducerDispatchView allowQualified session expression of
+    Nothing -> reduceSessionEvaluatedCall depth session expression
+    Just (dispatched, restore) ->
+      fmap (mapSessionResultValue restore)
+        (reduceSessionEvaluatedCall depth session dispatched)
+
+reduceEvaluatedCallForDispatch
+  :: Bool
+  -> EvaluationSession
+  -> Expr
+  -> Either EvaluationError Expr
+reduceEvaluatedCallForDispatch allowQualified session expression =
+  case reducerDispatchView allowQualified session expression of
+    Nothing -> reduceEvaluatedCall expression
+    Just (dispatched, restore) ->
+      restore <$> reduceEvaluatedCall dispatched
+
+reducerDispatchView
+  :: Bool
+  -> EvaluationSession
+  -> Expr
+  -> Maybe (Expr, Expr -> Expr)
+reducerDispatchView allowQualified session expression = case expression of
+  Call (Symbol originalHead) values
+    | isSystemSymbol originalHead
+    , Just shortName <- normalizeSystemSymbolName originalHead ->
+        if originalHead /= shortName && not allowQualified
+          then Nothing
+          else
+            let barrierName = reducerBarrierName shortName session expression
+                protectBareSameHead =
+                  originalHead /= shortName
+                    || not (symbolHasAttribute originalHead Flat session)
+                dispatchedValues =
+                  if protectBareSameHead
+                    then map (shieldReducerArgument shortName barrierName) values
+                    else values
+                restore =
+                  restoreReducerBarrier barrierName shortName
+                    . restoreQualifiedSystemHead originalHead shortName
+             in Just (Call (Symbol shortName) dispatchedValues, restore)
+  Call (Call (Symbol originalHead) operatorArguments) values
+    | isSystemSymbol originalHead
+    , Just shortName <- normalizeSystemSymbolName originalHead ->
+        if originalHead /= shortName && not allowQualified
+          then Nothing
+          else
+            let restore = restoreQualifiedOperatorHead originalHead shortName
+             in Just
+                  ( Call
+                      (Call (Symbol shortName) operatorArguments)
+                      values
+                  , restore
+                  )
+  _ -> Nothing
+
+reducerBarrierName :: Text -> EvaluationSession -> Expr -> Text
+reducerBarrierName shortName session expression = choose 0
+ where
+  baseName = "Tungsten`Private`QualifiedDispatchBarrier$" <> shortName
+  choose suffix =
+    let candidate =
+          if suffix == (0 :: Integer)
+            then baseName
+            else baseName <> "$" <> T.pack (show suffix)
+     in if Map.member candidate (sessionSymbols session)
+            || expressionContainsSymbol candidate expression
+          then choose (suffix + 1)
+          else candidate
+
+expressionContainsSymbol :: Text -> Expr -> Bool
+expressionContainsSymbol target = \case
+  Symbol name -> name == target
+  Call expressionHead values ->
+    expressionContainsSymbol target expressionHead
+      || any (expressionContainsSymbol target) values
+  Complex realPart imaginaryPart ->
+    expressionContainsSymbol target realPart
+      || expressionContainsSymbol target imaginaryPart
+  SparseArray _ entries fill ->
+    any
+      (\(SparseEntry _ value) -> expressionContainsSymbol target value)
+      entries
+      || expressionContainsSymbol target fill
+  _ -> False
+
+shieldReducerArgument :: Text -> Text -> Expr -> Expr
+shieldReducerArgument shortName barrierName = \case
+  Call (Symbol nestedHead) values
+    | nestedHead == shortName -> Call (Symbol barrierName) values
+  value -> value
+
+restoreReducerBarrier :: Text -> Text -> Expr -> Expr
+restoreReducerBarrier barrierName shortName = go
+ where
+  go = \case
+    Call expressionHead values ->
+      let restoredHead = case expressionHead of
+            Symbol name
+              | name == barrierName -> Symbol shortName
+            _ -> go expressionHead
+       in Call restoredHead (map go values)
+    Complex realPart imaginaryPart -> Complex (go realPart) (go imaginaryPart)
+    SparseArray dimensions entries fill ->
+      SparseArray
+        dimensions
+        [ SparseEntry indices (go value)
+        | SparseEntry indices value <- entries
+        ]
+        (go fill)
+    value -> value
+
+restoreQualifiedOperatorHead :: Text -> Text -> Expr -> Expr
+restoreQualifiedOperatorHead qualifiedName shortName = \case
+  Call (Call (Symbol resultHead) operatorArguments) values
+    | resultHead == shortName ->
+        Call (Call (Symbol qualifiedName) operatorArguments) values
+  result -> result
+
+mapSessionResultValue
+  :: (value -> value)
+  -> SessionResult value
+  -> SessionResult value
+mapSessionResultValue update = \case
+  Right (value, session) -> Right (update value, session)
+  Left evaluationExit -> Left evaluationExit
+
 evaluateSessionPrint
   :: Int
   -> EvaluationSession
@@ -1532,32 +2176,6 @@ evaluateSessionSelectionOperator headName depth session criterion = do
     , updated
     )
 
-evaluateHeldSessionSelectFirst
-  :: Int
-  -> EvaluationSession
-  -> [Expr]
-  -> SessionResult Expr
-evaluateHeldSessionSelectFirst depth session values = case values of
-  [subject, criterion] -> prepare subject criterion Nothing
-  [subject, criterion, defaultValue] ->
-    prepare subject criterion (Just defaultValue)
-  _ ->
-    sessionFailure
-      session
-      "SelectFirst expects an expression, a criterion or property specification, and an optional default."
- where
-  prepare subject criterion defaultValue = do
-    (evaluatedSubject, subjectSession) <-
-      evaluateSessionAt (depth + 1) session subject
-    (evaluatedCriterion, criterionSession) <-
-      evaluateSessionAt (depth + 1) subjectSession criterion
-    evaluateSessionSelectFirst
-      depth
-      criterionSession
-      ( [evaluatedSubject, evaluatedCriterion]
-          <> maybe [] pure defaultValue
-      )
-
 evaluateSessionCallable
   :: Int
   -> EvaluationSession
@@ -1566,8 +2184,10 @@ evaluateSessionCallable
   -> SessionResult Expr
 evaluateSessionCallable depth session function arguments' = case function of
   Symbol "Nothing" -> Right (Symbol "Nothing", session)
-  association@(Call (Symbol "Association") _)
-    | [key] <- arguments'
+  Call (Symbol associationHead) associationValues
+    | isSessionSystemHead "Association" associationHead
+    , [key] <- arguments'
+    , let association = Call (Symbol "Association") associationValues
     , Just collection <- sessionOrderedCollection association
     , sessionCollectionAssociation collection ->
         case sessionAssociationItemIndex
@@ -1585,12 +2205,17 @@ evaluateSessionCallable depth session function arguments' = case function of
                 (depth + 1)
                 session
                 (sessionItemValue selected)
-  Call (Symbol "Function") functionArguments -> do
-    instantiated <-
-      liftPureEvaluation
-        session
-        (instantiateFunctionCall functionArguments arguments')
-    evaluateSessionAt (depth + 1) session instantiated
+  Call (Symbol functionHead) functionArguments
+    | isSessionSystemHead "Function" functionHead -> do
+        instantiated <-
+          liftPureEvaluation
+            session
+            ( instantiateFunctionCallWithHead
+                (Symbol functionHead)
+                functionArguments
+                arguments'
+            )
+        evaluateSessionAt (depth + 1) session instantiated
   _ ->
     evaluateSessionAt
       (depth + 1)
@@ -2716,8 +3341,9 @@ data SessionOrderedCollection = SessionOrderedCollection
   deriving (Eq, Show)
 
 sessionOrderedCollection :: Expr -> Maybe SessionOrderedCollection
-sessionOrderedCollection expression@(Call (Symbol "Association") rules)
-  | Just items <- traverse (uncurry associationItem) (zip [1 ..] rules) =
+sessionOrderedCollection expression@(Call (Symbol associationHead) rules)
+  | isSessionSystemHead "Association" associationHead
+  , Just items <- traverse (uncurry associationItem) (zip [1 ..] rules) =
       Just (SessionOrderedCollection expression True items)
 sessionOrderedCollection expression@(Call _ values) =
   Just
@@ -2732,7 +3358,8 @@ sessionOrderedCollection _ = Nothing
 
 associationItem :: Integer -> Expr -> Maybe SessionOrderedItem
 associationItem index rule@(Call (Symbol ruleHead) [key, value])
-  | ruleHead `elem` ["Rule", "RuleDelayed"] =
+  | isSessionSystemHead "Rule" ruleHead
+      || isSessionSystemHead "RuleDelayed" ruleHead =
       Just (SessionOrderedItem index value (Just key) rule)
 associationItem _ _ = Nothing
 
@@ -3068,20 +3695,6 @@ evaluateSessionReturn depth session = \case
       _ -> Right (Call (Symbol "Return") arguments', headSession)
   arguments' -> Right (Call (Symbol "Return") arguments', session)
 
-evaluateSessionLevel
-  :: Int
-  -> EvaluationSession
-  -> [Expr]
-  -> SessionResult Expr
-evaluateSessionLevel depth session arguments' = do
-  (evaluatedArguments, updated) <-
-    evaluateArguments depth session arguments'
-  result <-
-    liftPureEvaluation
-      updated
-      (evaluate (Call (Symbol "Level") evaluatedArguments))
-  Right (result, updated)
-
 evaluateLoopControl
   :: ControlSignal
   -> Text
@@ -3097,39 +3710,448 @@ evaluateSessionOwnValues
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionOwnValues session = \case
-  [symbol@(Symbol name)] ->
-    let rules = case Map.lookup name (sessionDefinitions session) of
-          Nothing -> []
-          Just (ImmediateValue value) -> [ownValueRule symbol value]
-          Just (DelayedValue value) -> [ownValueRule symbol value]
-     in Right (Call (Symbol "List") rules, session)
-  arguments' -> Right (Call (Symbol "OwnValues") arguments', session)
+  [Symbol name] -> ownValuesFor name (registerSymbol name session)
+  [String name]
+    | isKnownSessionSymbol name session -> ownValuesFor name session
+    | otherwise ->
+        sessionFailure
+          session
+          ("OwnValues could not find a symbol named '" <> name <> "'.")
+  [_] ->
+    sessionFailure
+      session
+      "OwnValues expects a symbol or the name of an existing symbol."
+  _ ->
+    sessionFailure
+      session
+      "OwnValues expects exactly one symbol or symbol-name string."
  where
+  ownValuesFor name updated =
+    let displayedSymbol = Symbol (displaySessionSymbolName name)
+        rules = case symbolOwnValueFor name updated of
+          Nothing -> []
+          Just (ImmediateValue value) -> [ownValueRule displayedSymbol value]
+          Just (DelayedValue value) -> [ownValueRule displayedSymbol value]
+     in Right (evaluatedList rules, updated)
+
   ownValueRule symbol value =
     Call
       (Symbol "RuleDelayed")
       [Call (Symbol "HoldPattern") [symbol], value]
 
-evaluateSessionDownValues
-  :: EvaluationSession
+evaluateSessionDefinitionValues
+  :: Text
+  -> (SymbolValues -> [DownValue])
+  -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSessionDownValues session = \case
-  [Symbol name] ->
-    Right
-      ( Call
-          (Symbol "List")
-          (map downValueRule (Map.findWithDefault [] name (sessionDownValues session)))
-      , session
-      )
-  arguments' -> Right (Call (Symbol "DownValues") arguments', session)
+evaluateSessionDefinitionValues headName selectDefinitions session = \case
+  [Symbol name] -> valuesFor name (registerSymbol name session)
+  [String name]
+    | isKnownSessionSymbol name session -> valuesFor name session
+    | otherwise -> Right (evaluatedList [], session)
+  [_] ->
+    sessionFailure
+      session
+      (headName <> " expects a symbol or the name of an existing symbol.")
+  _ ->
+    sessionFailure
+      session
+      (headName <> " expects exactly one symbol.")
  where
-  downValueRule definition =
+  valuesFor name updated =
+    Right
+      ( evaluatedList
+          (map definitionRule (selectDefinitions (symbolValuesFor name updated)))
+      , updated
+      )
+
+  definitionRule definition =
     Call
       (Symbol "RuleDelayed")
       [ Call (Symbol "HoldPattern") [downValuePattern definition]
       , downValueBody definition
       ]
+
+evaluateSessionAttributes
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAttributes depth session = \case
+  [target] -> attributesForTarget session target
+  _ ->
+    sessionFailure
+      session
+      "Attributes expects a symbol, string symbol name, or list of symbols/names."
+ where
+  attributesForTarget current = \case
+    Call (Symbol evaluateHead) [payload]
+      | isSessionSystemHead "Evaluate" evaluateHead -> do
+          (evaluated, updated) <-
+            evaluateSessionAt (depth + 1) current payload
+          attributesForTarget updated evaluated
+    Call (Symbol listHead) values
+      | isSessionSystemHead "List" listHead -> do
+          (results, updated) <- attributesForTargets current values
+          Right (evaluatedList results, updated)
+    Symbol name ->
+      Right
+        ( attributeList (symbolAttributesFor name current)
+        , registerSymbol name current
+        )
+    String name
+      | isKnownSessionSymbol name current ->
+          Right (attributeList (symbolAttributesFor name current), current)
+      | otherwise ->
+          Right
+            ( Call (Symbol "Attributes") [String name]
+            , appendNamedMessage
+                "Attributes"
+                "notfound"
+                ("Symbol " <> name <> " not found.")
+                current
+            )
+    invalid ->
+      sessionFailure
+        current
+        ( "Attributes expects a symbol, string symbol name, or list of symbols/names; got "
+            <> inputForm invalid
+            <> "."
+        )
+
+  attributesForTargets current [] = Right ([], current)
+  attributesForTargets current (target : rest) = do
+    (result, updated) <- attributesForTarget current target
+    (remaining, completed) <- attributesForTargets updated rest
+    Right (result : remaining, completed)
+
+attributeList :: Set.Set SymbolAttribute -> Expr
+attributeList attributes =
+  evaluatedList
+    [ Symbol (symbolAttributeName attribute)
+    | attribute <- Set.toAscList attributes
+    ]
+
+evaluateSessionSetAttributes
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSetAttributes addMode _depth session = \case
+  [targetsExpression, attributesExpression] ->
+    let (targets, targetSession) =
+          attributeTargets operation targetsExpression session
+        (attributes, parsedSession) =
+          parseAttributeSpecification attributesExpression targetSession
+     in case (targets, attributes) of
+      (Just names, Just requested) ->
+        Right
+          ( Symbol "Null"
+          , foldl (updateAttributes requested) parsedSession names
+          )
+      _ -> Right (Symbol "Null", parsedSession)
+  _ ->
+    sessionFailure
+      session
+      ( operation
+          <> " expects a symbol or list of symbols and an attribute specification."
+      )
+ where
+  operation = if addMode then "SetAttributes" else "ClearAttributes"
+  updateAttributes requested current name
+    | symbolHasAttribute name Locked current =
+        appendSymbolMessage "Attributes" "locked" name "is locked." current
+    | otherwise =
+        let existing = symbolAttributesFor name current
+            updated =
+              if addMode
+                then Set.union existing requested
+                else Set.difference existing requested
+         in setSymbolAttributes name updated current
+
+evaluateSessionAttributesAssignment
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionAttributesAssignment depth session targets rhs = do
+  (value, valueSession) <- evaluateSessionAt (depth + 1) session rhs
+  case targets of
+    [target] ->
+      let (names, targetSession) =
+            attributeAssignmentTarget "Attributes" target valueSession
+          (attributes, parsedSession) =
+            parseAttributeSpecification value targetSession
+       in case (names, attributes) of
+            (Just [name], Just requested)
+              | symbolHasAttribute name Locked parsedSession ->
+                  Right
+                    ( value
+                    , appendSymbolMessage
+                        "Attributes"
+                        "locked"
+                        name
+                        "is locked."
+                        parsedSession
+                    )
+              | otherwise ->
+                  Right (value, setSymbolAttributes name requested parsedSession)
+            _ -> Right (value, parsedSession)
+    _ ->
+      sessionFailure
+        valueSession
+        "Attributes assignment expects exactly one target symbol."
+
+attributeAssignmentTarget
+  :: Text
+  -> Expr
+  -> EvaluationSession
+  -> (Maybe [Text], EvaluationSession)
+attributeAssignmentTarget operation expression session = case expression of
+  Symbol name -> (Just [name], registerSymbol name session)
+  String name
+    | isKnownSessionSymbol name session -> (Just [name], session)
+  invalid ->
+    ( Nothing
+    , appendNamedMessage
+        operation
+        "sym"
+        ("Argument " <> inputForm invalid <> " is expected to be a symbol.")
+        session
+    )
+
+attributeTargets
+  :: Text
+  -> Expr
+  -> EvaluationSession
+  -> (Maybe [Text], EvaluationSession)
+attributeTargets operation expression session = case expression of
+  Call (Symbol listHead) values
+    | isSessionSystemHead "List" listHead -> collect session values
+  Symbol name -> (Just [name], registerSymbol name session)
+  String name
+    | isKnownSessionSymbol name session -> (Just [name], session)
+  invalid ->
+    ( Nothing
+    , appendNamedMessage
+        operation
+        "sym"
+        ("Argument " <> inputForm invalid <> " is expected to be a symbol.")
+        session
+    )
+ where
+  collect current [] = (Just [], current)
+  collect current (value : rest) =
+    let (firstNames, firstSession) = attributeTargets operation value current
+     in case firstNames of
+          Nothing -> (Nothing, firstSession)
+          Just first ->
+            let (remainingNames, updated) = collect firstSession rest
+             in case remainingNames of
+                  Just remaining -> (Just (first <> remaining), updated)
+                  Nothing -> (Nothing, updated)
+
+parseAttributeSpecification
+  :: Expr
+  -> EvaluationSession
+  -> (Maybe (Set.Set SymbolAttribute), EvaluationSession)
+parseAttributeSpecification expression session =
+  case rawNames expression of
+    Nothing -> invalid expression session
+    Just names -> parseNames Set.empty session names
+ where
+  rawNames (Symbol name) = Just [name]
+  rawNames (Call (Symbol listHead) values)
+    | isSessionSystemHead "List" listHead = traverse symbolName values
+  rawNames _ = Nothing
+
+  parseNames retained current [] = (Just retained, current)
+  parseNames retained current (name : rest) =
+    case symbolAttributeFromName (systemAttributeSymbolName name) of
+      Just attribute -> parseNames (Set.insert attribute retained) current rest
+      Nothing -> invalid (Symbol name) current
+
+  invalid value current =
+    ( Nothing
+    , appendNamedMessage
+        "Attributes"
+        "attnf"
+        (inputForm value <> " is not a known attribute.")
+        current
+    )
+
+evaluateSessionProtect
+  :: Bool
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionProtect protectMode session targets =
+  let (names, targetSession) =
+        sessionSymbolTargets operation targets session
+      (changed, updated) = foldl update ([], targetSession) names
+   in Right (evaluatedList (map String changed), updated)
+ where
+  operation = if protectMode then "Protect" else "Unprotect"
+  update (changed, current) name
+    | symbolHasAttribute name Locked current =
+        ( changed
+        , appendSymbolMessage "Protect" "locked" name "is locked." current
+        )
+    | otherwise =
+        let attributes = symbolAttributesFor name current
+            wasProtected = Set.member Protected attributes
+            shouldChange = wasProtected /= protectMode
+            updatedAttributes =
+              if protectMode
+                then Set.insert Protected attributes
+                else Set.delete Protected attributes
+            updated =
+              if shouldChange
+                then setSymbolAttributes name updatedAttributes current
+                else current
+         in ( if shouldChange
+                then changed <> [displaySessionSymbolName name]
+                else changed
+            , updated
+            )
+
+evaluateSessionClear
+  :: Bool
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionClear clearAttributesMode session targets =
+  if clearAttributesMode
+    then
+      let (names, targetSession) =
+            sessionSymbolTargets "ClearAll" targets session
+          updated = foldl (clearOne "ClearAll") targetSession names
+       in Right (Symbol "Null", updated)
+    else
+      Right
+        ( Symbol "Null"
+        , foldl clearTarget session targets
+        )
+ where
+  clearTarget current = \case
+    Symbol name -> clearOne "Clear" (registerSymbol name current) name
+    Call (Symbol listHead) values
+      | isSessionSystemHead "List" listHead ->
+          foldl clearTarget current values
+    String patternText ->
+      foldl
+        (clearOne "Clear")
+        current
+        (matchingSessionSymbolNames patternText current)
+    invalid ->
+      appendNamedMessage
+        "Clear"
+        "ssym"
+        ( inputForm invalid
+            <> " is not a symbol or a valid string pattern."
+        )
+        current
+
+  clearOne operation current name
+    | Just _ <- specialSessionSettingName name =
+        appendSymbolMessage
+          operation
+          "spsym"
+          name
+          "is a special system symbol."
+          current
+    | clearAttributesMode
+    , symbolHasAttribute name Locked current =
+        appendSymbolMessage operation "locked" name "is locked." current
+    | symbolHasAttribute name Protected current
+    , clearAttributesMode || not (isProtectedValueHook name current) =
+        appendSymbolMessage operation "wrsym" name "is Protected." current
+    | clearAttributesMode =
+        setSymbolAttributes
+          name
+          Set.empty
+          (setSymbolValues name emptySymbolValues current)
+    | otherwise = setSymbolValues name emptySymbolValues current
+
+sessionSymbolTargets
+  :: Text
+  -> [Expr]
+  -> EvaluationSession
+  -> ([Text], EvaluationSession)
+sessionSymbolTargets operation targets initialSession = go [] initialSession targets
+ where
+  go retained current [] = (retained, current)
+  go retained current (target : rest) = case target of
+    Symbol name ->
+      go (retained <> [name]) (registerSymbol name current) rest
+    Call (Symbol listHead) values
+      | isSessionSystemHead "List" listHead ->
+          let (nested, nestedSession) = go [] current values
+           in go (retained <> nested) nestedSession rest
+    String patternText ->
+      go
+        (retained <> matchingSessionSymbolNames patternText current)
+        current
+        rest
+    invalid ->
+      go
+        retained
+        ( appendNamedMessage
+            operation
+            "ssym"
+            ( inputForm invalid
+                <> " is not a symbol or a valid string pattern."
+            )
+            current
+        )
+        rest
+
+matchingSessionSymbolNames :: Text -> EvaluationSession -> [Text]
+matchingSessionSymbolNames patternText session =
+  [ name
+  | name <- allNames
+  , Just candidate <- [patternCandidate name]
+  , wildcardSymbolNameMatches patternText candidate
+  ]
+ where
+  allNames =
+    Set.toAscList
+      (Set.fromList systemSymbolNames `Set.union` Map.keysSet (sessionSymbols session))
+  patternCandidate name
+    | "`" `T.isInfixOf` patternText
+    , "`" `T.isInfixOf` name = Just name
+    | "`" `T.isInfixOf` patternText
+    , isSystemSymbol name = Just ("System`" <> name)
+    | "`" `T.isInfixOf` patternText = Just ("Global`" <> name)
+    | Just shortName <- T.stripPrefix "System`" name = Just shortName
+    | "`" `T.isInfixOf` name = Nothing
+    | Map.member ("System`" <> name) (sessionSymbols session) = Nothing
+    | otherwise = Just name
+
+wildcardSymbolNameMatches :: Text -> Text -> Bool
+wildcardSymbolNameMatches patternText candidate =
+  match (T.unpack patternText) (T.unpack candidate)
+ where
+  match [] [] = True
+  match [] _ = False
+  match ('\\' : escaped : rest) (character : remaining)
+    | escaped == character = match rest remaining
+  match ('*' : rest) remaining =
+    match rest remaining
+      || case remaining of
+        [] -> False
+        _ : suffix -> match ('*' : rest) suffix
+  match ('@' : rest) remaining =
+    let prefix = takeWhile (not . isUpperAscii) remaining
+     in not (null prefix)
+          && any (\count -> match rest (drop count remaining)) [1 .. length prefix]
+  match (expected : rest) (actual : remaining)
+    | expected == actual = match rest remaining
+  match _ _ = False
+  isUpperAscii character = 'A' <= character && character <= 'Z'
 
 evaluateDownValueAssignment
   :: Bool
@@ -3152,12 +4174,25 @@ evaluateDownValueAssignment delayed depth session lhs rhs
   store updated normalizedLhs storedBody =
     case downValueOwner normalizedLhs of
       Just owner
-        | Set.notMember owner protectedDefinitionOwners ->
+        | symbolAllowsValueMutation owner updated ->
             let definition = DownValue normalizedLhs storedBody delayed
                 result = if delayed then Symbol "Null" else storedBody
              in Right (result, defineDownValue owner definition updated)
-      Just _
-        | delayed -> Right (Symbol "Null", updated)
+      Just owner ->
+        let assignmentHead = if delayed then "SetDelayed" else "Set"
+            result =
+              if delayed
+                then Symbol "Null"
+                else Call (Symbol assignmentHead) [normalizedLhs, storedBody]
+         in Right
+              ( result
+              , appendSymbolMessage
+                  assignmentHead
+                  "wrsym"
+                  owner
+                  "is Protected."
+                  updated
+              )
       _ ->
         let assignmentHead = if delayed then "SetDelayed" else "Set"
          in Right
@@ -3174,6 +4209,17 @@ evaluateDownValueUnset depth session lhs = do
   (normalizedLhs, normalizedSession) <- normalizeAssignmentLhs depth session lhs
   case downValueOwner normalizedLhs of
     Just owner
+      | not (symbolAllowsValueMutation owner normalizedSession) ->
+          Right
+            ( Symbol "$Failed"
+            , appendSymbolMessage
+                "Unset"
+                "wrsym"
+                owner
+                "is Protected."
+                normalizedSession
+            )
+    Just owner
       | hasDownValue owner normalizedLhs normalizedSession ->
           Right
             ( Symbol "Null"
@@ -3187,62 +4233,24 @@ normalizeAssignmentLhs
   -> Expr
   -> SessionResult Expr
 normalizeAssignmentLhs depth session expression = case expression of
-  Call (Symbol "Condition") [body, test] -> do
-    (normalizedBody, updated) <- normalizeAssignmentLhs depth session body
-    Right (Call (Symbol "Condition") [normalizedBody, test], updated)
-  Call (Symbol "HoldPattern") [_] -> Right (expression, session)
+  Call (Symbol wrapper) [body, test]
+    | wrapper == "Condition" || wrapper == "System`Condition" -> do
+        (normalizedBody, updated) <- normalizeAssignmentLhs depth session body
+        Right (Call (Symbol "Condition") [normalizedBody, test], updated)
   Call expressionHead arguments' -> do
     (normalizedHead, headSession) <-
       evaluateSessionAt (depth + 1) session expressionHead
     (normalizedArguments, updated) <-
-      normalizeAssignmentArguments depth headSession arguments'
-    Right (Call normalizedHead normalizedArguments, updated)
+      evaluateCallArgumentsWithAttributes
+        depth
+        headSession
+        normalizedHead
+        arguments'
+    Right
+      ( normalizeSessionAttributeCall updated normalizedHead normalizedArguments
+      , updated
+      )
   _ -> Right (expression, session)
-
-normalizeAssignmentArguments
-  :: Int
-  -> EvaluationSession
-  -> [Expr]
-  -> SessionResult [Expr]
-normalizeAssignmentArguments _ session [] = Right ([], session)
-normalizeAssignmentArguments depth session (argument : rest)
-  | containsPatternSyntax argument = do
-      (remaining, updated) <-
-        normalizeAssignmentArguments depth session rest
-      Right (argument : remaining, updated)
-  | otherwise = do
-      (value, valueSession) <- evaluateSessionAt (depth + 1) session argument
-      (remaining, updated) <-
-        normalizeAssignmentArguments depth valueSession rest
-      Right (value : remaining, updated)
-
-containsPatternSyntax :: Expr -> Bool
-containsPatternSyntax = \case
-  Call (Symbol headName) _
-    | headName `elem` patternHeads -> True
-  Call expressionHead arguments' ->
-    containsPatternSyntax expressionHead || any containsPatternSyntax arguments'
-  _ -> False
- where
-  patternHeads =
-    [ "Pattern"
-    , "Blank"
-    , "BlankSequence"
-    , "BlankNullSequence"
-    , "Optional"
-    , "PatternTest"
-    , "Alternatives"
-    , "Except"
-    , "Repeated"
-    , "RepeatedNull"
-    , "PatternSequence"
-    , "OrderlessPatternSequence"
-    , "Longest"
-    , "Shortest"
-    , "OptionsPattern"
-    , "Condition"
-    , "Verbatim"
-    ]
 
 downValueOwner :: Expr -> Maybe Text
 downValueOwner = \case
@@ -3251,42 +4259,13 @@ downValueOwner = \case
   Call (Symbol name) _ -> Just name
   _ -> Nothing
 
--- These are the System-style heads implemented or structurally recognized by
--- the Haskell evaluator. Until contexts and Attributes are ported, treating
--- this explicit surface as protected prevents user downvalues from replacing
--- core evaluation semantics while still allowing aliases between user heads.
-protectedDefinitionOwners :: Set.Set Text
-protectedDefinitionOwners =
-  Set.fromList
-    ( T.words
-        ( "Abs Accumulate AddTo AllTrue Alternatives And AnyTrue Append Apply Association AssociationMap "
-            <> "AssociationQ AssociationThread AtomQ Attributes Blank BlankNullSequence BlankSequence Block Boole Break "
-            <> "Cases Catch Catenate Ceiling Clear ClearAll ClearAttributes Complement CompoundExpression Condition "
-            <> "ContainsAll ContainsAny ContainsExactly ContainsNone Continue Count Counts Cycles Delete DeleteCases "
-            <> "Depth Differences Discard DivideBy Do DownValues Drop Equal EvenQ Except Extract Factorial Factorial2 "
-            <> "False First FirstCase FirstPosition Flatten Floor For FractionalPart FreeQ Function Gather GatherBy Greater "
-            <> "GreaterEqual GroupBy Head Hold HoldForm HoldPattern Identity If IgnoringInactive Inactive Inequality "
-            <> "InheritedBlock Insert IntegerPart IntegerQ Internal`InheritedBlock Intersection Join Key KeyComplement "
-            <> "KeyDrop KeyExistsQ KeyIntersection KeyMap KeyMemberQ Keys KeySelect KeySort KeyTake KeyUnion KeyValueMap "
-            <> "KeyValuePattern Last Length LengthWhile Level Less LessEqual List ListQ Longest Lookup Map MapAt MatchQ Max "
-            <> "Mean Median MemberQ Merge Min Missing Module Most NValues NoneTrue Normal Not Null NumberQ OddQ Optional "
-            <> "OptionsPattern Or Order OrderedQ Ordering OrderlessPatternSequence OwnValues PadLeft PadRight Part Pattern "
-            <> "PatternSequence PatternTest Permutations Permute Pick Plus Position PositionIndex PositionLargest "
-            <> "PositionSmallest Power Prepend Product Protect Range Replace ReplaceAll ReplaceAt ReplacePart "
-            <> "ReplaceRepeated Rest Return Reverse ReverseSort ReverseSortBy Riffle RotateLeft RotateRight Round Rule "
-            <> "RuleDelayed SameQ Select SelectFirst Sequence Set SetAttributes SetDelayed Shortest Sign Slot Sort SortBy "
-            <> "Splice Sqrt StringQ Subsets SubtractFrom SubValues Sum Table Take TakeWhile Tally Throw Times TimesBy Total "
-            <> "True Unequal Unevaluated Union Unprotect UnsameQ Unset UpValues Values Verbatim While With"
-        )
-    )
-
 applySessionDownValue
   :: Int
   -> EvaluationSession
   -> Expr
   -> SessionResult (Maybe Expr)
 applySessionDownValue depth session expression@(Call (Symbol name) _) =
-  applyDefinitions session (Map.findWithDefault [] name (sessionDownValues session))
+  applyDefinitions session (symbolDownValuesFor name session)
  where
   applyDefinitions current [] = Right (Nothing, current)
   applyDefinitions current (definition : rest) = do
@@ -3317,8 +4296,9 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
 
   applyReplacement current definition replacement rest =
     case replacement of
-      Call (Symbol "Condition") [body, condition]
-        | downValueDelayed definition ->
+      Call (Symbol conditionHead) [body, condition]
+        | isSessionSystemHead "Condition" conditionHead
+        , downValueDelayed definition ->
             case evaluateSessionAt (depth + 1) current condition of
               Left (SessionControl (Returned value Nothing) updated) ->
                 Right (Just value, updated)
@@ -3327,8 +4307,9 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
                 | conditionResult == Symbol "True" ->
                     catchBareReturn (evaluateReplacement updated body)
                 | otherwise -> applyDefinitions updated rest
-      Call (Symbol "Condition") [_, _] ->
-        Right (Just replacement, current)
+      Call (Symbol conditionHead) [_, _]
+        | isSessionSystemHead "Condition" conditionHead ->
+            Right (Just replacement, current)
       _ -> catchBareReturn (evaluateReplacement current replacement)
 
   catchBareReturn = \case
@@ -3344,8 +4325,9 @@ applySessionDownValue _ session _ = Right (Nothing, session)
 
 downValueMatchPattern :: DownValue -> (Expr, Maybe Expr)
 downValueMatchPattern definition = case downValuePattern definition of
-  Call (Symbol "Condition") [patternExpression, condition] ->
-    (patternExpression, Just condition)
+  Call (Symbol conditionHead) [patternExpression, condition]
+    | isSessionSystemHead "Condition" conditionHead ->
+        (patternExpression, Just condition)
   patternExpression -> (patternExpression, Nothing)
 
 evaluateSessionCatch
@@ -3403,10 +4385,12 @@ evaluateSessionModule
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionModule depth session = \case
-  [Call (Symbol "List") [], body] ->
-    evaluateTargetedReturn "Module" depth session body
-  originalArguments@[Call (Symbol "List") bindingExpressions, body]
-    | Just bindings <- parseModuleBindings bindingExpressions -> do
+  [Call (Symbol listHead) [], body]
+    | isSessionSystemHead "List" listHead ->
+        evaluateTargetedReturn "Module" depth session body
+  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+    | isSessionSystemHead "List" listHead
+    , Just bindings <- parseModuleBindings bindingExpressions -> do
         let nextCounter = sessionModuleCounter session + 1
             allocatedSession =
               session {sessionModuleCounter = nextCounter}
@@ -3429,18 +4413,20 @@ evaluateSessionWith
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionWith depth session = \case
-  [Call (Symbol "List") [], body] ->
-    evaluateSessionAt (depth + 1) session body
-  originalArguments@[Call (Symbol "List") bindingExpressions, body] ->
-    case collectWithBindings depth session Set.empty Map.empty bindingExpressions of
-      Left evaluationExit -> Left evaluationExit
-      Right (Nothing, updated) ->
-        Right (Call (Symbol "With") originalArguments, updated)
-      Right (Just substitutions, updated) ->
-        evaluateSessionAt
-          (depth + 1)
-          updated
-          (substituteNamedSymbols substitutions body)
+  [Call (Symbol listHead) [], body]
+    | isSessionSystemHead "List" listHead ->
+        evaluateSessionAt (depth + 1) session body
+  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+    | isSessionSystemHead "List" listHead ->
+        case collectWithBindings depth session Set.empty Map.empty bindingExpressions of
+          Left evaluationExit -> Left evaluationExit
+          Right (Nothing, updated) ->
+            Right (Call (Symbol "With") originalArguments, updated)
+          Right (Just substitutions, updated) ->
+            evaluateSessionAt
+              (depth + 1)
+              updated
+              (substituteNamedSymbols substitutions body)
   arguments' -> Right (Call (Symbol "With") arguments', session)
 
 collectWithBindings
@@ -3475,10 +4461,12 @@ collectWithBindings depth session seen substitutions (binding : rest) =
 
 parseWithBinding :: Expr -> Maybe WithBinding
 parseWithBinding = \case
-  Call (Symbol "Set") [Symbol name, rhs] ->
-    Just (WithBinding name rhs False)
-  Call (Symbol "SetDelayed") [Symbol name, rhs] ->
-    Just (WithBinding name rhs True)
+  Call (Symbol setHead) [Symbol name, rhs]
+    | isSessionSystemHead "Set" setHead ->
+        Just (WithBinding name rhs False)
+  Call (Symbol setHead) [Symbol name, rhs]
+    | isSessionSystemHead "SetDelayed" setHead ->
+        Just (WithBinding name rhs True)
   _ -> Nothing
 
 evaluateSessionBlock
@@ -3488,10 +4476,12 @@ evaluateSessionBlock
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionBlock headName depth session = \case
-  [Call (Symbol "List") [], body] ->
-    evaluateTargetedReturn (blockReturnTarget headName) depth session body
-  originalArguments@[Call (Symbol "List") bindingExpressions, body]
-    | Just bindings <- parseBlockBindings bindingExpressions ->
+  [Call (Symbol listHead) [], body]
+    | isSessionSystemHead "List" listHead ->
+        evaluateTargetedReturn (blockReturnTarget headName) depth session body
+  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+    | isSessionSystemHead "List" listHead
+    , Just bindings <- parseBlockBindings bindingExpressions ->
         let snapshots =
               [ (name, snapshotSymbolValues name session)
               | BlockBinding name _ <- bindings
@@ -3523,10 +4513,12 @@ parseBlockBindings expressions = do
  where
   parseBinding = \case
     Symbol name -> Just (BlockBinding name Nothing)
-    Call (Symbol "Set") [Symbol name, rhs] ->
-      Just (BlockBinding name (Just (ImmediateValue rhs)))
-    Call (Symbol "SetDelayed") [Symbol name, rhs] ->
-      Just (BlockBinding name (Just (DelayedValue rhs)))
+    Call (Symbol setHead) [Symbol name, rhs]
+      | isSessionSystemHead "Set" setHead ->
+          Just (BlockBinding name (Just (ImmediateValue rhs)))
+    Call (Symbol setHead) [Symbol name, rhs]
+      | isSessionSystemHead "SetDelayed" setHead ->
+          Just (BlockBinding name (Just (DelayedValue rhs)))
     _ -> Nothing
 
 initializeBlockBindings
@@ -3579,10 +4571,12 @@ parseModuleBindings expressions = do
  where
   parseBinding = \case
     Symbol name -> Just (ModuleBinding name Nothing)
-    Call (Symbol "Set") [Symbol name, rhs] ->
-      Just (ModuleBinding name (Just (ImmediateValue rhs)))
-    Call (Symbol "SetDelayed") [Symbol name, rhs] ->
-      Just (ModuleBinding name (Just (DelayedValue rhs)))
+    Call (Symbol setHead) [Symbol name, rhs]
+      | isSessionSystemHead "Set" setHead ->
+          Just (ModuleBinding name (Just (ImmediateValue rhs)))
+    Call (Symbol setHead) [Symbol name, rhs]
+      | isSessionSystemHead "SetDelayed" setHead ->
+          Just (ModuleBinding name (Just (DelayedValue rhs)))
     _ -> Nothing
 
 initializeModuleBindings
@@ -3613,8 +4607,9 @@ freshModuleName name counter = name <> "$" <> T.pack (show counter)
 renameBoundSymbols :: Map.Map Text Text -> Expr -> Expr
 renameBoundSymbols renameMap expression = case expression of
   Symbol name -> maybe expression Symbol (Map.lookup name renameMap)
-  Call (Symbol headName) [Call (Symbol "List") bindings, body]
-    | headName `elem` scopeHeads
+  Call (Symbol headName) [Call (Symbol listHead) bindings, body]
+    | any (`isSessionSystemHead` headName) scopeHeads
+    , isSessionSystemHead "List" listHead
     , Just bindingNames <- traverse scopeBindingName bindings ->
         let shadowedNames = Set.fromList bindingNames
             bodyMap = Set.foldr Map.delete renameMap shadowedNames
@@ -3625,14 +4620,15 @@ renameBoundSymbols renameMap expression = case expression of
                   (map (renameNestedBinding renameMap) bindings)
               , renameBoundSymbols bodyMap body
               ]
-  Call (Symbol "Function") (parameters : body : remaining)
-    | length remaining <= 1
+  Call (Symbol functionHead) (parameters : body : remaining)
+    | isSessionSystemHead "Function" functionHead
+    , length remaining <= 1
     , Just parameterNames <- functionParameterNames parameters ->
         let bodyMap =
               foldr Map.delete renameMap parameterNames
          in Call
-              (Symbol "Function")
-              ( parameters
+              (Symbol functionHead)
+              ( canonicalFunctionParameters parameters
                   : renameBoundSymbols bodyMap body
                   : remaining
               )
@@ -3645,11 +4641,18 @@ renameBoundSymbols renameMap expression = case expression of
   scopeHeads =
     ["Module", "With", "Block"]
 
+  canonicalFunctionParameters = \case
+    Call (Symbol listHead) parameters
+      | isSessionSystemHead "List" listHead ->
+          Call (Symbol "List") parameters
+    parameters -> parameters
+
 renameNestedBinding :: Map.Map Text Text -> Expr -> Expr
 renameNestedBinding renameMap = \case
   binding@(Symbol _) -> binding
   Call (Symbol headName) [name@(Symbol _), rhs]
-    | headName `elem` ["Set", "SetDelayed"] ->
+    | isSessionSystemHead "Set" headName
+        || isSessionSystemHead "SetDelayed" headName ->
         Call
           (Symbol headName)
           [name, renameBoundSymbols renameMap rhs]
@@ -3659,15 +4662,18 @@ scopeBindingName :: Expr -> Maybe Text
 scopeBindingName = \case
   Symbol name -> Just name
   Call (Symbol headName) [Symbol name, _]
-    | headName `elem` ["Set", "SetDelayed"] -> Just name
+    | isSessionSystemHead "Set" headName
+        || isSessionSystemHead "SetDelayed" headName -> Just name
   _ -> Nothing
 
 functionParameterNames :: Expr -> Maybe [Text]
 functionParameterNames = \case
-  Symbol "Null" -> Nothing
+  Symbol nullName
+    | isSessionSystemHead "Null" nullName -> Nothing
   Symbol name -> Just [name]
-  Call (Symbol "List") parameters ->
-    traverse symbolName parameters
+  Call (Symbol listHead) parameters
+    | isSessionSystemHead "List" listHead ->
+        traverse symbolName parameters
   _ -> Nothing
 
 evaluateSessionTable
@@ -3920,7 +4926,9 @@ resolveIterator
   -> Either IterationFailure (Iterator, EvaluationSession)
 resolveIterator depth session iteratorSpec = case iteratorSpec of
   Integer count -> (,session) <$> countIterator session count
-  Call (Symbol "List") values -> resolveListIterator depth session values
+  Call (Symbol listHead) values
+    | isSessionSystemHead "List" listHead ->
+        resolveListIterator depth session values
   _ -> do
     (evaluated, updated) <-
       liftIterationEvaluation (evaluateSessionAt (depth + 1) session iteratorSpec)
@@ -4023,32 +5031,9 @@ evaluatedListArguments = filter (/= Symbol "Nothing") . concatMap spliceArgument
       | target == Symbol "List" -> values
     value -> [value]
 
-isHeldSessionHead :: Expr -> Bool
-isHeldSessionHead (Symbol name) =
-  name
-    `elem` [ "Table"
-           , "Do"
-           , "For"
-           , "While"
-           , "Sum"
-           , "Product"
-           , "Catch"
-           , "Throw"
-           , "Break"
-           , "Continue"
-           , "OwnValues"
-           , "DownValues"
-           , "Condition"
-           , "Module"
-           , "With"
-           , "Block"
-           , "InheritedBlock"
-           , "Internal`InheritedBlock"
-           ]
-isHeldSessionHead _ = False
-
 isListIteratorSpec :: Expr -> Bool
-isListIteratorSpec (Call (Symbol "List") _) = True
+isListIteratorSpec (Call (Symbol listHead) _) =
+  isSessionSystemHead "List" listHead
 isListIteratorSpec _ = False
 
 accumulatorArguments :: Text -> [Expr] -> [Expr]
@@ -4093,30 +5078,45 @@ evaluateSessionAnd
   -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSessionAnd depth = go []
- where
-  go retained session [] = Right (logicalResult "And" (Symbol "True") retained, session)
-  go retained session (value : rest) = do
-    (evaluated, updated) <- evaluateSessionAt (depth + 1) session value
-    case evaluated of
-      Symbol "False" -> Right (Symbol "False", updated)
-      Symbol "True" -> go retained updated rest
-      _ -> go (retained <> [evaluated]) updated rest
+evaluateSessionAnd =
+  evaluateSessionLogical "And" (Symbol "True") (Symbol "False")
 
 evaluateSessionOr
   :: Int
   -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSessionOr depth = go []
+evaluateSessionOr =
+  evaluateSessionLogical "Or" (Symbol "False") (Symbol "True")
+
+evaluateSessionLogical
+  :: Text
+  -> Expr
+  -> Expr
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionLogical headName identity decisive depth = go []
  where
-  go retained session [] = Right (logicalResult "Or" (Symbol "False") retained, session)
+  go retained session [] =
+    let normalized =
+          normalizeSessionAttributeCall
+            session
+            (Symbol headName)
+            retained
+        values = case normalized of
+          Call _ normalizedValues -> normalizedValues
+          _ -> retained
+     in Right (logicalResult headName identity values, session)
   go retained session (value : rest) = do
     (evaluated, updated) <- evaluateSessionAt (depth + 1) session value
-    case evaluated of
-      Symbol "True" -> Right (Symbol "True", updated)
-      Symbol "False" -> go retained updated rest
-      _ -> go (retained <> [evaluated]) updated rest
+    if evaluated == decisive
+      then Right (decisive, updated)
+      else
+        if evaluated == identity
+          then go retained updated rest
+          else go (retained <> [evaluated]) updated rest
 
 evaluateArguments
   :: Int
@@ -4130,6 +5130,255 @@ evaluateArguments depth = go []
     (evaluated, updated) <- evaluateSessionAt (depth + 1) session value
     go (retained <> [evaluated]) updated rest
 
+staticHeldHeadNames :: [Text]
+staticHeldHeadNames =
+  [ "Function"
+  , "Hold"
+  , "HoldComplete"
+  , "HoldForm"
+  , "HoldPattern"
+  , "Unevaluated"
+  ]
+
+evaluateStaticHeldCall
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [Expr]
+  -> SessionResult Expr
+evaluateStaticHeldCall depth session headName = prepare [] session
+ where
+  expressionHead = Symbol headName
+  completeHold = headName `elem` ["HoldComplete", "Unevaluated"]
+
+  prepare retained current [] =
+    Right
+      ( if completeHold
+          then Call expressionHead retained
+          else normalizeEvaluatedCall expressionHead retained
+      , current
+      )
+  prepare retained current (argument : rest)
+    | not completeHold
+    , Call (Symbol evaluateHead) [payload] <- argument
+    , isSessionSystemHead "Evaluate" evaluateHead = do
+        (prepared, updated) <- case payload of
+          Call (Symbol unevaluatedHead) [_]
+            | isSessionSystemHead "Unevaluated" unevaluatedHead ->
+                Right (payload, current)
+          _ -> evaluateSessionAt (depth + 1) current payload
+        prepare (retained <> [prepared]) updated rest
+    | otherwise = prepare (retained <> [argument]) current rest
+
+evaluateCallArgumentsWithAttributes
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult [Expr]
+evaluateCallArgumentsWithAttributes depth session expressionHead arguments' =
+  case sessionCallAttributes session expressionHead of
+    Left (EvaluationError message) -> sessionFailure session message
+    Right attributes ->
+      prepare
+        attributes
+        (isSymbolExpression expressionHead)
+        0
+        []
+        session
+        arguments'
+ where
+  prepare _ _ _ retained current [] = Right (retained, current)
+  prepare attributes symbolHead index retained current (argument : rest) = do
+    (prepared, updated) <-
+      if attributeHoldsArgument attributes index
+        then evaluateHeldAttributeArgument attributes symbolHead current argument
+        else evaluateSessionAt (depth + 1) current argument
+    prepare
+      attributes
+      symbolHead
+      (index + 1)
+      (retained <> [prepared])
+      updated
+      rest
+
+  evaluateHeldAttributeArgument attributes symbolHead current argument
+    | Set.member HoldAllComplete attributes = Right (argument, current)
+    | not symbolHead = Right (argument, current)
+    | Call (Symbol evaluateHead) [payload] <- argument
+    , isSessionSystemHead "Evaluate" evaluateHead =
+        case payload of
+          Call (Symbol unevaluatedHead) [_]
+            | isSessionSystemHead "Unevaluated" unevaluatedHead ->
+                Right (payload, current)
+          _ -> evaluateSessionAt (depth + 1) current payload
+    | otherwise = Right (argument, current)
+
+  isSymbolExpression Symbol {} = True
+  isSymbolExpression _ = False
+
+attributeHoldsArgument :: Set.Set SymbolAttribute -> Int -> Bool
+attributeHoldsArgument attributes index =
+  Set.member HoldAll attributes
+    || Set.member HoldAllComplete attributes
+    || (Set.member HoldFirst attributes && index == 0)
+    || (Set.member HoldRest attributes && index > 0)
+
+normalizeSessionAttributeCall
+  :: EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> Expr
+normalizeSessionAttributeCall session expressionHead values =
+  case sessionCallAttributes session expressionHead of
+    Right attributes ->
+      let symbolHead = case expressionHead of Symbol {} -> True; _ -> False
+          sequenceNormalized =
+            if Set.member SequenceHold attributes
+                || Set.member HoldAllComplete attributes
+              then Call expressionHead values
+              else normalizeSessionSequenceCall expressionHead values
+          flattened =
+            if symbolHead && Set.member Flat attributes
+              then flattenSameHead expressionHead (arguments sequenceNormalized)
+              else arguments sequenceNormalized
+          ordered =
+            if symbolHead && Set.member Orderless attributes
+              then sortBy canonicalCompare flattened
+              else flattened
+       in Call expressionHead ordered
+    Left _ -> normalizeEvaluatedCall expressionHead values
+ where
+  flattenSameHead targetHead = concatMap flattenOne
+   where
+    flattenOne (Call nestedHead nestedValues)
+      | nestedHead == targetHead = nestedValues
+    flattenOne value = [value]
+
+-- Session attributes are mutable, so sequence preparation here cannot reuse
+-- the pure evaluator's fixed suppression table for Rule and RuleDelayed.
+normalizeSessionSequenceCall :: Expr -> [Expr] -> Expr
+normalizeSessionSequenceCall expressionHead values =
+  Call expressionHead retained
+ where
+  spliced = concatMap spliceArgument values
+  retained
+    | sessionHeadExpressionIsAny ["Association", "List"] expressionHead =
+        filter (/= Symbol "Nothing") spliced
+    | otherwise = spliced
+  spliceArgument = \case
+    Call (Symbol sequenceHead) sequenceValues
+      | isSessionSystemHead "Sequence" sequenceHead -> sequenceValues
+    Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues]
+      | isSessionSystemHead "Splice" spliceHead
+      , isSessionSystemHead "List" listHead
+      , expressionHead == Symbol "List" -> spliceValues
+    Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues, target]
+      | isSessionSystemHead "Splice" spliceHead
+      , isSessionSystemHead "List" listHead
+      , target == expressionHead -> spliceValues
+    value -> [value]
+
+threadSessionListableCall
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Maybe (SessionResult Expr)
+threadSessionListableCall depth session expression = case expression of
+  Call expressionHead values ->
+    case sessionCallAttributes session expressionHead of
+      Right attributes
+        | Set.member Listable attributes ->
+            case listableArgumentRows values of
+              Left (EvaluationError message) -> Just (sessionFailure session message)
+              Right Nothing -> Nothing
+              Right (Just rows) ->
+                Just (evaluateRows expressionHead [] session rows)
+      _ -> Nothing
+  _ -> Nothing
+ where
+  evaluateRows _ retained current [] =
+    Right (evaluatedList (reverse retained), current)
+  evaluateRows expressionHead retained current (row : rest) = do
+    (value, updated) <-
+      evaluateSessionAt (depth + 1) current (Call expressionHead row)
+    evaluateRows expressionHead (value : retained) updated rest
+
+listableArgumentRows :: [Expr] -> Either EvaluationError (Maybe [[Expr]])
+listableArgumentRows values = case listLengths of
+  [] -> Right Nothing
+  firstLength : remainingLengths
+    | all (== firstLength) remainingLengths ->
+        Right
+          ( Just
+              [ [ case value of
+                    Call (Symbol listHead) elements
+                      | isSessionSystemHead "List" listHead -> elements !! index
+                    scalar -> scalar
+                | value <- values
+                ]
+              | index <- [0 .. firstLength - 1]
+              ]
+          )
+    | otherwise ->
+        Left
+          ( EvaluationError
+              "Listable Function arguments have incompatible list lengths."
+          )
+ where
+  listLengths =
+    [ length elements
+    | Call (Symbol listHead) elements <- values
+    , isSessionSystemHead "List" listHead
+    ]
+
+sessionCallAttributes
+  :: EvaluationSession
+  -> Expr
+  -> Either EvaluationError (Set.Set SymbolAttribute)
+sessionCallAttributes session = \case
+  Symbol name -> Right (symbolAttributesFor name session)
+  Call (Symbol functionHead) functionArguments
+    | isSessionSystemHead "Function" functionHead ->
+        functionAttributeSet functionArguments
+  _ -> Right Set.empty
+
+functionAttributeSet
+  :: [Expr]
+  -> Either EvaluationError (Set.Set SymbolAttribute)
+functionAttributeSet [_, _, specification] =
+  Set.fromList . mapMaybeAttribute <$> attributeSymbols specification
+ where
+  attributeSymbols (Symbol name) = Right [name]
+  attributeSymbols (Call (Symbol listHead) values)
+    | isSessionSystemHead "List" listHead = traverse requireSymbol values
+  attributeSymbols _ = invalid
+  requireSymbol (Symbol name) = Right name
+  requireSymbol _ = invalid
+  invalid =
+    Left
+      (EvaluationError "Function attributes must be a symbol or a list of symbols.")
+  mapMaybeAttribute =
+    foldr
+      (\name retained -> maybe retained (: retained) (symbolAttributeFromName (systemAttributeSymbolName name)))
+      []
+functionAttributeSet _ = Right Set.empty
+
+isSessionSystemHead :: Text -> Text -> Bool
+isSessionSystemHead expected actual =
+  actual == expected || actual == "System`" <> expected
+
+sessionHeadExpressionIsAny :: [Text] -> Expr -> Bool
+sessionHeadExpressionIsAny expected = \case
+  Symbol actual -> any (`isSessionSystemHead` actual) expected
+  _ -> False
+
+restoreQualifiedSystemHead :: Text -> Text -> Expr -> Expr
+restoreQualifiedSystemHead qualifiedName shortName = \case
+  Call (Symbol resultHead) values
+    | resultHead == shortName -> Call (Symbol qualifiedName) values
+  result -> result
+
 evaluateUpdate
   :: Text
   -> Int
@@ -4138,6 +5387,11 @@ evaluateUpdate
   -> (Expr -> Expr -> Expr)
   -> Expr
   -> SessionResult Expr
+evaluateUpdate headName depth session name _ rhs
+  | symbolHasAttribute name Protected session
+      || specialSessionSettingName name /= Nothing = do
+      (value, updated) <- evaluateSessionAt (depth + 1) session rhs
+      Right (Call (Symbol headName) [Symbol name, value], updated)
 evaluateUpdate headName depth session name constructor rhs = do
   let initialMessageCount = length (sessionGeneratedMessages session)
   (current, currentSession) <- evaluateSessionAt (depth + 1) session (Symbol name)
@@ -4183,6 +5437,19 @@ appendEvaluationMessage
   -> EvaluationSession
   -> EvaluationSession
 appendEvaluationMessage expression (EvaluationError messageText) session =
+  appendNamedMessage headName "error" messageText session
+ where
+  headName = case expression of
+    Call (Symbol symbolName') _ -> canonicalMessageHeadName symbolName'
+    Symbol symbolName' -> canonicalMessageHeadName symbolName'
+    _ -> "General"
+
+  canonicalMessageHeadName name
+    | isSystemSymbol name = maybe name id (normalizeSystemSymbolName name)
+    | otherwise = name
+
+appendNamedMessage :: Text -> Text -> Text -> EvaluationSession -> EvaluationSession
+appendNamedMessage headName tag messageText session =
   session
     { sessionGeneratedMessages =
         sessionGeneratedMessages session <> [message]
@@ -4190,20 +5457,49 @@ appendEvaluationMessage expression (EvaluationError messageText) session =
         sessionVisibleMessages session <> [message]
     }
  where
-  headName = case expression of
-    Call (Symbol symbolName') _ -> symbolName'
-    Symbol symbolName' -> symbolName'
-    _ -> "General"
-  messageName = headName <> "::error"
+  messageName = headName <> "::" <> tag
   message =
     EvaluationMessage
       { evaluationMessageName = messageName
       , evaluationMessageFullName =
           Call
             (Symbol "MessageName")
-            [Symbol headName, String "error"]
+            [Symbol headName, String tag]
       , evaluationMessageText = messageName <> ": " <> messageText
       }
+
+appendSymbolMessage
+  :: Text
+  -> Text
+  -> Text
+  -> Text
+  -> EvaluationSession
+  -> EvaluationSession
+appendSymbolMessage headName tag name suffix =
+  appendNamedMessage
+    headName
+    tag
+    ("Symbol " <> displaySessionSymbolName name <> " " <> suffix)
+
+displaySessionSymbolName :: Text -> Text
+displaySessionSymbolName name = maybe name id (visibleContextShortName name)
+
+visibleContextShortName :: Text -> Maybe Text
+visibleContextShortName name =
+  strip "System`" `orElse` strip "Global`"
+ where
+  strip prefix = do
+    shortName <- T.stripPrefix prefix name
+    if T.null shortName || "`" `T.isInfixOf` shortName
+      then Nothing
+      else Just shortName
+  orElse Nothing fallback = fallback
+  orElse value _ = value
+
+systemAttributeSymbolName :: Text -> Text
+systemAttributeSymbolName name
+  | isSystemSymbol name = maybe name id (normalizeSystemSymbolName name)
+  | otherwise = name
 
 liftPureEvaluation
   :: EvaluationSession
@@ -4245,17 +5541,22 @@ logicalResult headName _ values = Call (Symbol headName) values
 
 define :: Text -> Definition -> EvaluationSession -> EvaluationSession
 define name value session =
-  session {sessionDefinitions = Map.insert name value (sessionDefinitions session)}
+  modifySymbolValues
+    name
+    (\values -> values {symbolOwnValue = Just value})
+    session
 
 defineDownValue :: Text -> DownValue -> EvaluationSession -> EvaluationSession
 defineDownValue name definition session =
-  session
-    { sessionDownValues =
-        Map.alter
-          (Just . insertDownValue definition . maybe [] id)
-          name
-          (sessionDownValues session)
-    }
+  modifySymbolValues
+    name
+    ( \values ->
+        values
+          { symbolDownValues =
+              insertDownValue definition (symbolDownValues values)
+          }
+    )
+    session
 
 insertDownValue :: DownValue -> [DownValue] -> [DownValue]
 insertDownValue definition = replaceOrInsert
@@ -4272,7 +5573,8 @@ insertDownValue definition = replaceOrInsert
 
 downValueConditionKey :: DownValue -> Maybe Expr
 downValueConditionKey definition = case downValueBody definition of
-  Call (Symbol "Condition") [_, condition] -> Just condition
+  Call (Symbol conditionHead) [_, condition]
+    | isSessionSystemHead "Condition" conditionHead -> Just condition
   _ -> Nothing
 
 downValueSpecificity :: Expr -> Int
@@ -4284,7 +5586,9 @@ downValueSpecificity = \case
     30 + sum (map downValueSpecificity arguments')
   Call (Symbol "BlankNullSequence") arguments' ->
     35 + sum (map downValueSpecificity arguments')
-  Call (Symbol "Condition") [inner, _] -> 2 + downValueSpecificity inner
+  Call (Symbol conditionHead) [inner, _]
+    | isSessionSystemHead "Condition" conditionHead ->
+        2 + downValueSpecificity inner
   Call (Symbol "PatternTest") [inner, _] -> 3 + downValueSpecificity inner
   Call (Symbol "Optional") (inner : _) -> 5 + downValueSpecificity inner
   Call (Symbol "Alternatives") alternatives ->
@@ -4302,39 +5606,40 @@ hasDownValue :: Text -> Expr -> EvaluationSession -> Bool
 hasDownValue name patternExpression session =
   any
     ((== patternExpression) . downValuePattern)
-    (Map.findWithDefault [] name (sessionDownValues session))
+    (symbolDownValuesFor name session)
 
 removeDownValue :: Text -> Expr -> EvaluationSession -> EvaluationSession
 removeDownValue name patternExpression session =
-  session
-    { sessionDownValues =
-        Map.update removeMatching name (sessionDownValues session)
-    }
- where
-  removeMatching definitions =
-    case filter ((/= patternExpression) . downValuePattern) definitions of
-      [] -> Nothing
-      retained -> Just retained
+  modifySymbolValues
+    name
+    ( \values ->
+        values
+          { symbolDownValues =
+              filter
+                ((/= patternExpression) . downValuePattern)
+                (symbolDownValues values)
+          }
+    )
+    session
 
 removeOwnValues :: [Text] -> EvaluationSession -> EvaluationSession
 removeOwnValues names session =
-  session
-    { sessionDefinitions =
-        foldl (flip Map.delete) (sessionDefinitions session) names
-    }
+  foldl
+    (\updated name -> modifySymbolValues name (\values -> values {symbolOwnValue = Nothing}) updated)
+    session
+    names
 
 clearDefinitions :: [Text] -> EvaluationSession -> EvaluationSession
 clearDefinitions names session =
-  (removeOwnValues names session)
-    { sessionDownValues =
-        foldl (flip Map.delete) (sessionDownValues session) names
-    }
+  foldl
+    (\updated name -> setSymbolValues name emptySymbolValues updated)
+    session
+    names
 
 snapshotSymbolValues :: Text -> EvaluationSession -> SymbolValueSnapshot
 snapshotSymbolValues name session =
   SymbolValueSnapshot
-    { snapshotOwnValue = Map.lookup name (sessionDefinitions session)
-    , snapshotDownValues = Map.lookup name (sessionDownValues session)
+    { snapshotValues = symbolValuesFor name session
     }
 
 restoreSymbolValues
@@ -4343,19 +5648,224 @@ restoreSymbolValues
   -> EvaluationSession
   -> EvaluationSession
 restoreSymbolValues name snapshot session =
-  let restoredOwn = restoreDefinition name (snapshotOwnValue snapshot) session
-   in restoredOwn
-        { sessionDownValues =
-            case snapshotDownValues snapshot of
-              Nothing -> Map.delete name (sessionDownValues restoredOwn)
-              Just definitions ->
-                Map.insert name definitions (sessionDownValues restoredOwn)
-        }
+  setSymbolValues name (snapshotValues snapshot) session
 
-restoreDefinition :: Text -> Maybe Definition -> EvaluationSession -> EvaluationSession
-restoreDefinition name = \case
-  Nothing -> removeOwnValues [name]
-  Just previous -> define name previous
+emptySymbolValues :: SymbolValues
+emptySymbolValues =
+  SymbolValues
+    { symbolOwnValue = Nothing
+    , symbolDownValues = []
+    , symbolUpValues = []
+    , symbolSubValues = []
+    , symbolNValues = []
+    }
+
+specialSessionSettingDefaults :: [(Text, Expr)]
+specialSessionSettingDefaults =
+  [ ("$RecursionLimit", Integer 1024)
+  , ("$IterationLimit", Integer 4096)
+  , ("$HistoryLength", Symbol "Infinity")
+  , ("$MaxExtraPrecision", Integer 50)
+  , ("$MaxRootDegree", Integer 1000)
+  , ("$OutputSizeLimit", Integer 12000)
+  ]
+
+specialSessionOwnValueDefaults :: [(Text, Expr)]
+specialSessionOwnValueDefaults =
+  specialSessionSettingDefaults
+    <> [("$MessagePrePrint", Symbol "Automatic")]
+
+specialSessionSettingName :: Text -> Maybe Text
+specialSessionSettingName name = do
+  shortName <-
+    if isSystemSymbol name
+      then normalizeSystemSymbolName name
+      else Nothing
+  case lookup shortName specialSessionSettingDefaults of
+    Just _ -> Just shortName
+    Nothing -> Nothing
+
+validSpecialSessionSetting :: Text -> Expr -> Bool
+validSpecialSessionSetting "$MaxRootDegree" (Integer value) =
+  value >= 1 && value <= 9223372036854775807
+validSpecialSessionSetting "$MaxRootDegree" _ = False
+validSpecialSessionSetting name (Symbol infinityName)
+  | isSessionSystemHead "Infinity" infinityName =
+      name /= "$MaxRootDegree"
+validSpecialSessionSetting name (Integer value) =
+  maybe False (value >=) (lookup name minimums)
+ where
+  minimums =
+    [ ("$RecursionLimit", 20)
+    , ("$IterationLimit", 20)
+    , ("$HistoryLength", 0)
+    , ("$MaxExtraPrecision", 0)
+    , ("$OutputSizeLimit", 0)
+    ]
+validSpecialSessionSetting _ _ = False
+
+currentSpecialSessionSettingValue :: Text -> EvaluationSession -> Expr
+currentSpecialSessionSettingValue name session =
+  case symbolOwnValueFor name session of
+    Just (ImmediateValue value) -> value
+    Just (DelayedValue value) -> value
+    Nothing -> maybe (Symbol name) id (lookup name specialSessionSettingDefaults)
+
+appendSpecialSettingLimitMessage
+  :: Text
+  -> Expr
+  -> EvaluationSession
+  -> EvaluationSession
+appendSpecialSettingLimitMessage name value =
+  appendNamedMessage
+    name
+    "limset"
+    ("Cannot set " <> name <> " to " <> inputForm value <> ".")
+
+exceedsSessionRecursionLimit :: Int -> EvaluationSession -> Bool
+exceedsSessionRecursionLimit depth session =
+  case currentSpecialSessionSettingValue "$RecursionLimit" session of
+    Symbol infinityName
+      | isSessionSystemHead "Infinity" infinityName -> False
+    Integer limit -> toInteger depth > limit
+    _ -> depth > 1024
+
+emptySymbolState :: SymbolState
+emptySymbolState =
+  SymbolState
+    { symbolKnown = False
+    , symbolAttributeOverride = Nothing
+    , symbolValues = emptySymbolValues
+    }
+
+symbolStateFor :: Text -> EvaluationSession -> SymbolState
+symbolStateFor name session =
+  Map.findWithDefault
+    emptySymbolState
+    (resolvedSymbolStorageName name session)
+    (sessionSymbols session)
+
+symbolValuesFor :: Text -> EvaluationSession -> SymbolValues
+symbolValuesFor name = symbolValues . symbolStateFor name
+
+symbolOwnValueFor :: Text -> EvaluationSession -> Maybe Definition
+symbolOwnValueFor name = symbolOwnValue . symbolValuesFor name
+
+symbolDownValuesFor :: Text -> EvaluationSession -> [DownValue]
+symbolDownValuesFor name = symbolDownValues . symbolValuesFor name
+
+modifySymbolState
+  :: Text
+  -> (SymbolState -> SymbolState)
+  -> EvaluationSession
+  -> EvaluationSession
+modifySymbolState name update session =
+  let storageName = resolvedSymbolStorageName name session
+      updatedState =
+        update
+          ( Map.findWithDefault
+              emptySymbolState
+              storageName
+              (sessionSymbols session)
+          )
+      updatedSymbols =
+        if updatedState == emptySymbolState
+          then Map.delete storageName (sessionSymbols session)
+          else Map.insert storageName updatedState (sessionSymbols session)
+   in session {sessionSymbols = updatedSymbols}
+
+modifySymbolValues
+  :: Text
+  -> (SymbolValues -> SymbolValues)
+  -> EvaluationSession
+  -> EvaluationSession
+modifySymbolValues name update =
+  modifySymbolState
+    name
+    ( \state ->
+        state
+          { symbolKnown = True
+          , symbolValues = update (symbolValues state)
+          }
+    )
+
+setSymbolValues :: Text -> SymbolValues -> EvaluationSession -> EvaluationSession
+setSymbolValues name values =
+  modifySymbolState
+    name
+    (\state -> state {symbolKnown = True, symbolValues = values})
+
+registerSymbol :: Text -> EvaluationSession -> EvaluationSession
+registerSymbol name =
+  modifySymbolState name (\state -> state {symbolKnown = True})
+
+symbolStorageName :: Text -> Text
+symbolStorageName name
+  | Just shortName <- globalSessionSymbolName name = shortName
+  | isSystemSymbol name = maybe name id (normalizeSystemSymbolName name)
+  | otherwise = name
+
+resolvedSymbolStorageName :: Text -> EvaluationSession -> Text
+resolvedSymbolStorageName name session
+  | "`" `T.isInfixOf` name = symbolStorageName name
+  | isSystemSymbol name = symbolStorageName name
+  | Map.member systemName (sessionSymbols session) = systemName
+  | otherwise = symbolStorageName name
+ where
+  systemName = "System`" <> name
+
+globalSessionSymbolName :: Text -> Maybe Text
+globalSessionSymbolName name = do
+  shortName <- T.stripPrefix "Global`" name
+  if T.null shortName
+      || "`" `T.isInfixOf` shortName
+      || isSystemSymbol shortName
+    then Nothing
+    else Just shortName
+
+symbolAttributesFor :: Text -> EvaluationSession -> Set.Set SymbolAttribute
+symbolAttributesFor name session =
+  case symbolAttributeOverride (symbolStateFor name session) of
+    Just attributes -> attributes
+    Nothing -> maybe Set.empty id (systemSymbolAttributes name)
+
+symbolHasAttribute :: Text -> SymbolAttribute -> EvaluationSession -> Bool
+symbolHasAttribute name attribute = Set.member attribute . symbolAttributesFor name
+
+symbolAllowsValueMutation :: Text -> EvaluationSession -> Bool
+symbolAllowsValueMutation name session =
+  not (symbolHasAttribute name Protected session)
+    || isProtectedValueHook name session
+
+isProtectedValueHook :: Text -> EvaluationSession -> Bool
+isProtectedValueHook name session =
+  resolvedSymbolStorageName name session
+    `elem` [ "$PreRead"
+           , "$Pre"
+           , "$Post"
+           , "$PrePrint"
+           , "$MessagePrePrint"
+           ]
+
+setSymbolAttributes
+  :: Text
+  -> Set.Set SymbolAttribute
+  -> EvaluationSession
+  -> EvaluationSession
+setSymbolAttributes name attributes =
+  modifySymbolState
+    name
+    ( \state ->
+        state
+          { symbolKnown = True
+          , symbolAttributeOverride = Just attributes
+          }
+    )
+
+isKnownSessionSymbol :: Text -> EvaluationSession -> Bool
+isKnownSessionSymbol name session =
+  isSystemSymbol name
+    || symbolKnown (symbolStateFor name session)
 
 symbolName :: Expr -> Maybe Text
 symbolName (Symbol name) = Just name
