@@ -19,7 +19,7 @@ module Tungsten.Evaluate
   ) where
 
 import Control.Monad (foldM)
-import Data.Char (isDigit)
+import Data.Char (isDigit, toUpper)
 import Data.List (permutations, sortBy, transpose)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
@@ -169,6 +169,18 @@ reduceCall expression = case expression of
     reduceBuiltin "Select" [subject, criterion]
   Call (Call (Symbol "Discard") [criterion]) [subject] ->
     reduceBuiltin "Discard" [subject, criterion]
+  Call (Call (Symbol "StringContainsQ") [patternExpression]) [subject] ->
+    reduceBuiltin "StringContainsQ" [subject, patternExpression]
+  Call (Call (Symbol "StringMatchQ") [patternExpression]) [subject] ->
+    reduceBuiltin "StringMatchQ" [subject, patternExpression]
+  Call (Call (Symbol "StringFreeQ") [patternExpression]) [subject] ->
+    reduceBuiltin "StringFreeQ" [subject, patternExpression]
+  Call (Call (Symbol "StringStartsQ") [patternExpression]) [subject] ->
+    reduceBuiltin "StringStartsQ" [subject, patternExpression]
+  Call (Call (Symbol "StringEndsQ") [patternExpression]) [subject] ->
+    reduceBuiltin "StringEndsQ" [subject, patternExpression]
+  Call (Call (Symbol "StringPosition") [patternExpression]) [subject] ->
+    reduceBuiltin "StringPosition" [subject, patternExpression]
   Call (Symbol headName) values -> reduceBuiltin headName values
   _ -> Right expression
 
@@ -214,6 +226,29 @@ reduceBuiltin headName values = case headName of
   "IntegerQ" -> Right (unary headName (boolean . isInteger) values)
   "NumberQ" -> Right (unary headName (boolean . isNumber) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
+  "Characters" -> reduceCharacters values
+  "StringLength" -> reduceStringLength values
+  "StringTake" -> reduceStringTakeDrop True values
+  "StringDrop" -> reduceStringTakeDrop False values
+  "StringJoin" -> reduceStringJoin values
+  "StringInsert" -> reduceStringInsert values
+  "StringReverse" -> reduceStringUnary "StringReverse" T.reverse values
+  "ToUpperCase" -> reduceStringUnary "ToUpperCase" T.toUpper values
+  "ToLowerCase" -> reduceStringUnary "ToLowerCase" T.toLower values
+  "Capitalize" -> reduceStringUnary "Capitalize" capitalizeText values
+  "StringRepeat" -> reduceStringRepeat values
+  "StringPadLeft" -> reduceStringPad True values
+  "StringPadRight" -> reduceStringPad False values
+  "StringSplit" -> reduceStringSplit values
+  "StringRiffle" -> reduceStringRiffle values
+  "StringTrim" -> reduceStringTrim values
+  "StringCount" -> reduceStringCount values
+  "StringPosition" -> reduceStringPosition values
+  "StringContainsQ" -> reduceStringPredicate StringContains values
+  "StringMatchQ" -> reduceStringPredicate StringMatches values
+  "StringFreeQ" -> reduceStringPredicate StringFree values
+  "StringStartsQ" -> reduceStringPredicate StringStarts values
+  "StringEndsQ" -> reduceStringPredicate StringEnds values
   "EvenQ" -> Right (reduceParity True headName values)
   "OddQ" -> Right (reduceParity False headName values)
   "First" -> Right (reduceFirstLast True headName values)
@@ -904,6 +939,486 @@ reduceNot :: [Expr] -> Expr
 reduceNot [Symbol "True"] = Symbol "False"
 reduceNot [Symbol "False"] = Symbol "True"
 reduceNot values = Call (Symbol "Not") values
+
+stringThread
+  :: Text
+  -> (Text -> Either EvaluationError Expr)
+  -> Expr
+  -> Either EvaluationError Expr
+stringThread operation scalar = go
+ where
+  go (String value) = scalar value
+  go (Call (Symbol "List") values) = evaluatedList <$> traverse go values
+  go _ = Left (EvaluationError (operation <> " expects a string or a list of strings."))
+
+reduceCharacters :: [Expr] -> Either EvaluationError Expr
+reduceCharacters = \case
+  [expression] ->
+    stringThread
+      "Characters"
+      (Right . evaluatedList . map (String . T.singleton) . T.unpack)
+      expression
+  _ -> Left (EvaluationError "Characters expects exactly one argument.")
+
+reduceStringLength :: [Expr] -> Either EvaluationError Expr
+reduceStringLength = \case
+  [expression] ->
+    stringThread
+      "StringLength"
+      (Right . Integer . fromIntegral . T.length)
+      expression
+  _ -> Left (EvaluationError "StringLength expects exactly one argument.")
+
+reduceStringUnary
+  :: Text
+  -> (Text -> Text)
+  -> [Expr]
+  -> Either EvaluationError Expr
+reduceStringUnary operation transform = \case
+  [expression] ->
+    stringThread operation (Right . String . transform) expression
+  _ -> Left (EvaluationError (operation <> " expects exactly one argument."))
+
+capitalizeText :: Text -> Text
+capitalizeText value = case T.uncons value of
+  Nothing -> value
+  Just (firstCharacter, remaining) -> T.cons (toUpper firstCharacter) remaining
+
+reduceStringTakeDrop :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceStringTakeDrop takeMode = \case
+  [expression, specification] ->
+    stringThread operation (slice specification) expression
+  _ -> Left (EvaluationError (operation <> " expects exactly two arguments."))
+ where
+  operation = if takeMode then "StringTake" else "StringDrop"
+  slice specification value = do
+    indices <- stringSelectorIndices operation (T.length value) specification
+    let characters' = T.unpack value
+        selected
+          | takeMode = [character | (index, character) <- zip [0 ..] characters', index `elem` indices]
+          | otherwise = [character | (index, character) <- zip [0 ..] characters', index `notElem` indices]
+    Right (String (T.pack selected))
+
+stringSelectorIndices :: Text -> Int -> Expr -> Either EvaluationError [Int]
+stringSelectorIndices operation count specification = case specification of
+  Integer amount
+    | amount >= 0
+    , amount <= fromIntegral count -> Right [0 .. fromIntegral amount - 1]
+    | amount < 0
+    , abs amount <= fromIntegral count ->
+        Right [count - fromIntegral (abs amount) .. count - 1]
+    | otherwise -> invalid
+  Symbol "All" -> Right [0 .. count - 1]
+  Call (Symbol "UpTo") [Integer amount]
+    | amount >= 0 -> Right [0 .. min count (fromIntegral amount) - 1]
+    | otherwise ->
+        let retained = min count (fromIntegral (abs amount))
+         in Right [count - retained .. count - 1]
+  spanSpecification@(Call (Symbol "Span") _) -> spanIndices spanSpecification
+  Call (Symbol "List") [Integer position] ->
+    maybe invalid (Right . pure) (resolvePosition count position)
+  Call (Symbol "List") [Symbol "All"] -> Right [0 .. count - 1]
+  Call (Symbol "List") [upTo@(Call (Symbol "UpTo") _)] ->
+    stringSelectorIndices operation count upTo
+  Call (Symbol "List") values
+    | length values `elem` [2, 3] ->
+        spanIndices (Call (Symbol "Span") values)
+  _ -> invalid
+ where
+  invalid =
+    Left
+      ( EvaluationError
+          ("Unsupported " <> operation <> " specification: " <> inputForm specification <> ".")
+      )
+  spanIndices spanSpecification = do
+    positions <- expandPartSpan count spanSpecification
+    maybe invalid Right (traverse (resolvePosition count) positions)
+
+reduceStringJoin :: [Expr] -> Either EvaluationError Expr
+reduceStringJoin values = String . T.concat <$> (concat <$> traverse flatten values)
+ where
+  flatten (String value) = Right [value]
+  flatten (Call (Symbol "List") nested) = concat <$> traverse flatten nested
+  flatten _ = Left (EvaluationError "StringJoin expects strings or nested lists of strings.")
+
+reduceStringInsert :: [Expr] -> Either EvaluationError Expr
+reduceStringInsert = \case
+  [expression, String insertion, positions] ->
+    stringThread "StringInsert" (insert positions insertion) expression
+  [_, _, _] ->
+    Left (EvaluationError "StringInsert expects the inserted value to be a string.")
+  _ ->
+    Left
+      ( EvaluationError
+          "StringInsert expects a source string, an insertion string, and positions."
+      )
+ where
+  insert positions insertion value = do
+    resolved <- stringInsertPositions (T.length value) positions
+    let counts = Map.fromListWith (+) [(index, 1 :: Int) | index <- resolved]
+        characters' = T.unpack value
+        pieces =
+          concat
+            [ replicate (Map.findWithDefault 0 index counts) insertion
+                <> if index < length characters'
+                  then [T.singleton (characters' !! index)]
+                  else []
+            | index <- [0 .. length characters']
+            ]
+    Right (String (T.concat pieces))
+
+stringInsertPositions :: Int -> Expr -> Either EvaluationError [Int]
+stringInsertPositions count = \case
+  Integer position -> pure <$> resolveInsert position
+  Call (Symbol "List") positions -> traverse requirePosition positions
+  _ ->
+    Left
+      ( EvaluationError
+          "StringInsert expects an integer position or a list of integer positions."
+      )
+ where
+  requirePosition (Integer position) = resolveInsert position
+  requirePosition _ =
+    Left (EvaluationError "StringInsert position lists must contain only integers.")
+  resolveInsert position
+    | position > 0
+    , position <= fromIntegral count + 1 = Right (fromIntegral position - 1)
+    | position < 0
+    , position >= negate (fromIntegral count) - 1 =
+        Right (count + fromIntegral position + 1)
+    | position == 0 =
+        Left (EvaluationError "StringInsert positions must be nonzero integers.")
+    | otherwise =
+        Left
+          ( EvaluationError
+              ( "StringInsert position "
+                  <> T.pack (show position)
+                  <> " is out of range for length "
+                  <> T.pack (show count)
+                  <> "."
+              )
+          )
+
+reduceStringRepeat :: [Expr] -> Either EvaluationError Expr
+reduceStringRepeat values = case values of
+  [expression, countExpression] -> repeatString expression countExpression Nothing
+  [expression, countExpression, targetExpression] ->
+    repeatString expression countExpression (Just targetExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          "StringRepeat expects a string, a count, and an optional target length."
+      )
+ where
+  repeatString expression countExpression targetExpression = do
+    count <- requireNonnegativeInt "StringRepeat expects a non-negative integer count." countExpression
+    target <- traverse (requireNonnegativeInt "StringRepeat expects a non-negative integer target length.") targetExpression
+    stringThread "StringRepeat" (repeatScalar count target) expression
+  repeatScalar count target value = case target of
+    Nothing -> Right (String (T.replicate count value))
+    Just targetLength
+      | T.null value && targetLength > 0 ->
+          Left
+            ( EvaluationError
+                "StringRepeat cannot pad an empty string to a positive length."
+            )
+      | T.null value -> Right (String "")
+      | otherwise ->
+          let needed = ceilingDiv targetLength (T.length value)
+           in Right (String (T.take targetLength (T.replicate (max count needed) value)))
+
+reduceStringPad :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceStringPad leftMode values = case values of
+  [expression, targetExpression] -> pad expression targetExpression (String " ")
+  [expression, targetExpression, paddingExpression] ->
+    pad expression targetExpression paddingExpression
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " expects a string, a target length, and an optional padding."
+          )
+      )
+ where
+  operation = if leftMode then "StringPadLeft" else "StringPadRight"
+  pad expression targetExpression paddingExpression = do
+    target <-
+      requireNonnegativeInt
+        (operation <> " expects a non-negative integer target length.")
+        targetExpression
+    padding <- case paddingExpression of
+      String value -> Right value
+      _ -> Left (EvaluationError (operation <> " currently expects a string padding value."))
+    if T.null padding
+      then Left (EvaluationError "String padding character must be a non-empty string.")
+      else stringThread operation (Right . String . padText target padding) expression
+  padText target padding value
+    | T.length value >= target =
+        if leftMode
+          then T.drop (T.length value - target) value
+          else T.take target value
+    | otherwise =
+        let needed = target - T.length value
+            block = T.take needed (T.replicate (ceilingDiv needed (T.length padding)) padding)
+         in if leftMode then block <> value else value <> block
+
+requireNonnegativeInt :: Text -> Expr -> Either EvaluationError Int
+requireNonnegativeInt message = \case
+  Integer value
+    | value >= 0
+    , value <= fromIntegral (maxBound :: Int) -> Right (fromIntegral value)
+  _ -> Left (EvaluationError message)
+
+ceilingDiv :: Int -> Int -> Int
+ceilingDiv numerator denominator
+  | numerator <= 0 = 0
+  | otherwise = (numerator + denominator - 1) `div` denominator
+
+reduceStringSplit :: [Expr] -> Either EvaluationError Expr
+reduceStringSplit = \case
+  [expression] ->
+    stringThread
+      "StringSplit"
+      (Right . evaluatedList . map String . T.words)
+      expression
+  [expression, separatorExpression] -> do
+    separators <- stringSeparators separatorExpression
+    stringThread
+      "StringSplit"
+      (Right . evaluatedList . map String . filter (not . T.null) . splitOnLiterals separators)
+      expression
+  _ ->
+    Left
+      ( EvaluationError
+          "StringSplit currently expects a string and an optional separator."
+      )
+
+stringSeparators :: Expr -> Either EvaluationError [Text]
+stringSeparators = \case
+  String value -> Right [value]
+  Call (Symbol "List") values -> traverse requireString values
+  _ ->
+    Left
+      ( EvaluationError
+          "StringSplit currently expects a literal-string separator or a list of them."
+      )
+ where
+  requireString (String value) = Right value
+  requireString _ =
+    Left
+      ( EvaluationError
+          "StringSplit currently expects literal-string separators."
+      )
+
+splitOnLiterals :: [Text] -> Text -> [Text]
+splitOnLiterals separators source = go source
+ where
+  retainedSeparators = filter (not . T.null) separators
+  go remaining = case nextSeparator remaining retainedSeparators of
+    Nothing -> [remaining]
+    Just (prefix, separator) ->
+      prefix : go (T.drop (T.length prefix + T.length separator) remaining)
+
+nextSeparator :: Text -> [Text] -> Maybe (Text, Text)
+nextSeparator source = foldl' choose Nothing
+ where
+  choose best separator =
+    let (prefix, suffix) = T.breakOn separator source
+     in if T.null suffix
+          then best
+          else case best of
+            Nothing -> Just (prefix, separator)
+            Just (bestPrefix, bestSeparator)
+              | T.length prefix < T.length bestPrefix -> Just (prefix, separator)
+              | T.length prefix == T.length bestPrefix
+              , T.length separator > T.length bestSeparator -> Just (prefix, separator)
+              | otherwise -> best
+
+reduceStringRiffle :: [Expr] -> Either EvaluationError Expr
+reduceStringRiffle values = case values of
+  [expression] -> riffle expression "" " " ""
+  [expression, String separator] -> riffle expression "" separator ""
+  [ expression
+    , Call (Symbol "List") [String leftDelimiter, String separator, String rightDelimiter]
+    ] -> riffle expression leftDelimiter separator rightDelimiter
+  [_, _] ->
+    Left
+      ( EvaluationError
+          "StringRiffle currently expects a string separator or a {left, sep, right} triple of strings."
+      )
+  _ ->
+    Left
+      ( EvaluationError
+          "StringRiffle expects a list and an optional separator or {l, sep, r} triple."
+      )
+ where
+  riffle (Call (Symbol "List") items) leftDelimiter separator rightDelimiter = do
+    rendered <- traverse (renderItem separator) items
+    Right (String (leftDelimiter <> T.intercalate separator rendered <> rightDelimiter))
+  riffle _ _ _ _ = Left (EvaluationError "StringRiffle expects a List as the first argument.")
+  renderItem _ (String value) = Right value
+  renderItem _ (Integer value) = Right (T.pack (show value))
+  renderItem separator (Call (Symbol "List") items) = do
+    values' <- traverse requireString items
+    Right (T.intercalate separator values')
+  renderItem _ _ =
+    Left
+      ( EvaluationError
+          "StringRiffle expects items convertible to strings; non-string items beyond integers are not yet supported."
+      )
+  requireString (String value) = Right value
+  requireString _ =
+    Left
+      ( EvaluationError
+          "StringRiffle expects items convertible to strings; non-string items beyond integers are not yet supported."
+      )
+
+reduceStringTrim :: [Expr] -> Either EvaluationError Expr
+reduceStringTrim = \case
+  [expression] ->
+    stringThread "StringTrim" (Right . String . T.strip) expression
+  [expression, String patternText] ->
+    stringThread "StringTrim" (Right . String . trimLiteral patternText) expression
+  [_, _] ->
+    Left
+      ( EvaluationError
+          "StringTrim currently expects a literal-string trim pattern."
+      )
+  _ ->
+    Left
+      ( EvaluationError
+          "StringTrim expects a string and an optional literal-string trim pattern."
+      )
+
+trimLiteral :: Text -> Text -> Text
+trimLiteral patternText source
+  | T.null patternText = source
+  | otherwise = trimEnd (trimStart source)
+ where
+  trimStart value = case T.stripPrefix patternText value of
+    Just remaining -> trimStart remaining
+    Nothing -> value
+  trimEnd value = case T.stripSuffix patternText value of
+    Just remaining -> trimEnd remaining
+    Nothing -> value
+
+reduceStringCount :: [Expr] -> Either EvaluationError Expr
+reduceStringCount = \case
+  [expression, patternExpression] -> do
+    patterns <- literalStringPatterns "StringCount" patternExpression
+    stringThread
+      "StringCount"
+      ( \value ->
+          Right
+            ( Integer
+                ( sum
+                    [ if T.null patternText
+                        then 0
+                        else fromIntegral (T.count patternText value)
+                    | patternText <- patterns
+                    ]
+                )
+            )
+      )
+      expression
+  _ ->
+    Left
+      ( EvaluationError
+          "StringCount expects a string and a literal-string pattern."
+      )
+
+data StringPredicateMode
+  = StringContains
+  | StringMatches
+  | StringFree
+  | StringStarts
+  | StringEnds
+
+reduceStringPredicate
+  :: StringPredicateMode
+  -> [Expr]
+  -> Either EvaluationError Expr
+reduceStringPredicate mode values = case values of
+  [_] -> Right (Call (Symbol operation) values)
+  [expression, patternExpression] -> do
+    patterns <- literalStringPatterns operation patternExpression
+    stringThread operation (Right . boolean . predicate patterns) expression
+  _ -> Left (EvaluationError (operation <> " expects a string and a pattern."))
+ where
+  operation = case mode of
+    StringContains -> "StringContainsQ"
+    StringMatches -> "StringMatchQ"
+    StringFree -> "StringFreeQ"
+    StringStarts -> "StringStartsQ"
+    StringEnds -> "StringEndsQ"
+  predicate patterns value = case mode of
+    StringContains -> any (`T.isInfixOf` value) patterns
+    StringMatches -> any (== value) patterns
+    StringFree -> all (not . (`T.isInfixOf` value)) patterns
+    StringStarts -> any (`T.isPrefixOf` value) patterns
+    StringEnds -> any (`T.isSuffixOf` value) patterns
+
+literalStringPatterns :: Text -> Expr -> Either EvaluationError [Text]
+literalStringPatterns operation = \case
+  String value -> Right [value]
+  Call (Symbol "List") values -> traverse requireString values
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " currently expects literal-string patterns.")
+      )
+ where
+  requireString (String value) = Right value
+  requireString _ =
+    Left
+      ( EvaluationError
+          (operation <> " currently expects literal-string patterns.")
+      )
+
+reduceStringPosition :: [Expr] -> Either EvaluationError Expr
+reduceStringPosition values = case values of
+  [_] -> Right (Call (Symbol "StringPosition") values)
+  [expression, patternExpression] -> positions expression patternExpression Nothing
+  [expression, patternExpression, limitExpression] ->
+    positions expression patternExpression (Just limitExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          "StringPosition expects a string, a pattern, and an optional match limit."
+      )
+ where
+  positions expression patternExpression limitExpression = do
+    patterns <- literalStringPatterns "StringPosition" patternExpression
+    limit <- normalizeStringMatchLimit limitExpression
+    stringThread
+      "StringPosition"
+      (Right . evaluatedList . map pair . takeLimit limit . literalPositions patterns)
+      expression
+  pair (start, end) = evaluatedList [Integer start, Integer end]
+  takeLimit Nothing = id
+  takeLimit (Just count) = take count
+
+normalizeStringMatchLimit :: Maybe Expr -> Either EvaluationError (Maybe Int)
+normalizeStringMatchLimit Nothing = Right Nothing
+normalizeStringMatchLimit (Just (Symbol "Infinity")) = Right Nothing
+normalizeStringMatchLimit (Just expression) =
+  Just <$> requireNonnegativeInt "Match limits must be non-negative integers or Infinity." expression
+
+literalPositions :: [Text] -> Text -> [(Integer, Integer)]
+literalPositions patterns source =
+  concat
+    [ [ (fromIntegral start + 1, fromIntegral start + fromIntegral (T.length patternText))
+      | patternText <- patterns
+      , literalMatchesAt source start patternText
+      ]
+    | start <- [0 .. T.length source]
+    ]
+
+literalMatchesAt :: Text -> Int -> Text -> Bool
+literalMatchesAt source start patternText
+  | T.null patternText = start <= T.length source
+  | start >= T.length source = False
+  | otherwise = patternText `T.isPrefixOf` T.drop start source
 
 reduceEquality :: Bool -> [Expr] -> Expr
 reduceEquality True values

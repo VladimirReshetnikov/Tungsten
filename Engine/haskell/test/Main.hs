@@ -470,6 +470,7 @@ checkFullFormParser = do
         , ("complex atom", "Complex[Rational[1, 2], -3]", Complex (Rational 1 2) (Integer (-3)))
         , ("escaped string", "\"line\\n snowman \\:2603 face \\|01f600\"", String "line\n snowman ☃ face 😀")
         , ("parenthesized head", "(f)[x]", Call (Symbol "f") [Symbol "x"])
+        , ("comment-only input", "(* comment *)", Symbol "Null")
         ]
   and
     <$> traverse
@@ -488,6 +489,7 @@ checkInputFormParser :: IO Bool
 checkInputFormParser = do
   let cases =
         [ ("implicit multiplication and power", "1 + 2 x^3", "Plus[1, Times[2, Power[x, 3]]]")
+        , ("numeric adjacency", "2x", "Times[2, x]")
         , ("exact division", "1/6 + 1/3", "Plus[Rational[1, 6], Rational[1, 3]]")
         , ("right associative power", "a^b^c", "Power[a, Power[b, c]]")
         , ("unary minus precedence", "-x^2", "Times[-1, Power[x, 2]]")
@@ -514,6 +516,12 @@ checkInputFormParser = do
         , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
         , ("association", "<|a -> 1, b :> 2|>", "Association[Rule[a, 1], RuleDelayed[b, 2]]")
         , ("pattern test", "x_?IntegerQ", "PatternTest[Pattern[x, Blank[]], IntegerQ]")
+        , ("left-associated pattern tests", "x_?f?g", "PatternTest[PatternTest[Pattern[x, Blank[]], f], g]")
+        , ("optional blank", "{_., x_.}", "List[Optional[Blank[]], Optional[Pattern[x, Blank[]]]]")
+        , ("non-symbol blank adjacency", "{1_, f[x]_, %_, x::arg_}", "List[Times[1, Blank[]], Times[f[x], Blank[]], Times[Out[], Blank[]], Times[MessageName[x, \"arg\"], Blank[]]]")
+        , ("anonymous function call head", "a &[x]", "Function[a][x]")
+        , ("comment-only input", "(* comment *)", "Null")
+        , ("line continuation", "a\\\n+b", "Plus[a, b]")
         , ("optional pattern default", "f[x_Integer:7]", "f[Optional[Pattern[x, Blank[Integer]], 7]]")
         , ("named pattern sequence", "x:PatternSequence[a_, b_]", "Pattern[x, PatternSequence[Pattern[a, Blank[]], Pattern[b, Blank[]]]]")
         , ("repeated postfix", "patt..", "Repeated[patt]")
@@ -533,7 +541,10 @@ checkInputFormParserErrors = do
   first <- assertLeft "reject incomplete InputForm call" (parseInputForm "f[1")
   second <- assertLeft "reject incomplete InputForm operator" (parseInputForm "1 +")
   third <- assertLeft "reject malformed InputForm part" (parseInputForm "x[[1]")
-  pure (and [first, second, third])
+  fourth <- assertLeft "reject optional sequence blank" (parseInputForm "x__.")
+  fifth <- assertLeft "reject optional null-sequence blank" (parseInputForm "x___.")
+  sixth <- assertLeft "reject optional typed blank" (parseInputForm "_Integer.")
+  pure (and [first, second, third, fourth, fifth, sixth])
 
 checkEvaluator :: IO Bool
 checkEvaluator = do
@@ -571,6 +582,11 @@ checkEvaluator = do
         , ("part selector lists preserve heads", "{Part[f[a,b,c],{1,3}], Part[<|a->1,b->2,c->3|>,{2,1}]}", "List[f[a, c], Association[Rule[b, 2], Rule[a, 1]]]")
         , ("part nested all span and recursive selectors", "{Part[f[a,b],{{1},2}], Part[f[a,b,c],All], Part[f[a,b,c,d],2;;4;;2], Part[f[g[a,b],h[c,d]],All,2], Part[<|a->1,b->2,c->3|>,Span[1,2]]}", "List[f[a, b], f[a, b, c], f[b, d], f[b, d], Association[Rule[a, 1], Rule[b, 2]]]")
         , ("head and predicates", "{Head[1/2], AtomQ[1/2], ListQ[{x}], IntegerQ[2], NumberQ[2/3], StringQ[\"x\"]}", "List[Rational, True, True, True, True, True]")
+        , ("string structural operations", "{Characters[\"abc\"], Characters[{\"ab\", \"c\"}], StringLength[{\"ab\", \"c\"}], StringJoin[{\"a\", {\"b\", \"c\"}}], StringInsert[\"abcd\", \"X\", {2, 4}], StringReverse[{\"ab\", \"cd\"}]}", "List[List[\"a\", \"b\", \"c\"], List[List[\"a\", \"b\"], List[\"c\"]], List[2, 1], \"abc\", \"aXbcXd\", List[\"ba\", \"dc\"]]")
+        , ("string case repeat and padding", "{ToUpperCase[\"hello\"], ToLowerCase[\"WORLD\"], Capitalize[\"hello world\"], StringRepeat[\"ab\", 3], StringRepeat[\"ab\", 1, 5], StringPadLeft[\"abc\", 6, \"0\"], StringPadRight[\"abc\", 6, \"*\"]}", "List[\"HELLO\", \"world\", \"Hello world\", \"ababab\", \"ababa\", \"000abc\", \"abc***\"]")
+        , ("string split riffle count and trim", "{StringSplit[\"a:b;c\", {\":\", \";\"}], StringSplit[\"  hello   world  \"], StringRiffle[{\"a\", \"b\", \"c\"}, {\"<\", \"+\", \">\"}], StringCount[\"abcabcabc\", \"a\"], StringTrim[\"abcXYZdef\", \"abc\"]}", "List[List[\"a\", \"b\", \"c\"], List[\"hello\", \"world\"], \"<a+b+c>\", 3, \"XYZdef\"]")
+        , ("literal string predicates and operator form", "{StringContainsQ[{\"ab\", \"cd\"}, \"a\"], StringFreeQ[\"catalog\", \"7\"], StringStartsQ[\"abc\", \"a\"], StringEndsQ[\"abc\", \"c\"], StringMatchQ[\"abc\", \"abc\"], Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]}", "List[List[True, False], True, True, True, True, List[\"ab\", \"ba\"]]")
+        , ("string selectors and literal positions", "{StringTake[\"abcdef\", {2, 5, 2}], StringTake[\"abc\", UpTo[5]], StringTake[{\"abc\", \"def\"}, 2], StringDrop[\"abcdef\", {2, 5, 2}], StringPosition[\"ababa\", {\"ba\", \"aba\"}], StringPosition[\"abc\", \"\"]}", "List[\"bd\", \"abc\", List[\"ab\", \"de\"], \"acef\", List[List[1, 3], List[2, 3], List[3, 5], List[4, 5]], List[List[1, 0], List[2, 1], List[3, 2], List[4, 3]]]")
         , ("map", "Map[f, {1, 2, 3}]", "List[f[1], f[2], f[3]]")
         , ("apply", "Apply[f, {1, 2, 3}]", "f[1, 2, 3]")
         , ("take positive", "Take[f[a, b, c, d], 2]", "f[a, b]")
@@ -1084,12 +1100,15 @@ checkEvaluationSession = do
         , ("SelectFirst holds an unused default", "y = 0; {SelectFirst[{a}, True &, y = y + 1], y}", "List[a, 0]")
         , ("SelectFirst returns an unevaluated default", "y = 0; {SelectFirst[{a}, False &, y = y + 1], y, SelectFirst[{a}, False &, 1 + 2]}", "List[Set[y, Plus[y, 1]], 0, Plus[1, 2]]")
         , ("map callbacks thread session state", "y = 0; {Map[Function[x, y = y + 1; x], {a, b}], y}", "List[List[a, b], 2]")
+        , ("map level specifications", "{Map[f, {a, b}, {0}], Map[f, {a, {b, c}}, {2}], Map[f, {a, {b, c}}, {1, 2}]}", "List[f[List[a, b]], List[a, List[f[b], f[c]]], List[f[a], f[List[f[b], f[c]]]]]")
+        , ("apply level specifications", "{Apply[f, {a, b}, {0}], Apply[f, {a, {b, c}}, {2}], Apply[f, {a, {b, c}}, {1, 2}]}", "List[f[a, b], List[a, List[b, c]], List[a, f[b, c]]]")
         , ("map normalizes generated Nothing", "Map[Nothing &, {a, b}]", "List[]")
         , ("Nothing is callable during mapping", "Map[Nothing, {a, b}]", "List[]")
         , ("associations are callable during mapping", "Map[<|a -> 1, b -> 2|>, {a, b, c}]", "List[1, 2, Missing[\"KeyAbsent\", c]]")
         , ("map normalizes generated Sequence", "f[x_] := Sequence[x, q]; Map[f, {a, b}]", "List[a, q, b, q]")
         , ("map at normalizes generated Nothing", "MapAt[Nothing &, {a, b}, 1]", "List[b]")
         , ("map at resolves negative positions before ordering callbacks", "y = 0; {MapAt[Function[x, y = y + 1], {a, b}, {{-1}, {1}}], y}", "List[List[2, 1], 2]")
+        , ("map at expands exact selector components", "{MapAt[f, {a, b, c}, {All}], MapAt[f, {a, b, c}, {2 ;; 3}], MapAt[f, {a, b, c}, {{{1, 3}}}], MapAt[f, <|a -> 1, b -> 2, c -> 3|>, {{{Key[a], Key[c]}}}]}", "List[List[f[a], f[b], f[c]], List[a, f[b], f[c]], List[f[a], b, f[c]], Association[Rule[a, f[1]], Rule[b, 2], Rule[c, f[3]]]]")
         , ("association callbacks thread session state", "y = 0; {KeyValueMap[Function[{k, v}, y = y + 1; HoldComplete[k, v]], <|a -> 1, b -> 2|>], y}", "List[List[HoldComplete[a, 1], HoldComplete[b, 2]], 2]")
         , ("association Nothing keys normalize by last value", "{<|Nothing -> 1, Nothing -> 2|>, KeyMap[Nothing &, <|a -> 1, b -> 2|>]}", "List[Association[Rule[Nothing, 2]], Association[Rule[Nothing, 2]]]")
         , ("sort keys thread session state", "y = 0; {SortBy[{b, a}, Function[x, y = y + 1; x]], y}", "List[List[a, b], 2]")

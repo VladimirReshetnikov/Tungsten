@@ -469,7 +469,18 @@ evaluateSessionMap depth session = \case
     Just collection -> do
       (mapped, updated) <- mapItems function [] session (sessionCollectionItems collection)
       Right (rebuildSessionCollection collection mapped, updated)
-  values@[_, _, _] -> Right (Call (Symbol "Map") values, session)
+  [function, subject, levelSpecification] -> do
+    (bounds, boundsSession) <-
+      liftSessionLevelBounds
+        session
+        levelSpecification
+    evaluateSessionMapLevels
+      depth
+      function
+      bounds
+      0
+      boundsSession
+      subject
   _ ->
     sessionFailure
       session
@@ -557,11 +568,218 @@ evaluateSessionApply depth session = \case
         session
         function
         (map sessionItemValue (sessionCollectionItems collection))
-  values@[_, _, _] -> Right (Call (Symbol "Apply") values, session)
+  [function, subject, levelSpecification] -> do
+    (bounds, boundsSession) <-
+      liftSessionLevelBounds
+        session
+        levelSpecification
+    evaluateSessionApplyLevels
+      depth
+      function
+      bounds
+      0
+      boundsSession
+      subject
   _ ->
     sessionFailure
       session
       "Apply expects a head, an expression, and an optional level specification."
+
+data SessionLevelBounds = SessionLevelBounds !Int !Int
+  deriving (Eq, Show)
+
+sessionLevelInfinity :: Int
+sessionLevelInfinity = maxBound `div` 4
+
+liftSessionLevelBounds
+  :: EvaluationSession
+  -> Expr
+  -> SessionResult SessionLevelBounds
+liftSessionLevelBounds session specification =
+  case normalizeSessionLevelSpec specification of
+    Left message -> sessionFailure session message
+    Right bounds -> Right (bounds, session)
+
+normalizeSessionLevelSpec :: Expr -> Either Text SessionLevelBounds
+normalizeSessionLevelSpec specification = case specification of
+  Integer level
+    | level >= 0 ->
+        Right
+          ( SessionLevelBounds
+              (if level == 0 then 0 else 1)
+              (boundedSessionLevel level)
+          )
+    | otherwise ->
+        Right (SessionLevelBounds 1 (boundedSessionLevel level))
+  Symbol "Infinity" -> Right (SessionLevelBounds 1 sessionLevelInfinity)
+  Call (Symbol "List") [bound] -> do
+    value <- normalizeSessionLevelBound bound
+    Right (SessionLevelBounds value value)
+  Call (Symbol "List") [lower, upper]
+    | isSessionLevelBound lower
+    , isSessionLevelBound upper ->
+        SessionLevelBounds
+          <$> normalizeSessionLevelBound lower
+          <*> normalizeSessionLevelBound upper
+  _ ->
+    Left
+      ( "Unsupported Level specification: '"
+          <> inputForm specification
+          <> "'."
+      )
+
+normalizeSessionLevelBound :: Expr -> Either Text Int
+normalizeSessionLevelBound = \case
+  Integer value -> Right (boundedSessionLevel value)
+  Symbol "Infinity" -> Right sessionLevelInfinity
+  value -> Left ("Unsupported level bound: " <> inputForm value <> ".")
+
+isSessionLevelBound :: Expr -> Bool
+isSessionLevelBound Integer {} = True
+isSessionLevelBound (Symbol "Infinity") = True
+isSessionLevelBound _ = False
+
+boundedSessionLevel :: Integer -> Int
+boundedSessionLevel value
+  | value > fromIntegral sessionLevelInfinity = sessionLevelInfinity
+  | value < fromIntegral (negate sessionLevelInfinity) = negate sessionLevelInfinity
+  | otherwise = fromIntegral value
+
+sessionLevelMatches :: SessionLevelBounds -> Int -> Expr -> Bool
+sessionLevelMatches (SessionLevelBounds lower upper) positive expression
+  | lower >= 0 && upper >= 0 = lower <= positive && positive <= upper
+  | lower < 0 && upper < 0 = lower <= negative && negative <= upper
+  | lower >= 0 && upper < 0 = positive >= lower && negative <= upper
+  | otherwise = negative >= lower || positive <= upper
+ where
+  negative = negate (sessionExpressionDepth expression)
+
+sessionExpressionDepth :: Expr -> Int
+sessionExpressionDepth (SparseArray dimensions _ _) = length dimensions + 1
+sessionExpressionDepth expression
+  | Just collection <- sessionOrderedCollection expression
+  , sessionCollectionAssociation collection =
+      case map sessionItemValue (sessionCollectionItems collection) of
+        [] -> 2
+        values -> 1 + maximum (map sessionExpressionDepth values)
+sessionExpressionDepth (Call _ []) = 2
+sessionExpressionDepth (Call _ values) =
+  1 + maximum (map sessionExpressionDepth values)
+sessionExpressionDepth _ = 1
+
+evaluateSessionMapLevels
+  :: Int
+  -> Expr
+  -> SessionLevelBounds
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionMapLevels depth function bounds positive session expression =
+  case sessionOrderedCollection expression of
+    Just collection
+      | sessionCollectionAssociation collection -> do
+          (mappedItems, updated) <-
+            walkItems [] session (sessionCollectionItems collection)
+          let rebuilt = rebuildSessionCollection collection mappedItems
+          if sessionLevelMatches bounds positive expression
+            then evaluateSessionCallable depth updated function [rebuilt]
+            else Right (rebuilt, updated)
+    _ -> case expression of
+      Call expressionHead values -> do
+        (mappedValues, updated) <- walkValues [] session values
+        let rebuilt = normalizeEvaluatedCall expressionHead mappedValues
+        if sessionLevelMatches bounds positive expression
+          then evaluateSessionCallable depth updated function [rebuilt]
+          else Right (rebuilt, updated)
+      _
+        | sessionLevelMatches bounds positive expression ->
+            evaluateSessionCallable depth session function [expression]
+        | otherwise -> Right (expression, session)
+ where
+  walkItems retained currentSession [] = Right (retained, currentSession)
+  walkItems retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      evaluateSessionMapLevels
+        depth
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        (sessionItemValue item)
+    walkItems
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  walkValues retained currentSession [] = Right (retained, currentSession)
+  walkValues retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      evaluateSessionMapLevels
+        depth
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        value
+    walkValues (retained <> [mapped]) updated rest
+
+evaluateSessionApplyLevels
+  :: Int
+  -> Expr
+  -> SessionLevelBounds
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionApplyLevels depth function bounds positive session expression =
+  case sessionOrderedCollection expression of
+    Just collection
+      | sessionCollectionAssociation collection -> do
+          (mappedItems, updated) <-
+            walkItems [] session (sessionCollectionItems collection)
+          if sessionLevelMatches bounds positive expression
+            then
+              evaluateSessionCallable
+                depth
+                updated
+                function
+                (map sessionItemValue mappedItems)
+            else Right (rebuildSessionCollection collection mappedItems, updated)
+    _ -> case expression of
+      Call expressionHead values -> do
+        (mappedValues, updated) <- walkValues [] session values
+        if sessionLevelMatches bounds positive expression
+          then evaluateSessionCallable depth updated function mappedValues
+          else Right (normalizeEvaluatedCall expressionHead mappedValues, updated)
+      _ -> Right (expression, session)
+ where
+  walkItems retained currentSession [] = Right (retained, currentSession)
+  walkItems retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      evaluateSessionApplyLevels
+        depth
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        (sessionItemValue item)
+    walkItems
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  walkValues retained currentSession [] = Right (retained, currentSession)
+  walkValues retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      evaluateSessionApplyLevels
+        depth
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        value
+    walkValues (retained <> [mapped]) updated rest
 
 evaluateSessionTotal
   :: Int
@@ -631,20 +849,18 @@ evaluateSessionMapAt
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionMapAt depth session = \case
-  [function, subject, positions] -> case sessionPositionPaths positions of
-    Nothing ->
-      sessionFailure
-        session
-        ("Unsupported position specification: " <> inputForm positions <> ".")
-    Just rawPaths -> case traverse (resolveSessionPath subject) rawPaths of
-      Nothing -> invalidPositions session subject
-      Just resolvedPaths ->
-        mapPaths
-          subject
-          function
-          subject
-          session
-          (sortSessionPaths resolvedPaths)
+  [function, subject, positions] ->
+    case expandSessionPositionPaths subject positions of
+      Left message -> sessionFailure session message
+      Right (resolvedPaths, invalid)
+        | invalid -> invalidPositions session subject
+        | otherwise ->
+            mapPaths
+              subject
+              function
+              subject
+              session
+              (sortSessionPaths resolvedPaths)
   _ -> sessionFailure session "MapAt currently supports exactly three arguments."
  where
   mapPaths _ _ result currentSession [] = Right (result, currentSession)
@@ -727,44 +943,291 @@ evaluateSessionMapAtPath depth function session expression = \case
       SessionKeySelector _ -> Right (Nothing, session)
     Nothing -> Right (Nothing, session)
 
-sessionPositionPaths :: Expr -> Maybe [[SessionPathSelector]]
-sessionPositionPaths expression
-  | Just selector <- sessionPathSelector expression = Just [[selector]]
-sessionPositionPaths (Call (Symbol "List") values)
-  | Just path <- traverse sessionPathSelector values = Just [path]
-  | otherwise = traverse explicitPath values
- where
-  explicitPath (Call (Symbol "List") components) =
-    traverse sessionPathSelector components
-  explicitPath _ = Nothing
-sessionPositionPaths _ = Nothing
+data SessionPathSelection = SessionPathSelection
+  { sessionPathSelectionSelector :: !SessionPathSelector
+  , sessionPathSelectionValue :: !Expr
+  }
+  deriving (Eq, Show)
 
-sessionPathSelector :: Expr -> Maybe SessionPathSelector
-sessionPathSelector (Integer position) = Just (SessionArgumentSelector position)
-sessionPathSelector (String key) = Just (SessionKeySelector (String key))
-sessionPathSelector (Call (Symbol "Key") [key]) = Just (SessionKeySelector key)
-sessionPathSelector _ = Nothing
-
-resolveSessionPath
+expandSessionPositionPaths
   :: Expr
-  -> [SessionPathSelector]
-  -> Maybe [SessionPathSelector]
-resolveSessionPath _ [] = Just []
-resolveSessionPath expression (selector : remaining) = do
-  collection <- sessionOrderedCollection expression
-  index <- case (sessionCollectionAssociation collection, selector) of
-    (True, _) ->
-      sessionAssociationItemIndex selector (sessionCollectionItems collection)
-    (False, SessionArgumentSelector position) ->
-      resolveSessionPosition (length (sessionCollectionItems collection)) position
-    (False, SessionKeySelector _) -> Nothing
-  selected <- sessionListItemAt index (sessionCollectionItems collection)
-  resolvedRemaining <- resolveSessionPath (sessionItemValue selected) remaining
-  let resolvedSelector = case selector of
-        SessionArgumentSelector _ ->
-          SessionArgumentSelector (fromIntegral index + 1)
-        SessionKeySelector key -> SessionKeySelector key
-  Just (resolvedSelector : resolvedRemaining)
+  -> Expr
+  -> Either Text ([[SessionPathSelector]], Bool)
+expandSessionPositionPaths expression specification
+  | isSessionPositionCollection specification =
+      case specification of
+        Call (Symbol "List") pathExpressions ->
+          expandPaths [] False pathExpressions
+        _ -> unsupportedPositionSpecification specification
+  | isSingleSessionPositionSpecification specification =
+      expandSessionExactPath
+        expression
+        (sessionPositionComponents specification)
+  | otherwise = unsupportedPositionSpecification specification
+ where
+  expandPaths retained invalid [] = Right (retained, invalid)
+  expandPaths retained invalid (pathExpression : rest) = do
+    (paths, pathInvalid) <-
+      expandSessionExactPath
+        expression
+        (sessionPositionComponents pathExpression)
+    expandPaths (retained <> paths) (invalid || pathInvalid) rest
+
+expandSessionExactPath
+  :: Expr
+  -> [Expr]
+  -> Either Text ([[SessionPathSelector]], Bool)
+expandSessionExactPath _ [] = Right ([[]], False)
+expandSessionExactPath expression (component : remaining) = do
+  (selections, selectionInvalid) <-
+    resolveSessionPathComponent expression component
+  expandSelections [] selectionInvalid selections
+ where
+  expandSelections retained invalid [] = Right (retained, invalid)
+  expandSelections retained invalid (selection : rest) = do
+    (childPaths, childInvalid) <-
+      expandSessionExactPath
+        (sessionPathSelectionValue selection)
+        remaining
+    let paths =
+          [ sessionPathSelectionSelector selection : childPath
+          | childPath <- childPaths
+          ]
+    expandSelections
+      (retained <> paths)
+      (invalid || childInvalid)
+      rest
+
+resolveSessionPathComponent
+  :: Expr
+  -> Expr
+  -> Either Text ([SessionPathSelection], Bool)
+resolveSessionPathComponent _ (Integer 0) =
+  Left "Position does not support index 0 in this position."
+resolveSessionPathComponent expression component =
+  case sessionOrderedCollection expression of
+    Nothing -> Right ([], True)
+    Just collection
+      | sessionCollectionAssociation collection ->
+          resolveSessionAssociationComponent
+            (sessionCollectionItems collection)
+            component
+      | otherwise -> do
+          (indices, invalid) <-
+            resolveSessionNumericSelectors
+              (length (sessionCollectionItems collection))
+              component
+          Right
+            ( mapMaybeSession
+                (sessionSelectionAt (sessionCollectionItems collection))
+                indices
+            , invalid
+            )
+
+resolveSessionAssociationComponent
+  :: [SessionOrderedItem]
+  -> Expr
+  -> Either Text ([SessionPathSelection], Bool)
+resolveSessionAssociationComponent items component
+  | Just key <- sessionKeySelectorValue component =
+      selectSessionAssociationKeys items [key]
+resolveSessionAssociationComponent items component@(Call (Symbol "List") selectors) =
+  case traverse sessionAssociationSelectorKind selectors of
+    Nothing -> unsupportedSelectorInsidePosition component
+    Just kinds
+      | any id kinds && any not kinds ->
+          Left "Association selector lists may not mix numeric and key selectors."
+      | any id kinds ->
+          selectKeys
+            (mapMaybeSession sessionKeySelectorValue selectors)
+      | otherwise -> selectNumeric
+ where
+  selectNumeric = do
+    (indices, invalid) <-
+      resolveSessionNumericSelectors (length items) component
+    Right
+      (mapMaybeSession (sessionSelectionAt items) indices, invalid)
+
+  selectKeys keys = selectSessionAssociationKeys items keys
+resolveSessionAssociationComponent items component = do
+  (indices, invalid) <-
+    resolveSessionNumericSelectors (length items) component
+  Right (mapMaybeSession (sessionSelectionAt items) indices, invalid)
+
+selectSessionAssociationKeys
+  :: [SessionOrderedItem]
+  -> [Expr]
+  -> Either Text ([SessionPathSelection], Bool)
+selectSessionAssociationKeys items = go [] False
+ where
+  go retained invalid [] = Right (retained, invalid)
+  go retained invalid (key : rest) =
+    case sessionAssociationItemIndex (SessionKeySelector key) items of
+      Nothing -> go retained True rest
+      Just index -> case sessionListItemAt index items of
+        Nothing -> go retained True rest
+        Just item ->
+          go
+            ( retained
+                <> [SessionPathSelection (SessionKeySelector key) (sessionItemValue item)]
+            )
+            invalid
+            rest
+
+sessionSelectionAt
+  :: [SessionOrderedItem]
+  -> Int
+  -> Maybe SessionPathSelection
+sessionSelectionAt items index = do
+  item <- sessionListItemAt index items
+  Just
+    ( SessionPathSelection
+        (SessionArgumentSelector (fromIntegral index + 1))
+        (sessionItemValue item)
+    )
+
+resolveSessionNumericSelectors
+  :: Int
+  -> Expr
+  -> Either Text ([Int], Bool)
+resolveSessionNumericSelectors count component = case component of
+  Integer 0 ->
+    Left "Position does not support index 0 in this position."
+  Integer position ->
+    Right
+      ( maybe [] pure resolved
+      , maybe True (const False) resolved
+      )
+   where
+    resolved = resolveSessionPosition count position
+  Symbol "All" -> Right ([0 .. count - 1], False)
+  spanSpecification@(Call (Symbol "Span") _) -> do
+    positions <- expandSessionPositionSpan count spanSpecification
+    let resolved = map (resolveSessionPosition count) positions
+    Right
+      ( mapMaybeSession id resolved
+      , any (maybe True (const False)) resolved
+      )
+  Call (Symbol "List") selectors -> appendSelectors [] False selectors
+  _ ->
+    Left
+      ( "Unsupported Position specification: "
+          <> inputForm component
+          <> "."
+      )
+ where
+  appendSelectors retained invalid [] = Right (retained, invalid)
+  appendSelectors retained invalid (selector : rest)
+    | isSessionKeySelector selector = unsupportedSelectorInsidePosition selector
+    | otherwise = do
+        (nested, nestedInvalid) <-
+          resolveSessionNumericSelectors count selector
+        appendSelectors
+          (retained <> nested)
+          (invalid || nestedInvalid)
+          rest
+
+expandSessionPositionSpan :: Int -> Expr -> Either Text [Integer]
+expandSessionPositionSpan count (Call (Symbol "Span") arguments') =
+  case arguments' of
+    [startExpression, endExpression] ->
+      expand startExpression endExpression (Integer 1)
+    [startExpression, endExpression, stepExpression] ->
+      expand startExpression endExpression stepExpression
+    _ -> Left "Span must contain two or three arguments."
+ where
+  expand startExpression endExpression stepExpression = do
+    step <- case stepExpression of
+      Integer value -> Right value
+      _ -> Left "Span steps must be integers."
+    if step == 0
+      then Left "Span step cannot be zero."
+      else
+        let start = spanEndpoint startExpression 1
+            end = spanEndpoint endExpression (fromIntegral count)
+         in Right
+              ( if step > 0 && start <= end || step < 0 && start >= end
+                  then [start, start + step .. end]
+                  else []
+              )
+  spanEndpoint endpoint defaultValue = case endpoint of
+    Symbol "All" -> fromIntegral count
+    Integer value
+      | value < 0 -> fromIntegral count + value + 1
+      | otherwise -> value
+    _ -> defaultValue
+expandSessionPositionSpan _ _ = Left "Span must contain two or three arguments."
+
+isSessionPositionCollection :: Expr -> Bool
+isSessionPositionCollection (Call (Symbol "List") values) =
+  not (null values) && all isExplicitSessionPositionPath values
+isSessionPositionCollection _ = False
+
+isExplicitSessionPositionPath :: Expr -> Bool
+isExplicitSessionPositionPath (Call (Symbol "List") components) =
+  all isSessionPositionComponent components
+isExplicitSessionPositionPath _ = False
+
+isSingleSessionPositionSpecification :: Expr -> Bool
+isSingleSessionPositionSpecification Integer {} = True
+isSingleSessionPositionSpecification expression
+  | isSessionKeySelector expression = True
+isSingleSessionPositionSpecification (Call (Symbol "List") components) =
+  all isSessionPositionComponent components
+isSingleSessionPositionSpecification _ = False
+
+isSessionPositionComponent :: Expr -> Bool
+isSessionPositionComponent expression
+  | isSessionSelectorAtom expression = True
+isSessionPositionComponent (Call (Symbol "List") selectors) =
+  all isSessionSelectorAtom selectors
+isSessionPositionComponent _ = False
+
+isSessionSelectorAtom :: Expr -> Bool
+isSessionSelectorAtom expression =
+  isSessionNumericSelectorAtom expression || isSessionKeySelector expression
+
+isSessionNumericSelectorAtom :: Expr -> Bool
+isSessionNumericSelectorAtom Integer {} = True
+isSessionNumericSelectorAtom (Symbol "All") = True
+isSessionNumericSelectorAtom (Call (Symbol "Span") _) = True
+isSessionNumericSelectorAtom _ = False
+
+isSessionKeySelector :: Expr -> Bool
+isSessionKeySelector = maybe False (const True) . sessionKeySelectorValue
+
+sessionKeySelectorValue :: Expr -> Maybe Expr
+sessionKeySelectorValue key@String {} = Just key
+sessionKeySelectorValue (Call (Symbol "Key") [key]) = Just key
+sessionKeySelectorValue _ = Nothing
+
+sessionAssociationSelectorKind :: Expr -> Maybe Bool
+sessionAssociationSelectorKind expression
+  | isSessionKeySelector expression = Just True
+  | isSessionNumericSelectorAtom expression = Just False
+sessionAssociationSelectorKind _ = Nothing
+
+sessionPositionComponents :: Expr -> [Expr]
+sessionPositionComponents (Call (Symbol "List") components) = components
+sessionPositionComponents expression = [expression]
+
+unsupportedPositionSpecification
+  :: Expr
+  -> Either Text value
+unsupportedPositionSpecification specification =
+  Left
+    ( "Unsupported position specification: "
+        <> inputForm specification
+        <> "."
+    )
+
+unsupportedSelectorInsidePosition :: Expr -> Either Text value
+unsupportedSelectorInsidePosition selector =
+  Left
+    ( "Unsupported selector inside Position specification: "
+        <> inputForm selector
+        <> "."
+    )
 
 sessionAssociationItemIndex
   :: SessionPathSelector

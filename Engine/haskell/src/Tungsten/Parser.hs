@@ -56,7 +56,7 @@ type Parser = Parsec Text ()
 parseFullForm :: Text -> Either ParseError Expr
 parseFullForm source =
   first (ParseError . T.pack . show)
-    (Parsec.parse (ignored *> expressionParser <* eof) "Wolfram FullForm" source)
+    (Parsec.parse (ignored *> option (Symbol "Null") expressionParser <* eof) "Wolfram FullForm" source)
 
 -- | Parse the most common Wolfram InputForm surface syntax.  This slice covers
 -- calls, lists, patterns, slots, arithmetic, comparisons, Boolean operators,
@@ -64,7 +64,7 @@ parseFullForm source =
 parseInputForm :: Text -> Either ParseError Expr
 parseInputForm source =
   first (ParseError . T.pack . show)
-    (Parsec.parse (ignored *> inputExpressionParser <* eof) "Wolfram InputForm" source)
+    (Parsec.parse (ignored *> option (Symbol "Null") inputExpressionParser <* eof) "Wolfram InputForm" source)
 
 inputExpressionParser :: Parser Expr
 inputExpressionParser = namedFunctionParser
@@ -107,10 +107,13 @@ spanParser = do
       )
 
 functionParser :: Parser Expr
-functionParser = do
-  body <- assignmentParser
-  ampersands <- many (operator "&" "&")
-  pure (foldl' (\expression _ -> Call (Symbol "Function") [expression]) body ampersands)
+functionParser = assignmentParser >>= functionPostfixes
+ where
+  functionPostfixes expression =
+    option expression $ do
+      _ <- operator "&" "&"
+      postfixed <- postfixesParser True (Call (Symbol "Function") [expression])
+      functionPostfixes postfixed
 
 assignmentParser :: Parser Expr
 assignmentParser = do
@@ -279,59 +282,68 @@ prefixApplicationParser = do
     pure (Call function [argument])
 
 postfixParser :: Parser Expr
-postfixParser = inputAtomParser >>= postfixes
- where
-  postfixes expression =
-    choice
-      [ do
-          indices <- partArgumentsParser
-          postfixes (Call (Symbol "Part") (expression : indices))
-      , do
-          arguments' <- inputArgumentsParser
-          called <- canonicalCall expression arguments'
-          postfixes called
-      , do
-          _ <- operator "!!" ""
-          postfixes (Call (Symbol "Factorial2") [expression])
-      , do
-          _ <- operator "!" "!="
-          postfixes (Call (Symbol "Factorial") [expression])
-      , do
-          updateHead <- choice
-            [ "Increment" <$ operator "++" ""
-            , "Decrement" <$ operator "--" ""
-            , "Unset" <$ operator "=." ""
-            ]
-          postfixes (Call (Symbol updateHead) [expression])
-      , do
-          _ <- operator "::" ""
-          tag <- messageTagParser
-          let messageName = case expression of
-                Call (Symbol "MessageName") values@(_ : _ : _) ->
-                  Call (Symbol "MessageName") (values <> [tag])
-                _ -> Call (Symbol "MessageName") [expression, tag]
-          postfixes messageName
-      , do
+postfixParser = inputAtomParser >>= postfixesParser True
+
+postfixesParser :: Bool -> Expr -> Parser Expr
+postfixesParser allowPatternTest expression =
+  choice
+    [ do
+        indices <- partArgumentsParser
+        postfixesParser allowPatternTest (Call (Symbol "Part") (expression : indices))
+    , do
+        arguments' <- inputArgumentsParser
+        called <- canonicalCall expression arguments'
+        postfixesParser allowPatternTest called
+    , do
+        _ <- operator "!!" ""
+        postfixesParser allowPatternTest (Call (Symbol "Factorial2") [expression])
+    , do
+        _ <- operator "!" "!="
+        postfixesParser allowPatternTest (Call (Symbol "Factorial") [expression])
+    , do
+        updateHead <- choice
+          [ "Increment" <$ operator "++" ""
+          , "Decrement" <$ operator "--" ""
+          , "Unset" <$ operator "=." ""
+          ]
+        postfixesParser allowPatternTest (Call (Symbol updateHead) [expression])
+    , do
+        _ <- operator "::" ""
+        tag <- messageTagParser
+        let messageName = case expression of
+              Call (Symbol "MessageName") values@(_ : _ : _) ->
+                Call (Symbol "MessageName") (values <> [tag])
+              _ -> Call (Symbol "MessageName") [expression, tag]
+        postfixesParser allowPatternTest messageName
+    , case expression of
+        Symbol _ -> do
           blank <- lexeme blankShapeParser
-          let patternExpression = Call (Symbol "Pattern") [expression, blank]
-          optionalPattern <- option patternExpression (operator "." "." *> pure (Call (Symbol "Optional") [patternExpression]))
-          postfixes optionalPattern
-      , do
-          repetitionHead <- choice
-            [ "RepeatedNull" <$ operator "..." ""
-            , "Repeated" <$ operator ".." ""
-            ]
-          let repeatedExpression = case (repetitionHead, optionalDotCandidate expression) of
-                ("RepeatedNull", True) ->
-                  Call (Symbol "Repeated") [Call (Symbol "Optional") [expression]]
-                _ -> Call (Symbol repetitionHead) [expression]
-          postfixes repeatedExpression
-      , do
+          postfixesParser allowPatternTest (Call (Symbol "Pattern") [expression, blank])
+        _ -> Parsec.parserZero
+    , do
+        if optionalDotCandidate expression
+          then pure ()
+          else Parsec.parserZero
+        _ <- operator "." "."
+        postfixesParser allowPatternTest (Call (Symbol "Optional") [expression])
+    , do
+        repetitionHead <- choice
+          [ "RepeatedNull" <$ operator "..." ""
+          , "Repeated" <$ operator ".." ""
+          ]
+        let repeatedExpression = case (repetitionHead, optionalDotCandidate expression) of
+              ("RepeatedNull", True) ->
+                Call (Symbol "Repeated") [Call (Symbol "Optional") [expression]]
+              _ -> Call (Symbol repetitionHead) [expression]
+        postfixesParser allowPatternTest repeatedExpression
+    , if allowPatternTest
+        then do
           _ <- operator "?" ""
-          test <- inputAtomParser >>= postfixes
-          postfixes (Call (Symbol "PatternTest") [expression, test])
-      , pure expression
-      ]
+          test <- inputAtomParser >>= postfixesParser False
+          postfixesParser True (Call (Symbol "PatternTest") [expression, test])
+        else Parsec.parserZero
+    , pure expression
+    ]
 
 messageTagParser :: Parser Expr
 messageTagParser =
@@ -504,7 +516,6 @@ numberLexeme = do
   precision <- optionalText precisionParser
   magnitude <- optionalText (try magnitudeParser)
   let source = sign <> mantissa <> precision <> magnitude
-  notFollowedBy (satisfy isSymbolContinuation)
   pure source
  where
   leadingPoint = do
@@ -627,7 +638,14 @@ isNonAsciiSymbolCharacter character =
         && not (isNamedOperatorCharacter character)
 
 ignored :: Parser ()
-ignored = skipMany (void (satisfy isSpace) <|> wolframComment)
+ignored = skipMany (void (satisfy isSpace) <|> lineContinuation <|> wolframComment)
+
+lineContinuation :: Parser ()
+lineContinuation = void . try $ do
+  _ <- char '\\'
+  _ <- many (oneOf " \t")
+  _ <- char '\n' <|> (char '\r' <* optionMaybe (char '\n'))
+  pure ()
 
 wolframComment :: Parser ()
 wolframComment = try (string "(*") *> nestedComment 1
