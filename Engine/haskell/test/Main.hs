@@ -846,6 +846,7 @@ checkEvaluator = do
         , ("compound result", "1 + 1; 3 + 4", "7")
         , ("held expression", "Hold[1 + 2]", "Hold[Plus[1, 2]]")
         , ("held condition", "Condition[x, 1 < 2]", "Condition[x, Less[1, 2]]")
+        , ("label holds its raw tag", "Label[1 + 2]", "Label[Plus[1, 2]]")
         , ("held session forms", "{OwnValues[1 + 2], With[{x = 1 + 2}, x], Module[{x = 1 + 2}, x], Block[{x = 1 + 2}, x], InheritedBlock[{x = 1 + 2}, x], Internal`InheritedBlock[{x = 1 + 2}, x], Return[1 + 2], Return[1 + 2, Module], For[x = 1, x < 2, x = x + 1, x], While[x < 2, x = x + 1]}", "List[OwnValues[Plus[1, 2]], With[List[Set[x, Plus[1, 2]]], x], Module[List[Set[x, Plus[1, 2]]], x], Block[List[Set[x, Plus[1, 2]]], x], InheritedBlock[List[Set[x, Plus[1, 2]]], x], Internal`InheritedBlock[List[Set[x, Plus[1, 2]]], x], Return[Plus[1, 2]], Return[Plus[1, 2], Module], For[Set[x, 1], Less[x, 2], Set[x, Plus[x, 1]], x], While[Less[x, 2], Set[x, Plus[x, 1]]]]")
         , ("capture-aware named functions", "{Function[x, Function[y, x + y]][a], Function[x, Function[y, x + y]][y], Function[x, Function[y, y]][a], Function[{x, y}, x + y][1], Function[{x, y}, x + y][1, 2, 3], Function[5, x][1], Function[{}, 7][1]}", "List[Function[y$, Plus[a, y$]], Function[y$, Plus[y, y$]], Function[y, y], Function[List[x, y], Plus[x, y]][1], 3, Function[5, x][1], 7]")
         , ("symbolic double negation remains inert", "{!!a, !!1, !!True}", "List[Not[Not[a]], Not[Not[1]], True]")
@@ -1430,6 +1431,14 @@ checkEvaluationSession = do
         , ("catch handlers", "{Catch[Throw[x, tag], tag, h], Catch[Throw[x, tag], tag, Function[{v, t}, h[v, t]]], Catch[Throw[x, tag], tag, Hold]}", "List[h[x, tag], h[x, tag], Hold[x, tag]]")
         , ("catch setup effects", "x = 0; {Catch[Throw[v, tag], (x = x + 1; tag), (x = x + 1; h)], x}", "List[h[v, tag], 2]")
         , ("throw argument effects", "x = 0; Catch[Throw[x = x + 1, tag, x = x + 1], tag]; x", "2")
+        , ("goto supports forward and backward labels", "ClearAll[x]; first = (Goto[end]; never; Label[end]; reached); x = 0; second = (Label[start]; x = x + 1; If[x < 3, Goto[start]]; x); {first, second}", "List[reached, 3]")
+        , ("goto catches at the nearest matching compound expression", "ClearAll[x]; x = 0; {(Label[a]; x = x + 1; If[x == 1, Goto[a]]; Label[a]; x), ((Goto[inner]; never; Label[inner]; reached)), ((Goto[out]; innerNever; Label[other]); outerNever; Label[out]; reached)}", "List[2, reached, reached]")
+        , ("goto compares evaluated targets with raw label tags", "ClearAll[x]; x = end; (Goto[x]; never; Label[x]; reached)", "Goto[end]")
+        , ("label qualification and aliases preserve raw dispatch boundaries", "ClearAll[l, g, first]; first = {Label[1 + 2], System`Label[1 + 2], Global`Label[1 + 2]}; l = Label; g = Goto; {first, {l[Sequence[a, b]], g[Sequence[a, b]]}}", "List[List[Label[Plus[1, 2]], Label[Plus[1, 2]], Global`Label[3]], List[Label[a, b], Goto[a, b]]]")
+        , ("goto handles trailing and qualified labels", "{(a; Label[end]), (Goto[end]; Label[end]), (System`Goto[end]; never; System`Label[end]; reached)}", "List[Label[end], Null, reached]")
+        , ("goto restores dynamic and iterator scopes", "ClearAll[i, x, f]; i = 99; x = 1; f[] := Goto[out]; (Block[{x = 2}, x = 3; Do[f[], {i, 1, 3}]]; never; Label[out]; {x, i})", "List[1, 99]")
+        , ("standalone labels remain inert", "{Label[done], HoldComplete[Goto[held]]}", "List[Label[done], HoldComplete[Goto[held]]]")
+        , ("uncaught goto remains inert", "Goto[missing]", "Goto[missing]")
         , ("uncaught throw handler", "Throw[x, tag, h]", "h[x, tag]")
         , ("caught throw ignores throw handler", "Catch[Throw[x, tag, h], tag]", "x")
         , ("unmatched throw stays inert", "Catch[Throw[x, tag], other]", "Throw[x, tag]")
@@ -1593,6 +1602,16 @@ checkEvaluationSession = do
         , ( "association calls expose delayed values without a second evaluation"
           , "ClearAll[x]; x = <|a -> 1|>; {AppendTo[x, b :> Print[\"late\"]], x, x[b]}"
           , "List[Association[Rule[a, 1], RuleDelayed[b, Print[\"late\"]]], Association[Rule[a, 1], RuleDelayed[b, Print[\"late\"]]], Print[\"late\"]]"
+          , []
+          )
+        , ( "goto skips effects until an outer matching label"
+          , "(Print[\"outer-before\"]; (Print[\"inner\"]; Goto[out]; Print[\"inner-never\"]; Label[other]); Print[\"outer-never\"]; Label[out]; Print[\"outer-after\"] )"
+          , "Null"
+          , ["outer-before", "inner", "outer-after"]
+          )
+        , ( "malformed label and goto calls suppress argument effects"
+          , "probe[Label[Print[\"l1\"], Print[\"l2\"]], Goto[Print[\"g1\"], Print[\"g2\"]]]"
+          , "probe[Label[Print[\"l1\"], Print[\"l2\"]], Goto[Print[\"g1\"], Print[\"g2\"]]]"
           , []
           )
         ]
@@ -2480,6 +2499,24 @@ checkEvaluationSession = do
               , "AppendTo::error: Append expects a rule when appending to an Association."
               )
             ]
+          )
+        , ( "malformed label and goto calls report exact errors"
+          , "probe[Label[Print[\"l1\"], Print[\"l2\"]], Goto[Print[\"g1\"], Print[\"g2\"]]]"
+          , "probe[Label[Print[\"l1\"], Print[\"l2\"]], Goto[Print[\"g1\"], Print[\"g2\"]]]"
+          , [ ( "Label::error"
+              , "MessageName[Label, \"error\"]"
+              , "Label::error: Label expects exactly one argument."
+              )
+            , ( "Goto::error"
+              , "MessageName[Goto, \"error\"]"
+              , "Goto::error: Goto expects exactly one argument."
+              )
+            ]
+          )
+        , ( "goto can match a recovered target expression"
+          , "(Goto[Part[]]; never; Label[Part[]]; reached)"
+          , "reached"
+          , [partArityMessage]
           )
         ]
   caseResults <- traverse evaluateSessionCase cases

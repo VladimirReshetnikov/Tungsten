@@ -808,6 +808,95 @@ CASES = (
         ),
         0,
     ),
+    (
+        "goto forward and backward control",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x]; first = (Goto[end]; never; Label[end]; reached); "
+            "x = 0; second = (Label[start]; x = x + 1; "
+            "If[x < 3, Goto[start]]; x); {first, second}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "goto nesting and scope restoration",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, i, f]; x = 0; i = 99; "
+            "duplicate = (Label[a]; x = x + 1; If[x == 1, Goto[a]]; "
+            "Label[a]; x); "
+            "nested = ((Goto[inner]; never; Label[inner]; reached)); "
+            "x = 1; f[] := Goto[out]; "
+            "scoped = (Block[{x = 2}, x = 3; Do[f[], {i, 1, 3}]]; "
+            "never; Label[out]; {x, i}); {duplicate, nested, scoped}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "label qualification alias and trailing boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[l, g]; l = Label; g = Goto; "
+            "{{Label[1 + 2], System`Label[1 + 2], Global`Label[1 + 2]}, "
+            "{l[Sequence[a, b]], g[Sequence[a, b]]}, "
+            "{(a; Label[end]), (Goto[end]; Label[end]), "
+            "(System`Goto[end]; never; System`Label[end]; reached)}}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "label and goto arity barriers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "probe[Label[Print[\"l1\"], Print[\"l2\"]], "
+            "Goto[Print[\"g1\"], Print[\"g2\"]]]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "goto recovered target and nested effect timing",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{(Goto[Part[]]; never; Label[Part[]]; reached), "
+            "(Print[\"outer-before\"]; "
+            "(Print[\"inner\"]; Goto[out]; Print[\"inner-never\"]; "
+            "Label[other]); Print[\"outer-never\"]; Label[out]; "
+            "Print[\"outer-after\"])}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "uncaught goto uses its evaluated raw-label target",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x]; x = end; (Goto[x]; never; Label[x]; reached)",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

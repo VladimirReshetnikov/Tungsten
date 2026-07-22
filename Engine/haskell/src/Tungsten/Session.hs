@@ -133,6 +133,7 @@ data ControlSignal
   | BreakSignal
   | ContinueSignal
   | Returned !Expr !(Maybe Text)
+  | GotoSignal !Expr
   deriving (Eq, Show)
 
 data EvaluationExit
@@ -386,6 +387,8 @@ finalizeSessionResult = \case
             (value : maybe [] (pure . Symbol) target)
         , stoppedSession
         )
+    Left (SessionControl (GotoSignal tag) stoppedSession) ->
+      Right (Call (Symbol "Goto") [tag], stoppedSession)
     Right result -> Right result
 
 evaluateSessionAt
@@ -557,7 +560,7 @@ evaluateSessionAtRaw depth session expression = case expression of
       Call (Symbol "Unprotect") targets ->
         evaluateSessionProtect False session targets
       Call (Symbol "CompoundExpression") expressions ->
-        evaluateSequence depth session expressions
+        evaluateSessionCompoundExpression depth session expressions
       Call (Symbol "If") arguments' -> evaluateSessionIf depth session arguments'
       Call (Symbol "Which") arguments' ->
         evaluateSessionWhich depth session arguments'
@@ -577,6 +580,10 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateLoopControl ContinueSignal "Continue" session arguments'
       Call (Symbol "Return") arguments' ->
         evaluateSessionReturn depth session arguments'
+      Call (Symbol "Label") arguments' ->
+        evaluateSessionLabel session arguments'
+      Call (Symbol "Goto") arguments' ->
+        evaluateSessionGoto depth session arguments'
       Call (Symbol "AppendTo") arguments' ->
         evaluateSessionAppendTo depth session arguments'
       Call (Symbol headName) arguments'
@@ -938,6 +945,8 @@ directSessionDispatchHead name =
              , "Break"
              , "Continue"
              , "Return"
+             , "Label"
+             , "Goto"
              , "AppendTo"
              , "Print"
              , "Evaluate"
@@ -5844,17 +5853,52 @@ accumulatorArguments accumulatorHead = concatMap spliceArgument
       | target == Symbol accumulatorHead -> values
     value -> [value]
 
-evaluateSequence
+evaluateSessionCompoundExpression
   :: Int
   -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSequence depth = go (Symbol "Null")
+evaluateSessionCompoundExpression depth session expressions =
+  go (Symbol "Null") session expressions
  where
-  go result session [] = Right (result, session)
-  go _ session (expression : rest) = do
-    (result, updated) <- evaluateSessionAt (depth + 1) session expression
-    go result updated rest
+  originalExpressions = expressions
+
+  go result current [] = Right (result, current)
+  go _ current (expression : rest) =
+    case evaluateSessionAt (depth + 1) current expression of
+      Left controlExit@(SessionControl (GotoSignal target) stoppedSession) ->
+        case sessionLabelContinuation target originalExpressions of
+          Just continuation -> go (Symbol "Null") stoppedSession continuation
+          Nothing -> Left controlExit
+      Left evaluationExit -> Left evaluationExit
+      Right (result, updated) -> go result updated rest
+
+sessionLabelContinuation :: Expr -> [Expr] -> Maybe [Expr]
+sessionLabelContinuation _ [] = Nothing
+sessionLabelContinuation target (expression : rest) = case expression of
+  Call (Symbol labelHead) [tag]
+    | isSessionSystemHead "Label" labelHead
+    , tag == target -> Just rest
+  _ -> sessionLabelContinuation target rest
+
+evaluateSessionLabel
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionLabel session = \case
+  [tag] -> Right (Call (Symbol "Label") [tag], session)
+  _ -> sessionFailure session "Label expects exactly one argument."
+
+evaluateSessionGoto
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionGoto depth session = \case
+  [tagExpression] -> do
+    (tag, updated) <- evaluateSessionAt (depth + 1) session tagExpression
+    Left (SessionControl (GotoSignal tag) updated)
+  _ -> sessionFailure session "Goto expects exactly one argument."
 
 evaluateSessionIf
   :: Int

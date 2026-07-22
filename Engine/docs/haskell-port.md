@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-22T09:38:32Z
-- Repository HEAD: 3cdfc0537cc84c3501d0bb5ab34bfd4348554262
+- Updated (UTC): 2026-07-22T09:45:58Z
+- Repository HEAD: 6f4792c2b217d8bf55bf3804a5e8a0be295a74c1
 
 ## Purpose
 
@@ -89,6 +89,11 @@ Haskell process clients.
 | Parser corpora | Deterministic recursive discovery, extension/include/exclude filtering, byte-budget skips, bounded local workers, held Wolfram kernel batches, outcome classification, summary/JSONL/Markdown reports, failure-policy exits, and the `parser-corpus` CLI family |
 | Notebook Assistant | Free-form and selected-cell hidden Chatbook requests, model/tool settings, stable notebook selectors, structured kernel failures, assistant text extraction, fenced-code classification, optional generated-input insertion/save, inline input creation/focus, completion/progress capture, inline output/code extraction, and the full `assistant` CLI family |
 
+Session control also includes raw `Label` markers and evaluated-target `Goto` signals. The nearest
+`CompoundExpression` with a structurally matching immediate label resumes after that marker; an
+unmatched signal crosses definition, iterator, and dynamic-scope boundaries with state restoration
+and becomes an inert `Goto[...]` only at the top-level evaluator boundary.
+
 ## Compatibility boundary
 
 The following Engine areas still use the Python implementation and are not represented as Haskell
@@ -99,7 +104,7 @@ features yet:
   of the mutable iteration, precision, root-degree, history, and output-size settings;
 - nested positional-slot scope diagnostics, session-aware callback evaluation for aggregation reducers
   beyond the selection, map, sort, and pattern/rewrite families, the full string-pattern, base
-  encoding, import/export, and textual-form character-encoding surface, broader loop and jump control, real-valued iteration,
+  encoding, import/export, and textual-form character-encoding surface, broader loop control, real-valued iteration,
   polynomial/SymPy bridges, broad
   number theory, and inexact numeric semantics;
 - global message-stream recovery in the exported pure `Tungsten.Evaluate.evaluate` API, which
