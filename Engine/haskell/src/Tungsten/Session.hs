@@ -66,6 +66,19 @@ data EvaluationMessage = EvaluationMessage
   }
   deriving (Eq, Show)
 
+data QuietScope = QuietScope
+  { quietScopeOffSpecification :: !Expr
+  , quietScopeOnSpecification :: !Expr
+  }
+  deriving (Eq, Show)
+
+data MessageCollector = MessageCollector
+  { messageCollectorSpecification :: !Expr
+  , messageCollectorQuietDepth :: !Int
+  , messageCollectorMessages :: ![EvaluationMessage]
+  }
+  deriving (Eq, Show)
+
 data SymbolValues = SymbolValues
   { symbolOwnValue :: !(Maybe Definition)
   , symbolOwnValuePattern :: !(Maybe Expr)
@@ -92,6 +105,8 @@ data EvaluationSession = EvaluationSession
   , sessionMessageAttemptCount :: !Integer
   , sessionDisabledMessages :: !(Set.Set Text)
   , sessionAssertEnabled :: !Bool
+  , sessionQuietScopes :: ![QuietScope]
+  , sessionMessageCollectors :: ![MessageCollector]
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
@@ -107,6 +122,8 @@ emptySession =
     , sessionMessageAttemptCount = 0
     , sessionDisabledMessages = Set.empty
     , sessionAssertEnabled = False
+    , sessionQuietScopes = []
+    , sessionMessageCollectors = []
     , sessionGeneratedMessages = []
     , sessionVisibleMessages = []
     , sessionPrints = []
@@ -346,6 +363,8 @@ evaluateInSession session expression =
             0
             registeredSession
               { sessionMessageAttemptCount = 0
+              , sessionQuietScopes = []
+              , sessionMessageCollectors = []
               , sessionGeneratedMessages = []
               , sessionVisibleMessages = []
               , sessionPrints = []
@@ -609,6 +628,10 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionMessageControl "Off" False depth session arguments'
       Call (Symbol "On") arguments' ->
         evaluateSessionMessageControl "On" True depth session arguments'
+      Call (Symbol "Quiet") arguments' ->
+        evaluateSessionQuiet depth session arguments'
+      Call (Symbol "Check") arguments' ->
+        evaluateSessionCheck depth session arguments'
       Call (Symbol "AppendTo") arguments' ->
         evaluateSessionAppendTo depth session arguments'
       Call (Symbol headName) arguments'
@@ -975,6 +998,8 @@ directSessionDispatchHead name =
              , "Message"
              , "Off"
              , "On"
+             , "Quiet"
+             , "Check"
              , "AppendTo"
              , "Print"
              , "Evaluate"
@@ -2371,6 +2396,159 @@ evaluateSessionMessageControl _ enabled depth = go
       evaluateSessionAt (depth + 1) session specificationExpression
     controlled <- setSessionMessageEnabled enabled evaluated specification
     go controlled rest
+
+evaluateSessionQuiet
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionQuiet depth session = \case
+  [body] ->
+    evaluateSessionQuietBody
+      depth
+      session
+      body
+      (Symbol "All")
+      (Symbol "None")
+  [body, offSpecificationExpression] -> do
+    (offSpecification, updated) <-
+      evaluateSessionAt
+        (depth + 1)
+        session
+        offSpecificationExpression
+    evaluateSessionQuietBody
+      depth
+      updated
+      body
+      offSpecification
+      (Symbol "None")
+  [body, offSpecificationExpression, onSpecificationExpression] -> do
+    (offSpecification, offSession) <-
+      evaluateSessionAt
+        (depth + 1)
+        session
+        offSpecificationExpression
+    (onSpecification, updated) <-
+      evaluateSessionAt
+        (depth + 1)
+        offSession
+        onSpecificationExpression
+    evaluateSessionQuietBody
+      depth
+      updated
+      body
+      offSpecification
+      onSpecification
+  _ -> sessionFailure session "Quiet expects one, two, or three arguments."
+
+evaluateSessionQuietBody
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionQuietBody depth session body offSpecification onSpecification =
+  restoreQuietScopes
+    baselineDepth
+    ( evaluateSessionAt
+        (depth + 1)
+        session
+          { sessionQuietScopes =
+              sessionQuietScopes session
+                <> [QuietScope offSpecification onSpecification]
+          }
+        body
+    )
+ where
+  baselineDepth = length (sessionQuietScopes session)
+
+restoreQuietScopes :: Int -> SessionResult value -> SessionResult value
+restoreQuietScopes baselineDepth = \case
+  Right (value, session) ->
+    Right
+      ( value
+      , session
+          { sessionQuietScopes =
+              take baselineDepth (sessionQuietScopes session)
+          }
+      )
+  Left evaluationExit ->
+    Left
+      ( mapEvaluationExitSession
+          ( \session ->
+              session
+                { sessionQuietScopes =
+                    take baselineDepth (sessionQuietScopes session)
+                }
+          )
+          evaluationExit
+      )
+
+evaluateSessionCheck
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCheck depth session = \case
+  [body, fallback] ->
+    evaluateSessionCheckBody depth session body fallback (Symbol "All")
+  [body, fallback, specificationExpression] -> do
+    (specification, updated) <-
+      evaluateSessionAt (depth + 1) session specificationExpression
+    evaluateSessionCheckBody depth updated body fallback specification
+  _ -> sessionFailure session "Check expects two or three arguments."
+
+evaluateSessionCheckBody
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionCheckBody depth session body fallback specification =
+  case evaluateSessionAt (depth + 1) scopedSession body of
+    Right (value, stoppedSession) ->
+      let (captured, restoredSession) =
+            popSessionMessageCollector baselineDepth stoppedSession
+       in if null captured
+            then Right (value, restoredSession)
+            else evaluateSessionAt (depth + 1) restoredSession fallback
+    Left evaluationExit ->
+      Left
+        ( mapEvaluationExitSession
+            (snd . popSessionMessageCollector baselineDepth)
+            evaluationExit
+        )
+ where
+  baselineDepth = length (sessionMessageCollectors session)
+  scopedSession =
+    session
+      { sessionMessageCollectors =
+          sessionMessageCollectors session
+            <> [ MessageCollector
+                   { messageCollectorSpecification = specification
+                   , messageCollectorQuietDepth = length (sessionQuietScopes session)
+                   , messageCollectorMessages = []
+                   }
+               ]
+      }
+
+popSessionMessageCollector
+  :: Int
+  -> EvaluationSession
+  -> ([EvaluationMessage], EvaluationSession)
+popSessionMessageCollector baselineDepth session =
+  ( captured
+  , session
+      { sessionMessageCollectors =
+          take baselineDepth (sessionMessageCollectors session)
+      }
+  )
+ where
+  captured = case drop baselineDepth (sessionMessageCollectors session) of
+    collector : _ -> messageCollectorMessages collector
+    [] -> []
 
 setSessionMessageEnabled
   :: Bool
@@ -6844,17 +7022,28 @@ appendSessionMessage :: Expr -> Text -> EvaluationSession -> EvaluationSession
 appendSessionMessage fullName messageText session =
   if sessionMessageIsDisabled fullName attempted
     then attempted
-    else
-      attempted
-        { sessionGeneratedMessages =
-            sessionGeneratedMessages attempted <> [message]
-        , sessionVisibleMessages =
-            sessionVisibleMessages attempted <> [message]
-        }
+    else case suppressedDepth of
+      Nothing ->
+        recorded
+          { sessionVisibleMessages =
+              sessionVisibleMessages recorded <> [message]
+          }
+      Just _ -> recorded
  where
   attempted =
     session
       { sessionMessageAttemptCount = sessionMessageAttemptCount session + 1
+      }
+  suppressedDepth =
+    quietSuppressionDepth fullName (sessionQuietScopes attempted)
+  recorded =
+    attempted
+      { sessionGeneratedMessages =
+          sessionGeneratedMessages attempted <> [message]
+      , sessionMessageCollectors =
+          map
+            (collectSessionMessage suppressedDepth fullName message)
+            (sessionMessageCollectors attempted)
       }
   messageName = sessionMessageDisplayName fullName
   message =
@@ -6863,6 +7052,68 @@ appendSessionMessage fullName messageText session =
       , evaluationMessageFullName = fullName
       , evaluationMessageText = messageName <> ": " <> messageText
       }
+
+collectSessionMessage
+  :: Maybe Int
+  -> Expr
+  -> EvaluationMessage
+  -> MessageCollector
+  -> MessageCollector
+collectSessionMessage suppressedDepth fullName message collector =
+  if visibleToCollector && sessionMessageSpecificationMatches specification fullName
+    then
+      collector
+        { messageCollectorMessages =
+            messageCollectorMessages collector <> [message]
+        }
+    else collector
+ where
+  specification = messageCollectorSpecification collector
+  visibleToCollector = case suppressedDepth of
+    Nothing -> True
+    Just depth -> messageCollectorQuietDepth collector >= depth
+
+quietSuppressionDepth :: Expr -> [QuietScope] -> Maybe Int
+quietSuppressionDepth fullName scopes =
+  decide (zip [length scopes, length scopes - 1 .. 1] (reverse scopes))
+ where
+  decide [] = Nothing
+  decide ((depth, scope) : rest)
+    | sessionMessageSpecificationMatches
+        (quietScopeOnSpecification scope)
+        fullName = Nothing
+    | sessionMessageSpecificationMatches
+        (quietScopeOffSpecification scope)
+        fullName = Just depth
+    | otherwise = decide rest
+
+sessionMessageSpecificationMatches :: Expr -> Expr -> Bool
+sessionMessageSpecificationMatches specification fullName =
+  case specification of
+    Symbol "All" -> True
+    Symbol "None" -> False
+    Symbol _ ->
+      sessionMessageSpecificationMatches
+        (Call (Symbol "MessageName") [specification, String "trace"])
+        fullName
+    String _ -> False
+    Call (Symbol listHead) values
+      | isSessionSystemHead "List" listHead ->
+          any (`sessionMessageSpecificationMatches` fullName) values
+    Call (Symbol messageHead) _
+      | isSessionSystemHead "MessageName" messageHead ->
+          specification == fullName
+            || componentsMatch
+    _ -> False
+ where
+  componentsMatch =
+    case (messageNameComponents specification, messageNameComponents fullName) of
+      (Just ("General", specificationTags), Just (_, nameTags))
+        | not (null specificationTags)
+        , not (null nameTags) -> last specificationTags == last nameTags
+      (Just specificationComponents, Just nameComponents) ->
+        specificationComponents == nameComponents
+      _ -> False
 
 sessionMessageIsDisabled :: Expr -> EvaluationSession -> Bool
 sessionMessageIsDisabled messageName session =

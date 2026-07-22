@@ -988,6 +988,87 @@ CASES = (
         ),
         0,
     ),
+    (
+        "Quiet visibility and Check collector depth",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Check[Quiet[Part[]], outer], "
+            "Quiet[Check[Part[], inner]], "
+            "Quiet[Message[f::a]; Message[g::b], All, f::a], "
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Quiet and Check specification timing and arity barriers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x]; x = 0; "
+            "first = Quiet[(x = 3; Message[f::a]), "
+            "(x = 1; f::a), (x = 2; g::b)]; "
+            "second = Check[Message[g::b], x = 4, (x = 5; g::b)]; "
+            "probe[first, second, x, "
+            "Quiet[Print[\"body\"], Print[\"off\"], Print[\"on\"], "
+            "Print[\"extra\"]], Check[Print[\"check\"]], $MessageList]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Quiet nesting and qualified message specifications",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Quiet[Quiet[Message[f::tag], None, f::tag], All], "
+            "Quiet[Quiet[Message[g::tag], All], All, g::tag], "
+            "Quiet[Message[h::trace], System`All], "
+            "Check[Message[i::trace], fallback, System`All], "
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Quiet and Check qualification and alias boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[q, c]; q = Quiet; c = Check; "
+            "{System`Quiet[Part[]], Global`Quiet[Part[]], q[Part[]], "
+            "System`Check[Part[], x], Global`Check[Part[], x], "
+            "c[Part[], x], $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "Quiet and Check restore across non-local control",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[r]; r[] := Check[Return[x], fallback]; "
+            "first = r[]; "
+            "second = (Quiet[Goto[out]]; never; Label[out]; "
+            "Message[f::a]; $MessageList); "
+            "{first, second, Catch[Quiet[Throw[y]]], "
+            "Message[g::b], $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

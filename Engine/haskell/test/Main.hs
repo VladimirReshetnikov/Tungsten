@@ -1624,11 +1624,26 @@ checkEvaluationSession = do
           , "probe[Message[], Message[x, Print[\"bad\"]]]"
           , []
           )
+        , ( "malformed Quiet and Check calls block held effects"
+          , "probe[Quiet[], Quiet[Print[\"body\"], Print[\"off\"], Print[\"on\"], Print[\"extra\"]], Check[], Check[Print[\"check\"]], Check[Print[\"body2\"], x, y, Print[\"extra2\"]]]"
+          , "probe[Quiet[], Quiet[Print[\"body\"], Print[\"off\"], Print[\"on\"], Print[\"extra\"]], Check[], Check[Print[\"check\"]], Check[Print[\"body2\"], x, y, Print[\"extra2\"]]]"
+          , []
+          )
         ]
       partArityMessage =
         ( "Part::error"
         , "MessageName[Part, \"error\"]"
         , "Part::error: Part expects an expression and at least one part specification."
+        )
+      fAMessage =
+        ( "f::a"
+        , "MessageName[f, \"a\"]"
+        , "f::a: Message generated."
+        )
+      gBMessage =
+        ( "g::b"
+        , "MessageName[g, \"b\"]"
+        , "g::b: Message generated."
         )
       messageCases =
         [ ( "Composition preserves invalid Function diagnostics"
@@ -2601,11 +2616,75 @@ checkEvaluationSession = do
               )
             ]
           )
+        , ( "malformed Quiet and Check calls report exact arity errors"
+          , "probe[Quiet[], Quiet[Print[\"body\"], Print[\"off\"], Print[\"on\"], Print[\"extra\"]], Check[], Check[Print[\"check\"]], Check[Print[\"body2\"], x, y, Print[\"extra2\"]]]"
+          , "probe[Quiet[], Quiet[Print[\"body\"], Print[\"off\"], Print[\"on\"], Print[\"extra\"]], Check[], Check[Print[\"check\"]], Check[Print[\"body2\"], x, y, Print[\"extra2\"]]]"
+          , [ ( "Quiet::error"
+              , "MessageName[Quiet, \"error\"]"
+              , "Quiet::error: Quiet expects one, two, or three arguments."
+              )
+            , ( "Quiet::error"
+              , "MessageName[Quiet, \"error\"]"
+              , "Quiet::error: Quiet expects one, two, or three arguments."
+              )
+            , ( "Check::error"
+              , "MessageName[Check, \"error\"]"
+              , "Check::error: Check expects two or three arguments."
+              )
+            , ( "Check::error"
+              , "MessageName[Check, \"error\"]"
+              , "Check::error: Check expects two or three arguments."
+              )
+            , ( "Check::error"
+              , "MessageName[Check, \"error\"]"
+              , "Check::error: Check expects two or three arguments."
+              )
+            ]
+          )
+        ]
+      scopedMessageCases =
+        [ ( "Quiet visibility and Check collection depend on entry depth"
+          , "{Check[Quiet[Part[]], outer], Quiet[Check[Part[], inner]], $MessageList}"
+          , "List[Part[], inner, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]]]]"
+          , []
+          , [partArityMessage, partArityMessage]
+          )
+        , ( "Quiet on specifications override off specifications"
+          , "Quiet[Message[f::a]; Message[g::b], All, f::a]; $MessageList"
+          , "List[HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[g, \"b\"]]]"
+          , [fAMessage]
+          , [fAMessage, gBMessage]
+          )
+        , ( "nested Check collectors retain outer captures"
+          , "Check[Check[Message[f::a], inner]; Message[g::b], outer]"
+          , "outer"
+          , [fAMessage, gBMessage]
+          , [fAMessage, gBMessage]
+          )
+        , ( "Quiet and Check specifications evaluate before their scopes"
+          , "{Check[Message[f::a], fallback, Part[]], Quiet[Message[g::b], Part[]], $MessageList}"
+          , "List[Null, Null, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[g, \"b\"]]]]"
+          , [partArityMessage, fAMessage, partArityMessage, gBMessage]
+          , [partArityMessage, fAMessage, partArityMessage, gBMessage]
+          )
+        , ( "Quiet scopes restore across goto propagation"
+          , "(Quiet[Goto[out]]; never; Label[out]; Message[f::a]; $MessageList)"
+          , "List[HoldForm[MessageName[f, \"a\"]]]"
+          , [fAMessage]
+          , [fAMessage]
+          )
+        , ( "Check collectors restore and bypass fallbacks across goto propagation"
+          , "(Check[Message[f::a]; Goto[out], fallback]; never; Label[out]; Message[g::b]; $MessageList)"
+          , "List[HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[g, \"b\"]]]"
+          , [fAMessage, gBMessage]
+          , [fAMessage, gBMessage]
+          )
         ]
   caseResults <- traverse evaluateSessionCase cases
   printResults <- traverse evaluatePrintCase printCases
   messageResults <- traverse evaluateMessageCase messageCases
-  pure (and (caseResults <> printResults <> messageResults))
+  scopedMessageResults <- traverse evaluateScopedMessageCase scopedMessageCases
+  pure (and (caseResults <> printResults <> messageResults <> scopedMessageResults))
  where
   evaluateSessionCase (label, source, expected) = do
     let result = do
@@ -2644,6 +2723,32 @@ checkEvaluationSession = do
         expected =
           Right (expectedValue, expectedMessages, expectedMessages)
     assertEqual ("evaluation session messages: " <> label) expected result
+
+  evaluateScopedMessageCase
+    (label, source, expectedValue, expectedVisible, expectedGenerated) = do
+      let result = do
+            expression <- parseInputForm source
+            (value, updated) <-
+              either
+                (Left . ParseError . evaluationErrorMessage)
+                Right
+                (evaluateInSession emptySession expression)
+            pure
+              ( fullForm value
+              , map messageTuple (sessionVisibleMessages updated)
+              , map messageTuple (sessionGeneratedMessages updated)
+              , null (sessionQuietScopes updated)
+              , null (sessionMessageCollectors updated)
+              )
+          expected =
+            Right
+              ( expectedValue
+              , expectedVisible
+              , expectedGenerated
+              , True
+              , True
+              )
+      assertEqual ("evaluation scoped messages: " <> label) expected result
 
   messageTuple message =
     ( evaluationMessageName message
