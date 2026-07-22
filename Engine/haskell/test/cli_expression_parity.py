@@ -13,6 +13,129 @@ import sys
 CASES = (
     ("parse success", ("expr", "parse", "--code", "f[a, 2]", "--form", "input"), 0),
     ("evaluation success", ("expr", "evaluate", "--code", "1 + 2", "--form", "input"), 0),
+    (
+        "flat one-identity downvalue",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; SetAttributes[f, {Flat, OneIdentity}]; "
+            "f[x_, y_] := HoldComplete[x, y]; f[a, b, c]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "flat downvalue preserves unary wrapper",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; SetAttributes[f, Flat]; "
+            "f[x_, y_] := HoldComplete[x, y]; f[a, b, c]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "orderless typed downvalue",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; SetAttributes[f, Orderless]; "
+            "f[x_Symbol, y_Integer] := HoldComplete[x, y]; f[a, 1]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "catalog flat matching",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "MatchQ[HoldComplete[Plus[a, b, c]], "
+            "HoldComplete[Plus[x_, y_]]]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "orderless callback backtracking",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "c = 0; ClearAll[f, q]; SetAttributes[f, Orderless]; "
+            "q[x_] := (c = c + 1; IntegerQ[x]); "
+            "{MatchQ[HoldComplete[f[a, 1]], "
+            "HoldComplete[f[x_?q, y_Symbol]]], c}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "pattern callbacks update later attributes",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, g, q]; "
+            "q[x_] := (SetAttributes[g, {Flat, OneIdentity}]; True); "
+            "MatchQ[HoldComplete[f[a, g[b, c, d]]], "
+            "HoldComplete[f[x_?q, g[y_, z_]]]]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "optional sequence width",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Cases[{f[], f[a], f[a, b]}, "
+            "f[x:Optional[__]] :> HoldComplete[x]]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "flat sequence alternatives",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; SetAttributes[f, {Flat, OneIdentity}]; "
+            "f[x:Alternatives[__Integer, __Symbol]] := HoldComplete[x]; "
+            "{f[1, 2], f[a, b], f[1, a]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "orderless pattern binding order",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; SetAttributes[f, Orderless]; "
+            "ReplaceAll[HoldComplete[f[a, b, c]], "
+            "HoldComplete[f[c, y_, z_]] :> HoldComplete[y, z]]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

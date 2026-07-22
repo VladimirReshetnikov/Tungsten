@@ -173,6 +173,17 @@ evaluatePatternCallback depth expression = PatternSession $ \session -> do
   (value, updated) <- evaluateSessionAt (depth + 1) session expression
   Right (Just value, updated)
 
+resolveSessionPatternAttributes
+  :: Expr
+  -> PatternSession (Set.Set SymbolAttribute)
+resolveSessionPatternAttributes expression = PatternSession $ \session ->
+  Right
+    ( case expression of
+        Symbol name -> symbolAttributesFor name session
+        _ -> Set.empty
+    , session
+    )
+
 instantiateSessionPattern
   :: Int
   -> EvaluationSession
@@ -182,8 +193,9 @@ instantiateSessionPattern
   -> SessionResult (Maybe [Expr])
 instantiateSessionPattern depth session expression patternExpression templates =
   runPatternSession
-    ( instantiatePatternMatchManyWith
+    ( instantiatePatternMatchManyWithAttributes
         (evaluatePatternCallback depth)
+        resolveSessionPatternAttributes
         expression
         patternExpression
         templates
