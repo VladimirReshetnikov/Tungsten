@@ -42,7 +42,7 @@ import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import Data.Char (chr, isDigit, ord, toUpper)
 import Data.Functor.Identity (Identity (..))
-import Data.List (permutations, sortBy, transpose)
+import Data.List (permutations, sort, sortBy, transpose)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -245,6 +245,8 @@ reduceBuiltin headName values = case headName of
   "Head" -> Right (unary headName headExpr values)
   "Length" -> Right (unary headName expressionLength values)
   "Depth" -> Right (unary headName (Integer . fromIntegral . expressionDepth) values)
+  "Dimensions" -> reduceDimensions values
+  "ArrayDepth" -> reduceArrayDepth values
   "AtomQ" -> Right (unary headName (boolean . isAtom) values)
   "ListQ" -> Right (unary headName (boolean . hasHead "List") values)
   "Association" -> Right (reduceAssociation values)
@@ -370,6 +372,23 @@ reduceBuiltin headName values = case headName of
   "RotateRight" -> Right (reduceRotate False headName values)
   "Take" -> reduceTakeDrop True values
   "Drop" -> reduceTakeDrop False values
+  "ConstantArray" -> reduceConstantArray values
+  "ArrayReshape" -> reduceArrayReshape values
+  "ArrayPad" -> reduceArrayPad values
+  "ArrayFlatten" -> reduceArrayFlatten values
+  "Transpose" -> reduceTranspose values
+  "UnitVector" -> reduceUnitVector values
+  "IdentityMatrix" -> reduceIdentityMatrix values
+  "DiagonalMatrix" -> reduceDiagonalMatrix values
+  "Tuples" -> reduceTuples values
+  "Partition" -> reducePartition values
+  "TakeList" -> reduceTakeList values
+  "TakeDrop" -> reduceTakeDropPair values
+  "Dot" -> reduceDot values
+  "Cross" -> reduceCross values
+  "Det" -> reduceDet values
+  "Inverse" -> reduceInverse values
+  "MatrixPower" -> reduceMatrixPower values
   "Append" -> Right (reduceAppendPrepend False headName values)
   "Prepend" -> Right (reduceAppendPrepend True headName values)
   "Join" -> Right (reduceJoin values)
@@ -510,7 +529,18 @@ imaginaryCoefficient (Call (Symbol "Times") [coefficient, Symbol "I"])
   | isExplicitReal coefficient = Just coefficient
 imaginaryCoefficient (Call (Symbol "Times") [Symbol "I", coefficient])
   | isExplicitReal coefficient = Just coefficient
+imaginaryCoefficient (Call (Symbol "Times") [coefficient, imaginaryUnit])
+  | isExplicitReal coefficient
+  , isExplicitImaginaryUnit imaginaryUnit = Just coefficient
+imaginaryCoefficient (Call (Symbol "Times") [imaginaryUnit, coefficient])
+  | isExplicitImaginaryUnit imaginaryUnit
+  , isExplicitReal coefficient = Just coefficient
 imaginaryCoefficient _ = Nothing
+
+isExplicitImaginaryUnit :: Expr -> Bool
+isExplicitImaginaryUnit (Complex realPart imaginaryPart) =
+  exactZero realPart && exactOne imaginaryPart
+isExplicitImaginaryUnit _ = False
 
 isExplicitReal :: Expr -> Bool
 isExplicitReal value
@@ -739,14 +769,38 @@ reducePlus originalValues =
   let values = concatMap (flattenHead "Plus") originalValues
       exactSum = foldl' addExact (Exact 0 1) (mapMaybe toExact values)
       symbolic = filter (not . isExact) values
-      collected = collectRepeated collectTerm symbolic
+      collected = collectLikeTerms symbolic
       combined = (if exactSum == Exact 0 1 then [] else [fromExact exactSum]) <> collected
    in case combined of
         [] -> Integer 0
         [single] -> single
         _ -> Call (Symbol "Plus") combined
  where
-  collectTerm term count = reduceTimes [Integer count, term]
+  collectLikeTerms terms = retainFirst Set.empty decomposed
+   where
+    decomposed = map termCoefficient terms
+    coefficients =
+      foldl'
+        (\retained (coefficient, term) ->
+          Map.insertWith addExact (fullForm term) coefficient retained)
+        Map.empty
+        decomposed
+    retainFirst _ [] = []
+    retainFirst seen ((_, term) : remaining)
+      | Set.member key seen = retainFirst seen remaining
+      | Exact 0 _ <- coefficient = retainFirst (Set.insert key seen) remaining
+      | coefficient == Exact 1 1 = term : retainFirst (Set.insert key seen) remaining
+      | otherwise =
+          reduceTimes [fromExact coefficient, term]
+            : retainFirst (Set.insert key seen) remaining
+     where
+      key = fullForm term
+      coefficient = Map.findWithDefault (Exact 1 1) key coefficients
+  termCoefficient (Call (Symbol "Times") factors) =
+    let coefficient = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact factors)
+        symbolicFactors = filter (not . isExact) factors
+     in (coefficient, reduceTimes symbolicFactors)
+  termCoefficient term = (Exact 1 1, term)
 
 reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =
@@ -4429,6 +4483,1042 @@ reduceRotate left headName = \case
          in Call expressionHead (drop offset arguments' <> take offset arguments')
   rotate subject amount = Call (Symbol headName) [subject, Integer amount]
 
+reduceDimensions :: [Expr] -> Either EvaluationError Expr
+reduceDimensions [SparseArray dimensions _ _] =
+  Right (evaluatedList (map Integer dimensions))
+reduceDimensions [expression] =
+  Right (evaluatedList (map (Integer . fromIntegral) (denseDimensions expression)))
+reduceDimensions _ = Left (EvaluationError "Dimensions expects exactly one argument.")
+
+-- Dimensions follows Wolfram's loose common-prefix rule.  Ragged children
+-- stop the inferred shape at the first axis on which they disagree.
+denseDimensions :: Expr -> [Int]
+denseDimensions (Call (Symbol "List") []) = [0]
+denseDimensions (Call (Symbol "List") values) =
+  length values : commonDimensionPrefix (map denseDimensions values)
+denseDimensions _ = []
+
+commonDimensionPrefix :: [[Int]] -> [Int]
+commonDimensionPrefix [] = []
+commonDimensionPrefix (firstDimensions : remaining) =
+  foldl' commonPrefix firstDimensions remaining
+ where
+  commonPrefix (left : leftRest) (right : rightRest)
+    | left == right = left : commonPrefix leftRest rightRest
+  commonPrefix _ _ = []
+
+reduceArrayDepth :: [Expr] -> Either EvaluationError Expr
+reduceArrayDepth [expression] = Right (Integer (fromIntegral (arrayDepthValue expression)))
+reduceArrayDepth _ = Left (EvaluationError "ArrayDepth expects exactly one argument.")
+
+arrayDepthValue :: Expr -> Int
+arrayDepthValue (SparseArray dimensions _ _) = length dimensions
+arrayDepthValue (Call (Symbol "List") []) = 1
+arrayDepthValue (Call (Symbol "List") values) =
+  1 + maximum (map arrayDepthValue values)
+arrayDepthValue _ = 0
+
+-- Unlike Dimensions, transformations require a genuinely rectangular List
+-- tree.  An atom has rank zero; callers decide whether rank zero is valid.
+strictDenseDimensions :: Expr -> Either EvaluationError [Int]
+strictDenseDimensions (Call (Symbol "List") []) = Right [0]
+strictDenseDimensions (Call (Symbol "List") values) = do
+  childDimensions <- traverse strictDenseDimensions values
+  case childDimensions of
+    [] -> Right [0]
+    firstDimensions : remaining
+      | all (== firstDimensions) remaining ->
+          Right (length values : firstDimensions)
+      | otherwise ->
+          Left (EvaluationError "dense List array input must be rectangular")
+strictDenseDimensions _ = Right []
+
+requireDenseArrayDimensions :: Text -> Expr -> Either EvaluationError [Int]
+requireDenseArrayDimensions operation expression = case expression of
+  SparseArray {} ->
+    Left (EvaluationError (operation <> " currently supports dense List arrays only."))
+  _ -> do
+    dimensions <- strictDenseDimensions expression
+    if null dimensions
+      then Left (EvaluationError (operation <> " expects a rectangular array."))
+      else Right dimensions
+
+normalizeDenseDimensions :: Text -> Expr -> Either EvaluationError [Int]
+normalizeDenseDimensions operation = \case
+  Integer dimension -> pure <$> nonnegativeDimension operation dimension
+  Call (Symbol "List") dimensions ->
+    traverse normalizeOne dimensions
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects an integer dimension or a list of dimensions.")
+      )
+ where
+  normalizeOne (Integer dimension) = nonnegativeDimension operation dimension
+  normalizeOne _ = Left (EvaluationError (operation <> " expects an integer argument."))
+
+nonnegativeDimension :: Text -> Integer -> Either EvaluationError Int
+nonnegativeDimension operation dimension
+  | dimension < 0 =
+      Left (EvaluationError (operation <> " expects non-negative dimensions."))
+  | dimension > toInteger (maxBound :: Int) =
+      Left (EvaluationError (operation <> " dimension is too large for this runtime."))
+  | otherwise = Right (fromInteger dimension)
+
+buildDenseArrayM
+  :: [Int]
+  -> ([Int] -> Either EvaluationError Expr)
+  -> Either EvaluationError Expr
+buildDenseArrayM dimensions builder = build [] dimensions
+ where
+  build reversedIndices [] = builder (reverse reversedIndices)
+  build reversedIndices (dimension : remaining) =
+    evaluatedList
+      <$> traverse
+        (\index -> build (index : reversedIndices) remaining)
+        [0 .. dimension - 1]
+
+denseArrayValueAt :: Expr -> [Int] -> Either EvaluationError Expr
+denseArrayValueAt = foldM select
+ where
+  select (Call (Symbol "List") values) index
+    | index >= 0
+    , index < length values = Right (values !! index)
+  select _ _ = Left (EvaluationError "Expected a rectangular List array.")
+
+denseLeafValues :: Expr -> [Expr]
+denseLeafValues (Call (Symbol "List") values) = concatMap denseLeafValues values
+denseLeafValues expression = [expression]
+
+reduceConstantArray :: [Expr] -> Either EvaluationError Expr
+reduceConstantArray [value, dimensionsExpression] = do
+  dimensions <- normalizeDenseDimensions "ConstantArray" dimensionsExpression
+  buildDenseArrayM dimensions (const (Right value))
+reduceConstantArray _ =
+  Left (EvaluationError "ConstantArray currently supports exactly two arguments.")
+
+reduceArrayReshape :: [Expr] -> Either EvaluationError Expr
+reduceArrayReshape [expression, dimensionsExpression] =
+  arrayReshape expression dimensionsExpression (Integer 0)
+reduceArrayReshape [expression, dimensionsExpression, padding] =
+  arrayReshape expression dimensionsExpression padding
+reduceArrayReshape _ =
+  Left
+    ( EvaluationError
+        "ArrayReshape expects an expression, dimensions, and an optional padding value."
+    )
+
+arrayReshape :: Expr -> Expr -> Expr -> Either EvaluationError Expr
+arrayReshape SparseArray {} _ _ =
+  Left (EvaluationError "ArrayReshape currently supports dense expressions only.")
+arrayReshape expression dimensionsExpression padding = do
+  dimensions <- normalizeDenseDimensions "ArrayReshape" dimensionsExpression
+  let (result, _) = buildReshaped dimensions (denseLeafValues expression)
+  Right result
+ where
+  buildReshaped [] (value : remaining) = (value, remaining)
+  buildReshaped [] [] = (padding, [])
+  buildReshaped (dimension : remainingDimensions) available =
+    let (children, leftover) = buildChildren dimension available []
+     in (evaluatedList (reverse children), leftover)
+   where
+    buildChildren 0 rest built = (built, rest)
+    buildChildren count rest built =
+      let (child, next) = buildReshaped remainingDimensions rest
+       in buildChildren (count - 1) next (child : built)
+
+normalizeArrayPadding
+  :: Int
+  -> Expr
+  -> Either EvaluationError [(Int, Int)]
+normalizeArrayPadding rank = \case
+  Integer width -> do
+    normalized <- paddingWidth width
+    Right (replicate rank (normalized, normalized))
+  Call (Symbol "List") [Integer left, Integer right]
+    | rank == 1 -> do
+        normalizedLeft <- paddingWidth left
+        normalizedRight <- paddingWidth right
+        Right [(normalizedLeft, normalizedRight)]
+  Call (Symbol "List") widths
+    | length widths == rank
+    , Just integerWidths <- traverse explicitInteger widths -> do
+        normalized <- traverse paddingWidth integerWidths
+        Right [(width, width) | width <- normalized]
+  Call (Symbol "List") widths
+    | length widths == rank -> traverse paddingPair widths
+  _ -> Left invalidShape
+ where
+  explicitInteger (Integer value) = Just value
+  explicitInteger _ = Nothing
+  paddingWidth value
+    | value < 0 =
+        Left (EvaluationError "ArrayPad expects non-negative padding widths.")
+    | value > toInteger (maxBound :: Int) =
+        Left (EvaluationError "ArrayPad padding width is too large for this runtime.")
+    | otherwise = Right (fromInteger value)
+  paddingPair (Call (Symbol "List") [Integer left, Integer right]) =
+    (,) <$> paddingWidth left <*> paddingWidth right
+  paddingPair (Call (Symbol "List") [_, _]) =
+    Left (EvaluationError "ArrayPad padding widths must be explicit integers.")
+  paddingPair _ = Left invalidShape
+  invalidShape =
+    EvaluationError
+      "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."
+
+reduceArrayPad :: [Expr] -> Either EvaluationError Expr
+reduceArrayPad [expression, paddingExpression] =
+  arrayPad expression paddingExpression (Integer 0)
+reduceArrayPad [expression, paddingExpression, padding] =
+  arrayPad expression paddingExpression padding
+reduceArrayPad _ =
+  Left
+    ( EvaluationError
+        "ArrayPad expects an array, padding widths, and an optional padding value."
+    )
+
+arrayPad :: Expr -> Expr -> Expr -> Either EvaluationError Expr
+arrayPad expression paddingExpression padding = do
+  dimensions <- requireDenseArrayDimensions "ArrayPad" expression
+  widths <- normalizeArrayPadding (length dimensions) paddingExpression
+  newDimensions <- sequence (zipWith paddedDimension dimensions widths)
+  buildDenseArrayM newDimensions $ \indices -> do
+    let sourceCoordinates = zipWith3 sourceCoordinate indices dimensions widths
+    case sequence sourceCoordinates of
+      Nothing -> Right padding
+      Just sourceIndices -> denseArrayValueAt expression sourceIndices
+ where
+  paddedDimension dimension (left, right)
+    | left > maxBound - dimension || right > maxBound - dimension - left =
+        Left (EvaluationError "ArrayPad dimensions are too large for this runtime.")
+    | otherwise = Right (dimension + left + right)
+  sourceCoordinate index dimension (left, _)
+    | index < left = Nothing
+    | index - left >= dimension = Nothing
+    | otherwise = Just (index - left)
+
+reduceArrayFlatten :: [Expr] -> Either EvaluationError Expr
+reduceArrayFlatten [expression] = arrayFlatten expression
+reduceArrayFlatten _ =
+  Left (EvaluationError "ArrayFlatten expects exactly one argument.")
+
+arrayFlatten :: Expr -> Either EvaluationError Expr
+arrayFlatten (Call (Symbol "List") []) = Right (evaluatedList [])
+arrayFlatten (Call (Symbol "List") rowExpressions) = do
+  blockRows <- traverse requireBlockRow rowExpressions
+  let columnCount = case blockRows of
+        firstRow : _ -> length firstRow
+        [] -> 0
+  if columnCount == 0 || any ((/= columnCount) . length) blockRows
+    then Left (EvaluationError "ArrayFlatten expects a rectangular block matrix.")
+    else do
+      shapeRows <- traverse (traverse blockShape) blockRows
+      rowHeights <- traverse consistentRowHeight (zip [1 :: Int ..] shapeRows)
+      _ <-
+        traverse
+          (consistentColumnWidth shapeRows)
+          [0 .. columnCount - 1]
+      let outputRows =
+            concat
+              [ [ evaluatedList
+                    ( concat
+                        [ blockMatrixRows block !! localRow
+                        | block <- blockRow
+                        ]
+                    )
+                | localRow <- [0 .. height - 1]
+                ]
+              | (blockRow, height) <- zip blockRows rowHeights
+              ]
+      Right (evaluatedList outputRows)
+ where
+  requireBlockRow (Call (Symbol "List") blocks) = Right blocks
+  requireBlockRow _ =
+    Left (EvaluationError "ArrayFlatten expects a rectangular list of array blocks.")
+  blockShape SparseArray {} =
+    Left (EvaluationError "ArrayFlatten currently supports dense array blocks only.")
+  blockShape block = do
+    dimensions <- strictDenseDimensions block
+    case dimensions of
+      [height, width] -> Right (height, width)
+      _ -> Left (EvaluationError "ArrayFlatten currently expects rank-2 array blocks.")
+  consistentRowHeight (rowIndex, shapes) = case shapes of
+    [] -> Left (EvaluationError "ArrayFlatten expects a rectangular block matrix.")
+    (height, _) : remaining
+      | all ((== height) . fst) remaining -> Right height
+      | otherwise ->
+          Left
+            ( EvaluationError
+                ( "ArrayFlatten block row "
+                    <> T.pack (show rowIndex)
+                    <> " has inconsistent heights."
+                )
+            )
+  consistentColumnWidth shapes columnIndex = case shapes of
+    [] -> Left (EvaluationError "ArrayFlatten expects a rectangular block matrix.")
+    firstRow : remaining ->
+      let width = snd (firstRow !! columnIndex)
+       in if all ((== width) . snd . (!! columnIndex)) remaining
+            then Right width
+            else
+              Left
+                ( EvaluationError
+                    ( "ArrayFlatten block column "
+                        <> T.pack (show (columnIndex + 1))
+                        <> " has inconsistent widths."
+                    )
+                )
+  blockMatrixRows (Call (Symbol "List") rows) =
+    [values | Call (Symbol "List") values <- rows]
+  blockMatrixRows _ = []
+arrayFlatten _ =
+  Left (EvaluationError "ArrayFlatten expects a rectangular list of array blocks.")
+
+reduceTranspose :: [Expr] -> Either EvaluationError Expr
+reduceTranspose [expression] = transposeDense expression Nothing
+reduceTranspose [expression, permutationExpression] =
+  transposeDense expression (Just permutationExpression)
+reduceTranspose _ =
+  Left (EvaluationError "Transpose expects an array and an optional permutation.")
+
+transposeDense :: Expr -> Maybe Expr -> Either EvaluationError Expr
+transposeDense expression permutationExpression = do
+  dimensions <- requireDenseArrayDimensions "Transpose" expression
+  permutation <- normalizeTransposePermutation (length dimensions) permutationExpression
+  if permutation == [0 .. length dimensions - 1]
+    then Right expression
+    else do
+      let newDimensions = [dimensions !! axis | axis <- permutation]
+      buildDenseArrayM newDimensions $ \outputIndices ->
+        denseArrayValueAt expression (sourceIndices permutation outputIndices)
+ where
+  sourceIndices permutation outputIndices =
+    [ sourceIndex axis
+    | axis <- [0 .. length permutation - 1]
+    ]
+   where
+    sourceIndex axis = case
+      [index | (sourceAxis, index) <- zip permutation outputIndices, sourceAxis == axis]
+      of
+        index : _ -> index
+        [] -> 0
+
+normalizeTransposePermutation
+  :: Int
+  -> Maybe Expr
+  -> Either EvaluationError [Int]
+normalizeTransposePermutation rank Nothing
+  | rank < 2 = Right [0 .. rank - 1]
+  | otherwise = Right (1 : 0 : [2 .. rank - 1])
+normalizeTransposePermutation rank (Just (Call (Symbol "List") values))
+  | length values /= rank = Left lengthError
+  | otherwise = do
+      axes <- traverse explicitAxis values
+      if sort axes == [1 .. toInteger rank]
+        then Right (map (subtract 1 . fromInteger) axes)
+        else Left (EvaluationError "Transpose expects a permutation of array axes.")
+ where
+  explicitAxis (Integer axis) = Right axis
+  explicitAxis _ = Left lengthError
+  lengthError =
+    EvaluationError "Transpose permutation length must match the array rank."
+normalizeTransposePermutation _ (Just _) =
+  Left (EvaluationError "Transpose expects a permutation list as its second argument.")
+
+reduceUnitVector :: [Expr] -> Either EvaluationError Expr
+reduceUnitVector [Integer lengthValue, Integer position]
+  | lengthValue < 0 =
+      Left (EvaluationError "UnitVector expects a non-negative length.")
+  | position < 1 || position > lengthValue =
+      Left
+        ( EvaluationError
+            "UnitVector position must be between 1 and the vector length."
+        )
+  | otherwise = do
+      lengthInt <- nonnegativeDimension "UnitVector" lengthValue
+      Right
+        ( evaluatedList
+            [ Integer (if toInteger index == position then 1 else 0)
+            | index <- [1 .. lengthInt]
+            ]
+        )
+reduceUnitVector _ =
+  Left
+    ( EvaluationError
+        "UnitVector currently supports exactly two explicit integer arguments."
+    )
+
+reduceIdentityMatrix :: [Expr] -> Either EvaluationError Expr
+reduceIdentityMatrix [Integer size] = identityMatrix size
+reduceIdentityMatrix [_] =
+  Left (EvaluationError "IdentityMatrix expects an integer argument.")
+reduceIdentityMatrix _ =
+  Left (EvaluationError "IdentityMatrix expects exactly one argument.")
+
+identityMatrix :: Integer -> Either EvaluationError Expr
+identityMatrix size
+  | size < 0 =
+      Left (EvaluationError "IdentityMatrix expects a non-negative integer size.")
+  | otherwise = do
+      dimension <- nonnegativeDimension "IdentityMatrix" size
+      Right
+        ( evaluatedList
+            [ evaluatedList
+                [Integer (if row == column then 1 else 0) | column <- [1 .. dimension]]
+            | row <- [1 .. dimension]
+            ]
+        )
+
+data DenseSequence
+  = DenseCompound !Expr ![Expr]
+  | DenseAssociation ![AssociationEntry]
+  deriving (Eq, Show)
+
+data DenseSequenceItem = DenseSequenceItem !Expr !(Maybe AssociationEntry)
+  deriving (Eq, Show)
+
+requireDenseSequence :: Text -> Expr -> Either EvaluationError DenseSequence
+requireDenseSequence _operation expression
+  | Just entries <- associationEntries expression = Right (DenseAssociation entries)
+requireDenseSequence _operation (Call expressionHead values) =
+  Right (DenseCompound expressionHead values)
+requireDenseSequence operation SparseArray {} =
+  Left (EvaluationError (operation <> " currently supports dense sequences only."))
+requireDenseSequence operation _ =
+  Left (EvaluationError (operation <> " expects a compound expression."))
+
+denseSequenceItems :: DenseSequence -> [DenseSequenceItem]
+denseSequenceItems (DenseCompound _ values) =
+  [DenseSequenceItem value Nothing | value <- values]
+denseSequenceItems (DenseAssociation entries) =
+  [ DenseSequenceItem value (Just entry)
+  | entry@(AssociationEntry _ _ value) <- entries
+  ]
+
+denseSequenceValues :: DenseSequence -> [Expr]
+denseSequenceValues sequenceExpression =
+  [value | DenseSequenceItem value _ <- denseSequenceItems sequenceExpression]
+
+rebuildDenseSequence :: DenseSequence -> [DenseSequenceItem] -> Expr
+rebuildDenseSequence (DenseCompound expressionHead _) items =
+  normalizeEvaluatedCall expressionHead
+    [value | DenseSequenceItem value _ <- items]
+rebuildDenseSequence (DenseAssociation _) items =
+  associationExpr
+    [entry | DenseSequenceItem _ (Just entry) <- items]
+
+emptyDenseSequence :: DenseSequence -> Expr
+emptyDenseSequence sequenceExpression = rebuildDenseSequence sequenceExpression []
+
+reduceDiagonalMatrix :: [Expr] -> Either EvaluationError Expr
+reduceDiagonalMatrix [valuesExpression] =
+  diagonalMatrix valuesExpression 0 Nothing
+reduceDiagonalMatrix [valuesExpression, Integer offset] =
+  diagonalMatrix valuesExpression offset Nothing
+reduceDiagonalMatrix [valuesExpression, Integer offset, Integer size] =
+  diagonalMatrix valuesExpression offset (Just size)
+reduceDiagonalMatrix [_valuesExpression, _offset] =
+  Left (EvaluationError "DiagonalMatrix expects an integer argument.")
+reduceDiagonalMatrix [_valuesExpression, _offset, _size] =
+  Left (EvaluationError "DiagonalMatrix expects an integer argument.")
+reduceDiagonalMatrix _ =
+  Left
+    ( EvaluationError
+        "DiagonalMatrix expects a list, an optional offset, and an optional matrix size."
+    )
+
+diagonalMatrix :: Expr -> Integer -> Maybe Integer -> Either EvaluationError Expr
+diagonalMatrix valuesExpression offset requestedSize = do
+  values <- denseSequenceValues <$> requireDenseSequence "DiagonalMatrix" valuesExpression
+  let inferredSize = toInteger (length values) + abs offset
+      sizeValue = maybe inferredSize id requestedSize
+  if sizeValue < 0
+    then Left (EvaluationError "DiagonalMatrix size must be non-negative.")
+    else do
+      size <- nonnegativeDimension "DiagonalMatrix" sizeValue
+      Right
+        ( evaluatedList
+            [ evaluatedList
+                [ diagonalValue values row column
+                | column <- [0 .. size - 1]
+                ]
+            | row <- [0 .. size - 1]
+            ]
+        )
+ where
+  diagonalValue values row column
+    | toInteger column - toInteger row /= offset = Integer 0
+    | valueIndex < 0 || valueIndex >= toInteger (length values) = Integer 0
+    | otherwise = values !! fromInteger valueIndex
+   where
+    valueIndex
+      | offset >= 0 = toInteger row
+      | otherwise = toInteger row + offset
+
+reduceTuples :: [Expr] -> Either EvaluationError Expr
+reduceTuples [itemsExpression] = tuplesProduct itemsExpression Nothing
+reduceTuples [itemsExpression, countExpression] =
+  tuplesProduct itemsExpression (Just countExpression)
+reduceTuples _ =
+  Left
+    ( EvaluationError
+        "Tuples expects a list of sequences or a sequence with a repetition count."
+    )
+
+tuplesProduct :: Expr -> Maybe Expr -> Either EvaluationError Expr
+tuplesProduct itemsExpression Nothing = case itemsExpression of
+  Call (Symbol "List") sequenceExpressions -> do
+    sequences <-
+      traverse
+        (fmap denseSequenceValues . requireDenseSequence "Tuples")
+        sequenceExpressions
+    Right (flatTuplesProduct sequences)
+  _ ->
+    Left
+      ( EvaluationError
+          "Tuples expects a list of sequences or a sequence with a repetition count."
+      )
+tuplesProduct itemsExpression (Just (Call (Symbol "List") shapeExpressions)) = do
+  shape <- traverse tupleShapeDimension shapeExpressions
+  baseItems <- denseSequenceValues <$> requireDenseSequence "Tuples" itemsExpression
+  Right (shapedTuplesProduct baseItems shape)
+tuplesProduct itemsExpression (Just (Integer repetitions)) = do
+  count <- tupleShapeDimension (Integer repetitions)
+  baseItems <- denseSequenceValues <$> requireDenseSequence "Tuples" itemsExpression
+  Right (flatTuplesProduct (replicate count baseItems))
+tuplesProduct _ (Just _) =
+  Left (EvaluationError "Tuples expects an integer argument.")
+
+tupleShapeDimension :: Expr -> Either EvaluationError Int
+tupleShapeDimension (Integer value)
+  | value < 0 =
+      Left (EvaluationError "Tuples shape components must be non-negative integers.")
+  | otherwise = nonnegativeDimension "Tuples" value
+tupleShapeDimension _ = Left (EvaluationError "Tuples expects an integer argument.")
+
+flatTuplesProduct :: [[Expr]] -> Expr
+flatTuplesProduct sequences =
+  evaluatedList (foldl' extend [evaluatedList []] sequences)
+ where
+  extend prefixes choices =
+    [ evaluatedList (prefixValues prefix <> [choice])
+    | prefix <- prefixes
+    , choice <- choices
+    ]
+  prefixValues (Call (Symbol "List") values) = values
+  prefixValues _ = []
+
+shapedTuplesProduct :: [Expr] -> [Int] -> Expr
+shapedTuplesProduct _ [] = evaluatedList []
+shapedTuplesProduct baseItems [count] =
+  flatTuplesProduct (replicate count baseItems)
+shapedTuplesProduct baseItems (count : remainingShape) =
+  let inner = shapedTuplesProduct baseItems remainingShape
+      innerChoices = case inner of
+        Call (Symbol "List") values -> values
+        _ -> []
+   in flatTuplesProduct (replicate count innerChoices)
+
+reducePartition :: [Expr] -> Either EvaluationError Expr
+reducePartition [expression, sizeExpression] =
+  partitionDense expression sizeExpression Nothing Nothing Nothing
+reducePartition [expression, sizeExpression, offsetExpression] =
+  partitionDense expression sizeExpression (Just offsetExpression) Nothing Nothing
+reducePartition [expression, sizeExpression, offsetExpression, alignmentExpression] =
+  partitionDense
+    expression sizeExpression (Just offsetExpression) (Just alignmentExpression) Nothing
+reducePartition
+  [expression, sizeExpression, offsetExpression, alignmentExpression, padding] =
+    partitionDense
+      expression sizeExpression (Just offsetExpression) (Just alignmentExpression) (Just padding)
+reducePartition _ =
+  Left
+    ( EvaluationError
+        ( "Partition expects an expression, a block size, an optional offset, "
+            <> "an optional alignment k or {kL, kR}, and an optional padding value."
+        )
+    )
+
+partitionDense
+  :: Expr
+  -> Expr
+  -> Maybe Expr
+  -> Maybe Expr
+  -> Maybe Expr
+  -> Either EvaluationError Expr
+partitionDense expression sizeExpression offsetExpression alignmentExpression padding = do
+  window <- positivePartitionInteger "block sizes" sizeExpression
+  step <- case offsetExpression of
+    Nothing -> Right window
+    Just value -> positivePartitionInteger "block sizes and offsets" value
+  sequenceExpression <- requireDenseSequence "Partition" expression
+  (leftAlignment, rightAlignment) <-
+    normalizePartitionAlignment window alignmentExpression
+  let items = denseSequenceItems sequenceExpression
+      itemCount = length items
+      firstStart = 2 - leftAlignment
+      lastStart = itemCount - (rightAlignment - 1)
+  if lastStart < firstStart
+    then Right (evaluatedList [])
+    else do
+      let blockCount = (lastStart - firstStart) `div` step + 1
+          starts = take blockCount [firstStart, firstStart + step ..]
+      blocks <- traverse (buildBlock sequenceExpression items itemCount window) starts
+      Right (evaluatedList blocks)
+ where
+  buildBlock sequenceExpression items itemCount window start =
+    case traverse (selectItem items itemCount) [start .. start + window - 1] of
+      Nothing -> Right (emptyDenseSequence sequenceExpression)
+      Just blockItems -> Right (rebuildDenseSequence sequenceExpression blockItems)
+  selectItem items itemCount position
+    | position >= 1 && position <= itemCount = Just (items !! (position - 1))
+    | Just paddingValue <- padding = Just (DenseSequenceItem paddingValue Nothing)
+    | itemCount == 0 = Nothing
+    | otherwise =
+        let cyclicPosition = ((position - 1) `mod` itemCount) + 1
+         in Just (items !! (cyclicPosition - 1))
+
+positivePartitionInteger :: Text -> Expr -> Either EvaluationError Int
+positivePartitionInteger description (Integer value)
+  | value <= 0 =
+      Left
+        ( EvaluationError
+            ("Partition expects positive integer " <> description <> ".")
+        )
+  | otherwise = nonnegativeDimension "Partition" value
+positivePartitionInteger _ _ =
+  Left (EvaluationError "Partition expects an integer argument.")
+
+normalizePartitionAlignment
+  :: Int
+  -> Maybe Expr
+  -> Either EvaluationError (Int, Int)
+normalizePartitionAlignment window Nothing = Right (1, window)
+normalizePartitionAlignment window (Just (Integer value)) = do
+  normalized <- partitionAlignment window value
+  Right (normalized, normalized)
+normalizePartitionAlignment window (Just (Call (Symbol "List") [Integer left, Integer right])) =
+  (,) <$> partitionAlignment window left <*> partitionAlignment window right
+normalizePartitionAlignment _ (Just _) =
+  Left
+    ( EvaluationError
+        "Partition currently expects an integer or {kL, kR} alignment."
+    )
+
+partitionAlignment :: Int -> Integer -> Either EvaluationError Int
+partitionAlignment window value
+  | value == -1 = Right window
+  | value >= 1 && value <= toInteger window = Right (fromInteger value)
+  | otherwise =
+      Left
+        ( EvaluationError
+            "Partition alignment must be -1 or an integer between 1 and the block size."
+        )
+
+reduceTakeList :: [Expr] -> Either EvaluationError Expr
+reduceTakeList [expression, Call (Symbol "List") specifications] = do
+  (taken, _) <- foldM consume ([], expression) specifications
+  Right (evaluatedList taken)
+ where
+  consume (taken, remaining) (Symbol "All") = do
+    let emptied = case requireDenseSequence "TakeList" remaining of
+          Right sequenceExpression -> emptyDenseSequence sequenceExpression
+          Left _ -> remaining
+    Right (taken <> [remaining], emptied)
+  consume (taken, remaining) specification = do
+    next <- reduceTakeDrop True [remaining, specification]
+    leftover <- reduceTakeDrop False [remaining, specification]
+    Right (taken <> [next], leftover)
+reduceTakeList [_, _] =
+  Left (EvaluationError "TakeList expects a list of specifications.")
+reduceTakeList _ = Left (EvaluationError "TakeList expects exactly two arguments.")
+
+reduceTakeDropPair :: [Expr] -> Either EvaluationError Expr
+reduceTakeDropPair [expression, specification] = do
+  taken <- reduceTakeDrop True [expression, specification]
+  dropped <- reduceTakeDrop False [expression, specification]
+  Right (evaluatedList [taken, dropped])
+reduceTakeDropPair _ = Left (EvaluationError "TakeDrop expects exactly two arguments.")
+
+denseListValues :: Expr -> Maybe [Expr]
+denseListValues (Call (Symbol "List") values) = Just values
+denseListValues _ = Nothing
+
+denseListRows :: Expr -> Maybe [[Expr]]
+denseListRows expression = do
+  rows <- denseListValues expression
+  traverse denseListValues rows
+
+reduceDot :: [Expr] -> Either EvaluationError Expr
+reduceDot [] = Left (EvaluationError "Dot expects at least two arguments.")
+reduceDot [_] = Left (EvaluationError "Dot expects at least two arguments.")
+reduceDot (firstExpression : remaining) =
+  foldM multiplyAndEvaluate firstExpression remaining
+ where
+  multiplyAndEvaluate left right = dotTwo left right >>= evaluate
+
+dotTwo :: Expr -> Expr -> Either EvaluationError Expr
+dotTwo SparseArray {} _ =
+  Left (EvaluationError "Dot currently supports dense List vectors and matrices only.")
+dotTwo _ SparseArray {} =
+  Left (EvaluationError "Dot currently supports dense List vectors and matrices only.")
+dotTwo left right =
+  case (denseListRows left, denseListRows right, denseListValues left, denseListValues right) of
+    (Nothing, Nothing, Just leftValues, Just rightValues)
+      | length leftValues /= length rightValues ->
+          Left (EvaluationError "Dot expects vectors of the same length.")
+      | otherwise ->
+          Right
+            ( Call
+                (Symbol "Plus")
+                [Call (Symbol "Times") [leftValue, rightValue]
+                | (leftValue, rightValue) <- zip leftValues rightValues
+                ]
+            )
+    (Just leftRows, Nothing, _, Just _) ->
+      evaluatedList
+        <$> traverse
+          (\row -> dotTwo (evaluatedList row) right)
+          leftRows
+    (Nothing, Just rightRows, Just leftValues, _)
+      | length leftValues /= length rightRows ->
+          Left (EvaluationError "Dot expects compatible vector/matrix dimensions.")
+      | not (rectangularRows rightRows) ->
+          Left (EvaluationError "Dot currently expects rectangular matrices.")
+      | otherwise ->
+          let rightWidth = matrixWidth rightRows
+              columns =
+                [evaluatedList [row !! column | row <- rightRows]
+                | column <- [0 .. rightWidth - 1]
+                ]
+           in evaluatedList <$> traverse (dotTwo left) columns
+    (Just leftRows, Just rightRows, _, _)
+      | not (rectangularRows leftRows) ->
+          Left (EvaluationError "Dot currently expects rectangular matrices.")
+      | not (rectangularRows rightRows)
+          || matrixWidth leftRows /= length rightRows ->
+          Left (EvaluationError "Dot currently expects compatible matrix dimensions.")
+      | otherwise ->
+          evaluatedList
+            <$> traverse
+              (\row -> dotTwo (evaluatedList row) right)
+              leftRows
+    _ ->
+      Left (EvaluationError "Dot currently supports List vectors and List matrices only.")
+
+matrixWidth :: [[Expr]] -> Int
+matrixWidth [] = 0
+matrixWidth (row : _) = length row
+
+rectangularRows :: [[Expr]] -> Bool
+rectangularRows rows = all ((== matrixWidth rows) . length) rows
+
+exactZero :: Expr -> Bool
+exactZero expression = case toExact expression of
+  Just (Exact numerator _) -> numerator == 0
+  Nothing -> False
+
+exactOne :: Expr -> Bool
+exactOne expression = case toExact expression of
+  Just (Exact numerator denominator) -> numerator == denominator
+  Nothing -> False
+
+expressionSum :: [Expr] -> Expr
+expressionSum = reducePlus
+
+expressionProduct :: [Expr] -> Expr
+expressionProduct = reduceTimes
+
+expressionNegate :: Expr -> Expr
+expressionNegate expression
+  | exactZero expression = Integer 0
+  | otherwise = reduceTimes [Integer (-1), expression]
+
+-- Canonical order places the signed term before the positive term.  This is
+-- observable in FullForm for symbolic Cross, minors, and determinants.
+expressionSubtract :: Expr -> Expr -> Expr
+expressionSubtract left right
+  | exactZero right = left
+  | otherwise = reducePlus (sortBy canonicalCompare [left, expressionNegate right])
+
+expressionInverse :: Expr -> Expr
+expressionInverse expression
+  | exactOne expression = Integer 1
+  | otherwise = reducePower [expression, Integer (-1)]
+
+expressionDivide :: Expr -> Expr -> Expr
+expressionDivide numerator denominator
+  | exactZero numerator = Integer 0
+  | exactOne denominator = numerator
+  | otherwise = reduceTimes [numerator, expressionInverse denominator]
+
+reduceCross :: [Expr] -> Either EvaluationError Expr
+reduceCross [left, right] = do
+  leftValues <- requireDenseVector "Cross" left
+  rightValues <- requireDenseVector "Cross" right
+  if length leftValues /= length rightValues || length leftValues `notElem` [2, 3]
+    then
+      Left
+        ( EvaluationError
+            "Cross currently supports pairs of 2D or 3D vectors."
+        )
+    else case (leftValues, rightValues) of
+      ([left1, left2], [right1, right2]) ->
+        Right
+          ( expressionSubtract
+              (expressionProduct [left1, right2])
+              (expressionProduct [left2, right1])
+          )
+      ([left1, left2, left3], [right1, right2, right3]) ->
+        Right
+          ( evaluatedList
+              [ expressionSubtract
+                  (expressionProduct [left2, right3])
+                  (expressionProduct [left3, right2])
+              , expressionSubtract
+                  (expressionProduct [left3, right1])
+                  (expressionProduct [left1, right3])
+              , expressionSubtract
+                  (expressionProduct [left1, right2])
+                  (expressionProduct [left2, right1])
+              ]
+          )
+      _ ->
+        Left
+          ( EvaluationError
+              "Cross currently supports pairs of 2D or 3D vectors."
+          )
+reduceCross _ =
+  Left (EvaluationError "Cross currently expects exactly two vector arguments.")
+
+requireDenseVector :: Text -> Expr -> Either EvaluationError [Expr]
+requireDenseVector _operation (Call (Symbol "List") values) = Right values
+requireDenseVector operation SparseArray {} =
+  Left (EvaluationError (operation <> " currently supports dense vectors only."))
+requireDenseVector operation _ =
+  Left (EvaluationError (operation <> " expects vectors."))
+
+requireDenseMatrixRows :: Text -> Expr -> Either EvaluationError [[Expr]]
+requireDenseMatrixRows operation SparseArray {} =
+  Left (EvaluationError (operation <> " currently supports dense matrices only."))
+requireDenseMatrixRows operation expression = case denseListRows expression of
+  Nothing -> Left (EvaluationError (operation <> " expects a matrix."))
+  Just rows
+    | rectangularRows rows -> Right rows
+    | otherwise ->
+        Left (EvaluationError (operation <> " expects a rectangular matrix."))
+
+requireSquareMatrixRows :: Text -> Expr -> Either EvaluationError [[Expr]]
+requireSquareMatrixRows operation expression = do
+  rows <- requireDenseMatrixRows operation expression
+  if length rows == matrixWidth rows
+    then Right rows
+    else Left (EvaluationError (operation <> " expects a square matrix."))
+
+reduceDet :: [Expr] -> Either EvaluationError Expr
+reduceDet [expression] = determinantFromRows <$> requireSquareMatrixRows "Det" expression
+reduceDet _ = Left (EvaluationError "Det expects exactly one matrix argument.")
+
+determinantFromRows :: [[Expr]] -> Expr
+determinantFromRows rows = case traverse (traverse toExact) rows of
+  Just exactRows -> fromExact (determinantExact exactRows)
+  Nothing -> determinantSymbolic rows
+
+determinantExact :: [[Exact]] -> Exact
+determinantExact [] = Exact 1 1
+determinantExact rows = eliminate 0 1 rows
+ where
+  size = length rows
+  eliminate column sign matrix
+    | column == size =
+        foldl'
+          multiplyExact
+          (Exact sign 1)
+          [matrix !! index !! index | index <- [0 .. size - 1]]
+    | otherwise = case findNonzeroPivot column matrix of
+        Nothing -> Exact 0 1
+        Just pivotIndex ->
+          let swapped = swapListItems column pivotIndex matrix
+              nextSign = if pivotIndex == column then sign else negate sign
+              pivotRow = swapped !! column
+              pivot = pivotRow !! column
+              reduced =
+                [ if rowIndex <= column
+                    then row
+                    else eliminateRow column pivot pivotRow row
+                | (rowIndex, row) <- zip [0 :: Int ..] swapped
+                ]
+           in eliminate (column + 1) nextSign reduced
+
+findNonzeroPivot :: Int -> [[Exact]] -> Maybe Int
+findNonzeroPivot column rows = findAt column
+ where
+  findAt index
+    | index >= length rows = Nothing
+    | exactNumerator (rows !! index !! column) /= 0 = Just index
+    | otherwise = findAt (index + 1)
+  exactNumerator (Exact numerator _) = numerator
+
+eliminateRow :: Int -> Exact -> [Exact] -> [Exact] -> [Exact]
+eliminateRow column pivot pivotRow row =
+  let factor = exactQuotient (row !! column) pivot
+      prefix = take column row
+      reducedSuffix =
+        zipWith
+          (\value pivotValue -> addExact value (negateExact (multiplyExact factor pivotValue)))
+          (drop column row)
+          (drop column pivotRow)
+   in prefix <> reducedSuffix
+
+exactQuotient :: Exact -> Exact -> Exact
+exactQuotient numerator denominator = case divideExact numerator denominator of
+  Just quotient -> quotient
+  Nothing -> Exact 0 1
+
+swapListItems :: Int -> Int -> [value] -> [value]
+swapListItems leftIndex rightIndex values
+  | leftIndex == rightIndex = values
+  | otherwise =
+      replaceListIndex
+        rightIndex
+        (values !! leftIndex)
+        (replaceListIndex leftIndex (values !! rightIndex) values)
+
+determinantSymbolic :: [[Expr]] -> Expr
+determinantSymbolic [] = Integer 1
+determinantSymbolic rows =
+  expressionSum
+    ( sortBy
+        canonicalCompare
+        [ term
+        | permutation <- permutations [0 .. length rows - 1]
+        , let factors = zipWith (!!) rows permutation
+        , not (any exactZero factors)
+        , let signedFactors =
+                (if permutationSign permutation < 0 then [Integer (-1)] else [])
+                  <> factors
+        , let term = expressionProduct signedFactors
+        , not (exactZero term)
+        ]
+    )
+
+permutationSign :: [Int] -> Int
+permutationSign values =
+  if even inversionCount then 1 else -1
+ where
+  inversionCount =
+    length
+      [ ()
+      | (leftIndex, left) <- zip [0 :: Int ..] values
+      , right <- drop (leftIndex + 1) values
+      , left > right
+      ]
+
+reduceInverse :: [Expr] -> Either EvaluationError Expr
+reduceInverse [expression] = do
+  rows <- requireSquareMatrixRows "Inverse" expression
+  case traverse (traverse toExact) rows of
+    Just exactRows -> inverseExact exactRows
+    Nothing -> inverseSymbolic rows
+reduceInverse _ =
+  Left (EvaluationError "Inverse expects exactly one matrix argument.")
+
+inverseExact :: [[Exact]] -> Either EvaluationError Expr
+inverseExact rows = do
+  reduced <- foldM eliminateColumn augmented [0 .. size - 1]
+  Right
+    ( evaluatedList
+        [evaluatedList (map fromExact (drop size row)) | row <- reduced]
+    )
+ where
+  size = length rows
+  augmented =
+    [ row
+        <> [Exact (if rowIndex == column then 1 else 0) 1 | column <- [0 .. size - 1]]
+    | (rowIndex, row) <- zip [0 :: Int ..] rows
+    ]
+  eliminateColumn matrix column = case findNonzeroPivot column matrix of
+    Nothing -> Left (EvaluationError "Inverse expects a nonsingular matrix.")
+    Just pivotIndex ->
+      let swapped = swapListItems column pivotIndex matrix
+          pivotRow = swapped !! column
+          pivot = pivotRow !! column
+          normalizedPivot = map (`exactQuotient` pivot) pivotRow
+          withPivot = replaceListIndex column normalizedPivot swapped
+          eliminateOther rowIndex row
+            | rowIndex == column = normalizedPivot
+            | otherwise =
+                let factor = row !! column
+                 in zipWith
+                      (\value pivotValue ->
+                        addExact value (negateExact (multiplyExact factor pivotValue)))
+                      row
+                      normalizedPivot
+       in Right
+            [ eliminateOther rowIndex row
+            | (rowIndex, row) <- zip [0 :: Int ..] withPivot
+            ]
+
+inverseSymbolic :: [[Expr]] -> Either EvaluationError Expr
+inverseSymbolic rows
+  | exactZero determinant =
+      Left (EvaluationError "Inverse expects a nonsingular matrix.")
+  | otherwise =
+      Right
+        ( evaluatedList
+            [ evaluatedList
+                [ inverseEntry outputRow outputColumn
+                | outputColumn <- [0 .. size - 1]
+                ]
+            | outputRow <- [0 .. size - 1]
+            ]
+        )
+ where
+  size = length rows
+  determinant = determinantFromRows rows
+  inverseEntry outputRow outputColumn =
+    let cofactor =
+          determinantFromRows (minorRows rows outputColumn outputRow)
+        signedCofactor =
+          if odd (outputRow + outputColumn)
+            then expressionNegate cofactor
+            else cofactor
+     in expressionDivide signedCofactor determinant
+
+minorRows :: [[value]] -> Int -> Int -> [[value]]
+minorRows rows removedRow removedColumn =
+  [ [value | (columnIndex, value) <- zip [0 :: Int ..] row, columnIndex /= removedColumn]
+  | (rowIndex, row) <- zip [0 :: Int ..] rows
+  , rowIndex /= removedRow
+  ]
+
+reduceMatrixPower :: [Expr] -> Either EvaluationError Expr
+reduceMatrixPower [expression, Integer power] = matrixPower expression power
+reduceMatrixPower [_, _] =
+  Left (EvaluationError "MatrixPower expects an integer argument.")
+reduceMatrixPower _ =
+  Left (EvaluationError "MatrixPower expects a matrix and an integer exponent.")
+
+matrixPower :: Expr -> Integer -> Either EvaluationError Expr
+matrixPower expression power = do
+  rows <- requireSquareMatrixRows "MatrixPower" expression
+  identity <- identityMatrix (toInteger (length rows))
+  base <- if power < 0 then reduceInverse [expression] else Right expression
+  powerLoop identity base (abs power)
+ where
+  powerLoop result _ 0 = Right result
+  powerLoop result base remaining = do
+    nextResult <-
+      if odd remaining
+        then dotTwo result base >>= evaluate
+        else Right result
+    let nextRemaining = remaining `div` 2
+    nextBase <-
+      if nextRemaining > 0
+        then dotTwo base base >>= evaluate
+        else Right base
+    powerLoop nextResult nextBase nextRemaining
+
 reduceTakeDrop :: Bool -> [Expr] -> Either EvaluationError Expr
 reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
   applySpecifications subject specifications
@@ -4456,8 +5546,12 @@ specificationIndices takeMode count specification = do
     Symbol "All" -> Right [0 .. count - 1]
     Symbol "None" -> Right []
     Integer amount
-      | amount >= 0 -> Right [0 .. min count (fromIntegral amount) - 1]
-      | otherwise -> Right [max 0 (count - fromIntegral (abs amount)) .. count - 1]
+      | amount >= 0
+      , amount <= toInteger count -> Right [0 .. fromInteger amount - 1]
+      | amount < 0
+      , abs amount <= toInteger count ->
+          Right [count - fromInteger (abs amount) .. count - 1]
+      | otherwise -> Left (oversizedIntegerError amount)
     Call (Symbol "List") [Integer position] ->
       maybe (Left invalid) (Right . pure) (resolvePosition count position)
     Call (Symbol "List") [Integer first, Integer last'] ->
@@ -4472,14 +5566,38 @@ specificationIndices takeMode count specification = do
     )
  where
   invalid = EvaluationError "Take/Drop received an unsupported or out-of-range specification"
+  oversizedIntegerError amount
+    | amount > toInteger count =
+        EvaluationError
+          ( "Part index "
+              <> T.pack (show (toInteger count + 1))
+              <> " is out of range for length "
+              <> T.pack (show count)
+              <> "."
+          )
+    | firstSelector < negate (toInteger count) =
+        EvaluationError
+          ( "Part index "
+              <> T.pack (show firstSelector)
+              <> " is out of range for length "
+              <> T.pack (show count)
+              <> "."
+          )
+    | otherwise =
+        EvaluationError "Only top-level Part specifications may use index 0."
+   where
+    firstSelector = toInteger count + amount + 1
   rangePositions :: Integer -> Integer -> Integer -> Either EvaluationError [Int]
   rangePositions first last' step = do
     start <- maybe (Left invalid) Right (resolvePosition count first)
     finish <- maybe (Left invalid) Right (resolvePosition count last')
-    let stepValue = fromIntegral step
+    let startValue = toInteger start
+        finishValue = toInteger finish
         indices
-          | stepValue > 0 && start <= finish = [start, start + stepValue .. finish]
-          | stepValue < 0 && start >= finish = [start, start + stepValue .. finish]
+          | step > 0 && startValue <= finishValue =
+              map fromInteger [startValue, startValue + step .. finishValue]
+          | step < 0 && startValue >= finishValue =
+              map fromInteger [startValue, startValue + step .. finishValue]
           | otherwise = []
     pure indices
 
@@ -4983,12 +6101,38 @@ instantiateFunctionCall functionArguments values =
 
 substituteSlots :: [Expr] -> Expr -> Expr
 substituteSlots (value : _) (Call (Symbol "Slot") []) = value
+substituteSlots values (Call (Symbol "SlotSequence") []) =
+  Call (Symbol "Sequence") (concatMap flattenSequenceArgument values)
 substituteSlots values expression = case expression of
   Call (Symbol "Slot") [Integer index]
     | index > 0 && index <= fromIntegral (length values) -> values !! fromIntegral (index - 1)
+  Call (Symbol "SlotSequence") [Integer index]
+    | index > 0 ->
+        Call
+          (Symbol "Sequence")
+          ( concatMap
+              flattenSequenceArgument
+              (dropInteger (index - 1) values)
+          )
   Call expressionHead arguments' ->
-    Call (substituteSlots values expressionHead) (map (substituteSlots values) arguments')
+    Call
+      (substituteSlots values expressionHead)
+      ( concatMap
+          (flattenSequenceArgument . substituteSlots values)
+          arguments'
+      )
   _ -> expression
+
+flattenSequenceArgument :: Expr -> [Expr]
+flattenSequenceArgument (Call (Symbol "Sequence") values) =
+  concatMap flattenSequenceArgument values
+flattenSequenceArgument value = [value]
+
+dropInteger :: Integer -> [value] -> [value]
+dropInteger count values
+  | count <= 0 = values
+dropInteger _ [] = []
+dropInteger count (_ : remaining) = dropInteger (count - 1) remaining
 
 -- | Capture-aware simultaneous substitution for named Wolfram symbols.
 -- Binding right-hand sides remain in their outer scope, while named Function

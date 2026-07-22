@@ -28,6 +28,7 @@ import System.Info (os)
 import System.IO (hClose, hSetEncoding, openTempFile, utf8)
 import System.FilePath ((</>))
 import Tungsten.Cli
+import qualified Tungsten.ArrayTests as ArrayTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
 import Tungsten.Expression
@@ -70,6 +71,7 @@ tests =
   , checkInputFormParserErrors
   , checkEvaluator
   , checkEvaluatorErrors
+  , ArrayTests.checkArrayEvaluator
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors
@@ -608,6 +610,7 @@ checkEvaluator = do
         , ("repeated symbolic collection", "{a + a + a, a*a*a, f[x] + f[x], f[x]*f[x]}", "List[Times[3, a], Power[a, 3], Times[2, f[x]], Power[f[x], 2]]")
         , ("evaluated argument normalization", "{Nothing, Sequence[a, b], Splice[{c, d}]}", "List[a, b, c, d]")
         , ("held function sequence normalization", "{Function[Sequence[x, x + x]][a], Function[x, Sequence[x, x]][a]}", "List[Times[2, a], a]")
+        , ("SequenceHold slot sequence substitution", "Function[Null, Hold[##], SequenceHold][a, Sequence[b, c]]", "Hold[a, b, c]")
         , ("factorials", "6! + 6!!", "768")
         , ("numeric comparison", "1 < 2 <= 2", "True")
         , ("numeric inequality", "Unequal[1, 2, 1]", "False")
