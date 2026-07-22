@@ -723,6 +723,90 @@ CASES = (
         ),
         0,
     ),
+    (
+        "in-place arithmetic state and return values",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, y]; x = 5; "
+            "first = {x++, x, x--, x, ++x, x, --x, x}; "
+            "ClearAll[x]; second = {x++, x}; "
+            "x = y; y = 5; third = {x++, x, y}; "
+            "x = Unevaluated[5]; {first, second, third, "
+            "{x++, x, OwnValues[x]}}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "AppendTo collection and definition targets",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, y, z, held, f, q]; x = {1, 2}; y = f[a]; "
+            "z = <|a -> 1, b -> 2|>; f[t_] := {t}; "
+            "SetAttributes[q, SequenceHold]; held = q[a]; "
+            "{AppendTo[x, 3], x, AppendTo[y, b], y, "
+            "AppendTo[z, b -> 9], z, AppendTo[f[q], 7], f[q], "
+            "DownValues[f], AppendTo[held, Sequence[b, c]], held}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "mutation qualification alias and Sequence boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, a, qi, qa]; x = 5; a = {1}; "
+            "qi = Increment; qa = AppendTo; "
+            "{System`Increment[x], System`Decrement[x], "
+            "System`PreIncrement[x], System`PreDecrement[x], x, "
+            "qi[x], Global`Increment[x], qi[Evaluate[x]], "
+            "qi[Sequence[x, y]], qa[a, 2], Global`AppendTo[a, 2], "
+            "qa[a, Sequence[b, c]], a}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "mutation validation and protection diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, y]; x = 5; y = {1}; Protect[x, y]; "
+            "probe[Increment[x], AppendTo[y, 2], "
+            "AppendTo[Print[\"append-arity\"]], "
+            "Decrement[Print[\"left\"], Print[\"right\"]], "
+            "PreIncrement[f[x]], x, y]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "mutation recovered errors and control timing",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[x, y]; x := Part[{1}, 2]; y = {1}; "
+            "probe[x++, Catch[AppendTo[y, Throw[7]]], x, y, "
+            "OwnValues[x], AppendTo[1, Print[\"item\"]], "
+            "AppendTo[<|a -> 1|>, b], "
+            "AppendTo[System`Association[a], Nothing]]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

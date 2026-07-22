@@ -577,6 +577,17 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateLoopControl ContinueSignal "Continue" session arguments'
       Call (Symbol "Return") arguments' ->
         evaluateSessionReturn depth session arguments'
+      Call (Symbol "AppendTo") arguments' ->
+        evaluateSessionAppendTo depth session arguments'
+      Call (Symbol headName) arguments'
+        | Just (delta, returnOld) <- Map.lookup headName inPlaceArithmeticVariants ->
+            evaluateSessionInPlaceArithmetic
+              headName
+              delta
+              returnOld
+              depth
+              session
+              arguments'
       Call (Symbol "Print") arguments' ->
         evaluateSessionPrint depth session arguments'
       Call (Symbol "Evaluate") arguments' ->
@@ -743,7 +754,7 @@ evaluateSessionPreparedGenericCall depth session expressionHead evaluatedHead ar
         Call _ values -> values
         _ -> preparedArguments
       normalizedArguments =
-        stripSessionCompositionUnevaluatedArguments
+        stripSessionTransparentUnevaluatedArguments
           evaluatedHead
           attributeNormalizedArguments
       normalizedCall = Call evaluatedHead normalizedArguments
@@ -927,6 +938,7 @@ directSessionDispatchHead name =
              , "Break"
              , "Continue"
              , "Return"
+             , "AppendTo"
              , "Print"
              , "Evaluate"
              , "ReleaseHold"
@@ -953,6 +965,7 @@ directSessionDispatchHead name =
              , "Product"
              ]
                <> heldPatternBuiltinHeads
+               <> Map.keys inPlaceArithmeticVariants
                <> Map.keys updateConstructors
                <> staticHeldHeadNames
            )
@@ -6332,16 +6345,19 @@ normalizeSessionSequenceCall expressionHead values =
       , target == expressionHead -> spliceValues
     value -> [value]
 
-stripSessionCompositionUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
-stripSessionCompositionUnevaluatedArguments expressionHead
-  | sessionHeadExpressionIsAny ["Composition", "RightComposition"] expressionHead =
-      map stripDirectUnevaluated
+stripSessionTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
+stripSessionTransparentUnevaluatedArguments expressionHead
+  | sessionHeadExpressionIsAny
+      ["Composition", "Plus", "RightComposition"]
+      expressionHead =
+      map stripSessionDirectUnevaluated
   | otherwise = id
- where
-  stripDirectUnevaluated = \case
-    Call (Symbol unevaluatedHead) [value]
-      | isSessionSystemHead "Unevaluated" unevaluatedHead -> value
-    value -> value
+
+stripSessionDirectUnevaluated :: Expr -> Expr
+stripSessionDirectUnevaluated = \case
+  Call (Symbol unevaluatedHead) [value]
+    | isSessionSystemHead "Unevaluated" unevaluatedHead -> value
+  value -> value
 
 threadSessionListableCall
   :: Int
@@ -6469,6 +6485,129 @@ evaluateUpdate headName depth session name constructor rhs = do
       if length (sessionGeneratedMessages resultSession) > beforeResultCount
         then Right (Call (Symbol headName) [Symbol name, rhs], resultSession)
         else Right (result, define name (ImmediateValue result) resultSession)
+
+evaluateSessionInPlaceArithmetic
+  :: Text
+  -> Integer
+  -> Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionInPlaceArithmetic headName delta returnOld depth session = \case
+  [Symbol name]
+    | not (symbolAllowsValueMutation name session) ->
+        sessionFailure
+          (appendSymbolMessage headName "wrsym" name "is Protected." session)
+          (headName <> ": cannot modify protected symbol.")
+    | otherwise -> do
+        (oldValue, oldValueSession) <-
+          evaluateSessionAt (depth + 1) session (Symbol name)
+        (newValue, newValueSession) <-
+          evaluateSessionAt
+            (depth + 1)
+            oldValueSession
+            (Call (Symbol "Plus") [oldValue, Integer delta])
+        let updated = define name (ImmediateValue newValue) newValueSession
+        Right (if returnOld then oldValue else newValue, updated)
+  [_] ->
+    sessionFailure
+      session
+      (headName <> " currently expects a bare-symbol target.")
+  _ ->
+    sessionFailure
+      session
+      (headName <> " expects exactly one argument.")
+
+inPlaceArithmeticVariants :: Map.Map Text (Integer, Bool)
+inPlaceArithmeticVariants =
+  Map.fromList
+    [ ("Increment", (1, True))
+    , ("Decrement", (-1, True))
+    , ("PreIncrement", (1, False))
+    , ("PreDecrement", (-1, False))
+    ]
+
+evaluateSessionAppendTo
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAppendTo depth session = \case
+  [target, item] -> do
+    (currentValue, currentSession) <-
+      evaluateSessionAt (depth + 1) session target
+    (itemValue, itemSession) <-
+      evaluateSessionAt (depth + 1) currentSession item
+    case appendSessionValue currentValue itemValue of
+      Left (EvaluationError message) -> sessionFailure itemSession message
+      Right appended ->
+        evaluateSessionAt
+          (depth + 1)
+          itemSession
+          (Call (Symbol "Set") [target, appended])
+  _ -> sessionFailure session "AppendTo expects exactly two arguments."
+
+appendSessionValue :: Expr -> Expr -> Either EvaluationError Expr
+appendSessionValue currentValue itemValue
+  | Just _ <- sessionAssociationEntries currentValue =
+      if isSessionAssociationItem itemValue
+        then
+          let appendCall =
+                Call (Symbol "Append") [currentValue, itemValue]
+           in case reduceEvaluatedCall appendCall of
+                Right result
+                  | result /= appendCall -> Right result
+                _ -> invalidAssociationItem
+        else invalidAssociationItem
+ where
+  invalidAssociationItem =
+    Left
+      ( EvaluationError
+          "Append expects a rule when appending to an Association."
+      )
+appendSessionValue currentValue itemValue = case currentValue of
+  Call expressionHead values ->
+    Right
+      ( Call
+          expressionHead
+          (appendSessionArguments expressionHead (values <> [itemValue]))
+      )
+  _ -> Left (EvaluationError "Append expects a nonatomic expression.")
+
+appendSessionArguments :: Expr -> [Expr] -> [Expr]
+appendSessionArguments expressionHead values = case expressionHead of
+  Symbol headName ->
+    let spliced
+          | headName
+              `elem` ["HoldComplete", "Rule", "RuleDelayed", "Unevaluated"] =
+              values
+          | otherwise = concatMap spliceArgument values
+     in if isSessionSystemHead "Association" headName
+            || isSessionSystemHead "List" headName
+          then filter (/= Symbol "Nothing") spliced
+          else spliced
+  _ -> values
+ where
+  spliceArgument = \case
+    Call (Symbol sequenceHead) sequenceValues
+      | isSessionSystemHead "Sequence" sequenceHead -> sequenceValues
+    Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues]
+      | isSessionSystemHead "Splice" spliceHead
+      , isSessionSystemHead "List" listHead
+      , expressionHead == Symbol "List" -> spliceValues
+    Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues, target]
+      | isSessionSystemHead "Splice" spliceHead
+      , isSessionSystemHead "List" listHead
+      , target == expressionHead -> spliceValues
+    value -> [value]
+
+isSessionAssociationItem :: Expr -> Bool
+isSessionAssociationItem = \case
+  Call (Symbol ruleHead) [_, _] ->
+    isSessionSystemHead "Rule" ruleHead
+      || isSessionSystemHead "RuleDelayed" ruleHead
+  _ -> False
 
 updateConstructors :: Map.Map Text (Expr -> Expr -> Expr)
 updateConstructors =

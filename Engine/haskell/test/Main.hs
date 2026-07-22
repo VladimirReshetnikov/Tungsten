@@ -1386,6 +1386,18 @@ checkEvaluationSession = do
         , ("assignment update", "x = 10; AddTo[x, 5]; x", "15")
         , ("assignment updates cannot bypass protection", "protectedUpdateX = 2; Protect[protectedUpdateX]; {AddTo[protectedUpdateX, 1 + 2], protectedUpdateX}", "List[AddTo[protectedUpdateX, 3], 2]")
         , ("assignment updates leave special settings unchanged", "AddTo[$RecursionLimit, -1000]; $RecursionLimit", "1024")
+        , ("in-place arithmetic attributes come from the catalog", "{Attributes[AppendTo], Attributes[Increment], Attributes[Decrement], Attributes[PreIncrement], Attributes[PreDecrement]}", "List[List[HoldFirst, Protected], List[HoldFirst, Protected, ReadProtected], List[HoldFirst, Protected, ReadProtected], List[HoldFirst, Protected, ReadProtected], List[HoldFirst, Protected, ReadProtected]]")
+        , ("in-place arithmetic returns old or new values", "ClearAll[x]; x = 5; {Increment[x], x, Decrement[x], x, PreIncrement[x], x, PreDecrement[x], x}", "List[5, 6, 6, 5, 6, 6, 5, 5]")
+        , ("in-place arithmetic mutates the raw alias target", "ClearAll[x, y, first]; x = y; y = 5; first = {x++, x, y}; ClearAll[x]; {first, {x++, x}}", "List[List[5, 6, 5], List[x, Plus[1, x]]]")
+        , ("in-place arithmetic preserves the old Unevaluated wrapper but strips it from Plus", "ClearAll[x]; x = Unevaluated[5]; {x++, x, OwnValues[x]}", "List[Unevaluated[5], 6, List[RuleDelayed[HoldPattern[x], 6]]]")
+        , ("in-place arithmetic stores one-step Unevaluated payloads", "ClearAll[x]; x = Unevaluated[Sequence[5, 6]]; {x++, x, OwnValues[x]}", "List[Unevaluated[Sequence[5, 6]], 12, List[RuleDelayed[HoldPattern[x], Plus[1, Sequence[5, 6]]]]]")
+        , ("AppendTo rebuilds lists generic calls and associations", "ClearAll[x, y, z]; x = {1, 2}; y = f[a]; z = <|a -> 1, b -> 2|>; {AppendTo[x, 3], x, AppendTo[y, b], y, AppendTo[z, b -> 9], z}", "List[List[1, 2, 3], List[1, 2, 3], f[a, b], f[a, b], Association[Rule[a, 1], Rule[b, 9]], Association[Rule[a, 1], Rule[b, 9]]]")
+        , ("AppendTo pre-normalizes Sequence by literal head spelling", "ClearAll[f, x, y, z]; SetAttributes[f, SequenceHold]; x = f[a]; y = System`HoldComplete[a]; z = HoldComplete[a]; {AppendTo[x, Sequence[b, c]], x, AppendTo[y, Sequence[b, c]], y, AppendTo[z, Sequence[b, c]], z}", "List[f[a, b, c], f[a, b, c], System`HoldComplete[a, b, c], System`HoldComplete[a, b, c], HoldComplete[a, Sequence[b, c]], HoldComplete[a, Sequence[b, c]]]")
+        , ("AppendTo treats a malformed Association as a generic call", "ClearAll[x]; x = Association[bad]; {AppendTo[x, c], x}", "List[Association[bad, c], Association[bad, c]]")
+        , ("AppendTo drops Nothing from a qualified malformed Association", "ClearAll[x]; x = System`Association[a]; {AppendTo[x, Nothing], x}", "List[System`Association[a], System`Association[a]]")
+        , ("AppendTo delegates compound targets to Set", "ClearAll[f]; f[x_] := {x}; {AppendTo[f[a], 2], f[a], DownValues[f]}", "List[List[a, 2], List[a, 2], List[RuleDelayed[HoldPattern[f[a]], List[a, 2]], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], List[x]]]]")
+        , ("mutation qualification and aliases keep raw dispatch boundaries", "ClearAll[x, a, qi, qa]; x = 5; a = {1}; qi = Increment; qa = AppendTo; {System`Increment[x], System`Decrement[x], System`PreIncrement[x], System`PreDecrement[x], x, qi[x], Global`Increment[x], qa[a, 2], Global`AppendTo[a, 2], a}", "List[5, 6, 6, 5, 5, Increment[x], Global`Increment[5], AppendTo[a, 2], Global`AppendTo[List[1], 2], List[1]]")
+        , ("mutation control exits stop before assignment", "ClearAll[x]; x = {1}; {Catch[AppendTo[x, Throw[7]]], x}", "List[7, List[1]]")
         , ("qualified ByteArrayQ aliases retain scalar dispatch", "f = System`ByteArrayQ; f[ByteArray[{1}]]", "True")
         , ("table count iterators", "{Table[a, 3], Table[a, {3}], Table[i, {i, 5}]}", "List[List[a, a, a], List[a, a, a], List[1, 2, 3, 4, 5]]")
         , ("table exact ranges", "{Table[i^2, {i, 1, 5}], Table[i, {i, 2, 8, 2}], Table[i, {i, 5, 1, -1}], Table[i, {i, 0, 1, 1/4}]}", "List[List[1, 4, 9, 16, 25], List[2, 4, 6, 8], List[5, 4, 3, 2, 1], List[0, Rational[1, 4], Rational[1, 2], Rational[3, 4], 1]]")
@@ -1567,6 +1579,16 @@ checkEvaluationSession = do
           , "Piecewise[{{Print[\"early\"], x}, bad, {2, True}}]"
           , "Piecewise[List[List[Print[\"early\"], x], bad, List[2, True]]]"
           , ["early"]
+          )
+        , ( "in-place arithmetic forces delayed values once before replacement"
+          , "ClearAll[x]; x := (Print[\"read\"]; 5); probe[x++, x, OwnValues[x]]"
+          , "probe[5, 6, List[RuleDelayed[HoldPattern[x], 6]]]"
+          , ["read"]
+          )
+        , ( "AppendTo evaluates its item before an atomic-target failure"
+          , "ClearAll[x]; x = 1; AppendTo[x, Print[\"item\"]]"
+          , "AppendTo[x, Print[\"item\"]]"
+          , ["item"]
           )
         ]
       partArityMessage =
@@ -2374,6 +2396,83 @@ checkEvaluationSession = do
             , ( "Part::error"
               , "MessageName[Part, \"error\"]"
               , "Part::error: Part specifications are invalid for g[b]."
+              )
+            ]
+          )
+        , ( "mutation arity checks suppress all argument effects"
+          , "probe[AppendTo[Print[\"a\"]], Increment[Print[\"i\"], Print[\"j\"]], Decrement[], PreIncrement[], PreDecrement[]]"
+          , "probe[AppendTo[Print[\"a\"]], Increment[Print[\"i\"], Print[\"j\"]], Decrement[], PreIncrement[], PreDecrement[]]"
+          , [ ( "AppendTo::error"
+              , "MessageName[AppendTo, \"error\"]"
+              , "AppendTo::error: AppendTo expects exactly two arguments."
+              )
+            , ( "Increment::error"
+              , "MessageName[Increment, \"error\"]"
+              , "Increment::error: Increment expects exactly one argument."
+              )
+            , ( "Decrement::error"
+              , "MessageName[Decrement, \"error\"]"
+              , "Decrement::error: Decrement expects exactly one argument."
+              )
+            , ( "PreIncrement::error"
+              , "MessageName[PreIncrement, \"error\"]"
+              , "PreIncrement::error: PreIncrement expects exactly one argument."
+              )
+            , ( "PreDecrement::error"
+              , "MessageName[PreDecrement, \"error\"]"
+              , "PreDecrement::error: PreDecrement expects exactly one argument."
+              )
+            ]
+          )
+        , ( "protected in-place arithmetic emits write and recovery messages"
+          , "ClearAll[x]; x = 5; Protect[x]; {Increment[x], x}"
+          , "List[Increment[x], 5]"
+          , [ ( "Increment::wrsym"
+              , "MessageName[Increment, \"wrsym\"]"
+              , "Increment::wrsym: Symbol x is Protected."
+              )
+            , ( "Increment::error"
+              , "MessageName[Increment, \"error\"]"
+              , "Increment::error: Increment: cannot modify protected symbol."
+              )
+            ]
+          )
+        , ( "protected AppendTo delegates its failure to Set"
+          , "ClearAll[x]; x = {1}; Protect[x]; AppendTo[x, 2]"
+          , "Set[x, List[1, 2]]"
+          , [ ( "Set::wrsym"
+              , "MessageName[Set, \"wrsym\"]"
+              , "Set::wrsym: Symbol x is Protected."
+              )
+            ]
+          )
+        , ( "in-place arithmetic assigns through recovered read errors"
+          , "ClearAll[x]; x := Part[{1}, 2]; x++; {x, OwnValues[x]}"
+          , "List[Plus[1, Part[List[1], 2]], List[RuleDelayed[HoldPattern[x], Plus[1, Part[List[1], 2]]]]]"
+          , [ ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for {1}."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for {1}."
+              )
+            , ( "Part::error"
+              , "MessageName[Part, \"error\"]"
+              , "Part::error: Part specifications are invalid for {1}."
+              )
+            ]
+          )
+        , ( "AppendTo reports strict atomic and association failures"
+          , "ClearAll[x, y]; x = 1; y = <|a -> 1|>; {AppendTo[x, b], AppendTo[y, b]}"
+          , "List[AppendTo[x, b], AppendTo[y, b]]"
+          , [ ( "AppendTo::error"
+              , "MessageName[AppendTo, \"error\"]"
+              , "AppendTo::error: Append expects a nonatomic expression."
+              )
+            , ( "AppendTo::error"
+              , "MessageName[AppendTo, \"error\"]"
+              , "AppendTo::error: Append expects a rule when appending to an Association."
               )
             ]
           )
