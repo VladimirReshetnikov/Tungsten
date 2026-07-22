@@ -18,6 +18,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Tungsten.Evaluate
 import Tungsten.Expression
+import Tungsten.PythonSort (pythonStableSortByState)
 
 data Definition
   = ImmediateValue !Expr
@@ -230,9 +231,14 @@ evaluateSessionAtRaw depth session expression = case expression of
       Call (Symbol headName) [Symbol name, rhs]
         | Just constructor <- Map.lookup headName updateConstructors ->
             evaluateUpdate headName depth session name constructor rhs
-      Call (Symbol headName) _
+      Call expressionHead@(Symbol headName) arguments'
         | headName `elem` ["Hold", "HoldComplete", "HoldForm", "HoldPattern", "Unevaluated", "Function", "SetDelayed", "RuleDelayed", "Condition"] ->
-            Right (expression, session)
+            Right
+              ( if headName == "Function"
+                  then normalizeEvaluatedCall expressionHead arguments'
+                  else expression
+              , session
+              )
       Call expressionHead arguments' -> do
         (evaluatedHead, headSession) <- evaluateSessionAt (depth + 1) session expressionHead
         if evaluatedHead == Symbol "Association"
@@ -1304,31 +1310,77 @@ data SessionDecoratedItem = SessionDecoratedItem
   }
   deriving (Eq, Show)
 
+splitSessionSameTestOptions
+  :: Text
+  -> [Expr]
+  -> Either Text ([Expr], Maybe Expr)
+splitSessionSameTestOptions operation values
+  | any ((/= "SameTest") . fst) optionParts =
+      Left (operation <> " currently supports only the SameTest option.")
+  | otherwise = Right (dataValues, normalizeSameTest selectedSameTest)
+ where
+  (dataValues, options) = splitTrailingSessionOptions values
+  optionParts =
+    [ parts
+    | option <- options
+    , Just parts <- [sessionOptionRuleParts option]
+    ]
+  selectedSameTest = foldl retainLast Nothing optionParts
+  retainLast retained (name, value)
+    | name == "SameTest" = Just value
+    | otherwise = retained
+  normalizeSameTest (Just (Symbol "Automatic")) = Nothing
+  normalizeSameTest other = other
+
+splitTrailingSessionOptions :: [Expr] -> ([Expr], [Expr])
+splitTrailingSessionOptions values =
+  (reverse reversedArguments, reverse reversedOptions)
+ where
+  (reversedOptions, reversedArguments) =
+    span isSessionOptionRule (reverse values)
+
+isSessionOptionRule :: Expr -> Bool
+isSessionOptionRule expression = case sessionOptionRuleParts expression of
+  Just _ -> True
+  Nothing -> False
+
+sessionOptionRuleParts :: Expr -> Maybe (Text, Expr)
+sessionOptionRuleParts = \case
+  Call (Symbol ruleHead) [Symbol name, value]
+    | ruleHead `elem` ["Rule", "RuleDelayed"] -> Just (name, value)
+  _ -> Nothing
+
 evaluateSessionSortBy
   :: Bool
   -> Int
   -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSessionSortBy reverseMode depth session values = case values of
-  [_] -> Right (Call (Symbol operation) values, session)
-  [subject, functions] -> sortSubject subject functions Nothing
-  [subject, functions, orderingFunction] ->
-    sortSubject subject functions (Just orderingFunction)
-  _ ->
-    sessionFailure
-      session
-      ( operation
-          <> " expects an expression, functions, optional ordering function, and optional SameTest rule."
-      )
+evaluateSessionSortBy reverseMode depth session values =
+  case splitSessionSameTestOptions operation values of
+    Left message -> sessionFailure session message
+    Right (sortArguments, sameTest) -> case sortArguments of
+      [_]
+        | sameTest == Nothing ->
+            Right (Call (Symbol operation) values, session)
+      [subject, functions] ->
+        sortSubject subject functions Nothing sameTest
+      [subject, functions, orderingFunction] ->
+        sortSubject subject functions (Just orderingFunction) sameTest
+      _ ->
+        sessionFailure
+          session
+          ( operation
+              <> " expects an expression, functions, optional ordering function, and optional SameTest rule."
+          )
  where
   operation = if reverseMode then "ReverseSortBy" else "SortBy"
 
-  sortSubject subject functions orderingFunction =
+  sortSubject subject functions orderingFunction sameTest =
     case sessionOrderedCollection subject of
       Nothing -> sessionFailure session "SortBy expects a nonatomic expression."
       Just collection -> do
-        let (keyFunctions, stableTies) = case functions of
+        let (keyFunctions, keySpecIsList) = case functions of
               Call (Symbol "List") functionList -> (functionList, True)
               _ -> ([functions], False)
         (decorated, keySession) <-
@@ -1338,19 +1390,16 @@ evaluateSessionSortBy reverseMode depth session values = case values of
             session
             (sessionCollectionItems collection)
         (sorted, updated) <-
-          case orderingFunction of
-            Nothing ->
-              Right
-                ( sortBy
-                    (compareDecoratedSessionItems reverseMode stableTies)
-                    decorated
-                , keySession
-                )
-            Just function ->
-              monadicSessionSort
-                (compareDecoratedWithFunction reverseMode stableTies depth function)
-                keySession
-                decorated
+          pythonStableSortByState
+            ( compareDecoratedSessionItems
+                reverseMode
+                keySpecIsList
+                depth
+                orderingFunction
+                sameTest
+            )
+            keySession
+            decorated
         Right
           ( rebuildSessionCollection
               collection
@@ -1384,71 +1433,77 @@ decorateSessionItems depth functions = go []
 compareDecoratedSessionItems
   :: Bool
   -> Bool
-  -> SessionDecoratedItem
-  -> SessionDecoratedItem
-  -> Ordering
-compareDecoratedSessionItems reverseMode stableTies left right =
-  reverseIfNeeded result
- where
-  keyOrdering = compareSessionKeyLists (decoratedSessionKeys left) (decoratedSessionKeys right)
-  result
-    | keyOrdering /= EQ = keyOrdering
-    | stableTies = EQ
-    | otherwise =
-        canonicalCompare
-          (sessionItemValue (decoratedSessionItem left))
-          (sessionItemValue (decoratedSessionItem right))
-  reverseIfNeeded ordering
-    | reverseMode = invertSessionOrdering ordering
-    | otherwise = ordering
-
-compareSessionKeyLists :: [Expr] -> [Expr] -> Ordering
-compareSessionKeyLists [] [] = EQ
-compareSessionKeyLists [] (_ : _) = LT
-compareSessionKeyLists (_ : _) [] = GT
-compareSessionKeyLists (left : leftRest) (right : rightRest) =
-  case canonicalCompare left right of
-    EQ -> compareSessionKeyLists leftRest rightRest
-    ordering -> ordering
-
-compareDecoratedWithFunction
-  :: Bool
-  -> Bool
   -> Int
-  -> Expr
+  -> Maybe Expr
+  -> Maybe Expr
   -> EvaluationSession
   -> SessionDecoratedItem
   -> SessionDecoratedItem
   -> SessionResult Ordering
-compareDecoratedWithFunction reverseMode stableTies depth function session left right = do
-  (keyOrdering, updated) <-
-    compareKeys
-      session
-      (decoratedSessionKeys left)
-      (decoratedSessionKeys right)
-  let tieOrdering
-        | stableTies = EQ
-        | otherwise =
-            canonicalCompare
-              (sessionItemValue (decoratedSessionItem left))
-              (sessionItemValue (decoratedSessionItem right))
-      result = if keyOrdering == EQ then tieOrdering else keyOrdering
-  Right
-    ( if reverseMode
-        then invertSessionOrdering result
-        else result
-    , updated
-    )
+compareDecoratedSessionItems
+  reverseMode
+  keySpecIsList
+  depth
+  orderingFunction
+  sameTest
+  session
+  left
+  right = do
+    (keyOrdering, updated) <-
+      compareKeys
+        session
+        (decoratedSessionKeys left)
+        (decoratedSessionKeys right)
+    let tieOrdering
+          | sameTest /= Nothing = EQ
+          | keySpecIsList = EQ
+          | otherwise =
+              canonicalCompare
+                (sessionItemValue (decoratedSessionItem left))
+                (sessionItemValue (decoratedSessionItem right))
+        result = if keyOrdering == EQ then tieOrdering else keyOrdering
+    Right (reverseIfNeeded result, updated)
  where
   compareKeys currentSession [] [] = Right (EQ, currentSession)
   compareKeys currentSession [] (_ : _) = Right (LT, currentSession)
   compareKeys currentSession (_ : _) [] = Right (GT, currentSession)
   compareKeys currentSession (leftKey : leftRest) (rightKey : rightRest) = do
-    (ordering, updated) <-
-      evaluateSessionOrderingCompare depth function currentSession leftKey rightKey
-    if ordering == EQ
-      then compareKeys updated leftRest rightRest
-      else Right (ordering, updated)
+    (same, sameTestSession) <-
+      evaluateSessionSameTest depth sameTest currentSession leftKey rightKey
+    if same
+      then compareKeys sameTestSession leftRest rightRest
+      else do
+        (ordering, orderingSession) <- case orderingFunction of
+          Nothing -> Right (canonicalCompare leftKey rightKey, sameTestSession)
+          Just function ->
+            evaluateSessionOrderingCompare
+              depth
+              function
+              sameTestSession
+              leftKey
+              rightKey
+        if ordering == EQ
+          then compareKeys orderingSession leftRest rightRest
+          else Right (ordering, orderingSession)
+
+  reverseIfNeeded ordering
+    | reverseMode = invertSessionOrdering ordering
+    | otherwise = ordering
+
+evaluateSessionSameTest
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Bool
+evaluateSessionSameTest _ Nothing session _ _ = Right (False, session)
+evaluateSessionSameTest depth (Just function) session left right = do
+  (firstValue, firstSession) <-
+    evaluateSessionCallable depth session function [left, right]
+  (result, updated) <-
+    evaluateSessionAt (depth + 1) firstSession firstValue
+  Right (result == Symbol "True", updated)
 
 evaluateSessionOrderingCompare
   :: Int
@@ -1481,27 +1536,6 @@ evaluateSessionOrderingCompare depth function session left right = do
     | value < 0 = LT
     | value > 0 = GT
     | otherwise = EQ
-
-monadicSessionSort
-  :: (EvaluationSession -> value -> value -> SessionResult Ordering)
-  -> EvaluationSession
-  -> [value]
-  -> SessionResult [value]
-monadicSessionSort compareValues = foldItems []
- where
-  foldItems retained session [] = Right (retained, session)
-  foldItems retained session (value : rest) = do
-    (inserted, updated) <- insertValue session value retained
-    foldItems inserted updated rest
-
-  insertValue session value [] = Right ([value], session)
-  insertValue session value items@(candidate : rest) = do
-    (ordering, updated) <- compareValues session value candidate
-    if ordering == LT
-      then Right (value : items, updated)
-      else do
-        (remaining, finalSession) <- insertValue updated value rest
-        Right (candidate : remaining, finalSession)
 
 invertSessionOrdering :: Ordering -> Ordering
 invertSessionOrdering LT = GT

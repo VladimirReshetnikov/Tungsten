@@ -46,6 +46,7 @@ library
     Tungsten.Notebook
     Tungsten.Parser
     Tungsten.ParserCorpus
+    Tungsten.PythonSort
     Tungsten.Repl
     Tungsten.Session
     Tungsten.WolframString

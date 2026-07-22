@@ -18,14 +18,18 @@ module Tungsten.Evaluate
   , substituteNamedSymbols
   ) where
 
-import Control.Monad (foldM)
-import Data.Char (isDigit, toUpper)
+import Control.Monad ((<=<), foldM)
+import Data.Bits ((.|.), shiftL, shiftR)
+import qualified Data.ByteString as BS
+import Data.Char (chr, isDigit, ord, toUpper)
 import Data.List (permutations, sortBy, transpose)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Word (Word8)
 import Text.Read (readMaybe)
 import Tungsten.Expression
 
@@ -45,7 +49,10 @@ evaluateAt depth expression
       Call (Symbol "HoldComplete") _ -> Right expression
       Call (Symbol "HoldForm") _ -> Right expression
       Call (Symbol "Unevaluated") _ -> Right expression
-      Call (Symbol "Function") _ -> Right expression
+      -- Function holds its arguments, but Sequence still participates in the
+      -- enclosing argument-list normalization before the function is called.
+      Call (Symbol "Function") arguments' ->
+        Right (normalizeEvaluatedCall (Symbol "Function") arguments')
       Call (Symbol "HoldPattern") _ -> Right expression
       Call (Symbol "SetDelayed") _ -> Right expression
       Call (Symbol "RuleDelayed") _ -> Right expression
@@ -216,7 +223,7 @@ reduceBuiltin headName values = case headName of
   "GreaterEqual" -> Right (reduceOrdering (>=) headName values)
   "Inequality" -> Right (reduceInequality values)
   "Head" -> Right (unary headName headExpr values)
-  "Length" -> Right (unary headName (Integer . fromIntegral . length . arguments) values)
+  "Length" -> Right (unary headName expressionLength values)
   "Depth" -> Right (unary headName (Integer . fromIntegral . expressionDepth) values)
   "AtomQ" -> Right (unary headName (boolean . isAtom) values)
   "ListQ" -> Right (unary headName (boolean . hasHead "List") values)
@@ -226,7 +233,13 @@ reduceBuiltin headName values = case headName of
   "IntegerQ" -> Right (unary headName (boolean . isInteger) values)
   "NumberQ" -> Right (unary headName (boolean . isNumber) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
+  "ByteArray" -> reduceByteArray values
+  "ByteArrayQ" -> Right (unary headName (boolean . isByteArray) values)
   "Characters" -> reduceCharacters values
+  "ToCharacterCode" -> reduceToCharacterCode values
+  "FromCharacterCode" -> reduceFromCharacterCode values
+  "StringToByteArray" -> reduceStringToByteArray values
+  "ByteArrayToString" -> reduceByteArrayToString values
   "StringLength" -> reduceStringLength values
   "StringTake" -> reduceStringTakeDrop True values
   "StringDrop" -> reduceStringTakeDrop False values
@@ -959,6 +972,400 @@ reduceCharacters = \case
       (Right . evaluatedList . map (String . T.singleton) . T.unpack)
       expression
   _ -> Left (EvaluationError "Characters expects exactly one argument.")
+
+data CharacterEncoding
+  = EncodingUnicode
+  | EncodingPrintableAscii
+  | EncodingAscii
+  | EncodingLatin1
+  | EncodingLatin15
+  | EncodingWindows1252
+  | EncodingUtf8
+  | EncodingUtf16LE
+  | EncodingUtf16BE
+  | EncodingUtf32LE
+  | EncodingUtf32BE
+  deriving (Eq, Show)
+
+reduceByteArray :: [Expr] -> Either EvaluationError Expr
+reduceByteArray = \case
+  [value@(ByteArray _)] -> Right value
+  [String encoded] ->
+    maybe
+      (Left (EvaluationError "ByteArray string input must be valid Base64."))
+      (Right . ByteArray)
+      (decodeBase64Strict encoded)
+  [Call (Symbol "List") values] -> do
+    bytes <- traverse byteValue values
+    Right (ByteArray (BS.pack bytes))
+  [_] ->
+    Left
+      ( EvaluationError
+          "ByteArray expects a byte list, a Base64 string, or another ByteArray."
+      )
+  _ -> Left (EvaluationError "ByteArray expects exactly one argument.")
+ where
+  byteValue (Integer value)
+    | value >= 0
+    , value <= 255 = Right (fromInteger value)
+  byteValue _ =
+    Left (EvaluationError "ByteArray list input must contain byte-sized integers.")
+
+reduceToCharacterCode :: [Expr] -> Either EvaluationError Expr
+reduceToCharacterCode values = case values of
+  [expression] -> convert EncodingUnicode expression
+  [expression, encodingExpression] -> do
+    encoding <- requireCharacterEncoding "ToCharacterCode" encodingExpression
+    convert encoding expression
+  _ ->
+    Left
+      ( EvaluationError
+          "ToCharacterCode expects a string and an optional encoding."
+      )
+ where
+  convert encoding = \case
+    String value -> Right (evaluatedList (textCharacterCodes encoding value))
+    Call (Symbol "List") items -> evaluatedList <$> traverse (convert encoding) items
+    _ ->
+      Left
+        ( EvaluationError
+            "ToCharacterCode expects a string or a list of strings."
+        )
+
+reduceFromCharacterCode :: [Expr] -> Either EvaluationError Expr
+reduceFromCharacterCode values = case values of
+  [expression] -> String <$> fromCharacterCodes EncodingUnicode expression
+  [expression, encodingExpression] -> do
+    encoding <- requireCharacterEncoding "FromCharacterCode" encodingExpression
+    String <$> fromCharacterCodes encoding expression
+  _ ->
+    Left
+      ( EvaluationError
+          "FromCharacterCode expects character codes and an optional encoding."
+      )
+
+reduceStringToByteArray :: [Expr] -> Either EvaluationError Expr
+reduceStringToByteArray values = case values of
+  [String value] -> ByteArray <$> encodeTextBytes EncodingUtf8 value
+  [String value, encodingExpression] -> do
+    encoding <- requireCharacterEncoding "StringToByteArray" encodingExpression
+    if encoding == EncodingUnicode
+      then
+        Left
+          ( EvaluationError
+              "StringToByteArray does not currently support the Unicode pseudo-encoding."
+          )
+      else ByteArray <$> encodeTextBytes encoding value
+  [_, _] -> Left (EvaluationError "StringToByteArray expects a string.")
+  _ ->
+    Left
+      ( EvaluationError
+          "StringToByteArray expects a string and an optional encoding."
+      )
+
+reduceByteArrayToString :: [Expr] -> Either EvaluationError Expr
+reduceByteArrayToString values = case values of
+  [expression] -> do
+    bytes <- requireBytes expression
+    String <$> decodeBytes EncodingUtf8 bytes
+  [expression, encodingExpression] -> do
+    bytes <- requireBytes expression
+    encoding <- requireCharacterEncoding "ByteArrayToString" encodingExpression
+    if encoding == EncodingUnicode
+      then
+        Left
+          ( EvaluationError
+              "ByteArrayToString does not currently support the Unicode pseudo-encoding."
+          )
+      else String <$> decodeBytes encoding bytes
+  _ ->
+    Left
+      ( EvaluationError
+          "ByteArrayToString expects a byte array and an optional encoding."
+      )
+ where
+  requireBytes (ByteArray bytes) = Right bytes
+  requireBytes (Call (Symbol "List") []) = Right BS.empty
+  requireBytes _ = Left (EvaluationError "ByteArrayToString expects a ByteArray.")
+
+requireCharacterEncoding :: Text -> Expr -> Either EvaluationError CharacterEncoding
+requireCharacterEncoding operation = \case
+  String raw ->
+    maybe
+      (Left (unsupportedCharacterEncoding operation))
+      Right
+      (normalizeCharacterEncoding raw)
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects the encoding name to be a string.")
+      )
+
+unsupportedCharacterEncoding :: Text -> EvaluationError
+unsupportedCharacterEncoding operation =
+  EvaluationError
+    ( operation
+        <> " currently supports Unicode, PrintableASCII, UTF-8, UTF-16LE, UTF-16BE, UTF-32LE, UTF-32BE, ASCII, WindowsANSI, ISO8859-1, and ISO8859-15."
+    )
+
+normalizeCharacterEncoding :: Text -> Maybe CharacterEncoding
+normalizeCharacterEncoding raw = case T.toLower (T.strip raw) of
+  "unicode" -> Just EncodingUnicode
+  "printableascii" -> Just EncodingPrintableAscii
+  "printable-ascii" -> Just EncodingPrintableAscii
+  "ascii" -> Just EncodingAscii
+  "iso8859-1" -> Just EncodingLatin1
+  "iso-8859-1" -> Just EncodingLatin1
+  "latin1" -> Just EncodingLatin1
+  "latin-1" -> Just EncodingLatin1
+  "iso8859-15" -> Just EncodingLatin15
+  "iso-8859-15" -> Just EncodingLatin15
+  "windowsansi" -> Just EncodingWindows1252
+  "windows-ansi" -> Just EncodingWindows1252
+  "windows-1252" -> Just EncodingWindows1252
+  "cp1252" -> Just EncodingWindows1252
+  "utf-8" -> Just EncodingUtf8
+  "utf8" -> Just EncodingUtf8
+  "utf-16le" -> Just EncodingUtf16LE
+  "utf16le" -> Just EncodingUtf16LE
+  "utf-16be" -> Just EncodingUtf16BE
+  "utf16be" -> Just EncodingUtf16BE
+  "utf-32le" -> Just EncodingUtf32LE
+  "utf32le" -> Just EncodingUtf32LE
+  "utf-32be" -> Just EncodingUtf32BE
+  "utf32be" -> Just EncodingUtf32BE
+  _ -> Nothing
+
+textCharacterCodes :: CharacterEncoding -> Text -> [Expr]
+textCharacterCodes EncodingUnicode = map (Integer . fromIntegral . ord) . T.unpack
+textCharacterCodes encoding
+  | isSingleByteEncoding encoding =
+      map
+        (maybe (Symbol "None") (Integer . fromIntegral) . encodeSingleByte encoding)
+        . T.unpack
+  | otherwise =
+      either
+        (const [])
+        (map (Integer . fromIntegral) . BS.unpack)
+        . encodeTextBytes encoding
+
+fromCharacterCodes :: CharacterEncoding -> Expr -> Either EvaluationError Text
+fromCharacterCodes encoding expression = do
+  values <- case expression of
+    Integer value -> Right [value]
+    Call (Symbol "List") items -> traverse requireInteger items
+    _ -> invalid
+  if any (\value -> value < 0 || value > 0x10ffff) values
+    then
+      Left
+        ( EvaluationError
+            "FromCharacterCode input must contain valid non-negative Unicode code points."
+        )
+    else
+      if encoding == EncodingUnicode
+        then Right (T.pack (map (chr . fromInteger) values))
+        else decodeMixed values
+ where
+  invalid =
+    Left
+      ( EvaluationError
+          "FromCharacterCode expects an integer or a list of integers."
+      )
+  requireInteger (Integer value) = Right value
+  requireInteger _ = invalid
+
+  decodeMixed = finish <=< foldM step ([], [])
+  step (pending, pieces) value
+    | value <= 255 = Right (fromInteger value : pending, pieces)
+    | otherwise = do
+        (cleared, flushed) <- flush pending pieces
+        Right (cleared, T.singleton (chr (fromInteger value)) : flushed)
+  finish (pending, pieces) = do
+    (_, flushed) <- flush pending pieces
+    Right (T.concat (reverse flushed))
+  flush [] pieces = Right ([], pieces)
+  flush pending pieces = do
+    decoded <- decodeBytes encoding (BS.pack (reverse pending))
+    Right ([], decoded : pieces)
+
+isSingleByteEncoding :: CharacterEncoding -> Bool
+isSingleByteEncoding encoding =
+  encoding
+    `elem` [ EncodingPrintableAscii
+           , EncodingAscii
+           , EncodingLatin1
+           , EncodingLatin15
+           , EncodingWindows1252
+           ]
+
+encodeTextBytes :: CharacterEncoding -> Text -> Either EvaluationError BS.ByteString
+encodeTextBytes encoding value = case encoding of
+  EncodingUnicode ->
+    Left (EvaluationError "Unicode is not a byte encoding in this operation.")
+  EncodingPrintableAscii -> encodeSingleBytes EncodingAscii
+  EncodingAscii -> encodeSingleBytes EncodingAscii
+  EncodingLatin1 -> encodeSingleBytes EncodingLatin1
+  EncodingLatin15 -> encodeSingleBytes EncodingLatin15
+  EncodingWindows1252 -> encodeSingleBytes EncodingWindows1252
+  EncodingUtf8 -> Right (TE.encodeUtf8 value)
+  EncodingUtf16LE -> Right (TE.encodeUtf16LE value)
+  EncodingUtf16BE -> Right (TE.encodeUtf16BE value)
+  EncodingUtf32LE -> Right (TE.encodeUtf32LE value)
+  EncodingUtf32BE -> Right (TE.encodeUtf32BE value)
+ where
+  encodeSingleBytes singleEncoding =
+    case traverse (encodeSingleByte singleEncoding) (T.unpack value) of
+      Nothing ->
+        Left
+          ( EvaluationError
+              "StringToByteArray could not represent the string in the requested encoding."
+          )
+      Just bytes -> Right (BS.pack bytes)
+
+decodeBytes :: CharacterEncoding -> BS.ByteString -> Either EvaluationError Text
+decodeBytes encoding bytes = Right $ case encoding of
+  EncodingUnicode -> T.pack (map (chr . fromIntegral) (BS.unpack bytes))
+  EncodingPrintableAscii -> T.pack (map decodeAsciiByte (BS.unpack bytes))
+  EncodingAscii -> T.pack (map decodeAsciiByte (BS.unpack bytes))
+  EncodingLatin1 -> TE.decodeLatin1 bytes
+  EncodingLatin15 -> T.pack (map decodeLatin15Byte (BS.unpack bytes))
+  EncodingWindows1252 -> T.pack (map decodeWindows1252Byte (BS.unpack bytes))
+  EncodingUtf8 -> TE.decodeUtf8With rawByteDecode bytes
+  EncodingUtf16LE -> TE.decodeUtf16LEWith rawByteDecode bytes
+  EncodingUtf16BE -> TE.decodeUtf16BEWith rawByteDecode bytes
+  EncodingUtf32LE -> TE.decodeUtf32LEWith rawByteDecode bytes
+  EncodingUtf32BE -> TE.decodeUtf32BEWith rawByteDecode bytes
+ where
+  rawByteDecode _ = fmap (chr . fromIntegral)
+  decodeAsciiByte byte
+    | byte < 128 = chr (fromIntegral byte)
+    | otherwise = chr (0xf200 + fromIntegral byte)
+
+encodeSingleByte :: CharacterEncoding -> Char -> Maybe Word8
+encodeSingleByte encoding character = case encoding of
+  EncodingPrintableAscii -> ascii
+  EncodingAscii -> ascii
+  EncodingLatin1
+    | codepoint <= 255 -> Just (fromIntegral codepoint)
+  EncodingLatin15 -> encodeLatin15 character
+  EncodingWindows1252 -> encodeWindows1252 character
+  _ -> Nothing
+ where
+  codepoint = ord character
+  ascii
+    | codepoint < 128 = Just (fromIntegral codepoint)
+    | otherwise = Nothing
+
+decodeLatin15Byte :: Word8 -> Char
+decodeLatin15Byte byte = case byte of
+  0xa4 -> '\x20ac'
+  0xa6 -> '\x0160'
+  0xa8 -> '\x0161'
+  0xb4 -> '\x017d'
+  0xb8 -> '\x017e'
+  0xbc -> '\x0152'
+  0xbd -> '\x0153'
+  0xbe -> '\x0178'
+  _ -> chr (fromIntegral byte)
+
+encodeLatin15 :: Char -> Maybe Word8
+encodeLatin15 character = case character of
+  '\x20ac' -> Just 0xa4
+  '\x0160' -> Just 0xa6
+  '\x0161' -> Just 0xa8
+  '\x017d' -> Just 0xb4
+  '\x017e' -> Just 0xb8
+  '\x0152' -> Just 0xbc
+  '\x0153' -> Just 0xbd
+  '\x0178' -> Just 0xbe
+  _
+    | ord character <= 255
+    , ord character `notElem` [0xa4, 0xa6, 0xa8, 0xb4, 0xb8, 0xbc, 0xbd, 0xbe] ->
+        Just (fromIntegral (ord character))
+    | otherwise -> Nothing
+
+windows1252Characters :: [(Word8, Char)]
+windows1252Characters =
+  [ (0x80, '\x20ac')
+  , (0x82, '\x201a')
+  , (0x83, '\x0192')
+  , (0x84, '\x201e')
+  , (0x85, '\x2026')
+  , (0x86, '\x2020')
+  , (0x87, '\x2021')
+  , (0x88, '\x02c6')
+  , (0x89, '\x2030')
+  , (0x8a, '\x0160')
+  , (0x8b, '\x2039')
+  , (0x8c, '\x0152')
+  , (0x8e, '\x017d')
+  , (0x91, '\x2018')
+  , (0x92, '\x2019')
+  , (0x93, '\x201c')
+  , (0x94, '\x201d')
+  , (0x95, '\x2022')
+  , (0x96, '\x2013')
+  , (0x97, '\x2014')
+  , (0x98, '\x02dc')
+  , (0x99, '\x2122')
+  , (0x9a, '\x0161')
+  , (0x9b, '\x203a')
+  , (0x9c, '\x0153')
+  , (0x9e, '\x017e')
+  , (0x9f, '\x0178')
+  ]
+
+decodeWindows1252Byte :: Word8 -> Char
+decodeWindows1252Byte byte =
+  maybe (chr (fromIntegral byte)) id (lookup byte windows1252Characters)
+
+encodeWindows1252 :: Char -> Maybe Word8
+encodeWindows1252 character =
+  case [byte | (byte, decoded) <- windows1252Characters, decoded == character] of
+    byte : _ -> Just byte
+    []
+      | codepoint < 128 || codepoint >= 160 && codepoint <= 255 ->
+          Just (fromIntegral codepoint)
+      | otherwise -> Nothing
+ where
+  codepoint = ord character
+
+decodeBase64Strict :: Text -> Maybe BS.ByteString
+decodeBase64Strict encoded
+  | T.length encoded `mod` 4 /= 0 = Nothing
+  | otherwise = BS.pack <$> decodeGroups (T.unpack encoded)
+ where
+  decodeGroups [] = Just []
+  decodeGroups (a : b : c : d : rest) = do
+    first <- base64Digit a
+    second <- base64Digit b
+    let byte1 = (first `shiftL` 2) .|. (second `shiftR` 4)
+    case (c, d, rest) of
+      ('=', '=', []) -> Just [byte1]
+      (_, '=', []) -> do
+        third <- base64Digit c
+        let byte2 = (second `shiftL` 4) .|. (third `shiftR` 2)
+        Just [byte1, byte2]
+      ('=', _, _) -> Nothing
+      (_, '=', _) -> Nothing
+      _ -> do
+        third <- base64Digit c
+        fourth <- base64Digit d
+        let byte2 = (second `shiftL` 4) .|. (third `shiftR` 2)
+            byte3 = (third `shiftL` 6) .|. fourth
+        ([byte1, byte2, byte3] <>) <$> decodeGroups rest
+  decodeGroups _ = Nothing
+
+  base64Digit character
+    | character >= 'A' && character <= 'Z' =
+        Just (fromIntegral (ord character - ord 'A'))
+    | character >= 'a' && character <= 'z' =
+        Just (fromIntegral (26 + ord character - ord 'a'))
+    | character >= '0' && character <= '9' =
+        Just (fromIntegral (52 + ord character - ord '0'))
+    | character == '+' = Just 62
+    | character == '/' = Just 63
+    | otherwise = Nothing
 
 reduceStringLength :: [Expr] -> Either EvaluationError Expr
 reduceStringLength = \case
@@ -1850,7 +2257,10 @@ reduceNormal [association] = case associationEntries association of
           | AssociationEntry ruleHead key value <- entries
           ]
       )
-  Nothing -> Right (Call (Symbol "Normal") [association])
+  Nothing -> case association of
+    ByteArray bytes ->
+      Right (evaluatedList (map (Integer . fromIntegral) (BS.unpack bytes)))
+    _ -> Right (Call (Symbol "Normal") [association])
 reduceNormal values = Right (Call (Symbol "Normal") values)
 
 reduceLookup :: [Expr] -> Either EvaluationError Expr
@@ -4272,6 +4682,8 @@ applyFunction functionArguments@[parameter, body] values
         )
   | otherwise =
       Right (Call (Call (Symbol "Function") functionArguments) values)
+applyFunction [parameter, body, _attributes] values =
+  applyFunction [parameter, body] values
 applyFunction functionArguments values =
   Right (Call (Call (Symbol "Function") functionArguments) values)
 
@@ -4656,6 +5068,10 @@ expressionDepth expression = case arguments expression of
   [] -> 1
   values -> 1 + maximum (map expressionDepth values)
 
+expressionLength :: Expr -> Expr
+expressionLength (ByteArray bytes) = Integer (fromIntegral (BS.length bytes))
+expressionLength expression = Integer (fromIntegral (length (arguments expression)))
+
 flattenHead :: Text -> Expr -> [Expr]
 flattenHead headName (Call (Symbol actualHead) values)
   | actualHead == headName = values
@@ -4682,6 +5098,10 @@ isNumber _ = False
 isString :: Expr -> Bool
 isString String {} = True
 isString _ = False
+
+isByteArray :: Expr -> Bool
+isByteArray ByteArray {} = True
+isByteArray _ = False
 
 integerValue :: Expr -> Maybe Integer
 integerValue (Integer value) = Just value

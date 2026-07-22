@@ -569,6 +569,7 @@ checkEvaluator = do
         , ("symbolic constant collection", "x + 1 + 2", "Plus[3, x]")
         , ("repeated symbolic collection", "{a + a + a, a*a*a, f[x] + f[x], f[x]*f[x]}", "List[Times[3, a], Power[a, 3], Times[2, f[x]], Power[f[x], 2]]")
         , ("evaluated argument normalization", "{Nothing, Sequence[a, b], Splice[{c, d}]}", "List[a, b, c, d]")
+        , ("held function sequence normalization", "{Function[Sequence[x, x + x]][a], Function[x, Sequence[x, x]][a]}", "List[Times[2, a], a]")
         , ("factorials", "6! + 6!!", "768")
         , ("numeric comparison", "1 < 2 <= 2", "True")
         , ("numeric inequality", "Unequal[1, 2, 1]", "False")
@@ -587,6 +588,9 @@ checkEvaluator = do
         , ("string split riffle count and trim", "{StringSplit[\"a:b;c\", {\":\", \";\"}], StringSplit[\"  hello   world  \"], StringRiffle[{\"a\", \"b\", \"c\"}, {\"<\", \"+\", \">\"}], StringCount[\"abcabcabc\", \"a\"], StringTrim[\"abcXYZdef\", \"abc\"]}", "List[List[\"a\", \"b\", \"c\"], List[\"hello\", \"world\"], \"<a+b+c>\", 3, \"XYZdef\"]")
         , ("literal string predicates and operator form", "{StringContainsQ[{\"ab\", \"cd\"}, \"a\"], StringFreeQ[\"catalog\", \"7\"], StringStartsQ[\"abc\", \"a\"], StringEndsQ[\"abc\", \"c\"], StringMatchQ[\"abc\", \"abc\"], Select[{\"ab\", \"cd\", \"ba\"}, StringContainsQ[\"a\"]]}", "List[List[True, False], True, True, True, True, List[\"ab\", \"ba\"]]")
         , ("string selectors and literal positions", "{StringTake[\"abcdef\", {2, 5, 2}], StringTake[\"abc\", UpTo[5]], StringTake[{\"abc\", \"def\"}, 2], StringDrop[\"abcdef\", {2, 5, 2}], StringPosition[\"ababa\", {\"ba\", \"aba\"}], StringPosition[\"abc\", \"\"]}", "List[\"bd\", \"abc\", List[\"ab\", \"de\"], \"acef\", List[List[1, 3], List[2, 3], List[3, 5], List[4, 5]], List[List[1, 0], List[2, 1], List[3, 2], List[4, 3]]]")
+        , ("byte array construction and structure", "{ByteArray[{65, 66, 67}], ByteArray[\"QUJD\"], ByteArrayQ[ByteArray[\"QUJD\"]], ByteArrayQ[{65, 66, 67}], Length[ByteArray[\"QUJD\"]], Normal[ByteArray[\"QUJD\"]]}", "List[ByteArray[\"QUJD\"], ByteArray[\"QUJD\"], True, False, 3, List[65, 66, 67]]")
+        , ("character code and byte string encodings", "{ToCharacterCode[FromCharacterCode[{97, 233}]], ToCharacterCode[FromCharacterCode[{97, 233}], \"UTF-8\"], ToCharacterCode[FromCharacterCode[{97, 233}], \"ASCII\"], ToCharacterCode[FromCharacterCode[{97, 233}, \"ISO8859-1\"]], StringToByteArray[FromCharacterCode[{97, 233}], \"UTF-8\"], ToCharacterCode[ByteArrayToString[ByteArray[{97, 195, 169}], \"UTF-8\"]], ToCharacterCode[ByteArrayToString[ByteArray[{97, 162, 98}], \"UTF-8\"]], ByteArrayToString[{}]}", "List[List[97, 233], List[97, 195, 169], List[97, None], List[97, 233], ByteArray[\"YcOp\"], List[97, 233], List[97, 162, 98], \"\"]")
+        , ("extended character encodings", "{ToCharacterCode[FromCharacterCode[{97, 233}], \"UTF-16LE\"], ToCharacterCode[FromCharacterCode[{97, 233}], \"UTF-32BE\"], ToCharacterCode[FromCharacterCode[{164}, \"ISO8859-15\"]], ToCharacterCode[FromCharacterCode[{128}, \"WindowsANSI\"]]}", "List[List[97, 0, 233, 0], List[0, 0, 0, 97, 0, 0, 0, 233], List[8364], List[8364]]")
         , ("map", "Map[f, {1, 2, 3}]", "List[f[1], f[2], f[3]]")
         , ("apply", "Apply[f, {1, 2, 3}]", "f[1, 2, 3]")
         , ("take positive", "Take[f[a, b, c, d], 2]", "f[a, b]")
@@ -1113,6 +1117,12 @@ checkEvaluationSession = do
         , ("association Nothing keys normalize by last value", "{<|Nothing -> 1, Nothing -> 2|>, KeyMap[Nothing &, <|a -> 1, b -> 2|>]}", "List[Association[Rule[Nothing, 2]], Association[Rule[Nothing, 2]]]")
         , ("sort keys thread session state", "y = 0; {SortBy[{b, a}, Function[x, y = y + 1; x]], y}", "List[List[a, b], 2]")
         , ("sort by operator form threads session state", "y = 0; {SortBy[Function[x, y = y + 1; x]][{b, a}], y}", "List[List[a, b], 2]")
+        , ("sort comparator follows CPython callback schedule", "c = 0; t = 0; {SortBy[{1, 2, 3, 4}, Identity, Function[{a, b}, c = c + 1; t = 100*t + 10*a + b; a < b]], c, t}", "List[List[1, 2, 3, 4], 6, 211232234334]")
+        , ("sort by SameTest precedes component ordering and requires exact True", "{SortBy[{{2, 1}, {1, 2}}, {First, Last}, SameTest -> (True &)], SortBy[{{2, 1}, {1, 2}}, {First, Last}, SameTest -> (1 &)]}", "List[List[List[2, 1], List[1, 2]], List[List[1, 2], List[2, 1]]]")
+        , ("sort by SameTest and key lists preserve stable ties", "{SortBy[{{c, 2}, {a, 2}, {b, 1}}, Last, SameTest -> Automatic], SortBy[{{c, 2}, {a, 2}, {b, 1}}, Last, SameTest -> (False &)], SortBy[{{c, 2}, {a, 2}, {b, 1}}, {Last}, SameTest -> (False &)]}", "List[List[List[b, 1], List[a, 2], List[c, 2]], List[List[b, 1], List[c, 2], List[a, 2]], List[List[b, 1], List[c, 2], List[a, 2]]]")
+        , ("sort by SameTest distinguishes eager and delayed rules", "c = 0; first = SortBy[{4, 3, 2, 1}, Identity, SameTest -> (c = c + 1; (False &))]; eager = c; c = 0; second = SortBy[{4, 3, 2, 1}, Identity, SameTest :> (c = c + 1; (False &))]; {first, eager, second, c}", "List[List[1, 2, 3, 4], 1, List[1, 2, 3, 4], 3]")
+        , ("sort by last SameTest option wins", "c = 0; {SortBy[{2, 1}, Identity, SameTest -> (c = c + 1; (True &)), SameTest :> (c = c + 10; (False &))], c}", "List[List[1, 2], 11]")
+        , ("reverse sort by preserves SameTest ties", "ReverseSortBy[{2, 1}, Identity, SameTest -> (True &)]", "List[2, 1]")
         , ("assignment update", "x = 10; AddTo[x, 5]; x", "15")
         , ("table count iterators", "{Table[a, 3], Table[a, {3}], Table[i, {i, 5}]}", "List[List[a, a, a], List[a, a, a], List[1, 2, 3, 4, 5]]")
         , ("table exact ranges", "{Table[i^2, {i, 1, 5}], Table[i, {i, 2, 8, 2}], Table[i, {i, 5, 1, -1}], Table[i, {i, 0, 1, 1/4}]}", "List[List[1, 4, 9, 16, 25], List[2, 4, 6, 8], List[5, 4, 3, 2, 1], List[0, Rational[1, 4], Rational[1, 2], Rational[3, 4], 1]]")
@@ -1446,6 +1456,15 @@ checkEvaluationSession = do
           , [ ( "ReverseSortBy::error"
               , "MessageName[ReverseSortBy, \"error\"]"
               , "ReverseSortBy::error: SortBy expects a nonatomic expression."
+              )
+            ]
+          )
+        , ( "SortBy rejects unsupported trailing options"
+          , "SortBy[{2, 1}, Identity, SameTest -> (True &), Foo -> bar]"
+          , "SortBy[List[2, 1], Identity, Rule[SameTest, Function[True]], Rule[Foo, bar]]"
+          , [ ( "SortBy::error"
+              , "MessageName[SortBy, \"error\"]"
+              , "SortBy::error: SortBy currently supports only the SameTest option."
               )
             ]
           )
