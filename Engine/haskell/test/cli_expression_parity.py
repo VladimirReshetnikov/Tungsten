@@ -136,6 +136,98 @@ CASES = (
         ),
         0,
     ),
+    (
+        "curried subvalue dispatch",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[x_][y_] := {x, y}; "
+            "{f[1][2], DownValues[f], SubValues[f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "evaluated subvalue owner",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, g]; f[x_] := g[x]; f[x_][y_] := {x, y}; "
+            "{f[1][2], SubValues[f], SubValues[g]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "curried subvalue unset",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[x_][y_] := {x, y}; "
+            "first = Unset[f[x_][y_]]; "
+            "{first, f[1][2], SubValues[f], Unset[f[x_][y_]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "normalized curried owner becomes downvalue",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, g]; f[x_] := g; f[u_][v_] := {u, v}; "
+            "{f[1][2], DownValues[g], SubValues[g]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "subvalue fires inside deeper call",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, p]; f[x_][y_] := p[x, y]; f[1][2][3]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "curried attribute layers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, a, b]; a = 1; b = 2; "
+            "SetAttributes[f, HoldAll]; f[a][b] = rhs; "
+            "{f[a][b], f[1][2], SubValues[f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "explicit subvalue context spelling",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[Global`sv]; Global`sv[x_][y_] := global[x, y]; "
+            "{sv[1][2], Global`sv[1][2], SubValues[sv]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

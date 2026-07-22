@@ -1218,6 +1218,13 @@ checkEvaluationSession = do
         , ("downvalue specificity and recursion", "f[x_] := x * f[x - 1]; f[1] = 1; {f[5], DownValues[f]}", "List[120, List[RuleDelayed[HoldPattern[f[1]], 1], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], Times[x, f[Plus[x, -1]]]]]]")
         , ("downvalue conditional equations", "f[x_] := positive /; x > 0; f[x_] := negative /; x < 0; f[0] = zero; {f[2], f[-2], f[0], DownValues[f]}", "List[positive, negative, zero, List[RuleDelayed[HoldPattern[f[0]], zero], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], Condition[positive, Greater[x, 0]]], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], Condition[negative, Less[x, 0]]]]]")
         , ("compound unset preserves other equations", "f[x_] := x + 1; f[0] = 9; {Unset[f[x_]], f[0], f[2], DownValues[f], Unset[f[x_]]}", "List[Null, 9, f[2], List[RuleDelayed[HoldPattern[f[0]], 9]], $Failed]")
+        , ("curried definitions use subvalues", "ClearAll[f]; f[x_][y_] := {x, y}; {f[1][2], DownValues[f], SubValues[f]}", "List[List[1, 2], List[], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], List[x, y]]]]")
+        , ("immediate subvalues evaluate rhs before lhs", "ClearAll[f, y]; y = 5; result = (f[x_][z_] = {x, y, z}); y = 10; {result, f[1][2], SubValues[f]}", "List[List[x, 5, z], List[1, 5, 2], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[z, Blank[]]]], List[x, 5, z]]]]")
+        , ("evaluated curried heads retarget subvalues", "ClearAll[f, g]; f[x_] := g[x]; f[x_][y_] := {x, y}; {f[1][2], SubValues[f], SubValues[g]}", "List[List[1, 2], List[], List[RuleDelayed[HoldPattern[g[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], List[x, y]]]]")
+        , ("subvalue specificity favors exact definitions", "ClearAll[f]; f[x_][y_] := generic[x, y]; f[1][2] = exact; {f[1][2], f[1][3], SubValues[f]}", "List[exact, generic[1, 3], List[RuleDelayed[HoldPattern[f[1][2]], exact], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], generic[x, y]]]]")
+        , ("subvalue specificity preserves tied assignment order", "ClearAll[f]; f[x_][y_] := generic[x, y]; f[1][y_] := partial[y]; {f[1][2], SubValues[f]}", "List[generic[1, 2], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], generic[x, y]], RuleDelayed[HoldPattern[f[1][Pattern[y, Blank[]]]], partial[y]]]]")
+        , ("subvalue conditional equations and exact unset", "ClearAll[f]; f[x_][y_] := pos[y] /; x > 0; f[x_][y_] := neg[y] /; x < 0; a = {f[2][9], f[-2][9], SubValues[f]}; u = Unset[f[x_][y_]]; {a, u, f[2][9], SubValues[f], Unset[f[x_][y_]]}", "List[List[pos[9], neg[9], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], Condition[pos[y], Greater[x, 0]]], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], Condition[neg[y], Less[x, 0]]]]], Null, f[2][9], List[], $Failed]")
+        , ("subvalue bodies catch bare Return and preserve effects", "ClearAll[f, z]; f[x_][y_] := (z = 1; Return[{x, y}]; z = 2); {f[a][b], z}", "List[List[a, b], 1]")
         , ("clear removes own and down values", "f[x_] := x; f = 7; Clear[f]; {f, f[3], DownValues[f]}", "List[f, f[3], List[]]")
         , ("iterator downvalue mutations persist", "f[x_] := x; Table[f[i] = i^2, {i, 3}]; {f[1], f[2], f[3], f[4], DownValues[f]}", "List[1, 4, 9, 4, List[RuleDelayed[HoldPattern[f[1]], 1], RuleDelayed[HoldPattern[f[2]], 4], RuleDelayed[HoldPattern[f[3]], 9], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], x]]]")
         , ("held assignment remains inert", "Hold[x = 9]; x", "x")
@@ -1518,6 +1525,15 @@ checkEvaluationSession = do
           , [ ( "SetDelayed::wrsym"
               , "MessageName[SetDelayed, \"wrsym\"]"
               , "SetDelayed::wrsym: Symbol HoldPattern is Protected."
+              )
+            ]
+          )
+        , ( "more than one curried level is not assignable"
+          , "ClearAll[f]; f[x_][y_][z_] := {x, y, z}; {f[1][2][3], SubValues[f]}"
+          , "List[f[1][2][3], List[]]"
+          , [ ( "SetDelayed::error"
+              , "MessageName[SetDelayed, \"error\"]"
+              , "SetDelayed::error: SetDelayed does not support this left-hand side in Tungsten yet."
               )
             ]
           )

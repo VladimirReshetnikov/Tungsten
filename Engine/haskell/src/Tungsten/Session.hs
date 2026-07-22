@@ -43,6 +43,14 @@ data DownValue = DownValue
   }
   deriving (Eq, Show)
 
+-- DownValues and SubValues share the same ordered rule representation and
+-- application contract.  The slot only controls which symbol-owned list a
+-- compound assignment mutates or a call dispatches through.
+data CompoundValueSlot
+  = DownValueSlot
+  | SubValueSlot
+  deriving (Eq, Show)
+
 data EvaluationMessage = EvaluationMessage
   { evaluationMessageName :: !Text
   , evaluationMessageFullName :: !Expr
@@ -723,9 +731,14 @@ evaluateSessionGenericCall depth session expressionHead arguments' = do
               then Right (instantiated, argumentsSession)
               else evaluateSessionAt (depth + 1) argumentsSession instantiated
       _ -> do
-        (downValueReplacement, definitionSession) <-
-          applySessionDownValue depth argumentsSession normalizedCall
-        case downValueReplacement of
+        (definitionReplacement, definitionSession) <-
+          case evaluatedHead of
+            Symbol _ ->
+              applySessionDownValue depth argumentsSession normalizedCall
+            Call {} ->
+              applySessionSubValue depth argumentsSession normalizedCall
+            _ -> Right (Nothing, argumentsSession)
+        case definitionReplacement of
           Just replacement -> Right (replacement, definitionSession)
           Nothing ->
             if expressionHead /= evaluatedHead
@@ -4184,13 +4197,16 @@ evaluateDownValueAssignment delayed depth session lhs rhs
       store normalizedSession normalizedLhs value
  where
   store updated normalizedLhs storedBody =
-    case downValueOwner normalizedLhs of
-      Just owner
+    case compoundValueOwner normalizedLhs of
+      Just (slot, owner)
         | symbolAllowsValueMutation owner updated ->
             let definition = DownValue normalizedLhs storedBody delayed
                 result = if delayed then Symbol "Null" else storedBody
-             in Right (result, defineDownValue owner definition updated)
-      Just owner ->
+             in Right
+                  ( result
+                  , defineCompoundValue slot owner definition updated
+                  )
+      Just (_, owner) ->
         let assignmentHead = if delayed then "SetDelayed" else "Set"
             result =
               if delayed
@@ -4207,9 +4223,10 @@ evaluateDownValueAssignment delayed depth session lhs rhs
               )
       _ ->
         let assignmentHead = if delayed then "SetDelayed" else "Set"
-         in Right
-              ( Call (Symbol assignmentHead) [normalizedLhs, storedBody]
-              , updated
+         in sessionFailure
+              updated
+              ( assignmentHead
+                  <> " does not support this left-hand side in Tungsten yet."
               )
 
 evaluateDownValueUnset
@@ -4219,8 +4236,8 @@ evaluateDownValueUnset
   -> SessionResult Expr
 evaluateDownValueUnset depth session lhs = do
   (normalizedLhs, normalizedSession) <- normalizeAssignmentLhs depth session lhs
-  case downValueOwner normalizedLhs of
-    Just owner
+  case compoundValueOwner normalizedLhs of
+    Just (_, owner)
       | not (symbolAllowsValueMutation owner normalizedSession) ->
           Right
             ( Symbol "$Failed"
@@ -4231,11 +4248,11 @@ evaluateDownValueUnset depth session lhs = do
                 "is Protected."
                 normalizedSession
             )
-    Just owner
-      | hasDownValue owner normalizedLhs normalizedSession ->
+    Just (slot, owner)
+      | hasCompoundValue slot owner normalizedLhs normalizedSession ->
           Right
             ( Symbol "Null"
-            , removeDownValue owner normalizedLhs normalizedSession
+            , removeCompoundValue slot owner normalizedLhs normalizedSession
             )
     _ -> Right (Symbol "$Failed", normalizedSession)
 
@@ -4264,11 +4281,12 @@ normalizeAssignmentLhs depth session expression = case expression of
       )
   _ -> Right (expression, session)
 
-downValueOwner :: Expr -> Maybe Text
-downValueOwner = \case
+compoundValueOwner :: Expr -> Maybe (CompoundValueSlot, Text)
+compoundValueOwner = \case
   Call (Symbol wrapper) (body : _)
-    | wrapper `elem` ["Condition", "HoldPattern"] -> downValueOwner body
-  Call (Symbol name) _ -> Just name
+    | wrapper `elem` ["Condition", "HoldPattern"] -> compoundValueOwner body
+  Call (Symbol name) _ -> Just (DownValueSlot, name)
+  Call (Call (Symbol name) _) _ -> Just (SubValueSlot, name)
   _ -> Nothing
 
 applySessionDownValue
@@ -4277,10 +4295,47 @@ applySessionDownValue
   -> Expr
   -> SessionResult (Maybe Expr)
 applySessionDownValue depth session expression@(Call (Symbol name) _) =
-  applyDefinitions session (symbolDownValuesFor name session)
+  applySessionDefinitions
+    depth
+    session
+    expression
+    (compoundValuesFor DownValueSlot name session)
+applySessionDownValue _ session _ = Right (Nothing, session)
+
+applySessionSubValue
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult (Maybe Expr)
+applySessionSubValue depth session expression@(Call (Call {}) _) =
+  case subValueTargetSymbol expression of
+    Just name ->
+      applySessionDefinitions
+        depth
+        session
+        expression
+        (compoundValuesFor SubValueSlot name session)
+    Nothing -> Right (Nothing, session)
+applySessionSubValue _ session _ = Right (Nothing, session)
+
+subValueTargetSymbol :: Expr -> Maybe Text
+subValueTargetSymbol (Call expressionHead _) = headChainSymbol expressionHead
  where
-  applyDefinitions current [] = Right (Nothing, current)
-  applyDefinitions current (definition : rest) = do
+  headChainSymbol (Symbol name) = Just name
+  headChainSymbol (Call nestedHead _) = headChainSymbol nestedHead
+  headChainSymbol _ = Nothing
+subValueTargetSymbol _ = Nothing
+
+applySessionDefinitions
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [DownValue]
+  -> SessionResult (Maybe Expr)
+applySessionDefinitions depth session expression = tryDefinitions session
+ where
+  tryDefinitions current [] = Right (Nothing, current)
+  tryDefinitions current (definition : rest) = do
     let (patternExpression, lhsCondition) =
           downValueMatchPattern definition
         templates = downValueBody definition : maybe [] pure lhsCondition
@@ -4292,7 +4347,7 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
         patternExpression
         templates
     case (lhsCondition, instantiated) of
-      (_, Nothing) -> applyDefinitions matchedSession rest
+      (_, Nothing) -> tryDefinitions matchedSession rest
       (Nothing, Just [replacement]) ->
         applyReplacement matchedSession definition replacement rest
       (Just _, Just [replacement, instantiatedCondition]) -> do
@@ -4303,8 +4358,8 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
             instantiatedCondition
         if conditionResult == Symbol "True"
           then applyReplacement updated definition replacement rest
-          else applyDefinitions updated rest
-      _ -> applyDefinitions matchedSession rest
+          else tryDefinitions updated rest
+      _ -> tryDefinitions matchedSession rest
 
   applyReplacement current definition replacement rest =
     case replacement of
@@ -4318,7 +4373,7 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
               Right (conditionResult, updated)
                 | conditionResult == Symbol "True" ->
                     catchBareReturn (evaluateReplacement updated body)
-                | otherwise -> applyDefinitions updated rest
+                | otherwise -> tryDefinitions updated rest
       Call (Symbol conditionHead) [_, _]
         | isSessionSystemHead "Condition" conditionHead ->
             Right (Just replacement, current)
@@ -4333,7 +4388,6 @@ applySessionDownValue depth session expression@(Call (Symbol name) _) =
     (result, updated) <-
       evaluateSessionAt (depth + 1) current replacement
     Right (Just result, updated)
-applySessionDownValue _ session _ = Right (Nothing, session)
 
 downValueMatchPattern :: DownValue -> (Expr, Maybe Expr)
 downValueMatchPattern definition = case downValuePattern definition of
@@ -5558,17 +5612,24 @@ define name value session =
     (\values -> values {symbolOwnValue = Just value})
     session
 
-defineDownValue :: Text -> DownValue -> EvaluationSession -> EvaluationSession
-defineDownValue name definition session =
+defineCompoundValue
+  :: CompoundValueSlot
+  -> Text
+  -> DownValue
+  -> EvaluationSession
+  -> EvaluationSession
+defineCompoundValue slot name definition session =
   modifySymbolValues
     name
-    ( \values ->
-        values
-          { symbolDownValues =
-              insertDownValue definition (symbolDownValues values)
-          }
-    )
+    (insertDefinition valuesForSlot updateSlot)
     session
+ where
+  valuesForSlot = compoundValuesFrom slot
+  updateSlot values definitions = case slot of
+    DownValueSlot -> values {symbolDownValues = definitions}
+    SubValueSlot -> values {symbolSubValues = definitions}
+  insertDefinition select update values =
+    update values (insertDownValue definition (select values))
 
 insertDownValue :: DownValue -> [DownValue] -> [DownValue]
 insertDownValue definition = replaceOrInsert
@@ -5614,25 +5675,37 @@ downValueSpecificity = \case
   minimumOrZero [] = 0
   minimumOrZero values = minimum values
 
-hasDownValue :: Text -> Expr -> EvaluationSession -> Bool
-hasDownValue name patternExpression session =
+hasCompoundValue
+  :: CompoundValueSlot
+  -> Text
+  -> Expr
+  -> EvaluationSession
+  -> Bool
+hasCompoundValue slot name patternExpression session =
   any
     ((== patternExpression) . downValuePattern)
-    (symbolDownValuesFor name session)
+    (compoundValuesFor slot name session)
 
-removeDownValue :: Text -> Expr -> EvaluationSession -> EvaluationSession
-removeDownValue name patternExpression session =
+removeCompoundValue
+  :: CompoundValueSlot
+  -> Text
+  -> Expr
+  -> EvaluationSession
+  -> EvaluationSession
+removeCompoundValue slot name patternExpression session =
   modifySymbolValues
     name
-    ( \values ->
-        values
-          { symbolDownValues =
-              filter
-                ((/= patternExpression) . downValuePattern)
-                (symbolDownValues values)
-          }
-    )
+    removeMatching
     session
+ where
+  removeMatching values =
+    let retained =
+          filter
+            ((/= patternExpression) . downValuePattern)
+            (compoundValuesFrom slot values)
+     in case slot of
+          DownValueSlot -> values {symbolDownValues = retained}
+          SubValueSlot -> values {symbolSubValues = retained}
 
 removeOwnValues :: [Text] -> EvaluationSession -> EvaluationSession
 removeOwnValues names session =
@@ -5763,8 +5836,16 @@ symbolValuesFor name = symbolValues . symbolStateFor name
 symbolOwnValueFor :: Text -> EvaluationSession -> Maybe Definition
 symbolOwnValueFor name = symbolOwnValue . symbolValuesFor name
 
-symbolDownValuesFor :: Text -> EvaluationSession -> [DownValue]
-symbolDownValuesFor name = symbolDownValues . symbolValuesFor name
+compoundValuesFrom :: CompoundValueSlot -> SymbolValues -> [DownValue]
+compoundValuesFrom DownValueSlot = symbolDownValues
+compoundValuesFrom SubValueSlot = symbolSubValues
+
+compoundValuesFor
+  :: CompoundValueSlot
+  -> Text
+  -> EvaluationSession
+  -> [DownValue]
+compoundValuesFor slot name = compoundValuesFrom slot . symbolValuesFor name
 
 modifySymbolState
   :: Text
