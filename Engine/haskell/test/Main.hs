@@ -553,6 +553,11 @@ checkInputFormParser = do
         , ("completed span adjacency", "a ;; b ;; c ;; d", "Times[Span[a, b, c], Span[1, d]]")
         , ("right associative assignment", "a = b = 2", "Set[a, Set[b, 2]]")
         , ("delayed assignment", "f[x_] := x^2", "SetDelayed[f[Pattern[x, Blank[]]], Power[x, 2]]")
+        , ("right associative tagged assignment", "f /: h[f[x_]] = a = b", "TagSet[f, h[f[Pattern[x, Blank[]]]], Set[a, b]]")
+        , ("tagged delayed lhs condition", "f /: h[f[x_]] /; x > 0 := rhs", "TagSetDelayed[f, Condition[h[f[Pattern[x, Blank[]]]], Greater[x, 0]], rhs]")
+        , ("tagged spaced unset continuation", "f /: h[f[x_]] = . + y", "Plus[TagUnset[f, h[f[Pattern[x, Blank[]]]]], y]")
+        , ("tagged target nested unset", "f /: g[x =.] = rhs", "TagSet[f, g[Unset[x]], rhs]")
+        , ("nested tagged prefix", "f /: g /: lhs = rhs", "TagSet[TagSetPrefix[f, g], lhs, rhs]")
         , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
         , ("association", "<|a -> 1, b :> 2|>", "Association[Rule[a, 1], RuleDelayed[b, 2]]")
         , ("pattern test", "x_?IntegerQ", "PatternTest[Pattern[x, Blank[]], IntegerQ]")
@@ -1225,6 +1230,17 @@ checkEvaluationSession = do
         , ("subvalue specificity preserves tied assignment order", "ClearAll[f]; f[x_][y_] := generic[x, y]; f[1][y_] := partial[y]; {f[1][2], SubValues[f]}", "List[generic[1, 2], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], generic[x, y]], RuleDelayed[HoldPattern[f[1][Pattern[y, Blank[]]]], partial[y]]]]")
         , ("subvalue conditional equations and exact unset", "ClearAll[f]; f[x_][y_] := pos[y] /; x > 0; f[x_][y_] := neg[y] /; x < 0; a = {f[2][9], f[-2][9], SubValues[f]}; u = Unset[f[x_][y_]]; {a, u, f[2][9], SubValues[f], Unset[f[x_][y_]]}", "List[List[pos[9], neg[9], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], Condition[pos[y], Greater[x, 0]]], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], Condition[neg[y], Less[x, 0]]]]], Null, f[2][9], List[], $Failed]")
         , ("subvalue bodies catch bare Return and preserve effects", "ClearAll[f, z]; f[x_][y_] := (z = 1; Return[{x, y}]; z = 2); {f[a][b], z}", "List[List[a, b], 1]")
+        , ("tagged assignments route natural own down and sub values", "ClearAll[f, x, y]; a = TagSet[f, f, 7]; own = {a, f, OwnValues[f]}; ClearAll[f]; b = TagSetDelayed[f, f[x_], x + 1]; down = {b, f[3], DownValues[f], UpValues[f]}; ClearAll[f]; c = TagSetDelayed[f, f[x_][y_], {x, y}]; {own, down, c, f[1][2], SubValues[f], UpValues[f]}", "List[List[7, 7, List[RuleDelayed[HoldPattern[f], 7]]], List[Null, 4, List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], Plus[x, 1]]], List[]], Null, List[1, 2], List[RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]], List[x, y]]], List[]]")
+        , ("tagged immediate and delayed upvalues preserve rhs timing", "ClearAll[f, g, h, x, y]; y = 5; a = TagSet[f, h[f[x_]], x + y]; first = h[f[3]]; y = 10; TagSetDelayed[g, h[g[x_]], x + y]; {a, first, h[f[3]], h[g[3]], UpValues[f], UpValues[g], DownValues[h]}", "List[Plus[5, x], 8, 8, 13, List[RuleDelayed[HoldPattern[h[f[Pattern[x, Blank[]]]]], Plus[5, x]]], List[RuleDelayed[HoldPattern[h[g[Pattern[x, Blank[]]]]], Plus[x, y]]], List[]]")
+        , ("upvalues beat head downvalues", "ClearAll[f, h, x]; TagSetDelayed[f, h[f[x_]], up[x]]; h[x_] := down[x]; {h[f[1]], UpValues[f], DownValues[h]}", "List[up[1], List[RuleDelayed[HoldPattern[h[f[Pattern[x, Blank[]]]]], up[x]]], List[RuleDelayed[HoldPattern[h[Pattern[x, Blank[]]]], down[x]]]]")
+        , ("upvalue candidates are tried left to right", "ClearAll[a, b, h]; TagSetDelayed[a, h[a, b], froma]; TagSetDelayed[b, h[a, b], fromb]; h[a, b]", "froma")
+        , ("upvalues beat call head subvalues", "ClearAll[f, g, x, y]; g[x_][y_] := sub; TagSetDelayed[f, g[x_][f], up]; g[1][f]", "up")
+        , ("upvalue head chain dispatch and hold suppression", "ClearAll[f, h, q, r, x, y]; SetAttributes[q, HoldAll]; TagSetDelayed[f, q[f[x_]], held[x]]; SetAttributes[r, HoldAllComplete]; TagSetDelayed[f, r[f[x_]], blocked[x]]; TagSetDelayed[f, h[f[x_][y_]], {x, y}]; {q[f[2]], r[f[3]], h[f[1][2]], UpValues[f]}", "List[held[2], r[f[3]], List[1, 2], List[RuleDelayed[HoldPattern[q[f[Pattern[x, Blank[]]]]], held[x]], RuleDelayed[HoldPattern[r[f[Pattern[x, Blank[]]]]], blocked[x]], RuleDelayed[HoldPattern[h[f[Pattern[x, Blank[]]][Pattern[y, Blank[]]]]], List[x, y]]]]")
+        , ("upvalue conditions callbacks and bare Return share definition dispatch", "ClearAll[f, h, x, c]; c = 0; TagSetDelayed[f, h[f[x_ /; (c = c + 1; x > 0)]], (c = c + 10; Return[x])]; {h[f[-1]], h[f[2]], c}", "List[h[f[-1]], 2, 12]")
+        , ("duplicate upvalue candidates retain one failed match effect", "ClearAll[c, f, h, x, y]; c = 0; TagSetDelayed[f, h[f[x_], f[y_]], Condition[hit, c = c + 1; False]]; {h[f[1], f[2]], c}", "List[h[f[1], f[2]], 1]")
+        , ("tagged unset removes exact upvalue equations", "ClearAll[f, h, x]; TagSetDelayed[f, h[f[x_]], x]; a = {h[f[2]], UpValues[f]}; b = TagUnset[f, h[f[x_]]]; {a, b, h[f[2]], UpValues[f]}", "List[List[2, List[RuleDelayed[HoldPattern[h[f[Pattern[x, Blank[]]]]], x]]], Null, h[f[2]], List[]]")
+        , ("tagged special settings use canonical own equations", "a = TagSet[$OutputSizeLimit, $OutputSizeLimit, 99]; b = TagUnset[$OutputSizeLimit, $OutputSizeLimit]; {a, b, $OutputSizeLimit, OwnValues[$OutputSizeLimit]}", "List[99, Null, $OutputSizeLimit, List[]]")
+        , ("tagged own equations use visible context spelling", "ClearAll[Global`f]; Global`f = 7; {OwnValues[Global`f], TagUnset[Global`f, Global`f], Global`f, TagUnset[Global`f, f], Global`f}", "List[List[RuleDelayed[HoldPattern[f], 7]], $Failed, 7, Null, Global`f]")
         , ("clear removes own and down values", "f[x_] := x; f = 7; Clear[f]; {f, f[3], DownValues[f]}", "List[f, f[3], List[]]")
         , ("iterator downvalue mutations persist", "f[x_] := x; Table[f[i] = i^2, {i, 3}]; {f[1], f[2], f[3], f[4], DownValues[f]}", "List[1, 4, 9, 4, List[RuleDelayed[HoldPattern[f[1]], 1], RuleDelayed[HoldPattern[f[2]], 4], RuleDelayed[HoldPattern[f[3]], 9], RuleDelayed[HoldPattern[f[Pattern[x, Blank[]]]], x]]]")
         , ("held assignment remains inert", "Hold[x = 9]; x", "x")
@@ -1430,7 +1446,97 @@ checkEvaluationSession = do
         , "Part::error: Part expects an expression and at least one part specification."
         )
       messageCases =
-        [ ( "attribute specifications remain held"
+        [ ( "tagged delayed assignments reject deep tag positions"
+          , "ClearAll[f, h, x]; TagSetDelayed[f, h[deep[f[x_]]], x]"
+          , "Null"
+          , [ ( "TagSetDelayed::tagpos"
+              , "MessageName[TagSetDelayed, \"tagpos\"]"
+              , "TagSetDelayed::tagpos: Tag f does not occur in a supported position in h[deep[f[x_]]]."
+              )
+            ]
+          )
+        , ( "tagged immediate failures retain the evaluated rhs"
+          , "ClearAll[f, h, x, y]; y = 3; TagSet[f, h[deep[f[x_]]], x + y]"
+          , "TagSet[f, h[deep[f[Pattern[x, Blank[]]]]], Plus[3, x]]"
+          , [ ( "TagSet::tagpos"
+              , "MessageName[TagSet, \"tagpos\"]"
+              , "TagSet::tagpos: Tag f does not occur in a supported position in h[deep[f[x_]]]."
+              )
+            ]
+          )
+        , ( "tagged assignments respect protected tags"
+          , "ClearAll[h, x, y]; TagSetDelayed[Plus, h[Plus[x_, y_]], x]"
+          , "Null"
+          , [ ( "TagSetDelayed::wrsym"
+              , "MessageName[TagSetDelayed, \"wrsym\"]"
+              , "TagSetDelayed::wrsym: Symbol Plus is Protected."
+              )
+            ]
+          )
+        , ( "missing tagged definitions report norep"
+          , "ClearAll[f, h, x]; TagUnset[f, h[f[x_]]]"
+          , "$Failed"
+          , [ ( "TagUnset::norep"
+              , "MessageName[TagUnset, \"norep\"]"
+              , "TagUnset::norep: Assignment on f for h[f[x_]] not found."
+              )
+            ]
+          )
+        , ( "tagged unset requires the canonical own-value lhs"
+          , "ClearAll[f]; f = 7; TagUnset[f, Condition[f, True]]"
+          , "$Failed"
+          , [ ( "TagUnset::norep"
+              , "MessageName[TagUnset, \"norep\"]"
+              , "TagUnset::norep: Assignment on f for f /; True not found."
+              )
+            ]
+          )
+        , ( "tagged unset preserves untouched seeded defaults"
+          , "TagUnset[$RecursionLimit, $RecursionLimit]"
+          , "$Failed"
+          , [ ( "TagUnset::norep"
+              , "MessageName[TagUnset, \"norep\"]"
+              , "TagUnset::norep: Assignment on $RecursionLimit for $RecursionLimit not found."
+              )
+            ]
+          )
+        , ( "TagSet validates arity"
+          , "TagSet[f, f]"
+          , "TagSet[f, f]"
+          , [ ( "TagSet::error"
+              , "MessageName[TagSet, \"error\"]"
+              , "TagSet::error: TagSet expects a tag, left-hand side, and right-hand side."
+              )
+            ]
+          )
+        , ( "TagSet validates symbol tags"
+          , "TagSet[1, f, 2]"
+          , "TagSet[1, f, 2]"
+          , [ ( "TagSet::error"
+              , "MessageName[TagSet, \"error\"]"
+              , "TagSet::error: TagSet expects a symbol tag."
+              )
+            ]
+          )
+        , ( "TagSetDelayed validates arity"
+          , "TagSetDelayed[f, f]"
+          , "TagSetDelayed[f, f]"
+          , [ ( "TagSetDelayed::error"
+              , "MessageName[TagSetDelayed, \"error\"]"
+              , "TagSetDelayed::error: TagSetDelayed expects a tag, left-hand side, and right-hand side."
+              )
+            ]
+          )
+        , ( "TagUnset validates arity"
+          , "TagUnset[f]"
+          , "TagUnset[f]"
+          , [ ( "TagUnset::error"
+              , "MessageName[TagUnset, \"error\"]"
+              , "TagUnset::error: TagUnset expects a tag and a left-hand side."
+              )
+            ]
+          )
+        , ( "attribute specifications remain held"
           , "ClearAll[a, f]; a = HoldAll; SetAttributes[f, a]; {Attributes[f], f[1 + 2]}"
           , "List[List[], f[3]]"
           , [ ( "Attributes::attnf"
@@ -2459,6 +2565,8 @@ checkInputForms = do
         , ("mapping operators", "{f /@ x, f @@ x, x /. r, x //. r}", "{f /@ x, f @@ x, x /. r, x //. r}")
         , ("composition", "{f @* g, f /* g}", "{f @* g, f /* g}")
         , ("updates", "{x++, ++x, x =.}", "{x++, ++x, x =.}")
+        , ("tagged delayed assignment", "TagSetDelayed[f, h[f[x_]], x]", "f /: h[f[x_]] := x")
+        , ("tagged unset", "TagUnset[f, h[f[x_]]]", "f /: h[f[x_]] =.")
         , ("message name", "a::b", "a::b")
         , ("nested prefix not", "!!a", "!!a")
         , ("span shorthand", "1 ;; 3", ";; 3")

@@ -12,6 +12,30 @@ import sys
 
 CASES = (
     ("parse success", ("expr", "parse", "--code", "f[a, 2]", "--form", "input"), 0),
+    (
+        "tagged delayed assignment parser",
+        (
+            "expr",
+            "parse",
+            "--code",
+            "f /: h[f[x_]] := x",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "tagged spaced unset parser",
+        (
+            "expr",
+            "parse",
+            "--code",
+            "f /: h[f[x_]] = .",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("evaluation success", ("expr", "evaluate", "--code", "1 + 2", "--form", "input"), 0),
     (
         "flat one-identity downvalue",
@@ -223,6 +247,74 @@ CASES = (
             "--code",
             "ClearAll[Global`sv]; Global`sv[x_][y_] := global[x, y]; "
             "{sv[1][2], Global`sv[1][2], SubValues[sv]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "natural tagged subvalue",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f /: f[x_][y_] := {x, y}; "
+            "{f[1][2], SubValues[f], UpValues[f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "upvalue precedes downvalue",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, h]; f /: h[f] := up; h[x_] := down; "
+            "{h[f], DownValues[h], UpValues[f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "upvalue HoldAllComplete suppression and tagged unset",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f, h]; f /: h[f[x_]] := up[x]; "
+            "SetAttributes[h, HoldAllComplete]; "
+            "{h[f[2]], f /: h[f[x_]] =., h[f[2]], UpValues[f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "tagged own-value equation provenance",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f = 7; "
+            "first = TagUnset[f, Condition[f, True]]; "
+            "seeded = TagUnset[$RecursionLimit, $RecursionLimit]; "
+            "{first, f, seeded, $RecursionLimit}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "explicit system tagged owner",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "TagSetDelayed[System`fresh, fresh[x_], x]; "
+            "{fresh[1], DownValues[System`fresh], UpValues[System`fresh]}",
             "--form",
             "input",
         ),

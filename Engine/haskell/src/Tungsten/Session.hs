@@ -43,12 +43,18 @@ data DownValue = DownValue
   }
   deriving (Eq, Show)
 
--- DownValues and SubValues share the same ordered rule representation and
--- application contract.  The slot only controls which symbol-owned list a
--- compound assignment mutates or a call dispatches through.
+-- DownValues, UpValues, and SubValues share the same ordered rule
+-- representation and application contract.  The slot only controls which
+-- symbol-owned list an assignment mutates or a call dispatches through.
 data CompoundValueSlot
   = DownValueSlot
+  | UpValueSlot
   | SubValueSlot
+  deriving (Eq, Show)
+
+data TaggedValueTarget
+  = TaggedOwnValue !Text
+  | TaggedCompoundValue !CompoundValueSlot !Text
   deriving (Eq, Show)
 
 data EvaluationMessage = EvaluationMessage
@@ -60,6 +66,7 @@ data EvaluationMessage = EvaluationMessage
 
 data SymbolValues = SymbolValues
   { symbolOwnValue :: !(Maybe Definition)
+  , symbolOwnValuePattern :: !(Maybe Expr)
   , symbolDownValues :: ![DownValue]
   , symbolUpValues :: ![DownValue]
   , symbolSubValues :: ![DownValue]
@@ -454,6 +461,12 @@ evaluateSessionAtRaw depth session expression = case expression of
                   session
                   (Symbol qualifiedName)
                   arguments'
+      Call (Symbol "TagSet") arguments' ->
+        evaluateSessionTagSet False depth session arguments'
+      Call (Symbol "TagSetDelayed") arguments' ->
+        evaluateSessionTagSet True depth session arguments'
+      Call (Symbol "TagUnset") arguments' ->
+        evaluateSessionTagUnset depth session arguments'
       Call (Symbol "Set") [Call (Symbol attributesHead) targets, rhs]
         | isSessionSystemHead "Attributes" attributesHead ->
             evaluateSessionAttributesAssignment depth session targets rhs
@@ -687,28 +700,6 @@ evaluateSessionGenericCall depth session expressionHead arguments' = do
   case threadSessionListableCall depth argumentsSession normalizedCall of
     Just sessionResult -> sessionResult
     Nothing -> case evaluatedHead of
-      Symbol logicalHead
-        | allowSystemDispatch
-        , isSessionSystemHead "And" logicalHead ->
-            Right
-              ( reduceHeldLogicalAlias
-                  logicalHead
-                  (Symbol "True")
-                  (Symbol "False")
-                  normalizedArguments
-              , argumentsSession
-              )
-      Symbol logicalHead
-        | allowSystemDispatch
-        , isSessionSystemHead "Or" logicalHead ->
-            Right
-              ( reduceHeldLogicalAlias
-                  logicalHead
-                  (Symbol "False")
-                  (Symbol "True")
-                  normalizedArguments
-              , argumentsSession
-              )
       association@(Call (Symbol associationHead) _)
         | allowSystemDispatch
         , isSessionSystemHead "Association" associationHead ->
@@ -731,36 +722,71 @@ evaluateSessionGenericCall depth session expressionHead arguments' = do
               then Right (instantiated, argumentsSession)
               else evaluateSessionAt (depth + 1) argumentsSession instantiated
       _ -> do
-        (definitionReplacement, definitionSession) <-
-          case evaluatedHead of
-            Symbol _ ->
-              applySessionDownValue depth argumentsSession normalizedCall
-            Call {} ->
-              applySessionSubValue depth argumentsSession normalizedCall
-            _ -> Right (Nothing, argumentsSession)
-        case definitionReplacement of
-          Just replacement -> Right (replacement, definitionSession)
-          Nothing ->
-            if expressionHead /= evaluatedHead
-                && evaluatedHead == Symbol "CompoundExpression"
-              then Right (normalizedCall, definitionSession)
-              else
-                case reduceSessionEvaluatedCallForDispatch
-                  allowSystemDispatch
-                  depth
-                  definitionSession
-                  normalizedCall of
-                  Just sessionReduction -> sessionReduction
-                  Nothing -> do
-                    reduced <-
-                      liftPureEvaluation
+        (upValueReplacement, upValueSession) <-
+          if suppressSymbolCallUpValues evaluatedHead argumentsSession
+            then Right (Nothing, argumentsSession)
+            else applySessionUpValue depth argumentsSession normalizedCall
+        case upValueReplacement of
+          Just replacement -> Right (replacement, upValueSession)
+          Nothing -> case evaluatedHead of
+            Symbol logicalHead
+              | allowSystemDispatch
+              , isSessionSystemHead "And" logicalHead ->
+                  Right
+                    ( reduceHeldLogicalAlias
+                        logicalHead
+                        (Symbol "True")
+                        (Symbol "False")
+                        normalizedArguments
+                    , upValueSession
+                    )
+            Symbol logicalHead
+              | allowSystemDispatch
+              , isSessionSystemHead "Or" logicalHead ->
+                  Right
+                    ( reduceHeldLogicalAlias
+                        logicalHead
+                        (Symbol "False")
+                        (Symbol "True")
+                        normalizedArguments
+                    , upValueSession
+                    )
+            _ -> do
+              (definitionReplacement, definitionSession) <-
+                case evaluatedHead of
+                  Symbol _ ->
+                    applySessionDownValue depth upValueSession normalizedCall
+                  Call {} ->
+                    applySessionSubValue depth upValueSession normalizedCall
+                  _ -> Right (Nothing, upValueSession)
+              case definitionReplacement of
+                Just replacement -> Right (replacement, definitionSession)
+                Nothing ->
+                  if expressionHead /= evaluatedHead
+                      && evaluatedHead == Symbol "CompoundExpression"
+                    then Right (normalizedCall, definitionSession)
+                    else
+                      case reduceSessionEvaluatedCallForDispatch
+                        allowSystemDispatch
+                        depth
                         definitionSession
-                        ( reduceEvaluatedCallForDispatch
-                            allowSystemDispatch
-                            definitionSession
-                            normalizedCall
-                        )
-                    Right (reduced, definitionSession)
+                        normalizedCall of
+                        Just sessionReduction -> sessionReduction
+                        Nothing -> do
+                          reduced <-
+                            liftPureEvaluation
+                              definitionSession
+                              ( reduceEvaluatedCallForDispatch
+                                  allowSystemDispatch
+                                  definitionSession
+                                  normalizedCall
+                              )
+                          Right (reduced, definitionSession)
+
+suppressSymbolCallUpValues :: Expr -> EvaluationSession -> Bool
+suppressSymbolCallUpValues (Symbol name) session =
+  symbolHasAttribute name HoldAllComplete session
+suppressSymbolCallUpValues _ _ = False
 
 reduceHeldLogicalAlias :: Text -> Expr -> Expr -> [Expr] -> Expr
 reduceHeldLogicalAlias headName identity decisive values
@@ -813,6 +839,9 @@ directSessionDispatchHead name =
     `elem` ( [ "Set"
              , "SetDelayed"
              , "Unset"
+             , "TagSet"
+             , "TagSetDelayed"
+             , "TagUnset"
              , "Clear"
              , "ClearAll"
              , "Attributes"
@@ -4229,6 +4258,204 @@ evaluateDownValueAssignment delayed depth session lhs rhs
                   <> " does not support this left-hand side in Tungsten yet."
               )
 
+evaluateSessionTagSet
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTagSet delayed depth session = \case
+  [Symbol tag, lhs, rhs]
+    | delayed -> do
+        let taggedSession = registerSymbol tag session
+        (normalizedLhs, normalizedSession) <-
+          normalizeAssignmentLhs depth taggedSession lhs
+        store normalizedSession tag normalizedLhs rhs
+    | otherwise -> do
+        let taggedSession = registerSymbol tag session
+        (value, valueSession) <-
+          evaluateSessionAt (depth + 1) taggedSession rhs
+        (normalizedLhs, normalizedSession) <-
+          normalizeAssignmentLhs depth valueSession lhs
+        store normalizedSession tag normalizedLhs value
+  [_, _, _] ->
+    sessionFailure session (operation <> " expects a symbol tag.")
+  _ ->
+    sessionFailure
+      session
+      (operation <> " expects a tag, left-hand side, and right-hand side.")
+ where
+  operation = if delayed then "TagSetDelayed" else "TagSet"
+
+  store current tag normalizedLhs storedBody =
+    case taggedAssignmentTarget current tag normalizedLhs of
+      Nothing ->
+        Right
+          ( failedAssignment tag normalizedLhs storedBody
+          , appendTagPositionMessage operation tag normalizedLhs current
+          )
+      Just target
+        | not (symbolAllowsValueMutation tag current) ->
+            Right
+              ( failedAssignment tag normalizedLhs storedBody
+              , appendSymbolMessage
+                  operation
+                  "wrsym"
+                  tag
+                  "is Protected."
+                  current
+              )
+        | otherwise ->
+            let updated = case target of
+                  TaggedOwnValue _ ->
+                    define
+                      tag
+                      (if delayed then DelayedValue storedBody else ImmediateValue storedBody)
+                      current
+                  TaggedCompoundValue slot _ ->
+                    defineCompoundValue
+                      slot
+                      tag
+                      (DownValue normalizedLhs storedBody delayed)
+                      current
+             in Right
+                  ( if delayed then Symbol "Null" else storedBody
+                  , updated
+                  )
+
+  failedAssignment tag normalizedLhs storedBody
+    | delayed = Symbol "Null"
+    | otherwise =
+        Call
+          (Symbol operation)
+          [Symbol tag, normalizedLhs, storedBody]
+
+evaluateSessionTagUnset
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTagUnset depth session = \case
+  [Symbol tag, lhs] -> do
+    let taggedSession = registerSymbol tag session
+    (normalizedLhs, normalizedSession) <-
+      normalizeAssignmentLhs depth taggedSession lhs
+    case taggedAssignmentTarget normalizedSession tag normalizedLhs of
+      Nothing ->
+        Right
+          ( Symbol "$Failed"
+          , appendTagPositionMessage
+              "TagUnset"
+              tag
+              normalizedLhs
+              normalizedSession
+          )
+      Just _
+        | not (symbolAllowsValueMutation tag normalizedSession) ->
+            Right
+              ( Symbol "$Failed"
+              , appendSymbolMessage
+                  "TagUnset"
+                  "wrsym"
+                  tag
+                  "is Protected."
+                  normalizedSession
+              )
+      Just (TaggedOwnValue _)
+        | symbolOwnValuePatternFor tag normalizedSession
+            == Just normalizedLhs ->
+            Right
+              ( Symbol "Null"
+              , removeOwnValues [tag] normalizedSession
+              )
+      Just (TaggedCompoundValue slot _)
+        | hasCompoundValue slot tag normalizedLhs normalizedSession ->
+            Right
+              ( Symbol "Null"
+              , removeCompoundValue slot tag normalizedLhs normalizedSession
+              )
+      Just _ ->
+        Right
+          ( Symbol "$Failed"
+          , appendNamedMessage
+              "TagUnset"
+              "norep"
+              ( "Assignment on "
+                  <> inputForm (Symbol tag)
+                  <> " for "
+                  <> inputForm normalizedLhs
+                  <> " not found."
+              )
+              normalizedSession
+          )
+  [_, _] -> sessionFailure session "TagUnset expects a symbol tag."
+  _ -> sessionFailure session "TagUnset expects a tag and a left-hand side."
+
+taggedAssignmentTarget
+  :: EvaluationSession
+  -> Text
+  -> Expr
+  -> Maybe TaggedValueTarget
+taggedAssignmentTarget session tag lhs =
+  case naturalTaggedValueTarget lhs of
+    Just naturalTarget
+      | sameTargetSymbol naturalTarget -> retarget naturalTarget
+    _
+      | tagOccursInUpValuePosition session tag lhs ->
+          Just (TaggedCompoundValue UpValueSlot tag)
+      | otherwise -> Nothing
+ where
+  sameTargetSymbol = \case
+    TaggedOwnValue name -> sameSessionSymbol session tag name
+    TaggedCompoundValue _ name -> sameSessionSymbol session tag name
+
+  retarget = \case
+    TaggedOwnValue _ -> Just (TaggedOwnValue tag)
+    TaggedCompoundValue slot _ -> Just (TaggedCompoundValue slot tag)
+
+naturalTaggedValueTarget :: Expr -> Maybe TaggedValueTarget
+naturalTaggedValueTarget = \case
+  Call (Symbol wrapper) (body : _)
+    | wrapper `elem` ["Condition", "HoldPattern"] ->
+        naturalTaggedValueTarget body
+  Symbol name -> Just (TaggedOwnValue name)
+  Call (Symbol name) _ -> Just (TaggedCompoundValue DownValueSlot name)
+  Call (Call (Symbol name) _) _ ->
+    Just (TaggedCompoundValue SubValueSlot name)
+  _ -> Nothing
+
+tagOccursInUpValuePosition :: EvaluationSession -> Text -> Expr -> Bool
+tagOccursInUpValuePosition session tag = \case
+  Call (Symbol "Condition") [body, _] ->
+    tagOccursInUpValuePosition session tag body
+  Call (Symbol "HoldPattern") [body] ->
+    tagOccursInUpValuePosition session tag body
+  Call _ values -> any occursInArgument values
+  _ -> False
+ where
+  occursInArgument = \case
+    Symbol name -> sameSessionSymbol session tag name
+    expression@Call {} ->
+      maybe False (sameSessionSymbol session tag) (headChainSymbol expression)
+    _ -> False
+
+appendTagPositionMessage
+  :: Text
+  -> Text
+  -> Expr
+  -> EvaluationSession
+  -> EvaluationSession
+appendTagPositionMessage operation tag lhs =
+  appendNamedMessage
+    operation
+    "tagpos"
+    ( "Tag "
+        <> inputForm (Symbol tag)
+        <> " does not occur in a supported position in "
+        <> inputForm lhs
+        <> "."
+    )
+
 evaluateDownValueUnset
   :: Int
   -> EvaluationSession
@@ -4289,6 +4516,51 @@ compoundValueOwner = \case
   Call (Call (Symbol name) _) _ -> Just (SubValueSlot, name)
   _ -> Nothing
 
+applySessionUpValue
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult (Maybe Expr)
+applySessionUpValue depth session expression =
+  let (candidates, registeredSession) =
+        upValueCandidateSymbols session expression
+   in tryCandidates registeredSession candidates
+ where
+  tryCandidates current [] = Right (Nothing, current)
+  tryCandidates current (name : rest) = do
+    (replacement, updated) <-
+      applySessionDefinitions
+        depth
+        current
+        expression
+        (compoundValuesFor UpValueSlot name current)
+    case replacement of
+      Just _ -> Right (replacement, updated)
+      Nothing -> tryCandidates updated rest
+
+upValueCandidateSymbols
+  :: EvaluationSession
+  -> Expr
+  -> ([Text], EvaluationSession)
+upValueCandidateSymbols session expression = case expression of
+  Call _ values ->
+    let (_, retained, updated) =
+          foldl addArgument (Set.empty, [], session) values
+     in (reverse retained, updated)
+  _ -> ([], session)
+ where
+  addArgument accumulated argument = case argument of
+    Symbol name -> addCandidate accumulated name
+    Call {} -> maybe accumulated (addCandidate accumulated) (headChainSymbol argument)
+    _ -> accumulated
+
+  addCandidate (seen, retained, current) name =
+    let registered = registerSymbol name current
+        storageName = resolvedSymbolStorageName name registered
+     in if Set.member storageName seen
+          then (seen, retained, registered)
+          else (Set.insert storageName seen, name : retained, registered)
+
 applySessionDownValue
   :: Int
   -> EvaluationSession
@@ -4320,11 +4592,17 @@ applySessionSubValue _ session _ = Right (Nothing, session)
 
 subValueTargetSymbol :: Expr -> Maybe Text
 subValueTargetSymbol (Call expressionHead _) = headChainSymbol expressionHead
- where
-  headChainSymbol (Symbol name) = Just name
-  headChainSymbol (Call nestedHead _) = headChainSymbol nestedHead
-  headChainSymbol _ = Nothing
 subValueTargetSymbol _ = Nothing
+
+headChainSymbol :: Expr -> Maybe Text
+headChainSymbol (Symbol name) = Just name
+headChainSymbol (Call nestedHead _) = headChainSymbol nestedHead
+headChainSymbol _ = Nothing
+
+sameSessionSymbol :: EvaluationSession -> Text -> Text -> Bool
+sameSessionSymbol session first second =
+  resolvedSymbolStorageName first session
+    == resolvedSymbolStorageName second session
 
 applySessionDefinitions
   :: Int
@@ -5609,7 +5887,13 @@ define :: Text -> Definition -> EvaluationSession -> EvaluationSession
 define name value session =
   modifySymbolValues
     name
-    (\values -> values {symbolOwnValue = Just value})
+    ( \values ->
+        values
+          { symbolOwnValue = Just value
+          , symbolOwnValuePattern =
+              Just (Symbol (displaySessionSymbolName name))
+          }
+    )
     session
 
 defineCompoundValue
@@ -5627,6 +5911,7 @@ defineCompoundValue slot name definition session =
   valuesForSlot = compoundValuesFrom slot
   updateSlot values definitions = case slot of
     DownValueSlot -> values {symbolDownValues = definitions}
+    UpValueSlot -> values {symbolUpValues = definitions}
     SubValueSlot -> values {symbolSubValues = definitions}
   insertDefinition select update values =
     update values (insertDownValue definition (select values))
@@ -5705,12 +5990,23 @@ removeCompoundValue slot name patternExpression session =
             (compoundValuesFrom slot values)
      in case slot of
           DownValueSlot -> values {symbolDownValues = retained}
+          UpValueSlot -> values {symbolUpValues = retained}
           SubValueSlot -> values {symbolSubValues = retained}
 
 removeOwnValues :: [Text] -> EvaluationSession -> EvaluationSession
 removeOwnValues names session =
   foldl
-    (\updated name -> modifySymbolValues name (\values -> values {symbolOwnValue = Nothing}) updated)
+    ( \updated name ->
+        modifySymbolValues
+          name
+          ( \values ->
+              values
+                { symbolOwnValue = Nothing
+                , symbolOwnValuePattern = Nothing
+                }
+          )
+          updated
+    )
     session
     names
 
@@ -5739,6 +6035,7 @@ emptySymbolValues :: SymbolValues
 emptySymbolValues =
   SymbolValues
     { symbolOwnValue = Nothing
+    , symbolOwnValuePattern = Nothing
     , symbolDownValues = []
     , symbolUpValues = []
     , symbolSubValues = []
@@ -5836,8 +6133,12 @@ symbolValuesFor name = symbolValues . symbolStateFor name
 symbolOwnValueFor :: Text -> EvaluationSession -> Maybe Definition
 symbolOwnValueFor name = symbolOwnValue . symbolValuesFor name
 
+symbolOwnValuePatternFor :: Text -> EvaluationSession -> Maybe Expr
+symbolOwnValuePatternFor name = symbolOwnValuePattern . symbolValuesFor name
+
 compoundValuesFrom :: CompoundValueSlot -> SymbolValues -> [DownValue]
 compoundValuesFrom DownValueSlot = symbolDownValues
+compoundValuesFrom UpValueSlot = symbolUpValues
 compoundValuesFrom SubValueSlot = symbolSubValues
 
 compoundValuesFor
@@ -5929,6 +6230,7 @@ symbolAllowsValueMutation :: Text -> EvaluationSession -> Bool
 symbolAllowsValueMutation name session =
   not (symbolHasAttribute name Protected session)
     || isProtectedValueHook name session
+    || specialSessionSettingName name /= Nothing
 
 isProtectedValueHook :: Text -> EvaluationSession -> Bool
 isProtectedValueHook name session =
