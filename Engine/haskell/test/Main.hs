@@ -8,6 +8,7 @@ import qualified Data.ByteString as BS
 import Data.Char (chr)
 import Data.IORef (atomicModifyIORef', newIORef)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
@@ -43,6 +44,7 @@ import Tungsten.Parser
 import Tungsten.ParserCorpus
 import Tungsten.Repl
 import Tungsten.Session
+import qualified Tungsten.SystemSymbols as SystemSymbols
 import Tungsten.WolframString
 import Tungsten.WolframProcesses
 
@@ -60,6 +62,7 @@ tests =
   , checkAssistant
   , checkWolframStrings
   , checkNamedCharacters
+  , checkSystemSymbols
   , checkInlineBoxes
   , checkFullFormParser
   , checkFullFormParserErrors
@@ -88,6 +91,41 @@ tests =
   , checkParserEvaluatorProtocol
   , checkProtocolErrors
   ]
+
+checkSystemSymbols :: IO Bool
+checkSystemSymbols = do
+  let attributes = SystemSymbols.systemSymbolAttributes
+      expectedPlus =
+        Set.fromList
+          [ SystemSymbols.Flat
+          , SystemSymbols.Listable
+          , SystemSymbols.NumericFunction
+          , SystemSymbols.OneIdentity
+          , SystemSymbols.Orderless
+          , SystemSymbols.Protected
+          ]
+      expectedFunction =
+        Set.fromList [SystemSymbols.HoldAll, SystemSymbols.Protected]
+      expectedI =
+        Set.fromList
+          [ SystemSymbols.Locked
+          , SystemSymbols.Protected
+          , SystemSymbols.ReadProtected
+          ]
+  checks <- sequence
+    [ assertEqual "System symbol catalog count" 7941 SystemSymbols.systemSymbolCount
+    , assertEqual "System symbol catalog name count" 7941 (length SystemSymbols.systemSymbolNames)
+    , assertEqual "System symbol bare lookup" (Just expectedPlus) (attributes "Plus")
+    , assertEqual "System symbol qualified lookup" (Just expectedPlus) (attributes "System`Plus")
+    , assertEqual "System symbol rejects Global context" Nothing (attributes "Global`Plus")
+    , assertEqual "System symbol Function attributes" (Just expectedFunction) (attributes "Function")
+    , assertEqual "System symbol I attributes" (Just expectedI) (attributes "I")
+    , assertEqual "Python-only System symbol exists" True (SystemSymbols.isSystemSymbol "ConfirmationFailed")
+    , assertEqual "Python-only System symbol attributes" (Just Set.empty) (attributes "ConfirmationFailed")
+    , assertEqual "reserved Stub spelling" "Stub" (SystemSymbols.symbolAttributeName SystemSymbols.Stub)
+    , assertEqual "reserved Temporary spelling" "Temporary" (SystemSymbols.symbolAttributeName SystemSymbols.Temporary)
+    ]
+  pure (and checks)
 
 checkWolframProcesses :: IO Bool
 checkWolframProcesses = withTemporaryDirectory "tungsten-processes" $ \temporary -> do

@@ -15,6 +15,7 @@ build-type:         Simple
 extra-source-files:
   README.md
   docs/haskell-port.md
+  src/tungsten/data/system_symbols_wolfram_15_0.json
   src/tungsten/data/wolfram_named_characters_15_0.json
 tested-with:        GHC == 9.12.4
 
@@ -49,6 +50,7 @@ library
     Tungsten.PythonSort
     Tungsten.Repl
     Tungsten.Session
+    Tungsten.SystemSymbols
     Tungsten.WolframString
     Tungsten.WolframProcesses
   build-depends:
@@ -64,6 +66,7 @@ library
     template-haskell >= 2.23 && < 2.24
   other-modules:
     Tungsten.NamedCharacterTH
+    Tungsten.SystemSymbolTH
 
 executable tungsten-hs
   import:          common-settings
