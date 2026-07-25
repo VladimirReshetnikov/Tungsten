@@ -45,6 +45,17 @@ public:
     EvaluationSession();
 
     [[nodiscard]] std::size_t line() const noexcept { return line_; }
+    // History lookups return independent snapshots. A missing optional means that the line
+    // never existed or has been pruned; retained effect histories use an empty vector when the
+    // line produced no such effects. Exit lines retain their input and effect histories but do
+    // not have an output history entry.
+    [[nodiscard]] std::optional<std::string> input_string(std::size_t line) const;
+    [[nodiscard]] std::optional<Expr> input(std::size_t line) const;
+    [[nodiscard]] std::optional<Expr> output(std::size_t line) const;
+    [[nodiscard]] std::optional<std::vector<Expr>> message_names(std::size_t line) const;
+    [[nodiscard]] std::optional<std::vector<std::string>> message_texts(
+        std::size_t line) const;
+    [[nodiscard]] std::optional<std::vector<std::string>> prints(std::size_t line) const;
     [[nodiscard]] SessionOutput evaluate_input(const std::string& source);
     [[nodiscard]] SessionOutput evaluate_expression(
         const std::string& source,
@@ -87,6 +98,8 @@ private:
     std::map<std::size_t, Expr> inputs_;
     std::map<std::size_t, Expr> outputs_;
     std::map<std::size_t, std::vector<Expr>> message_history_;
+    std::map<std::size_t, std::vector<std::string>> message_text_history_;
+    std::map<std::size_t, std::vector<std::string>> print_history_;
 };
 
 int run_repl(

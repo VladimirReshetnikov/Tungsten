@@ -152,6 +152,95 @@ void history_pruning_tests() {
         "List[]", "history length zero prunes the current input before evaluation");
 }
 
+void installed_history_api_tests() {
+    tungsten::EvaluationSession retained;
+    const auto expression = tungsten::call("CompoundExpression", {
+        tungsten::call("Print", {tungsten::string("kept print")}),
+        tungsten::call("Plus", {tungsten::integer(20), tungsten::integer(22)}),
+    });
+    const auto value = retained.evaluate_expression("original source spelling", expression);
+    check_equal(value.result.to_full_form(), "42", "history API source evaluation");
+
+    const auto source = retained.input_string(value.line);
+    check(source.has_value(), "history API exposes a retained input string");
+    if (source) check_equal(*source, "original source spelling", "retained input string snapshot");
+    const auto input = retained.input(value.line);
+    check(input.has_value(), "history API exposes a retained input expression");
+    if (input) check_equal(input->to_full_form(), expression.to_full_form(),
+        "retained input expression is the expression before evaluation");
+    const auto output = retained.output(value.line);
+    check(output.has_value(), "history API exposes a retained output expression");
+    if (output) check_equal(output->to_full_form(), "42", "retained output snapshot");
+
+    const auto names = retained.message_names(value.line);
+    check(names.has_value() && names->empty(),
+        "retained line distinguishes an empty message-name history from a missing line");
+    const auto texts = retained.message_texts(value.line);
+    check(texts.has_value() && texts->empty(),
+        "retained line distinguishes an empty message-text history from a missing line");
+    auto prints = retained.prints(value.line);
+    check(prints.has_value() && prints->size() == 1,
+        "history API exposes a retained print history");
+    if (prints && prints->size() == 1)
+        check_equal(prints->front(), "kept print", "retained print snapshot");
+    if (prints) prints->clear();
+    const auto prints_again = retained.prints(value.line);
+    check(prints_again.has_value() && prints_again->size() == 1,
+        "history API returns independent snapshots");
+
+    const auto diagnostic = retained.evaluate_input("Take[<|a->1|>, {Key[a]}]");
+    const auto diagnostic_names = retained.message_names(diagnostic.line);
+    check(diagnostic_names.has_value() && *diagnostic_names == diagnostic.message_names,
+        "history API retains structured message names");
+    const auto diagnostic_texts = retained.message_texts(diagnostic.line);
+    check(diagnostic_texts.has_value() && *diagnostic_texts == diagnostic.messages,
+        "history API retains rendered message texts");
+    const auto diagnostic_prints = retained.prints(diagnostic.line);
+    check(diagnostic_prints.has_value() && diagnostic_prints->empty(),
+        "history API retains an empty print history on a diagnostic line");
+
+    check(!retained.input_string(999).has_value(), "missing input-string history is nullopt");
+    check(!retained.input(999).has_value(), "missing input-expression history is nullopt");
+    check(!retained.output(999).has_value(), "missing output history is nullopt");
+    check(!retained.message_names(999).has_value(), "missing message-name history is nullopt");
+    check(!retained.message_texts(999).has_value(), "missing message-text history is nullopt");
+    check(!retained.prints(999).has_value(), "missing print history is nullopt");
+
+    tungsten::EvaluationSession pruned;
+    (void)pruned.evaluate_input("$HistoryLength = 1");
+    const auto printed = pruned.evaluate_input("Print[\"short lived\"]; 10");
+    check(pruned.prints(printed.line).has_value(), "current print history is retained");
+    const auto messaged = pruned.evaluate_input("Take[<|a->1|>, {Key[a]}]");
+    check(!pruned.input_string(printed.line).has_value(), "pruned input string is nullopt");
+    check(!pruned.input(printed.line).has_value(), "pruned input expression is nullopt");
+    check(!pruned.output(printed.line).has_value(), "pruned output is nullopt");
+    check(!pruned.message_names(printed.line).has_value(), "pruned message names are nullopt");
+    check(!pruned.message_texts(printed.line).has_value(), "pruned message texts are nullopt");
+    check(!pruned.prints(printed.line).has_value(), "pruned prints are nullopt");
+    check(pruned.message_names(messaged.line).has_value(),
+        "current message-name history survives finite pruning");
+    check(pruned.message_texts(messaged.line).has_value(),
+        "current message-text history survives finite pruning");
+
+    tungsten::EvaluationSession exits;
+    const auto exit_expression = tungsten::call("CompoundExpression", {
+        tungsten::call("Print", {tungsten::string("before exit")}),
+        tungsten::call("Exit", {tungsten::integer(7)}),
+    });
+    const auto exit = exits.evaluate_expression("exit source", exit_expression);
+    check(exit.is_exit() && exit.exit_code == 7, "history API exit setup");
+    check(exits.input_string(exit.line).has_value(), "exit line retains its input string");
+    check(exits.input(exit.line).has_value(), "exit line retains its input expression");
+    check(!exits.output(exit.line).has_value(), "exit line has no output history entry");
+    check(exits.message_names(exit.line).has_value(), "exit line retains message-name history");
+    check(exits.message_texts(exit.line).has_value(), "exit line retains message-text history");
+    const auto exit_prints = exits.prints(exit.line);
+    check(exit_prints.has_value() && exit_prints->size() == 1,
+        "exit line retains effects produced before exit");
+    if (exit_prints && exit_prints->size() == 1)
+        check_equal(exit_prints->front(), "before exit", "exit-line print history");
+}
+
 void display_and_print_tests() {
     std::istringstream input(
         "InputForm[1 + x]\n"
@@ -278,6 +367,7 @@ int main() {
     history_and_exit_tests();
     parsed_input_and_exit_diagnostic_tests();
     history_pruning_tests();
+    installed_history_api_tests();
     display_and_print_tests();
     hook_and_limit_tests();
     error_and_banner_tests();

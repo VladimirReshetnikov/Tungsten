@@ -594,6 +594,14 @@ bool blank_source(const std::string& source) {
     });
 }
 
+template<typename Value>
+std::optional<Value> history_snapshot(
+    const std::map<std::size_t, Value>& history, std::size_t line) {
+    const auto found = history.find(line);
+    if (found == history.end()) return std::nullopt;
+    return found->second;
+}
+
 } // namespace
 
 std::string repl_banner() {
@@ -637,6 +645,31 @@ EvaluationSession::EvaluationSession() {
         symbol("$HistoryLength"), symbol("Infinity")}));
     (void)evaluator_.evaluate(call("Set", {
         symbol("$MessagePrePrint"), symbol("Automatic")}));
+}
+
+std::optional<std::string> EvaluationSession::input_string(std::size_t line) const {
+    return history_snapshot(input_strings_, line);
+}
+
+std::optional<Expr> EvaluationSession::input(std::size_t line) const {
+    return history_snapshot(inputs_, line);
+}
+
+std::optional<Expr> EvaluationSession::output(std::size_t line) const {
+    return history_snapshot(outputs_, line);
+}
+
+std::optional<std::vector<Expr>> EvaluationSession::message_names(std::size_t line) const {
+    return history_snapshot(message_history_, line);
+}
+
+std::optional<std::vector<std::string>> EvaluationSession::message_texts(
+    std::size_t line) const {
+    return history_snapshot(message_text_history_, line);
+}
+
+std::optional<std::vector<std::string>> EvaluationSession::prints(std::size_t line) const {
+    return history_snapshot(print_history_, line);
 }
 
 void EvaluationSession::collect_effects(
@@ -812,10 +845,18 @@ SessionOutput EvaluationSession::evaluate_prepared_input(
         "$Pre", prepared_expression, &prints, &message_names, &messages);
     auto result = evaluator_.evaluate(prepared_expression);
     collect_effects(prints, message_names, messages);
+    const auto finish_effect_history = [&]() {
+        message_history_[line_] = message_names;
+        message_text_history_[line_] = messages;
+        print_history_[line_] = prints;
+        prune_history();
+    };
     const auto evaluated_exit = exit_result(result);
-    if (evaluated_exit.requested())
+    if (evaluated_exit.requested()) {
+        finish_effect_history();
         return {SessionOutput::Kind::Exit, evaluated_exit.code, line_, result,
             std::move(prints), std::move(messages), std::move(message_names)};
+    }
     if (evaluated_exit.invalid()) {
         message_names.push_back(call("MessageName", {
             symbol(evaluated_exit.head), string("error")}));
@@ -825,9 +866,11 @@ SessionOutput EvaluationSession::evaluate_prepared_input(
     const auto result_before_post = result;
     result = apply_hook("$Post", result, &prints, &message_names, &messages);
     const auto post_exit = exit_result(result);
-    if (post_exit.requested())
+    if (post_exit.requested()) {
+        finish_effect_history();
         return {SessionOutput::Kind::Exit, post_exit.code, line_, result,
             std::move(prints), std::move(messages), std::move(message_names)};
+    }
     if (post_exit.invalid()
         && (!evaluated_exit.invalid() || result != result_before_post)) {
         message_names.push_back(call("MessageName", {
@@ -836,8 +879,7 @@ SessionOutput EvaluationSession::evaluate_prepared_input(
     }
 
     outputs_[line_] = history_output_expression(result);
-    message_history_[line_] = message_names;
-    prune_history();
+    finish_effect_history();
     return {SessionOutput::Kind::Value, 0, line_, result,
         std::move(prints), std::move(messages), std::move(message_names)};
 }
@@ -867,6 +909,8 @@ void EvaluationSession::prune_history() {
     prune(inputs_);
     prune(outputs_);
     prune(message_history_);
+    prune(message_text_history_);
+    prune(print_history_);
 }
 
 int run_repl(
