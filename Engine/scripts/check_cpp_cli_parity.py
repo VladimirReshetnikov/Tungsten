@@ -310,7 +310,9 @@ def normalize_parser_corpus_report(source: str) -> str:
 def make_isolated_environment(root: Path) -> dict[str, str]:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(ENGINE_ROOT / "src")
-    environment.pop("TUNGSTEN_WOLFRAM_HOME", None)
+    # An explicit nonexistent root prevents native POSIX discovery from
+    # finding a real installation under /opt, /usr/local, or /Applications.
+    environment["TUNGSTEN_WOLFRAM_HOME"] = str(root / "missing-wolfram-home")
     environment.pop("TUNGSTEN_WOLFRAM_PRODUCT", None)
     environment["APPDATA"] = str(root / "appdata")
     environment["LOCALAPPDATA"] = str(root / "localappdata")
