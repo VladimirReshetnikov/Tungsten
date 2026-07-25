@@ -38,6 +38,7 @@ struct SessionOutput {
     std::vector<Expr> message_names;
 
     [[nodiscard]] bool is_exit() const noexcept { return kind == Kind::Exit; }
+    [[nodiscard]] std::vector<EvaluationMessage> evaluation_messages() const;
 };
 
 class EvaluationSession {
@@ -55,7 +56,10 @@ public:
     [[nodiscard]] std::optional<std::vector<Expr>> message_names(std::size_t line) const;
     [[nodiscard]] std::optional<std::vector<std::string>> message_texts(
         std::size_t line) const;
+    [[nodiscard]] std::optional<std::vector<EvaluationMessage>> evaluation_messages(
+        std::size_t line) const;
     [[nodiscard]] std::optional<std::vector<std::string>> prints(std::size_t line) const;
+    [[nodiscard]] const Evaluator& evaluator() const noexcept { return evaluator_; }
     [[nodiscard]] SessionOutput evaluate_input(const std::string& source);
     [[nodiscard]] SessionOutput evaluate_expression(
         const std::string& source,

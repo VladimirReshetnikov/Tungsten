@@ -11,6 +11,24 @@
 
 namespace tungsten {
 
+struct EvaluationMessage {
+    Expr name;
+    std::string text;
+
+    [[nodiscard]] Expr name_expr() const {
+        return call("HoldForm", {name});
+    }
+
+    friend bool operator==(
+        const EvaluationMessage& left, const EvaluationMessage& right) {
+        return left.name == right.name && left.text == right.text;
+    }
+    friend bool operator!=(
+        const EvaluationMessage& left, const EvaluationMessage& right) {
+        return !(left == right);
+    }
+};
+
 class Evaluator {
 public:
     Evaluator();

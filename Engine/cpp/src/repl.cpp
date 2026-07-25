@@ -602,6 +602,17 @@ std::optional<Value> history_snapshot(
     return found->second;
 }
 
+std::vector<EvaluationMessage> zip_evaluation_messages(
+    const std::vector<Expr>& names,
+    const std::vector<std::string>& texts) {
+    const auto count = std::min(names.size(), texts.size());
+    std::vector<EvaluationMessage> messages;
+    messages.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+        messages.push_back({names[index], texts[index]});
+    return messages;
+}
+
 } // namespace
 
 std::string repl_banner() {
@@ -638,6 +649,10 @@ std::string apply_output_size_limit(
     return center_truncate(shortened.empty() ? text : shortened, *limit);
 }
 
+std::vector<EvaluationMessage> SessionOutput::evaluation_messages() const {
+    return zip_evaluation_messages(message_names, messages);
+}
+
 EvaluationSession::EvaluationSession() {
     (void)evaluator_.evaluate(call("Set", {
         symbol("$OutputSizeLimit"), integer(12000L)}));
@@ -666,6 +681,14 @@ std::optional<std::vector<Expr>> EvaluationSession::message_names(std::size_t li
 std::optional<std::vector<std::string>> EvaluationSession::message_texts(
     std::size_t line) const {
     return history_snapshot(message_text_history_, line);
+}
+
+std::optional<std::vector<EvaluationMessage>>
+EvaluationSession::evaluation_messages(std::size_t line) const {
+    const auto names = message_names(line);
+    const auto texts = message_texts(line);
+    if (!names || !texts) return std::nullopt;
+    return zip_evaluation_messages(*names, *texts);
 }
 
 std::optional<std::vector<std::string>> EvaluationSession::prints(std::size_t line) const {

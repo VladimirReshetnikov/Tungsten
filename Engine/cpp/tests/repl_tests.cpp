@@ -178,6 +178,9 @@ void installed_history_api_tests() {
     const auto texts = retained.message_texts(value.line);
     check(texts.has_value() && texts->empty(),
         "retained line distinguishes an empty message-text history from a missing line");
+    const auto empty_records = retained.evaluation_messages(value.line);
+    check(empty_records.has_value() && empty_records->empty(),
+        "retained line distinguishes empty message records from a missing line");
     auto prints = retained.prints(value.line);
     check(prints.has_value() && prints->size() == 1,
         "history API exposes a retained print history");
@@ -195,6 +198,29 @@ void installed_history_api_tests() {
     const auto diagnostic_texts = retained.message_texts(diagnostic.line);
     check(diagnostic_texts.has_value() && *diagnostic_texts == diagnostic.messages,
         "history API retains rendered message texts");
+    const auto current_records = diagnostic.evaluation_messages();
+    check(current_records.size() == 1,
+        "session output exposes paired evaluation message records");
+    if (current_records.size() == 1) {
+        check_equal(current_records.front().name.to_full_form(),
+            diagnostic.message_names.front().to_full_form(),
+            "session output message record preserves its structured name");
+        check_equal(current_records.front().text, diagnostic.messages.front(),
+            "session output message record preserves its rendered text");
+        check_equal(current_records.front().name_expr().to_full_form(),
+            "HoldForm[" + diagnostic.message_names.front().to_full_form() + "]",
+            "evaluation message exposes its held name expression");
+    }
+    auto diagnostic_records = retained.evaluation_messages(diagnostic.line);
+    check(diagnostic_records.has_value() && *diagnostic_records == current_records,
+        "history API retains paired evaluation message records");
+    if (diagnostic_records && !diagnostic_records->empty())
+        diagnostic_records->front().text.clear();
+    const auto diagnostic_records_again
+        = retained.evaluation_messages(diagnostic.line);
+    check(diagnostic_records_again.has_value()
+            && *diagnostic_records_again == current_records,
+        "message-record history returns independent snapshots");
     const auto diagnostic_prints = retained.prints(diagnostic.line);
     check(diagnostic_prints.has_value() && diagnostic_prints->empty(),
         "history API retains an empty print history on a diagnostic line");
@@ -204,7 +230,24 @@ void installed_history_api_tests() {
     check(!retained.output(999).has_value(), "missing output history is nullopt");
     check(!retained.message_names(999).has_value(), "missing message-name history is nullopt");
     check(!retained.message_texts(999).has_value(), "missing message-text history is nullopt");
+    check(!retained.evaluation_messages(999).has_value(),
+        "missing message-record history is nullopt");
     check(!retained.prints(999).has_value(), "missing print history is nullopt");
+
+    const tungsten::EvaluationSession& retained_const = retained;
+    (void)retained_const.evaluator();
+
+    tungsten::SessionOutput uneven;
+    uneven.message_names = {
+        tungsten::call("MessageName", {
+            tungsten::symbol("f"), tungsten::string("one")}),
+        tungsten::call("MessageName", {
+            tungsten::symbol("f"), tungsten::string("two")}),
+    };
+    uneven.messages = {"first"};
+    const auto uneven_records = uneven.evaluation_messages();
+    check(uneven_records.size() == 1 && uneven_records.front().text == "first",
+        "message-record projection defensively zips parallel effect vectors");
 
     tungsten::EvaluationSession pruned;
     (void)pruned.evaluate_input("$HistoryLength = 1");
@@ -216,6 +259,8 @@ void installed_history_api_tests() {
     check(!pruned.output(printed.line).has_value(), "pruned output is nullopt");
     check(!pruned.message_names(printed.line).has_value(), "pruned message names are nullopt");
     check(!pruned.message_texts(printed.line).has_value(), "pruned message texts are nullopt");
+    check(!pruned.evaluation_messages(printed.line).has_value(),
+        "pruned message records are nullopt");
     check(!pruned.prints(printed.line).has_value(), "pruned prints are nullopt");
     check(pruned.message_names(messaged.line).has_value(),
         "current message-name history survives finite pruning");
@@ -234,6 +279,9 @@ void installed_history_api_tests() {
     check(!exits.output(exit.line).has_value(), "exit line has no output history entry");
     check(exits.message_names(exit.line).has_value(), "exit line retains message-name history");
     check(exits.message_texts(exit.line).has_value(), "exit line retains message-text history");
+    const auto exit_records = exits.evaluation_messages(exit.line);
+    check(exit_records.has_value() && exit_records->empty(),
+        "exit line retains an empty message-record history");
     const auto exit_prints = exits.prints(exit.line);
     check(exit_prints.has_value() && exit_prints->size() == 1,
         "exit line retains effects produced before exit");
