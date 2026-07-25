@@ -146,6 +146,14 @@ void expression_projection_tests() {
         "Out[-" + enormous_order.get_str() + "]",
         "huge output-history offsets use bounded generic formatting");
 
+    check_equal(parse_input_form("Hold[?foo]").to_input_form(), "Hold[?foo]",
+        "short Information form survives InputForm formatting");
+    check_equal(parse_input_form("Hold[??foo]").to_input_form(), "Hold[??foo]",
+        "long Information form survives InputForm formatting");
+    check_equal(parse_input_form(R"WL(Hold[?"foo bar"])WL").to_input_form(),
+        R"WL(Hold[?"foo bar"])WL",
+        "Information shorthand quotes non-simple names");
+
     check(symbol("x").has_head("x"), "Symbol.has_head matches its own name");
     check(!symbol("System`x").has_head("x"),
         "Symbol.has_head does not context-normalize atom names");
@@ -263,6 +271,22 @@ void exact_binary64_tests() {
 
 void parser_helper_tests() {
     using namespace tungsten;
+    for (const auto& source : {"Hold[1*^3.5]", "Hold[16^^f*^3.5]"}) {
+        try {
+            (void)parse_input_form(source);
+            check(false, std::string("fractional numeric exponent rejected: ") + source);
+        } catch (const ParseError& error) {
+            check_equal(error.what(), "Malformed Wolfram numeric exponent.",
+                std::string("fractional numeric exponent diagnostic: ") + source);
+        }
+    }
+    check_equal(parse_input_form("Hold[1*^3..]").to_full_form(),
+        "Hold[Repeated[1*^3]]",
+        "decimal magnitude remains compatible with repeated shorthand");
+    check_equal(parse_input_form("Hold[16^^f*^3..]").to_full_form(),
+        "Hold[Repeated[16^^f*^3]]",
+        "base magnitude remains compatible with repeated shorthand");
+
     bool classified_parse_error = false;
     try {
         (void)parse_input_form(std::string(10000, '9') + "^^1");

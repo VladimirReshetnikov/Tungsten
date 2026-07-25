@@ -65,6 +65,35 @@ bool is_integer(const Expr& expression, long value) {
     return expression.kind() == ExprKind::Integer && expression.integer_value() == value;
 }
 
+bool is_simple_file_name(const std::string& value) {
+    if (value.empty()) return false;
+    return std::all_of(value.begin(), value.end(), [](char character) {
+        return (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
+            || character == '$' || character == '_' || character == '.'
+            || character == '/' || character == '\\' || character == '-';
+    });
+}
+
+std::optional<std::string> format_information(const std::vector<Expr>& args) {
+    if (args.size() != 2 || args[0].kind() != ExprKind::String
+        || !args[1].has_head("Rule") || args[1].args().size() != 2) {
+        return std::nullopt;
+    }
+    const auto& option = args[1].args();
+    const auto* option_name = option[0].symbol_name();
+    const auto* option_value = option[1].symbol_name();
+    if (!option_name || *option_name != "LongForm" || !option_value)
+        return std::nullopt;
+    const auto prefix = *option_value == "False" ? "?"
+        : *option_value == "True" ? "??" : nullptr;
+    if (!prefix) return std::nullopt;
+    const auto name = is_simple_file_name(args[0].text())
+        ? args[0].text() : format_input(args[0], 0);
+    return std::string(prefix) + name;
+}
+
 std::optional<std::string> format_blank(const std::string& name, const std::vector<Expr>& args) {
     std::string prefix;
     if (name == "Blank") prefix = "_";
@@ -307,6 +336,10 @@ Formatted format_call(const Expr& head, const std::vector<Expr>& args) {
         if (name == "Function" && args.size() == 1) return {format_input(args[0], prec_function + 1) + " &", prec_function};
         if (name == "Function" && args.size() == 2)
             return {format_input(args[0], prec_function + 1) + " |-> " + format_input(args[1], prec_function), prec_function};
+        if (name == "Information") {
+            if (const auto information = format_information(args))
+                return {*information, prec_prefix};
+        }
         if (name == "MessageName" && args.size() >= 2) {
             auto output = format_input(args[0], prec_message_name);
             for (std::size_t index = 1; index < args.size(); ++index) {
