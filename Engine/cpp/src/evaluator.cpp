@@ -1,5 +1,6 @@
 #include "tungsten/bundled_data.hpp"
 #include "tungsten/detail/numeric.hpp"
+#include "tungsten/detail/unicode.hpp"
 #include "tungsten/evaluator.hpp"
 #include "tungsten/parser.hpp"
 #include "tungsten/wolfram_strings.hpp"
@@ -1589,40 +1590,137 @@ std::vector<std::string> utf8_characters(const std::string& source) {
     return output;
 }
 
-std::optional<std::vector<std::size_t>> string_selector_indices(std::size_t length, const Expr& specification) {
-    if (specification.has_head("UpTo") && specification.args().size() == 1 && machine_index(specification.args()[0])) {
-        const auto requested = *machine_index(specification.args()[0]);
-        const auto count = clamped_signed_magnitude(requested, length);
-        std::vector<std::size_t> indices(count);
-        if (requested >= 0) std::iota(indices.begin(), indices.end(), 0);
-        else std::iota(indices.begin(), indices.end(), length - count);
-        return indices;
-    }
-    if (const auto count = machine_index(specification)) {
-        const auto raw_amount = unsigned_magnitude(*count);
-        if (raw_amount > length) return std::nullopt;
-        const auto amount = static_cast<std::size_t>(raw_amount);
-        std::vector<std::size_t> indices;
-        if (*count >= 0) for (std::size_t index = 0; index < amount; ++index) indices.push_back(index);
-        else for (std::size_t index = length - amount; index < length; ++index) indices.push_back(index);
-        return indices;
-    }
-    if (specification.has_head("List") && (specification.args().size() == 2 || specification.args().size() == 3)) {
-        const auto start = machine_index(specification.args()[0]); const auto end = machine_index(specification.args()[1]);
-        const auto step = specification.args().size() == 3 ? machine_index(specification.args()[2]) : std::optional<long>(1);
-        if (!start || !end || !step || *step == 0) return std::nullopt;
-        auto normalize = [length](long value) { return value > 0 ? value - 1 : static_cast<long>(length) + value; };
-        const auto first = normalize(*start), last = normalize(*end); std::vector<std::size_t> indices;
-        for (long index = first; *step > 0 ? index <= last : index >= last;) {
-            if (index < 0 || index >= static_cast<long>(length)) return std::nullopt;
-            indices.push_back(static_cast<std::size_t>(index));
-            const auto next = checked_signed_sum(index, *step);
-            if (!next) break;
-            index = *next;
+struct StringSelectorResult {
+    std::vector<std::size_t> indices;
+    std::string error;
+};
+
+StringSelectorResult string_selector_indices(
+    std::size_t length, const Expr& specification,
+    const std::string& function_name) {
+    StringSelectorResult result;
+    const mpz_class length_value(std::to_string(length), 10);
+
+    auto append_selector = [&](const mpz_class& selector) {
+        if (selector == 0) {
+            result.error = "Only top-level Part specifications may use index 0.";
+            return false;
         }
-        return indices;
+        mpz_class resolved = selector;
+        if (selector > 0) --resolved;
+        else resolved += length_value;
+        if (resolved < 0 || resolved >= length_value) {
+            result.error = "Part index " + selector.get_str()
+                + " is out of range for length " + std::to_string(length) + ".";
+            return false;
+        }
+        result.indices.push_back(nonnegative_size_t(resolved).value_or(0));
+        return true;
+    };
+
+    auto append_count = [&](const mpz_class& count) {
+        if (count >= 0) {
+            for (mpz_class selector = 1; selector <= count; ++selector)
+                if (!append_selector(selector)) return;
+            return;
+        }
+        for (mpz_class selector = length_value + count + 1;
+             selector <= length_value; ++selector)
+            if (!append_selector(selector)) return;
+    };
+
+    auto append_span = [&](const std::vector<Expr>& components) {
+        if (components.size() != 2 && components.size() != 3) {
+            result.error = "Span must contain two or three arguments.";
+            return;
+        }
+        auto endpoint = [&](const Expr& value, const mpz_class& fallback) {
+            if (is_symbol(value, "All")) return length_value;
+            if (value.kind() != ExprKind::Integer) return fallback;
+            mpz_class normalized = value.integer_value();
+            if (normalized < 0) normalized += length_value + 1;
+            return normalized;
+        };
+        const auto first = endpoint(components[0], mpz_class(1));
+        const auto last = endpoint(components[1], length_value);
+        mpz_class step = 1;
+        if (components.size() == 3) {
+            if (components[2].kind() != ExprKind::Integer) {
+                result.error = "Span steps must be integers.";
+                return;
+            }
+            step = components[2].integer_value();
+        }
+        if (step == 0) {
+            result.error = "Span step cannot be zero.";
+            return;
+        }
+        for (mpz_class selector = first;
+             step > 0 ? selector <= last : selector >= last;
+             selector += step)
+            if (!append_selector(selector)) return;
+    };
+
+    auto append_up_to = [&](const Expr& up_to) {
+        if (up_to.args().size() != 1
+            || up_to.args()[0].kind() != ExprKind::Integer) {
+            result.error = function_name
+                + " currently supports only integer UpTo specifications.";
+            return;
+        }
+        const auto& requested = up_to.args()[0].integer_value();
+        mpz_class magnitude = requested;
+        if (magnitude < 0) magnitude = -magnitude;
+        const mpz_class count = std::min(magnitude, length_value);
+        if (requested >= 0) {
+            for (mpz_class selector = 1; selector <= count; ++selector)
+                (void)append_selector(selector);
+        } else {
+            for (mpz_class selector = length_value - count + 1;
+                 selector <= length_value; ++selector)
+                (void)append_selector(selector);
+        }
+    };
+
+    if (specification.kind() == ExprKind::Integer) {
+        append_count(specification.integer_value());
+        return result;
     }
-    return std::nullopt;
+    if (is_symbol(specification, "All")) {
+        append_count(length_value);
+        return result;
+    }
+    if (specification.has_head("UpTo")) {
+        append_up_to(specification);
+        return result;
+    }
+    if (specification.has_head("Span")) {
+        append_span(specification.args());
+        return result;
+    }
+    if (specification.has_head("List")) {
+        if (specification.args().size() == 1) {
+            const auto& item = specification.args()[0];
+            if (item.kind() == ExprKind::Integer)
+                (void)append_selector(item.integer_value());
+            else if (is_symbol(item, "All")) append_count(length_value);
+            else if (item.has_head("UpTo")) append_up_to(item);
+            else result.error = function_name
+                + " single-element list specifications must contain an integer, All, or UpTo[n].";
+            return result;
+        }
+        if (specification.args().size() == 2
+            || specification.args().size() == 3) {
+            append_span(specification.args());
+            return result;
+        }
+        result.error = function_name
+            + " list specifications must contain one, two, or three items.";
+        return result;
+    }
+    result.error = "Unsupported " + function_name + " specification: "
+        + specification.to_input_form() + ".";
+    return result;
 }
 
 int lexicographic_compare(const Expr& left, const Expr& right) {
@@ -3312,6 +3410,7 @@ using Bindings = std::map<std::string, Expr>;
 struct CompiledStringPattern {
     std::regex regex;
     std::map<std::string, std::vector<std::size_t>> bindings;
+    std::optional<Expr> codepoint_pattern;
 };
 
 std::string regex_escape(const std::string& source, bool character_class = false) {
@@ -3321,11 +3420,1075 @@ std::string regex_escape(const std::string& source, bool character_class = false
     return output;
 }
 
+bool unicode_string_class_matches(
+    const std::string& name, std::uint32_t value) {
+    if (name == "DigitCharacter") return detail::unicode_is_digit(value);
+    if (name == "HexadecimalCharacter")
+        return (value >= '0' && value <= '9')
+            || (value >= 'A' && value <= 'F')
+            || (value >= 'a' && value <= 'f');
+    if (name == "LetterCharacter") return detail::unicode_is_letter(value);
+    if (name == "PunctuationCharacter")
+        return detail::unicode_is_punctuation(value);
+    if (name == "WhitespaceCharacter")
+        return detail::unicode_is_whitespace(value);
+    if (name == "WordCharacter")
+        return detail::unicode_is_alphanumeric(value) || value == '_';
+    return false;
+}
+
+bool unicode_string_class_symbol(const Expr& pattern) {
+    if (!pattern.symbol_name()) return false;
+    const auto name = system_dispatch_name(*pattern.symbol_name());
+    return name == "DigitCharacter" || name == "HexadecimalCharacter"
+        || name == "LetterCharacter" || name == "PunctuationCharacter"
+        || name == "WhitespaceCharacter" || name == "WordCharacter";
+}
+
+enum class UnicodeRegexKind {
+    Empty,
+    Literal,
+    Dot,
+    CharacterClass,
+    Sequence,
+    Alternatives,
+    Repeat,
+    Start,
+    End,
+    AbsoluteEnd,
+    WordBoundary,
+};
+
+struct UnicodeRegexClassItem {
+    enum class Kind { Range, Decimal, Whitespace, Word };
+    Kind kind = Kind::Range;
+    std::uint32_t first = 0;
+    std::uint32_t last = 0;
+    bool negated = false;
+};
+
+struct UnicodeRegexNode {
+    UnicodeRegexKind kind = UnicodeRegexKind::Empty;
+    std::uint32_t literal = 0;
+    std::vector<UnicodeRegexClassItem> class_items;
+    bool class_negated = false;
+    std::vector<UnicodeRegexNode> children;
+    std::size_t minimum = 1;
+    std::optional<std::size_t> maximum = 1;
+    bool greedy = true;
+};
+
+struct ParsedUnicodeRegex {
+    UnicodeRegexNode root;
+    bool ignore_case = false;
+};
+
+class UnicodeRegexParser {
+public:
+    explicit UnicodeRegexParser(const std::string& expression)
+        : input_(utf8_codepoints(expression)) {}
+
+    std::optional<ParsedUnicodeRegex> parse() {
+        if (starts_with({'(', '?', 'i', ')'})) {
+            ignore_case_ = true;
+            position_ += 4;
+        }
+        const auto root = parse_alternatives();
+        if (!root || position_ != input_.size()) return std::nullopt;
+        return ParsedUnicodeRegex{*root, ignore_case_};
+    }
+
+private:
+    bool starts_with(std::initializer_list<std::uint32_t> values) const {
+        if (position_ + values.size() > input_.size()) return false;
+        return std::equal(values.begin(), values.end(),
+            input_.begin() + static_cast<std::ptrdiff_t>(position_));
+    }
+
+    std::optional<std::size_t> parse_count() {
+        if (position_ >= input_.size()
+            || input_[position_] < '0' || input_[position_] > '9')
+            return std::nullopt;
+        std::size_t value = 0;
+        while (position_ < input_.size()
+            && input_[position_] >= '0' && input_[position_] <= '9') {
+            const auto digit = static_cast<std::size_t>(
+                input_[position_++] - '0');
+            if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10)
+                return std::nullopt;
+            value = value * 10 + digit;
+        }
+        return value;
+    }
+
+    std::optional<UnicodeRegexNode> parse_alternatives() {
+        std::vector<UnicodeRegexNode> branches;
+        const auto first = parse_sequence();
+        if (!first) return std::nullopt;
+        branches.push_back(*first);
+        while (position_ < input_.size() && input_[position_] == '|') {
+            ++position_;
+            const auto branch = parse_sequence();
+            if (!branch) return std::nullopt;
+            branches.push_back(*branch);
+        }
+        if (branches.size() == 1) return branches.front();
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::Alternatives;
+        result.children = std::move(branches);
+        return result;
+    }
+
+    std::optional<UnicodeRegexNode> parse_sequence() {
+        std::vector<UnicodeRegexNode> elements;
+        while (position_ < input_.size()
+            && input_[position_] != ')' && input_[position_] != '|') {
+            const auto element = parse_quantified_atom();
+            if (!element) return std::nullopt;
+            elements.push_back(*element);
+        }
+        if (elements.empty()) return UnicodeRegexNode{};
+        if (elements.size() == 1) return elements.front();
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::Sequence;
+        result.children = std::move(elements);
+        return result;
+    }
+
+    std::optional<UnicodeRegexNode> parse_quantified_atom() {
+        const auto atom = parse_atom();
+        if (!atom) return std::nullopt;
+        std::size_t minimum = 1;
+        std::optional<std::size_t> maximum = 1;
+        bool quantified = false;
+        if (position_ < input_.size()) {
+            const auto quantifier = input_[position_];
+            if (quantifier == '*' || quantifier == '+' || quantifier == '?') {
+                ++position_;
+                quantified = true;
+                minimum = quantifier == '+' ? 1 : 0;
+                maximum = quantifier == '?' ? std::optional<std::size_t>(1)
+                                             : std::nullopt;
+            } else if (quantifier == '{') {
+                ++position_;
+                quantified = true;
+                const auto low = parse_count();
+                if (!low) return std::nullopt;
+                minimum = *low;
+                if (position_ < input_.size() && input_[position_] == '}') {
+                    ++position_;
+                    maximum = minimum;
+                } else if (position_ < input_.size()
+                    && input_[position_] == ',') {
+                    ++position_;
+                    if (position_ < input_.size() && input_[position_] == '}') {
+                        ++position_;
+                        maximum = std::nullopt;
+                    } else {
+                        const auto high = parse_count();
+                        if (!high || *high < minimum
+                            || position_ >= input_.size()
+                            || input_[position_] != '}') return std::nullopt;
+                        ++position_;
+                        maximum = *high;
+                    }
+                } else {
+                    return std::nullopt;
+                }
+            }
+        }
+        if (!quantified) return atom;
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::Repeat;
+        result.children = {*atom};
+        result.minimum = minimum;
+        result.maximum = maximum;
+        if (position_ < input_.size() && input_[position_] == '?') {
+            ++position_;
+            result.greedy = false;
+        }
+        return result;
+    }
+
+    static std::optional<std::uint32_t> escaped_literal(
+        std::uint32_t value, bool character_class) {
+        if (value == 'a') return 0x07U;
+        if (value == 'b' && character_class) return 0x08U;
+        if (value == 'n') return '\n';
+        if (value == 'r') return '\r';
+        if (value == 't') return '\t';
+        if (value == 'f') return '\f';
+        if (value == 'v') return '\v';
+        if ((value >= 'A' && value <= 'Z')
+            || (value >= 'a' && value <= 'z')) return std::nullopt;
+        return value;
+    }
+
+    static std::optional<std::uint32_t> hex_digit(std::uint32_t value) {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return std::nullopt;
+    }
+
+    std::optional<std::uint32_t> parse_hex_escape(std::size_t digits) {
+        if (position_ + digits > input_.size()) return std::nullopt;
+        std::uint32_t result = 0;
+        for (std::size_t index = 0; index < digits; ++index) {
+            const auto digit = hex_digit(input_[position_++]);
+            if (!digit) return std::nullopt;
+            result = (result << 4U) | *digit;
+        }
+        if (result > 0x10ffffU
+            || (result >= 0xd800U && result <= 0xdfffU))
+            return std::nullopt;
+        return result;
+    }
+
+    std::optional<UnicodeRegexClassItem> parse_class_item() {
+        if (position_ >= input_.size()) return std::nullopt;
+        UnicodeRegexClassItem item;
+        if (input_[position_] != '\\') {
+            item.first = item.last = input_[position_++];
+            return item;
+        }
+        if (++position_ >= input_.size()) return std::nullopt;
+        const auto escape = input_[position_++];
+        const auto lower = escape <= 0x7fU
+            ? static_cast<std::uint32_t>(std::tolower(
+                static_cast<unsigned char>(escape))) : escape;
+        if (lower == 'd') item.kind = UnicodeRegexClassItem::Kind::Decimal;
+        else if (lower == 's') item.kind = UnicodeRegexClassItem::Kind::Whitespace;
+        else if (lower == 'w') item.kind = UnicodeRegexClassItem::Kind::Word;
+        else if (escape == 'x' || escape == 'u' || escape == 'U') {
+            const auto value = parse_hex_escape(
+                escape == 'x' ? 2 : escape == 'u' ? 4 : 8);
+            if (!value) return std::nullopt;
+            item.first = item.last = *value;
+        } else {
+            const auto value = escaped_literal(escape, true);
+            if (!value) return std::nullopt;
+            item.first = item.last = *value;
+        }
+        item.negated = escape == 'D' || escape == 'S' || escape == 'W';
+        return item;
+    }
+
+    std::optional<UnicodeRegexNode> parse_character_class() {
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::CharacterClass;
+        if (position_ < input_.size() && input_[position_] == '^') {
+            result.class_negated = true;
+            ++position_;
+        }
+        bool first_item = true;
+        while (position_ < input_.size()) {
+            if (input_[position_] == ']' && !first_item) {
+                ++position_;
+                return result;
+            }
+            auto item = parse_class_item();
+            if (!item) return std::nullopt;
+            first_item = false;
+            if (item->kind == UnicodeRegexClassItem::Kind::Range
+                && position_ + 1 < input_.size()
+                && input_[position_] == '-' && input_[position_ + 1] != ']') {
+                ++position_;
+                const auto end = parse_class_item();
+                if (!end || end->kind != UnicodeRegexClassItem::Kind::Range)
+                    return std::nullopt;
+                item->last = end->first;
+                if (item->last < item->first) return std::nullopt;
+            }
+            result.class_items.push_back(*item);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<UnicodeRegexNode> parse_atom() {
+        if (position_ >= input_.size()) return std::nullopt;
+        const auto value = input_[position_++];
+        UnicodeRegexNode result;
+        if (value == '(') {
+            if (position_ < input_.size() && input_[position_] == '?') {
+                if (position_ + 1 >= input_.size()
+                    || input_[position_ + 1] != ':') return std::nullopt;
+                position_ += 2;
+            }
+            const auto group = parse_alternatives();
+            if (!group || position_ >= input_.size()
+                || input_[position_] != ')') return std::nullopt;
+            ++position_;
+            return group;
+        }
+        if (value == '[') return parse_character_class();
+        if (value == '.') { result.kind = UnicodeRegexKind::Dot; return result; }
+        if (value == '^') { result.kind = UnicodeRegexKind::Start; return result; }
+        if (value == '$') { result.kind = UnicodeRegexKind::End; return result; }
+        if (value == '*' || value == '+' || value == '?' || value == '{')
+            return std::nullopt;
+        if (value != '\\') {
+            result.kind = UnicodeRegexKind::Literal;
+            result.literal = value;
+            return result;
+        }
+        if (position_ >= input_.size()) return std::nullopt;
+        const auto escape = input_[position_++];
+        const auto lower = escape <= 0x7fU
+            ? static_cast<std::uint32_t>(std::tolower(
+                static_cast<unsigned char>(escape))) : escape;
+        if (lower == 'b') {
+            result.kind = UnicodeRegexKind::WordBoundary;
+            result.class_negated = escape == 'B';
+            return result;
+        }
+        if (lower == 'd' || lower == 's' || lower == 'w') {
+            result.kind = UnicodeRegexKind::CharacterClass;
+            UnicodeRegexClassItem item;
+            item.kind = lower == 'd' ? UnicodeRegexClassItem::Kind::Decimal
+                : lower == 's' ? UnicodeRegexClassItem::Kind::Whitespace
+                               : UnicodeRegexClassItem::Kind::Word;
+            item.negated = escape == 'D' || escape == 'S' || escape == 'W';
+            result.class_items.push_back(item);
+            return result;
+        }
+        if (escape == 'A') {
+            result.kind = UnicodeRegexKind::Start;
+            return result;
+        }
+        if (escape == 'Z') {
+            result.kind = UnicodeRegexKind::AbsoluteEnd;
+            return result;
+        }
+        if (escape == 'x' || escape == 'u' || escape == 'U') {
+            const auto value = parse_hex_escape(
+                escape == 'x' ? 2 : escape == 'u' ? 4 : 8);
+            if (!value) return std::nullopt;
+            result.kind = UnicodeRegexKind::Literal;
+            result.literal = *value;
+            return result;
+        }
+        if (escape >= '0' && escape <= '9') return std::nullopt;
+        const auto literal = escaped_literal(escape, false);
+        if (!literal) return std::nullopt;
+        result.kind = UnicodeRegexKind::Literal;
+        result.literal = *literal;
+        return result;
+    }
+
+    std::vector<std::uint32_t> input_;
+    std::size_t position_ = 0;
+    bool ignore_case_ = false;
+};
+
+bool regular_expression_needs_codepoint_matching(const std::string& source) {
+    if (source.compare(0, 4, "(?i)") == 0) return true;
+    bool escaped = false;
+    for (const auto value : utf8_codepoints(source)) {
+        if (value >= 0x80U) return true;
+        if (escaped) {
+            if (value == 'd' || value == 'D' || value == 's' || value == 'S'
+                || value == 'w' || value == 'W' || value == 'b'
+                || value == 'B') return true;
+            escaped = false;
+        } else if (value == '\\') {
+            escaped = true;
+        } else if (value == '.') {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ascii_text(const std::string& source) {
+    return std::all_of(source.begin(), source.end(),
+        [](unsigned char value) { return value < 0x80U; });
+}
+
+bool contains_regular_expression(const Expr& pattern) {
+    if (pattern.has_head("RegularExpression")) return true;
+    if (pattern.kind() != ExprKind::Call) return false;
+    return std::any_of(pattern.args().begin(), pattern.args().end(),
+        contains_regular_expression);
+}
+
+bool contains_date_pattern(const Expr& pattern) {
+    if (pattern.has_head("DatePattern")) return true;
+    if (pattern.kind() != ExprKind::Call) return false;
+    return std::any_of(pattern.args().begin(), pattern.args().end(),
+        contains_date_pattern);
+}
+
+bool unsupported_byte_regular_expression_is_safe(
+    const std::string& expression) {
+    bool escaped = false;
+    bool character_class = false;
+    unsigned char previous = 0;
+    for (const auto value : expression) {
+        const auto character = static_cast<unsigned char>(value);
+        if (escaped) {
+            if ((character >= '0' && character <= '9')
+                || (character >= 'A' && character <= 'Z')
+                || (character >= 'a' && character <= 'z')) return false;
+            escaped = false;
+            previous = 0;
+            continue;
+        }
+        if (character == '\\') { escaped = true; continue; }
+        if (character == '[') { character_class = true; previous = 0; continue; }
+        if (character == ']' && character_class) {
+            character_class = false;
+            previous = 0;
+            continue;
+        }
+        if (character_class) continue;
+        if (character == '^' || character == '$') return false;
+        if (character == '+'
+            && (previous == '*' || previous == '+'
+                || previous == '?' || previous == '}')) return false;
+        previous = character;
+    }
+    return !escaped;
+}
+
+std::optional<std::regex> compile_byte_regular_expression(
+    const std::string& expression) {
+    auto source = expression;
+    auto flags = std::regex_constants::ECMAScript;
+    if (source.compare(0, 4, "(?i)") == 0) {
+        flags |= std::regex_constants::icase;
+        source.erase(0, 4);
+    }
+    try {
+        return std::regex(source, flags);
+    } catch (const std::regex_error&) {
+        return std::nullopt;
+    }
+}
+
+bool needs_codepoint_string_matcher(
+    const Expr& pattern, bool include_regular_expressions = true) {
+    if (unicode_string_class_symbol(pattern)
+        && !is_symbol(pattern, "HexadecimalCharacter")) return true;
+    if (is_symbol(pattern, "Whitespace")
+        || is_symbol(pattern, "WordBoundary")
+        || is_symbol(pattern, "NumberString")
+        || is_symbol(pattern, "StartOfLine")
+        || is_symbol(pattern, "EndOfLine")) return true;
+    if (pattern.has_head("PatternTest") && pattern.args().size() == 2
+        && (is_symbol(pattern.args()[1], "DigitQ")
+            || is_symbol(pattern.args()[1], "LetterQ"))) return true;
+    if (pattern.has_head("CharacterRange") || pattern.has_head("Except"))
+        return true;
+    if (include_regular_expressions
+        && pattern.has_head("RegularExpression")
+        && pattern.args().size() == 1
+        && pattern.args()[0].kind() == ExprKind::String
+        && regular_expression_needs_codepoint_matching(
+            pattern.args()[0].text())) return true;
+    if (pattern.kind() != ExprKind::Call) return false;
+    return std::any_of(pattern.args().begin(), pattern.args().end(),
+        [&](const Expr& argument) {
+            return needs_codepoint_string_matcher(
+                argument, include_regular_expressions);
+        });
+}
+
+bool codepoint_regular_expressions_supported(
+    const Expr& pattern, bool source_ascii) {
+    if (pattern.has_head("RegularExpression")) {
+        if (pattern.args().size() != 1
+            || pattern.args()[0].kind() != ExprKind::String) return false;
+        const auto& expression = pattern.args()[0].text();
+        return UnicodeRegexParser(expression).parse().has_value()
+            || (source_ascii && ascii_text(expression)
+                && unsupported_byte_regular_expression_is_safe(expression)
+                && compile_byte_regular_expression(expression).has_value());
+    }
+    if (pattern.kind() != ExprKind::Call) return true;
+    return std::all_of(pattern.args().begin(), pattern.args().end(),
+        [&](const Expr& argument) {
+            return codepoint_regular_expressions_supported(
+                argument, source_ascii);
+        });
+}
+
+struct CodePointPatternSource {
+    explicit CodePointPatternSource(const std::string& value)
+        : text(value), codepoints(utf8_codepoints(value)),
+          boundaries(detail::utf8_code_point_boundaries(value)),
+          ascii(ascii_text(value)) {}
+
+    std::string substring(std::size_t first, std::size_t last) const {
+        return text.substr(boundaries[first], boundaries[last] - boundaries[first]);
+    }
+
+    const std::optional<ParsedUnicodeRegex>& unicode_regular_expression(
+        const std::string& expression) const {
+        const auto found = unicode_regular_expressions.find(expression);
+        if (found != unicode_regular_expressions.end()) return found->second;
+        return unicode_regular_expressions.emplace(expression,
+            UnicodeRegexParser(expression).parse()).first->second;
+    }
+
+    const std::optional<std::regex>& byte_regular_expression(
+        const std::string& expression) const {
+        const auto found = byte_regular_expressions.find(expression);
+        if (found != byte_regular_expressions.end()) return found->second;
+        return byte_regular_expressions.emplace(expression,
+            compile_byte_regular_expression(expression)).first->second;
+    }
+
+    const std::string& text;
+    std::vector<std::uint32_t> codepoints;
+    std::vector<std::size_t> boundaries;
+    bool ascii;
+    mutable std::map<std::string, std::optional<ParsedUnicodeRegex>>
+        unicode_regular_expressions;
+    mutable std::map<std::string, std::optional<std::regex>>
+        byte_regular_expressions;
+};
+
+struct CodePointPatternState {
+    std::size_t end;
+    Bindings bindings;
+};
+
+void order_codepoint_states(
+    std::vector<CodePointPatternState>& states, bool longest) {
+    std::stable_sort(states.begin(), states.end(),
+        [=](const CodePointPatternState& left,
+            const CodePointPatternState& right) {
+            return longest ? left.end > right.end : left.end < right.end;
+        });
+}
+
+std::vector<CodePointPatternState> match_codepoint_string_pattern(
+    const Expr& pattern, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings, bool longest = true);
+
+std::vector<CodePointPatternState> match_codepoint_string_sequence(
+    const std::vector<Expr>& patterns, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings, bool longest) {
+    std::vector<CodePointPatternState> states{{start, bindings}};
+    for (const auto& pattern : patterns) {
+        std::vector<CodePointPatternState> next;
+        for (const auto& state : states) {
+            auto matches = match_codepoint_string_pattern(
+                pattern, source, state.end, state.bindings, longest);
+            next.insert(next.end(),
+                std::make_move_iterator(matches.begin()),
+                std::make_move_iterator(matches.end()));
+        }
+        if (next.empty()) return {};
+        order_codepoint_states(next, longest);
+        states = std::move(next);
+    }
+    return states;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>>
+codepoint_repetition_bounds(const Expr& pattern, std::size_t available) {
+    std::size_t minimum = pattern.has_head("RepeatedNull") ? 0 : 1;
+    std::size_t maximum = available + 1;
+    if (pattern.args().size() == 1) return std::pair{minimum, maximum};
+    if (pattern.args().size() != 2) return std::nullopt;
+    const auto normalize = [&](const Expr& value) -> std::optional<std::size_t> {
+        if (is_symbol(value, "Infinity")) return available + 1;
+        if (value.kind() != ExprKind::Integer || value.integer_value() < 0)
+            return std::nullopt;
+        return nonnegative_size_t(value.integer_value()).value_or(available + 1);
+    };
+    const auto& specification = pattern.args()[1];
+    if (specification.kind() == ExprKind::Integer
+        || is_symbol(specification, "Infinity")) {
+        const auto bound = normalize(specification);
+        if (!bound) return std::nullopt;
+        return std::pair{minimum, std::min(*bound, available + 1)};
+    }
+    if (!specification.has_head("List")
+        || specification.args().empty()
+        || specification.args().size() > 2) return std::nullopt;
+    const auto low = normalize(specification.args()[0]);
+    const auto high = specification.args().size() == 2
+        ? normalize(specification.args()[1]) : low;
+    if (!low || !high) return std::nullopt;
+    return std::pair{std::min(*low, available + 1),
+        std::min(*high, available + 1)};
+}
+
+bool codepoint_pattern_test_succeeds(
+    const Expr& test, const CodePointPatternSource& source,
+    std::size_t first, std::size_t last) {
+    auto all_match = [&](const std::string& class_name) {
+        return std::all_of(
+            source.codepoints.begin() + static_cast<std::ptrdiff_t>(first),
+            source.codepoints.begin() + static_cast<std::ptrdiff_t>(last),
+            [&](std::uint32_t value) {
+                return unicode_string_class_matches(class_name, value);
+            });
+    };
+    if (is_symbol(test, "DigitQ")) return all_match("DigitCharacter");
+    if (is_symbol(test, "LetterQ")) return all_match("LetterCharacter");
+    if (test.has_head("Function") && !test.args().empty()
+        && test.args()[0].has_head("StringMatchQ")
+        && test.args()[0].args().size() == 2
+        && unicode_string_class_symbol(test.args()[0].args()[1])) {
+        const auto name = system_dispatch_name(
+            *test.args()[0].args()[1].symbol_name());
+        return all_match(name);
+    }
+    return true;
+}
+
+std::vector<CodePointPatternState> match_number_string(
+    const CodePointPatternSource& source, std::size_t start,
+    const Bindings& bindings) {
+    auto cursor = start;
+    if (cursor < source.codepoints.size()
+        && (source.codepoints[cursor] == '+'
+            || source.codepoints[cursor] == '-')) ++cursor;
+    const auto integer_start = cursor;
+    while (cursor < source.codepoints.size()
+        && detail::unicode_is_decimal(source.codepoints[cursor])) ++cursor;
+    const bool integer_digits = cursor > integer_start;
+    bool fraction_digits = false;
+    if (cursor < source.codepoints.size() && source.codepoints[cursor] == '.') {
+        ++cursor;
+        const auto fraction_start = cursor;
+        while (cursor < source.codepoints.size()
+            && detail::unicode_is_decimal(source.codepoints[cursor])) ++cursor;
+        fraction_digits = cursor > fraction_start;
+    }
+    if (!integer_digits && !fraction_digits) return {};
+    auto exponent = cursor;
+    if (exponent < source.codepoints.size()
+        && (source.codepoints[exponent] == 'e'
+            || source.codepoints[exponent] == 'E')) {
+        ++exponent;
+    } else if (exponent + 1 < source.codepoints.size()
+        && source.codepoints[exponent] == '*'
+        && source.codepoints[exponent + 1] == '^') {
+        exponent += 2;
+    } else {
+        return {{cursor, bindings}};
+    }
+    if (exponent < source.codepoints.size()
+        && (source.codepoints[exponent] == '+'
+            || source.codepoints[exponent] == '-')) ++exponent;
+    const auto exponent_start = exponent;
+    while (exponent < source.codepoints.size()
+        && detail::unicode_is_decimal(source.codepoints[exponent])) ++exponent;
+    return {{exponent > exponent_start ? exponent : cursor, bindings}};
+}
+
+bool unicode_regex_codepoint_equal(
+    std::uint32_t left, std::uint32_t right, bool ignore_case) {
+    if (left == right) return true;
+    if (!ignore_case) return false;
+    return detail::unicode_regex_case_equivalent(left, right);
+}
+
+bool unicode_regex_class_item_matches(const UnicodeRegexClassItem& item,
+    std::uint32_t value, bool ignore_case) {
+    bool matches = false;
+    if (item.kind == UnicodeRegexClassItem::Kind::Decimal) {
+        matches = detail::unicode_is_decimal(value);
+    } else if (item.kind == UnicodeRegexClassItem::Kind::Whitespace) {
+        matches = detail::unicode_is_whitespace(value);
+    } else if (item.kind == UnicodeRegexClassItem::Kind::Word) {
+        matches = detail::unicode_is_alphanumeric(value) || value == '_';
+    } else if (item.first == item.last) {
+        matches = unicode_regex_codepoint_equal(
+            value, item.first, ignore_case);
+    } else {
+        matches = ignore_case
+            ? detail::unicode_regex_case_matches_range(
+                value, item.first, item.last)
+            : value >= item.first && value <= item.last;
+    }
+    return item.negated ? !matches : matches;
+}
+
+void stable_unique_regex_ends(std::vector<std::size_t>& values) {
+    std::set<std::size_t> seen;
+    values.erase(std::remove_if(values.begin(), values.end(),
+        [&](std::size_t value) { return !seen.insert(value).second; }),
+        values.end());
+}
+
+std::vector<std::size_t> match_unicode_regex_node(
+    const UnicodeRegexNode& node, const CodePointPatternSource& source,
+    std::size_t start, bool ignore_case) {
+    if (node.kind == UnicodeRegexKind::Empty) return {start};
+    if (node.kind == UnicodeRegexKind::Start)
+        return start == 0 ? std::vector<std::size_t>{start}
+                          : std::vector<std::size_t>{};
+    if (node.kind == UnicodeRegexKind::End) {
+        const bool matches = start == source.codepoints.size()
+            || (start + 1 == source.codepoints.size()
+                && source.codepoints[start] == '\n');
+        return matches ? std::vector<std::size_t>{start}
+                       : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::AbsoluteEnd)
+        return start == source.codepoints.size()
+            ? std::vector<std::size_t>{start} : std::vector<std::size_t>{};
+    if (node.kind == UnicodeRegexKind::WordBoundary) {
+        const bool previous = start > 0
+            && (detail::unicode_is_alphanumeric(source.codepoints[start - 1])
+                || source.codepoints[start - 1] == '_');
+        const bool next = start < source.codepoints.size()
+            && (detail::unicode_is_alphanumeric(source.codepoints[start])
+                || source.codepoints[start] == '_');
+        const bool boundary = previous != next;
+        return boundary != node.class_negated
+            ? std::vector<std::size_t>{start} : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::Literal) {
+        return start < source.codepoints.size()
+            && unicode_regex_codepoint_equal(
+                source.codepoints[start], node.literal, ignore_case)
+            ? std::vector<std::size_t>{start + 1}
+            : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::Dot) {
+        return start < source.codepoints.size()
+            && source.codepoints[start] != '\n'
+            ? std::vector<std::size_t>{start + 1}
+            : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::CharacterClass) {
+        if (start >= source.codepoints.size()) return {};
+        const bool included = std::any_of(node.class_items.begin(),
+            node.class_items.end(), [&](const UnicodeRegexClassItem& item) {
+                return unicode_regex_class_item_matches(
+                    item, source.codepoints[start], ignore_case);
+            });
+        return included != node.class_negated
+            ? std::vector<std::size_t>{start + 1}
+            : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::Sequence) {
+        std::vector<std::size_t> states{start};
+        for (const auto& child : node.children) {
+            std::vector<std::size_t> next;
+            for (const auto state : states) {
+                auto matches = match_unicode_regex_node(
+                    child, source, state, ignore_case);
+                next.insert(next.end(), matches.begin(), matches.end());
+            }
+            stable_unique_regex_ends(next);
+            if (next.empty()) return {};
+            states = std::move(next);
+        }
+        return states;
+    }
+    if (node.kind == UnicodeRegexKind::Alternatives) {
+        std::vector<std::size_t> results;
+        for (const auto& child : node.children) {
+            auto matches = match_unicode_regex_node(
+                child, source, start, ignore_case);
+            results.insert(results.end(), matches.begin(), matches.end());
+        }
+        stable_unique_regex_ends(results);
+        return results;
+    }
+    if (node.kind == UnicodeRegexKind::Repeat && !node.children.empty()) {
+        std::vector<std::vector<std::size_t>> accepted;
+        std::vector<std::size_t> frontier{start};
+        if (node.minimum == 0) accepted.push_back(frontier);
+        const auto maximum = node.maximum.value_or(std::max(
+            node.minimum, source.codepoints.size() - start + 1));
+        for (std::size_t count = 1; count <= maximum; ++count) {
+            std::vector<std::size_t> next;
+            for (const auto state : frontier) {
+                auto matches = match_unicode_regex_node(
+                    node.children.front(), source, state, ignore_case);
+                for (const auto match : matches)
+                    next.push_back(match);
+            }
+            stable_unique_regex_ends(next);
+            if (next.empty()) break;
+            const bool stable = next.size() == frontier.size()
+                && std::all_of(next.begin(), next.end(),
+                    [&](std::size_t end) {
+                        return std::find(frontier.begin(), frontier.end(), end)
+                            != frontier.end();
+                    });
+            frontier = std::move(next);
+            if (count >= node.minimum) accepted.push_back(frontier);
+            if (stable) {
+                if (count < node.minimum && node.minimum <= maximum)
+                    accepted.push_back(frontier);
+                break;
+            }
+        }
+        if (node.greedy) std::reverse(accepted.begin(), accepted.end());
+        std::vector<std::size_t> results;
+        for (const auto& level : accepted)
+            results.insert(results.end(), level.begin(), level.end());
+        stable_unique_regex_ends(results);
+        return results;
+    }
+    return {};
+}
+
+std::vector<CodePointPatternState> match_simple_unicode_regex(
+    const std::string& expression, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings) {
+    const auto& parsed = source.unicode_regular_expression(expression);
+    if (parsed) {
+        const auto ends = match_unicode_regex_node(
+            parsed->root, source, start, parsed->ignore_case);
+        return ends.empty()
+            ? std::vector<CodePointPatternState>{}
+            : std::vector<CodePointPatternState>{{ends.front(), bindings}};
+    }
+    if (!source.ascii || !ascii_text(expression)) return {};
+    const auto& regex = source.byte_regular_expression(expression);
+    if (!regex) return {};
+    const auto byte_start = source.boundaries[start];
+    const auto first = source.text.begin()
+        + static_cast<std::ptrdiff_t>(byte_start);
+    auto flags = std::regex_constants::match_continuous;
+    if (byte_start != 0) flags |= std::regex_constants::match_prev_avail;
+    std::match_results<std::string::const_iterator> match;
+    if (!std::regex_search(first, source.text.end(), match, *regex, flags))
+        return {};
+    const auto byte_end = byte_start
+        + static_cast<std::size_t>(match.length(0));
+    const auto boundary = std::lower_bound(
+        source.boundaries.begin(), source.boundaries.end(), byte_end);
+    if (boundary == source.boundaries.end() || *boundary != byte_end) return {};
+    return {{static_cast<std::size_t>(
+        boundary - source.boundaries.begin()), bindings}};
+}
+
+std::vector<CodePointPatternState> match_codepoint_string_pattern(
+    const Expr& pattern, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings, bool longest) {
+    if (pattern.kind() == ExprKind::String) {
+        const auto expected = utf8_codepoints(pattern.text());
+        if (start + expected.size() > source.codepoints.size()
+            || !std::equal(expected.begin(), expected.end(),
+                source.codepoints.begin() + static_cast<std::ptrdiff_t>(start)))
+            return {};
+        return {{start + expected.size(), bindings}};
+    }
+    if (pattern.symbol_name()) {
+        const auto name = system_dispatch_name(*pattern.symbol_name());
+        if (name == "Whitespace") {
+            auto end = start;
+            while (end < source.codepoints.size()
+                && detail::unicode_is_whitespace(source.codepoints[end])) ++end;
+            return end > start ? std::vector<CodePointPatternState>{{end, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "StartOfString")
+            return start == 0 ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        if (name == "EndOfString")
+            return start == source.codepoints.size()
+                ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        if (name == "StartOfLine") {
+            const bool match = start == 0
+                || source.codepoints[start - 1] == '\n';
+            return match ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "EndOfLine") {
+            const bool match = start == source.codepoints.size()
+                || source.codepoints[start] == '\n'
+                || source.codepoints[start] == '\r';
+            return match ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "WordBoundary") {
+            const bool previous = start > 0
+                && (detail::unicode_is_alphanumeric(source.codepoints[start - 1])
+                    || source.codepoints[start - 1] == '_');
+            const bool next = start < source.codepoints.size()
+                && (detail::unicode_is_alphanumeric(source.codepoints[start])
+                    || source.codepoints[start] == '_');
+            return previous != next
+                ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "NumberString") return match_number_string(source, start, bindings);
+        if (unicode_string_class_symbol(pattern)) {
+            return start < source.codepoints.size()
+                && unicode_string_class_matches(name, source.codepoints[start])
+                ? std::vector<CodePointPatternState>{{start + 1, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        return {};
+    }
+    if (pattern.kind() != ExprKind::Call) return {};
+    if (pattern.has_head("HoldPattern") && !pattern.args().empty())
+        return match_codepoint_string_pattern(pattern.args()[0], source, start,
+            bindings, longest);
+    if (pattern.has_head("Longest") && !pattern.args().empty())
+        return match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, true);
+    if (pattern.has_head("Shortest") && !pattern.args().empty())
+        return match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, false);
+    if (pattern.has_head("StringExpression"))
+        return match_codepoint_string_sequence(
+            pattern.args(), source, start, bindings, longest);
+    if (pattern.has_head("Alternatives") || pattern.has_head("List")) {
+        std::vector<CodePointPatternState> matches;
+        for (const auto& branch : pattern.args()) {
+            auto branch_matches = match_codepoint_string_pattern(
+                branch, source, start, bindings, longest);
+            matches.insert(matches.end(),
+                std::make_move_iterator(branch_matches.begin()),
+                std::make_move_iterator(branch_matches.end()));
+        }
+        return matches;
+    }
+    if (pattern.has_head("Pattern") && pattern.args().size() == 2
+        && pattern.args()[0].symbol_name()) {
+        auto matches = match_codepoint_string_pattern(
+            pattern.args()[1], source, start, bindings, longest);
+        std::vector<CodePointPatternState> bound;
+        const auto name = *pattern.args()[0].symbol_name();
+        for (auto& match : matches) {
+            const auto value = string(source.substring(start, match.end));
+            const auto existing = match.bindings.find(name);
+            if (existing != match.bindings.end() && existing->second != value)
+                continue;
+            match.bindings[name] = value;
+            bound.push_back(std::move(match));
+        }
+        return bound;
+    }
+    if (pattern.has_head("Blank") && pattern.args().empty())
+        return start < source.codepoints.size()
+            ? std::vector<CodePointPatternState>{{start + 1, bindings}}
+            : std::vector<CodePointPatternState>{};
+    if ((pattern.has_head("BlankSequence")
+        || pattern.has_head("BlankNullSequence")) && pattern.args().empty()) {
+        const auto minimum = pattern.has_head("BlankSequence") ? start + 1 : start;
+        if (minimum > source.codepoints.size()) return {};
+        std::vector<CodePointPatternState> matches;
+        if (longest) {
+            for (auto end = source.codepoints.size() + 1; end-- > minimum;)
+                matches.push_back({end, bindings});
+        } else {
+            for (auto end = minimum; end <= source.codepoints.size(); ++end)
+                matches.push_back({end, bindings});
+        }
+        return matches;
+    }
+    if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull"))
+        && !pattern.args().empty()) {
+        const auto bounds = codepoint_repetition_bounds(
+            pattern, source.codepoints.size() - start);
+        if (!bounds || bounds->first > bounds->second) return {};
+        std::vector<CodePointPatternState> results;
+        std::vector<CodePointPatternState> frontier{{start, bindings}};
+        if (bounds->first == 0) results = frontier;
+        for (std::size_t count = 1; count <= bounds->second; ++count) {
+            std::vector<CodePointPatternState> next;
+            for (const auto& state : frontier) {
+                auto matches = match_codepoint_string_pattern(
+                    pattern.args()[0], source, state.end, state.bindings, longest);
+                for (auto& match : matches)
+                    if (match.end > state.end) next.push_back(std::move(match));
+            }
+            if (next.empty()) break;
+            order_codepoint_states(next, longest);
+            frontier = std::move(next);
+            if (count >= bounds->first)
+                results.insert(results.end(), frontier.begin(), frontier.end());
+        }
+        order_codepoint_states(results, longest);
+        return results;
+    }
+    if (pattern.has_head("PatternTest") && pattern.args().size() == 2) {
+        auto matches = match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, longest);
+        matches.erase(std::remove_if(matches.begin(), matches.end(),
+            [&](const CodePointPatternState& match) {
+                return !codepoint_pattern_test_succeeds(
+                    pattern.args()[1], source, start, match.end);
+            }), matches.end());
+        return matches;
+    }
+    if (pattern.has_head("Except") && !pattern.args().empty()
+        && pattern.args().size() <= 2) {
+        const auto allowed_pattern = pattern.args().size() == 2
+            ? pattern.args()[1] : call("Blank");
+        auto allowed = match_codepoint_string_pattern(
+            allowed_pattern, source, start, bindings, longest);
+        auto disallowed = match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, longest);
+        allowed.erase(std::remove_if(allowed.begin(), allowed.end(),
+            [&](const CodePointPatternState& candidate) {
+                return std::any_of(disallowed.begin(), disallowed.end(),
+                    [&](const CodePointPatternState& excluded) {
+                        return excluded.end == candidate.end;
+                    });
+            }), allowed.end());
+        return allowed;
+    }
+    if (pattern.has_head("CharacterRange") && pattern.args().size() == 2
+        && pattern.args()[0].kind() == ExprKind::String
+        && pattern.args()[1].kind() == ExprKind::String) {
+        const auto first = utf8_codepoints(pattern.args()[0].text());
+        const auto last = utf8_codepoints(pattern.args()[1].text());
+        return first.size() == 1 && last.size() == 1
+            && start < source.codepoints.size()
+            && source.codepoints[start] >= first[0]
+            && source.codepoints[start] <= last[0]
+            ? std::vector<CodePointPatternState>{{start + 1, bindings}}
+            : std::vector<CodePointPatternState>{};
+    }
+    if (pattern.has_head("RegularExpression") && pattern.args().size() == 1
+        && pattern.args()[0].kind() == ExprKind::String)
+        return match_simple_unicode_regex(
+            pattern.args()[0].text(), source, start, bindings);
+    return {};
+}
+
+std::size_t regex_capture_count(const std::string& source) {
+    std::size_t count = 0;
+    bool escaped = false;
+    bool character_class = false;
+    for (std::size_t index = 0; index < source.size(); ++index) {
+        const auto character = source[index];
+        if (escaped) { escaped = false; continue; }
+        if (character == '\\') { escaped = true; continue; }
+        if (character == '[') { character_class = true; continue; }
+        if (character == ']' && character_class) { character_class = false; continue; }
+        if (character != '(' || character_class) continue;
+        if (index + 1 >= source.size() || source[index + 1] != '?') ++count;
+    }
+    return count;
+}
+
 class StringPatternCompiler {
 public:
-    std::optional<CompiledStringPattern> compile(const Expr& pattern) {
+    std::optional<CompiledStringPattern> compile(
+        const Expr& pattern, bool source_has_non_ascii = true) {
+        if (contains_regular_expression(pattern)
+            || needs_codepoint_string_matcher(pattern)) {
+            if (contains_date_pattern(pattern)) return std::nullopt;
+            if (!codepoint_regular_expressions_supported(
+                    pattern, !source_has_non_ascii))
+                return std::nullopt;
+            return CompiledStringPattern{std::regex{}, {}, pattern};
+        }
         const auto source = fragment(pattern, false); if (!source) return std::nullopt;
-        try { return CompiledStringPattern{std::regex(*source, flags_), bindings_}; } catch (const std::regex_error&) { return std::nullopt; }
+        try {
+            return CompiledStringPattern{
+                std::regex(*source, flags_), bindings_, std::nullopt};
+        } catch (const std::regex_error&) {
+            return std::nullopt;
+        }
     }
 private:
     std::optional<std::string> class_contents(const Expr& pattern) {
@@ -3355,19 +4518,30 @@ private:
             if (name == "Whitespace") return R"([[:space:]]+)";
             if (name == "NumberString") return R"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))";
             if (name == "WordBoundary") return R"(\b)";
-            if (name == "StartOfLine") return "^";
-            if (name == "EndOfLine") return "$";
+            if (name == "StartOfLine") {
+                flags_ |= std::regex_constants::multiline;
+                return "^";
+            }
+            if (name == "EndOfLine") {
+                flags_ |= std::regex_constants::multiline;
+                return "$";
+            }
         }
         if ((pattern.has_head("HoldPattern") || pattern.has_head("Longest") || pattern.has_head("Shortest")) && !pattern.args().empty())
             return fragment(pattern.args()[0], pattern.has_head("Shortest"));
         if (pattern.has_head("StringExpression")) { std::string output; for (const auto& part : pattern.args()) { const auto value = fragment(part, shortest); if (!value) return std::nullopt; output += *value; } return output; }
         if (pattern.has_head("Alternatives") && !pattern.args().empty()) { std::vector<std::string> values; for (const auto& part : pattern.args()) { const auto value = fragment(part, shortest); if (!value) return std::nullopt; values.push_back(*value); } std::string output = "(?:"; for (std::size_t index = 0; index < values.size(); ++index) { if (index) output += '|'; output += values[index]; } return output + ')'; }
-        if (pattern.has_head("RegularExpression") && pattern.args().size() == 1 && pattern.args()[0].kind() == ExprKind::String) { auto source = pattern.args()[0].text(); if (source.compare(0, 4, "(?i)") == 0) { flags_ |= std::regex_constants::icase; source.erase(0, 4); } return "(?:" + source + ')'; }
+        if (pattern.has_head("RegularExpression") && pattern.args().size() == 1 && pattern.args()[0].kind() == ExprKind::String) { auto source = pattern.args()[0].text(); if (source.compare(0, 4, "(?i)") == 0) { flags_ |= std::regex_constants::icase; source.erase(0, 4); } captures_ += regex_capture_count(source); return "(?:" + source + ')'; }
         if (pattern.has_head("CharacterRange") && pattern.args().size() == 2 && pattern.args()[0].kind() == ExprKind::String && pattern.args()[1].kind() == ExprKind::String)
             return "[" + regex_escape(pattern.args()[0].text(), true) + "-" + regex_escape(pattern.args()[1].text(), true) + "]";
-        if (pattern.has_head("Blank") && pattern.args().empty()) return R"([\s\S])";
-        if (pattern.has_head("BlankSequence") && pattern.args().empty()) return std::string(R"([\s\S]+)") + (shortest ? "?" : "");
-        if (pattern.has_head("BlankNullSequence") && pattern.args().empty()) return std::string(R"([\s\S]*)") + (shortest ? "?" : "");
+        static const std::string any_utf8_code_point =
+            R"((?:[\x00-\x7F]|[\xC2-\xDF][\x80-\xBF]|[\xE0-\xEF][\x80-\xBF]{2}|[\xF0-\xF4][\x80-\xBF]{3}))";
+        if (pattern.has_head("Blank") && pattern.args().empty())
+            return any_utf8_code_point;
+        if (pattern.has_head("BlankSequence") && pattern.args().empty())
+            return "(?:" + any_utf8_code_point + ")+" + (shortest ? "?" : "");
+        if (pattern.has_head("BlankNullSequence") && pattern.args().empty())
+            return "(?:" + any_utf8_code_point + ")*" + (shortest ? "?" : "");
         if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull")) && !pattern.args().empty() && pattern.args().size() <= 2) {
             const auto inner = fragment(pattern.args()[0], shortest); if (!inner) return std::nullopt; std::string quantifier = pattern.has_head("RepeatedNull") ? "*" : "+";
             if (pattern.args().size() == 2) {
@@ -3390,7 +4564,7 @@ private:
         if (pattern.has_head("Except") && !pattern.args().empty() && pattern.args().size() <= 2) { const auto excluded = class_contents(pattern.args()[0]); if (!excluded) return std::nullopt; return "[^" + *excluded + "]"; }
         if (pattern.has_head("DatePattern") && !pattern.args().empty() && pattern.args().size() <= 2 && pattern.args()[0].has_head("List")) {
             const auto separator = pattern.args().size() == 2 ? fragment(pattern.args()[1], shortest) : std::optional<std::string>(R"((?:[-/.[:space:]]+))"); if (!separator) return std::nullopt; std::string output;
-            for (std::size_t index = 0; index < pattern.args()[0].args().size(); ++index) { if (index) output += *separator; const auto& item = pattern.args()[0].args()[index]; if (item.kind() != ExprKind::String) return std::nullopt; const auto& name = item.text(); if (name == "Year") output += R"([0-9]{1,4})"; else if (name == "Month") output += R"((1[0-2]|0?[1-9]))"; else if (name == "Day") output += R"(([12][0-9]|3[01]|0?[1-9]))"; else if (name == "Hour") output += R"((2[0-3]|[01]?[0-9]))"; else if (name == "Minute" || name == "Second") output += R"([0-5]?[0-9])"; else return std::nullopt; }
+            for (std::size_t index = 0; index < pattern.args()[0].args().size(); ++index) { if (index) output += *separator; const auto& item = pattern.args()[0].args()[index]; if (item.kind() != ExprKind::String) return std::nullopt; const auto& name = item.text(); if (name == "Year") output += R"([0-9]{1,4})"; else if (name == "Month") output += R"((?:1[0-2]|0?[1-9]))"; else if (name == "Day") output += R"((?:[12][0-9]|3[01]|0?[1-9]))"; else if (name == "Hour") output += R"((?:2[0-3]|[01]?[0-9]))"; else if (name == "Minute" || name == "Second") output += R"([0-5]?[0-9])"; else return std::nullopt; }
             return output;
         }
         return std::nullopt;
@@ -3398,21 +4572,92 @@ private:
     std::size_t captures_ = 0;
     std::map<std::string, std::vector<std::size_t>> bindings_;
     std::regex_constants::syntax_option_type flags_ =
-        std::regex_constants::ECMAScript | std::regex_constants::multiline;
+        std::regex_constants::ECMAScript;
 };
 
 struct StringMatchResult { std::size_t start; std::size_t end; Bindings bindings; };
 
-std::optional<StringMatchResult> string_pattern_match(const CompiledStringPattern& pattern, const std::string& source, std::size_t start) {
+Expr normalize_string_expression(std::vector<Expr> pieces) {
+    std::vector<Expr> flattened;
+    const auto append = [&](const auto& self, const Expr& piece) -> void {
+        if (piece.has_head("StringExpression")) {
+            for (const auto& argument : piece.args()) self(self, argument);
+            return;
+        }
+        if (piece.kind() == ExprKind::String && !flattened.empty()
+            && flattened.back().kind() == ExprKind::String) {
+            flattened.back() = string(
+                flattened.back().text() + piece.text());
+            return;
+        }
+        flattened.push_back(piece);
+    };
+    for (const auto& piece : pieces) append(append, piece);
+    if (flattened.empty()) return string("");
+    if (flattened.size() == 1) return flattened.front();
+    return call("StringExpression", std::move(flattened));
+}
+
+bool is_string_or_string_list(const Expr& expression) {
+    if (expression.kind() == ExprKind::String) return true;
+    return expression.has_head("List")
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            is_string_or_string_list);
+}
+
+std::optional<StringMatchResult> string_pattern_match(
+    const CompiledStringPattern& pattern, const std::string& source,
+    std::size_t start, const CodePointPatternSource* decoded_source = nullptr,
+    std::optional<std::size_t> required_end = std::nullopt) {
+    if (pattern.codepoint_pattern) {
+        const std::optional<CodePointPatternSource> local_source =
+            decoded_source ? std::nullopt
+                           : std::optional<CodePointPatternSource>(source);
+        const auto& decoded = decoded_source ? *decoded_source : *local_source;
+        const auto boundary = std::lower_bound(
+            decoded.boundaries.begin(), decoded.boundaries.end(), start);
+        if (boundary == decoded.boundaries.end() || *boundary != start)
+            return std::nullopt;
+        const auto codepoint_start = static_cast<std::size_t>(
+            boundary - decoded.boundaries.begin());
+        const auto matches = match_codepoint_string_pattern(
+            *pattern.codepoint_pattern, decoded, codepoint_start, {}, true);
+        if (matches.empty()) return std::nullopt;
+        auto selected = matches.begin();
+        if (required_end) {
+            const auto end_boundary = std::lower_bound(decoded.boundaries.begin(),
+                decoded.boundaries.end(), *required_end);
+            if (end_boundary == decoded.boundaries.end()
+                || *end_boundary != *required_end) return std::nullopt;
+            const auto codepoint_end = static_cast<std::size_t>(
+                end_boundary - decoded.boundaries.begin());
+            selected = std::find_if(matches.begin(), matches.end(),
+                [&](const CodePointPatternState& match) {
+                    return match.end == codepoint_end;
+                });
+            if (selected == matches.end()) return std::nullopt;
+        }
+        return StringMatchResult{start, decoded.boundaries[selected->end],
+            selected->bindings};
+    }
     std::match_results<std::string::const_iterator> match;
-    if (!std::regex_search(source.begin() + static_cast<std::ptrdiff_t>(start), source.end(), match, pattern.regex, std::regex_constants::match_continuous)) return std::nullopt;
+    const auto first = source.begin() + static_cast<std::ptrdiff_t>(start);
+    const bool matched = required_end
+        ? *required_end >= start && *required_end <= source.size()
+            && std::regex_match(first,
+                source.begin() + static_cast<std::ptrdiff_t>(*required_end),
+                match, pattern.regex)
+        : std::regex_search(first, source.end(), match, pattern.regex,
+            std::regex_constants::match_continuous);
+    if (!matched) return std::nullopt;
     Bindings bindings;
     for (const auto& [name, groups] : pattern.bindings) {
         std::optional<std::string> value;
         for (const auto group : groups) { if (group >= match.size() || !match[group].matched) return std::nullopt; const auto current = match[group].str(); if (value && *value != current) return std::nullopt; value = current; }
         bindings.emplace(name, string(value.value_or("")));
     }
-    return StringMatchResult{start, start + match.length(0), std::move(bindings)};
+    return StringMatchResult{start,
+        required_end.value_or(start + match.length(0)), std::move(bindings)};
 }
 Expr substitute_bindings(const Expr& expression, const Bindings& bindings);
 
@@ -5788,9 +7033,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     std::vector<Expr> args;
     for (std::size_t argument_index = 0; argument_index < raw_args.size(); ++argument_index) {
         const auto& argument = raw_args[argument_index];
-        const bool pattern_held = argument_index >= 1 && (name == "MatchQ" || name == "FreeQ" || name == "Cases" || name == "DeleteCases"
+        const bool pattern_held = (argument_index == 1
+                && (name == "StringCases" || name == "StringReplace"))
+            || (argument_index >= 1 && (name == "MatchQ" || name == "FreeQ" || name == "Cases" || name == "DeleteCases"
             || name == "Count" || name == "MemberQ" || name == "FirstCase" || name == "Position" || name == "ReplaceAll"
-            || name == "ReplaceRepeated" || name == "Replace" || name == "ReplaceAt");
+            || name == "ReplaceRepeated" || name == "Replace" || name == "ReplaceAt"));
         const bool held = hold_all || (hold_first && argument_index == 0) || (hold_rest && argument_index > 0);
         if (argument.has_head("Unevaluated") && argument.args().size() == 1) args.push_back(argument.args()[0]);
         else if (held) {
@@ -7564,13 +8811,41 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("StringLength", {item}))); return list(std::move(values)); }
         if (args[0].kind() == ExprKind::String) return integer(utf8_codepoints(args[0].text()).size());
     }
-    if ((function == "StringTake" || function == "StringDrop") && args.size() == 2) {
-        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call(function, {item, args[1]}))); return list(std::move(values)); }
-        if (args[0].kind() == ExprKind::String) if (const auto selected = string_selector_indices(utf8_codepoints(args[0].text()).size(), args[1])) {
-            const auto characters = utf8_characters(args[0].text()); std::string output;
-            for (std::size_t index = 0; index < characters.size(); ++index) if ((std::find(selected->begin(), selected->end(), index) != selected->end()) != (function == "StringDrop")) output += characters[index];
-            return string(output);
+    if (function == "StringTake" || function == "StringDrop") {
+        std::string error;
+        if (args.size() != 2) {
+            error = function + " expects exactly two arguments.";
+        } else if (!is_string_or_string_list(args[0])) {
+            error = function + " expects a string or a list of strings.";
+        } else if (args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args())
+                values.push_back(evaluate(call(function, {item, args[1]})));
+            return list(std::move(values));
+        } else {
+            const auto characters = utf8_characters(args[0].text());
+            const auto selected = string_selector_indices(
+                characters.size(), args[1], function);
+            if (!selected.error.empty()) {
+                error = selected.error;
+            } else {
+                std::string output;
+                if (function == "StringTake") {
+                    for (const auto index : selected.indices)
+                        output += characters[index];
+                } else {
+                    std::vector<bool> removed(characters.size());
+                    for (const auto index : selected.indices) removed[index] = true;
+                    for (std::size_t index = 0; index < characters.size(); ++index)
+                        if (!removed[index]) output += characters[index];
+                }
+                return string(std::move(output));
+            }
         }
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return evaluated_expression;
     }
     if (function == "StringJoin") {
         std::string output; bool valid = true;
@@ -7587,39 +8862,119 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("StringReverse", {item}))); return list(std::move(values)); }
         if (args[0].kind() == ExprKind::String) { auto characters = utf8_characters(args[0].text()); std::reverse(characters.begin(), characters.end()); return string(std::accumulate(characters.begin(), characters.end(), std::string())); }
     }
-    if ((function == "ToUpperCase" || function == "ToLowerCase" || function == "Capitalize")
-        && args.size() == 1 && args[0].kind() == ExprKind::String) {
-        auto output = args[0].text();
-        if (function == "Capitalize") { if (!output.empty()) output[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(output[0]))); }
-        else std::transform(output.begin(), output.end(), output.begin(), [&](unsigned char value) {
-            return static_cast<char>(function == "ToUpperCase" ? std::toupper(value) : std::tolower(value));
-        });
-        return string(std::move(output));
-    }
-    if (function == "StringSplit" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::String) {
-        std::vector<std::string> pieces;
-        if (args.size() == 1) {
-            std::string current;
-            for (const unsigned char value : args[0].text()) {
-                if (std::isspace(value)) { if (!current.empty()) { pieces.push_back(std::move(current)); current.clear(); } }
-                else current.push_back(static_cast<char>(value));
-            }
-            if (!current.empty()) pieces.push_back(std::move(current));
+    if (function == "ToUpperCase" || function == "ToLowerCase"
+        || function == "Capitalize") {
+        std::string error;
+        if (args.size() != 1) {
+            error = function + " expects exactly one argument.";
+        } else if (args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args())
+                values.push_back(evaluate(call(function, {item})));
+            return list(std::move(values));
+        } else if (args[0].kind() != ExprKind::String) {
+            error = function + " expects a string or a list of strings.";
+        } else if (function == "ToUpperCase") {
+            return string(detail::unicode_to_upper(args[0].text()));
+        } else if (function == "ToLowerCase") {
+            return string(detail::unicode_to_lower(args[0].text()));
         } else {
-            const auto separators = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-            if (std::all_of(separators.begin(), separators.end(), [](const Expr& value) { return value.kind() == ExprKind::String && !value.text().empty(); })) {
-                std::size_t start = 0;
-                while (start <= args[0].text().size()) {
-                    std::size_t next = std::string::npos, width = 0;
-                    for (const auto& separator : separators) { const auto found = args[0].text().find(separator.text(), start); if (found < next) { next = found; width = separator.text().size(); } }
-                    if (next == std::string::npos) { if (start < args[0].text().size()) pieces.push_back(args[0].text().substr(start)); break; }
-                    if (next > start)
-                        pieces.push_back(args[0].text().substr(start, next - start));
-                    start = next + width;
-                }
-            } else return call(head, args);
+            const auto& source = args[0].text();
+            if (source.empty()) return args[0];
+            const auto first = detail::decode_utf8_code_point(source, 0);
+            return string(detail::unicode_to_upper(
+                std::string_view(source).substr(0, first.length))
+                + source.substr(first.length));
         }
-        std::vector<Expr> values; for (auto& piece : pieces) values.push_back(string(std::move(piece))); return list(std::move(values));
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return evaluated_expression;
+    }
+    if (function == "StringSplit") {
+        std::string error;
+        if (args.empty() || args.size() > 2) {
+            error = "StringSplit currently expects a string and an optional separator.";
+        } else if (!is_string_or_string_list(args[0])) {
+            error = "StringSplit expects a string or a list of strings.";
+        } else if (args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args()) {
+                auto threaded = args;
+                threaded[0] = item;
+                values.push_back(evaluate(call("StringSplit", threaded)));
+            }
+            return list(std::move(values));
+        } else {
+            std::vector<std::string> separators;
+            if (args.size() == 2) {
+                if (args[1].kind() == ExprKind::String) {
+                    separators.push_back(args[1].text());
+                } else if (args[1].has_head("List")) {
+                    for (const auto& separator : args[1].args()) {
+                        if (separator.kind() != ExprKind::String) {
+                            error = "StringSplit currently expects literal-string separators.";
+                            break;
+                        }
+                        separators.push_back(separator.text());
+                    }
+                } else {
+                    error = "StringSplit currently expects a literal-string separator or a list of them.";
+                }
+            }
+            if (error.empty()) {
+                std::vector<std::string> pieces;
+                const auto& source = args[0].text();
+                if (args.size() == 1) {
+                    std::string current;
+                    for (std::size_t offset = 0; offset < source.size();) {
+                        const auto decoded = detail::decode_utf8_code_point(
+                            source, offset);
+                        if (detail::unicode_is_whitespace(decoded.value)) {
+                            if (!current.empty()) {
+                                pieces.push_back(std::move(current));
+                                current.clear();
+                            }
+                        } else {
+                            current.append(source, offset, decoded.length);
+                        }
+                        offset += decoded.length;
+                    }
+                    if (!current.empty()) pieces.push_back(std::move(current));
+                } else {
+                    std::size_t cursor = 0;
+                    while (cursor <= source.size()) {
+                        std::size_t next = std::string::npos;
+                        std::size_t width = 0;
+                        for (const auto& separator : separators) {
+                            if (separator.empty()) continue;
+                            const auto found = source.find(separator, cursor);
+                            if (found < next
+                                || (found == next && separator.size() > width)) {
+                                next = found;
+                                width = separator.size();
+                            }
+                        }
+                        if (next == std::string::npos) {
+                            pieces.push_back(source.substr(cursor));
+                            break;
+                        }
+                        pieces.push_back(source.substr(cursor, next - cursor));
+                        cursor = next + width;
+                    }
+                    pieces.erase(std::remove(pieces.begin(), pieces.end(), ""),
+                        pieces.end());
+                }
+                std::vector<Expr> values;
+                for (auto& piece : pieces)
+                    values.push_back(string(std::move(piece)));
+                return list(std::move(values));
+            }
+        }
+        const auto message = call("MessageName", {
+            symbol("StringSplit"), string("error")});
+        emit_message(message, "StringSplit::error: " + error);
+        return evaluated_expression;
     }
     if (function == "StringRiffle" && !args.empty() && args.size() <= 2 && args[0].has_head("List")
         && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) {
@@ -7668,48 +9023,146 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         } else return call(head, args);
         return string(std::move(output));
     }
-    if ((function == "StringPosition" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ" || function == "StringMatchQ") && args.size() >= 2) {
-        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) { auto threaded = args; threaded[0] = item; values.push_back(evaluate(call(function, threaded))); } return list(std::move(values)); }
-        if (args[0].kind() == ExprKind::String) {
-            const auto patterns = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-            if (std::all_of(patterns.begin(), patterns.end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) {
-                std::vector<std::pair<std::size_t, std::size_t>> positions;
-                for (const auto& pattern : patterns) {
-                    if (pattern.text().empty()) for (std::size_t index = 0; index <= args[0].text().size(); ++index) positions.emplace_back(index + 1, index);
-                    else for (std::size_t start = 0; (start = args[0].text().find(pattern.text(), start)) != std::string::npos; ++start) positions.emplace_back(start + 1, start + pattern.text().size());
-                }
-                std::sort(positions.begin(), positions.end()); positions.erase(std::unique(positions.begin(), positions.end()), positions.end());
-                if (function == "StringContainsQ") return boolean(!positions.empty());
-                if (function == "StringStartsQ") return boolean(std::any_of(positions.begin(), positions.end(), [](const auto& value) { return value.first == 1; }));
-                if (function == "StringEndsQ") return boolean(std::any_of(positions.begin(), positions.end(), [&](const auto& value) { return value.second == args[0].text().size(); }));
-                if (function == "StringMatchQ") return boolean(std::any_of(positions.begin(), positions.end(), [&](const auto& value) { return value.first == 1 && value.second == args[0].text().size(); }));
-                std::vector<Expr> result; for (const auto& [start, end] : positions) result.push_back(list({integer(start), integer(end)})); return list(std::move(result));
-            }
-        }
+    const bool boolean_string_matcher = function == "StringMatchQ"
+        || function == "StringFreeQ" || function == "StringContainsQ"
+        || function == "StringStartsQ" || function == "StringEndsQ";
+    const bool string_matcher_family = boolean_string_matcher
+        || function == "StringPosition" || function == "StringCases"
+        || function == "StringReplace";
+    if (boolean_string_matcher && (args.empty() || args.size() > 2)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + function
+            + " expects a string and a pattern.");
+        return evaluated_expression;
     }
-    if ((function == "StringMatchQ" || function == "StringFreeQ" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ"
-            || function == "StringPosition" || function == "StringCases" || function == "StringReplace") && args.size() >= 2 && args.size() <= 3) {
+    if (function == "StringPosition"
+        && (args.empty() || args.size() > 3)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message,
+            "StringPosition::error: StringPosition expects a string, a pattern, and an optional match limit.");
+        return evaluated_expression;
+    }
+    if (function == "StringCases" && (args.size() < 2 || args.size() > 3)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message,
+            "StringCases::error: StringCases expects a string, a pattern or rule, and an optional match limit.");
+        return evaluated_expression;
+    }
+    if (function == "StringReplace" && (args.size() < 2 || args.size() > 3)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message,
+            "StringReplace::error: StringReplace expects a string, rules, and an optional replacement limit.");
+        return evaluated_expression;
+    }
+    const bool matcher_arity = boolean_string_matcher ? args.size() == 2
+        : args.size() >= 2 && args.size() <= 3;
+    if (string_matcher_family && matcher_arity
+        && !is_string_or_string_list(args[0])) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + function
+            + " expects a string or a list of strings.");
+        return evaluated_expression;
+    }
+    if (string_matcher_family && matcher_arity) {
         if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) { auto threaded = args; threaded[0] = item; values.push_back(evaluate(call(function, threaded))); } return list(std::move(values)); }
         if (args[0].kind() == ExprKind::String) {
             struct Spec { CompiledStringPattern pattern; std::optional<Expr> replacement; };
-            const auto raw_specs = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]}; std::vector<Spec> specs; bool valid = true;
+            std::vector<Expr> raw_specs;
+            const auto append_specs = [&](const auto& self,
+                const Expr& specification) -> void {
+                if ((function == "StringCases" || function == "StringReplace")
+                    && specification.has_head("List")) {
+                    for (const auto& item : specification.args())
+                        self(self, item);
+                } else {
+                    raw_specs.push_back(specification);
+                }
+            };
+            if (function == "StringCases" || function == "StringReplace") {
+                append_specs(append_specs, args[1]);
+            } else {
+                raw_specs = args[1].has_head("List") ? args[1].args()
+                    : std::vector<Expr>{args[1]};
+            }
+            std::vector<Spec> specs;
+            bool valid = true;
+            std::optional<Expr> failed_string_pattern;
             for (const auto& raw_spec : raw_specs) {
                 const bool rule = (raw_spec.has_head("Rule") || raw_spec.has_head("RuleDelayed")) && raw_spec.args().size() == 2;
-                const auto& pattern_expression = rule ? raw_spec.args()[0] : raw_spec; const auto compiled = StringPatternCompiler().compile(pattern_expression);
-                if (!compiled) { valid = false; break; } specs.push_back({*compiled, rule ? std::optional<Expr>(raw_spec.args()[1]) : std::nullopt});
+                if (function == "StringReplace" && !rule) {
+                    const auto message = call("MessageName", {
+                        symbol(function), string("error")});
+                    emit_message(message, function
+                        + "::error: StringReplace expects a rule or a list of rules.");
+                    return evaluated_expression;
+                }
+                std::optional<Expr> replacement;
+                if (rule) replacement = raw_spec.has_head("Rule")
+                    ? evaluate(raw_spec.args()[1]) : raw_spec.args()[1];
+                const auto& pattern_expression = rule
+                    ? raw_spec.args()[0] : raw_spec;
+                const bool unicode_source = std::any_of(
+                    args[0].text().begin(), args[0].text().end(),
+                    [](unsigned char value) { return value >= 0x80U; });
+                const auto compiled = StringPatternCompiler().compile(
+                    pattern_expression, unicode_source);
+                if (!compiled) {
+                    valid = false;
+                    failed_string_pattern = pattern_expression;
+                    break;
+                }
+                specs.push_back({*compiled, std::move(replacement)});
             }
             if (valid) {
                 std::optional<std::size_t> limit = std::nullopt;
                 if (args.size() == 3) {
-                    if (const auto requested_limit = machine_index(args[2])) {
-                        limit = static_cast<std::size_t>(
-                            std::max<long>(0, *requested_limit));
+                    if (args[2].kind() == ExprKind::Integer
+                        && args[2].integer_value() >= 0) {
+                        limit = nonnegative_size_t(args[2].integer_value());
+                    } else if (!is_symbol(args[2], "Infinity")) {
+                        const auto message = call("MessageName", {
+                            symbol(function), string("error")});
+                        emit_message(message, function
+                            + "::error: Match limits must be non-negative integers or Infinity.");
+                        return evaluated_expression;
                     }
                 }
-                auto first_at = [&](std::size_t start) -> std::optional<std::pair<StringMatchResult, std::size_t>> { for (std::size_t index = 0; index < specs.size(); ++index) if (const auto found = string_pattern_match(specs[index].pattern, args[0].text(), start)) return std::pair{*found, index}; return std::nullopt; };
+                const auto boundaries = detail::utf8_code_point_boundaries(
+                    args[0].text());
+                std::optional<CodePointPatternSource> decoded_source;
+                if (std::any_of(specs.begin(), specs.end(), [](const Spec& spec) {
+                        return spec.pattern.codepoint_pattern.has_value();
+                    })) decoded_source.emplace(args[0].text());
+                auto first_at = [&](std::size_t start,
+                    std::optional<std::size_t> required_end)
+                    -> std::optional<std::pair<StringMatchResult, std::size_t>> {
+                    for (std::size_t index = 0; index < specs.size(); ++index) {
+                        if (const auto found = string_pattern_match(
+                                specs[index].pattern, args[0].text(), start,
+                                decoded_source ? &*decoded_source : nullptr,
+                                required_end)) {
+                            if (std::binary_search(boundaries.begin(), boundaries.end(),
+                                    found->end))
+                                return std::pair{*found, index};
+                        }
+                    }
+                    return std::nullopt;
+                };
                 if (function == "StringMatchQ" || function == "StringFreeQ" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ") {
                     bool matched = false;
-                    for (std::size_t start = 0; start <= args[0].text().size() && !matched; ++start) if (const auto found = first_at(start)) {
+                    for (const auto start : boundaries) {
+                        if (matched) break;
+                        const auto found = first_at(start,
+                            function == "StringMatchQ"
+                                || function == "StringEndsQ"
+                            ? std::optional<std::size_t>(args[0].text().size())
+                            : std::nullopt);
+                        if (!found) continue;
                         matched = function == "StringMatchQ" ? found->first.start == 0 && found->first.end == args[0].text().size()
                             : function == "StringStartsQ" ? found->first.start == 0
                             : function == "StringEndsQ" ? found->first.end == args[0].text().size() : true;
@@ -7718,34 +9171,67 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 }
                 if (function == "StringPosition") {
                     std::vector<std::pair<std::size_t, std::size_t>> positions;
-                    for (std::size_t start = 0; start <= args[0].text().size() && (!limit || positions.size() < *limit); ++start) if (const auto found = first_at(start)) positions.emplace_back(found->first.start, found->first.end);
+                    for (const auto start : boundaries) {
+                        if (limit && positions.size() >= *limit) break;
+                        if (const auto found = first_at(start, std::nullopt))
+                            positions.emplace_back(
+                                found->first.start, found->first.end);
+                    }
                     std::sort(positions.begin(), positions.end()); positions.erase(std::unique(positions.begin(), positions.end()), positions.end()); std::vector<Expr> values;
                     for (const auto& [start, end] : positions) values.push_back(list({integer(utf8_codepoints(args[0].text().substr(0, start)).size() + 1), integer(utf8_codepoints(args[0].text().substr(0, end)).size())}));
                     return list(std::move(values));
                 }
                 if (function == "StringCases") {
-                    std::vector<Expr> values; std::size_t position = 0;
-                    while (position <= args[0].text().size() && (!limit || values.size() < *limit)) {
-                        const auto found = first_at(position); if (!found) { ++position; continue; }
+                    std::vector<Expr> values;
+                    std::size_t boundary_index = 0;
+                    while (boundary_index < boundaries.size()
+                        && (!limit || values.size() < *limit)) {
+                        const auto position = boundaries[boundary_index];
+                        const auto found = first_at(position, std::nullopt);
+                        if (!found) { ++boundary_index; continue; }
                         if (specs[found->second].replacement) values.push_back(evaluate(substitute_bindings(*specs[found->second].replacement, found->first.bindings)));
                         else values.push_back(string(args[0].text().substr(found->first.start, found->first.end - found->first.start)));
-                        position = found->first.end > position ? found->first.end : position + 1;
+                        if (found->first.end > position) {
+                            boundary_index = static_cast<std::size_t>(
+                                std::lower_bound(boundaries.begin(), boundaries.end(),
+                                    found->first.end) - boundaries.begin());
+                        } else {
+                            ++boundary_index;
+                        }
                     }
-                    return list(std::move(values));
+                    return evaluate(list(std::move(values)));
                 }
                 if (function == "StringReplace" && std::all_of(specs.begin(), specs.end(), [](const Spec& spec) { return spec.replacement.has_value(); })) {
-                    std::vector<Expr> pieces; std::string literal; std::size_t position = 0, replacements = 0;
-                    while (position <= args[0].text().size() && (!limit || replacements < *limit)) {
-                        const auto found = first_at(position); if (!found) { if (position < args[0].text().size()) literal.push_back(args[0].text()[position]); ++position; continue; }
+                    std::vector<Expr> pieces;
+                    std::string literal;
+                    std::size_t boundary_index = 0;
+                    std::size_t replacements = 0;
+                    while (boundary_index < boundaries.size()
+                        && (!limit || replacements < *limit)) {
+                        const auto position = boundaries[boundary_index];
+                        const auto found = first_at(position, std::nullopt);
+                        if (!found) {
+                            if (boundary_index + 1 < boundaries.size())
+                                literal.append(args[0].text(), position,
+                                    boundaries[boundary_index + 1] - position);
+                            ++boundary_index;
+                            continue;
+                        }
                         if (!literal.empty()) { pieces.push_back(string(literal)); literal.clear(); }
                         pieces.push_back(evaluate(substitute_bindings(*specs[found->second].replacement, found->first.bindings))); ++replacements;
-                        position = found->first.end > position ? found->first.end : position + 1;
+                        if (found->first.end > position) {
+                            boundary_index = static_cast<std::size_t>(
+                                std::lower_bound(boundaries.begin(), boundaries.end(),
+                                    found->first.end) - boundaries.begin());
+                        } else {
+                            ++boundary_index;
+                        }
                     }
-                    if (position < args[0].text().size())
-                        literal += args[0].text().substr(position);
+                    if (boundary_index < boundaries.size()
+                        && boundaries[boundary_index] < args[0].text().size())
+                        literal += args[0].text().substr(boundaries[boundary_index]);
                     if (!literal.empty()) pieces.push_back(string(literal));
-                    if (std::all_of(pieces.begin(), pieces.end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) { std::string output; for (const auto& piece : pieces) output += piece.text(); return string(output); }
-                    return call("StringExpression", std::move(pieces));
+                    return normalize_string_expression(std::move(pieces));
                 }
             }
             if (!valid) {
@@ -7756,8 +9242,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     if (value.kind() == ExprKind::Call)
                         for (const auto& item : value.args()) locate(item);
                 };
-                locate(args[1]);
-                std::string rendered = unsupported ? unsupported->to_input_form() : args[1].to_input_form();
+                const auto& diagnostic_pattern = failed_string_pattern
+                    ? *failed_string_pattern : args[1];
+                locate(diagnostic_pattern);
+                std::string rendered = unsupported ? unsupported->to_input_form()
+                    : diagnostic_pattern.to_input_form();
                 if (unsupported && unsupported->args().size() == 1)
                     rendered = unsupported->args()[0].to_input_form() + ".";
                 const auto message = call("MessageName", {symbol(function), string("error")});

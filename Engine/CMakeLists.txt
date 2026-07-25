@@ -122,6 +122,7 @@ add_library(tungsten_cpp STATIC
     cpp/src/parser.cpp
     cpp/src/parser_corpus.cpp
     cpp/src/repl.cpp
+    cpp/src/unicode.cpp
     cpp/src/wolfram_strings.cpp
     cpp/src/wolfram_processes.cpp
 )

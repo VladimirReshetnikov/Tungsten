@@ -580,6 +580,320 @@ int main() {
             "ranked selection diagnostic: " + diagnostic.source);
     }
 
+    const std::vector<std::pair<std::string, std::string>> string_parity_cases{
+        {u8R"WL(ToUpperCase["café λ"])WL", u8R"WL("CAFÉ Λ")WL"},
+        {u8R"WL(ToLowerCase["CAFÉ Λ"])WL", u8R"WL("café λ")WL"},
+        {u8R"WL(Capitalize["élan λ"])WL", u8R"WL("Élan λ")WL"},
+        {u8R"WL(ToUpperCase["𐐨 ﬃ"])WL", u8R"WL("𐐀 FFI")WL"},
+        {u8R"WL(ToLowerCase["İ ΟΣ ΟΣΑ"])WL", u8R"WL("i̇ ος οσα")WL"},
+        {u8R"WL(ToLowerCase["AΣ́B ÁΣ"])WL", u8R"WL("aσ́b áς")WL"},
+        {u8R"WL(Capitalize["ﬃle"])WL", R"WL("FFIle")WL"},
+        {u8R"WL(ToUpperCase[{"café", {"λ"}}])WL",
+            u8R"WL(List["CAFÉ", List["Λ"]])WL"},
+        {u8R"WL(StringTake["café λ", {1}])WL", u8R"WL("c")WL"},
+        {u8R"WL(StringDrop["café λ", {1}])WL", u8R"WL("afé λ")WL"},
+        {R"WL(StringTake["abc", {3, 1, -1}])WL", R"WL("cba")WL"},
+        {R"WL(StringTake["abc", {{1}, {-1}}])WL", R"WL("abc")WL"},
+        {R"WL(StringDrop["abc", {{1}, {-1}}])WL", R"WL("")WL"},
+        {R"WL(StringTake["abc", UpTo[2]])WL", R"WL("ab")WL"},
+        {R"WL(StringDrop["abc", All])WL", R"WL("")WL"},
+        {R"WL(StringSplit["a b", ""])WL", R"WL(List["a b"])WL"},
+        {R"WL(StringSplit["", ""])WL", "List[]"},
+        {u8R"WL(StringSplit["a b"])WL", R"WL(List["a", "b"])WL"},
+        {R"WL(StringPosition["aba", "", 2])WL",
+            "List[List[1, 0], List[2, 1]]"},
+        {u8R"WL(StringPosition["café λ", ""])WL",
+            "List[List[1, 0], List[2, 1], List[3, 2], List[4, 3], "
+            "List[5, 4], List[6, 5], List[7, 6]]"},
+        {u8R"WL(StringPosition["café λ", LetterCharacter])WL",
+            "List[List[1, 1], List[2, 2], List[3, 3], List[4, 4], List[6, 6]]"},
+        {R"WL(StringPosition["abc", LetterCharacter, 0])WL", "List[]"},
+        {u8R"WL(StringPosition["café λ", __])WL",
+            "List[List[1, 6], List[2, 6], List[3, 6], List[4, 6], "
+            "List[5, 6], List[6, 6]]"},
+        {u8R"WL(StringEndsQ["café λ", LetterCharacter])WL", "True"},
+        {u8R"WL(StringCases["café λ", ""])WL",
+            R"WL(List["", "", "", "", "", "", ""])WL"},
+        {u8R"WL(StringCases["café λ", LetterCharacter])WL",
+            u8R"WL(List["c", "a", "f", "é", "λ"])WL"},
+        {u8R"WL(StringCases["𐐨", LetterCharacter])WL",
+            u8R"WL(List["𐐨"])WL"},
+        {u8R"WL(StringCases["éλ", LetterCharacter..])WL",
+            u8R"WL(List["éλ"])WL"},
+        {u8R"WL(StringCases["é", Alternatives[LetterCharacter, "x"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["é", Pattern[x, LetterCharacter] :> x])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["١", DigitCharacter])WL",
+            u8R"WL(List["١"])WL"},
+        {u8R"WL(StringCases[" ", WhitespaceCharacter])WL",
+            u8R"WL(List[" "])WL"},
+        {u8R"WL(StringCases["—", PunctuationCharacter])WL",
+            u8R"WL(List["—"])WL"},
+        {u8R"WL(StringCases["é", WordCharacter])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["a١!", Except[DigitCharacter]])WL",
+            u8R"WL(List["a", "!"])WL"},
+        {R"WL(StringCases["!", Except[DigitCharacter, LetterCharacter]])WL",
+            "List[]"},
+        {u8R"WL(StringCases["𐐨", RegularExpression["."]])WL",
+            u8R"WL(List["𐐨"])WL"},
+        {u8R"WL(StringCases["éé", RegularExpression["é+"]])WL",
+            u8R"WL(List["éé"])WL"},
+        {u8R"WL(StringCases["É", RegularExpression["(?i)é"]])WL",
+            u8R"WL(List["É"])WL"},
+        {u8R"WL(StringCases["١٢", RegularExpression["\d{2}"]])WL",
+            u8R"WL(List["١٢"])WL"},
+        {u8R"WL(StringCases["é", RegularExpression["(?:é|λ)"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["éλ", RegularExpression["é."]])WL",
+            u8R"WL(List["éλ"])WL"},
+        {u8R"WL(StringCases["١٢", RegularExpression["\d\d"]])WL",
+            u8R"WL(List["١٢"])WL"},
+        {u8R"WL(StringCases["é", RegularExpression["[éλ]"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["É", RegularExpression["(?i)(é)"]])WL",
+            u8R"WL(List["É"])WL"},
+        {R"WL(StringCases["abc", RegularExpression["a.(?=c)"]])WL",
+            R"WL(List["ab"])WL"},
+        {u8R"WL(StringCases["İıſK", RegularExpression["(?i)[isk]"]])WL",
+            u8R"WL(List["İ", "ı", "ſ", "K"])WL"},
+        {u8R"WL(StringCases["ΣσςµΜμ", RegularExpression["(?i)[σμ]"]])WL",
+            u8R"WL(List["Σ", "σ", "ς", "µ", "Μ", "μ"])WL"},
+        {u8R"WL(StringCases["éA", RegularExpression["(?i)[a-z]"]])WL",
+            R"WL(List["A"])WL"},
+        {u8R"WL(StringCases["é\n", RegularExpression["^é$"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["é", RegularExpression["\Aé\Z"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["é", RegularExpression["\u00e9"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["é", RegularExpression["\xE9"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["λ", RegularExpression["(?:é?){2}"]])WL",
+            R"WL(List["", ""])WL"},
+        {u8R"WL(StringCases["λ", RegularExpression["(?:é*)+"]])WL",
+            R"WL(List["", ""])WL"},
+        {u8R"WL(StringCases[FromCharacterCode[{8,233}], RegularExpression["[\bé]+"]])WL",
+            std::string("List[\"") + '\b' + u8"é\"]"},
+        {u8R"WL(StringCases[FromCharacterCode[{8,233}], RegularExpression["[^\b]+"]])WL",
+            u8R"WL(List["é"])WL"},
+        {u8R"WL(StringCases["a", RegularExpression["é?"]])WL",
+            R"WL(List["", ""])WL"},
+        {u8R"WL(StringMatchQ["éλ", RegularExpression["é|éλ"]])WL",
+            "False"},
+        {u8R"WL(StringEndsQ["éλ", RegularExpression["é|éλ"]])WL",
+            "False"},
+        {u8R"WL(StringCases["éé", StringExpression[RegularExpression["é+"], "é"]])WL",
+            "List[]"},
+        {R"WL(StringMatchQ["ab", RegularExpression["a|ab"]])WL",
+            "False"},
+        {R"WL(StringCases["aa", StringExpression[RegularExpression["a+"], "a"]])WL",
+            "List[]"},
+        {R"WL(StringCases["AB", StringExpression[RegularExpression["(?i)a"], "b"]])WL",
+            "List[]"},
+        {R"WL(StringCases["ab", StringExpression["A", RegularExpression["(?i)b"]]])WL",
+            "List[]"},
+        {u8R"WL(StringCases["aé", RegularExpression["^"]])WL",
+            R"WL(List[""])WL"},
+        {R"WL(StringCases["x\na", RegularExpression["^a"]])WL", "List[]"},
+        {R"WL(StringCases["x\na", StringExpression[StartOfLine, "a"]])WL",
+            R"WL(List["a"])WL"},
+        {R"WL(StringCases["a", Alternatives[RegularExpression["a(?=b)"], LetterCharacter]])WL",
+            R"WL(List["a"])WL"},
+        {u8R"WL(StringCases["àzê", CharacterRange["à", "ê"]])WL",
+            u8R"WL(List["à", "ê"])WL"},
+        {u8R"WL(StringCases["١", NumberString])WL",
+            u8R"WL(List["١"])WL"},
+        {R"WL(StringCases["ab", Alternatives[LetterCharacter, __]])WL",
+            R"WL(List["a", "b"])WL"},
+        {R"WL(StringCases["ab", Shortest[Longest[__]]])WL",
+            R"WL(List["ab"])WL"},
+        {R"WL(StringCases["", PatternTest[___, DigitQ]])WL",
+            R"WL(List[""])WL"},
+        {R"WL(StringCases["ab", LetterCharacter -> Nothing])WL", "List[]"},
+        {R"WL(StringCases["ab", LetterCharacter -> Sequence[x, y]])WL",
+            "List[x, y, x, y]"},
+        {R"WL(StringCases["a", {{"a"}}])WL", R"WL(List["a"])WL"},
+        {R"WL(StringMatchQ["ab", Alternatives["a", "ab"]])WL", "True"},
+        {R"WL(StringEndsQ["ab", Alternatives["a", "ab"]])WL", "True"},
+        {R"WL(StringCases["ab", StringExpression[RegularExpression["(a)"], Pattern[x, _]] -> x])WL",
+            R"WL(List["b"])WL"},
+        {u8R"WL(StringReplace["café λ", "" -> "x"])WL",
+            R"WL("xxxxxxx")WL"},
+        {R"WL(StringReplace["", "" -> f["x"]])WL", R"WL(f["x"])WL"},
+        {R"WL(StringReplace["a", "a" -> f["x"]])WL", R"WL(f["x"])WL"},
+        {R"WL(StringReplace["aa", "a" -> StringExpression[f, g]])WL",
+            R"WL(StringExpression[f, g, f, g])WL"},
+        {R"WL(StringReplace["ba", "a" -> StringExpression[f, g]])WL",
+            R"WL(StringExpression["b", f, g])WL"},
+        {R"WL(StringReplace["a", {{"a" -> "x"}}])WL", R"WL("x")WL"},
+        {R"WL(CompoundExpression[n = 0, StringReplace["aa", "a" -> (n = n + 1)]])WL",
+            "StringExpression[1, 1]"},
+        {R"WL(CompoundExpression[n = 0, StringReplace["aa", "a" :> (n = n + 1)]])WL",
+            "StringExpression[1, 2]"},
+    };
+    for (const auto& [source, expected] : string_parity_cases)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "string evaluator parity: " + source);
+
+    struct StringDiagnosticCase {
+        std::string source;
+        std::string expected_result;
+        std::string expected_message;
+    };
+    const std::vector<StringDiagnosticCase> string_diagnostic_cases{
+        {R"WL(StringTake["", 1])WL", R"WL(StringTake["", 1])WL",
+            "StringTake::error: Part index 1 is out of range for length 0."},
+        {R"WL(StringDrop["", -1])WL", R"WL(StringDrop["", -1])WL",
+            "StringDrop::error: Only top-level Part specifications may use index 0."},
+        {R"WL(StringTake["a", {1, 2}])WL",
+            R"WL(StringTake["a", List[1, 2]])WL",
+            "StringTake::error: Part index 2 is out of range for length 1."},
+        {R"WL(StringTake["a", {x}])WL",
+            R"WL(StringTake["a", List[x]])WL",
+            "StringTake::error: StringTake single-element list specifications "
+            "must contain an integer, All, or UpTo[n]."},
+        {R"WL(StringSplit["a", Whitespace])WL",
+            R"WL(StringSplit["a", Whitespace])WL",
+            "StringSplit::error: StringSplit currently expects a literal-string "
+            "separator or a list of them."},
+        {R"WL(StringSplit["a", {",", Whitespace}])WL",
+            R"WL(StringSplit["a", List[",", Whitespace]])WL",
+            "StringSplit::error: StringSplit currently expects literal-string separators."},
+        {R"WL(StringPosition["a", "a", -1])WL",
+            R"WL(StringPosition["a", "a", -1])WL",
+            "StringPosition::error: Match limits must be non-negative integers or Infinity."},
+        {R"WL(StringReplace["a", "a"])WL",
+            R"WL(StringReplace["a", "a"])WL",
+            "StringReplace::error: StringReplace expects a rule or a list of rules."},
+        {R"WL(StringPosition[{"a", 1}, "a"])WL",
+            R"WL(StringPosition[List["a", 1], "a"])WL",
+            "StringPosition::error: StringPosition expects a string or a list of strings."},
+        {R"WL(StringCases[{"a", 1}, "a"])WL",
+            R"WL(StringCases[List["a", 1], "a"])WL",
+            "StringCases::error: StringCases expects a string or a list of strings."},
+        {R"WL(StringReplace[{"a", 1}, "a" -> "x"])WL",
+            R"WL(StringReplace[List["a", 1], Rule["a", "x"]])WL",
+            "StringReplace::error: StringReplace expects a string or a list of strings."},
+        {R"WL(StringContainsQ[{"a", 1}, "a"])WL",
+            R"WL(StringContainsQ[List["a", 1], "a"])WL",
+            "StringContainsQ::error: StringContainsQ expects a string or a list of strings."},
+        {R"WL(StringTake[{"abc", 1}, 1])WL",
+            R"WL(StringTake[List["abc", 1], 1])WL",
+            "StringTake::error: StringTake expects a string or a list of strings."},
+        {R"WL(StringSplit[{"a b", 1}])WL",
+            R"WL(StringSplit[List["a b", 1]])WL",
+            "StringSplit::error: StringSplit expects a string or a list of strings."},
+        {R"WL(StringContainsQ["a", "a", 0])WL",
+            R"WL(StringContainsQ["a", "a", 0])WL",
+            "StringContainsQ::error: StringContainsQ expects a string and a pattern."},
+        {R"WL(StringPosition[])WL", R"WL(StringPosition[])WL",
+            "StringPosition::error: StringPosition expects a string, a pattern, and an optional match limit."},
+        {R"WL(StringPosition["a", "a", 1, 2])WL",
+            R"WL(StringPosition["a", "a", 1, 2])WL",
+            "StringPosition::error: StringPosition expects a string, a pattern, and an optional match limit."},
+        {R"WL(StringCases[])WL", R"WL(StringCases[])WL",
+            "StringCases::error: StringCases expects a string, a pattern or rule, and an optional match limit."},
+        {R"WL(StringCases["a"])WL", R"WL(StringCases["a"])WL",
+            "StringCases::error: StringCases expects a string, a pattern or rule, and an optional match limit."},
+        {R"WL(StringCases["a", "a", 1, 2])WL",
+            R"WL(StringCases["a", "a", 1, 2])WL",
+            "StringCases::error: StringCases expects a string, a pattern or rule, and an optional match limit."},
+        {R"WL(StringReplace[])WL", R"WL(StringReplace[])WL",
+            "StringReplace::error: StringReplace expects a string, rules, and an optional replacement limit."},
+        {R"WL(StringReplace["a"])WL", R"WL(StringReplace["a"])WL",
+            "StringReplace::error: StringReplace expects a string, rules, and an optional replacement limit."},
+        {R"WL(StringReplace["a", "a" -> "x", 1, 2])WL",
+            R"WL(StringReplace["a", Rule["a", "x"], 1, 2])WL",
+            "StringReplace::error: StringReplace expects a string, rules, and an optional replacement limit."},
+        {u8R"WL(StringCases["éλ", RegularExpression["é(?=λ)"]])WL",
+            u8R"WL(StringCases["éλ", RegularExpression["é(?=λ)"]])WL",
+            "StringCases::error: Unsupported Wolfram string-pattern form in the "
+            "current Tungsten subset: RegularExpression[\"é(?=λ)\"]."},
+        {u8R"WL(StringCases["é", RegularExpression["\N{LATIN SMALL LETTER E WITH ACUTE}"]])WL",
+            u8R"WL(StringCases["é", RegularExpression["\\N{LATIN SMALL LETTER E WITH ACUTE}"]])WL",
+            "StringCases::error: Unsupported Wolfram string-pattern form in the "
+            "current Tungsten subset: RegularExpression[\"\\\\N{LATIN SMALL "
+            "LETTER E WITH ACUTE}\"]."},
+        {u8R"WL(StringCases["é", RegularExpression["\z"]])WL",
+            u8R"WL(StringCases["é", RegularExpression["\\z"]])WL",
+            "StringCases::error: Unsupported Wolfram string-pattern form in the "
+            "current Tungsten subset: RegularExpression[\"\\\\z\"]."},
+        {R"WL(StringCases[" ", RegularExpression["(?=\s)"]])WL",
+            R"WL(StringCases[" ", RegularExpression["(?=\\s)"]])WL",
+            "StringCases::error: Unsupported Wolfram string-pattern form in the "
+            "current Tungsten subset: RegularExpression[\"(?=\\\\s)\"]."},
+        {R"WL(StringCases["a\n", RegularExpression["a(?=$)"]])WL",
+            R"WL(StringCases["a\n", RegularExpression["a(?=$)"]])WL",
+            "StringCases::error: Unsupported Wolfram string-pattern form in the "
+            "current Tungsten subset: RegularExpression[\"a(?=$)\"]."},
+        {R"WL(StringCases["aaa", RegularExpression["a++a"]])WL",
+            R"WL(StringCases["aaa", RegularExpression["a++a"]])WL",
+            "StringCases::error: Unsupported Wolfram string-pattern form in the "
+            "current Tungsten subset: RegularExpression[\"a++a\"]."},
+        {R"WL(StringCases["2024", StringExpression[DatePattern[{"Year"}], RegularExpression[""]]])WL",
+            R"WL(StringCases["2024", StringExpression[DatePattern[List["Year"]], RegularExpression[""]]])WL",
+            "StringCases::error: Unsupported Wolfram string-pattern form in the "
+            "current Tungsten subset: DatePattern[{\"Year\"}]~~"
+            "RegularExpression[\"\"]."},
+    };
+    for (const auto& diagnostic : string_diagnostic_cases) {
+        Evaluator string_diagnostics;
+        check_equal(string_diagnostics.evaluate(parse_input_form(
+            diagnostic.source)).to_full_form(), diagnostic.expected_result,
+            "string failure remains inert: " + diagnostic.source);
+        const auto function = diagnostic.source.substr(
+            0, diagnostic.source.find('['));
+        check_equal(string_diagnostics.messages().empty() ? ""
+                : string_diagnostics.messages().front().to_full_form(),
+            "MessageName[" + function + ", \"error\"]",
+            "string diagnostic message name: " + diagnostic.source);
+        check_equal(string_diagnostics.message_texts().empty() ? ""
+                : string_diagnostics.message_texts().front(),
+            diagnostic.expected_message,
+            "string diagnostic text: " + diagnostic.source);
+    }
+
+    const auto check_held_string_spec = [&](const std::string& setup,
+        const std::string& source, const std::string& expected,
+        const std::string& function, const std::string& expected_message) {
+        Evaluator held_string_spec;
+        (void)held_string_spec.evaluate(parse_input_form(setup));
+        check_equal(held_string_spec.evaluate(parse_input_form(source)).to_full_form(),
+            expected, "held string specification remains raw: " + source);
+        check_equal(held_string_spec.messages().empty() ? ""
+                : held_string_spec.messages().front().to_full_form(),
+            "MessageName[" + function + ", \"error\"]",
+            "held string specification message name: " + source);
+        check_equal(held_string_spec.message_texts().empty() ? ""
+                : held_string_spec.message_texts().front(),
+            expected_message,
+            "held string specification diagnostic: " + source);
+    };
+    check_held_string_spec(R"WL(p = "a")WL", R"WL(StringCases["a", p])WL",
+        R"WL(StringCases["a", p])WL", "StringCases",
+        "StringCases::error: Unsupported Wolfram string-pattern form in the current Tungsten subset: p.");
+    check_held_string_spec(R"WL(r = "a" -> "x")WL",
+        R"WL(StringReplace["a", r])WL", R"WL(StringReplace["a", r])WL",
+        "StringReplace",
+        "StringReplace::error: StringReplace expects a rule or a list of rules.");
+    check_held_string_spec(R"WL(p = "a")WL",
+        R"WL(StringCases["a", p -> "x"])WL",
+        R"WL(StringCases["a", Rule[p, "x"]])WL", "StringCases",
+        "StringCases::error: Unsupported Wolfram string-pattern form in the current Tungsten subset: p.");
+    Evaluator held_rule_evaluation;
+    (void)held_rule_evaluation.evaluate(parse_input_form("n = 0"));
+    (void)held_rule_evaluation.evaluate(parse_input_form(
+        R"WL(StringCases["a", p -> (n = n + 1)])WL"));
+    check_equal(held_rule_evaluation.evaluate(parse_input_form("n")).to_full_form(),
+        "1", "immediate string Rule RHS evaluates during normalization");
+    (void)held_rule_evaluation.evaluate(parse_input_form("n = 0"));
+    (void)held_rule_evaluation.evaluate(parse_input_form(
+        R"WL(StringCases["a", p :> (n = n + 1)])WL"));
+    check_equal(held_rule_evaluation.evaluate(parse_input_form("n")).to_full_form(),
+        "0", "delayed string Rule RHS remains held when its pattern is invalid");
+
     const std::vector<std::pair<std::string, std::string>> take_drop_cases{
         {"Take[{a,b,c},{3,1,-1}]", "List[c, b, a]"},
         {"Drop[{a,b,c},{3,1,-1}]", "List[]"},
