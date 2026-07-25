@@ -441,6 +441,91 @@ int main() {
         check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
             "kernel parity evaluator: " + source);
 
+    const std::vector<std::pair<std::string, std::string>> structural_selector_cases{
+        {"Part[{a,b,c},{{1},{3}}]", "List[a, c]"},
+        {"Part[<|a->1,b->2,c->3|>,0]", "Association"},
+        {"Part[<|a->1,b->2,c->3|>,{1,-1}]",
+            "Association[Rule[a, 1], Rule[c, 3]]"},
+        {"Part[<|a->1,b->2,c->3|>,Span[1,2]]",
+            "Association[Rule[a, 1], Rule[b, 2]]"},
+        {"Extract[f[a,b,c],0]", "f"},
+        {"Extract[f[a,b,c],{{1},{3}}]", "List[a, c]"},
+        {"Delete[f[a,b,c],{{1},{3}}]", "f[b]"},
+        {"Insert[f[a,b,c],z,0]", "f[z, a, b, c]"},
+        {"Insert[f[a,b,c],z,{-1}]", "f[a, b, c, z]"},
+        {"Insert[f[a,b,c],z,{{1},{3}}]", "f[z, a, b, z, c]"},
+        {"Insert[<|a->1,b->2,c->3|>,z,{{1},{3}}]",
+            "Association[z, Rule[a, 1], Rule[b, 2], z, Rule[c, 3]]"},
+        {"ReplacePart[f[a,b,c],{{1},{3}}->z]", "f[z, b, z]"},
+        {"ReplacePart[<|a->1,b->2,c->3|>,{{1},{3}}->z]",
+            "Association[Rule[a, z], Rule[b, 2], Rule[c, z]]"},
+    };
+    for (const auto& [source, expected] : structural_selector_cases)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "structural selector/path parity: " + source);
+
+    const std::vector<std::pair<std::string, std::string>> conditional_same_q_cases{
+        {"DeleteCases[{a,b,c},x_ /; x===b]", "List[a, c]"},
+        {"DeleteCases[{a,b,c},x_ /; x===b,{0,Infinity}]", "List[a, c]"},
+        {"Replace[{a,b,c},x_ /; x===b->z,{0,Infinity}]", "List[a, z, c]"},
+        {"DeleteCases[f[a,b,c],x_ /; x===b]", "f[a, c]"},
+        {"DeleteCases[f[a,b,c],x_ /; x===b,{0,Infinity}]", "f[a, c]"},
+        {"Replace[f[a,b,c],x_ /; x===b->z,{0,Infinity}]", "f[a, z, c]"},
+    };
+    for (const auto& [source, expected] : conditional_same_q_cases)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "conditional SameQ pattern parity: " + source);
+
+    struct StructuralDiagnosticCase {
+        std::string source;
+        std::string expected_result;
+        std::string expected_message;
+    };
+    const std::vector<StructuralDiagnosticCase> structural_diagnostic_cases{
+        {"Part[{a,b,c},{0}]", "Part[List[a, b, c], List[0]]",
+            "Part::error: Part does not support index 0 in this position."},
+        {"Part[<|a->1,b->2,c->3|>,{{1},{3}}]",
+            "Part[Association[Rule[a, 1], Rule[b, 2], Rule[c, 3]], List[List[1], List[3]]]",
+            "Part::error: Unsupported selector inside Part specification: {{1}, {3}}."},
+        {"Extract[{a,b,c},4]", "Extract[List[a, b, c], 4]",
+            "Extract::error: Part specifications are invalid for {a, b, c}."},
+        {"Extract[{a,b,c},All]", "Extract[List[a, b, c], All]",
+            "Extract::error: Extract positions must be a position list or a list of position lists."},
+        {"Delete[{a,b,c},0]", "Delete[List[a, b, c], 0]",
+            "Delete::error: Position does not support index 0 in this position."},
+        {"Delete[{a,b,c},4]", "Delete[List[a, b, c], 4]",
+            "Delete::error: Delete positions are invalid for {a, b, c}."},
+        {"Delete[{a,b,c},All]", "Delete[List[a, b, c], All]",
+            "Delete::error: Unsupported position specification: All."},
+        {"Delete[{a,b,c},Span[1,2]]", "Delete[List[a, b, c], Span[1, 2]]",
+            "Delete::error: Unsupported position specification: ;; 2."},
+        {"Insert[{a,b,c},z,5]", "Insert[List[a, b, c], z, 5]",
+            "Insert::error: Insert positions are invalid for {a, b, c}."},
+        {"Insert[{a,b,c},z,All]", "Insert[List[a, b, c], z, All]",
+            "Insert::error: Insert expects an integer position, a position list, or a list of position lists."},
+        {"ReplacePart[{a,b,c},0->z]", "ReplacePart[List[a, b, c], Rule[0, z]]",
+            "ReplacePart::error: Position does not support index 0 in this position."},
+        {"ReplacePart[{a,b,c},All->z]",
+            "ReplacePart[List[a, b, c], Rule[All, z]]",
+            "ReplacePart::error: Unsupported position specification: All."},
+    };
+    for (const auto& diagnostic : structural_diagnostic_cases) {
+        Evaluator structural_diagnostics;
+        check_equal(structural_diagnostics.evaluate(parse_input_form(
+            diagnostic.source)).to_full_form(), diagnostic.expected_result,
+            "structural failure remains inert: " + diagnostic.source);
+        const auto function = diagnostic.source.substr(
+            0, diagnostic.source.find('['));
+        check_equal(structural_diagnostics.messages().empty() ? ""
+                : structural_diagnostics.messages().front().to_full_form(),
+            "MessageName[" + function + ", \"error\"]",
+            "structural diagnostic message name: " + diagnostic.source);
+        check_equal(structural_diagnostics.message_texts().empty() ? ""
+                : structural_diagnostics.message_texts().front(),
+            diagnostic.expected_message,
+            "structural diagnostic text: " + diagnostic.source);
+    }
+
     const std::vector<std::pair<std::string, std::string>> rounding_multiple_cases{
         {"Floor[-2.5,-2]", "-2"},
         {"Ceiling[.2,2]", "2"},

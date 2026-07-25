@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <locale>
 #include <map>
@@ -2608,6 +2609,564 @@ std::optional<Expr> selector_key(const Expr& selector) {
     return std::nullopt;
 }
 
+struct StructuralSelector {
+    std::optional<std::size_t> index;
+    std::optional<Expr> key;
+};
+
+struct StructuralSelection {
+    StructuralSelector selector;
+    Expr child;
+    std::optional<Expr> association_rule;
+};
+
+struct StructuralSelectionResult {
+    std::vector<StructuralSelection> selections;
+    bool invalid = false;
+    std::string error;
+};
+
+struct StructuralNumericResult {
+    std::vector<std::size_t> indices;
+    bool invalid = false;
+    std::string error;
+};
+
+enum class StructuralSelectorKind { None, Numeric, Key };
+
+StructuralSelectorKind structural_selector_kind(const Expr& expression) {
+    if (expression.kind() == ExprKind::Integer || is_symbol(expression, "All")
+        || expression.has_head("Span")) return StructuralSelectorKind::Numeric;
+    if (expression.kind() == ExprKind::String || selector_key(expression))
+        return StructuralSelectorKind::Key;
+    return StructuralSelectorKind::None;
+}
+
+std::optional<std::size_t> structural_index(
+    const mpz_class& raw_index, std::size_t length) {
+    if (raw_index == 0) return std::nullopt;
+    const mpz_class one_based = raw_index > 0
+        ? raw_index : mpz_class(std::to_string(length)) + raw_index + 1;
+    if (one_based < 1 || one_based > mpz_class(std::to_string(length)))
+        return std::nullopt;
+    return nonnegative_size_t(one_based);
+}
+
+StructuralNumericResult structural_numeric_selectors(
+    std::size_t length, const Expr& component, const std::string& function_name,
+    bool allow_head) {
+    StructuralNumericResult result;
+    const mpz_class length_value(std::to_string(length));
+
+    if (component.kind() == ExprKind::Integer) {
+        const auto raw_index = component.integer_value();
+        if (raw_index == 0) {
+            if (allow_head) result.indices.push_back(0);
+            else result.error = function_name
+                + " does not support index 0 in this position.";
+            return result;
+        }
+        const auto one_based = structural_index(raw_index, length);
+        if (!one_based) result.invalid = true;
+        else result.indices.push_back(*one_based);
+        return result;
+    }
+
+    if (is_symbol(component, "All")) {
+        result.indices.reserve(length);
+        for (std::size_t index = 1; index <= length; ++index)
+            result.indices.push_back(index);
+        return result;
+    }
+
+    if (component.has_head("Span")) {
+        if (component.args().size() != 2 && component.args().size() != 3) {
+            result.error = "Span must contain two or three arguments.";
+            return result;
+        }
+        auto endpoint = [&](const Expr& expression, const mpz_class& fallback) {
+            if (is_symbol(expression, "All")) return length_value;
+            if (expression.kind() != ExprKind::Integer) return fallback;
+            auto value = expression.integer_value();
+            if (value < 0) value += length_value + 1;
+            return value;
+        };
+        const auto first = endpoint(component.args()[0], mpz_class(1));
+        const auto last = endpoint(component.args()[1], length_value);
+        mpz_class step = 1;
+        if (component.args().size() == 3) {
+            if (component.args()[2].kind() != ExprKind::Integer) {
+                result.error = "Span steps must be integers.";
+                return result;
+            }
+            step = component.args()[2].integer_value();
+        }
+        if (step == 0) {
+            result.error = "Span step cannot be zero.";
+            return result;
+        }
+        for (auto raw_index = first;
+             step > 0 ? raw_index <= last : raw_index >= last;
+             raw_index += step) {
+            const auto one_based = structural_index(raw_index, length);
+            if (!one_based) result.invalid = true;
+            else result.indices.push_back(*one_based);
+        }
+        return result;
+    }
+
+    if (component.has_head("List")) {
+        for (const auto& item : component.args()) {
+            if (structural_selector_kind(item) == StructuralSelectorKind::Key) {
+                result.error = "Unsupported selector inside " + function_name
+                    + " specification: " + item.to_input_form() + ".";
+                return result;
+            }
+            const auto nested = structural_numeric_selectors(
+                length, item, function_name, false);
+            if (!nested.error.empty()) {
+                result.error = nested.error;
+                return result;
+            }
+            result.invalid = result.invalid || nested.invalid;
+            result.indices.insert(result.indices.end(),
+                nested.indices.begin(), nested.indices.end());
+        }
+        return result;
+    }
+
+    result.error = "Unsupported " + function_name + " specification: "
+        + component.to_input_form() + ".";
+    return result;
+}
+
+StructuralSelectionResult structural_component_selections(
+    const Expr& expression, const Expr& component, bool allow_head,
+    const std::string& function_name) {
+    StructuralSelectionResult result;
+    if (component.kind() == ExprKind::Integer
+        && component.integer_value() == 0) {
+        if (!allow_head) {
+            result.error = function_name
+                + " does not support index 0 in this position.";
+            return result;
+        }
+        result.selections.push_back({
+            StructuralSelector{std::size_t(0), std::nullopt}, expression.head(),
+            std::nullopt});
+        return result;
+    }
+
+    if (const auto rules = association_rules(expression)) {
+        auto append_key = [&](const Expr& key) {
+            const auto found = std::find_if(rules->begin(), rules->end(),
+                [&](const Expr& rule) { return rule.args()[0] == key; });
+            if (found == rules->end()) {
+                result.invalid = true;
+                return;
+            }
+            result.selections.push_back({
+                StructuralSelector{std::nullopt, key}, found->args()[1], *found});
+        };
+
+        if (component.kind() == ExprKind::String || selector_key(component)) {
+            append_key(selector_key(component).value_or(component));
+            return result;
+        }
+
+        if (component.has_head("List")) {
+            bool has_numeric = false;
+            bool has_key = false;
+            for (const auto& item : component.args()) {
+                const auto kind = structural_selector_kind(item);
+                if (kind == StructuralSelectorKind::None) {
+                    result.error = "Unsupported selector inside " + function_name
+                        + " specification: " + component.to_input_form() + ".";
+                    return result;
+                }
+                has_numeric = has_numeric || kind == StructuralSelectorKind::Numeric;
+                has_key = has_key || kind == StructuralSelectorKind::Key;
+            }
+            if (has_numeric && has_key) {
+                result.error =
+                    "Association selector lists may not mix numeric and key selectors.";
+                return result;
+            }
+            if (has_key) {
+                for (const auto& item : component.args())
+                    append_key(selector_key(item).value_or(item));
+                return result;
+            }
+        }
+
+        const auto numeric = structural_numeric_selectors(
+            rules->size(), component, function_name, false);
+        result.invalid = numeric.invalid;
+        result.error = numeric.error;
+        if (!result.error.empty()) return result;
+        for (const auto one_based : numeric.indices) {
+            const auto& rule = (*rules)[one_based - 1];
+            result.selections.push_back({
+                StructuralSelector{one_based, std::nullopt}, rule.args()[1], rule});
+        }
+        return result;
+    }
+
+    if (expression.kind() != ExprKind::Call) {
+        result.invalid = true;
+        return result;
+    }
+
+    const auto numeric = structural_numeric_selectors(
+        expression.args().size(), component, function_name, allow_head);
+    result.invalid = numeric.invalid;
+    result.error = numeric.error;
+    if (!result.error.empty()) return result;
+    for (const auto one_based : numeric.indices) {
+        result.selections.push_back({
+            StructuralSelector{one_based, std::nullopt},
+            one_based == 0 ? expression.head() : expression.args()[one_based - 1],
+            std::nullopt});
+    }
+    return result;
+}
+
+bool structural_multi_component(const Expr& component) {
+    return is_symbol(component, "All") || component.has_head("Span")
+        || component.has_head("List");
+}
+
+struct StructuralPartResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+StructuralPartResult structural_part(
+    const Expr& expression, const std::vector<Expr>& components,
+    std::size_t depth = 0) {
+    if (depth == components.size()) return {expression, {}};
+    const auto& component = components[depth];
+    const auto selected = structural_component_selections(
+        expression, component, true, "Part");
+    if (!selected.error.empty()) return {std::nullopt, selected.error};
+    const bool multi = structural_multi_component(component);
+    if (selected.invalid || (selected.selections.empty() && !multi)) {
+        return {std::nullopt, "Part specifications are invalid for "
+            + expression.to_input_form() + "."};
+    }
+    if (!multi) {
+        if (depth + 1 == components.size())
+            return {selected.selections.front().child, {}};
+        return structural_part(
+            selected.selections.front().child, components, depth + 1);
+    }
+
+    std::vector<Expr> transformed;
+    transformed.reserve(selected.selections.size());
+    for (const auto& selection : selected.selections) {
+        if (depth + 1 == components.size()) {
+            transformed.push_back(selection.child);
+            continue;
+        }
+        const auto child = structural_part(selection.child, components, depth + 1);
+        if (!child.error.empty()) return child;
+        transformed.push_back(*child.value);
+    }
+
+    if (association_rules(expression)) {
+        std::vector<Expr> entries;
+        entries.reserve(transformed.size());
+        for (std::size_t index = 0; index < transformed.size(); ++index) {
+            if (!selected.selections[index].association_rule) continue;
+            const auto& rule = *selected.selections[index].association_rule;
+            entries.push_back(call(rule.head(), {rule.args()[0], transformed[index]}));
+        }
+        return {call("Association", std::move(entries)), {}};
+    }
+    return {call(expression.head(), std::move(transformed)), {}};
+}
+
+bool structural_selector_equal(
+    const StructuralSelector& left, const StructuralSelector& right) {
+    return left.index == right.index && left.key == right.key;
+}
+
+using StructuralPath = std::vector<StructuralSelector>;
+
+bool structural_path_equal(
+    const StructuralPath& left, const StructuralPath& right) {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index)
+        if (!structural_selector_equal(left[index], right[index])) return false;
+    return true;
+}
+
+bool structural_path_descending(
+    const StructuralPath& left, const StructuralPath& right) {
+    if (left.size() != right.size()) return left.size() > right.size();
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        const auto& lhs = left[index];
+        const auto& rhs = right[index];
+        if (structural_selector_equal(lhs, rhs)) continue;
+        if (lhs.key.has_value() != rhs.key.has_value()) return lhs.key.has_value();
+        if (lhs.index && rhs.index) return *lhs.index > *rhs.index;
+        return lhs.key->to_input_form() > rhs.key->to_input_form();
+    }
+    return false;
+}
+
+bool structural_position_component(const Expr& expression) {
+    if (structural_selector_kind(expression) != StructuralSelectorKind::None)
+        return true;
+    return expression.has_head("List")
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            [](const Expr& item) {
+                return structural_selector_kind(item)
+                    != StructuralSelectorKind::None;
+            });
+}
+
+bool structural_position_collection(const Expr& expression) {
+    return expression.has_head("List") && !expression.args().empty()
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            [](const Expr& item) {
+                return item.has_head("List")
+                    && std::all_of(item.args().begin(), item.args().end(),
+                        structural_position_component);
+            });
+}
+
+bool structural_single_position(const Expr& expression) {
+    if (expression.kind() == ExprKind::Integer
+        || expression.kind() == ExprKind::String || selector_key(expression))
+        return true;
+    return expression.has_head("List")
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            structural_position_component);
+}
+
+std::vector<Expr> structural_position_components(const Expr& expression) {
+    if (expression.has_head("List")) return expression.args();
+    return {expression};
+}
+
+struct StructuralPathResult {
+    std::vector<StructuralPath> paths;
+    bool invalid = false;
+    std::string error;
+};
+
+StructuralPathResult structural_exact_paths(
+    const Expr& expression, const std::vector<Expr>& components,
+    std::size_t depth = 0) {
+    if (depth == components.size()) return {{{}}, false, {}};
+    const auto selected = structural_component_selections(
+        expression, components[depth], false, "Position");
+    if (!selected.error.empty()) return {{}, false, selected.error};
+    StructuralPathResult result;
+    result.invalid = selected.invalid;
+    for (const auto& selection : selected.selections) {
+        auto children = structural_exact_paths(
+            selection.child, components, depth + 1);
+        if (!children.error.empty()) return children;
+        result.invalid = result.invalid || children.invalid;
+        for (auto& child : children.paths) {
+            child.insert(child.begin(), selection.selector);
+            result.paths.push_back(std::move(child));
+        }
+    }
+    return result;
+}
+
+StructuralPathResult structural_operation_paths(
+    const Expr& expression, const Expr& specification) {
+    StructuralPathResult result;
+    if (structural_position_collection(specification)) {
+        for (const auto& item : specification.args()) {
+            auto expanded = structural_exact_paths(
+                expression, structural_position_components(item));
+            if (!expanded.error.empty()) return expanded;
+            result.invalid = result.invalid || expanded.invalid;
+            result.paths.insert(result.paths.end(),
+                std::make_move_iterator(expanded.paths.begin()),
+                std::make_move_iterator(expanded.paths.end()));
+        }
+        return result;
+    }
+    if (structural_single_position(specification))
+        return structural_exact_paths(
+            expression, structural_position_components(specification));
+    result.error = "Unsupported position specification: "
+        + specification.to_input_form() + ".";
+    return result;
+}
+
+std::vector<StructuralPath> unique_structural_paths(
+    const std::vector<StructuralPath>& paths) {
+    std::vector<StructuralPath> result;
+    for (const auto& path : paths) {
+        if (std::none_of(result.begin(), result.end(), [&](const auto& existing) {
+            return structural_path_equal(path, existing);
+        })) result.push_back(path);
+    }
+    return result;
+}
+
+std::optional<std::size_t> structural_association_selection(
+    const std::vector<Expr>& rules, const StructuralSelector& selector) {
+    if (selector.index) {
+        if (*selector.index == 0 || *selector.index > rules.size())
+            return std::nullopt;
+        return *selector.index - 1;
+    }
+    if (!selector.key) return std::nullopt;
+    for (std::size_t index = 0; index < rules.size(); ++index)
+        if (rules[index].args()[0] == *selector.key) return index;
+    return std::nullopt;
+}
+
+std::pair<Expr, bool> structural_delete_at_path(
+    const Expr& expression, const StructuralPath& path,
+    std::size_t depth = 0) {
+    if (depth >= path.size()) return {expression, false};
+    if (const auto rules = association_rules(expression)) {
+        const auto selected = structural_association_selection(*rules, path[depth]);
+        if (!selected) return {expression, false};
+        auto entries = *rules;
+        if (depth + 1 == path.size()) {
+            entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(*selected));
+        } else {
+            auto child = structural_delete_at_path(
+                entries[*selected].args()[1], path, depth + 1);
+            if (!child.second) return {expression, false};
+            entries[*selected] = call(entries[*selected].head(),
+                {entries[*selected].args()[0], child.first});
+        }
+        return {call("Association", std::move(entries)), true};
+    }
+    if (expression.kind() != ExprKind::Call || !path[depth].index
+        || *path[depth].index == 0 || *path[depth].index > expression.args().size())
+        return {expression, false};
+    auto arguments = expression.args();
+    const auto selected = *path[depth].index - 1;
+    if (depth + 1 == path.size()) {
+        arguments.erase(arguments.begin() + static_cast<std::ptrdiff_t>(selected));
+    } else {
+        auto child = structural_delete_at_path(
+            arguments[selected], path, depth + 1);
+        if (!child.second) return {expression, false};
+        arguments[selected] = child.first;
+    }
+    return {call(expression.head(), std::move(arguments)), true};
+}
+
+std::pair<Expr, bool> structural_replace_at_path(
+    const Expr& expression, const StructuralPath& path, const Expr& replacement,
+    std::size_t depth = 0) {
+    if (depth == path.size()) return {replacement, true};
+    if (const auto rules = association_rules(expression)) {
+        const auto selected = structural_association_selection(*rules, path[depth]);
+        if (!selected) return {expression, false};
+        auto entries = *rules;
+        auto child = structural_replace_at_path(
+            entries[*selected].args()[1], path, replacement, depth + 1);
+        if (!child.second) return {expression, false};
+        entries[*selected] = call(entries[*selected].head(),
+            {entries[*selected].args()[0], child.first});
+        return {call("Association", std::move(entries)), true};
+    }
+    if (expression.kind() != ExprKind::Call || !path[depth].index
+        || *path[depth].index == 0 || *path[depth].index > expression.args().size())
+        return {expression, false};
+    auto arguments = expression.args();
+    const auto selected = *path[depth].index - 1;
+    auto child = structural_replace_at_path(
+        arguments[selected], path, replacement, depth + 1);
+    if (!child.second) return {expression, false};
+    arguments[selected] = child.first;
+    return {call(expression.head(), std::move(arguments)), true};
+}
+
+using InsertPath = std::vector<mpz_class>;
+
+struct InsertPathResult {
+    std::vector<InsertPath> paths;
+    std::string error;
+};
+
+InsertPathResult structural_insert_paths(const Expr& specification) {
+    if (specification.kind() == ExprKind::Integer)
+        return {{{specification.integer_value()}}, {}};
+    if (!specification.has_head("List")) {
+        return {{}, "Insert expects an integer position, a position list, or a "
+            "list of position lists."};
+    }
+    if (std::all_of(specification.args().begin(), specification.args().end(),
+        [](const Expr& item) { return item.kind() == ExprKind::Integer; })) {
+        InsertPath path;
+        for (const auto& item : specification.args())
+            path.push_back(item.integer_value());
+        return {{std::move(path)}, {}};
+    }
+    InsertPathResult result;
+    for (const auto& item : specification.args()) {
+        if (!item.has_head("List")
+            || !std::all_of(item.args().begin(), item.args().end(),
+                [](const Expr& component) {
+                    return component.kind() == ExprKind::Integer;
+                })) {
+            result.error = "Insert expects an integer position, a position list, "
+                "or a list of position lists.";
+            result.paths.clear();
+            return result;
+        }
+        InsertPath path;
+        for (const auto& component : item.args())
+            path.push_back(component.integer_value());
+        result.paths.push_back(std::move(path));
+    }
+    return result;
+}
+
+bool insert_path_descending(const InsertPath& left, const InsertPath& right) {
+    if (left.size() != right.size()) return left.size() > right.size();
+    return std::lexicographical_compare(right.begin(), right.end(),
+        left.begin(), left.end());
+}
+
+std::optional<std::size_t> structural_insert_offset(
+    const mpz_class& raw_index, std::size_t length) {
+    const mpz_class length_value(std::to_string(length));
+    mpz_class offset;
+    if (raw_index == 0) offset = 0;
+    else if (raw_index > 0) offset = raw_index - 1;
+    else offset = length_value + raw_index + 1;
+    if (offset < 0 || offset > length_value) return std::nullopt;
+    return nonnegative_size_t(offset);
+}
+
+std::pair<Expr, bool> structural_insert_at_path(
+    const Expr& expression, const InsertPath& path, const Expr& item,
+    std::size_t depth = 0) {
+    if (depth >= path.size() || expression.kind() != ExprKind::Call)
+        return {expression, false};
+    auto arguments = expression.args();
+    if (depth + 1 == path.size()) {
+        const auto offset = structural_insert_offset(
+            path[depth], arguments.size());
+        if (!offset) return {expression, false};
+        arguments.insert(arguments.begin() + static_cast<std::ptrdiff_t>(*offset), item);
+        return {call(expression.head(), std::move(arguments)), true};
+    }
+    const auto selected = structural_index(path[depth], arguments.size());
+    if (!selected) return {expression, false};
+    auto child = structural_insert_at_path(
+        arguments[*selected - 1], path, item, depth + 1);
+    if (!child.second) return {expression, false};
+    arguments[*selected - 1] = child.first;
+    return {call(expression.head(), std::move(arguments)), true};
+}
+
 std::optional<Expr> value_at_path(const Expr& target, const std::vector<Expr>& path, std::size_t depth = 0) {
     if (depth == path.size()) return target;
     if (const auto rules = association_rules(target)) {
@@ -2638,25 +3197,6 @@ Expr replace_at_path(const Expr& target, const std::vector<Expr>& path, std::siz
     if (!index) return target;
     auto args = target.args();
     args[*index] = replace_at_path(args[*index], path, depth + 1, value);
-    return call(target.head(), std::move(args));
-}
-
-Expr delete_at_path(const Expr& target, const std::vector<Expr>& path, std::size_t depth) {
-    if (target.kind() != ExprKind::Call || depth >= path.size()) return target;
-    if (const auto rules = association_rules(target)) {
-        auto values = *rules; std::optional<std::size_t> selected;
-        if (const auto key = selector_key(path[depth])) { for (std::size_t index = 0; index < values.size(); ++index) if (values[index].args()[0] == *key) { selected = index; break; } }
-        else selected = normalized_index(path[depth], values.size());
-        if (!selected) return target;
-        if (depth + 1 == path.size()) values.erase(values.begin() + static_cast<std::ptrdiff_t>(*selected));
-        else values[*selected] = call(values[*selected].head(), {values[*selected].args()[0], delete_at_path(values[*selected].args()[1], path, depth + 1)});
-        return call("Association", std::move(values));
-    }
-    const auto index = normalized_index(path[depth], target.args().size());
-    if (!index) return target;
-    auto args = target.args();
-    if (depth + 1 == path.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(*index));
-    else args[*index] = delete_at_path(args[*index], path, depth + 1);
     return call(target.head(), std::move(args));
 }
 
@@ -2881,6 +3421,10 @@ std::optional<bool> simple_truth(const Expr& expression) {
     if (is_symbol(expression, "False")) return false;
     if (expression.kind() != ExprKind::Call || expression.args().size() != 2) return std::nullopt;
     const auto* name = expression.head().symbol_name();
+    if (!name) return std::nullopt;
+    const auto operation = system_dispatch_name(*name);
+    if (operation == "SameQ") return expression.args()[0] == expression.args()[1];
+    if (operation == "UnsameQ") return expression.args()[0] != expression.args()[1];
     auto simple_value = [](auto&& self, const Expr& value) -> std::optional<double> {
         if (const auto number = numeric_real(value)) return number;
         if (value.has_head("Length") && value.args().size() == 1) return static_cast<double>(value.args()[0].length());
@@ -2911,8 +3455,7 @@ std::optional<bool> simple_truth(const Expr& expression) {
     };
     const auto left = simple_value(simple_value, expression.args()[0]);
     const auto right = simple_value(simple_value, expression.args()[1]);
-    if (!name || !left || !right) return std::nullopt;
-    const auto operation = system_dispatch_name(*name);
+    if (!left || !right) return std::nullopt;
     if (operation == "Equal") return *left == *right;
     if (operation == "Unequal") return *left != *right;
     if (operation == "Less") return *left < *right;
@@ -8519,15 +9062,15 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args[0].kind() == ExprKind::Call) for (const auto& item : args[0].args()) collect(collect, item);
         atoms.insert(atoms.end(), compounds.begin(), compounds.end()); return list(std::move(atoms));
     }
-    if (function == "Part" && args.size() >= 2) {
+    if (function == "Part") {
         auto invalid_part = [&](const std::string& detail) {
             const auto message = call("MessageName", {symbol("Part"), string("error")});
-            const auto text = detail.empty()
-                ? "Part::error: Part specifications are invalid for " + args[0].to_input_form() + "."
-                : "Part::error: " + detail;
-            emit_message(message, text);
+            emit_message(message, "Part::error: " + detail);
             return call(head, args);
         };
+        if (args.size() < 2)
+            return invalid_part(
+                "Part expects an expression and at least one part specification.");
         if (args[0].kind() == ExprKind::SparseArray) {
             const auto dense = sparse_dense_value(args[0]);
             auto select = [&](auto&& self, const Expr& value, std::size_t selector) -> std::optional<Expr> {
@@ -8550,87 +9093,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 return *selected;
             }
         }
-        Expr target = args[0];
-        for (std::size_t part = 1; part < args.size(); ++part) {
-            if (const auto rules = association_rules(target)) {
-                if (args[part].has_head("List")) {
-                    const bool has_key = std::any_of(args[part].args().begin(), args[part].args().end(),
-                        [](const Expr& value) { return value.has_head("Key") || value.kind() == ExprKind::String; });
-                    const bool has_numeric = std::any_of(args[part].args().begin(), args[part].args().end(),
-                        [](const Expr& value) { return value.kind() == ExprKind::Integer; });
-                    if (has_key && has_numeric)
-                        return invalid_part("Association selector lists may not mix numeric and key selectors.");
-                    std::vector<Expr> selected;
-                    for (const auto& specification : args[part].args()) {
-                        const auto key = selector_key(specification); if (!key) return invalid_part("");
-                        const auto found = std::find_if(rules->begin(), rules->end(), [&](const Expr& rule) { return rule.args()[0] == *key; }); if (found == rules->end()) return invalid_part(""); selected.push_back(*found);
-                    }
-                    target = call("Association", std::move(selected)); continue;
-                }
-                const auto key = selector_key(args[part]).value_or(args[part]);
-                if (args[part].has_head("Key") || args[part].kind() == ExprKind::String) {
-                    const auto found = std::find_if(rules->begin(), rules->end(), [&](const Expr& rule) { return rule.args()[0] == key; }); if (found == rules->end()) return call(head, args); target = found->args()[1]; continue;
-                }
-                const auto index = normalized_index(args[part], rules->size()); if (!index) return invalid_part(""); target = (*rules)[*index].args()[1]; continue;
-            }
-            if (is_symbol(args[part], "All") || args[part].has_head("Span")) {
-                if (target.kind() != ExprKind::Call) return invalid_part("");
-                std::vector<std::size_t> selected_indices;
-                const auto length = static_cast<long>(target.args().size());
-                if (is_symbol(args[part], "All")) {
-                    for (std::size_t index = 0; index < target.args().size(); ++index)
-                        selected_indices.push_back(index);
-                } else {
-                    const auto& specification = args[part];
-                    if (specification.args().size() > 3) return invalid_part("");
-                    const auto step = specification.args().size() >= 3
-                        ? machine_index(specification.args()[2]) : std::optional<long>(1);
-                    if (!step || *step == 0) return invalid_part("");
-                    auto endpoint = [&](std::size_t position, bool start) -> std::optional<long> {
-                        if (position >= specification.args().size()
-                            || is_symbol(specification.args()[position], "All"))
-                            return *step > 0 ? (start ? 1 : length) : (start ? length : 1);
-                        const auto value = machine_index(specification.args()[position]);
-                        if (!value || *value == 0) return std::nullopt;
-                        const auto normalized = *value < 0 ? length + *value + 1 : *value;
-                        if (normalized < 1 || normalized > length) return std::nullopt;
-                        return normalized;
-                    };
-                    const auto first = endpoint(0, true);
-                    const auto last = endpoint(1, false);
-                    if (!first || !last) return invalid_part("");
-                    for (long index = *first;
-                        *step > 0 ? index <= *last : index >= *last;) {
-                        selected_indices.push_back(static_cast<std::size_t>(index - 1));
-                        const auto next = checked_signed_sum(index, *step);
-                        if (!next) break;
-                        index = *next;
-                    }
-                }
-                std::vector<Expr> selected;
-                for (const auto index : selected_indices) selected.push_back(target.args()[index]);
-                target = call(target.head(), std::move(selected));
-                continue;
-            }
-            if (args[part].has_head("List")) {
-                std::vector<Expr> selected;
-                for (const auto& spec : args[part].args()) {
-                    const auto index = normalized_index(spec, target.args().size());
-                    if (!index) return invalid_part("");
-                    selected.push_back(target.args()[*index]);
-                }
-                target = call(target.head(), std::move(selected));
-                continue;
-            }
-            if (args[part].kind() != ExprKind::Integer || !args[part].integer_value().fits_slong_p()) return invalid_part("");
-            const auto raw_index = args[part].integer_value().get_si();
-            const auto length = static_cast<long>(target.args().size());
-            const auto index = raw_index < 0 ? length + raw_index : raw_index - 1;
-            if (raw_index == 0) target = target.head();
-            else if (index >= 0 && index < length) target = target.args()[static_cast<std::size_t>(index)];
-            else return invalid_part("");
-        }
-        return target;
+        const std::vector<Expr> components(args.begin() + 1, args.end());
+        const auto result = structural_part(args[0], components);
+        if (!result.error.empty()) return invalid_part(result.error);
+        return *result.value;
     }
     if (function == "First") {
         std::string error;
@@ -9400,12 +9866,27 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return list(std::move(result));
         }
     }
-    if (function == "Insert" && args.size() == 3 && args[0].kind() == ExprKind::Call && machine_index(args[2])) {
-        auto position = *machine_index(args[2]); const auto length = static_cast<long>(args[0].args().size());
-        if (position < 0) position = length + position + 2;
-        if (position >= 1 && position <= length + 1) {
-            auto values = args[0].args(); values.insert(values.begin() + position - 1, args[1]); return call(args[0].head(), std::move(values));
+    if (function == "Insert") {
+        auto invalid_insert = [&](const std::string& detail) {
+            const auto message = call("MessageName", {symbol("Insert"), string("error")});
+            emit_message(message, "Insert::error: " + detail);
+            return call(head, args);
+        };
+        if (args.size() != 3)
+            return invalid_insert("Insert expects exactly three arguments.");
+        auto paths = structural_insert_paths(args[2]);
+        if (!paths.error.empty()) return invalid_insert(paths.error);
+        std::stable_sort(paths.paths.begin(), paths.paths.end(), insert_path_descending);
+        auto result = args[0];
+        for (const auto& path : paths.paths) {
+            auto inserted = structural_insert_at_path(result, path, args[1]);
+            if (!inserted.second) {
+                return invalid_insert("Insert positions are invalid for "
+                    + args[0].to_input_form() + ".");
+            }
+            result = std::move(inserted.first);
         }
+        return result;
     }
     if (function == "FlattenAt" && args.size() == 2 && args[0].kind() == ExprKind::Call && machine_index(args[1])) {
         const auto position = normalized_index(args[1], args[0].args().size());
@@ -11050,35 +11531,111 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         for (const auto& item : args[0].args()) flatten(flatten, item, level, values);
         return call(selected_head, std::move(values));
     }
-    if (function == "Extract" && args.size() == 2) {
-        auto extract_one = [&](const Expr& position) {
-            const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position};
-            return value_at_path(args[0], path).value_or(call("Extract", {args[0], position}));
+    if (function == "Extract") {
+        auto invalid_extract = [&](const std::string& detail) {
+            const auto message = call("MessageName", {symbol("Extract"), string("error")});
+            emit_message(message, "Extract::error: " + detail);
+            return call(head, args);
         };
-        if (args[1].has_head("List") && !args[1].args().empty() && args[1].args()[0].has_head("List")) {
-            std::vector<Expr> values; for (const auto& path : args[1].args()) values.push_back(extract_one(path));
+        if (args.size() != 2)
+            return invalid_extract("Extract expects exactly two arguments.");
+        if (structural_position_collection(args[1])) {
+            std::vector<Expr> values;
+            values.reserve(args[1].args().size());
+            for (const auto& position : args[1].args()) {
+                const auto selected = structural_part(
+                    args[0], structural_position_components(position));
+                if (!selected.error.empty())
+                    return invalid_extract(selected.error);
+                values.push_back(*selected.value);
+            }
             return list(std::move(values));
         }
-        return extract_one(args[1]);
+        if (!structural_single_position(args[1])) {
+            return invalid_extract(
+                "Extract positions must be a position list or a list of position lists.");
+        }
+        const auto selected = structural_part(
+            args[0], structural_position_components(args[1]));
+        if (!selected.error.empty()) return invalid_extract(selected.error);
+        return *selected.value;
     }
-    if (function == "Delete" && args.size() == 2) {
-        std::vector<Expr> positions = args[1].has_head("List") && !args[1].args().empty()
-            && args[1].args()[0].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-        std::reverse(positions.begin(), positions.end());
+    if (function == "Delete") {
+        auto invalid_delete = [&](const std::string& detail) {
+            const auto message = call("MessageName", {symbol("Delete"), string("error")});
+            emit_message(message, "Delete::error: " + detail);
+            return call(head, args);
+        };
+        if (args.size() != 2)
+            return invalid_delete("Delete expects exactly two arguments.");
+        const auto expanded = structural_operation_paths(args[0], args[1]);
+        if (!expanded.error.empty()) return invalid_delete(expanded.error);
+        auto paths = unique_structural_paths(expanded.paths);
+        if (expanded.invalid || std::any_of(paths.begin(), paths.end(),
+            [](const auto& path) { return path.empty(); })) {
+            return invalid_delete("Delete positions are invalid for "
+                + args[0].to_input_form() + ".");
+        }
+        std::stable_sort(paths.begin(), paths.end(), structural_path_descending);
         auto result = args[0];
-        for (const auto& position : positions) {
-            const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position};
-            result = delete_at_path(result, path, 0);
+        for (const auto& path : paths) {
+            auto deleted = structural_delete_at_path(result, path);
+            if (!deleted.second) {
+                return invalid_delete("Delete positions are invalid for "
+                    + args[0].to_input_form() + ".");
+            }
+            result = std::move(deleted.first);
         }
         return remove_nothing_from_list_like(result);
     }
-    if (function == "ReplacePart" && args.size() == 2) {
-        std::vector<Expr> rules = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-        auto result = args[0];
+    if (function == "ReplacePart") {
+        auto invalid_replace = [&](const std::string& detail) {
+            const auto message = call(
+                "MessageName", {symbol("ReplacePart"), string("error")});
+            emit_message(message, "ReplacePart::error: " + detail);
+            return call(head, args);
+        };
+        if (args.size() != 2)
+            return invalid_replace("ReplacePart expects exactly two arguments.");
+
+        std::vector<Expr> rules;
+        if ((args[1].has_head("Rule") || args[1].has_head("RuleDelayed"))) {
+            if (args[1].args().size() != 2)
+                return invalid_replace(
+                    "ReplacePart rules must contain exactly two arguments.");
+            rules.push_back(args[1]);
+        } else if (args[1].has_head("List")) {
+            for (const auto& rule : args[1].args()) {
+                if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed"))
+                    || rule.args().size() != 2) {
+                    return invalid_replace(
+                        "ReplacePart expects a rule or a list of rules.");
+                }
+                rules.push_back(rule);
+            }
+        } else {
+            return invalid_replace("ReplacePart expects a rule or a list of rules.");
+        }
+
+        std::vector<std::pair<StructuralPath, Expr>> planned;
         for (const auto& rule : rules) {
-            if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed")) || rule.args().size() != 2) continue;
-            const auto path = rule.args()[0].has_head("List") ? rule.args()[0].args() : std::vector<Expr>{rule.args()[0]};
-            result = replace_at_path(result, path, 0, rule.args()[1]);
+            auto expanded = structural_operation_paths(args[0], rule.args()[0]);
+            if (!expanded.error.empty()) return invalid_replace(expanded.error);
+            for (auto& path : expanded.paths) {
+                if (std::any_of(planned.begin(), planned.end(), [&](const auto& item) {
+                    return structural_path_equal(item.first, path);
+                })) continue;
+                planned.emplace_back(std::move(path), rule.args()[1]);
+            }
+        }
+        std::stable_sort(planned.begin(), planned.end(),
+            [](const auto& left, const auto& right) {
+                return structural_path_descending(left.first, right.first);
+            });
+        auto result = args[0];
+        for (const auto& [path, replacement] : planned) {
+            auto replaced = structural_replace_at_path(result, path, replacement);
+            if (replaced.second) result = std::move(replaced.first);
         }
         return remove_nothing_from_list_like(result);
     }
