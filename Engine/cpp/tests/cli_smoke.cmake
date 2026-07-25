@@ -130,6 +130,47 @@ foreach(group IN ITEMS
     endif()
 endforeach()
 
+set(missing_wolfram_home "${SMOKE_ROOT}/missing-wolfram-home")
+execute_process(
+    COMMAND
+        "${CMAKE_COMMAND}" -E env
+        "TUNGSTEN_WOLFRAM_HOME=${missing_wolfram_home}"
+        "${CLI}" frontend probe
+    RESULT_VARIABLE frontend_unavailable_status
+    OUTPUT_VARIABLE frontend_unavailable_json
+    ERROR_VARIABLE frontend_unavailable_error)
+if(NOT frontend_unavailable_status EQUAL 0)
+    message(FATAL_ERROR
+        "non-strict unavailable FrontEnd probe returned "
+        "${frontend_unavailable_status}: ${frontend_unavailable_error}")
+endif()
+string(JSON frontend_unavailable_type
+    GET "${frontend_unavailable_json}" failure_type)
+if(NOT frontend_unavailable_type STREQUAL "KernelNotFound")
+    message(FATAL_ERROR
+        "non-strict unavailable FrontEnd probe lost its structured failure")
+endif()
+
+execute_process(
+    COMMAND
+        "${CMAKE_COMMAND}" -E env
+        "TUNGSTEN_WOLFRAM_HOME=${missing_wolfram_home}"
+        "${CLI}" frontend probe --require-success
+    RESULT_VARIABLE frontend_strict_status
+    OUTPUT_VARIABLE frontend_strict_json
+    ERROR_VARIABLE frontend_strict_error)
+if(NOT frontend_strict_status EQUAL 1)
+    message(FATAL_ERROR
+        "strict unavailable FrontEnd probe returned ${frontend_strict_status}; "
+        "expected 1: ${frontend_strict_error}")
+endif()
+string(JSON frontend_strict_type
+    GET "${frontend_strict_json}" failure_type)
+if(NOT frontend_strict_type STREQUAL "KernelNotFound")
+    message(FATAL_ERROR
+        "strict unavailable FrontEnd probe lost its structured failure")
+endif()
+
 execute_process(
     COMMAND "${CLI}" expr parse --code "1+1" --help
     RESULT_VARIABLE nested_help_status

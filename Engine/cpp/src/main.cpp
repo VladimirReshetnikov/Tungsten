@@ -1104,7 +1104,7 @@ int execute_frontend_command(int argc, char** argv) {
         else if (command == "run") result = controller.run(*code, !no_wrap);
         else result = controller.execute_token(*positional, file);
         std::cout << result.to_json().dump_pretty(2) << '\n';
-        return require_success && result.success == std::optional<bool>(false) ? 1 : 0;
+        return require_success && result.success != std::optional<bool>(true) ? 1 : 0;
     } catch (const std::exception& error) {
         std::cerr << "tungsten-cpp: frontend " << command
                   << " failed: " << error.what() << '\n';

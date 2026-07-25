@@ -34,9 +34,11 @@ try {
         @'
 @echo off
 > "%TUNGSTEN_FAKE_ARGUMENTS_FILE%" echo %*
-echo {"success":false,"error_type":"SyntheticFailure","error":"synthetic structured failure"}
+set "TUNGSTEN_FAKE_EXIT_CODE=0"
+echo %* | findstr /C:"--require-success" >nul && set "TUNGSTEN_FAKE_EXIT_CODE=1"
+echo {"success":null,"failure_type":"KernelNotFound","stderr":"synthetic unavailable kernel"}
 >&2 echo synthetic native stderr
-exit /b 1
+exit /b %TUNGSTEN_FAKE_EXIT_CODE%
 '@ | Set-Content -LiteralPath $fakeExecutable -Encoding Ascii
     }
     else {
@@ -44,9 +46,15 @@ exit /b 1
         @'
 #!/bin/sh
 printf '%s\n' "$@" > "${TUNGSTEN_FAKE_ARGUMENTS_FILE}"
-printf '%s\n' '{"success":false,"error_type":"SyntheticFailure","error":"synthetic structured failure"}'
+exit_code=0
+for argument in "$@"; do
+    if [ "$argument" = "--require-success" ]; then
+        exit_code=1
+    fi
+done
+printf '%s\n' '{"success":null,"failure_type":"KernelNotFound","stderr":"synthetic unavailable kernel"}'
 printf '%s\n' 'synthetic native stderr' >&2
-exit 1
+exit "$exit_code"
 '@ | Set-Content -LiteralPath $fakeExecutable -Encoding utf8NoBOM
         & chmod +x -- $fakeExecutable
         if ($LASTEXITCODE -ne 0) {
@@ -100,10 +108,10 @@ exit 1
         $nonStrictParameters = @{} + $contract.Parameters
         $payload = & $contract.Command @nonStrictParameters
         Assert-TungstenContract `
-            -Condition ($payload.success -eq $false) `
-            -Message "$($contract.Name) did not preserve a structured failure in non-strict mode."
+            -Condition ($null -eq $payload.success) `
+            -Message "$($contract.Name) did not preserve an unavailable result in non-strict mode."
         Assert-TungstenContract `
-            -Condition ($payload.error_type -eq "SyntheticFailure") `
+            -Condition ($payload.failure_type -eq "KernelNotFound") `
             -Message "$($contract.Name) returned an unexpected non-strict failure payload."
 
         $nonStrictArguments = Get-Content -LiteralPath $argumentsPath -Raw
