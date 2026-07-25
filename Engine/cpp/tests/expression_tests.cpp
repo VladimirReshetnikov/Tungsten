@@ -441,6 +441,60 @@ int main() {
         check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
             "kernel parity evaluator: " + source);
 
+    const std::vector<std::pair<std::string, std::string>> rounding_multiple_cases{
+        {"Floor[-2.5,-2]", "-2"},
+        {"Ceiling[.2,2]", "2"},
+        {"Round[2.5,2]", "2"},
+        {"Floor[3.7,.5]", "3.5"},
+        {"Floor[3.7,0.5`20]", "3.5`20."},
+    };
+    for (const auto& [source, expected] : rounding_multiple_cases)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "rounding multiple result type: " + source);
+
+    check_equal(evaluate(parse_input_form("RankedMin[{3,1,2},2]")).to_full_form(),
+        "2", "RankedMin selects a positive rank");
+    check_equal(evaluate(parse_input_form(
+        "RankedMax[<|a->3,b->1,c->2|>,-2]")).to_full_form(),
+        "2", "RankedMax selects a negative rank from association values");
+
+    struct RankedDiagnosticCase {
+        std::string source;
+        std::string expected_result;
+        std::string expected_message;
+    };
+    const std::vector<RankedDiagnosticCase> ranked_diagnostic_cases{
+        {"RankedMin[]", "RankedMin[]",
+            "RankedMin::error: RankedMin expects a list and an integer rank."},
+        {"RankedMax[x,1]", "RankedMax[x, 1]",
+            "RankedMax::error: RankedMax expects a list or association."},
+        {"RankedMin[{1,2},x]", "RankedMin[List[1, 2], x]",
+            "RankedMin::error: RankedMin expects an explicit integer rank."},
+        {"RankedMax[{},1]", "RankedMax[List[], 1]",
+            "RankedMax::error: RankedMax requires a nonempty list."},
+        {"RankedMin[{1,x},1]", "RankedMin[List[1, x], 1]",
+            "RankedMin::error: RankedMin currently expects explicit real-valued numbers."},
+        {"RankedMax[{1,2,3},4]", "RankedMax[List[1, 2, 3], 4]",
+            "RankedMax::error: RankedMax rank 4 is out of range for a list of length 3."},
+        {"RankedMin[{1,2,3},-5]", "RankedMin[List[1, 2, 3], -5]",
+            "RankedMin::error: RankedMin rank -5 is out of range for a list of length 3."},
+    };
+    for (const auto& diagnostic : ranked_diagnostic_cases) {
+        Evaluator ranked_diagnostics;
+        check_equal(ranked_diagnostics.evaluate(parse_input_form(
+            diagnostic.source)).to_full_form(), diagnostic.expected_result,
+            "ranked selection failure remains inert: " + diagnostic.source);
+        check_equal(ranked_diagnostics.messages().empty() ? ""
+                : ranked_diagnostics.messages().front().to_full_form(),
+            "MessageName[" + diagnostic.source.substr(0,
+                diagnostic.source.find('[')) + ", \"error\"]",
+            "ranked selection message name: " + diagnostic.source);
+        check_equal(ranked_diagnostics.message_texts().empty() ? ""
+                : ranked_diagnostics.message_texts().front(),
+            diagnostic.expected_message,
+            "ranked selection diagnostic: " + diagnostic.source);
+    }
+
     const std::vector<std::pair<std::string, std::string>> take_drop_cases{
         {"Take[{a,b,c},{3,1,-1}]", "List[c, b, a]"},
         {"Drop[{a,b,c},{3,1,-1}]", "List[]"},

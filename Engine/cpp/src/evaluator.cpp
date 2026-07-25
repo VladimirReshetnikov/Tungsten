@@ -9112,17 +9112,28 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (values.empty()) return list({symbol("Infinity"), call("Times", {integer(-1L), symbol("Infinity")})});
         return list({evaluate(call("Min", values)), evaluate(call("Max", std::move(values)))});
     }
-    if ((function == "RankedMin" || function == "RankedMax") && args.size() == 2
-        && args[0].kind() == ExprKind::Call
-        && args[1].kind() == ExprKind::Integer) {
-        const auto rules = association_rules(args[0]);
+    if (function == "RankedMin" || function == "RankedMax") {
+        std::string error;
         std::vector<Expr> values;
-        if (rules) {
+        if (args.size() != 2) {
+            error = function + " expects a list and an integer rank.";
+        } else if (const auto rules = association_rules(args[0])) {
             for (const auto& rule : *rules) values.push_back(rule.args()[1]);
-        } else values = args[0].args();
-        if (!values.empty() && std::all_of(values.begin(), values.end(), [](const Expr& value) {
+        } else if (args[0].has_head("List")) {
+            values = args[0].args();
+        } else {
+            error = function + " expects a list or association.";
+        }
+        if (error.empty() && args[1].kind() != ExprKind::Integer)
+            error = function + " expects an explicit integer rank.";
+        if (error.empty() && values.empty())
+            error = function + " requires a nonempty list.";
+        if (error.empty() && !std::all_of(values.begin(), values.end(), [](const Expr& value) {
                 return numeric_real(value).has_value();
             })) {
+            error = function + " currently expects explicit real-valued numbers.";
+        }
+        if (error.empty()) {
             std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
                 return *numeric_real(left) < *numeric_real(right);
             });
@@ -9136,7 +9147,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 if (const auto index = nonnegative_size_t(count + rank))
                     return values[*index];
             }
+            error = function + " rank " + rank.get_str()
+                + " is out of range for a list of length "
+                + std::to_string(values.size()) + ".";
         }
+        const auto message = call("MessageName", {symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return evaluated_expression;
     }
     if (function == "Mode" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
         const auto rules = association_rules(args[0]);
@@ -11227,10 +11244,22 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 const auto rounded_value = function == "Floor" ? std::floor(quotient)
                     : function == "Ceiling" ? std::ceil(quotient)
                     : round_binary64_ties_to_even(quotient);
-                const auto rounded = rounded_value == 0.0 ? 0.0 : rounded_value;
-                const auto product = *machine_unit * rounded;
-                return std::isfinite(product) ? real(real_text(product))
-                    : special_real("Overflow");
+                mpz_class rounded;
+                mpz_set_d(rounded.get_mpz_t(), rounded_value);
+                const mpq_class exact_product = *unit * rounded;
+                if (args[1].kind() != ExprKind::Real)
+                    return from_rational(exact_product);
+                if (is_machine_number(args[1])) {
+                    const auto product = *machine_unit
+                        * (rounded_value == 0.0 ? 0.0 : rounded_value);
+                    return std::isfinite(product) ? real(real_text(product))
+                        : special_real("Overflow");
+                }
+                const auto precision = explicit_real_precision(args[1].text());
+                if (!precision || !std::isfinite(*precision)
+                    || *precision > 1000000.0) return call(head, args);
+                return arbitrary_real_from_rational(exact_product,
+                    static_cast<std::size_t>(std::max(1.0, *precision)));
             }
             const mpq_class ratio = *value / *unit;
             mpz_class rounded = ratio.get_num() / ratio.get_den();
@@ -11246,16 +11275,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     : lower % 2 == 0 ? lower : lower + 1;
             }
             const mpq_class product = *unit * rounded;
-            if (args[0].kind() != ExprKind::Real && args[1].kind() != ExprKind::Real)
+            if (args[1].kind() != ExprKind::Real)
                 return from_rational(product);
-            double precision = 1000000.0;
-            for (const auto& argument : args) if (argument.kind() == ExprKind::Real) {
-                const auto requested = explicit_real_precision(argument.text());
-                if (!requested || !std::isfinite(*requested)) return call(head, args);
-                precision = std::min(precision, *requested);
-            }
+            const auto requested = explicit_real_precision(args[1].text());
+            if (!requested || !std::isfinite(*requested)
+                || *requested > 1000000.0) return call(head, args);
             return arbitrary_real_from_rational(product,
-                static_cast<std::size_t>(std::max(1.0, precision)));
+                static_cast<std::size_t>(std::max(1.0, *requested)));
         }
     }
     if (function == "Min" || function == "Max") {
