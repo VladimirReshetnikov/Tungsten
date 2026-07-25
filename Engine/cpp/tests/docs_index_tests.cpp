@@ -2,12 +2,21 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <sys/resource.h>
+#endif
 
 namespace {
 
@@ -70,6 +79,108 @@ std::string read_prefix(const fs::path& path, std::size_t size) {
     result.resize(static_cast<std::size_t>(stream.gcount()));
     return result;
 }
+
+std::string read_file(const fs::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) throw std::runtime_error("could not read " + path.string());
+    std::ostringstream contents;
+    contents << stream.rdbuf();
+    if (stream.bad()) throw std::runtime_error("could not read " + path.string());
+    return contents.str();
+}
+
+bool has_staging_artifacts(const fs::path& target) {
+    auto parent = target.parent_path();
+    if (parent.empty()) parent = fs::path(".");
+    if (!fs::exists(parent)) return false;
+    constexpr const char* prefix = ".tungsten-docs-index-staging-";
+    for (const auto& entry : fs::directory_iterator(parent)) {
+        const auto filename = entry.path().filename().u8string();
+        if (filename.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+}
+
+#ifdef _WIN32
+class HeldIndexReplacement {
+public:
+    explicit HeldIndexReplacement(const fs::path& path)
+        : handle_(CreateFileW(path.c_str(), GENERIC_READ,
+              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+              FILE_ATTRIBUTE_NORMAL, nullptr)) {
+        if (handle_ == INVALID_HANDLE_VALUE)
+            throw std::runtime_error(
+                "could not hold the existing index against replacement");
+    }
+
+    HeldIndexReplacement(const HeldIndexReplacement&) = delete;
+    HeldIndexReplacement& operator=(const HeldIndexReplacement&) = delete;
+
+    ~HeldIndexReplacement() {
+        if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+    }
+
+    void restore() {
+        if (handle_ == INVALID_HANDLE_VALUE) return;
+        const HANDLE handle = handle_;
+        handle_ = INVALID_HANDLE_VALUE;
+        if (CloseHandle(handle) == 0)
+            throw std::runtime_error(
+                "could not release the held documentation index");
+    }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
+#else
+class ScopedFileSizeLimit {
+public:
+    explicit ScopedFileSizeLimit(rlim_t limit) {
+        if (getrlimit(RLIMIT_FSIZE, &original_) != 0)
+            throw std::runtime_error("could not read the process file-size limit");
+        if (original_.rlim_cur <= limit)
+            throw std::runtime_error(
+                "process file-size limit is too small for the preservation test");
+
+        previous_handler_ = std::signal(SIGXFSZ, SIG_IGN);
+        if (previous_handler_ == SIG_ERR)
+            throw std::runtime_error("could not ignore SIGXFSZ");
+
+        auto restricted = original_;
+        restricted.rlim_cur = limit;
+        if (setrlimit(RLIMIT_FSIZE, &restricted) != 0) {
+            (void)std::signal(SIGXFSZ, previous_handler_);
+            throw std::runtime_error("could not restrict the process file-size limit");
+        }
+        active_ = true;
+    }
+
+    ScopedFileSizeLimit(const ScopedFileSizeLimit&) = delete;
+    ScopedFileSizeLimit& operator=(const ScopedFileSizeLimit&) = delete;
+
+    ~ScopedFileSizeLimit() {
+        if (!active_) return;
+        (void)setrlimit(RLIMIT_FSIZE, &original_);
+        (void)std::signal(SIGXFSZ, previous_handler_);
+    }
+
+    void restore() {
+        if (!active_) return;
+        const bool limit_restored = setrlimit(RLIMIT_FSIZE, &original_) == 0;
+        const bool handler_restored
+            = std::signal(SIGXFSZ, previous_handler_) != SIG_ERR;
+        active_ = false;
+        if (!limit_restored || !handler_restored)
+            throw std::runtime_error(
+                "could not restore the process file-size limit");
+    }
+
+private:
+    struct rlimit original_ {};
+    void (*previous_handler_)(int) = SIG_DFL;
+    bool active_ = false;
+};
+#endif
 
 WolframInstallation installation_for(
     std::vector<fs::path> roots, const fs::path& index_path) {
@@ -161,6 +272,8 @@ void test_build_search_read_and_resolve() {
     require(fs::exists(index_path), "build_index did not create the index");
     require(read_prefix(index_path, 16) == std::string("SQLite format 3\0", 16),
         "documentation index is not a SQLite database");
+    require(!has_staging_artifacts(index_path),
+        "successful index build left a staging artifact");
 
     const auto filename_hits = index.search("foo", index_path, 5, false);
     require(filename_hits.size() == 1, "case-insensitive filename search missed Foo.nb");
@@ -242,6 +355,8 @@ void test_fast_path_root_priority_and_index_lifecycle() {
         "ensure_index rebuild returned the wrong path");
     require(read_prefix(index_path, 16) == std::string("SQLite format 3\0", 16),
         "ensure_index(rebuild=true) did not replace the existing file");
+    require(!has_staging_artifacts(index_path),
+        "successful index rebuild left a staging artifact");
 
     write_file(second / "Guides" / "Topic.nb",
         "Notebook[{Cell[\"OldNeedle\",\"Text\"]},WindowTitle->Topic]");
@@ -254,6 +369,80 @@ void test_fast_path_root_priority_and_index_lifecycle() {
         "search rebuilt an existing index without request");
     require(index.search("NewNeedle", index_path, 5, true).size() == 1,
         "search(rebuild=true) did not refresh full-text content");
+}
+
+void test_failed_publish_cleans_staging_artifacts() {
+    TemporaryDirectory temporary("tungsten-cpp-doc-publish-failure");
+    const auto docs_root = temporary.path() / "docs";
+    write_file(docs_root / "Guides" / "Topic.nb",
+        "Notebook[{Cell[\"PublishFailureNeedle\",\"Text\"]},"
+        "WindowTitle->Topic]");
+
+    const auto target = temporary.path() / "state" / "docs.sqlite3";
+    const auto sentinel = target / "sentinel";
+    write_file(sentinel, "existing target");
+    DocumentationIndex index(installation_for({docs_root}, target));
+
+    bool io_error = false;
+    try {
+        (void)index.build_index(target);
+    } catch (const DocumentationError& error) {
+        io_error = error.code() == DocumentationErrorCode::Io;
+    }
+    require(io_error,
+        "failed staging publication did not report a typed I/O error");
+    require(fs::is_directory(target) && read_file(sentinel) == "existing target",
+        "failed staging publication modified the existing target");
+    require(!has_staging_artifacts(target),
+        "failed staging publication left a staging artifact");
+}
+
+void test_failed_rebuild_preserves_existing_database() {
+    TemporaryDirectory temporary("tungsten-cpp-doc-preserve-index");
+    const auto docs_root = temporary.path() / "docs";
+    const auto notebook = docs_root / "Guides" / "Topic.nb";
+    write_file(notebook,
+        "Notebook[{Cell[\"OldTransactionalNeedle\",\"Text\"]},"
+        "WindowTitle->Topic]");
+
+    const auto state = temporary.path() / "state";
+    const auto initial_target = state / "docs.sqlite3";
+    DocumentationIndex index(installation_for({docs_root}, initial_target));
+    (void)index.build_index(initial_target);
+
+    const auto original_bytes = read_file(initial_target);
+    write_file(notebook,
+        "Notebook[{Cell[\"NewTransactionalNeedle\",\"Text\"]},"
+        "WindowTitle->Topic]");
+
+#ifdef _WIN32
+    HeldIndexReplacement forced_failure(initial_target);
+#else
+    ScopedFileSizeLimit forced_failure(1024);
+#endif
+
+    bool expected_error = false;
+    try {
+        (void)index.build_index(initial_target);
+    } catch (const DocumentationError& error) {
+        expected_error = error.code()
+#ifdef _WIN32
+            == DocumentationErrorCode::Io;
+#else
+            == DocumentationErrorCode::Sqlite;
+#endif
+    }
+
+    forced_failure.restore();
+
+    require(expected_error, "forced rebuild failure reported the wrong error type");
+    require(read_file(initial_target) == original_bytes,
+        "failed rebuild changed the existing index bytes");
+    require(!has_staging_artifacts(initial_target),
+        "failed rebuild left a staging artifact");
+    require(index.search("OldTransactionalNeedle", initial_target, 5, false).size()
+            == 1,
+        "failed rebuild left the existing index unusable");
 }
 
 void test_failure_semantics() {
@@ -305,6 +494,8 @@ int main() {
         test_records_and_category_inference();
         test_build_search_read_and_resolve();
         test_fast_path_root_priority_and_index_lifecycle();
+        test_failed_publish_cleans_staging_artifacts();
+        test_failed_rebuild_preserves_existing_database();
         test_failure_semantics();
         test_symlink_boundary_safety();
         std::cout << "all C++ documentation-index tests passed\n";

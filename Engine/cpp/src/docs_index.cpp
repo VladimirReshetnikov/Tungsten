@@ -5,6 +5,9 @@
 #include "tungsten/wolfram_strings.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -21,6 +24,9 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace tungsten {
@@ -202,6 +208,105 @@ private:
 
 std::string path_text(const fs::path& path) { return path.u8string(); }
 
+fs::path sqlite_artifact_path(fs::path database_path, const char* suffix) {
+    database_path += suffix;
+    return database_path;
+}
+
+void remove_sqlite_artifacts(const fs::path& database_path) noexcept {
+    for (const char* suffix : {"", "-journal", "-wal", "-shm"}) {
+        std::error_code error;
+        fs::remove(sqlite_artifact_path(database_path, suffix), error);
+    }
+}
+
+fs::path reserve_staging_database(const fs::path& target) {
+    static std::atomic<std::uint64_t> sequence{0};
+    const auto stamp = static_cast<unsigned long long>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    const auto ticket = sequence.fetch_add(1, std::memory_order_relaxed);
+    const auto prefix = ".tungsten-docs-index-staging-"
+        + std::to_string(stamp) + '-'
+        + std::to_string(ticket) + '-';
+
+    for (unsigned int attempt = 0; attempt < 1000; ++attempt) {
+        const auto candidate = target.parent_path()
+            / fs::u8path(prefix + std::to_string(attempt));
+#ifdef _WIN32
+        const HANDLE handle = CreateFileW(candidate.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle != INVALID_HANDLE_VALUE) {
+            if (CloseHandle(handle) != 0) return candidate;
+            const auto code = GetLastError();
+            remove_sqlite_artifacts(candidate);
+            throw fs::filesystem_error("could not close staging documentation index",
+                candidate,
+                std::error_code(static_cast<int>(code), std::system_category()));
+        }
+        const auto code = GetLastError();
+        if (code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS) continue;
+        throw fs::filesystem_error("could not reserve staging documentation index",
+            candidate,
+            std::error_code(static_cast<int>(code), std::system_category()));
+#else
+        const int descriptor = ::open(candidate.c_str(), O_CREAT | O_EXCL | O_RDWR,
+            S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        if (descriptor >= 0) {
+            if (::close(descriptor) == 0) return candidate;
+            const int code = errno;
+            remove_sqlite_artifacts(candidate);
+            throw fs::filesystem_error("could not close staging documentation index",
+                candidate, std::error_code(code, std::generic_category()));
+        }
+        const int code = errno;
+        if (code == EEXIST) continue;
+        throw fs::filesystem_error("could not reserve staging documentation index",
+            candidate, std::error_code(code, std::generic_category()));
+#endif
+    }
+
+    throw fs::filesystem_error("could not reserve unique staging documentation index",
+        target, std::make_error_code(std::errc::file_exists));
+}
+
+class StagingDatabaseFile {
+public:
+    explicit StagingDatabaseFile(const fs::path& target)
+        : path_(reserve_staging_database(target)) {}
+
+    StagingDatabaseFile(const StagingDatabaseFile&) = delete;
+    StagingDatabaseFile& operator=(const StagingDatabaseFile&) = delete;
+
+    ~StagingDatabaseFile() { remove_sqlite_artifacts(path_); }
+
+    [[nodiscard]] const fs::path& path() const noexcept { return path_; }
+
+private:
+    fs::path path_;
+};
+
+void publish_staging_database(
+    const fs::path& staging_path, const fs::path& target) {
+#ifdef _WIN32
+    if (MoveFileExW(staging_path.c_str(), target.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+        != 0)
+        return;
+    const auto code = GetLastError();
+    throw fs::filesystem_error("could not publish documentation index",
+        staging_path, target,
+        std::error_code(static_cast<int>(code), std::system_category()));
+#else
+    std::error_code error;
+    fs::rename(staging_path, target, error);
+    if (error)
+        throw fs::filesystem_error(
+            "could not publish documentation index", staging_path, target, error);
+#endif
+}
+
 std::string sqlite_message(
     const SqliteApi& api, sqlite3* database, const std::string& context, int code,
     const std::string& explicit_message = {}) {
@@ -270,6 +375,15 @@ public:
 
     ~Database() {
         if (database_ != nullptr) api_.close(database_);
+    }
+
+    void close() {
+        if (database_ == nullptr) return;
+        const int result = api_.close(database_);
+        if (result != sqlite_ok)
+            throw_sqlite(api_, database_,
+                "could not close documentation index", result);
+        database_ = nullptr;
     }
 
     void execute(const std::string& sql) {
@@ -724,78 +838,85 @@ fs::path DocumentationIndex::build_index(
     const auto target = index_path.value_or(installation_.default_index_path);
     try {
         ensure_parent_directory(target);
-        if (fs::exists(target)) fs::remove(target);
+        StagingDatabaseFile staging(target);
+        {
+            Database database(staging.path());
+            database.execute(
+                "CREATE TABLE documents ("
+                "id INTEGER PRIMARY KEY,"
+                "title TEXT NOT NULL,"
+                "paclet TEXT NOT NULL,"
+                "kind TEXT NOT NULL,"
+                "category TEXT NOT NULL,"
+                "path TEXT NOT NULL,"
+                "preview TEXT NOT NULL,"
+                "text TEXT NOT NULL"
+                ");"
+                "CREATE VIRTUAL TABLE documents_fts USING fts5("
+                "title,paclet,kind,category,preview,text,"
+                "content='documents',content_rowid='id'"
+                ");"
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);");
+
+            JsonValue::Array roots;
+            roots.reserve(installation_.docs_roots.size());
+            for (const auto& root : installation_.docs_roots)
+                roots.emplace_back(path_text(root));
+            {
+                Statement metadata(database,
+                    "INSERT INTO metadata(key,value) VALUES(?1,?2)");
+                metadata.bind_text(1, "docs_roots");
+                metadata.bind_text(2, JsonValue(std::move(roots)).dump());
+                metadata.expect_done();
+            }
+
+            database.execute("BEGIN");
+            try {
+                Statement documents(database,
+                    "INSERT INTO documents(title,paclet,kind,category,path,preview,text)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7)");
+                Statement full_text(database,
+                    "INSERT INTO documents_fts(rowid,title,paclet,kind,category,preview,text)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7)");
+                for (const auto& notebook_path : notebook_files(
+                         installation_.docs_roots)) {
+                    const auto record = record_from_path(notebook_path);
+                    documents.bind_text(1, record.title);
+                    documents.bind_text(2, record.paclet);
+                    documents.bind_text(3, record.kind);
+                    documents.bind_text(4, record.category);
+                    documents.bind_text(5, record.path);
+                    documents.bind_text(6, record.preview);
+                    documents.bind_text(7, record.text);
+                    documents.expect_done();
+                    const auto rowid = database.last_insert_rowid();
+                    documents.reset_and_clear();
+
+                    full_text.bind_int64(1, rowid);
+                    full_text.bind_text(2, record.title);
+                    full_text.bind_text(3, record.paclet);
+                    full_text.bind_text(4, record.kind);
+                    full_text.bind_text(5, record.category);
+                    full_text.bind_text(6, record.preview);
+                    full_text.bind_text(7, record.text);
+                    full_text.expect_done();
+                    full_text.reset_and_clear();
+                }
+                database.execute("COMMIT");
+            } catch (...) {
+                try {
+                    database.execute("ROLLBACK");
+                } catch (...) {
+                }
+                throw;
+            }
+            database.close();
+        }
+        publish_staging_database(staging.path(), target);
+    } catch (const DocumentationError&) {
+        throw;
     } catch (const fs::filesystem_error& error) {
         throw DocumentationError(DocumentationErrorCode::Io, error.what());
-    }
-
-    Database database(target);
-    database.execute(
-        "CREATE TABLE documents ("
-        "id INTEGER PRIMARY KEY,"
-        "title TEXT NOT NULL,"
-        "paclet TEXT NOT NULL,"
-        "kind TEXT NOT NULL,"
-        "category TEXT NOT NULL,"
-        "path TEXT NOT NULL,"
-        "preview TEXT NOT NULL,"
-        "text TEXT NOT NULL"
-        ");"
-        "CREATE VIRTUAL TABLE documents_fts USING fts5("
-        "title,paclet,kind,category,preview,text,"
-        "content='documents',content_rowid='id'"
-        ");"
-        "CREATE TABLE metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);");
-
-    JsonValue::Array roots;
-    roots.reserve(installation_.docs_roots.size());
-    for (const auto& root : installation_.docs_roots) roots.emplace_back(path_text(root));
-    {
-        Statement metadata(database,
-            "INSERT INTO metadata(key,value) VALUES(?1,?2)");
-        metadata.bind_text(1, "docs_roots");
-        metadata.bind_text(2, JsonValue(std::move(roots)).dump());
-        metadata.expect_done();
-    }
-
-    database.execute("BEGIN");
-    try {
-        Statement documents(database,
-            "INSERT INTO documents(title,paclet,kind,category,path,preview,text)"
-            " VALUES(?1,?2,?3,?4,?5,?6,?7)");
-        Statement full_text(database,
-            "INSERT INTO documents_fts(rowid,title,paclet,kind,category,preview,text)"
-            " VALUES(?1,?2,?3,?4,?5,?6,?7)");
-        for (const auto& notebook_path : notebook_files(installation_.docs_roots)) {
-            const auto record = record_from_path(notebook_path);
-            documents.bind_text(1, record.title);
-            documents.bind_text(2, record.paclet);
-            documents.bind_text(3, record.kind);
-            documents.bind_text(4, record.category);
-            documents.bind_text(5, record.path);
-            documents.bind_text(6, record.preview);
-            documents.bind_text(7, record.text);
-            documents.expect_done();
-            const auto rowid = database.last_insert_rowid();
-            documents.reset_and_clear();
-
-            full_text.bind_int64(1, rowid);
-            full_text.bind_text(2, record.title);
-            full_text.bind_text(3, record.paclet);
-            full_text.bind_text(4, record.kind);
-            full_text.bind_text(5, record.category);
-            full_text.bind_text(6, record.preview);
-            full_text.bind_text(7, record.text);
-            full_text.expect_done();
-            full_text.reset_and_clear();
-        }
-        database.execute("COMMIT");
-    } catch (...) {
-        try {
-            database.execute("ROLLBACK");
-        } catch (...) {
-        }
-        throw;
     }
     return target;
 }
