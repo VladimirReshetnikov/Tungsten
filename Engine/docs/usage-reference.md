@@ -882,7 +882,8 @@ Options:
 - `--insert-wolfram-code-below`
 - `--insert-all-wolfram-code-below`
 - `--save`
-- `--close-assistant-notebook`
+- `--close-assistant-notebook`: close the generated hidden chat notebook; when omitted, it
+  remains open and `assistant.assistant_notebook_closed` is `false`
 - `--extra-instructions <text>`
 - `--model-service <name>`
 - `--model-name <name>`

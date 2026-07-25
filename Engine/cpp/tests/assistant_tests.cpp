@@ -116,9 +116,9 @@ void test_response_and_code_block_extraction() {
         "<|\"Role\" -> \"Assistant\", \"Content\" -> {"
         "<|\"Type\" -> \"Text\", \"Data\" -> \"old\"|>}, \"Metadata\" -> <||>|>,"
         "<|\"Role\" -> \"Assistant\", \"Content\" -> {"
-        "<|\"Type\" -> \"Text\", \"Data\" -> \"first\\\\nline\"|>,"
+        "<|\"Type\" -> \"Text\", \"Data\" -> \"first\\nline\"|>,"
         "<|\"Type\" -> \"Image\", \"Data\" -> \"ignore\"|>,"
-        "<|\"Type\" -> \"Text\", \"Data\" -> \"```Wolfram   Language\\\\n2 + 2\\\\n```\"|>},"
+        "<|\"Type\" -> \"Text\", \"Data\" -> \"```Wolfram   Language\\n2 + 2\\n```\"|>},"
         "\"Metadata\" -> <||>|>}|>]";
     const auto response = extract_assistant_text(raw);
     require(response == "first\nline\n\n```Wolfram   Language\n2 + 2\n```",
@@ -145,6 +145,37 @@ void test_response_and_code_block_extraction() {
         "assistant fenced-code handling matches Python Unicode whitespace semantics");
     require(extract_assistant_text("ChatObject[<||>]").empty(),
         "missing assistant section did not produce an empty response");
+
+    const std::string escaped = R"WL(ChatObject[<|"Messages" -> {
+<|"Role" -> "Assistant", "Content" -> {
+<|"Type" -> "Text", "Data" -> "prefix \"quoted\" \\ café λ literal \\n } , \"Metadata\" -> <||> suffix"|>,
+<|"Type" -> "Text", "Data" -> "tail\nline"|>
+}, "Metadata" -> <||>|>
+}|>])WL";
+    require(extract_assistant_text(escaped)
+            == u8"prefix \"quoted\" \\ café λ literal \\n } , \"Metadata\" -> <||> suffix\n\ntail\nline",
+        "assistant response extraction truncated or corrupted an escaped Wolfram string");
+
+    const std::string crossed_message_boundary = R"WL(ChatObject[<|"Messages" -> {
+<|"Role" -> "Assistant", "Other" -> 1|>,
+<|"Role" -> "User", "Content" -> {
+<|"Type" -> "Text", "Data" -> "user content"|>
+}, "Metadata" -> <||>|>
+}|>])WL";
+    require(extract_assistant_text(crossed_message_boundary).empty(),
+        "assistant extraction crossed into a different role's Content field");
+
+    const std::string nested_metadata = R"WL(ChatObject[<|"Messages" -> {
+<|"Role" -> "Assistant", "Content" -> {
+(* braces and association delimiters in comments must not affect matching: { } <| |> *)
+<|"Type" -> "Text", "Data" -> "actual response"|>
+}, "Metadata" -> <|
+"Role" -> "Assistant", "Content" -> {
+<|"Type" -> "Text", "Data" -> "metadata content"|>
+}, "Metadata" -> <||>|>|>|>
+}|>])WL";
+    require(extract_assistant_text(nested_metadata) == "actual response",
+        "assistant extraction treated nested Metadata as a later message");
 }
 
 void test_payload_parsing_and_result_model() {
@@ -203,7 +234,7 @@ void test_finalize_bare_payload() {
         {"success", true},
         {"prompt", "question"},
         {"assistant_chat_object_string", assistant_chat(
-            "Use Integrate.\\\\n```wolfram\\\\nIntegrate[x,x]\\\\n```")},
+            "Use Integrate.\\n```wolfram\\nIntegrate[x,x]\\n```")},
     });
     auto finalized = finalize_assistant_ask_payload(payload);
     require(finalized.at("success").as_boolean(), "successful ask payload became a failure");
@@ -307,8 +338,23 @@ void test_wrapper_scripts() {
             && cell_script.find("Source notebook cell style") != std::string::npos
             && cell_script.find("Be concise.") != std::string::npos
             && cell_script.find("NotebookClose @ assistantNotebook") != std::string::npos
+            && cell_script.find("tungstenCloseAssistantNotebook = False")
+                != std::string::npos
+            && cell_script.find(
+                "\"assistant_notebook_closed\" -> assistantNotebookClosed")
+                != std::string::npos
             && cell_script.find("abc") != std::string::npos,
         "ask-cell wrapper omitted source context or deterministic cleanup");
+    cell.close_assistant_notebook = true;
+    const auto closing_cell_script = build_assistant_ask_cell_script(cell, selector);
+    (void)parse_input_form(closing_cell_script);
+    require(closing_cell_script.find("tungstenCloseAssistantNotebook = True")
+                != std::string::npos
+            && closing_cell_script.find("If[TrueQ @ tungstenCloseAssistantNotebook")
+                != std::string::npos
+            && closing_cell_script.find("(NotebookClose @ assistantNotebook; True)")
+                != std::string::npos,
+        "ask-cell wrapper did not conditionally close and report the assistant notebook");
 
     const auto insert_script = build_assistant_insert_script(
         "example.nb", selector, {"2 + 2", "Integrate[x,x]"}, true);
@@ -342,7 +388,7 @@ void test_fake_ask_workflow() {
         {"success", true},
         {"prompt", "question"},
         {"assistant_chat_object_string",
-            assistant_chat("answer\\\\n```wl\\\\n2+2\\\\n```")},
+            assistant_chat("answer\\n```wl\\n2+2\\n```")},
     })));
     auto controller = fake_controller(state);
     AskOptions options;
@@ -365,7 +411,7 @@ void test_fake_ask_cell_and_insertion_workflow() {
         {"success", true},
         {"source_cell", JsonValue::object({{"expression_uuid", "uuid-first"}})},
         {"assistant_chat_object_string", assistant_chat(
-            "```wolfram\\\\n2 + 2\\\\n```\\\\n```wl\\\\n3 + 3\\\\n```")},
+            "```wolfram\\n2 + 2\\n```\\n```wl\\n3 + 3\\n```")},
     })));
     state->replies.push_back(evaluation_for(JsonValue::object({
         {"success", true},
@@ -395,6 +441,45 @@ void test_fake_ask_cell_and_insertion_workflow() {
         "first-code insertion did not issue the expected second wrapper evaluation");
     require(result.evaluation.result == state->replies[0].result,
         "ask-cell result did not retain the primary assistant evaluation");
+}
+
+void test_close_assistant_notebook_contract() {
+    TemporaryDirectory temporary("tungsten-cpp-assistant-close");
+    const auto notebook = make_notebook(temporary.path());
+    auto state = std::make_shared<FakeEvaluatorState>();
+    state->replies.push_back(evaluation_for(JsonValue::object({
+        {"success", true},
+        {"source_cell", JsonValue::object({{"expression_uuid", "uuid-first"}})},
+        {"assistant_notebook_closed", false},
+        {"assistant_chat_object_string", assistant_chat("kept open")},
+    })));
+    state->replies.push_back(evaluation_for(JsonValue::object({
+        {"success", true},
+        {"source_cell", JsonValue::object({{"expression_uuid", "uuid-first"}})},
+        {"assistant_notebook_closed", true},
+        {"assistant_chat_object_string", assistant_chat("closed")},
+    })));
+    auto controller = fake_controller(state);
+    AskCellOptions options;
+    options.notebook_path = notebook;
+    options.selector = AssistantFlatIndexSelector{0};
+    options.question = "Explain this cell";
+
+    const auto kept_open = controller.ask_cell(options);
+    options.close_assistant_notebook = true;
+    const auto closed = controller.ask_cell(options);
+
+    require(kept_open.assistant_success()
+            && !kept_open.payload.at("assistant_notebook_closed").as_boolean()
+            && closed.assistant_success()
+            && closed.payload.at("assistant_notebook_closed").as_boolean(),
+        "ask-cell finalization did not preserve the reported assistant notebook state");
+    require(state->scripts.size() == 2
+            && state->scripts[0].find("tungstenCloseAssistantNotebook = False")
+                != std::string::npos
+            && state->scripts[1].find("tungstenCloseAssistantNotebook = True")
+                != std::string::npos,
+        "ask-cell did not pass both close-option states into generated scripts");
 }
 
 void test_fake_inline_workflows_and_no_insert_finalization() {
@@ -431,7 +516,7 @@ void test_fake_inline_workflows_and_no_insert_finalization() {
         {"success", true},
         {"source_cell", JsonValue::object({{"expression_uuid", "uuid-first"}})},
         {"assistant_chat_object_string",
-            assistant_chat("```wolfram\\\\n4 + 4\\\\n```")},
+            assistant_chat("```wolfram\\n4 + 4\\n```")},
     }), notebook, row, "none", false);
     require(no_insert.at("success").as_boolean()
             && no_insert.at("inserted").size() == 0
@@ -453,6 +538,7 @@ int main() {
         test_wrapper_scripts();
         test_fake_ask_workflow();
         test_fake_ask_cell_and_insertion_workflow();
+        test_close_assistant_notebook_contract();
         test_fake_inline_workflows_and_no_insert_finalization();
         std::cout << "all C++ Notebook Assistant tests passed\n";
         return EXIT_SUCCESS;
