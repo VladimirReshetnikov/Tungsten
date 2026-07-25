@@ -35,6 +35,7 @@ struct SessionOutput {
     Expr result;
     std::vector<std::string> prints;
     std::vector<std::string> messages;
+    std::vector<Expr> message_names;
 
     [[nodiscard]] bool is_exit() const noexcept { return kind == Kind::Exit; }
 };
@@ -45,6 +46,9 @@ public:
 
     [[nodiscard]] std::size_t line() const noexcept { return line_; }
     [[nodiscard]] SessionOutput evaluate_input(const std::string& source);
+    [[nodiscard]] SessionOutput evaluate_expression(
+        const std::string& source,
+        const Expr& expression);
     [[nodiscard]] Expr preprint(const Expr& result);
     [[nodiscard]] std::optional<std::size_t> output_size_limit();
 
@@ -69,6 +73,12 @@ private:
         std::vector<std::string>& prints,
         std::vector<Expr>& message_names,
         std::vector<std::string>& messages) const;
+    [[nodiscard]] SessionOutput evaluate_prepared_input(
+        const std::string& source,
+        const Expr& expression,
+        std::vector<std::string> prints,
+        std::vector<Expr> message_names,
+        std::vector<std::string> messages);
     void prune_history();
 
     Evaluator evaluator_;

@@ -66,6 +66,92 @@ void history_and_exit_tests() {
         "List[HoldForm[MessageName[Take, \"error\"]]]", "message history lookup");
 }
 
+void parsed_input_and_exit_diagnostic_tests() {
+    tungsten::EvaluationSession parsed;
+    check_equal(parsed.evaluate_expression("not valid InputForm [", tungsten::integer(42))
+            .result.to_full_form(),
+        "42", "parsed-expression evaluation does not reparse source text");
+    check_equal(parsed.evaluate_expression(
+            "InString[1]", tungsten::parse_input_form("InString[1]"))
+            .result.to_full_form(),
+        "\"not valid InputForm [\"", "parsed-expression source is recorded verbatim");
+
+    tungsten::EvaluationSession line;
+    check_equal(line.evaluate_expression("$Line", tungsten::symbol("$Line"))
+            .result.to_full_form(),
+        "1", "parsed-expression evaluation has active line state");
+
+    tungsten::EvaluationSession exits;
+    const auto exit = exits.evaluate_expression(
+        "Exit[7]", tungsten::parse_input_form("Exit[7]"));
+    check(exit.is_exit() && exit.exit_code == 7,
+        "parsed-expression Exit returns the requested status");
+    const auto quit = exits.evaluate_expression("Quit", tungsten::symbol("Quit"));
+    check(quit.is_exit() && quit.exit_code == 0,
+        "parsed-expression bare Quit returns status zero");
+
+    tungsten::EvaluationSession invalid;
+    const auto invalid_code = invalid.evaluate_expression(
+        "Exit[x]", tungsten::parse_input_form("Exit[x]"));
+    check(!invalid_code.is_exit(), "invalid Exit remains an ordinary value");
+    check_equal(invalid_code.result.to_full_form(), "Exit[x]",
+        "invalid Exit remains inert");
+    check(invalid_code.message_names.size() == 1,
+        "invalid Exit exposes one structured diagnostic name");
+    if (invalid_code.message_names.size() == 1)
+        check_equal(invalid_code.message_names.front().to_full_form(),
+            "MessageName[Exit, \"error\"]", "invalid Exit diagnostic name");
+    check(invalid_code.messages.size() == 1,
+        "invalid Exit exposes one diagnostic text");
+    if (invalid_code.messages.size() == 1)
+        check_equal(invalid_code.messages.front(),
+            "Exit::error: Exit and Quit expect an optional integer exit code.",
+            "invalid Exit diagnostic text");
+    check_equal(invalid.evaluate_expression(
+            "MessageList[1]", tungsten::parse_input_form("MessageList[1]"))
+            .result.to_full_form(),
+        "List[HoldForm[MessageName[Exit, \"error\"]]]",
+        "invalid Exit diagnostic is recorded in session message history");
+
+    const auto invalid_arity = invalid.evaluate_expression(
+        "Quit[1, 2]", tungsten::parse_input_form("Quit[1, 2]"));
+    check_equal(invalid_arity.result.to_full_form(), "Quit[1, 2]",
+        "wrong-arity Quit remains inert");
+    check(invalid_arity.message_names.size() == 1,
+        "wrong-arity Quit exposes one structured diagnostic name");
+    if (invalid_arity.message_names.size() == 1)
+        check_equal(invalid_arity.message_names.front().to_full_form(),
+            "MessageName[Quit, \"error\"]", "wrong-arity Quit diagnostic name");
+    check(invalid_arity.messages.size() == 1,
+        "wrong-arity Quit exposes one diagnostic text");
+    if (invalid_arity.messages.size() == 1)
+        check_equal(invalid_arity.messages.front(),
+            "Quit::error: Exit and Quit expect zero or one argument.",
+            "wrong-arity Quit diagnostic text");
+}
+
+void history_pruning_tests() {
+    tungsten::EvaluationSession two;
+    check_equal(two.evaluate_input("$HistoryLength = 2").result.to_full_form(),
+        "2", "finite history length assignment");
+    check_equal(two.evaluate_input("10").result.to_full_form(), "10",
+        "first finite-history value");
+    check_equal(two.evaluate_input("20").result.to_full_form(), "20",
+        "second finite-history value");
+    check_equal(two.evaluate_input("DownValues[In]").result.to_full_form(),
+        "List[RuleDelayed[HoldPattern[In[3]], 20], "
+        "RuleDelayed[HoldPattern[In[4]], DownValues[In]]]",
+        "history length two is pruned before the current evaluation");
+
+    tungsten::EvaluationSession zero;
+    check_equal(zero.evaluate_input("$HistoryLength = 0").result.to_full_form(),
+        "0", "zero history length assignment");
+    check_equal(zero.evaluate_input("10").result.to_full_form(), "10",
+        "zero-history value evaluation");
+    check_equal(zero.evaluate_input("DownValues[In]").result.to_full_form(),
+        "List[]", "history length zero prunes the current input before evaluation");
+}
+
 void display_and_print_tests() {
     std::istringstream input(
         "InputForm[1 + x]\n"
@@ -179,14 +265,19 @@ void error_and_banner_tests() {
         "syntax and evaluation failures both consume line numbers");
     check(error.str().find("Syntax::sntxi:") != std::string::npos,
         "syntax errors use Wolfram console label");
-    check(error.str().find("Evaluate::error: Exit and Quit expect") != std::string::npos,
-        "evaluation errors use evaluator label");
+    check(error.str().find(
+        "Exit::error: Exit and Quit expect an optional integer exit code.")
+        != std::string::npos, "invalid Exit uses a head-specific diagnostic");
+    check(output.str().find("Out[2]= Exit[x]") != std::string::npos,
+        "invalid Exit remains inert and leaves the session running");
 }
 
 } // namespace
 
 int main() {
     history_and_exit_tests();
+    parsed_input_and_exit_diagnostic_tests();
+    history_pruning_tests();
     display_and_print_tests();
     hook_and_limit_tests();
     error_and_banner_tests();

@@ -411,6 +411,41 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
         ["expr", "evaluate", "--code", "Length[{a,b,c}]"],
         expected_exit=0,
     )
+    audit.json_case(
+        "expr evaluate session line",
+        ["expr", "evaluate", "--code", "$Line"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate session input string",
+        ["expr", "evaluate", "--code", "InString[1]"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate session input downvalues",
+        ["expr", "evaluate", "--code", "DownValues[In]"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate session message history",
+        ["expr", "evaluate", "--code", "MessageList[1]"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate invalid Exit diagnostic",
+        ["expr", "evaluate", "--code", "Exit[x]"],
+        expected_exit=0,
+    )
+    audit.expected_exit_difference(
+        "expr evaluate valid Exit",
+        ["expr", "evaluate", "--code", "Exit[7]"],
+        python_exit=1,
+        native_exit=7,
+        reason=(
+            "the Python oracle CLI leaves TungstenExitRequested uncaught; the native session "
+            "returns the requested process status without emitting JSON"
+        ),
+    )
 
     audit.json_case(
         "notebook inspect",
