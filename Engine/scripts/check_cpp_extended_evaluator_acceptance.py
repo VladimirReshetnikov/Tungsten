@@ -8,8 +8,9 @@ nondeterministic values exact:
 * ``CompositeQ`` is compared exactly with the Python compatibility engine;
 * ``RandomSample`` and ``RandomPermutation`` are checked for shape,
   cardinality, and without-replacement/permutation invariants;
-* ``Pause``, ``AbsoluteTiming``, ``TimeConstrained``, and ``TimeRemaining``
-  are checked with deliberately generous monotonic-clock tolerances; and
+* ``Pause``, ``AbsoluteTiming``, ``TimeConstrained``, ``TimeRemaining``, and
+  ``WithCleanup`` are checked with deliberately generous monotonic-clock
+  tolerances and control-flow assertions; and
 * invalid random/timing forms are compared exactly, including their inert
   results, message names, and message text.
 
@@ -208,6 +209,9 @@ TIMING_DIAGNOSTIC_CASES = (
     "TimeConstrained[1,x]",
     "TimeConstrained[1,1,x,y]",
     "TimeRemaining[1]",
+    "WithCleanup[]",
+    "WithCleanup[1]",
+    "WithCleanup[1,2,3,4]",
 )
 
 
@@ -603,6 +607,24 @@ def _clean_success(evaluation: Evaluation) -> str | None:
     return None
 
 
+def _expected_success(
+    evaluation: Evaluation,
+    *,
+    full_form: str,
+    prints: tuple[str, ...] = (),
+) -> str | None:
+    """Validate an exact successful result while allowing expected prints."""
+    if not evaluation.success:
+        return f"evaluation failed: {evaluation.error}"
+    if evaluation.full_form != full_form:
+        return f"expected {full_form}, got {_display(evaluation)}"
+    if evaluation.messages or evaluation.message_texts:
+        return f"unexpected messages: {_display(evaluation)}"
+    if evaluation.prints != prints:
+        return f"expected prints={prints!r}, got {_display(evaluation)}"
+    return None
+
+
 def _canonical_item(source: str) -> str:
     return parse_input_form(source).to_full_form()
 
@@ -729,6 +751,36 @@ def _real_value(expression: runtime.Expr) -> float | None:
 
 def _timing_checks(batch: _TimedEvalBatch) -> list[Check]:
     checks: list[Check] = []
+
+    def add_exact_behavior(
+        label: str,
+        source: str,
+        *,
+        full_form: str,
+        prints: tuple[str, ...] = (),
+        minimum_wall: float = 0.0,
+        maximum_wall: float = 3.0,
+    ) -> None:
+        actual, wall = batch.evaluate(source)
+        problem = _expected_success(
+            actual,
+            full_form=full_form,
+            prints=prints,
+        )
+        passed = problem is None and minimum_wall <= wall <= maximum_wall
+        checks.append(
+            Check(
+                "timing",
+                label,
+                passed,
+                "" if passed else (
+                    f"result={_display(actual)}, wall={wall:.6f}s; "
+                    f"expected {full_form} with prints={prints!r} and wall time "
+                    f"in [{minimum_wall:.3f}, {maximum_wall:.1f}]s"
+                    + (f"; {problem}" if problem is not None else "")
+                ),
+            )
+        )
 
     pause_source = "Pause[.06]"
     pause, pause_wall = batch.evaluate(pause_source)
@@ -878,6 +930,61 @@ def _timing_checks(batch: _TimedEvalBatch) -> list[Check]:
                 "expected two finite readings separated by at least 0.025s"
             ),
         )
+    )
+
+    add_exact_behavior(
+        "WithCleanup runs cleanup when its body times out",
+        'TimeConstrained[WithCleanup[Pause[.3];7,Print["cleanup"]],.04,timeout]',
+        full_form="timeout",
+        prints=("cleanup",),
+        minimum_wall=0.01,
+    )
+
+    add_exact_behavior(
+        "WithCleanup suppresses the expired deadline while cleanup runs",
+        "TimeConstrained[WithCleanup[Pause[.3];7,"
+        'Pause[.08];Print["cleanup"]],.04,timeout]',
+        full_form="timeout",
+        prints=("cleanup",),
+        minimum_wall=0.06,
+    )
+
+    add_exact_behavior(
+        "WithCleanup evaluates initialization, body, and cleanup in order",
+        'WithCleanup[Print["init"],Print["body"];7,Print["cleanup"]]',
+        full_form="7",
+        prints=("init", "body", "cleanup"),
+    )
+
+    add_exact_behavior(
+        "WithCleanup finishes initialization then skips a body past the deadline",
+        "TimeConstrained[WithCleanup[Pause[.08];Print[\"init\"],"
+        'Print["body"];7,Print["cleanup"]],.03,timeout]',
+        full_form="timeout",
+        prints=("init", "cleanup"),
+        minimum_wall=0.04,
+    )
+
+    add_exact_behavior(
+        "an inner deadline evaluates the inner fallback",
+        "TimeConstrained[TimeConstrained[Pause[.3];7,.04,inner],.2,outer]",
+        full_form="inner",
+        minimum_wall=0.01,
+    )
+
+    add_exact_behavior(
+        "an outer deadline preempts an inner fallback",
+        "TimeConstrained[TimeConstrained[Pause[.3];7,.2,"
+        '(Print["inner-fallback"];inner)],.04,outer]',
+        full_form="outer",
+        minimum_wall=0.01,
+    )
+
+    add_exact_behavior(
+        "a timeout fallback runs after its own deadline scope is removed",
+        "TimeConstrained[Pause[.3],.04,TimeRemaining[]]",
+        full_form="Infinity",
+        minimum_wall=0.01,
     )
 
     return checks
