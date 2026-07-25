@@ -315,7 +315,7 @@ function Invoke-TungstenKernel {
         $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:(-not $RequireSuccess)
 }
 
 function Convert-TungstenExpression {
@@ -593,7 +593,7 @@ function Get-TungstenNotebookCellInlineBoxes {
         $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:(-not $RequireSuccess)
 }
 
 function Get-TungstenNotebook {
@@ -717,7 +717,7 @@ function Open-TungstenDocumentation {
         $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:(-not $RequireSuccess)
 }
 
 function Open-TungstenNotebook {
@@ -734,7 +734,7 @@ function Open-TungstenNotebook {
         $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:(-not $RequireSuccess)
 }
 
 function Invoke-TungstenFrontEnd {
@@ -756,7 +756,7 @@ function Invoke-TungstenFrontEnd {
         $cliArgs += "--require-success"
     }
 
-    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
+    Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:(-not $RequireSuccess)
 }
 
 function Get-TungstenNotebookAssistantAskCliArguments {
@@ -1316,7 +1316,7 @@ function Invoke-TungstenNotebookAssistant {
             -ModelName $ModelName `
             -RequireSuccess:$RequireSuccess
 
-        return Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:$RequireSuccess
+        return Invoke-TungstenCliJson -Arguments $cliArgs -AllowFailure:(-not $RequireSuccess)
     }
 
     if ($CloseAssistantNotebook) {
