@@ -3107,6 +3107,114 @@ SparseConstructionResult construct_sparse_array(
     return {*result, {}};
 }
 
+struct SparseArithmeticResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+SparseArithmeticResult sparse_binary_elementwise(
+    const std::string& function, const Expr& left, const Expr& right,
+    const std::function<Expr(const Expr&)>& evaluate_expression) {
+    auto evaluated_binary = [&](const Expr& lhs, const Expr& rhs) {
+        return evaluate_expression(call(function, {lhs, rhs}));
+    };
+
+    if (left.has_head("List")) {
+        const auto dense_right = right.kind() == ExprKind::SparseArray
+            ? sparse_dense_value(right) : std::optional<Expr>(right);
+        if (!dense_right)
+            return {std::nullopt,
+                "SparseArray dimensions exceed the native materialization limit."};
+        return {evaluated_binary(left, *dense_right), {}};
+    }
+    if (right.has_head("List")) {
+        const auto dense_left = left.kind() == ExprKind::SparseArray
+            ? sparse_dense_value(left) : std::optional<Expr>(left);
+        if (!dense_left)
+            return {std::nullopt,
+                "SparseArray dimensions exceed the native materialization limit."};
+        return {evaluated_binary(*dense_left, right), {}};
+    }
+
+    if (left.kind() == ExprKind::SparseArray
+        && right.kind() == ExprKind::SparseArray) {
+        if (left.dimensions() != right.dimensions())
+            return {std::nullopt, function
+                + " expects SparseArray dimensions to agree."};
+
+        const auto fill = evaluated_binary(
+            left.fill_value(), right.fill_value());
+        std::vector<SparseEntry> entries;
+        entries.reserve(left.sparse_entries().size()
+            + right.sparse_entries().size());
+        std::size_t left_index = 0;
+        std::size_t right_index = 0;
+        while (left_index < left.sparse_entries().size()
+            || right_index < right.sparse_entries().size()) {
+            const bool take_left = right_index >= right.sparse_entries().size()
+                || (left_index < left.sparse_entries().size()
+                    && left.sparse_entries()[left_index].indices
+                        < right.sparse_entries()[right_index].indices);
+            const bool take_right = left_index >= left.sparse_entries().size()
+                || (right_index < right.sparse_entries().size()
+                    && right.sparse_entries()[right_index].indices
+                        < left.sparse_entries()[left_index].indices);
+
+            std::vector<std::size_t> indices;
+            Expr left_value = left.fill_value();
+            Expr right_value = right.fill_value();
+            if (take_left) {
+                const auto& entry = left.sparse_entries()[left_index++];
+                indices = entry.indices;
+                left_value = entry.value;
+            } else if (take_right) {
+                const auto& entry = right.sparse_entries()[right_index++];
+                indices = entry.indices;
+                right_value = entry.value;
+            } else {
+                const auto& left_entry = left.sparse_entries()[left_index++];
+                const auto& right_entry = right.sparse_entries()[right_index++];
+                indices = left_entry.indices;
+                left_value = left_entry.value;
+                right_value = right_entry.value;
+            }
+            const auto value = evaluated_binary(left_value, right_value);
+            if (value != fill)
+                entries.push_back({std::move(indices), value});
+        }
+        return {sparse_array(
+            left.dimensions(), std::move(entries), fill), {}};
+    }
+
+    if (left.kind() == ExprKind::SparseArray) {
+        const auto fill = evaluated_binary(left.fill_value(), right);
+        std::vector<SparseEntry> entries;
+        entries.reserve(left.sparse_entries().size());
+        for (const auto& entry : left.sparse_entries()) {
+            const auto value = evaluated_binary(entry.value, right);
+            if (value != fill)
+                entries.push_back({entry.indices, value});
+        }
+        return {sparse_array(
+            left.dimensions(), std::move(entries), fill), {}};
+    }
+
+    if (right.kind() == ExprKind::SparseArray) {
+        const auto fill = evaluated_binary(left, right.fill_value());
+        std::vector<SparseEntry> entries;
+        entries.reserve(right.sparse_entries().size());
+        for (const auto& entry : right.sparse_entries()) {
+            const auto value = evaluated_binary(left, entry.value);
+            if (value != fill)
+                entries.push_back({entry.indices, value});
+        }
+        return {sparse_array(
+            right.dimensions(), std::move(entries), fill), {}};
+    }
+
+    return {evaluated_binary(left, right), {}};
+}
+
 constexpr long level_infinity = 1000000000L;
 struct LevelBounds {
     long minimum;
@@ -10963,17 +11071,16 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return raw_evaluation_error(result.error);
     }
     if ((function == "Plus" || function == "Times") && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::SparseArray; })) {
-        std::vector<Expr> dense;
-        for (const auto& value : args) {
-            const auto materialized = sparse_dense_value(value);
-            if (!materialized)
-                return raw_evaluation_error(
-                    "SparseArray dimensions exceed the native materialization limit.");
-            dense.push_back(*materialized);
+        auto current = args.front();
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            const auto result = sparse_binary_elementwise(
+                function, current, args[index],
+                [this](const Expr& value) { return evaluate(value); });
+            if (!result.value)
+                return raw_evaluation_error(result.error);
+            current = *result.value;
         }
-        const auto result = evaluate(call(function, std::move(dense)));
-        if (const auto sparse = sparse_from_dense(result)) return *sparse;
-        return result;
+        return current;
     }
     if ((function == "Plus" || function == "Times" || function == "Power")
         && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.has_head("List"); })) {

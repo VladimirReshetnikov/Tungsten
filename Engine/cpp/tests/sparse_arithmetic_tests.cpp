@@ -163,12 +163,95 @@ void constructor_diagnostic_tests() {
          "sparse array with different dimensions."});
 }
 
+void sparse_elementwise_arithmetic_tests() {
+    check_case(
+        "ArrayRules[SparseArray[{{1}->a},{3},z]+"
+        "SparseArray[{{2}->b},{3},q]]",
+        "List[Rule[List[1], Plus[a, q]], Rule[List[2], Plus[b, z]], "
+        "Rule[List[Blank[]], Plus[q, z]]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->a},{3},1]+"
+        "SparseArray[{{1}->2,{2}->b},{3},3]]",
+        "List[Rule[List[1], Plus[2, a]], Rule[List[2], Plus[1, b]], "
+        "Rule[List[Blank[]], 4]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->a},{3},z]+q]",
+        "List[Rule[List[1], Plus[a, q]], "
+        "Rule[List[Blank[]], Plus[q, z]]]");
+    check_case(
+        "ArrayRules[2 SparseArray[{{1}->a},{3},z]]",
+        "List[Rule[List[1], Times[2, a]], "
+        "Rule[List[Blank[]], Times[2, z]]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->a},{3}]+"
+        "SparseArray[{{2}->b},{3}]+1]",
+        "List[Rule[List[1], Plus[1, a]], Rule[List[2], Plus[1, b]], "
+        "Rule[List[Blank[]], 1]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->1},{3}]-1]",
+        "List[Rule[List[1], 0], Rule[List[Blank[]], -1]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->2},{3},1]*0]",
+        "List[Rule[List[Blank[]], 0]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->2},{3},1]*"
+        "SparseArray[{{2}->3},{3},2]]",
+        "List[Rule[List[1], 4], Rule[List[2], 3], "
+        "Rule[List[Blank[]], 2]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->a},{3},z]*"
+        "SparseArray[{{1}->b,{2}->c},{3},q]*r]",
+        "List[Rule[List[1], Times[a, b, r]], "
+        "Rule[List[2], Times[c, r, z]], "
+        "Rule[List[Blank[]], Times[q, r, z]]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1}->a},{3},z]+"
+        "SparseArray[{{1}->-a},{3},-z]]",
+        "List[Rule[List[Blank[]], 0]]");
+    check_case(
+        "ArrayRules[Plus[SparseArray[{{1}->a},{3},z]]]",
+        "List[Rule[List[1], a], Rule[List[Blank[]], z]]");
+    check_case(
+        "ArrayRules[Times[SparseArray[{{1}->a},{3},z]]]",
+        "List[Rule[List[1], a], Rule[List[Blank[]], z]]");
+}
+
+void sparse_arithmetic_shape_and_scale_tests() {
+    check_case(
+        "ArrayRules[SparseArray[{{1}->a},{4294967296},z]+"
+        "SparseArray[{{4294967296}->b},{4294967296},q]+r]",
+        "List[Rule[List[1], Plus[a, q, r]], "
+        "Rule[List[4294967296], Plus[b, r, z]], "
+        "Rule[List[Blank[]], Plus[q, r, z]]]");
+    check_case(
+        "ArrayRules[SparseArray[{{1,1}->a},"
+        "{4294967296,4294967296},z]+"
+        "SparseArray[{{4294967296,4294967296}->b},"
+        "{4294967296,4294967296},q]]",
+        "List[Rule[List[1, 1], Plus[a, q]], "
+        "Rule[List[4294967296, 4294967296], Plus[b, z]], "
+        "Rule[List[Blank[], Blank[]], Plus[q, z]]]");
+    check_case(
+        "{1,2}+SparseArray[{{1}->a},{4294967296},z]",
+        "List[SparseArray[List[Rule[List[1], Plus[1, a]]], "
+        "List[4294967296], Plus[1, z]], "
+        "SparseArray[List[Rule[List[1], Plus[2, a]]], "
+        "List[4294967296], Plus[2, z]]]");
+    check_case(
+        "SparseArray[{{1}->a},{3},z]+SparseArray[{{1}->b},{4},q]",
+        "Plus[SparseArray[List[Rule[List[1], a]], List[3], z], "
+        "SparseArray[List[Rule[List[1], b]], List[4], q]]",
+        {"Plus::error: Plus expects SparseArray dimensions to agree."});
+}
+
 } // namespace
 
 int main() {
     constructor_success_tests();
     existing_sparse_constructor_tests();
     constructor_diagnostic_tests();
+    sparse_elementwise_arithmetic_tests();
+    sparse_arithmetic_shape_and_scale_tests();
     if (failures != 0)
         std::cerr << failures << " sparse-arithmetic test(s) failed\n";
     return failures == 0 ? 0 : 1;
