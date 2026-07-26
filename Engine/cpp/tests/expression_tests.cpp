@@ -3,8 +3,12 @@
 #include "tungsten/parser.hpp"
 #include "tungsten/wolfram_strings.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <numeric>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +31,14 @@ void check_equal(
                   << "\n  actual:   " << actual << '\n';
         ++failures;
     }
+}
+
+std::map<std::string, std::size_t> full_form_counts(
+    const std::vector<tungsten::Expr>& expressions) {
+    std::map<std::string, std::size_t> counts;
+    for (const auto& expression : expressions)
+        ++counts[expression.to_full_form()];
+    return counts;
 }
 
 } // namespace
@@ -226,6 +238,515 @@ int main() {
     for (const auto& [source, expected] : exact_integer_cases)
         check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
             "exact integer evaluator: " + source);
+
+    const std::vector<std::pair<std::string, std::string>> composite_cases{
+        {"CompositeQ[-100]", "False"},
+        {"CompositeQ[-4]", "False"},
+        {"CompositeQ[-1]", "False"},
+        {"CompositeQ[0]", "False"},
+        {"CompositeQ[1]", "False"},
+        {"CompositeQ[2]", "False"},
+        {"CompositeQ[3]", "False"},
+        {"CompositeQ[4]", "True"},
+        {"CompositeQ[5]", "False"},
+        {"CompositeQ[6]", "True"},
+        {"CompositeQ[9]", "True"},
+        {"CompositeQ[25]", "True"},
+        {"CompositeQ[97]", "False"},
+        {"CompositeQ[561]", "True"},
+        {"CompositeQ[65537]", "False"},
+        {"CompositeQ[1000005]", "True"},
+        {"CompositeQ[18446744073709551615]", "True"},
+        {"CompositeQ[18446744073709551557]", "False"},
+        {"CompositeQ[2^16]", "True"},
+        {"CompositeQ[49/7]", "False"},
+        {"CompositeQ[]", "CompositeQ[]"},
+        {"CompositeQ[x]", "CompositeQ[x]"},
+        {"CompositeQ[4.]", "CompositeQ[4.]"},
+        {"CompositeQ[4,6]", "CompositeQ[4, 6]"},
+    };
+    for (const auto& [source, expected] : composite_cases) {
+        Evaluator composite_evaluator;
+        check_equal(composite_evaluator.evaluate(parse_input_form(source)).to_full_form(),
+            expected, "CompositeQ parity: " + source);
+        check(composite_evaluator.messages().empty(),
+            "CompositeQ invalid forms remain silent: " + source);
+    }
+    check_equal(evaluate(parse_input_form("CompositeQ[{4,5,6}]")).to_full_form(),
+        "List[True, False, True]", "CompositeQ Listable threading");
+    check_equal(evaluate(parse_input_form("CompositeQ[{{4,5},{6,7}}]")).to_full_form(),
+        "List[List[True, False], List[True, False]]",
+        "CompositeQ nested Listable threading");
+    check_equal(evaluate(parse_input_form("CompositeQ[{4,5},{6,7}]")).to_full_form(),
+        "List[CompositeQ[4, 6], CompositeQ[5, 7]]",
+        "CompositeQ threads equal multiple lists before arity validation");
+    Evaluator composite_listable_error;
+    check_equal(composite_listable_error.evaluate(parse_input_form(
+        "CompositeQ[{4},{6,7}]")).to_full_form(),
+        "CompositeQ[List[4], List[6, 7]]",
+        "CompositeQ incompatible Listable lengths remain raw");
+    check_equal(composite_listable_error.messages().empty() ? ""
+            : composite_listable_error.messages().front().to_full_form(),
+        "MessageName[CompositeQ, \"error\"]",
+        "CompositeQ incompatible Listable message name");
+    check_equal(composite_listable_error.message_texts().empty() ? ""
+            : composite_listable_error.message_texts().front(),
+        "CompositeQ::error: Listable Function arguments have incompatible list lengths.",
+        "CompositeQ incompatible Listable diagnostic");
+    check_equal(evaluate(parse_input_form(
+        "CompositeQ[Unevaluated[4]]")).to_full_form(),
+        "CompositeQ[Unevaluated[4]]",
+        "CompositeQ preserves a direct Unevaluated wrapper");
+    Evaluator composite_alias_unevaluated;
+    (void)composite_alias_unevaluated.evaluate(parse_input_form("f=CompositeQ"));
+    check_equal(composite_alias_unevaluated.evaluate(parse_input_form(
+        "f[Unevaluated[4]]")).to_full_form(),
+        "CompositeQ[Unevaluated[4]]",
+        "CompositeQ alias preserves a direct Unevaluated wrapper");
+    check(composite_alias_unevaluated.messages().empty(),
+        "CompositeQ alias Unevaluated form remains silent");
+    check_equal(evaluate(parse_input_form(
+        "CompositeQ[Sequence[Unevaluated[4]]]")).to_full_form(),
+        "CompositeQ[Unevaluated[4]]",
+        "CompositeQ preserves Unevaluated nested directly in Sequence");
+    check_equal(evaluate(parse_input_form(
+        "CompositeQ[Splice[{Unevaluated[4]},CompositeQ]]"
+        )).to_full_form(),
+        "CompositeQ[Unevaluated[4]]",
+        "CompositeQ preserves Unevaluated nested in a Splice payload");
+    check_equal(evaluate(parse_input_form(
+        "CompositeQ[Splice[f[4],CompositeQ]]"
+        )).to_full_form(),
+        "CompositeQ[Splice[f[4], CompositeQ]]",
+        "CompositeQ does not splice a non-List Splice payload");
+
+    const auto full_sample = evaluate(parse_input_form(
+        "RandomSample[{a,b,c,d}]") );
+    check(full_sample.has_head("List") && full_sample.args().size() == 4,
+        "RandomSample full list shape");
+    check(full_form_counts(full_sample.args()) == full_form_counts(
+            {symbol("a"), symbol("b"), symbol("c"), symbol("d")}),
+        "RandomSample full list is a permutation");
+
+    const auto duplicate_sample = evaluate(parse_input_form(
+        "RandomSample[{a,a,b,c},3]"));
+    check(duplicate_sample.has_head("List") && duplicate_sample.args().size() == 3,
+        "RandomSample bounded duplicate shape");
+    const auto duplicate_counts = full_form_counts(duplicate_sample.args());
+    const auto duplicate_capacity = full_form_counts(
+        {symbol("a"), symbol("a"), symbol("b"), symbol("c")});
+    check(std::all_of(duplicate_counts.begin(), duplicate_counts.end(),
+            [&](const auto& entry) {
+                const auto found = duplicate_capacity.find(entry.first);
+                return found != duplicate_capacity.end()
+                    && entry.second <= found->second;
+            }),
+        "RandomSample never exceeds duplicate multiplicity");
+
+    const auto all_duplicate_sample = evaluate(parse_input_form(
+        "RandomSample[{a,a,b,c},All]"));
+    check(all_duplicate_sample.has_head("List")
+            && full_form_counts(all_duplicate_sample.args()) == duplicate_capacity,
+        "RandomSample All preserves a complete multiset");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[{a,b,c,d},0]")).to_full_form(),
+        "List[]", "RandomSample zero count");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[{}]")).to_full_form(),
+        "List[]", "RandomSample empty source");
+    const auto upto_sample = evaluate(parse_input_form(
+        "RandomSample[{a,b,c,d},UpTo[2]]"));
+    check(upto_sample.has_head("List") && upto_sample.args().size() == 2,
+        "RandomSample UpTo clips to its count");
+    const auto huge_upto_sample = evaluate(parse_input_form(
+        "RandomSample[{a,b},UpTo[1000000000000000000000000000000]]"));
+    check(huge_upto_sample.has_head("List")
+            && full_form_counts(huge_upto_sample.args())
+                == full_form_counts({symbol("a"), symbol("b")}),
+        "RandomSample arbitrary-width UpTo clips at source length");
+
+    const auto headed_sample = evaluate(parse_input_form(
+        "RandomSample[f[a,b,c,d],2]"));
+    check(headed_sample.has_head("f") && headed_sample.args().size() == 2,
+        "RandomSample preserves an arbitrary head");
+    check(std::all_of(headed_sample.args().begin(), headed_sample.args().end(),
+            [](const Expr& item) {
+                return item == symbol("a") || item == symbol("b")
+                    || item == symbol("c") || item == symbol("d");
+            }),
+        "RandomSample arbitrary-head items come from the source");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[f[],All]")).to_full_form(),
+        "f[]", "RandomSample accepts a zero-argument compound source");
+    const auto evaluated_sample = evaluate(parse_input_form(
+        "RandomSample[Identity[f[a,b,c]],1+1]"));
+    check(evaluated_sample.has_head("f") && evaluated_sample.args().size() == 2,
+        "RandomSample evaluates source and count before sampling");
+
+    const auto association_sample = evaluate(parse_input_form(
+        "RandomSample[Association[a->1,b->2,c->3],2]"));
+    const auto association_capacity = full_form_counts({
+        call("Rule", {symbol("a"), integer(1L)}),
+        call("Rule", {symbol("b"), integer(2L)}),
+        call("Rule", {symbol("c"), integer(3L)})});
+    check(association_sample.has_head("Association")
+            && association_sample.args().size() == 2,
+        "RandomSample Association shape");
+    check(std::all_of(association_sample.args().begin(),
+            association_sample.args().end(), [&](const Expr& entry) {
+                return association_capacity.count(entry.to_full_form()) != 0;
+            }),
+        "RandomSample keeps Association rules atomic");
+    const auto delayed_association = evaluate(parse_input_form(
+        "RandomSample[Association[a:>x,b->2],All]"));
+    check(delayed_association.has_head("Association")
+            && full_form_counts(delayed_association.args()) == full_form_counts({
+                call("RuleDelayed", {symbol("a"), symbol("x")}),
+                call("Rule", {symbol("b"), integer(2L)})}),
+        "RandomSample preserves complete RuleDelayed Association entries");
+    const auto normalized_association = evaluate(parse_input_form(
+        "RandomSample[Association[a->1,a->2,b->3],All]"));
+    check(normalized_association.has_head("Association")
+            && full_form_counts(normalized_association.args()) == full_form_counts({
+                call("Rule", {symbol("a"), integer(2L)}),
+                call("Rule", {symbol("b"), integer(3L)})}),
+        "RandomSample samples normalized Association keys");
+    const auto malformed_association = evaluate(parse_input_form(
+        "RandomSample[Association[z,a->1],2]"));
+    check(malformed_association.has_head("Association")
+            && full_form_counts(malformed_association.args()) == full_form_counts({
+                symbol("z"), call("Rule", {symbol("a"), integer(1L)})}),
+        "RandomSample treats a malformed Association as an ordinary compound");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[Unevaluated[Association[{a->1,b->2}]],All]"
+        )).to_full_form(),
+        "Association[List[Rule[a, 1], Rule[b, 2]]]",
+        "RandomSample does not flatten a raw nested Association item");
+    Evaluator raw_duplicate_association_evaluator;
+    const auto raw_duplicate_association =
+        raw_duplicate_association_evaluator.evaluate(parse_input_form(
+            "RandomSample[Unevaluated[Association[a->1,a->2]],2]"));
+    check(raw_duplicate_association.has_head("Association")
+            && raw_duplicate_association.args().size() == 1
+            && raw_duplicate_association.args()[0].has_head("Rule")
+            && raw_duplicate_association.args()[0].args().size() == 2
+            && raw_duplicate_association.args()[0].args()[0] == symbol("a")
+            && (raw_duplicate_association.args()[0].args()[1] == integer(1L)
+                || raw_duplicate_association.args()[0].args()[1] == integer(2L)),
+        "RandomSample samples raw duplicate Association keys as occurrences before rebuild");
+    check(raw_duplicate_association_evaluator.messages().empty(),
+        "RandomSample raw duplicate Association count uses pre-normalized length");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[Unevaluated[List[Sequence[a,b],Nothing]],All]"
+        )).to_full_form(),
+        "List[a, b]",
+        "RandomSample rebuild splices Sequence and removes Nothing from a raw List");
+    const auto raw_general_rebuild = evaluate(parse_input_form(
+        "RandomSample[Unevaluated[f[Sequence[a,b],Nothing]],All]"));
+    check(raw_general_rebuild.has_head("f")
+            && full_form_counts(raw_general_rebuild.args()) == full_form_counts({
+                symbol("a"), symbol("b"), symbol("Nothing")}),
+        "RandomSample rebuild splices Sequence but retains Nothing for a general head");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[Unevaluated[Association[Nothing,a->1]],All]"
+        )).to_full_form(),
+        "Association[Rule[a, 1]]",
+        "RandomSample raw Association rebuild removes Nothing");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[Unevaluated[Association[Sequence[a->1,a->2]]],All]"
+        )).to_full_form(),
+        "Association[Rule[a, 1], Rule[a, 2]]",
+        "RandomSample malformed Association rebuild splices without deduplication");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[Unevaluated[List[Splice[{a,b}]]],All]"
+        )).to_full_form(),
+        "List[a, b]", "RandomSample raw List rebuild applies eligible Splice");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[Splice[f[{a,b},0],RandomSample],0]"
+        )).to_full_form(),
+        "Splice[]", "RandomSample does not outer-splice a non-List payload");
+    const auto ineligible_splice = evaluate(parse_input_form(
+        "RandomSample[Unevaluated[f[Splice[g[a,b],f]]],All]"));
+    check_equal(ineligible_splice.to_full_form(),
+        "f[Splice[g[a, b], f]]",
+        "RandomSample raw rebuild retains a non-List Splice payload");
+
+    const auto unevaluated_sample = evaluate(parse_input_form(
+        "RandomSample[Unevaluated[{1+1,3}],All]"));
+    check(unevaluated_sample.has_head("List")
+            && full_form_counts(unevaluated_sample.args()) == full_form_counts({
+                call("Plus", {integer(1L), integer(1L)}), integer(3L)}),
+        "RandomSample samples direct Unevaluated contents without evaluating them");
+    const auto nested_unevaluated_list_sample = evaluate(parse_input_form(
+        "RandomSample[{Unevaluated[1+1],3},All]"));
+    check(nested_unevaluated_list_sample.has_head("List")
+            && full_form_counts(nested_unevaluated_list_sample.args())
+                == full_form_counts({
+                    call("Unevaluated", {
+                        call("Plus", {integer(1L), integer(1L)})}),
+                    integer(3L)}),
+        "RandomSample preserves nested Unevaluated wrappers in List sources");
+    const auto nested_unevaluated_headed_sample = evaluate(parse_input_form(
+        "RandomSample[f[Unevaluated[1+1],3],All]"));
+    check(nested_unevaluated_headed_sample.has_head("f")
+            && full_form_counts(nested_unevaluated_headed_sample.args())
+                == full_form_counts({
+                    call("Unevaluated", {
+                        call("Plus", {integer(1L), integer(1L)})}),
+                    integer(3L)}),
+        "RandomSample preserves nested Unevaluated wrappers under user heads");
+    const auto nested_unevaluated_association_sample = evaluate(parse_input_form(
+        "RandomSample[Association[a->Unevaluated[1+1],b->3],All]"));
+    check(nested_unevaluated_association_sample.has_head("Association")
+            && full_form_counts(nested_unevaluated_association_sample.args())
+                == full_form_counts({
+                    call("Rule", {symbol("a"), call("Unevaluated", {
+                        call("Plus", {integer(1L), integer(1L)})})}),
+                    call("Rule", {symbol("b"), integer(3L)})}),
+        "RandomSample preserves nested Unevaluated wrappers in Association rules");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[Unevaluated[Sequence[a,b]],0]")).to_full_form(),
+        "Sequence[]",
+        "RandomSample unwraps Unevaluated only after outer Sequence splicing");
+    const auto unevaluated_sequence_sample = evaluate(parse_input_form(
+        "RandomSample[Unevaluated[Sequence[{a,b},0]]]"));
+    check(unevaluated_sequence_sample.has_head("Sequence")
+            && full_form_counts(unevaluated_sequence_sample.args())
+                == full_form_counts({list({symbol("a"), symbol("b")}), integer(0L)}),
+        "RandomSample treats a Sequence inside Unevaluated as the sampled source");
+    check_equal(evaluate(parse_input_form(
+        "RandomSample[{a,Nothing,b},All] // Sort")).to_full_form(),
+        "List[a, b]", "RandomSample sees Nothing-elided List items");
+    Evaluator random_sample_effects;
+    check_equal(random_sample_effects.evaluate(parse_input_form(
+        "x=0; {RandomSample[(x=x+1;{a,b}),(x=x+1;0)],x}")).to_full_form(),
+        "List[List[], 2]", "RandomSample evaluates source before count exactly once");
+
+    struct RandomDiagnosticCase {
+        std::string source;
+        std::string expected_result;
+        std::string expected_name;
+        std::string expected_text;
+    };
+    const std::vector<RandomDiagnosticCase> random_diagnostic_cases{
+        {"RandomSample[]", "RandomSample[]", "RandomSample",
+            "RandomSample expects an expression and an optional count."},
+        {"RandomSample[{a,b},All,1]", "RandomSample[List[a, b], All, 1]",
+            "RandomSample", "RandomSample expects an expression and an optional count."},
+        {"RandomSample[a]", "RandomSample[a]", "RandomSample",
+            "RandomSample expects a nonatomic expression."},
+        {"RandomSample[{a,b},x]", "RandomSample[List[a, b], x]", "RandomSample",
+            "RandomSample expects an integer, UpTo[n], All, or no count."},
+        {"RandomSample[{a,b},UpTo[x]]", "RandomSample[List[a, b], UpTo[x]]",
+            "RandomSample", "RandomSample expects an integer, UpTo[n], All, or no count."},
+        {"RandomSample[{a,b},-1]", "RandomSample[List[a, b], -1]", "RandomSample",
+            "RandomSample count must be between 0 and the sequence length."},
+        {"RandomSample[{a,b},3]", "RandomSample[List[a, b], 3]", "RandomSample",
+            "RandomSample count must be between 0 and the sequence length."},
+        {"RandomSample[{a,b},UpTo[-1]]", "RandomSample[List[a, b], UpTo[-1]]",
+            "RandomSample", "RandomSample count must be between 0 and the sequence length."},
+        {"RandomSample[{a,b},1000000000000000000000000000000]",
+            "RandomSample[List[a, b], 1000000000000000000000000000000]",
+            "RandomSample", "RandomSample count must be between 0 and the sequence length."},
+        {"RandomSample[{a,b},UpTo[-1000000000000000000000000000000]]",
+            "RandomSample[List[a, b], UpTo[-1000000000000000000000000000000]]",
+            "RandomSample", "RandomSample count must be between 0 and the sequence length."},
+        {"RandomPermutation[]", "RandomPermutation[]", "RandomPermutation",
+            "RandomPermutation expects an integer length."},
+        {"RandomPermutation[1,2]", "RandomPermutation[1, 2]", "RandomPermutation",
+            "RandomPermutation expects an integer length."},
+        {"RandomPermutation[-1]", "RandomPermutation[-1]", "RandomPermutation",
+            "RandomPermutation expects a non-negative integer."},
+        {"RandomPermutation[-1000000000000000000000000000000]",
+            "RandomPermutation[-1000000000000000000000000000000]",
+            "RandomPermutation", "RandomPermutation expects a non-negative integer."},
+        {"RandomPermutation[2.]", "RandomPermutation[2.]", "RandomPermutation",
+            "RandomPermutation currently expects an integer length."},
+        {"RandomPermutation[x]", "RandomPermutation[x]", "RandomPermutation",
+            "RandomPermutation currently expects an integer length."},
+        {"RandomPermutation[Unevaluated[2]]", "RandomPermutation[Unevaluated[2]]",
+            "RandomPermutation", "RandomPermutation currently expects an integer length."},
+    };
+    for (const auto& diagnostic : random_diagnostic_cases) {
+        Evaluator random_diagnostics;
+        check_equal(random_diagnostics.evaluate(parse_input_form(
+            diagnostic.source)).to_full_form(), diagnostic.expected_result,
+            "random failure remains raw: " + diagnostic.source);
+        check_equal(random_diagnostics.messages().empty() ? ""
+                : random_diagnostics.messages().front().to_full_form(),
+            "MessageName[" + diagnostic.expected_name + ", \"error\"]",
+            "random diagnostic message name: " + diagnostic.source);
+        check_equal(random_diagnostics.message_texts().empty() ? ""
+                : random_diagnostics.message_texts().front(),
+            diagnostic.expected_name + "::error: " + diagnostic.expected_text,
+            "random diagnostic text: " + diagnostic.source);
+        check(random_diagnostics.messages().size() == 1,
+            "random invalid form emits exactly one message: " + diagnostic.source);
+    }
+    Evaluator random_validation_order;
+    check_equal(random_validation_order.evaluate(parse_input_form(
+        "RandomSample[a,-1]")).to_full_form(),
+        "RandomSample[a, -1]", "RandomSample validates source before count");
+    check_equal(random_validation_order.message_texts().empty() ? ""
+            : random_validation_order.message_texts().front(),
+        "RandomSample::error: RandomSample expects a nonatomic expression.",
+        "RandomSample source-before-count diagnostic");
+    Evaluator random_print_order;
+    (void)random_print_order.evaluate(parse_input_form(
+        "RandomSample[(Print[\"source\"];a),(Print[\"count\"];-1)]"));
+    check(random_print_order.prints()
+            == std::vector<std::string>({"source", "count"}),
+        "RandomSample evaluates invalid arguments left to right");
+    check_equal(random_print_order.message_texts().empty() ? ""
+            : random_print_order.message_texts().front(),
+        "RandomSample::error: RandomSample expects a nonatomic expression.",
+        "RandomSample source validation still precedes count after effects");
+
+    Evaluator random_alias;
+    (void)random_alias.evaluate(parse_input_form("f=RandomSample"));
+    check_equal(random_alias.evaluate(parse_input_form("f[a]")).to_full_form(),
+        "f[a]", "RandomSample alias errors preserve the raw call");
+    check_equal(random_alias.messages().empty() ? ""
+            : random_alias.messages().front().to_full_form(),
+        "MessageName[f, \"error\"]", "RandomSample alias message name");
+    check_equal(random_alias.message_texts().empty() ? ""
+            : random_alias.message_texts().front(),
+        "f::error: RandomSample expects a nonatomic expression.",
+        "RandomSample alias diagnostic prefix");
+    Evaluator permutation_alias;
+    (void)permutation_alias.evaluate(parse_input_form("f=RandomPermutation"));
+    check_equal(permutation_alias.evaluate(parse_input_form("f[-1]")).to_full_form(),
+        "f[-1]", "RandomPermutation alias errors preserve the raw call");
+    check_equal(permutation_alias.message_texts().empty() ? ""
+            : permutation_alias.message_texts().front(),
+        "f::error: RandomPermutation expects a non-negative integer.",
+        "RandomPermutation alias diagnostic prefix");
+    Evaluator permutation_alias_unevaluated;
+    (void)permutation_alias_unevaluated.evaluate(parse_input_form(
+        "f=RandomPermutation"));
+    check_equal(permutation_alias_unevaluated.evaluate(parse_input_form(
+        "f[Unevaluated[0]]")).to_full_form(),
+        "f[Unevaluated[0]]",
+        "RandomPermutation alias preserves Unevaluated on type failure");
+    check_equal(permutation_alias_unevaluated.message_texts().empty() ? ""
+            : permutation_alias_unevaluated.message_texts().front(),
+        "f::error: RandomPermutation currently expects an integer length.",
+        "RandomPermutation alias Unevaluated diagnostic");
+    Evaluator permutation_sequence_unevaluated;
+    check_equal(permutation_sequence_unevaluated.evaluate(parse_input_form(
+        "RandomPermutation[Sequence[Unevaluated[0]]]"
+        )).to_full_form(),
+        "RandomPermutation[Sequence[Unevaluated[0]]]",
+        "RandomPermutation raw fallback preserves Unevaluated nested in Sequence");
+    check_equal(permutation_sequence_unevaluated.message_texts().empty() ? ""
+            : permutation_sequence_unevaluated.message_texts().front(),
+        "RandomPermutation::error: RandomPermutation currently expects an integer length.",
+        "RandomPermutation Sequence-nested Unevaluated diagnostic");
+    Evaluator permutation_nonlist_splice;
+    check_equal(permutation_nonlist_splice.evaluate(parse_input_form(
+        "RandomPermutation[Splice[f[0],RandomPermutation]]"
+        )).to_full_form(),
+        "RandomPermutation[Splice[f[0], RandomPermutation]]",
+        "RandomPermutation does not splice a non-List Splice payload");
+    check_equal(permutation_nonlist_splice.message_texts().empty() ? ""
+            : permutation_nonlist_splice.message_texts().front(),
+        "RandomPermutation::error: RandomPermutation currently expects an integer length.",
+        "RandomPermutation non-List Splice diagnostic");
+
+    Evaluator nonsymbol_sample_head;
+    check_equal(nonsymbol_sample_head.evaluate(parse_input_form(
+        "Identity[RandomSample][a]")).to_full_form(),
+        "Identity[RandomSample][a]",
+        "RandomSample nonsymbolic callable errors preserve the raw call");
+    check_equal(nonsymbol_sample_head.messages().empty() ? ""
+            : nonsymbol_sample_head.messages().front().to_full_form(),
+        "MessageName[General, \"error\"]",
+        "RandomSample nonsymbolic callable uses General message name");
+    check_equal(nonsymbol_sample_head.message_texts().empty() ? ""
+            : nonsymbol_sample_head.message_texts().front(),
+        "General::error: RandomSample expects a nonatomic expression.",
+        "RandomSample nonsymbolic callable diagnostic prefix");
+    Evaluator nonsymbol_permutation_head;
+    check_equal(nonsymbol_permutation_head.evaluate(parse_input_form(
+        "Identity[RandomPermutation][-1]")).to_full_form(),
+        "Identity[RandomPermutation][-1]",
+        "RandomPermutation nonsymbolic callable errors preserve the raw call");
+    check_equal(nonsymbol_permutation_head.message_texts().empty() ? ""
+            : nonsymbol_permutation_head.message_texts().front(),
+        "General::error: RandomPermutation expects a non-negative integer.",
+        "RandomPermutation nonsymbolic callable diagnostic prefix");
+    Evaluator nonsymbol_composite_head;
+    check_equal(nonsymbol_composite_head.evaluate(parse_input_form(
+        "Identity[CompositeQ][{4,5},{6}]")).to_full_form(),
+        "Identity[CompositeQ][List[4, 5], List[6]]",
+        "CompositeQ nonsymbolic callable Listable errors preserve the raw call");
+    check_equal(nonsymbol_composite_head.messages().empty() ? ""
+            : nonsymbol_composite_head.messages().front().to_full_form(),
+        "MessageName[General, \"error\"]",
+        "CompositeQ nonsymbolic callable uses General message name");
+    check_equal(nonsymbol_composite_head.message_texts().empty() ? ""
+            : nonsymbol_composite_head.message_texts().front(),
+        "General::error: Listable Function arguments have incompatible list lengths.",
+        "CompositeQ nonsymbolic callable diagnostic prefix");
+
+    for (const std::size_t length : {std::size_t{0}, std::size_t{1},
+            std::size_t{2}, std::size_t{8}, std::size_t{32}}) {
+        const auto encoded = evaluate(parse_input_form(
+            "RandomPermutation[" + std::to_string(length) + "]"));
+        check(encoded.has_head("Cycles") && encoded.args().size() == 1
+                && encoded.args()[0].has_head("List"),
+            "RandomPermutation returns a Cycles expression for length "
+                + std::to_string(length));
+        if (!encoded.has_head("Cycles") || encoded.args().size() != 1
+            || !encoded.args()[0].has_head("List")) continue;
+
+        std::vector<std::size_t> image(length);
+        std::iota(image.begin(), image.end(), std::size_t{1});
+        std::set<std::size_t> seen;
+        std::size_t previous_cycle_minimum = 0;
+        bool valid_cycles = true;
+        for (const auto& cycle_expression : encoded.args()[0].args()) {
+            if (!cycle_expression.has_head("List")
+                || cycle_expression.args().size() < 2) {
+                valid_cycles = false;
+                continue;
+            }
+            std::vector<std::size_t> cycle;
+            for (const auto& member : cycle_expression.args()) {
+                if (member.kind() != ExprKind::Integer
+                    || !member.integer_value().fits_ulong_p()) {
+                    valid_cycles = false;
+                    continue;
+                }
+                const auto value = static_cast<std::size_t>(
+                    member.integer_value().get_ui());
+                if (value == 0 || value > length || !seen.insert(value).second)
+                    valid_cycles = false;
+                cycle.push_back(value);
+            }
+            if (cycle.empty()) continue;
+            const auto minimum = *std::min_element(cycle.begin(), cycle.end());
+            if (cycle.front() != minimum || minimum <= previous_cycle_minimum)
+                valid_cycles = false;
+            previous_cycle_minimum = minimum;
+            for (std::size_t index = 0; index < cycle.size(); ++index)
+                if (cycle[index] >= 1 && cycle[index] <= length)
+                    image[cycle[index] - 1] = cycle[(index + 1) % cycle.size()];
+        }
+        auto sorted_image = image;
+        std::sort(sorted_image.begin(), sorted_image.end());
+        std::vector<std::size_t> expected_image(length);
+        std::iota(expected_image.begin(), expected_image.end(), std::size_t{1});
+        check(valid_cycles && sorted_image == expected_image,
+            "RandomPermutation cycles encode a canonical permutation for length "
+                + std::to_string(length));
+        if (length <= 1)
+            check(encoded.args()[0].args().empty(),
+                "RandomPermutation omits fixed points for length "
+                    + std::to_string(length));
+    }
+    check(evaluate(parse_input_form("RandomPermutation[8/2]")).has_head("Cycles"),
+        "RandomPermutation evaluates an exact integer argument");
 
     const std::vector<std::pair<std::string, std::string>> transcendental_cases{
         {"ComplexExpand[x + I]", "ComplexExpand[Plus[Complex[0, 1], x]]"},

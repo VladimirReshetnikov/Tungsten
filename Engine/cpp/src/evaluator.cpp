@@ -17,8 +17,10 @@
 #include <limits>
 #include <locale>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -31,6 +33,63 @@ namespace {
 std::optional<std::vector<Expr>> association_rules(const Expr& expression);
 std::optional<long> machine_index(const Expr& expression);
 int expression_compare(const Expr& left, const Expr& right);
+
+std::mutex& process_random_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::mt19937_64& process_random_engine() {
+    static std::mt19937_64 engine([] {
+        std::random_device source;
+        std::seed_seq seed{source(), source(), source(), source(),
+            source(), source(), source(), source()};
+        return std::mt19937_64(seed);
+    }());
+    return engine;
+}
+
+bool unevaluated_transparent_head(const std::string& name) {
+    // Kept in lockstep with the Python compatibility evaluator's pinned
+    // _UNEVALUATED_TRANSPARENT_HEADS registry.  Argument normalization happens
+    // while wrappers are intact; only these evaluated heads strip them.
+    static const std::set<std::string> names{
+        "Abs", "Accuracy", "AlphabeticSort", "And", "Append", "AppendTo",
+        "Apply", "Array", "ArrayDepth", "ArrayFlatten", "ArrayPad", "ArrayQ",
+        "ArrayReshape", "ArrayRules", "AtomQ", "BaseDecode", "BaseEncode", "BlockMap",
+        "Boole", "ByteArray", "ByteArrayQ", "ByteArrayToString", "Cases", "Characters",
+        "Clip", "Comap", "ComapApply", "ComposeList", "Composition", "Conjugate",
+        "ConstantArray", "Construct", "Cross", "Delete", "DeleteAdjacentDuplicates", "DeleteCases",
+        "DeleteDuplicates", "DeleteDuplicatesBy", "Depth", "Det", "Dimensions", "Discard",
+        "DiscreteDelta", "Dot", "Drop", "DuplicateFreeQ", "Equal", "ExactNumberQ",
+        "Extract", "First", "FirstCase", "FixedPoint", "FixedPointList", "Flatten",
+        "FlattenAt", "Fold", "FoldList", "FoldPair", "FoldPairList", "FoldWhile",
+        "FoldWhileList", "FreeQ", "FromCharacterCode", "Greater", "GreaterEqual", "Head",
+        "Identity", "If", "Im", "InexactNumberQ", "Insert", "IntegerQ",
+        "Inverse", "Join", "KroneckerDelta", "Last", "Length", "LengthWhile",
+        "Less", "LessEqual", "Level", "LeviCivitaTensor", "LexicographicOrder", "LexicographicSort",
+        "Lookup", "MachineIntegerQ", "MachineNumberQ", "Map", "MapAll", "MapApply",
+        "MapAt", "MapIndexed", "MapThread", "MatchQ", "MatrixPower", "Max",
+        "MaximalBy", "MemberQ", "Min", "MinimalBy", "Mod", "Most",
+        "N", "Nest", "NestList", "NestWhile", "NestWhileList", "Normal",
+        "Not", "NumberQ", "NumericalSort", "Operate", "Or", "Order",
+        "OrderedQ", "Ordering", "OrderingBy", "Outer", "Part", "Partition",
+        "Pick", "Plus", "Position", "Power", "Precision", "Prepend",
+        "Quotient", "QuotientRemainder", "Ramp", "RandomSample", "Range", "Re",
+        "RealAbs", "RealSign", "RealValuedNumberQ", "Replace", "ReplaceAll", "ReplaceAt",
+        "ReplacePart", "ReplaceRepeated", "Rest", "Reverse", "ReverseSort", "ReverseSortBy",
+        "RightComposition", "RotateLeft", "RotateRight", "SameQ", "Scan", "Select",
+        "SelectFirst", "SequenceFold", "SequenceFoldList", "SetAccuracy", "SetPrecision", "Sign",
+        "Sort", "SortBy", "SparseArray", "SparseArrayQ", "Split", "SplitBy",
+        "StringContainsQ", "StringDrop", "StringEndsQ", "StringFreeQ", "StringInsert", "StringJoin",
+        "StringLength", "StringMatchQ", "StringPosition", "StringReplace", "StringReverse", "StringStartsQ",
+        "StringTake", "StringToByteArray", "Subsequences", "Switch", "Take", "TakeDrop",
+        "TakeList", "TakeWhile", "Thread", "Through", "Times", "ToCharacterCode",
+        "Tr", "Transpose", "Tuples", "UnitStep", "UnitVector", "Unitize",
+        "UnsameQ", "Which",
+    };
+    return names.count(name) != 0;
+}
 
 bool is_symbol(const Expr& value, const std::string& name) {
     const auto* symbol_name = value.symbol_name();
@@ -7025,6 +7084,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
 
     auto head = evaluate(raw_head);
+    const auto argument_dispatch_name = head.symbol_name()
+        ? system_dispatch_name(*head.symbol_name()) : std::string{};
     const auto call_attributes = attributes_for(head);
     const bool hold_all_complete = call_attributes.count("HoldAllComplete") != 0;
     const bool hold_all = hold_all_complete || call_attributes.count("HoldAll") != 0;
@@ -7039,7 +7100,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             || name == "Count" || name == "MemberQ" || name == "FirstCase" || name == "Position" || name == "ReplaceAll"
             || name == "ReplaceRepeated" || name == "Replace" || name == "ReplaceAt"));
         const bool held = hold_all || (hold_first && argument_index == 0) || (hold_rest && argument_index > 0);
-        if (argument.has_head("Unevaluated") && argument.args().size() == 1) args.push_back(argument.args()[0]);
+        if (argument.has_head("Unevaluated") && argument.args().size() == 1)
+            args.push_back(argument);
         else if (held) {
             if (!hold_all_complete && argument.has_head("Evaluate") && argument.args().size() == 1)
                 args.push_back(evaluate(argument.args()[0]));
@@ -7059,7 +7121,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         for (const auto& argument : args) {
             if (argument.has_head("Splice") && !argument.args().empty() && argument.args().size() <= 2) {
                 const auto target_head = argument.args().size() == 2 ? argument.args()[1] : symbol("List");
-                if (head == target_head && argument.args()[0].kind() == ExprKind::Call) {
+                if (head == target_head && argument.args()[0].has_head("List")) {
                     spliced.insert(spliced.end(), argument.args()[0].args().begin(), argument.args()[0].args().end());
                     changed = true;
                     continue;
@@ -7079,6 +7141,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         args = std::move(flattened);
     }
     if (call_attributes.count("Orderless") != 0) std::sort(args.begin(), args.end(), expression_less);
+    if (unevaluated_transparent_head(argument_dispatch_name)) {
+        for (auto& argument : args)
+            if (argument.has_head("Unevaluated") && argument.args().size() == 1)
+                argument = argument.args()[0];
+    }
 
     if (head.has_head("Function") && !head.args().empty()) {
         if (head.args().size() >= 2 && !args.empty() && !is_symbol(head.args()[0], "Null")) {
@@ -7110,7 +7177,20 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             if (!list_length) list_length = argument.args().size();
             else if (*list_length != argument.args().size()) incompatible = true;
         }
-        if (incompatible) return evaluated_expression;
+        if (incompatible) {
+            if (function == "CompositeQ") {
+                const auto message_head = raw_head.symbol_name()
+                    ? raw_head : symbol("General");
+                const auto message_prefix = message_head.symbol_name()
+                    ? system_dispatch_name(*message_head.symbol_name()) : "General";
+                const auto message = call("MessageName", {
+                    message_head, string("error")});
+                emit_message(message, message_prefix
+                    + "::error: Listable Function arguments have incompatible list lengths.");
+                return call(raw_head, raw_args);
+            }
+            return evaluated_expression;
+        }
         if (list_length) {
             std::vector<Expr> threaded;
             for (std::size_t index = 0; index < *list_length; ++index) {
@@ -10118,6 +10198,117 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return call(rules ? symbol("Association") : args[0].head(), std::move(result));
         }
     }
+    if (function == "RandomSample") {
+        std::string error;
+        if (args.size() != 1 && args.size() != 2) {
+            error = "RandomSample expects an expression and an optional count.";
+        } else if (args[0].kind() != ExprKind::Call) {
+            error = "RandomSample expects a nonatomic expression.";
+        } else {
+            std::optional<std::vector<Expr>> rules;
+            if (args[0].has_head("Association")
+                && std::all_of(args[0].args().begin(), args[0].args().end(),
+                    [](const Expr& entry) {
+                        return (entry.has_head("Rule")
+                                || entry.has_head("RuleDelayed"))
+                            && entry.args().size() == 2;
+                    })) {
+                rules = args[0].args();
+            }
+            auto items = rules ? *rules : args[0].args();
+            const mpz_class length(std::to_string(items.size()), 10);
+            std::optional<std::size_t> count;
+            bool valid_count_syntax = true;
+
+            if (args.size() == 1 || is_symbol(args[1], "All")) {
+                count = items.size();
+            } else if (args[1].kind() == ExprKind::Integer) {
+                const auto& requested = args[1].integer_value();
+                if (requested < 0 || requested > length) {
+                    error = "RandomSample count must be between 0 and the sequence length.";
+                } else {
+                    count = nonnegative_size_t(requested);
+                }
+            } else if (args[1].has_head("UpTo") && args[1].args().size() == 1
+                && args[1].args()[0].kind() == ExprKind::Integer) {
+                const auto& requested = args[1].args()[0].integer_value();
+                if (requested < 0) {
+                    error = "RandomSample count must be between 0 and the sequence length.";
+                } else if (requested >= length) {
+                    count = items.size();
+                } else {
+                    count = nonnegative_size_t(requested);
+                }
+            } else {
+                valid_count_syntax = false;
+            }
+
+            if (!valid_count_syntax) {
+                error = "RandomSample expects an integer, UpTo[n], All, or no count.";
+            } else if (error.empty() && count) {
+                if (*count != 0) {
+                    std::lock_guard<std::mutex> lock(process_random_mutex());
+                    auto& engine = process_random_engine();
+                    for (std::size_t index = 0; index < *count; ++index) {
+                        std::uniform_int_distribution<std::size_t> choose(
+                            index, items.size() - 1);
+                        std::swap(items[index], items[choose(engine)]);
+                    }
+                }
+                items.resize(*count);
+                if (rules)
+                    return call("Association",
+                        *normalized_association_rules(items));
+                auto rebuilt = items;
+                const auto* rebuild_head = args[0].head().symbol_name();
+                const auto rebuild_name = rebuild_head
+                    ? system_dispatch_name(*rebuild_head) : std::string{};
+                const bool normalize_first_level = rebuild_head
+                    && rebuild_name != "HoldComplete" && rebuild_name != "Rule"
+                    && rebuild_name != "RuleDelayed"
+                    && rebuild_name != "Unevaluated";
+                if (normalize_first_level) {
+                    rebuilt.clear();
+                    for (const auto& item : items) {
+                        if (item.has_head("Sequence")) {
+                            rebuilt.insert(rebuilt.end(), item.args().begin(),
+                                item.args().end());
+                            continue;
+                        }
+                        if (item.has_head("Splice") && !item.args().empty()
+                            && item.args().size() <= 2
+                            && item.args()[0].has_head("List")) {
+                            const auto target_head = item.args().size() == 2
+                                ? item.args()[1] : symbol("List");
+                            if (args[0].head() == target_head) {
+                                rebuilt.insert(rebuilt.end(),
+                                    item.args()[0].args().begin(),
+                                    item.args()[0].args().end());
+                                continue;
+                            }
+                        }
+                        rebuilt.push_back(item);
+                    }
+                }
+                if (args[0].has_head("List")
+                    || args[0].has_head("Association")) {
+                    rebuilt.erase(std::remove_if(rebuilt.begin(), rebuilt.end(),
+                        [](const Expr& item) {
+                            return is_symbol(item, "Nothing");
+                        }), rebuilt.end());
+                }
+                return call(args[0].head(), std::move(rebuilt));
+            }
+        }
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + error);
+        return call(raw_head, raw_args);
+    }
     if (function == "Inequality" && args.size() >= 3 && args.size() % 2 == 1) {
         for (std::size_t index = 1; index < args.size(); index += 2) {
             const auto* operation = args[index].symbol_name();
@@ -12004,8 +12195,53 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return integer(order);
         }
     }
-    if (function == "RandomPermutation" && args.size() == 1 && machine_index(args[0]) && *machine_index(args[0]) == 0)
-        return call("Cycles", {list({})});
+    if (function == "RandomPermutation") {
+        std::string error;
+        if (args.size() != 1) {
+            error = "RandomPermutation expects an integer length.";
+        } else if (args[0].kind() != ExprKind::Integer) {
+            error = "RandomPermutation currently expects an integer length.";
+        } else if (args[0].integer_value() < 0) {
+            error = "RandomPermutation expects a non-negative integer.";
+        } else if (const auto length = nonnegative_size_t(args[0].integer_value())) {
+            std::vector<std::size_t> permutation(*length);
+            std::iota(permutation.begin(), permutation.end(), std::size_t{1});
+            {
+                std::lock_guard<std::mutex> lock(process_random_mutex());
+                std::shuffle(permutation.begin(), permutation.end(),
+                    process_random_engine());
+            }
+
+            std::vector<bool> visited(*length);
+            std::vector<Expr> cycles;
+            for (std::size_t start = 0; start < *length; ++start) {
+                if (visited[start]) continue;
+                std::vector<Expr> cycle;
+                auto current = start;
+                while (!visited[current]) {
+                    visited[current] = true;
+                    cycle.push_back(integer(mpz_class(
+                        std::to_string(current + 1), 10)));
+                    current = permutation[current] - 1;
+                }
+                if (cycle.size() > 1) cycles.push_back(list(std::move(cycle)));
+            }
+            return call("Cycles", {list(std::move(cycles))});
+        } else {
+            // A non-negative Integer wider than size_t cannot be materialized by
+            // this native process.  Keep the evaluated call inert, as the
+            // reference would likewise be unable to construct its permutation.
+            return evaluated_expression;
+        }
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + error);
+        return call(raw_head, raw_args);
+    }
     if ((function == "Union" || function == "Intersection" || function == "Complement") && !args.empty()) {
         std::vector<Expr> collections; std::optional<Expr> same_test;
         for (const auto& argument : args) {
@@ -13360,6 +13596,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "PrimeQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer)
         return boolean(args[0].integer_value() > 1 && mpz_probab_prime_p(args[0].integer_value().get_mpz_t(), 25) != 0);
+    if (function == "CompositeQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer)
+        return boolean(args[0].integer_value() >= 4
+            && mpz_probab_prime_p(args[0].integer_value().get_mpz_t(), 25) == 0);
     if (function == "PrimePowerQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer) {
         mpz_class value = abs(args[0].integer_value()); if (value <= 1) return symbol("False");
         for (unsigned long exponent = 1; exponent <= mpz_sizeinbase(value.get_mpz_t(), 2); ++exponent) {
