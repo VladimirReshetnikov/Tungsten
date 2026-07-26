@@ -2947,6 +2947,38 @@ std::vector<Expr> splice_sequences(const std::vector<Expr>& args) {
     return result;
 }
 
+Expr rebuild_evaluated_call(Expr head, std::vector<Expr> arguments) {
+    std::vector<Expr> normalized;
+    for (const auto& argument : arguments) {
+        if (argument.has_head("Sequence")) {
+            normalized.insert(
+                normalized.end(), argument.args().begin(), argument.args().end());
+            continue;
+        }
+        if (argument.has_head("Splice") && !argument.args().empty()
+            && argument.args().size() <= 2
+            && argument.args()[0].has_head("List")) {
+            const auto target = argument.args().size() == 2
+                ? argument.args()[1] : symbol("List");
+            if (target == head) {
+                normalized.insert(normalized.end(), argument.args()[0].args().begin(),
+                    argument.args()[0].args().end());
+                continue;
+            }
+        }
+        normalized.push_back(argument);
+    }
+    if (is_symbol(head, "List") || is_symbol(head, "Association"))
+        normalized.erase(std::remove_if(normalized.begin(), normalized.end(),
+            [](const Expr& value) { return is_symbol(value, "Nothing"); }),
+            normalized.end());
+    return call(std::move(head), std::move(normalized));
+}
+
+Expr evaluated_list_expr(std::vector<Expr> arguments) {
+    return rebuild_evaluated_call(symbol("List"), std::move(arguments));
+}
+
 Expr replace_slots(const Expr& expression, const std::vector<Expr>& args, const Expr& self) {
     if (expression.has_head("Function")) return expression;
     if (expression.has_head("Slot") && expression.args().empty()) return args.empty() ? expression : args[0];
@@ -3700,6 +3732,215 @@ std::optional<std::vector<Expr>> association_rules(const Expr& expression) {
     if (expression.kind() != ExprKind::Call || !expression.has_head("Association"))
         return std::nullopt;
     return normalized_association_rules(expression.args());
+}
+
+struct TakeDropSelectorResult {
+    std::vector<std::size_t> indices;
+    std::string error;
+};
+
+TakeDropSelectorResult normalize_take_drop_selectors(
+    const Expr& value, const Expr& specification,
+    const std::string& function_name) {
+    TakeDropSelectorResult result;
+    const auto count = value.args().size();
+    const mpz_class length(std::to_string(count));
+
+    auto append_selector = [&](const mpz_class& selector) {
+        if (selector == 0) {
+            result.error = "Only top-level Part specifications may use index 0.";
+            return false;
+        }
+        mpz_class resolved = selector;
+        if (selector > 0) --resolved;
+        else resolved += length;
+        if (resolved < 0 || resolved >= length) {
+            result.error = "Part index " + selector.get_str()
+                + " is out of range for length " + length.get_str() + ".";
+            return false;
+        }
+        const auto index = nonnegative_size_t(resolved);
+        if (!index || *index >= count) {
+            result.error = "Part index " + selector.get_str()
+                + " is out of range for length " + length.get_str() + ".";
+            return false;
+        }
+        result.indices.push_back(*index);
+        return true;
+    };
+
+    auto append_count = [&](const mpz_class& requested) {
+        if (requested >= 0) {
+            if (requested > length) {
+                (void)append_selector(length + 1);
+                return;
+            }
+            const auto amount = nonnegative_size_t(requested);
+            if (!amount) {
+                (void)append_selector(length + 1);
+                return;
+            }
+            result.indices.reserve(*amount);
+            for (std::size_t index = 0; index < *amount; ++index)
+                result.indices.push_back(index);
+            return;
+        }
+
+        mpz_class first = length + requested + 1;
+        if (first < -length) {
+            (void)append_selector(first);
+            return;
+        }
+        if (first <= 0) {
+            // Values from -length through -1 are valid, but Python's range
+            // reaches 0 next and reports that selector.
+            (void)append_selector(0);
+            return;
+        }
+        const auto amount = nonnegative_size_t(-requested);
+        if (!amount || *amount > count) {
+            (void)append_selector(first);
+            return;
+        }
+        result.indices.reserve(*amount);
+        for (std::size_t index = count - *amount; index < count; ++index)
+            result.indices.push_back(index);
+    };
+
+    auto append_span = [&](const std::vector<Expr>& span) {
+        if (span.size() != 2 && span.size() != 3) {
+            result.error = "Span must contain two or three arguments.";
+            return;
+        }
+        auto endpoint = [&](const Expr& item, const mpz_class& fallback) {
+            if (is_symbol(item, "All")) return length;
+            if (item.kind() != ExprKind::Integer) return fallback;
+            mpz_class endpoint_value = item.integer_value();
+            if (endpoint_value < 0) endpoint_value += length + 1;
+            return endpoint_value;
+        };
+        const auto first = endpoint(span[0], mpz_class(1));
+        const auto last = endpoint(span[1], length);
+        mpz_class step = 1;
+        if (span.size() == 3) {
+            if (span[2].kind() != ExprKind::Integer) {
+                result.error = "Span steps must be integers.";
+                return;
+            }
+            step = span[2].integer_value();
+        }
+        if (step == 0) {
+            result.error = "Span step cannot be zero.";
+            return;
+        }
+        for (auto selector = first;
+             step > 0 ? selector <= last : selector >= last;
+             selector += step) {
+            if (!append_selector(selector)) return;
+        }
+    };
+
+    if (specification.kind() == ExprKind::Integer) {
+        append_count(specification.integer_value());
+        return result;
+    }
+    if (is_symbol(specification, "All")) {
+        result.indices.resize(count);
+        std::iota(result.indices.begin(), result.indices.end(), 0);
+        return result;
+    }
+    if (is_symbol(specification, "None")) return result;
+    if (specification.has_head("Span")) {
+        append_span(specification.args());
+        return result;
+    }
+    if (specification.has_head("List")) {
+        if (specification.args().size() == 1) {
+            const auto& item = specification.args()[0];
+            if (item.kind() == ExprKind::Integer) {
+                (void)append_selector(item.integer_value());
+                return result;
+            }
+            if (is_symbol(item, "All")) {
+                result.indices.resize(count);
+                std::iota(result.indices.begin(), result.indices.end(), 0);
+                return result;
+            }
+            result.error = function_name
+                + " single-element list specifications must contain an integer or All.";
+            return result;
+        }
+        if (specification.args().size() == 2
+            || specification.args().size() == 3) {
+            append_span(specification.args());
+            return result;
+        }
+        result.error = function_name
+            + " list specifications must contain one, two, or three items.";
+        return result;
+    }
+    result.error = "Unsupported " + function_name + " specification: '"
+        + specification.to_input_form() + "'.";
+    return result;
+}
+
+std::optional<Expr> take_or_drop_one(
+    const Expr& value, const Expr& specification, bool drop,
+    const std::string& function_name, std::string& failure) {
+    if (value.kind() != ExprKind::Call) {
+        failure = function_name + " expects a nonatomic expression.";
+        return std::nullopt;
+    }
+    const auto rules = association_rules(value);
+    if (rules && specification.has_head("List")
+        && !specification.args().empty()
+        && std::any_of(specification.args().begin(), specification.args().end(),
+            [](const Expr& item) {
+                return item.has_head("Key") || item.kind() == ExprKind::String;
+            })) {
+        failure = function_name
+            + " on associations currently supports only numeric or span selectors; "
+              "key-list selectors such as ``{Key[a], …}`` are not yet implemented.";
+        return std::nullopt;
+    }
+
+    const auto selection = normalize_take_drop_selectors(
+        value, specification, function_name);
+    if (!selection.error.empty()) {
+        failure = selection.error;
+        return std::nullopt;
+    }
+    const auto& source = rules ? *rules : value.args();
+    std::vector<Expr> output;
+    if (drop) {
+        const std::set<std::size_t> removed(
+            selection.indices.begin(), selection.indices.end());
+        output.reserve(source.size() - removed.size());
+        for (std::size_t index = 0; index < source.size(); ++index)
+            if (removed.count(index) == 0) output.push_back(source[index]);
+    } else {
+        output.reserve(selection.indices.size());
+        for (const auto index : selection.indices) output.push_back(source[index]);
+    }
+    return rebuild_evaluated_call(value.head(), std::move(output));
+}
+
+std::optional<Expr> apply_take_or_drop_specs(
+    const Expr& value, const std::vector<Expr>& specifications,
+    std::size_t dimension, bool drop, const std::string& function_name,
+    std::string& failure) {
+    auto sliced = take_or_drop_one(value, specifications[dimension], drop,
+        function_name, failure);
+    if (!sliced || dimension + 1 == specifications.size()) return sliced;
+    std::vector<Expr> children;
+    children.reserve(sliced->args().size());
+    for (const auto& child : sliced->args()) {
+        auto transformed = apply_take_or_drop_specs(child, specifications,
+            dimension + 1, drop, function_name, failure);
+        if (!transformed) return std::nullopt;
+        children.push_back(std::move(*transformed));
+    }
+    return rebuild_evaluated_call(sliced->head(), std::move(children));
 }
 
 std::optional<std::vector<Expr>> list_or_association_values(
@@ -14007,15 +14248,45 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, "Partition::error: " + error);
         return call(raw_head, raw_args);
     }
-    if (function == "TakeDrop" && args.size() == 2) return list({evaluate(call("Take", args)), evaluate(call("Drop", args))});
-    if (function == "TakeList" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")) {
-        std::vector<Expr> chunks; std::size_t offset = 0;
-        for (const auto& count_expr : args[1].args()) {
-            const auto count = machine_index(count_expr); if (!count || *count < 0) return call(head, args);
-            const auto end = std::min(args[0].args().size(), offset + static_cast<std::size_t>(*count));
-            chunks.push_back(list(std::vector<Expr>(args[0].args().begin() + offset, args[0].args().begin() + end))); offset = end;
+    if (function == "TakeDrop") {
+        if (args.size() != 2)
+            return raw_evaluation_error("TakeDrop expects exactly two arguments.");
+        std::string error;
+        auto taken = take_or_drop_one(args[0], args[1], false, "Take", error);
+        if (!taken) return raw_evaluation_error(error);
+        auto dropped = take_or_drop_one(args[0], args[1], true, "Drop", error);
+        if (!dropped) return raw_evaluation_error(error);
+        return evaluated_list_expr({std::move(*taken), std::move(*dropped)});
+    }
+    if (function == "TakeList") {
+        if (args.size() != 2)
+            return raw_evaluation_error("TakeList expects exactly two arguments.");
+        if (!args[1].has_head("List"))
+            return raw_evaluation_error(
+                "TakeList expects a list of specifications.");
+
+        Expr remaining = args[0];
+        std::vector<Expr> chunks;
+        chunks.reserve(args[1].args().size());
+        for (const auto& specification : args[1].args()) {
+            if (is_symbol(specification, "All")) {
+                chunks.push_back(remaining);
+                if (remaining.kind() == ExprKind::Call)
+                    remaining = call(remaining.head(), {});
+                continue;
+            }
+
+            std::string error;
+            auto taken = take_or_drop_one(
+                remaining, specification, false, "Take", error);
+            if (!taken) return raw_evaluation_error(error);
+            auto dropped = take_or_drop_one(
+                remaining, specification, true, "Drop", error);
+            if (!dropped) return raw_evaluation_error(error);
+            chunks.push_back(std::move(*taken));
+            remaining = std::move(*dropped);
         }
-        return list(std::move(chunks));
+        return evaluated_list_expr(std::move(chunks));
     }
     if ((function == "Fold" || function == "FoldList") && ((args.size() == 3 && args[2].has_head("List"))
         || (args.size() == 2 && args[1].has_head("List") && !args[1].args().empty()))) {
@@ -14349,212 +14620,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if (function == "Take" || function == "Drop") {
         const bool drop = function == "Drop";
         std::string error;
-
-        struct SelectorResult {
-            std::vector<std::size_t> indices;
-            std::string error;
-        };
-
-        auto normalize_selectors = [&](const Expr& value, const Expr& specification) {
-            SelectorResult result;
-            const auto count = value.args().size();
-            const mpz_class length(std::to_string(count));
-
-            auto append_selector = [&](const mpz_class& selector) {
-                if (selector == 0) {
-                    result.error = "Only top-level Part specifications may use index 0.";
-                    return false;
-                }
-                mpz_class resolved = selector;
-                if (selector > 0) --resolved;
-                else resolved += length;
-                if (resolved < 0 || resolved >= length) {
-                    result.error = "Part index " + selector.get_str()
-                        + " is out of range for length " + length.get_str() + ".";
-                    return false;
-                }
-                const auto index = nonnegative_size_t(resolved);
-                if (!index || *index >= count) {
-                    result.error = "Part index " + selector.get_str()
-                        + " is out of range for length " + length.get_str() + ".";
-                    return false;
-                }
-                result.indices.push_back(*index);
-                return true;
-            };
-
-            auto append_count = [&](const mpz_class& requested) {
-                if (requested >= 0) {
-                    if (requested > length) {
-                        (void)append_selector(length + 1);
-                        return;
-                    }
-                    const auto amount = nonnegative_size_t(requested);
-                    if (!amount) {
-                        (void)append_selector(length + 1);
-                        return;
-                    }
-                    result.indices.reserve(*amount);
-                    for (std::size_t index = 0; index < *amount; ++index)
-                        result.indices.push_back(index);
-                    return;
-                }
-
-                mpz_class first = length + requested + 1;
-                if (first < -length) {
-                    (void)append_selector(first);
-                    return;
-                }
-                if (first <= 0) {
-                    // Values from -length through -1 are valid, but Python's
-                    // range reaches 0 next and reports that selector.
-                    (void)append_selector(0);
-                    return;
-                }
-                const auto amount = nonnegative_size_t(-requested);
-                if (!amount || *amount > count) {
-                    (void)append_selector(first);
-                    return;
-                }
-                result.indices.reserve(*amount);
-                for (std::size_t index = count - *amount; index < count; ++index)
-                    result.indices.push_back(index);
-            };
-
-            auto append_span = [&](const std::vector<Expr>& span) {
-                if (span.size() != 2 && span.size() != 3) {
-                    result.error = "Span must contain two or three arguments.";
-                    return;
-                }
-                auto endpoint = [&](const Expr& item, const mpz_class& fallback) -> mpz_class {
-                    if (is_symbol(item, "All")) return length;
-                    if (item.kind() != ExprKind::Integer) return fallback;
-                    mpz_class endpoint_value = item.integer_value();
-                    if (endpoint_value < 0) endpoint_value += length + 1;
-                    return endpoint_value;
-                };
-                const auto first = endpoint(span[0], mpz_class(1));
-                const auto last = endpoint(span[1], length);
-                mpz_class step = 1;
-                if (span.size() == 3) {
-                    if (span[2].kind() != ExprKind::Integer) {
-                        result.error = "Span steps must be integers.";
-                        return;
-                    }
-                    step = span[2].integer_value();
-                }
-                if (step == 0) {
-                    result.error = "Span step cannot be zero.";
-                    return;
-                }
-                for (auto selector = first;
-                     step > 0 ? selector <= last : selector >= last;
-                     selector += step) {
-                    if (!append_selector(selector)) return;
-                }
-            };
-
-            if (specification.kind() == ExprKind::Integer) {
-                append_count(specification.integer_value());
-                return result;
-            }
-            if (is_symbol(specification, "All")) {
-                result.indices.resize(count);
-                std::iota(result.indices.begin(), result.indices.end(), 0);
-                return result;
-            }
-            if (is_symbol(specification, "None")) return result;
-            if (specification.has_head("Span")) {
-                append_span(specification.args());
-                return result;
-            }
-            if (specification.has_head("List")) {
-                if (specification.args().size() == 1) {
-                    const auto& item = specification.args()[0];
-                    if (item.kind() == ExprKind::Integer) {
-                        (void)append_selector(item.integer_value());
-                        return result;
-                    }
-                    if (is_symbol(item, "All")) {
-                        result.indices.resize(count);
-                        std::iota(result.indices.begin(), result.indices.end(), 0);
-                        return result;
-                    }
-                    result.error = function
-                        + " single-element list specifications must contain an integer or All.";
-                    return result;
-                }
-                if (specification.args().size() == 2 || specification.args().size() == 3) {
-                    append_span(specification.args());
-                    return result;
-                }
-                result.error = function
-                    + " list specifications must contain one, two, or three items.";
-                return result;
-            }
-            result.error = "Unsupported " + function + " specification: '"
-                + specification.to_input_form() + "'.";
-            return result;
-        };
-
-        auto take_or_drop_one = [&](const Expr& value, const Expr& specification,
-                                    std::string& failure) -> std::optional<Expr> {
-            if (value.kind() != ExprKind::Call) {
-                failure = function + " expects a nonatomic expression.";
-                return std::nullopt;
-            }
-            const auto rules = association_rules(value);
-            if (rules && specification.has_head("List") && !specification.args().empty()
-                && std::any_of(specification.args().begin(), specification.args().end(),
-                    [](const Expr& item) {
-                        return item.has_head("Key") || item.kind() == ExprKind::String;
-                    })) {
-                failure = function
-                    + " on associations currently supports only numeric or span selectors; "
-                      "key-list selectors such as ``{Key[a], …}`` are not yet implemented.";
-                return std::nullopt;
-            }
-
-            const auto selection = normalize_selectors(value, specification);
-            if (!selection.error.empty()) {
-                failure = selection.error;
-                return std::nullopt;
-            }
-            const auto& source = rules ? *rules : value.args();
-            std::vector<Expr> output;
-            if (drop) {
-                const std::set<std::size_t> removed(
-                    selection.indices.begin(), selection.indices.end());
-                output.reserve(source.size() - removed.size());
-                for (std::size_t index = 0; index < source.size(); ++index)
-                    if (removed.count(index) == 0) output.push_back(source[index]);
-            } else {
-                output.reserve(selection.indices.size());
-                for (const auto index : selection.indices) output.push_back(source[index]);
-            }
-            return call(value.head(), std::move(output));
-        };
-
         if (args.size() < 2) {
             error = function + " expects at least one specification.";
         } else {
-            std::function<std::optional<Expr>(const Expr&, std::size_t)> apply_specs;
-            apply_specs = [&](const Expr& value, std::size_t dimension) -> std::optional<Expr> {
-                auto sliced = take_or_drop_one(value, args[dimension], error);
-                if (!sliced || dimension + 1 == args.size()) return sliced;
-                std::vector<Expr> children;
-                children.reserve(sliced->args().size());
-                for (const auto& child : sliced->args()) {
-                    auto transformed = apply_specs(child, dimension + 1);
-                    if (!transformed) return std::nullopt;
-                    children.push_back(std::move(*transformed));
-                }
-                return call(sliced->head(), std::move(children));
-            };
-            if (auto result = apply_specs(args[0], 1)) return *result;
+            const std::vector<Expr> specifications(
+                args.begin() + 1, args.end());
+            if (auto result = apply_take_or_drop_specs(args[0], specifications,
+                    0, drop, function, error))
+                return *result;
         }
 
-        const auto message = call("MessageName", {symbol(function), string("error")});
+        const auto message = call(
+            "MessageName", {symbol(function), string("error")});
         emit_message(message, function + "::error: " + error);
         return call(raw_head, raw_args);
     }
