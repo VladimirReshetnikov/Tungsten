@@ -714,6 +714,16 @@ reduceBuiltin headName values = case headName of
   "Max" -> Right (reduceMinMax False headName values)
   "Mean" -> reduceMean values
   "Median" -> reduceMedian values
+  "Variance" -> reduceVariance values
+  "StandardDeviation" -> reduceStandardDeviation values
+  "Norm" -> reduceNorm values
+  "MinMax" -> reduceMinMaxPair values
+  "RankedMin" -> reduceRankedExtremum False values
+  "RankedMax" -> reduceRankedExtremum True values
+  "Mode" -> reduceMode values
+  "CountDistinct" -> reduceCountDistinct values
+  "Ratios" -> reduceRatios values
+  "Subdivide" -> reduceSubdivide values
   "Order" -> Right (reduceOrder values)
   "OrderedQ" -> reduceOrderedQ values
   "Ordering" -> reduceOrderingIndices values
@@ -3345,6 +3355,239 @@ reduceMedian [dataExpression] = do
   compareExactValue (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
     compare (leftNumerator * rightDenominator) (rightNumerator * leftDenominator)
 reduceMedian values = Right (Call (Symbol "Median") values)
+
+reduceVariance :: [Expr] -> Either EvaluationError Expr
+reduceVariance [subject] = do
+  values <- listOrAssociationValues "Variance" subject
+  if length values < 2
+    then Left (EvaluationError "Variance requires at least two elements.")
+    else do
+      let count = fromIntegral (length values)
+          mean = reduceTimes [reducePlus values, fromExact (normalizeExact 1 count)]
+          deviation value =
+            reducePlus [value, reduceTimes [Integer (-1), mean]]
+          squared value = reducePower [deviation value, Integer 2]
+      pure
+        ( reduceTimes
+            [ reducePlus (map squared values)
+            , fromExact (normalizeExact 1 (count - 1))
+            ]
+        )
+reduceVariance _ =
+  Left (EvaluationError "Variance currently expects exactly one argument.")
+
+reduceStandardDeviation :: [Expr] -> Either EvaluationError Expr
+reduceStandardDeviation [subject] =
+  reduceSqrt . pure <$> reduceVariance [subject]
+reduceStandardDeviation _ =
+  Left
+    ( EvaluationError
+        "StandardDeviation currently expects exactly one argument."
+    )
+
+reduceNorm :: [Expr] -> Either EvaluationError Expr
+reduceNorm values = case values of
+  [subject] -> norm subject Nothing
+  [subject, pValue] -> norm subject (Just pValue)
+  _ -> Left (EvaluationError "Norm expects a vector and an optional p value.")
+ where
+  norm subject requestedExponent = case subject of
+    Call (Symbol "List") elements -> case requestedExponent of
+      Nothing ->
+        pure
+          ( reduceSqrt
+              [reducePlus (map (\value -> reducePower [absolute value, Integer 2]) elements)]
+          )
+      Just (Symbol "Infinity") ->
+        pure
+          ( if null elements
+              then Integer 0
+              else reduceMinMax False "Max" (map absolute elements)
+          )
+      Just pValue@(Integer power)
+        | power > 0 ->
+            pure
+              ( reducePower
+                  [ reducePlus (map (\value -> reducePower [absolute value, pValue]) elements)
+                  , fromExact (normalizeExact 1 power)
+                  ]
+              )
+      _ ->
+        Left
+          ( EvaluationError
+              "Norm currently expects a positive integer p or Infinity."
+          )
+    Call {} ->
+      Left
+        ( EvaluationError
+            "Norm currently expects a List of explicit numbers."
+        )
+    _ -> Left (EvaluationError "Norm expects a nonatomic expression.")
+  absolute value = reduceAbs [value]
+
+reduceMinMaxPair :: [Expr] -> Either EvaluationError Expr
+reduceMinMaxPair [subject] = do
+  values <- listOrAssociationValues "MinMax" subject
+  pure $ case values of
+    [] ->
+      evaluatedList
+        [ Symbol "Infinity"
+        , Call (Symbol "Times") [Integer (-1), Symbol "Infinity"]
+        ]
+    _ ->
+      evaluatedList
+        [reduceMinMax True "Min" values, reduceMinMax False "Max" values]
+reduceMinMaxPair _ =
+  Left (EvaluationError "MinMax expects exactly one argument.")
+
+reduceRankedExtremum :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceRankedExtremum descending values = case values of
+  [subject, rankExpression] -> do
+    items <- listOrAssociationValues operation subject
+    rank <- case rankExpression of
+      Integer value -> Right value
+      _ ->
+        Left
+          ( EvaluationError
+              (operation <> " expects an explicit integer rank.")
+          )
+    if null items
+      then Left (EvaluationError (operation <> " requires a nonempty list."))
+      else do
+        decorated <-
+          maybe
+            ( Left
+                ( EvaluationError
+                    ( operation
+                        <> " currently expects explicit real-valued numbers."
+                    )
+                )
+            )
+            Right
+            ( traverse
+                (\item -> case explicitRealExact item of
+                    Just exactValue -> Just (item, exactValue)
+                    Nothing -> Nothing
+                )
+                items
+            )
+        let ordered =
+              (if descending then reverse else id)
+                (sortBy (\(_, left) (_, right) -> compareExact left right) decorated)
+            count = toInteger (length ordered)
+        if rank == 0 || rank > count || rank < negate count
+          then
+            Left
+              ( EvaluationError
+                  ( operation
+                      <> " rank "
+                      <> T.pack (show rank)
+                      <> " is out of range for a list of length "
+                      <> T.pack (show count)
+                      <> "."
+                  )
+              )
+          else
+            let index = if rank > 0 then rank - 1 else count + rank
+             in pure (fst (ordered !! fromInteger index))
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects a list and an integer rank.")
+      )
+ where
+  operation = if descending then "RankedMax" else "RankedMin"
+
+reduceMode :: [Expr] -> Either EvaluationError Expr
+reduceMode [subject] = do
+  values <- listOrAssociationValues "Mode" subject
+  pure $ case values of
+    [] -> Call (Symbol "Mode") [subject]
+    _ ->
+      let counts = foldl' countValue [] values
+          maximumCount = maximum (map snd counts)
+          candidates = [value | (value, count) <- counts, count == maximumCount]
+       in case sortBy canonicalCompare candidates of
+            firstCandidate : _ -> firstCandidate
+            [] -> Call (Symbol "Mode") [subject]
+ where
+  countValue retained value = case break ((== value) . fst) retained of
+    (_, []) -> retained <> [(value, 1 :: Integer)]
+    (before, (existing, count) : after) ->
+      before <> ((existing, count + 1) : after)
+reduceMode _ = Left (EvaluationError "Mode expects exactly one argument.")
+
+reduceCountDistinct :: [Expr] -> Either EvaluationError Expr
+reduceCountDistinct [subject] = do
+  values <- listOrAssociationValues "CountDistinct" subject
+  pure (Integer (toInteger (length (uniqueCanonical values))))
+reduceCountDistinct _ =
+  Left (EvaluationError "CountDistinct expects exactly one argument.")
+
+reduceRatios :: [Expr] -> Either EvaluationError Expr
+reduceRatios [subject] = do
+  values <- listOrAssociationValues "Ratios" subject
+  pure
+    ( evaluatedList
+        [ reduceTimes [right, reducePower [left, Integer (-1)]]
+        | (left, right) <- zip values (drop 1 values)
+        ]
+    )
+reduceRatios _ = Left (EvaluationError "Ratios expects exactly one argument.")
+
+reduceSubdivide :: [Expr] -> Either EvaluationError Expr
+reduceSubdivide values = case values of
+  [Integer count]
+    | count > 0 -> do
+        boundedSubdivision count
+        pure
+          ( evaluatedList
+              [fromExact (normalizeExact index count) | index <- [0 .. count]]
+          )
+    | otherwise -> positiveCountError
+  [_] -> positiveCountError
+  [extent, Integer count]
+    | count > 0 -> do
+        boundedSubdivision count
+        pure
+          ( evaluatedList
+              [ reduceTimes
+                  [extent, Integer index, fromExact (normalizeExact 1 count)]
+              | index <- [0 .. count]
+              ]
+          )
+    | otherwise -> positiveSubdivisionError
+  [_, _] -> positiveSubdivisionError
+  [lower, upper, Integer count]
+    | count > 0 -> do
+        boundedSubdivision count
+        let step =
+              reduceTimes
+                [ reducePlus [upper, reduceTimes [Integer (-1), lower]]
+                , fromExact (normalizeExact 1 count)
+                ]
+        pure
+          ( evaluatedList
+              [reducePlus [lower, reduceTimes [Integer index, step]] | index <- [0 .. count]]
+          )
+    | otherwise -> positiveSubdivisionError
+  [_, _, _] -> positiveSubdivisionError
+  _ -> Left (EvaluationError "Subdivide expects 1, 2, or 3 arguments.")
+ where
+  positiveCountError =
+    Left (EvaluationError "Subdivide expects a positive integer count.")
+  positiveSubdivisionError =
+    Left
+      ( EvaluationError
+          "Subdivide expects a positive integer subdivision count."
+      )
+  boundedSubdivision count
+    | count + 1 <= maximumDenseArrayMaterializedNodes = Right ()
+    | otherwise =
+        Left
+          ( EvaluationError
+              "Subdivide output exceeds the native materialization limit."
+          )
 
 data OrderedItem = OrderedItem !Int !Expr !(Maybe AssociationEntry) ![Expr]
   deriving (Eq, Show)

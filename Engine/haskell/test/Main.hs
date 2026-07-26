@@ -53,6 +53,7 @@ import Tungsten.Parser
 import Tungsten.ParserCorpus
 import Tungsten.Repl
 import Tungsten.Session
+import qualified Tungsten.StatisticsTests as StatisticsTests
 import qualified Tungsten.SystemSymbols as SystemSymbols
 import Tungsten.WolframString
 import Tungsten.WolframProcesses
@@ -81,6 +82,7 @@ tests =
   , checkEvaluatorErrors
   , ArrayTests.checkArrayEvaluator
   , IntervalTests.checkIntervalEvaluator
+  , StatisticsTests.checkStatisticsEvaluator
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors

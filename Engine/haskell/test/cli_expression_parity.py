@@ -1598,6 +1598,49 @@ CASES = (
         ),
         0,
     ),
+    (
+        "collection statistics and vector norms",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Variance[{1,2,3,4,5}], StandardDeviation[{1,2,3,4,5}], "
+            "Norm[{3,4}], Norm[{1,2,3},2], "
+            "Norm[{1,-2,3},Infinity], Norm[{}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ranked extrema modes and distinct counts",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{MinMax[{3,1,4,1,5}], MinMax[{}], "
+            "RankedMin[{3,1,4,1,5},2], RankedMax[{3,1,4,1,5},2], "
+            "RankedMin[{3,1,4,1},-1], Mode[{3,1,3,2,1}], Mode[{}], "
+            "CountDistinct[{a,b,a,c,b}], CountDistinct[<|a->1,b->2,c->1|>]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ratios subdivision and recoverable diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Ratios[{2,6,3,12}], Ratios[{a,b,c}], Subdivide[4], "
+            "Subdivide[10,4], Subdivide[1,10,4], Subdivide[x,4], "
+            "Variance[{1}], Norm[x], RankedMin[{1},0], Subdivide[0]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
