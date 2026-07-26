@@ -48,6 +48,7 @@ library
     Tungsten.Notebook
     Tungsten.Parser
     Tungsten.ParserCorpus
+    Tungsten.PolynomialAlgebra
     Tungsten.PythonSort
     Tungsten.Repl
     Tungsten.Session
@@ -96,6 +97,7 @@ test-suite tungsten-engine-test
     Tungsten.IntervalTests
     Tungsten.StatisticsTests
     Tungsten.NumericAlgebraTests
+    Tungsten.PolynomialAlgebraTests
     Tungsten.TextualFormsTests
     Tungsten.StringSequencePatternTests
   build-depends:

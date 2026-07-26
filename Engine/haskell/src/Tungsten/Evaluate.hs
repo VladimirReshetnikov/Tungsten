@@ -56,6 +56,7 @@ import Data.Word (Word8)
 import Text.Read (readMaybe)
 import Tungsten.Expression
 import qualified Tungsten.NumericAlgebra as NumericAlgebra
+import qualified Tungsten.PolynomialAlgebra as PolynomialAlgebra
 import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
@@ -868,7 +869,13 @@ reduceBuiltin headName values = case headName of
   _ -> case NumericAlgebra.reduceNumericBuiltin headName values of
     Left message -> Left (EvaluationError message)
     Right (Just result) -> Right result
-    Right Nothing -> Right (Call (Symbol headName) values)
+    Right Nothing ->
+      Right
+        ( maybe
+            (Call (Symbol headName) values)
+            id
+            (PolynomialAlgebra.reducePolynomialBuiltin canonicalCompare headName values)
+        )
 
 data Exact = Exact !Integer !Integer
   deriving (Eq, Ord, Show)

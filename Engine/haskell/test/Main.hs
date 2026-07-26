@@ -38,6 +38,7 @@ import Tungsten.Cli
 import qualified Tungsten.ArrayTests as ArrayTests
 import qualified Tungsten.CollectionExtensionsTests as CollectionExtensionsTests
 import qualified Tungsten.NumericAlgebraTests as NumericAlgebraTests
+import qualified Tungsten.PolynomialAlgebraTests as PolynomialAlgebraTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
 import qualified Tungsten.DistributionTests as DistributionTests
@@ -93,6 +94,7 @@ tests =
   , IntervalTests.checkIntervalEvaluator
   , StatisticsTests.checkStatisticsEvaluator
   , NumericAlgebraTests.checkNumericAlgebraEvaluator
+  , PolynomialAlgebraTests.checkPolynomialAlgebraEvaluator
   , TextualFormsTests.checkTextualFormsEvaluator
   , StringSequencePatternTests.checkStringSequencePatterns
   , checkCliArguments

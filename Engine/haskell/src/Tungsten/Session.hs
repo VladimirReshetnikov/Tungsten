@@ -1197,6 +1197,8 @@ qualifiedAliasDispatchHeads =
   , "CarmichaelLambda"
   , "ChineseRemainder"
   , "CompositeQ"
+  , "Coefficient"
+  , "CoefficientList"
   , "ComposeList"
   , "Construct"
   , "ContinuedFraction"
@@ -1210,8 +1212,10 @@ qualifiedAliasDispatchHeads =
   , "EvenQ"
   , "EulerPhi"
   , "EulerE"
+  , "Expand"
   , "FailureQ"
   , "FactorInteger"
+  , "FullSimplify"
   , "Fibonacci"
   , "FixedPoint"
   , "FixedPointList"
@@ -1266,6 +1270,7 @@ qualifiedAliasDispatchHeads =
   , "PrimePi"
   , "PrimePowerQ"
   , "PrimeQ"
+  , "PolynomialQ"
   , "PrimitiveRoot"
   , "Quotient"
   , "QuotientRemainder"
@@ -1275,6 +1280,7 @@ qualifiedAliasDispatchHeads =
   , "RealSign"
   , "Sign"
   , "Sqrt"
+  , "Simplify"
   , "StringQ"
   , "Symbol"
   , "SymbolName"
@@ -1283,6 +1289,7 @@ qualifiedAliasDispatchHeads =
   , "Unitize"
   , "Unequal"
   , "Unique"
+  , "Variables"
   ]
 
 directSessionDispatchHead :: Text -> Bool
