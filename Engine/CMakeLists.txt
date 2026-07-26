@@ -179,6 +179,14 @@ if(BUILD_TESTING)
         NAME tungsten_evaluator_api_tests
         COMMAND tungsten_evaluator_api_tests)
 
+    add_executable(tungsten_combinator_state_tests
+        cpp/tests/combinator_state_tests.cpp)
+    target_link_libraries(tungsten_combinator_state_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_combinator_state_tests)
+    add_test(
+        NAME tungsten_combinator_state_tests
+        COMMAND tungsten_combinator_state_tests)
+
     add_executable(
         tungsten_expression_model_tests
         cpp/tests/expression_model_tests.cpp)

@@ -89,6 +89,7 @@ private:
     void emit_message(const Expr& name, std::string text);
     [[nodiscard]] bool message_is_enabled(const Expr& name) const;
     [[nodiscard]] bool control_active() const noexcept;
+    [[nodiscard]] bool immediate_signal_active() const noexcept;
     [[nodiscard]] Expr control_expression() const;
     void clear_control() noexcept;
     [[nodiscard]] std::optional<TimeConstraintScope>

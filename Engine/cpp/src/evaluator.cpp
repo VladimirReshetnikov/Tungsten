@@ -5973,6 +5973,11 @@ bool Evaluator::control_active() const noexcept {
     return control_kind_ != ControlKind::None;
 }
 
+bool Evaluator::immediate_signal_active() const noexcept {
+    return aborted_ || thrown_.has_value()
+        || confirmation_failure_.has_value() || control_active();
+}
+
 Expr Evaluator::control_expression() const {
     if (control_kind_ == ControlKind::Break) return call("Break");
     if (control_kind_ == ControlKind::Continue) return call("Continue");
@@ -11442,14 +11447,24 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto limit = args.size() >= 3 && machine_index(args[2]) ? std::max<long>(0, *machine_index(args[2])) : 1000000L;
         std::size_t remaining = static_cast<std::size_t>(limit);
         for (std::size_t index = 0; index < source.size(); ++index) {
-            const bool matches = is_symbol(evaluate(call(criterion, {source[index]})), "True");
             bool selected = false;
             if (function == "Discard") {
-                if (matches && remaining > 0) { --remaining; continue; }
-                selected = true;
-            } else if (matches && remaining > 0) {
-                selected = true;
-                --remaining;
+                if (remaining == 0) {
+                    selected = true;
+                } else {
+                    const auto outcome = evaluate(call(criterion, {source[index]}));
+                    if (immediate_signal_active()) return outcome;
+                    const bool matches = is_symbol(outcome, "True");
+                    if (matches) { --remaining; continue; }
+                    selected = true;
+                }
+            } else {
+                const auto outcome = evaluate(call(criterion, {source[index]}));
+                if (immediate_signal_active()) return outcome;
+                if (is_symbol(outcome, "True") && remaining > 0) {
+                    selected = true;
+                    --remaining;
+                }
             }
             if (!selected) continue;
             elements.push_back(source[index]); indices.push_back(integer(index + 1));
@@ -11594,11 +11609,21 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (level && *level == 1) return call(call(args[0], {args[1].head()}), args[1].args());
     }
     if (function == "Comap" && args.size() == 2 && args[0].has_head("List")) {
-        std::vector<Expr> values; for (const auto& callable : args[0].args()) values.push_back(evaluate(call(callable, {args[1]})));
+        std::vector<Expr> values;
+        for (const auto& callable : args[0].args()) {
+            const auto value = evaluate(call(callable, {args[1]}));
+            if (immediate_signal_active()) return value;
+            values.push_back(value);
+        }
         return list(std::move(values));
     }
     if (function == "ComapApply" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")) {
-        std::vector<Expr> values; for (const auto& callable : args[0].args()) values.push_back(evaluate(call(callable, args[1].args())));
+        std::vector<Expr> values;
+        for (const auto& callable : args[0].args()) {
+            const auto value = evaluate(call(callable, args[1].args()));
+            if (immediate_signal_active()) return value;
+            values.push_back(value);
+        }
         return list(std::move(values));
     }
     if (function == "Through" && args.size() == 1 && args[0].kind() == ExprKind::Call
@@ -13016,7 +13041,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "ComposeList" && args.size() == 2 && args[0].has_head("List")) {
         Expr value = args[1]; std::vector<Expr> values{value};
-        for (const auto& callable : args[0].args()) { value = evaluate(call(callable, {value})); values.push_back(value); }
+        for (const auto& callable : args[0].args()) {
+            value = evaluate(call(callable, {value}));
+            if (immediate_signal_active()) return value;
+            values.push_back(value);
+        }
         return list(std::move(values));
     }
     if ((function == "NestWhile" || function == "NestWhileList")
@@ -13436,7 +13465,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto& source = args.size() == 3 ? args[2].args() : args[1].args();
         Expr value = args.size() == 3 ? args[1] : source.front(); std::vector<Expr> values{value};
         const auto start = args.size() == 3 ? 0U : 1U;
-        for (std::size_t index = start; index < source.size(); ++index) { value = evaluate(call(args[0], {value, source[index]})); values.push_back(value); }
+        for (std::size_t index = start; index < source.size(); ++index) {
+            value = evaluate(call(args[0], {value, source[index]}));
+            if (immediate_signal_active()) return value;
+            values.push_back(value);
+        }
         return function == "Fold" ? value : list(std::move(values));
     }
     if ((function == "SequenceFold" || function == "SequenceFoldList") && args.size() == 3
@@ -13444,7 +13477,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         auto window = args[1].args(); std::vector<Expr> values = window;
         if (window.empty()) return function == "SequenceFold" ? args[1] : list(values);
         for (const auto& item : args[2].args()) {
-            auto call_args = window; call_args.push_back(item); const auto next = evaluate(call(args[0], call_args));
+            auto call_args = window;
+            call_args.push_back(item);
+            const auto next = evaluate(call(args[0], call_args));
+            if (immediate_signal_active()) return next;
             window.erase(window.begin()); window.push_back(next); values.push_back(next);
         }
         return function == "SequenceFold" ? window.back() : list(std::move(values));
@@ -13452,11 +13488,15 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if ((function == "FoldWhile" || function == "FoldWhileList") && args.size() >= 4 && args[2].has_head("List")) {
         Expr value = args[1]; std::vector<Expr> values{value}; std::size_t extra = 0;
         for (const auto& item : args[2].args()) {
-            const bool keep_going = is_symbol(evaluate(call(args[3], {value})), "True");
+            const auto outcome = evaluate(call(args[3], {value}));
+            if (immediate_signal_active()) return outcome;
+            const bool keep_going = is_symbol(outcome, "True");
             if (!keep_going && extra == 0) extra = args.size() >= 5 && machine_index(args[4])
                 ? static_cast<std::size_t>(std::max<long>(0, *machine_index(args[4]))) : 0;
             if (!keep_going && extra == 0) break;
-            value = evaluate(call(args[0], {value, item})); values.push_back(value);
+            value = evaluate(call(args[0], {value, item}));
+            if (immediate_signal_active()) return value;
+            values.push_back(value);
             if (!keep_going && extra > 0) --extra;
         }
         return function == "FoldWhile" ? value : list(std::move(values));
