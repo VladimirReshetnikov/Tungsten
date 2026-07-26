@@ -1180,6 +1180,22 @@ checkEvaluationSession :: IO Bool
 checkEvaluationSession = do
   let cases =
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
+        , ( "failure and missing predicates preserve the Python value domain"
+          , "{FailureQ[Failure[\"x\", <||>]], FailureQ[$Failed], FailureQ[$Canceled], FailureQ[$Aborted], FailureQ[Missing[\"x\"]], MissingQ[Missing[\"x\"]], MissingQ[$Failed], System`FailureQ[System`Failure[\"x\", <||>]]}"
+          , "List[True, True, True, True, False, True, False, True]"
+          )
+        , ( "failure property lookup accepts associations and rule lists"
+          , "{Failure[\"bad\", <|\"x\" -> 1|>][\"x\"], Failure[\"bad\", <||>][\"Type\"], Failure[\"bad\", {\"x\" -> 2}][\"x\"], Failure[\"bad\", <||>][\"absent\"], System`Failure[\"bad\", <|\"x\" -> 3|>][\"x\"]}"
+          , "List[1, \"bad\", 2, Missing[\"KeyAbsent\", \"absent\"], 3]"
+          )
+        , ( "failsafe guards dispatch success failure and custom callbacks"
+          , "{Failsafe[f][1, 2], Failsafe[f][1, Missing[\"x\"], Failure[\"bad\", <||>]], Failsafe[f, SameQ][1, 1], Failsafe[f, SameQ][1, 2][\"Type\"], Failsafe[f, SameQ, g][1, 2], System`Failsafe[f][1, 2]}"
+          , "List[f[1, 2], Missing[\"x\"], f[1, 1], FailsafeFailed, g[1, 2], f[1, 2]]"
+          )
+        , ( "failsafe callback control signals remain nonlocal"
+          , "{Catch[Failsafe[f, Function[x, Throw[x]]][1]], CheckAbort[Failsafe[f, Function[x, Abort[]]][1], caught]}"
+          , "List[1, caught]"
+          )
         , ("right-associated assignment", "a = b = 5; a + b", "10")
         , ("immediate value captures current result", "a = 1; x = a; a = 2; x", "1")
         , ("immediate symbolic value reevaluates", "x = y; y = 3; x", "3")
@@ -1576,6 +1592,16 @@ checkEvaluationSession = do
           , "fail"
           , ["innerTail", "outerTail"]
           )
+        , ( "failsafe evaluates constructors in order and short circuits failure calls"
+          , "{Failsafe[(Print[\"function\"]; f), (Print[\"test\"]; SameQ)][1, 1], Failsafe[Function[x, Print[\"not-called\"]]][Missing[\"x\"]]}"
+          , "List[f[1, 1], Missing[\"x\"]]"
+          , ["function", "test"]
+          )
+        , ( "malformed failsafe construction suppresses argument effects"
+          , "Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]"
+          , "Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]"
+          , []
+          )
         , ( "same-depth check abort catches only its fresh abort"
           , "CheckAbort[AbortProtect[Abort[]; Print[CheckAbort[1, inner]]; Print[CheckAbort[Abort[], inner]]; Print[\"tail\"]], fail]"
           , "fail"
@@ -1727,6 +1753,23 @@ checkEvaluationSession = do
             , ( "AbortProtect::error"
               , "MessageName[AbortProtect, \"error\"]"
               , "AbortProtect::error: AbortProtect expects exactly one argument."
+              )
+            ]
+          )
+        , ( "failure properties and failsafe constructors report exact diagnostics"
+          , "{Failure[\"x\", <||>][1], Failsafe[], Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]}"
+          , "List[Failure[\"x\", Association[]][1], Failsafe[], Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]]"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Failure property lookup expects a string key."
+              )
+            , ( "Failsafe::error"
+              , "MessageName[Failsafe, \"error\"]"
+              , "Failsafe::error: Failsafe expects one, two, or three arguments."
+              )
+            , ( "Failsafe::error"
+              , "MessageName[Failsafe, \"error\"]"
+              , "Failsafe::error: Failsafe expects one, two, or three arguments."
               )
             ]
           )

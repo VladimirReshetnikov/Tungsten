@@ -659,6 +659,8 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionReap depth session arguments'
       Call (Symbol "Sow") arguments' ->
         evaluateSessionSow depth session arguments'
+      Call (Symbol "Failsafe") arguments' ->
+        evaluateSessionFailsafe depth session arguments'
       Call (Symbol "Break") arguments' ->
         evaluateLoopControl BreakSignal "Break" session arguments'
       Call (Symbol "Continue") arguments' ->
@@ -985,6 +987,7 @@ qualifiedAliasDispatchHeads =
   , "Contexts"
   , "Equal"
   , "EvenQ"
+  , "FailureQ"
   , "Greater"
   , "GreaterEqual"
   , "IntegerQ"
@@ -993,6 +996,7 @@ qualifiedAliasDispatchHeads =
   , "LessEqual"
   , "Max"
   , "Min"
+  , "MissingQ"
   , "N"
   , "NameQ"
   , "Names"
@@ -1043,6 +1047,7 @@ directSessionDispatchHead name =
              , "WithCleanup"
              , "Reap"
              , "Sow"
+             , "Failsafe"
              , "Break"
              , "Continue"
              , "Return"
@@ -2750,6 +2755,14 @@ evaluateSessionCallable depth session function arguments' = case function of
               Right
                 (Call (Symbol "Missing") [String "KeyAbsent", key], session)
             Just selected -> Right (sessionItemValue selected, session)
+  Call (Symbol failsafeHead) failsafeArguments
+    | isSessionSystemHead "Failsafe" failsafeHead
+    , length failsafeArguments `elem` [1, 2, 3] ->
+        evaluateSessionFailsafeApply
+          depth
+          session
+          failsafeArguments
+          arguments'
   Call (Symbol functionHead) functionArguments
     | isSessionSystemHead "Function" functionHead -> do
         instantiated <-
@@ -2771,9 +2784,12 @@ isSessionStructuralCallable :: Expr -> Bool
 isSessionStructuralCallable = \case
   Call (Symbol sameAsHead) [_]
     | isSessionSystemHead "SameAs" sameAsHead -> True
-  Call (Symbol compositionHead) _ ->
-    isSessionSystemHead "Composition" compositionHead
-      || isSessionSystemHead "RightComposition" compositionHead
+  Call (Symbol callableHead) arguments' ->
+    isSessionSystemHead "Composition" callableHead
+      || isSessionSystemHead "RightComposition" callableHead
+      || ( isSessionSystemHead "Failsafe" callableHead
+             && length arguments' `elem` [1, 2, 3]
+         )
   _ -> False
 
 evaluateSessionComposition
@@ -4529,6 +4545,99 @@ evaluateSessionSow depth session = \case
     sowEachTag current (tag : rest) = do
       (_, taggedSession) <- routeSownValue depth current value tag
       sowEachTag taggedSession rest
+
+evaluateSessionFailsafe
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFailsafe depth session arguments'
+  | length arguments' `elem` [1, 2, 3] = do
+      (evaluatedArguments, updated) <-
+        evaluateArguments depth session arguments'
+      Right (Call (Symbol "Failsafe") evaluatedArguments, updated)
+  | otherwise =
+      sessionFailure session "Failsafe expects one, two, or three arguments."
+
+evaluateSessionFailsafeApply
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFailsafeApply depth session failsafeArguments callArguments =
+  case failsafeArguments of
+    [function] ->
+      case firstSessionFailureValue callArguments of
+        Just failure -> Right (failure, session)
+        Nothing ->
+          evaluateSessionCallable depth session function callArguments
+    [function, test] -> do
+      (testResult, testedSession) <-
+        evaluateSessionCallable depth session test callArguments
+      if testResult == Symbol "True"
+        then
+          evaluateSessionCallable
+            depth
+            testedSession
+            function
+            callArguments
+        else
+          Right
+            ( sessionFailureExpr
+                "FailsafeFailed"
+                [ ( "Arguments"
+                  , Call (Symbol "Hold") callArguments
+                  )
+                ]
+            , testedSession
+            )
+    [function, test, failureFunction] -> do
+      (testResult, testedSession) <-
+        evaluateSessionCallable depth session test callArguments
+      evaluateSessionCallable
+        depth
+        testedSession
+        (if testResult == Symbol "True" then function else failureFunction)
+        callArguments
+    _ ->
+      sessionFailure session "Failsafe expects one, two, or three arguments."
+
+firstSessionFailureValue :: [Expr] -> Maybe Expr
+firstSessionFailureValue [] = Nothing
+firstSessionFailureValue (value : rest)
+  | isSessionFailsafeFailureValue value = Just value
+  | otherwise = firstSessionFailureValue rest
+
+isSessionFailsafeFailureValue :: Expr -> Bool
+isSessionFailsafeFailureValue expression =
+  isSessionFailureValue expression
+    || isSessionMissingValue expression
+    || expression
+      `elem` [Symbol "$Failed", Symbol "$Canceled", Symbol "$Aborted"]
+
+isSessionFailureValue :: Expr -> Bool
+isSessionFailureValue = \case
+  Call (Symbol failureHead) _ ->
+    isSessionSystemHead "Failure" failureHead
+  _ -> False
+
+isSessionMissingValue :: Expr -> Bool
+isSessionMissingValue = \case
+  Call (Symbol missingHead) _ ->
+    isSessionSystemHead "Missing" missingHead
+  _ -> False
+
+sessionFailureExpr :: Text -> [(Text, Expr)] -> Expr
+sessionFailureExpr failureType fields =
+  Call
+    (Symbol "Failure")
+    [ Symbol failureType
+    , normalizedSessionAssociation
+        [ Call (Symbol "Rule") [String name, value]
+        | (name, value) <- fields
+        ]
+    ]
 
 reapPatterns :: Expr -> (Bool, [Expr])
 reapPatterns = \case

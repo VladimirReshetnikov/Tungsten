@@ -446,6 +446,9 @@ evaluateOr depth = go []
 
 reduceCall :: Expr -> Either EvaluationError Expr
 reduceCall expression = case expression of
+  Call failure@(Call (Symbol failureHead) _) values
+    | systemHeadIn ["Failure"] failureHead ->
+        reduceFailureApplication failure values
   Call (Call functionHead@(Symbol functionName) functionArguments) values
     | systemHeadIn ["Function"] functionName ->
         applyFunctionWithHead functionHead functionArguments values
@@ -627,6 +630,8 @@ reduceBuiltin headName values = case headName of
   "IntegerQ" -> Right (unary headName (boolean . isInteger) values)
   "NumberQ" -> Right (unary headName (boolean . isNumber) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
+  "FailureQ" -> Right (unary headName (boolean . isFailureQValue) values)
+  "MissingQ" -> Right (unary headName (boolean . isMissingValue) values)
   "ByteArray" -> reduceByteArray values
   "ByteArrayQ" -> Right (unary headName (boolean . isByteArray) values)
   "Characters" -> reduceCharacters values
@@ -2632,6 +2637,62 @@ associationEntries :: Expr -> Maybe [AssociationEntry]
 associationEntries (Call (Symbol associationHead) values)
   | systemHeadIn ["Association"] associationHead = traverse ruleEntry values
 associationEntries _ = Nothing
+
+isFailureValue :: Expr -> Bool
+isFailureValue (Call (Symbol failureHead) _) =
+  systemHeadIn ["Failure"] failureHead
+isFailureValue _ = False
+
+isMissingValue :: Expr -> Bool
+isMissingValue (Call (Symbol missingHead) _) =
+  systemHeadIn ["Missing"] missingHead
+isMissingValue _ = False
+
+isFailureQValue :: Expr -> Bool
+isFailureQValue expression =
+  isFailureValue expression
+    || expression `elem` [Symbol "$Failed", Symbol "$Canceled", Symbol "$Aborted"]
+
+reduceFailureApplication
+  :: Expr
+  -> [Expr]
+  -> Either EvaluationError Expr
+reduceFailureApplication failure = \case
+  [key] -> failureProperty failure key
+  values -> Right (Call failure values)
+
+failureProperty :: Expr -> Expr -> Either EvaluationError Expr
+failureProperty failure key@(String propertyName)
+  | propertyName `elem` ["Type", "FailureType"]
+  , Call _ (failureType : _) <- failure = Right failureType
+  | otherwise =
+      Right
+        ( maybe
+            (Call (Symbol "Missing") [String "KeyAbsent", key])
+            associationEntryValue
+            (findFailureEntry key (failureEntries failure))
+        )
+failureProperty _ _ =
+  Left
+    ( EvaluationError
+        "Failure property lookup expects a string key."
+    )
+
+failureEntries :: Expr -> [AssociationEntry]
+failureEntries (Call _ (_ : details : _)) =
+  case associationEntries details of
+    Just entries -> entries
+    Nothing -> case details of
+      Call (Symbol listHead) values
+        | systemHeadIn ["List"] listHead -> mapMaybe ruleEntry values
+      _ -> []
+failureEntries _ = []
+
+findFailureEntry :: Expr -> [AssociationEntry] -> Maybe AssociationEntry
+findFailureEntry _ [] = Nothing
+findFailureEntry key (entry@(AssociationEntry _ candidate _) : rest)
+  | key == candidate = Just entry
+  | otherwise = findFailureEntry key rest
 
 isAssociation :: Expr -> Bool
 isAssociation = maybe False (const True) . associationEntries

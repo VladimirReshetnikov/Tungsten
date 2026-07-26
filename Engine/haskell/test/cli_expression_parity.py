@@ -1271,6 +1271,58 @@ CASES = (
         ),
         0,
     ),
+    (
+        "failure predicates and properties",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            '{FailureQ[Failure["x", <||>]], FailureQ[$Failed], '
+            'FailureQ[$Canceled], FailureQ[$Aborted], '
+            'FailureQ[Missing["x"]], MissingQ[Missing["x"]], '
+            'MissingQ[$Failed], Failure["bad", <|"x" -> 1|>]["x"], '
+            'Failure["bad", <||>]["Type"], '
+            'Failure["bad", <||>]["absent"], '
+            'System`FailureQ[System`Failure["x", <||>]]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "failsafe guards and qualified operator",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            '{Failsafe[f][1, 2], '
+            'Failsafe[f][1, Missing["x"], Failure["bad", <||>]], '
+            'Failsafe[f, SameQ][1, 1], '
+            'Failsafe[f, SameQ][1, 2]["Type"], '
+            'Failsafe[f, SameQ, g][1, 2], System`Failsafe[f][1, 2]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "failsafe effects diagnostics and nonlocal exits",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Failsafe[(Print["function"]; f), '
+            '(Print["test"]; SameQ)][1, 1]; '
+            'second = Catch[Failsafe[f, Function[x, Throw[x]]][1]]; '
+            'third = CheckAbort[Failsafe[f, Function[x, Abort[]]][1], caught]; '
+            'Failure["x", <||>][1]; '
+            'Failsafe[Print["f"], Print["test"], Print["failure"], '
+            'Print["extra"]]; {first, second, third}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
