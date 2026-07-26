@@ -3570,6 +3570,18 @@ std::optional<std::vector<Expr>> list_or_association_values(
     return values;
 }
 
+std::optional<std::vector<Expr>> compound_sequence_values(
+    const Expr& expression) {
+    if (const auto rules = association_rules(expression)) {
+        std::vector<Expr> values;
+        values.reserve(rules->size());
+        for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        return values;
+    }
+    if (expression.kind() != ExprKind::Call) return std::nullopt;
+    return expression.args();
+}
+
 using Bindings = std::map<std::string, Expr>;
 
 struct CompiledStringPattern {
@@ -13485,21 +13497,103 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return function == "SequenceFold" ? window.back() : list(std::move(values));
     }
-    if ((function == "FoldWhile" || function == "FoldWhileList") && args.size() >= 4 && args[2].has_head("List")) {
-        Expr value = args[1]; std::vector<Expr> values{value}; std::size_t extra = 0;
-        for (const auto& item : args[2].args()) {
-            const auto outcome = evaluate(call(args[3], {value}));
-            if (immediate_signal_active()) return outcome;
-            const bool keep_going = is_symbol(outcome, "True");
-            if (!keep_going && extra == 0) extra = args.size() >= 5 && machine_index(args[4])
-                ? static_cast<std::size_t>(std::max<long>(0, *machine_index(args[4]))) : 0;
-            if (!keep_going && extra == 0) break;
-            value = evaluate(call(args[0], {value, item}));
-            if (immediate_signal_active()) return value;
-            values.push_back(value);
-            if (!keep_going && extra > 0) --extra;
+    if (function == "FoldWhile" || function == "FoldWhileList") {
+        if (args.size() < 4 || args.size() > 6)
+            return raw_evaluation_error(function
+                + " currently supports a function, an initial value, inputs, a test, "
+                  "and optional history and trailing counts.");
+        const auto inputs = compound_sequence_values(args[2]);
+        if (!inputs)
+            return raw_evaluation_error(
+                "FoldWhileList expects a nonatomic expression.");
+
+        bool all_history = false;
+        std::optional<mpz_class> history_length;
+        if (args.size() >= 5) {
+            if (is_symbol(args[4], "All")) {
+                all_history = true;
+            } else if (args[4].kind() != ExprKind::Integer) {
+                return raw_evaluation_error(
+                    "FoldWhileList expects an integer argument.");
+            } else if (args[4].integer_value() <= 0) {
+                return raw_evaluation_error(
+                    "FoldWhileList expects a positive history length or All.");
+            } else {
+                history_length = args[4].integer_value();
+            }
+        } else {
+            history_length = 1;
         }
-        return function == "FoldWhile" ? value : list(std::move(values));
+
+        std::vector<Expr> values{args[1]};
+        auto predicate_arguments = [&] {
+            const auto native_history = history_length
+                ? nonnegative_size_t(*history_length) : std::nullopt;
+            if (all_history || !native_history
+                || *native_history >= values.size())
+                return values;
+            const auto count = *native_history;
+            return std::vector<Expr>(values.end()
+                    - static_cast<std::ptrdiff_t>(count),
+                values.end());
+        };
+        std::optional<Expr> predicate_signal;
+        auto predicate_succeeds = [&]() -> std::optional<bool> {
+            const auto outcome = evaluate(call(args[3], predicate_arguments()));
+            if (immediate_signal_active()) {
+                predicate_signal = outcome;
+                return std::nullopt;
+            }
+            return is_symbol(outcome, "True");
+        };
+        auto finish = [&] {
+            return function == "FoldWhile" ? values.back() : list(values);
+        };
+
+        const auto initial_test = predicate_succeeds();
+        if (!initial_test) return *predicate_signal;
+        if (!*initial_test) return finish();
+
+        bool failure_detected = false;
+        std::size_t index = 0;
+        for (; index < inputs->size(); ++index) {
+            const auto updated = evaluate(call(args[0], {values.back(), (*inputs)[index]}));
+            if (immediate_signal_active()) return updated;
+            values.push_back(updated);
+            const auto keep_going = predicate_succeeds();
+            if (!keep_going) return *predicate_signal;
+            if (!*keep_going) {
+                failure_detected = true;
+                ++index;
+                break;
+            }
+        }
+        if (!failure_detected) return finish();
+
+        mpz_class trailing = 0;
+        if (args.size() == 6) {
+            if (args[5].kind() != ExprKind::Integer)
+                return raw_evaluation_error(
+                    "FoldWhileList expects an integer argument.");
+            trailing = args[5].integer_value();
+        }
+        if (trailing < 0) {
+            const mpz_class requested = -trailing;
+            const auto native_requested = nonnegative_size_t(requested);
+            const auto removal = !native_requested
+                    || *native_requested >= values.size()
+                ? values.size() - 1 : *native_requested;
+            values.resize(values.size() - removal);
+            return finish();
+        }
+        while (trailing > 0 && index < inputs->size()) {
+            const auto updated = evaluate(call(args[0], {values.back(), (*inputs)[index]}));
+            if (immediate_signal_active()) return updated;
+            values.push_back(updated);
+            --trailing;
+            ++index;
+        }
+        return finish();
     }
     if ((function == "FoldPair" || function == "FoldPairList") && args.size() >= 3 && args[2].has_head("List")) {
         Expr state = args[1]; Expr last_emitted = state; std::vector<Expr> emitted;

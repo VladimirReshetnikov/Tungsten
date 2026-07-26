@@ -42,6 +42,31 @@ void check_effect_case(
     }
 }
 
+void check_message_case(
+    const std::string& source, const std::string& expected_result,
+    std::vector<std::string> expected_messages, const std::string& label) {
+    tungsten::Evaluator evaluator;
+    const auto result = evaluator.evaluate_result(
+        tungsten::parse_input_form(source));
+    check_equal(result.result.to_full_form(), expected_result,
+        label + " result");
+    std::vector<std::string> actual_messages;
+    for (const auto& message : result.messages)
+        actual_messages.push_back(message.text);
+    if (actual_messages != expected_messages) {
+        std::cerr << "FAIL: " << label << " messages\n  expected:";
+        for (const auto& value : expected_messages) std::cerr << ' ' << value;
+        std::cerr << "\n  actual:  ";
+        for (const auto& value : actual_messages) std::cerr << ' ' << value;
+        std::cerr << '\n';
+        ++failures;
+    }
+    if (!result.prints.empty()) {
+        std::cerr << "FAIL: " << label << " emitted an unexpected print\n";
+        ++failures;
+    }
+}
+
 void immediate_signal_tests() {
     check_effect_case(
         "Catch[Fold[Function[{acc,x},Print[InputForm[x]];"
@@ -97,11 +122,84 @@ void deferred_abort_tests() {
         "ComposeList does not treat a protected deferred abort as immediate");
 }
 
+void fold_while_tests() {
+    check_effect_case(
+        "FoldWhileList[Plus,0,{1,2,3,4},Function[x,Less[x,4]]]",
+        "List[0, 1, 3, 6]", {}, "FoldWhileList default history");
+    check_effect_case(
+        "FoldWhile[Plus,0,{1,2,3,4},Function[x,Less[x,4]]]",
+        "6", {}, "FoldWhile scalar result");
+    check_effect_case(
+        "FoldWhileList[Function[{a,x},Plus[a,x]],0,{1,2,3},"
+        "Function[Null,Print[InputForm[{##}]];True],2]",
+        "List[0, 1, 3, 6]", {"{0}", "{0, 1}", "{1, 3}", "{3, 6}"},
+        "FoldWhileList bounded history argument order");
+    check_effect_case(
+        "FoldWhileList[Function[{a,x},Plus[a,x]],0,{1,2},"
+        "Function[Null,Print[InputForm[{##}]];True],All]",
+        "List[0, 1, 3]", {"{0}", "{0, 1}", "{0, 1, 3}"},
+        "FoldWhileList All history argument order");
+    check_effect_case(
+        "FoldWhileList[Plus,0,{1,2,3,4,5},Function[x,Less[x,4]],1,1]",
+        "List[0, 1, 3, 6, 10]", {}, "FoldWhileList positive trailing count");
+    check_effect_case(
+        "FoldWhileList[Plus,0,{1,2,3,4,5},Function[x,Less[x,4]],1,2]",
+        "List[0, 1, 3, 6, 10, 15]", {}, "FoldWhileList bounded trailing count");
+    check_effect_case(
+        "FoldWhileList[Plus,0,{1,2,3,4},Function[x,Less[x,4]],1,-1]",
+        "List[0, 1, 3]", {}, "FoldWhileList removes the failing result");
+    check_effect_case(
+        "FoldWhileList[Plus,0,{1,2,3,4},Function[x,Less[x,4]],1,-20]",
+        "List[0]", {}, "FoldWhileList negative trailing count keeps initial");
+    check_effect_case(
+        "FoldWhileList[f,z,{},Function[x,Print[\"predicate\"];False]]",
+        "List[z]", {"predicate"}, "FoldWhileList tests empty input initially");
+    check_effect_case(
+        "FoldWhileList[f,z,g[a,b],Function[x,True]]",
+        "List[z, f[z, a], f[f[z, a], b]]", {},
+        "FoldWhileList accepts a generic compound sequence");
+    check_effect_case(
+        "FoldWhileList[f,z,<|a->x,b:>y|>,Function[x,True]]",
+        "List[z, f[z, x], f[f[z, x], y]]", {},
+        "FoldWhileList consumes Association values");
+    check_message_case(
+        "FoldWhileList[f,z,{a}]",
+        "FoldWhileList[f, z, List[a]]",
+        {"FoldWhileList::error: FoldWhileList currently supports a function, an "
+         "initial value, inputs, a test, and optional history and trailing counts."},
+        "FoldWhileList arity diagnostic");
+    check_message_case(
+        "x=1;FoldWhile[f,z,x,p]",
+        "FoldWhile[f, z, x, p]",
+        {"FoldWhile::error: FoldWhileList expects a nonatomic expression."},
+        "FoldWhile raw domain diagnostic");
+    check_message_case(
+        "FoldWhileList[f,z,{a},p,0]",
+        "FoldWhileList[f, z, List[a], p, 0]",
+        {"FoldWhileList::error: FoldWhileList expects a positive history length or All."},
+        "FoldWhileList nonpositive history diagnostic");
+    check_message_case(
+        "FoldWhileList[f,z,{a},p,foo]",
+        "FoldWhileList[f, z, List[a], p, foo]",
+        {"FoldWhileList::error: FoldWhileList expects an integer argument."},
+        "FoldWhileList history type diagnostic");
+    check_message_case(
+        "FoldWhileList[Plus,0,{1},Function[x,Less[x,1]],1,foo]",
+        "FoldWhileList[Plus, 0, List[1], Function[x, Less[x, 1]], 1, foo]",
+        {"FoldWhileList::error: FoldWhileList expects an integer argument."},
+        "FoldWhileList trailing type diagnostic after failure");
+    check_effect_case(
+        "FoldWhileList[Plus,0,{1},Function[x,True],1,foo]",
+        "List[0, 1]", {},
+        "FoldWhileList does not validate unused trailing count");
+}
+
 } // namespace
 
 int main() {
     immediate_signal_tests();
     deferred_abort_tests();
+    fold_while_tests();
     if (failures != 0) {
         std::cerr << failures << " combinator-state test(s) failed\n";
         return EXIT_FAILURE;
