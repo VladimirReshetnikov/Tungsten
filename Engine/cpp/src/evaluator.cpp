@@ -17246,11 +17246,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             std::vector<Expr> values;
             values.reserve(args[1].args().size());
             for (const auto& position : args[1].args()) {
-                const auto selected = structural_part(
-                    args[0], structural_position_components(position));
-                if (!selected.error.empty())
-                    return invalid_extract(selected.error);
-                values.push_back(*selected.value);
+                const auto components = structural_position_components(position);
+                if (args[0].kind() == ExprKind::SparseArray) {
+                    const auto selected = sparse_part(args[0], components);
+                    if (!selected.error.empty())
+                        return invalid_extract(selected.error);
+                    values.push_back(*selected.value);
+                } else {
+                    const auto selected = structural_part(args[0], components);
+                    if (!selected.error.empty())
+                        return invalid_extract(selected.error);
+                    values.push_back(*selected.value);
+                }
             }
             return list(std::move(values));
         }
@@ -17258,8 +17265,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return invalid_extract(
                 "Extract positions must be a position list or a list of position lists.");
         }
-        const auto selected = structural_part(
-            args[0], structural_position_components(args[1]));
+        const auto components = structural_position_components(args[1]);
+        if (args[0].kind() == ExprKind::SparseArray) {
+            const auto selected = sparse_part(args[0], components);
+            if (!selected.error.empty()) return invalid_extract(selected.error);
+            return *selected.value;
+        }
+        const auto selected = structural_part(args[0], components);
         if (!selected.error.empty()) return invalid_extract(selected.error);
         return *selected.value;
     }

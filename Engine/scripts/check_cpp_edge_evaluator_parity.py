@@ -801,6 +801,11 @@ def sparse_structural_cases() -> list[str]:
         "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2},z]}}]",
         "ArrayFlatten[{{SparseArray[{{1,1}->a},{1000000000,1}],"
         "SparseArray[{{1000000000,1}->b},{1000000000,1}]}}]",
+        f"Extract[{vector},{{4}}]",
+        f"Extract[{vector},{{{{4}},{{1}},{{2}}}}]",
+        f"Extract[{matrix},{{All,2}}]",
+        f"Extract[{tensor},{{{{2,3,4}},{{1,1,2}}}}]",
+        "Extract[SparseArray[{{1}->a},{1000000000}],{1000000000}]",
     ]
     return _unique(cases)
 

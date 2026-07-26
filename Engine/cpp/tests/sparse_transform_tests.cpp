@@ -99,6 +99,18 @@ void block_tests() {
         "Rule[List[1000000000, 2], b]], List[1000000000, 2]]");
 }
 
+void extract_tests() {
+    check_case(
+        "Extract[SparseArray[{{1}->a,{4}->d},{5}],{{4},{1},{2}}]",
+        "List[d, a, 0]");
+    check_case(
+        "Extract[SparseArray[{{1,1}->a,{2,3}->f},{2,3}],{All,2}]",
+        "SparseArray[List[], List[2]]");
+    check_case(
+        "Extract[SparseArray[{{1}->a},{1000000000}],{1000000000}]",
+        "0");
+}
+
 } // namespace
 
 int main() {
@@ -106,6 +118,7 @@ int main() {
     padding_and_transpose_tests();
     flatten_tests();
     block_tests();
+    extract_tests();
     if (failures != 0)
         std::cerr << failures << " sparse-transform test(s) failed\n";
     return failures == 0 ? 0 : 1;
