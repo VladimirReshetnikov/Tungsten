@@ -2392,8 +2392,43 @@ Expr interval_expression(const std::vector<IntervalSegment>& segments) {
     return call("Interval", std::move(arguments));
 }
 
-Expr sparse_dense_value(const Expr& value) {
+constexpr std::size_t maximum_sparse_materialized_nodes = 1000000;
+
+std::optional<std::size_t> checked_dimension_product(
+    const std::vector<std::size_t>& dimensions) noexcept {
+    std::size_t product = 1;
+    for (const auto dimension : dimensions) {
+        if (dimension != 0
+            && product > std::numeric_limits<std::size_t>::max() / dimension)
+            return std::nullopt;
+        product *= dimension;
+    }
+    return product;
+}
+
+bool sparse_has_implicit_values(const Expr& value) noexcept {
+    const auto product = checked_dimension_product(value.dimensions());
+    return !product || *product > value.sparse_entries().size();
+}
+
+bool sparse_materialization_within_limit(const Expr& value) noexcept {
+    std::size_t prefix_count = 1;
+    std::size_t node_count = 1;
+    for (const auto dimension : value.dimensions()) {
+        if (dimension != 0
+            && prefix_count > maximum_sparse_materialized_nodes / dimension)
+            return false;
+        prefix_count *= dimension;
+        if (prefix_count > maximum_sparse_materialized_nodes - node_count)
+            return false;
+        node_count += prefix_count;
+    }
+    return true;
+}
+
+std::optional<Expr> sparse_dense_value(const Expr& value) {
     if (value.kind() != ExprKind::SparseArray) return value;
+    if (!sparse_materialization_within_limit(value)) return std::nullopt;
     auto build = [&](auto&& self, std::vector<std::size_t> prefix) -> Expr {
         if (prefix.size() == value.dimensions().size()) {
             const auto found = std::find_if(value.sparse_entries().begin(), value.sparse_entries().end(),
@@ -2401,6 +2436,7 @@ Expr sparse_dense_value(const Expr& value) {
             return found == value.sparse_entries().end() ? value.fill_value() : found->value;
         }
         std::vector<Expr> items;
+        items.reserve(value.dimensions()[prefix.size()]);
         for (std::size_t index = 1; index <= value.dimensions()[prefix.size()]; ++index) {
             auto child = prefix; child.push_back(index); items.push_back(self(self, std::move(child)));
         }
@@ -3589,7 +3625,12 @@ std::optional<std::vector<Expr>> sequence_fold_values(
             error = "SequenceFoldList expects a one-dimensional SparseArray sequence.";
             return std::nullopt;
         }
-        return sparse_dense_value(expression).args();
+        const auto dense = sparse_dense_value(expression);
+        if (!dense) {
+            error = "SequenceFoldList SparseArray sequence exceeds the native materialization limit.";
+            return std::nullopt;
+        }
+        return dense->args();
     }
     const auto values = compound_sequence_values(expression);
     if (!values)
@@ -7747,8 +7788,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return list(std::move(positions));
         }
         if (args[0].text() == "Density") {
-            std::size_t count = 1; for (const auto dimension : head.dimensions()) count *= dimension;
-            return count == 0 ? integer(0L) : rational(mpz_class(head.sparse_entries().size()), mpz_class(count));
+            mpz_class count = 1;
+            for (const auto dimension : head.dimensions())
+                count *= mpz_class(std::to_string(dimension), 10);
+            return count == 0 ? integer(0L)
+                : rational(mpz_class(head.sparse_entries().size()), std::move(count));
         }
     }
     if (head.has_head("SameAs") && head.args().size() == 1)
@@ -7839,7 +7883,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (!dimensions.empty()) return sparse_array(std::move(dimensions), std::move(entries), fill);
     }
     if ((function == "Plus" || function == "Times") && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::SparseArray; })) {
-        std::vector<Expr> dense; for (const auto& value : args) dense.push_back(sparse_dense_value(value));
+        std::vector<Expr> dense;
+        for (const auto& value : args) {
+            const auto materialized = sparse_dense_value(value);
+            if (!materialized)
+                return raw_evaluation_error(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            dense.push_back(*materialized);
+        }
         const auto result = evaluate(call(function, std::move(dense)));
         if (const auto sparse = sparse_from_dense(result)) return *sparse;
         return result;
@@ -11206,9 +11257,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             const auto expected_rank = function == "VectorQ" ? 1U : 2U;
             bool valid = args[0].dimensions().size() == expected_rank;
             if (valid && predicate) {
-                std::size_t total = 1;
-                for (const auto dimension : args[0].dimensions()) total *= dimension;
-                if (total > args[0].sparse_entries().size()) valid = matches_predicate(args[0].fill_value());
+                if (sparse_has_implicit_values(args[0]))
+                    valid = matches_predicate(args[0].fill_value());
                 for (const auto& entry : args[0].sparse_entries()) valid = valid && matches_predicate(entry.value);
             }
             return boolean(valid);
@@ -11321,6 +11371,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 "Part expects an expression and at least one part specification.");
         if (args[0].kind() == ExprKind::SparseArray) {
             const auto dense = sparse_dense_value(args[0]);
+            if (!dense)
+                return invalid_part(
+                    "SparseArray dimensions exceed the native materialization limit.");
             auto select = [&](auto&& self, const Expr& value, std::size_t selector) -> std::optional<Expr> {
                 if (selector == args.size()) return value;
                 if (!value.has_head("List")) return std::nullopt;
@@ -11336,7 +11389,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 const auto index = normalized_index(args[selector], value.args().size()); if (!index) return std::nullopt;
                 return self(self, value.args()[*index], selector + 1);
             };
-            if (const auto selected = select(select, dense, 1)) {
+            if (const auto selected = select(select, *dense, 1)) {
                 if (selected->has_head("List")) return *sparse_from_dense(*selected, args[0].fill_value());
                 return *selected;
             }
@@ -11897,24 +11950,60 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
     }
     if (function == "ArrayQ" && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); return evaluate(call("ArrayQ", std::move(dense_args)));
+        if (args.size() > 3) return call(head, args);
+        bool valid = true;
+        if (args.size() >= 2) {
+            if (args[1].kind() != ExprKind::Integer) valid = false;
+            else {
+                const mpz_class rank(
+                    std::to_string(args[0].dimensions().size()), 10);
+                valid = args[1].integer_value() == rank;
+            }
+        }
+        if (valid && args.size() == 3) {
+            auto matches_predicate = [&](const Expr& value) {
+                return is_symbol(evaluate(call(args[2], {value})), "True");
+            };
+            if (sparse_has_implicit_values(args[0]))
+                valid = matches_predicate(args[0].fill_value());
+            for (const auto& entry : args[0].sparse_entries())
+                valid = valid && matches_predicate(entry.value);
+        }
+        return boolean(valid);
     }
     if ((function == "ArrayReshape" || function == "ArrayPad" || function == "Transpose" || function == "Flatten")
         && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); const auto result = evaluate(call(function, std::move(dense_args)));
+        const auto dense = sparse_dense_value(args[0]);
+        if (!dense)
+            return raw_evaluation_error(
+                "SparseArray dimensions exceed the native materialization limit.");
+        auto dense_args = args; dense_args[0] = *dense; const auto result = evaluate(call(function, std::move(dense_args)));
         if (const auto sparse = sparse_from_dense(result, args[0].fill_value())) return *sparse;
         return result;
     }
     if ((function == "Tr" || function == "Det") && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); return evaluate(call(function, std::move(dense_args)));
+        const auto dense = sparse_dense_value(args[0]);
+        if (!dense)
+            return raw_evaluation_error(
+                "SparseArray dimensions exceed the native materialization limit.");
+        auto dense_args = args; dense_args[0] = *dense; return evaluate(call(function, std::move(dense_args)));
     }
     if ((function == "Inverse" || function == "MatrixPower") && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); const auto result = evaluate(call(function, std::move(dense_args)));
+        const auto dense = sparse_dense_value(args[0]);
+        if (!dense)
+            return raw_evaluation_error(
+                "SparseArray dimensions exceed the native materialization limit.");
+        auto dense_args = args; dense_args[0] = *dense; const auto result = evaluate(call(function, std::move(dense_args)));
         if (const auto sparse = sparse_from_dense(result)) return *sparse;
         return result;
     }
     if (function == "Dot" && args.size() == 2 && (args[0].kind() == ExprKind::SparseArray || args[1].kind() == ExprKind::SparseArray)) {
-        const auto result = evaluate(call("Dot", {sparse_dense_value(args[0]), sparse_dense_value(args[1])}));
+        const auto left = sparse_dense_value(args[0]);
+        const auto right = sparse_dense_value(args[1]);
+        if (!left || !right)
+            return raw_evaluation_error(
+                "SparseArray dimensions exceed the native materialization limit.");
+        const auto result = evaluate(call("Dot", {*left, *right}));
         if (const auto sparse = sparse_from_dense(result)) return *sparse;
         return result;
     }
@@ -12221,6 +12310,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (is_symbol(args[0], "False")) return integer(0L);
     }
     if (function == "ArrayDepth" && args.size() == 1) {
+        if (args[0].kind() == ExprKind::SparseArray)
+            return integer(args[0].dimensions().size());
         auto depth = [&](auto&& self, const Expr& value) -> std::size_t {
             if (!value.has_head("List") || value.args().empty()) return value.has_head("List") ? 1 : 0;
             std::size_t child = self(self, value.args().front());
@@ -14807,7 +14898,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 }
             }
         }
-        if (args[0].kind() == ExprKind::SparseArray) return sparse_dense_value(args[0]);
+        if (args[0].kind() == ExprKind::SparseArray) {
+            const auto dense = sparse_dense_value(args[0]);
+            if (!dense)
+                return raw_evaluation_error(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            return *dense;
+        }
         if (args[0].kind() == ExprKind::ByteArray) {
             std::vector<Expr> values; for (const auto value : args[0].bytes()) values.push_back(integer(static_cast<long>(value)));
             return list(std::move(values));
