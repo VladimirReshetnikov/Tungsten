@@ -1550,6 +1550,83 @@ CASES = (
         0,
     ),
     (
+        "sparse array result JSON metadata",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "SparseArray[{{2}->a,{1}->b},{3},z]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sparse construction properties and selection",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Normal[SparseArray[{{1,2}->a,{2,3}->b},{2,3}]], "
+            "ArrayRules[SparseArray[{{0,1},{2,0}}]], "
+            "SparseArray[{{1,2}->a},{2,3}][[1]], "
+            "Extract[SparseArray[{{2,3}->b},{2,3}],{2,3}], "
+            "SparseArray[{{1}->a},{3}][\"Density\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sparse structural transformations",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ArrayReshape[SparseArray[{{2}->a,{5}->b},{6}],{2,3}], "
+            "ArrayPad[SparseArray[{{2}->a},{3}],1], "
+            "Transpose[SparseArray[{{1,2}->a,{2,1}->b},{2,3}]], "
+            "Flatten[SparseArray[{{1,2}->a,{2,1}->b},{2,3}]], "
+            "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2}],{{b},{c}}}}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sparse arithmetic and dot products",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{SparseArray[{{1,2}->a},{2,3}] + "
+            "SparseArray[{{2,3}->b},{2,3}], "
+            "2 SparseArray[{{1}->a},{3}] + 1, "
+            "z + SparseArray[{{1}->b},{2}], "
+            "Dot[SparseArray[{{1}->a,{3}->c},{3}],"
+            "SparseArray[{{1}->b,{2}->d},{3}]], "
+            "Dot[SparseArray[{{1,2}->a},{2,3}],"
+            "SparseArray[{{2,1}->b},{3,2}]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "huge sparse dimensions remain compact",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Part[SparseArray[{{1}->a},{1000000000}],1000000000], "
+            "ArrayPad[SparseArray[{{1000000000}->a},{1000000000}],{2,3}], "
+            "Flatten[SparseArray[{{1,1}->a},{1000000000,1000000000}]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "canonical interval construction and set operations",
         (
             "expr",

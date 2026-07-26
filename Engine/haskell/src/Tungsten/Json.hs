@@ -252,6 +252,7 @@ exprToJson expression = JsonObject $ case expression of
       , ("fill_value", exprToJson fill)
       , ("entries", JsonArray (map sparseEntryToJson entries))
       , number "explicit_length" (fromIntegral (length entries) :: Integer)
+      , text "backend" "sparse.numba_backend._coo.core.COO"
       ]
  where
   object = Map.fromList

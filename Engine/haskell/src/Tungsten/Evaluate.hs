@@ -1294,6 +1294,14 @@ evaluateSparseScalar
   -> Expr
   -> Expr
   -> Either EvaluationError Expr
+evaluateSparseScalar "Plus" left right =
+  Right
+    ( reducePlus
+        ( sortBy
+            canonicalCompare
+            (flattenHead "Plus" left <> flattenHead "Plus" right)
+        )
+    )
 evaluateSparseScalar functionName left right =
   evaluate (Call (Symbol functionName) [left, right])
 
@@ -2885,23 +2893,18 @@ cartesianIndices = foldr extend [[]]
   extend values suffixes = [value : suffix | value <- values, suffix <- suffixes]
 
 reduceExtract :: [Expr] -> Either EvaluationError Expr
-reduceExtract [sparse@SparseArray {}, positions] = do
-  let paths = positionPaths positions
-  if null paths
-    then Left (EvaluationError "Extract received an invalid position specification")
-    else do
-      selected <- traverse extractSparsePath paths
-      case selected of
-        firstSelected : _ ->
-          Right
-            ( if hasMultiplePositionPaths positions
-                then evaluatedList selected
-                else firstSelected
-            )
-        [] -> Left (EvaluationError "Extract received an empty internal position set")
- where
-  extractSparsePath path =
-    sparseArrayPart sparse [Integer position | ArgumentSelector position <- path]
+reduceExtract [sparse@SparseArray {}, positions] = case sparseExtractPaths positions of
+  Nothing ->
+    Left
+      ( EvaluationError
+          "Extract positions must be a position list or a list of position lists."
+      )
+  Just (paths, multiple) -> do
+    selected <- traverse (sparseArrayPart sparse) paths
+    case selected of
+      firstSelected : _ ->
+        Right (if multiple then evaluatedList selected else firstSelected)
+      [] -> Left (EvaluationError "Extract received an empty internal position set")
 reduceExtract [subject, positions] = do
   let paths = positionPaths positions
   if null paths
@@ -2919,6 +2922,36 @@ reduceExtract [subject, positions] = do
       Right
       (selectAtPath path subject)
 reduceExtract values = Right (Call (Symbol "Extract") values)
+
+sparseExtractPaths :: Expr -> Maybe ([[Expr]], Bool)
+sparseExtractPaths position
+  | sparseSelectorAtom position = Just ([[position]], False)
+sparseExtractPaths (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead
+  , not (null values)
+  , Just paths <- traverse sparseExplicitPath values = Just (paths, True)
+  | systemHeadIn ["List"] listHead
+  , all sparsePositionComponent values = Just ([values], False)
+sparseExtractPaths _ = Nothing
+
+sparseExplicitPath :: Expr -> Maybe [Expr]
+sparseExplicitPath (Call (Symbol listHead) components)
+  | systemHeadIn ["List"] listHead
+  , all sparsePositionComponent components = Just components
+sparseExplicitPath _ = Nothing
+
+sparsePositionComponent :: Expr -> Bool
+sparsePositionComponent expression
+  | sparseSelectorAtom expression = True
+sparsePositionComponent (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = all sparseSelectorAtom values
+sparsePositionComponent _ = False
+
+sparseSelectorAtom :: Expr -> Bool
+sparseSelectorAtom Integer {} = True
+sparseSelectorAtom (Symbol allName) = systemHeadIn ["All"] allName
+sparseSelectorAtom (Call (Symbol spanHead) _) = systemHeadIn ["Span"] spanHead
+sparseSelectorAtom _ = False
 
 data AssociationEntry = AssociationEntry !Text !Expr !Expr
   deriving (Eq, Show)
@@ -6507,10 +6540,11 @@ reduceSparseArrayProperty sparse@(SparseArray dimensions entries fill) = \case
         )
     "Density" ->
       let totalSize = product dimensions
+          explicitCount = fromIntegral (length entries)
        in Right
-            ( if totalSize == 0
+            ( if totalSize == 0 || explicitCount == 0
                 then Integer 0
-                else fromExact (Exact (fromIntegral (length entries)) totalSize)
+                else fromExact (normalizeExact explicitCount totalSize)
             )
     _ ->
       Left
@@ -6722,10 +6756,10 @@ reduceArrayPad _ =
 
 arrayPad :: Expr -> Expr -> Expr -> Either EvaluationError Expr
 arrayPad sparse@(SparseArray dimensions entries sourceFill) paddingExpression padding = do
-  widths <- normalizeArrayPadding (length dimensions) paddingExpression
+  widths <- normalizeSparseArrayPadding (length dimensions) paddingExpression
   let newDimensions =
         zipWith
-          (\dimension (left, right) -> dimension + fromIntegral left + fromIntegral right)
+          (\dimension (left, right) -> dimension + left + right)
           dimensions
           widths
   if padding == sourceFill
@@ -6733,7 +6767,7 @@ arrayPad sparse@(SparseArray dimensions entries sourceFill) paddingExpression pa
       canonicalSparseArray
         newDimensions
         [ ( zipWith
-              (\index (left, _) -> index + fromIntegral left)
+              (\index (left, _) -> index + left)
               indices
               widths
           , value
@@ -6762,6 +6796,48 @@ arrayPad expression paddingExpression padding = do
     | index < left = Nothing
     | index - left >= dimension = Nothing
     | otherwise = Just (index - left)
+
+normalizeSparseArrayPadding
+  :: Int
+  -> Expr
+  -> Either EvaluationError [(Integer, Integer)]
+normalizeSparseArrayPadding rank = \case
+  Integer width -> do
+    normalized <- paddingWidth width
+    Right (replicate rank (normalized, normalized))
+  Call (Symbol listHead) [Integer left, Integer right]
+    | systemHeadIn ["List"] listHead
+    , rank == 1 -> do
+        normalizedLeft <- paddingWidth left
+        normalizedRight <- paddingWidth right
+        Right [(normalizedLeft, normalizedRight)]
+  Call (Symbol listHead) widths
+    | systemHeadIn ["List"] listHead
+    , length widths == rank
+    , Just integerWidths <- traverse explicitInteger widths -> do
+        normalized <- traverse paddingWidth integerWidths
+        Right [(width, width) | width <- normalized]
+  Call (Symbol listHead) widths
+    | systemHeadIn ["List"] listHead
+    , length widths == rank -> traverse paddingPair widths
+  _ -> Left invalidShape
+ where
+  explicitInteger (Integer value) = Just value
+  explicitInteger _ = Nothing
+  paddingWidth value
+    | value < 0 =
+        Left (EvaluationError "ArrayPad expects non-negative padding widths.")
+    | otherwise = Right value
+  paddingPair (Call (Symbol listHead) [Integer left, Integer right])
+    | systemHeadIn ["List"] listHead =
+        (,) <$> paddingWidth left <*> paddingWidth right
+  paddingPair (Call (Symbol listHead) [_, _])
+    | systemHeadIn ["List"] listHead =
+        Left (EvaluationError "ArrayPad padding widths must be explicit integers.")
+  paddingPair _ = Left invalidShape
+  invalidShape =
+    EvaluationError
+      "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."
 
 reduceArrayFlatten :: [Expr] -> Either EvaluationError Expr
 reduceArrayFlatten [expression] = arrayFlatten expression
@@ -7608,7 +7684,11 @@ sparseDot left@(SparseArray leftDimensions leftEntries leftFill) right@(SparseAr
                 foldl'
                   ( \retained (SparseEntry indices value) -> case indices of
                       [row, column] ->
-                        Map.insertWith (<>) row [(column, value)] retained
+                        Map.insertWith
+                          (\newValues oldValues -> oldValues <> newValues)
+                          row
+                          [(column, value)]
+                          retained
                       _ -> retained
                   )
                   Map.empty
@@ -9194,6 +9274,7 @@ expressionDepth expression = case arguments expression of
 
 expressionLength :: Expr -> Expr
 expressionLength (ByteArray bytes) = Integer (fromIntegral (BS.length bytes))
+expressionLength (SparseArray (firstDimension : _) _ _) = Integer firstDimension
 expressionLength expression = Integer (fromIntegral (length (arguments expression)))
 
 flattenHead :: Text -> Expr -> [Expr]

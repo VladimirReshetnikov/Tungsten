@@ -1476,7 +1476,7 @@ parsePayload form source expression =
         , ("form", JsonString form)
         , ("full_form", JsonString (fullForm expression))
         , ("input_form", JsonString (inputForm expression))
-        , ("length", JsonNumber (T.pack (show (length (arguments expression)))))
+        , ("length", JsonNumber (T.pack (show (expressionLength expression))))
         , ("source", JsonString source)
         , ("tree", exprToJson expression)
         ]
@@ -1521,7 +1521,7 @@ expressionPayload expression =
         [ ("depth", JsonNumber (T.pack (show (expressionDepth expression))))
         , ("full_form", JsonString (fullForm expression))
         , ("input_form", JsonString (inputForm expression))
-        , ("length", JsonNumber (T.pack (show (length (arguments expression)))))
+        , ("length", JsonNumber (T.pack (show (expressionLength expression))))
         , ("tree", exprToJson expression)
         ]
     )
@@ -1665,6 +1665,10 @@ expressionDepth (Call _ []) = 2
 expressionDepth expression = case arguments expression of
   [] -> 1
   values -> 1 + maximum (map expressionDepth values)
+
+expressionLength :: Expr -> Integer
+expressionLength (SparseArray (firstDimension : _) _ _) = firstDimension
+expressionLength expression = fromIntegral (length (arguments expression))
 
 usage :: Text
 usage =
