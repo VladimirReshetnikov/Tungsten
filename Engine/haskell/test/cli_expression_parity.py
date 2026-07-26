@@ -1198,6 +1198,84 @@ CASES = (
         0,
     ),
     (
+        "timing zero duration qualification and structural timing",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Pause[0], TimeRemaining[], "
+            "TimeConstrained[Pause[0]; 7, 1, fail], "
+            "System`Pause[0], "
+            "System`TimeConstrained[Pause[0]; 8, 1, fail], "
+            "MatchQ[AbsoluteTiming[1 + 2], {_Real, 3}], "
+            "MatchQ[TimeConstrained[TimeRemaining[], 1, fail], _Real]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "nested timing deadlines and abort protection",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{TimeConstrained[Pause[.1]; 7, .02, timeout], "
+            "TimeConstrained[TimeConstrained[Pause[.1]; 7, .02, inner], .2, outer], "
+            "TimeConstrained[TimeConstrained[Pause[.1]; 7, .2, inner], .02, outer], "
+            "CheckAbort[AbortProtect[TimeConstrained[Pause[.1], .02, inner]], fail]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "timed cleanup suppresses an expired deadline",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "TimeConstrained[WithCleanup[Pause[.1]; 7, "
+            "Print[TimeRemaining[]]], .02, timeout]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "time scopes restore across every control signal",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[] := TimeConstrained[Return[r], 1, timeout]; "
+            "{Catch[TimeConstrained[Throw[t], 1, timeout]], "
+            "Enclose[TimeConstrained[Confirm[$Failed], 1, timeout]], "
+            "CheckAbort[TimeConstrained[Abort[], 1, timeout], a], "
+            "Do[TimeConstrained[Break[], 1, timeout], {i, 1}], "
+            "Do[TimeConstrained[Continue[], 1, timeout], {i, 1}], f[], "
+            "(TimeConstrained[Goto[out], 1, timeout]; never; Label[out]; g)}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "timing diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Pause[], Pause[-1], Pause[Infinity], TimeConstrained[1], "
+            "TimeConstrained[1, x], TimeRemaining[1], AbsoluteTiming[], "
+            "System`Pause[], System`TimeConstrained[1], "
+            "System`TimeRemaining[1], System`AbsoluteTiming[]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "reap tag selectors and combiners",
         (
             "expr",

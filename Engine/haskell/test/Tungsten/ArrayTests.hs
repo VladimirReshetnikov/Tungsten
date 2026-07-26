@@ -114,15 +114,17 @@ checkValue (label, source, expected) = case parseInputForm source of
             ("expected " <> expected <> ", got " <> fullForm result)
 
 checkSessionValue :: Text -> Expr -> Text -> IO Bool
-checkSessionValue label expression expected = case evaluateInSession emptySession expression of
-  Left evaluationError ->
-    failCheck label ("session evaluation error: " <> showText evaluationError)
-  Right (result, _)
-    | fullForm result == expected -> pure True
-    | otherwise ->
-        failCheck
-          label
-          ("session expected " <> expected <> ", got " <> fullForm result)
+checkSessionValue label expression expected = do
+  evaluated <- evaluateInSession emptySession expression
+  case evaluated of
+    Left evaluationError ->
+      failCheck label ("session evaluation error: " <> showText evaluationError)
+    Right (result, _)
+      | fullForm result == expected -> pure True
+      | otherwise ->
+          failCheck
+            label
+            ("session expected " <> expected <> ", got " <> fullForm result)
 
 checkError :: (Text, Text) -> IO Bool
 checkError (label, source) = case parseInputForm source of

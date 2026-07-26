@@ -6,7 +6,13 @@ module Main (main) where
 import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import Data.Char (chr)
-import Data.IORef (atomicModifyIORef', newIORef)
+import Data.IORef
+  ( atomicModifyIORef'
+  , modifyIORef'
+  , newIORef
+  , readIORef
+  , writeIORef
+  )
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -27,6 +33,7 @@ import System.Exit (exitFailure)
 import System.Info (os)
 import System.IO (hClose, hSetEncoding, openTempFile, utf8)
 import System.FilePath ((</>))
+import Text.Read (readMaybe)
 import Tungsten.Cli
 import qualified Tungsten.ArrayTests as ArrayTests
 import Tungsten.Assistant
@@ -78,6 +85,7 @@ tests =
   , checkNotebookPatches
   , checkNotebookPatchJson
   , checkEvaluationSession
+  , checkSessionTimingRuntime
   , checkRepl
   , checkDiscovery
   , checkDocumentationIndex
@@ -863,9 +871,12 @@ checkEvaluator = do
   evaluateCase parser (label, source, expected) = do
     let parsed = parser source
         pureResult = fullForm <$> (parsed >>= mapLeftEvaluation . evaluate)
-        sessionResult = do
-          expression <- parsed
-          (value, _) <- mapLeftEvaluation (evaluateInSession emptySession expression)
+    sessionResult <- case parsed of
+      Left parseError -> pure (Left parseError)
+      Right expression -> do
+        evaluated <- evaluateInSession emptySession expression
+        pure $ do
+          (value, _) <- mapLeftEvaluation evaluated
           pure (fullForm value)
     pureCheck <-
       assertEqual
@@ -2932,78 +2943,74 @@ checkEvaluationSession = do
   pure (and (caseResults <> printResults <> messageResults <> scopedMessageResults))
  where
   evaluateSessionCase (label, source, expected) = do
-    let result = do
-          expression <- parseInputForm source
-          (value, updated) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
-          pure
-            ( fullForm value
-            , null (sessionAbortProtectScopes updated)
-            , null (sessionCheckAbortScopes updated)
-            , null (sessionReapScopes updated)
-            , null (sessionEncloseScopes updated)
-            )
+    result <- fmap
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , null (sessionAbortProtectScopes updated)
+              , null (sessionCheckAbortScopes updated)
+              , null (sessionReapScopes updated)
+              , null (sessionEncloseScopes updated)
+              )
+          )
+      )
+      (evaluateSessionSource source)
     assertEqual
       ("evaluation session: " <> label)
       (Right (expected, True, True, True, True))
       result
 
   evaluatePrintCase (label, source, expectedValue, expectedPrints) = do
-    let result = do
-          expression <- parseInputForm source
-          (value, updated) <-
-            either
-              (Left . ParseError . evaluationErrorMessage)
-              Right
-              (evaluateInSession emptySession expression)
-          pure
-            ( fullForm value
-            , sessionPrints updated
-            , null (sessionAbortProtectScopes updated)
-            , null (sessionCheckAbortScopes updated)
-            , null (sessionReapScopes updated)
-            , null (sessionEncloseScopes updated)
-            )
+    result <- fmap
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , sessionPrints updated
+              , null (sessionAbortProtectScopes updated)
+              , null (sessionCheckAbortScopes updated)
+              , null (sessionReapScopes updated)
+              , null (sessionEncloseScopes updated)
+              )
+          )
+      )
+      (evaluateSessionSource source)
     assertEqual
       ("evaluation session prints: " <> label)
       (Right (expectedValue, expectedPrints, True, True, True, True))
       result
 
   evaluateMessageCase (label, source, expectedValue, expectedMessages) = do
-    let result = do
-          expression <- parseInputForm source
-          (value, updated) <-
-            either
-              (Left . ParseError . evaluationErrorMessage)
-              Right
-              (evaluateInSession emptySession expression)
-          pure
-            ( fullForm value
-            , map messageTuple (sessionVisibleMessages updated)
-            , map messageTuple (sessionGeneratedMessages updated)
-            , null (sessionEncloseScopes updated)
-            )
-        expected =
+    result <- fmap
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , map messageTuple (sessionVisibleMessages updated)
+              , map messageTuple (sessionGeneratedMessages updated)
+              , null (sessionEncloseScopes updated)
+              )
+          )
+      )
+      (evaluateSessionSource source)
+    let expected =
           Right (expectedValue, expectedMessages, expectedMessages, True)
     assertEqual ("evaluation session messages: " <> label) expected result
 
   evaluateScopedMessageCase
     (label, source, expectedValue, expectedVisible, expectedGenerated) = do
-      let result = do
-            expression <- parseInputForm source
-            (value, updated) <-
-              either
-                (Left . ParseError . evaluationErrorMessage)
-                Right
-                (evaluateInSession emptySession expression)
-            pure
-              ( fullForm value
-              , map messageTuple (sessionVisibleMessages updated)
-              , map messageTuple (sessionGeneratedMessages updated)
-              , null (sessionQuietScopes updated)
-              , null (sessionMessageCollectors updated)
-              , null (sessionEncloseScopes updated)
-              )
-          expected =
+      result <- fmap
+        ( fmap
+            ( \(value, updated) ->
+                ( fullForm value
+                , map messageTuple (sessionVisibleMessages updated)
+                , map messageTuple (sessionGeneratedMessages updated)
+                , null (sessionQuietScopes updated)
+                , null (sessionMessageCollectors updated)
+                , null (sessionEncloseScopes updated)
+                )
+            )
+        )
+        (evaluateSessionSource source)
+      let expected =
             Right
               ( expectedValue
               , expectedVisible
@@ -3020,41 +3027,256 @@ checkEvaluationSession = do
     , evaluationMessageText message
     )
 
+checkSessionTimingRuntime :: IO Bool
+checkSessionTimingRuntime = do
+  pureBoundary <-
+    assertEqual
+      "pure evaluator leaves runtime timing effects symbolic"
+      (Right "Pause[0]")
+      (pureTimingFullForm "Pause[0]")
+  clock <- newIORef 100.0
+  let runtime =
+        SessionRuntime
+          { sessionRuntimeMonotonicSeconds = readIORef clock
+          , sessionRuntimeSleepSeconds = \seconds ->
+              modifyIORef' clock (+ seconds)
+          }
+      deterministicCases =
+        [ ( "time remaining uses the active deadline"
+          , "TimeConstrained[TimeRemaining[], 2, fail]"
+          , "2."
+          , []
+          )
+        , ( "pause cooperatively expires its deadline"
+          , "TimeConstrained[Pause[2]; 7, 1, timeout]"
+          , "timeout"
+          , []
+          )
+        , ( "inner deadline owns its timeout"
+          , "TimeConstrained[TimeConstrained[Pause[2]; 7, 1, inner], 5, outer]"
+          , "inner"
+          , []
+          )
+        , ( "outer deadline remains authoritative"
+          , "TimeConstrained[TimeConstrained[Pause[2]; 7, 5, inner], 1, outer]"
+          , "outer"
+          , []
+          )
+        , ( "time expiration crosses AbortProtect without becoming Abort"
+          , "CheckAbort[AbortProtect[TimeConstrained[Pause[2], 1, inner]], fail]"
+          , "inner"
+          , []
+          )
+        , ( "body cleanup suppresses an expired deadline"
+          , "TimeConstrained[WithCleanup[Pause[2]; 7, Print[TimeRemaining[]]], 1, timeout]"
+          , "timeout"
+          , ["Infinity"]
+          )
+        , ( "initializer and cleanup suppress an expired deadline"
+          , "TimeConstrained[WithCleanup[Pause[2], 7, Print[TimeRemaining[]]], 1, timeout]"
+          , "timeout"
+          , ["Infinity"]
+          )
+        , ( "cleanup throw supersedes a pending timeout"
+          , "TimeConstrained[WithCleanup[Pause[2], Throw[cleanup]], 1, timeout]"
+          , "Throw[cleanup]"
+          , []
+          )
+        , ( "time scope restores across Throw"
+          , "Catch[TimeConstrained[Throw[x], 1, timeout]]"
+          , "x"
+          , []
+          )
+        , ( "time scope restores across ConfirmationFailed"
+          , "Enclose[TimeConstrained[Confirm[$Failed], 1, timeout]]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , []
+          )
+        , ( "time scope restores across Abort"
+          , "CheckAbort[TimeConstrained[Abort[], 1, timeout], caught]"
+          , "caught"
+          , []
+          )
+        , ( "time scope restores across Break"
+          , "Do[TimeConstrained[Break[], 1, timeout], {i, 1}]"
+          , "Null"
+          , []
+          )
+        , ( "time scope restores across Continue"
+          , "Do[TimeConstrained[Continue[], 1, timeout], {i, 1}]"
+          , "Null"
+          , []
+          )
+        , ( "time scope restores across Return"
+          , "ClearAll[f]; f[] := TimeConstrained[Return[x], 1, timeout]; f[]"
+          , "x"
+          , []
+          )
+        , ( "time scope restores across a targeted Return"
+          , "Module[{}, TimeConstrained[Return[x, Module], 1, timeout]]"
+          , "x"
+          , []
+          )
+        , ( "time scope restores across Goto"
+          , "(TimeConstrained[Goto[out], 1, timeout]; never; Label[out]; reached)"
+          , "reached"
+          , []
+          )
+        , ( "evaluation diagnostics recover after a runtime suspension"
+          , "Quiet[TimeConstrained[1, AbsoluteTiming[1], fail]]"
+          , "TimeConstrained[1, AbsoluteTiming[1], fail]"
+          , []
+          )
+        ]
+  deterministicResults <- traverse (runCase runtime clock) deterministicCases
+  fakeTiming <- runAbsoluteTimingCase runtime clock
+  realTiming <- runRealAbsoluteTimingCase
+  realTimeout <- runRealTimeoutCase
+  pure
+    ( pureBoundary
+        && and (deterministicResults <> [fakeTiming, realTiming, realTimeout])
+    )
+ where
+  pureTimingFullForm source = do
+    expression <- parseInputForm source
+    case evaluate expression of
+      Left evaluationError ->
+        Left (ParseError (evaluationErrorMessage evaluationError))
+      Right value -> Right (fullForm value)
+
+  runCase runtime clock (label, source, expected, expectedPrints) = do
+    writeIORef clock 100.0
+    evaluated <- evaluateWith runtime source
+    assertEqual
+      ("session timing: " <> label)
+      (Right (expected, expectedPrints, True, 0, True, True, True, True, True))
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , sessionPrints updated
+              , null (sessionTimeConstraintScopes updated)
+              , sessionTimeConstraintSuppressionDepth updated
+              , null (sessionAbortProtectScopes updated)
+              , null (sessionCheckAbortScopes updated)
+              , null (sessionReapScopes updated)
+              , null (sessionEncloseScopes updated)
+              , null (sessionQuietScopes updated)
+              )
+          )
+          evaluated
+      )
+
+  runAbsoluteTimingCase runtime clock = do
+    writeIORef clock 100.0
+    evaluated <- evaluateWith runtime "AbsoluteTiming[Pause[0.25]; 3]"
+    case evaluated of
+      Right
+        ( Call (Symbol "List") [Real elapsedSource, Integer 3]
+          , updated
+          ) ->
+            assertEqual
+              "session timing: deterministic AbsoluteTiming structure"
+              True
+              ( maybe False (\elapsed -> elapsed >= 0.24 && elapsed <= 0.26) (realValue elapsedSource)
+                  && timingScopesRestored updated
+              )
+      other ->
+        assertEqual
+          "session timing: deterministic AbsoluteTiming result"
+          "List[Real, 3]"
+          (either (Text.pack . show) (fullForm . fst) other)
+
+  runRealAbsoluteTimingCase = do
+    evaluated <- evaluateWith defaultSessionRuntime "AbsoluteTiming[Pause[0.03]]"
+    case evaluated of
+      Right
+        ( Call (Symbol "List") [Real elapsedSource, Symbol "Null"]
+          , updated
+          ) ->
+            assertEqual
+              "session timing: real AbsoluteTiming deadline margin"
+              True
+              ( maybe False (\elapsed -> elapsed >= 0.02 && elapsed < 2.0) (realValue elapsedSource)
+                  && timingScopesRestored updated
+              )
+      other ->
+        assertEqual
+          "session timing: real AbsoluteTiming result"
+          "List[Real, Null]"
+          (either (Text.pack . show) (fullForm . fst) other)
+
+  runRealTimeoutCase = do
+    evaluated <-
+      evaluateWith
+        defaultSessionRuntime
+        "TimeConstrained[Pause[0.2], 0.03, timeout]"
+    assertEqual
+      "session timing: real timeout uses a robust margin"
+      (Right ("timeout", True))
+      ( fmap
+          (\(value, updated) -> (fullForm value, timingScopesRestored updated))
+          evaluated
+      )
+
+  evaluateWith runtime source = case parseInputForm source of
+    Left parseError -> pure (Left parseError)
+    Right expression -> do
+      evaluated <- evaluateInSessionWithRuntime runtime emptySession expression
+      pure
+        ( either
+            (Left . ParseError . evaluationErrorMessage)
+            Right
+            evaluated
+        )
+
+  timingScopesRestored session =
+    null (sessionTimeConstraintScopes session)
+      && sessionTimeConstraintSuppressionDepth session == 0
+
+  realValue :: Text -> Maybe Double
+  realValue source =
+    readMaybe
+      (Text.unpack (Text.replace "*^" "e" source))
+
 checkRepl :: IO Bool
 checkRepl = do
-  let firstStep = evaluateReplLine initialReplState "x = 2"
-      firstState = replStateFrom firstStep
-      secondStep = evaluateReplLine firstState "x^3"
-      secondState = replStateFrom secondStep
-      thirdStep = evaluateReplLine secondState "% + %%"
-      thirdState = replStateFrom thirdStep
-      messageStep =
-        evaluateReplLine
-          thirdState
-          "x = 5; {Part[f[x = x + 1], 2], x}"
-      messageState = replStateFrom messageStep
-      persistedAfterMessageStep = evaluateReplLine messageState "x"
-      parseFailureAfterMessage = evaluateReplLine messageState "1 +"
-      offStep = evaluateReplLine initialReplState "Off[f::tag]"
-      suppressedMessageStep =
-        evaluateReplLine
-          (replStateFrom offStep)
-          "Message[f::tag]; $MessageList"
-      onStep = evaluateReplLine (replStateFrom suppressedMessageStep) "On[f::tag]"
-      enabledMessageStep =
-        evaluateReplLine
-          (replStateFrom onStep)
-          "Message[f::tag]; $MessageList"
-      resetMessageListStep =
-        evaluateReplLine (replStateFrom enabledMessageStep) "$MessageList"
-      printStep = evaluateReplLine thirdState "Print[\"x\", 2]; 1"
-      printSequenceStep = evaluateReplLine thirdState "Print[Sequence[1, 2]]"
-      printRationalStep = evaluateReplLine thirdState "Print[1/2]"
-      printAliasStep = evaluateReplLine thirdState "p = Print; p[1/2]"
-      lineStep = evaluateReplLine thirdState "$Line"
-      historyStep = evaluateReplLine thirdState "{Out[1], InString[2]}"
-      exitStep = evaluateReplLine thirdState "Exit[7]"
-      checks =
+  firstStep <- evaluateReplLine initialReplState "x = 2"
+  let firstState = replStateFrom firstStep
+  secondStep <- evaluateReplLine firstState "x^3"
+  let secondState = replStateFrom secondStep
+  thirdStep <- evaluateReplLine secondState "% + %%"
+  let thirdState = replStateFrom thirdStep
+  messageStep <-
+    evaluateReplLine
+      thirdState
+      "x = 5; {Part[f[x = x + 1], 2], x}"
+  let messageState = replStateFrom messageStep
+  persistedAfterMessageStep <- evaluateReplLine messageState "x"
+  parseFailureAfterMessage <- evaluateReplLine messageState "1 +"
+  offStep <- evaluateReplLine initialReplState "Off[f::tag]"
+  suppressedMessageStep <-
+    evaluateReplLine
+      (replStateFrom offStep)
+      "Message[f::tag]; $MessageList"
+  onStep <- evaluateReplLine (replStateFrom suppressedMessageStep) "On[f::tag]"
+  enabledMessageStep <-
+    evaluateReplLine
+      (replStateFrom onStep)
+      "Message[f::tag]; $MessageList"
+  resetMessageListStep <-
+    evaluateReplLine (replStateFrom enabledMessageStep) "$MessageList"
+  printStep <- evaluateReplLine thirdState "Print[\"x\", 2]; 1"
+  printSequenceStep <- evaluateReplLine thirdState "Print[Sequence[1, 2]]"
+  printRationalStep <- evaluateReplLine thirdState "Print[1/2]"
+  printAliasStep <- evaluateReplLine thirdState "p = Print; p[1/2]"
+  timingStep <-
+    evaluateReplLine
+      thirdState
+      "TimeConstrained[Pause[0]; 7, 1, fail]"
+  lineStep <- evaluateReplLine thirdState "$Line"
+  historyStep <- evaluateReplLine thirdState "{Out[1], InString[2]}"
+  exitStep <- evaluateReplLine thirdState "Exit[7]"
+  let checks =
         [ assertEqual "REPL assignment result" (Just (Integer 2)) (replValueFrom firstStep)
         , assertEqual "REPL persistent definition" (Just (Integer 8)) (replValueFrom secondStep)
         , assertEqual "REPL percent history" (Just (Integer 10)) (replValueFrom thirdStep)
@@ -3153,6 +3375,10 @@ checkRepl = do
             "REPL Print aliases do not capture output"
             []
             (sessionPrints (replSession (replStateFrom printAliasStep)))
+        , assertEqual
+            "REPL executes session runtime timing effects"
+            (Just (Integer 7))
+            (replValueFrom timingStep)
         , assertEqual "REPL line counter" (Just (Integer 4)) (replValueFrom lineStep)
         , assertEqual
             "REPL explicit history"
@@ -3681,8 +3907,8 @@ checkProtocol = do
               )
           )
       request = expectRight (decodeRequestLine requestLine)
-      response = handleProtocolRequest request
-      encoded = encodeResponseLine response
+  response <- handleProtocolRequest request
+  let encoded = encodeResponseLine response
       decodedResponse = parseJson (withoutNewline encoded)
       expectedResult =
         JsonObject
@@ -3719,7 +3945,8 @@ checkProtocolErrors = do
           , protocolResponseCommand = "unknown"
           , protocolError = "unsupported command: unknown"
           }
-  second <- assertEqual "unknown protocol command" expected (handleProtocolRequest request)
+  actual <- handleProtocolRequest request
+  second <- assertEqual "unknown protocol command" expected actual
   third <- assertLeft "protocol source must be a string" (decodeRequestLine "{\"command\":\"parse\",\"source\":42}")
   pure (first && second && third)
 
@@ -3731,12 +3958,14 @@ checkParserEvaluatorProtocol = do
       isolatedEvaluateRequest = expectRight (decodeRequestLine "{\"id\":4,\"command\":\"evaluate\",\"source\":\"x\"}")
       messageEvaluateRequest = expectRight (decodeRequestLine "{\"id\":5,\"command\":\"evaluate\",\"source\":\"Part[f[a], 2]\"}")
       printEvaluateRequest = expectRight (decodeRequestLine "{\"id\":6,\"command\":\"evaluate\",\"source\":\"Print[\\\"x\\\"]; 1\"}")
-      parseResponse = handleProtocolRequest parseRequest
-      evaluateResponse = handleProtocolRequest evaluateRequest
-      sessionEvaluateResponse = handleProtocolRequest sessionEvaluateRequest
-      isolatedEvaluateResponse = handleProtocolRequest isolatedEvaluateRequest
-      messageEvaluateResponse = handleProtocolRequest messageEvaluateRequest
-      printEvaluateResponse = handleProtocolRequest printEvaluateRequest
+      timingEvaluateRequest = expectRight (decodeRequestLine "{\"id\":7,\"command\":\"evaluate\",\"source\":\"TimeConstrained[Pause[0]; 7, 1, fail]\"}")
+  parseResponse <- handleProtocolRequest parseRequest
+  evaluateResponse <- handleProtocolRequest evaluateRequest
+  sessionEvaluateResponse <- handleProtocolRequest sessionEvaluateRequest
+  isolatedEvaluateResponse <- handleProtocolRequest isolatedEvaluateRequest
+  messageEvaluateResponse <- handleProtocolRequest messageEvaluateRequest
+  printEvaluateResponse <- handleProtocolRequest printEvaluateRequest
+  timingEvaluateResponse <- handleProtocolRequest timingEvaluateRequest
   first <- case parseResponse of
     ProtocolSuccess {protocolResult = JsonObject result} ->
       case Map.lookup "full_form" result of
@@ -3781,7 +4010,12 @@ checkParserEvaluatorProtocol = do
         (Map.lookup "prints" outer)
     other -> assertEqual "protocol Print response" True (isSuccess other)
   eighth <- assertProtocolEvaluation "protocol Print result" "1" printEvaluateResponse
-  pure (and [first, second, third, fourth, fifth, sixth, seventh, eighth])
+  ninth <-
+    assertProtocolEvaluation
+      "protocol executes session runtime timing effects"
+      "7"
+      timingEvaluateResponse
+  pure (and [first, second, third, fourth, fifth, sixth, seventh, eighth, ninth])
  where
   assertProtocolEvaluation label expected response = case response of
     ProtocolSuccess {protocolResult = JsonObject outer} ->
@@ -3799,6 +4033,20 @@ withoutNewline :: Text -> Text
 withoutNewline value = case Text.unsnoc value of
   Just (prefix, '\n') -> prefix
   _ -> value
+
+evaluateSessionSource
+  :: Text
+  -> IO (Either ParseError (Expr, EvaluationSession))
+evaluateSessionSource source = case parseInputForm source of
+  Left parseError -> pure (Left parseError)
+  Right expression -> do
+    evaluated <- evaluateInSession emptySession expression
+    pure
+      ( either
+          (Left . ParseError . evaluationErrorMessage)
+          Right
+          evaluated
+      )
 
 assertEqual :: (Eq value, Show value) => Text -> value -> value -> IO Bool
 assertEqual label expected actual

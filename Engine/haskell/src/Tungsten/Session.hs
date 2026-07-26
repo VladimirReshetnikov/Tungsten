@@ -4752,7 +4752,9 @@ evaluateSessionTimeConstrained depth session = \case
     case runtimeSecondsValue "TimeConstrained" True secondsValue of
       P.Left message -> sessionFailure secondsSession message
       P.Right rawSeconds ->
-        let seconds = max 0 rawSeconds
+        let seconds
+              | rawSeconds < 0 = 0
+              | otherwise = rawSeconds
          in if isInfinite seconds
               then runBody body fallback secondsSession Nothing False
               else do
@@ -4826,10 +4828,18 @@ parseRuntimeReal source =
   readMaybe (T.unpack normalized)
  where
   (literal, exponentMarker) = T.breakOn "*^" source
-  mantissa = T.takeWhile (/= '`') literal
+  mantissa = normalizeRuntimeMantissa (T.takeWhile (/= '`') literal)
   normalized
     | T.null exponentMarker = mantissa
     | otherwise = mantissa <> "e" <> T.drop 2 exponentMarker
+
+normalizeRuntimeMantissa :: Text -> Text
+normalizeRuntimeMantissa source
+  | T.isPrefixOf "-." source = "-0" <> T.drop 1 source
+  | T.isPrefixOf "+." source = "+0" <> T.drop 1 source
+  | T.isPrefixOf "." source = "0" <> source
+  | T.isSuffixOf "." source = source <> "0"
+  | otherwise = source
 
 evaluateSessionWithCleanup
   :: Int
@@ -8303,13 +8313,14 @@ sessionFailure session message =
   Left (SessionEvaluationFailure (EvaluationError message) session)
 
 recoverEvaluationFailure :: Expr -> SessionResult Expr -> SessionResult Expr
-recoverEvaluationFailure expression = \case
-  Left (SessionEvaluationFailure evaluationError stoppedSession) ->
+recoverEvaluationFailure expression result = inspectRuntimeResult result $ \case
+  P.Left (SessionEvaluationFailure evaluationError stoppedSession) ->
     Right
       ( expression
       , appendEvaluationMessage expression evaluationError stoppedSession
       )
-  result -> result
+  P.Left evaluationExit -> Left evaluationExit
+  P.Right success -> Right success
 
 appendEvaluationMessage
   :: Expr
@@ -8533,10 +8544,11 @@ evaluateTargetedReturn
   -> Expr
   -> SessionResult Expr
 evaluateTargetedReturn target depth session body =
-  case evaluateSessionAt (depth + 1) session body of
-    Left (SessionControl (Returned value (Just actualTarget)) stoppedSession)
+  inspectRuntimeResult (evaluateSessionAt (depth + 1) session body) $ \case
+    P.Left (SessionControl (Returned value (Just actualTarget)) stoppedSession)
       | actualTarget == target -> Right (value, stoppedSession)
-    result -> result
+    P.Left evaluationExit -> Left evaluationExit
+    P.Right success -> Right success
 
 logicalResult :: Text -> Expr -> [Expr] -> Expr
 logicalResult _ identity [] = identity
