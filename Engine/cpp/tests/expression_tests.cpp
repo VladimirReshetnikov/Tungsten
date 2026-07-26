@@ -1915,6 +1915,153 @@ int main() {
         "ContainsAll::error: ContainsAll expects a list or association.",
         "effectful invalid collection diagnostic text");
 
+    const std::vector<std::pair<std::string, std::string>>
+        callback_collection_contracts{
+            {"AllTrue[<|a->1,b->2|>,IntegerQ]", "True"},
+            {"AnyTrue[<|a->1,b->2|>,#>1&]", "True"},
+            {"NoneTrue[<|a->1,b->2|>,#>1&]", "False"},
+            {"Tally[<|a->x,b->x,c->y|>]",
+                "List[List[x, 2], List[y, 1]]"},
+            {"Counts[<|a->x,b->x,c->y|>]",
+                "Association[Rule[x, 2], Rule[y, 1]]"},
+            {"Tally[{1,2,3},#1<#2&]", "List[List[1, 3]]"},
+            {"Counts[{1,2,3},#1<#2&]", "Association[Rule[1, 3]]"},
+            {"CountsBy[<|a->1.5,b->1.7,c->2.2|>,Floor]",
+                "Association[Rule[1, 2], Rule[2, 1]]"},
+            {"ContainsOnly[<|a->1,b->2|>,<|x->1,y->2,z->3|>]", "True"},
+            {"ContainsOnly[{1,2},{1,2},SameTest->Automatic]", "True"},
+            {"ContainsOnly[{1.0},{1},SameTest:>Equal]", "True"},
+            {"ContainsOnly[{1.0},{1},SameTest->SameQ,SameTest->Equal]", "True"},
+        };
+    for (const auto& [source, expected] : callback_collection_contracts)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "callback collection contract: " + source);
+
+    Evaluator callback_collections;
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "AllTrue[{1,2,3},(Print[#];#<2)&]")).to_full_form(),
+        "False", "AllTrue stops at the first non-True predicate result");
+    check(callback_collections.prints() == std::vector<std::string>{"1", "2"},
+        "AllTrue short-circuit preserves exact predicate effects");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "AnyTrue[{1,2,3},(Print[#];#==2)&]")).to_full_form(),
+        "True", "AnyTrue stops at the first True predicate result");
+    check(callback_collections.prints() == std::vector<std::string>{"1", "2"},
+        "AnyTrue short-circuit preserves exact predicate effects");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "NoneTrue[{1,2,3},(Print[#];#==2)&]")).to_full_form(),
+        "False", "NoneTrue stops at the first True predicate result");
+    check(callback_collections.prints() == std::vector<std::string>{"1", "2"},
+        "NoneTrue short-circuit preserves exact predicate effects");
+
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "Counts[{1,2},(Print[{#1,#2}];False)&]")).to_full_form(),
+        "Association[Rule[1, 1], Rule[2, 1]]",
+        "Counts retains distinct groups after a False binary test");
+    check(callback_collections.prints() == std::vector<std::string>{"{1, 2}"},
+        "Counts calls its binary test as representative then current value");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "Tally[{1,2},(Print[{#1,#2}];False)&]")).to_full_form(),
+        "List[List[1, 1], List[2, 1]]",
+        "Tally retains distinct groups after a False binary test");
+    check(callback_collections.prints() == std::vector<std::string>{"{1, 2}"},
+        "Tally calls its binary test as representative then current value");
+
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "Catch[Counts[{1,2,3},(Print[{#1,#2}];Throw[x])&]]"
+        )).to_full_form(),
+        "x", "Counts propagates Throw from its binary test");
+    check(callback_collections.prints() == std::vector<std::string>{"{1, 2}"},
+        "Counts stops invoking its binary test after Throw");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "Catch[CountsBy[{1,2,3},(Print[#];If[#==2,Throw[x]];#)&]]"
+        )).to_full_form(),
+        "x", "CountsBy propagates Throw from its key function");
+    check(callback_collections.prints() == std::vector<std::string>{"1", "2"},
+        "CountsBy stops invoking its key function after Throw");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "Catch[ContainsOnly[{1,2},{0,1,2},"
+        "SameTest->((Print[{#1,#2}];Throw[x])&)]]"
+        )).to_full_form(),
+        "x", "ContainsOnly propagates Throw from SameTest");
+    check(callback_collections.prints()
+            == std::vector<std::string>{"{1, 0}"},
+        "ContainsOnly stops invoking SameTest after Throw");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "Enclose[CountsBy[{1,2,3},(Print[#];"
+        "If[#==2,Confirm[Failure[\"stop\",<||>]]];#)&]]"
+        )).to_full_form(),
+        "Failure[\"stop\", Association[]]",
+        "CountsBy propagates a confirmation failure from its key function");
+    check(callback_collections.prints() == std::vector<std::string>{"1", "2"},
+        "CountsBy stops invoking its key function after confirmation failure");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "CheckAbort[AnyTrue[{1,2,3},"
+        "(Print[#];If[#==2,Abort[]];False)&],caught]"
+        )).to_full_form(),
+        "caught", "AnyTrue propagates an immediate abort to CheckAbort");
+    check(callback_collections.prints() == std::vector<std::string>{"1", "2"},
+        "AnyTrue stops invoking its predicate after an immediate abort");
+
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[AllTrue[{1,2},"
+        "(Print[#];If[#==1,Abort[]];True)&];Print[\"after\"]],caught]"
+        )).to_full_form(),
+        "caught", "AllTrue leaves a protected abort pending for AbortProtect");
+    check(callback_collections.prints()
+            == std::vector<std::string>{"1", "2", "after"},
+        "a protected abort remains invisible to collection iteration");
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Abort[];CountsBy[{1,2},"
+        "(Print[#];#)&];Print[\"after\"]],caught]"
+        )).to_full_form(),
+        "caught", "CountsBy ignores an enclosing protected pending abort");
+    check(callback_collections.prints()
+            == std::vector<std::string>{"1", "2", "after"},
+        "CountsBy completes while an enclosing protected abort is pending");
+
+    check_equal(callback_collections.evaluate(parse_input_form(
+        "ContainsOnly[{1.0,2.0},{0,1,2},"
+        "SameTest:>(Print[\"delayed\"];Equal)]"
+        )).to_full_form(),
+        "True", "ContainsOnly accepts a delayed SameTest option");
+    check(callback_collections.prints() == std::vector<std::string>(5, "delayed"),
+        "RuleDelayed SameTest is evaluated once per comparison");
+
+    check_structural_collection_error(
+        "AllTrue[f[1,2],IntegerQ]", "AllTrue",
+        "AllTrue expects a list or association.");
+    check_structural_collection_error(
+        "AnyTrue[{1}]", "AnyTrue",
+        "AnyTrue expects a list and a test function.");
+    check_structural_collection_error(
+        "Tally[f[a,a,b]]", "Tally",
+        "Tally expects a list or association.");
+    check_structural_collection_error(
+        "Counts[]", "Counts",
+        "Counts expects a list or association and an optional binary test.");
+    check_structural_collection_error(
+        "CountsBy[f[1,2],Identity]", "CountsBy",
+        "CountsBy expects a list or association.");
+    check_structural_collection_error(
+        "ContainsOnly[f[1],g[1]]", "ContainsOnly",
+        "ContainsOnly expects a list or association.");
+    check_structural_collection_error(
+        "ContainsOnly[{1},{1},Heads->False]", "ContainsOnly",
+        "ContainsOnly currently supports only the SameTest option.");
+    check_structural_collection_error(
+        "ContainsOnly[{1},{1},WorkingPrecision->20]", "ContainsOnly",
+        "ContainsOnly currently supports only the SameTest option.");
+    check_structural_collection_error(
+        "ContainsOnly[{1},{1},Rule[SameTest]]", "ContainsOnly",
+        "ContainsOnly expects two arguments and an optional SameTest rule.");
+    check_structural_collection_error(
+        "ContainsOnly[{1},{1},1->Equal]", "ContainsOnly",
+        "ContainsOnly expects two arguments and an optional SameTest rule.");
+    check_structural_collection_error(
+        "ContainsOnly[{1},SameTest->Equal,{1}]", "ContainsOnly",
+        "ContainsOnly expects two arguments and an optional SameTest rule.");
+
     const std::vector<std::pair<std::string, std::string>> polynomial_boundary_cases{
         {"ToExpression[\"f[a]\", InputForm, List]", "List[f[a]]"},
         {"Coefficient[2 x^2 y + 3 x y + y, x, 1]", "Times[3, y]"},

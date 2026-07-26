@@ -12377,19 +12377,32 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             }
         }
     }
-    if ((function == "Tally" || function == "Counts") && !args.empty() && args.size() <= 2
-        && args[0].kind() == ExprKind::Call) {
+    if (function == "Tally" || function == "Counts") {
+        if (args.empty() || args.size() > 2)
+            return raw_evaluation_error(function == "Tally"
+                ? "Tally expects a list and an optional binary test."
+                : "Counts expects a list or association and an optional binary test.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                function + " expects a list or association.");
         struct Group { Expr representative; std::size_t count; };
         std::vector<Group> groups;
-        auto equivalent = [&](const Expr& left, const Expr& right) {
-            return args.size() == 1 ? left == right
-                : is_symbol(evaluate(call(args[1], {left, right})), "True");
-        };
-        for (const auto& item : args[0].args()) {
-            const auto found = std::find_if(groups.begin(), groups.end(), [&](const Group& group) {
-                return equivalent(item, group.representative);
-            });
-            if (found == groups.end()) groups.push_back({item, 1}); else ++found->count;
+        for (const auto& item : *source) {
+            std::optional<std::size_t> found;
+            for (std::size_t index = 0; index < groups.size(); ++index) {
+                bool equivalent = groups[index].representative == item;
+                if (args.size() == 2) {
+                    const auto outcome = evaluate(call(
+                        args[1], {groups[index].representative, item}));
+                    if (aborted_ || thrown_ || confirmation_failure_
+                        || control_active()) return outcome;
+                    equivalent = is_symbol(outcome, "True");
+                }
+                if (equivalent) { found = index; break; }
+            }
+            if (found) ++groups[*found].count;
+            else groups.push_back({item, 1});
         }
         std::vector<Expr> values;
         for (const auto& group : groups) values.push_back(function == "Tally"
@@ -12411,13 +12424,20 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return integer(static_cast<unsigned long>(unique.size()));
     }
-    if (function == "CountsBy" && args.size() == 2 && args[0].kind() == ExprKind::Call) {
-        const auto input_rules = association_rules(args[0]);
+    if (function == "CountsBy") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                "CountsBy expects a list and a key function.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                "CountsBy expects a list or association.");
         std::vector<Expr> keys;
         std::vector<std::size_t> counts;
-        for (const auto& item : input_rules ? *input_rules : args[0].args()) {
-            const auto& value = input_rules ? item.args()[1] : item;
+        for (const auto& value : *source) {
             const auto key = evaluate(call(args[1], {value}));
+            if (aborted_ || thrown_ || confirmation_failure_
+                || control_active()) return key;
             const auto found = std::find(keys.begin(), keys.end(), key);
             if (found == keys.end()) {
                 keys.push_back(key);
@@ -12566,14 +12586,25 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, "Riffle::error: " + error);
         return call(raw_head, raw_args);
     }
-    if ((function == "AllTrue" || function == "AnyTrue" || function == "NoneTrue")
-        && args.size() == 2 && args[0].kind() == ExprKind::Call) {
-        bool any = false; bool all = true;
-        for (const auto& item : args[0].args()) {
-            const bool truth = is_symbol(evaluate(call(args[1], {item})), "True");
-            any = any || truth; all = all && truth;
+    if (function == "AllTrue" || function == "AnyTrue"
+        || function == "NoneTrue") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                function + " expects a list and a test function.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                function + " expects a list or association.");
+        for (const auto& item : *source) {
+            const auto outcome = evaluate(call(args[1], {item}));
+            if (aborted_ || thrown_ || confirmation_failure_
+                || control_active()) return outcome;
+            const bool truth = is_symbol(outcome, "True");
+            if (function == "AllTrue" && !truth) return boolean(false);
+            if (function == "AnyTrue" && truth) return boolean(true);
+            if (function == "NoneTrue" && truth) return boolean(false);
         }
-        return boolean(function == "AllTrue" ? all : function == "AnyTrue" ? any : !any);
+        return boolean(function != "AnyTrue");
     }
     if (function == "ContainsAll" || function == "ContainsAny"
         || function == "ContainsNone" || function == "ContainsExactly") {
@@ -12600,26 +12631,48 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return boolean(function == "ContainsAll" ? all : function == "ContainsAny" ? any
             : function == "ContainsNone" ? !any : all && reverse_all);
     }
-    if (function == "ContainsOnly" && args.size() >= 2 && args.size() <= 3
-        && args[0].kind() == ExprKind::Call && args[1].kind() == ExprKind::Call) {
+    if (function == "ContainsOnly") {
+        std::size_t data_count = args.size();
+        while (data_count > 0) {
+            const auto& option = args[data_count - 1];
+            if ((!option.has_head("Rule") && !option.has_head("RuleDelayed"))
+                || option.args().size() != 2
+                || !option.args()[0].symbol_name()) break;
+            --data_count;
+        }
         std::optional<Expr> same_test;
-        if (args.size() == 3 && args[2].has_head("Rule") && args[2].args().size() == 2
-            && is_symbol(args[2].args()[0], "SameTest")) same_test = args[2].args()[1];
-        else if (args.size() == 3) return call(head, args);
-        auto values_of = [](const Expr& value) {
-            std::vector<Expr> values;
-            if (const auto rules = association_rules(value)) {
-                for (const auto& rule : *rules) values.push_back(rule.args()[1]);
-            } else values = value.args();
-            return values;
-        };
-        const auto left = values_of(args[0]);
-        const auto right = values_of(args[1]);
-        return boolean(std::all_of(left.begin(), left.end(), [&](const Expr& value) {
-            return std::any_of(right.begin(), right.end(), [&](const Expr& candidate) {
-                return same_test ? is_symbol(evaluate(call(*same_test, {value, candidate})), "True") : value == candidate;
-            });
-        }));
+        for (std::size_t index = data_count; index < args.size(); ++index) {
+            const auto& option = args[index];
+            if (!is_symbol(option.args()[0], "SameTest"))
+                return raw_evaluation_error(
+                    "ContainsOnly currently supports only the SameTest option.");
+            same_test = is_symbol(option.args()[1], "Automatic")
+                ? std::nullopt : std::optional<Expr>(option.args()[1]);
+        }
+        if (data_count != 2)
+            return raw_evaluation_error(
+                "ContainsOnly expects two arguments and an optional SameTest rule.");
+        const auto left = list_or_association_values(args[0]);
+        const auto right = list_or_association_values(args[1]);
+        if (!left || !right)
+            return raw_evaluation_error(
+                "ContainsOnly expects a list or association.");
+        for (const auto& value : *left) {
+            bool found = false;
+            for (const auto& candidate : *right) {
+                bool equivalent = value == candidate;
+                if (same_test) {
+                    const auto outcome = evaluate(call(
+                        *same_test, {value, candidate}));
+                    if (aborted_ || thrown_ || confirmation_failure_
+                        || control_active()) return outcome;
+                    equivalent = is_symbol(outcome, "True");
+                }
+                if (equivalent) { found = true; break; }
+            }
+            if (!found) return boolean(false);
+        }
+        return boolean(true);
     }
     if (function == "Subsets" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
         long minimum = 0, maximum = static_cast<long>(args[0].args().size()), step = 1;
