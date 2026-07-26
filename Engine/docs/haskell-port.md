@@ -131,6 +131,11 @@ failures, and ordinary completion. Explicit `System`` spellings dispatch with th
 the Python reference. `ConfirmQuiet` and `FailWhen` deliberately remain symbolic because the
 current Python compatibility reference has no evaluator implementation for either head.
 
+The exact numeric reducer also covers the Python reference's integer combinatorics and sequences,
+ordinary and Gaussian factorization, divisor and prime arithmetic, modular arithmetic and residue
+symbols, continued fractions, integer partitions, digit/base conversion, Chinese remaindering,
+special integer sequences, and arbitrary-precision bit operations.
+
 ## Compatibility boundary
 
 The following Engine areas still use the Python implementation and are not represented as Haskell

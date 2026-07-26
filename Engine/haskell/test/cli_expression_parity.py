@@ -1550,6 +1550,79 @@ CASES = (
         0,
     ),
     (
+        "exact integer arithmetic and number theory",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Binomial[-3,2],Multinomial[2,3,4],Fibonacci[-6],LucasL[-6],"
+            "HarmonicNumber[5,2],Mod[-14,5],QuotientRemainder[-14,5],"
+            "GCD[-12,18,30],LCM[-4,6],Divisors[-12],PrimeQ[1000000007],"
+            "EulerPhi[12],CarmichaelLambda[12],MoebiusMu[6],"
+            "JordanTotient[2,10],DivisorSigma[-1,6],PrimePi[100],Prime[10],"
+            "NextPrime[10,3],PowerMod[3,-1,7],MultiplicativeOrder[2,7]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "structured exact number reducers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{FactorInteger[-12],FactorInteger[FromContinuedFraction[{0,1,1,17}]],"
+            "FactorInteger[210,2],IntegerExponent[1000],"
+            "ContinuedFraction[FromContinuedFraction[{4,2,6,7}]],"
+            "FromContinuedFraction[{4,2,6,7}],IntegerPartitions[4,{2}],"
+            "FromDigits[{1,2,3,4},16],FromDigits[\"abc\",16],"
+            "ChineseRemainder[{2,3,2},{3,5,7}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "exact residue sequences and Gaussian factors",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{JacobiSymbol[1001,9907],KroneckerSymbol[-1,2],BernoulliB[10],"
+            "EulerE[6],PrimitiveRoot[7],PrimitiveRoot[8],RamanujanTau[5],"
+            "FactorInteger[5,GaussianIntegers->True],"
+            "FactorInteger[3+4 I,GaussianIntegers->True]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "FromDigits exact diagnostic parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "FromDigits[\"g\",16]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ChineseRemainder exact diagnostic parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ChineseRemainder[{0,1},{2,4}]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "sparse array result JSON metadata",
         (
             "expr",
