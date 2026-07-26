@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-26T07:27:50Z
-- Repository HEAD: 32890912572f7ea66a219e0665946229446910c2
+- Updated (UTC): 2026-07-26T07:53:01Z
+- Repository HEAD: 0d771114c2c96a3692d867f51085d3791e34207d
 
 ## Purpose
 
