@@ -49,7 +49,7 @@ def _arguments() -> argparse.Namespace:
         "--cluster",
         action="append",
         choices=(
-            "rounding", "take-drop", "list", "structural", "traversal",
+            "rounding", "take-drop", "take-list", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
             "array-shape", "ordering", "strings",
         ),
@@ -151,6 +151,122 @@ def take_drop_cases() -> list[str]:
             ("Take", "Drop"), sequences, specifications
         )
     ]
+
+
+def take_list_cases() -> list[str]:
+    """Sequential TakeList and paired TakeDrop projection contracts."""
+
+    subjects = (
+        "a",
+        "f[]",
+        "f[a,b,c,d]",
+        "Association[a->1,b:>2,c->3,d->4]",
+    )
+    specifications: list[str] = [str(value) for value in range(-5, 6)]
+    specifications.extend(("All", "None"))
+    specifications.extend(f"{{{value}}}" for value in range(-4, 5))
+    specifications.append("{All}")
+    specifications.extend(
+        f"{{{first},{last}}}"
+        for first, last in itertools.product(range(-2, 3), repeat=2)
+    )
+    specifications.extend(
+        f"{{{first},{last},{step}}}"
+        for first, last, step in itertools.product(
+            range(-1, 2), range(-1, 2), (-2, -1, 1, 2)
+        )
+    )
+    specifications.extend(
+        (
+            "Span[1,All]",
+            "Span[All,All]",
+            "Span[-1,1,-1]",
+            "Span[1,-1,2]",
+            "Span[1,2,0]",
+            "Span[1,2,x]",
+            "UpTo[-1]",
+            "UpTo[0]",
+            "UpTo[1]",
+            "UpTo[4]",
+            "x",
+            "{}",
+            "{x}",
+            "{1,2,3,4}",
+            "{Key[a]}",
+            '{"a"}',
+        )
+    )
+
+    cases = [
+        f"TakeDrop[{subject},{specification}]"
+        for subject, specification in itertools.product(
+            subjects, specifications
+        )
+    ]
+    cases.extend(
+        f"TakeList[{subject},{{{specification}}}]"
+        for subject, specification in itertools.product(
+            subjects, specifications
+        )
+    )
+    cases.extend(
+        (
+            "TakeList[]",
+            "TakeList[f[a]]",
+            "TakeList[f[a],{1},extra]",
+            "TakeList[f[a],x]",
+            "TakeDrop[]",
+            "TakeDrop[f[a]]",
+            "TakeDrop[f[a],1,extra]",
+            "TakeList[a,{}]",
+            "TakeList[a,{All}]",
+            "TakeList[a,{All,All}]",
+            "TakeList[Nothing,{All}]",
+            "TakeList[Unevaluated[Nothing],{All,All}]",
+            "TakeList[Unevaluated[Sequence[a,b]],{All}]",
+            "TakeList[Unevaluated[Splice[{a,b}]],{All}]",
+            "TakeList[Unevaluated[Splice[{a,b},List]],{All}]",
+            "TakeDrop[Unevaluated[Sequence[a,b]],All]",
+            "TakeList[Unevaluated[f[Sequence[a,b]]],{1}]",
+            "TakeList[Unevaluated[f[Sequence[a,b]]],{All}]",
+            "TakeDrop[Unevaluated[f[Sequence[a,b]]],All]",
+            "TakeDrop[Unevaluated[f[Splice[{a,b},f]]],All]",
+            "TakeDrop[Unevaluated[f[Splice[{a,b}]]],All]",
+            "Take[Unevaluated[f[Sequence[a,b]]],All]",
+            "Drop[Unevaluated[f[Splice[{a,b},f],c]],{-1}]",
+            "TakeList[f[a,b,c,d],{}]",
+            "TakeList[f[a,b,c,d],{2,1}]",
+            "TakeList[f[a,b,c,d],{{2,3},{-1},All}]",
+            "TakeList[f[a,b,c,d],{None,All}]",
+            "TakeList[f[a,b,c,d],{Span[2,4,2],All}]",
+            "TakeList[f[a,b,c,d],{{All},All}]",
+            "TakeList[f[a,b,c,d],{{2,2},{1},All}]",
+            "TakeList[Association[a->1,b:>2,c->3],{1,-1,All}]",
+            "TakeList[Association[a->1,b:>2,c->3],{{2,3},All}]",
+            "TakeList[Association[a->1,b:>2,c->3],{None,All}]",
+            "TakeDrop[f[a,b,c,d],Span[4,2,-1]]",
+            "TakeDrop[Association[a->1,b:>2,c->3],{2,3}]",
+            "Quiet[TakeDrop[f[a],2]]",
+            "Quiet[TakeList[f[a],{{x}}]]",
+            "Check[TakeDrop[f[a],2],caught]",
+            "Check[TakeList[f[a],{{x}}],caught]",
+            "Reap[TakeDrop[{Sow[a],b},All]]",
+            "Reap[TakeList[{Sow[a],Sow[b],c},{1,All}]]",
+            "Catch[TakeDrop[f[a],Throw[tag]]]",
+            "CheckAbort[TakeDrop[f[a],Abort[]],caught]",
+            "Function[TakeDrop[f[a],Return[r]]][]",
+            "Do[TakeDrop[f[a],Break[]];Print[bad],{1}]",
+            "Catch[TakeList[f[a],{Throw[tag]}]]",
+            "CheckAbort[TakeList[f[a],{Abort[]}],caught]",
+            "Function[TakeList[f[a],{Return[r]}]][]",
+            "Do[TakeList[f[a],{Break[]}];Print[bad],{1}]",
+            "Block[{x=0},TakeDrop[f[a,b],(x=x+1;All)];x]",
+            "Block[{x=0},TakeList[f[a,b],{(x=x+1;1),All}];x]",
+            "CheckAbort[AbortProtect[TakeDrop[f[a],Abort[]]],caught]",
+            "CheckAbort[AbortProtect[TakeList[f[a],{Abort[]}]],caught]",
+        )
+    )
+    return _unique(cases)
 
 
 def list_cases() -> list[str]:
@@ -963,6 +1079,7 @@ def ordering_cases() -> list[str]:
 CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "rounding": rounding_cases,
     "take-drop": take_drop_cases,
+    "take-list": take_list_cases,
     "list": list_cases,
     "structural": structural_cases,
     "traversal": traversal_cases,
