@@ -13167,22 +13167,33 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return list(std::move(values));
     }
-    if (function == "Distribute" && !args.empty() && args[0].kind() == ExprKind::Call) {
+    if (function == "Distribute") {
+        if (args.size() != 1 && args.size() != 2
+            && args.size() != 3 && args.size() != 5)
+            return raw_evaluation_error(
+                "Distribute expects an expression, optional distributed/outer heads, "
+                "and an optional ``gp, fp`` replacement pair.");
+        if (args[0].kind() != ExprKind::Call) return args[0];
+
         const auto distribution_head = args.size() >= 2 ? args[1] : symbol("Plus");
-        if (args.size() == 5 && args[0].head() != args[2]) return args[0];
+        const bool restrict_outer_head = args.size() == 3 || args.size() == 5;
+        if (restrict_outer_head && args[0].head() != args[2]) return args[0];
         const auto product_head = args.size() == 5 ? args[3] : args[0].head();
         const auto result_head = args.size() == 5 ? args[4] : distribution_head;
         std::vector<std::vector<Expr>> products{{}};
+        bool found = false;
         for (const auto& argument : args[0].args()) {
-            const auto choices = argument.kind() == ExprKind::Call && argument.head() == distribution_head
-                ? argument.args() : std::vector<Expr>{argument};
+            const bool distributes = argument.kind() == ExprKind::Call
+                && argument.head() == distribution_head;
+            if (distributes) found = true;
+            const auto choices = distributes ? argument.args() : std::vector<Expr>{argument};
             std::vector<std::vector<Expr>> next;
             for (const auto& prefix : products) for (const auto& choice : choices) { auto value = prefix; value.push_back(choice); next.push_back(std::move(value)); }
             products = std::move(next);
         }
+        if (!found) return args[0];
         std::vector<Expr> terms; for (auto& product : products) terms.push_back(call(product_head, std::move(product)));
-        const auto result = call(result_head, std::move(terms));
-        return args.size() == 5 ? result : evaluate(result);
+        return call(result_head, std::move(terms));
     }
     if ((function == "Nest" || function == "NestList") && args.size() == 3 && machine_index(args[2]) && *machine_index(args[2]) >= 0) {
         Expr value = args[1]; std::vector<Expr> values{value};
@@ -13277,8 +13288,36 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return list(std::move(values));
         }
     }
-    if (function == "Thread" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
-        if (const auto threaded = thread_lists(args[0].head().to_full_form(), args[0].args())) return *threaded;
+    if (function == "Thread") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Thread expects an expression and an optional thread head.");
+        if (args[0].kind() != ExprKind::Call) return args[0];
+
+        const auto thread_head = args.size() == 2 ? args[1] : symbol("List");
+        std::optional<std::size_t> threaded_length;
+        for (const auto& argument : args[0].args()) {
+            if (argument.kind() != ExprKind::Call || argument.head() != thread_head)
+                continue;
+            if (!threaded_length) threaded_length = argument.args().size();
+            else if (*threaded_length != argument.args().size())
+                return raw_evaluation_error(
+                    "Thread expects all threaded arguments to have the same length.");
+        }
+        if (!threaded_length) return args[0];
+
+        std::vector<Expr> threaded;
+        threaded.reserve(*threaded_length);
+        for (std::size_t index = 0; index < *threaded_length; ++index) {
+            std::vector<Expr> threaded_arguments;
+            threaded_arguments.reserve(args[0].args().size());
+            for (const auto& argument : args[0].args())
+                threaded_arguments.push_back(
+                    argument.kind() == ExprKind::Call && argument.head() == thread_head
+                    ? argument.args()[index] : argument);
+            threaded.push_back(call(args[0].head(), std::move(threaded_arguments)));
+        }
+        return call(thread_head, std::move(threaded));
     }
     if (function == "Dot" && args.size() == 2
         && args[0].has_head("List") && args[1].has_head("List")

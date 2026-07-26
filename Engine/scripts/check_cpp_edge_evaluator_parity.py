@@ -50,7 +50,8 @@ def _arguments() -> argparse.Namespace:
         action="append",
         choices=(
             "rounding", "take-drop", "list", "structural", "traversal",
-            "collections", "combinator-state", "combinators", "strings",
+            "collections", "combinator-state", "combinators", "distribution",
+            "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -702,6 +703,42 @@ def combinator_cases() -> list[str]:
     ]
 
 
+def distribution_cases() -> list[str]:
+    """Threading and Cartesian distribution without result re-evaluation."""
+
+    return [
+        "Thread[f[{a,b},x,{c,d}]]",
+        "Thread[f[g[a,b],x,g[c,d]],g]",
+        "Thread[f[g[],x],g]",
+        "Thread[f[g[a,b],x,h[c,d]],g]",
+        "Thread[f[x,y]]",
+        "Thread[x]",
+        "Thread[f[{a},{b,c}]]",
+        "Thread[]",
+        "Thread[f[x],List,extra]",
+        "Thread[<|a->{x,y},b->z|>]",
+        "Thread[f[(h[q])[a,b],x,(h[q])[c,d]],h[q]]",
+        "Distribute[Times[Plus[a,b],Plus[c,d]]]",
+        "Distribute[f[g[a,b],x,g[c,d]],g]",
+        "Distribute[f[g[a,b],x],g,f]",
+        "Distribute[q[g[a,b],x],g,f]",
+        "Distribute[f[g[a,b],g[c,d]],g,f,h,k]",
+        "Distribute[q[g[a,b]],g,f,h,k]",
+        "Distribute[x]",
+        "Distribute[f[a,b],g]",
+        "Distribute[f[g[],x],g]",
+        "Distribute[f[],g]",
+        "Distribute[]",
+        "Distribute[f[g[a,b]],g,f,h]",
+        "Distribute[f[(h[q])[a,b],x],h[q]]",
+        (
+            "ClearAll[f];SetAttributes[f,Orderless];"
+            "Distribute[f[g[a,b],g[b,a]],g]"
+        ),
+        "Distribute[<|a->g[x,y]|>,g]",
+    ]
+
+
 CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "rounding": rounding_cases,
     "take-drop": take_drop_cases,
@@ -711,6 +748,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "collections": collections_cases,
     "combinator-state": combinator_state_cases,
     "combinators": combinator_cases,
+    "distribution": distribution_cases,
     "strings": string_cases,
 }
 
