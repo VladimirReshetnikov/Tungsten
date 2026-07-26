@@ -1323,6 +1323,83 @@ CASES = (
         ),
         0,
     ),
+    (
+        "confirmation values predicates and property handlers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            '{Enclose[1 + Confirm[2]], '
+            'Enclose[Confirm[Missing["Nope"], "info"], "Expression"], '
+            'Enclose[Confirm[Missing["Nope"], "info"], "Information"], '
+            'Enclose[ConfirmBy[3, IntegerQ]], '
+            'Enclose[ConfirmBy[3, StringQ, "info"], "Function"], '
+            'Enclose[ConfirmMatch[3, _Integer]], '
+            'Enclose[ConfirmMatch[3, _String, "info"], "Pattern"]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "tagged nested confirmation scopes and patterns",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'c = 0; first = Enclose[Confirm[$Failed, "info", tag], '
+            '"Information", tag]; second = Enclose['
+            'Enclose[Confirm[$Failed, "outer", outer], inner, inner], '
+            '"Information", outer]; third = Enclose['
+            'Confirm[$Failed, Null, 1], "Information", '
+            'x_ /; (c = c + 1; True)]; '
+            'fourth = Enclose[ConfirmMatch[1, '
+            'x_ /; (c = c + 1; False), c], "Information"]; '
+            '{first, second, third, fourth, c}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "confirmation effects cleanup and nonlocal exits",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Enclose[Confirm[Missing["x"], '
+            '(Print["info"]; "i"), (Print["tag"]; tag)], '
+            '(Print["handler"]; "Information"), tag]; '
+            'second = Enclose[WithCleanup[Confirm[$Failed, "bad"], '
+            'Print["cleanup"]], "Information"]; '
+            'third = Catch[Enclose[Throw[x]]]; '
+            'fourth = CheckAbort[Enclose[Abort[]], caught]; '
+            'fifth = (Enclose[Goto[out]]; never; Label[out]; reached); '
+            '{first, second, third, fourth, fifth}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "confirmation messages malformed calls and unsupported heads",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Quiet[Confirm[$Failed]]; '
+            'second = Enclose[Confirm[$Failed], '
+            'Function[failure, Confirm[$Failed]]]; '
+            'malformed = {Enclose[], Confirm[], '
+            'ConfirmBy[Print["value"]], ConfirmMatch[Print["value"]]}; '
+            '{first, second, malformed, '
+            'ConfirmQuiet[Failure["x", <||>]], FailWhen[1, True], '
+            'System`Enclose[System`Confirm[$Failed], "Expression"]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

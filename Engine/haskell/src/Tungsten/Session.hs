@@ -102,6 +102,11 @@ data ReapScope = ReapScope
   }
   deriving (Eq, Show)
 
+data EncloseScope = EncloseScope
+  { encloseScopeForm :: !(Maybe Expr)
+  }
+  deriving (Eq, Show)
+
 data SymbolValues = SymbolValues
   { symbolOwnValue :: !(Maybe Definition)
   , symbolOwnValuePattern :: !(Maybe Expr)
@@ -133,6 +138,7 @@ data EvaluationSession = EvaluationSession
   , sessionAbortProtectScopes :: ![AbortProtectScope]
   , sessionCheckAbortScopes :: ![CheckAbortScope]
   , sessionReapScopes :: ![ReapScope]
+  , sessionEncloseScopes :: ![EncloseScope]
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
@@ -153,6 +159,7 @@ emptySession =
     , sessionAbortProtectScopes = []
     , sessionCheckAbortScopes = []
     , sessionReapScopes = []
+    , sessionEncloseScopes = []
     , sessionGeneratedMessages = []
     , sessionVisibleMessages = []
     , sessionPrints = []
@@ -192,6 +199,7 @@ data SymbolValueSnapshot = SymbolValueSnapshot
 
 data ControlSignal
   = Thrown !Expr !(Maybe Expr) !(Maybe Expr)
+  | ConfirmationFailed !Expr !(Maybe Expr)
   | Aborted
   | BreakSignal
   | ContinueSignal
@@ -398,6 +406,7 @@ evaluateInSession session expression =
               , sessionAbortProtectScopes = []
               , sessionCheckAbortScopes = []
               , sessionReapScopes = []
+              , sessionEncloseScopes = []
               , sessionGeneratedMessages = []
               , sessionVisibleMessages = []
               , sessionPrints = []
@@ -445,6 +454,15 @@ finalizeSessionResult = \case
                 stoppedSession
                 (Call evaluatedHandler [value, evaluatedTag])
             )
+    Left (SessionControl (ConfirmationFailed failure _) stoppedSession) ->
+      Right
+        ( failure
+        , appendNamedMessage
+            "Confirm"
+            "confirmnotag"
+            "Message generated."
+            (clearEncloseScopes stoppedSession)
+        )
     Left (SessionControl Aborted stoppedSession) ->
       Right (Symbol "$Aborted", clearAbortScopes stoppedSession)
     Left (SessionControl BreakSignal stoppedSession) ->
@@ -647,6 +665,14 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionCatch depth session arguments'
       Call (Symbol "Throw") arguments' ->
         evaluateSessionThrow depth session arguments'
+      Call (Symbol "Enclose") arguments' ->
+        evaluateSessionEnclose depth session arguments'
+      Call (Symbol "Confirm") arguments' ->
+        evaluateSessionConfirm depth session arguments'
+      Call (Symbol "ConfirmBy") arguments' ->
+        evaluateSessionConfirmBy depth session arguments'
+      Call (Symbol "ConfirmMatch") arguments' ->
+        evaluateSessionConfirmMatch depth session arguments'
       Call (Symbol "Abort") arguments' ->
         evaluateSessionAbort session arguments'
       Call (Symbol "CheckAbort") arguments' ->
@@ -1041,6 +1067,10 @@ directSessionDispatchHead name =
              , "Or"
              , "Catch"
              , "Throw"
+             , "Enclose"
+             , "Confirm"
+             , "ConfirmBy"
+             , "ConfirmMatch"
              , "Abort"
              , "CheckAbort"
              , "AbortProtect"
@@ -6083,6 +6113,300 @@ catchMatches :: Maybe Expr -> Maybe Expr -> Bool
 catchMatches Nothing Nothing = True
 catchMatches (Just form) (Just tag) = matchesPattern tag form
 catchMatches _ _ = False
+
+evaluateSessionEnclose
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionEnclose depth session = \case
+  [body] -> encloseBody session body Nothing Nothing
+  [body, handler] -> encloseBody session body (Just handler) Nothing
+  [body, handler, formExpression] -> do
+    (form, updated) <-
+      evaluateSessionAt (depth + 1) session formExpression
+    encloseBody updated body (Just handler) (Just form)
+  _ -> sessionFailure session "Enclose expects one, two, or three arguments."
+ where
+  encloseBody currentSession body handler form =
+    case evaluateSessionAt (depth + 1) scopedSession body of
+      Left
+        ( SessionControl
+            confirmation@(ConfirmationFailed failure tag)
+            stoppedSession
+          ) ->
+          case encloseScopeMatches depth stoppedSession form tag of
+            Left matchingExit ->
+              Left
+                ( mapEvaluationExitSession
+                    (popEncloseScopes baselineDepth)
+                    matchingExit
+                )
+            Right (False, matchedSession) ->
+              Left
+                ( SessionControl
+                    confirmation
+                    (popEncloseScopes baselineDepth matchedSession)
+                )
+            Right (True, matchedSession) ->
+              restoreEncloseScopes
+                baselineDepth
+                (handleEnclosedFailure depth matchedSession failure handler)
+      Left evaluationExit ->
+        Left
+          ( mapEvaluationExitSession
+              (popEncloseScopes baselineDepth)
+              evaluationExit
+          )
+      Right (value, stoppedSession) ->
+        Right (value, popEncloseScopes baselineDepth stoppedSession)
+   where
+    baselineDepth = length (sessionEncloseScopes currentSession)
+    scopedSession =
+      currentSession
+        { sessionEncloseScopes =
+            sessionEncloseScopes currentSession
+              <> [EncloseScope {encloseScopeForm = form}]
+        }
+
+handleEnclosedFailure
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Maybe Expr
+  -> SessionResult Expr
+handleEnclosedFailure _ session failure Nothing = Right (failure, session)
+handleEnclosedFailure depth session failure (Just handlerExpression) = do
+  (handler, updated) <-
+    evaluateSessionAt (depth + 1) session handlerExpression
+  case handler of
+    String _ -> do
+      value <-
+        liftPureEvaluation
+          updated
+          (reduceEvaluatedCall (Call failure [handler]))
+      Right (value, updated)
+    _ -> evaluateSessionCallable depth updated handler [failure]
+
+encloseScopeMatches
+  :: Int
+  -> EvaluationSession
+  -> Maybe Expr
+  -> Maybe Expr
+  -> SessionResult Bool
+encloseScopeMatches _ session Nothing Nothing = Right (True, session)
+encloseScopeMatches depth session (Just form) (Just tag) =
+  sessionPatternMatches depth session tag form
+encloseScopeMatches _ session _ _ = Right (False, session)
+
+matchingEncloseScopeExists
+  :: Int
+  -> EvaluationSession
+  -> Maybe Expr
+  -> [EncloseScope]
+  -> SessionResult Bool
+matchingEncloseScopeExists depth = go
+ where
+  go session _ [] = Right (False, session)
+  go session tag (scope : rest) = do
+    (matches, updated) <-
+      encloseScopeMatches depth session (encloseScopeForm scope) tag
+    if matches
+      then Right (True, updated)
+      else go updated tag rest
+
+restoreEncloseScopes :: Int -> SessionResult value -> SessionResult value
+restoreEncloseScopes baselineDepth = \case
+  Right (value, session) ->
+    Right (value, popEncloseScopes baselineDepth session)
+  Left evaluationExit ->
+    Left
+      ( mapEvaluationExitSession
+          (popEncloseScopes baselineDepth)
+          evaluationExit
+      )
+
+popEncloseScopes :: Int -> EvaluationSession -> EvaluationSession
+popEncloseScopes baselineDepth session =
+  session
+    { sessionEncloseScopes =
+        take baselineDepth (sessionEncloseScopes session)
+    }
+
+clearEncloseScopes :: EvaluationSession -> EvaluationSession
+clearEncloseScopes session = session {sessionEncloseScopes = []}
+
+evaluateSessionConfirm
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionConfirm depth session arguments'
+  | length arguments' `notElem` [1, 2, 3] =
+      sessionFailure session "Confirm expects one, two, or three arguments."
+  | valueExpression : _ <- arguments' = do
+      (value, valueSession) <-
+        evaluateSessionAt (depth + 1) session valueExpression
+      if not (isSessionConfirmFailureValue value)
+        then Right (value, valueSession)
+        else do
+          (information, informationSession) <-
+            evaluateConfirmationInformation depth valueSession arguments' 1
+          (tag, taggedSession) <-
+            evaluateConfirmationTag depth informationSession arguments' 2
+          let failure
+                | length arguments' == 1
+                , isSessionFailureValue value = value
+                | otherwise =
+                    sessionConfirmationFailure
+                      "Confirm"
+                      value
+                      information
+                      []
+          raiseSessionConfirmation depth taggedSession failure tag
+  | otherwise =
+      sessionFailure session "Confirm expects one, two, or three arguments."
+
+evaluateSessionConfirmBy
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionConfirmBy depth session arguments'
+  | length arguments' `notElem` [2, 3, 4] =
+      sessionFailure session "ConfirmBy expects two, three, or four arguments."
+  | valueExpression : functionExpression : _ <- arguments' = do
+      (value, valueSession) <-
+        evaluateSessionAt (depth + 1) session valueExpression
+      (function, functionSession) <-
+        evaluateSessionAt (depth + 1) valueSession functionExpression
+      (testResult, testedSession) <-
+        evaluateSessionCallable depth functionSession function [value]
+      if testResult == Symbol "True"
+        then Right (value, testedSession)
+        else do
+          (information, informationSession) <-
+            evaluateConfirmationInformation depth testedSession arguments' 2
+          (tag, taggedSession) <-
+            evaluateConfirmationTag depth informationSession arguments' 3
+          raiseSessionConfirmation
+            depth
+            taggedSession
+            ( sessionConfirmationFailure
+                "ConfirmBy"
+                value
+                information
+                [("Function", function)]
+            )
+            tag
+  | otherwise =
+      sessionFailure session "ConfirmBy expects two, three, or four arguments."
+
+evaluateSessionConfirmMatch
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionConfirmMatch depth session arguments'
+  | length arguments' `notElem` [2, 3, 4] =
+      sessionFailure session "ConfirmMatch expects two, three, or four arguments."
+  | valueExpression : patternExpression : _ <- arguments' = do
+      (value, valueSession) <-
+        evaluateSessionAt (depth + 1) session valueExpression
+      (matches, matchedSession) <-
+        sessionPatternMatches depth valueSession value patternExpression
+      if matches
+        then Right (value, matchedSession)
+        else do
+          (information, informationSession) <-
+            evaluateConfirmationInformation depth matchedSession arguments' 2
+          (tag, taggedSession) <-
+            evaluateConfirmationTag depth informationSession arguments' 3
+          raiseSessionConfirmation
+            depth
+            taggedSession
+            ( sessionConfirmationFailure
+                "ConfirmMatch"
+                value
+                information
+                [("Pattern", patternExpression)]
+            )
+            tag
+  | otherwise =
+      sessionFailure session "ConfirmMatch expects two, three, or four arguments."
+
+evaluateConfirmationInformation
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> Int
+  -> SessionResult Expr
+evaluateConfirmationInformation depth session arguments' index =
+  case drop index arguments' of
+    expression : _ -> evaluateSessionAt (depth + 1) session expression
+    [] -> Right (Symbol "Null", session)
+
+evaluateConfirmationTag
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> Int
+  -> SessionResult (Maybe Expr)
+evaluateConfirmationTag depth session arguments' index =
+  case drop index arguments' of
+    expression : _ -> do
+      (tag, updated) <- evaluateSessionAt (depth + 1) session expression
+      Right (Just tag, updated)
+    [] -> Right (Nothing, session)
+
+sessionConfirmationFailure
+  :: Text
+  -> Expr
+  -> Expr
+  -> [(Text, Expr)]
+  -> Expr
+sessionConfirmationFailure confirmationType expression information extraFields =
+  sessionFailureExpr
+    "ConfirmationFailed"
+    ( [ ("ConfirmationType", Symbol confirmationType)
+      , ("Expression", expression)
+      , ("Information", information)
+      ]
+        <> extraFields
+    )
+
+isSessionConfirmFailureValue :: Expr -> Bool
+isSessionConfirmFailureValue = isSessionFailsafeFailureValue
+
+raiseSessionConfirmation
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Maybe Expr
+  -> SessionResult Expr
+raiseSessionConfirmation depth session failure tag = do
+  (matchingScope, matchedSession) <-
+    matchingEncloseScopeExists
+      depth
+      session
+      tag
+      (sessionEncloseScopes session)
+  if matchingScope
+    then
+      Left
+        ( SessionControl
+            (ConfirmationFailed failure tag)
+            matchedSession
+        )
+    else
+      Right
+        ( failure
+        , appendNamedMessage
+            "Confirm"
+            "confirmnotag"
+            "Message generated."
+            matchedSession
+        )
 
 evaluateSessionModule
   :: Int

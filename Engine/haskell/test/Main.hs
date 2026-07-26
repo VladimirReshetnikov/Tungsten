@@ -1196,6 +1196,26 @@ checkEvaluationSession = do
           , "{Catch[Failsafe[f, Function[x, Throw[x]]][1]], CheckAbort[Failsafe[f, Function[x, Abort[]]][1], caught]}"
           , "List[1, caught]"
           )
+        , ( "confirmation controls return values and project failure properties"
+          , "{Enclose[1 + Confirm[2]], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Expression\"], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Information\"], Enclose[ConfirmBy[3, IntegerQ]], Enclose[ConfirmBy[3, StringQ, \"info\"], \"Function\"], Enclose[ConfirmMatch[3, _Integer]], Enclose[ConfirmMatch[3, _String, \"info\"], \"Pattern\"]}"
+          , "List[3, Missing[\"Nope\"], \"info\", 3, StringQ, 3, Blank[String]]"
+          )
+        , ( "tagged confirmations route to the nearest matching enclose"
+          , "{Enclose[Confirm[$Failed, \"info\", tag], \"Information\", tag], Enclose[Enclose[Confirm[$Failed, \"outer\", outer], inner, inner], \"Information\", outer]}"
+          , "List[\"info\", \"outer\"]"
+          )
+        , ( "confirmation predicates and tag patterns thread session effects"
+          , "c = 0; {Enclose[Confirm[$Failed, Null, 1], \"Information\", x_ /; (c = c + 1; True)], c, Enclose[ConfirmMatch[1, x_ /; (c = c + 1; False), c], \"Information\"], c}"
+          , "List[Null, 2, 3, 3]"
+          )
+        , ( "enclose restores its scope across existing nonlocal exits"
+          , "{Catch[Enclose[Throw[x]]], CheckAbort[Enclose[Abort[]], caught], (Enclose[Goto[out]]; never; Label[out]; reached)}"
+          , "List[x, caught, reached]"
+          )
+        , ( "unsupported confirm quiet and fail when remain symbolic"
+          , "{ConfirmQuiet[Failure[\"x\", <||>]], FailWhen[1, True]}"
+          , "List[ConfirmQuiet[Failure[\"x\", Association[]]], FailWhen[1, True]]"
+          )
         , ("right-associated assignment", "a = b = 5; a + b", "10")
         , ("immediate value captures current result", "a = 1; x = a; a = 2; x", "1")
         , ("immediate symbolic value reevaluates", "x = y; y = 3; x", "3")
@@ -1602,6 +1622,21 @@ checkEvaluationSession = do
           , "Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]"
           , []
           )
+        , ( "confirmation information tags and handlers preserve effect order"
+          , "Enclose[Confirm[Missing[\"x\"], (Print[\"info\"]; \"i\"), (Print[\"tag\"]; tag)], (Print[\"handler\"]; \"Information\"), tag]"
+          , "\"i\""
+          , ["info", "tag", "handler"]
+          )
+        , ( "with cleanup runs before an enclosed confirmation handler"
+          , "Enclose[WithCleanup[Confirm[$Failed, \"bad\"], Print[\"cleanup\"]], \"Information\"]"
+          , "\"bad\""
+          , ["cleanup"]
+          )
+        , ( "malformed confirmation controls suppress all held effects"
+          , "probe[Enclose[Print[\"body\"], Print[\"handler\"], Print[\"form\"], Print[\"extra\"]], Confirm[], ConfirmBy[Print[\"by\"]], ConfirmMatch[Print[\"match\"]]]"
+          , "probe[Enclose[Print[\"body\"], Print[\"handler\"], Print[\"form\"], Print[\"extra\"]], Confirm[], ConfirmBy[Print[\"by\"]], ConfirmMatch[Print[\"match\"]]]"
+          , []
+          )
         , ( "same-depth check abort catches only its fresh abort"
           , "CheckAbort[AbortProtect[Abort[]; Print[CheckAbort[1, inner]]; Print[CheckAbort[Abort[], inner]]; Print[\"tail\"]], fail]"
           , "fail"
@@ -1770,6 +1805,45 @@ checkEvaluationSession = do
             , ( "Failsafe::error"
               , "MessageName[Failsafe, \"error\"]"
               , "Failsafe::error: Failsafe expects one, two, or three arguments."
+              )
+            ]
+          )
+        , ( "unhandled confirmations emit the canonical message"
+          , "Confirm[$Failed]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
+        , ( "confirmation handlers cannot recatch their own failure"
+          , "Enclose[Confirm[$Failed], Function[failure, Confirm[$Failed]]]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
+        , ( "malformed confirmation controls report exact arity errors"
+          , "{Enclose[], Confirm[], ConfirmBy[Print[\"value\"]], ConfirmMatch[Print[\"value\"]]}"
+          , "List[Enclose[], Confirm[], ConfirmBy[Print[\"value\"]], ConfirmMatch[Print[\"value\"]]]"
+          , [ ( "Enclose::error"
+              , "MessageName[Enclose, \"error\"]"
+              , "Enclose::error: Enclose expects one, two, or three arguments."
+              )
+            , ( "Confirm::error"
+              , "MessageName[Confirm, \"error\"]"
+              , "Confirm::error: Confirm expects one, two, or three arguments."
+              )
+            , ( "ConfirmBy::error"
+              , "MessageName[ConfirmBy, \"error\"]"
+              , "ConfirmBy::error: ConfirmBy expects two, three, or four arguments."
+              )
+            , ( "ConfirmMatch::error"
+              , "MessageName[ConfirmMatch, \"error\"]"
+              , "ConfirmMatch::error: ConfirmMatch expects two, three, or four arguments."
               )
             ]
           )
@@ -2810,6 +2884,16 @@ checkEvaluationSession = do
           , []
           , [partArityMessage, partArityMessage]
           )
+        , ( "Quiet hides unhandled confirmation messages without blocking generation"
+          , "Quiet[Confirm[$Failed]]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , []
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
         , ( "Quiet on specifications override off specifications"
           , "Quiet[Message[f::a]; Message[g::b], All, f::a]; $MessageList"
           , "List[HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[g, \"b\"]]]"
@@ -2856,10 +2940,11 @@ checkEvaluationSession = do
             , null (sessionAbortProtectScopes updated)
             , null (sessionCheckAbortScopes updated)
             , null (sessionReapScopes updated)
+            , null (sessionEncloseScopes updated)
             )
     assertEqual
       ("evaluation session: " <> label)
-      (Right (expected, True, True, True))
+      (Right (expected, True, True, True, True))
       result
 
   evaluatePrintCase (label, source, expectedValue, expectedPrints) = do
@@ -2876,10 +2961,11 @@ checkEvaluationSession = do
             , null (sessionAbortProtectScopes updated)
             , null (sessionCheckAbortScopes updated)
             , null (sessionReapScopes updated)
+            , null (sessionEncloseScopes updated)
             )
     assertEqual
       ("evaluation session prints: " <> label)
-      (Right (expectedValue, expectedPrints, True, True, True))
+      (Right (expectedValue, expectedPrints, True, True, True, True))
       result
 
   evaluateMessageCase (label, source, expectedValue, expectedMessages) = do
@@ -2894,9 +2980,10 @@ checkEvaluationSession = do
             ( fullForm value
             , map messageTuple (sessionVisibleMessages updated)
             , map messageTuple (sessionGeneratedMessages updated)
+            , null (sessionEncloseScopes updated)
             )
         expected =
-          Right (expectedValue, expectedMessages, expectedMessages)
+          Right (expectedValue, expectedMessages, expectedMessages, True)
     assertEqual ("evaluation session messages: " <> label) expected result
 
   evaluateScopedMessageCase
@@ -2914,12 +3001,14 @@ checkEvaluationSession = do
               , map messageTuple (sessionGeneratedMessages updated)
               , null (sessionQuietScopes updated)
               , null (sessionMessageCollectors updated)
+              , null (sessionEncloseScopes updated)
               )
           expected =
             Right
               ( expectedValue
               , expectedVisible
               , expectedGenerated
+              , True
               , True
               , True
               )
