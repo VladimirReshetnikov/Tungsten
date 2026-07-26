@@ -52,8 +52,8 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "rounding", "take-drop", "take-list", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
-            "array-shape", "sparse-properties", "ordering", "failure-confirmation",
-            "polynomial", "strings",
+            "array-shape", "sparse-properties", "sparse-structural", "ordering",
+            "failure-confirmation", "polynomial", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -723,6 +723,38 @@ def sparse_property_cases() -> list[str]:
         f'{array}[]',
         f'{array}["ExplicitLength","ExplicitValues"]',
     ]
+
+
+def sparse_structural_cases() -> list[str]:
+    """Coordinate-native SparseArray Part selection and projection."""
+
+    vector = "SparseArray[{{1}->a,{4}->d},{5}]"
+    matrix = "SparseArray[{{1,1}->a,{2,3}->f},{2,3}]"
+    tensor = "SparseArray[{{1,1,2}->x,{2,3,4}->y},{2,3,4},z]"
+    cases = [
+        f"Part[{vector},1]",
+        f"Part[{vector},-2]",
+        f"Part[{vector},2]",
+        f"Part[{vector},All]",
+        f"Part[{vector},Span[2,5,2]]",
+        f"Part[{vector},Span[-1,1,-2]]",
+        f"Part[{vector},{{4,1,4,2}}]",
+        f"Part[{vector},{{{{1,3}},All}}]",
+        f"Part[{vector},{{}}]",
+        f"Part[{matrix},1,All]",
+        f"Part[{matrix},All,2]",
+        f"Part[{matrix},{{2,1}},{{3,1}}]",
+        f"Part[{matrix},Span[2,1,-1],Span[3,1,-2]]",
+        f"Part[{tensor},All,2]",
+        f"Part[{tensor},2,All,All]",
+        f"Part[{tensor},{{2,1}},3,{{4,2,4}}]",
+        f"Part[{tensor},2,3,4]",
+        f"Part[{tensor},1,2,3]",
+        "Part[SparseArray[{{1}->a},{1000000000}],1000000000]",
+        "Part[SparseArray[{{1,1}->a},{1000000000,1000000000}],"
+        "1000000000,1000000000]",
+    ]
+    return _unique(cases)
 
 
 def string_cases() -> list[str]:
@@ -1401,6 +1433,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "distribution": distribution_cases,
     "array-shape": array_shape_cases,
     "sparse-properties": sparse_property_cases,
+    "sparse-structural": sparse_structural_cases,
     "ordering": ordering_cases,
     "failure-confirmation": failure_confirmation_cases,
     "polynomial": polynomial_cases,

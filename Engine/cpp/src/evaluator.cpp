@@ -3315,6 +3315,125 @@ StructuralPartResult structural_part(
     return {call(expression.head(), std::move(transformed)), {}};
 }
 
+struct SparseAxisSelection {
+    bool preserve = false;
+    bool identity = false;
+    std::vector<std::size_t> source_indices;
+    std::size_t output_dimension = 0;
+};
+
+struct SparsePartResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+SparsePartResult sparse_part(
+    const Expr& array, const std::vector<Expr>& specifications) {
+    const auto& dimensions = array.dimensions();
+    if (specifications.size() > dimensions.size())
+        return {std::nullopt,
+            "Part received too many specifications for SparseArray."};
+
+    std::vector<SparseAxisSelection> selections;
+    selections.reserve(dimensions.size());
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        if (axis >= specifications.size()
+            || is_symbol(specifications[axis], "All")) {
+            selections.push_back({true, true, {}, dimensions[axis]});
+            continue;
+        }
+
+        const auto& specification = specifications[axis];
+        const bool preserve = specification.has_head("Span")
+            || specification.has_head("List");
+        if (specification.kind() != ExprKind::Integer && !preserve) {
+            return {std::nullopt, "Unsupported Part specification for SparseArray: "
+                + specification.to_input_form() + "."};
+        }
+
+        const auto numeric = structural_numeric_selectors(
+            dimensions[axis], specification, "Part", false);
+        if (!numeric.error.empty()) return {std::nullopt, numeric.error};
+        if (numeric.invalid || (!preserve && numeric.indices.size() != 1))
+            return {std::nullopt,
+                "Part specifications are invalid for SparseArray."};
+        selections.push_back({preserve, false, numeric.indices,
+            preserve ? numeric.indices.size() : 0});
+    }
+
+    const bool scalar = std::none_of(
+        selections.begin(), selections.end(),
+        [](const SparseAxisSelection& selection) { return selection.preserve; });
+    if (scalar) {
+        std::vector<std::size_t> indices;
+        indices.reserve(selections.size());
+        for (const auto& selection : selections)
+            indices.push_back(selection.source_indices.front());
+        const auto found = std::lower_bound(
+            array.sparse_entries().begin(), array.sparse_entries().end(), indices,
+            [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+                return entry.indices < target;
+            });
+        return {found != array.sparse_entries().end() && found->indices == indices
+                ? found->value : array.fill_value(), {}};
+    }
+
+    std::vector<std::size_t> output_dimensions;
+    for (const auto& selection : selections)
+        if (selection.preserve)
+            output_dimensions.push_back(selection.output_dimension);
+
+    std::vector<SparseEntry> output_entries;
+    for (const auto& entry : array.sparse_entries()) {
+        std::vector<std::vector<std::size_t>> output_options;
+        bool include = true;
+        for (std::size_t axis = 0; axis < selections.size(); ++axis) {
+            const auto& selection = selections[axis];
+            const auto source_index = entry.indices[axis];
+            if (!selection.preserve) {
+                if (selection.source_indices.front() != source_index) {
+                    include = false;
+                    break;
+                }
+                continue;
+            }
+            if (selection.identity) {
+                output_options.push_back({source_index});
+                continue;
+            }
+            std::vector<std::size_t> mapped;
+            for (std::size_t output_index = 0;
+                 output_index < selection.source_indices.size(); ++output_index)
+                if (selection.source_indices[output_index] == source_index)
+                    mapped.push_back(output_index + 1);
+            if (mapped.empty()) {
+                include = false;
+                break;
+            }
+            output_options.push_back(std::move(mapped));
+        }
+        if (!include) continue;
+
+        std::vector<std::size_t> output_index;
+        output_index.reserve(output_options.size());
+        auto append = [&](auto&& self, std::size_t axis) -> void {
+            if (axis == output_options.size()) {
+                output_entries.push_back({output_index, entry.value});
+                return;
+            }
+            for (const auto index : output_options[axis]) {
+                output_index.push_back(index);
+                self(self, axis + 1);
+                output_index.pop_back();
+            }
+        };
+        append(append, 0);
+    }
+    return {sparse_array(
+        std::move(output_dimensions), std::move(output_entries),
+        array.fill_value()), {}};
+}
+
 bool structural_selector_equal(
     const StructuralSelector& left, const StructuralSelector& right) {
     return left.index == right.index && left.key == right.key;
@@ -13483,29 +13602,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return invalid_part(
                 "Part expects an expression and at least one part specification.");
         if (args[0].kind() == ExprKind::SparseArray) {
-            const auto dense = sparse_dense_value(args[0]);
-            if (!dense)
-                return invalid_part(
-                    "SparseArray dimensions exceed the native materialization limit.");
-            auto select = [&](auto&& self, const Expr& value, std::size_t selector) -> std::optional<Expr> {
-                if (selector == args.size()) return value;
-                if (!value.has_head("List")) return std::nullopt;
-                if (is_symbol(args[selector], "All")) {
-                    std::vector<Expr> selected; for (const auto& item : value.args()) { const auto child = self(self, item, selector + 1); if (!child) return std::nullopt; selected.push_back(*child); }
-                    return list(std::move(selected));
-                }
-                if (args[selector].has_head("List")) {
-                    std::vector<Expr> selected;
-                    for (const auto& specification : args[selector].args()) { const auto index = normalized_index(specification, value.args().size()); if (!index) return std::nullopt; const auto child = self(self, value.args()[*index], selector + 1); if (!child) return std::nullopt; selected.push_back(*child); }
-                    return list(std::move(selected));
-                }
-                const auto index = normalized_index(args[selector], value.args().size()); if (!index) return std::nullopt;
-                return self(self, value.args()[*index], selector + 1);
-            };
-            if (const auto selected = select(select, *dense, 1)) {
-                if (selected->has_head("List")) return *sparse_from_dense(*selected, args[0].fill_value());
-                return *selected;
-            }
+            const std::vector<Expr> specifications(args.begin() + 1, args.end());
+            const auto selected = sparse_part(args[0], specifications);
+            if (!selected.error.empty()) return invalid_part(selected.error);
+            return *selected.value;
         }
         const std::vector<Expr> components(args.begin() + 1, args.end());
         const auto result = structural_part(args[0], components);
