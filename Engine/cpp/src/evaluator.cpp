@@ -8460,7 +8460,26 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     } else {
         if (auto result = apply_sub_values(evaluated_expression)) return *result;
     }
-    if (head.kind() == ExprKind::SparseArray && args.size() == 1 && args[0].kind() == ExprKind::String) {
+    if (head.kind() == ExprKind::SparseArray && args.size() == 1) {
+        if (args[0].kind() != ExprKind::String) {
+            const auto message = call("MessageName", {
+                symbol("General"), string("error")});
+            emit_message(message,
+                "General::error: SparseArray properties must be requested by string name.");
+            return call(raw_head, raw_args);
+        }
+        if (args[0].text() == "ImplicitValue")
+            return head.fill_value();
+        if (args[0].text() == "ExplicitLength")
+            return integer(mpz_class(
+                std::to_string(head.sparse_entries().size()), 10));
+        if (args[0].text() == "ExplicitValues") {
+            std::vector<Expr> values;
+            values.reserve(head.sparse_entries().size());
+            for (const auto& entry : head.sparse_entries())
+                values.push_back(entry.value);
+            return rebuild_evaluated_call(symbol("List"), std::move(values));
+        }
         if (args[0].text() == "ExplicitPositions") {
             std::vector<Expr> positions;
             for (const auto& entry : head.sparse_entries()) { std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index)); positions.push_back(list(std::move(indices))); }
@@ -8473,6 +8492,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return count == 0 ? integer(0L)
                 : rational(mpz_class(head.sparse_entries().size()), std::move(count));
         }
+        const auto message = call("MessageName", {
+            symbol("General"), string("error")});
+        emit_message(message, "General::error: Unsupported SparseArray property: "
+            + args[0].text() + ".");
+        return call(raw_head, raw_args);
     }
     if (head.has_head("SameAs") && head.args().size() == 1)
         return boolean(args.size() == 1 && args[0] == head.args()[0]);

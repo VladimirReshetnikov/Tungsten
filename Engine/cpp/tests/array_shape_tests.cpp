@@ -74,6 +74,24 @@ void sparse_shape_tests() {
         "SparseArray[{{1,1}->1},{4294967296,4294967296}]"
         "[\"Density\"]",
         "Rational[1, 18446744073709551616]");
+    check_case(
+        "SparseArray[{{2}->a,{1}->b},{3},z][\"ImplicitValue\"]",
+        "z");
+    check_case(
+        "SparseArray[{{2}->a,{1}->b},{3},z][\"ExplicitLength\"]",
+        "2");
+    check_case(
+        "SparseArray[{{2}->a,{1}->b},{3},z][\"ExplicitValues\"]",
+        "List[b, a]");
+    check_case(
+        "SparseArray[{{2}->a,{1}->b},{3},z][\"ExplicitPositions\"]",
+        "List[List[1], List[2]]");
+    check_case(
+        "SparseArray[{}, {0,1000000000},z][\"ExplicitLength\"]",
+        "0");
+    check_case(
+        "SparseArray[{}, {0,1000000000},z][\"ExplicitValues\"]",
+        "List[]");
 }
 
 void predicate_and_message_tests() {
@@ -104,6 +122,14 @@ void predicate_and_message_tests() {
     check_case(
         "ArrayDepth[]", "ArrayDepth[]",
         {"ArrayDepth::error: ArrayDepth expects exactly one argument."});
+    check_case(
+        "SparseArray[{{2}->a},{3},z][bad]",
+        "SparseArray[List[Rule[List[2], a]], List[3], z][bad]",
+        {"General::error: SparseArray properties must be requested by string name."});
+    check_case(
+        "SparseArray[{{2}->a},{3},z][\"Unknown\"]",
+        "SparseArray[List[Rule[List[2], a]], List[3], z][\"Unknown\"]",
+        {"General::error: Unsupported SparseArray property: Unknown."});
 }
 
 void materialization_guard_tests() {

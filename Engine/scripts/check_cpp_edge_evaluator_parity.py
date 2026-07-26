@@ -51,7 +51,8 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "rounding", "take-drop", "take-list", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
-            "array-shape", "ordering", "failure-confirmation", "strings",
+            "array-shape", "sparse-properties", "ordering", "failure-confirmation",
+            "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -693,6 +694,36 @@ def array_shape_cases() -> list[str]:
     return _unique(cases)
 
 
+def sparse_property_cases() -> list[str]:
+    """Callable SparseArray metadata and canonical explicit-entry order."""
+
+    array = "SparseArray[{{2}->a,{1}->b},{3},z]"
+    empty = "SparseArray[{}, {0,1000000000},z]"
+    return [
+        f'{array}["ImplicitValue"]',
+        f'{array}["ExplicitLength"]',
+        f'{array}["ExplicitValues"]',
+        f'{array}["ExplicitPositions"]',
+        f'{array}["Density"]',
+        f'{empty}["ImplicitValue"]',
+        f'{empty}["ExplicitLength"]',
+        f'{empty}["ExplicitValues"]',
+        f'{empty}["ExplicitPositions"]',
+        f'{empty}["Density"]',
+        'SparseArray[{{2}->a,{2}->b},{3}]["ExplicitValues"]',
+        'SparseArray[{{2}->0,{1}->a},{3}]["ExplicitLength"]',
+        'SparseArray[{{2,2}->a,{1,3}->b},{2,3}]["ExplicitPositions"]',
+        (
+            'SparseArray[{{2}->a},{3},z][Print["property"];'
+            '"ExplicitLength"]'
+        ),
+        f'{array}[bad]',
+        f'{array}["Unknown"]',
+        f'{array}[]',
+        f'{array}["ExplicitLength","ExplicitValues"]',
+    ]
+
+
 def string_cases() -> list[str]:
     strings = ('""', '"a"', '"ab"', '"aba"', '"a b"', '"café λ"')
     patterns = (
@@ -1253,6 +1284,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "combinators": combinator_cases,
     "distribution": distribution_cases,
     "array-shape": array_shape_cases,
+    "sparse-properties": sparse_property_cases,
     "ordering": ordering_cases,
     "failure-confirmation": failure_confirmation_cases,
     "strings": string_cases,
