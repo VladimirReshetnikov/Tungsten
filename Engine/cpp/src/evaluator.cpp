@@ -11246,7 +11246,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                                 for (std::size_t index = 0; index < variables.size(); ++index)
                                     expected_cross[index] = squares[0].root_monomial[index]
                                         + squares[1].root_monomial[index];
-                                const auto expected_coefficient = 2
+                                const mpz_class expected_coefficient = 2
                                     * squares[0].root_coefficient
                                     * squares[1].root_coefficient;
                                 if (cross->first == expected_cross
