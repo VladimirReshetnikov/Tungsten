@@ -8,9 +8,11 @@
 #include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -25,6 +27,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 
 namespace tungsten {
@@ -33,6 +36,43 @@ namespace {
 std::optional<std::vector<Expr>> association_rules(const Expr& expression);
 std::optional<long> machine_index(const Expr& expression);
 int expression_compare(const Expr& left, const Expr& right);
+
+template<typename Function>
+class ScopeExit {
+public:
+    explicit ScopeExit(Function function) : function_(std::move(function)) {}
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ScopeExit(ScopeExit&& other) noexcept
+        : function_(std::move(other.function_)), active_(other.active_) {
+        other.active_ = false;
+    }
+    ~ScopeExit() {
+        if (active_) function_();
+    }
+    void release() noexcept { active_ = false; }
+
+private:
+    Function function_;
+    bool active_ = true;
+};
+
+template<typename Function>
+ScopeExit<Function> scope_exit(Function function) {
+    return ScopeExit<Function>(std::move(function));
+}
+
+class TimeConstraintExpired final : public std::exception {
+public:
+    explicit TimeConstraintExpired(std::size_t owner) noexcept : owner_(owner) {}
+    [[nodiscard]] std::size_t owner() const noexcept { return owner_; }
+    [[nodiscard]] const char* what() const noexcept override {
+        return "Tungsten time constraint expired";
+    }
+
+private:
+    std::size_t owner_;
+};
 
 std::mutex& process_random_mutex() {
     static std::mutex mutex;
@@ -1308,19 +1348,20 @@ bool numeric_q_value(const Expr& value) {
         && std::all_of(value.args().begin(), value.args().end(), numeric_q_value);
 }
 
-double requested_pause(const Expr& expression) {
-    if (expression.has_head("Pause") && expression.args().size() == 1)
-        return numeric_real(expression.args()[0]).value_or(0.0);
-    if (expression.kind() != ExprKind::Call) return 0.0;
-    double result = 0.0;
-    for (const auto& argument : expression.args()) result += requested_pause(argument);
-    return result;
-}
-
 std::string real_text(double value) {
     if (std::isnan(value)) return "Indeterminate";
     if (std::isinf(value)) return value < 0 ? "-Infinity" : "Infinity";
     return detail::python_machine_real_text(value);
+}
+
+std::chrono::steady_clock::time_point steady_deadline_after(double seconds) {
+    using Clock = std::chrono::steady_clock;
+    using Seconds = std::chrono::duration<double>;
+    const auto now = Clock::now();
+    const auto available = std::chrono::duration_cast<Seconds>(
+        Clock::time_point::max() - now).count();
+    if (seconds >= available) return Clock::time_point::max();
+    return now + std::chrono::duration_cast<Clock::duration>(Seconds(seconds));
 }
 
 std::optional<double> explicit_real_precision(const std::string& text) {
@@ -5889,6 +5930,23 @@ void Evaluator::clear_control() noexcept {
     control_target_.reset();
 }
 
+std::optional<Evaluator::TimeConstraintScope>
+Evaluator::active_time_constraint() const {
+    if (time_constraint_suppression_depth_ != 0) return std::nullopt;
+    std::optional<TimeConstraintScope> active;
+    for (const auto& scope : time_constraints_) {
+        if (!scope.deadline) continue;
+        if (!active || *scope.deadline < *active->deadline) active = scope;
+    }
+    return active;
+}
+
+void Evaluator::check_time_constraint() const {
+    const auto active = active_time_constraint();
+    if (active && SteadyClock::now() >= *active->deadline)
+        throw TimeConstraintExpired(active->id);
+}
+
 std::set<std::string> Evaluator::attributes_for(const Expr& symbol_expression) const {
     std::set<std::string> result;
     const auto* raw_name = symbol_expression.symbol_name();
@@ -6021,17 +6079,24 @@ Expr Evaluator::evaluate(const Expr& expression) {
     if (root) {
         register_expression_symbols(expression);
         messages_.clear(); message_texts_.clear(); prints_.clear(); aborted_ = false;
-        deferred_abort_ = false; abort_protection_depth_ = 0;
+        abort_protect_scopes_.clear(); check_abort_depths_.clear();
+        active_own_values_.clear();
+        reap_stack_.clear();
         message_scopes_.clear();
+        time_constraints_.clear();
+        time_constraint_suppression_depth_ = 0;
         clear_control();
         thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
         confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
         confirmation_pattern_.reset(); confirmation_tag_.reset();
     }
+    check_time_constraint();
     if (depth_ >= recursion_limit_) return call("TerminatedEvaluation", {symbol("RecursionLimit")});
     ++depth_;
+    auto depth_guard = scope_exit([&] { --depth_; });
     auto result = evaluate_impl(expression);
     --depth_;
+    depth_guard.release();
     if (root && thrown_) {
         if (thrown_handler_) result = evaluate(call(*thrown_handler_, {*thrown_, thrown_tag_.value_or(symbol("Null"))}));
         else {
@@ -6040,6 +6105,10 @@ Expr Evaluator::evaluate(const Expr& expression) {
             result = call("Throw", std::move(args));
         }
         thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+    }
+    if (root && aborted_) {
+        result = symbol("$Aborted");
+        aborted_ = false;
     }
     if (root && control_active()) {
         result = control_expression();
@@ -6069,8 +6138,10 @@ Expr Evaluator::evaluate_impl(const Expr& expression) {
             if (std::find(active_own_values_.begin(), active_own_values_.end(), full_name)
                 != active_own_values_.end()) return expression;
             active_own_values_.push_back(full_name);
+            auto active_guard = scope_exit([&] { active_own_values_.pop_back(); });
             const auto value = evaluate(definition->second.value);
             active_own_values_.pop_back();
+            active_guard.release();
             return value;
         }
         return expression;
@@ -6167,18 +6238,24 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         MessageScope scope;
         if (raw_args.size() >= 3)
             scope.selectors.assign(raw_args.begin() + 2, raw_args.end());
+        const auto scope_depth = message_scopes_.size();
         message_scopes_.push_back(std::move(scope));
+        auto scope_guard = scope_exit([&] { message_scopes_.resize(scope_depth); });
         const auto value = evaluate(raw_args[0]);
         const bool triggered = message_scopes_.back().triggered;
         message_scopes_.pop_back();
+        scope_guard.release();
         return triggered ? evaluate(raw_args[1]) : value;
     }
     if (name == "Quiet" && !raw_args.empty()) {
         MessageScope scope;
         scope.quiet = true;
+        const auto scope_depth = message_scopes_.size();
         message_scopes_.push_back(std::move(scope));
+        auto scope_guard = scope_exit([&] { message_scopes_.resize(scope_depth); });
         const auto value = evaluate(raw_args[0]);
         message_scopes_.pop_back();
+        scope_guard.release();
         return value;
     }
     if ((name == "Off" || name == "On") && !raw_args.empty()) {
@@ -6233,37 +6310,135 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message_name, std::move(text));
         return symbol("Null");
     }
-    if (name == "WithCleanup" && (raw_args.size() == 2 || raw_args.size() == 3)) {
-        const auto expression_index = raw_args.size() == 2 ? 0U : 1U;
-        if (raw_args.size() == 3) (void)evaluate(raw_args[0]);
-        const auto value = evaluate(raw_args[expression_index]);
-        const bool saved_aborted = aborted_;
-        const auto saved_thrown = thrown_;
-        const auto saved_thrown_tag = thrown_tag_;
-        const auto saved_thrown_handler = thrown_handler_;
-        const auto saved_confirmation_failure = confirmation_failure_;
-        const auto saved_confirmation_information = confirmation_information_;
-        const auto saved_confirmation_function = confirmation_function_;
-        const auto saved_confirmation_pattern = confirmation_pattern_;
-        const auto saved_confirmation_tag = confirmation_tag_;
-        const auto saved_control_kind = control_kind_;
-        const auto saved_control_value = control_value_;
-        const auto saved_control_target = control_target_;
-        aborted_ = false;
-        thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
-        clear_control();
-        (void)evaluate(raw_args.back());
-        aborted_ = saved_aborted;
-        thrown_ = saved_thrown; thrown_tag_ = saved_thrown_tag; thrown_handler_ = saved_thrown_handler;
-        confirmation_failure_ = saved_confirmation_failure;
-        confirmation_information_ = saved_confirmation_information;
-        confirmation_function_ = saved_confirmation_function;
-        confirmation_pattern_ = saved_confirmation_pattern; confirmation_tag_ = saved_confirmation_tag;
-        control_kind_ = saved_control_kind;
-        control_value_ = saved_control_value;
-        control_target_ = saved_control_target;
+    auto raw_evaluation_error = [&](const std::string& text) {
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + text);
+        return call(raw_head, raw_args);
+    };
+    if (name == "WithCleanup") {
+        if (raw_args.size() != 2 && raw_args.size() != 3)
+            return raw_evaluation_error(
+                "WithCleanup expects two or three arguments.");
+
+        struct PendingState {
+            bool aborted;
+            std::optional<Expr> thrown;
+            std::optional<Expr> thrown_tag;
+            std::optional<Expr> thrown_handler;
+            std::optional<Expr> confirmation_failure;
+            std::optional<Expr> confirmation_information;
+            std::optional<Expr> confirmation_function;
+            std::optional<Expr> confirmation_pattern;
+            std::optional<Expr> confirmation_tag;
+            ControlKind control_kind;
+            std::optional<Expr> control_value;
+            std::optional<Expr> control_target;
+
+            [[nodiscard]] bool active() const noexcept {
+                return aborted || thrown.has_value()
+                    || confirmation_failure.has_value()
+                    || control_kind != ControlKind::None;
+            }
+        };
+        auto capture_pending = [&] {
+            return PendingState{aborted_, thrown_, thrown_tag_,
+                thrown_handler_, confirmation_failure_, confirmation_information_,
+                confirmation_function_, confirmation_pattern_, confirmation_tag_,
+                control_kind_, control_value_, control_target_};
+        };
+        auto clear_pending = [&] {
+            aborted_ = false;
+            thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+            confirmation_failure_.reset(); confirmation_information_.reset();
+            confirmation_function_.reset(); confirmation_pattern_.reset();
+            confirmation_tag_.reset();
+            clear_control();
+        };
+        auto restore_pending = [&](const PendingState& pending) {
+            aborted_ = pending.aborted;
+            thrown_ = pending.thrown;
+            thrown_tag_ = pending.thrown_tag;
+            thrown_handler_ = pending.thrown_handler;
+            confirmation_failure_ = pending.confirmation_failure;
+            confirmation_information_ = pending.confirmation_information;
+            confirmation_function_ = pending.confirmation_function;
+            confirmation_pattern_ = pending.confirmation_pattern;
+            confirmation_tag_ = pending.confirmation_tag;
+            control_kind_ = pending.control_kind;
+            control_value_ = pending.control_value;
+            control_target_ = pending.control_target;
+        };
+        auto protected_suppressed_evaluate = [&](const Expr& expression) {
+            ++time_constraint_suppression_depth_;
+            auto suppression_guard = scope_exit(
+                [&] { --time_constraint_suppression_depth_; });
+            const auto protection_depth = abort_protect_scopes_.size();
+            abort_protect_scopes_.push_back(false);
+            auto protection_guard = scope_exit(
+                [&] { abort_protect_scopes_.resize(protection_depth); });
+            auto value = evaluate(expression);
+            const bool superseded = thrown_ || confirmation_failure_
+                || control_active();
+            bool pending_abort = abort_protect_scopes_.back();
+            if (aborted_) {
+                aborted_ = false;
+                if (!superseded) {
+                    pending_abort = true;
+                    value = symbol("Null");
+                }
+            }
+            abort_protect_scopes_.pop_back();
+            protection_guard.release();
+            --time_constraint_suppression_depth_;
+            suppression_guard.release();
+            if (pending_abort && !superseded) {
+                aborted_ = true;
+                return symbol("$Aborted");
+            }
+            return value;
+        };
+
+        Expr value = symbol("Null");
+        std::optional<PendingState> pending;
+        std::exception_ptr pending_exception;
+        auto record_pending_state = [&] {
+            auto state = capture_pending();
+            if (!state.active()) return false;
+            pending = std::move(state);
+            clear_pending();
+            return true;
+        };
+
+        if (raw_args.size() == 3) {
+            try {
+                (void)protected_suppressed_evaluate(raw_args[0]);
+                if (!record_pending_state()) check_time_constraint();
+            } catch (...) {
+                pending_exception = std::current_exception();
+                (void)record_pending_state();
+            }
+        }
+        if (!pending && !pending_exception) {
+            try {
+                value = evaluate(raw_args[raw_args.size() == 2 ? 0U : 1U]);
+            } catch (...) {
+                pending_exception = std::current_exception();
+            }
+            (void)record_pending_state();
+        }
+
+        const auto cleanup_value
+            = protected_suppressed_evaluate(raw_args.back());
+        auto cleanup_state = capture_pending();
+        if (cleanup_state.active()) return cleanup_value;
+        clear_pending();
+        if (pending) restore_pending(*pending);
+        if (pending_exception) std::rethrow_exception(pending_exception);
         return value;
     }
     if (name == "Break" && raw_args.empty()) {
@@ -6287,8 +6462,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return control_expression();
     }
     if (name == "Abort" && raw_args.empty()) {
-        if (abort_protection_depth_ != 0) deferred_abort_ = true;
-        else aborted_ = true;
+        const auto protection_depth = abort_protect_scopes_.size();
+        const bool same_depth_check = !check_abort_depths_.empty()
+            && check_abort_depths_.back() == protection_depth;
+        if (protection_depth != 0 && !same_depth_check) {
+            abort_protect_scopes_.back() = true;
+            return symbol("Null");
+        }
+        aborted_ = true;
         return symbol("$Aborted");
     }
     if ((name == "Overflow" || name == "Underflow") && raw_args.empty()) return special_real(name);
@@ -6314,11 +6495,17 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return value;
     }
     if (name == "CheckAbort" && raw_args.size() == 2) {
-        const auto value = evaluate(raw_args[0]);
-        if (aborted_ || deferred_abort_) {
-            aborted_ = false; deferred_abort_ = false;
-            return evaluate(raw_args[1]);
+        const auto check_depth = check_abort_depths_.size();
+        check_abort_depths_.push_back(abort_protect_scopes_.size());
+        auto check_guard = scope_exit(
+            [&] { check_abort_depths_.resize(check_depth); });
+        auto value = evaluate(raw_args[0]);
+        if (aborted_) {
+            aborted_ = false;
+            value = evaluate(raw_args[1]);
         }
+        check_abort_depths_.pop_back();
+        check_guard.release();
         return value;
     }
     if (name == "Enclose" && !raw_args.empty()) {
@@ -6363,27 +6550,130 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return value;
     }
     if (name == "AbortProtect" && raw_args.size() == 1) {
-        const bool outermost = abort_protection_depth_ == 0;
-        ++abort_protection_depth_;
-        const auto value = evaluate(raw_args[0]);
-        --abort_protection_depth_;
-        if (outermost && deferred_abort_) {
-            deferred_abort_ = false;
+        const auto protection_depth = abort_protect_scopes_.size();
+        abort_protect_scopes_.push_back(false);
+        auto protection_guard = scope_exit(
+            [&] { abort_protect_scopes_.resize(protection_depth); });
+        auto value = evaluate(raw_args[0]);
+        const bool superseded = thrown_ || confirmation_failure_
+            || control_active();
+        bool pending_abort = abort_protect_scopes_.back();
+        if (aborted_) {
+            aborted_ = false;
+            if (!superseded) {
+                pending_abort = true;
+                value = symbol("Null");
+            }
+        }
+        abort_protect_scopes_.pop_back();
+        protection_guard.release();
+        if (pending_abort && !superseded) {
             aborted_ = true;
             return symbol("$Aborted");
         }
         return value;
     }
-    if (name == "Pause" && raw_args.size() == 1) return symbol("Null");
-    if (name == "TimeRemaining" && raw_args.empty()) return symbol("Infinity");
-    if (name == "TimeConstrained" && raw_args.size() >= 2) {
-        const auto limit = numeric_real(evaluate(raw_args[1]));
-        if (limit && requested_pause(raw_args[0]) > *limit)
-            return raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("$Aborted");
-        if (raw_args[0].has_head("TimeRemaining")) return real(real_text(limit.value_or(0.0)));
-        return evaluate(raw_args[0]);
+    if (name == "Pause") {
+        if (raw_args.size() != 1)
+            return raw_evaluation_error("Pause expects exactly one argument.");
+        const auto duration = evaluate(raw_args[0]);
+        if (aborted_ || thrown_ || confirmation_failure_
+            || control_active()) return duration;
+        if (duration.kind() != ExprKind::Integer
+            && duration.kind() != ExprKind::Real)
+            return raw_evaluation_error(
+                "Pause expects a numeric time in seconds.");
+        const auto seconds = numeric_real(duration);
+        if (!seconds)
+            return raw_evaluation_error(
+                "Pause expects a numeric time in seconds.");
+        if (!std::isfinite(*seconds) || *seconds < 0.0)
+            return raw_evaluation_error(
+                "Pause expects a non-negative finite number of seconds.");
+
+        const auto pause_end = steady_deadline_after(*seconds);
+        while (true) {
+            check_time_constraint();
+            const auto now = SteadyClock::now();
+            if (now >= pause_end) return symbol("Null");
+            auto wake = pause_end;
+            if (const auto constraint = active_time_constraint();
+                constraint && *constraint->deadline < wake)
+                wake = *constraint->deadline;
+            const auto slice = now + std::chrono::milliseconds(50);
+            std::this_thread::sleep_until(std::min(wake, slice));
+        }
     }
-    if (name == "AbsoluteTiming" && raw_args.size() == 1) return list({real("0."), evaluate(raw_args[0])});
+    if (name == "TimeRemaining") {
+        if (!raw_args.empty())
+            return raw_evaluation_error(
+                "TimeRemaining expects no arguments.");
+        const auto constraint = active_time_constraint();
+        if (!constraint) return symbol("Infinity");
+        const auto remaining = std::chrono::duration<double>(
+            *constraint->deadline - SteadyClock::now()).count();
+        return real(real_text(std::max(0.0, remaining)));
+    }
+    if (name == "TimeConstrained") {
+        if (raw_args.size() != 2 && raw_args.size() != 3)
+            return raw_evaluation_error(
+                "TimeConstrained expects two or three arguments.");
+        const auto duration = evaluate(raw_args[1]);
+        if (aborted_ || thrown_ || confirmation_failure_
+            || control_active()) return duration;
+        const bool infinite = is_symbol(duration, "Infinity");
+        if (!infinite && duration.kind() != ExprKind::Integer
+            && duration.kind() != ExprKind::Real)
+            return raw_evaluation_error(
+                "TimeConstrained expects a numeric time in seconds.");
+        const auto parsed_seconds = infinite
+            ? std::optional<double>(std::numeric_limits<double>::infinity())
+            : numeric_real(duration);
+        if (!parsed_seconds)
+            return raw_evaluation_error(
+                "TimeConstrained expects a numeric time in seconds.");
+        const auto seconds = *parsed_seconds < 0.0 ? 0.0 : *parsed_seconds;
+        const auto constraint_id = ++time_constraint_counter_;
+        const auto constraint_depth = time_constraints_.size();
+        time_constraints_.push_back({constraint_id,
+            std::isinf(seconds)
+                ? std::nullopt
+                : std::optional<SteadyClock::time_point>(
+                    steady_deadline_after(seconds))});
+        auto constraint_guard = scope_exit(
+            [&] { time_constraints_.resize(constraint_depth); });
+
+        std::optional<Expr> result;
+        bool timed_out = false;
+        try {
+            result = evaluate(raw_args[0]);
+            const bool pending_control = aborted_ || thrown_
+                || confirmation_failure_ || control_active();
+            if (!pending_control && !std::isinf(seconds))
+                check_time_constraint();
+        } catch (const TimeConstraintExpired& expired) {
+            if (expired.owner() != constraint_id) throw;
+            timed_out = true;
+        }
+        time_constraints_.resize(constraint_depth);
+        constraint_guard.release();
+        if (timed_out)
+            return raw_args.size() == 3
+                ? evaluate(raw_args[2]) : symbol("$Aborted");
+        return *result;
+    }
+    if (name == "AbsoluteTiming") {
+        if (raw_args.size() != 1)
+            return raw_evaluation_error(
+                "AbsoluteTiming expects exactly one argument.");
+        const auto started = SteadyClock::now();
+        const auto value = evaluate(raw_args[0]);
+        if (aborted_ || thrown_ || confirmation_failure_
+            || control_active()) return value;
+        const auto elapsed = std::chrono::duration<double>(
+            SteadyClock::now() - started).count();
+        return list({real(real_text(elapsed)), value});
+    }
     if (name == "Sow" && (raw_args.size() == 1 || raw_args.size() == 2)) {
         const auto value = evaluate(raw_args[0]);
         auto tags = raw_args.size() == 1 ? std::vector<Expr>{symbol("None")}
@@ -6397,9 +6687,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (name == "Reap" && !raw_args.empty() && raw_args.size() <= 3) {
         const auto selector = raw_args.size() >= 2 ? raw_args[1] : call("Blank");
+        const auto reap_depth = reap_stack_.size();
         reap_stack_.push_back({selector, {}});
+        auto reap_guard = scope_exit([&] { reap_stack_.resize(reap_depth); });
         const auto value = evaluate(raw_args[0]);
         auto scope = std::move(reap_stack_.back()); reap_stack_.pop_back();
+        reap_guard.release();
         std::vector<Expr> tags;
         std::vector<std::vector<Expr>> groups;
         for (const auto& [tag, item] : scope.entries) {
@@ -6530,19 +6823,25 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 pattern_snapshot(down_values_, binding.name), pattern_snapshot(up_values_, binding.name),
                 pattern_snapshot(sub_values_, binding.name)});
         }
-        for (const auto& binding : bindings) if (binding.value)
-            own_values_[binding.name] = {binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
-        auto result = evaluate(raw_args[1]);
         auto restore_patterns = [](DefinitionTable& table, const std::string& target,
             const std::optional<PatternDefinitions>& value) {
             if (value) table[target] = *value; else table.erase(target);
         };
-        for (const auto& snapshot : snapshots) {
-            if (snapshot.own) own_values_[snapshot.name] = *snapshot.own; else own_values_.erase(snapshot.name);
-            restore_patterns(down_values_, snapshot.name, snapshot.down);
-            restore_patterns(up_values_, snapshot.name, snapshot.up);
-            restore_patterns(sub_values_, snapshot.name, snapshot.sub);
-        }
+        auto restore_snapshots = [&] {
+            for (const auto& snapshot : snapshots) {
+                if (snapshot.own) own_values_[snapshot.name] = *snapshot.own;
+                else own_values_.erase(snapshot.name);
+                restore_patterns(down_values_, snapshot.name, snapshot.down);
+                restore_patterns(up_values_, snapshot.name, snapshot.up);
+                restore_patterns(sub_values_, snapshot.name, snapshot.sub);
+            }
+        };
+        auto snapshot_guard = scope_exit(restore_snapshots);
+        for (const auto& binding : bindings) if (binding.value)
+            own_values_[binding.name] = {binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
+        auto result = evaluate(raw_args[1]);
+        restore_snapshots();
+        snapshot_guard.release();
         if (control_kind_ == ControlKind::Return && control_target_
             && is_symbol(*control_target_, "Block")) {
             result = control_value_.value_or(symbol("Null"));
@@ -6707,14 +7006,23 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             const auto saved_down = snapshot_table(down_values_, target);
             const auto saved_up = snapshot_table(up_values_, target);
             const auto saved_sub = snapshot_table(sub_values_, target);
+            auto restore_iterator = [&] {
+                if (saved_own) own_values_[target] = *saved_own;
+                else own_values_.erase(target);
+                if (saved_down) down_values_[target] = *saved_down;
+                else down_values_.erase(target);
+                if (saved_up) up_values_[target] = *saved_up;
+                else up_values_.erase(target);
+                if (saved_sub) sub_values_[target] = *saved_sub;
+                else sub_values_.erase(target);
+            };
+            auto iterator_guard = scope_exit(restore_iterator);
             for (const auto& value : iterator.values) {
                 own_values_[target] = {value, false};
                 if (!step()) break;
             }
-            if (saved_own) own_values_[target] = *saved_own; else own_values_.erase(target);
-            if (saved_down) down_values_[target] = *saved_down; else down_values_.erase(target);
-            if (saved_up) up_values_[target] = *saved_up; else up_values_.erase(target);
-            if (saved_sub) sub_values_[target] = *saved_sub; else sub_values_.erase(target);
+            restore_iterator();
+            iterator_guard.release();
         };
         if (name == "Table") {
             bool valid = true;
@@ -7122,6 +7430,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::size_t jumps = 0;
         while (cursor < raw_args.size() && jumps < 100000) {
             result = evaluate(raw_args[cursor++]);
+            if (aborted_ && !abort_protect_scopes_.empty()) {
+                aborted_ = false;
+                abort_protect_scopes_.back() = true;
+                result = symbol("Null");
+                continue;
+            }
             if (control_kind_ == ControlKind::Goto && control_target_) {
                 const auto label = std::find_if(raw_args.begin(), raw_args.end(), [&](const Expr& candidate) {
                     return candidate.has_head("Label") && candidate.args().size() == 1

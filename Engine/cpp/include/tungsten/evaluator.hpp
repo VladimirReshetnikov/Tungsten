@@ -2,6 +2,7 @@
 
 #include "tungsten/expression.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <optional>
 #include <set>
@@ -77,6 +78,11 @@ private:
         std::vector<Expr> selectors;
         bool triggered = false;
     };
+    using SteadyClock = std::chrono::steady_clock;
+    struct TimeConstraintScope {
+        std::size_t id = 0;
+        std::optional<SteadyClock::time_point> deadline;
+    };
     enum class ControlKind { None, Break, Continue, Return, Goto };
     Expr evaluate_impl(const Expr& expression);
     Expr evaluate_call(const Expr& head, const std::vector<Expr>& args);
@@ -85,6 +91,9 @@ private:
     [[nodiscard]] bool control_active() const noexcept;
     [[nodiscard]] Expr control_expression() const;
     void clear_control() noexcept;
+    [[nodiscard]] std::optional<TimeConstraintScope>
+        active_time_constraint() const;
+    void check_time_constraint() const;
     [[nodiscard]] std::string resolve_full_symbol_name(
         const std::string& symbol_name) const;
     [[nodiscard]] std::string ensure_full_symbol_name(
@@ -107,7 +116,8 @@ private:
     std::size_t depth_ = 0;
     std::size_t recursion_limit_ = 1024;
     std::size_t module_counter_ = 0;
-    std::size_t abort_protection_depth_ = 0;
+    std::size_t time_constraint_counter_ = 0;
+    std::size_t time_constraint_suppression_depth_ = 0;
     std::unordered_map<std::string, std::size_t> unique_string_counters_;
     std::unordered_map<std::string, Definition> own_values_;
     DefinitionTable down_values_;
@@ -117,6 +127,8 @@ private:
     std::set<std::string> unprotected_symbols_;
     std::set<std::string> known_symbols_;
     std::vector<std::string> active_own_values_;
+    std::vector<bool> abort_protect_scopes_;
+    std::vector<std::size_t> check_abort_depths_;
     std::optional<Expr> thrown_;
     std::optional<Expr> thrown_tag_;
     std::optional<Expr> thrown_handler_;
@@ -127,6 +139,7 @@ private:
     std::optional<Expr> confirmation_tag_;
     std::vector<ReapScope> reap_stack_;
     std::vector<MessageScope> message_scopes_;
+    std::vector<TimeConstraintScope> time_constraints_;
     std::set<std::string> disabled_messages_;
     std::set<std::string> disabled_message_heads_;
     bool assert_enabled_ = false;
@@ -134,7 +147,6 @@ private:
     std::optional<Expr> control_value_;
     std::optional<Expr> control_target_;
     bool aborted_ = false;
-    bool deferred_abort_ = false;
     std::vector<Expr> messages_;
     std::vector<std::string> message_texts_;
     std::vector<std::string> prints_;

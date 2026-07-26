@@ -155,6 +155,249 @@ int main() {
             && stateful.prints()[1] == "cleanup",
         "WithCleanup skips the aborted tail and prints cleanup");
 
+    Evaluator timing;
+    check_equal(timing.evaluate(parse_input_form(
+        "TimeConstrained[Pause[.03];7,.002,timeout]")).to_full_form(),
+        "timeout", "TimeConstrained interrupts Pause and evaluates its fallback");
+    check_equal(timing.evaluate(parse_input_form("TimeRemaining[]")).to_full_form(),
+        "Infinity", "expired deadline is removed before the next root evaluation");
+    const auto absolute_timing = timing.evaluate(parse_input_form(
+        "AbsoluteTiming[Pause[.005];7]"));
+    check(absolute_timing.has_head("List") && absolute_timing.args().size() == 2
+            && absolute_timing.args()[0].kind() == ExprKind::Real
+            && absolute_timing.args()[1] == integer(7L),
+        "AbsoluteTiming returns a real elapsed duration and evaluated value");
+    check_equal(timing.evaluate(parse_input_form(
+        "TimeConstrained[TimeConstrained[Pause[.03],.002,inner],.02,outer]"
+        )).to_full_form(),
+        "inner", "an earlier inner deadline owns its fallback");
+    check_equal(timing.evaluate(parse_input_form(
+        "TimeConstrained[TimeConstrained[Pause[.03],.02,inner],.002,outer]"
+        )).to_full_form(),
+        "outer", "an earlier outer deadline bypasses the inner fallback");
+
+    Evaluator abort_ownership;
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Abort[];"
+        "Print[InputForm[Pause[0]]]],caught]"
+        )).to_full_form(),
+        "caught", "a protected pending abort survives Pause evaluation");
+    check(abort_ownership.prints().size() == 1
+            && abort_ownership.prints().front() == "Null",
+        "Pause still evaluates normally under a pre-existing protected abort");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Abort[];Print[InputForm["
+        "TimeConstrained[7,1,fail]]]],caught]"
+        )).to_full_form(),
+        "caught", "a protected pending abort survives TimeConstrained evaluation");
+    check(abort_ownership.prints().size() == 1
+            && abort_ownership.prints().front() == "7",
+        "TimeConstrained evaluates its body under a pre-existing protected abort");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Abort[];Print[InputForm["
+        "AbsoluteTiming[7]]]],caught]"
+        )).to_full_form(),
+        "caught", "a protected pending abort survives AbsoluteTiming evaluation");
+    const auto protected_timing = abort_ownership.prints().size() == 1
+        ? parse_input_form(abort_ownership.prints().front()) : symbol("Missing");
+    check(protected_timing.has_head("List")
+            && protected_timing.args().size() == 2
+            && protected_timing.args()[0].kind() == ExprKind::Real
+            && protected_timing.args()[1] == integer(7L),
+        "AbsoluteTiming remains structurally complete under a pending abort");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Abort[];WithCleanup[Print[\"init\"],"
+        "Print[\"body\"],Print[\"cleanup\"]];Print[\"after\"]],caught]"
+        )).to_full_form(),
+        "caught", "WithCleanup preserves an enclosing pending abort");
+    check(abort_ownership.prints()
+            == std::vector<std::string>({"init", "body", "cleanup", "after"}),
+        "WithCleanup does not mistake an enclosing abort for init control");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Pause[Abort[]]],caught]"
+        )).to_full_form(),
+        "caught", "Abort in a protected Pause duration remains deferred");
+    check(abort_ownership.messages().size() == 1
+            && abort_ownership.messages().front().to_full_form()
+                == "MessageName[Pause, \"error\"]",
+        "protected Abort returns Null for Pause duration validation");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[TimeConstrained[7,Abort[],fallback]],caught]"
+        )).to_full_form(),
+        "caught", "Abort in a protected time limit remains deferred");
+    check(abort_ownership.messages().size() == 1
+            && abort_ownership.messages().front().to_full_form()
+                == "MessageName[TimeConstrained, \"error\"]",
+        "protected Abort returns Null for time-limit validation");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Print[InputForm["
+        "AbsoluteTiming[Abort[]]]]],caught]"
+        )).to_full_form(),
+        "caught", "Abort in AbsoluteTiming remains protected");
+    const auto aborted_timing = abort_ownership.prints().size() == 1
+        ? parse_input_form(abort_ownership.prints().front()) : symbol("Missing");
+    check(aborted_timing.has_head("List")
+            && aborted_timing.args().size() == 2
+            && aborted_timing.args()[0].kind() == ExprKind::Real
+            && aborted_timing.args()[1] == symbol("Null"),
+        "AbsoluteTiming wraps the Null returned by a protected Abort");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "TimeConstrained[AbortProtect[Abort[];Pause[.03]],.001,timeout]"
+        )).to_full_form(),
+        "timeout", "timeout unwinding discards its AbortProtect-local abort");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "TimeConstrained[AbortProtect[Abort[];WithCleanup[Pause[.03],"
+        "Print[\"cleanup\"]]],.001,timeout]"
+        )).to_full_form(),
+        "timeout", "cleanup timeout discards its AbortProtect-local abort");
+    check(abort_ownership.prints().size() == 1
+            && abort_ownership.prints().front() == "cleanup",
+        "WithCleanup still executes while a timeout unwinds AbortProtect");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[AbortProtect[Abort[];"
+        "Print[\"innerTail\"]];Print[\"outerTail\"]],fail]"
+        )).to_full_form(),
+        "fail", "nested AbortProtect propagates the pending abort");
+    check(abort_ownership.prints()
+            == std::vector<std::string>({"innerTail", "outerTail"}),
+        "CompoundExpression re-defers an inner protected abort");
+    check_equal(abort_ownership.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Abort[];Print[InputForm[CheckAbort[1,inner]]];"
+        "Print[InputForm[CheckAbort[Abort[],inner]]];Print[\"tail\"]],fail]"
+        )).to_full_form(),
+        "fail", "same-depth CheckAbort does not consume an older pending abort");
+    check(abort_ownership.prints()
+            == std::vector<std::string>({"1", "inner", "tail"}),
+        "same-depth CheckAbort catches only the Abort raised in its body");
+
+    Evaluator timeout_state;
+    (void)timeout_state.evaluate(parse_input_form("$RecursionLimit=20"));
+    for (int repetition = 0; repetition < 32; ++repetition)
+        check_equal(timeout_state.evaluate(parse_input_form(
+            "TimeConstrained[Pause[.03],.001,timeout]"
+            )).to_full_form(),
+            "timeout", "repeated timeout restores evaluator depth");
+    (void)timeout_state.evaluate(parse_input_form("$RecursionLimit=1024"));
+    (void)timeout_state.evaluate(parse_input_form(
+        "tungstenTimedOwn:=Pause[.03]"));
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "TimeConstrained[tungstenTimedOwn,.002,timeout]"
+        )).to_full_form(),
+        "timeout", "timeout unwinds an active own-value evaluation");
+    (void)timeout_state.evaluate(parse_input_form("tungstenTimedOwn=7"));
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "tungstenTimedOwn")).to_full_form(),
+        "7", "timeout leaves no stale own-value recursion guard");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "tungstenBlock[x_]:=original")).to_full_form(),
+        "Null", "timed Block restoration setup");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "TimeConstrained[Block[{tungstenBlock},"
+        "tungstenBlock[x_]:=temporary;Pause[.03]],.002,timeout]"
+        )).to_full_form(),
+        "timeout", "timeout unwinds Block-local definitions");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "tungstenBlock[1]")).to_full_form(),
+        "original", "Block definitions are restored after timeout");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "tungstenInherited[x_]:=outer")).to_full_form(),
+        "Null", "timed InheritedBlock restoration setup");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "{TimeConstrained[InheritedBlock[{tungstenInherited},"
+        "tungstenInherited[x_]:=inner;Pause[.03]],.002,timeout],"
+        "tungstenInherited[a]}")).to_full_form(),
+        "List[timeout, outer]",
+        "InheritedBlock definitions are restored after timeout");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "tungstenIterator=original;{TimeConstrained["
+        "Table[Pause[.03],{tungstenIterator,1,2}],.002,timeout],"
+        "tungstenIterator}")).to_full_form(),
+        "List[timeout, original]",
+        "iterator binding is restored after timeout");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "Reap[TimeConstrained[Reap[Pause[.03]],.002,Sow[fallback]]]"
+        )).to_full_form(),
+        "List[fallback, List[List[fallback]]]",
+        "timeout pops an inner Reap scope before evaluating the fallback");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "TimeConstrained[Quiet[Pause[.03]],.002,Message[foo::bar]]"
+        )).to_full_form(),
+        "Null", "timeout pops Quiet before evaluating the fallback");
+    check_equal(timeout_state.messages().empty() ? ""
+            : timeout_state.messages().front().to_full_form(),
+        "MessageName[foo, \"bar\"]",
+        "post-timeout fallback message remains visible");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "Check[TimeConstrained[Check[Pause[.03],inner,f::tag],.002,timeout];"
+        "Message[g::tag];7,outer,g::tag]"
+        )).to_full_form(),
+        "outer", "timeout pops the innermost Check message scope");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "CheckAbort[TimeConstrained[AbortProtect[Pause[.03]],.002,timeout];"
+        "Print[\"before\"];Abort[];Print[\"after\"];done,caught]"
+        )).to_full_form(),
+        "caught", "timeout restores AbortProtect depth");
+    check(timeout_state.prints().size() == 1
+            && timeout_state.prints().front() == "before",
+        "restored AbortProtect depth stops the post-abort tail");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "TimeConstrained[WithCleanup[7,Pause[.03]];Pause[.03];9,.04,outer]"
+        )).to_full_form(),
+        "outer", "WithCleanup restores deadline suppression after cleanup");
+    check_equal(timeout_state.evaluate(parse_input_form(
+        "{TimeConstrained[Pause[.03],.002,timeout],TimeRemaining[],"
+        "TimeConstrained[Pause[0];7,.1,secondFail]}"
+        )).to_full_form(),
+        "List[timeout, Infinity, 7]",
+        "deadline stack is reusable after timeout");
+    (void)timeout_state.evaluate(parse_input_form("Part[f[a],2]"));
+    check(!timeout_state.messages().empty(),
+        "same evaluator records a diagnostic after timeout recovery");
+    check_equal(timeout_state.evaluate(parse_input_form("1+1")).to_full_form(),
+        "2", "same evaluator remains usable after timeout recovery");
+    check(timeout_state.messages().empty(),
+        "same evaluator restores root depth and clears later effects");
+
+    check_equal(evaluate(parse_input_form(
+        "WithCleanup[7,Abort[]]")).to_full_form(),
+        "$Aborted", "cleanup Abort supersedes a completed body at root");
+    check_equal(evaluate(parse_input_form(
+        "Catch[WithCleanup[Throw[body],Throw[cleanup]]]"
+        )).to_full_form(),
+        "cleanup", "cleanup Throw supersedes a body Throw");
+    check_equal(evaluate(parse_input_form(
+        "WithCleanup[Return[body],Return[cleanup]]"
+        )).to_full_form(),
+        "Return[cleanup]", "cleanup Return supersedes a body Return");
+    check_equal(evaluate(parse_input_form(
+        "CheckAbort[Catch[WithCleanup[Abort[],Throw[cleanup]]],caught]"
+        )).to_full_form(),
+        "cleanup", "cleanup Throw supersedes a pending body Abort");
+    Evaluator cleanup_precedence;
+    (void)cleanup_precedence.evaluate(parse_input_form(
+        "tungstenCleanupReturn[]:=Catch[WithCleanup[Throw[body],"
+        "Return[cleanup]]]"));
+    check_equal(cleanup_precedence.evaluate(parse_input_form(
+        "tungstenCleanupReturn[]")).to_full_form(),
+        "cleanup", "cleanup Return supersedes a pending body Throw");
+    (void)cleanup_precedence.evaluate(parse_input_form(
+        "tungstenCleanupThrow[]:=Catch[WithCleanup[Return[body],"
+        "Throw[cleanup]]]"));
+    check_equal(cleanup_precedence.evaluate(parse_input_form(
+        "tungstenCleanupThrow[]")).to_full_form(),
+        "cleanup", "cleanup Throw supersedes a pending body Return");
+    check_equal(cleanup_precedence.evaluate(parse_input_form(
+        "CheckAbort[TimeConstrained[7,Abort[],fallback],caught]"
+        )).to_full_form(),
+        "caught", "control from a time-limit expression bypasses validation");
+    check(cleanup_precedence.messages().empty(),
+        "time-limit control does not emit a numeric diagnostic");
+    check_equal(cleanup_precedence.evaluate(parse_input_form(
+        "Catch[Pause[Throw[seconds]]]")).to_full_form(),
+        "seconds", "control from a Pause duration bypasses validation");
+    check(cleanup_precedence.messages().empty(),
+        "Pause duration control does not emit a numeric diagnostic");
+
     check_equal(evaluate(parse_input_form(
         "Module[{i = 0, s = 0}, While[i < 5, i = i + 1; "
         "If[Mod[i, 2] == 0, Continue[]]; s = s + i]; s]")).to_full_form(),
