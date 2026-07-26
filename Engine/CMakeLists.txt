@@ -229,6 +229,14 @@ if(BUILD_TESTING)
         NAME tungsten_sparse_arithmetic_tests
         COMMAND tungsten_sparse_arithmetic_tests)
 
+    add_executable(tungsten_tensor_matrix_tests
+        cpp/tests/tensor_matrix_tests.cpp)
+    target_link_libraries(tungsten_tensor_matrix_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_tensor_matrix_tests)
+    add_test(
+        NAME tungsten_tensor_matrix_tests
+        COMMAND tungsten_tensor_matrix_tests)
+
     add_executable(tungsten_take_list_tests
         cpp/tests/take_list_tests.cpp)
     target_link_libraries(tungsten_take_list_tests PRIVATE tungsten_cpp)
