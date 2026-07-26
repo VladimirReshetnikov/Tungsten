@@ -87,6 +87,17 @@ valueCases =
   , ("MatrixQ applies an element predicate", "MatrixQ[{{1,a}},IntegerQ]", "False")
   , ("MatrixQ rejects ragged rows", "MatrixQ[{{1},{2,3}}]", "False")
   , ("MatrixQ rejects the rank-one empty list", "MatrixQ[{}]", "False")
+  , ("SparseArray constructs from explicit rules", "Normal[SparseArray[{{1,2}->a,{2,3}->b},{2,3}]]", "List[List[0, a, 0], List[0, 0, b]]")
+  , ("SparseArray constructs from a dense matrix", "ArrayRules[SparseArray[{{0,1},{2,0}}]]", "List[Rule[List[1, 2], 1], Rule[List[2, 1], 2], Rule[List[Blank[], Blank[]], 0]]")
+  , ("SparseArray expands vectorized rank-one rules", "Normal[SparseArray[{1,3}->{a,b}]]", "List[a, 0, b]")
+  , ("SparseArray retains the first duplicate rule", "Normal[SparseArray[{{1,1}->a,{1,1}->b},{1,1}]]", "List[List[a]]")
+  , ("SparseArray supports a nonzero implicit value", "Normal[SparseArray[{{1,1}->a},{2,2},z]]", "List[List[a, z], List[z, z]]")
+  , ("SparseArray exposes canonical properties", "{SparseArrayQ[SparseArray[{{1}->a}]],SparseArray[{{2}->a,{1}->b},{3},z][\"ImplicitValue\"],SparseArray[{{2}->a,{1}->b},{3},z][\"ExplicitValues\"],SparseArray[{{2}->a,{1}->b},{3},z][\"Density\"]}", "List[True, z, List[b, a], Rational[2, 3]]")
+  , ("SparseArray Part preserves a compact slice", "SparseArray[{{1,2}->a},{2,3}][[1]]", "SparseArray[List[Rule[List[2], a]], List[3]]")
+  , ("SparseArray Part selects duplicate projected coordinates", "Normal[SparseArray[{{1}->a,{3}->c},{3}][[{3,1,3}]]]", "List[c, a, c]")
+  , ("SparseArray Extract uses compact coordinate lookup", "Extract[SparseArray[{{2,3}->a},{2,3}],{2,3}]", "a")
+  , ("SparseArray addition merges explicit coordinates", "Normal[SparseArray[{{1,2}->a},{2,3}]+SparseArray[{{2,3}->b},{2,3}]]", "List[List[0, a, 0], List[0, 0, b]]")
+  , ("SparseArray scalar arithmetic transforms the implicit value", "Normal[2 SparseArray[{{1}->a},{3}]+1]", "List[Plus[1, Times[2, a]], 1, 1]")
   , ("ArrayReshape flattens and pads", "ArrayReshape[{{1,2},{3,4}},{3,2},x]", "List[List[1, 2], List[3, 4], List[x, x]]")
   , ("ArrayReshape truncates row-major leaves", "ArrayReshape[{{1,2},{3,4}},{3}]", "List[1, 2, 3]")
   , ("ArrayReshape preserves rank around a zero axis", "ArrayReshape[{{}}, {2,0,3}]", "List[List[], List[]]")
@@ -160,6 +171,9 @@ errorCases =
   , ("Inverse rejects singular exact matrices", "Inverse[{{1,2},{2,4}}]")
   , ("Inverse rejects singular symbolic matrices", "Inverse[{{a,a},{a,a}}]")
   , ("MatrixPower requires an integer exponent", "MatrixPower[{{1}},x]")
+  , ("SparseArray rejects an empty inferred rule set", "SparseArray[{}]")
+  , ("SparseArray rejects out-of-bounds rules", "SparseArray[{{3}->a},{2}]")
+  , ("SparseArray Part rejects too many axes", "SparseArray[{{1}->a},{2}][[1,1]]")
   ]
 
 exactErrorCases :: [(Text, Text, Text)]

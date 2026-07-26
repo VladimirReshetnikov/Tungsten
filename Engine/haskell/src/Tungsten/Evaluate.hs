@@ -447,6 +447,8 @@ evaluateOr depth = go []
 
 reduceCall :: Expr -> Either EvaluationError Expr
 reduceCall expression = case expression of
+  Call sparse@SparseArray {} values ->
+    reduceSparseArrayProperty sparse values
   Call failure@(Call (Symbol failureHead) _) values
     | systemHeadIn ["Failure"] failureHead ->
         reduceFailureApplication failure values
@@ -595,8 +597,8 @@ reduceEvaluatedCall = reduceCall
 
 reduceBuiltin :: Text -> [Expr] -> Either EvaluationError Expr
 reduceBuiltin headName values = case headName of
-  "Plus" -> Right (reducePlus values)
-  "Times" -> Right (reduceTimes values)
+  "Plus" -> reduceSparseArithmetic "Plus" values
+  "Times" -> reduceSparseArithmetic "Times" values
   "Power" -> Right (reducePower values)
   "Factorial" -> Right (reduceFactorial values)
   "Factorial2" -> Right (reduceFactorial2 values)
@@ -624,6 +626,9 @@ reduceBuiltin headName values = case headName of
   "Dimensions" -> reduceDimensions values
   "ArrayDepth" -> reduceArrayDepth values
   "ArrayQ" -> reduceArrayQ values
+  "SparseArray" -> reduceSparseArray values
+  "SparseArrayQ" -> Right (unary headName (boolean . isSparseArray) values)
+  "ArrayRules" -> reduceArrayRules values
   "AtomQ" -> Right (unary headName (boolean . isAtom) values)
   "ListQ" -> Right (unary headName (boolean . hasHead "List") values)
   "Association" -> Right (reduceAssociation values)
@@ -1214,7 +1219,83 @@ reduceTimes originalValues =
         [single] -> single
         _ -> Call (Symbol "Times") combined
  where
-  collectFactor factor count = reducePower [factor, Integer count]
+ collectFactor factor count = reducePower [factor, Integer count]
+
+reduceSparseArithmetic
+  :: Text
+  -> [Expr]
+  -> Either EvaluationError Expr
+reduceSparseArithmetic functionName values
+  | not (any isSparseArray values) = Right (reduceOrdinary values)
+  | null values = Right (if functionName == "Plus" then Integer 0 else Integer 1)
+  | any isListExpression values = Right (Call (Symbol functionName) values)
+  | first : remaining <- values = foldM (sparseBinary functionName) first remaining
+  | otherwise = Right (reduceOrdinary values)
+ where
+  reduceOrdinary
+    | functionName == "Plus" = reducePlus
+    | otherwise = reduceTimes
+  isListExpression (Call (Symbol listHead) _) = systemHeadIn ["List"] listHead
+  isListExpression _ = False
+
+sparseBinary
+  :: Text
+  -> Expr
+  -> Expr
+  -> Either EvaluationError Expr
+sparseBinary functionName left right = case (left, right) of
+  (SparseArray leftDimensions leftEntries leftFill, SparseArray rightDimensions rightEntries rightFill)
+    | leftDimensions /= rightDimensions ->
+        Left
+          ( EvaluationError
+              (functionName <> " expects SparseArray dimensions to agree.")
+          )
+    | otherwise -> do
+        fill <- evaluateSparseScalar functionName leftFill rightFill
+        let leftMap = Map.fromList [(indices, value) | SparseEntry indices value <- leftEntries]
+            rightMap = Map.fromList [(indices, value) | SparseEntry indices value <- rightEntries]
+            coordinates = Set.toAscList (Map.keysSet leftMap `Set.union` Map.keysSet rightMap)
+        pairs <-
+          traverse
+            ( \indices -> do
+                value <-
+                  evaluateSparseScalar
+                    functionName
+                    (Map.findWithDefault leftFill indices leftMap)
+                    (Map.findWithDefault rightFill indices rightMap)
+                Right (indices, value)
+            )
+            coordinates
+        canonicalSparseArray leftDimensions pairs fill
+  (SparseArray dimensions entries fill, scalar) -> do
+    outputFill <- evaluateSparseScalar functionName fill scalar
+    pairs <-
+      traverse
+        ( \(SparseEntry indices value) -> do
+            outputValue <- evaluateSparseScalar functionName value scalar
+            Right (indices, outputValue)
+        )
+        entries
+    canonicalSparseArray dimensions pairs outputFill
+  (scalar, SparseArray dimensions entries fill) -> do
+    outputFill <- evaluateSparseScalar functionName scalar fill
+    pairs <-
+      traverse
+        ( \(SparseEntry indices value) -> do
+            outputValue <- evaluateSparseScalar functionName scalar value
+            Right (indices, outputValue)
+        )
+        entries
+    canonicalSparseArray dimensions pairs outputFill
+  _ -> evaluateSparseScalar functionName left right
+
+evaluateSparseScalar
+  :: Text
+  -> Expr
+  -> Expr
+  -> Either EvaluationError Expr
+evaluateSparseScalar functionName left right =
+  evaluate (Call (Symbol functionName) [left, right])
 
 collectRepeated :: (Expr -> Integer -> Expr) -> [Expr] -> [Expr]
 collectRepeated combine values = retainFirst Set.empty values
@@ -2378,6 +2459,8 @@ reduceRestMost _ headName values = Call (Symbol headName) values
 reducePart :: [Expr] -> Either EvaluationError Expr
 reducePart values@[] = invalidPartArity values
 reducePart values@[_] = invalidPartArity values
+reducePart (sparse@SparseArray {} : specifications) =
+  sparseArrayPart sparse specifications
 reducePart (target : specifications) = selectRecursively target specifications
  where
   selectRecursively expression [] = Right expression
@@ -2586,7 +2669,239 @@ invalidPartArity _ =
         "Part expects an expression and at least one part specification."
     )
 
+data SparseAxisSelection
+  = SparseScalar !Integer
+  | SparseProjection !SparseIndexSequence
+
+data SparseIndexSequence
+  = SparseOne !Integer
+  | SparseAll !Integer
+  | SparseSpan !Integer !Integer !Integer
+  | SparseConcatenate ![SparseIndexSequence]
+
+sparseArrayPart
+  :: Expr
+  -> [Expr]
+  -> Either EvaluationError Expr
+sparseArrayPart (SparseArray dimensions entries fill) specifications
+  | length specifications > length dimensions =
+      Left
+        ( EvaluationError
+            "Part received too many specifications for SparseArray."
+        )
+  | otherwise = do
+      specified <-
+        sequence
+          [ if axis < length specifications
+              then normalizeSparseSelector dimension (specifications !! axis)
+              else Right (SparseProjection (SparseAll dimension))
+          | (axis, dimension) <- zip [0 :: Int ..] dimensions
+          ]
+      case traverse sparseScalarValue specified of
+        Just indices -> Right (sparseValueAt entries fill indices)
+        Nothing -> do
+          let outputDimensions =
+                [ sparseSequenceLength sequenceExpression
+                | SparseProjection sequenceExpression <- specified
+                ]
+          outputPairs <- concat <$> traverse (projectEntry specified) entries
+          canonicalSparseArray outputDimensions outputPairs fill
+ where
+  projectEntry selections (SparseEntry sourceIndices value) =
+    if or
+      [ source /= selected
+      | (SparseScalar selected, source) <- zip selections sourceIndices
+      ]
+      then Right []
+      else
+        let options =
+              [ sparseSequencePositions sequenceExpression source
+              | (SparseProjection sequenceExpression, source) <-
+                  zip selections sourceIndices
+              ]
+         in if any null options
+              then Right []
+              else
+                Right
+                  [ (indices, value)
+                  | indices <- cartesianIndices options
+                  ]
+sparseArrayPart _ _ =
+  Left (EvaluationError "Part currently expects a SparseArray value.")
+
+sparseValueAt :: [SparseEntry] -> Expr -> [Integer] -> Expr
+sparseValueAt entries fill target = go entries
+ where
+  go [] = fill
+  go (SparseEntry indices value : remaining)
+    | indices == target = value
+    | otherwise = go remaining
+
+sparseScalarValue :: SparseAxisSelection -> Maybe Integer
+sparseScalarValue (SparseScalar index) = Just index
+sparseScalarValue SparseProjection {} = Nothing
+
+normalizeSparseSelector
+  :: Integer
+  -> Expr
+  -> Either EvaluationError SparseAxisSelection
+normalizeSparseSelector dimension = \case
+  Integer position -> SparseScalar <$> resolveSparsePosition dimension position
+  Symbol allName
+    | systemHeadIn ["All"] allName ->
+        Right (SparseProjection (SparseAll dimension))
+  spanExpression@(Call (Symbol spanHead) _)
+    | systemHeadIn ["Span"] spanHead ->
+        SparseProjection <$> normalizeSparseSpan dimension spanExpression
+  Call (Symbol listHead) values
+    | systemHeadIn ["List"] listHead ->
+        SparseProjection . SparseConcatenate
+          <$> traverse (normalizeSparseSequence dimension) values
+  selector ->
+    Left
+      ( EvaluationError
+          ( "Unsupported Part specification for SparseArray: "
+              <> inputForm selector
+              <> "."
+          )
+      )
+
+normalizeSparseSequence
+  :: Integer
+  -> Expr
+  -> Either EvaluationError SparseIndexSequence
+normalizeSparseSequence dimension = \case
+  Integer position -> SparseOne <$> resolveSparsePosition dimension position
+  Symbol allName
+    | systemHeadIn ["All"] allName -> Right (SparseAll dimension)
+  spanExpression@(Call (Symbol spanHead) _)
+    | systemHeadIn ["Span"] spanHead -> normalizeSparseSpan dimension spanExpression
+  Call (Symbol listHead) values
+    | systemHeadIn ["List"] listHead ->
+        SparseConcatenate <$> traverse (normalizeSparseSequence dimension) values
+  selector ->
+    Left
+      ( EvaluationError
+          ( "Unsupported Part specification for SparseArray: "
+              <> inputForm selector
+              <> "."
+          )
+      )
+
+resolveSparsePosition
+  :: Integer
+  -> Integer
+  -> Either EvaluationError Integer
+resolveSparsePosition dimension position
+  | position > 0
+  , position <= dimension = Right position
+  | position < 0
+  , position >= negate dimension = Right (dimension + position + 1)
+  | otherwise =
+      Left
+        ( EvaluationError
+            "Part specifications are invalid for SparseArray."
+        )
+
+normalizeSparseSpan
+  :: Integer
+  -> Expr
+  -> Either EvaluationError SparseIndexSequence
+normalizeSparseSpan dimension (Call _ arguments') = case arguments' of
+  [startExpression, endExpression] ->
+    build startExpression endExpression (Integer 1)
+  [startExpression, endExpression, stepExpression] ->
+    build startExpression endExpression stepExpression
+  _ -> Left (EvaluationError "Span must contain two or three arguments.")
+ where
+  build startExpression endExpression stepExpression = do
+    step <- case stepExpression of
+      Integer value -> Right value
+      _ -> Left (EvaluationError "Span steps must be integers.")
+    if step == 0
+      then Left (EvaluationError "Span step cannot be zero.")
+      else do
+        let start = sparseSpanEndpoint startExpression 1
+            end = sparseSpanEndpoint endExpression dimension
+            count
+              | step > 0 && start <= end = (end - start) `div` step + 1
+              | step < 0 && start >= end = (start - end) `div` negate step + 1
+              | otherwise = 0
+            finalPosition = if count == 0 then start else start + (count - 1) * step
+        if count > 0
+          && ( start < 1
+                 || start > dimension
+                 || finalPosition < 1
+                 || finalPosition > dimension
+             )
+          then
+            Left
+              ( EvaluationError
+                  "Part specifications are invalid for SparseArray."
+              )
+          else Right (SparseSpan start step count)
+  sparseSpanEndpoint endpoint defaultValue = case endpoint of
+    Symbol allName
+      | systemHeadIn ["All"] allName -> dimension
+    Integer value
+      | value < 0 -> dimension + value + 1
+      | otherwise -> value
+    _ -> defaultValue
+normalizeSparseSpan _ _ =
+  Left (EvaluationError "Span must contain two or three arguments.")
+
+sparseSequenceLength :: SparseIndexSequence -> Integer
+sparseSequenceLength = \case
+  SparseOne _ -> 1
+  SparseAll dimension -> dimension
+  SparseSpan _ _ count -> count
+  SparseConcatenate sequences -> sum (map sparseSequenceLength sequences)
+
+sparseSequencePositions :: SparseIndexSequence -> Integer -> [Integer]
+sparseSequencePositions sequenceExpression source = case sequenceExpression of
+  SparseOne selected -> [1 | source == selected]
+  SparseAll dimension -> [source | source >= 1 && source <= dimension]
+  SparseSpan start step count
+    | count <= 0 -> []
+    | step > 0
+    , source >= start
+    , source <= start + (count - 1) * step
+    , (source - start) `mod` step == 0 -> [(source - start) `div` step + 1]
+    | step < 0
+    , source <= start
+    , source >= start + (count - 1) * step
+    , (start - source) `mod` negate step == 0 -> [(start - source) `div` negate step + 1]
+    | otherwise -> []
+  SparseConcatenate sequences -> go 0 sequences
+ where
+  go _ [] = []
+  go offset (current : remaining) =
+    map (+ offset) (sparseSequencePositions current source)
+      <> go (offset + sparseSequenceLength current) remaining
+
+cartesianIndices :: [[Integer]] -> [[Integer]]
+cartesianIndices = foldr extend [[]]
+ where
+  extend values suffixes = [value : suffix | value <- values, suffix <- suffixes]
+
 reduceExtract :: [Expr] -> Either EvaluationError Expr
+reduceExtract [sparse@SparseArray {}, positions] = do
+  let paths = positionPaths positions
+  if null paths
+    then Left (EvaluationError "Extract received an invalid position specification")
+    else do
+      selected <- traverse extractSparsePath paths
+      case selected of
+        firstSelected : _ ->
+          Right
+            ( if hasMultiplePositionPaths positions
+                then evaluatedList selected
+                else firstSelected
+            )
+        [] -> Left (EvaluationError "Extract received an empty internal position set")
+ where
+  extractSparsePath path =
+    sparseArrayPart sparse [Integer position | ArgumentSelector position <- path]
 reduceExtract [subject, positions] = do
   let paths = positionPaths positions
   if null paths
@@ -2778,6 +3093,7 @@ reduceValues [association] = do
 reduceValues values = Right (Call (Symbol "Values") values)
 
 reduceNormal :: [Expr] -> Either EvaluationError Expr
+reduceNormal [sparse@SparseArray {}] = sparseArrayNormal sparse
 reduceNormal [association] = case associationEntries association of
   Just entries ->
     pure
@@ -5855,6 +6171,353 @@ denseArrayValueAt = foldM select
 denseLeafValues :: Expr -> [Expr]
 denseLeafValues (Call (Symbol "List") values) = concatMap denseLeafValues values
 denseLeafValues expression = [expression]
+
+isSparseArray :: Expr -> Bool
+isSparseArray SparseArray {} = True
+isSparseArray _ = False
+
+normalizeSparseDimensions :: Expr -> Either EvaluationError [Integer]
+normalizeSparseDimensions = \case
+  Integer dimension -> pure <$> normalizeOne dimension
+  Call (Symbol listHead) dimensions
+    | systemHeadIn ["List"] listHead -> traverse requireInteger dimensions
+  _ ->
+    Left
+      ( EvaluationError
+          "SparseArray expects an integer dimension or a list of dimensions."
+      )
+ where
+  requireInteger (Integer dimension) = normalizeOne dimension
+  requireInteger _ =
+    Left (EvaluationError "SparseArray expects an integer argument.")
+  normalizeOne dimension
+    | dimension < 0 =
+        Left (EvaluationError "SparseArray expects non-negative dimensions.")
+    | otherwise = Right dimension
+
+canonicalSparseArray
+  :: [Integer]
+  -> [([Integer], Expr)]
+  -> Expr
+  -> Either EvaluationError Expr
+canonicalSparseArray dimensions pairs fill
+  | null dimensions =
+      Left (EvaluationError "SparseArray expects at least one dimension.")
+  | any (< 0) dimensions =
+      Left (EvaluationError "SparseArray dimensions must be non-negative.")
+  | otherwise = do
+      retained <- retainFirst Set.empty [] pairs
+      Right
+        ( SparseArray
+            dimensions
+            [SparseEntry indices value | (indices, value) <- sortBy comparePair retained]
+            fill
+        )
+ where
+  comparePair (left, _) (right, _) = compare left right
+  retainFirst _ retained [] = Right (reverse retained)
+  retainFirst seen retained ((indices, value) : remaining)
+    | length indices /= length dimensions =
+        Left
+          ( EvaluationError
+              "SparseArray rule positions must match the array rank."
+          )
+    | or (zipWith (\index dimension -> index < 1 || index > dimension) indices dimensions) =
+        Left
+          ( EvaluationError
+              "SparseArray rule positions must be inside the array dimensions."
+          )
+    | Set.member indices seen = retainFirst seen retained remaining
+    | value == fill = retainFirst (Set.insert indices seen) retained remaining
+    | otherwise =
+        retainFirst
+          (Set.insert indices seen)
+          ((indices, value) : retained)
+          remaining
+
+reduceSparseArray :: [Expr] -> Either EvaluationError Expr
+reduceSparseArray = \case
+  [dataExpression] ->
+    constructSparseArray dataExpression Nothing (Integer 0)
+  [dataExpression, dimensionsExpression] -> do
+    dimensions <- normalizeSparseDimensions dimensionsExpression
+    constructSparseArray dataExpression (Just dimensions) (Integer 0)
+  [dataExpression, dimensionsExpression, fill] -> do
+    dimensions <- normalizeSparseDimensions dimensionsExpression
+    constructSparseArray dataExpression (Just dimensions) fill
+  _ ->
+    Left
+      ( EvaluationError
+          "SparseArray expects data, optional dimensions, and an optional implicit value."
+      )
+
+constructSparseArray
+  :: Expr
+  -> Maybe [Integer]
+  -> Expr
+  -> Either EvaluationError Expr
+constructSparseArray dataExpression requestedDimensions fill = case dataExpression of
+  sparse@(SparseArray dimensions _ originalFill)
+    | maybe False (/= dimensions) requestedDimensions ->
+        Left
+          ( EvaluationError
+              "SparseArray cannot reinterpret an existing sparse array with different dimensions."
+          )
+    | fill == originalFill -> Right sparse
+    | otherwise -> do
+        dense <- sparseArrayNormal sparse
+        pairs <- denseSparsePairs dense dimensions fill
+        canonicalSparseArray dimensions pairs fill
+  Symbol automaticName
+    | systemHeadIn ["Automatic"] automaticName
+    , Just dimensions <- requestedDimensions ->
+        canonicalSparseArray dimensions [] fill
+  _ -> case sparseRuleExpressions dataExpression of
+    Just ruleExpressions -> do
+      let rankHint = length <$> requestedDimensions
+      pairs <- concat <$> traverse (sparseRulePairs rankHint) ruleExpressions
+      dimensions <- case requestedDimensions of
+        Just explicitDimensions -> Right explicitDimensions
+        Nothing -> inferSparseDimensions pairs
+      canonicalSparseArray dimensions pairs fill
+    Nothing -> do
+      inferredDenseDimensions <- strictDenseDimensions dataExpression
+      if null inferredDenseDimensions
+        then
+          Left
+            ( EvaluationError
+                "SparseArray expects a rule specification or a rectangular dense list."
+            )
+        else do
+          let inferredDimensions = map fromIntegral inferredDenseDimensions
+              finalDimensions = maybe inferredDimensions id requestedDimensions
+          if finalDimensions /= inferredDimensions
+            then
+              Left
+                ( EvaluationError
+                    "SparseArray dense input dimensions do not match the explicit dimensions."
+                )
+            else do
+              pairs <- denseSparsePairs dataExpression finalDimensions fill
+              canonicalSparseArray finalDimensions pairs fill
+
+sparseRuleExpressions :: Expr -> Maybe [Expr]
+sparseRuleExpressions expression
+  | Just _ <- ruleEntry expression = Just [expression]
+sparseRuleExpressions (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead
+  , all (maybe False (const True) . ruleEntry) values = Just values
+sparseRuleExpressions _ = Nothing
+
+sparseRulePairs
+  :: Maybe Int
+  -> Expr
+  -> Either EvaluationError [([Integer], Expr)]
+sparseRulePairs rankHint rule = case ruleEntry rule of
+  Nothing ->
+    Left (EvaluationError "SparseArray expects rules or a dense list.")
+  Just (AssociationEntry _ position value) ->
+    case sparsePositionSequence rankHint position value of
+      Left message -> Left message
+      Right (Just pairs) -> Right pairs
+      Right Nothing -> case sparsePosition rankHint position of
+        Just indices -> Right [(indices, value)]
+        Nothing ->
+          Left
+            ( EvaluationError
+                "SparseArray currently supports explicit integer positions, not patterns or Band."
+            )
+
+sparsePosition :: Maybe Int -> Expr -> Maybe [Integer]
+sparsePosition rankHint (Integer position)
+  | rankHint `elem` [Nothing, Just 1] = Just [position]
+sparsePosition rankHint (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead
+  , Just indices <- traverse explicitInteger values
+  , maybe True (== length indices) rankHint = Just indices
+ where
+  explicitInteger (Integer value) = Just value
+  explicitInteger _ = Nothing
+sparsePosition _ _ = Nothing
+
+sparsePositionSequence
+  :: Maybe Int
+  -> Expr
+  -> Expr
+  -> Either EvaluationError (Maybe [([Integer], Expr)])
+sparsePositionSequence rankHint positions values = case (positions, values) of
+  (Call (Symbol positionsHead) positionValues, Call (Symbol valuesHead) entryValues)
+    | systemHeadIn ["List"] positionsHead
+    , systemHeadIn ["List"] valuesHead ->
+        if length positionValues /= length entryValues
+          then
+            Left
+              ( EvaluationError
+                  "SparseArray position and value lists must have the same length."
+              )
+          else case traverse explicitInteger positionValues of
+            Just indices
+              | rankHint `elem` [Nothing, Just 1] ->
+                  Right
+                    ( Just
+                        (zipWith (\index value -> ([index], value)) indices entryValues)
+                    )
+            _ ->
+              Right
+                ( zipWith (,)
+                    <$> traverse (sparsePosition rankHint) positionValues
+                    <*> pure entryValues
+                )
+  _ -> Right Nothing
+ where
+  explicitInteger (Integer value) = Just value
+  explicitInteger _ = Nothing
+
+inferSparseDimensions
+  :: [([Integer], Expr)]
+  -> Either EvaluationError [Integer]
+inferSparseDimensions [] =
+  Left
+    ( EvaluationError
+        "SparseArray dimensions cannot be inferred from an empty rule set."
+    )
+inferSparseDimensions pairs@((firstIndices, _) : _)
+  | null firstIndices
+      || any ((/= length firstIndices) . length . fst) pairs =
+      Left
+        ( EvaluationError
+            "SparseArray rule positions must have a consistent rank."
+        )
+  | otherwise =
+      Right
+        [ maximum [indices !! axis | (indices, _) <- pairs]
+        | axis <- [0 .. length firstIndices - 1]
+        ]
+
+denseSparsePairs
+  :: Expr
+  -> [Integer]
+  -> Expr
+  -> Either EvaluationError [([Integer], Expr)]
+denseSparsePairs expression dimensions fill = go [] expression dimensions
+ where
+  go reversedIndices value [] =
+    Right
+      ( if value == fill
+          then []
+          else [(reverse reversedIndices, value)]
+      )
+  go reversedIndices (Call (Symbol listHead) values) (dimension : remaining)
+    | systemHeadIn ["List"] listHead
+    , toInteger (length values) == dimension =
+        concat
+          <$> sequence
+            [ go (index : reversedIndices) value remaining
+            | (index, value) <- zip [1 ..] values
+            ]
+  go _ _ _ =
+    Left
+      ( EvaluationError
+          "SparseArray dense input must match the requested dimensions."
+      )
+
+sparseArrayNormal :: Expr -> Either EvaluationError Expr
+sparseArrayNormal (SparseArray dimensions entries fill) = do
+  guardSparseMaterialization "Normal" dimensions
+  let entryMap = Map.fromList [(indices, value) | SparseEntry indices value <- entries]
+  build entryMap [] dimensions
+ where
+  build entryMap reversedIndices [] =
+    Right (Map.findWithDefault fill (reverse reversedIndices) entryMap)
+  build entryMap reversedIndices (dimension : remaining) =
+    evaluatedList
+      <$> traverse
+        (\index -> build entryMap (index : reversedIndices) remaining)
+        [1 .. dimension]
+sparseArrayNormal _ =
+  Left (EvaluationError "Normal currently expects a SparseArray value.")
+
+guardSparseMaterialization
+  :: Text
+  -> [Integer]
+  -> Either EvaluationError ()
+guardSparseMaterialization operation dimensions =
+  if sparseMaterializedNodes dimensions <= maximumDenseArrayMaterializedNodes
+    then Right ()
+    else
+      Left
+        ( EvaluationError
+            (operation <> " output exceeds the native materialization limit.")
+        )
+
+sparseMaterializedNodes :: [Integer] -> Integer
+sparseMaterializedNodes = go 1 0
+ where
+  go _ total [] = total
+  go prefix total (dimension : remaining) =
+    let nextPrefix = prefix * dimension
+        nextTotal = total + nextPrefix
+     in if nextTotal > maximumDenseArrayMaterializedNodes
+          then nextTotal
+          else go nextPrefix nextTotal remaining
+
+reduceArrayRules :: [Expr] -> Either EvaluationError Expr
+reduceArrayRules [SparseArray dimensions entries fill] =
+  Right
+    ( evaluatedList
+        ( [ Call
+              (Symbol "Rule")
+              [evaluatedList (map Integer indices), value]
+          | SparseEntry indices value <- entries
+          ]
+            <> [ Call
+                   (Symbol "Rule")
+                   [ evaluatedList
+                       [Call (Symbol "Blank") [] | _ <- dimensions]
+                   , fill
+                   ]
+               ]
+        )
+    )
+reduceArrayRules [_] =
+  Left (EvaluationError "ArrayRules currently expects a SparseArray.")
+reduceArrayRules _ =
+  Left (EvaluationError "ArrayRules expects exactly one argument.")
+
+reduceSparseArrayProperty
+  :: Expr
+  -> [Expr]
+  -> Either EvaluationError Expr
+reduceSparseArrayProperty sparse@(SparseArray dimensions entries fill) = \case
+  [String propertyName] -> case propertyName of
+    "ImplicitValue" -> Right fill
+    "ExplicitLength" -> Right (Integer (fromIntegral (length entries)))
+    "ExplicitValues" ->
+      Right (evaluatedList [value | SparseEntry _ value <- entries])
+    "ExplicitPositions" ->
+      Right
+        ( evaluatedList
+            [evaluatedList (map Integer indices) | SparseEntry indices _ <- entries]
+        )
+    "Density" ->
+      let totalSize = product dimensions
+       in Right
+            ( if totalSize == 0
+                then Integer 0
+                else fromExact (Exact (fromIntegral (length entries)) totalSize)
+            )
+    _ ->
+      Left
+        ( EvaluationError
+            ("Unsupported SparseArray property: " <> propertyName <> ".")
+        )
+  [_] ->
+    Left
+      ( EvaluationError
+          "SparseArray properties must be requested by string name."
+      )
+  values -> Right (Call sparse values)
+reduceSparseArrayProperty sparse = \values -> Right (Call sparse values)
 
 reduceArray :: [Expr] -> Either EvaluationError Expr
 reduceArray = \case
