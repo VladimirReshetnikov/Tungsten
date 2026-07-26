@@ -194,12 +194,143 @@ void fold_while_tests() {
         "FoldWhileList does not validate unused trailing count");
 }
 
+void sequence_fold_tests() {
+    check_effect_case(
+        "SequenceFoldList[f,{x0,x1},{a,b,c}]",
+        "List[x0, x1, f[x0, x1, a], f[x1, f[x0, x1, a], b], "
+        "f[f[x0, x1, a], f[x1, f[x0, x1, a], b], c]]",
+        {}, "SequenceFoldList default state window");
+    check_effect_case(
+        "SequenceFold[f,{x0,x1},{a,b,c,d},4]",
+        "f[x1, f[x0, x1, a, b], c, d]", {},
+        "SequenceFold explicit argument count");
+    check_effect_case(
+        "SequenceFoldList[f,{x0,x1},{a,b,c,d,e},4]",
+        "List[x0, x1, f[x0, x1, a, b], "
+        "f[x1, f[x0, x1, a, b], c, d]]",
+        {}, "SequenceFoldList ignores an incomplete trailing chunk");
+    check_effect_case(
+        "SequenceFoldList[f,g[x0,x1],h[a,b]]",
+        "List[x0, x1, f[x0, x1, a], f[x1, f[x0, x1, a], b]]",
+        {}, "SequenceFoldList accepts generic compound sequences");
+    check_effect_case(
+        "SequenceFoldList[f,<|a->x0,b:>x1|>,<|p->a,q:>b|>]",
+        "List[x0, x1, f[x0, x1, a], f[x1, f[x0, x1, a], b]]",
+        {}, "SequenceFoldList consumes Association values");
+    check_effect_case(
+        "SequenceFoldList[f,{s},SparseArray[{{2}->x},{3},z]]",
+        "List[s, f[s, z], f[f[s, z], x], f[f[f[s, z], x], z]]",
+        {}, "SequenceFoldList consumes a vector SparseArray");
+    check_message_case(
+        "SequenceFold[f,{x},{a},2,extra]",
+        "SequenceFold[f, List[x], List[a], 2, extra]",
+        {"SequenceFold::error: SequenceFold expects a function, initial values, "
+         "inputs, and an optional argument count."},
+        "SequenceFold arity diagnostic");
+    check_message_case(
+        "SequenceFoldList[f,{},{}]",
+        "SequenceFoldList[f, List[], List[]]",
+        {"SequenceFoldList::error: SequenceFoldList expects at least one initial value."},
+        "SequenceFoldList empty initial diagnostic");
+    check_message_case(
+        "SequenceFoldList[f,{},x]",
+        "SequenceFoldList[f, List[], x]",
+        {"SequenceFoldList::error: SequenceFoldList expects a nonatomic expression."},
+        "SequenceFoldList validates inputs before empty initial state");
+    check_message_case(
+        "SequenceFoldList[f,{s},SparseArray[{}, {2,2}, z]]",
+        "SequenceFoldList[f, List[s], SparseArray[List[], List[2, 2], z]]",
+        {"SequenceFoldList::error: SequenceFoldList expects a one-dimensional "
+         "SparseArray sequence."},
+        "SequenceFoldList SparseArray rank diagnostic");
+    check_message_case(
+        "SequenceFoldList[f,{x0,x1},{a},1]",
+        "SequenceFoldList[f, List[x0, x1], List[a], 1]",
+        {"SequenceFoldList::error: SequenceFoldList expects an argument count greater "
+         "than or equal to the number of initial values."},
+        "SequenceFoldList short argument-count diagnostic");
+    check_message_case(
+        "SequenceFoldList[f,{x0,x1},{a},2]",
+        "SequenceFoldList[f, List[x0, x1], List[a], 2]",
+        {"SequenceFoldList::error: SequenceFoldList currently expects each step to "
+         "consume at least one input element."},
+        "SequenceFoldList zero-consumption diagnostic");
+    check_message_case(
+        "SequenceFoldList[f,{x0},{a},foo]",
+        "SequenceFoldList[f, List[x0], List[a], foo]",
+        {"SequenceFoldList::error: SequenceFoldList expects an integer argument."},
+        "SequenceFoldList argument-count type diagnostic");
+}
+
+void fold_pair_tests() {
+    check_effect_case(
+        "FoldPairList[Function[{s,x},{emit[s,x],state[s,x]}],z,{a,b,c}]",
+        "List[emit[z, a], emit[state[z, a], b], "
+        "emit[state[state[z, a], b], c]]",
+        {}, "FoldPairList emission and state direction");
+    check_effect_case(
+        "FoldPair[Function[{s,x},{emit[s,x],state[s,x]}],z,g[a,b]]",
+        "emit[state[z, a], b]", {}, "FoldPair accepts a generic sequence");
+    check_effect_case(
+        "FoldPairList[Function[{st,item},{emit[st,item],state[st,item]}],z,"
+        "<|a->x,b:>y|>]",
+        "List[emit[z, x], emit[state[z, x], y]]", {},
+        "FoldPairList consumes Association values");
+    check_effect_case(
+        "FoldPairList[Function[{s,x},{emit[s,x],state[s,x]}],z,{a,b},Last]",
+        "List[state[z, a], state[state[z, a], b]]", {},
+        "FoldPairList applies Last as a projection");
+    check_effect_case(
+        "FoldPairList[Function[{s,x},{emit[s,x],state[s,x]}],z,{a,b},"
+        "Function[p,h[p]]]",
+        "List[h[List[emit[z, a], state[z, a]]], "
+        "h[List[emit[state[z, a], b], state[state[z, a], b]]]]",
+        {}, "FoldPairList applies a callable projection to each pair");
+    check_effect_case(
+        "FoldPairList[f,z,g[]]", "List[]", {},
+        "FoldPairList empty sequence");
+    check_effect_case(
+        "FoldPair[f,z,g[]]", "FoldPair[f, z, g[]]", {},
+        "FoldPair empty sequence stays inert");
+    check_message_case(
+        "FoldPairList[Function[{s,x},bad[s,x]],z,{a}]",
+        "FoldPairList[Function[List[s, x], bad[s, x]], z, List[a]]",
+        {"FoldPairList::error: FoldPairList expects each function application to "
+         "return a list of two elements, got bad[z, a]."},
+        "FoldPairList non-pair diagnostic");
+    check_message_case(
+        "FoldPair[Function[{s,x},{a,b,c}],z,{a}]",
+        "FoldPair[Function[List[s, x], List[a, b, c]], z, List[a]]",
+        {"FoldPair::error: FoldPairList expects each function application to return "
+         "a list of two elements, got {a, b, c}."},
+        "FoldPair exact pair-length diagnostic");
+    check_message_case(
+        "FoldPairList[f,z,x]",
+        "FoldPairList[f, z, x]",
+        {"FoldPairList::error: FoldPairList expects a nonatomic expression."},
+        "FoldPairList domain diagnostic");
+    check_message_case(
+        "FoldPair[f,z,{a},p,q]",
+        "FoldPair[f, z, List[a], p, q]",
+        {"FoldPair::error: FoldPair currently supports a function, an initial value, "
+         "inputs, and an optional projection."},
+        "FoldPair arity diagnostic");
+    check_effect_case(
+        "Catch[FoldPairList[Function[{s,x},{emit[s,x],state[s,x]}],z,{a,b},"
+        "Function[p,Print[InputForm[p]];If[SameQ[First[p],emit[z,a]],"
+        "Throw[boom]];p]]]",
+        "boom", {"{emit[z, a], state[z, a]}"},
+        "FoldPairList stops after a projection signal");
+}
+
 } // namespace
 
 int main() {
     immediate_signal_tests();
     deferred_abort_tests();
     fold_while_tests();
+    sequence_fold_tests();
+    fold_pair_tests();
     if (failures != 0) {
         std::cerr << failures << " combinator-state test(s) failed\n";
         return EXIT_FAILURE;

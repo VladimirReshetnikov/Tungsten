@@ -50,7 +50,7 @@ def _arguments() -> argparse.Namespace:
         action="append",
         choices=(
             "rounding", "take-drop", "list", "structural", "traversal",
-            "collections", "strings",
+            "collections", "combinator-state", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -515,6 +515,104 @@ def string_cases() -> list[str]:
     return _unique(cases)
 
 
+def combinator_state_cases() -> list[str]:
+    """State-machine boundaries whose parity includes messages and prints."""
+
+    return [
+        (
+            "Catch[Fold[Function[{acc,x},Print[InputForm[x]];"
+            "If[SameQ[x,b],Throw[boom]];p[acc,x]],z,{a,b,c}]]"
+        ),
+        (
+            "CheckAbort[FoldList[Function[{acc,x},Print[InputForm[x]];"
+            "If[SameQ[x,b],Abort[]];p[acc,x]],z,{a,b,c}],caught]"
+        ),
+        (
+            "worker[]:=SequenceFoldList[Function[Null,Print[InputForm[#3]];"
+            "If[SameQ[#3,b],Return[returned]];q[##]],{x0,x1},{a,b,c}];worker[]"
+        ),
+        (
+            "Catch[FoldWhileList[Function[{acc,x},Print[InputForm[x]];"
+            "If[SameQ[x,b],Throw[boom]];p[acc,x]],z,{a,b,c},Function[x,True]]]"
+        ),
+        (
+            "Catch[ComposeList[{Function[x,Print[InputForm[x]];f[x]],"
+            "Function[x,Print[InputForm[x]];Throw[boom]],"
+            "Function[x,Print[InputForm[x]];h[x]]},z]]"
+        ),
+        (
+            "Catch[Comap[{Function[x,Print[\"a\"];f[x]],"
+            "Function[x,Print[\"b\"];Throw[boom]],"
+            "Function[x,Print[\"c\"];h[x]]},z]]"
+        ),
+        (
+            "Catch[Discard[{a,b,c},Function[x,Print[InputForm[x]];"
+            "If[SameQ[x,b],Throw[boom]];False]]]"
+        ),
+        "Discard[{a,b,c},Function[x,Print[InputForm[x]];True],1]",
+        (
+            "CheckAbort[AbortProtect[Fold[Function[{acc,x},Abort[];"
+            "Print[InputForm[x]];p[acc,x]],z,{a,b,c}]],caught]"
+        ),
+        "FoldWhileList[Plus,0,{1,2,3,4},Function[x,Less[x,4]]]",
+        "FoldWhile[Plus,0,{1,2,3,4},Function[x,Less[x,4]]]",
+        (
+            "FoldWhileList[Function[{a,x},Plus[a,x]],0,{1,2,3},"
+            "Function[Null,Print[InputForm[{##}]];True],2]"
+        ),
+        (
+            "FoldWhileList[Function[{a,x},Plus[a,x]],0,{1,2},"
+            "Function[Null,Print[InputForm[{##}]];True],All]"
+        ),
+        "FoldWhileList[Plus,0,{1,2,3,4,5},Function[x,Less[x,4]],1,2]",
+        "FoldWhileList[Plus,0,{1,2,3,4},Function[x,Less[x,4]],1,-20]",
+        "FoldWhileList[f,z,{},Function[x,Print[\"predicate\"];False]]",
+        "FoldWhileList[f,z,g[a,b],Function[x,True]]",
+        "FoldWhileList[f,z,<|a->x,b:>y|>,Function[x,True]]",
+        "FoldWhileList[f,z,{a}]",
+        "foldWhileAtomic=1;FoldWhile[f,z,foldWhileAtomic,p]",
+        "FoldWhileList[f,z,{a},p,0]",
+        "FoldWhileList[Plus,0,{1},Function[x,Less[x,1]],1,foo]",
+        "FoldWhileList[Plus,0,{1},Function[x,True],1,foo]",
+        "SequenceFoldList[f,{x0,x1},{a,b,c}]",
+        "SequenceFold[f,{x0,x1},{a,b,c,d},4]",
+        "SequenceFoldList[f,{x0,x1},{a,b,c,d,e},4]",
+        "SequenceFoldList[f,g[x0,x1],h[a,b]]",
+        "SequenceFoldList[f,<|a->x0,b:>x1|>,<|p->a,q:>b|>]",
+        "SequenceFoldList[f,{s},SparseArray[{{2}->x},{3},z]]",
+        "SequenceFoldList[f,{s},SparseArray[{}, {2,2}, z]]",
+        "SequenceFoldList[f,{},{}]",
+        "SequenceFoldList[f,{},x]",
+        "SequenceFoldList[f,{x0,x1},{a},1]",
+        "SequenceFoldList[f,{x0,x1},{a},2]",
+        "SequenceFoldList[f,{x0},{a},foo]",
+        (
+            "FoldPairList[Function[{st,item},{emit[st,item],state[st,item]}],"
+            "z,{a,b,c}]"
+        ),
+        "FoldPair[Function[{s,x},{emit[s,x],state[s,x]}],z,g[a,b]]",
+        (
+            "FoldPairList[Function[{st,item},{emit[st,item],state[st,item]}],"
+            "z,<|a->x,b:>y|>]"
+        ),
+        (
+            "FoldPairList[Function[{s,x},{emit[s,x],state[s,x]}],"
+            "z,{a,b},Function[p,h[p]]]"
+        ),
+        "FoldPairList[f,z,g[]]",
+        "FoldPair[f,z,g[]]",
+        "FoldPairList[Function[{s,x},bad[s,x]],z,{a}]",
+        "FoldPair[Function[{s,x},{a,b,c}],z,{a}]",
+        "FoldPairList[f,z,x]",
+        "FoldPair[f,z,{a},p,q]",
+        (
+            "Catch[FoldPairList[Function[{s,x},{emit[s,x],state[s,x]}],"
+            "z,{a,b},Function[p,Print[InputForm[p]];"
+            "If[SameQ[First[p],emit[z,a]],Throw[boom]];p]]]"
+        ),
+    ]
+
+
 CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "rounding": rounding_cases,
     "take-drop": take_drop_cases,
@@ -522,6 +620,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "structural": structural_cases,
     "traversal": traversal_cases,
     "collections": collections_cases,
+    "combinator-state": combinator_state_cases,
     "strings": string_cases,
 }
 

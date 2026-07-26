@@ -3582,6 +3582,21 @@ std::optional<std::vector<Expr>> compound_sequence_values(
     return expression.args();
 }
 
+std::optional<std::vector<Expr>> sequence_fold_values(
+    const Expr& expression, std::string& error) {
+    if (expression.kind() == ExprKind::SparseArray) {
+        if (expression.dimensions().size() != 1) {
+            error = "SequenceFoldList expects a one-dimensional SparseArray sequence.";
+            return std::nullopt;
+        }
+        return sparse_dense_value(expression).args();
+    }
+    const auto values = compound_sequence_values(expression);
+    if (!values)
+        error = "SequenceFoldList expects a nonatomic expression.";
+    return values;
+}
+
 using Bindings = std::map<std::string, Expr>;
 
 struct CompiledStringPattern {
@@ -13484,18 +13499,61 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return function == "Fold" ? value : list(std::move(values));
     }
-    if ((function == "SequenceFold" || function == "SequenceFoldList") && args.size() == 3
-        && args[1].has_head("List") && args[2].has_head("List")) {
-        auto window = args[1].args(); std::vector<Expr> values = window;
-        if (window.empty()) return function == "SequenceFold" ? args[1] : list(values);
-        for (const auto& item : args[2].args()) {
-            auto call_args = window;
-            call_args.push_back(item);
-            const auto next = evaluate(call(args[0], call_args));
-            if (immediate_signal_active()) return next;
-            window.erase(window.begin()); window.push_back(next); values.push_back(next);
+    if (function == "SequenceFold" || function == "SequenceFoldList") {
+        if (args.size() != 3 && args.size() != 4)
+            return raw_evaluation_error(function
+                + " expects a function, initial values, inputs, and an optional "
+                  "argument count.");
+        std::string sequence_error;
+        const auto initial_values = sequence_fold_values(args[1], sequence_error);
+        if (!initial_values) return raw_evaluation_error(sequence_error);
+        const auto inputs = sequence_fold_values(args[2], sequence_error);
+        if (!inputs) return raw_evaluation_error(sequence_error);
+        if (initial_values->empty())
+            return raw_evaluation_error(
+                "SequenceFoldList expects at least one initial value.");
+
+        const auto state_count = initial_values->size();
+        std::size_t consumed_per_step = 1;
+        if (args.size() == 4) {
+            if (args[3].kind() != ExprKind::Integer)
+                return raw_evaluation_error(
+                    "SequenceFoldList expects an integer argument.");
+            const mpz_class state_count_value(std::to_string(state_count));
+            const auto argument_count = args[3].integer_value();
+            if (argument_count < state_count_value)
+                return raw_evaluation_error(
+                    "SequenceFoldList expects an argument count greater than or equal "
+                    "to the number of initial values.");
+            const auto consumed = argument_count - state_count_value;
+            if (consumed <= 0)
+                return raw_evaluation_error(
+                    "SequenceFoldList currently expects each step to consume at least "
+                    "one input element.");
+            const auto native_consumed = nonnegative_size_t(consumed);
+            if (!native_consumed || *native_consumed > inputs->size())
+                return function == "SequenceFold"
+                    ? initial_values->back() : list(*initial_values);
+            consumed_per_step = *native_consumed;
         }
-        return function == "SequenceFold" ? window.back() : list(std::move(values));
+
+        std::vector<Expr> values = *initial_values;
+        std::size_t index = 0;
+        while (index <= inputs->size()
+            && consumed_per_step <= inputs->size() - index) {
+            std::vector<Expr> call_arguments(
+                values.end() - static_cast<std::ptrdiff_t>(state_count),
+                values.end());
+            call_arguments.insert(call_arguments.end(),
+                inputs->begin() + static_cast<std::ptrdiff_t>(index),
+                inputs->begin()
+                    + static_cast<std::ptrdiff_t>(index + consumed_per_step));
+            const auto next = evaluate(call(args[0], std::move(call_arguments)));
+            if (immediate_signal_active()) return next;
+            values.push_back(next);
+            index += consumed_per_step;
+        }
+        return function == "SequenceFold" ? values.back() : list(std::move(values));
     }
     if (function == "FoldWhile" || function == "FoldWhileList") {
         if (args.size() < 4 || args.size() > 6)
@@ -13595,15 +13653,33 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return finish();
     }
-    if ((function == "FoldPair" || function == "FoldPairList") && args.size() >= 3 && args[2].has_head("List")) {
-        Expr state = args[1]; Expr last_emitted = state; std::vector<Expr> emitted;
-        for (const auto& item : args[2].args()) {
+    if (function == "FoldPair" || function == "FoldPairList") {
+        if (args.size() != 3 && args.size() != 4)
+            return raw_evaluation_error(function
+                + " currently supports a function, an initial value, inputs, and an "
+                  "optional projection.");
+        const auto inputs = compound_sequence_values(args[2]);
+        if (!inputs)
+            return raw_evaluation_error(
+                "FoldPairList expects a nonatomic expression.");
+
+        Expr state = args[1];
+        std::vector<Expr> emitted;
+        for (const auto& item : *inputs) {
             const auto pair = evaluate(call(args[0], {state, item}));
-            if (!pair.has_head("List") || pair.args().size() < 2) return call(head, args);
-            const bool last = args.size() >= 4 && is_symbol(args[3], "Last");
-            last_emitted = pair.args()[last ? 1 : 0]; emitted.push_back(last_emitted); state = pair.args()[1];
+            if (immediate_signal_active()) return pair;
+            if (!pair.has_head("List") || pair.args().size() != 2)
+                return raw_evaluation_error(
+                    "FoldPairList expects each function application to return a list "
+                    "of two elements, got " + pair.to_input_form() + ".");
+            auto projected = args.size() == 4
+                ? evaluate(call(args[3], {pair})) : pair.args()[0];
+            if (immediate_signal_active()) return projected;
+            emitted.push_back(std::move(projected));
+            state = pair.args()[1];
         }
-        return function == "FoldPair" ? last_emitted : list(std::move(emitted));
+        if (function == "FoldPairList") return list(std::move(emitted));
+        return emitted.empty() ? call(head, args) : emitted.back();
     }
     if (function == "LengthWhile" && args.size() == 2 && args[0].has_head("List")) {
         std::size_t count = 0; for (const auto& item : args[0].args()) { if (!is_symbol(evaluate(call(args[1], {item})), "True")) break; ++count; }
