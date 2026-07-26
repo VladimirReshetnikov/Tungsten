@@ -345,9 +345,9 @@ cabal run tungsten-hs -- inline-box from-cell --file example.nb --cell-index 0 -
 cabal run tungsten-hs -- docs search NotebookGet
 ```
 
-The Haskell port currently covers the kernel-free expression, structural notebook, Wolfram-string,
-inline-box, and documentation-index foundations, plus typed discovery, kernel, and FrontEnd
-operations. See
+The Haskell port currently covers the kernel-free expression, stateful session and explicit timing
+runtime, structural notebook, Wolfram-string, inline-box, and documentation-index foundations,
+plus typed discovery, kernel, and FrontEnd operations. See
 [Haskell Port](./docs/haskell-port.md) for its exact compatibility boundary and migration order.
 
 ### PowerShell

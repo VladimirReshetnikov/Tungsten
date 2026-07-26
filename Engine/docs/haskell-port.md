@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-26T03:25:53Z
-- Repository HEAD: 3b29d653d1244d7ecc01ef337950b141e73c96cb
+- Updated (UTC): 2026-07-26T05:44:01Z
+- Repository HEAD: 3ee6ad29aea1c34be44e35418f503aed95ee2631
 
 ## Purpose
 
@@ -63,6 +63,18 @@ printf '%s\n' \
 The no-argument executable mode also starts the protocol server for compatibility with the first
 Haskell process clients.
 
+## Evaluation runtime boundary
+
+`Tungsten.Evaluate.evaluate` remains a pure, kernel-free reducer. Runtime-dependent forms stay
+symbolic at that API boundary. Stateful callers use `Tungsten.Session.evaluateInSession`, whose
+result is in `IO`; the CLI, protocol server, and REPL all use this session entry point.
+
+`evaluateInSessionWithRuntime` accepts a `SessionRuntime` containing monotonic-clock and sleep
+handlers. Production code uses `defaultSessionRuntime`, while tests can inject deterministic
+handlers. The immutable evaluator constructs explicit clock-read and sleep requests and only the
+session entry point interprets them, so timing does not rely on `unsafePerformIO` or hidden mutable
+process state.
+
 ## Implemented surface
 
 | Area | Current Haskell support |
@@ -100,6 +112,14 @@ once across every supported non-local control exit with cleanup-signal precedenc
 sow buckets route to the nearest matching reap scope before optional combiners run outside that
 scope. These controls are available through the session, CLI, protocol, and REPL evaluators; the
 exported pure `Tungsten.Evaluate.evaluate` API remains the deterministic expression reducer.
+
+Session timing includes `Pause`, `AbsoluteTiming`, `TimeConstrained`, and `TimeRemaining`, with
+bare and explicit `System`` dispatch. Nested constraints use the earliest active monotonic
+deadline; the scope owner supplies its fallback only after its own scope is removed. Deadlines are
+restored across normal completion, diagnostics, throws, confirmations, aborts, loop control,
+returns, gotos, and cleanup. `Pause` sleeps cooperatively in bounded increments, and
+`WithCleanup` suppresses expired deadlines while its abort-protected initializer and cleanup run,
+matching the Python reference's cleanup guarantee.
 
 Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
 and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides
