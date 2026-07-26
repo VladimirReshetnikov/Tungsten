@@ -753,6 +753,16 @@ def sparse_structural_cases() -> list[str]:
         "Part[SparseArray[{{1}->a},{1000000000}],1000000000]",
         "Part[SparseArray[{{1,1}->a},{1000000000,1000000000}],"
         "1000000000,1000000000]",
+        f"Insert[{vector},x,0]",
+        f"Insert[{vector},x,1]",
+        f"Insert[{vector},x,2]",
+        f"Insert[{vector},x,6]",
+        f"Insert[{vector},x,-1]",
+        f"Insert[{vector},x,-6]",
+        f"Insert[{vector},0,3]",
+        f"Insert[{vector},x,{{2}}]",
+        f"Insert[{matrix},{{p,q,r}},2]",
+        "Insert[SparseArray[{{1}->a},{1000000000}],x,-1]",
     ]
     return _unique(cases)
 

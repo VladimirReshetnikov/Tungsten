@@ -14606,10 +14606,48 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         if (args.size() != 3)
             return invalid_insert("Insert expects exactly three arguments.");
+        if (args[0].kind() == ExprKind::SparseArray
+            && args[0].dimensions().size() == 1
+            && args[2].kind() == ExprKind::Integer) {
+            const auto length = args[0].dimensions().front();
+            if (length == std::numeric_limits<std::size_t>::max())
+                return invalid_insert(
+                    "SparseArray length exceeds the native representation limit.");
+            const mpz_class length_value(std::to_string(length), 10);
+            const auto& raw_index = args[2].integer_value();
+            mpz_class offset;
+            if (raw_index == 0) offset = 0;
+            else if (raw_index > 0) offset = raw_index - 1;
+            else offset = length_value + raw_index + 1;
+            const auto native_offset = nonnegative_size_t(offset);
+            if (!native_offset || *native_offset > length)
+                return invalid_insert(
+                    "Insert position is invalid for SparseArray.");
+
+            const auto inserted_index = *native_offset + 1;
+            std::vector<SparseEntry> entries;
+            entries.reserve(args[0].sparse_entries().size() + 1);
+            for (const auto& entry : args[0].sparse_entries()) {
+                auto indices = entry.indices;
+                if (indices.front() >= inserted_index) ++indices.front();
+                entries.push_back({std::move(indices), entry.value});
+            }
+            if (args[1] != args[0].fill_value())
+                entries.push_back({{inserted_index}, args[1]});
+            return sparse_array(
+                {length + 1}, std::move(entries), args[0].fill_value());
+        }
         auto paths = structural_insert_paths(args[2]);
         if (!paths.error.empty()) return invalid_insert(paths.error);
         std::stable_sort(paths.paths.begin(), paths.paths.end(), insert_path_descending);
         auto result = args[0];
+        if (result.kind() == ExprKind::SparseArray) {
+            const auto dense = sparse_dense_value(result);
+            if (!dense)
+                return invalid_insert(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            result = *dense;
+        }
         for (const auto& path : paths.paths) {
             auto inserted = structural_insert_at_path(result, path, args[1]);
             if (!inserted.second) {
