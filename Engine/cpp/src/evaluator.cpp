@@ -3956,6 +3956,63 @@ std::optional<Expr> apply_take_or_drop_specs(
     return rebuild_evaluated_call(sliced->head(), std::move(children));
 }
 
+bool failure_value(const Expr& expression) {
+    return expression.kind() == ExprKind::Call
+        && expression.has_head("Failure");
+}
+
+bool failure_symbol(const Expr& expression) {
+    return is_symbol(expression, "$Failed")
+        || is_symbol(expression, "$Canceled")
+        || is_symbol(expression, "$Aborted");
+}
+
+bool confirmation_failure_value(const Expr& expression) {
+    return failure_value(expression) || failure_symbol(expression)
+        || expression.has_head("Missing");
+}
+
+std::optional<std::vector<Expr>> failure_detail_rules(
+    const Expr& expression) {
+    if (!failure_value(expression) || expression.args().size() < 2)
+        return std::vector<Expr>{};
+    const auto& details = expression.args()[1];
+    if (const auto rules = association_rules(details)) return rules;
+    if (details.has_head("List")) {
+        std::vector<Expr> rules;
+        for (const auto& item : details.args()) {
+            if ((item.has_head("Rule") || item.has_head("RuleDelayed"))
+                && item.args().size() == 2)
+                rules.push_back(item);
+        }
+        return rules;
+    }
+    return std::vector<Expr>{};
+}
+
+Expr failure_property(const Expr& failure, const Expr& key) {
+    if ((key.text() == "Type" || key.text() == "FailureType")
+        && !failure.args().empty())
+        return failure.args()[0];
+    if (const auto rules = failure_detail_rules(failure)) {
+        const auto found = std::find_if(
+            rules->begin(), rules->end(), [&](const Expr& rule) {
+                return rule.args()[0] == key;
+            });
+        if (found != rules->end()) return found->args()[1];
+    }
+    return call("Missing", {string("KeyAbsent"), key});
+}
+
+Expr structured_failure(const Expr& type,
+    const std::vector<std::pair<std::string, Expr>>& fields) {
+    std::vector<Expr> rules;
+    rules.reserve(fields.size());
+    for (const auto& [name, value] : fields)
+        rules.push_back(call("Rule", {string(name), value}));
+    return call("Failure", {type, call("Association", std::move(rules))});
+}
+
 std::optional<std::vector<Expr>> list_or_association_values(
     const Expr& expression) {
     if (expression.has_head("List")) return expression.args();
@@ -6816,6 +6873,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, message_prefix + "::error: " + text);
         return call(raw_head, raw_args);
     };
+    if (name == "Failsafe") {
+        if (raw_args.empty() || raw_args.size() > 3)
+            return raw_evaluation_error(
+                "Failsafe expects one, two, or three arguments.");
+        std::vector<Expr> arguments;
+        arguments.reserve(raw_args.size());
+        for (const auto& argument : raw_args) {
+            arguments.push_back(evaluate(argument));
+            if (immediate_signal_active()) return arguments.back();
+        }
+        return call(raw_head, std::move(arguments));
+    }
     if (name == "WithCleanup") {
         if (raw_args.size() != 2 && raw_args.size() != 3)
             return raw_evaluation_error(
@@ -8098,6 +8167,16 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (found != rules->end()) return evaluate(found->args()[1]);
         return call("Missing", {string("KeyAbsent"), key});
     }
+    if (failure_value(head)) {
+        if (args.size() != 1) return call(head, args);
+        if (args[0].kind() == ExprKind::String)
+            return failure_property(head, args[0]);
+        const auto message = call("MessageName", {
+            symbol("General"), string("error")});
+        emit_message(message,
+            "General::error: Failure property lookup expects a string key.");
+        return call(head, args);
+    }
     const auto* evaluated_name = head.symbol_name();
     const auto function = evaluated_name ? system_dispatch_name(*evaluated_name) : std::string{};
     const auto evaluated_expression = call(head, args);
@@ -8160,12 +8239,21 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return boolean(args.size() == 1 && args[0] == head.args()[0]);
     if (head.has_head("UnsameAs") && head.args().size() == 1)
         return boolean(args.size() == 1 && args[0] != head.args()[0]);
-    if (head.has_head("Failsafe") && !head.args().empty()) {
-        for (const auto& argument : args) if (argument.has_head("Missing") || argument.has_head("Failure")) return argument;
-        bool valid = true;
-        if (head.args().size() >= 2) valid = is_symbol(evaluate(call(head.args()[1], args)), "True");
-        if (!valid) return head.args().size() >= 3 ? evaluate(call(head.args()[2], args)) : symbol("FailsafeFailed");
-        return evaluate(call(head.args()[0], args));
+    if (head.has_head("Failsafe") && !head.args().empty()
+        && head.args().size() <= 3) {
+        if (head.args().size() == 1) {
+            for (const auto& argument : args)
+                if (confirmation_failure_value(argument)) return argument;
+            return evaluate(call(head.args()[0], args));
+        }
+        const auto test = evaluate(call(head.args()[1], args));
+        if (immediate_signal_active()) return test;
+        if (is_symbol(test, "True"))
+            return evaluate(call(head.args()[0], args));
+        if (head.args().size() == 3)
+            return evaluate(call(head.args()[2], args));
+        return structured_failure(symbol("FailsafeFailed"), {
+            {"Arguments", call("Hold", args)}});
     }
     if ((head.has_head("Composition") || head.has_head("RightComposition")) && args.size() == 1) {
         auto functions = head.args();
