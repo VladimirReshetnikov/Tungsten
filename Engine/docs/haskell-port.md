@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-22T19:30:17Z
-- Repository HEAD: b6e36d4fcd683cb312b5bf4000be5da0205356cf
+- Updated (UTC): 2026-07-26T03:25:53Z
+- Repository HEAD: 3b29d653d1244d7ecc01ef337950b141e73c96cb
 
 ## Purpose
 
@@ -101,6 +101,16 @@ sow buckets route to the nearest matching reap scope before optional combiners r
 scope. These controls are available through the session, CLI, protocol, and REPL evaluators; the
 exported pure `Tungsten.Evaluate.evaluate` API remains the deterministic expression reducer.
 
+Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
+and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides
+dynamic `Enclose` scopes plus `Confirm`, `ConfirmBy`, and `ConfirmMatch`. Confirmations preserve
+lazy information and tag evaluation, session-aware tag and match predicates, string or callable
+handlers, `Confirm::confirmnotag` message filtering, and cleanup before a matching outer handler.
+The scope stack is restored across aborts, throws, returns, loop control, gotos, reaping, handler
+failures, and ordinary completion. Explicit `System`` spellings dispatch with the same boundary as
+the Python reference. `ConfirmQuiet` and `FailWhen` deliberately remain symbolic because the
+current Python compatibility reference has no evaluator implementation for either head.
+
 ## Compatibility boundary
 
 The following Engine areas still use the Python implementation and are not represented as Haskell
@@ -117,6 +127,8 @@ features yet:
   number theory, and inexact numeric semantics;
 - global message-stream recovery in the exported pure `Tungsten.Evaluate.evaluate` API, which
   remains fatal while session, CLI, protocol, and REPL evaluation recover nonfatal diagnostics;
+- `ConfirmAssert`, `Assert`, and the remaining failure/assertion helpers beyond the implemented
+  `FailureQ`/`MissingQ`/`Failsafe` and `Enclose`/`Confirm`/`ConfirmBy`/`ConfirmMatch` slice;
 - `OutputForm`, `TraditionalForm`, `TeXForm`, and the remaining display-form renderers at session
   output boundaries, including explicit `Message` insertions;
 - general `Array`, `ArrayQ`, `Tr`, `LeviCivitaTensor`, and full `SparseArray` construction,
