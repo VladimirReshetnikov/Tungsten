@@ -79,6 +79,16 @@ data MessageCollector = MessageCollector
   }
   deriving (Eq, Show)
 
+data AbortProtectScope = AbortProtectScope
+  { abortProtectScopePending :: !Bool
+  }
+  deriving (Eq, Show)
+
+data CheckAbortScope = CheckAbortScope
+  { checkAbortScopeProtectDepth :: !Int
+  }
+  deriving (Eq, Show)
+
 data SymbolValues = SymbolValues
   { symbolOwnValue :: !(Maybe Definition)
   , symbolOwnValuePattern :: !(Maybe Expr)
@@ -107,6 +117,8 @@ data EvaluationSession = EvaluationSession
   , sessionAssertEnabled :: !Bool
   , sessionQuietScopes :: ![QuietScope]
   , sessionMessageCollectors :: ![MessageCollector]
+  , sessionAbortProtectScopes :: ![AbortProtectScope]
+  , sessionCheckAbortScopes :: ![CheckAbortScope]
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
@@ -124,6 +136,8 @@ emptySession =
     , sessionAssertEnabled = False
     , sessionQuietScopes = []
     , sessionMessageCollectors = []
+    , sessionAbortProtectScopes = []
+    , sessionCheckAbortScopes = []
     , sessionGeneratedMessages = []
     , sessionVisibleMessages = []
     , sessionPrints = []
@@ -163,6 +177,7 @@ data SymbolValueSnapshot = SymbolValueSnapshot
 
 data ControlSignal
   = Thrown !Expr !(Maybe Expr) !(Maybe Expr)
+  | Aborted
   | BreakSignal
   | ContinueSignal
   | Returned !Expr !(Maybe Text)
@@ -365,6 +380,8 @@ evaluateInSession session expression =
               { sessionMessageAttemptCount = 0
               , sessionQuietScopes = []
               , sessionMessageCollectors = []
+              , sessionAbortProtectScopes = []
+              , sessionCheckAbortScopes = []
               , sessionGeneratedMessages = []
               , sessionVisibleMessages = []
               , sessionPrints = []
@@ -412,6 +429,8 @@ finalizeSessionResult = \case
                 stoppedSession
                 (Call evaluatedHandler [value, evaluatedTag])
             )
+    Left (SessionControl Aborted stoppedSession) ->
+      Right (Symbol "$Aborted", clearAbortScopes stoppedSession)
     Left (SessionControl BreakSignal stoppedSession) ->
       Right (Call (Symbol "Break") [], stoppedSession)
     Left (SessionControl ContinueSignal stoppedSession) ->
@@ -612,6 +631,12 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionCatch depth session arguments'
       Call (Symbol "Throw") arguments' ->
         evaluateSessionThrow depth session arguments'
+      Call (Symbol "Abort") arguments' ->
+        evaluateSessionAbort session arguments'
+      Call (Symbol "CheckAbort") arguments' ->
+        evaluateSessionCheckAbort depth session arguments'
+      Call (Symbol "AbortProtect") arguments' ->
+        evaluateSessionAbortProtect depth session arguments'
       Call (Symbol "Break") arguments' ->
         evaluateLoopControl BreakSignal "Break" session arguments'
       Call (Symbol "Continue") arguments' ->
@@ -990,6 +1015,9 @@ directSessionDispatchHead name =
              , "Or"
              , "Catch"
              , "Throw"
+             , "Abort"
+             , "CheckAbort"
+             , "AbortProtect"
              , "Break"
              , "Continue"
              , "Return"
@@ -4228,6 +4256,142 @@ evaluateSessionThrow depth session arguments' =
         Left (SessionControl (Thrown value (Just tag) (Just handler)) updated)
       _ -> Right (Call (Symbol "Throw") arguments', updated)
 
+evaluateSessionAbort
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAbort session = \case
+  []
+    | activeCheckAbortHandlesCurrentAbort session ->
+        Left (SessionControl Aborted session)
+    | Just deferred <- deferAbortToCurrentProtect session ->
+        Right (Symbol "Null", deferred)
+    | otherwise -> Left (SessionControl Aborted session)
+  _ -> sessionFailure session "Abort expects no arguments."
+
+evaluateSessionCheckAbort
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCheckAbort depth session = \case
+  [body, fallback] ->
+    case evaluateSessionAt (depth + 1) scopedSession body of
+      Left (SessionControl Aborted stoppedSession) ->
+        evaluateSessionAt
+          (depth + 1)
+          (popCheckAbortScopes baselineDepth stoppedSession)
+          fallback
+      Left evaluationExit ->
+        Left
+          ( mapEvaluationExitSession
+              (popCheckAbortScopes baselineDepth)
+              evaluationExit
+          )
+      Right (value, stoppedSession) ->
+        Right
+          ( value
+          , popCheckAbortScopes baselineDepth stoppedSession
+          )
+   where
+    baselineDepth = length (sessionCheckAbortScopes session)
+    scopedSession =
+      session
+        { sessionCheckAbortScopes =
+            sessionCheckAbortScopes session
+              <> [ CheckAbortScope
+                     { checkAbortScopeProtectDepth =
+                         length (sessionAbortProtectScopes session)
+                     }
+                 ]
+        }
+  _ -> sessionFailure session "CheckAbort expects exactly two arguments."
+
+evaluateSessionAbortProtect
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAbortProtect depth session = \case
+  [body] ->
+    case evaluateSessionAt (depth + 1) scopedSession body of
+      Left (SessionControl Aborted stoppedSession) ->
+        Left
+          ( SessionControl
+              Aborted
+              (popAbortProtectScopes baselineDepth stoppedSession)
+          )
+      Left evaluationExit ->
+        Left
+          ( mapEvaluationExitSession
+              (popAbortProtectScopes baselineDepth)
+              evaluationExit
+          )
+      Right (value, stoppedSession) ->
+        let pending = abortProtectScopePendingAt baselineDepth stoppedSession
+            restored = popAbortProtectScopes baselineDepth stoppedSession
+         in if pending
+              then Left (SessionControl Aborted restored)
+              else Right (value, restored)
+   where
+    baselineDepth = length (sessionAbortProtectScopes session)
+    scopedSession =
+      session
+        { sessionAbortProtectScopes =
+            sessionAbortProtectScopes session
+              <> [AbortProtectScope {abortProtectScopePending = False}]
+        }
+  _ -> sessionFailure session "AbortProtect expects exactly one argument."
+
+activeCheckAbortHandlesCurrentAbort :: EvaluationSession -> Bool
+activeCheckAbortHandlesCurrentAbort session =
+  case reverse (sessionCheckAbortScopes session) of
+    scope : _ ->
+      checkAbortScopeProtectDepth scope
+        == length (sessionAbortProtectScopes session)
+    [] -> False
+
+deferAbortToCurrentProtect :: EvaluationSession -> Maybe EvaluationSession
+deferAbortToCurrentProtect session =
+  case reverse (sessionAbortProtectScopes session) of
+    scope : outerScopes ->
+      Just
+        session
+          { sessionAbortProtectScopes =
+              reverse
+                ( scope {abortProtectScopePending = True}
+                    : outerScopes
+                )
+          }
+    [] -> Nothing
+
+abortProtectScopePendingAt :: Int -> EvaluationSession -> Bool
+abortProtectScopePendingAt baselineDepth session =
+  case drop baselineDepth (sessionAbortProtectScopes session) of
+    scope : _ -> abortProtectScopePending scope
+    [] -> False
+
+popAbortProtectScopes :: Int -> EvaluationSession -> EvaluationSession
+popAbortProtectScopes baselineDepth session =
+  session
+    { sessionAbortProtectScopes =
+        take baselineDepth (sessionAbortProtectScopes session)
+    }
+
+popCheckAbortScopes :: Int -> EvaluationSession -> EvaluationSession
+popCheckAbortScopes baselineDepth session =
+  session
+    { sessionCheckAbortScopes =
+        take baselineDepth (sessionCheckAbortScopes session)
+    }
+
+clearAbortScopes :: EvaluationSession -> EvaluationSession
+clearAbortScopes session =
+  session
+    { sessionAbortProtectScopes = []
+    , sessionCheckAbortScopes = []
+    }
+
 evaluateSessionReturn
   :: Int
   -> EvaluationSession
@@ -6183,6 +6347,10 @@ evaluateSessionCompoundExpression depth session expressions =
   go result current [] = Right (result, current)
   go _ current (expression : rest) =
     case evaluateSessionAt (depth + 1) current expression of
+      Left controlExit@(SessionControl Aborted stoppedSession) ->
+        case deferAbortToCurrentProtect stoppedSession of
+          Just deferred -> go (Symbol "Null") deferred rest
+          Nothing -> Left controlExit
       Left controlExit@(SessionControl (GotoSignal target) stoppedSession) ->
         case sessionLabelContinuation target originalExpressions of
           Just continuation -> go (Symbol "Null") stoppedSession continuation

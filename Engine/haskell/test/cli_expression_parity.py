@@ -1069,6 +1069,60 @@ CASES = (
         ),
         0,
     ),
+    (
+        "abort protect ownership and compound re-deferral",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'CheckAbort[AbortProtect[AbortProtect[Abort[]; '
+            'Print["innerTail"]]; Print["outerTail"]], fail]',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "same-depth check abort catches only its fresh abort",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "CheckAbort[AbortProtect[Abort[]; "
+            "Print[CheckAbort[1, inner]]; "
+            "Print[CheckAbort[Abort[], inner]]; "
+            'Print["tail"]], fail]',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "abort scopes restore across throw and return",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[] := AbortProtect[Return[returned]]; "
+            "{Catch[AbortProtect[Throw[thrown]]], f[], "
+            "CheckAbort[Abort[], caught]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "abort control arity diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Abort[1], CheckAbort[1], AbortProtect[]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

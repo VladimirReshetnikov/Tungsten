@@ -1431,6 +1431,11 @@ checkEvaluationSession = do
         , ("catch handlers", "{Catch[Throw[x, tag], tag, h], Catch[Throw[x, tag], tag, Function[{v, t}, h[v, t]]], Catch[Throw[x, tag], tag, Hold]}", "List[h[x, tag], h[x, tag], Hold[x, tag]]")
         , ("catch setup effects", "x = 0; {Catch[Throw[v, tag], (x = x + 1; tag), (x = x + 1; h)], x}", "List[h[v, tag], 2]")
         , ("throw argument effects", "x = 0; Catch[Throw[x = x + 1, tag, x = x + 1], tag]; x", "2")
+        , ("root abort becomes aborted", "Abort[]", "$Aborted")
+        , ("check abort catches its body abort", "CheckAbort[Abort[], caught]", "caught")
+        , ("abort protect releases its pending abort at the boundary", "CheckAbort[AbortProtect[Abort[]; 7], caught]", "caught")
+        , ("same-depth check abort handles a fresh abort inside protection", "AbortProtect[CheckAbort[Abort[], inner]]", "inner")
+        , ("abort scopes restore across throw and return", "ClearAll[f]; f[] := AbortProtect[Return[returned]]; {Catch[AbortProtect[Throw[thrown]]], f[], CheckAbort[Abort[], caught]}", "List[thrown, returned, caught]")
         , ("goto supports forward and backward labels", "ClearAll[x]; first = (Goto[end]; never; Label[end]; reached); x = 0; second = (Label[start]; x = x + 1; If[x < 3, Goto[start]]; x); {first, second}", "List[reached, 3]")
         , ("goto catches at the nearest matching compound expression", "ClearAll[x]; x = 0; {(Label[a]; x = x + 1; If[x == 1, Goto[a]]; Label[a]; x), ((Goto[inner]; never; Label[inner]; reached)), ((Goto[out]; innerNever; Label[other]); outerNever; Label[out]; reached)}", "List[2, reached, reached]")
         , ("goto compares evaluated targets with raw label tags", "ClearAll[x]; x = end; (Goto[x]; never; Label[x]; reached)", "Goto[end]")
@@ -1549,7 +1554,22 @@ checkEvaluationSession = do
         , ("module closure multiple arguments", "bin = Module[{f}, f[x_, y_] := x + y; f]; {bin[3, 4], bin[a, b]}", "List[7, Plus[a, b]]")
         ]
       printCases =
-        [ ( "pattern callbacks preserve prints in traversal order"
+        [ ( "nested abort protection re-defers at compound boundaries"
+          , "CheckAbort[AbortProtect[AbortProtect[Abort[]; Print[\"innerTail\"]]; Print[\"outerTail\"]], fail]"
+          , "fail"
+          , ["innerTail", "outerTail"]
+          )
+        , ( "same-depth check abort catches only its fresh abort"
+          , "CheckAbort[AbortProtect[Abort[]; Print[CheckAbort[1, inner]]; Print[CheckAbort[Abort[], inner]]; Print[\"tail\"]], fail]"
+          , "fail"
+          , ["1", "inner", "tail"]
+          )
+        , ( "unprotected abort skips the remaining compound tail"
+          , "CheckAbort[Print[\"before\"]; Abort[]; Print[\"after\"], caught]"
+          , "caught"
+          , ["before"]
+          )
+        , ( "pattern callbacks preserve prints in traversal order"
           , "p[x_] := (Print[x]; x > 1); Cases[{1, 2, 3}, x_ /; p[x]]"
           , "List[2, 3]"
           , ["1", "2", "3"]
@@ -1646,7 +1666,24 @@ checkEvaluationSession = do
         , "g::b: Message generated."
         )
       messageCases =
-        [ ( "Composition preserves invalid Function diagnostics"
+        [ ( "abort control arity diagnostics"
+          , "{Abort[1], CheckAbort[1], AbortProtect[]}"
+          , "List[Abort[1], CheckAbort[1], AbortProtect[]]"
+          , [ ( "Abort::error"
+              , "MessageName[Abort, \"error\"]"
+              , "Abort::error: Abort expects no arguments."
+              )
+            , ( "CheckAbort::error"
+              , "MessageName[CheckAbort, \"error\"]"
+              , "CheckAbort::error: CheckAbort expects exactly two arguments."
+              )
+            , ( "AbortProtect::error"
+              , "MessageName[AbortProtect, \"error\"]"
+              , "AbortProtect::error: AbortProtect expects exactly one argument."
+              )
+            ]
+          )
+        , ( "Composition preserves invalid Function diagnostics"
           , "Composition[Function[f[x], x]][a]"
           , "Function[f[x], x][a]"
           , [ ( "General::error"
@@ -2689,9 +2726,16 @@ checkEvaluationSession = do
   evaluateSessionCase (label, source, expected) = do
     let result = do
           expression <- parseInputForm source
-          (value, _) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
-          pure (fullForm value)
-    assertEqual ("evaluation session: " <> label) (Right expected) result
+          (value, updated) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
+          pure
+            ( fullForm value
+            , null (sessionAbortProtectScopes updated)
+            , null (sessionCheckAbortScopes updated)
+            )
+    assertEqual
+      ("evaluation session: " <> label)
+      (Right (expected, True, True))
+      result
 
   evaluatePrintCase (label, source, expectedValue, expectedPrints) = do
     let result = do
@@ -2701,10 +2745,15 @@ checkEvaluationSession = do
               (Left . ParseError . evaluationErrorMessage)
               Right
               (evaluateInSession emptySession expression)
-          pure (fullForm value, sessionPrints updated)
+          pure
+            ( fullForm value
+            , sessionPrints updated
+            , null (sessionAbortProtectScopes updated)
+            , null (sessionCheckAbortScopes updated)
+            )
     assertEqual
       ("evaluation session prints: " <> label)
-      (Right (expectedValue, expectedPrints))
+      (Right (expectedValue, expectedPrints, True, True))
       result
 
   evaluateMessageCase (label, source, expectedValue, expectedMessages) = do
