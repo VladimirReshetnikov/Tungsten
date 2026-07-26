@@ -860,6 +860,15 @@ def ordering_cases() -> list[str]:
 
     larger = "1" + "0" * 400
     smaller = "9" + "0" * 399
+    schedule_values = [
+        ((index * 37 + index // 5) % 11) - 5
+        for index in range(128)
+    ]
+    schedule_source = (
+        "Sort[{"
+        + ",".join(str(value) for value in schedule_values)
+        + "},(Print[{#1,#2}];Order[#1,#2])&]"
+    )
     return [
         f"Order[{larger},{smaller}]",
         f"Sort[{{{larger},{smaller}}}]",
@@ -867,9 +876,84 @@ def ordering_cases() -> list[str]:
         f"Ordering[{{{larger},{smaller}}}]",
         "Order[Complex[10,2],Complex[9,3]]",
         "Sort[{Complex[10,2],Complex[9,3]}]",
+        "Order[Overflow[],Infinity]",
+        "Order[Infinity,Overflow[]]",
+        "Order[Underflow[],-1]",
+        "Order[Underflow[],0]",
+        "Order[Underflow[],1]",
         "Sort[<|z->1,a->2|>]",
         "ReverseSort[<|z->1,a->2|>]",
         "Ordering[<|z->1,a->2|>]",
+        "OrderedQ[{1,2,2}]",
+        "OrderedQ[f[1,2,2]]",
+        "OrderedQ[<|z->1,a->2|>]",
+        "OrderedQ[{3,2,1},(Print[{#1,#2}];#1>#2)&]",
+        "Catch[OrderedQ[{1,2,3},(Print[{#1,#2}];Throw[x])&]]",
+        "CheckAbort[OrderedQ[{1,2,3},(Print[{#1,#2}];Abort[])&],caught]",
+        (
+            "Enclose[OrderedQ[{1,2,3},(Print[{#1,#2}];"
+            'Confirm[Failure["stop",<||>]])&]]'
+        ),
+        (
+            "orderingOrderedQWorker[]:=OrderedQ[{1,2,3},"
+            "(Print[{#1,#2}];Return[returned])&];orderingOrderedQWorker[]"
+        ),
+        "Sort[{3,1,2},(Print[{#1,#2}];#1<#2)&]",
+        "ReverseSort[{3,1,2},(Print[{#1,#2}];#1<#2)&]",
+        "Ordering[{3,1,2},All,(Print[{#1,#2}];#1<#2)&]",
+        (
+            "Catch[Sort[{3,1,2},SameTest->"
+            "((Print[{#1,#2}];Throw[x])&)]]"
+        ),
+        "Catch[Sort[{3,1,2},(Print[{#1,#2}];Throw[x])&]]",
+        "Catch[ReverseSort[{3,1,2},(Print[{#1,#2}];Throw[x])&]]",
+        "Catch[Ordering[{3,1,2},All,(Print[{#1,#2}];Throw[x])&]]",
+        (
+            "CheckAbort[Sort[{3,1,2},"
+            "(Print[{#1,#2}];Abort[])&],caught]"
+        ),
+        (
+            "Enclose[Sort[{3,1,2},(Print[{#1,#2}];"
+            'Confirm[Failure["stop",<||>]])&]]'
+        ),
+        (
+            "orderingSortWorker[]:=Sort[{3,1,2},"
+            "(Print[{#1,#2}];Return[returned])&];orderingSortWorker[]"
+        ),
+        (
+            "CheckAbort[AbortProtect[Sort[{3,1,2},"
+            "(Abort[];Print[{#1,#2}];#1<#2)&]],caught]"
+        ),
+        "SortBy[<|z->2,a->1|>,Identity]",
+        "ReverseSortBy[<|z->2,a->1|>,Identity]",
+        "OrderingBy[<|z->2,a->1|>,Identity]",
+        "Catch[SortBy[{3,1,2},(Print[#];If[#==1,Throw[x]];#)&]]",
+        (
+            "CheckAbort[SortBy[{3,1,2},"
+            "(Print[#];If[#==1,Abort[]];#)&],caught]"
+        ),
+        (
+            "Enclose[SortBy[{3,1,2},(Print[#];If[#==1,"
+            'Confirm[Failure["stop",<||>]]];#)&]]'
+        ),
+        (
+            "orderingSortByWorker[]:=SortBy[{3,1,2},"
+            "(Print[#];If[#==1,Return[returned]];#)&];"
+            "orderingSortByWorker[]"
+        ),
+        (
+            "Catch[SortBy[{3,1,2},Identity,"
+            "(Print[{#1,#2}];Throw[x])&]]"
+        ),
+        (
+            "Catch[ReverseSortBy[{3,1,2},Identity,"
+            "(Print[{#1,#2}];Throw[x])&]]"
+        ),
+        (
+            "Catch[OrderingBy[{3,1,2},Identity,All,"
+            "(Print[{#1,#2}];Throw[x])&]]"
+        ),
+        schedule_source,
         "Order[]",
         "Order[a]",
         "Order[a,b,c]",

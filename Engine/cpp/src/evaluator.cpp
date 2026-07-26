@@ -1,5 +1,6 @@
 #include "tungsten/bundled_data.hpp"
 #include "tungsten/detail/numeric.hpp"
+#include "tungsten/detail/python_sort.hpp"
 #include "tungsten/detail/unicode.hpp"
 #include "tungsten/evaluator.hpp"
 #include "tungsten/parser.hpp"
@@ -180,11 +181,6 @@ std::optional<unsigned long> bounded_nonnegative_ulong(
 unsigned long unsigned_magnitude(long value) noexcept {
     const auto converted = static_cast<unsigned long>(value);
     return value < 0 ? 0UL - converted : converted;
-}
-
-std::size_t clamped_signed_magnitude(long value, std::size_t maximum) noexcept {
-    const auto magnitude = unsigned_magnitude(value);
-    return magnitude > maximum ? maximum : static_cast<std::size_t>(magnitude);
 }
 
 std::optional<std::size_t> nonnegative_size_t(const mpz_class& value) {
@@ -2332,6 +2328,30 @@ std::optional<std::pair<Expr, Expr>> orderable_numeric_parts(
 std::optional<int> compare_orderable_real(
     const Expr& left, const Expr& right) {
     if (left == right) return 0;
+
+    // SpecialReal participates in numeric ordering before the infinity
+    // sentinels.  Overflow is greater than every other real value, while
+    // Underflow models a positive value too small for machine precision.
+    // Keep the comparison in this order to match the compatibility runtime:
+    // in particular, Overflow[] sorts after Infinity.
+    if (left.kind() == ExprKind::SpecialReal
+        || right.kind() == ExprKind::SpecialReal) {
+        if (left.kind() == ExprKind::SpecialReal && left.text() == "Overflow")
+            return 1;
+        if (right.kind() == ExprKind::SpecialReal && right.text() == "Overflow")
+            return -1;
+        if (left.kind() == ExprKind::SpecialReal && left.text() == "Underflow") {
+            const auto right_value = numeric_real(right);
+            if (!right_value) return std::nullopt;
+            return *right_value <= 0 ? 1 : -1;
+        }
+        if (right.kind() == ExprKind::SpecialReal && right.text() == "Underflow") {
+            const auto left_value = numeric_real(left);
+            if (!left_value) return std::nullopt;
+            return *left_value <= 0 ? -1 : 1;
+        }
+    }
+
     if (is_symbol(left, "-Infinity")) return -1;
     if (is_symbol(right, "-Infinity")) return 1;
     if (is_symbol(left, "Infinity")) return 1;
@@ -10802,90 +10822,270 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if (function == "LexicographicSort" && args.size() == 1 && args[0].has_head("List")) {
         auto values = args[0].args(); std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) { return lexicographic_compare(left, right) < 0; }); return list(std::move(values));
     }
-    if (function == "OrderedQ" && (args.size() == 1 || args.size() == 2) && args[0].has_head("List")) {
-        const bool descending = args.size() == 2 && is_symbol(args[1], "Greater");
-        return boolean(std::adjacent_find(args[0].args().begin(), args[0].args().end(), [&](const Expr& left, const Expr& right) {
-            const auto order = expression_compare(left, right); return descending ? order < 0 : order > 0;
-        }) == args[0].args().end());
+    struct OrderingSignal {};
+    Expr ordering_signal_value = symbol("Null");
+    auto evaluate_ordering_callable = [&](const Expr& callable,
+                                          std::vector<Expr> values) {
+        auto result = evaluate(call(callable, std::move(values)));
+        if (immediate_signal_active()) {
+            ordering_signal_value = result;
+            throw OrderingSignal{};
+        }
+        return result;
+    };
+    auto ordering_compare = [&](const std::optional<Expr>& callable,
+                                const Expr& left, const Expr& right) {
+        if (!callable) return expression_compare(left, right);
+        const auto first = evaluate_ordering_callable(
+            *callable, {left, right});
+        if (is_symbol(first, "True")) return -1;
+        if (is_symbol(first, "False")) {
+            const auto reverse = evaluate_ordering_callable(
+                *callable, {right, left});
+            if (is_symbol(reverse, "True")) return 1;
+            if (is_symbol(reverse, "False")) return 0;
+            if (reverse.kind() == ExprKind::Integer)
+                return reverse.integer_value() < 0 ? -1
+                    : reverse.integer_value() > 0 ? 1 : 0;
+            return 0;
+        }
+        if (first.kind() == ExprKind::Integer)
+            return first.integer_value() < 0 ? 1
+                : first.integer_value() > 0 ? -1 : 0;
+        return expression_compare(left, right);
+    };
+    auto same_test_succeeds = [&](const std::optional<Expr>& same_test,
+                                  const Expr& left, const Expr& right) {
+        return same_test && is_symbol(evaluate_ordering_callable(
+            *same_test, {left, right}), "True");
+    };
+
+    struct OrderedItem {
+        Expr original;
+        Expr value;
+        std::vector<Expr> keys;
+        std::size_t index;
+    };
+    auto ordered_items = [&](const Expr& subject)
+        -> std::optional<std::vector<OrderedItem>> {
+        std::vector<OrderedItem> result;
+        if (const auto rules = association_rules(subject)) {
+            result.reserve(rules->size());
+            for (std::size_t index = 0; index < rules->size(); ++index)
+                result.push_back({(*rules)[index], (*rules)[index].args()[1],
+                    {}, index});
+            return result;
+        }
+        if (subject.kind() != ExprKind::Call) return std::nullopt;
+        result.reserve(subject.args().size());
+        for (std::size_t index = 0; index < subject.args().size(); ++index)
+            result.push_back({subject.args()[index], subject.args()[index],
+                {}, index});
+        return result;
+    };
+    auto rebuild_ordered = [&](const Expr& subject,
+                               const std::vector<OrderedItem>& items) {
+        std::vector<Expr> result;
+        result.reserve(items.size());
+        const bool association = association_rules(subject).has_value();
+        for (const auto& item : items)
+            result.push_back(association ? item.original : item.value);
+        return call(association ? symbol("Association") : subject.head(),
+            std::move(result));
+    };
+    auto slice_ordered_count = [&](std::vector<OrderedItem>& items,
+                                   const std::optional<Expr>& count,
+                                   const std::string& operation) {
+        if (!count || is_symbol(*count, "All")) return std::string{};
+        if (count->kind() != ExprKind::Integer)
+            return operation + " expects an integer or All count.";
+        const auto length = mpz_class(std::to_string(items.size()), 10);
+        if (count->integer_value() >= 0) {
+            if (count->integer_value() < length)
+                items.resize(nonnegative_size_t(
+                    count->integer_value()).value_or(0));
+        } else {
+            const auto magnitude = -count->integer_value();
+            if (magnitude < length) {
+                const auto retained = nonnegative_size_t(magnitude).value_or(0);
+                items.erase(items.begin(), items.end()
+                    - static_cast<std::ptrdiff_t>(retained));
+            }
+        }
+        return std::string{};
+    };
+    struct OrderingArguments {
+        std::vector<Expr> values;
+        std::optional<Expr> same_test;
+        std::string error;
+    };
+    auto split_ordering_options = [&](const std::string& operation) {
+        OrderingArguments result{args, std::nullopt, {}};
+        std::size_t option_start = result.values.size();
+        while (option_start != 0) {
+            const auto& option = result.values[option_start - 1];
+            if ((!option.has_head("Rule") && !option.has_head("RuleDelayed"))
+                || option.args().size() != 2
+                || !option.args()[0].symbol_name())
+                break;
+            --option_start;
+        }
+        for (std::size_t index = option_start;
+             index < result.values.size(); ++index) {
+            const auto& option = result.values[index];
+            if (!is_symbol(option.args()[0], "SameTest")) {
+                result.error = operation
+                    + " currently supports only the SameTest option.";
+                return result;
+            }
+            result.same_test = is_symbol(option.args()[1], "Automatic")
+                ? std::nullopt : std::optional<Expr>(option.args()[1]);
+        }
+        result.values.resize(option_start);
+        return result;
+    };
+
+    if (function == "OrderedQ") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "OrderedQ expects an expression and an optional ordering function.");
+        auto items = ordered_items(args[0]);
+        if (!items)
+            return raw_evaluation_error(
+                "OrderedQ expects a nonatomic expression.");
+        const auto callable = args.size() == 2
+            ? std::optional<Expr>(args[1]) : std::nullopt;
+        try {
+            for (std::size_t index = 1; index < items->size(); ++index)
+                if (ordering_compare(callable, (*items)[index - 1].value,
+                    (*items)[index].value) > 0)
+                    return boolean(false);
+        } catch (const OrderingSignal&) {
+            return ordering_signal_value;
+        }
+        return boolean(true);
     }
-    if ((function == "Sort" || function == "ReverseSort" || function == "Ordering") && !args.empty()) {
-        const auto rules = association_rules(args[0]);
-        if (rules || args[0].kind() == ExprKind::Call) {
-            std::vector<Expr> items = rules ? *rules : args[0].args(); std::vector<std::size_t> indices(items.size()); std::iota(indices.begin(), indices.end(), 0);
-            bool greater = function == "ReverseSort"; std::optional<long> count; std::optional<Expr> same_test;
-            for (std::size_t index = 1; index < args.size(); ++index) {
-                if (is_symbol(args[index], "Greater")) greater = !greater;
-                else if (is_symbol(args[index], "Less")) {}
-                else if (args[index].kind() == ExprKind::Integer && args[index].integer_value().fits_slong_p()) count = args[index].integer_value().get_si();
-                else if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "SameTest")) same_test = args[index].args()[1];
-            }
-            auto compare_indices = [&](std::size_t left, std::size_t right) {
-                const auto& left_value = rules ? items[left].args()[1] : items[left]; const auto& right_value = rules ? items[right].args()[1] : items[right];
-                const auto order = expression_compare(left_value, right_value); return greater ? order > 0 : order < 0;
-            };
-            if (!same_test) std::stable_sort(indices.begin(), indices.end(), compare_indices);
-            else for (std::size_t index = 1; index < indices.size(); ++index) {
-                auto insertion = index;
-                while (insertion > 0) {
-                    const auto& left = rules ? items[indices[insertion - 1]].args()[1] : items[indices[insertion - 1]];
-                    const auto& right = rules ? items[indices[insertion]].args()[1] : items[indices[insertion]];
-                    if (is_symbol(evaluate(call(*same_test, {left, right})), "True") || !compare_indices(indices[insertion], indices[insertion - 1])) break;
-                    std::swap(indices[insertion - 1], indices[insertion]); --insertion;
-                }
-            }
-            if (count) {
-                const auto amount = clamped_signed_magnitude(*count, indices.size());
-                if (*count >= 0) indices.resize(amount); else indices.erase(indices.begin(), indices.end() - static_cast<std::ptrdiff_t>(amount));
-            }
+    if (function == "Sort" || function == "ReverseSort"
+        || function == "Ordering") {
+        auto parsed = split_ordering_options(function);
+        if (!parsed.error.empty()) return raw_evaluation_error(parsed.error);
+        const bool ordering = function == "Ordering";
+        const bool reverse = function == "ReverseSort";
+        const bool valid_arity
+            = parsed.values.size() >= 1 && parsed.values.size() <= 3;
+        if (!valid_arity) {
+            return raw_evaluation_error(ordering
+                ? "Ordering expects an expression, optional count, optional ordering function, and optional SameTest rule."
+                : function + " expects an expression, optional ordering function, optional count, and optional SameTest rule.");
+        }
+        auto items = ordered_items(parsed.values[0]);
+        if (!items)
+            return raw_evaluation_error(ordering
+                ? "Ordering expects a nonatomic expression."
+                : "Sort expects a nonatomic expression.");
+        const auto count = ordering
+            ? parsed.values.size() >= 2
+                ? std::optional<Expr>(parsed.values[1]) : std::nullopt
+            : parsed.values.size() >= 3
+                ? std::optional<Expr>(parsed.values[2]) : std::nullopt;
+        const auto callable = ordering
+            ? parsed.values.size() >= 3
+                ? std::optional<Expr>(parsed.values[2]) : std::nullopt
+            : parsed.values.size() >= 2
+                ? std::optional<Expr>(parsed.values[1]) : std::nullopt;
+        try {
+            *items = detail::python_stable_sort(std::move(*items),
+                [&](const OrderedItem& left, const OrderedItem& right) {
+                    if (same_test_succeeds(
+                            parsed.same_test, left.value, right.value))
+                        return false;
+                    const auto order = ordering_compare(
+                        callable, left.value, right.value);
+                    return reverse ? order > 0 : order < 0;
+                });
+        } catch (const OrderingSignal&) {
+            return ordering_signal_value;
+        }
+        if (const auto error = slice_ordered_count(
+                *items, count, ordering ? "Ordering" : "Sort");
+            !error.empty())
+            return raw_evaluation_error(error);
+        if (ordering) {
             std::vector<Expr> result;
-            for (const auto index : indices) result.push_back(function == "Ordering" ? integer(index + 1) : items[index]);
-            if (function == "Ordering") return list(std::move(result));
-            return call(rules ? symbol("Association") : args[0].head(), std::move(result));
+            result.reserve(items->size());
+            for (const auto& item : *items)
+                result.push_back(integer(item.index + 1));
+            return list(std::move(result));
         }
+        return rebuild_ordered(parsed.values[0], *items);
     }
-    if ((function == "SortBy" || function == "ReverseSortBy" || function == "OrderingBy") && args.size() >= 2) {
-        const auto rules = association_rules(args[0]);
-        if (rules || args[0].kind() == ExprKind::Call) {
-            std::vector<Expr> items = rules ? *rules : args[0].args();
-            const bool multiple = args[1].has_head("List"); const auto functions = multiple ? args[1].args() : std::vector<Expr>{args[1]};
-            std::optional<Expr> same_test; std::optional<long> count; bool greater = false;
-            for (std::size_t index = 2; index < args.size(); ++index) {
-                if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "SameTest")) same_test = args[index].args()[1];
-                else if (is_symbol(args[index], "Greater")) greater = true;
-                else if (is_symbol(args[index], "Less")) greater = false;
-                else if (is_symbol(args[index], "All")) {}
-                else if (args[index].kind() == ExprKind::Integer && args[index].integer_value().fits_slong_p()) count = args[index].integer_value().get_si();
-            }
-            struct Keyed { Expr item; Expr value; std::vector<Expr> keys; std::size_t index; };
-            std::vector<Keyed> keyed;
-            for (std::size_t index = 0; index < items.size(); ++index) {
-                const auto value = rules ? items[index].args()[1] : items[index]; std::vector<Expr> keys;
-                for (const auto& callable : functions) keys.push_back(evaluate(call(callable, {value})));
-                keyed.push_back({items[index], value, std::move(keys), index});
-            }
-            for (std::size_t index = 1; index < keyed.size(); ++index) {
-                auto insertion = index;
-                while (insertion > 0) {
-                    int order = 0;
-                    for (std::size_t key = 0; key < keyed[insertion - 1].keys.size(); ++key) {
-                        const auto& left = keyed[insertion - 1].keys[key]; const auto& right = keyed[insertion].keys[key];
-                        if (same_test && is_symbol(evaluate(call(*same_test, {left, right})), "True")) continue;
-                        order = expression_compare(left, right); if (order != 0) break;
-                    }
-                    if (order == 0 && !same_test && !multiple) order = expression_compare(keyed[insertion - 1].value, keyed[insertion].value);
-                    if (greater) order = -order;
-                    if (function == "ReverseSortBy") order = -order;
-                    if (order <= 0) break;
-                    std::swap(keyed[insertion - 1], keyed[insertion]); --insertion;
-                }
-            }
-            if (count) {
-                const auto amount = clamped_signed_magnitude(*count, keyed.size());
-                if (*count >= 0) keyed.resize(amount); else keyed.erase(keyed.begin(), keyed.end() - static_cast<std::ptrdiff_t>(amount));
-            }
-            std::vector<Expr> result; for (const auto& item : keyed) result.push_back(function == "OrderingBy" ? integer(item.index + 1) : item.item);
-            return function == "OrderingBy" ? list(std::move(result)) : call(rules ? symbol("Association") : args[0].head(), std::move(result));
+    if (function == "SortBy" || function == "ReverseSortBy"
+        || function == "OrderingBy") {
+        auto parsed = split_ordering_options(function);
+        if (!parsed.error.empty()) return raw_evaluation_error(parsed.error);
+        const bool ordering = function == "OrderingBy";
+        const bool reverse = function == "ReverseSortBy";
+        if ((parsed.values.size() == 1 && !parsed.same_test)
+            || (ordering && parsed.values.size() == 1))
+            return call(raw_head, raw_args);
+        const bool valid_arity = ordering
+            ? parsed.values.size() >= 2 && parsed.values.size() <= 4
+            : parsed.values.size() >= 2 && parsed.values.size() <= 3;
+        if (!valid_arity) {
+            return raw_evaluation_error(ordering
+                ? "OrderingBy expects an expression, functions, optional count, optional ordering function, and optional SameTest rule."
+                : function + " expects an expression, functions, optional ordering function, and optional SameTest rule.");
         }
+        auto items = ordered_items(parsed.values[0]);
+        if (!items)
+            return raw_evaluation_error(
+                "SortBy expects a nonatomic expression.");
+        const bool key_specification_is_list
+            = parsed.values[1].has_head("List");
+        const auto key_functions = key_specification_is_list
+            ? parsed.values[1].args() : std::vector<Expr>{parsed.values[1]};
+        const auto count = ordering && parsed.values.size() >= 3
+            ? std::optional<Expr>(parsed.values[2]) : std::nullopt;
+        const auto callable = ordering
+            ? parsed.values.size() >= 4
+                ? std::optional<Expr>(parsed.values[3]) : std::nullopt
+            : parsed.values.size() >= 3
+                ? std::optional<Expr>(parsed.values[2]) : std::nullopt;
+        try {
+            for (auto& item : *items)
+                for (const auto& key_function : key_functions)
+                    item.keys.push_back(evaluate_ordering_callable(
+                        key_function, {item.value}));
+            *items = detail::python_stable_sort(std::move(*items),
+                [&](const OrderedItem& left, const OrderedItem& right) {
+                    int order = 0;
+                    for (std::size_t key = 0; key < left.keys.size(); ++key) {
+                        if (same_test_succeeds(parsed.same_test,
+                                left.keys[key], right.keys[key]))
+                            continue;
+                        order = ordering_compare(callable,
+                            left.keys[key], right.keys[key]);
+                        if (order != 0) break;
+                    }
+                    if (order == 0 && !parsed.same_test
+                        && !key_specification_is_list)
+                        order = expression_compare(left.value, right.value);
+                    return reverse ? order > 0 : order < 0;
+                });
+        } catch (const OrderingSignal&) {
+            return ordering_signal_value;
+        }
+        if (const auto error = slice_ordered_count(
+                *items, count, "OrderingBy"); !error.empty())
+            return raw_evaluation_error(error);
+        if (ordering) {
+            std::vector<Expr> result;
+            result.reserve(items->size());
+            for (const auto& item : *items)
+                result.push_back(integer(item.index + 1));
+            return list(std::move(result));
+        }
+        return rebuild_ordered(parsed.values[0], *items);
     }
     if ((function == "MinimalBy" || function == "MaximalBy") && (args.size() == 2 || args.size() == 3)) {
         const auto rules = association_rules(args[0]);
