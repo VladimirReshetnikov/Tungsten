@@ -2485,6 +2485,10 @@ reduceSessionEvaluatedCall
   -> Expr
   -> Maybe (SessionResult Expr)
 reduceSessionEvaluatedCall depth session = \case
+  expression@(Call (Symbol "ToExpression") _) ->
+    Just $ do
+      parsed <- liftPureEvaluation session (reduceEvaluatedCall expression)
+      evaluateSessionAt (depth + 1) session parsed
   Call (Symbol "Symbol") values ->
     Just (evaluateSessionSymbol session values)
   Call (Symbol "SymbolName") values ->

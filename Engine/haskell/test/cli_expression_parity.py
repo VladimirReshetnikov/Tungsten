@@ -1884,6 +1884,125 @@ CASES = (
         ),
         0,
     ),
+    (
+        "base encodings and permissive decoders",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{BaseEncode[ByteArray[{65,66,67}]], "
+            "BaseEncode[ByteArray[{0,255}],\"Base16\"], "
+            "BaseEncode[ByteArray[{0,0,0,0}],\"Base85ASCII\"], "
+            "Normal[BaseDecode[\"Q U!J@D\",\"Base64\"]], "
+            "Normal[BaseDecode[\"00-ff\",\"Base16\"]], "
+            "Normal[BaseDecode[\"z\",\"Base85ASCII\"]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "textual forms and named operators",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ToString[HoldComplete[1+2],InputForm], "
+            "ToString[HoldComplete[f@x//g],StandardForm], "
+            "ToString[1+x,OutputForm], ToString[x^2,CForm], "
+            "ToString[x^2,FortranForm], ToString[x^2,TextForm], "
+            "ToString[1+x,TeXForm], ToString[x^2,TeXForm], "
+            "ToString[1+x,TraditionalForm], "
+            "ToString[CirclePlus[a,b],InputForm], "
+            "ToString[CirclePlus[a,b],TeXForm], "
+            "ToString[CirclePlus[a,b],MathMLForm]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "expression parsing boxes and syntax",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ToExpression[\"1+2\"], "
+            "ToExpression[\"1+2\",InputForm,HoldComplete], "
+            "ToExpression[\"f@x//g\",StandardForm,HoldComplete], "
+            "ToExpression[{\"1+2\",\"f[x]\"},InputForm,HoldComplete], "
+            "ToExpression[\"a\\\\oplus b\",TeXForm,HoldComplete], "
+            "ToExpression[ToString[x^2,TeXForm],TeXForm,HoldComplete], "
+            "ToExpression[ToString[x^2,MathMLForm],MathMLForm,HoldComplete], "
+            "MakeBoxes[1+2,StandardForm], ToBoxes[1+2,StandardForm], "
+            "MakeBoxes[1+x,TraditionalForm], ToBoxes[1+x,TraditionalForm], "
+            "MakeExpression[RowBox[{\"1\",\"+\",\"2\"}],StandardForm], "
+            "StripBoxes[RowBox[{\"1\",\" \",StyleBox[\"+\",Red],\"2\"}]], "
+            "SyntaxQ[\"1+2\"], SyntaxQ[\"1+\"], "
+            "SyntaxQ[RowBox[{\"1\",\"+\",\"2\"}]], "
+            "SyntaxLength[\"1+2\"], SyntaxLength[\"1+\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "direct string import and export formats",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ImportString[\"abc\",\"Text\"], "
+            "ImportString[\"abc\",\"Byte\"], "
+            "ImportString[\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\",\"JSON\"], "
+            "ImportString[\"{\\\"a\\\":1}\",\"RawJSON\"], "
+            "ImportString[\"1,2\\n3,4\\n\",\"CSV\"], "
+            "ImportString[\"1\\t2\\n3\\t4\\n\",\"TSV\"], "
+            "ImportString[\"1 2\\n3 4\\n\",\"Table\"], "
+            "ImportString[\"f[a,1]\",\"WL\"], "
+            "ExportString[{97,98,99},\"Byte\"], "
+            "ExportString[f[a,1],\"WL\"], "
+            "ImportString[ExportString[{{1,2},{3,4}},\"CSV\"],\"CSV\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "byte array import export and JSON round trips",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ImportByteArray[ByteArray[{97,98,99}],\"Byte\"], "
+            "ImportByteArray[ByteArray[{97,98,99}],\"String\"], "
+            "Normal[ExportByteArray[{97,98,99},\"Byte\"]], "
+            "Normal[ExportByteArray[\"abc\",\"String\"]], "
+            "ImportString[ExportString[{\"a\"->1,\"b\"->{2,3}},\"JSON\"],\"JSON\"], "
+            "ImportString[ExportString[<|\"a\"->1|>,\"JSON\"],\"JSON\"], "
+            "ImportString[ExportString[<|\"a\"->1,\"b\"->{2,3}|>,\"RawJSON\"],\"RawJSON\"], "
+            "ImportByteArray[ExportByteArray[<|\"a\"->1|>,\"RawJSON\"],\"RawJSON\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "textual conversion recoverable diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{BaseEncode[{1}], BaseDecode[1], "
+            "ToExpression[\"x\",OutputForm], ToBoxes[x,TeXForm], "
+            "SyntaxQ[1], ImportString[1,\"Text\"], "
+            "ExportString[{256},\"Byte\"], "
+            "ExportString[{\"a\"->1},\"RawJSON\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

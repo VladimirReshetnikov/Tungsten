@@ -58,6 +58,7 @@ import Tungsten.Repl
 import Tungsten.Session
 import qualified Tungsten.StatisticsTests as StatisticsTests
 import qualified Tungsten.SystemSymbols as SystemSymbols
+import qualified Tungsten.TextualFormsTests as TextualFormsTests
 import Tungsten.WolframString
 import Tungsten.WolframProcesses
 
@@ -89,6 +90,7 @@ tests =
   , IntervalTests.checkIntervalEvaluator
   , StatisticsTests.checkStatisticsEvaluator
   , NumericAlgebraTests.checkNumericAlgebraEvaluator
+  , TextualFormsTests.checkTextualFormsEvaluator
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors

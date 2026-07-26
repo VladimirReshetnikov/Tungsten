@@ -52,6 +52,7 @@ library
     Tungsten.Repl
     Tungsten.Session
     Tungsten.SystemSymbols
+    Tungsten.TextualForms
     Tungsten.WolframString
     Tungsten.WolframProcesses
   build-depends:
@@ -90,6 +91,7 @@ test-suite tungsten-engine-test
     Tungsten.IntervalTests
     Tungsten.StatisticsTests
     Tungsten.NumericAlgebraTests
+    Tungsten.TextualFormsTests
   build-depends:
     base            >= 4.21 && < 4.22,
     bytestring      >= 0.12 && < 0.13,

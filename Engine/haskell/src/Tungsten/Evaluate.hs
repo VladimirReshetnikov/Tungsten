@@ -62,9 +62,13 @@ import Tungsten.SystemSymbols
   , normalizeSystemSymbolName
   , systemSymbolAttributes
   )
+import qualified Tungsten.TextualForms as TextualForms
 
 newtype EvaluationError = EvaluationError {evaluationErrorMessage :: Text}
   deriving (Eq, Show)
+
+textualReduction :: Either Text Expr -> Either EvaluationError Expr
+textualReduction = either (Left . EvaluationError) Right
 
 -- | Evaluate an expression to a fixed point, with a depth guard for malformed
 -- self-referential transformations.
@@ -78,6 +82,9 @@ evaluateAt depth expression
       Call (Symbol headName) _
         | systemHeadIn ["HoldComplete", "Unevaluated"] headName ->
             Right expression
+      Call (Symbol headName) arguments'
+        | systemHeadIn ["MakeBoxes", "MakeExpression"] headName ->
+            reducePureCallForDispatch (Call (Symbol headName) arguments')
       Call (Symbol ruleHead) (leftHandSide : heldArguments)
         | systemHeadIn ["RuleDelayed"] ruleHead -> do
             evaluatedLeft <- evaluateAt (depth + 1) leftHandSide
@@ -648,6 +655,20 @@ reduceBuiltin headName values = case headName of
   "FromCharacterCode" -> reduceFromCharacterCode values
   "StringToByteArray" -> reduceStringToByteArray values
   "ByteArrayToString" -> reduceByteArrayToString values
+  "BaseEncode" -> textualReduction (TextualForms.baseEncodeExpr values)
+  "BaseDecode" -> textualReduction (TextualForms.baseDecodeExpr values)
+  "ToString" -> textualReduction (TextualForms.toStringExpr values)
+  "ToExpression" -> textualReduction (TextualForms.toExpressionExpr values)
+  "ToBoxes" -> textualReduction (TextualForms.toBoxesExpr values)
+  "MakeBoxes" -> textualReduction (TextualForms.makeBoxesExpr values)
+  "MakeExpression" -> textualReduction (TextualForms.makeExpressionExpr values)
+  "StripBoxes" -> textualReduction (TextualForms.stripBoxesExpr values)
+  "SyntaxQ" -> textualReduction (TextualForms.syntaxQExpr values)
+  "SyntaxLength" -> textualReduction (TextualForms.syntaxLengthExpr values)
+  "ExportString" -> textualReduction (TextualForms.exportStringExpr values)
+  "ImportString" -> textualReduction (TextualForms.importStringExpr values)
+  "ExportByteArray" -> textualReduction (TextualForms.exportByteArrayExpr values)
+  "ImportByteArray" -> textualReduction (TextualForms.importByteArrayExpr values)
   "StringLength" -> reduceStringLength values
   "StringTake" -> reduceStringTakeDrop True values
   "StringDrop" -> reduceStringTakeDrop False values
