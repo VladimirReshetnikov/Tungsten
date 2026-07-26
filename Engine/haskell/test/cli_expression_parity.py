@@ -1549,6 +1549,55 @@ CASES = (
         ),
         0,
     ),
+    (
+        "canonical interval construction and set operations",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Interval[], Interval[3], Interval[{3,1}], "
+            "Interval[{1,3},{2,5}], Interval[{3,4},{1,2}], "
+            "Interval[{-Infinity,0},{0,Infinity}], "
+            "IntervalUnion[], "
+            "IntervalUnion[Interval[{1,2}],Interval[{2,4}]], "
+            "IntervalIntersection[], "
+            "IntervalIntersection[Interval[{1,2},{4,5}],Interval[{2,4}]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "interval scalar vector and subinterval membership",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{IntervalMemberQ[Interval[{1,3}],2], "
+            "IntervalMemberQ[Interval[{1,3}],{1,4}], "
+            "IntervalMemberQ[Interval[{1,3}],Interval[{2,3}]], "
+            "IntervalMemberQ[Interval[{1,3}],Interval[{0,2}]], "
+            "IntervalMemberQ[Interval[],Interval[]], "
+            "IntervalMemberQ[Interval[{1,3}],x], IntervalMemberQ[x,1]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "symbolic malformed and qualified intervals",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Interval[{a,b}], IntervalMemberQ[Interval[{1,3}]], "
+            "System`Interval[{3,1}], "
+            "System`IntervalMemberQ[Interval[{1,3}],2]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

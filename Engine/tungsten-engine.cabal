@@ -82,7 +82,9 @@ test-suite tungsten-engine-test
   type:            exitcode-stdio-1.0
   hs-source-dirs:  haskell/test
   main-is:         Main.hs
-  other-modules:   Tungsten.ArrayTests
+  other-modules:
+    Tungsten.ArrayTests
+    Tungsten.IntervalTests
   build-depends:
     base            >= 4.21 && < 4.22,
     bytestring      >= 0.12 && < 0.13,

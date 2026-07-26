@@ -43,6 +43,7 @@ import Tungsten.Evaluate
 import Tungsten.Discovery
 import Tungsten.Frontend
 import Tungsten.InlineBoxes
+import qualified Tungsten.IntervalTests as IntervalTests
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Licensing
@@ -79,6 +80,7 @@ tests =
   , checkEvaluator
   , checkEvaluatorErrors
   , ArrayTests.checkArrayEvaluator
+  , IntervalTests.checkIntervalEvaluator
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors

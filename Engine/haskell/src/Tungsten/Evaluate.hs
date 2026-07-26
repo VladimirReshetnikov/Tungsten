@@ -724,6 +724,10 @@ reduceBuiltin headName values = case headName of
   "Union" -> reduceSetOperation SetUnion values
   "Intersection" -> reduceSetOperation SetIntersection values
   "Complement" -> reduceSetOperation SetComplement values
+  "Interval" -> Right (reduceInterval values)
+  "IntervalUnion" -> Right (reduceIntervalUnion values)
+  "IntervalIntersection" -> Right (reduceIntervalIntersection values)
+  "IntervalMemberQ" -> Right (reduceIntervalMemberQ values)
   "Select" -> reduceSelect False values
   "Discard" -> reduceSelect True values
   "SelectFirst" -> reduceSelectFirst values
@@ -3557,6 +3561,194 @@ uniqueCanonical = foldl' appendUnique []
   appendUnique retained value
     | value `elem` retained = retained
     | otherwise = retained <> [value]
+
+data IntervalSegment = IntervalSegment !Expr !Expr
+  deriving (Eq, Show)
+
+reduceInterval :: [Expr] -> Expr
+reduceInterval values =
+  maybe
+    (Call (Symbol "Interval") values)
+    intervalExpression
+    (intervalSegmentsFromArguments values)
+
+reduceIntervalUnion :: [Expr] -> Expr
+reduceIntervalUnion values =
+  case traverse intervalSegmentsFromInterval values of
+    Just segmentGroups ->
+      maybe
+        (Call (Symbol "IntervalUnion") values)
+        intervalExpression
+        (normalizeIntervalSegments (concat segmentGroups))
+    Nothing -> Call (Symbol "IntervalUnion") values
+
+reduceIntervalIntersection :: [Expr] -> Expr
+reduceIntervalIntersection [] = intervalExpression []
+reduceIntervalIntersection values =
+  case traverse intervalSegmentsFromInterval values of
+    Nothing -> Call (Symbol "IntervalIntersection") values
+    Just [] -> intervalExpression []
+    Just (initial : remaining) ->
+      maybe
+        (Call (Symbol "IntervalIntersection") values)
+        intervalExpression
+        (foldM intersectIntervalSets initial remaining)
+
+reduceIntervalMemberQ :: [Expr] -> Expr
+reduceIntervalMemberQ [intervalValue, item] =
+  case intervalSegmentsFromInterval intervalValue of
+    Nothing -> Symbol "False"
+    Just container -> intervalMembership container item
+reduceIntervalMemberQ values = Call (Symbol "IntervalMemberQ") values
+
+intervalMembership :: [IntervalSegment] -> Expr -> Expr
+intervalMembership container (Call (Symbol "List") values) =
+  list (map (intervalMembership container) values)
+intervalMembership container candidate =
+  case intervalSegmentsFromInterval candidate of
+    Just segments -> boolean (all (intervalContainsSegment container) segments)
+    Nothing -> case intervalSegmentFromArgument candidate of
+      Just segment -> boolean (intervalContainsSegment container segment)
+      Nothing -> Symbol "False"
+
+intervalContainsSegment :: [IntervalSegment] -> IntervalSegment -> Bool
+intervalContainsSegment container (IntervalSegment candidateLeft candidateRight) =
+  any contains container
+ where
+  contains (IntervalSegment left right) =
+    case
+      ( compareIntervalEndpoint left candidateLeft
+      , compareIntervalEndpoint candidateRight right
+      )
+    of
+      (Just leftOrdering, Just rightOrdering) ->
+        leftOrdering /= GT && rightOrdering /= GT
+      _ -> False
+
+intervalSegmentsFromInterval :: Expr -> Maybe [IntervalSegment]
+intervalSegmentsFromInterval (Call (Symbol "Interval") values) =
+  intervalSegmentsFromArguments values
+intervalSegmentsFromInterval _ = Nothing
+
+intervalSegmentsFromArguments :: [Expr] -> Maybe [IntervalSegment]
+intervalSegmentsFromArguments values = do
+  segments <- traverse intervalSegmentFromArgument values
+  normalizeIntervalSegments segments
+
+intervalSegmentFromArgument :: Expr -> Maybe IntervalSegment
+intervalSegmentFromArgument argument = do
+  let (left, right) = case argument of
+        Call (Symbol "List") [first, second] -> (first, second)
+        _ -> (argument, argument)
+  ordering <- compareIntervalEndpoint left right
+  pure
+    ( if ordering == GT
+        then IntervalSegment right left
+        else IntervalSegment left right
+    )
+
+normalizeIntervalSegments :: [IntervalSegment] -> Maybe [IntervalSegment]
+normalizeIntervalSegments segments
+  | not (allIntervalEndpointsComparable segments) = Nothing
+  | otherwise = mergeSegments [] (sortBy compareSegments segments)
+ where
+  appendSegment [] segment = Just [segment]
+  appendSegment retained@(IntervalSegment lastLeft lastRight : rest) segment@(IntervalSegment left right) = do
+    overlap <- compareIntervalEndpoint left lastRight
+    if overlap == GT
+      then Just (segment : retained)
+      else do
+        rightOrdering <- compareIntervalEndpoint right lastRight
+        let merged =
+              if rightOrdering == GT
+                then IntervalSegment lastLeft right
+                else IntervalSegment lastLeft lastRight
+        Just (merged : rest)
+
+  compareSegments (IntervalSegment leftStart leftEnd) (IntervalSegment rightStart rightEnd) =
+    case compareIntervalEndpoint leftStart rightStart of
+      Just EQ -> maybe EQ id (compareIntervalEndpoint leftEnd rightEnd)
+      Just ordering -> ordering
+      Nothing -> EQ
+
+  -- The merge is accumulated in reverse order so replacing the most recent
+  -- segment remains constant-time. Restore Python's ascending output order.
+  mergeSegments initial [] = Just (reverse initial)
+  mergeSegments initial (value : remaining) = do
+    next <- appendSegment initial value
+    case remaining of
+      [] -> Just (reverse next)
+      _ -> mergeSegments next remaining
+
+allIntervalEndpointsComparable :: [IntervalSegment] -> Bool
+allIntervalEndpointsComparable segments =
+  all pairComparable [(left, right) | left <- endpoints, right <- endpoints]
+ where
+  endpoints = concatMap (\(IntervalSegment left right) -> [left, right]) segments
+  pairComparable (left, right) = case compareIntervalEndpoint left right of
+    Just _ -> True
+    Nothing -> False
+
+intersectIntervalSets
+  :: [IntervalSegment]
+  -> [IntervalSegment]
+  -> Maybe [IntervalSegment]
+intersectIntervalSets left right =
+  normalizeIntervalSegments
+    (mapMaybe (uncurry intersectIntervalSegments) [(a, b) | a <- left, b <- right])
+
+intersectIntervalSegments
+  :: IntervalSegment
+  -> IntervalSegment
+  -> Maybe IntervalSegment
+intersectIntervalSegments
+  (IntervalSegment leftStart leftEnd)
+  (IntervalSegment rightStart rightEnd) = do
+    startOrdering <- compareIntervalEndpoint leftStart rightStart
+    endOrdering <- compareIntervalEndpoint leftEnd rightEnd
+    let start = if startOrdering == LT then rightStart else leftStart
+        end = if endOrdering == GT then rightEnd else leftEnd
+    containment <- compareIntervalEndpoint start end
+    if containment == GT
+      then Nothing
+      else Just (IntervalSegment start end)
+
+intervalExpression :: [IntervalSegment] -> Expr
+intervalExpression =
+  Call (Symbol "Interval")
+    . map (\(IntervalSegment left right) -> list [left, right])
+
+compareIntervalEndpoint :: Expr -> Expr -> Maybe Ordering
+compareIntervalEndpoint leftValue rightValue =
+  case (intervalEndpointKind leftValue, intervalEndpointKind rightValue) of
+    (IntervalNegativeInfinity, IntervalNegativeInfinity) -> Just EQ
+    (IntervalNegativeInfinity, _) -> Just LT
+    (_, IntervalNegativeInfinity) -> Just GT
+    (IntervalPositiveInfinity, IntervalPositiveInfinity) -> Just EQ
+    (IntervalPositiveInfinity, _) -> Just GT
+    (_, IntervalPositiveInfinity) -> Just LT
+    (IntervalFinite left, IntervalFinite right) ->
+      compareExact <$> explicitRealExact left <*> explicitRealExact right
+
+data IntervalEndpointKind
+  = IntervalNegativeInfinity
+  | IntervalFinite !Expr
+  | IntervalPositiveInfinity
+
+intervalEndpointKind :: Expr -> IntervalEndpointKind
+intervalEndpointKind (Symbol "Infinity") = IntervalPositiveInfinity
+intervalEndpointKind (Symbol "-Infinity") = IntervalNegativeInfinity
+intervalEndpointKind (Call (Symbol "DirectedInfinity") [direction])
+  | Just (Exact 1 1) <- explicitRealExact direction = IntervalPositiveInfinity
+  | Just (Exact (-1) 1) <- explicitRealExact direction = IntervalNegativeInfinity
+intervalEndpointKind value@(Call (Symbol "Times") factors)
+  | length factors == 2
+  , Symbol "Infinity" `elem` factors
+  , any isNegativeOne factors = IntervalNegativeInfinity
+  | otherwise = IntervalFinite value
+ where
+  isNegativeOne factor = explicitRealExact factor == Just (Exact (-1) 1)
+intervalEndpointKind value = IntervalFinite value
 
 predicateMatches :: Expr -> Expr -> Either EvaluationError Bool
 predicateMatches criterion value =
