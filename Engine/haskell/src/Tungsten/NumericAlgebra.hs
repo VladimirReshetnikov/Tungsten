@@ -11,14 +11,23 @@ module Tungsten.NumericAlgebra
   ) where
 
 import Data.Bits ((.&.), (.|.), complement, shiftL, shiftR, xor)
+import Data.Char (toUpper)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Tungsten.Expression (Expr (..))
 
 -- | Attempt one exact numeric reduction.  The outer 'Either' is reserved for
 -- Python-compatible diagnostics from structurally invalid constructors; the
 -- ordinary unsupported-domain result is @Right Nothing@.
 reduceNumericBuiltin :: Text -> [Expr] -> Either Text (Maybe Expr)
+reduceNumericBuiltin "FromDigits" arguments' = Just <$> reduceFromDigits arguments'
+reduceNumericBuiltin "ChineseRemainder" arguments' = Just <$> reduceChineseRemainder arguments'
 reduceNumericBuiltin headName arguments' = Right $ case headName of
+  "FactorInteger" -> reduceFactorInteger arguments'
+  "IntegerExponent" -> reduceIntegerExponent arguments'
+  "ContinuedFraction" -> reduceContinuedFraction arguments'
+  "FromContinuedFraction" -> reduceFromContinuedFraction arguments'
+  "IntegerPartitions" -> reduceIntegerPartitions arguments'
   "Binomial" -> integerBinary binomialInteger arguments'
   "Multinomial" -> reduceMultinomial arguments'
   "Fibonacci" -> integerUnary fibonacciInteger arguments'
@@ -69,6 +78,243 @@ reduceNumericBuiltin headName arguments' = Right $ case headName of
   "PartitionsP" -> integerUnary (partitionCount False) arguments'
   "PartitionsQ" -> integerUnary (partitionCount True) arguments'
   _ -> Nothing
+
+reduceFactorInteger :: [Expr] -> Maybe Expr
+reduceFactorInteger [] = Nothing
+reduceFactorInteger (value : options) = do
+  (numerator, denominator) <- exactFractionParts value
+  (partialLimit, gaussianIntegers) <- parseFactorOptions options
+  if gaussianIntegers
+    then Nothing
+    else
+      Just . listExpr . map factorPair $
+        specialFactors partialLimit numerator denominator
+ where
+  factorPair (factor, exponentValue) =
+    listExpr [Integer factor, Integer exponentValue]
+  specialFactors _ 0 _ = [(0, 1)]
+  specialFactors _ 1 1 = [(1, 1)]
+  specialFactors _ (-1) 1 = [(-1, 1)]
+  specialFactors partialLimit numerator denominator =
+    (if numerator < 0 then [(-1, 1)] else [])
+      <> factorWithLimit (abs numerator) partialLimit
+      <> [ (factor, negate exponentValue)
+         | (factor, exponentValue) <- factorWithLimit denominator partialLimit
+         ]
+
+exactFractionParts :: Expr -> Maybe (Integer, Integer)
+exactFractionParts (Integer value) = Just (value, 1)
+exactFractionParts (Rational numerator denominator) = Just (numerator, denominator)
+exactFractionParts _ = Nothing
+
+parseFactorOptions :: [Expr] -> Maybe (Maybe Integer, Bool)
+parseFactorOptions = foldl' parseOne (Just (Nothing, False))
+ where
+  parseOne Nothing _ = Nothing
+  parseOne (Just (_, gaussian)) (Integer limit)
+    | limit > 0 = Just (Just limit, gaussian)
+  parseOne (Just (limit, _)) (Call (Symbol "Rule") [Symbol option, Symbol truth])
+    | option `elem` ["GaussianIntegers", "System`GaussianIntegers"]
+    , truth `elem` ["True", "False", "System`True", "System`False"] =
+        Just (limit, truth `elem` ["True", "System`True"])
+  parseOne _ _ = Nothing
+
+factorWithLimit :: Integer -> Maybe Integer -> [(Integer, Integer)]
+factorWithLimit value Nothing = factorInteger value
+factorWithLimit value (Just limit) = partialFactorInteger value limit
+
+partialFactorInteger :: Integer -> Integer -> [(Integer, Integer)]
+partialFactorInteger value limit = go value candidates
+ where
+  candidates = 2 : [3, 5 .. limit]
+  go 1 _ = []
+  go remaining [] = [(remaining, 1)]
+  go remaining (candidate : rest)
+    | candidate * candidate > remaining = [(remaining, 1)]
+    | otherwise =
+        let (exponentValue, quotient) = divideRepeatedly remaining candidate 0
+         in (if exponentValue == 0 then [] else [(candidate, exponentValue)])
+              <> go quotient rest
+  divideRepeatedly remaining candidate exponentValue
+    | remaining `mod` candidate == 0 =
+        divideRepeatedly (remaining `div` candidate) candidate (exponentValue + 1)
+    | otherwise = (exponentValue, remaining)
+
+reduceIntegerExponent :: [Expr] -> Maybe Expr
+reduceIntegerExponent [Integer value] = integerExponent value 10
+reduceIntegerExponent [Integer value, Integer base]
+  | abs base > 1 = integerExponent value (abs base)
+reduceIntegerExponent _ = Nothing
+
+integerExponent :: Integer -> Integer -> Maybe Expr
+integerExponent 0 _ = Just (Symbol "Infinity")
+integerExponent value base = Just (Integer (go (abs value) 0))
+ where
+  go remaining exponentValue
+    | remaining `mod` base == 0 = go (remaining `div` base) (exponentValue + 1)
+    | otherwise = exponentValue
+
+reduceContinuedFraction :: [Expr] -> Maybe Expr
+reduceContinuedFraction [value] = do
+  fraction <- fractionFromExpr value
+  Just (listExpr (map Integer (continuedFractionTerms fraction)))
+reduceContinuedFraction [value, Integer limit]
+  | limit > 0 = do
+      fraction <- fractionFromExpr value
+      Just
+        ( listExpr
+            (map Integer (take (fromInteger limit) (continuedFractionTerms fraction)))
+        )
+reduceContinuedFraction _ = Nothing
+
+fractionFromExpr :: Expr -> Maybe Fraction
+fractionFromExpr (Integer value) = Just (Fraction value 1)
+fractionFromExpr (Rational numerator denominator) =
+  Just (normalizeFraction (Fraction numerator denominator))
+fractionFromExpr _ = Nothing
+
+continuedFractionTerms :: Fraction -> [Integer]
+continuedFractionTerms (Fraction 0 _) = [0]
+continuedFractionTerms (Fraction numerator denominator) =
+  map (signum numerator *) (go (abs numerator) denominator)
+ where
+  go currentNumerator currentDenominator =
+    let (quotient, remainder) = currentNumerator `divMod` currentDenominator
+     in quotient
+          : if remainder == 0
+              then []
+              else go currentDenominator remainder
+
+reduceFromContinuedFraction :: [Expr] -> Maybe Expr
+reduceFromContinuedFraction [Call (Symbol "List") []] = Just (Symbol "Infinity")
+reduceFromContinuedFraction [Call (Symbol "List") terms] = do
+  integers <- integerArguments terms
+  case reverse integers of
+    [] -> Just (Symbol "Infinity")
+    final : rest -> fromTerms (Fraction final 1) rest
+ where
+  fromTerms value [] = Just (fromFraction value)
+  fromTerms (Fraction 0 _) _ = Just (Symbol "ComplexInfinity")
+  fromTerms (Fraction numerator denominator) (term : remaining) =
+    fromTerms
+      (addFraction (Fraction term 1) (Fraction denominator numerator))
+      remaining
+reduceFromContinuedFraction _ = Nothing
+
+reduceIntegerPartitions :: [Expr] -> Maybe Expr
+reduceIntegerPartitions [Integer value] =
+  Just (partitionListExpr value 0 (max 0 value))
+reduceIntegerPartitions [Integer value, specification] = do
+  (minimumLength, maximumLength) <- partitionLengthBounds value specification
+  Just (partitionListExpr value minimumLength maximumLength)
+reduceIntegerPartitions _ = Nothing
+
+partitionLengthBounds :: Integer -> Expr -> Maybe (Integer, Integer)
+partitionLengthBounds _ (Integer maximumLength)
+  | maximumLength >= 0 = Just (0, maximumLength)
+partitionLengthBounds _ (Call (Symbol "List") [Integer exactLength])
+  | exactLength >= 0 = Just (exactLength, exactLength)
+partitionLengthBounds _ (Call (Symbol "List") [Integer minimumLength, Integer maximumLength])
+  | minimumLength >= 0 && maximumLength >= minimumLength =
+      Just (minimumLength, maximumLength)
+partitionLengthBounds _ _ = Nothing
+
+partitionListExpr :: Integer -> Integer -> Integer -> Expr
+partitionListExpr value minimumLength maximumLength
+  | value < 0 = listExpr []
+  | otherwise =
+      listExpr
+        [ listExpr (map Integer partition)
+        | partition <- integerPartitions value value maximumLength
+        , fromIntegral (length partition) >= minimumLength
+        ]
+
+integerPartitions :: Integer -> Integer -> Integer -> [[Integer]]
+integerPartitions 0 _ _ = [[]]
+integerPartitions _ _ maximumLength | maximumLength <= 0 = []
+integerPartitions remaining maximumPart maximumLength =
+  [ first : rest
+  | first <- reverse [1 .. min maximumPart remaining]
+  , rest <- integerPartitions (remaining - first) first (maximumLength - 1)
+  ]
+
+reduceFromDigits :: [Expr] -> Either Text Expr
+reduceFromDigits [digits] = fromDigits digits 10
+reduceFromDigits [digits, Integer base]
+  | base >= 2 = fromDigits digits base
+reduceFromDigits [_digits, _base] =
+  Left "FromDigits expects an integer base >= 2."
+reduceFromDigits _ =
+  Left "FromDigits expects digits and an optional base."
+
+fromDigits :: Expr -> Integer -> Either Text Expr
+fromDigits (String source) base = do
+  values <- traverse (characterDigit base) (T.unpack source)
+  pure (Integer (foldl' (\result value -> result * base + value) 0 values))
+fromDigits (Call (Symbol "List") digits) base = do
+  values <-
+    maybe
+      (Left "FromDigits expects a list of explicit integer digits.")
+      Right
+      (integerArguments digits)
+  pure (Integer (foldl' (\result value -> result * base + value) 0 values))
+fromDigits _ _ = Left "FromDigits expects a string or a list of digits."
+
+characterDigit :: Integer -> Char -> Either Text Integer
+characterDigit base character =
+  let upper = toUpper character
+      value
+        | character >= '0' && character <= '9' =
+            Just (toInteger (fromEnum character - fromEnum '0'))
+        | upper >= 'A' && upper <= 'Z' = Just (toInteger (fromEnum upper - fromEnum 'A' + 10))
+        | otherwise = Nothing
+   in case value of
+        Just digit | digit < base && base <= 36 -> Right digit
+        _ ->
+          Left
+            ( "FromDigits cannot interpret '"
+                <> T.singleton character
+                <> "' as a base-"
+                <> T.pack (show base)
+                <> " digit."
+            )
+
+reduceChineseRemainder :: [Expr] -> Either Text Expr
+reduceChineseRemainder [residuesExpression, moduliExpression] = do
+  residues <- integerList "residues" residuesExpression
+  moduli <- integerList "moduli" moduliExpression
+  if length residues /= length moduli
+    then Left "ChineseRemainder expects residues and moduli of the same length."
+    else Integer <$> foldMChinese (0, 1) (zip residues moduli)
+reduceChineseRemainder _ =
+  Left "ChineseRemainder expects two list arguments."
+
+integerList :: Text -> Expr -> Either Text [Integer]
+integerList description (Call (Symbol "List") values) =
+  maybe
+    (Left ("ChineseRemainder currently expects explicit integer " <> description <> "."))
+    Right
+    (integerArguments values)
+integerList description _ =
+  Left ("ChineseRemainder expects a list of " <> description <> ".")
+
+foldMChinese :: (Integer, Integer) -> [(Integer, Integer)] -> Either Text Integer
+foldMChinese (currentResidue, _) [] = Right currentResidue
+foldMChinese (currentResidue, currentModulus) ((residue, signedModulus) : rest)
+  | signedModulus == 0 = Left "ChineseRemainder moduli must be nonzero."
+  | (residue - currentResidue) `mod` commonDivisor /= 0 =
+      Left "ChineseRemainder system is inconsistent for the given residues and moduli."
+  | otherwise = case modularInverse (currentModulus `div` commonDivisor) reducedModulus of
+      Nothing -> Left "ChineseRemainder requires invertible reduced moduli."
+      Just inverse ->
+        let offset = ((residue - currentResidue) `div` commonDivisor * inverse) `mod` reducedModulus
+            combinedModulus = currentModulus * reducedModulus
+            combinedResidue = (currentResidue + currentModulus * offset) `mod` combinedModulus
+         in foldMChinese (combinedResidue, combinedModulus) rest
+ where
+  modulus = abs signedModulus
+  commonDivisor = gcd currentModulus modulus
+  reducedModulus = modulus `div` commonDivisor
 
 listExpr :: [Expr] -> Expr
 listExpr = Call (Symbol "List")

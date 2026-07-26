@@ -5,13 +5,16 @@ module Tungsten.NumericAlgebraTests (checkNumericAlgebraEvaluator) where
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Tungsten.Evaluate (evaluate)
+import Tungsten.Evaluate (EvaluationError (..), evaluate)
 import Tungsten.Expression (fullForm)
 import Tungsten.Parser (parseInputForm)
 import Tungsten.Session (emptySession, evaluateInSession)
 
 checkNumericAlgebraEvaluator :: IO Bool
-checkNumericAlgebraEvaluator = and <$> traverse checkValue valueCases
+checkNumericAlgebraEvaluator = do
+  valueResults <- traverse checkValue valueCases
+  errorResults <- traverse checkError errorCases
+  pure (and (valueResults <> errorResults))
 
 valueCases :: [(Text, Text, Text)]
 valueCases =
@@ -71,6 +74,74 @@ valueCases =
     , "{System`GCD[12,18],System`PrimeQ[7],Global`GCD[12,18]}"
     , "List[6, True, Global`GCD[12, 18]]"
     )
+  , ( "exact rational and bounded integer factorization"
+    , "{FactorInteger[-12],FactorInteger[18/35],FactorInteger[0],FactorInteger[1],FactorInteger[-1],FactorInteger[210,2],FactorInteger[210,5],FactorInteger[12,GaussianIntegers->False]}"
+    , "List[List[List[-1, 1], List[2, 2], List[3, 1]], List[List[2, 1], List[3, 2], List[5, -1], List[7, -1]], List[List[0, 1]], List[List[1, 1]], List[List[-1, 1]], List[List[2, 1], List[105, 1]], List[List[2, 1], List[3, 1], List[5, 1], List[7, 1]], List[List[2, 2], List[3, 1]]]"
+    )
+  , ( "integer exponent and continued fractions"
+    , "{IntegerExponent[1000],IntegerExponent[-81,-3],IntegerExponent[0,10],ContinuedFraction[415/93],ContinuedFraction[415/93,2],ContinuedFraction[-415/93],FromContinuedFraction[{4,2,6,7}],FromContinuedFraction[{}],FromContinuedFraction[{1,0}]}"
+    , "List[3, 4, Infinity, List[4, 2, 6, 7], List[4, 2], List[-4, -2, -6, -7], Rational[415, 93], Infinity, ComplexInfinity]"
+    )
+  , ( "integer partition enumeration"
+    , "{IntegerPartitions[-1],IntegerPartitions[0],IntegerPartitions[4],IntegerPartitions[4,2],IntegerPartitions[4,{2}],IntegerPartitions[4,{1,2}]}"
+    , "List[List[], List[List[]], List[List[4], List[3, 1], List[2, 2], List[2, 1, 1], List[1, 1, 1, 1]], List[List[4], List[3, 1], List[2, 2]], List[List[3, 1], List[2, 2]], List[List[4], List[3, 1], List[2, 2]]]"
+    )
+  , ( "digit reconstruction and generalized Chinese remainder"
+    , "{FromDigits[{}],FromDigits[{1,2,3,4}],FromDigits[{1,2,3,4},16],FromDigits[\"abc\",16],FromDigits[{2,-1},10],ChineseRemainder[{2,3,2},{3,5,7}],ChineseRemainder[{1,3},{2,4}],ChineseRemainder[{},{}]}"
+    , "List[0, 1234, 4660, 2748, 19, 23, 3, 0]"
+    )
+  , ( "qualified structural numeric reducers"
+    , "{System`FactorInteger[12],System`ContinuedFraction[10/7],System`FromDigits[{1,0,1},2],System`ChineseRemainder[{2,3},{3,5}]}"
+    , "List[List[List[2, 2], List[3, 1]], List[1, 2, 3], 5, 8]"
+    )
+  ]
+
+errorCases :: [(Text, Text, Text)]
+errorCases =
+  [ ( "FromDigits arity"
+    , "FromDigits[]"
+    , "FromDigits expects digits and an optional base."
+    )
+  , ( "FromDigits base domain"
+    , "FromDigits[{1,2},1]"
+    , "FromDigits expects an integer base >= 2."
+    )
+  , ( "FromDigits string digit domain"
+    , "FromDigits[\"g\",16]"
+    , "FromDigits cannot interpret 'g' as a base-16 digit."
+    )
+  , ( "FromDigits list element domain"
+    , "FromDigits[{1,x},10]"
+    , "FromDigits expects a list of explicit integer digits."
+    )
+  , ( "FromDigits subject domain"
+    , "FromDigits[x]"
+    , "FromDigits expects a string or a list of digits."
+    )
+  , ( "ChineseRemainder arity"
+    , "ChineseRemainder[]"
+    , "ChineseRemainder expects two list arguments."
+    )
+  , ( "ChineseRemainder residue shape"
+    , "ChineseRemainder[x,{3}]"
+    , "ChineseRemainder expects a list of residues."
+    )
+  , ( "ChineseRemainder lengths"
+    , "ChineseRemainder[{1},{2,3}]"
+    , "ChineseRemainder expects residues and moduli of the same length."
+    )
+  , ( "ChineseRemainder integer moduli"
+    , "ChineseRemainder[{1},{x}]"
+    , "ChineseRemainder currently expects explicit integer moduli."
+    )
+  , ( "ChineseRemainder nonzero moduli"
+    , "ChineseRemainder[{1},{0}]"
+    , "ChineseRemainder moduli must be nonzero."
+    )
+  , ( "ChineseRemainder consistency"
+    , "ChineseRemainder[{0,1},{2,4}]"
+    , "ChineseRemainder system is inconsistent for the given residues and moduli."
+    )
   ]
 
 checkValue :: (Text, Text, Text) -> IO Bool
@@ -90,6 +161,15 @@ checkValue (label, source, expected) = case parseInputForm source of
               | otherwise ->
                   failCheck label ("session expected " <> expected <> ", got " <> fullForm sessionValue)
 
+checkError :: (Text, Text, Text) -> IO Bool
+checkError (label, source, expected) = case parseInputForm source of
+  Left parseError -> failCheck label ("parse error: " <> showText parseError)
+  Right expression -> case evaluate expression of
+    Left (EvaluationError actual)
+      | actual == expected -> pure True
+      | otherwise -> failCheck label ("expected error " <> expected <> ", got " <> actual)
+    Right result -> failCheck label ("expected an evaluation error, got " <> fullForm result)
+
 failCheck :: Text -> Text -> IO Bool
 failCheck label detail = do
   TextIO.putStrLn ("FAILED numeric algebra evaluator: " <> label <> ": " <> detail)
@@ -97,4 +177,3 @@ failCheck label detail = do
 
 showText :: Show value => value -> Text
 showText = Text.pack . show
-
