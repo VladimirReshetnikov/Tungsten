@@ -1849,6 +1849,72 @@ int main() {
             && empty_permute.prints().empty(),
         "empty positional permutation has no evaluation effects");
 
+    const std::vector<std::pair<std::string, std::string>>
+        structural_collection_contracts{
+            {"ContainsAll[<|a->1,b->2|>,{1,2}]", "True"},
+            {"ContainsAll[{1,2},<|z->2|>]", "True"},
+            {"ContainsAny[<|a->1,b->2|>,{2}]", "True"},
+            {"ContainsNone[<|a->1,b->2|>,{2}]", "False"},
+            {"ContainsExactly[<|a->1,b->2|>,<|x->2,y->1|>]", "True"},
+            {"ContainsExactly[{1,1,2},{2,1}]", "True"},
+            {"ContainsAll[{},{}]", "True"},
+            {"ContainsAny[{},{}]", "False"},
+            {"ContainsNone[{},{}]", "True"},
+            {"ContainsExactly[{},{}]", "True"},
+            {"CountDistinct[<|a->x,b->x,c->y|>]", "2"},
+            {"CountDistinct[{1,1.0,1,1.0}]", "2"},
+        };
+    for (const auto& [source, expected] : structural_collection_contracts)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "structural collection contract: " + source);
+
+    Evaluator structural_collection_diagnostics;
+    const auto check_structural_collection_error = [&](const std::string& source,
+                                                       const std::string& head,
+                                                       const std::string& detail) {
+        const auto parsed = parse_input_form(source);
+        check_equal(structural_collection_diagnostics.evaluate(parsed).to_full_form(),
+            parsed.to_full_form(), head + " preserves the raw invalid call");
+        check_equal(structural_collection_diagnostics.messages().empty() ? ""
+                : structural_collection_diagnostics.messages().front().to_full_form(),
+            "MessageName[" + head + ", \"error\"]",
+            head + " invalid collection message name");
+        check_equal(structural_collection_diagnostics.message_texts().empty() ? ""
+                : structural_collection_diagnostics.message_texts().front(),
+            head + "::error: " + detail,
+            head + " invalid collection message text");
+    };
+    check_structural_collection_error(
+        "ContainsAll[f[1],g[1]]", "ContainsAll",
+        "ContainsAll expects a list or association.");
+    check_structural_collection_error(
+        "ContainsAny[{1}]", "ContainsAny",
+        "ContainsAny expects exactly two arguments.");
+    check_structural_collection_error(
+        "CountDistinct[f[a,a,b]]", "CountDistinct",
+        "CountDistinct expects a list or association.");
+    check_structural_collection_error(
+        "CountDistinct[{1},x]", "CountDistinct",
+        "CountDistinct expects exactly one argument.");
+    check_structural_collection_error(
+        "CountDistinct[Association[x]]", "CountDistinct",
+        "CountDistinct expects a list or association.");
+    const auto effectful_collection_source = std::string(
+        "ContainsAll[(Print[\"collection-arg\"];f[1]),{1}]");
+    const auto effectful_collection_parsed
+        = parse_input_form(effectful_collection_source);
+    check_equal(structural_collection_diagnostics.evaluate(
+            effectful_collection_parsed).to_full_form(),
+        effectful_collection_parsed.to_full_form(),
+        "collection diagnostics recover the raw syntax after argument effects");
+    check(structural_collection_diagnostics.prints()
+            == std::vector<std::string>{"collection-arg"},
+        "collection diagnostics evaluate argument effects exactly once");
+    check_equal(structural_collection_diagnostics.message_texts().empty() ? ""
+            : structural_collection_diagnostics.message_texts().front(),
+        "ContainsAll::error: ContainsAll expects a list or association.",
+        "effectful invalid collection diagnostic text");
+
     const std::vector<std::pair<std::string, std::string>> polynomial_boundary_cases{
         {"ToExpression[\"f[a]\", InputForm, List]", "List[f[a]]"},
         {"Coefficient[2 x^2 y + 3 x y + y, x, 1]", "Times[3, y]"},

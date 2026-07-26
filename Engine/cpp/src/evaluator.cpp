@@ -3559,6 +3559,17 @@ std::optional<std::vector<Expr>> association_rules(const Expr& expression) {
     return normalized_association_rules(expression.args());
 }
 
+std::optional<std::vector<Expr>> list_or_association_values(
+    const Expr& expression) {
+    if (expression.has_head("List")) return expression.args();
+    const auto rules = association_rules(expression);
+    if (!rules) return std::nullopt;
+    std::vector<Expr> values;
+    values.reserve(rules->size());
+    for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+    return values;
+}
+
 using Bindings = std::map<std::string, Expr>;
 
 struct CompiledStringPattern {
@@ -12386,11 +12397,16 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             : call("Rule", {group.representative, integer(static_cast<unsigned long>(group.count))}));
         return call(function == "Tally" ? "List" : "Association", std::move(values));
     }
-    if (function == "CountDistinct" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
-        const auto rules = association_rules(args[0]);
+    if (function == "CountDistinct") {
+        if (args.size() != 1)
+            return raw_evaluation_error(
+                "CountDistinct expects exactly one argument.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                "CountDistinct expects a list or association.");
         std::vector<Expr> unique;
-        for (const auto& item : rules ? *rules : args[0].args()) {
-            const auto& value = rules ? item.args()[1] : item;
+        for (const auto& value : *source) {
             if (std::find(unique.begin(), unique.end(), value) == unique.end()) unique.push_back(value);
         }
         return integer(static_cast<unsigned long>(unique.size()));
@@ -12559,20 +12575,27 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return boolean(function == "AllTrue" ? all : function == "AnyTrue" ? any : !any);
     }
-    if ((function == "ContainsAll" || function == "ContainsAny" || function == "ContainsNone"
-        || function == "ContainsExactly") && args.size() == 2 && args[0].kind() == ExprKind::Call
-        && args[1].kind() == ExprKind::Call) {
+    if (function == "ContainsAll" || function == "ContainsAny"
+        || function == "ContainsNone" || function == "ContainsExactly") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                function + " expects exactly two arguments.");
+        const auto left = list_or_association_values(args[0]);
+        const auto right = list_or_association_values(args[1]);
+        if (!left || !right)
+            return raw_evaluation_error(
+                function + " expects a list or association.");
         auto contains = [](const std::vector<Expr>& values, const Expr& target) {
             return std::find(values.begin(), values.end(), target) != values.end();
         };
-        const bool all = std::all_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& value) {
-            return contains(args[0].args(), value);
+        const bool all = std::all_of(right->begin(), right->end(), [&](const Expr& value) {
+            return contains(*left, value);
         });
-        const bool any = std::any_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& value) {
-            return contains(args[0].args(), value);
+        const bool any = std::any_of(right->begin(), right->end(), [&](const Expr& value) {
+            return contains(*left, value);
         });
-        const bool reverse_all = std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& value) {
-            return contains(args[1].args(), value);
+        const bool reverse_all = std::all_of(left->begin(), left->end(), [&](const Expr& value) {
+            return contains(*right, value);
         });
         return boolean(function == "ContainsAll" ? all : function == "ContainsAny" ? any
             : function == "ContainsNone" ? !any : all && reverse_all);
