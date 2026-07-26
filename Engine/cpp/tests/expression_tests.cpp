@@ -1471,6 +1471,46 @@ int main() {
         "Take[List[a, b, c], 999999999999999999999999999999999]",
         "Take arbitrary-width count remains safe and inert");
 
+    Evaluator gather_by_arity;
+    check_equal(gather_by_arity.evaluate(parse_input_form(
+        "GatherBy[{1,2,3}]")).to_full_form(),
+        "GatherBy[List[1, 2, 3]]",
+        "one-argument GatherBy remains inert without indexing a missing key function");
+    check_equal(gather_by_arity.messages().empty() ? ""
+            : gather_by_arity.messages().front().to_full_form(),
+        "MessageName[GatherBy, \"error\"]",
+        "one-argument GatherBy message name");
+    check_equal(gather_by_arity.message_texts().empty() ? ""
+            : gather_by_arity.message_texts().front(),
+        "GatherBy::error: GatherBy currently expects two arguments.",
+        "one-argument GatherBy message text");
+    check(gather_by_arity.prints().empty(),
+        "one-argument GatherBy does not produce print effects");
+
+    (void)gather_by_arity.evaluate(parse_input_form(
+        "tungstenGatherByAlias=GatherBy"));
+    check_equal(gather_by_arity.evaluate(parse_input_form(
+        "tungstenGatherByAlias[{1,2,3}]")).to_full_form(),
+        "tungstenGatherByAlias[List[1, 2, 3]]",
+        "GatherBy alias arity errors preserve the raw call");
+    check_equal(gather_by_arity.messages().empty() ? ""
+            : gather_by_arity.messages().front().to_full_form(),
+        "MessageName[tungstenGatherByAlias, \"error\"]",
+        "GatherBy alias message name");
+    check_equal(gather_by_arity.message_texts().empty() ? ""
+            : gather_by_arity.message_texts().front(),
+        "tungstenGatherByAlias::error: GatherBy currently expects two arguments.",
+        "GatherBy alias message text");
+
+    Evaluator empty_permute;
+    check_equal(empty_permute.evaluate(parse_input_form(
+        "Permute[{},{}]")).to_full_form(),
+        "List[]", "empty positional permutation is the List identity");
+    check(empty_permute.messages().empty()
+            && empty_permute.message_texts().empty()
+            && empty_permute.prints().empty(),
+        "empty positional permutation has no evaluation effects");
+
     const std::vector<std::pair<std::string, std::string>> polynomial_boundary_cases{
         {"ToExpression[\"f[a]\", InputForm, List]", "List[f[a]]"},
         {"Coefficient[2 x^2 y + 3 x y + y, x, 1]", "Times[3, y]"},

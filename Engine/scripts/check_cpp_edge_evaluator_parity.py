@@ -194,6 +194,7 @@ def list_cases() -> list[str]:
                 f"{head}[{value},{width},{padding}]"
                 for width, padding in itertools.product(range(0, 6), ("x", "{x,y}"))
             )
+    cases.extend(("GatherBy[{1,2,3}]", "Permute[{},{}]"))
     return _unique(cases)
 
 

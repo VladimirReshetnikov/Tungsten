@@ -11377,7 +11377,20 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::vector<Expr> rules; for (std::size_t index = 0; index < keys.size(); ++index) { Expr value = list(groups[index]); if (aggregator) value = evaluate(call(*aggregator, {value})); rules.push_back(call("Rule", {keys[index], value})); }
         return call("Association", std::move(rules));
     }
-    if ((function == "Gather" || function == "GatherBy") && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+    if (function == "GatherBy" && args.size() != 2) {
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix
+            + "::error: GatherBy currently expects two arguments.");
+        return call(raw_head, raw_args);
+    }
+    if (((function == "Gather" && args.size() == 1)
+            || (function == "GatherBy" && args.size() == 2))
+        && args[0].kind() == ExprKind::Call) {
         std::vector<Expr> keys; std::vector<std::vector<Expr>> groups;
         for (const auto& item : args[0].args()) { const auto key = function == "GatherBy" ? evaluate(call(args[1], {item})) : item; const auto found = std::find(keys.begin(), keys.end(), key); if (found == keys.end()) { keys.push_back(key); groups.push_back({item}); } else groups[found - keys.begin()].push_back(item); }
         std::vector<Expr> values; for (auto& group : groups) values.push_back(call(args[0].head(), std::move(group))); return list(std::move(values));
@@ -12266,8 +12279,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     else valid = false;
             }
         } else valid = false;
+        if (valid && permutation.empty() && args[0].has_head("List"))
+            return args[0];
         std::set<long> positions(permutation.begin(), permutation.end());
-        if (valid && positions.size() == permutation.size() && *positions.begin() == 1
+        if (valid && !positions.empty() && positions.size() == permutation.size()
+            && *positions.begin() == 1
             && *positions.rbegin() == static_cast<long>(permutation.size())) {
             std::vector<Expr> values(args[0].args().size());
             for (std::size_t index = 0; index < values.size(); ++index) values[permutation[index] - 1] = args[0].args()[index];
