@@ -139,8 +139,7 @@ void materialization_guard_tests() {
         {"Normal::error: SparseArray dimensions exceed the native materialization limit."});
     check_case(
         "Part[SparseArray[{}, {4294967296}],1]",
-        "Part[SparseArray[List[], List[4294967296]], 1]",
-        {"Part::error: SparseArray dimensions exceed the native materialization limit."});
+        "0");
     check_case(
         "Normal[SparseArray[{}, {0,1000000000}]]", "List[]");
 }
