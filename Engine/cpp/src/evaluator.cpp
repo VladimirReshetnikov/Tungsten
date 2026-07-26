@@ -2559,7 +2559,7 @@ void append_dense_leaves(const Expr& expression, std::vector<Expr>& values) {
         append_dense_leaves(argument, values);
 }
 
-[[maybe_unused]] std::optional<Expr> dense_value_at(
+std::optional<Expr> dense_value_at(
     const Expr& expression, const std::vector<mpz_class>& indices) {
     const Expr* current = &expression;
     for (const auto& index : indices) {
@@ -2569,6 +2569,73 @@ void append_dense_leaves(const Expr& expression, std::vector<Expr>& values) {
         current = &current->args()[*offset];
     }
     return *current;
+}
+
+struct NormalizedDensePadding {
+    std::optional<std::vector<std::pair<mpz_class, mpz_class>>> widths;
+    std::string error;
+};
+
+NormalizedDensePadding normalize_dense_padding(
+    const Expr& expression, std::size_t rank) {
+    using Width = std::pair<mpz_class, mpz_class>;
+    if (expression.kind() == ExprKind::Integer) {
+        if (expression.integer_value() < 0)
+            return {std::nullopt,
+                "ArrayPad expects non-negative padding widths."};
+        return {std::vector<Width>(rank,
+            {expression.integer_value(), expression.integer_value()}), {}};
+    }
+    if (!expression.has_head("List"))
+        return {std::nullopt,
+            "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."};
+
+    const auto& arguments = expression.args();
+    const auto all_integers = std::all_of(
+        arguments.begin(), arguments.end(), [](const Expr& value) {
+            return value.kind() == ExprKind::Integer;
+        });
+    if (rank == 1 && arguments.size() == 2 && all_integers) {
+        if (arguments[0].integer_value() < 0
+            || arguments[1].integer_value() < 0)
+            return {std::nullopt,
+                "ArrayPad expects non-negative padding widths."};
+        return {std::vector<Width>{{arguments[0].integer_value(),
+            arguments[1].integer_value()}}, {}};
+    }
+    if (arguments.size() == rank && all_integers) {
+        std::vector<Width> widths;
+        widths.reserve(rank);
+        for (const auto& value : arguments) {
+            if (value.integer_value() < 0)
+                return {std::nullopt,
+                    "ArrayPad expects non-negative padding widths."};
+            widths.emplace_back(value.integer_value(), value.integer_value());
+        }
+        return {std::move(widths), {}};
+    }
+    if (arguments.size() == rank) {
+        std::vector<Width> widths;
+        widths.reserve(rank);
+        for (const auto& value : arguments) {
+            if (!value.has_head("List") || value.args().size() != 2)
+                return {std::nullopt,
+                    "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."};
+            if (value.args()[0].kind() != ExprKind::Integer
+                || value.args()[1].kind() != ExprKind::Integer)
+                return {std::nullopt,
+                    "ArrayPad padding widths must be explicit integers."};
+            if (value.args()[0].integer_value() < 0
+                || value.args()[1].integer_value() < 0)
+                return {std::nullopt,
+                    "ArrayPad expects non-negative padding widths."};
+            widths.emplace_back(value.args()[0].integer_value(),
+                value.args()[1].integer_value());
+        }
+        return {std::move(widths), {}};
+    }
+    return {std::nullopt,
+        "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."};
 }
 
 std::optional<std::size_t> checked_dimension_product(
@@ -14654,22 +14721,47 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 return cursor < leaves.size() ? leaves[cursor++] : padding;
             });
     }
-    if (function == "ArrayPad" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
-        && machine_index(args[1]) && *machine_index(args[1]) >= 0) {
-        const auto width = static_cast<std::size_t>(*machine_index(args[1]));
+    if (function == "ArrayPad" && evaluated_name
+        && *evaluated_name == "ArrayPad") {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayPad expects an array, padding widths, and an optional padding value.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        if (!dimensions) return raw_evaluation_error(args[0].has_head("List")
+            ? "SparseArray dense input must be rectangular."
+            : "ArrayPad expects a rectangular array.");
+        const auto normalized = normalize_dense_padding(
+            args[1], dimensions->size());
+        if (!normalized.widths)
+            return raw_evaluation_error(normalized.error);
+
+        DenseDimensions output_dimensions;
+        output_dimensions.reserve(dimensions->size());
+        for (std::size_t axis = 0; axis < dimensions->size(); ++axis)
+            output_dimensions.push_back(
+                mpz_class(std::to_string((*dimensions)[axis]), 10)
+                + (*normalized.widths)[axis].first
+                + (*normalized.widths)[axis].second);
+        if (!dense_materialization_within_limit(output_dimensions))
+            return raw_evaluation_error(
+                "ArrayPad output exceeds the native materialization limit.");
+
         const auto padding = args.size() == 3 ? args[2] : integer(0L);
-        if (std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
-            const auto columns = args[0].args().empty() ? 0 : args[0].args().front().args().size();
-            std::vector<Expr> rows(width, list(std::vector<Expr>(columns + 2 * width, padding)));
-            for (const auto& row : args[0].args()) {
-                auto values = row.args(); values.insert(values.begin(), width, padding); values.insert(values.end(), width, padding);
-                rows.push_back(list(std::move(values)));
-            }
-            rows.insert(rows.end(), width, list(std::vector<Expr>(columns + 2 * width, padding)));
-            return list(std::move(rows));
-        }
-        auto values = args[0].args(); values.insert(values.begin(), width, padding); values.insert(values.end(), width, padding);
-        return list(std::move(values));
+        return build_dense_array(output_dimensions,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<mpz_class> source_indices;
+                source_indices.reserve(indices.size());
+                for (std::size_t axis = 0; axis < indices.size(); ++axis) {
+                    const auto source_index = indices[axis]
+                        - (*normalized.widths)[axis].first;
+                    if (source_index < 1
+                        || source_index
+                            > mpz_class(std::to_string((*dimensions)[axis]), 10))
+                        return padding;
+                    source_indices.push_back(source_index);
+                }
+                return dense_value_at(args[0], source_indices).value_or(padding);
+            });
     }
     if (function == "ArrayFlatten" && args.size() == 1 && args[0].has_head("List")) {
         std::vector<Expr> result; bool valid = true;
@@ -14693,17 +14785,67 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         if (valid) return list(std::move(result));
     }
-    if (function == "Transpose" && args.size() == 1 && args[0].has_head("List") && !args[0].args().empty()
-        && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
-        const auto columns = args[0].args().front().args().size();
-        if (std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& row) { return row.args().size() == columns; })) {
-            std::vector<Expr> result;
-            for (std::size_t column = 0; column < columns; ++column) {
-                std::vector<Expr> row; for (const auto& source_row : args[0].args()) row.push_back(source_row.args()[column]);
-                result.push_back(list(std::move(row)));
+    if (function == "Transpose" && evaluated_name
+        && *evaluated_name == "Transpose") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Transpose expects an array and an optional permutation.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        if (!dimensions) return raw_evaluation_error(args[0].has_head("List")
+            ? "SparseArray dense input must be rectangular."
+            : "Transpose expects a rectangular array.");
+
+        std::vector<std::size_t> permutation(dimensions->size());
+        std::iota(permutation.begin(), permutation.end(), std::size_t{0});
+        if (args.size() == 1) {
+            if (permutation.size() >= 2)
+                std::swap(permutation[0], permutation[1]);
+        } else {
+            if (!args[1].has_head("List"))
+                return raw_evaluation_error(
+                    "Transpose expects a permutation list as its second argument.");
+            if (args[1].args().size() != dimensions->size()
+                || !std::all_of(args[1].args().begin(), args[1].args().end(),
+                    [](const Expr& value) {
+                        return value.kind() == ExprKind::Integer;
+                    }))
+                return raw_evaluation_error(
+                    "Transpose permutation length must match the array rank.");
+            for (std::size_t axis = 0; axis < permutation.size(); ++axis) {
+                const auto& value = args[1].args()[axis].integer_value();
+                if (value < 1
+                    || value > mpz_class(std::to_string(permutation.size()), 10))
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
+                permutation[axis] = *nonnegative_size_t(value - 1);
             }
-            return list(std::move(result));
+            auto sorted = permutation;
+            std::sort(sorted.begin(), sorted.end());
+            for (std::size_t axis = 0; axis < sorted.size(); ++axis)
+                if (sorted[axis] != axis)
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
         }
+        if (std::is_sorted(permutation.begin(), permutation.end()))
+            return args[0];
+
+        DenseDimensions output_dimensions;
+        output_dimensions.reserve(dimensions->size());
+        for (const auto axis : permutation)
+            output_dimensions.emplace_back(
+                std::to_string((*dimensions)[axis]), 10);
+        if (!dense_materialization_within_limit(output_dimensions))
+            return raw_evaluation_error(
+                "Transpose output exceeds the native materialization limit.");
+        return build_dense_array(output_dimensions,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<mpz_class> source_indices(
+                    dimensions->size(), mpz_class(1));
+                for (std::size_t output_axis = 0;
+                     output_axis < permutation.size(); ++output_axis)
+                    source_indices[permutation[output_axis]] = indices[output_axis];
+                return *dense_value_at(args[0], source_indices);
+            });
     }
     if (function == "Insert") {
         auto invalid_insert = [&](const std::string& detail) {
