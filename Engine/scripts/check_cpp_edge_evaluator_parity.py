@@ -4,7 +4,8 @@
 The recorded-test gate proves compatibility for calls that the Python unittest
 suite happens to make.  This companion gate generates dense, deterministic
 cross-products around sequence boundaries, selector direction, inexact
-rounding, structural positions, and Unicode/string-pattern behavior.
+rounding, structural positions, level traversal, and Unicode/string-pattern
+behavior.
 """
 
 from __future__ import annotations
@@ -47,7 +48,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--cluster",
         action="append",
-        choices=("rounding", "take-drop", "list", "structural", "strings"),
+        choices=(
+            "rounding", "take-drop", "list", "structural", "traversal", "strings"
+        ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
     parser.add_argument("--max-mismatches", type=int, default=50)
@@ -233,6 +236,85 @@ def structural_cases() -> list[str]:
     return _unique(cases)
 
 
+def traversal_cases() -> list[str]:
+    expressions = (
+        "a",
+        "f[]",
+        "f[a,g[b],h[c,d]]",
+        "{a,g[b],h[c,d]}",
+        "<||>",
+        "<|a->x,b:>g[y],c->h[z,w]|>",
+        "<|a-><|x->p|>,b->g[q]|>",
+        "{a,Nothing,g[b,Nothing]}",
+    )
+    specifications = (
+        "-5", "-3", "-2", "-1", "0", "1", "2", "3", "Infinity",
+        "{-3}", "{-2}", "{-1}", "{0}", "{1}", "{2}", "{3}",
+        "{0,Infinity}", "{1,2}", "{-3,-1}", "{2,Infinity}", "{1,-1}",
+    )
+    cases: list[str] = []
+    for expression, specification in itertools.product(expressions, specifications):
+        cases.append(f"Level[{expression},{specification}]")
+        for head in ("Apply", "Map", "MapApply", "MapIndexed"):
+            cases.append(f"{head}[q,{expression},{specification}]")
+
+    for expression in expressions:
+        cases.extend(
+            (
+                f"Apply[q,{expression}]",
+                f"Map[q,{expression}]",
+                f"Map[q,{expression},Heads->False]",
+                f"Map[q,{expression},Heads->True]",
+                f"Map[q,{expression},{{1,2}},Heads->True]",
+                f"MapApply[q,{expression}]",
+                f"MapApply[q][{expression}]",
+                f"MapIndexed[q,{expression}]",
+                f"MapIndexed[q][{expression}]",
+            )
+        )
+
+    huge = "999999999999999999999999999999999999999"
+    cases.extend(
+        (
+            f"Level[f[a,g[b]],{huge}]",
+            f"Level[f[a,g[b]],{{-{huge}}}]",
+            f"Apply[q,f[a,g[b]],{huge}]",
+            f"Map[q,f[a,g[b]],{{-{huge}}}]",
+            f"MapApply[q,f[a,g[b]],{huge}]",
+            f"MapIndexed[q,f[a,g[b]],{{-{huge}}}]",
+            "Map[Function[Nothing],{a,g[b]},Infinity]",
+            "MapIndexed[Function[{value,path},path],<|a->x,b->g[y]|>,Infinity]",
+            "Level[x,1,False]",
+            "Level[x]",
+            "Level[x,1,False,z]",
+            "Level[x,1,z]",
+            "Level[x,1,True]",
+            "Level[x,z]",
+            "Level[x,{z}]",
+            "Level[x,{1,z}]",
+            "Apply[q]",
+            "Apply[q,x,1,z]",
+            "Apply[q,x,z]",
+            "Apply[q,x,{z}]",
+            "Map[q]",
+            "Map[q,x,1,z]",
+            "Map[q,x,z]",
+            "Map[q,x,{z}]",
+            "MapApply[]",
+            "MapApply[q]",
+            "MapApply[q,x,1,z]",
+            "MapApply[q,x,z]",
+            "MapApply[q,x,{z}]",
+            "MapIndexed[]",
+            "MapIndexed[q]",
+            "MapIndexed[q,x,1,z]",
+            "MapIndexed[q,x,z]",
+            "MapIndexed[q,x,{z}]",
+        )
+    )
+    return _unique(cases)
+
+
 def string_cases() -> list[str]:
     strings = ('""', '"a"', '"ab"', '"aba"', '"a b"', '"café λ"')
     patterns = (
@@ -293,6 +375,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "take-drop": take_drop_cases,
     "list": list_cases,
     "structural": structural_cases,
+    "traversal": traversal_cases,
     "strings": string_cases,
 }
 
