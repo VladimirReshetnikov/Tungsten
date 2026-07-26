@@ -4,8 +4,8 @@
 The recorded-test gate proves compatibility for calls that the Python unittest
 suite happens to make.  This companion gate generates dense, deterministic
 cross-products around sequence boundaries, selector direction, inexact
-rounding, structural positions, level traversal, collection callback
-contracts, and Unicode/string-pattern behavior.
+rounding, structural positions, level traversal, ordering state machines,
+collection callback contracts, and Unicode/string-pattern behavior.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "rounding", "take-drop", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
-            "array-shape", "strings",
+            "array-shape", "ordering", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -855,6 +855,27 @@ def distribution_cases() -> list[str]:
     ]
 
 
+def ordering_cases() -> list[str]:
+    """Canonical-order boundaries and observable ordering callbacks."""
+
+    larger = "1" + "0" * 400
+    smaller = "9" + "0" * 399
+    return [
+        f"Order[{larger},{smaller}]",
+        f"Sort[{{{larger},{smaller}}}]",
+        f"ReverseSort[{{{larger},{smaller}}}]",
+        f"Ordering[{{{larger},{smaller}}}]",
+        "Order[Complex[10,2],Complex[9,3]]",
+        "Sort[{Complex[10,2],Complex[9,3]}]",
+        "Sort[<|z->1,a->2|>]",
+        "ReverseSort[<|z->1,a->2|>]",
+        "Ordering[<|z->1,a->2|>]",
+        "Order[]",
+        "Order[a]",
+        "Order[a,b,c]",
+    ]
+
+
 CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "rounding": rounding_cases,
     "take-drop": take_drop_cases,
@@ -866,6 +887,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "combinators": combinator_cases,
     "distribution": distribution_cases,
     "array-shape": array_shape_cases,
+    "ordering": ordering_cases,
     "strings": string_cases,
 }
 

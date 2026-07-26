@@ -2318,17 +2318,57 @@ int numeric_type_rank(const Expr& value) {
     return 7;
 }
 
+std::optional<std::pair<Expr, Expr>> orderable_numeric_parts(
+    const Expr& value) {
+    if (value.kind() == ExprKind::Complex)
+        return std::pair{value.real_part(), value.imaginary_part()};
+    if (as_rational(value) || value.kind() == ExprKind::Real
+        || value.kind() == ExprKind::SpecialReal
+        || is_symbol(value, "Infinity") || is_symbol(value, "-Infinity"))
+        return std::pair{value, integer(0L)};
+    return std::nullopt;
+}
+
+std::optional<int> compare_orderable_real(
+    const Expr& left, const Expr& right) {
+    if (left == right) return 0;
+    if (is_symbol(left, "-Infinity")) return -1;
+    if (is_symbol(right, "-Infinity")) return 1;
+    if (is_symbol(left, "Infinity")) return 1;
+    if (is_symbol(right, "Infinity")) return -1;
+
+    auto exact_decimal = [](const Expr& value) -> std::optional<mpq_class> {
+        if (const auto exact = as_rational(value)) return exact;
+        if (value.kind() == ExprKind::Real)
+            return decimal_rational(value.text());
+        return std::nullopt;
+    };
+    const auto left_exact = exact_decimal(left);
+    const auto right_exact = exact_decimal(right);
+    if (left_exact && right_exact)
+        return *left_exact < *right_exact ? -1 : *left_exact > *right_exact ? 1 : 0;
+
+    const auto left_approximate = numeric_real(left);
+    const auto right_approximate = numeric_real(right);
+    if (!left_approximate || !right_approximate) return std::nullopt;
+    if (*left_approximate < *right_approximate) return -1;
+    if (*left_approximate > *right_approximate) return 1;
+    return 0;
+}
+
 int expression_compare(const Expr& left, const Expr& right) {
     if (left == right) return 0;
-    auto numeric_value = [](const Expr& value) -> std::optional<std::pair<double, double>> {
-        if (is_symbol(value, "-Infinity")) return std::pair{-std::numeric_limits<double>::infinity(), 0.0};
-        if (is_symbol(value, "Infinity")) return std::pair{std::numeric_limits<double>::infinity(), 0.0};
-        return numeric_complex(value);
-    };
-    const auto left_numeric = numeric_value(left), right_numeric = numeric_value(right);
+    const auto left_numeric = orderable_numeric_parts(left);
+    const auto right_numeric = orderable_numeric_parts(right);
     if (left_numeric && right_numeric) {
-        if (left_numeric->first != right_numeric->first) return left_numeric->first < right_numeric->first ? -1 : 1;
-        if (left_numeric->second != right_numeric->second) return left_numeric->second < right_numeric->second ? -1 : 1;
+        if (const auto real_order = compare_orderable_real(
+                left_numeric->first, right_numeric->first);
+            real_order && *real_order != 0)
+            return *real_order;
+        if (const auto imaginary_order = compare_orderable_real(
+                left_numeric->second, right_numeric->second);
+            imaginary_order && *imaginary_order != 0)
+            return *imaginary_order;
         if (numeric_type_rank(left) != numeric_type_rank(right)) return numeric_type_rank(left) < numeric_type_rank(right) ? -1 : 1;
     }
     const auto left_rank = expression_rank(left);
@@ -10752,7 +10792,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         if (known) return boolean(result);
     }
-    if (function == "Order" && args.size() == 2) return integer(expression_compare(args[0], args[1]) < 0 ? 1L : expression_compare(args[0], args[1]) > 0 ? -1L : 0L);
+    if (function == "Order") {
+        if (args.size() != 2)
+            return raw_evaluation_error("Order expects exactly two arguments.");
+        const auto order = expression_compare(args[0], args[1]);
+        return integer(order < 0 ? 1L : order > 0 ? -1L : 0L);
+    }
     if (function == "LexicographicOrder" && args.size() == 2) return integer(lexicographic_compare(args[0], args[1]) < 0 ? 1L : lexicographic_compare(args[0], args[1]) > 0 ? -1L : 0L);
     if (function == "LexicographicSort" && args.size() == 1 && args[0].has_head("List")) {
         auto values = args[0].args(); std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) { return lexicographic_compare(left, right) < 0; }); return list(std::move(values));
@@ -10775,15 +10820,15 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 else if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "SameTest")) same_test = args[index].args()[1];
             }
             auto compare_indices = [&](std::size_t left, std::size_t right) {
-                const auto& left_value = rules ? items[left].args()[0] : items[left]; const auto& right_value = rules ? items[right].args()[0] : items[right];
+                const auto& left_value = rules ? items[left].args()[1] : items[left]; const auto& right_value = rules ? items[right].args()[1] : items[right];
                 const auto order = expression_compare(left_value, right_value); return greater ? order > 0 : order < 0;
             };
             if (!same_test) std::stable_sort(indices.begin(), indices.end(), compare_indices);
             else for (std::size_t index = 1; index < indices.size(); ++index) {
                 auto insertion = index;
                 while (insertion > 0) {
-                    const auto& left = rules ? items[indices[insertion - 1]].args()[0] : items[indices[insertion - 1]];
-                    const auto& right = rules ? items[indices[insertion]].args()[0] : items[indices[insertion]];
+                    const auto& left = rules ? items[indices[insertion - 1]].args()[1] : items[indices[insertion - 1]];
+                    const auto& right = rules ? items[indices[insertion]].args()[1] : items[indices[insertion]];
                     if (is_symbol(evaluate(call(*same_test, {left, right})), "True") || !compare_indices(indices[insertion], indices[insertion - 1])) break;
                     std::swap(indices[insertion - 1], indices[insertion]); --insertion;
                 }
