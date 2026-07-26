@@ -2357,6 +2357,19 @@ std::optional<int> compare_orderable_real(
     if (is_symbol(left, "Infinity")) return 1;
     if (is_symbol(right, "Infinity")) return -1;
 
+    const auto contains_machine_real = [](const Expr& value) {
+        return value.kind() == ExprKind::Real
+            && value.text().find('`') == std::string::npos;
+    };
+    if (contains_machine_real(left) || contains_machine_real(right)) {
+        const auto left_approximate = numeric_real(left);
+        const auto right_approximate = numeric_real(right);
+        if (!left_approximate || !right_approximate) return std::nullopt;
+        if (*left_approximate < *right_approximate) return -1;
+        if (*left_approximate > *right_approximate) return 1;
+        return 0;
+    }
+
     auto exact_decimal = [](const Expr& value) -> std::optional<mpq_class> {
         if (const auto exact = as_rational(value)) return exact;
         if (value.kind() == ExprKind::Real)
@@ -14943,14 +14956,51 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "Min" && args.empty()) return symbol("Infinity");
     if (function == "Max" && args.empty()) return symbol("-Infinity");
-    if (function == "Clip" && args.size() >= 1 && args.size() <= 3) {
-        const auto value = numeric_real(args[0]); Expr lower = integer(-1L), upper = integer(1L);
-        if (args.size() >= 2 && args[1].has_head("List") && args[1].args().size() == 2) { lower = args[1].args()[0]; upper = args[1].args()[1]; }
-        const auto low = numeric_real(lower), high = numeric_real(upper);
-        if (value && low && high) {
-            Expr below = lower, above = upper; if (args.size() == 3 && args[2].has_head("List") && args[2].args().size() == 2) { below = args[2].args()[0]; above = args[2].args()[1]; }
-            return *value < *low ? below : *value > *high ? above : args[0];
+    if (function == "Clip" && evaluated_name && *evaluated_name == "Clip") {
+        if (args.empty() || args.size() > 3)
+            return raw_evaluation_error(
+                "Clip expects one, two, or three arguments.");
+        auto is_explicit_real = [](const Expr& value) {
+            return value.kind() == ExprKind::Integer
+                || value.kind() == ExprKind::Rational
+                || value.kind() == ExprKind::Real
+                || value.kind() == ExprKind::SpecialReal;
+        };
+        if (!is_explicit_real(args[0]))
+            return raw_evaluation_error(
+                "Clip currently evaluates only for explicit real numeric arguments.");
+
+        Expr lower = integer(-1L);
+        Expr upper = integer(1L);
+        if (args.size() >= 2) {
+            if (!args[1].has_head("List") || args[1].args().size() != 2)
+                return raw_evaluation_error(
+                    "Clip currently expects bounds of the form {min, max}.");
+            lower = args[1].args()[0];
+            upper = args[1].args()[1];
+            if (!is_explicit_real(lower) || !is_explicit_real(upper))
+                return raw_evaluation_error(
+                    "Clip currently evaluates only for explicit real numeric bounds.");
         }
+
+        const auto lower_order = compare_orderable_real(args[0], lower);
+        const auto upper_order = compare_orderable_real(args[0], upper);
+        if (!lower_order || !upper_order)
+            return raw_evaluation_error(args.size() == 1
+                ? "Clip could not compare the input with default bounds."
+                : "Clip could not compare the input with the supplied bounds.");
+
+        if (*lower_order < 0 || *upper_order > 0) {
+            if (args.size() == 3) {
+                if (!args[2].has_head("List") || args[2].args().size() != 2)
+                    return raw_evaluation_error(
+                        "Clip currently expects replacement values of the form {vmin, vmax}.");
+                return *lower_order < 0
+                    ? args[2].args()[0] : args[2].args()[1];
+            }
+            return *lower_order < 0 ? lower : upper;
+        }
+        return args[0];
     }
     if (function == "KroneckerDelta" && !args.empty()) return integer(std::adjacent_find(args.begin(), args.end(), std::not_equal_to<Expr>()) == args.end() ? 1L : 0L);
     if (function == "DiscreteDelta" && !args.empty() && std::all_of(args.begin(), args.end(), [](const Expr& value) { return as_rational(value).has_value(); }))
