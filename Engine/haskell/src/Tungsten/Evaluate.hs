@@ -610,6 +610,7 @@ reduceBuiltin headName values = case headName of
   "Round" -> Right (reduceRounding RoundNearest headName values)
   "IntegerPart" -> Right (reduceRounding RoundIntegerPart headName values)
   "FractionalPart" -> Right (reduceRounding RoundFractionalPart headName values)
+  "Clip" -> reduceClip values
   "Sqrt" -> Right (reduceSqrt values)
   "Not" -> Right (reduceNot values)
   "Equal" -> Right (reduceEquality True values)
@@ -711,6 +712,15 @@ reduceBuiltin headName values = case headName of
   "ContainsAny" -> reduceContains "ContainsAny" containsAny values
   "ContainsNone" -> reduceContains "ContainsNone" (\left right -> not (containsAny left right)) values
   "ContainsExactly" -> reduceContains "ContainsExactly" containsExactly values
+  "ContainsOnly" -> reduceContainsOnly values
+  "DeleteAdjacentDuplicates" -> reduceDeleteAdjacentDuplicates values
+  "DeleteDuplicates" -> reduceDeleteDuplicates values
+  "DeleteDuplicatesBy" -> reduceDeleteDuplicatesBy values
+  "DuplicateFreeQ" -> reduceDuplicateFreeQ values
+  "Split" -> reduceSplit values
+  "SplitBy" -> reduceSplitBy values
+  "Subsequences" -> reduceSubsequences values
+  "CountsBy" -> reduceCountsBy values
   "Subsets" -> reduceSubsets values
   "Permutations" -> reducePermutations values
   "Permute" -> reducePermute values
@@ -742,6 +752,10 @@ reduceBuiltin headName values = case headName of
   "Ordering" -> reduceOrderingIndices values
   "Sort" -> reduceSort False values
   "ReverseSort" -> reduceSort True values
+  "AlphabeticSort" -> reduceTextSort False values
+  "NumericalSort" -> reduceTextSort True values
+  "LexicographicOrder" -> reduceLexicographicOrder values
+  "LexicographicSort" -> reduceLexicographicSort values
   "SortBy" -> reduceSortBy False values
   "ReverseSortBy" -> reduceSortBy True values
   "Union" -> reduceSetOperation SetUnion values
@@ -910,6 +924,60 @@ reduceRounding operation headName values =
                   (multiplyExact exactMultiple (Exact (roundExact operation quotient) 1))
               Nothing -> Call (Symbol headName) values
     _ -> Call (Symbol headName) values
+
+reduceClip :: [Expr] -> Either EvaluationError Expr
+reduceClip arguments' = case arguments' of
+  [value] -> clip value (Integer (-1)) (Integer 1) Nothing
+  [value, bounds] -> do
+    (lower, upper) <- parseBounds bounds
+    clip value lower upper Nothing
+  [value, bounds, replacements] -> do
+    (lower, upper) <- parseBounds bounds
+    clip value lower upper (Just replacements)
+  _ -> Left (EvaluationError "Clip expects one, two, or three arguments.")
+ where
+  parseBounds (Call (Symbol "List") [lower, upper]) = Right (lower, upper)
+  parseBounds _ =
+    Left
+      ( EvaluationError
+          "Clip currently expects bounds of the form {min, max}."
+      )
+  clip value lower upper replacements = do
+    exactValue <-
+      maybe
+        ( Left
+            ( EvaluationError
+                "Clip currently evaluates only for explicit real numeric arguments."
+            )
+        )
+        Right
+        (explicitRealExact value)
+    exactLower <- explicitBound lower
+    exactUpper <- explicitBound upper
+    if compareExact exactValue exactLower == LT
+      then replacementAt 0 replacements lower
+      else
+        if compareExact exactValue exactUpper == GT
+          then replacementAt 1 replacements upper
+          else Right value
+  explicitBound value =
+    maybe
+      ( Left
+          ( EvaluationError
+              "Clip currently evaluates only for explicit real numeric bounds."
+          )
+      )
+      Right
+      (explicitRealExact value)
+  replacementAt :: Int -> Maybe Expr -> Expr -> Either EvaluationError Expr
+  replacementAt _ Nothing boundary = Right boundary
+  replacementAt index (Just (Call (Symbol "List") [lowerReplacement, upperReplacement])) _ =
+    Right (if index == 0 then lowerReplacement else upperReplacement)
+  replacementAt _ (Just _) _ =
+    Left
+      ( EvaluationError
+          "Clip currently expects replacement values of the form {vmin, vmax}."
+      )
 
 roundScalar :: RoundingOperation -> Expr -> Maybe Expr
 roundScalar operation value
@@ -2402,12 +2470,14 @@ reduceEquality :: Bool -> [Expr] -> Expr
 reduceEquality True values
   | length values < 2 = Symbol "True"
   | allEqual values = Symbol "True"
-  | all isExact values = Symbol "False"
+  | Just numericValues <- traverse explicitRealExact values =
+      boolean (allEqual numericValues)
   | otherwise = Call (Symbol "Equal") values
 reduceEquality False values
   | length values < 2 = Symbol "True"
   | not (allDistinct values) = Symbol "False"
-  | all isExact values = Symbol "True"
+  | Just numericValues <- traverse explicitRealExact values =
+      boolean (allDistinct numericValues)
   | otherwise = Call (Symbol "Unequal") values
 
 reduceOrdering :: (Exact -> Exact -> Bool) -> Text -> [Expr] -> Expr
@@ -3496,6 +3566,258 @@ containsAny left right = any (`elem` left) right
 containsExactly :: [Expr] -> [Expr] -> Bool
 containsExactly left right = containsAll left right && containsAll right left
 
+reduceContainsOnly :: [Expr] -> Either EvaluationError Expr
+reduceContainsOnly arguments' = do
+  (dataArguments, sameTest) <- splitSameTestOption "ContainsOnly" arguments'
+  case dataArguments of
+    [left, right] -> do
+      leftValues <- listOrAssociationValues "ContainsOnly" left
+      rightValues <- listOrAssociationValues "ContainsOnly" right
+      outcomes <-
+        traverse
+          (\value -> anyEquivalent sameTest value rightValues)
+          leftValues
+      pure (boolean (and outcomes))
+    _ ->
+      Left
+        ( EvaluationError
+            "ContainsOnly expects two arguments and an optional SameTest rule."
+        )
+
+splitSameTestOption
+  :: Text
+  -> [Expr]
+  -> Either EvaluationError ([Expr], Maybe Expr)
+splitSameTestOption _operation arguments' = case reverse arguments' of
+  Call (Symbol ruleHead) [Symbol optionName, function] : remaining
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead
+    , systemHeadIn ["SameTest"] optionName ->
+        Right (reverse remaining, normalizeAutomatic function)
+  _ -> Right (arguments', Nothing)
+ where
+  normalizeAutomatic (Symbol name)
+    | systemHeadIn ["Automatic"] name = Nothing
+  normalizeAutomatic value = Just value
+
+equivalentBy :: Maybe Expr -> Expr -> Expr -> Either EvaluationError Bool
+equivalentBy Nothing left right = Right (left == right)
+equivalentBy (Just test) left right = do
+  result <- evaluate (Call test [left, right])
+  pure (result == Symbol "True")
+
+anyEquivalent :: Maybe Expr -> Expr -> [Expr] -> Either EvaluationError Bool
+anyEquivalent _ _ [] = Right False
+anyEquivalent test value (candidate : remaining) = do
+  matches <- equivalentBy test value candidate
+  if matches
+    then Right True
+    else anyEquivalent test value remaining
+
+sequenceCollectionValues :: Text -> Expr -> Either EvaluationError [Expr]
+sequenceCollectionValues operation expression = do
+  items <- orderedItems operation expression
+  pure [value | OrderedItem _ value _ _ <- items]
+
+reduceSplit :: [Expr] -> Either EvaluationError Expr
+reduceSplit arguments' = case arguments' of
+  [subject] -> split subject Nothing
+  [subject, test] -> split subject (Just test)
+  _ -> Left (EvaluationError "Split expects a sequence and an optional test.")
+ where
+  split subject test = do
+    values <- sequenceCollectionValues "Split" subject
+    groups <- groupAdjacent test values
+    pure (evaluatedList (map evaluatedList groups))
+
+groupAdjacent :: Maybe Expr -> [Expr] -> Either EvaluationError [[Expr]]
+groupAdjacent _ [] = Right []
+groupAdjacent test (firstValue : remaining) = go firstValue [firstValue] [] remaining
+ where
+  go _ current retained [] = Right (retained <> [current])
+  go previous current retained (value : rest) = do
+    matches <- equivalentBy test previous value
+    if matches
+      then go value (current <> [value]) retained rest
+      else go value [value] (retained <> [current]) rest
+
+reduceSplitBy :: [Expr] -> Either EvaluationError Expr
+reduceSplitBy [subject, keyFunction] = do
+  values <- sequenceCollectionValues "SplitBy" subject
+  case values of
+    [] -> Right (evaluatedList [])
+    firstValue : remaining -> do
+      firstKey <- evaluate (Call keyFunction [firstValue])
+      groups <- go keyFunction firstKey [firstValue] [] remaining
+      pure (evaluatedList (map evaluatedList groups))
+ where
+  go _ _ current retained [] = Right (retained <> [current])
+  go callback previousKey current retained (value : rest) = do
+    key <- evaluate (Call callback [value])
+    if key == previousKey
+      then go callback key (current <> [value]) retained rest
+      else go callback key [value] (retained <> [current]) rest
+reduceSplitBy _ = Left (EvaluationError "SplitBy expects a sequence and a function.")
+
+reduceDeleteAdjacentDuplicates :: [Expr] -> Either EvaluationError Expr
+reduceDeleteAdjacentDuplicates arguments' = case arguments' of
+  [subject] -> delete subject Nothing
+  [subject, test] -> delete subject (Just test)
+  _ ->
+    Left
+      ( EvaluationError
+          "DeleteAdjacentDuplicates expects a sequence and an optional test."
+      )
+ where
+  delete subject test = do
+    values <- sequenceCollectionValues "DeleteAdjacentDuplicates" subject
+    evaluatedList <$> retainAdjacent test values
+  retainAdjacent _ [] = Right []
+  retainAdjacent test (firstValue : remaining) =
+    go firstValue [firstValue] remaining
+   where
+    go _ retained [] = Right retained
+    go previous retained (value : rest) = do
+      matches <- equivalentBy test previous value
+      if matches
+        then go previous retained rest
+        else go value (retained <> [value]) rest
+
+reduceDeleteDuplicates :: [Expr] -> Either EvaluationError Expr
+reduceDeleteDuplicates arguments' = case arguments' of
+  [subject] -> delete subject Nothing
+  [subject, test] -> delete subject (Just test)
+  _ ->
+    Left
+      ( EvaluationError
+          "DeleteDuplicates expects a compound expression and an optional test."
+      )
+ where
+  delete subject test = do
+    items <- orderedItems "DeleteDuplicates" subject
+    retained <- foldM (retainUniqueItem test) [] items
+    pure (rebuildOrdered subject retained)
+
+retainUniqueItem
+  :: Maybe Expr
+  -> [OrderedItem]
+  -> OrderedItem
+  -> Either EvaluationError [OrderedItem]
+retainUniqueItem test retained item@(OrderedItem _ value _ _) = do
+  duplicate <-
+    anyEquivalent
+      test
+      value
+      [prior | OrderedItem _ prior _ _ <- retained]
+  pure (if duplicate then retained else retained <> [item])
+
+reduceDeleteDuplicatesBy :: [Expr] -> Either EvaluationError Expr
+reduceDeleteDuplicatesBy arguments' = case arguments' of
+  [subject, function] -> delete subject function Nothing
+  [subject, function, test] -> delete subject function (Just test)
+  _ ->
+    Left
+      ( EvaluationError
+          "DeleteDuplicatesBy expects a compound expression, a function, and an optional test."
+      )
+ where
+  delete subject function test = do
+    items <- orderedItems "DeleteDuplicatesBy" subject
+    (_, retained) <- foldM (retainByKey function test) ([], []) items
+    pure (rebuildOrdered subject retained)
+  retainByKey function test (keys, retained) item@(OrderedItem _ value _ _) = do
+    key <- evaluate (Call function [value])
+    duplicate <- anyPriorKey test keys key
+    pure
+      ( if duplicate
+          then (keys, retained)
+          else (keys <> [key], retained <> [item])
+      )
+  anyPriorKey _ [] _ = Right False
+  anyPriorKey test (prior : remaining) key = do
+    matches <- equivalentBy test prior key
+    if matches then Right True else anyPriorKey test remaining key
+
+reduceDuplicateFreeQ :: [Expr] -> Either EvaluationError Expr
+reduceDuplicateFreeQ arguments' = case arguments' of
+  [subject] -> check subject Nothing
+  [subject, test] -> check subject (Just test)
+  _ ->
+    Left
+      ( EvaluationError
+          "DuplicateFreeQ expects a compound expression and an optional test."
+      )
+ where
+  check subject test = do
+    values <- sequenceCollectionValues "DuplicateFreeQ" subject
+    boolean <$> allDistinctBy test values
+  allDistinctBy _ [] = Right True
+  allDistinctBy test (value : remaining) = do
+    duplicate <- anyEquivalent test value remaining
+    if duplicate then Right False else allDistinctBy test remaining
+
+reduceCountsBy :: [Expr] -> Either EvaluationError Expr
+reduceCountsBy [subject, function] = do
+  values <- listOrAssociationValues "CountsBy" subject
+  groups <- groupValuesBy function values
+  pure
+    ( associationExpr
+        [ AssociationEntry "Rule" key (Integer (fromIntegral (length groupedValues)))
+        | ValueGroup key groupedValues <- groups
+        ]
+    )
+reduceCountsBy _ = Left (EvaluationError "CountsBy expects a collection and a function.")
+
+reduceSubsequences :: [Expr] -> Either EvaluationError Expr
+reduceSubsequences arguments' = case arguments' of
+  [subject] -> subsequences subject Nothing
+  [subject, specification] -> subsequences subject (Just specification)
+  _ ->
+    Left
+      ( EvaluationError
+          "Subsequences expects a sequence and an optional length specification."
+      )
+ where
+  subsequences subject specification = do
+    values <- sequenceCollectionValues "Subsequences" subject
+    (lowerBound, upperBound) <- subsequenceBounds (length values) specification
+    let lower = max 0 lowerBound
+        upper = min (length values) (max (-1) upperBound)
+        output =
+          [ evaluatedList (take width (drop start values))
+          | width <- [lower .. upper]
+          , start <- if width == 0 then [0] else [0 .. length values - width]
+          ]
+    if toInteger (length output) > maximumDenseArrayMaterializedNodes
+      then
+        Left
+          ( EvaluationError
+              "Subsequences output exceeds the native materialization limit."
+          )
+      else Right (evaluatedList output)
+  subsequenceBounds count Nothing = Right (1, count)
+  subsequenceBounds _ (Just (Integer upper)) = integerBounds 1 upper
+  subsequenceBounds _ (Just (Call (Symbol "List") [Integer target])) =
+    integerBounds target target
+  subsequenceBounds _ (Just (Call (Symbol "List") [Integer lower, Integer upper])) =
+    integerBounds lower upper
+  subsequenceBounds _ (Just (Call (Symbol "List") _)) =
+    Left
+      ( EvaluationError
+          "Subsequences currently supports n, {n}, or {min, max} length specs."
+      )
+  subsequenceBounds _ _ =
+    Left
+      ( EvaluationError
+          "Subsequences expects an integer count or a length specification list."
+      )
+  integerBounds lower upper
+    | lower < toInteger (minBound :: Int)
+        || lower > toInteger (maxBound :: Int)
+        || upper < toInteger (minBound :: Int)
+        || upper > toInteger (maxBound :: Int) =
+        Left (EvaluationError "Subsequences length specification is out of native range.")
+    | otherwise = Right (fromInteger lower, fromInteger upper)
+
 reduceSubsets :: [Expr] -> Either EvaluationError Expr
 reduceSubsets = \case
   [dataExpression] -> subsetsWithSizes dataExpression Nothing
@@ -4533,6 +4855,105 @@ reduceSort reverseMode = \case
     selected <- countSlice operation count sorted
     pure (rebuildOrdered subject selected)
   operation = if reverseMode then "ReverseSort" else "Sort"
+
+data NaturalSortPart
+  = NaturalText !Text
+  | NaturalNumber !Integer
+  deriving (Eq, Show)
+
+instance Ord NaturalSortPart where
+  compare (NaturalText left) (NaturalText right) = compare left right
+  compare NaturalText {} NaturalNumber {} = LT
+  compare NaturalNumber {} NaturalText {} = GT
+  compare (NaturalNumber left) (NaturalNumber right) = compare left right
+
+reduceTextSort :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceTextSort numerical [subject] = do
+  items <- orderedItems operation subject
+  let key (OrderedItem _ value _ _) =
+        let source = case value of
+              String textValue -> textValue
+              _ -> inputForm value
+         in if numerical
+              then Left (naturalSortParts (T.toCaseFold source))
+              else Right (T.toCaseFold source)
+      compareItems left right = compare (key left) (key right)
+  pure (rebuildOrdered subject (sortBy compareItems items))
+ where
+  operation = if numerical then "NumericalSort" else "AlphabeticSort"
+reduceTextSort numerical _ =
+  Left
+    ( EvaluationError
+        ( (if numerical then "NumericalSort" else "AlphabeticSort")
+            <> " expects exactly one compound expression."
+        )
+    )
+
+naturalSortParts :: Text -> [NaturalSortPart]
+naturalSortParts source = case T.uncons source of
+  Nothing -> []
+  Just (firstCharacter, _)
+    | isDigit firstCharacter ->
+        let (digits, remaining) = T.span isDigit source
+            part = case readMaybe (T.unpack digits) of
+              Just value -> NaturalNumber value
+              Nothing -> NaturalText digits
+         in part : naturalSortParts remaining
+    | otherwise ->
+        let (textPart, remaining) = T.span (not . isDigit) source
+         in NaturalText textPart : naturalSortParts remaining
+
+reduceLexicographicOrder :: [Expr] -> Either EvaluationError Expr
+reduceLexicographicOrder arguments' = case arguments' of
+  [left, right] -> Right (orderResult (lexicographicCompare Nothing left right))
+  [left, right, function] ->
+    Right (orderResult (lexicographicCompare (Just function) left right))
+  _ ->
+    Left
+      ( EvaluationError
+          "LexicographicOrder expects two expressions and an optional ordering function."
+      )
+ where
+  orderResult ordering = Integer $ case ordering of
+    LT -> 1
+    EQ -> 0
+    GT -> -1
+
+reduceLexicographicSort :: [Expr] -> Either EvaluationError Expr
+reduceLexicographicSort arguments' = case arguments' of
+  [subject] -> sortSubject subject Nothing
+  [subject, function] -> sortSubject subject (Just function)
+  _ ->
+    Left
+      ( EvaluationError
+          "LexicographicSort expects a compound expression and an optional ordering function."
+      )
+ where
+  sortSubject subject function = do
+    items <- orderedItems "LexicographicSort" subject
+    let compareItems (OrderedItem _ left _ _) (OrderedItem _ right _ _) =
+          lexicographicCompare function left right
+    pure (rebuildOrdered subject (sortBy compareItems items))
+
+lexicographicCompare :: Maybe Expr -> Expr -> Expr -> Ordering
+lexicographicCompare function left right =
+  case (lexicographicElements left, lexicographicElements right) of
+    (Just leftValues, Just rightValues) -> compareValues leftValues rightValues
+    _ -> orderingFunctionCompare function left right
+ where
+  compareValues [] [] = EQ
+  compareValues [] (_ : _) = LT
+  compareValues (_ : _) [] = GT
+  compareValues (leftValue : leftRest) (rightValue : rightRest) =
+    case orderingFunctionCompare function leftValue rightValue of
+      EQ -> compareValues leftRest rightRest
+      ordering -> ordering
+
+lexicographicElements :: Expr -> Maybe [Expr]
+lexicographicElements (String value) =
+  Just (map (String . T.singleton) (T.unpack value))
+lexicographicElements (Call _ values) = Just values
+lexicographicElements _ = Nothing
 
 invertOrdering :: Ordering -> Ordering
 invertOrdering LT = GT

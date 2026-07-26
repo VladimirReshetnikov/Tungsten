@@ -1550,6 +1550,55 @@ CASES = (
         0,
     ),
     (
+        "clipping splitting and contiguous subsequences",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Clip[-3],Clip[9,{-5,5}],Clip[-7,{-5,5},{100,200}], "
+            "Split[{a,a,b,b,a}],SplitBy[{1,3,2,4,5},EvenQ], "
+            "DeleteAdjacentDuplicates[{a,a,b,a,a}], "
+            "Subsequences[{a,b,c},{0,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "alphabetic numerical and lexicographic ordering",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{AlphabeticSort[{\"beta\",\"Alpha\",\"gamma\"}], "
+            "NumericalSort[{\"x10\",\"x2\",\"x1\"}], "
+            "LexicographicOrder[{1,2},{1,3}], "
+            "LexicographicOrder[\"a\",\"aa\"], "
+            "LexicographicSort[{{1,3},{1,2},{0,9}}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "duplicate containment counts and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{DeleteDuplicates[{a,b,a,c,b}], "
+            "DeleteDuplicatesBy[{{a},{b,c},{d},{e,f}},Length], "
+            "DeleteDuplicatesBy[{1,2,3,4,5,6},Mod[#,3]&,SameQ], "
+            "DuplicateFreeQ[{a,b,a}], "
+            "ContainsOnly[{1.0,2},{1,2,3},SameTest->Equal], "
+            "CountsBy[{1.5,1.7,1.9,2.5,3.7},Floor], "
+            "Clip[x],Subsequences[{a,b},{0,1,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "quantiles and quartile interpolation",
         (
             "expr",
