@@ -98,6 +98,16 @@ valueCases =
   , ("SparseArray Extract uses compact coordinate lookup", "Extract[SparseArray[{{2,3}->a},{2,3}],{2,3}]", "a")
   , ("SparseArray addition merges explicit coordinates", "Normal[SparseArray[{{1,2}->a},{2,3}]+SparseArray[{{2,3}->b},{2,3}]]", "List[List[0, a, 0], List[0, 0, b]]")
   , ("SparseArray scalar arithmetic transforms the implicit value", "Normal[2 SparseArray[{{1}->a},{3}]+1]", "List[Plus[1, Times[2, a]], 1, 1]")
+  , ("ArrayReshape preserves compact SparseArray storage", "ArrayRules[ArrayReshape[SparseArray[{{2}->a,{5}->b},{6}],{2,3}]]", "List[Rule[List[1, 2], a], Rule[List[2, 2], b], Rule[List[Blank[], Blank[]], 0]]")
+  , ("ArrayReshape falls back to dense padding when fills differ", "ArrayReshape[SparseArray[{{1}->a,{4}->d},{5}],{2,3},x]", "List[List[a, 0, 0], List[d, 0, x]]")
+  , ("ArrayPad shifts compact SparseArray coordinates", "ArrayRules[ArrayPad[SparseArray[{{2}->a},{3}],1]]", "List[Rule[List[3], a], Rule[List[Blank[]], 0]]")
+  , ("ArrayPad materializes differing boundary fill", "ArrayPad[SparseArray[{{2}->a},{3}],{1,2},x]", "List[x, 0, a, 0, x, x]")
+  , ("Transpose permutes compact SparseArray axes", "ArrayRules[Transpose[SparseArray[{{1,2}->a,{2,1}->b},{2,3}]]]", "List[Rule[List[1, 2], b], Rule[List[2, 1], a], Rule[List[Blank[], Blank[]], 0]]")
+  , ("Flatten linearizes compact SparseArray coordinates", "ArrayRules[Flatten[SparseArray[{{1,2}->a,{2,1}->b},{2,3}]]]", "List[Rule[List[2], a], Rule[List[4], b], Rule[List[Blank[]], 0]]")
+  , ("Flatten supports partial rank collapse", "ArrayRules[Flatten[SparseArray[{{1,1,2}->x,{2,3,4}->y},{2,3,4}],1]]", "List[Rule[List[1, 2], x], Rule[List[6, 4], y], Rule[List[Blank[], Blank[]], 0]]")
+  , ("ArrayFlatten combines sparse and dense zero-fill blocks", "ArrayRules[ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2}],{{b},{c}}}}]]", "List[Rule[List[1, 1], a], Rule[List[1, 3], b], Rule[List[2, 3], c], Rule[List[Blank[], Blank[]], 0]]")
+  , ("ArrayFlatten materializes nonzero sparse fill", "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2},z]}}]", "List[List[a, z], List[z, z]]")
+  , ("sparse transforms retain arbitrary-precision dimensions", "{ArrayReshape[SparseArray[{{1000000000}->a},{1000000000}],{1000000,1000}],ArrayPad[SparseArray[{{1000000000}->a},{1000000000}],{2,3}],Flatten[SparseArray[{{1,1}->a},{1000000000,1000000000}]]}", "List[SparseArray[List[Rule[List[1000000, 1000], a]], List[1000000, 1000]], SparseArray[List[Rule[List[1000000002], a]], List[1000000005]], SparseArray[List[Rule[List[1], a]], List[1000000000000000000]]]")
   , ("ArrayReshape flattens and pads", "ArrayReshape[{{1,2},{3,4}},{3,2},x]", "List[List[1, 2], List[3, 4], List[x, x]]")
   , ("ArrayReshape truncates row-major leaves", "ArrayReshape[{{1,2},{3,4}},{3}]", "List[1, 2, 3]")
   , ("ArrayReshape preserves rank around a zero axis", "ArrayReshape[{{}}, {2,0,3}]", "List[List[], List[]]")
@@ -174,6 +184,8 @@ errorCases =
   , ("SparseArray rejects an empty inferred rule set", "SparseArray[{}]")
   , ("SparseArray rejects out-of-bounds rules", "SparseArray[{{3}->a},{2}]")
   , ("SparseArray Part rejects too many axes", "SparseArray[{{1}->a},{2}][[1,1]]")
+  , ("Flatten rejects a negative SparseArray level", "Flatten[SparseArray[{}, {2,2}],-1]")
+  , ("ArrayFlatten rejects rank-one SparseArray blocks", "ArrayFlatten[{{SparseArray[{}, {2}]}}]")
   ]
 
 exactErrorCases :: [(Text, Text, Text)]

@@ -794,7 +794,7 @@ reduceBuiltin headName values = case headName of
   "Append" -> Right (reduceAppendPrepend False headName values)
   "Prepend" -> Right (reduceAppendPrepend True headName values)
   "Join" -> Right (reduceJoin values)
-  "Flatten" -> Right (reduceFlatten values)
+  "Flatten" -> reduceFlatten values
   "Delete" -> reduceDelete values
   "Insert" -> reduceInsert values
   "ReplacePart" -> Right (reduceReplacePart values)
@@ -6177,22 +6177,28 @@ isSparseArray SparseArray {} = True
 isSparseArray _ = False
 
 normalizeSparseDimensions :: Expr -> Either EvaluationError [Integer]
-normalizeSparseDimensions = \case
+normalizeSparseDimensions = normalizeArbitraryDimensions "SparseArray"
+
+normalizeArbitraryDimensions
+  :: Text
+  -> Expr
+  -> Either EvaluationError [Integer]
+normalizeArbitraryDimensions operation = \case
   Integer dimension -> pure <$> normalizeOne dimension
   Call (Symbol listHead) dimensions
     | systemHeadIn ["List"] listHead -> traverse requireInteger dimensions
   _ ->
     Left
       ( EvaluationError
-          "SparseArray expects an integer dimension or a list of dimensions."
+          (operation <> " expects an integer dimension or a list of dimensions.")
       )
  where
   requireInteger (Integer dimension) = normalizeOne dimension
   requireInteger _ =
-    Left (EvaluationError "SparseArray expects an integer argument.")
+    Left (EvaluationError (operation <> " expects an integer argument."))
   normalizeOne dimension
     | dimension < 0 =
-        Left (EvaluationError "SparseArray expects non-negative dimensions.")
+        Left (EvaluationError (operation <> " expects non-negative dimensions."))
     | otherwise = Right dimension
 
 canonicalSparseArray
@@ -6586,8 +6592,10 @@ reduceArrayReshape _ =
     )
 
 arrayReshape :: Expr -> Expr -> Expr -> Either EvaluationError Expr
-arrayReshape SparseArray {} _ _ =
-  Left (EvaluationError "ArrayReshape currently supports dense expressions only.")
+arrayReshape sparse@SparseArray {} dimensionsExpression padding = do
+  dimensions <-
+    normalizeArbitraryDimensions "ArrayReshape" dimensionsExpression
+  sparseArrayReshape sparse dimensions dimensionsExpression padding
 arrayReshape expression dimensionsExpression padding = do
   dimensions <- normalizeDenseDimensions "ArrayReshape" dimensionsExpression
   guardDenseArrayMaterialization "ArrayReshape" dimensions
@@ -6604,6 +6612,63 @@ arrayReshape expression dimensionsExpression padding = do
     buildChildren count rest built =
       let (child, next) = buildReshaped remainingDimensions rest
        in buildChildren (count - 1) next (child : built)
+
+sparseArrayReshape
+  :: Expr
+  -> [Integer]
+  -> Expr
+  -> Expr
+  -> Either EvaluationError Expr
+sparseArrayReshape sparse@(SparseArray oldDimensions entries oldFill) dimensions dimensionsExpression padding
+  | null dimensions =
+      if oldTotal == 0
+        then Right padding
+        else
+          Right
+            ( sparseValueAt
+                entries
+                oldFill
+                (replicate (length oldDimensions) 1)
+            )
+  | newTotal > oldTotal
+  , oldFill /= padding = do
+      dense <- sparseArrayNormal sparse
+      arrayReshape dense dimensionsExpression padding
+  | otherwise = do
+      pairs <-
+        traverse
+          ( \(SparseEntry indices value) ->
+              let linear = sparseLinearIndex indices oldDimensions
+               in Right (sparseIndicesFromLinear linear dimensions, value)
+          )
+          [ entry
+          | entry@(SparseEntry indices _) <- entries
+          , sparseLinearIndex indices oldDimensions < newTotal
+          ]
+      canonicalSparseArray dimensions pairs outputFill
+ where
+  oldTotal = product oldDimensions
+  newTotal = product dimensions
+  outputFill
+    | newTotal <= oldTotal = oldFill
+    | otherwise = padding
+sparseArrayReshape _ _ _ _ =
+  Left (EvaluationError "ArrayReshape currently expects an array.")
+
+sparseLinearIndex :: [Integer] -> [Integer] -> Integer
+sparseLinearIndex indices dimensions =
+  foldl'
+    (\linear (index, dimension) -> linear * dimension + index - 1)
+    0
+    (zip indices dimensions)
+
+sparseIndicesFromLinear :: Integer -> [Integer] -> [Integer]
+sparseIndicesFromLinear linear dimensions =
+  snd (foldl' select (linear, []) (reverse dimensions))
+ where
+  select (remaining, indices) dimension =
+    let (next, offset) = remaining `divMod` dimension
+     in (next, offset + 1 : indices)
 
 normalizeArrayPadding
   :: Int
@@ -6656,6 +6721,29 @@ reduceArrayPad _ =
     )
 
 arrayPad :: Expr -> Expr -> Expr -> Either EvaluationError Expr
+arrayPad sparse@(SparseArray dimensions entries sourceFill) paddingExpression padding = do
+  widths <- normalizeArrayPadding (length dimensions) paddingExpression
+  let newDimensions =
+        zipWith
+          (\dimension (left, right) -> dimension + fromIntegral left + fromIntegral right)
+          dimensions
+          widths
+  if padding == sourceFill
+    then
+      canonicalSparseArray
+        newDimensions
+        [ ( zipWith
+              (\index (left, _) -> index + fromIntegral left)
+              indices
+              widths
+          , value
+          )
+        | SparseEntry indices value <- entries
+        ]
+        sourceFill
+    else do
+      dense <- sparseArrayNormal sparse
+      arrayPad dense paddingExpression padding
 arrayPad expression paddingExpression padding = do
   dimensions <- requireDenseArrayDimensions "ArrayPad" expression
   widths <- normalizeArrayPadding (length dimensions) paddingExpression
@@ -6682,6 +6770,13 @@ reduceArrayFlatten _ =
 
 arrayFlatten :: Expr -> Either EvaluationError Expr
 arrayFlatten (Call (Symbol "List") []) = Right (evaluatedList [])
+arrayFlatten (Call (Symbol "List") rowExpressions)
+  | any rowContainsSparse rowExpressions =
+      arrayFlattenSparseBlocks rowExpressions
+ where
+  rowContainsSparse (Call (Symbol listHead) blocks)
+    | systemHeadIn ["List"] listHead = any isSparseArray blocks
+  rowContainsSparse _ = False
 arrayFlatten (Call (Symbol "List") rowExpressions) = do
   blockRows <- traverse requireBlockRow rowExpressions
   let columnCount = case blockRows of
@@ -6755,6 +6850,121 @@ arrayFlatten (Call (Symbol "List") rowExpressions) = do
 arrayFlatten _ =
   Left (EvaluationError "ArrayFlatten expects a rectangular list of array blocks.")
 
+arrayFlattenSparseBlocks :: [Expr] -> Either EvaluationError Expr
+arrayFlattenSparseBlocks rowExpressions = do
+  blockRows <- traverse requireBlockRow rowExpressions
+  let columnCount = case blockRows of
+        firstRow : _ -> length firstRow
+        [] -> 0
+  if columnCount == 0 || any ((/= columnCount) . length) blockRows
+    then Left (EvaluationError "ArrayFlatten expects a rectangular block matrix.")
+    else
+      if any hasNonzeroSparseFill (concat blockRows)
+        then do
+          denseRows <- traverse (traverse densifyBlock) blockRows
+          arrayFlatten
+            ( evaluatedList
+                [evaluatedList row | row <- denseRows]
+            )
+        else do
+          shapeRows <- traverse (traverse sparseBlockShape) blockRows
+          rowHeights <- traverse consistentRowHeight (zip [1 :: Int ..] shapeRows)
+          columnWidths <-
+            traverse
+              (consistentColumnWidth shapeRows)
+              [0 .. columnCount - 1]
+          pairs <- collectRows blockRows rowHeights columnWidths 0
+          canonicalSparseArray
+            [sum rowHeights, sum columnWidths]
+            pairs
+            (Integer 0)
+ where
+  requireBlockRow (Call (Symbol listHead) blocks)
+    | systemHeadIn ["List"] listHead = Right blocks
+  requireBlockRow _ =
+    Left
+      ( EvaluationError
+          "ArrayFlatten expects a rectangular list of array blocks."
+      )
+  hasNonzeroSparseFill (SparseArray _ _ fill) = fill /= Integer 0
+  hasNonzeroSparseFill _ = False
+  densifyBlock sparse@SparseArray {} = sparseArrayNormal sparse
+  densifyBlock dense = Right dense
+  sparseBlockShape (SparseArray dimensions _ _) = case dimensions of
+    [height, width] -> Right (height, width)
+    _ ->
+      Left
+        ( EvaluationError
+            "ArrayFlatten currently expects rank-2 SparseArray blocks."
+        )
+  sparseBlockShape dense = do
+    dimensions <- strictDenseDimensions dense
+    case dimensions of
+      [height, width] -> Right (fromIntegral height, fromIntegral width)
+      _ ->
+        Left
+          ( EvaluationError
+              "ArrayFlatten currently expects rank-2 array blocks."
+          )
+  consistentRowHeight (rowIndex, shapes) = case shapes of
+    [] -> Left (EvaluationError "ArrayFlatten expects a rectangular block matrix.")
+    (height, _) : remaining
+      | all ((== height) . fst) remaining -> Right height
+      | otherwise ->
+          Left
+            ( EvaluationError
+                ( "ArrayFlatten block row "
+                    <> T.pack (show rowIndex)
+                    <> " has inconsistent heights."
+                )
+            )
+  consistentColumnWidth shapes columnIndex = case shapes of
+    [] -> Left (EvaluationError "ArrayFlatten expects a rectangular block matrix.")
+    firstRow : remaining ->
+      let width = snd (firstRow !! columnIndex)
+       in if all ((== width) . snd . (!! columnIndex)) remaining
+            then Right width
+            else
+              Left
+                ( EvaluationError
+                    ( "ArrayFlatten block column "
+                        <> T.pack (show (columnIndex + 1))
+                        <> " has inconsistent widths."
+                    )
+                )
+  collectRows [] [] _ _ = Right []
+  collectRows (blocks : remainingRows) (height : remainingHeights) widths rowOffset = do
+    rowPairs <- collectBlocks blocks widths rowOffset 0
+    remainingPairs <-
+      collectRows remainingRows remainingHeights widths (rowOffset + height)
+    Right (rowPairs <> remainingPairs)
+  collectRows _ _ _ _ =
+    Left (EvaluationError "ArrayFlatten encountered inconsistent block rows.")
+  collectBlocks [] [] _ _ = Right []
+  collectBlocks (block : remainingBlocks) (width : remainingWidths) rowOffset columnOffset = do
+    blockPairs <- shiftedBlockPairs block rowOffset columnOffset
+    remainingPairs <-
+      collectBlocks
+        remainingBlocks
+        remainingWidths
+        rowOffset
+        (columnOffset + width)
+    Right (blockPairs <> remainingPairs)
+  collectBlocks _ _ _ _ =
+    Left (EvaluationError "ArrayFlatten encountered inconsistent block columns.")
+  shiftedBlockPairs (SparseArray _ entries _) rowOffset columnOffset =
+    Right
+      [ ([rowOffset + row, columnOffset + column], value)
+      | SparseEntry [row, column] value <- entries
+      ]
+  shiftedBlockPairs block rowOffset columnOffset = do
+    dimensions <- strictDenseDimensions block
+    pairs <- denseSparsePairs block (map fromIntegral dimensions) (Integer 0)
+    Right
+      [ ([rowOffset + row, columnOffset + column], value)
+      | ([row, column], value) <- pairs
+      ]
+
 checkedDimensionSum :: Text -> [Int] -> Either EvaluationError Int
 checkedDimensionSum operation dimensions =
   let total = sum (map toInteger dimensions)
@@ -6774,6 +6984,18 @@ reduceTranspose _ =
   Left (EvaluationError "Transpose expects an array and an optional permutation.")
 
 transposeDense :: Expr -> Maybe Expr -> Either EvaluationError Expr
+transposeDense (SparseArray dimensions entries fill) permutationExpression = do
+  permutation <-
+    normalizeTransposePermutation (length dimensions) permutationExpression
+  if permutation == [0 .. length dimensions - 1]
+    then Right (SparseArray dimensions entries fill)
+    else
+      canonicalSparseArray
+        [dimensions !! axis | axis <- permutation]
+        [ ([indices !! axis | axis <- permutation], value)
+        | SparseEntry indices value <- entries
+        ]
+        fill
 transposeDense expression permutationExpression = do
   dimensions <- requireDenseArrayDimensions "Transpose" expression
   permutation <- normalizeTransposePermutation (length dimensions) permutationExpression
@@ -7695,19 +7917,70 @@ reduceJoin values = case values of
     matchingArguments _ _ = Nothing
   _ -> Call (Symbol "Join") values
 
-reduceFlatten :: [Expr] -> Expr
+reduceFlatten :: [Expr] -> Either EvaluationError Expr
 reduceFlatten = \case
-  [subject@(Call expressionHead _)] -> flattenSameHead expressionHead Nothing subject
-  [subject@(Call expressionHead _), Symbol "Infinity"] -> flattenSameHead expressionHead Nothing subject
+  [sparse@SparseArray {}] -> sparseArrayFlatten sparse Nothing
+  [sparse@SparseArray {}, Symbol infinityName]
+    | systemHeadIn ["Infinity"] infinityName -> sparseArrayFlatten sparse Nothing
+  [sparse@SparseArray {}, Integer level]
+    | level >= 0 -> sparseArrayFlatten sparse (Just level)
+    | otherwise ->
+        Left (EvaluationError "Flatten levels must be non-negative.")
+  [SparseArray {}, _, _] ->
+    Left
+      ( EvaluationError
+          "Flatten currently does not implement the 3-argument head-selecting form for SparseArray inputs."
+      )
+  [SparseArray {}, _] ->
+    Left
+      ( EvaluationError
+          "Flatten levels must be a non-negative integer or Infinity."
+      )
+  [subject@(Call expressionHead _)] ->
+    Right (flattenSameHead expressionHead Nothing subject)
+  [subject@(Call expressionHead _), Symbol infinityName]
+    | systemHeadIn ["Infinity"] infinityName ->
+        Right (flattenSameHead expressionHead Nothing subject)
   [subject@(Call expressionHead _), Integer level]
-    | level >= 0 -> flattenSameHead expressionHead (Just (fromIntegral level)) subject
+    | level >= 0 ->
+        Right (flattenSameHead expressionHead (Just (fromIntegral level)) subject)
   [subject@(Call _ _), levelSpecification, targetHead]
-    | Just level <- flattenLevel levelSpecification -> flattenNamedHead targetHead level subject
-  values -> Call (Symbol "Flatten") values
+    | Just level <- flattenLevel levelSpecification ->
+        Right (flattenNamedHead targetHead level subject)
+  values -> Right (Call (Symbol "Flatten") values)
  where
   flattenLevel (Symbol "Infinity") = Just Nothing
   flattenLevel (Integer level) | level >= 0 = Just (Just (fromIntegral level))
   flattenLevel _ = Nothing
+
+sparseArrayFlatten
+  :: Expr
+  -> Maybe Integer
+  -> Either EvaluationError Expr
+sparseArrayFlatten sparse@(SparseArray dimensions entries fill) requestedLevel
+  | requestedLevel == Just 0 || rank <= 1 = Right sparse
+  | otherwise =
+      canonicalSparseArray
+        newDimensions
+        [ ( sparseLinearIndex
+              (take collapseCount indices)
+              collapsedDimensions
+              + 1
+              : drop collapseCount indices
+          , value
+          )
+        | SparseEntry indices value <- entries
+        ]
+        fill
+ where
+  rank = length dimensions
+  collapseCount = case requestedLevel of
+    Nothing -> rank
+    Just level -> fromInteger (min (toInteger rank) (level + 1))
+  collapsedDimensions = take collapseCount dimensions
+  newDimensions = product collapsedDimensions : drop collapseCount dimensions
+sparseArrayFlatten _ _ =
+  Left (EvaluationError "Flatten currently expects a SparseArray value.")
 
 flattenSameHead :: Expr -> Maybe Int -> Expr -> Expr
 flattenSameHead target remaining expression@(Call expressionHead values)
