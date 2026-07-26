@@ -2820,6 +2820,293 @@ Expr sparse_coordinate_value(
         ? found->value : array.fill_value();
 }
 
+using ExactSparsePosition = std::vector<mpz_class>;
+
+struct ExactSparseEntry {
+    ExactSparsePosition indices;
+    Expr value;
+};
+
+struct SparseConstructionResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+std::optional<ExactSparsePosition> sparse_position_from_expression(
+    const Expr& expression, std::optional<std::size_t> rank_hint) {
+    if (expression.kind() == ExprKind::Integer) {
+        if (rank_hint && *rank_hint != 1) return std::nullopt;
+        return ExactSparsePosition{expression.integer_value()};
+    }
+    if (!expression.has_head("List")
+        || !std::all_of(expression.args().begin(), expression.args().end(),
+            [](const Expr& value) {
+                return value.kind() == ExprKind::Integer;
+            }))
+        return std::nullopt;
+    if (rank_hint && expression.args().size() != *rank_hint)
+        return std::nullopt;
+    ExactSparsePosition result;
+    result.reserve(expression.args().size());
+    for (const auto& value : expression.args())
+        result.push_back(value.integer_value());
+    return result;
+}
+
+bool sparse_rule_expression(const Expr& expression) {
+    return (expression.has_head("Rule")
+        || expression.has_head("RuleDelayed"))
+        && expression.args().size() == 2;
+}
+
+struct SparseRuleExpansionResult {
+    std::optional<std::vector<ExactSparseEntry>> entries;
+    std::string error;
+};
+
+SparseRuleExpansionResult expand_sparse_rule(
+    const Expr& rule, std::optional<std::size_t> rank_hint) {
+    if (!sparse_rule_expression(rule))
+        return {std::nullopt,
+            "SparseArray expects rules or a dense list."};
+
+    const auto& positions = rule.args()[0];
+    const auto& values = rule.args()[1];
+    if (positions.has_head("List") && values.has_head("List")) {
+        if (positions.args().size() != values.args().size())
+            return {std::nullopt,
+                "SparseArray position and value lists must have the same length."};
+
+        if ((!rank_hint || *rank_hint == 1)
+            && std::all_of(positions.args().begin(), positions.args().end(),
+                [](const Expr& value) {
+                    return value.kind() == ExprKind::Integer;
+                })) {
+            std::vector<ExactSparseEntry> result;
+            result.reserve(positions.args().size());
+            for (std::size_t index = 0; index < positions.args().size(); ++index)
+                result.push_back({
+                    {positions.args()[index].integer_value()},
+                    values.args()[index]});
+            return {std::move(result), {}};
+        }
+
+        std::vector<ExactSparseEntry> expanded;
+        expanded.reserve(positions.args().size());
+        bool vectorized = true;
+        for (std::size_t index = 0; index < positions.args().size(); ++index) {
+            const auto position = sparse_position_from_expression(
+                positions.args()[index], rank_hint);
+            if (!position) {
+                vectorized = false;
+                break;
+            }
+            expanded.push_back({*position, values.args()[index]});
+        }
+        if (vectorized) return {std::move(expanded), {}};
+    }
+
+    const auto position = sparse_position_from_expression(
+        positions, rank_hint);
+    if (!position)
+        return {std::nullopt,
+            "SparseArray currently supports explicit integer positions, not patterns or Band."};
+    return {std::vector<ExactSparseEntry>{{*position, values}}, {}};
+}
+
+SparseConstructionResult make_native_sparse_array(
+    const DenseDimensions& exact_dimensions,
+    const std::vector<ExactSparseEntry>& exact_entries,
+    const Expr& fill) {
+    if (exact_dimensions.empty())
+        return {std::nullopt,
+            "SparseArray expects at least one dimension."};
+    if (std::any_of(exact_dimensions.begin(), exact_dimensions.end(),
+            [](const mpz_class& dimension) { return dimension < 0; }))
+        return {std::nullopt,
+            "SparseArray dimensions must be non-negative."};
+
+    std::set<ExactSparsePosition> seen;
+    std::vector<ExactSparseEntry> normalized_entries;
+    normalized_entries.reserve(exact_entries.size());
+    for (const auto& entry : exact_entries) {
+        if (entry.indices.size() != exact_dimensions.size())
+            return {std::nullopt,
+                "SparseArray rule positions must match the array rank."};
+        if (!seen.insert(entry.indices).second) continue;
+        for (std::size_t axis = 0; axis < entry.indices.size(); ++axis)
+            if (entry.indices[axis] < 1
+                || entry.indices[axis] > exact_dimensions[axis])
+                return {std::nullopt,
+                    "SparseArray rule positions must be inside the array dimensions."};
+        if (entry.value != fill) normalized_entries.push_back(entry);
+    }
+
+    std::vector<std::size_t> dimensions;
+    dimensions.reserve(exact_dimensions.size());
+    for (const auto& dimension : exact_dimensions) {
+        const auto native = nonnegative_size_t(dimension);
+        if (!native)
+            return {std::nullopt,
+                "SparseArray dimensions exceed the native representation limit."};
+        dimensions.push_back(*native);
+    }
+
+    std::vector<SparseEntry> entries;
+    entries.reserve(normalized_entries.size());
+    for (const auto& entry : normalized_entries) {
+        std::vector<std::size_t> indices;
+        indices.reserve(entry.indices.size());
+        for (const auto& index : entry.indices) {
+            const auto native = nonnegative_size_t(index);
+            if (!native)
+                return {std::nullopt,
+                    "SparseArray positions exceed the native representation limit."};
+            indices.push_back(*native);
+        }
+        entries.push_back({std::move(indices), entry.value});
+    }
+    return {sparse_array(
+        std::move(dimensions), std::move(entries), fill), {}};
+}
+
+SparseConstructionResult reencode_sparse_fill(
+    const Expr& source, const Expr& fill) {
+    if (source.fill_value() == fill) return {source, {}};
+    if (!sparse_materialization_within_limit(source))
+        return {std::nullopt,
+            "SparseArray dimensions exceed the native materialization limit."};
+
+    std::vector<SparseEntry> entries;
+    std::vector<std::size_t> position;
+    position.reserve(source.dimensions().size());
+    auto visit = [&](auto&& self, std::size_t axis) -> void {
+        if (axis == source.dimensions().size()) {
+            const auto found = std::lower_bound(
+                source.sparse_entries().begin(), source.sparse_entries().end(),
+                position,
+                [](const SparseEntry& entry,
+                    const std::vector<std::size_t>& target) {
+                    return entry.indices < target;
+                });
+            const auto value = found != source.sparse_entries().end()
+                    && found->indices == position
+                ? found->value : source.fill_value();
+            if (value != fill) entries.push_back({position, value});
+            return;
+        }
+        for (std::size_t index = 1;
+             index <= source.dimensions()[axis]; ++index) {
+            position.push_back(index);
+            self(self, axis + 1);
+            position.pop_back();
+        }
+    };
+    visit(visit, 0);
+    return {sparse_array(
+        source.dimensions(), std::move(entries), fill), {}};
+}
+
+SparseConstructionResult construct_sparse_array(
+    const std::vector<Expr>& arguments) {
+    if (arguments.empty() || arguments.size() > 3)
+        return {std::nullopt,
+            "SparseArray expects data, optional dimensions, and an optional implicit value."};
+
+    const auto& data = arguments[0];
+    const auto fill = arguments.size() == 3
+        ? arguments[2] : integer(0L);
+    std::optional<DenseDimensions> dimensions;
+    if (arguments.size() >= 2) {
+        const auto normalized = normalize_dense_dimensions(
+            arguments[1], "SparseArray");
+        if (!normalized.values)
+            return {std::nullopt, normalized.error};
+        dimensions = *normalized.values;
+    }
+
+    if (data.kind() == ExprKind::SparseArray) {
+        DenseDimensions source_dimensions;
+        source_dimensions.reserve(data.dimensions().size());
+        for (const auto dimension : data.dimensions())
+            source_dimensions.emplace_back(std::to_string(dimension), 10);
+        if (dimensions && *dimensions != source_dimensions)
+            return {std::nullopt,
+                "SparseArray cannot reinterpret an existing sparse array with different dimensions."};
+        return reencode_sparse_fill(data, fill);
+    }
+
+    if (is_symbol(data, "Automatic") && dimensions)
+        return make_native_sparse_array(*dimensions, {}, fill);
+
+    std::optional<std::vector<Expr>> rule_expressions;
+    if (sparse_rule_expression(data)) {
+        rule_expressions = std::vector<Expr>{data};
+    } else if (data.has_head("List")
+        && std::all_of(data.args().begin(), data.args().end(),
+            sparse_rule_expression)) {
+        rule_expressions = data.args();
+    }
+
+    if (rule_expressions) {
+        std::vector<ExactSparseEntry> entries;
+        const auto rank_hint = dimensions
+            ? std::optional<std::size_t>(dimensions->size())
+            : std::nullopt;
+        for (const auto& rule : *rule_expressions) {
+            auto expanded = expand_sparse_rule(rule, rank_hint);
+            if (!expanded.entries)
+                return {std::nullopt, expanded.error};
+            entries.insert(entries.end(), expanded.entries->begin(),
+                expanded.entries->end());
+        }
+
+        DenseDimensions final_dimensions;
+        if (dimensions) {
+            final_dimensions = *dimensions;
+        } else {
+            if (entries.empty())
+                return {std::nullopt,
+                    "SparseArray dimensions cannot be inferred from an empty rule set."};
+            const auto rank = entries.front().indices.size();
+            if (rank == 0
+                || std::any_of(entries.begin(), entries.end(),
+                    [&](const ExactSparseEntry& entry) {
+                        return entry.indices.size() != rank;
+                    }))
+                return {std::nullopt,
+                    "SparseArray rule positions must have a consistent rank."};
+            final_dimensions = entries.front().indices;
+            for (const auto& entry : entries)
+                for (std::size_t axis = 0; axis < rank; ++axis)
+                    final_dimensions[axis] = std::max(
+                        final_dimensions[axis], entry.indices[axis]);
+        }
+        return make_native_sparse_array(
+            final_dimensions, entries, fill);
+    }
+
+    const auto inferred_dimensions = dense_dimensions(data);
+    if (!inferred_dimensions)
+        return {std::nullopt,
+            "SparseArray dense input must be rectangular."};
+    if (inferred_dimensions->empty())
+        return {std::nullopt,
+            "SparseArray expects a rule specification or a rectangular dense list."};
+    DenseDimensions exact_inferred_dimensions;
+    exact_inferred_dimensions.reserve(inferred_dimensions->size());
+    for (const auto dimension : *inferred_dimensions)
+        exact_inferred_dimensions.emplace_back(std::to_string(dimension), 10);
+    if (dimensions && *dimensions != exact_inferred_dimensions)
+        return {std::nullopt,
+            "SparseArray dense input dimensions do not match the explicit dimensions."};
+    const auto result = sparse_from_dense(data, fill);
+    if (!result)
+        return {std::nullopt,
+            "SparseArray expects a rule specification or a rectangular dense list."};
+    return {*result, {}};
+}
+
 constexpr long level_infinity = 1000000000L;
 struct LevelBounds {
     long minimum;
@@ -9610,38 +9897,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return display_symbol(full_name);
     }
     if ((function == "Composition" || function == "RightComposition") && !args.empty()) return call(head, args);
-    if (function == "SparseArray" && !args.empty() && args.size() <= 3) {
-        const auto fill = args.size() == 3 ? args[2] : integer(0L);
-        if (args[0].has_head("List") && (!args[0].args().empty() && !args[0].args().front().has_head("Rule")
-            && !args[0].args().front().has_head("RuleDelayed"))) {
-            if (const auto result = sparse_from_dense(args[0], fill)) return *result;
-        }
-        std::vector<std::size_t> dimensions;
-        if (args.size() >= 2 && args[1].has_head("List")) {
-            bool valid = true; for (const auto& item : args[1].args()) { const auto value = machine_index(item); if (!value || *value < 0) { valid = false; break; } dimensions.push_back(static_cast<std::size_t>(*value)); }
-            if (!valid) return call(head, args);
-        }
-        std::vector<SparseEntry> entries;
-        auto add = [&](std::vector<std::size_t> indices, const Expr& value) {
-            if (value == fill || std::any_of(indices.begin(), indices.end(), [](std::size_t index) { return index == 0; })) return;
-            if (dimensions.size() < indices.size()) dimensions.resize(indices.size(), 0);
-            for (std::size_t index = 0; index < indices.size(); ++index) dimensions[index] = std::max(dimensions[index], indices[index]);
-            if (std::none_of(entries.begin(), entries.end(), [&](const SparseEntry& entry) { return entry.indices == indices; })) entries.push_back({std::move(indices), value});
-        };
-        const auto source = args[0].has_head("List") ? args[0].args() : std::vector<Expr>{args[0]};
-        for (const auto& rule : source) {
-            if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed")) || rule.args().size() != 2 || !rule.args()[0].has_head("List")) continue;
-            if (source.size() == 1 && rule.args()[1].has_head("List") && rule.args()[0].args().size() == rule.args()[1].args().size()
-                && std::all_of(rule.args()[0].args().begin(), rule.args()[0].args().end(), [](const Expr& item) { return machine_index(item).has_value(); })) {
-                for (std::size_t index = 0; index < rule.args()[0].args().size(); ++index)
-                    add({static_cast<std::size_t>(*machine_index(rule.args()[0].args()[index]))}, rule.args()[1].args()[index]);
-                continue;
-            }
-            std::vector<std::size_t> indices; bool valid = true;
-            for (const auto& item : rule.args()[0].args()) { const auto value = machine_index(item); if (!value || *value <= 0) { valid = false; break; } indices.push_back(static_cast<std::size_t>(*value)); }
-            if (valid) add(std::move(indices), rule.args()[1]);
-        }
-        if (!dimensions.empty()) return sparse_array(std::move(dimensions), std::move(entries), fill);
+    if (function == "SparseArray") {
+        const auto result = construct_sparse_array(args);
+        if (result.value) return *result.value;
+        return raw_evaluation_error(result.error);
     }
     if ((function == "Plus" || function == "Times") && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::SparseArray; })) {
         std::vector<Expr> dense;
