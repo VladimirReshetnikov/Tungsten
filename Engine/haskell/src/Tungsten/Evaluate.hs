@@ -1208,7 +1208,7 @@ reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =
   let values = concatMap (flattenHead "Times") originalValues
       exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
-      symbolic = filter (not . isExact) values
+      symbolic = sortBy canonicalCompare (filter (not . isExact) values)
       collected = collectRepeated collectFactor symbolic
       combined
         | exactProduct == Exact 0 1 = [Integer 0]
@@ -7451,10 +7451,13 @@ reduceDot (firstExpression : remaining) =
   multiplyAndEvaluate left right = dotTwo left right >>= evaluate
 
 dotTwo :: Expr -> Expr -> Either EvaluationError Expr
-dotTwo SparseArray {} _ =
-  Left (EvaluationError "Dot currently supports dense List vectors and matrices only.")
-dotTwo _ SparseArray {} =
-  Left (EvaluationError "Dot currently supports dense List vectors and matrices only.")
+dotTwo left@SparseArray {} right@SparseArray {} = sparseDot left right
+dotTwo left@SparseArray {} right = do
+  denseLeft <- sparseArrayNormal left
+  dotTwo denseLeft right
+dotTwo left right@SparseArray {} = do
+  denseRight <- sparseArrayNormal right
+  dotTwo left denseRight
 dotTwo left right =
   case (denseListRows left, denseListRows right, denseListValues left, denseListValues right) of
     (Nothing, Nothing, Just leftValues, Just rightValues)
@@ -7498,6 +7501,168 @@ dotTwo left right =
               leftRows
     _ ->
       Left (EvaluationError "Dot currently supports List vectors and List matrices only.")
+
+sparseDot :: Expr -> Expr -> Either EvaluationError Expr
+sparseDot left@(SparseArray leftDimensions leftEntries leftFill) right@(SparseArray rightDimensions rightEntries rightFill)
+  | leftFill /= Integer 0 || rightFill /= Integer 0 = do
+      denseLeft <- sparseArrayNormal left
+      denseRight <- sparseArrayNormal right
+      dotTwo denseLeft denseRight
+  | leftRank `notElem` [1, 2] || rightRank `notElem` [1, 2] =
+      Left
+        ( EvaluationError
+            "Dot currently supports sparse vectors and matrices only."
+        )
+  | leftRank == 1 && rightRank == 1 = sparseVectorDot
+  | leftRank == 2 && rightRank == 1 = sparseMatrixVectorDot
+  | leftRank == 1 && rightRank == 2 = sparseVectorMatrixDot
+  | otherwise = sparseMatrixMatrixDot
+ where
+  leftRank = length leftDimensions
+  rightRank = length rightDimensions
+  leftMap = Map.fromList [(indices, value) | SparseEntry indices value <- leftEntries]
+  rightMap = Map.fromList [(indices, value) | SparseEntry indices value <- rightEntries]
+
+  sparseVectorDot
+    | leftDimensions /= rightDimensions =
+        Left (EvaluationError "Dot expects vectors of the same length.")
+    | otherwise = do
+        terms <-
+          traverse
+            (uncurry (evaluateSparseScalar "Times"))
+            [ (leftValue, rightValue)
+            | (indices, leftValue) <- Map.toAscList leftMap
+            , Just rightValue <- [Map.lookup indices rightMap]
+            ]
+        evaluate (Call (Symbol "Plus") terms)
+
+  sparseMatrixVectorDot = case (leftDimensions, rightDimensions) of
+    ([rows, width], [rightWidth])
+      | width /= rightWidth ->
+          Left
+            ( EvaluationError
+                "Dot expects compatible sparse matrix/vector dimensions."
+            )
+      | otherwise -> do
+          output <-
+            foldM
+              ( \retained (SparseEntry indices leftValue) -> case indices of
+                  [row, column] -> case Map.lookup [column] rightMap of
+                    Nothing -> Right retained
+                    Just rightValue ->
+                      addSparseProduct retained [row] leftValue rightValue
+                  _ ->
+                    Left
+                      ( EvaluationError
+                          "Dot encountered an invalid sparse matrix coordinate."
+                      )
+              )
+              Map.empty
+              leftEntries
+          canonicalSparseArray [rows] (Map.toAscList output) (Integer 0)
+    _ ->
+      Left
+        ( EvaluationError
+            "Dot currently supports sparse vectors and matrices only."
+        )
+
+  sparseVectorMatrixDot = case (leftDimensions, rightDimensions) of
+    ([width], [rightRows, columns])
+      | width /= rightRows ->
+          Left
+            ( EvaluationError
+                "Dot expects compatible sparse vector/matrix dimensions."
+            )
+      | otherwise -> do
+          output <-
+            foldM
+              ( \retained (SparseEntry indices rightValue) -> case indices of
+                  [row, column] -> case Map.lookup [row] leftMap of
+                    Nothing -> Right retained
+                    Just leftValue ->
+                      addSparseProduct retained [column] leftValue rightValue
+                  _ ->
+                    Left
+                      ( EvaluationError
+                          "Dot encountered an invalid sparse matrix coordinate."
+                      )
+              )
+              Map.empty
+              rightEntries
+          canonicalSparseArray [columns] (Map.toAscList output) (Integer 0)
+    _ ->
+      Left
+        ( EvaluationError
+            "Dot currently supports sparse vectors and matrices only."
+        )
+
+  sparseMatrixMatrixDot = case (leftDimensions, rightDimensions) of
+    ([rows, width], [rightRows, columns])
+      | width /= rightRows ->
+          Left
+            ( EvaluationError
+                "Dot expects compatible sparse matrix dimensions."
+            )
+      | otherwise -> do
+          let rightByRow =
+                foldl'
+                  ( \retained (SparseEntry indices value) -> case indices of
+                      [row, column] ->
+                        Map.insertWith (<>) row [(column, value)] retained
+                      _ -> retained
+                  )
+                  Map.empty
+                  rightEntries
+          output <-
+            foldM
+              ( \retained (SparseEntry indices leftValue) -> case indices of
+                  [row, shared] ->
+                    foldM
+                      ( \current (column, rightValue) ->
+                          addSparseProduct
+                            current
+                            [row, column]
+                            leftValue
+                            rightValue
+                      )
+                      retained
+                      (Map.findWithDefault [] shared rightByRow)
+                  _ ->
+                    Left
+                      ( EvaluationError
+                          "Dot encountered an invalid sparse matrix coordinate."
+                      )
+              )
+              Map.empty
+              leftEntries
+          canonicalSparseArray [rows, columns] (Map.toAscList output) (Integer 0)
+    _ ->
+      Left
+        ( EvaluationError
+            "Dot currently supports sparse vectors and matrices only."
+        )
+sparseDot _ _ =
+  Left (EvaluationError "Dot currently expects SparseArray values.")
+
+addSparseProduct
+  :: Map.Map [Integer] Expr
+  -> [Integer]
+  -> Expr
+  -> Expr
+  -> Either EvaluationError (Map.Map [Integer] Expr)
+addSparseProduct retained indices left right = do
+  contribution <- evaluateSparseScalar "Times" left right
+  if contribution == Integer 0
+    then Right retained
+    else case Map.lookup indices retained of
+      Nothing -> Right (Map.insert indices contribution retained)
+      Just previous -> do
+        combined <- evaluateSparseScalar "Plus" previous contribution
+        Right
+          ( if combined == Integer 0
+              then Map.delete indices retained
+              else Map.insert indices combined retained
+          )
 
 matrixWidth :: [[Expr]] -> Int
 matrixWidth [] = 0

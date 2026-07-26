@@ -108,6 +108,12 @@ valueCases =
   , ("ArrayFlatten combines sparse and dense zero-fill blocks", "ArrayRules[ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2}],{{b},{c}}}}]]", "List[Rule[List[1, 1], a], Rule[List[1, 3], b], Rule[List[2, 3], c], Rule[List[Blank[], Blank[]], 0]]")
   , ("ArrayFlatten materializes nonzero sparse fill", "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2},z]}}]", "List[List[a, z], List[z, z]]")
   , ("sparse transforms retain arbitrary-precision dimensions", "{ArrayReshape[SparseArray[{{1000000000}->a},{1000000000}],{1000000,1000}],ArrayPad[SparseArray[{{1000000000}->a},{1000000000}],{2,3}],Flatten[SparseArray[{{1,1}->a},{1000000000,1000000000}]]}", "List[SparseArray[List[Rule[List[1000000, 1000], a]], List[1000000, 1000]], SparseArray[List[Rule[List[1000000002], a]], List[1000000005]], SparseArray[List[Rule[List[1], a]], List[1000000000000000000]]]")
+  , ("Dot intersects compact sparse vector coordinates", "Dot[SparseArray[{{1}->a,{3}->c},{3}],SparseArray[{{1}->b,{2}->d},{3}]]", "Times[a, b]")
+  , ("Dot multiplies a sparse matrix and vector", "ArrayRules[Dot[SparseArray[{{1,2}->a,{2,1}->b},{2,3}],SparseArray[{{2}->c,{3}->d},{3}]]]", "List[Rule[List[1], Times[a, c]], Rule[List[Blank[]], 0]]")
+  , ("Dot multiplies a sparse vector and matrix", "ArrayRules[Dot[SparseArray[{{1}->a,{3}->c},{3}],SparseArray[{{1,2}->b,{3,1}->d},{3,2}]]]", "List[Rule[List[1], Times[c, d]], Rule[List[2], Times[a, b]], Rule[List[Blank[]], 0]]")
+  , ("Dot multiplies compact sparse matrices", "ArrayRules[Dot[SparseArray[{{1,2}->a},{2,3}],SparseArray[{{2,1}->b},{3,2}]]]", "List[Rule[List[1, 1], Times[a, b]], Rule[List[Blank[], Blank[]], 0]]")
+  , ("Dot falls back for nonzero sparse fills", "Dot[SparseArray[{{1}->a},{2},z],SparseArray[{{2}->b},{2},x]]", "Plus[Times[a, x], Times[b, z]]")
+  , ("Dot keeps huge zero-fill matrices compact", "Dot[SparseArray[{{1,1}->a},{1000000000,1000000000}],SparseArray[{{1,2}->b},{1000000000,1000000000}]]", "SparseArray[List[Rule[List[1, 2], Times[a, b]]], List[1000000000, 1000000000]]")
   , ("ArrayReshape flattens and pads", "ArrayReshape[{{1,2},{3,4}},{3,2},x]", "List[List[1, 2], List[3, 4], List[x, x]]")
   , ("ArrayReshape truncates row-major leaves", "ArrayReshape[{{1,2},{3,4}},{3}]", "List[1, 2, 3]")
   , ("ArrayReshape preserves rank around a zero axis", "ArrayReshape[{{}}, {2,0,3}]", "List[List[], List[]]")
@@ -186,6 +192,8 @@ errorCases =
   , ("SparseArray Part rejects too many axes", "SparseArray[{{1}->a},{2}][[1,1]]")
   , ("Flatten rejects a negative SparseArray level", "Flatten[SparseArray[{}, {2,2}],-1]")
   , ("ArrayFlatten rejects rank-one SparseArray blocks", "ArrayFlatten[{{SparseArray[{}, {2}]}}]")
+  , ("Dot rejects incompatible sparse vectors", "Dot[SparseArray[{}, {2}],SparseArray[{}, {3}]]")
+  , ("Dot rejects unsupported sparse tensor ranks", "Dot[SparseArray[{}, {2,2,2}],SparseArray[{}, {2,2,2}]]")
   ]
 
 exactErrorCases :: [(Text, Text, Text)]
