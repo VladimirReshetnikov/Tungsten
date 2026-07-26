@@ -50,7 +50,7 @@ def _arguments() -> argparse.Namespace:
         action="append",
         choices=(
             "rounding", "take-drop", "list", "structural", "traversal",
-            "collections", "combinator-state", "strings",
+            "collections", "combinator-state", "combinators", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -613,6 +613,95 @@ def combinator_state_cases() -> list[str]:
     ]
 
 
+def combinator_cases() -> list[str]:
+    """Higher-order container, projection, and head-chain contracts."""
+
+    return [
+        "Discard[g[a,b,c,d],Function[x,UnsameQ[x,b]],2]",
+        "Discard[<|x->a,y:>b,z->c|>,Function[v,SameQ[v,b]]]",
+        "Discard[g[a,b,c],Function[x,SameQ[x,b]]->\"Element\"]",
+        "Discard[g[a,b,c],Function[x,SameQ[x,b]]->\"Index\"]",
+        (
+            "Discard[g[a,b,c],Function[x,SameQ[x,b]]->"
+            "{\"Element\",\"Index\"}]"
+        ),
+        "Discard[g[a,b],Function[x,True]->{}]",
+        "Discard[{a,b,c},Function[x,Print[InputForm[x]];True],0]",
+        "Discard[{a,b,c},Function[x,SameQ[x,b]],Infinity]",
+        "Discard[{a,b},p,-1]",
+        "Discard[x,p]",
+        "Discard[{a},p->\"Unknown\"]",
+        "Discard[{a},Rule[p],1]",
+        "Discard[{a},p,1,extra]",
+        "Discard[Function[x,SameQ[x,b]]][g[a,b,c]]",
+        "Discard[Function[x,SameQ[x,b]]]",
+        (
+            "Catch[Discard[{a,b,c},Function[x,Print[InputForm[x]];"
+            "If[SameQ[x,b],Throw[boom]];False]]]"
+        ),
+        (
+            "CheckAbort[AbortProtect[Discard[{a,b},Function[x,Abort[];"
+            "Print[InputForm[x]];False]]],caught]"
+        ),
+        "ComposeList[{},z]",
+        "ComposeList[g[a,b],z]",
+        "ComposeList[<|a->f,b:>g|>,z]",
+        "ComposeList[x,z]",
+        "ComposeList[f]",
+        (
+            "Catch[ComposeList[g[Function[x,Print[\"a\"];f[x]],"
+            "Function[x,Print[\"b\"];Throw[boom]],"
+            "Function[x,Print[\"c\"];h[x]]],z]]"
+        ),
+        "Comap[g[f,h],x]",
+        "Comap[<|a->f,b:>g|>,x]",
+        "Comap[q,x]",
+        "Comap[g[f,h]][x]",
+        "Comap[g[f,h],x,extra]",
+        (
+            "Catch[Comap[g[Function[x,Print[\"a\"];f[x]],"
+            "Function[x,Print[\"b\"];Throw[boom]],"
+            "Function[x,Print[\"c\"];h[x]]],z]]"
+        ),
+        "ComapApply[g[f,h],p[a,b]]",
+        "ComapApply[<|a->f,b:>g|>,p[a,b]]",
+        "ComapApply[g[f,h],<|a->x,b:>y|>]",
+        "ComapApply[g[f,h],x]",
+        "ComapApply[q,p[a,b]]",
+        "ComapApply[g[f,h]][p[a,b]]",
+        "ComapApply[g[f,h],p[a,b],extra]",
+        (
+            "Catch[ComapApply[g[Function[Null,Print[\"a\"];f[##]],"
+            "Function[Null,Print[\"b\"];Throw[boom]],"
+            "Function[Null,Print[\"c\"];h[##]]],p[x,y]]]"
+        ),
+        "Operate[p,x,0]",
+        "Operate[p,f[g][x]]",
+        "Operate[p,f[g][x],2]",
+        "Operate[p,f[g][x],3]",
+        "Operate[p,f[g][x],1000000000000000000000000000000]",
+        "Operate[p,f[x],-1]",
+        "Operate[p,f[x],n]",
+        "Operate[p]",
+        (
+            "Catch[Operate[Function[x,Print[InputForm[x]];Throw[boom]],"
+            "f[g][z],2]]"
+        ),
+        "LengthWhile[g[1,2,0],Function[x,Greater[x,0]]]",
+        "LengthWhile[<|a->1,b:>2,c->0|>,Function[x,Greater[x,0]]]",
+        "LengthWhile[x,p]",
+        "LengthWhile[{a},p,extra]",
+        (
+            "Catch[LengthWhile[g[a,b,c],Function[x,Print[InputForm[x]];"
+            "If[SameQ[x,b],Throw[boom]];True]]]"
+        ),
+        (
+            "CheckAbort[AbortProtect[LengthWhile[g[a,b],Function[x,Abort[];"
+            "Print[InputForm[x]];True]]],caught]"
+        ),
+    ]
+
+
 CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "rounding": rounding_cases,
     "take-drop": take_drop_cases,
@@ -621,6 +710,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "traversal": traversal_cases,
     "collections": collections_cases,
     "combinator-state": combinator_state_cases,
+    "combinators": combinator_cases,
     "strings": string_cases,
 }
 

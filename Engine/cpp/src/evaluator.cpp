@@ -7733,6 +7733,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return list(std::move(threaded));
         }
     }
+    if (head.has_head("Function")) return evaluate(call(head, args));
     if (!hold_all_complete) if (auto result = apply_up_values(evaluated_expression)) return *result;
     if (evaluated_name) {
         if (auto result = apply_down_values(evaluated_expression)) return *result;
@@ -7774,6 +7775,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return evaluate(call("KeySelect", {args[0], head.args()[0]}));
     if (head.has_head("Select") && head.args().size() == 1 && args.size() == 1)
         return evaluate(call("Select", {args[0], head.args()[0]}));
+    if ((head.has_head("Comap") || head.has_head("ComapApply"))
+        && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call(head.head(), {head.args()[0], args[0]}));
     if ((head.has_head("SortBy") || head.has_head("ReverseSortBy") || head.has_head("OrderingBy")) && head.args().size() == 1 && args.size() == 1)
         return evaluate(call(head.head(), {args[0], head.args()[0]}));
     if ((head.has_head("StringPosition") || head.has_head("StringContainsQ") || head.has_head("StringStartsQ") || head.has_head("StringEndsQ") || head.has_head("StringMatchQ"))
@@ -11463,7 +11467,92 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         return transform(transform, args[1], 0);
     }
-    if ((function == "Select" || function == "Discard" || function == "SelectFirst") && args.size() >= 2) {
+    if (function == "Discard") {
+        if (args.size() == 1)
+            return call("Function", {
+                call("Discard", {call("Slot", {}), args[0]})});
+        if (args.size() != 2 && args.size() != 3)
+            return raw_evaluation_error(
+                "Discard expects an expression, a criterion or property "
+                "specification, and an optional limit.");
+
+        const auto rules = association_rules(args[0]);
+        if (!rules && args[0].kind() != ExprKind::Call)
+            return raw_evaluation_error(
+                "Discard expects a nonatomic expression.");
+
+        Expr criterion = args[1];
+        std::optional<std::vector<std::string>> properties;
+        bool property_list_mode = false;
+        if (criterion.has_head("Rule")) {
+            if (criterion.args().size() != 2)
+                return raw_evaluation_error(
+                    "Discard property specifications must contain exactly two arguments.");
+            const auto property_specification = criterion.args()[1];
+            criterion = criterion.args()[0];
+            property_list_mode = property_specification.has_head("List");
+            std::vector<Expr> property_values = property_specification.has_head("List")
+                ? property_specification.args()
+                : std::vector<Expr>{property_specification};
+            properties.emplace();
+            for (const auto& property : property_values) {
+                if (property.kind() != ExprKind::String
+                    || (property.text() != "Element" && property.text() != "Index"))
+                    return raw_evaluation_error(
+                        "Discard currently supports only \"Element\" and \"Index\" properties.");
+                properties->push_back(property.text());
+            }
+        }
+
+        std::optional<mpz_class> remaining;
+        if (args.size() == 3 && !is_symbol(args[2], "Infinity")) {
+            if (args[2].kind() != ExprKind::Integer || args[2].integer_value() < 0)
+                return raw_evaluation_error(
+                    "Match limits must be non-negative integers or Infinity.");
+            remaining = args[2].integer_value();
+        }
+
+        std::vector<Expr> source;
+        if (rules) {
+            source.reserve(rules->size());
+            for (const auto& rule : *rules) source.push_back(rule.args()[1]);
+        } else source = args[0].args();
+
+        std::vector<Expr> retained_elements;
+        std::vector<Expr> retained_indices;
+        std::vector<Expr> retained_rules;
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            bool discard_item = false;
+            if (!remaining || *remaining != 0) {
+                const auto outcome = evaluate(call(criterion, {source[index]}));
+                if (immediate_signal_active()) return outcome;
+                discard_item = is_symbol(outcome, "True");
+                if (discard_item && remaining) --*remaining;
+            }
+            if (discard_item) continue;
+            retained_elements.push_back(source[index]);
+            retained_indices.push_back(integer(index + 1));
+            if (rules) retained_rules.push_back((*rules)[index]);
+        }
+
+        auto elements_projection = [&] {
+            return rules ? call("Association", retained_rules)
+                         : call(args[0].head(), retained_elements);
+        };
+        if (!properties) return elements_projection();
+        if (!property_list_mode)
+            return properties->front() == "Element"
+                ? elements_projection() : list(retained_indices);
+
+        std::vector<Expr> projected_rules;
+        projected_rules.reserve(properties->size());
+        for (const auto& property : *properties)
+            projected_rules.push_back(call("Rule", {
+                string(property), property == "Element"
+                    ? elements_projection() : list(retained_indices)}));
+        return call("Association", std::move(projected_rules));
+    }
+    if ((function == "Select" || function == "SelectFirst") && args.size() >= 2) {
         const auto rules = association_rules(args[0]);
         if (!rules && args[0].kind() != ExprKind::Call) return call(head, args);
         Expr criterion = args[1]; std::optional<Expr> property;
@@ -11475,23 +11564,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::size_t remaining = static_cast<std::size_t>(limit);
         for (std::size_t index = 0; index < source.size(); ++index) {
             bool selected = false;
-            if (function == "Discard") {
-                if (remaining == 0) {
-                    selected = true;
-                } else {
-                    const auto outcome = evaluate(call(criterion, {source[index]}));
-                    if (immediate_signal_active()) return outcome;
-                    const bool matches = is_symbol(outcome, "True");
-                    if (matches) { --remaining; continue; }
-                    selected = true;
-                }
-            } else {
-                const auto outcome = evaluate(call(criterion, {source[index]}));
-                if (immediate_signal_active()) return outcome;
-                if (is_symbol(outcome, "True") && remaining > 0) {
-                    selected = true;
-                    --remaining;
-                }
+            const auto outcome = evaluate(call(criterion, {source[index]}));
+            if (immediate_signal_active()) return outcome;
+            if (is_symbol(outcome, "True") && remaining > 0) {
+                selected = true;
+                --remaining;
             }
             if (!selected) continue;
             elements.push_back(source[index]); indices.push_back(integer(index + 1));
@@ -11630,28 +11707,74 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "Construct" && args.size() >= 1)
         return evaluate(call(args[0], std::vector<Expr>(args.begin() + 1, args.end())));
-    if (function == "Operate" && args.size() >= 2 && args.size() <= 3 && args[1].kind() == ExprKind::Call) {
-        const auto level = args.size() == 3 ? machine_index(args[2]) : std::optional<long>(1);
-        if (level && *level == 0) return evaluate(call(args[0], {args[1]}));
-        if (level && *level == 1) return call(call(args[0], {args[1].head()}), args[1].args());
-    }
-    if (function == "Comap" && args.size() == 2 && args[0].has_head("List")) {
-        std::vector<Expr> values;
-        for (const auto& callable : args[0].args()) {
-            const auto value = evaluate(call(callable, {args[1]}));
-            if (immediate_signal_active()) return value;
-            values.push_back(value);
+    if (function == "Operate") {
+        if (args.size() != 2 && args.size() != 3)
+            return raw_evaluation_error(
+                "Operate expects an operator, an expression, and an optional positive level.");
+        mpz_class level = 1;
+        if (args.size() == 3) {
+            if (args[2].kind() != ExprKind::Integer)
+                return raw_evaluation_error("Operate expects an integer argument.");
+            level = args[2].integer_value();
         }
-        return list(std::move(values));
+        if (level < 0)
+            return raw_evaluation_error(
+                "Operate expects a non-negative integer level.");
+
+        auto operate = [&](auto&& self, const Expr& expression,
+                           const mpz_class& current_level) -> Expr {
+            if (current_level == 0) {
+                const auto outcome = evaluate(call(args[0], {expression}));
+                return outcome;
+            }
+            if (expression.kind() != ExprKind::Call) return expression;
+            Expr replaced_head;
+            if (current_level == 1) {
+                replaced_head = evaluate(call(args[0], {expression.head()}));
+                if (immediate_signal_active()) return replaced_head;
+            } else {
+                if (expression.head().kind() != ExprKind::Call) return expression;
+                replaced_head = self(self, expression.head(), current_level - 1);
+                if (immediate_signal_active()) return replaced_head;
+            }
+            return call(std::move(replaced_head), expression.args());
+        };
+        return operate(operate, args[1], level);
     }
-    if (function == "ComapApply" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")) {
-        std::vector<Expr> values;
-        for (const auto& callable : args[0].args()) {
-            const auto value = evaluate(call(callable, args[1].args()));
+    if (function == "Comap" || function == "ComapApply") {
+        if (args.size() == 1) return call(head, args);
+        if (args.size() != 2)
+            return raw_evaluation_error(function + " expects exactly two arguments.");
+
+        const auto function_rules = association_rules(args[0]);
+        if (!function_rules && args[0].kind() != ExprKind::Call) return args[0];
+
+        std::vector<Expr> application_arguments;
+        bool application_is_atomic = false;
+        if (function == "ComapApply") {
+            if (const auto argument_rules = association_rules(args[1])) {
+                application_arguments.reserve(argument_rules->size());
+                for (const auto& rule : *argument_rules)
+                    application_arguments.push_back(rule.args()[1]);
+            } else if (args[1].kind() == ExprKind::Call) {
+                application_arguments = args[1].args();
+            } else application_is_atomic = true;
+        } else application_arguments = {args[1]};
+
+        std::vector<Expr> rebuilt;
+        const auto& function_values = function_rules ? *function_rules : args[0].args();
+        rebuilt.reserve(function_values.size());
+        for (const auto& item : function_values) {
+            const auto& callable = function_rules ? item.args()[1] : item;
+            const auto value = application_is_atomic
+                ? args[1] : evaluate(call(callable, application_arguments));
             if (immediate_signal_active()) return value;
-            values.push_back(value);
+            if (function_rules)
+                rebuilt.push_back(call(item.head(), {item.args()[0], value}));
+            else rebuilt.push_back(value);
         }
-        return list(std::move(values));
+        return function_rules ? call("Association", std::move(rebuilt))
+                              : call(args[0].head(), std::move(rebuilt));
     }
     if (function == "Through" && args.size() == 1 && args[0].kind() == ExprKind::Call
         && args[0].head().kind() == ExprKind::Call) {
@@ -13066,7 +13189,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         for (long index = 0; index < *machine_index(args[2]); ++index) { value = evaluate(call(args[0], {value})); values.push_back(value); }
         return function == "Nest" ? value : list(std::move(values));
     }
-    if (function == "ComposeList" && args.size() == 2 && args[0].has_head("List")) {
+    if (function == "ComposeList") {
+        if (args.size() != 2)
+            return raw_evaluation_error("ComposeList expects exactly two arguments.");
+        if (args[0].kind() != ExprKind::Call)
+            return raw_evaluation_error(
+                "ComposeList expects a list or other nonatomic expression of functions.");
         Expr value = args[1]; std::vector<Expr> values{value};
         for (const auto& callable : args[0].args()) {
             value = evaluate(call(callable, {value}));
@@ -13681,8 +13809,20 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (function == "FoldPairList") return list(std::move(emitted));
         return emitted.empty() ? call(head, args) : emitted.back();
     }
-    if (function == "LengthWhile" && args.size() == 2 && args[0].has_head("List")) {
-        std::size_t count = 0; for (const auto& item : args[0].args()) { if (!is_symbol(evaluate(call(args[1], {item})), "True")) break; ++count; }
+    if (function == "LengthWhile") {
+        if (args.size() != 2)
+            return raw_evaluation_error("LengthWhile expects exactly two arguments.");
+        const auto inputs = compound_sequence_values(args[0]);
+        if (!inputs)
+            return raw_evaluation_error(
+                "LengthWhile expects a nonatomic expression.");
+        std::size_t count = 0;
+        for (const auto& item : *inputs) {
+            const auto outcome = evaluate(call(args[1], {item}));
+            if (immediate_signal_active()) return outcome;
+            if (!is_symbol(outcome, "True")) break;
+            ++count;
+        }
         return integer(count);
     }
     if (function == "DeleteDuplicates" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
