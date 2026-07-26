@@ -995,10 +995,14 @@ def tensor_matrix_cases() -> list[str]:
         "f[a,b]",
         "x",
     )
-    cases = [
+    # Earlier clusters intentionally mutate common callback symbols while
+    # testing definition state.  Establish a deterministic local baseline so
+    # this matrix has the same meaning both alone and in the all-cluster gate.
+    cases = ["ClearAll[f,g,q]"]
+    cases.extend(
         f"Dot[{left},{right}]"
         for left, right in itertools.product(dense_operands, repeat=2)
-    ]
+    )
     sparse_operands = (
         "SparseArray[{}, {0}]",
         "SparseArray[{{1}->a}, {2}]",
