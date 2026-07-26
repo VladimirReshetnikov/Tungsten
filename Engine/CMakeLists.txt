@@ -204,6 +204,14 @@ if(BUILD_TESTING)
         NAME tungsten_array_shape_tests
         COMMAND tungsten_array_shape_tests)
 
+    add_executable(tungsten_dense_array_tests
+        cpp/tests/dense_array_tests.cpp)
+    target_link_libraries(tungsten_dense_array_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_dense_array_tests)
+    add_test(
+        NAME tungsten_dense_array_tests
+        COMMAND tungsten_dense_array_tests)
+
     add_executable(tungsten_take_list_tests
         cpp/tests/take_list_tests.cpp)
     target_link_libraries(tungsten_take_list_tests PRIVATE tungsten_cpp)

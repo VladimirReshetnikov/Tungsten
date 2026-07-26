@@ -2526,6 +2526,7 @@ std::optional<std::size_t> bounded_dense_dimension(
 Expr build_dense_array(
     const DenseDimensions& dimensions,
     const std::function<Expr(const std::vector<mpz_class>&)>& builder,
+    const std::function<bool()>& interrupted,
     std::vector<mpz_class>& indices, std::size_t level = 0) {
     if (level == dimensions.size()) return builder(indices);
     const auto count = bounded_dense_dimension(dimensions[level]);
@@ -2535,19 +2536,22 @@ Expr build_dense_array(
     values.reserve(*count);
     for (std::size_t index = 1; index <= *count; ++index) {
         indices.push_back(mpz_class(std::to_string(index), 10));
-        values.push_back(build_dense_array(
-            dimensions, builder, indices, level + 1));
+        auto value = build_dense_array(
+            dimensions, builder, interrupted, indices, level + 1);
         indices.pop_back();
+        if (interrupted && interrupted()) return value;
+        values.push_back(std::move(value));
     }
     return evaluated_list_expr(std::move(values));
 }
 
 Expr build_dense_array(
     const DenseDimensions& dimensions,
-    const std::function<Expr(const std::vector<mpz_class>&)>& builder) {
+    const std::function<Expr(const std::vector<mpz_class>&)>& builder,
+    const std::function<bool()>& interrupted = {}) {
     std::vector<mpz_class> indices;
     indices.reserve(dimensions.size());
-    return build_dense_array(dimensions, builder, indices);
+    return build_dense_array(dimensions, builder, interrupted, indices);
 }
 
 void append_dense_leaves(const Expr& expression, std::vector<Expr>& values) {
@@ -14763,27 +14767,110 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 return dense_value_at(args[0], source_indices).value_or(padding);
             });
     }
-    if (function == "ArrayFlatten" && args.size() == 1 && args[0].has_head("List")) {
-        std::vector<Expr> result; bool valid = true;
+    if (function == "ArrayFlatten" && evaluated_name
+        && *evaluated_name == "ArrayFlatten") {
+        if (args.size() != 1)
+            return raw_evaluation_error(
+                "ArrayFlatten expects exactly one argument.");
+        if (!args[0].has_head("List"))
+            return raw_evaluation_error(
+                "ArrayFlatten expects a rectangular list of array blocks.");
+        for (const auto& row : args[0].args())
+            if (!row.has_head("List"))
+                return raw_evaluation_error(
+                    "ArrayFlatten expects a rectangular list of array blocks.");
+        if (args[0].args().empty()) return evaluated_list_expr({});
+
+        const auto column_count = args[0].args().front().args().size();
+        if (column_count == 0
+            || std::any_of(args[0].args().begin(), args[0].args().end(),
+                [&](const Expr& row) {
+                    return row.args().size() != column_count;
+                }))
+            return raw_evaluation_error(
+                "ArrayFlatten expects a rectangular block matrix.");
+
+        std::vector<std::vector<std::pair<std::size_t, std::size_t>>> shapes;
+        shapes.reserve(args[0].args().size());
         for (const auto& block_row : args[0].args()) {
-            if (!block_row.has_head("List")) { valid = false; break; }
-            std::size_t height = 0;
+            std::vector<std::pair<std::size_t, std::size_t>> shape_row;
+            shape_row.reserve(column_count);
             for (const auto& block : block_row.args()) {
-                if (!block.has_head("List")) { valid = false; break; }
-                height = std::max(height, block.args().size());
-            }
-            if (!valid) break;
-            for (std::size_t row_index = 0; row_index < height; ++row_index) {
-                std::vector<Expr> row;
-                for (const auto& block : block_row.args()) {
-                    if (row_index >= block.args().size() || !block.args()[row_index].has_head("List")) { valid = false; break; }
-                    const auto& block_values = block.args()[row_index].args(); row.insert(row.end(), block_values.begin(), block_values.end());
+                if (block.kind() == ExprKind::SparseArray) {
+                    if (block.dimensions().size() != 2)
+                        return raw_evaluation_error(
+                            "ArrayFlatten currently expects rank-2 SparseArray blocks.");
+                    return raw_evaluation_error(
+                        "ArrayFlatten dense parity does not materialize SparseArray blocks.");
                 }
-                if (!valid) break;
-                result.push_back(list(std::move(row)));
+                const auto dimensions = dense_dimensions(block);
+                if (!dimensions)
+                    return raw_evaluation_error(
+                        "SparseArray dense input must be rectangular.");
+                if (dimensions->size() != 2)
+                    return raw_evaluation_error(
+                        "ArrayFlatten currently expects rank-2 array blocks.");
+                shape_row.emplace_back((*dimensions)[0], (*dimensions)[1]);
+            }
+            shapes.push_back(std::move(shape_row));
+        }
+
+        std::vector<std::size_t> row_heights;
+        row_heights.reserve(shapes.size());
+        for (std::size_t row = 0; row < shapes.size(); ++row) {
+            const auto height = shapes[row][0].first;
+            if (std::any_of(shapes[row].begin(), shapes[row].end(),
+                    [&](const auto& shape) { return shape.first != height; }))
+                return raw_evaluation_error(
+                    "ArrayFlatten block row " + std::to_string(row + 1)
+                        + " has inconsistent heights.");
+            row_heights.push_back(height);
+        }
+        std::vector<std::size_t> column_widths;
+        column_widths.reserve(column_count);
+        for (std::size_t column = 0; column < column_count; ++column) {
+            const auto width = shapes[0][column].second;
+            if (std::any_of(shapes.begin(), shapes.end(),
+                    [&](const auto& shape_row) {
+                        return shape_row[column].second != width;
+                    }))
+                return raw_evaluation_error(
+                    "ArrayFlatten block column " + std::to_string(column + 1)
+                        + " has inconsistent widths.");
+            column_widths.push_back(width);
+        }
+
+        const auto row_total = std::accumulate(row_heights.begin(),
+            row_heights.end(), mpz_class(0),
+            [](mpz_class total, std::size_t value) -> mpz_class {
+                return total + mpz_class(std::to_string(value), 10);
+            });
+        const auto column_total = std::accumulate(column_widths.begin(),
+            column_widths.end(), mpz_class(0),
+            [](mpz_class total, std::size_t value) -> mpz_class {
+                return total + mpz_class(std::to_string(value), 10);
+            });
+        if (!dense_materialization_within_limit({row_total, column_total}))
+            return raw_evaluation_error(
+                "ArrayFlatten output exceeds the native materialization limit.");
+
+        std::vector<Expr> rows;
+        const auto row_count = *bounded_dense_dimension(row_total);
+        rows.reserve(row_count);
+        for (std::size_t block_row = 0;
+             block_row < args[0].args().size(); ++block_row) {
+            for (std::size_t local_row = 0;
+                 local_row < row_heights[block_row]; ++local_row) {
+                std::vector<Expr> values;
+                for (const auto& block : args[0].args()[block_row].args()) {
+                    const auto& block_values = block.args()[local_row].args();
+                    values.insert(values.end(),
+                        block_values.begin(), block_values.end());
+                }
+                rows.push_back(evaluated_list_expr(std::move(values)));
             }
         }
-        if (valid) return list(std::move(result));
+        return evaluated_list_expr(std::move(rows));
     }
     if (function == "Transpose" && evaluated_name
         && *evaluated_name == "Transpose") {
@@ -15067,8 +15154,76 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         return list({component(1, 2, 2, 1), component(2, 0, 0, 2), component(0, 1, 1, 0)});
     }
-    if (function == "LeviCivitaTensor" && args.size() == 1 && machine_index(args[0]) && *machine_index(args[0]) == 2)
-        return list({list({integer(0L), integer(1L)}), list({integer(-1L), integer(0L)})});
+    if (function == "LeviCivitaTensor" && evaluated_name
+        && *evaluated_name == "LeviCivitaTensor") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "LeviCivitaTensor expects a dimension and an optional head.");
+        if (args[0].kind() != ExprKind::Integer)
+            return raw_evaluation_error(
+                "LeviCivitaTensor expects an integer argument.");
+        if (args[0].integer_value() < 0)
+            return raw_evaluation_error(
+                "LeviCivitaTensor expects a non-negative dimension.");
+
+        const bool sparse_requested = args.size() == 2
+            && is_symbol(args[1], "SparseArray");
+        if (sparse_requested && args[0].integer_value() == 0)
+            return raw_evaluation_error(
+                "SparseArray rule positions must match the array rank.");
+        const auto dimension = bounded_dense_dimension(args[0].integer_value());
+        if (!dimension)
+            return raw_evaluation_error(
+                "LeviCivitaTensor output exceeds the native materialization limit.");
+
+        auto permutation_sign = [](const std::vector<std::size_t>& indices) {
+            std::size_t inversions = 0;
+            for (std::size_t left = 0; left < indices.size(); ++left)
+                for (std::size_t right = left + 1;
+                     right < indices.size(); ++right)
+                    if (indices[left] > indices[right]) ++inversions;
+            return inversions % 2 == 0 ? 1L : -1L;
+        };
+        if (sparse_requested) {
+            std::size_t entry_count = 1;
+            for (std::size_t factor = 2; factor <= *dimension; ++factor) {
+                if (entry_count > maximum_sparse_materialized_nodes / factor)
+                    return raw_evaluation_error(
+                        "LeviCivitaTensor output exceeds the native materialization limit.");
+                entry_count *= factor;
+            }
+            std::vector<std::size_t> permutation(*dimension);
+            std::iota(permutation.begin(), permutation.end(), std::size_t{1});
+            std::vector<SparseEntry> entries;
+            entries.reserve(entry_count);
+            do {
+                entries.push_back({permutation,
+                    integer(permutation_sign(permutation))});
+            } while (std::next_permutation(
+                permutation.begin(), permutation.end()));
+            return sparse_array(
+                std::vector<std::size_t>(*dimension, *dimension),
+                std::move(entries), integer(0L));
+        }
+
+        DenseDimensions dimensions(*dimension, args[0].integer_value());
+        if (!dense_materialization_within_limit(dimensions))
+            return raw_evaluation_error(
+                "LeviCivitaTensor output exceeds the native materialization limit.");
+        if (*dimension == 0) return integer(1L);
+        return build_dense_array(dimensions,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<std::size_t> permutation;
+                permutation.reserve(indices.size());
+                for (const auto& index : indices)
+                    permutation.push_back(*nonnegative_size_t(index));
+                auto sorted = permutation;
+                std::sort(sorted.begin(), sorted.end());
+                if (std::adjacent_find(sorted.begin(), sorted.end())
+                    != sorted.end()) return integer(0L);
+                return integer(permutation_sign(permutation));
+            });
+    }
     if (function == "Total" && !args.empty() && args.size() <= 2) {
         auto total_default = [&](const Expr& value) -> std::optional<Expr> {
             std::vector<Expr> values;
@@ -16532,7 +16687,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 for (std::size_t axis = 0; axis < indices.size(); ++axis)
                     arguments.push_back(integer(origins[axis] + indices[axis] - 1));
                 return evaluate(call(args[0], std::move(arguments)));
-            });
+            }, [&] { return immediate_signal_active(); });
     }
     if (function == "Range" && args.size() >= 1 && args.size() <= 3) {
         if (args.size() == 1 && args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Range", {item}))); return list(std::move(values)); }

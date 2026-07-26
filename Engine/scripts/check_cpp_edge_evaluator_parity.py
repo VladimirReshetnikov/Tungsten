@@ -52,8 +52,8 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "rounding", "take-drop", "take-list", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
-            "array-shape", "sparse-properties", "sparse-structural", "ordering",
-            "failure-confirmation", "polynomial", "strings",
+            "array-shape", "dense-array", "sparse-properties", "sparse-structural",
+            "ordering", "failure-confirmation", "polynomial", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -767,6 +767,174 @@ def sparse_structural_cases() -> list[str]:
     return _unique(cases)
 
 
+def dense_array_cases() -> list[str]:
+    """Dense constructors, rank-generic transforms, and validation edges."""
+
+    cases: list[str] = [
+        "ClearAll[TungstenDenseArrayFunction,TungstenDenseArrayHead]"
+    ]
+    reshape_sources = (
+        "a", "{}", "{a,b,c}", "{{a,b},{c,d}}",
+        "{{a},{b,{c,d}}}", "{{}}",
+    )
+    reshape_shapes = (
+        "0", "1", "3", "{}", "{0}", "{2}", "{2,2}", "{1,2,2}",
+        "{0,999999999999999999999999999999999999999}",
+    )
+    for source, dimensions, padding in itertools.product(
+        reshape_sources, reshape_shapes, (None, "x")
+    ):
+        suffix = "" if padding is None else f",{padding}"
+        cases.append(f"ArrayReshape[{source},{dimensions}{suffix}]")
+    cases.extend(
+        (
+            "ArrayReshape[]",
+            "ArrayReshape[{a}]",
+            "ArrayReshape[{a},{1},x,y]",
+            "ArrayReshape[{a},x]",
+            "ArrayReshape[{a},{1,x}]",
+            "ArrayReshape[{a},-1]",
+            "ArrayReshape[{a},{1,-1}]",
+            "ArrayReshape[{},3,Nothing]",
+        )
+    )
+
+    for value, dimensions in itertools.product(
+        ("x", "Nothing", "TungstenDenseArrayFunction[a]"),
+        (
+            "0", "1", "3", "{}", "{0}", "{2,2}", "{2,0,3}",
+            "{0,999999999999999999999999999999999999999}",
+        ),
+    ):
+        cases.append(f"ConstantArray[{value},{dimensions}]")
+    cases.extend(
+        (
+            "ConstantArray[]", "ConstantArray[x]", "ConstantArray[x,2,y]",
+            "ConstantArray[x,z]", "ConstantArray[x,{2,z}]",
+            "ConstantArray[x,-1]", "ConstantArray[x,{2,-1}]",
+        )
+    )
+
+    for dimensions, origin in itertools.product(
+        ("0", "2", "{}", "{2,2}",
+         "{0,999999999999999999999999999999999999999}"),
+        (None, "0", "{5,7}", "{0,10}", "x", "{0}"),
+    ):
+        suffix = "" if origin is None else f",{origin}"
+        cases.append(f"Array[TungstenDenseArrayFunction,{dimensions}{suffix}]")
+    cases.extend(
+        (
+            "Array[]", "Array[TungstenDenseArrayFunction]",
+            "Array[TungstenDenseArrayFunction,2,0,x]",
+            "Array[TungstenDenseArrayFunction,x]",
+            "Array[TungstenDenseArrayFunction,{2,x}]",
+            "Array[TungstenDenseArrayFunction,-1]",
+            "Array[TungstenDenseArrayFunction,{2,-1}]",
+            "Array[Nothing&,3]", "Array[(#1+#2)&,{2,2},{0,10}]",
+            "Array[(Print[InputForm[#]];#)&,3]",
+        )
+    )
+
+    cases.extend(
+        (
+            "ArrayPad[{a,b},1]", "ArrayPad[{a,b},{1}]",
+            "ArrayPad[{a,b},{1,2}]", "ArrayPad[{},2]",
+            "ArrayPad[{a},1,Nothing]",
+            "ArrayPad[{{1,2},{3,4}},1]",
+            "ArrayPad[{{1,2},{3,4}},{1,2}]",
+            "ArrayPad[{{1,2},{3,4}},{{1,0},{0,2}},x]",
+            "ArrayPad[{{{a,b}}},{{1,0},{0,1},{2,0}},z]",
+            "ArrayPad[{{},{}} , {{1,0},{2,3}},x]",
+            "ArrayPad[{{1},{2,3}},1]", "ArrayPad[x,1]",
+            "ArrayPad[{a},x]", "ArrayPad[{a},-1]",
+            "ArrayPad[{a},{-1,2}]",
+            "ArrayPad[{{a}},{{1,x},{2,2}}]",
+            "ArrayPad[{{a}},{{1,2},x}]", "ArrayPad[{{a}},{1}]",
+            "ArrayPad[]", "ArrayPad[{a},1,x,y]",
+        )
+    )
+
+    cases.extend(
+        (
+            "Transpose[{}]", "Transpose[{a,b}]", "Transpose[{a,b},{1}]",
+            "Transpose[{{1,2,3},{4,5,6}}]",
+            "Transpose[{{1,2,3},{4,5,6}},{1,2}]",
+            "Transpose[{{1,2,3},{4,5,6}},{2,1}]",
+            "Transpose[{{{1,2},{3,4}},{{5,6},{7,8}}}]",
+            "Transpose[{{{1,2},{3,4}},{{5,6},{7,8}}},{3,1,2}]",
+            "Transpose[{{},{}}]", "Transpose[{{1},{2,3}}]",
+            "Transpose[x]", "Transpose[{a,b},x]", "Transpose[{a,b},{}]",
+            "Transpose[{a,b},{x}]", "Transpose[{{a}},{1,1}]",
+            "Transpose[{{a}},{0,2}]", "Transpose[]",
+            "Transpose[{a},{1},x]",
+        )
+    )
+
+    cases.extend(
+        (
+            "ArrayFlatten[{}]",
+            "ArrayFlatten[{{{{1,2},{3,4}},{{5},{6}}},"
+            "{{{7,8}},{{9}}}}]",
+            "ArrayFlatten[{{{{}}}}]", "ArrayFlatten[{{{{1}},{{2}}}}]",
+            "ArrayFlatten[x]", "ArrayFlatten[{x}]", "ArrayFlatten[{{}}]",
+            "ArrayFlatten[{{{{1}}},{{{2}},{{3}}}}]",
+            "ArrayFlatten[{{{{1},{2}},{{3}}}}]",
+            "ArrayFlatten[{{{{1,2}}},{{{3}}}}]",
+            "ArrayFlatten[{{{{1},{2,3}}}}]",
+            "ArrayFlatten[]", "ArrayFlatten[x,y]",
+        )
+    )
+
+    cases.extend(
+        (
+            "LeviCivitaTensor[0]", "LeviCivitaTensor[1]",
+            "LeviCivitaTensor[2]", "LeviCivitaTensor[3]",
+            "LeviCivitaTensor[2,TungstenDenseArrayHead]",
+            "LeviCivitaTensor[1,SparseArray]",
+            "LeviCivitaTensor[2,System`SparseArray]",
+            "LeviCivitaTensor[0,SparseArray]", "LeviCivitaTensor[-1]",
+            "LeviCivitaTensor[x]", "LeviCivitaTensor[]",
+            "LeviCivitaTensor[2,TungstenDenseArrayHead,g]",
+        )
+    )
+
+    cases.extend(
+        (
+            "System`ArrayReshape[{{a},{b}},{2}]",
+            "System`ArrayPad[{a},1]",
+            "System`ArrayFlatten[{{{{a}}}}]",
+            "System`Transpose[{{a,b},{c,d}}]",
+            "System`ConstantArray[x,{2,1}]",
+            "System`Array[TungstenDenseArrayFunction,2]",
+            "System`LeviCivitaTensor[2]",
+            "Quiet[ArrayPad[x,1]]", "Check[ArrayPad[x,1],caught]",
+            "Quiet[Transpose[x]]", "Check[Transpose[x],caught]",
+            "Quiet[ArrayFlatten[x]]", "Check[ArrayFlatten[x],caught]",
+            "Quiet[ArrayReshape[{a},x]]",
+            "Check[ArrayReshape[{a},x],caught]",
+            "Quiet[ConstantArray[x,-1]]",
+            "Check[ConstantArray[x,-1],caught]",
+            "Quiet[Array[TungstenDenseArrayFunction,-1]]",
+            "Check[Array[TungstenDenseArrayFunction,-1],caught]",
+            "Quiet[LeviCivitaTensor[-1]]",
+            "Check[LeviCivitaTensor[-1],caught]",
+            "Reap[ConstantArray[Sow[a],2]]",
+            "Reap[Array[(Sow[#];#)&,3]]",
+            "Catch[Array[(If[#==2,Throw[tag],#])&,3]]",
+            "Catch[Array[(Print[InputForm[#]];"
+            "If[#==2,Throw[tag],#])&,3]]",
+            "CheckAbort[Array[(If[#==2,Abort[],#])&,3],caught]",
+            "CheckAbort[Array[(Print[InputForm[#]];"
+            "If[#==2,Abort[],#])&,3],caught]",
+            "Array[TungstenDenseArrayFunction,Print[\"dimension\"];2]",
+            "Reap[ArrayPad[{Sow[a]},1]]",
+            "Catch[Transpose[Throw[tag]]]",
+            "LeviCivitaTensor[2,Print[\"head\"]]",
+        )
+    )
+    return _unique(cases)
+
+
 def string_cases() -> list[str]:
     strings = ('""', '"a"', '"ab"', '"aba"', '"a b"', '"café λ"')
     patterns = (
@@ -1442,6 +1610,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "combinators": combinator_cases,
     "distribution": distribution_cases,
     "array-shape": array_shape_cases,
+    "dense-array": dense_array_cases,
     "sparse-properties": sparse_property_cases,
     "sparse-structural": sparse_structural_cases,
     "ordering": ordering_cases,
