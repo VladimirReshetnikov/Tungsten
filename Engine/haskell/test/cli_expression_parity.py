@@ -1123,6 +1123,80 @@ CASES = (
         ),
         0,
     ),
+    (
+        "with cleanup executes every stage exactly once",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "x = 0; result = WithCleanup[x = x + 1, x = x + 10, "
+            "x = x + 100]; {result, x}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup body and initializer abort effects",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = CheckAbort[WithCleanup[Print["expr1"]; Abort[]; '
+            'Print["expr2"], Print["cleanup1"]], caught1]; '
+            'second = CheckAbort[WithCleanup[Print["init1"]; Abort[]; '
+            'Print["init2"], Print["body"], Print["cleanup2"]], caught2]; '
+            "{first, second}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup preserves an enclosing pending abort",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'CheckAbort[AbortProtect[Abort[]; WithCleanup[Print["init"], '
+            'Print["body"], Print["cleanup"]]; Print["after"]], caught]',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup covers every existing control exit",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'ClearAll[f]; f[] := WithCleanup[Return[returned], '
+            'Print["returnCleanup"]]; '
+            '{Catch[WithCleanup[Throw[thrown], Print["throwCleanup"]]], '
+            'f[], Do[WithCleanup[Break[], Print["breakCleanup"]], {i, 3}], '
+            '(WithCleanup[Goto[out], Print["gotoCleanup"]]; never; '
+            "Label[out]; reached)}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup signal precedence and arity diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[] := WithCleanup[Return[body], Return[cleanup]]; "
+            "{Catch[WithCleanup[Throw[body], Throw[cleanup]]], f[], "
+            "CheckAbort[Catch[WithCleanup[Abort[], Throw[cleanup]]], caught], "
+            "WithCleanup[1], WithCleanup[1, 2, 3, 4]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

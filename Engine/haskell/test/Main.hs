@@ -1436,6 +1436,12 @@ checkEvaluationSession = do
         , ("abort protect releases its pending abort at the boundary", "CheckAbort[AbortProtect[Abort[]; 7], caught]", "caught")
         , ("same-depth check abort handles a fresh abort inside protection", "AbortProtect[CheckAbort[Abort[], inner]]", "inner")
         , ("abort scopes restore across throw and return", "ClearAll[f]; f[] := AbortProtect[Return[returned]]; {Catch[AbortProtect[Throw[thrown]]], f[], CheckAbort[Abort[], caught]}", "List[thrown, returned, caught]")
+        , ("with cleanup evaluates init body and cleanup exactly once", "x = 0; result = WithCleanup[x = x + 1, x = x + 10, x = x + 100]; {result, x}", "List[11, 111]")
+        , ("cleanup abort supersedes a completed body", "WithCleanup[7, Abort[]]", "$Aborted")
+        , ("cleanup throw supersedes a body throw", "Catch[WithCleanup[Throw[body], Throw[cleanup]]]", "cleanup")
+        , ("cleanup return supersedes a body return", "WithCleanup[Return[body], Return[cleanup]]", "Return[cleanup]")
+        , ("cleanup throw supersedes a body abort", "CheckAbort[Catch[WithCleanup[Abort[], Throw[cleanup]]], caught]", "cleanup")
+        , ("cleanup return and throw cross definition boundaries", "ClearAll[f, g]; f[] := Catch[WithCleanup[Throw[body], Return[cleanup]]]; g[] := Catch[WithCleanup[Return[body], Throw[cleanup]]]; {f[], g[]}", "List[cleanup, cleanup]")
         , ("goto supports forward and backward labels", "ClearAll[x]; first = (Goto[end]; never; Label[end]; reached); x = 0; second = (Label[start]; x = x + 1; If[x < 3, Goto[start]]; x); {first, second}", "List[reached, 3]")
         , ("goto catches at the nearest matching compound expression", "ClearAll[x]; x = 0; {(Label[a]; x = x + 1; If[x == 1, Goto[a]]; Label[a]; x), ((Goto[inner]; never; Label[inner]; reached)), ((Goto[out]; innerNever; Label[other]); outerNever; Label[out]; reached)}", "List[2, reached, reached]")
         , ("goto compares evaluated targets with raw label tags", "ClearAll[x]; x = end; (Goto[x]; never; Label[x]; reached)", "Goto[end]")
@@ -1569,6 +1575,26 @@ checkEvaluationSession = do
           , "caught"
           , ["before"]
           )
+        , ( "with cleanup runs after a body abort"
+          , "CheckAbort[WithCleanup[Print[\"expr1\"]; Abort[]; Print[\"expr2\"], Print[\"cleanup\"]], caught]"
+          , "caught"
+          , ["expr1", "cleanup"]
+          )
+        , ( "with cleanup protects init and skips body after init control"
+          , "CheckAbort[WithCleanup[Print[\"init1\"]; Abort[]; Print[\"init2\"], Print[\"body\"], Print[\"cleanup\"]], caught]"
+          , "caught"
+          , ["init1", "init2", "cleanup"]
+          )
+        , ( "with cleanup preserves an enclosing pending abort"
+          , "CheckAbort[AbortProtect[Abort[]; WithCleanup[Print[\"init\"], Print[\"body\"], Print[\"cleanup\"]]; Print[\"after\"]], caught]"
+          , "caught"
+          , ["init", "body", "cleanup", "after"]
+          )
+        , ( "with cleanup runs for throw return break and goto exits"
+          , "ClearAll[f]; f[] := WithCleanup[Return[returned], Print[\"returnCleanup\"]]; {Catch[WithCleanup[Throw[thrown], Print[\"throwCleanup\"]]], f[], Do[WithCleanup[Break[], Print[\"breakCleanup\"]], {i, 3}], (WithCleanup[Goto[out], Print[\"gotoCleanup\"]]; never; Label[out]; reached)}"
+          , "List[thrown, returned, Null, reached]"
+          , ["throwCleanup", "returnCleanup", "breakCleanup", "gotoCleanup"]
+          )
         , ( "pattern callbacks preserve prints in traversal order"
           , "p[x_] := (Print[x]; x > 1); Cases[{1, 2, 3}, x_ /; p[x]]"
           , "List[2, 3]"
@@ -1680,6 +1706,19 @@ checkEvaluationSession = do
             , ( "AbortProtect::error"
               , "MessageName[AbortProtect, \"error\"]"
               , "AbortProtect::error: AbortProtect expects exactly one argument."
+              )
+            ]
+          )
+        , ( "with cleanup arity diagnostics"
+          , "{WithCleanup[1], WithCleanup[1, 2, 3, 4]}"
+          , "List[WithCleanup[1], WithCleanup[1, 2, 3, 4]]"
+          , [ ( "WithCleanup::error"
+              , "MessageName[WithCleanup, \"error\"]"
+              , "WithCleanup::error: WithCleanup expects two or three arguments."
+              )
+            , ( "WithCleanup::error"
+              , "MessageName[WithCleanup, \"error\"]"
+              , "WithCleanup::error: WithCleanup expects two or three arguments."
               )
             ]
           )

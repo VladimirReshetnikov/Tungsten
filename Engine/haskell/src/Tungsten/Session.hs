@@ -637,6 +637,8 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionCheckAbort depth session arguments'
       Call (Symbol "AbortProtect") arguments' ->
         evaluateSessionAbortProtect depth session arguments'
+      Call (Symbol "WithCleanup") arguments' ->
+        evaluateSessionWithCleanup depth session arguments'
       Call (Symbol "Break") arguments' ->
         evaluateLoopControl BreakSignal "Break" session arguments'
       Call (Symbol "Continue") arguments' ->
@@ -1018,6 +1020,7 @@ directSessionDispatchHead name =
              , "Abort"
              , "CheckAbort"
              , "AbortProtect"
+             , "WithCleanup"
              , "Break"
              , "Continue"
              , "Return"
@@ -4391,6 +4394,42 @@ clearAbortScopes session =
     { sessionAbortProtectScopes = []
     , sessionCheckAbortScopes = []
     }
+
+evaluateSessionWithCleanup
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionWithCleanup depth session = \case
+  [body, cleanup] -> evaluateBody session body cleanup
+  [initializer, body, cleanup] ->
+    case evaluateAbortProtected initializer session of
+      Left (SessionControl controlSignal stoppedSession) ->
+        evaluateCleanup (Left controlSignal) stoppedSession cleanup
+      Left evaluationFailure -> Left evaluationFailure
+      Right (_, initializedSession) ->
+        evaluateBody initializedSession body cleanup
+  _ -> sessionFailure session "WithCleanup expects two or three arguments."
+ where
+  evaluateBody currentSession body cleanup =
+    case evaluateSessionAt (depth + 1) currentSession body of
+      Left (SessionControl controlSignal stoppedSession) ->
+        evaluateCleanup (Left controlSignal) stoppedSession cleanup
+      Left evaluationFailure -> Left evaluationFailure
+      Right (value, bodySession) ->
+        evaluateCleanup (Right value) bodySession cleanup
+
+  evaluateCleanup pending currentSession cleanup =
+    case evaluateAbortProtected cleanup currentSession of
+      Left cleanupExit -> Left cleanupExit
+      Right (_, cleanedSession) ->
+        case pending of
+          Left controlSignal ->
+            Left (SessionControl controlSignal cleanedSession)
+          Right value -> Right (value, cleanedSession)
+
+  evaluateAbortProtected expression currentSession =
+    evaluateSessionAbortProtect depth currentSession [expression]
 
 evaluateSessionReturn
   :: Int
