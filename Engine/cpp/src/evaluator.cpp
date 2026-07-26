@@ -38,6 +38,7 @@ namespace {
 std::optional<std::vector<Expr>> association_rules(const Expr& expression);
 std::optional<long> machine_index(const Expr& expression);
 int expression_compare(const Expr& left, const Expr& right);
+void gather_polynomial_symbols(const Expr& expression, std::vector<Expr>& symbols);
 
 template<typename Function>
 class ScopeExit {
@@ -6011,6 +6012,226 @@ private:
     Evaluate evaluate_;
 };
 
+NativePolynomial scale_native_polynomial(const NativePolynomialContext& context,
+    const NativePolynomial& polynomial, const Expr& factor) {
+    auto result = context.zero();
+    for (const auto& [monomial, coefficient] : polynomial.terms)
+        result = context.add(result, context.monomial_polynomial(monomial,
+            context.coefficient_multiply(factor, coefficient)));
+    return result;
+}
+
+NativePolynomial divide_native_polynomial_by_scalar(
+    const NativePolynomialContext& context, const NativePolynomial& polynomial,
+    const Expr& divisor) {
+    auto result = context.zero();
+    for (const auto& [monomial, coefficient] : polynomial.terms)
+        result = context.add(result, context.monomial_polynomial(monomial,
+            context.coefficient_divide(coefficient, divisor)));
+    return result;
+}
+
+Expr native_coefficient_power(const NativePolynomialContext& context,
+    const Expr& base, long exponent) {
+    Expr result = integer(1L);
+    for (long index = 0; index < exponent; ++index)
+        result = context.coefficient_multiply(result, base);
+    return result;
+}
+
+NativePolynomial pseudo_remainder(const NativePolynomialContext& context,
+    NativePolynomial dividend, const NativePolynomial& divisor) {
+    if (divisor.empty()) return dividend;
+    const auto divisor_degree = context.degree(divisor);
+    const auto divisor_leading = context.leading_term(divisor).second;
+    long remaining_power = context.degree(dividend) - divisor_degree + 1;
+    std::size_t iterations = 0;
+    while (!dividend.empty() && context.degree(dividend) >= divisor_degree
+        && iterations++ < 10000) {
+        const auto dividend_degree = context.degree(dividend);
+        const auto dividend_leading = context.leading_term(dividend).second;
+        const auto offset = dividend_degree - divisor_degree;
+        const auto shifted_divisor = context.multiply(divisor,
+            context.monomial_polynomial(NativeMonomial{offset}, integer(1L)));
+        dividend = context.subtract(
+            scale_native_polynomial(context, dividend, divisor_leading),
+            scale_native_polynomial(context, shifted_divisor, dividend_leading));
+        --remaining_power;
+    }
+    if (iterations >= 10000) return context.zero();
+    return scale_native_polynomial(context, dividend,
+        native_coefficient_power(context, divisor_leading,
+            std::max(0L, remaining_power)));
+}
+
+std::optional<std::vector<NativePolynomial>> native_subresultant_sequence(
+    const NativePolynomialContext& context, NativePolynomial left,
+    NativePolynomial right) {
+    if (context.variables().size() != 1 || left.empty()) return std::nullopt;
+    if (right.empty()) return std::vector<NativePolynomial>{std::move(left)};
+    auto left_degree = context.degree(left);
+    auto right_degree = context.degree(right);
+    if (left_degree < right_degree) {
+        std::swap(left, right);
+        std::swap(left_degree, right_degree);
+    }
+    std::vector<NativePolynomial> sequence{left, right};
+    long difference = left_degree - right_degree;
+    const Expr sign = ((difference + 1) & 1L) == 0
+        ? integer(1L) : integer(-1L);
+    auto next = scale_native_polynomial(
+        context, pseudo_remainder(context, left, right), sign);
+    Expr leading = context.leading_term(right).second;
+    Expr scale = native_coefficient_power(context, leading, difference);
+    Expr negative_scale = context.coefficient_multiply(integer(-1L), scale);
+    std::size_t iterations = 0;
+    while (!next.empty() && iterations++ < 1000) {
+        const auto next_degree = context.degree(next);
+        sequence.push_back(next);
+        left = std::move(right);
+        right = std::move(next);
+        const auto previous_degree = right_degree;
+        right_degree = next_degree;
+        difference = previous_degree - next_degree;
+        const auto divisor = context.coefficient_multiply(integer(-1L),
+            context.coefficient_multiply(leading,
+                native_coefficient_power(context, negative_scale, difference)));
+        next = divide_native_polynomial_by_scalar(context,
+            pseudo_remainder(context, left, right), divisor);
+        leading = context.leading_term(right).second;
+        if (difference > 1) {
+            const auto numerator = native_coefficient_power(context,
+                context.coefficient_multiply(integer(-1L), leading), difference);
+            const auto denominator = native_coefficient_power(
+                context, negative_scale, difference - 1);
+            negative_scale = context.coefficient_divide(numerator, denominator);
+        } else negative_scale = context.coefficient_multiply(integer(-1L), leading);
+    }
+    if (iterations >= 1000) return std::nullopt;
+    return sequence;
+}
+
+Expr factor_common_additive_expression(const Expr& expression,
+    const NativePolynomialContext::Evaluate& evaluate, std::size_t depth = 0) {
+    if (!expression.has_head("Plus") || depth >= 32) return expression;
+    auto terms = expression.args();
+    std::vector<Expr> variables;
+    for (const auto& term : terms) gather_polynomial_symbols(term, variables);
+    std::sort(variables.begin(), variables.end(), expression_less);
+    auto monomial_exponents = [&](const Expr& term) {
+        std::vector<long> exponents(variables.size(), 0);
+        const auto factors = term.has_head("Times")
+            ? term.args() : std::vector<Expr>{term};
+        for (const auto& factor : factors) {
+            Expr base = factor;
+            long exponent = 1;
+            if (factor.has_head("Power") && factor.args().size() == 2
+                && factor.args()[1].kind() == ExprKind::Integer
+                && factor.args()[1].integer_value() >= 0
+                && factor.args()[1].integer_value().fits_slong_p()) {
+                base = factor.args()[0];
+                exponent = factor.args()[1].integer_value().get_si();
+            }
+            const auto found = std::find(variables.begin(), variables.end(), base);
+            if (found != variables.end())
+                exponents[static_cast<std::size_t>(found - variables.begin())] += exponent;
+        }
+        return exponents;
+    };
+    std::stable_sort(terms.begin(), terms.end(), [&](const Expr& left, const Expr& right) {
+        const auto left_exponents = monomial_exponents(left);
+        const auto right_exponents = monomial_exponents(right);
+        if (left_exponents != right_exponents)
+            return std::lexicographical_compare(
+                right_exponents.begin(), right_exponents.end(),
+                left_exponents.begin(), left_exponents.end());
+        return expression_less(left, right);
+    });
+    struct DecomposedTerm {
+        Expr coefficient = integer(1L);
+        std::vector<Expr> factors;
+    };
+    std::vector<DecomposedTerm> decomposed;
+    decomposed.reserve(terms.size());
+    for (const auto& term : terms) {
+        DecomposedTerm value;
+        if (const auto numeric = as_rational(term)) {
+            value.coefficient = from_rational(*numeric);
+        } else if (term.has_head("Times")) {
+            mpq_class coefficient = 1;
+            for (const auto& factor : term.args()) {
+                if (const auto numeric = as_rational(factor)) coefficient *= *numeric;
+                else value.factors.push_back(factor);
+            }
+            value.coefficient = from_rational(coefficient);
+        } else value.factors.push_back(term);
+        decomposed.push_back(std::move(value));
+    }
+    std::vector<Expr> unique_factors;
+    for (const auto& term : decomposed)
+        for (const auto& factor : term.factors)
+            if (std::find(unique_factors.begin(), unique_factors.end(), factor)
+                == unique_factors.end()) unique_factors.push_back(factor);
+
+    std::vector<std::size_t> best_indices;
+    std::vector<Expr> best_common;
+    for (const auto& candidate : unique_factors) {
+        std::vector<std::size_t> indices;
+        for (std::size_t index = 0; index < decomposed.size(); ++index)
+            if (std::find(decomposed[index].factors.begin(),
+                    decomposed[index].factors.end(), candidate)
+                != decomposed[index].factors.end()) indices.push_back(index);
+        if (indices.size() < 2) continue;
+        std::vector<Expr> common;
+        auto remaining = decomposed[indices.front()].factors;
+        for (const auto& factor : remaining) {
+            bool present = true;
+            for (std::size_t position = 1; position < indices.size(); ++position)
+                if (std::find(decomposed[indices[position]].factors.begin(),
+                        decomposed[indices[position]].factors.end(), factor)
+                    == decomposed[indices[position]].factors.end()) {
+                    present = false;
+                    break;
+                }
+            if (present) common.push_back(factor);
+        }
+        if (common.empty()) continue;
+        if (indices.size() > best_indices.size()
+            || (indices.size() == best_indices.size()
+                && common.size() > best_common.size())) {
+            best_indices = std::move(indices);
+            best_common = std::move(common);
+        }
+    }
+    if (best_indices.empty()) return expression;
+    std::set<std::size_t> selected(best_indices.begin(), best_indices.end());
+    std::vector<Expr> quotients;
+    for (const auto index : best_indices) {
+        auto factors = decomposed[index].factors;
+        for (const auto& common : best_common) {
+            const auto found = std::find(factors.begin(), factors.end(), common);
+            if (found != factors.end()) factors.erase(found);
+        }
+        if (decomposed[index].coefficient != integer(1L))
+            factors.insert(factors.begin(), decomposed[index].coefficient);
+        quotients.push_back(evaluate(call("Times", std::move(factors))));
+    }
+    const auto common = evaluate(call("Times", best_common));
+    const auto inner = factor_common_additive_expression(
+        simplify_plus(quotients, false), evaluate, depth + 1);
+    const auto factored = evaluate(call("Times", {common, inner}));
+    std::vector<Expr> rebuilt;
+    bool inserted = false;
+    for (std::size_t index = 0; index < terms.size(); ++index) {
+        if (selected.count(index) != 0) {
+            if (!inserted) { rebuilt.push_back(factored); inserted = true; }
+        } else rebuilt.push_back(terms[index]);
+    }
+    const auto result = simplify_plus(rebuilt, false);
+    if (result == expression) return expression;
+    return factor_common_additive_expression(result, evaluate, depth + 1);
+}
+
 void gather_polynomial_symbols(const Expr& expression, std::vector<Expr>& symbols) {
     if (expression.kind() == ExprKind::Symbol) {
         if (std::find(symbols.begin(), symbols.end(), expression) == symbols.end()) symbols.push_back(expression);
@@ -6151,6 +6372,173 @@ RationalPolynomial rational_polynomial_gcd(
     return monic_polynomial(std::move(left));
 }
 
+std::vector<mpz_class> primitive_integer_polynomial(
+    const RationalPolynomial& polynomial);
+mpq_class evaluate_polynomial(
+    const RationalPolynomial& polynomial, const mpq_class& value);
+
+std::vector<std::pair<RationalPolynomial, long>> rational_square_free_factors(
+    RationalPolynomial polynomial) {
+    std::vector<std::pair<RationalPolynomial, long>> factors;
+    polynomial = monic_polynomial(std::move(polynomial));
+    if (polynomial_degree(polynomial) <= 0) return factors;
+    auto repeated = rational_polynomial_gcd(
+        polynomial, polynomial_derivative(polynomial));
+    auto square_free = rational_polynomial_divide(polynomial, repeated).first;
+    for (long multiplicity = 1; polynomial_degree(square_free) > 0; ++multiplicity) {
+        const auto common = rational_polynomial_gcd(square_free, repeated);
+        auto factor = monic_polynomial(
+            rational_polynomial_divide(square_free, common).first);
+        if (polynomial_degree(factor) > 0)
+            factors.emplace_back(std::move(factor), multiplicity);
+        square_free = common;
+        repeated = rational_polynomial_divide(repeated, common).first;
+    }
+    return factors;
+}
+
+std::optional<std::vector<mpz_class>> bounded_positive_divisors(
+    mpz_class value, unsigned long maximum_value = 1000000UL) {
+    if (value < 0) value = -value;
+    if (value == 0) return std::vector<mpz_class>{0};
+    if (!value.fits_ulong_p() || value.get_ui() > maximum_value) return std::nullopt;
+    const auto raw = value.get_ui();
+    std::vector<mpz_class> divisors;
+    for (unsigned long candidate = 1; candidate <= raw / candidate; ++candidate) {
+        if (raw % candidate != 0) continue;
+        divisors.emplace_back(candidate);
+        if (candidate != raw / candidate) divisors.emplace_back(raw / candidate);
+    }
+    std::sort(divisors.begin(), divisors.end());
+    return divisors;
+}
+
+std::optional<mpq_class> bounded_rational_root(
+    const RationalPolynomial& polynomial) {
+    const auto integer_coefficients = primitive_integer_polynomial(polynomial);
+    if (integer_coefficients.size() <= 1) return std::nullopt;
+    if (integer_coefficients.front() == 0) return mpq_class(0);
+    const auto numerators = bounded_positive_divisors(integer_coefficients.front());
+    const auto denominators = bounded_positive_divisors(integer_coefficients.back());
+    if (!numerators || !denominators) return std::nullopt;
+    std::set<mpq_class> candidates;
+    for (const auto& numerator : *numerators)
+        for (const auto& denominator : *denominators) {
+            mpq_class candidate(numerator, denominator);
+            candidate.canonicalize();
+            candidates.insert(candidate);
+            candidates.insert(-candidate);
+        }
+    for (auto candidate = candidates.rbegin(); candidate != candidates.rend(); ++candidate)
+        if (evaluate_polynomial(polynomial, *candidate) == 0) return *candidate;
+    return std::nullopt;
+}
+
+std::optional<RationalPolynomial> bounded_nontrivial_rational_factor(
+    const RationalPolynomial& polynomial) {
+    const auto integer_coefficients = primitive_integer_polynomial(polynomial);
+    const auto degree = polynomial_degree(polynomial);
+    if (degree < 4 || integer_coefficients.empty()
+        || integer_coefficients.front() == 0) return std::nullopt;
+    const auto constant_divisors = bounded_positive_divisors(integer_coefficients.front());
+    const auto leading_divisors = bounded_positive_divisors(integer_coefficients.back());
+    if (!constant_divisors || !leading_divisors) return std::nullopt;
+    long coefficient_bound = 4;
+    for (const auto& coefficient : integer_coefficients) {
+        if (!coefficient.fits_slong_p()) return std::nullopt;
+        mpz_class magnitude = coefficient < 0 ? -coefficient : coefficient;
+        const auto local_bound = magnitude > 16 ? 32L
+            : static_cast<long>(magnitude.get_ui() * 2UL);
+        coefficient_bound = std::max(coefficient_bound, local_bound);
+    }
+    for (long factor_degree = 2; factor_degree <= degree / 2; ++factor_degree)
+        for (const auto& leading : *leading_divisors)
+            for (const auto& constant_magnitude : *constant_divisors)
+                for (const long sign : {-1L, 1L}) {
+                    RationalPolynomial candidate(
+                        static_cast<std::size_t>(factor_degree + 1));
+                    candidate.front() = sign * constant_magnitude;
+                    candidate.back() = leading;
+                    std::optional<RationalPolynomial> found;
+                    std::function<void(long)> search = [&](long exponent) {
+                        if (found) return;
+                        if (exponent == factor_degree) {
+                            auto monic_candidate = monic_polynomial(candidate);
+                            const auto division = rational_polynomial_divide(
+                                polynomial, monic_candidate);
+                            if (division.second.empty()
+                                && polynomial_degree(division.first) > 0)
+                                found = std::move(monic_candidate);
+                            return;
+                        }
+                        for (long coefficient = -coefficient_bound;
+                            coefficient <= coefficient_bound; ++coefficient) {
+                            candidate[static_cast<std::size_t>(exponent)] = coefficient;
+                            search(exponent + 1);
+                            if (found) return;
+                        }
+                    };
+                    search(1);
+                    if (found) return found;
+                }
+    return std::nullopt;
+}
+
+std::vector<RationalPolynomial> factor_square_free_rational_polynomial(
+    RationalPolynomial polynomial, std::size_t depth = 0) {
+    polynomial = monic_polynomial(std::move(polynomial));
+    if (polynomial_degree(polynomial) <= 0) return {};
+    if (depth >= 16) return {std::move(polynomial)};
+    if (const auto root = bounded_rational_root(polynomial)) {
+        RationalPolynomial linear{-*root, 1};
+        auto quotient = rational_polynomial_divide(polynomial, linear).first;
+        auto rest = factor_square_free_rational_polynomial(
+            std::move(quotient), depth + 1);
+        rest.insert(rest.begin(), std::move(linear));
+        return rest;
+    }
+    if (const auto factor = bounded_nontrivial_rational_factor(polynomial)) {
+        auto quotient = rational_polynomial_divide(polynomial, *factor).first;
+        auto left = factor_square_free_rational_polynomial(*factor, depth + 1);
+        auto right = factor_square_free_rational_polynomial(
+            std::move(quotient), depth + 1);
+        left.insert(left.end(), std::make_move_iterator(right.begin()),
+            std::make_move_iterator(right.end()));
+        return left;
+    }
+    return {std::move(polynomial)};
+}
+
+struct ExactRationalFactorization {
+    mpq_class content = 0;
+    std::vector<std::pair<std::vector<mpz_class>, long>> factors;
+};
+
+ExactRationalFactorization factor_rational_polynomial(
+    RationalPolynomial polynomial) {
+    trim_polynomial(polynomial);
+    if (polynomial.empty()) return {};
+    if (polynomial_degree(polynomial) == 0)
+        return ExactRationalFactorization{polynomial.front(), {}};
+
+    ExactRationalFactorization result;
+    result.content = polynomial.back();
+    polynomial = monic_polynomial(std::move(polynomial));
+    for (auto [factor, multiplicity] : rational_square_free_factors(polynomial)) {
+        for (const auto& irreducible : factor_square_free_rational_polynomial(
+            std::move(factor))) {
+            const auto primitive = primitive_integer_polynomial(irreducible);
+            const auto leading = primitive.back();
+            mpq_class scale(1, leading);
+            for (long count = 0; count < multiplicity; ++count)
+                result.content *= scale;
+            result.factors.emplace_back(primitive, multiplicity);
+        }
+    }
+    result.content.canonicalize();
+    return result;
+}
+
 RationalPolynomial square_free_polynomial(const RationalPolynomial& polynomial) {
     auto value = monic_polynomial(polynomial);
     if (polynomial_degree(value) <= 0) return value;
@@ -6278,6 +6666,316 @@ long real_root_count_with_multiplicity(RationalPolynomial polynomial,
         polynomial = rational_polynomial_gcd(polynomial, polynomial_derivative(polynomial));
     }
     return result;
+}
+
+using IntegerPolynomial = std::vector<mpz_class>;
+
+void trim_integer_polynomial(IntegerPolynomial& polynomial) {
+    while (!polynomial.empty() && polynomial.back() == 0) polynomial.pop_back();
+}
+
+IntegerPolynomial shift_integer_polynomial(
+    const IntegerPolynomial& polynomial, const mpz_class& amount) {
+    IntegerPolynomial result;
+    for (auto iterator = polynomial.rbegin(); iterator != polynomial.rend(); ++iterator) {
+        IntegerPolynomial shifted(result.size() + (result.empty() ? 0 : 1));
+        for (std::size_t index = 0; index < result.size(); ++index) {
+            shifted[index] += amount * result[index];
+            shifted[index + 1] += result[index];
+        }
+        result = std::move(shifted);
+        if (result.empty()) result.resize(1);
+        result.front() += *iterator;
+        trim_integer_polynomial(result);
+    }
+    return result;
+}
+
+IntegerPolynomial reverse_integer_polynomial(IntegerPolynomial polynomial) {
+    std::reverse(polynomial.begin(), polynomial.end());
+    trim_integer_polynomial(polynomial);
+    return polynomial;
+}
+
+IntegerPolynomial mirror_integer_polynomial(IntegerPolynomial polynomial) {
+    for (std::size_t index = 1; index < polynomial.size(); index += 2)
+        polynomial[index] = -polynomial[index];
+    return polynomial;
+}
+
+int integer_polynomial_sign_variations(const IntegerPolynomial& polynomial) {
+    int previous = 0;
+    int variations = 0;
+    for (auto iterator = polynomial.rbegin(); iterator != polynomial.rend(); ++iterator) {
+        const int sign = *iterator < 0 ? -1 : *iterator > 0 ? 1 : 0;
+        if (sign == 0) continue;
+        if (previous != 0 && previous != sign) ++variations;
+        previous = sign;
+    }
+    return variations;
+}
+
+long floor_quotient(long numerator, long positive_denominator) {
+    if (numerator >= 0) return numerator / positive_denominator;
+    return -((-numerator + positive_denominator - 1) / positive_denominator);
+}
+
+std::optional<long> integer_polynomial_upper_bound_exponent(
+    IntegerPolynomial polynomial) {
+    if (polynomial.empty()) return std::nullopt;
+    if (polynomial.back() < 0)
+        for (auto& coefficient : polynomial) coefficient = -coefficient;
+    std::vector<long> adjustments(polynomial.size(), 1L);
+    std::vector<long> bounds;
+    for (std::size_t index = 0; index < polynomial.size(); ++index) {
+        if (polynomial[index] >= 0) continue;
+        const mpz_class negative_magnitude = -polynomial[index];
+        const auto negative_bits = mpz_sizeinbase(
+            negative_magnitude.get_mpz_t(), 2) - 1;
+        if (negative_bits > static_cast<std::size_t>(std::numeric_limits<long>::max()))
+            return std::nullopt;
+        std::optional<std::pair<long, std::size_t>> best;
+        for (std::size_t candidate = index + 1; candidate < polynomial.size(); ++candidate) {
+            if (polynomial[candidate] <= 0) continue;
+            const auto positive_bits = mpz_sizeinbase(
+                polynomial[candidate].get_mpz_t(), 2) - 1;
+            if (positive_bits > static_cast<std::size_t>(std::numeric_limits<long>::max()))
+                return std::nullopt;
+            const auto numerator = adjustments[candidate]
+                + static_cast<long>(negative_bits) - static_cast<long>(positive_bits);
+            const auto quotient = floor_quotient(
+                numerator, static_cast<long>(candidate - index));
+            const std::pair<long, std::size_t> value{quotient, candidate};
+            if (!best || value < *best) best = value;
+        }
+        if (!best) continue;
+        ++adjustments[best->second];
+        bounds.push_back(best->first);
+    }
+    if (bounds.empty()) return std::nullopt;
+    return *std::max_element(bounds.begin(), bounds.end()) + 1L;
+}
+
+std::optional<mpz_class> integer_polynomial_root_lower_shift(
+    const IntegerPolynomial& polynomial) {
+    const auto exponent = integer_polynomial_upper_bound_exponent(
+        reverse_integer_polynomial(polynomial));
+    if (!exponent) return mpz_class(0);
+    const auto lower_exponent = -*exponent;
+    if (lower_exponent < 0) return mpz_class(0);
+    if (lower_exponent > 20) return std::nullopt;
+    mpz_class result;
+    mpz_ui_pow_ui(result.get_mpz_t(), 2UL, static_cast<unsigned long>(lower_exponent));
+    return result;
+}
+
+struct MobiusTransform {
+    mpz_class a = 1;
+    mpz_class b = 0;
+    mpz_class c = 0;
+    mpz_class d = 1;
+};
+
+struct ExactRootInterval {
+    mpq_class lower;
+    mpq_class upper;
+};
+
+ExactRootInterval mobius_interval(const MobiusTransform& transform) {
+    mpq_class first(transform.a, transform.c);
+    mpq_class second(transform.b, transform.d);
+    first.canonicalize();
+    second.canonicalize();
+    return first <= second ? ExactRootInterval{first, second}
+        : ExactRootInterval{second, first};
+}
+
+std::optional<std::pair<IntegerPolynomial, MobiusTransform>>
+refine_positive_root(IntegerPolynomial polynomial, MobiusTransform transform) {
+    for (std::size_t iteration = 0; transform.c == 0 && iteration < 100000; ++iteration) {
+        if (transform.a == transform.b && transform.c == transform.d)
+            return std::pair{std::move(polynomial), std::move(transform)};
+        const auto shift = integer_polynomial_root_lower_shift(polynomial);
+        if (!shift) return std::nullopt;
+        if (*shift >= 1) {
+            polynomial = shift_integer_polynomial(polynomial, *shift);
+            transform.b = *shift * transform.a + transform.b;
+            transform.d = *shift * transform.c + transform.d;
+            if (!polynomial.empty() && polynomial.front() == 0) {
+                transform = MobiusTransform{transform.b, transform.b,
+                    transform.d, transform.d};
+                return std::pair{std::move(polynomial), std::move(transform)};
+            }
+        }
+        auto shifted = shift_integer_polynomial(polynomial, 1);
+        MobiusTransform left{transform.a, transform.a + transform.b,
+            transform.c, transform.c + transform.d};
+        if (!shifted.empty() && shifted.front() == 0) {
+            left = MobiusTransform{left.b, left.b, left.d, left.d};
+            return std::pair{std::move(shifted), std::move(left)};
+        }
+        if (integer_polynomial_sign_variations(shifted) == 1) {
+            polynomial = std::move(shifted);
+            transform = std::move(left);
+        } else {
+            polynomial = shift_integer_polynomial(
+                reverse_integer_polynomial(std::move(polynomial)), 1);
+            if (!polynomial.empty() && polynomial.front() == 0)
+                polynomial.erase(polynomial.begin());
+            transform = MobiusTransform{transform.b, transform.a + transform.b,
+                transform.d, transform.c + transform.d};
+        }
+    }
+    if (transform.c == 0) return std::nullopt;
+    return std::pair{std::move(polynomial), std::move(transform)};
+}
+
+std::optional<std::vector<ExactRootInterval>> isolate_positive_roots(
+    const IntegerPolynomial& source) {
+    const auto variations = integer_polynomial_sign_variations(source);
+    if (variations == 0) return std::vector<ExactRootInterval>{};
+    if (variations == 1) {
+        const auto refined = refine_positive_root(source, {});
+        if (!refined) return std::nullopt;
+        return std::vector<ExactRootInterval>{mobius_interval(refined->second)};
+    }
+    struct State {
+        IntegerPolynomial polynomial;
+        MobiusTransform transform;
+        int variations = 0;
+    };
+    std::vector<State> stack{{source, {}, variations}};
+    std::vector<ExactRootInterval> roots;
+    std::size_t iterations = 0;
+    while (!stack.empty() && iterations++ < 100000) {
+        auto state = std::move(stack.back());
+        stack.pop_back();
+        auto shift = integer_polynomial_root_lower_shift(state.polynomial);
+        if (!shift) return std::nullopt;
+        if (*shift >= 1) {
+            state.polynomial = shift_integer_polynomial(state.polynomial, *shift);
+            state.transform.b = *shift * state.transform.a + state.transform.b;
+            state.transform.d = *shift * state.transform.c + state.transform.d;
+            if (!state.polynomial.empty() && state.polynomial.front() == 0) {
+                const auto point = mpq_class(state.transform.b, state.transform.d);
+                roots.push_back({point, point});
+                state.polynomial.erase(state.polynomial.begin());
+            }
+            state.variations = integer_polynomial_sign_variations(state.polynomial);
+            if (state.variations == 0) continue;
+            if (state.variations == 1) {
+                const auto refined = refine_positive_root(
+                    std::move(state.polynomial), std::move(state.transform));
+                if (!refined) return std::nullopt;
+                roots.push_back(mobius_interval(refined->second));
+                continue;
+            }
+        }
+
+        std::optional<IntegerPolynomial> left_polynomial =
+            shift_integer_polynomial(state.polynomial, 1);
+        MobiusTransform left{state.transform.a, state.transform.a + state.transform.b,
+            state.transform.c, state.transform.c + state.transform.d};
+        int exact = 0;
+        if (!left_polynomial->empty() && left_polynomial->front() == 0) {
+            const auto point = mpq_class(left.b, left.d);
+            roots.push_back({point, point});
+            left_polynomial->erase(left_polynomial->begin());
+            exact = 1;
+        }
+        int left_variations = integer_polynomial_sign_variations(*left_polynomial);
+        int right_variations = state.variations - left_variations - exact;
+        std::optional<IntegerPolynomial> right_polynomial;
+        if (right_variations > 1) {
+            right_polynomial = shift_integer_polynomial(
+                reverse_integer_polynomial(state.polynomial), 1);
+            if (!right_polynomial->empty() && right_polynomial->front() == 0)
+                right_polynomial->erase(right_polynomial->begin());
+            right_variations = integer_polynomial_sign_variations(*right_polynomial);
+        }
+        MobiusTransform right{state.transform.b, state.transform.a + state.transform.b,
+            state.transform.d, state.transform.c + state.transform.d};
+        if (left_variations < right_variations) {
+            std::swap(left, right);
+            std::swap(left_polynomial, right_polynomial);
+            std::swap(left_variations, right_variations);
+        }
+        if (left_variations != 0) {
+            if (!left_polynomial) {
+                left_polynomial = shift_integer_polynomial(
+                    reverse_integer_polynomial(state.polynomial), 1);
+                if (!left_polynomial->empty() && left_polynomial->front() == 0)
+                    left_polynomial->erase(left_polynomial->begin());
+            }
+            if (left_variations == 1) {
+                const auto refined = refine_positive_root(
+                    std::move(*left_polynomial), std::move(left));
+                if (!refined) return std::nullopt;
+                roots.push_back(mobius_interval(refined->second));
+            } else stack.push_back({std::move(*left_polynomial),
+                std::move(left), left_variations});
+        }
+        if (right_variations != 0) {
+            if (!right_polynomial) {
+                right_polynomial = shift_integer_polynomial(
+                    reverse_integer_polynomial(state.polynomial), 1);
+                if (!right_polynomial->empty() && right_polynomial->front() == 0)
+                    right_polynomial->erase(right_polynomial->begin());
+            }
+            if (right_variations == 1) {
+                const auto refined = refine_positive_root(
+                    std::move(*right_polynomial), std::move(right));
+                if (!refined) return std::nullopt;
+                roots.push_back(mobius_interval(refined->second));
+            } else stack.push_back({std::move(*right_polynomial),
+                std::move(right), right_variations});
+        }
+    }
+    if (!stack.empty()) return std::nullopt;
+    return roots;
+}
+
+std::optional<std::vector<ExactRootInterval>> isolate_real_roots(
+    const RationalPolynomial& polynomial) {
+    auto square_free = primitive_integer_polynomial(
+        square_free_polynomial(polynomial));
+    std::vector<ExactRootInterval> intervals;
+    if (!square_free.empty() && square_free.front() == 0) {
+        intervals.push_back({0, 0});
+        square_free.erase(square_free.begin());
+    }
+    if (polynomial_degree(rational_polynomial(square_free)) <= 0) return intervals;
+    const auto positive = isolate_positive_roots(square_free);
+    const auto negative_source = mirror_integer_polynomial(square_free);
+    const auto negative = isolate_positive_roots(negative_source);
+    if (!positive || !negative) return std::nullopt;
+    for (const auto& interval : *negative)
+        intervals.push_back({-interval.upper, -interval.lower});
+    intervals.insert(intervals.end(), positive->begin(), positive->end());
+    std::sort(intervals.begin(), intervals.end(), [](const auto& left, const auto& right) {
+        return left.lower < right.lower
+            || (left.lower == right.lower && left.upper < right.upper);
+    });
+    return intervals;
+}
+
+long isolated_root_multiplicity(const RationalPolynomial& polynomial,
+    const ExactRootInterval& interval) {
+    if (interval.lower == interval.upper)
+        return root_multiplicity_at(polynomial, interval.lower);
+    for (const auto& [factor, multiplicity] : rational_square_free_factors(polynomial)) {
+        auto interior = factor;
+        if (evaluate_polynomial(interior, interval.lower) == 0)
+            interior = rational_polynomial_divide(interior,
+                {-interval.lower, 1}).first;
+        if (evaluate_polynomial(interior, interval.upper) == 0)
+            interior = rational_polynomial_divide(interior,
+                {-interval.upper, 1}).first;
+        if (distinct_real_root_count(
+                interior, interval.lower, interval.upper) != 0)
+            return multiplicity;
+    }
+    return 1;
 }
 
 ApproximateComplex evaluate_complex_polynomial(
@@ -9176,31 +9874,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             const auto parsed = context.parse(args[0]);
             const auto coefficients = parsed ? rational_coefficients(context, *parsed) : std::nullopt;
             if (coefficients && polynomial_degree(*coefficients) > 0) {
-                std::vector<std::pair<mpq_class, long>> exact_roots;
-                std::set<std::string> seen;
-                for (long denominator = 1; denominator <= 128; ++denominator)
-                    for (long numerator = -512; numerator <= 512; ++numerator) {
-                        if (std::gcd(std::abs(numerator), denominator) != 1) continue;
-                        mpq_class candidate(numerator, denominator);
-                        if (evaluate_polynomial(*coefficients, candidate) != 0) continue;
-                        if (!seen.insert(candidate.get_str()).second) continue;
-                        exact_roots.emplace_back(candidate,
-                            root_multiplicity_at(*coefficients, candidate));
-                    }
-                std::sort(exact_roots.begin(), exact_roots.end(), [](const auto& left, const auto& right) {
-                    return left.first < right.first;
-                });
-                RationalPolynomial remaining = *coefficients;
-                for (const auto& [value, multiplicity] : exact_roots)
-                    for (long count = 0; count < multiplicity; ++count)
-                        remaining = rational_polynomial_divide(remaining, {-value, 1}).first;
-                if (distinct_real_root_count(remaining) == 0) {
+                if (const auto roots = isolate_real_roots(*coefficients)) {
                     std::vector<Expr> intervals;
                     std::vector<Expr> multiplicities;
-                    for (const auto& [value, multiplicity] : exact_roots) {
-                        const auto expression = from_rational(value);
-                        intervals.push_back(list({expression, expression}));
-                        multiplicities.push_back(list({integer(multiplicity)}));
+                    for (const auto& interval : *roots) {
+                        intervals.push_back(list({from_rational(interval.lower),
+                            from_rational(interval.upper)}));
+                        multiplicities.push_back(list({integer(
+                            isolated_root_multiplicity(*coefficients, interval))}));
                     }
                     return list({list(std::move(intervals)), list(std::move(multiplicities))});
                 }
@@ -9595,34 +10276,61 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             if (function == "Resultant") {
                 const auto other = context.parse(args[1]);
                 if (other) if (const auto value = polynomial_resultant(context, *polynomial, *other)) return *value;
-            } else if (!polynomial->empty()) {
+            } else if (polynomial->empty() || context.degree(*polynomial) <= 0) {
+                return integer(0L);
+            } else {
                 const auto degree = context.degree(*polynomial); const auto derivative = context.derivative(*polynomial);
                 if (const auto value = polynomial_resultant(context, *polynomial, derivative)) {
-                    auto result = context.coefficient_divide(*value,
-                        context.coefficient(*polynomial, NativeMonomial{degree}));
+                    const auto leading = context.coefficient(
+                        *polynomial, NativeMonomial{degree});
+                    Expr result;
+                    if (const auto exact_numerator = as_rational(*value),
+                        exact_denominator = as_rational(leading);
+                        exact_numerator && exact_denominator && *exact_denominator != 0) {
+                        result = from_rational(*exact_numerator / *exact_denominator);
+                    } else {
+                        const auto coefficient_variables = polynomial_variables({*value, leading});
+                        const auto coefficient_context = polynomial_context(coefficient_variables);
+                        const auto parsed_numerator = coefficient_context.parse(*value);
+                        const auto parsed_denominator = coefficient_context.parse(leading);
+                        if (parsed_numerator && parsed_denominator && !parsed_denominator->empty()) {
+                            const auto division = coefficient_context.divide(
+                                *parsed_numerator, {*parsed_denominator});
+                            result = division.second.empty()
+                                ? coefficient_context.expression(division.first[0])
+                                : context.coefficient_divide(*value, leading);
+                        } else result = context.coefficient_divide(*value, leading);
+                    }
                     if (((degree * (degree - 1) / 2) & 1L) != 0)
                         result = context.coefficient_multiply(integer(-1L), result);
-                    return result;
+                    const auto expanded = evaluate(call("Expand", {result}));
+                    return factor_common_additive_expression(expanded,
+                        [this](const Expr& value) { return evaluate(value); });
                 }
             }
         }
     }
     if (function == "Subresultants" && args.size() == 3) {
-        const auto variable = args[2].has_head("List") && args[2].args().size() == 1 ? args[2].args()[0] : args[2];
+        if (args[2].has_head("List") && args[2].args().size() != 1)
+            return call(head, args);
+        const auto variable = args[2].has_head("List") ? args[2].args()[0] : args[2];
         const auto context = polynomial_context({variable}); const auto left = context.parse(args[0]), right = context.parse(args[1]);
         if (left && right && !left->empty() && !right->empty()) {
             const auto limit = std::min(context.degree(*left), context.degree(*right));
             std::vector<Expr> coefficients(static_cast<std::size_t>(limit + 1), integer(0L));
-            if (const auto resultant = polynomial_resultant(context, *left, *right)) coefficients[0] = *resultant;
-            auto previous = *left, current = *right;
-            while (!current.empty()) {
-                const auto degree = context.degree(current);
-                if (degree >= 1 && degree <= limit)
-                    coefficients[static_cast<std::size_t>(degree)] = context.coefficient(current, NativeMonomial{degree});
-                auto remainder = context.divide(previous, {current}).second;
-                previous = std::move(current); current = std::move(remainder);
+            if (const auto sequence = native_subresultant_sequence(context, *left, *right)) {
+                for (const auto& polynomial : *sequence) {
+                    const auto degree = context.degree(polynomial);
+                    if (degree >= 0 && degree <= limit) {
+                        const auto expanded = evaluate(call("Expand", {
+                            context.coefficient(polynomial, NativeMonomial{degree})}));
+                        coefficients[static_cast<std::size_t>(degree)] =
+                            factor_common_additive_expression(expanded,
+                                [this](const Expr& value) { return evaluate(value); });
+                    }
+                }
+                return list(std::move(coefficients));
             }
-            return list(std::move(coefficients));
         }
     }
     if ((function == "PolynomialGCD" || function == "PolynomialLCM") && !args.empty()) {
@@ -9951,10 +10659,216 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return {value, integer(1L)};
         };
         const auto parts = split(split, args[0]);
-        auto variables = args.size() == 2 ? std::vector<Expr>{args[1]} : polynomial_variables({parts.first, parts.second});
+        auto variables = args.size() == 2 ? std::vector<Expr>{args[1]}
+            : polynomial_variables({parts.first, parts.second});
         if (!variables.empty()) {
-            const auto context = polynomial_context(variables); const auto numerator = context.parse(parts.first), denominator = context.parse(parts.second);
+            const auto context = polynomial_context(
+                function == "Apart" ? std::vector<Expr>{variables.front()} : variables);
+            const auto numerator = context.parse(parts.first);
+            const auto denominator = context.parse(parts.second);
             if (numerator && denominator && !denominator->empty()) {
+                if (function == "Apart" && context.variables().size() == 1) {
+                    struct ApartFactor {
+                        NativePolynomial polynomial;
+                        Expr expression;
+                        long multiplicity = 1;
+                    };
+                    std::vector<ApartFactor> factors;
+                    std::optional<Expr> outside_scalar;
+                    auto scaled_numerator = *numerator;
+                    const auto exact_denominator = rational_coefficients(context, *denominator);
+                    if (!exact_denominator && context.degree(*denominator) == 1
+                        && context.degree(*numerator) < 1)
+                        return args[0];
+                    if (exact_denominator) {
+                        const auto factorization = factor_rational_polynomial(*exact_denominator);
+                        if (factorization.content == 0) return call(head, args);
+                        scaled_numerator = scale_native_polynomial(context, scaled_numerator,
+                            from_rational(1 / factorization.content));
+                        for (const auto& [integer_factor, multiplicity] : factorization.factors) {
+                            auto native_factor = context.zero();
+                            for (std::size_t exponent = 0; exponent < integer_factor.size(); ++exponent) {
+                                if (integer_factor[exponent] == 0) continue;
+                                native_factor = context.add(native_factor,
+                                    context.monomial_polynomial(
+                                        NativeMonomial{static_cast<long>(exponent)},
+                                        integer(integer_factor[exponent])));
+                            }
+                            factors.push_back({native_factor,
+                                context.expression(native_factor), multiplicity});
+                        }
+                    } else if (context.degree(*denominator) == 1) {
+                        const auto leading = context.coefficient(
+                            *denominator, NativeMonomial{1});
+                        auto normalized = context.zero();
+                        for (const auto& [monomial, coefficient] : denominator->terms)
+                            normalized = context.add(normalized,
+                                context.monomial_polynomial(monomial,
+                                    context.coefficient_divide(coefficient, leading)));
+                        outside_scalar = leading;
+                        factors.push_back({normalized,
+                            context.expression(normalized), 1L});
+                    } else if (denominator->terms.size() == 1) {
+                        const auto& [monomial, coefficient] = *denominator->terms.begin();
+                        if (monomial.size() == 1 && monomial[0] > 0) {
+                            outside_scalar = coefficient;
+                            const auto native_factor = context.monomial_polynomial(
+                                NativeMonomial{1}, integer(1L));
+                            factors.push_back({native_factor,
+                                context.variables()[0], monomial[0]});
+                        }
+                    }
+                    if (!factors.empty()) {
+                        auto factored_denominator = context.constant(integer(1L));
+                        for (const auto& factor : factors) {
+                            factored_denominator = context.multiply(factored_denominator,
+                                context.power(factor.polynomial,
+                                    static_cast<unsigned long>(factor.multiplicity)));
+                        }
+                        const auto division = context.divide(
+                            scaled_numerator, {factored_denominator});
+                        const auto& quotient = division.first[0];
+                        const auto& remainder = division.second;
+                        const auto degree = context.degree(factored_denominator);
+                        if (degree > 0 && degree <= 64) {
+                            struct ApartBasis {
+                                std::size_t factor = 0;
+                                long power = 1;
+                                long numerator_degree = 0;
+                                NativePolynomial polynomial;
+                            };
+                            std::vector<ApartBasis> basis;
+                            for (std::size_t factor_index = 0;
+                                factor_index < factors.size(); ++factor_index) {
+                                const auto& native_factor = factors[factor_index].polynomial;
+                                const auto factor_degree = context.degree(native_factor);
+                                for (long power = 1;
+                                    power <= factors[factor_index].multiplicity; ++power) {
+                                    const auto divisor = context.power(native_factor,
+                                        static_cast<unsigned long>(power));
+                                    const auto complement = context.divide(
+                                        factored_denominator, {divisor});
+                                    if (!complement.second.empty()) continue;
+                                    for (long numerator_degree = 0;
+                                        numerator_degree < factor_degree; ++numerator_degree) {
+                                        const auto monomial = context.monomial_polynomial(
+                                            NativeMonomial{numerator_degree}, integer(1L));
+                                        basis.push_back({factor_index, power,
+                                            numerator_degree,
+                                            context.multiply(complement.first[0], monomial)});
+                                    }
+                                }
+                            }
+                            if (basis.size() == static_cast<std::size_t>(degree)) {
+                                std::vector<std::vector<mpq_class>> matrix(
+                                    static_cast<std::size_t>(degree),
+                                    std::vector<mpq_class>(basis.size()));
+                                bool exact_matrix = true;
+                                for (std::size_t column = 0; column < basis.size(); ++column)
+                                    for (long row = 0; row < degree; ++row) {
+                                        const auto coefficient = as_rational(context.coefficient(
+                                            basis[column].polynomial, NativeMonomial{row}));
+                                        if (!coefficient) { exact_matrix = false; break; }
+                                        matrix[static_cast<std::size_t>(row)][column] = *coefficient;
+                                    }
+                                std::vector<Expr> solution(static_cast<std::size_t>(degree));
+                                for (long row = 0; row < degree; ++row)
+                                    solution[static_cast<std::size_t>(row)] = context.coefficient(
+                                        remainder, NativeMonomial{row});
+                                if (exact_matrix) {
+                                    for (std::size_t column = 0; column < basis.size(); ++column) {
+                                        auto pivot = column;
+                                        while (pivot < matrix.size() && matrix[pivot][column] == 0)
+                                            ++pivot;
+                                        if (pivot == matrix.size()) { exact_matrix = false; break; }
+                                        if (pivot != column) {
+                                            std::swap(matrix[pivot], matrix[column]);
+                                            std::swap(solution[pivot], solution[column]);
+                                        }
+                                        const auto pivot_value = matrix[column][column];
+                                        for (std::size_t inner = column; inner < basis.size(); ++inner)
+                                            matrix[column][inner] /= pivot_value;
+                                        solution[column] = context.coefficient_multiply(
+                                            from_rational(1 / pivot_value), solution[column]);
+                                        for (std::size_t row = 0; row < matrix.size(); ++row) {
+                                            if (row == column || matrix[row][column] == 0) continue;
+                                            const auto multiplier = matrix[row][column];
+                                            for (std::size_t inner = column; inner < basis.size(); ++inner)
+                                                matrix[row][inner] -= multiplier * matrix[column][inner];
+                                            solution[row] = context.coefficient_add(solution[row],
+                                                context.coefficient_multiply(from_rational(-multiplier),
+                                                    solution[column]));
+                                        }
+                                    }
+                                }
+                                if (exact_matrix) {
+                                    std::vector<NativePolynomial> numerators;
+                                    numerators.reserve(factors.size());
+                                    for (const auto& factor : factors)
+                                        for (long power = 0; power < factor.multiplicity; ++power)
+                                            numerators.push_back(context.zero());
+                                    std::vector<std::size_t> offsets(factors.size());
+                                    std::size_t running = 0;
+                                    for (std::size_t index = 0; index < factors.size(); ++index) {
+                                        offsets[index] = running;
+                                        running += static_cast<std::size_t>(factors[index].multiplicity);
+                                    }
+                                    for (std::size_t index = 0; index < basis.size(); ++index) {
+                                        const auto slot = offsets[basis[index].factor]
+                                            + static_cast<std::size_t>(basis[index].power - 1);
+                                        numerators[slot] = context.add(numerators[slot],
+                                            context.monomial_polynomial(
+                                                NativeMonomial{basis[index].numerator_degree},
+                                                solution[index]));
+                                    }
+                                    std::vector<Expr> terms;
+                                    if (!quotient.empty()) terms.push_back(context.expression(quotient));
+                                    auto factored_numerator_expression = [&](const NativePolynomial& value) {
+                                        const auto coefficients = rational_coefficients(context, value);
+                                        if (!coefficients) return context.expression(value);
+                                        const auto factorization = factor_rational_polynomial(*coefficients);
+                                        std::vector<Expr> product;
+                                        if (factorization.content != 1 || factorization.factors.empty())
+                                            product.push_back(from_rational(factorization.content));
+                                        for (const auto& [factor, multiplicity] : factorization.factors) {
+                                            auto native_factor = context.zero();
+                                            for (std::size_t exponent = 0; exponent < factor.size(); ++exponent) {
+                                                if (factor[exponent] == 0) continue;
+                                                native_factor = context.add(native_factor,
+                                                    context.monomial_polynomial(
+                                                        NativeMonomial{static_cast<long>(exponent)},
+                                                        integer(factor[exponent])));
+                                            }
+                                            auto factor_expression = context.expression(native_factor);
+                                            if (multiplicity != 1)
+                                                factor_expression = call("Power", {
+                                                    factor_expression, integer(multiplicity)});
+                                            product.push_back(std::move(factor_expression));
+                                        }
+                                        return evaluate(call("Times", std::move(product)));
+                                    };
+                                    for (std::size_t factor_index = 0;
+                                        factor_index < factors.size(); ++factor_index)
+                                        for (long power = 1;
+                                            power <= factors[factor_index].multiplicity; ++power) {
+                                            const auto& value = numerators[offsets[factor_index]
+                                                + static_cast<std::size_t>(power - 1)];
+                                            if (value.empty()) continue;
+                                            terms.push_back(evaluate(call("Times", {
+                                                factored_numerator_expression(value),
+                                                call("Power", {factors[factor_index].expression,
+                                                    integer(-power)})})));
+                                        }
+                                    auto result = evaluate(call("Plus", std::move(terms)));
+                                    if (outside_scalar)
+                                        result = evaluate(call("Times", {result,
+                                            call("Power", {*outside_scalar, integer(-1L)})}));
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+                }
                 const auto common = polynomial_gcd(context, *numerator, *denominator);
                 const auto reduced_numerator = context.divide(*numerator, {common}).first[0];
                 const auto reduced_denominator = context.divide(*denominator, {common}).first[0];
@@ -10083,27 +10997,325 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return value;
     }
-    if (function == "FactorList" && args.size() > 1) {
-        std::vector<Expr> factor_arguments{args[0]}; factor_arguments.insert(factor_arguments.end(), args.begin() + 1, args.end());
-        const auto factored = evaluate(call("Factor", factor_arguments));
-        if (!factored.has_head("Factor")) {
-            std::vector<Expr> result{list({integer(1L), integer(1L)})};
-            const auto factors = factored.has_head("Times") ? factored.args() : std::vector<Expr>{factored};
-            for (const auto& factor : factors) {
-                if (factor.has_head("Power") && factor.args().size() == 2 && factor.args()[1].kind() == ExprKind::Integer)
-                    result.push_back(list({factor.args()[0], factor.args()[1]}));
-                else result.push_back(list({factor, integer(1L)}));
+    if (function == "FactorList" && !args.empty()) {
+        bool gaussian = false;
+        bool valid_options = true;
+        std::optional<unsigned long> modulus;
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            if (!args[index].has_head("Rule") || args[index].args().size() != 2
+                || !args[index].args()[0].symbol_name()) {
+                valid_options = false;
+                break;
             }
-            return list(std::move(result));
+            const auto option = system_dispatch_name(
+                *args[index].args()[0].symbol_name());
+            const auto& value = args[index].args()[1];
+            if (option == "GaussianIntegers"
+                && (is_symbol(value, "True") || is_symbol(value, "False"))) {
+                gaussian = gaussian || is_symbol(value, "True");
+            } else if (option == "Extension") {
+                const auto extensions = value.has_head("List")
+                    ? value.args() : std::vector<Expr>{value};
+                if (is_symbol(value, "None") || extensions.empty()) continue;
+                if (!std::all_of(extensions.begin(), extensions.end(), [](const Expr& extension) {
+                        return extension.kind() == ExprKind::Complex
+                            && extension.real_part() == integer(0L)
+                            && extension.imaginary_part() == integer(1L);
+                    })) {
+                    valid_options = false;
+                    break;
+                }
+                gaussian = true;
+            } else if (option == "Modulus" && value.kind() == ExprKind::Integer
+                && value.integer_value() > 1 && value.integer_value().fits_ulong_p()
+                && value.integer_value().get_ui() <= 10000UL) {
+                modulus = value.integer_value().get_ui();
+            } else {
+                valid_options = false;
+                break;
+            }
         }
-    }
-    if (function == "FactorList" && args.size() == 1) {
-        if (args[0] == integer(0L)) return list({list({integer(0L), integer(1L)})});
-        const auto factored = evaluate(call("Factor", {args[0]}));
-        const auto factors = factored.has_head("Times") ? factored.args() : std::vector<Expr>{factored}; std::vector<Expr> result;
-        for (const auto& factor : factors)
-            result.push_back(list({factor, integer(1L)}));
-        return list(std::move(result));
+        if (!valid_options || (gaussian && modulus)) {
+            // Unsupported domains stay inert, matching the compatibility evaluator.
+        } else {
+            const auto variables = polynomial_variables({args[0]});
+            const auto context = polynomial_context(variables);
+            const auto parsed = context.parse(args[0]);
+            if (parsed) {
+                auto polynomial_from_integers = [&](const std::vector<mpz_class>& coefficients) {
+                    auto polynomial = context.zero();
+                    for (std::size_t exponent = 0; exponent < coefficients.size(); ++exponent) {
+                        if (coefficients[exponent] == 0) continue;
+                        NativeMonomial monomial(variables.size(), 0);
+                        if (!monomial.empty()) monomial[0] = static_cast<long>(exponent);
+                        polynomial = context.add(polynomial,
+                            context.monomial_polynomial(monomial,
+                                integer(coefficients[exponent])));
+                    }
+                    return context.expression(polynomial);
+                };
+                auto finish = [&](Expr content,
+                    std::vector<std::pair<Expr, long>> factors,
+                    bool preserve_order = false) {
+                    std::vector<std::pair<Expr, long>> merged;
+                    for (auto& factor_entry : factors) {
+                        auto& factor = factor_entry.first;
+                        const auto multiplicity = factor_entry.second;
+                        const auto found = std::find_if(merged.begin(), merged.end(),
+                            [&](const auto& item) { return item.first == factor; });
+                        if (found == merged.end())
+                            merged.emplace_back(std::move(factor), multiplicity);
+                        else found->second += multiplicity;
+                    }
+                    if (!preserve_order)
+                        std::stable_sort(merged.begin(), merged.end(), [](const auto& left, const auto& right) {
+                            return expression_less(left.first, right.first);
+                        });
+                    std::vector<Expr> entries{list({std::move(content), integer(1L)})};
+                    for (auto& [factor, multiplicity] : merged)
+                        entries.push_back(list({std::move(factor), integer(multiplicity)}));
+                    return list(std::move(entries));
+                };
+
+                if (variables.empty()) {
+                    if (const auto value = as_rational(args[0]))
+                        return finish(from_rational(*value), {});
+                } else if (variables.size() == 1) {
+                    const auto coefficients = rational_coefficients(context, *parsed);
+                    if (coefficients) {
+                        if (modulus) {
+                            const auto prime = mpz_class(*modulus);
+                            std::vector<mpz_class> modular_coefficients;
+                            modular_coefficients.reserve(coefficients->size());
+                            bool supported = true;
+                            for (const auto& coefficient : *coefficients) {
+                                mpz_class denominator = coefficient.get_den() % prime;
+                                if (denominator < 0) denominator += prime;
+                                mpz_class inverse;
+                                if (mpz_invert(inverse.get_mpz_t(), denominator.get_mpz_t(),
+                                        prime.get_mpz_t()) == 0) {
+                                    supported = false;
+                                    break;
+                                }
+                                mpz_class residue = (coefficient.get_num() % prime) * inverse % prime;
+                                if (residue < 0) residue += prime;
+                                modular_coefficients.push_back(std::move(residue));
+                            }
+                            if (supported && !modular_coefficients.empty()
+                                && modular_coefficients.back() != 0) {
+                                auto balanced = [&](mpz_class value) {
+                                    value %= prime;
+                                    if (value < 0) value += prime;
+                                    if (value * 2 > prime) value -= prime;
+                                    return value;
+                                };
+                                mpz_class leading_inverse;
+                                mpz_invert(leading_inverse.get_mpz_t(),
+                                    modular_coefficients.back().get_mpz_t(), prime.get_mpz_t());
+                                const auto content = balanced(modular_coefficients.back());
+                                for (auto& coefficient : modular_coefficients)
+                                    coefficient = (coefficient * leading_inverse) % prime;
+                                std::vector<std::pair<Expr, long>> factors;
+                                for (long root = static_cast<long>(*modulus) - 1; root >= 0; --root) {
+                                    long multiplicity = 0;
+                                    while (modular_coefficients.size() > 1) {
+                                        mpz_class value = 0;
+                                        for (auto iterator = modular_coefficients.rbegin();
+                                            iterator != modular_coefficients.rend(); ++iterator)
+                                            value = (value * root + *iterator) % prime;
+                                        if (value != 0) break;
+                                        std::vector<mpz_class> quotient(
+                                            modular_coefficients.size() - 1);
+                                        quotient.back() = modular_coefficients.back();
+                                        for (std::size_t index = quotient.size() - 1; index > 0; --index)
+                                            quotient[index - 1] = (modular_coefficients[index]
+                                                + root * quotient[index]) % prime;
+                                        modular_coefficients = std::move(quotient);
+                                        ++multiplicity;
+                                    }
+                                    if (multiplicity != 0) {
+                                        const auto constant = balanced(-mpz_class(root));
+                                        factors.emplace_back(polynomial_from_integers({constant, 1}),
+                                            multiplicity);
+                                    }
+                                }
+                                if (modular_coefficients.size() > 1) {
+                                    for (auto& coefficient : modular_coefficients)
+                                        coefficient = balanced(coefficient);
+                                    factors.emplace_back(
+                                        polynomial_from_integers(modular_coefficients), 1L);
+                                }
+                                return finish(integer(content), std::move(factors), true);
+                            }
+                        } else {
+                            const auto factorization = factor_rational_polynomial(*coefficients);
+                            std::vector<std::pair<Expr, long>> factors;
+                            auto ordered_factors = factorization.factors;
+                            std::stable_sort(ordered_factors.begin(), ordered_factors.end(),
+                                [](const auto& left, const auto& right) {
+                                    if (left.first.size() != right.first.size())
+                                        return left.first.size() < right.first.size();
+                                    if (left.first.back() != right.first.back())
+                                        return left.first.back() < right.first.back();
+                                    return std::lexicographical_compare(
+                                        left.first.begin(), left.first.end(),
+                                        right.first.begin(), right.first.end());
+                                });
+                            for (const auto& [factor, multiplicity] : ordered_factors) {
+                                if (gaussian && factor == std::vector<mpz_class>{1, 0, 1}) {
+                                    factors.emplace_back(evaluate(call("Plus", {variables[0],
+                                        complex(integer(0L), integer(-1L))})), multiplicity);
+                                    factors.emplace_back(evaluate(call("Plus", {variables[0],
+                                        complex(integer(0L), integer(1L))})), multiplicity);
+                                } else factors.emplace_back(
+                                    polynomial_from_integers(factor), multiplicity);
+                            }
+                            return finish(from_rational(factorization.content),
+                                std::move(factors), true);
+                        }
+                    }
+                } else if (!gaussian && !modulus && !parsed->empty()) {
+                    std::vector<mpq_class> coefficients;
+                    bool exact = true;
+                    for (const auto& [monomial, coefficient] : parsed->terms) {
+                        (void)monomial;
+                        const auto value = as_rational(coefficient);
+                        if (!value) { exact = false; break; }
+                        coefficients.push_back(*value);
+                    }
+                    if (exact) {
+                        const auto primitive_coefficients =
+                            primitive_integer_polynomial(coefficients);
+                        mpq_class content = coefficients.back()
+                            / primitive_coefficients.back();
+                        auto primitive = context.zero();
+                        NativeMonomial common(variables.size(),
+                            std::numeric_limits<long>::max());
+                        std::size_t coefficient_index = 0;
+                        for (const auto& [monomial, coefficient] : parsed->terms) {
+                            for (std::size_t index = 0; index < monomial.size(); ++index)
+                                common[index] = std::min(common[index], monomial[index]);
+                            primitive = context.add(primitive,
+                                context.monomial_polynomial(monomial,
+                                    integer(primitive_coefficients[coefficient_index++])));
+                        }
+                        std::vector<std::pair<Expr, long>> factors;
+                        if (std::any_of(common.begin(), common.end(), [](long value) {
+                                return value > 0;
+                            })) {
+                            for (std::size_t index = common.size(); index-- > 0; )
+                                if (common[index] > 0)
+                                    factors.emplace_back(variables[index], common[index]);
+                            auto reduced = context.zero();
+                            for (const auto& [monomial, coefficient] : primitive.terms) {
+                                auto reduced_monomial = monomial;
+                                for (std::size_t index = 0; index < common.size(); ++index)
+                                    reduced_monomial[index] -= common[index];
+                                reduced = context.add(reduced,
+                                    context.monomial_polynomial(reduced_monomial, coefficient));
+                            }
+                            primitive = std::move(reduced);
+                        }
+                        bool perfect_square = false;
+                        if (primitive.terms.size() == 3) {
+                            struct SquareTerm {
+                                NativeMonomial root_monomial;
+                                mpz_class root_coefficient;
+                            };
+                            std::vector<SquareTerm> squares;
+                            std::optional<std::pair<NativeMonomial, mpz_class>> cross;
+                            for (const auto& [monomial, coefficient] : primitive.terms) {
+                                if (coefficient.kind() != ExprKind::Integer) continue;
+                                const auto integer_coefficient = coefficient.integer_value();
+                                const bool even_monomial = std::all_of(
+                                    monomial.begin(), monomial.end(),
+                                    [](long exponent) { return (exponent & 1L) == 0; });
+                                mpz_class root;
+                                if (integer_coefficient > 0 && even_monomial
+                                    && mpz_root(root.get_mpz_t(),
+                                        integer_coefficient.get_mpz_t(), 2UL) != 0
+                                    && root * root == integer_coefficient) {
+                                    auto root_monomial = monomial;
+                                    for (auto& exponent : root_monomial) exponent /= 2;
+                                    squares.push_back({std::move(root_monomial),
+                                        std::move(root)});
+                                } else cross = std::pair{monomial, integer_coefficient};
+                            }
+                            if (squares.size() == 2 && cross) {
+                                NativeMonomial expected_cross(variables.size(), 0);
+                                for (std::size_t index = 0; index < variables.size(); ++index)
+                                    expected_cross[index] = squares[0].root_monomial[index]
+                                        + squares[1].root_monomial[index];
+                                const auto expected_coefficient = 2
+                                    * squares[0].root_coefficient
+                                    * squares[1].root_coefficient;
+                                if (cross->first == expected_cross
+                                    && (cross->second == expected_coefficient
+                                        || cross->second == -expected_coefficient)) {
+                                    const auto left = context.term_expression(
+                                        squares[0].root_monomial,
+                                        integer(squares[0].root_coefficient));
+                                    auto right = context.term_expression(
+                                        squares[1].root_monomial,
+                                        integer(squares[1].root_coefficient));
+                                    if (cross->second < 0)
+                                        right = evaluate(call("Times", {integer(-1L), right}));
+                                    factors.emplace_back(evaluate(call("Plus", {left, right})), 2L);
+                                    perfect_square = true;
+                                }
+                            }
+                        }
+                        bool difference_of_squares = primitive.terms.size() == 2;
+                        std::optional<std::pair<NativeMonomial, mpz_class>> positive;
+                        std::optional<std::pair<NativeMonomial, mpz_class>> negative;
+                        if (perfect_square) {
+                            // The square factor was emitted above.
+                        } else if (difference_of_squares) {
+                            for (const auto& [monomial, coefficient] : primitive.terms) {
+                                if (coefficient.kind() != ExprKind::Integer) {
+                                    difference_of_squares = false;
+                                    break;
+                                }
+                                auto magnitude = coefficient.integer_value();
+                                const bool is_negative = magnitude < 0;
+                                if (is_negative) magnitude = -magnitude;
+                                mpz_class root;
+                                if (mpz_root(root.get_mpz_t(), magnitude.get_mpz_t(), 2UL) == 0
+                                    || root * root != magnitude
+                                    || std::any_of(monomial.begin(), monomial.end(),
+                                        [](long exponent) { return (exponent & 1L) != 0; })) {
+                                    difference_of_squares = false;
+                                    break;
+                                }
+                                auto square_root_monomial = monomial;
+                                for (auto& exponent : square_root_monomial) exponent /= 2;
+                                if (is_negative) negative = std::pair{
+                                    std::move(square_root_monomial), std::move(root)};
+                                else positive = std::pair{
+                                    std::move(square_root_monomial), std::move(root)};
+                            }
+                            difference_of_squares = difference_of_squares
+                                && positive.has_value() && negative.has_value();
+                        }
+                        if (perfect_square) {
+                            // The square factor was emitted above.
+                        } else if (difference_of_squares) {
+                            const auto left = context.term_expression(
+                                positive->first, integer(positive->second));
+                            const auto right = context.term_expression(
+                                negative->first, integer(negative->second));
+                            factors.emplace_back(evaluate(call("Plus", {left,
+                                evaluate(call("Times", {integer(-1L), right}))})), 1L);
+                            factors.emplace_back(evaluate(call("Plus", {left, right})), 1L);
+                        } else if (!primitive.empty()
+                            && context.expression(primitive) != integer(1L)) {
+                            factors.emplace_back(context.expression(primitive), 1L);
+                        }
+                        return finish(from_rational(content), std::move(factors), true);
+                    }
+                }
+            }
+        }
     }
     if (function == "Decompose" && args.size() == 2) {
         const auto variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
