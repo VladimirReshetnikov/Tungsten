@@ -89,6 +89,19 @@ data CheckAbortScope = CheckAbortScope
   }
   deriving (Eq, Show)
 
+data ReapTagGroup = ReapTagGroup
+  { reapTagGroupTag :: !Expr
+  , reapTagGroupValues :: ![Expr]
+  }
+  deriving (Eq, Show)
+
+data ReapScope = ReapScope
+  { reapScopePatterns :: ![Expr]
+  , reapScopePatternListMode :: !Bool
+  , reapScopeBuckets :: ![[ReapTagGroup]]
+  }
+  deriving (Eq, Show)
+
 data SymbolValues = SymbolValues
   { symbolOwnValue :: !(Maybe Definition)
   , symbolOwnValuePattern :: !(Maybe Expr)
@@ -119,6 +132,7 @@ data EvaluationSession = EvaluationSession
   , sessionMessageCollectors :: ![MessageCollector]
   , sessionAbortProtectScopes :: ![AbortProtectScope]
   , sessionCheckAbortScopes :: ![CheckAbortScope]
+  , sessionReapScopes :: ![ReapScope]
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
@@ -138,6 +152,7 @@ emptySession =
     , sessionMessageCollectors = []
     , sessionAbortProtectScopes = []
     , sessionCheckAbortScopes = []
+    , sessionReapScopes = []
     , sessionGeneratedMessages = []
     , sessionVisibleMessages = []
     , sessionPrints = []
@@ -382,6 +397,7 @@ evaluateInSession session expression =
               , sessionMessageCollectors = []
               , sessionAbortProtectScopes = []
               , sessionCheckAbortScopes = []
+              , sessionReapScopes = []
               , sessionGeneratedMessages = []
               , sessionVisibleMessages = []
               , sessionPrints = []
@@ -639,6 +655,10 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionAbortProtect depth session arguments'
       Call (Symbol "WithCleanup") arguments' ->
         evaluateSessionWithCleanup depth session arguments'
+      Call (Symbol "Reap") arguments' ->
+        evaluateSessionReap depth session arguments'
+      Call (Symbol "Sow") arguments' ->
+        evaluateSessionSow depth session arguments'
       Call (Symbol "Break") arguments' ->
         evaluateLoopControl BreakSignal "Break" session arguments'
       Call (Symbol "Continue") arguments' ->
@@ -1021,6 +1041,8 @@ directSessionDispatchHead name =
              , "CheckAbort"
              , "AbortProtect"
              , "WithCleanup"
+             , "Reap"
+             , "Sow"
              , "Break"
              , "Continue"
              , "Return"
@@ -4430,6 +4452,257 @@ evaluateSessionWithCleanup depth session = \case
 
   evaluateAbortProtected expression currentSession =
     evaluateSessionAbortProtect depth currentSession [expression]
+
+evaluateSessionReap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionReap depth session = \case
+  [body] ->
+    beginReap session body (Call (Symbol "Blank") []) Nothing
+  [body, patternExpression] -> do
+    (patternSpecification, updated) <-
+      evaluateSessionAt (depth + 1) session patternExpression
+    beginReap updated body patternSpecification Nothing
+  [body, patternExpression, handlerExpression] -> do
+    (patternSpecification, patternSession) <-
+      evaluateSessionAt (depth + 1) session patternExpression
+    (handler, updated) <-
+      evaluateSessionAt (depth + 1) patternSession handlerExpression
+    beginReap updated body patternSpecification (Just handler)
+  _ -> sessionFailure session "Reap expects one, two, or three arguments."
+ where
+  beginReap currentSession body patternSpecification handler =
+    case evaluateSessionAt (depth + 1) scopedSession body of
+      Left evaluationExit ->
+        Left
+          ( mapEvaluationExitSession
+              (popReapScopes baselineDepth)
+              evaluationExit
+          )
+      Right (value, stoppedSession) ->
+        let restored = popReapScopes baselineDepth stoppedSession
+         in case reapScopeAt baselineDepth stoppedSession of
+              Nothing ->
+                sessionFailure restored "Reap lost its active collection scope."
+              Just completedScope ->
+                finishReapScope depth handler value completedScope restored
+   where
+    (patternListMode, patterns) = reapPatterns patternSpecification
+    baselineDepth = length (sessionReapScopes currentSession)
+    scopedSession =
+      currentSession
+        { sessionReapScopes =
+            sessionReapScopes currentSession
+              <> [ ReapScope
+                     { reapScopePatterns = patterns
+                     , reapScopePatternListMode = patternListMode
+                     , reapScopeBuckets = replicate (length patterns) []
+                     }
+                 ]
+        }
+
+evaluateSessionSow
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSow depth session = \case
+  [valueExpression] -> do
+    (value, updated) <-
+      evaluateSessionAt (depth + 1) session valueExpression
+    sowTags value [Symbol "None"] updated
+  [valueExpression, tagExpression] -> do
+    (value, valueSession) <-
+      evaluateSessionAt (depth + 1) session valueExpression
+    (tagSpecification, updated) <-
+      evaluateSessionAt (depth + 1) valueSession tagExpression
+    sowTags value (normalizedSowTags tagSpecification) updated
+  _ -> sessionFailure session "Sow expects one or two arguments."
+ where
+  sowTags value tags currentSession = do
+    (_, updated) <- sowEachTag currentSession tags
+    Right (value, updated)
+   where
+    sowEachTag current [] = Right ((), current)
+    sowEachTag current (tag : rest) = do
+      (_, taggedSession) <- routeSownValue depth current value tag
+      sowEachTag taggedSession rest
+
+reapPatterns :: Expr -> (Bool, [Expr])
+reapPatterns = \case
+  Call (Symbol listHead) patterns
+    | isSessionSystemHead "List" listHead -> (True, patterns)
+  patternExpression -> (False, [patternExpression])
+
+normalizedSowTags :: Expr -> [Expr]
+normalizedSowTags = \case
+  Call (Symbol listHead) tags
+    | isSessionSystemHead "List" listHead -> tags
+  tag -> [tag]
+
+routeSownValue
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult ()
+routeSownValue depth session value tag =
+  search (length (sessionReapScopes session) - 1) session
+ where
+  search index currentSession
+    | index < 0 = Right ((), currentSession)
+    | otherwise =
+        case reapScopeAt index currentSession of
+          Nothing -> search (index - 1) currentSession
+          Just scope -> do
+            (matchingIndices, matchedSession) <-
+              matchingReapPatternIndices
+                depth
+                currentSession
+                tag
+                (reapScopePatterns scope)
+            if null matchingIndices
+              then search (index - 1) matchedSession
+              else
+                case updateReapScopeAt
+                  index
+                  (appendSownValue matchingIndices tag value)
+                  matchedSession of
+                    Nothing ->
+                      sessionFailure
+                        matchedSession
+                        "Sow lost its matching Reap scope."
+                    Just updated -> Right ((), updated)
+
+matchingReapPatternIndices
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult [Int]
+matchingReapPatternIndices depth = go 0 []
+ where
+  go _ retained session _ [] = Right (reverse retained, session)
+  go index retained session tag (patternExpression : rest) = do
+    (matched, updated) <-
+      sessionPatternMatches depth session tag patternExpression
+    go
+      (index + 1)
+      (if matched then index : retained else retained)
+      updated
+      tag
+      rest
+
+appendSownValue :: [Int] -> Expr -> Expr -> ReapScope -> ReapScope
+appendSownValue matchingIndices tag value scope =
+  scope
+    { reapScopeBuckets =
+        zipWith append [0 ..] (reapScopeBuckets scope)
+    }
+ where
+  append index bucket
+    | index `elem` matchingIndices = appendReapTagGroup tag value bucket
+    | otherwise = bucket
+
+appendReapTagGroup :: Expr -> Expr -> [ReapTagGroup] -> [ReapTagGroup]
+appendReapTagGroup tag value = \case
+  [] -> [ReapTagGroup tag [value]]
+  group : rest
+    | reapTagGroupTag group == tag ->
+        group {reapTagGroupValues = reapTagGroupValues group <> [value]}
+          : rest
+    | otherwise -> group : appendReapTagGroup tag value rest
+
+finishReapScope
+  :: Int
+  -> Maybe Expr
+  -> Expr
+  -> ReapScope
+  -> EvaluationSession
+  -> SessionResult Expr
+finishReapScope depth handler value scope session = do
+  (bucketResults, updated) <-
+    evaluateReapBuckets
+      depth
+      handler
+      (reapScopePatternListMode scope)
+      session
+      (reapScopeBuckets scope)
+  Right
+    ( evaluatedList [value, evaluatedList bucketResults]
+    , updated
+    )
+
+evaluateReapBuckets
+  :: Int
+  -> Maybe Expr
+  -> Bool
+  -> EvaluationSession
+  -> [[ReapTagGroup]]
+  -> SessionResult [Expr]
+evaluateReapBuckets depth handler patternListMode = go []
+ where
+  go retained session [] = Right (retained, session)
+  go retained session (bucket : rest) = do
+    (groups, groupSession) <-
+      evaluateReapTagGroups depth handler session bucket
+    go
+      ( if patternListMode
+          then retained <> [evaluatedList groups]
+          else retained <> groups
+      )
+      groupSession
+      rest
+
+evaluateReapTagGroups
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> [ReapTagGroup]
+  -> SessionResult [Expr]
+evaluateReapTagGroups depth handler = go []
+ where
+  go retained session [] = Right (retained, session)
+  go retained session (group : rest) = do
+    let values = evaluatedList (reapTagGroupValues group)
+    (result, updated) <- case handler of
+      Nothing -> Right (values, session)
+      Just function ->
+        evaluateSessionCallable
+          depth
+          session
+          function
+          [reapTagGroupTag group, values]
+    go (retained <> [result]) updated rest
+
+reapScopeAt :: Int -> EvaluationSession -> Maybe ReapScope
+reapScopeAt index session =
+  case drop index (sessionReapScopes session) of
+    scope : _ -> Just scope
+    [] -> Nothing
+
+updateReapScopeAt
+  :: Int
+  -> (ReapScope -> ReapScope)
+  -> EvaluationSession
+  -> Maybe EvaluationSession
+updateReapScopeAt index update session =
+  case splitAt index (sessionReapScopes session) of
+    (before, scope : after) ->
+      Just
+        session
+          { sessionReapScopes = before <> (update scope : after)
+          }
+    _ -> Nothing
+
+popReapScopes :: Int -> EvaluationSession -> EvaluationSession
+popReapScopes baselineDepth session =
+  session
+    { sessionReapScopes =
+        take baselineDepth (sessionReapScopes session)
+    }
 
 evaluateSessionReturn
   :: Int

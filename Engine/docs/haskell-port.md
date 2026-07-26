@@ -94,6 +94,13 @@ Session control also includes raw `Label` markers and evaluated-target `Goto` si
 unmatched signal crosses definition, iterator, and dynamic-scope boundaries with state restoration
 and becomes an inert `Goto[...]` only at the top-level evaluator boundary.
 
+Session-native safety and resource control includes `Abort`, `CheckAbort`, `AbortProtect`,
+`WithCleanup`, `Reap`, and `Sow`. Abort ownership follows the active protection depth, cleanup runs
+once across every supported non-local control exit with cleanup-signal precedence, and ordered
+sow buckets route to the nearest matching reap scope before optional combiners run outside that
+scope. These controls are available through the session, CLI, protocol, and REPL evaluators; the
+exported pure `Tungsten.Evaluate.evaluate` API remains the deterministic expression reducer.
+
 ## Compatibility boundary
 
 The following Engine areas still use the Python implementation and are not represented as Haskell

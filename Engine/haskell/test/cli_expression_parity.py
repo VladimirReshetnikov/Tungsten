@@ -1197,6 +1197,80 @@ CASES = (
         ),
         0,
     ),
+    (
+        "reap tag selectors and combiners",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Reap[Sow[1]; Sow[2]; 3], "
+            "Reap[Sow[1, a]; Sow[2, b]; Sow[3, a]; 4], "
+            "Reap[Sow[1, a]; Sow[2, 2]; 3, {_Symbol, _Integer}], "
+            "Reap[Sow[1, a]; Sow[2, a]; 3, _, f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "nested reap chooses the nearest matching scope",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Reap[Reap[Sow[1, a]; 2, a], _], "
+            "Reap[Reap[Sow[1, b]; 2, a], _], "
+            "Reap[Sow[1, {a, b}]; 3, {a, b}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "reap pops before applying its combiner",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Reap[Reap[Sow[1, a], a, "
+            "Function[{tag, values}, Sow[values, outer]]], outer]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "reap effect order and control-scope restoration",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Reap[Sow[(Print["value"]; 1), '
+            '(Print["tag"]; a)]; 2]; '
+            "second = Catch[Reap[Sow[1]; Throw[thrown]]]; "
+            "third = CheckAbort[Reap[Sow[2]; Abort[]], caught]; "
+            "fourth = (Reap[Sow[3]; Goto[out]]; never; Label[out]; reached); "
+            "fifth = Catch[Reap[Sow[5, a], _, "
+            "Function[{tag, values}, Throw[done]]]]; "
+            "{first, second, third, fourth, fifth, Sow[4]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "qualified reap sow and arity diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{System`Reap[System`Sow[1]; 2], "
+            "Sow[], Sow[1, 2, 3], Reap[], Reap[1, 2, 3, 4]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

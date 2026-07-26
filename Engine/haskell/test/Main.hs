@@ -1442,6 +1442,17 @@ checkEvaluationSession = do
         , ("cleanup return supersedes a body return", "WithCleanup[Return[body], Return[cleanup]]", "Return[cleanup]")
         , ("cleanup throw supersedes a body abort", "CheckAbort[Catch[WithCleanup[Abort[], Throw[cleanup]]], caught]", "cleanup")
         , ("cleanup return and throw cross definition boundaries", "ClearAll[f, g]; f[] := Catch[WithCleanup[Throw[body], Return[cleanup]]]; g[] := Catch[WithCleanup[Return[body], Throw[cleanup]]]; {f[], g[]}", "List[cleanup, cleanup]")
+        , ("sow outside reap returns its evaluated value", "x = 0; {Sow[x = x + 1], x}", "List[1, 1]")
+        , ("reap collects default and distinct tags in order", "{Reap[Sow[1]; Sow[2]; 3], Reap[Sow[1, a]; Sow[2, b]; Sow[3, a]; 4]}", "List[List[3, List[List[1, 2]]], List[4, List[List[1, 3], List[2]]]]")
+        , ("reap literal and typed pattern selectors filter tags", "{Reap[Sow[1, a]; Sow[2, b]; 3, a], Reap[Sow[1, a]; Sow[2, 2]; 3, {_Symbol, _Integer}]}", "List[List[3, List[List[1]]], List[3, List[List[List[1]], List[List[2]]]]]")
+        , ("sow list tags populate each selector bucket", "Reap[Sow[1, {a, b}]; 3, {a, b}]", "List[3, List[List[List[1]], List[List[1]]]]")
+        , ("reap combiners receive each tag and ordered value list", "{Reap[Sow[1, a]; Sow[2, a]; 3, _, f], Reap[Sow[1]; 3, _, f]}", "List[List[3, List[f[a, List[1, 2]]]], List[3, List[f[None, List[1]]]]]")
+        , ("nested reap routes to the nearest matching scope", "{Reap[Reap[Sow[1, a]; 2, a], _], Reap[Reap[Sow[1, b]; 2, a], _]}", "List[List[List[2, List[List[1]]], List[]], List[List[2, List[]], List[List[1]]]]")
+        , ("reap pops before its combiner so sow reaches the outer scope", "Reap[Reap[Sow[1, a], a, Function[{tag, values}, Sow[values, outer]]], outer]", "List[List[1, List[List[1]]], List[List[List[1]]]]")
+        , ("reap evaluates selector and combiner before the body", "x = 0; result = Reap[(x = 100; Sow[x, a]), (x = x + 1; a), (x = x + 10; f)]; {result, x}", "List[List[100, List[f[a, List[100]]]], 100]")
+        , ("reap scopes restore across throw abort and goto", "{Catch[Reap[Sow[1]; Throw[thrown]]], CheckAbort[Reap[Sow[2]; Abort[]], caught], (Reap[Sow[3]; Goto[out]]; never; Label[out]; reached), Sow[4]}", "List[thrown, caught, reached, 4]")
+        , ("reap remains popped when a combiner exits by control", "{Catch[Reap[Sow[1, a], _, Function[{tag, values}, Throw[done]]]], Sow[2]}", "List[done, 2]")
+        , ("qualified reap and sow share native collection scopes", "System`Reap[System`Sow[1]; 2]", "List[2, List[List[1]]]")
         , ("goto supports forward and backward labels", "ClearAll[x]; first = (Goto[end]; never; Label[end]; reached); x = 0; second = (Label[start]; x = x + 1; If[x < 3, Goto[start]]; x); {first, second}", "List[reached, 3]")
         , ("goto catches at the nearest matching compound expression", "ClearAll[x]; x = 0; {(Label[a]; x = x + 1; If[x == 1, Goto[a]]; Label[a]; x), ((Goto[inner]; never; Label[inner]; reached)), ((Goto[out]; innerNever; Label[other]); outerNever; Label[out]; reached)}", "List[2, reached, reached]")
         , ("goto compares evaluated targets with raw label tags", "ClearAll[x]; x = end; (Goto[x]; never; Label[x]; reached)", "Goto[end]")
@@ -1595,6 +1606,16 @@ checkEvaluationSession = do
           , "List[thrown, returned, Null, reached]"
           , ["throwCleanup", "returnCleanup", "breakCleanup", "gotoCleanup"]
           )
+        , ( "sow evaluates values before tags exactly once"
+          , "Reap[Sow[(Print[\"value\"]; 1), (Print[\"tag\"]; a)]; 2]"
+          , "List[2, List[List[1]]]"
+          , ["value", "tag"]
+          )
+        , ( "reap combiner effects run after the scope is popped"
+          , "Reap[Sow[1, a]; 2, _, Function[{tag, values}, Print[tag]; values]]"
+          , "List[2, List[List[1]]]"
+          , ["a"]
+          )
         , ( "pattern callbacks preserve prints in traversal order"
           , "p[x_] := (Print[x]; x > 1); Cases[{1, 2, 3}, x_ /; p[x]]"
           , "List[2, 3]"
@@ -1719,6 +1740,27 @@ checkEvaluationSession = do
             , ( "WithCleanup::error"
               , "MessageName[WithCleanup, \"error\"]"
               , "WithCleanup::error: WithCleanup expects two or three arguments."
+              )
+            ]
+          )
+        , ( "reap and sow arity diagnostics"
+          , "{Sow[], Sow[1, 2, 3], Reap[], Reap[1, 2, 3, 4]}"
+          , "List[Sow[], Sow[1, 2, 3], Reap[], Reap[1, 2, 3, 4]]"
+          , [ ( "Sow::error"
+              , "MessageName[Sow, \"error\"]"
+              , "Sow::error: Sow expects one or two arguments."
+              )
+            , ( "Sow::error"
+              , "MessageName[Sow, \"error\"]"
+              , "Sow::error: Sow expects one or two arguments."
+              )
+            , ( "Reap::error"
+              , "MessageName[Reap, \"error\"]"
+              , "Reap::error: Reap expects one, two, or three arguments."
+              )
+            , ( "Reap::error"
+              , "MessageName[Reap, \"error\"]"
+              , "Reap::error: Reap expects one, two, or three arguments."
               )
             ]
           )
@@ -2770,10 +2812,11 @@ checkEvaluationSession = do
             ( fullForm value
             , null (sessionAbortProtectScopes updated)
             , null (sessionCheckAbortScopes updated)
+            , null (sessionReapScopes updated)
             )
     assertEqual
       ("evaluation session: " <> label)
-      (Right (expected, True, True))
+      (Right (expected, True, True, True))
       result
 
   evaluatePrintCase (label, source, expectedValue, expectedPrints) = do
@@ -2789,10 +2832,11 @@ checkEvaluationSession = do
             , sessionPrints updated
             , null (sessionAbortProtectScopes updated)
             , null (sessionCheckAbortScopes updated)
+            , null (sessionReapScopes updated)
             )
     assertEqual
       ("evaluation session prints: " <> label)
-      (Right (expectedValue, expectedPrints, True, True))
+      (Right (expectedValue, expectedPrints, True, True, True))
       result
 
   evaluateMessageCase (label, source, expectedValue, expectedMessages) = do
