@@ -2761,6 +2761,65 @@ std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = inte
     collect(collect, value, {}); return sparse_array(*dimensions, std::move(entries), fill);
 }
 
+mpz_class sparse_dimension_product(
+    const std::vector<std::size_t>& dimensions) {
+    mpz_class product = 1;
+    for (const auto dimension : dimensions)
+        product *= mpz_class(std::to_string(dimension), 10);
+    return product;
+}
+
+mpz_class sparse_linear_offset(
+    const std::vector<std::size_t>& indices,
+    const std::vector<std::size_t>& dimensions) {
+    mpz_class offset = 0;
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        offset *= mpz_class(std::to_string(dimensions[axis]), 10);
+        offset += mpz_class(std::to_string(indices[axis] - 1), 10);
+    }
+    return offset;
+}
+
+std::optional<std::vector<std::size_t>> sparse_indices_from_offset(
+    mpz_class offset, const std::vector<std::size_t>& dimensions) {
+    std::vector<std::size_t> indices(dimensions.size(), 1);
+    for (std::size_t reverse_axis = dimensions.size(); reverse_axis > 0;
+         --reverse_axis) {
+        const auto axis = reverse_axis - 1;
+        if (dimensions[axis] == 0) return std::nullopt;
+        const mpz_class dimension(std::to_string(dimensions[axis]), 10);
+        const mpz_class remainder = offset % dimension;
+        offset /= dimension;
+        const auto index = nonnegative_size_t(remainder + 1);
+        if (!index) return std::nullopt;
+        indices[axis] = *index;
+    }
+    return indices;
+}
+
+std::optional<std::vector<std::size_t>> native_sparse_dimensions(
+    const DenseDimensions& dimensions) {
+    std::vector<std::size_t> native;
+    native.reserve(dimensions.size());
+    for (const auto& dimension : dimensions) {
+        const auto value = nonnegative_size_t(dimension);
+        if (!value) return std::nullopt;
+        native.push_back(*value);
+    }
+    return native;
+}
+
+Expr sparse_coordinate_value(
+    const Expr& array, const std::vector<std::size_t>& indices) {
+    const auto found = std::lower_bound(
+        array.sparse_entries().begin(), array.sparse_entries().end(), indices,
+        [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+            return entry.indices < target;
+        });
+    return found != array.sparse_entries().end() && found->indices == indices
+        ? found->value : array.fill_value();
+}
+
 constexpr long level_infinity = 1000000000L;
 struct LevelBounds {
     long minimum;
@@ -14335,18 +14394,217 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return boolean(contains_point(args[1]));
         }
     }
-    if (((function == "ArrayReshape" && evaluated_name && *evaluated_name == "ArrayReshape")
-            || (function == "ArrayPad" && evaluated_name && *evaluated_name == "ArrayPad")
-            || (function == "Transpose" && evaluated_name && *evaluated_name == "Transpose")
-            || function == "Flatten")
-        && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        const auto dense = sparse_dense_value(args[0]);
-        if (!dense)
+    if (function == "ArrayReshape" && evaluated_name
+        && *evaluated_name == "ArrayReshape" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() < 2 || args.size() > 3)
             return raw_evaluation_error(
-                "SparseArray dimensions exceed the native materialization limit.");
-        auto dense_args = args; dense_args[0] = *dense; const auto result = evaluate(call(function, std::move(dense_args)));
-        if (const auto sparse = sparse_from_dense(result, args[0].fill_value())) return *sparse;
-        return result;
+                "ArrayReshape expects an expression, dimensions, and an optional padding value.");
+        const auto normalized = normalize_dense_dimensions(args[1], "ArrayReshape");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+        const auto dimensions = native_sparse_dimensions(*normalized.values);
+        if (!dimensions)
+            return raw_evaluation_error(
+                "ArrayReshape dimensions exceed the native representation limit.");
+
+        const auto padding = args.size() == 3 ? args[2] : integer(0L);
+        const auto old_total = sparse_dimension_product(args[0].dimensions());
+        mpz_class new_total = 1;
+        for (const auto& dimension : *normalized.values)
+            new_total *= dimension;
+        if (dimensions->empty()) {
+            if (old_total == 0) return padding;
+            return sparse_coordinate_value(args[0],
+                std::vector<std::size_t>(args[0].dimensions().size(), 1));
+        }
+
+        const bool preserves_sparse = new_total <= old_total
+            || args[0].fill_value() == padding;
+        if (!preserves_sparse) {
+            const auto dense = sparse_dense_value(args[0]);
+            if (!dense || !dense_materialization_within_limit(*normalized.values))
+                return raw_evaluation_error(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            auto dense_args = args;
+            dense_args[0] = *dense;
+            return evaluate(call("ArrayReshape", std::move(dense_args)));
+        }
+
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            const auto linear = sparse_linear_offset(
+                entry.indices, args[0].dimensions());
+            if (linear >= new_total) continue;
+            const auto indices = sparse_indices_from_offset(linear, *dimensions);
+            if (indices) entries.push_back({*indices, entry.value});
+        }
+        const auto output_fill = new_total <= old_total
+            ? args[0].fill_value() : padding;
+        return sparse_array(*dimensions, std::move(entries), output_fill);
+    }
+    if (function == "ArrayPad" && evaluated_name
+        && *evaluated_name == "ArrayPad" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayPad expects an array, padding widths, and an optional padding value.");
+        const auto normalized = normalize_dense_padding(
+            args[1], args[0].dimensions().size());
+        if (!normalized.widths)
+            return raw_evaluation_error(normalized.error);
+        DenseDimensions output_dimensions;
+        output_dimensions.reserve(args[0].dimensions().size());
+        for (std::size_t axis = 0; axis < args[0].dimensions().size(); ++axis)
+            output_dimensions.push_back(
+                mpz_class(std::to_string(args[0].dimensions()[axis]), 10)
+                + (*normalized.widths)[axis].first
+                + (*normalized.widths)[axis].second);
+        const auto dimensions = native_sparse_dimensions(output_dimensions);
+        if (!dimensions)
+            return raw_evaluation_error(
+                "ArrayPad dimensions exceed the native representation limit.");
+        const auto padding = args.size() == 3 ? args[2] : integer(0L);
+        if (padding != args[0].fill_value()) {
+            const auto dense = sparse_dense_value(args[0]);
+            if (!dense || !dense_materialization_within_limit(output_dimensions))
+                return raw_evaluation_error(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            auto dense_args = args;
+            dense_args[0] = *dense;
+            return evaluate(call("ArrayPad", std::move(dense_args)));
+        }
+
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            auto indices = entry.indices;
+            for (std::size_t axis = 0; axis < indices.size(); ++axis) {
+                const auto offset = nonnegative_size_t(
+                    (*normalized.widths)[axis].first);
+                if (!offset || indices[axis]
+                    > std::numeric_limits<std::size_t>::max() - *offset)
+                    return raw_evaluation_error(
+                        "ArrayPad dimensions exceed the native representation limit.");
+                indices[axis] += *offset;
+            }
+            entries.push_back({std::move(indices), entry.value});
+        }
+        return sparse_array(
+            *dimensions, std::move(entries), args[0].fill_value());
+    }
+    if (function == "Transpose" && evaluated_name
+        && *evaluated_name == "Transpose" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Transpose expects an array and an optional permutation.");
+        const auto rank = args[0].dimensions().size();
+        std::vector<std::size_t> permutation(rank);
+        std::iota(permutation.begin(), permutation.end(), std::size_t{0});
+        if (args.size() == 1) {
+            if (rank >= 2) std::swap(permutation[0], permutation[1]);
+        } else {
+            if (!args[1].has_head("List"))
+                return raw_evaluation_error(
+                    "Transpose expects a permutation list as its second argument.");
+            if (args[1].args().size() != rank
+                || !std::all_of(args[1].args().begin(), args[1].args().end(),
+                    [](const Expr& value) {
+                        return value.kind() == ExprKind::Integer;
+                    }))
+                return raw_evaluation_error(
+                    "Transpose permutation length must match the array rank.");
+            for (std::size_t axis = 0; axis < rank; ++axis) {
+                const auto& value = args[1].args()[axis].integer_value();
+                if (value < 1
+                    || value > mpz_class(std::to_string(rank), 10))
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
+                permutation[axis] = *nonnegative_size_t(value - 1);
+            }
+            auto sorted = permutation;
+            std::sort(sorted.begin(), sorted.end());
+            for (std::size_t axis = 0; axis < rank; ++axis)
+                if (sorted[axis] != axis)
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
+        }
+        if (std::is_sorted(permutation.begin(), permutation.end()))
+            return args[0];
+
+        std::vector<std::size_t> dimensions;
+        dimensions.reserve(rank);
+        for (const auto axis : permutation)
+            dimensions.push_back(args[0].dimensions()[axis]);
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            std::vector<std::size_t> indices;
+            indices.reserve(rank);
+            for (const auto axis : permutation)
+                indices.push_back(entry.indices[axis]);
+            entries.push_back({std::move(indices), entry.value});
+        }
+        return sparse_array(
+            std::move(dimensions), std::move(entries), args[0].fill_value());
+    }
+    if (function == "Flatten" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() == 3)
+            return raw_evaluation_error(
+                "Flatten currently does not implement the 3-argument head-selecting form for SparseArray inputs.");
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Flatten expects an expression, an optional level specification, and an optional head.");
+        std::optional<std::size_t> level;
+        if (args.size() == 2 && !is_symbol(args[1], "Infinity")) {
+            if (args[1].kind() != ExprKind::Integer
+                || args[1].integer_value() < 0)
+                return raw_evaluation_error(
+                    "Flatten levels must be a non-negative integer or Infinity.");
+            level = nonnegative_size_t(args[1].integer_value());
+            if (!level)
+                return raw_evaluation_error(
+                    "Flatten level exceeds the native representation limit.");
+        }
+        const auto rank = args[0].dimensions().size();
+        if ((level && *level == 0) || rank <= 1) return args[0];
+        const auto collapse_count = level
+            ? (*level >= rank ? rank : *level + 1) : rank;
+        std::vector<std::size_t> collapsed_dimensions(
+            args[0].dimensions().begin(),
+            args[0].dimensions().begin()
+                + static_cast<std::ptrdiff_t>(collapse_count));
+        const auto collapsed = checked_dimension_product(collapsed_dimensions);
+        if (!collapsed)
+            return raw_evaluation_error(
+                "Flatten dimensions exceed the native representation limit.");
+        std::vector<std::size_t> dimensions{*collapsed};
+        dimensions.insert(dimensions.end(),
+            args[0].dimensions().begin()
+                + static_cast<std::ptrdiff_t>(collapse_count),
+            args[0].dimensions().end());
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            std::vector<std::size_t> prefix(
+                entry.indices.begin(), entry.indices.begin()
+                    + static_cast<std::ptrdiff_t>(collapse_count));
+            const auto collapsed_index = nonnegative_size_t(
+                sparse_linear_offset(prefix, collapsed_dimensions) + 1);
+            if (!collapsed_index)
+                return raw_evaluation_error(
+                    "Flatten dimensions exceed the native representation limit.");
+            std::vector<std::size_t> indices{*collapsed_index};
+            indices.insert(indices.end(),
+                entry.indices.begin()
+                    + static_cast<std::ptrdiff_t>(collapse_count),
+                entry.indices.end());
+            entries.push_back({std::move(indices), entry.value});
+        }
+        return sparse_array(
+            std::move(dimensions), std::move(entries), args[0].fill_value());
     }
     if ((function == "Tr" || function == "Det") && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
         const auto dense = sparse_dense_value(args[0]);
@@ -14792,6 +15050,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
 
         std::vector<std::vector<std::pair<std::size_t, std::size_t>>> shapes;
         shapes.reserve(args[0].args().size());
+        bool any_sparse = false;
+        bool nonzero_sparse_fill = false;
         for (const auto& block_row : args[0].args()) {
             std::vector<std::pair<std::size_t, std::size_t>> shape_row;
             shape_row.reserve(column_count);
@@ -14800,8 +15060,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     if (block.dimensions().size() != 2)
                         return raw_evaluation_error(
                             "ArrayFlatten currently expects rank-2 SparseArray blocks.");
-                    return raw_evaluation_error(
-                        "ArrayFlatten dense parity does not materialize SparseArray blocks.");
+                    any_sparse = true;
+                    nonzero_sparse_fill = nonzero_sparse_fill
+                        || block.fill_value() != integer(0L);
+                    shape_row.emplace_back(
+                        block.dimensions()[0], block.dimensions()[1]);
+                    continue;
                 }
                 const auto dimensions = dense_dimensions(block);
                 if (!dimensions)
@@ -14850,6 +15114,69 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             [](mpz_class total, std::size_t value) -> mpz_class {
                 return total + mpz_class(std::to_string(value), 10);
             });
+        if (nonzero_sparse_fill) {
+            std::vector<Expr> dense_rows;
+            dense_rows.reserve(args[0].args().size());
+            for (const auto& block_row : args[0].args()) {
+                std::vector<Expr> dense_blocks;
+                dense_blocks.reserve(block_row.args().size());
+                for (const auto& block : block_row.args()) {
+                    const auto dense = sparse_dense_value(block);
+                    if (!dense)
+                        return raw_evaluation_error(
+                            "SparseArray dimensions exceed the native materialization limit.");
+                    dense_blocks.push_back(*dense);
+                }
+                dense_rows.push_back(evaluated_list_expr(
+                    std::move(dense_blocks)));
+            }
+            return evaluate(call("ArrayFlatten", {
+                evaluated_list_expr(std::move(dense_rows))}));
+        }
+        if (any_sparse) {
+            const auto output_rows = nonnegative_size_t(row_total);
+            const auto output_columns = nonnegative_size_t(column_total);
+            if (!output_rows || !output_columns)
+                return raw_evaluation_error(
+                    "ArrayFlatten dimensions exceed the native representation limit.");
+            std::vector<SparseEntry> entries;
+            std::size_t row_offset = 0;
+            for (std::size_t block_row = 0;
+                 block_row < args[0].args().size(); ++block_row) {
+                std::size_t column_offset = 0;
+                for (std::size_t block_column = 0;
+                     block_column < column_count; ++block_column) {
+                    const auto& block =
+                        args[0].args()[block_row].args()[block_column];
+                    if (block.kind() == ExprKind::SparseArray) {
+                        for (const auto& entry : block.sparse_entries())
+                            entries.push_back({
+                                {row_offset + entry.indices[0],
+                                    column_offset + entry.indices[1]},
+                                entry.value});
+                    } else {
+                        const auto [height, width] =
+                            shapes[block_row][block_column];
+                        for (std::size_t row = 0; row < height; ++row)
+                            for (std::size_t column = 0; column < width;
+                                 ++column) {
+                                const auto& value =
+                                    block.args()[row].args()[column];
+                                if (value != integer(0L))
+                                    entries.push_back({
+                                        {row_offset + row + 1,
+                                            column_offset + column + 1},
+                                        value});
+                            }
+                    }
+                    column_offset += column_widths[block_column];
+                }
+                row_offset += row_heights[block_row];
+            }
+            return sparse_array(
+                {*output_rows, *output_columns}, std::move(entries),
+                integer(0L));
+        }
         if (!dense_materialization_within_limit({row_total, column_total}))
             return raw_evaluation_error(
                 "ArrayFlatten output exceeds the native materialization limit.");

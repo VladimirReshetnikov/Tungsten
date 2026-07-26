@@ -212,6 +212,14 @@ if(BUILD_TESTING)
         NAME tungsten_dense_array_tests
         COMMAND tungsten_dense_array_tests)
 
+    add_executable(tungsten_sparse_transform_tests
+        cpp/tests/sparse_transform_tests.cpp)
+    target_link_libraries(tungsten_sparse_transform_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_sparse_transform_tests)
+    add_test(
+        NAME tungsten_sparse_transform_tests
+        COMMAND tungsten_sparse_transform_tests)
+
     add_executable(tungsten_take_list_tests
         cpp/tests/take_list_tests.cpp)
     target_link_libraries(tungsten_take_list_tests PRIVATE tungsten_cpp)
