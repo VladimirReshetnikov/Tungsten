@@ -1205,6 +1205,101 @@ int main() {
         check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
             "kernel parity evaluator: " + source);
 
+    const std::vector<std::pair<std::string, std::string>> traversal_level_cases{
+        {"Level[x,0]", "List[x]"},
+        {"Level[f[a,g[b]],{1}]", "List[a, g[b]]"},
+        {"Level[f[a,g[b]],{2}]", "List[b]"},
+        {"Level[f[a,g[b]],{0,1}]", "List[a, g[b], f[a, g[b]]]"},
+        {"Level[<|a->x,b:>g[y]|>,Infinity]", "List[x, y, g[y]]"},
+        {"Level[f[],{-2}]", "List[f[]]"},
+        {"Level[{a,Nothing,g[b,Nothing]},Infinity]", "List[a, b, g[b, Nothing]]"},
+        {"Apply[q,f[a,g[b]]]", "q[a, g[b]]"},
+        {"Apply[q,<|a->x,b:>g[y]|>]", "q[x, g[y]]"},
+        {"Apply[q,f[a,g[b]],{1}]", "f[a, q[b]]"},
+        {"Apply[q,<|a->x,b:>g[y]|>,{1}]",
+            "Association[Rule[a, x], RuleDelayed[b, q[y]]]"},
+        {"Apply[q,f[a,g[b]],{-2}]", "f[a, q[b]]"},
+        {"Apply[q,f[],{-2}]", "q[]"},
+        {"Map[q,f[a,g[b]]]", "f[q[a], q[g[b]]]"},
+        {"Map[q,<|a->x,b:>g[y]|>]",
+            "Association[Rule[a, q[x]], RuleDelayed[b, q[g[y]]]]"},
+        {"Map[q,f[a,g[b]],{-1}]", "f[q[a], g[q[b]]]"},
+        {"Map[q,f[a,g[b]],{0}]", "q[f[a, g[b]]]"},
+        {"Map[q,f[a,g[b]],Heads->True]", "q[f][q[a], q[g[b]]]"},
+        {"Map[q,f[a,g[b]],{1,2},Heads->True]", "q[f][q[a], q[q[g][q[b]]]]"},
+        {"Map[Function[Nothing],{a,g[b]},Infinity]", "List[]"},
+        {"MapApply[q,f[a,g[b]]]", "f[a, q[b]]"},
+        {"MapApply[q,<|a->x,b:>g[y]|>]",
+            "Association[Rule[a, x], RuleDelayed[b, q[y]]]"},
+        {"MapApply[q,f[a,g[b]],{-2}]", "f[a, q[b]]"},
+        {"MapApply[q][f[a,g[b]]]", "f[a, q[b]]"},
+        {"MapIndexed[q,f[a,g[b]]]", "f[q[a, List[1]], q[g[b], List[2]]]"},
+        {"MapIndexed[q,f[a,g[b]],Infinity]",
+            "f[q[a, List[1]], q[g[q[b, List[2, 1]]], List[2]]]"},
+        {"MapIndexed[q,<|a->x,b:>g[y]|>,Infinity]",
+            "Association[Rule[a, q[x, List[Key[a]]]], RuleDelayed[b, "
+            "q[g[q[y, List[Key[b], 1]]], List[Key[b]]]]]"},
+        {"MapIndexed[q,f[a,g[b]],{-2}]", "f[a, q[g[b], List[2]]]"},
+        {"MapIndexed[q][f[a,g[b]]]", "f[q[a, List[1]], q[g[b], List[2]]]"},
+        {"MapIndexed[Function[{value,path},path],<|a->x,b->g[y]|>,Infinity]",
+            "Association[Rule[a, List[Key[a]]], Rule[b, List[Key[b]]]]"},
+    };
+    for (const auto& [source, expected] : traversal_level_cases)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "association-aware traversal parity: " + source);
+
+    struct TraversalDiagnosticCase {
+        std::string source;
+        std::string expected_result;
+        std::string expected_message;
+    };
+    const std::vector<TraversalDiagnosticCase> traversal_diagnostic_cases{
+        {"Level[x]", "Level[x]",
+            "Level::error: Level expects an expression, a level specification, and an optional heads flag."},
+        {"Level[x,1,z]", "Level[x, 1, z]",
+            "Level::error: The optional third Level argument must be True or False."},
+        {"Level[x,1,True]", "Level[x, 1, True]",
+            "Level::error: Level[..., ..., True] is not implemented yet."},
+        {"Level[x,z]", "Level[x, z]",
+            "Level::error: Unsupported Level specification: 'z'."},
+        {"Level[x,{z}]", "Level[x, List[z]]",
+            "Level::error: Unsupported level bound: z."},
+        {"Apply[q]", "Apply[q]",
+            "Apply::error: Apply expects a head, an expression, and an optional level specification."},
+        {"Apply[q,x,z]", "Apply[q, x, z]",
+            "Apply::error: Unsupported Level specification: 'z'."},
+        {"Map[q]", "Map[q]",
+            "Map::error: Map expects a function, an expression, and an optional level specification."},
+        {"Map[q,x,z]", "Map[q, x, z]",
+            "Map::error: Unsupported Level specification: 'z'."},
+        {"MapApply[]", "MapApply[]",
+            "MapApply::error: MapApply expects a function, an expression, and an optional level specification."},
+        {"MapApply[q,x,z]", "MapApply[q, x, z]",
+            "MapApply::error: Unsupported Level specification: 'z'."},
+        {"MapIndexed[]", "MapIndexed[]",
+            "MapIndexed::error: MapIndexed expects a function, an expression, and an optional level specification."},
+        {"MapIndexed[q,x,z]", "MapIndexed[q, x, z]",
+            "MapIndexed::error: Unsupported Level specification: 'z'."},
+    };
+    for (const auto& diagnostic : traversal_diagnostic_cases) {
+        Evaluator traversal_diagnostics;
+        check_equal(traversal_diagnostics.evaluate(parse_input_form(
+            diagnostic.source)).to_full_form(), diagnostic.expected_result,
+            "traversal failure remains inert: " + diagnostic.source);
+        const auto function = diagnostic.source.substr(
+            0, diagnostic.source.find('['));
+        check_equal(traversal_diagnostics.messages().empty() ? ""
+                : traversal_diagnostics.messages().front().to_full_form(),
+            "MessageName[" + function + ", \"error\"]",
+            "traversal diagnostic message name: " + diagnostic.source);
+        check_equal(traversal_diagnostics.message_texts().empty() ? ""
+                : traversal_diagnostics.message_texts().front(),
+            diagnostic.expected_message,
+            "traversal diagnostic text: " + diagnostic.source);
+        check(traversal_diagnostics.messages().size() == 1,
+            "traversal emits one diagnostic: " + diagnostic.source);
+    }
+
     const std::vector<std::pair<std::string, std::string>> structural_selector_cases{
         {"Part[{a,b,c},{{1},{3}}]", "List[a, c]"},
         {"Part[<|a->1,b->2,c->3|>,0]", "Association"},

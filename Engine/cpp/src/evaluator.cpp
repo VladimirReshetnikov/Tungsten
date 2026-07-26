@@ -2431,30 +2431,54 @@ std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = inte
 }
 
 constexpr long level_infinity = 1000000000L;
-struct LevelBounds { long minimum; long maximum; bool valid; };
+struct LevelBounds {
+    long minimum;
+    long maximum;
+    bool valid;
+    std::string error;
+
+    LevelBounds(long minimum_value, long maximum_value, bool is_valid,
+        std::string error_message = {})
+        : minimum(minimum_value), maximum(maximum_value), valid(is_valid),
+          error(std::move(error_message)) {}
+};
+
+std::optional<long> normalized_level_integer(const Expr& expression) {
+    if (expression.kind() != ExprKind::Integer) return std::nullopt;
+    const auto& value = expression.integer_value();
+    if (value > level_infinity) return level_infinity;
+    if (value < -level_infinity) return -level_infinity;
+    return value.get_si();
+}
 
 LevelBounds normalize_level_spec(const Expr& specification) {
     if (is_symbol(specification, "Infinity")) return {1, level_infinity, true};
-    if (const auto level = machine_index(specification)) return *level >= 0
+    if (const auto level = normalized_level_integer(specification)) return *level >= 0
         ? LevelBounds{*level == 0 ? 0 : 1, *level, true} : LevelBounds{1, *level, true};
     if (specification.has_head("List") && specification.args().size() == 1) {
         if (is_symbol(specification.args()[0], "Infinity")) return {level_infinity, level_infinity, true};
-        if (const auto level = machine_index(specification.args()[0])) return {*level, *level, true};
+        if (const auto level = normalized_level_integer(specification.args()[0]))
+            return {*level, *level, true};
+        return {0, 0, false, "Unsupported level bound: "
+            + specification.args()[0].to_input_form() + "."};
     }
     if (specification.has_head("List") && specification.args().size() == 2) {
-        const auto lower = machine_index(specification.args()[0]);
+        const auto lower = normalized_level_integer(specification.args()[0]);
         const auto upper = is_symbol(specification.args()[1], "Infinity") ? std::optional<long>(level_infinity)
-            : machine_index(specification.args()[1]);
+            : normalized_level_integer(specification.args()[1]);
         if (lower && upper) return {*lower, *upper, true};
     }
-    return {0, 0, false};
+    return {0, 0, false, "Unsupported Level specification: '"
+        + specification.to_input_form() + "'."};
 }
 
 std::size_t semantic_expression_depth(const Expr& value) {
     if (const auto rules = association_rules(value)) {
+        if (rules->empty()) return 2;
         std::size_t depth = 1; for (const auto& rule : *rules) depth = std::max(depth, semantic_expression_depth(rule.args()[1]) + 1); return depth;
     }
     if (value.kind() != ExprKind::Call) return 1;
+    if (value.args().empty()) return 2;
     std::size_t depth = 1; for (const auto& item : value.args()) depth = std::max(depth, semantic_expression_depth(item) + 1); return depth;
 }
 
@@ -3420,6 +3444,33 @@ Expr remove_nothing_from_list_like(Expr expression) {
     std::vector<Expr> values;
     for (const auto& value : expression.args()) if (!is_symbol(value, "Nothing")) values.push_back(value);
     return call(expression.head(), std::move(values));
+}
+
+std::vector<Expr> structural_children(const Expr& expression) {
+    if (const auto rules = association_rules(expression)) {
+        std::vector<Expr> values;
+        values.reserve(rules->size());
+        for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        return values;
+    }
+    return expression.kind() == ExprKind::Call ? expression.args() : std::vector<Expr>{};
+}
+
+Expr rebuild_structural_children(const Expr& expression, std::vector<Expr> children,
+                                 const std::optional<Expr>& replacement_head = std::nullopt) {
+    if (const auto rules = association_rules(expression)) {
+        if (children.size() != rules->size()) return expression;
+        std::vector<Expr> rebuilt;
+        rebuilt.reserve(rules->size());
+        for (std::size_t index = 0; index < rules->size(); ++index) {
+            const auto& rule = (*rules)[index];
+            rebuilt.push_back(call(rule.head(), {rule.args()[0], std::move(children[index])}));
+        }
+        return call(expression.head(), std::move(rebuilt));
+    }
+    if (expression.kind() != ExprKind::Call) return expression;
+    return remove_nothing_from_list_like(call(
+        replacement_head.value_or(expression.head()), std::move(children)));
 }
 
 std::optional<std::vector<Expr>> normalized_association_rules(const std::vector<Expr>& source) {
@@ -7673,12 +7724,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         Expr value = args[0]; for (const auto& callable : functions) value = evaluate(call(callable, {value}));
         return value;
     }
-    if (head.has_head("MapApply") && head.args().size() == 1 && args.size() == 1 && args[0].kind() == ExprKind::Call) {
-        std::vector<Expr> values;
-        for (const auto& item : args[0].args()) values.push_back(item.kind() == ExprKind::Call
-            ? evaluate(call(head.args()[0], item.args())) : evaluate(call(head.args()[0], {item})));
-        return call(args[0].head(), std::move(values));
-    }
+    if ((head.has_head("MapApply") || head.has_head("MapIndexed"))
+        && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call(head.head(), {head.args()[0], args[0]}));
     if (head.has_head("KeySelect") && head.args().size() == 1 && args.size() == 1)
         return evaluate(call("KeySelect", {args[0], head.args()[0]}));
     if (head.has_head("Select") && head.args().size() == 1 && args.size() == 1)
@@ -11182,30 +11230,38 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (association_rules(args[0])) return integer(semantic_depth(semantic_depth, args[0]));
         return integer(args[0].depth());
     }
-    if (function == "Level" && args.size() >= 2) {
-        if (args[1].has_head("List") && args[1].args().size() == 1
-            && machine_index(args[1].args()[0])
-            && *machine_index(args[1].args()[0]) == -1) {
-            std::vector<Expr> atoms;
-            auto collect_atoms = [&](auto&& self, const Expr& value) -> void {
-                if (value.kind() != ExprKind::Call) {
-                    if (!is_symbol(value, "Nothing")) atoms.push_back(value);
-                    return;
-                }
-                for (const auto& item : value.args()) self(self, item);
-            };
-            if (args[0].kind() == ExprKind::Call)
-                for (const auto& item : args[0].args()) collect_atoms(collect_atoms, item);
-            return list(std::move(atoms));
+    auto invalid_traversal_call = [&](const std::string& detail) {
+        const auto message_head = raw_head.symbol_name() ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + detail);
+        return call(raw_head, raw_args);
+    };
+    if (function == "Level") {
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "Level expects an expression, a level specification, and an optional heads flag.");
+        if (args.size() == 3) {
+            if (!is_symbol(args[2], "True") && !is_symbol(args[2], "False"))
+                return invalid_traversal_call(
+                    "The optional third Level argument must be True or False.");
+            if (is_symbol(args[2], "True"))
+                return invalid_traversal_call("Level[..., ..., True] is not implemented yet.");
         }
-        std::vector<Expr> atoms, compounds;
-        auto collect = [&](auto&& self, const Expr& value) -> void {
-            if (value.kind() != ExprKind::Call) { if (!is_symbol(value, "Nothing")) atoms.push_back(value); return; }
-            for (const auto& item : value.args()) self(self, item);
-            compounds.push_back(value);
+        const auto bounds = normalize_level_spec(args[1]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        std::vector<Expr> values;
+        auto collect = [&](auto&& self, const Expr& value, long positive) -> void {
+            if (value.kind() == ExprKind::Call)
+                for (const auto& child : structural_children(value))
+                    self(self, child, positive + 1);
+            if (level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                values.push_back(value);
         };
-        if (args[0].kind() == ExprKind::Call) for (const auto& item : args[0].args()) collect(collect, item);
-        atoms.insert(atoms.end(), compounds.begin(), compounds.end()); return list(std::move(atoms));
+        collect(collect, args[0], 0);
+        return remove_nothing_from_list_like(list(std::move(values)));
     }
     if (function == "Part") {
         auto invalid_part = [&](const std::string& detail) {
@@ -11304,44 +11360,65 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, function + "::error: " + error);
         return call(raw_head, raw_args);
     }
-    if (function == "Map" && args.size() == 3 && args[2].has_head("Rule")
-        && args[2].args().size() == 2 && is_symbol(args[2].args()[0], "Heads")
-        && args[1].kind() == ExprKind::Call) {
-        const bool include_heads = is_symbol(args[2].args()[1], "True");
-        Expr mapped_head = args[1].head();
-        if (include_heads) mapped_head = evaluate(call(args[0], {mapped_head}));
-        std::vector<Expr> values;
-        for (const auto& item : args[1].args()) values.push_back(evaluate(call(args[0], {item})));
-        return call(mapped_head, std::move(values));
+    if (function == "Apply") {
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "Apply expects a head, an expression, and an optional level specification.");
+        auto apply_head = [&](const Expr& value) {
+            if (value.kind() != ExprKind::Call) return value;
+            return evaluate(call(args[0], structural_children(value)));
+        };
+        if (args.size() == 2) return apply_head(args[1]);
+        const auto bounds = normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto transform = [&](auto&& self, const Expr& value, long positive) -> Expr {
+            Expr rebuilt = value;
+            if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children;
+                for (const auto& child : structural_children(value))
+                    children.push_back(self(self, child, positive + 1));
+                rebuilt = rebuild_structural_children(value, std::move(children));
+            }
+            if (!level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                return rebuilt;
+            return apply_head(rebuilt);
+        };
+        return transform(transform, args[1], 0);
     }
-    if ((function == "Apply" || function == "Map") && args.size() == 3) {
-        long minimum = -1, maximum = -1;
-        if (args[2].has_head("List") && args[2].args().size() == 1 && machine_index(args[2].args()[0])) minimum = maximum = *machine_index(args[2].args()[0]);
-        else if (args[2].has_head("List") && args[2].args().size() == 2 && machine_index(args[2].args()[0]) && machine_index(args[2].args()[1])) {
-            minimum = *machine_index(args[2].args()[0]); maximum = *machine_index(args[2].args()[1]);
+    if (function == "Map") {
+        std::size_t argument_count = args.size();
+        bool include_heads = false;
+        if (argument_count != 0 && args[argument_count - 1].has_head("Rule")
+            && args[argument_count - 1].args().size() == 2
+            && is_symbol(args[argument_count - 1].args()[0], "Heads")) {
+            include_heads = is_symbol(args[argument_count - 1].args()[1], "True");
+            --argument_count;
         }
-        if (minimum >= 0 && maximum >= minimum) {
-            auto transform = [&](auto&& self, const Expr& value, long depth) -> Expr {
-                Expr current = value;
-                if (value.kind() == ExprKind::Call) { std::vector<Expr> children; for (const auto& child : value.args()) children.push_back(self(self, child, depth + 1)); current = call(value.head(), std::move(children)); }
-                if (depth < minimum || depth > maximum) return current;
-                return function == "Map" ? evaluate(call(args[0], {current}))
-                    : current.kind() == ExprKind::Call ? call(args[0], current.args()) : current;
-            };
-            return transform(transform, args[1], 0);
-        }
-    }
-    if ((function == "Apply" || function == "Map") && args.size() == 2) {
-        if (args[1].kind() != ExprKind::Call) return args[1];
-        if (const auto rules = association_rules(args[1])) {
-            if (function == "Apply") { std::vector<Expr> values; for (const auto& rule : *rules) values.push_back(rule.args()[1]); return evaluate(call(args[0], values)); }
-            std::vector<Expr> mapped; for (const auto& rule : *rules) mapped.push_back(call("Rule", {rule.args()[0], evaluate(call(args[0], {rule.args()[1]}))}));
-            return call("Association", std::move(mapped));
-        }
-        if (function == "Apply") return evaluate(call(args[0], args[1].args()));
-        std::vector<Expr> values;
-        for (const auto& item : args[1].args()) values.push_back(evaluate(call(args[0], {item})));
-        return remove_nothing_from_list_like(call(args[1].head(), std::move(values)));
+        if (argument_count != 2 && argument_count != 3)
+            return invalid_traversal_call(
+                "Map expects a function, an expression, and an optional level specification.");
+        const auto bounds = argument_count == 2
+            ? LevelBounds{1, 1, true} : normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto transform = [&](auto&& self, const Expr& value, long positive) -> Expr {
+            Expr rebuilt = value;
+            if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children;
+                for (const auto& child : structural_children(value))
+                    children.push_back(self(self, child, positive + 1));
+                std::optional<Expr> mapped_head;
+                if (include_heads && !association_rules(value))
+                    mapped_head = self(self, value.head(), positive + 1);
+                rebuilt = rebuild_structural_children(
+                    value, std::move(children), mapped_head);
+            }
+            if (!level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                return rebuilt;
+            return evaluate(call(args[0], {rebuilt}));
+        };
+        return transform(transform, args[1], 0);
     }
     if ((function == "Select" || function == "Discard" || function == "SelectFirst") && args.size() >= 2) {
         const auto rules = association_rules(args[0]);
@@ -11423,26 +11500,32 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         if (bounds.valid) { scan(scan, args[1], 0); return symbol("Null"); }
     }
-    if (function == "MapApply" && args.size() == 3) {
-        const auto bounds = normalize_level_spec(args[2]);
-        auto map_apply = [&](auto&& self, const Expr& value, long positive) -> Expr {
+    if (function == "MapApply") {
+        if (args.size() == 1) return call(head, args);
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "MapApply expects a function, an expression, and an optional level specification.");
+        const auto bounds = args.size() == 2
+            ? LevelBounds{1, 1, true} : normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto apply_head = [&](const Expr& value) {
+            if (value.kind() != ExprKind::Call) return value;
+            return evaluate(call(args[0], structural_children(value)));
+        };
+        auto transform = [&](auto&& self, const Expr& value, long positive) -> Expr {
             Expr rebuilt = value;
             if (value.kind() == ExprKind::Call) {
                 std::vector<Expr> children;
-                for (const auto& child : value.args()) children.push_back(self(self, child, positive + 1));
-                rebuilt = call(value.head(), std::move(children));
+                for (const auto& child : structural_children(value))
+                    children.push_back(self(self, child, positive + 1));
+                rebuilt = rebuild_structural_children(value, std::move(children));
             }
-            if (!level_matches(positive, -static_cast<long>(semantic_expression_depth(rebuilt)), bounds)) return rebuilt;
-            return rebuilt.kind() == ExprKind::Call
-                ? evaluate(call(args[0], rebuilt.args())) : evaluate(call(args[0], {rebuilt}));
+            if (positive < 1 || !level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                return rebuilt;
+            return apply_head(rebuilt);
         };
-        if (bounds.valid) return map_apply(map_apply, args[1], 0);
-    }
-    if (function == "MapApply" && args.size() == 2 && args[1].kind() == ExprKind::Call) {
-        std::vector<Expr> values;
-        for (const auto& item : args[1].args()) values.push_back(item.kind() == ExprKind::Call
-            ? evaluate(call(args[0], item.args())) : evaluate(call(args[0], {item})));
-        return call(args[1].head(), std::move(values));
+        return transform(transform, args[1], 0);
     }
     if (function == "MapAll" && (args.size() == 2 || (args.size() == 3 && args[2].has_head("Rule")
         && args[2].args().size() == 2 && is_symbol(args[2].args()[0], "Heads")))) {
@@ -11455,17 +11538,42 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         return map_all(map_all, args[1]);
     }
-    if (function == "MapIndexed" && args.size() == 2 && args[1].kind() == ExprKind::Call) {
-        if (const auto rules = association_rules(args[1])) {
-            std::vector<Expr> mapped;
-            for (const auto& rule : *rules) mapped.push_back(call("Rule", {rule.args()[0],
-                evaluate(call(args[0], {rule.args()[1], list({call("Key", {rule.args()[0]})})}))}));
-            return call("Association", std::move(mapped));
-        }
-        std::vector<Expr> values;
-        for (std::size_t index = 0; index < args[1].args().size(); ++index)
-            values.push_back(evaluate(call(args[0], {args[1].args()[index], list({integer(index + 1)})})));
-        return call(args[1].head(), std::move(values));
+    if (function == "MapIndexed") {
+        if (args.size() == 1) return call(head, args);
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "MapIndexed expects a function, an expression, and an optional level specification.");
+        const auto bounds = args.size() == 2
+            ? LevelBounds{1, 1, true} : normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto transform = [&](auto&& self, const Expr& value, std::vector<Expr> path) -> Expr {
+            Expr rebuilt = value;
+            if (const auto rules = association_rules(value)) {
+                std::vector<Expr> children;
+                children.reserve(rules->size());
+                for (const auto& rule : *rules) {
+                    auto child_path = path;
+                    child_path.push_back(call("Key", {rule.args()[0]}));
+                    children.push_back(self(self, rule.args()[1], std::move(child_path)));
+                }
+                rebuilt = rebuild_structural_children(value, std::move(children));
+            } else if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children;
+                children.reserve(value.args().size());
+                for (std::size_t index = 0; index < value.args().size(); ++index) {
+                    auto child_path = path;
+                    child_path.push_back(integer(index + 1));
+                    children.push_back(self(self, value.args()[index], std::move(child_path)));
+                }
+                rebuilt = rebuild_structural_children(value, std::move(children));
+            }
+            const auto positive = static_cast<long>(path.size());
+            if (positive < 1 || !level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(rebuilt)), bounds))
+                return rebuilt;
+            return evaluate(call(args[0], {rebuilt, list(std::move(path))}));
+        };
+        return transform(transform, args[1], {});
     }
     if (function == "Construct" && args.size() >= 1)
         return evaluate(call(args[0], std::vector<Expr>(args.begin() + 1, args.end())));
