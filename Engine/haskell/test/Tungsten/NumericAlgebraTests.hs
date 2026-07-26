@@ -94,6 +94,22 @@ valueCases =
     , "{System`FactorInteger[12],System`ContinuedFraction[10/7],System`FromDigits[{1,0,1},2],System`ChineseRemainder[{2,3},{3,5}]}"
     , "List[List[List[2, 2], List[3, 1]], List[1, 2, 3], 5, 8]"
     )
+  , ( "residue symbols and exact integer sequences"
+    , "{JacobiSymbol[1001,9907],KroneckerSymbol[-1,2],KroneckerSymbol[3,0],BernoulliB[0],BernoulliB[1],BernoulliB[2],BernoulliB[10],EulerE[0],EulerE[5],EulerE[6]}"
+    , "List[-1, 1, 0, 1, Rational[-1, 2], Rational[1, 6], Rational[5, 66], 1, 0, -61]"
+    )
+  , ( "primitive roots and Ramanujan tau"
+    , "{PrimitiveRoot[2],PrimitiveRoot[7],PrimitiveRoot[8],RamanujanTau[1],RamanujanTau[2],RamanujanTau[5]}"
+    , "List[1, 3, PrimitiveRoot[8], 1, -24, 4830]"
+    )
+  , ( "Gaussian integer factorization"
+    , "{FactorInteger[5,GaussianIntegers->True],FactorInteger[3+4 I,GaussianIntegers->True],FactorInteger[1,GaussianIntegers->True],FactorInteger[0,GaussianIntegers->True]}"
+    , "List[List[List[Complex[0, -1], 1], List[Complex[1, 2], 1], List[Complex[2, 1], 1]], List[List[Complex[2, 1], 2]], List[List[1, 1]], List[List[0, 1]]]"
+    )
+  , ( "remaining invalid exact sequence domains stay symbolic"
+    , "{JacobiSymbol[1,2],BernoulliB[-1],PrimitiveRoot[1],RamanujanTau[0],FactorInteger[5,2,GaussianIntegers->True]}"
+    , "List[JacobiSymbol[1, 2], BernoulliB[-1], PrimitiveRoot[1], RamanujanTau[0], FactorInteger[5, 2, Rule[GaussianIntegers, True]]]"
+    )
   ]
 
 errorCases :: [(Text, Text, Text)]

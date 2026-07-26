@@ -30,8 +30,12 @@ reduceNumericBuiltin headName arguments' = Right $ case headName of
   "IntegerPartitions" -> reduceIntegerPartitions arguments'
   "Binomial" -> integerBinary binomialInteger arguments'
   "Multinomial" -> reduceMultinomial arguments'
+  "JacobiSymbol" -> reduceJacobiSymbol arguments'
+  "KroneckerSymbol" -> reduceKroneckerSymbol arguments'
   "Fibonacci" -> integerUnary fibonacciInteger arguments'
   "LucasL" -> integerUnary lucasInteger arguments'
+  "BernoulliB" -> constrainedIntegerExprUnary (>= 0) (fromFraction . bernoulliNumber) arguments'
+  "EulerE" -> constrainedIntegerUnary (>= 0) eulerNumber arguments'
   "HarmonicNumber" -> reduceHarmonicNumber arguments'
   "UnitStep" -> integerVariadic (\values -> if all (>= 0) values then 1 else 0) arguments'
   "Unitize" -> integerUnary (\value -> if value == 0 then 0 else 1) arguments'
@@ -54,6 +58,7 @@ reduceNumericBuiltin headName arguments' = Right $ case headName of
   "MoebiusMu" -> constrainedIntegerUnary (> 0) moebiusMu arguments'
   "LiouvilleLambda" -> constrainedIntegerUnary (> 0) liouvilleLambda arguments'
   "JordanTotient" -> reduceJordanTotient arguments'
+  "RamanujanTau" -> constrainedIntegerUnary (>= 1) ramanujanTau arguments'
   "DivisorSigma" -> reduceDivisorSigma arguments'
   "PrimePi" -> constrainedIntegerUnary (>= 0) primePi arguments'
   "Prime" -> constrainedIntegerUnary (>= 1) nthPrime arguments'
@@ -61,6 +66,7 @@ reduceNumericBuiltin headName arguments' = Right $ case headName of
   "PowerMod" -> reducePowerMod arguments'
   "ModularInverse" -> reduceModularInverse arguments'
   "MultiplicativeOrder" -> reduceMultiplicativeOrder arguments'
+  "PrimitiveRoot" -> reducePrimitiveRoot arguments'
   "IntegerLength" -> reduceIntegerLength arguments'
   "IntegerDigits" -> reduceIntegerDigits arguments'
   "IntegerReverse" -> reduceIntegerReverse arguments'
@@ -82,11 +88,17 @@ reduceNumericBuiltin headName arguments' = Right $ case headName of
 reduceFactorInteger :: [Expr] -> Maybe Expr
 reduceFactorInteger [] = Nothing
 reduceFactorInteger (value : options) = do
-  (numerator, denominator) <- exactFractionParts value
   (partialLimit, gaussianIntegers) <- parseFactorOptions options
   if gaussianIntegers
-    then Nothing
-    else
+    then do
+      if partialLimit == Nothing then pure () else Nothing
+      factors <- gaussianFactorsForExpr value
+      Just . listExpr $
+        [ listExpr [gaussianExpr factor, Integer exponentValue]
+        | (factor, exponentValue) <- factors
+        ]
+    else do
+      (numerator, denominator) <- exactFractionParts value
       Just . listExpr . map factorPair $
         specialFactors partialLimit numerator denominator
  where
@@ -101,6 +113,143 @@ reduceFactorInteger (value : options) = do
       <> [ (factor, negate exponentValue)
          | (factor, exponentValue) <- factorWithLimit denominator partialLimit
          ]
+
+gaussianFactorsForExpr :: Expr -> Maybe [((Integer, Integer), Integer)]
+gaussianFactorsForExpr value
+  | Just gaussian <- exactGaussianInteger value = Just (gaussianFactorInteger gaussian)
+  | Just (numerator, denominator) <- exactFractionParts value =
+      Just
+        ( gaussianFactorInteger (numerator, 0)
+            <> [ (factor, negate exponentValue)
+               | (factor, exponentValue) <- gaussianFactorInteger (denominator, 0)
+               ]
+        )
+  | otherwise = Nothing
+
+exactGaussianInteger :: Expr -> Maybe (Integer, Integer)
+exactGaussianInteger (Integer value) = Just (value, 0)
+exactGaussianInteger (Rational numerator 1) = Just (numerator, 0)
+exactGaussianInteger (Complex realPart imaginaryPart) = do
+  realValue <- exactIntegerPart realPart
+  imaginaryValue <- exactIntegerPart imaginaryPart
+  Just (realValue, imaginaryValue)
+exactGaussianInteger (Symbol name)
+  | name `elem` ["I", "System`I"] = Just (0, 1)
+exactGaussianInteger (Call (Symbol headName) values)
+  | headName `elem` ["Complex", "System`Complex"] = case values of
+      [realPart, imaginaryPart] -> do
+        realValue <- exactIntegerPart realPart
+        imaginaryValue <- exactIntegerPart imaginaryPart
+        Just (realValue, imaginaryValue)
+      _ -> Nothing
+  | headName `elem` ["Plus", "System`Plus"] =
+      foldl' addGaussian (Just (0, 0)) (map exactGaussianInteger values)
+  | headName `elem` ["Times", "System`Times"] =
+      foldl' multiplyGaussian (Just (1, 0)) (map exactGaussianInteger values)
+exactGaussianInteger _ = Nothing
+
+exactIntegerPart :: Expr -> Maybe Integer
+exactIntegerPart (Integer value) = Just value
+exactIntegerPart (Rational numerator 1) = Just numerator
+exactIntegerPart _ = Nothing
+
+addGaussian
+  :: Maybe (Integer, Integer)
+  -> Maybe (Integer, Integer)
+  -> Maybe (Integer, Integer)
+addGaussian (Just (leftReal, leftImaginary)) (Just (rightReal, rightImaginary)) =
+  Just (leftReal + rightReal, leftImaginary + rightImaginary)
+addGaussian _ _ = Nothing
+
+multiplyGaussian
+  :: Maybe (Integer, Integer)
+  -> Maybe (Integer, Integer)
+  -> Maybe (Integer, Integer)
+multiplyGaussian (Just (leftReal, leftImaginary)) (Just (rightReal, rightImaginary)) =
+  Just
+    ( leftReal * rightReal - leftImaginary * rightImaginary
+    , leftReal * rightImaginary + leftImaginary * rightReal
+    )
+multiplyGaussian _ _ = Nothing
+
+gaussianExpr :: (Integer, Integer) -> Expr
+gaussianExpr (realPart, 0) = Integer realPart
+gaussianExpr (realPart, imaginaryPart) =
+  Complex (Integer realPart) (Integer imaginaryPart)
+
+gaussianFactorInteger :: (Integer, Integer) -> [((Integer, Integer), Integer)]
+gaussianFactorInteger (0, 0) = [((0, 0), 1)]
+gaussianFactorInteger value@(realPart, imaginaryPart)
+  | norm == 1 = [(value, 1)]
+  | otherwise =
+      let (remaining, factors) =
+            foldl' dividePrimeCandidates (value, []) (map fst (factorInteger norm))
+       in if remaining == (1, 0)
+            then factors
+            else (remaining, 1) : factors
+ where
+  norm = realPart * realPart + imaginaryPart * imaginaryPart
+  dividePrimeCandidates state prime =
+    foldl' divideCandidate state (gaussianPrimeCandidates prime)
+  divideCandidate (remaining, factors) candidate =
+    let (quotient, exponentValue) = divideRepeatedlyGaussian remaining candidate 0
+     in ( quotient
+        , factors
+            <> if exponentValue == 0 then [] else [(candidate, exponentValue)]
+        )
+
+divideRepeatedlyGaussian
+  :: (Integer, Integer)
+  -> (Integer, Integer)
+  -> Integer
+  -> ((Integer, Integer), Integer)
+divideRepeatedlyGaussian value divisor exponentValue =
+  case divideGaussianInteger value divisor of
+    Nothing -> (value, exponentValue)
+    Just quotient -> divideRepeatedlyGaussian quotient divisor (exponentValue + 1)
+
+gaussianPrimeCandidates :: Integer -> [(Integer, Integer)]
+gaussianPrimeCandidates 2 = [(1, 1)]
+gaussianPrimeCandidates prime
+  | prime `mod` 4 == 3 = [(prime, 0)]
+  | otherwise = case sumOfTwoSquares prime of
+      Nothing -> [(prime, 0)]
+      Just (small, large)
+        | small == large -> [(small, large)]
+        | otherwise -> [(small, large), (large, small)]
+
+sumOfTwoSquares :: Integer -> Maybe (Integer, Integer)
+sumOfTwoSquares prime = search 1
+ where
+  search first
+    | first * first > prime = Nothing
+    | otherwise =
+        let secondSquared = prime - first * first
+            second = integerSquareRoot secondSquared
+         in if second >= first && second * second == secondSquared
+              then Just (first, second)
+              else search (first + 1)
+
+integerSquareRoot :: Integer -> Integer
+integerSquareRoot value
+  | value < 2 = value
+  | otherwise = converge (value `div` 2 + 1)
+ where
+  converge estimate =
+    let next = (estimate + value `div` estimate) `div` 2
+     in if next >= estimate then estimate else converge next
+
+divideGaussianInteger
+  :: (Integer, Integer)
+  -> (Integer, Integer)
+  -> Maybe (Integer, Integer)
+divideGaussianInteger (realPart, imaginaryPart) (divisorReal, divisorImaginary) =
+  let norm = divisorReal * divisorReal + divisorImaginary * divisorImaginary
+      realNumerator = realPart * divisorReal + imaginaryPart * divisorImaginary
+      imaginaryNumerator = imaginaryPart * divisorReal - realPart * divisorImaginary
+   in if realNumerator `mod` norm == 0 && imaginaryNumerator `mod` norm == 0
+        then Just (realNumerator `div` norm, imaginaryNumerator `div` norm)
+        else Nothing
 
 exactFractionParts :: Expr -> Maybe (Integer, Integer)
 exactFractionParts (Integer value) = Just (value, 1)
@@ -341,6 +490,15 @@ constrainedIntegerUnary predicate function [Integer value]
   | predicate value = Just (Integer (function value))
 constrainedIntegerUnary _ _ _ = Nothing
 
+constrainedIntegerExprUnary
+  :: (Integer -> Bool)
+  -> (Integer -> Expr)
+  -> [Expr]
+  -> Maybe Expr
+constrainedIntegerExprUnary predicate function [Integer value]
+  | predicate value = Just (function value)
+constrainedIntegerExprUnary _ _ _ = Nothing
+
 integerBinary :: (Integer -> Integer -> Integer) -> [Expr] -> Maybe Expr
 integerBinary function [Integer left, Integer right] = Just (Integer (function left right))
 integerBinary _ _ = Nothing
@@ -361,6 +519,81 @@ reduceMultinomial values = do
       let total = sum integers
           denominator = product (map factorialInteger integers)
        in Just (Integer (factorialInteger total `div` denominator))
+
+reduceJacobiSymbol :: [Expr] -> Maybe Expr
+reduceJacobiSymbol [Integer numerator, Integer denominator]
+  | denominator > 0 && odd denominator = Just (Integer (jacobiSymbol numerator denominator))
+reduceJacobiSymbol _ = Nothing
+
+jacobiSymbol :: Integer -> Integer -> Integer
+jacobiSymbol numerator denominator = go (numerator `mod` denominator) denominator 1
+ where
+  go 0 currentDenominator result = if currentDenominator == 1 then result else 0
+  go currentNumerator currentDenominator result =
+    let (oddNumerator, powersOfTwo) = removeTwos currentNumerator (0 :: Integer)
+        afterTwos
+          | even powersOfTwo = result
+          | currentDenominator `mod` 8 `elem` [3, 5] = negate result
+          | otherwise = result
+        afterReciprocity
+          | oddNumerator `mod` 4 == 3 && currentDenominator `mod` 4 == 3 = negate afterTwos
+          | otherwise = afterTwos
+     in go (currentDenominator `mod` oddNumerator) oddNumerator afterReciprocity
+  removeTwos value count
+    | even value = removeTwos (value `div` 2) (count + 1)
+    | otherwise = (value, count)
+
+reduceKroneckerSymbol :: [Expr] -> Maybe Expr
+reduceKroneckerSymbol [Integer numerator, Integer denominator] =
+  Just (Integer (kroneckerSymbol numerator denominator))
+reduceKroneckerSymbol _ = Nothing
+
+kroneckerSymbol :: Integer -> Integer -> Integer
+kroneckerSymbol numerator 0 = if abs numerator == 1 then 1 else 0
+kroneckerSymbol _ 1 = 1
+kroneckerSymbol numerator denominator
+  | denominator < 0 =
+      (if numerator < 0 then -1 else 1) * kroneckerSymbol numerator (abs denominator)
+  | otherwise =
+      let (oddDenominator, powersOfTwo) = removeTwos denominator (0 :: Integer)
+          atTwo
+            | even powersOfTwo = 1
+            | even numerator = 0
+            | numerator `mod` 8 `elem` [1, 7] = 1
+            | otherwise = -1
+          oddPart = if oddDenominator == 1 then 1 else jacobiSymbol numerator oddDenominator
+       in atTwo * oddPart
+ where
+  removeTwos value count
+    | even value = removeTwos (value `div` 2) (count + 1)
+    | otherwise = (value, count)
+
+bernoulliNumber :: Integer -> Fraction
+bernoulliNumber index = snd (foldl' appendValue ([Fraction 1 1], Fraction 1 1) [1 .. index])
+ where
+  appendValue (previous, _) current =
+    let weighted =
+          [ multiplyFraction (binomialInteger (current + 1) position) value
+          | (position, value) <- zip [0 ..] previous
+          ]
+        total = foldl' addFraction (Fraction 0 1) weighted
+        next = multiplyFraction (-1) (divideFraction total (Fraction (current + 1) 1))
+     in (previous <> [next], next)
+
+eulerNumber :: Integer -> Integer
+eulerNumber index = snd (foldl' appendValue ([1], 1) [1 .. index])
+ where
+  appendValue (previous, _) current
+    | odd current = (previous <> [0], 0)
+    | otherwise =
+        let next =
+              negate
+                ( sum
+                    [ binomialInteger current position * (previous !! fromInteger position)
+                    | position <- [0, 2 .. current - 2]
+                    ]
+                )
+         in (previous <> [next], next)
 
 factorialInteger :: Integer -> Integer
 factorialInteger value = product [1 .. value]
@@ -570,6 +803,33 @@ jordanTotient order value =
     (value ^ order)
     (factorInteger value)
 
+ramanujanTau :: Integer -> Integer
+ramanujanTau index = coefficients !! fromInteger degree
+ where
+  degree = index - 1
+  initial = 1 : replicate (fromInteger degree) 0
+  coefficients = foldl' multiplyFactor initial [1 .. degree]
+  multiplyFactor current part =
+    foldl' (accumulateTerm current part) (replicate (length current) 0) [0 .. degree]
+  accumulateTerm current part next sourceIndex =
+    let coefficient = current !! fromInteger sourceIndex
+        maximumExponent = min 24 ((degree - sourceIndex) `div` part)
+     in if coefficient == 0
+          then next
+          else
+            foldl'
+              (addExponent coefficient part sourceIndex)
+              next
+              [0 .. maximumExponent]
+  addExponent coefficient part sourceIndex next exponentValue =
+    let target = sourceIndex + part * exponentValue
+        multiplier =
+          (if odd exponentValue then negate else id)
+            (binomialInteger 24 exponentValue)
+        targetIndex = fromInteger target
+        updated = next !! targetIndex + coefficient * multiplier
+     in replaceAt targetIndex updated next
+
 reduceDivisorSigma :: [Expr] -> Maybe Expr
 reduceDivisorSigma [Integer order, Integer value]
   | value /= 0 =
@@ -649,6 +909,21 @@ multiplicativeOrder value modulus = search 1 (value `mod` modulus)
   search exponentValue residue
     | residue == 1 = exponentValue
     | otherwise = search (exponentValue + 1) ((residue * value) `mod` modulus)
+
+reducePrimitiveRoot :: [Expr] -> Maybe Expr
+reducePrimitiveRoot [Integer modulus]
+  | modulus > 1 = Integer <$> firstPrimitiveRoot modulus
+reducePrimitiveRoot _ = Nothing
+
+firstPrimitiveRoot :: Integer -> Maybe Integer
+firstPrimitiveRoot modulus = findCandidate 1
+ where
+  targetOrder = eulerPhi modulus
+  findCandidate candidate
+    | candidate >= modulus = Nothing
+    | gcd candidate modulus == 1
+        && multiplicativeOrder candidate modulus == targetOrder = Just candidate
+    | otherwise = findCandidate (candidate + 1)
 
 reduceIntegerLength :: [Expr] -> Maybe Expr
 reduceIntegerLength [Integer value] = Just (Integer (integerLength value 10))
@@ -790,6 +1065,15 @@ addFraction (Fraction leftNumerator leftDenominator) (Fraction rightNumerator ri
         (leftNumerator * rightDenominator + rightNumerator * leftDenominator)
         (leftDenominator * rightDenominator)
     )
+
+multiplyFraction :: Integer -> Fraction -> Fraction
+multiplyFraction multiplier (Fraction numerator denominator) =
+  normalizeFraction (Fraction (multiplier * numerator) denominator)
+
+divideFraction :: Fraction -> Fraction -> Fraction
+divideFraction (Fraction leftNumerator leftDenominator) (Fraction rightNumerator rightDenominator) =
+  normalizeFraction
+    (Fraction (leftNumerator * rightDenominator) (leftDenominator * rightNumerator))
 
 fromFraction :: Fraction -> Expr
 fromFraction value = case normalizeFraction value of
