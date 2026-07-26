@@ -43,13 +43,29 @@ valueCases =
     , "{PolynomialQ[x^2+I x+1,x],Coefficient[x^2+I x+1,x],CoefficientList[x^2+I x+1,x]}"
     , "List[True, Complex[0, 1], List[1, Complex[0, 1], 1]]"
     )
+  , ( "structural fraction projections"
+    , "{Numerator[(x^2-1)/(x+1)],Denominator[(x^2-1)/(x+1)],Numerator[{1/2,x/y}],Denominator[{1/2,x/y}]}"
+    , "List[Plus[-1, Power[x, 2]], Plus[1, x], List[1, x], List[2, y]]"
+    )
+  , ( "rational combination and cancellation"
+    , "{Together[1/x+1/y],Cancel[(x^2-1)/(x-1)],Apart[(x+1)/(x^2-1)]}"
+    , "List[Times[Plus[x, y], Power[x, -1], Power[y, -1]], Plus[1, x], Power[Plus[-1, x], -1]]"
+    )
+  , ( "rational polynomial factorization"
+    , "{Factor[x^2-1],Factor[2x y+2y],FactorList[2x^2-2],FactorList[0]}"
+    , "List[Times[Plus[-1, x], Plus[1, x]], Times[2, y, Plus[1, x]], List[List[2, 1], List[Plus[-1, x], 1], List[Plus[1, x], 1]], List[List[0, 1]]]"
+    )
+  , ( "polynomial gcd lcm and division"
+    , "{PolynomialGCD[x^2-1,x^2-x],PolynomialLCM[x-1,x+1],PolynomialQuotient[x^3-1,x-1,x],PolynomialRemainder[x^3-1,x-1,x]}"
+    , "List[Plus[-1, x], Times[Plus[-1, x], Plus[1, x]], Plus[1, x, Power[x, 2]], 0]"
+    )
   , ( "qualified algebra dispatch"
-    , "{System`Expand[(x+1)^2],System`Coefficient[x^2+2x+1,x],System`PolynomialQ[x^2,x]}"
-    , "List[Plus[1, Power[x, 2], Times[2, x]], 2, True]"
+    , "{System`Expand[(x+1)^2],System`Coefficient[x^2+2x+1,x],System`PolynomialQ[x^2,x],System`Cancel[(x^2-1)/(x-1)]}"
+    , "List[Plus[1, Power[x, 2], Times[2, x]], 2, True, Plus[1, x]]"
     )
   , ( "unsupported algebra domains stay symbolic"
-    , "{Expand[Sin[x]],Coefficient[Sin[x],x],CoefficientList[x^2,x,-1]}"
-    , "List[Expand[Sin[x]], Coefficient[Sin[x], x], CoefficientList[Power[x, 2], x, -1]]"
+    , "{Expand[Sin[x]],Coefficient[Sin[x],x],CoefficientList[x^2,x,-1],Apart[1/(x^2-1)]}"
+    , "List[Expand[Sin[x]], Coefficient[Sin[x], x], CoefficientList[Power[x, 2], x, -1], Apart[Power[Plus[-1, Power[x, 2]], -1]]]"
     )
   ]
 
