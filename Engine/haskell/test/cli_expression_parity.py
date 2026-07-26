@@ -1478,6 +1478,77 @@ CASES = (
         ),
         0,
     ),
+    (
+        "dense array construction origins and callables",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Array[f,{2,2},{0,-1}], Array[Function[x,x^2],3], "
+            "Array[f,{}], ConstantArray[x,{2,0,3}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense array shape predicates",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ArrayQ[{{1,2},{3,4}},2,IntegerQ], "
+            "ArrayQ[{{1},{2,3}}], ArrayQ[{}], ArrayQ[x,bad], "
+            "ArrayQ[{{1},{2,3}},bad], "
+            "VectorQ[{1,a},IntegerQ], MatrixQ[{{}}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "rank N dense array transformations",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ArrayReshape[{{1,2},{3,4}},{3,2},x], "
+            "ArrayReshape[{{}},{2,0,3}], "
+            "ArrayPad[{{1,2},{3,4}},{{1,0},{0,1}},x], "
+            "ArrayFlatten[{{{{1,2},{3,4}},{{5},{6}}},{{{7,8}},{{9}}}}], "
+            "Transpose[{{{a,b},{c,d}},{{e,f},{g,h}}},{3,1,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense vector matrix and antisymmetric constructors",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{IdentityMatrix[0], UnitVector[5,3], LeviCivitaTensor[0], "
+            "LeviCivitaTensor[2], LeviCivitaTensor[2,f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense array diagnostics remain nonfatal",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Array[f,{2,3},{4}], ArrayQ[{{1}},x], "
+            "ArrayPad[{{1,2},{3}},1], ArrayFlatten[{{}}], "
+            "Transpose[{{1,2},{3,4}},{1,1}], LeviCivitaTensor[-1]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

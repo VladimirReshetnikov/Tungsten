@@ -5202,17 +5202,32 @@ arrayDepthValue _ = 0
 reduceArrayQ :: [Expr] -> Either EvaluationError Expr
 reduceArrayQ = \case
   [expression] -> Right (boolean (arrayQValue expression Nothing Nothing))
-  [expression, depthExpression] -> do
-    depth <- requireArrayQDepth depthExpression
-    Right (boolean (arrayQValue expression (Just depth) Nothing))
-  [expression, depthExpression, test] -> do
-    depth <- requireArrayQDepth depthExpression
-    Right (boolean (arrayQValue expression (Just depth) (Just test)))
+  [expression, depthExpression] ->
+    arrayQWithDepth expression depthExpression Nothing
+  [expression, depthExpression, test] ->
+    arrayQWithDepth expression depthExpression (Just test)
   _ ->
     Left
       ( EvaluationError
           "ArrayQ expects an expression, optional depth, and optional element test."
       )
+
+arrayQWithDepth :: Expr -> Expr -> Maybe Expr -> Either EvaluationError Expr
+arrayQWithDepth expression depthExpression test =
+  case arrayRank expression of
+    Nothing -> Right (Symbol "False")
+    Just _ -> do
+      depth <- requireArrayQDepth depthExpression
+      Right (boolean (arrayQValue expression (Just depth) test))
+
+arrayRank :: Expr -> Maybe Int
+arrayRank (SparseArray dimensions _ _)
+  | null dimensions = Nothing
+  | otherwise = Just (length dimensions)
+arrayRank expression = case strictDenseDimensions expression of
+  Right dimensions
+    | not (null dimensions) -> Just (length dimensions)
+  _ -> Nothing
 
 requireArrayQDepth :: Expr -> Either EvaluationError Integer
 requireArrayQDepth (Integer depth) = Right depth
