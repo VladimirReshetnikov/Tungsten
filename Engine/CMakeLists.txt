@@ -212,6 +212,14 @@ if(BUILD_TESTING)
         NAME tungsten_take_list_tests
         COMMAND tungsten_take_list_tests)
 
+    add_executable(tungsten_polynomial_algebra_tests
+        cpp/tests/polynomial_algebra_tests.cpp)
+    target_link_libraries(tungsten_polynomial_algebra_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_polynomial_algebra_tests)
+    add_test(
+        NAME tungsten_polynomial_algebra_tests
+        COMMAND tungsten_polynomial_algebra_tests)
+
     add_executable(
         tungsten_expression_model_tests
         cpp/tests/expression_model_tests.cpp)
