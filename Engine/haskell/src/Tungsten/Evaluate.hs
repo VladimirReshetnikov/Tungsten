@@ -18,6 +18,7 @@ module Tungsten.Evaluate
   , deleteAtPath
   , evaluate
   , exactRangeValues
+  , formatMachineReal
   , instantiateFunctionCall
   , instantiateFunctionCallWithHead
   , instantiatePatternMatch

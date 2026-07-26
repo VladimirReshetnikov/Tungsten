@@ -1,3 +1,4 @@
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -7,22 +8,30 @@ module Tungsten.Session
   , DownValue (..)
   , EvaluationMessage (..)
   , EvaluationSession (..)
+  , SessionRuntime (..)
   , SymbolState (..)
   , SymbolValues (..)
+  , defaultSessionRuntime
   , emptySession
   , evaluateInSession
+  , evaluateInSessionWithRuntime
   ) where
 
+import Control.Concurrent (threadDelay)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Char (isAlpha, isAlphaNum, isPrint, ord)
 import Data.List (sortBy)
 import Data.Text (Text)
 import qualified Data.Text as T
+import GHC.Clock (getMonotonicTimeNSec)
 import Numeric (showHex)
+import Prelude hiding (Left, Right)
+import qualified Prelude as P
+import Text.Read (readMaybe)
 import Tungsten.Evaluate
 import Tungsten.Expression
-import Tungsten.PythonSort (pythonStableSortByState)
+import Tungsten.PythonSort (pythonStableSortByStateM)
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
   , isSystemSymbol
@@ -107,6 +116,11 @@ data EncloseScope = EncloseScope
   }
   deriving (Eq, Show)
 
+data TimeConstraintScope = TimeConstraintScope
+  { timeConstraintDeadline :: !(Maybe Double)
+  }
+  deriving (Eq, Show)
+
 data SymbolValues = SymbolValues
   { symbolOwnValue :: !(Maybe Definition)
   , symbolOwnValuePattern :: !(Maybe Expr)
@@ -139,6 +153,8 @@ data EvaluationSession = EvaluationSession
   , sessionCheckAbortScopes :: ![CheckAbortScope]
   , sessionReapScopes :: ![ReapScope]
   , sessionEncloseScopes :: ![EncloseScope]
+  , sessionTimeConstraintScopes :: ![TimeConstraintScope]
+  , sessionTimeConstraintSuppressionDepth :: !Int
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
@@ -160,6 +176,8 @@ emptySession =
     , sessionCheckAbortScopes = []
     , sessionReapScopes = []
     , sessionEncloseScopes = []
+    , sessionTimeConstraintScopes = []
+    , sessionTimeConstraintSuppressionDepth = 0
     , sessionGeneratedMessages = []
     , sessionVisibleMessages = []
     , sessionPrints = []
@@ -205,6 +223,7 @@ data ControlSignal
   | ContinueSignal
   | Returned !Expr !(Maybe Text)
   | GotoSignal !Expr
+  | TimeConstraintExpired
   deriving (Eq, Show)
 
 data EvaluationExit
@@ -212,8 +231,64 @@ data EvaluationExit
   | SessionControl !ControlSignal !EvaluationSession
   deriving (Eq, Show)
 
+-- Runtime effects are represented explicitly in the evaluation plan.  The
+-- pure reducer and the immutable session machinery construct this small free
+-- effect tree; only 'evaluateInSessionWithRuntime' interprets it in IO.
+data SessionEffect value where
+  ReadMonotonicTime :: SessionEffect Double
+  SleepForSeconds :: !Double -> SessionEffect ()
+
+data RuntimeResult failure value where
+  Left :: !failure -> RuntimeResult failure value
+  Right :: value -> RuntimeResult failure value
+  RuntimeEffect
+    :: SessionEffect request
+    -> (request -> RuntimeResult failure value)
+    -> RuntimeResult failure value
+
+instance Functor (RuntimeResult failure) where
+  fmap function result = result >>= (pure . function)
+
+instance Applicative (RuntimeResult failure) where
+  pure = Right
+  (<*>) = apRuntimeResult
+
+instance Monad (RuntimeResult failure) where
+  Left evaluationExit >>= _ = Left evaluationExit
+  Right value >>= continuation = continuation value
+  RuntimeEffect request resume >>= continuation =
+    RuntimeEffect request (\response -> resume response >>= continuation)
+
+apRuntimeResult
+  :: RuntimeResult failure (value -> result)
+  -> RuntimeResult failure value
+  -> RuntimeResult failure result
+apRuntimeResult functionAction valueAction = do
+  function <- functionAction
+  value <- valueAction
+  pure (function value)
+
 type SessionResult value =
-  Either EvaluationExit (value, EvaluationSession)
+  RuntimeResult EvaluationExit (value, EvaluationSession)
+
+-- | Concrete effect handlers for session timing.  Tests may supply a
+-- deterministic clock and sleeper; production consumers use
+-- 'defaultSessionRuntime'.
+data SessionRuntime = SessionRuntime
+  { sessionRuntimeMonotonicSeconds :: IO Double
+  , sessionRuntimeSleepSeconds :: Double -> IO ()
+  }
+
+defaultSessionRuntime :: SessionRuntime
+defaultSessionRuntime =
+  SessionRuntime
+    { sessionRuntimeMonotonicSeconds =
+        (/ 1000000000) . fromIntegral <$> getMonotonicTimeNSec
+    , sessionRuntimeSleepSeconds = \seconds ->
+        if seconds <= 0
+          then pure ()
+          else threadDelay (ceiling (seconds * 1000000))
+    }
 
 -- Pattern matching can invoke arbitrary Condition and PatternTest callbacks.
 -- This small state monad lets the shared matcher thread the same immutable
@@ -393,26 +468,109 @@ data IterationFailure
   | IterationEvaluationFailure !EvaluationExit
   deriving (Eq, Show)
 
-evaluateInSession :: EvaluationSession -> Expr -> Either EvaluationError (Expr, EvaluationSession)
-evaluateInSession session expression =
+type IterationResult value = RuntimeResult IterationFailure value
+
+evaluateInSession
+  :: EvaluationSession
+  -> Expr
+  -> IO (Either EvaluationError (Expr, EvaluationSession))
+evaluateInSession = evaluateInSessionWithRuntime defaultSessionRuntime
+
+evaluateInSessionWithRuntime
+  :: SessionRuntime
+  -> EvaluationSession
+  -> Expr
+  -> IO (Either EvaluationError (Expr, EvaluationSession))
+evaluateInSessionWithRuntime runtime session expression = do
   let registeredSession = registerExpressionSymbols expression session
-   in finalizeSessionResult
-        ( evaluateSessionAt
-            0
-            registeredSession
-              { sessionMessageAttemptCount = 0
-              , sessionQuietScopes = []
-              , sessionMessageCollectors = []
-              , sessionAbortProtectScopes = []
-              , sessionCheckAbortScopes = []
-              , sessionReapScopes = []
-              , sessionEncloseScopes = []
-              , sessionGeneratedMessages = []
-              , sessionVisibleMessages = []
-              , sessionPrints = []
-              }
-            expression
+      plan =
+        finalizeSessionResult
+          ( evaluateSessionAt
+              0
+              registeredSession
+                { sessionMessageAttemptCount = 0
+                , sessionQuietScopes = []
+                , sessionMessageCollectors = []
+                , sessionAbortProtectScopes = []
+                , sessionCheckAbortScopes = []
+                , sessionReapScopes = []
+                , sessionEncloseScopes = []
+                , sessionTimeConstraintScopes = []
+                , sessionTimeConstraintSuppressionDepth = 0
+                , sessionGeneratedMessages = []
+                , sessionVisibleMessages = []
+                , sessionPrints = []
+                }
+              expression
+          )
+  runRuntimeResult runtime plan >>= \case
+    P.Left (SessionEvaluationFailure evaluationFailure _) ->
+      pure (P.Left evaluationFailure)
+    P.Left (SessionControl _ stoppedSession) ->
+      pure
+        ( P.Left
+            ( EvaluationError
+                ( "an internal control signal escaped session finalization: "
+                    <> T.pack (show stoppedSession)
+                )
+            )
         )
+    P.Right result -> pure (P.Right result)
+
+runRuntimeResult
+  :: SessionRuntime
+  -> RuntimeResult failure value
+  -> IO (Either failure value)
+runRuntimeResult runtime = \case
+  Left evaluationExit -> pure (P.Left evaluationExit)
+  Right value -> pure (P.Right value)
+  RuntimeEffect ReadMonotonicTime resume ->
+    sessionRuntimeMonotonicSeconds runtime
+      >>= runRuntimeResult runtime . resume
+  RuntimeEffect (SleepForSeconds seconds) resume ->
+    sessionRuntimeSleepSeconds runtime seconds
+      >> runRuntimeResult runtime (resume ())
+
+inspectRuntimeResult
+  :: RuntimeResult failure value
+  -> (Either failure value -> RuntimeResult nextFailure result)
+  -> RuntimeResult nextFailure result
+inspectRuntimeResult action continuation = case action of
+  Left evaluationExit -> continuation (P.Left evaluationExit)
+  Right value -> continuation (P.Right value)
+  RuntimeEffect request resume ->
+    RuntimeEffect
+      request
+      (\response -> inspectRuntimeResult (resume response) continuation)
+
+readSessionMonotonicTime :: RuntimeResult failure Double
+readSessionMonotonicTime = RuntimeEffect ReadMonotonicTime Right
+
+sleepSessionSeconds :: Double -> RuntimeResult failure ()
+sleepSessionSeconds seconds = RuntimeEffect (SleepForSeconds seconds) Right
+
+effectiveTimeConstraintDeadline :: EvaluationSession -> Maybe Double
+effectiveTimeConstraintDeadline session
+  | sessionTimeConstraintSuppressionDepth session > 0 = Nothing
+  | otherwise = case
+      [ deadline
+      | TimeConstraintScope (Just deadline) <- sessionTimeConstraintScopes session
+      ] of
+      [] -> Nothing
+      deadlines -> Just (minimum deadlines)
+
+checkSessionTimeConstraint
+  :: EvaluationSession
+  -> SessionResult value
+  -> SessionResult value
+checkSessionTimeConstraint session continuation =
+  case effectiveTimeConstraintDeadline session of
+    Nothing -> continuation
+    Just deadline -> do
+      now <- readSessionMonotonicTime
+      if now >= deadline
+        then Left (SessionControl TimeConstraintExpired session)
+        else continuation
 
 registerExpressionSymbols :: Expr -> EvaluationSession -> EvaluationSession
 registerExpressionSymbols expression session = case expression of
@@ -433,12 +591,10 @@ registerExpressionSymbols expression session = case expression of
       entries
   _ -> session
 
-finalizeSessionResult
-  :: SessionResult Expr
-  -> Either EvaluationError (Expr, EvaluationSession)
-finalizeSessionResult = \case
-    Left (SessionEvaluationFailure evaluationFailure _) -> Left evaluationFailure
-    Left (SessionControl (Thrown value tag handler) stoppedSession) ->
+finalizeSessionResult :: SessionResult Expr -> SessionResult Expr
+finalizeSessionResult result = inspectRuntimeResult result $ \case
+    P.Left evaluationExit@(SessionEvaluationFailure _ _) -> Left evaluationExit
+    P.Left (SessionControl (Thrown value tag handler) stoppedSession) ->
       case (tag, handler) of
         (Nothing, _) ->
           Right (Call (Symbol "Throw") [value], stoppedSession)
@@ -454,7 +610,7 @@ finalizeSessionResult = \case
                 stoppedSession
                 (Call evaluatedHandler [value, evaluatedTag])
             )
-    Left (SessionControl (ConfirmationFailed failure _) stoppedSession) ->
+    P.Left (SessionControl (ConfirmationFailed failure _) stoppedSession) ->
       Right
         ( failure
         , appendNamedMessage
@@ -463,35 +619,38 @@ finalizeSessionResult = \case
             "Message generated."
             (clearEncloseScopes stoppedSession)
         )
-    Left (SessionControl Aborted stoppedSession) ->
+    P.Left (SessionControl Aborted stoppedSession) ->
       Right (Symbol "$Aborted", clearAbortScopes stoppedSession)
-    Left (SessionControl BreakSignal stoppedSession) ->
+    P.Left (SessionControl BreakSignal stoppedSession) ->
       Right (Call (Symbol "Break") [], stoppedSession)
-    Left (SessionControl ContinueSignal stoppedSession) ->
+    P.Left (SessionControl ContinueSignal stoppedSession) ->
       Right (Call (Symbol "Continue") [], stoppedSession)
-    Left (SessionControl (Returned value target) stoppedSession) ->
+    P.Left (SessionControl (Returned value target) stoppedSession) ->
       Right
         ( Call
             (Symbol "Return")
             (value : maybe [] (pure . Symbol) target)
         , stoppedSession
         )
-    Left (SessionControl (GotoSignal tag) stoppedSession) ->
+    P.Left (SessionControl (GotoSignal tag) stoppedSession) ->
       Right (Call (Symbol "Goto") [tag], stoppedSession)
-    Right result -> Right result
+    P.Left (SessionControl TimeConstraintExpired stoppedSession) ->
+      Right (Symbol "$Aborted", clearTimeConstraintScopes stoppedSession)
+    P.Right success -> Right success
 
 evaluateSessionAt
   :: Int
   -> EvaluationSession
   -> Expr
   -> SessionResult Expr
-evaluateSessionAt depth session expression
-  | exceedsSessionRecursionLimit depth session =
-      sessionFailure session "the session evaluation recursion limit was exceeded"
-  | otherwise =
-      recoverEvaluationFailure
-        expression
-        (evaluateSessionAtRaw depth session expression)
+evaluateSessionAt depth session expression =
+  checkSessionTimeConstraint session $
+    if exceedsSessionRecursionLimit depth session
+      then sessionFailure session "the session evaluation recursion limit was exceeded"
+      else
+        recoverEvaluationFailure
+          expression
+          (evaluateSessionAtRaw depth session expression)
 
 evaluateSessionAtRaw
   :: Int
@@ -681,6 +840,14 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionAbortProtect depth session arguments'
       Call (Symbol "WithCleanup") arguments' ->
         evaluateSessionWithCleanup depth session arguments'
+      Call (Symbol "Pause") arguments' ->
+        evaluateSessionPause depth session arguments'
+      Call (Symbol "AbsoluteTiming") arguments' ->
+        evaluateSessionAbsoluteTiming depth session arguments'
+      Call (Symbol "TimeConstrained") arguments' ->
+        evaluateSessionTimeConstrained depth session arguments'
+      Call (Symbol "TimeRemaining") arguments' ->
+        evaluateSessionTimeRemaining session arguments'
       Call (Symbol "Reap") arguments' ->
         evaluateSessionReap depth session arguments'
       Call (Symbol "Sow") arguments' ->
@@ -829,10 +996,10 @@ restoreActiveOwnValues
   :: Set.Set Text
   -> SessionResult value
   -> SessionResult value
-restoreActiveOwnValues active = \case
-  Right (value, session) ->
+restoreActiveOwnValues active result = inspectRuntimeResult result $ \case
+  P.Right (value, session) ->
     Right (value, session {sessionActiveOwnValues = active})
-  Left evaluationExit ->
+  P.Left evaluationExit ->
     Left
       ( mapEvaluationExitSession
           (\session -> session {sessionActiveOwnValues = active})
@@ -1075,6 +1242,10 @@ directSessionDispatchHead name =
              , "CheckAbort"
              , "AbortProtect"
              , "WithCleanup"
+             , "Pause"
+             , "AbsoluteTiming"
+             , "TimeConstrained"
+             , "TimeRemaining"
              , "Reap"
              , "Sow"
              , "Failsafe"
@@ -1300,30 +1471,33 @@ heldPatternArityMessage = \case
     "MemberQ expects an expression, a pattern, and an optional level specification."
   headName -> headName <> " received an unsupported argument list."
 
-patternFailure :: EvaluationSession -> Text -> Either EvaluationExit value
+patternFailure
+  :: EvaluationSession
+  -> Text
+  -> RuntimeResult EvaluationExit value
 patternFailure session message =
   Left (SessionEvaluationFailure (EvaluationError message) session)
 
 sessionLevelBounds
   :: EvaluationSession
   -> Expr
-  -> Either EvaluationExit LevelBounds
+  -> RuntimeResult EvaluationExit LevelBounds
 sessionLevelBounds session specification =
   case normalizeLevelSpec specification of
-    Left (EvaluationError message) ->
+    P.Left (EvaluationError message) ->
       Left (SessionEvaluationFailure (EvaluationError message) session)
-    Right bounds -> Right bounds
+    P.Right bounds -> Right bounds
 
 patternSelectionLimit
   :: Text
   -> EvaluationSession
   -> Maybe Expr
-  -> Either EvaluationExit (Maybe Integer)
+  -> RuntimeResult EvaluationExit (Maybe Integer)
 patternSelectionLimit operation session limit =
   case selectionLimit operation limit of
-    Left (EvaluationError message) ->
+    P.Left (EvaluationError message) ->
       Left (SessionEvaluationFailure (EvaluationError message) session)
-    Right normalized -> Right normalized
+    P.Right normalized -> Right normalized
 
 evaluateSessionCount
   :: Int
@@ -1681,7 +1855,7 @@ deleteSessionPaths
   :: EvaluationSession
   -> Expr
   -> [[PathSelector]]
-  -> Either EvaluationExit Expr
+  -> RuntimeResult EvaluationExit Expr
 deleteSessionPaths _ expression [] = Right expression
 deleteSessionPaths session expression (path : rest) =
   case deleteAtPath path expression of
@@ -1815,7 +1989,7 @@ requireSessionPatternRules
   :: Text
   -> EvaluationSession
   -> Expr
-  -> Either EvaluationExit [SessionPatternRule]
+  -> RuntimeResult EvaluationExit [SessionPatternRule]
 requireSessionPatternRules operation session expression =
   case sessionPatternRuleSet expression of
     Just rules -> Right rules
@@ -2439,9 +2613,8 @@ mapSessionResultValue
   :: (value -> value)
   -> SessionResult value
   -> SessionResult value
-mapSessionResultValue update = \case
-  Right (value, session) -> Right (update value, session)
-  Left evaluationExit -> Left evaluationExit
+mapSessionResultValue update =
+  fmap (\(value, session) -> (update value, session))
 
 evaluateSessionMessage
   :: Int
@@ -2552,8 +2725,8 @@ evaluateSessionQuietBody depth session body offSpecification onSpecification =
   baselineDepth = length (sessionQuietScopes session)
 
 restoreQuietScopes :: Int -> SessionResult value -> SessionResult value
-restoreQuietScopes baselineDepth = \case
-  Right (value, session) ->
+restoreQuietScopes baselineDepth result = inspectRuntimeResult result $ \case
+  P.Right (value, session) ->
     Right
       ( value
       , session
@@ -2561,7 +2734,7 @@ restoreQuietScopes baselineDepth = \case
               take baselineDepth (sessionQuietScopes session)
           }
       )
-  Left evaluationExit ->
+  P.Left evaluationExit ->
     Left
       ( mapEvaluationExitSession
           ( \session ->
@@ -2595,14 +2768,14 @@ evaluateSessionCheckBody
   -> Expr
   -> SessionResult Expr
 evaluateSessionCheckBody depth session body fallback specification =
-  case evaluateSessionAt (depth + 1) scopedSession body of
-    Right (value, stoppedSession) ->
+  inspectRuntimeResult (evaluateSessionAt (depth + 1) scopedSession body) $ \case
+    P.Right (value, stoppedSession) ->
       let (captured, restoredSession) =
             popSessionMessageCollector baselineDepth stoppedSession
        in if null captured
             then Right (value, restoredSession)
             else evaluateSessionAt (depth + 1) restoredSession fallback
-    Left evaluationExit ->
+    P.Left evaluationExit ->
       Left
         ( mapEvaluationExitSession
             (snd . popSessionMessageCollector baselineDepth)
@@ -2642,7 +2815,7 @@ setSessionMessageEnabled
   :: Bool
   -> EvaluationSession
   -> Expr
-  -> Either EvaluationExit EvaluationSession
+  -> RuntimeResult EvaluationExit EvaluationSession
 setSessionMessageEnabled enabled session = \case
   Call (Symbol listHead) specifications
     | isSessionSystemHead "List" listHead ->
@@ -3040,24 +3213,24 @@ liftSessionLevelBounds
   -> SessionResult SessionLevelBounds
 liftSessionLevelBounds session specification =
   case normalizeSessionLevelSpec specification of
-    Left message -> sessionFailure session message
-    Right bounds -> Right (bounds, session)
+    P.Left message -> sessionFailure session message
+    P.Right bounds -> Right (bounds, session)
 
 normalizeSessionLevelSpec :: Expr -> Either Text SessionLevelBounds
 normalizeSessionLevelSpec specification = case specification of
   Integer level
     | level >= 0 ->
-        Right
+        P.Right
           ( SessionLevelBounds
               (if level == 0 then 0 else 1)
               (boundedSessionLevel level)
           )
     | otherwise ->
-        Right (SessionLevelBounds 1 (boundedSessionLevel level))
-  Symbol "Infinity" -> Right (SessionLevelBounds 1 sessionLevelInfinity)
+        P.Right (SessionLevelBounds 1 (boundedSessionLevel level))
+  Symbol "Infinity" -> P.Right (SessionLevelBounds 1 sessionLevelInfinity)
   Call (Symbol "List") [bound] -> do
     value <- normalizeSessionLevelBound bound
-    Right (SessionLevelBounds value value)
+    P.Right (SessionLevelBounds value value)
   Call (Symbol "List") [lower, upper]
     | isSessionLevelBound lower
     , isSessionLevelBound upper ->
@@ -3065,7 +3238,7 @@ normalizeSessionLevelSpec specification = case specification of
           <$> normalizeSessionLevelBound lower
           <*> normalizeSessionLevelBound upper
   _ ->
-    Left
+    P.Left
       ( "Unsupported Level specification: '"
           <> inputForm specification
           <> "'."
@@ -3073,9 +3246,9 @@ normalizeSessionLevelSpec specification = case specification of
 
 normalizeSessionLevelBound :: Expr -> Either Text Int
 normalizeSessionLevelBound = \case
-  Integer value -> Right (boundedSessionLevel value)
-  Symbol "Infinity" -> Right sessionLevelInfinity
-  value -> Left ("Unsupported level bound: " <> inputForm value <> ".")
+  Integer value -> P.Right (boundedSessionLevel value)
+  Symbol "Infinity" -> P.Right sessionLevelInfinity
+  value -> P.Left ("Unsupported level bound: " <> inputForm value <> ".")
 
 isSessionLevelBound :: Expr -> Bool
 isSessionLevelBound Integer {} = True
@@ -3294,8 +3467,8 @@ evaluateSessionMapAt
 evaluateSessionMapAt depth session = \case
   [function, subject, positions] ->
     case expandSessionPositionPaths subject positions of
-      Left message -> sessionFailure session message
-      Right (resolvedPaths, invalid)
+      P.Left message -> sessionFailure session message
+      P.Right (resolvedPaths, invalid)
         | invalid -> invalidPositions session subject
         | otherwise ->
             mapPaths
@@ -3408,7 +3581,7 @@ expandSessionPositionPaths expression specification
         (sessionPositionComponents specification)
   | otherwise = unsupportedPositionSpecification specification
  where
-  expandPaths retained invalid [] = Right (retained, invalid)
+  expandPaths retained invalid [] = P.Right (retained, invalid)
   expandPaths retained invalid (pathSpecification : rest) = do
     (paths, pathInvalid) <-
       expandSessionExactPath
@@ -3420,13 +3593,13 @@ expandSessionExactPath
   :: Expr
   -> [Expr]
   -> Either Text ([[SessionPathSelector]], Bool)
-expandSessionExactPath _ [] = Right ([[]], False)
+expandSessionExactPath _ [] = P.Right ([[]], False)
 expandSessionExactPath expression (component : remaining) = do
   (selections, selectionInvalid) <-
     resolveSessionPathComponent expression component
   expandSelections [] selectionInvalid selections
  where
-  expandSelections retained invalid [] = Right (retained, invalid)
+  expandSelections retained invalid [] = P.Right (retained, invalid)
   expandSelections retained invalid (selection : rest) = do
     (childPaths, childInvalid) <-
       expandSessionExactPath
@@ -3446,10 +3619,10 @@ resolveSessionPathComponent
   -> Expr
   -> Either Text ([SessionPathSelection], Bool)
 resolveSessionPathComponent _ (Integer 0) =
-  Left "Position does not support index 0 in this position."
+  P.Left "Position does not support index 0 in this position."
 resolveSessionPathComponent expression component =
   case sessionOrderedCollection expression of
-    Nothing -> Right ([], True)
+    Nothing -> P.Right ([], True)
     Just collection
       | sessionCollectionAssociation collection ->
           resolveSessionAssociationComponent
@@ -3460,7 +3633,7 @@ resolveSessionPathComponent expression component =
             resolveSessionNumericSelectors
               (length (sessionCollectionItems collection))
               component
-          Right
+          P.Right
             ( mapMaybeSession
                 (sessionSelectionAt (sessionCollectionItems collection))
                 indices
@@ -3479,7 +3652,7 @@ resolveSessionAssociationComponent items component@(Call (Symbol "List") selecto
     Nothing -> unsupportedSelectorInsidePosition component
     Just kinds
       | any id kinds && any not kinds ->
-          Left "Association selector lists may not mix numeric and key selectors."
+          P.Left "Association selector lists may not mix numeric and key selectors."
       | any id kinds ->
           selectKeys
             (mapMaybeSession sessionKeySelectorValue selectors)
@@ -3488,14 +3661,14 @@ resolveSessionAssociationComponent items component@(Call (Symbol "List") selecto
   selectNumeric = do
     (indices, invalid) <-
       resolveSessionNumericSelectors (length items) component
-    Right
+    P.Right
       (mapMaybeSession (sessionSelectionAt items) indices, invalid)
 
   selectKeys keys = selectSessionAssociationKeys items keys
 resolveSessionAssociationComponent items component = do
   (indices, invalid) <-
     resolveSessionNumericSelectors (length items) component
-  Right (mapMaybeSession (sessionSelectionAt items) indices, invalid)
+  P.Right (mapMaybeSession (sessionSelectionAt items) indices, invalid)
 
 selectSessionAssociationKeys
   :: [SessionOrderedItem]
@@ -3503,7 +3676,7 @@ selectSessionAssociationKeys
   -> Either Text ([SessionPathSelection], Bool)
 selectSessionAssociationKeys items = go [] False
  where
-  go retained invalid [] = Right (retained, invalid)
+  go retained invalid [] = P.Right (retained, invalid)
   go retained invalid (key : rest) =
     case sessionAssociationItemIndex (SessionKeySelector key) items of
       Nothing -> go retained True rest
@@ -3535,31 +3708,31 @@ resolveSessionNumericSelectors
   -> Either Text ([Int], Bool)
 resolveSessionNumericSelectors count component = case component of
   Integer 0 ->
-    Left "Position does not support index 0 in this position."
+    P.Left "Position does not support index 0 in this position."
   Integer position ->
-    Right
+    P.Right
       ( maybe [] pure resolved
       , maybe True (const False) resolved
       )
    where
     resolved = resolveSessionPosition count position
-  Symbol "All" -> Right ([0 .. count - 1], False)
+  Symbol "All" -> P.Right ([0 .. count - 1], False)
   spanSpecification@(Call (Symbol "Span") _) -> do
     positions <- expandSessionPositionSpan count spanSpecification
     let resolved = map (resolveSessionPosition count) positions
-    Right
+    P.Right
       ( mapMaybeSession id resolved
       , any (maybe True (const False)) resolved
       )
   Call (Symbol "List") selectors -> appendSelectors [] False selectors
   _ ->
-    Left
+    P.Left
       ( "Unsupported Position specification: "
           <> inputForm component
           <> "."
       )
  where
-  appendSelectors retained invalid [] = Right (retained, invalid)
+  appendSelectors retained invalid [] = P.Right (retained, invalid)
   appendSelectors retained invalid (selector : rest)
     | isSessionKeySelector selector = unsupportedSelectorInsidePosition selector
     | otherwise = do
@@ -3577,18 +3750,18 @@ expandSessionPositionSpan count (Call (Symbol "Span") arguments') =
       expand startExpression endExpression (Integer 1)
     [startExpression, endExpression, stepExpression] ->
       expand startExpression endExpression stepExpression
-    _ -> Left "Span must contain two or three arguments."
+    _ -> P.Left "Span must contain two or three arguments."
  where
   expand startExpression endExpression stepExpression = do
     step <- case stepExpression of
-      Integer value -> Right value
-      _ -> Left "Span steps must be integers."
+      Integer value -> P.Right value
+      _ -> P.Left "Span steps must be integers."
     if step == 0
-      then Left "Span step cannot be zero."
+      then P.Left "Span step cannot be zero."
       else
         let start = spanEndpoint startExpression 1
             end = spanEndpoint endExpression (fromIntegral count)
-         in Right
+         in P.Right
               ( if step > 0 && start <= end || step < 0 && start >= end
                   then [start, start + step .. end]
                   else []
@@ -3599,7 +3772,7 @@ expandSessionPositionSpan count (Call (Symbol "Span") arguments') =
       | value < 0 -> fromIntegral count + value + 1
       | otherwise -> value
     _ -> defaultValue
-expandSessionPositionSpan _ _ = Left "Span must contain two or three arguments."
+expandSessionPositionSpan _ _ = P.Left "Span must contain two or three arguments."
 
 isSessionPositionCollection :: Expr -> Bool
 isSessionPositionCollection (Call (Symbol "List") values) =
@@ -3658,7 +3831,7 @@ unsupportedPositionSpecification
   :: Expr
   -> Either Text value
 unsupportedPositionSpecification specification =
-  Left
+  P.Left
     ( "Unsupported position specification: "
         <> inputForm specification
         <> "."
@@ -3666,7 +3839,7 @@ unsupportedPositionSpecification specification =
 
 unsupportedSelectorInsidePosition :: Expr -> Either Text value
 unsupportedSelectorInsidePosition selector =
-  Left
+  P.Left
     ( "Unsupported selector inside Position specification: "
         <> inputForm selector
         <> "."
@@ -3753,8 +3926,8 @@ splitSessionSameTestOptions
   -> Either Text ([Expr], Maybe Expr)
 splitSessionSameTestOptions operation values
   | any ((/= "SameTest") . fst) optionParts =
-      Left (operation <> " currently supports only the SameTest option.")
-  | otherwise = Right (dataValues, normalizeSameTest selectedSameTest)
+      P.Left (operation <> " currently supports only the SameTest option.")
+  | otherwise = P.Right (dataValues, normalizeSameTest selectedSameTest)
  where
   (dataValues, options) = splitTrailingSessionOptions values
   optionParts =
@@ -3795,8 +3968,8 @@ evaluateSessionSortBy
   -> SessionResult Expr
 evaluateSessionSortBy reverseMode depth session values =
   case splitSessionSameTestOptions operation values of
-    Left message -> sessionFailure session message
-    Right (sortArguments, sameTest) -> case sortArguments of
+    P.Left message -> sessionFailure session message
+    P.Right (sortArguments, sameTest) -> case sortArguments of
       [_]
         | sameTest == Nothing ->
             Right (Call (Symbol operation) values, session)
@@ -3827,7 +4000,7 @@ evaluateSessionSortBy reverseMode depth session values =
             session
             (sessionCollectionItems collection)
         (sorted, updated) <-
-          pythonStableSortByState
+          pythonStableSortByStateM
             ( compareDecoratedSessionItems
                 reverseMode
                 keySpecIsList
@@ -4047,23 +4220,26 @@ parseSessionSelectionSpec
 parseSessionSelectionSpec operation criterion = case criterion of
   Call (Symbol "Rule") [selector, propertyExpression] -> do
     propertySpec <- parsePropertyExpression propertyExpression
-    Right (selector, Just propertySpec)
+    P.Right (selector, Just propertySpec)
   Call (Symbol "Rule") _ ->
-    Left (operation <> " property specifications must contain exactly two arguments.")
-  _ -> Right (criterion, Nothing)
+    P.Left (operation <> " property specifications must contain exactly two arguments.")
+  _ -> P.Right (criterion, Nothing)
  where
   parsePropertyExpression (String "Element") =
-    Right (SingleSelectionProperty SelectionElement)
+    P.Right (SingleSelectionProperty SelectionElement)
   parsePropertyExpression (String "Index") =
-    Right (SingleSelectionProperty SelectionIndex)
+    P.Right (SingleSelectionProperty SelectionIndex)
   parsePropertyExpression (Call (Symbol "List") properties) =
     MultipleSelectionProperties <$> traverse parseProperty properties
-  parsePropertyExpression _ = unsupportedProperties
-  parseProperty (String "Element") = Right SelectionElement
-  parseProperty (String "Index") = Right SelectionIndex
-  parseProperty _ = unsupportedProperties
-  unsupportedProperties =
-    Left
+  parsePropertyExpression _ =
+    P.Left
+      ( operation
+          <> " currently supports only \"Element\" and \"Index\" properties."
+      )
+  parseProperty (String "Element") = P.Right SelectionElement
+  parseProperty (String "Index") = P.Right SelectionIndex
+  parseProperty _ =
+    P.Left
       ( operation
           <> " currently supports only \"Element\" and \"Index\" properties."
       )
@@ -4155,8 +4331,8 @@ evaluateSessionSelect discardMode depth session values =
   operation = if discardMode then "Discard" else "Select"
   select subject criterion limitExpression =
     case parseSessionSelectionSpec operation criterion of
-      Left message -> sessionFailure session message
-      Right (selector, propertySpec) -> case sessionOrderedCollection subject of
+      P.Left message -> sessionFailure session message
+      P.Right (selector, propertySpec) -> case sessionOrderedCollection subject of
         Nothing -> sessionFailure session (operation <> " expects a nonatomic expression.")
         Just collection -> case sessionSelectionLimit limitExpression of
           Nothing ->
@@ -4212,8 +4388,8 @@ evaluateSessionSelectFirst depth session values = case values of
  where
   selectFirst subject criterion defaultValue =
     case parseSessionSelectionSpec "SelectFirst" criterion of
-      Left message -> sessionFailure session message
-      Right (selector, propertySpec) -> case sessionOrderedCollection subject of
+      P.Left message -> sessionFailure session message
+      P.Right (selector, propertySpec) -> case sessionOrderedCollection subject of
         Nothing -> sessionFailure session "SelectFirst expects a nonatomic expression."
         Just collection ->
           findMatch
@@ -4347,19 +4523,19 @@ evaluateSessionCheckAbort
   -> SessionResult Expr
 evaluateSessionCheckAbort depth session = \case
   [body, fallback] ->
-    case evaluateSessionAt (depth + 1) scopedSession body of
-      Left (SessionControl Aborted stoppedSession) ->
+    inspectRuntimeResult (evaluateSessionAt (depth + 1) scopedSession body) $ \case
+      P.Left (SessionControl Aborted stoppedSession) ->
         evaluateSessionAt
           (depth + 1)
           (popCheckAbortScopes baselineDepth stoppedSession)
           fallback
-      Left evaluationExit ->
+      P.Left evaluationExit ->
         Left
           ( mapEvaluationExitSession
               (popCheckAbortScopes baselineDepth)
               evaluationExit
           )
-      Right (value, stoppedSession) ->
+      P.Right (value, stoppedSession) ->
         Right
           ( value
           , popCheckAbortScopes baselineDepth stoppedSession
@@ -4385,20 +4561,20 @@ evaluateSessionAbortProtect
   -> SessionResult Expr
 evaluateSessionAbortProtect depth session = \case
   [body] ->
-    case evaluateSessionAt (depth + 1) scopedSession body of
-      Left (SessionControl Aborted stoppedSession) ->
+    inspectRuntimeResult (evaluateSessionAt (depth + 1) scopedSession body) $ \case
+      P.Left (SessionControl Aborted stoppedSession) ->
         Left
           ( SessionControl
               Aborted
               (popAbortProtectScopes baselineDepth stoppedSession)
           )
-      Left evaluationExit ->
+      P.Left evaluationExit ->
         Left
           ( mapEvaluationExitSession
               (popAbortProtectScopes baselineDepth)
               evaluationExit
           )
-      Right (value, stoppedSession) ->
+      P.Right (value, stoppedSession) ->
         let pending = abortProtectScopePendingAt baselineDepth stoppedSession
             restored = popAbortProtectScopes baselineDepth stoppedSession
          in if pending
@@ -4463,6 +4639,198 @@ clearAbortScopes session =
     , sessionCheckAbortScopes = []
     }
 
+clearTimeConstraintScopes :: EvaluationSession -> EvaluationSession
+clearTimeConstraintScopes session =
+  session
+    { sessionTimeConstraintScopes = []
+    , sessionTimeConstraintSuppressionDepth = 0
+    }
+
+popTimeConstraintScopes :: Int -> EvaluationSession -> EvaluationSession
+popTimeConstraintScopes baselineDepth session =
+  session
+    { sessionTimeConstraintScopes =
+        take baselineDepth (sessionTimeConstraintScopes session)
+    }
+
+evaluateWithTimeConstraintSuppressed
+  :: Int
+  -> SessionResult value
+  -> SessionResult value
+evaluateWithTimeConstraintSuppressed baselineDepth result =
+  inspectRuntimeResult result $ \case
+    P.Left evaluationExit ->
+      Left
+        ( mapEvaluationExitSession restoreSuppressionDepth evaluationExit
+        )
+    P.Right (value, stoppedSession) ->
+      Right (value, restoreSuppressionDepth stoppedSession)
+ where
+  restoreSuppressionDepth stoppedSession =
+    stoppedSession
+      { sessionTimeConstraintSuppressionDepth =
+          baselineDepth
+      }
+
+evaluateSessionPause
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionPause depth session = \case
+  [secondsExpression] -> do
+    (secondsValue, updated) <-
+      evaluateSessionAt (depth + 1) session secondsExpression
+    case runtimeSecondsValue "Pause" False secondsValue of
+      P.Left message -> sessionFailure updated message
+      P.Right seconds
+        | isInfinite seconds || isNaN seconds || seconds < 0 ->
+            sessionFailure
+              updated
+              "Pause expects a non-negative finite number of seconds."
+        | otherwise -> do
+            start <- readSessionMonotonicTime
+            pauseUntil updated (start + seconds)
+  _ -> sessionFailure session "Pause expects exactly one argument."
+ where
+  pauseUntil currentSession endTime = do
+    now <- readSessionMonotonicTime
+    case effectiveTimeConstraintDeadline currentSession of
+      Just deadline
+        | now >= deadline ->
+            Left (SessionControl TimeConstraintExpired currentSession)
+      deadline ->
+        let remainingPause = endTime - now
+            remainingConstraint = maybe remainingPause (\value -> value - now) deadline
+            sleepFor = min 0.05 (min remainingPause remainingConstraint)
+         in if remainingPause <= 0
+              then Right (Symbol "Null", currentSession)
+              else do
+                sleepSessionSeconds (max 0 sleepFor)
+                pauseUntil currentSession endTime
+
+evaluateSessionAbsoluteTiming
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAbsoluteTiming depth session = \case
+  [body] -> do
+    start <- readSessionMonotonicTime
+    (value, updated) <- evaluateSessionAt (depth + 1) session body
+    finished <- readSessionMonotonicTime
+    Right
+      ( evaluatedList
+          [ Real (formatMachineReal (max 0 (finished - start)))
+          , value
+          ]
+      , updated
+      )
+  _ ->
+    sessionFailure
+      session
+      "AbsoluteTiming expects exactly one argument."
+
+evaluateSessionTimeConstrained
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTimeConstrained depth session = \case
+  [body, secondsExpression] ->
+    begin body secondsExpression Nothing
+  [body, secondsExpression, fallback] ->
+    begin body secondsExpression (Just fallback)
+  _ ->
+    sessionFailure
+      session
+      "TimeConstrained expects two or three arguments."
+ where
+  begin body secondsExpression fallback = do
+    (secondsValue, secondsSession) <-
+      evaluateSessionAt (depth + 1) session secondsExpression
+    case runtimeSecondsValue "TimeConstrained" True secondsValue of
+      P.Left message -> sessionFailure secondsSession message
+      P.Right rawSeconds ->
+        let seconds = max 0 rawSeconds
+         in if isInfinite seconds
+              then runBody body fallback secondsSession Nothing False
+              else do
+                now <- readSessionMonotonicTime
+                runBody body fallback secondsSession (Just (now + seconds)) True
+
+  runBody body fallback currentSession deadline checkOnCompletion =
+    let baselineDepth = length (sessionTimeConstraintScopes currentSession)
+        scopedSession =
+          currentSession
+            { sessionTimeConstraintScopes =
+                sessionTimeConstraintScopes currentSession
+                  <> [TimeConstraintScope deadline]
+            }
+        bodyResult = evaluateSessionAt (depth + 1) scopedSession body
+        checkedResult =
+          inspectRuntimeResult bodyResult $ \case
+            P.Left evaluationExit -> Left evaluationExit
+            P.Right success@(_, stoppedSession)
+              | checkOnCompletion ->
+                  checkSessionTimeConstraint stoppedSession (Right success)
+            P.Right success -> Right success
+     in finish baselineDepth fallback checkedResult
+
+  finish baselineDepth fallback result =
+    inspectRuntimeResult result $ \case
+      P.Left (SessionControl TimeConstraintExpired stoppedSession) ->
+        let restored = popTimeConstraintScopes baselineDepth stoppedSession
+         in case fallback of
+              Nothing -> Right (Symbol "$Aborted", restored)
+              Just fallbackExpression ->
+                evaluateSessionAt (depth + 1) restored fallbackExpression
+      P.Left evaluationExit ->
+        Left
+          ( mapEvaluationExitSession
+              (popTimeConstraintScopes baselineDepth)
+              evaluationExit
+          )
+      P.Right (value, stoppedSession) ->
+        Right (value, popTimeConstraintScopes baselineDepth stoppedSession)
+
+evaluateSessionTimeRemaining
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTimeRemaining session = \case
+  [] -> case effectiveTimeConstraintDeadline session of
+    Nothing -> Right (Symbol "Infinity", session)
+    Just deadline -> do
+      now <- readSessionMonotonicTime
+      Right
+        ( Real (formatMachineReal (max 0 (deadline - now)))
+        , session
+        )
+  _ -> sessionFailure session "TimeRemaining expects no arguments."
+
+runtimeSecondsValue :: Text -> Bool -> Expr -> Either Text Double
+runtimeSecondsValue functionName allowInfinity = \case
+  Integer value -> P.Right (fromInteger value)
+  Real source ->
+    maybe
+      (P.Left (functionName <> " expects a numeric time in seconds."))
+      P.Right
+      (parseRuntimeReal source)
+  Symbol "Infinity"
+    | allowInfinity -> P.Right (1 / 0)
+  _ -> P.Left (functionName <> " expects a numeric time in seconds.")
+
+parseRuntimeReal :: Text -> Maybe Double
+parseRuntimeReal source =
+  readMaybe (T.unpack normalized)
+ where
+  (literal, exponentMarker) = T.breakOn "*^" source
+  mantissa = T.takeWhile (/= '`') literal
+  normalized
+    | T.null exponentMarker = mantissa
+    | otherwise = mantissa <> "e" <> T.drop 2 exponentMarker
+
 evaluateSessionWithCleanup
   :: Int
   -> EvaluationSession
@@ -4471,33 +4839,54 @@ evaluateSessionWithCleanup
 evaluateSessionWithCleanup depth session = \case
   [body, cleanup] -> evaluateBody session body cleanup
   [initializer, body, cleanup] ->
-    case evaluateAbortProtected initializer session of
-      Left (SessionControl controlSignal stoppedSession) ->
-        evaluateCleanup (Left controlSignal) stoppedSession cleanup
-      Left evaluationFailure -> Left evaluationFailure
-      Right (_, initializedSession) ->
-        evaluateBody initializedSession body cleanup
+    inspectRuntimeResult (evaluateAbortProtected initializer session) $ \case
+      P.Left (SessionControl controlSignal stoppedSession) ->
+        evaluateCleanup (P.Left controlSignal) stoppedSession cleanup
+      P.Left evaluationFailure -> Left evaluationFailure
+      P.Right (_, initializedSession) ->
+        inspectRuntimeResult
+          ( checkSessionTimeConstraint
+              initializedSession
+              (Right (Symbol "Null", initializedSession))
+          )
+          $ \case
+          P.Left (SessionControl controlSignal stoppedSession) ->
+            evaluateCleanup (P.Left controlSignal) stoppedSession cleanup
+          P.Left evaluationFailure -> Left evaluationFailure
+          P.Right (_, checkedSession) ->
+            evaluateBody checkedSession body cleanup
   _ -> sessionFailure session "WithCleanup expects two or three arguments."
  where
   evaluateBody currentSession body cleanup =
-    case evaluateSessionAt (depth + 1) currentSession body of
-      Left (SessionControl controlSignal stoppedSession) ->
-        evaluateCleanup (Left controlSignal) stoppedSession cleanup
-      Left evaluationFailure -> Left evaluationFailure
-      Right (value, bodySession) ->
-        evaluateCleanup (Right value) bodySession cleanup
+    inspectRuntimeResult
+      (evaluateSessionAt (depth + 1) currentSession body)
+      $ \case
+      P.Left (SessionControl controlSignal stoppedSession) ->
+        evaluateCleanup (P.Left controlSignal) stoppedSession cleanup
+      P.Left evaluationFailure -> Left evaluationFailure
+      P.Right (value, bodySession) ->
+        evaluateCleanup (P.Right value) bodySession cleanup
 
   evaluateCleanup pending currentSession cleanup =
-    case evaluateAbortProtected cleanup currentSession of
-      Left cleanupExit -> Left cleanupExit
-      Right (_, cleanedSession) ->
+    inspectRuntimeResult (evaluateAbortProtected cleanup currentSession) $ \case
+      P.Left cleanupExit -> Left cleanupExit
+      P.Right (_, cleanedSession) ->
         case pending of
-          Left controlSignal ->
+          P.Left controlSignal ->
             Left (SessionControl controlSignal cleanedSession)
-          Right value -> Right (value, cleanedSession)
+          P.Right value -> Right (value, cleanedSession)
 
   evaluateAbortProtected expression currentSession =
-    evaluateSessionAbortProtect depth currentSession [expression]
+    let baselineSuppressionDepth =
+          sessionTimeConstraintSuppressionDepth currentSession
+        suppressedSession =
+          currentSession
+            { sessionTimeConstraintSuppressionDepth =
+                baselineSuppressionDepth + 1
+            }
+     in evaluateWithTimeConstraintSuppressed
+          baselineSuppressionDepth
+          (evaluateSessionAbortProtect depth suppressedSession [expression])
 
 evaluateSessionReap
   :: Int
@@ -4520,14 +4909,14 @@ evaluateSessionReap depth session = \case
   _ -> sessionFailure session "Reap expects one, two, or three arguments."
  where
   beginReap currentSession body patternSpecification handler =
-    case evaluateSessionAt (depth + 1) scopedSession body of
-      Left evaluationExit ->
+    inspectRuntimeResult (evaluateSessionAt (depth + 1) scopedSession body) $ \case
+      P.Left evaluationExit ->
         Left
           ( mapEvaluationExitSession
               (popReapScopes baselineDepth)
               evaluationExit
           )
-      Right (value, stoppedSession) ->
+      P.Right (value, stoppedSession) ->
         let restored = popReapScopes baselineDepth stoppedSession
          in case reapScopeAt baselineDepth stoppedSession of
               Nothing ->
@@ -6035,11 +6424,13 @@ applySessionDefinitions depth session expression = tryDefinitions session
       Call (Symbol conditionHead) [body, condition]
         | isSessionSystemHead "Condition" conditionHead
         , downValueDelayed definition ->
-            case evaluateSessionAt (depth + 1) current condition of
-              Left (SessionControl (Returned value Nothing) updated) ->
+            inspectRuntimeResult
+              (evaluateSessionAt (depth + 1) current condition)
+              $ \case
+              P.Left (SessionControl (Returned value Nothing) updated) ->
                 Right (Just value, updated)
-              Left evaluationExit -> Left evaluationExit
-              Right (conditionResult, updated)
+              P.Left evaluationExit -> Left evaluationExit
+              P.Right (conditionResult, updated)
                 | conditionResult == Symbol "True" ->
                     catchBareReturn (evaluateReplacement updated body)
                 | otherwise -> tryDefinitions updated rest
@@ -6048,10 +6439,11 @@ applySessionDefinitions depth session expression = tryDefinitions session
             Right (Just replacement, current)
       _ -> catchBareReturn (evaluateReplacement current replacement)
 
-  catchBareReturn = \case
-    Left (SessionControl (Returned value Nothing) updated) ->
+  catchBareReturn result = inspectRuntimeResult result $ \case
+    P.Left (SessionControl (Returned value Nothing) updated) ->
       Right (Just value, updated)
-    result -> result
+    P.Left evaluationExit -> Left evaluationExit
+    P.Right success -> Right success
 
   evaluateReplacement current replacement = do
     (result, updated) <-
@@ -6092,10 +6484,10 @@ catchBody
   -> Maybe Expr
   -> SessionResult Expr
 catchBody depth session body form handler =
-  case evaluateSessionAt (depth + 1) session body of
-    Left evaluationExit@(SessionEvaluationFailure _ _) ->
+  inspectRuntimeResult (evaluateSessionAt (depth + 1) session body) $ \case
+    P.Left evaluationExit@(SessionEvaluationFailure _ _) ->
       Left evaluationExit
-    Left evaluationExit@(SessionControl (Thrown value tag _) stoppedSession)
+    P.Left evaluationExit@(SessionControl (Thrown value tag _) stoppedSession)
       | catchMatches form tag ->
           case (handler, tag) of
             (Nothing, _) -> Right (value, stoppedSession)
@@ -6106,8 +6498,8 @@ catchBody depth session body form handler =
                 (Call evaluatedHandler [value, evaluatedTag])
             _ -> Left evaluationExit
       | otherwise -> Left evaluationExit
-    Left evaluationExit -> Left evaluationExit
-    Right result -> Right result
+    P.Left evaluationExit -> Left evaluationExit
+    P.Right success -> Right success
 
 catchMatches :: Maybe Expr -> Maybe Expr -> Bool
 catchMatches Nothing Nothing = True
@@ -6129,36 +6521,38 @@ evaluateSessionEnclose depth session = \case
   _ -> sessionFailure session "Enclose expects one, two, or three arguments."
  where
   encloseBody currentSession body handler form =
-    case evaluateSessionAt (depth + 1) scopedSession body of
-      Left
+    inspectRuntimeResult (evaluateSessionAt (depth + 1) scopedSession body) $ \case
+      P.Left
         ( SessionControl
             confirmation@(ConfirmationFailed failure tag)
             stoppedSession
           ) ->
-          case encloseScopeMatches depth stoppedSession form tag of
-            Left matchingExit ->
+          inspectRuntimeResult
+            (encloseScopeMatches depth stoppedSession form tag)
+            $ \case
+            P.Left matchingExit ->
               Left
                 ( mapEvaluationExitSession
                     (popEncloseScopes baselineDepth)
                     matchingExit
                 )
-            Right (False, matchedSession) ->
+            P.Right (False, matchedSession) ->
               Left
                 ( SessionControl
                     confirmation
                     (popEncloseScopes baselineDepth matchedSession)
                 )
-            Right (True, matchedSession) ->
+            P.Right (True, matchedSession) ->
               restoreEncloseScopes
                 baselineDepth
                 (handleEnclosedFailure depth matchedSession failure handler)
-      Left evaluationExit ->
+      P.Left evaluationExit ->
         Left
           ( mapEvaluationExitSession
               (popEncloseScopes baselineDepth)
               evaluationExit
           )
-      Right (value, stoppedSession) ->
+      P.Right (value, stoppedSession) ->
         Right (value, popEncloseScopes baselineDepth stoppedSession)
    where
     baselineDepth = length (sessionEncloseScopes currentSession)
@@ -6216,10 +6610,10 @@ matchingEncloseScopeExists depth = go
       else go updated tag rest
 
 restoreEncloseScopes :: Int -> SessionResult value -> SessionResult value
-restoreEncloseScopes baselineDepth = \case
-  Right (value, session) ->
+restoreEncloseScopes baselineDepth result = inspectRuntimeResult result $ \case
+  P.Right (value, session) ->
     Right (value, popEncloseScopes baselineDepth session)
-  Left evaluationExit ->
+  P.Left evaluationExit ->
     Left
       ( mapEvaluationExitSession
           (popEncloseScopes baselineDepth)
@@ -6447,11 +6841,13 @@ evaluateSessionWith depth session = \case
         evaluateSessionAt (depth + 1) session body
   originalArguments@[Call (Symbol listHead) bindingExpressions, body]
     | isSessionSystemHead "List" listHead ->
-        case collectWithBindings depth session Set.empty Map.empty bindingExpressions of
-          Left evaluationExit -> Left evaluationExit
-          Right (Nothing, updated) ->
+        inspectRuntimeResult
+          (collectWithBindings depth session Set.empty Map.empty bindingExpressions)
+          $ \case
+          P.Left evaluationExit -> Left evaluationExit
+          P.Right (Nothing, updated) ->
             Right (Call (Symbol "With") originalArguments, updated)
-          Right (Just substitutions, updated) ->
+          P.Right (Just substitutions, updated) ->
             evaluateSessionAt
               (depth + 1)
               updated
@@ -6570,14 +6966,14 @@ restoreScopedResult
   :: [(Text, SymbolValueSnapshot)]
   -> SessionResult value
   -> SessionResult value
-restoreScopedResult snapshots = \case
-  Left evaluationExit ->
+restoreScopedResult snapshots result = inspectRuntimeResult result $ \case
+  P.Left evaluationExit ->
     Left
       ( mapEvaluationExitSession
           (restoreSnapshots snapshots)
           evaluationExit
       )
-  Right (value, session) ->
+  P.Right (value, session) ->
     Right (value, restoreSnapshots snapshots session)
 
 restoreSnapshots
@@ -6712,12 +7108,12 @@ evaluateSessionTable
   -> SessionResult Expr
 evaluateSessionTable depth session arguments' = case arguments' of
   body : iteratorSpecs@(_ : _) ->
-    case tableLoop depth session body iteratorSpecs of
-      Left (InvalidIterator updated) ->
+    inspectRuntimeResult (tableLoop depth session body iteratorSpecs) $ \case
+      P.Left (InvalidIterator updated) ->
         Right (Call (Symbol "Table") arguments', updated)
-      Left (IterationEvaluationFailure evaluationExit) ->
+      P.Left (IterationEvaluationFailure evaluationExit) ->
         Left evaluationExit
-      Right result -> Right result
+      P.Right result -> Right result
   _ -> Right (Call (Symbol "Table") arguments', session)
 
 evaluateSessionDo
@@ -6727,22 +7123,24 @@ evaluateSessionDo
   -> SessionResult Expr
 evaluateSessionDo depth session arguments' = case arguments' of
   body : iteratorSpecs@(_ : _) ->
-    case flatIterationLoop False depth session body iteratorSpecs of
-      Left (InvalidIterator updated) ->
+    inspectRuntimeResult
+      (flatIterationLoop False depth session body iteratorSpecs)
+      $ \case
+      P.Left (InvalidIterator updated) ->
         Right (Call (Symbol "Do") arguments', updated)
-      Left
+      P.Left
         ( IterationEvaluationFailure
             (SessionControl BreakSignal stoppedSession)
           ) ->
           Right (Symbol "Null", stoppedSession)
-      Left
+      P.Left
         ( IterationEvaluationFailure
             (SessionControl (Returned value (Just "Do")) stoppedSession)
           ) ->
           Right (value, stoppedSession)
-      Left (IterationEvaluationFailure evaluationExit) ->
+      P.Left (IterationEvaluationFailure evaluationExit) ->
         Left evaluationExit
-      Right (_, updated) -> Right (Symbol "Null", updated)
+      P.Right (_, updated) -> Right (Symbol "Null", updated)
   _ -> Right (Call (Symbol "Do") arguments', session)
 
 evaluateSessionFor
@@ -6812,23 +7210,24 @@ evaluateContinuableBody
   -> Expr
   -> SessionResult ()
 evaluateContinuableBody depth session body =
-  case evaluateSessionAt (depth + 1) session body of
-    Left (SessionControl ContinueSignal stoppedSession) ->
+  inspectRuntimeResult (evaluateSessionAt (depth + 1) session body) $ \case
+    P.Left (SessionControl ContinueSignal stoppedSession) ->
       Right ((), stoppedSession)
-    Left evaluationExit -> Left evaluationExit
-    Right (_, updated) -> Right ((), updated)
+    P.Left evaluationExit -> Left evaluationExit
+    P.Right (_, updated) -> Right ((), updated)
 
 catchLoopBoundary :: Text -> SessionResult Expr -> SessionResult Expr
-catchLoopBoundary target = \case
-  Left (SessionControl BreakSignal stoppedSession) ->
+catchLoopBoundary target result = inspectRuntimeResult result $ \case
+  P.Left (SessionControl BreakSignal stoppedSession) ->
     Right (Symbol "Null", stoppedSession)
-  Left
+  P.Left
     ( SessionControl
         (Returned value (Just actualTarget))
         stoppedSession
       )
     | actualTarget == target -> Right (value, stoppedSession)
-  result -> result
+  P.Left evaluationExit -> Left evaluationExit
+  P.Right success -> Right success
 
 evaluateSessionAccumulator
   :: Text
@@ -6841,11 +7240,13 @@ evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
   case arguments' of
     body : iteratorSpecs@(_ : _)
       | all isListIteratorSpec iteratorSpecs ->
-          case flatIterationLoop True depth session body iteratorSpecs of
-            Left (InvalidIterator updated) -> inert updated
-            Left (IterationEvaluationFailure evaluationExit) ->
+          inspectRuntimeResult
+            (flatIterationLoop True depth session body iteratorSpecs)
+            $ \case
+            P.Left (InvalidIterator updated) -> inert updated
+            P.Left (IterationEvaluationFailure evaluationExit) ->
               Left evaluationExit
-            Right (terms, updated) ->
+            P.Right (terms, updated) ->
               evaluateSessionAt
                 (depth + 1)
                 updated
@@ -6863,17 +7264,20 @@ flatIterationLoop
   -> EvaluationSession
   -> Expr
   -> [Expr]
-  -> Either IterationFailure ([Expr], EvaluationSession)
+  -> IterationResult ([Expr], EvaluationSession)
 flatIterationLoop retainValues depth session body iteratorSpecs = do
   (reversed, updated) <- collect depth session iteratorSpecs []
   Right (reverse reversed, updated)
  where
   collect currentDepth current [] retained = do
-    case evaluateSessionAt (currentDepth + 1) current body of
-      Left (SessionControl ContinueSignal stoppedSession)
+    inspectRuntimeResult
+      (evaluateSessionAt (currentDepth + 1) current body)
+      $ \case
+      P.Left (SessionControl ContinueSignal stoppedSession)
         | not retainValues -> Right (retained, stoppedSession)
-      evaluationResult -> do
-        (value, updated) <- liftIterationEvaluation evaluationResult
+      P.Left evaluationExit ->
+        Left (IterationEvaluationFailure evaluationExit)
+      P.Right (value, updated) ->
         Right (if retainValues then value : retained else retained, updated)
   collect currentDepth current (iteratorSpec : remainingSpecs) retained = do
     (Iterator variable values, resolvedSession) <-
@@ -6903,9 +7307,11 @@ flatIterationLoop retainValues depth session body iteratorSpecs = do
         )
     collectWithVariable nestedDepth name previous currentSession (value : rest) retainedValues =
       let bound = define name (ImmediateValue value) currentSession
-       in case collect (nestedDepth + 1) bound remainingSpecs retainedValues of
-            Left failure -> Left (restoreIterationFailure name previous failure)
-            Right (nextRetained, updated) ->
+       in inspectRuntimeResult
+            (collect (nestedDepth + 1) bound remainingSpecs retainedValues)
+            $ \case
+            P.Left failure -> Left (restoreIterationFailure name previous failure)
+            P.Right (nextRetained, updated) ->
               collectWithVariable
                 nestedDepth
                 name
@@ -6919,7 +7325,7 @@ tableLoop
   -> EvaluationSession
   -> Expr
   -> [Expr]
-  -> Either IterationFailure (Expr, EvaluationSession)
+  -> IterationResult (Expr, EvaluationSession)
 tableLoop depth session body [] =
   liftIterationEvaluation (evaluateSessionAt (depth + 1) session body)
 tableLoop depth session body (iteratorSpec : remainingSpecs) = do
@@ -6943,16 +7349,18 @@ tableLoop depth session body (iteratorSpec : remainingSpecs) = do
       )
   collectWithVariable name previous current (value : rest) results =
     let bound = define name (ImmediateValue value) current
-     in case tableLoop (depth + 1) bound body remainingSpecs of
-          Left failure -> Left (restoreIterationFailure name previous failure)
-          Right (result, updated) ->
+     in inspectRuntimeResult
+          (tableLoop (depth + 1) bound body remainingSpecs)
+          $ \case
+          P.Left failure -> Left (restoreIterationFailure name previous failure)
+          P.Right (result, updated) ->
             collectWithVariable name previous updated rest (result : results)
 
 resolveIterator
   :: Int
   -> EvaluationSession
   -> Expr
-  -> Either IterationFailure (Iterator, EvaluationSession)
+  -> IterationResult (Iterator, EvaluationSession)
 resolveIterator depth session iteratorSpec = case iteratorSpec of
   Integer count -> (,session) <$> countIterator session count
   Call (Symbol listHead) values
@@ -6969,7 +7377,7 @@ resolveListIterator
   :: Int
   -> EvaluationSession
   -> [Expr]
-  -> Either IterationFailure (Iterator, EvaluationSession)
+  -> IterationResult (Iterator, EvaluationSession)
 resolveListIterator depth session = \case
   [countExpression] -> do
     (evaluated, updated) <-
@@ -7006,7 +7414,7 @@ resolveListIterator depth session = \case
       _ -> invalidIterator updated
   _ -> invalidIterator session
 
-countIterator :: EvaluationSession -> Integer -> Either IterationFailure Iterator
+countIterator :: EvaluationSession -> Integer -> IterationResult Iterator
 countIterator session count
   | count > toInteger (maxBound :: Int) = invalidIterator session
   | otherwise =
@@ -7017,20 +7425,19 @@ numericIteratorValues
   -> Expr
   -> Expr
   -> Expr
-  -> Either IterationFailure [Expr]
+  -> IterationResult [Expr]
 numericIteratorValues session start end step =
   maybe (invalidIterator session) Right (exactRangeValues start end step)
 
-invalidIterator :: EvaluationSession -> Either IterationFailure value
+invalidIterator :: EvaluationSession -> IterationResult value
 invalidIterator = Left . InvalidIterator
 
 liftIterationEvaluation
   :: SessionResult value
-  -> Either IterationFailure (value, EvaluationSession)
-liftIterationEvaluation =
-  either
-    (Left . IterationEvaluationFailure)
-    Right
+  -> IterationResult (value, EvaluationSession)
+liftIterationEvaluation result = inspectRuntimeResult result $ \case
+  P.Left evaluationExit -> Left (IterationEvaluationFailure evaluationExit)
+  P.Right success -> Right success
 
 restoreIterationFailure
   :: Text
@@ -7091,17 +7498,17 @@ evaluateSessionCompoundExpression depth session expressions =
 
   go result current [] = Right (result, current)
   go _ current (expression : rest) =
-    case evaluateSessionAt (depth + 1) current expression of
-      Left controlExit@(SessionControl Aborted stoppedSession) ->
+    inspectRuntimeResult (evaluateSessionAt (depth + 1) current expression) $ \case
+      P.Left controlExit@(SessionControl Aborted stoppedSession) ->
         case deferAbortToCurrentProtect stoppedSession of
           Just deferred -> go (Symbol "Null") deferred rest
           Nothing -> Left controlExit
-      Left controlExit@(SessionControl (GotoSignal target) stoppedSession) ->
+      P.Left controlExit@(SessionControl (GotoSignal target) stoppedSession) ->
         case sessionLabelContinuation target originalExpressions of
           Just continuation -> go (Symbol "Null") stoppedSession continuation
           Nothing -> Left controlExit
-      Left evaluationExit -> Left evaluationExit
-      Right (result, updated) -> go result updated rest
+      P.Left evaluationExit -> Left evaluationExit
+      P.Right (result, updated) -> go result updated rest
 
 sessionLabelContinuation :: Expr -> [Expr] -> Maybe [Expr]
 sessionLabelContinuation _ [] = Nothing
@@ -7514,8 +7921,8 @@ evaluateCallArgumentsWithAttributes
   -> SessionResult [Expr]
 evaluateCallArgumentsWithAttributes depth session expressionHead arguments' =
   case sessionCallAttributes session expressionHead of
-    Left (EvaluationError message) -> sessionFailure session message
-    Right attributes ->
+    P.Left (EvaluationError message) -> sessionFailure session message
+    P.Right attributes ->
       prepare
         attributes
         (isSymbolExpression expressionHead)
@@ -7567,7 +7974,7 @@ normalizeSessionAttributeCall
   -> Expr
 normalizeSessionAttributeCall session expressionHead values =
   case sessionCallAttributes session expressionHead of
-    Right attributes ->
+    P.Right attributes ->
       let symbolHead = case expressionHead of Symbol {} -> True; _ -> False
           sequenceNormalized =
             if Set.member SequenceHold attributes
@@ -7583,7 +7990,7 @@ normalizeSessionAttributeCall session expressionHead values =
               then sortBy canonicalCompare flattened
               else flattened
        in Call expressionHead ordered
-    Left _ -> normalizeEvaluatedCall expressionHead values
+    P.Left _ -> normalizeEvaluatedCall expressionHead values
  where
   flattenSameHead targetHead = concatMap flattenOne
    where
@@ -7637,12 +8044,12 @@ threadSessionListableCall
 threadSessionListableCall depth session expression = case expression of
   Call expressionHead values ->
     case sessionCallAttributes session expressionHead of
-      Right attributes
+      P.Right attributes
         | Set.member Listable attributes ->
             case listableArgumentRows values of
-              Left (EvaluationError message) -> Just (sessionFailure session message)
-              Right Nothing -> Nothing
-              Right (Just rows) ->
+              P.Left (EvaluationError message) -> Just (sessionFailure session message)
+              P.Right Nothing -> Nothing
+              P.Right (Just rows) ->
                 Just (evaluateRows expressionHead [] session rows)
       _ -> Nothing
   _ -> Nothing
@@ -7656,10 +8063,10 @@ threadSessionListableCall depth session expression = case expression of
 
 listableArgumentRows :: [Expr] -> Either EvaluationError (Maybe [[Expr]])
 listableArgumentRows values = case listLengths of
-  [] -> Right Nothing
+  [] -> P.Right Nothing
   firstLength : remainingLengths
     | all (== firstLength) remainingLengths ->
-        Right
+        P.Right
           ( Just
               [ [ case value of
                     Call (Symbol listHead) elements
@@ -7671,7 +8078,7 @@ listableArgumentRows values = case listLengths of
               ]
           )
     | otherwise ->
-        Left
+        P.Left
           ( EvaluationError
               "Listable Function arguments have incompatible list lengths."
           )
@@ -7687,11 +8094,11 @@ sessionCallAttributes
   -> Expr
   -> Either EvaluationError (Set.Set SymbolAttribute)
 sessionCallAttributes session = \case
-  Symbol name -> Right (symbolAttributesFor name session)
+  Symbol name -> P.Right (symbolAttributesFor name session)
   Call (Symbol functionHead) functionArguments
     | isSessionSystemHead "Function" functionHead ->
         functionAttributeSet functionArguments
-  _ -> Right Set.empty
+  _ -> P.Right Set.empty
 
 functionAttributeSet
   :: [Expr]
@@ -7699,20 +8106,20 @@ functionAttributeSet
 functionAttributeSet [_, _, specification] =
   Set.fromList . mapMaybeAttribute <$> attributeSymbols specification
  where
-  attributeSymbols (Symbol name) = Right [name]
+  attributeSymbols (Symbol name) = P.Right [name]
   attributeSymbols (Call (Symbol listHead) values)
     | isSessionSystemHead "List" listHead = traverse requireSymbol values
   attributeSymbols _ = invalid
-  requireSymbol (Symbol name) = Right name
+  requireSymbol (Symbol name) = P.Right name
   requireSymbol _ = invalid
   invalid =
-    Left
+    P.Left
       (EvaluationError "Function attributes must be a symbol or a list of symbols.")
   mapMaybeAttribute =
     foldr
       (\name retained -> maybe retained (: retained) (symbolAttributeFromName (systemAttributeSymbolName name)))
       []
-functionAttributeSet _ = Right Set.empty
+functionAttributeSet _ = P.Right Set.empty
 
 isSessionSystemHead :: Text -> Text -> Bool
 isSessionSystemHead expected actual =
@@ -7810,8 +8217,8 @@ evaluateSessionAppendTo depth session = \case
     (itemValue, itemSession) <-
       evaluateSessionAt (depth + 1) currentSession item
     case appendSessionValue currentValue itemValue of
-      Left (EvaluationError message) -> sessionFailure itemSession message
-      Right appended ->
+      P.Left (EvaluationError message) -> sessionFailure itemSession message
+      P.Right appended ->
         evaluateSessionAt
           (depth + 1)
           itemSession
@@ -7826,24 +8233,24 @@ appendSessionValue currentValue itemValue
           let appendCall =
                 Call (Symbol "Append") [currentValue, itemValue]
            in case reduceEvaluatedCall appendCall of
-                Right result
-                  | result /= appendCall -> Right result
+                P.Right result
+                  | result /= appendCall -> P.Right result
                 _ -> invalidAssociationItem
         else invalidAssociationItem
  where
   invalidAssociationItem =
-    Left
+    P.Left
       ( EvaluationError
           "Append expects a rule when appending to an Association."
       )
 appendSessionValue currentValue itemValue = case currentValue of
   Call expressionHead values ->
-    Right
+    P.Right
       ( Call
           expressionHead
           (appendSessionArguments expressionHead (values <> [itemValue]))
       )
-  _ -> Left (EvaluationError "Append expects a nonatomic expression.")
+  _ -> P.Left (EvaluationError "Append expects a nonatomic expression.")
 
 appendSessionArguments :: Expr -> [Expr] -> [Expr]
 appendSessionArguments expressionHead values = case expressionHead of
@@ -8101,7 +8508,7 @@ systemAttributeSymbolName name
 liftPureEvaluation
   :: EvaluationSession
   -> Either EvaluationError value
-  -> Either EvaluationExit value
+  -> RuntimeResult EvaluationExit value
 liftPureEvaluation session =
   either
     (\evaluationFailure ->

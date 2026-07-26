@@ -389,62 +389,71 @@ decodeRequestLine source = parseJson source >>= protocolRequestFromJson
 encodeResponseLine :: ProtocolResponse -> Text
 encodeResponseLine response = encodeJson (protocolResponseToJson response) <> "\n"
 
--- | Pure command dispatch for the protocol foundation.  Parser and evaluator
--- commands can be added without changing framing or response/error shapes.
-handleProtocolRequest :: ProtocolRequest -> ProtocolResponse
+-- | Command dispatch for the protocol foundation.  Evaluation crosses the
+-- explicit session runtime boundary; parse-only commands remain immediate.
+handleProtocolRequest :: ProtocolRequest -> IO ProtocolResponse
 handleProtocolRequest request = case protocolCommand request of
   "ping" ->
-    ProtocolSuccess
-      (protocolRequestId request)
-      "ping"
-      ( JsonObject
-          ( Map.fromList
-              [ ("protocol", JsonNumber "1")
-              , ("version", JsonString "0.1.0")
-              ]
+    pure
+      ( ProtocolSuccess
+          (protocolRequestId request)
+          "ping"
+          ( JsonObject
+              ( Map.fromList
+                  [ ("protocol", JsonNumber "1")
+                  , ("version", JsonString "0.1.0")
+                  ]
+              )
           )
       )
   "full_form" -> case protocolExpression request of
     Just expression ->
-      ProtocolSuccess
-        (protocolRequestId request)
-        "full_form"
-        ( JsonObject
-            ( Map.fromList
-                [ ("full_form", JsonString (fullForm expression))
-                , ("expression", exprToJson expression)
-                ]
+      pure
+        ( ProtocolSuccess
+            (protocolRequestId request)
+            "full_form"
+            ( JsonObject
+                ( Map.fromList
+                    [ ("full_form", JsonString (fullForm expression))
+                    , ("expression", exprToJson expression)
+                    ]
+                )
             )
         )
-    Nothing -> failure "full_form requires an expression"
+    Nothing -> pure (failure "full_form requires an expression")
   "parse" -> case requestExpression request of
-    Left message -> failure message
+    Left message -> pure (failure message)
     Right expression ->
-      ProtocolSuccess
-        (protocolRequestId request)
-        "parse"
-        (expressionResult expression)
+      pure
+        ( ProtocolSuccess
+            (protocolRequestId request)
+            "parse"
+            (expressionResult expression)
+        )
   "evaluate" -> case requestExpression request of
-    Left message -> failure message
-    Right expression -> case evaluateInSession emptySession expression of
-      Left evaluationError -> failure (evaluationErrorMessage evaluationError)
-      Right (result, updatedSession) ->
-        ProtocolSuccess
-          (protocolRequestId request)
-          "evaluate"
-          ( JsonObject
-              ( Map.fromList
-                  [ ("input", expressionResult expression)
-                  , ( "messages"
-                    , JsonArray
-                        (map evaluationMessageResult (sessionVisibleMessages updatedSession))
+    Left message -> pure (failure message)
+    Right expression ->
+      evaluateInSession emptySession expression >>= \case
+        Left evaluationError -> pure (failure (evaluationErrorMessage evaluationError))
+        Right (result, updatedSession) ->
+          pure
+            ( ProtocolSuccess
+                (protocolRequestId request)
+                "evaluate"
+                ( JsonObject
+                    ( Map.fromList
+                        [ ("input", expressionResult expression)
+                        , ( "messages"
+                          , JsonArray
+                              (map evaluationMessageResult (sessionVisibleMessages updatedSession))
+                          )
+                        , ("prints", JsonArray (map JsonString (sessionPrints updatedSession)))
+                        , ("result", expressionResult result)
+                        ]
                     )
-                  , ("prints", JsonArray (map JsonString (sessionPrints updatedSession)))
-                  , ("result", expressionResult result)
-                  ]
-              )
-          )
-  command -> failure ("unsupported command: " <> command)
+                )
+            )
+  command -> pure (failure ("unsupported command: " <> command))
  where
   failure message =
     ProtocolFailure (protocolRequestId request) (protocolCommand request) message

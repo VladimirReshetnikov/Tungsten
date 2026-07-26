@@ -935,9 +935,9 @@ serveProtocol = do
     then pure ()
     else do
       line <- TextIO.hGetLine stdin
-      let response = case decodeRequestLine line of
-            Left jsonError -> ProtocolFailure Nothing "" (jsonErrorMessage jsonError)
-            Right request -> handleProtocolRequest request
+      response <- case decodeRequestLine line of
+        Left jsonError -> pure (ProtocolFailure Nothing "" (jsonErrorMessage jsonError))
+        Right request -> handleProtocolRequest request
       TextIO.putStr (encodeResponseLine response)
       serveProtocol
 
@@ -959,26 +959,27 @@ runExpressionCommand command sourceSpec requestedForm = do
         ParseCommand -> do
           emitJson (parsePayload normalizedForm source expression)
           pure 0
-        EvaluateCommand -> case evaluateInSession emptySession expression of
-          Left evaluationError ->
-            emitError
-              command
-              normalizedForm
-              (Just source)
-              "WolframEvaluationError"
-              (evaluationErrorMessage evaluationError)
-              (Just expression)
-          Right (result, updatedSession) -> do
-            emitJson
-              ( evaluationPayload
-                  normalizedForm
-                  source
-                  expression
-                  result
-                  (sessionVisibleMessages updatedSession)
-                  (sessionPrints updatedSession)
-              )
-            pure 0
+        EvaluateCommand ->
+          evaluateInSession emptySession expression >>= \case
+            Left evaluationError ->
+              emitError
+                command
+                normalizedForm
+                (Just source)
+                "WolframEvaluationError"
+                (evaluationErrorMessage evaluationError)
+                (Just expression)
+            Right (result, updatedSession) -> do
+              emitJson
+                ( evaluationPayload
+                    normalizedForm
+                    source
+                    expression
+                    result
+                    (sessionVisibleMessages updatedSession)
+                    (sessionPrints updatedSession)
+                )
+              pure 0
 
 readSource :: SourceSpec -> IO (Either Text Text)
 readSource (InlineSource source) = pure (Right source)
