@@ -36,6 +36,7 @@ import System.FilePath ((</>))
 import Text.Read (readMaybe)
 import Tungsten.Cli
 import qualified Tungsten.ArrayTests as ArrayTests
+import qualified Tungsten.NumericAlgebraTests as NumericAlgebraTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
 import Tungsten.Expression
@@ -83,6 +84,7 @@ tests =
   , ArrayTests.checkArrayEvaluator
   , IntervalTests.checkIntervalEvaluator
   , StatisticsTests.checkStatisticsEvaluator
+  , NumericAlgebraTests.checkNumericAlgebraEvaluator
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors

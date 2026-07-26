@@ -44,6 +44,7 @@ library
     Tungsten.Kernel
     Tungsten.Licensing
     Tungsten.NamedCharacters
+    Tungsten.NumericAlgebra
     Tungsten.Notebook
     Tungsten.Parser
     Tungsten.ParserCorpus
@@ -86,6 +87,7 @@ test-suite tungsten-engine-test
     Tungsten.ArrayTests
     Tungsten.IntervalTests
     Tungsten.StatisticsTests
+    Tungsten.NumericAlgebraTests
   build-depends:
     base            >= 4.21 && < 4.22,
     bytestring      >= 0.12 && < 0.13,

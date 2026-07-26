@@ -55,6 +55,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Word (Word8)
 import Text.Read (readMaybe)
 import Tungsten.Expression
+import qualified Tungsten.NumericAlgebra as NumericAlgebra
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
   , isSystemSymbol
@@ -806,7 +807,10 @@ reduceBuiltin headName values = case headName of
   "ReplaceAll" -> reduceReplaceAll values
   "ReplaceRepeated" -> reduceReplaceRepeated values
   "CompoundExpression" -> Right (if null values then Symbol "Null" else last values)
-  _ -> Right (Call (Symbol headName) values)
+  _ -> case NumericAlgebra.reduceNumericBuiltin headName values of
+    Left message -> Left (EvaluationError message)
+    Right (Just result) -> Right result
+    Right Nothing -> Right (Call (Symbol headName) values)
 
 data Exact = Exact !Integer !Integer
   deriving (Eq, Ord, Show)
