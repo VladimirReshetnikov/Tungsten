@@ -12502,17 +12502,34 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             if (valid) if (const auto result = multidimensional(multidimensional, args[0], 0)) return *result;
         }
     }
-    if (function == "Accumulate" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+    if (function == "Accumulate") {
+        if (args.empty() || args.size() > 2)
+            return raw_evaluation_error(
+                "Accumulate expects a list and an optional binary combiner.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                "Accumulate expects a list or association.");
         const auto rules = association_rules(args[0]);
         const auto combine = args.size() == 2 ? args[1] : symbol("Plus");
         std::vector<Expr> values;
-        bool first = true; Expr total = integer(0L);
-        for (const auto& item : rules ? *rules : args[0].args()) {
-            const auto& value = rules ? item.args()[1] : item;
-            total = first ? value : evaluate(call(combine, {total, value})); first = false;
-            values.push_back(rules ? call("Rule", {item.args()[0], total}) : total);
+        values.reserve(source->size());
+        std::optional<Expr> total;
+        for (std::size_t index = 0; index < source->size(); ++index) {
+            if (!total) total = (*source)[index];
+            else {
+                const auto outcome = evaluate(call(
+                    combine, {*total, (*source)[index]}));
+                if (aborted_ || thrown_ || confirmation_failure_
+                    || control_active()) return outcome;
+                total = outcome;
+            }
+            values.push_back(rules
+                ? call((*rules)[index].head(), {
+                    (*rules)[index].args()[0], *total})
+                : *total);
         }
-        return call(rules ? symbol("Association") : args[0].head(), std::move(values));
+        return call(rules ? "Association" : "List", std::move(values));
     }
     if (function == "Riffle") {
         std::string error;

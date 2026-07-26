@@ -4,8 +4,8 @@
 The recorded-test gate proves compatibility for calls that the Python unittest
 suite happens to make.  This companion gate generates dense, deterministic
 cross-products around sequence boundaries, selector direction, inexact
-rounding, structural positions, level traversal, and Unicode/string-pattern
-behavior.
+rounding, structural positions, level traversal, collection callback
+contracts, and Unicode/string-pattern behavior.
 """
 
 from __future__ import annotations
@@ -49,7 +49,8 @@ def _arguments() -> argparse.Namespace:
         "--cluster",
         action="append",
         choices=(
-            "rounding", "take-drop", "list", "structural", "traversal", "strings"
+            "rounding", "take-drop", "list", "structural", "traversal",
+            "collections", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -315,6 +316,150 @@ def traversal_cases() -> list[str]:
     return _unique(cases)
 
 
+def collections_cases() -> list[str]:
+    cases: list[str] = []
+
+    structural_pairs = (
+        ("{}", "{}"),
+        ("{1,2,3}", "{2,3}"),
+        ("{1,2}", "{2,3}"),
+        ("{1,1,2}", "{2,1,2}"),
+        ("<|a->1,b->2,c->3|>", "<|x->2,y->3|>"),
+        ("<||>", "<||>"),
+    )
+    for head in ("ContainsAll", "ContainsAny", "ContainsNone", "ContainsExactly"):
+        cases.extend(f"{head}[{left},{right}]" for left, right in structural_pairs)
+        cases.extend(
+            (
+                f"{head}[f[1],{{1}}]",
+                f"{head}[Association[x],{{1}}]",
+                f"{head}[{{1}}]",
+                f"{head}[{{1}},{{1}},x]",
+            )
+        )
+    cases.extend(
+        (
+            'ContainsAll[(Print["collection-arg"];f[1]),{1}]',
+            "CountDistinct[{}]",
+            "CountDistinct[{1,1.0,1,1.0}]",
+            "CountDistinct[<|a->x,b->x,c->y|>]",
+            "CountDistinct[f[a,a,b]]",
+            "CountDistinct[Association[x]]",
+            "CountDistinct[]",
+            "CountDistinct[{1},x]",
+            "CountDistinctBy[{1,2,3},Parity]",
+        )
+    )
+
+    for head in ("AllTrue", "AnyTrue", "NoneTrue"):
+        cases.extend(
+            (
+                f"{head}[{{}},IntegerQ]",
+                f"{head}[{{1,2,3}},IntegerQ]",
+                f"{head}[<|a->1,b->2|>,IntegerQ]",
+                f"{head}[f[1,2],IntegerQ]",
+                f"{head}[{{1}}]",
+                f"{head}[{{1}},IntegerQ,x]",
+            )
+        )
+    cases.extend(
+        (
+            "AllTrue[{1,2,3},(Print[#];#<2)&]",
+            "AnyTrue[{1,2,3},(Print[#];#==2)&]",
+            "NoneTrue[{1,2,3},(Print[#];#==2)&]",
+            "Catch[AllTrue[{1,2,3},(Print[#];If[#==2,Throw[x]];True)&]]",
+            "CheckAbort[AnyTrue[{1,2,3},(Print[#];If[#==2,Abort[]];False)&],caught]",
+            "CheckAbort[AbortProtect[AllTrue[{1,2},"
+            '(Print[#];If[#==1,Abort[]];True)&];Print["after"]],caught]',
+        )
+    )
+
+    for head in ("Tally", "Counts"):
+        cases.extend(
+            (
+                f"{head}[{{}}]",
+                f"{head}[{{x,x,y}}]",
+                f"{head}[<|a->x,b->x,c->y|>]",
+                f"{head}[{{1,2,3}},#1<#2&]",
+                f"{head}[{{1,2}},(Print[{{#1,#2}}];False)&]",
+                f"Catch[{head}[{{1,2,3}},"
+                "(Print[{#1,#2}];Throw[x])&]]",
+                f"{head}[f[x,x,y]]",
+                f"{head}[]",
+                f"{head}[{{1}},SameQ,x]",
+            )
+        )
+
+    cases.extend(
+        (
+            "CountsBy[{},Identity]",
+            "CountsBy[{1.5,1.7,2.2},Floor]",
+            "CountsBy[<|a->1.5,b->1.7,c->2.2|>,Floor]",
+            "CountsBy[{1,2,3},(Print[#];Mod[#,2])&]",
+            "Catch[CountsBy[{1,2,3},(Print[#];If[#==2,Throw[x]];#)&]]",
+            'Enclose[CountsBy[{1,2,3},(Print[#];If[#==2,'
+            'Confirm[Failure["stop",<||>]]];#)&]]',
+            "CheckAbort[AbortProtect[Abort[];CountsBy[{1,2},"
+            '(Print[#];#)&];Print["after"]],caught]',
+            "CountsBy[f[1,2],Identity]",
+            "CountsBy[Association[x],Identity]",
+            "CountsBy[{1}]",
+            "CountsBy[{1},Identity,x]",
+        )
+    )
+
+    cases.extend(
+        (
+            "ContainsOnly[{1,2},{0,1,2,3}]",
+            "ContainsOnly[{1,4},{0,1,2,3}]",
+            "ContainsOnly[{},{}]",
+            "ContainsOnly[{},f[]]",
+            "ContainsOnly[<|a->1,b->2|>,<|x->1,y->2,z->3|>]",
+            "ContainsOnly[{1.0,2.0},{0,1,2},SameTest->Equal]",
+            "ContainsOnly[{1.0},{1},SameTest:>Equal]",
+            "ContainsOnly[{1,2},{1,2},SameTest->Equal,SameTest->Automatic]",
+            "ContainsOnly[{1.0},{1},SameTest->SameQ,SameTest->Equal]",
+            'ContainsOnly[{1.0,2.0},{0,1,2},SameTest:>'
+            '(Print["delayed"];Equal)]',
+            "Catch[ContainsOnly[{1,2},{0,1,2},"
+            "SameTest->((Print[{#1,#2}];Throw[x])&)]]",
+            "ContainsOnly[f[1],g[1]]",
+            "ContainsOnly[Association[x],{1}]",
+            "ContainsOnly[{1},{1},Heads->False]",
+            "ContainsOnly[{1},{1},WorkingPrecision->20]",
+            "ContainsOnly[{1},{1},Rule[SameTest]]",
+            "ContainsOnly[{1},{1},1->Equal]",
+            "ContainsOnly[{1},SameTest->Equal,{1}]",
+            "ContainsOnly[{1}]",
+        )
+    )
+
+    cases.extend(
+        (
+            "Accumulate[{}]",
+            "Accumulate[{1,2,3,4}]",
+            "Accumulate[{1,2,3,4},Times]",
+            "Accumulate[System`List[1,2,3]]",
+            "Accumulate[<||>]",
+            "Accumulate[<|a->1,b->2,c->3|>]",
+            "Accumulate[Association[RuleDelayed[a,1],RuleDelayed[b,2]]]",
+            "Accumulate[System`Association[System`RuleDelayed[a,1],"
+            "System`Rule[b,2]]]",
+            "Catch[Accumulate[{1,2,3},(Print[{#1,#2}];"
+            "If[#2==2,Throw[x]];Plus[#1,#2])&]]",
+            "CheckAbort[Accumulate[{1,2,3},(Print[{#1,#2}];"
+            "If[#2==2,Abort[]];Plus[#1,#2])&],caught]",
+            "CheckAbort[AbortProtect[Abort[];Accumulate[{1,2,3},"
+            '(Print[{#1,#2}];Plus[#1,#2])&];Print["after"]],caught]',
+            "Accumulate[f[1,2]]",
+            "Accumulate[Association[x]]",
+            "Accumulate[]",
+            "Accumulate[{1},Plus,x]",
+        )
+    )
+    return _unique(cases)
+
+
 def string_cases() -> list[str]:
     strings = ('""', '"a"', '"ab"', '"aba"', '"a b"', '"café λ"')
     patterns = (
@@ -376,6 +521,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "list": list_cases,
     "structural": structural_cases,
     "traversal": traversal_cases,
+    "collections": collections_cases,
     "strings": string_cases,
 }
 

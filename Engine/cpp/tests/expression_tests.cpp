@@ -2062,6 +2062,63 @@ int main() {
         "ContainsOnly[{1},SameTest->Equal,{1}]", "ContainsOnly",
         "ContainsOnly expects two arguments and an optional SameTest rule.");
 
+    const std::vector<std::pair<std::string, std::string>> accumulate_contracts{
+        {"Accumulate[{1,2,3,4}]", "List[1, 3, 6, 10]"},
+        {"Accumulate[{1,2,3,4},Times]", "List[1, 2, 6, 24]"},
+        {"Accumulate[{}]", "List[]"},
+        {"Accumulate[<||>]", "Association[]"},
+        {"Accumulate[<|a->1,b->2,c->3|>]",
+            "Association[Rule[a, 1], Rule[b, 3], Rule[c, 6]]"},
+        {"Accumulate[Association[RuleDelayed[a,1],RuleDelayed[b,2]]]",
+            "Association[RuleDelayed[a, 1], RuleDelayed[b, 3]]"},
+        {"Accumulate[System`Association[System`RuleDelayed[a,1],"
+            "System`Rule[b,2]]]",
+            "Association[System`RuleDelayed[a, 1], System`Rule[b, 3]]"},
+        {"Accumulate[System`List[1,2,3]]", "List[1, 3, 6]"},
+    };
+    for (const auto& [source, expected] : accumulate_contracts)
+        check_equal(evaluate(parse_input_form(source)).to_full_form(), expected,
+            "Accumulate collection contract: " + source);
+
+    Evaluator accumulate_callbacks;
+    check_equal(accumulate_callbacks.evaluate(parse_input_form(
+        "Catch[Accumulate[{1,2,3},(Print[{#1,#2}];"
+        "If[#2==2,Throw[x]];Plus[#1,#2])&]]"
+        )).to_full_form(),
+        "x", "Accumulate propagates Throw from its combiner");
+    check(accumulate_callbacks.prints()
+            == std::vector<std::string>{"{1, 2}"},
+        "Accumulate stops invoking its combiner after Throw");
+    check_equal(accumulate_callbacks.evaluate(parse_input_form(
+        "CheckAbort[Accumulate[{1,2,3},(Print[{#1,#2}];"
+        "If[#2==2,Abort[]];Plus[#1,#2])&],caught]"
+        )).to_full_form(),
+        "caught", "Accumulate propagates an immediate abort to CheckAbort");
+    check(accumulate_callbacks.prints()
+            == std::vector<std::string>{"{1, 2}"},
+        "Accumulate stops invoking its combiner after an immediate abort");
+    check_equal(accumulate_callbacks.evaluate(parse_input_form(
+        "CheckAbort[AbortProtect[Abort[];Accumulate[{1,2,3},"
+        "(Print[{#1,#2}];Plus[#1,#2])&];Print[\"after\"]],caught]"
+        )).to_full_form(),
+        "caught", "Accumulate leaves a protected abort pending");
+    check(accumulate_callbacks.prints()
+            == std::vector<std::string>{"{1, 2}", "{3, 3}", "after"},
+        "Accumulate completes while an enclosing protected abort is pending");
+
+    check_structural_collection_error(
+        "Accumulate[f[1,2]]", "Accumulate",
+        "Accumulate expects a list or association.");
+    check_structural_collection_error(
+        "Accumulate[Association[x]]", "Accumulate",
+        "Accumulate expects a list or association.");
+    check_structural_collection_error(
+        "Accumulate[]", "Accumulate",
+        "Accumulate expects a list and an optional binary combiner.");
+    check_structural_collection_error(
+        "Accumulate[{1},Plus,x]", "Accumulate",
+        "Accumulate expects a list and an optional binary combiner.");
+
     const std::vector<std::pair<std::string, std::string>> polynomial_boundary_cases{
         {"ToExpression[\"f[a]\", InputForm, List]", "List[f[a]]"},
         {"Coefficient[2 x^2 y + 3 x y + y, x, 1]", "Times[3, y]"},
