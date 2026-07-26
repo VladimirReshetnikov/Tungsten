@@ -73,6 +73,9 @@ private:
         Expr selector;
         std::vector<std::pair<Expr, Expr>> entries;
     };
+    struct EncloseScope {
+        std::optional<Expr> form;
+    };
     struct MessageScope {
         bool quiet = false;
         std::vector<Expr> selectors;
@@ -134,10 +137,8 @@ private:
     std::optional<Expr> thrown_tag_;
     std::optional<Expr> thrown_handler_;
     std::optional<Expr> confirmation_failure_;
-    std::optional<Expr> confirmation_information_;
-    std::optional<Expr> confirmation_function_;
-    std::optional<Expr> confirmation_pattern_;
     std::optional<Expr> confirmation_tag_;
+    std::vector<EncloseScope> enclose_scopes_;
     std::vector<ReapScope> reap_stack_;
     std::vector<MessageScope> message_scopes_;
     std::vector<TimeConstraintScope> time_constraints_;

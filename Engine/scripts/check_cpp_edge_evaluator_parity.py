@@ -51,7 +51,7 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "rounding", "take-drop", "take-list", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
-            "array-shape", "ordering", "strings",
+            "array-shape", "ordering", "failure-confirmation", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -1104,6 +1104,143 @@ def ordering_cases() -> list[str]:
     ]
 
 
+def failure_confirmation_cases() -> list[str]:
+    """Failure values, guarded calls, and dynamically scoped confirmation."""
+
+    return [
+        "FailureQ[Failure[]]",
+        "FailureQ[$Failed]",
+        "FailureQ[$Canceled]",
+        "FailureQ[$Aborted]",
+        'FailureQ[Missing["x"]]',
+        "MissingQ[Missing[]]",
+        "MissingQ[$Failed]",
+        'Failure[x,<|"A"->1|>]["Type"]',
+        'Failure[x,<|"A"->1|>]["FailureType"]',
+        'Failure[x,<|"A"->1|>]["A"]',
+        'Failure[x,<|"A"->1|>]["B"]',
+        'Failure[x,{"A":>Print["late"]}]["A"]',
+        "Failure[x,<||>][1]",
+        'Failure[x,<|"A"->1|>]["A","B"]',
+        'Failsafe[Print["no"],a,b,c]',
+        "Failsafe[f][1,2]",
+        'Failsafe[f][1,Missing["x"],Failure[bad,<||>]]',
+        "Failsafe[f][$Failed]",
+        "Failsafe[f][$Canceled]",
+        "Failsafe[f][$Aborted]",
+        "Failsafe[f,SameQ][1,1]",
+        "Failsafe[f,SameQ][1,2]",
+        'Failsafe[f,SameQ][1,2]["Arguments"]',
+        'Failsafe[f,SameQ][1,2]["Type"]',
+        "Failsafe[f,SameQ,g][1,2]",
+        "Failsafe[f,SameQ,g][1,1]",
+        (
+            'Failsafe[(Print["f"];f),(Print["t"];SameQ),'
+            '(Print["g"];g)][(Print["a"];1),(Print["b"];2)]'
+        ),
+        "Confirm[]",
+        'Confirm[Print["x"],a,b,c]',
+        'Confirm[1,Print["i"],Print["t"]]',
+        "Confirm[$Failed]",
+        'Confirm[Failure["x",<|"A"->1|>]]',
+        'Confirm[Failure["x",<||>],info]',
+        'Confirm[Missing["x"],info]',
+        "Confirm[$Canceled]",
+        "Confirm[$Aborted]",
+        'Confirm[$Failed];Print["after"];7',
+        'Enclose[Confirm[$Failed];Print["after"]]',
+        'Enclose[Confirm[$Failed],"Type"]',
+        'Enclose[Confirm[$Failed],"Expression"]',
+        'Enclose[Confirm[$Failed],"Information"]',
+        'Enclose[Confirm[$Failed],"Nope"]',
+        "Enclose[Confirm[$Failed,info],f]",
+        "Enclose[Confirm[$Failed,info,tag],Identity,tag]",
+        "Enclose[Confirm[$Failed,info,tag],Identity,_Symbol]",
+        (
+            'Enclose[Confirm[$Failed,info,tag];Print["after"],'
+            "Identity,other]"
+        ),
+        (
+            "Enclose[Enclose[Confirm[$Failed,info,outer],Identity,inner],"
+            "Identity,outer]"
+        ),
+        (
+            "Enclose[Enclose[Confirm[$Failed,info,inner],Identity,inner],"
+            "Identity,outer]"
+        ),
+        (
+            'Enclose[Confirm[$Failed,Null,tag],Identity,PatternTest[Blank[],'
+            'Function[x,Print["p"];True]]]'
+        ),
+        (
+            'Enclose[Enclose[Confirm[$Failed,Null,tag],Identity,'
+            'PatternTest[Blank[],Function[x,Print["inner"];False]]],Identity,'
+            'PatternTest[Blank[],Function[x,Print["outer"];True]]]'
+        ),
+        (
+            "Enclose[Confirm[$Failed,Null,tag],Identity,"
+            "Condition[Pattern[x,Blank[]],Print[InputForm[x]];SameQ[x,tag]]]"
+        ),
+        "ConfirmBy[1]",
+        "Enclose[ConfirmBy[3,IntegerQ]]",
+        "ConfirmBy[3,StringQ]",
+        'Enclose[ConfirmBy[3,StringQ,info],"Function"]',
+        (
+            "Enclose[ConfirmBy[3,Function[x,Print[InputForm[x]];False],"
+            'info],"Expression"]'
+        ),
+        "ConfirmMatch[3]",
+        "Enclose[ConfirmMatch[3,_Integer]]",
+        "ConfirmMatch[3,_String]",
+        'Enclose[ConfirmMatch[3,_String,info],"Pattern"]',
+        (
+            "Enclose[ConfirmMatch[3,PatternTest[Blank[],"
+            "Function[x,Print[InputForm[x]];IntegerQ[x]]]]]"
+        ),
+        (
+            "Enclose[ConfirmMatch[3,Condition[Pattern[x,Blank[]],"
+            "Print[InputForm[x]];Greater[x,2]]]]"
+        ),
+        "ConfirmAssert[]",
+        "Enclose[ConfirmAssert[True]]",
+        "ConfirmAssert[False]",
+        'Enclose[ConfirmAssert[False,info],"Test"]',
+        'ConfirmQuiet[Print["q"];1]',
+        'FailWhen[Print["f"];False]',
+        "Catch[Enclose[Throw[x]]];Confirm[$Failed]",
+        "CheckAbort[Enclose[Abort[]],caught];Confirm[$Failed]",
+        (
+            "CheckAbort[Enclose[AbortProtect[Abort[];7]],caught];"
+            "Confirm[$Failed]"
+        ),
+        "ClearAll[f];f[]:=Enclose[Return[x]];f[];Confirm[$Failed]",
+        "Do[Enclose[Break[]],{2}];Confirm[$Failed]",
+        "Do[Enclose[Continue[]],{2}];Confirm[$Failed]",
+        'Enclose[Goto[l];Print["bad"];Label[l];7];Confirm[$Failed]',
+        (
+            'Enclose[WithCleanup[Confirm[$Failed,bad],Print["cleanup"]],'
+            '"Information"]'
+        ),
+        'Enclose[Reap[Sow[a];Confirm[$Failed,bad]],"Information"]',
+        'Reap[Enclose[Sow[a];Confirm[$Failed,bad],"Information"]]',
+        (
+            "Enclose[TimeConstrained[Confirm[$Failed,bad],1,timeout],"
+            '"Information"]'
+        ),
+        (
+            "TimeConstrained[Enclose[Pause[.02];Confirm[$Failed],Identity],"
+            ".001,timeout];Confirm[$Failed]"
+        ),
+        "Enclose[Confirm[$Failed],Function[x,Confirm[$Failed]]]",
+        "Enclose[Enclose[Confirm[$Failed],Function[x,Confirm[$Failed]]]]",
+        "Catch[Enclose[ConfirmBy[1,Function[x,Throw[boom]]]]]",
+        (
+            "CheckAbort[Enclose[ConfirmMatch[1,PatternTest[Blank[],"
+            "Function[x,Abort[]]]]],caught]"
+        ),
+    ]
+
+
 CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "rounding": rounding_cases,
     "take-drop": take_drop_cases,
@@ -1117,6 +1254,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "distribution": distribution_cases,
     "array-shape": array_shape_cases,
     "ordering": ordering_cases,
+    "failure-confirmation": failure_confirmation_cases,
     "strings": string_cases,
 }
 

@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -3972,12 +3973,11 @@ bool confirmation_failure_value(const Expr& expression) {
         || expression.has_head("Missing");
 }
 
-std::optional<std::vector<Expr>> failure_detail_rules(
-    const Expr& expression) {
+std::vector<Expr> failure_detail_rules(const Expr& expression) {
     if (!failure_value(expression) || expression.args().size() < 2)
         return std::vector<Expr>{};
     const auto& details = expression.args()[1];
-    if (const auto rules = association_rules(details)) return rules;
+    if (const auto rules = association_rules(details)) return *rules;
     if (details.has_head("List")) {
         std::vector<Expr> rules;
         for (const auto& item : details.args()) {
@@ -3994,13 +3994,12 @@ Expr failure_property(const Expr& failure, const Expr& key) {
     if ((key.text() == "Type" || key.text() == "FailureType")
         && !failure.args().empty())
         return failure.args()[0];
-    if (const auto rules = failure_detail_rules(failure)) {
-        const auto found = std::find_if(
-            rules->begin(), rules->end(), [&](const Expr& rule) {
-                return rule.args()[0] == key;
-            });
-        if (found != rules->end()) return found->args()[1];
-    }
+    const auto rules = failure_detail_rules(failure);
+    const auto found = std::find_if(
+        rules.begin(), rules.end(), [&](const Expr& rule) {
+            return rule.args()[0] == key;
+        });
+    if (found != rules.end()) return found->args()[1];
     return call("Missing", {string("KeyAbsent"), key});
 }
 
@@ -5377,9 +5376,18 @@ std::optional<Expr> recover_inactive_original(const Expr& original, const Expr& 
     return recover_inactive_original(original.head(), active);
 }
 
-bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& bindings);
+struct PatternEvaluationContext {
+    std::function<bool(const Expr&, const Expr&)> predicate;
+    std::function<bool(const Expr&)> condition;
+};
 
-bool predicate_matches(const Expr& value, const Expr& predicate) {
+bool pattern_match(const Expr& value, const Expr& raw_pattern,
+    Bindings& bindings,
+    const PatternEvaluationContext* context = nullptr);
+
+bool predicate_matches(const Expr& value, const Expr& predicate,
+    const PatternEvaluationContext* context) {
+    if (context) return context->predicate(value, predicate);
     if (is_symbol(predicate, "IntegerQ")) return value.kind() == ExprKind::Integer;
     if (is_symbol(predicate, "StringQ")) return value.kind() == ExprKind::String;
     if (is_symbol(predicate, "NumberQ") || is_symbol(predicate, "NumericQ")) return numeric_q_value(value);
@@ -5422,7 +5430,10 @@ std::pair<std::size_t, std::size_t> sequence_bounds(const Expr& pattern, std::si
     return {1, 1};
 }
 
-bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_index, const std::vector<Expr>& patterns, std::size_t pattern_index, Bindings& bindings);
+bool match_argument_sequence(const std::vector<Expr>& values,
+    std::size_t value_index, const std::vector<Expr>& patterns,
+    std::size_t pattern_index, Bindings& bindings,
+    const PatternEvaluationContext* context);
 
 bool bind_sequence_name(const Expr& name, const std::vector<Expr>& values, Bindings& bindings, bool sequence) {
     if (!name.symbol_name()) return false;
@@ -5431,13 +5442,46 @@ bool bind_sequence_name(const Expr& name, const std::vector<Expr>& values, Bindi
     bindings.emplace(*name.symbol_name(), value); return true;
 }
 
-bool match_pattern_chunk(const std::vector<Expr>& values, const Expr& pattern, Bindings& bindings) {
-    if ((pattern.has_head("Longest") || pattern.has_head("Shortest") || pattern.has_head("HoldPattern")) && !pattern.args().empty()) return match_pattern_chunk(values, pattern.args()[0], bindings);
-    if (pattern.has_head("Condition") && pattern.args().size() == 2) { auto candidate = bindings; if (!match_pattern_chunk(values, pattern.args()[0], candidate)) return false; if (!simple_truth(substitute_bindings(pattern.args()[1], candidate)).value_or(false)) return false; bindings = std::move(candidate); return true; }
-    if (pattern.has_head("Pattern") && pattern.args().size() == 2) { auto candidate = bindings; if (!match_pattern_chunk(values, pattern.args()[1], candidate) || !bind_sequence_name(pattern.args()[0], values, candidate, is_sequence_pattern(pattern.args()[1]))) return false; bindings = std::move(candidate); return true; }
-    if (pattern.has_head("PatternTest") && pattern.args().size() == 2) return match_pattern_chunk(values, pattern.args()[0], bindings) && std::all_of(values.begin(), values.end(), [&](const Expr& value) { return predicate_matches(value, pattern.args()[1]); });
+bool match_pattern_chunk(const std::vector<Expr>& values,
+    const Expr& pattern, Bindings& bindings,
+    const PatternEvaluationContext* context) {
+    if ((pattern.has_head("Longest") || pattern.has_head("Shortest")
+        || pattern.has_head("HoldPattern")) && !pattern.args().empty())
+        return match_pattern_chunk(
+            values, pattern.args()[0], bindings, context);
+    if (pattern.has_head("Condition") && pattern.args().size() == 2) {
+        auto candidate = bindings;
+        if (!match_pattern_chunk(
+            values, pattern.args()[0], candidate, context)) return false;
+        const auto condition = substitute_bindings(
+            pattern.args()[1], candidate);
+        const bool succeeds = context
+            ? context->condition(condition)
+            : simple_truth(condition).value_or(false);
+        if (!succeeds) return false;
+        bindings = std::move(candidate);
+        return true;
+    }
+    if (pattern.has_head("Pattern") && pattern.args().size() == 2) {
+        auto candidate = bindings;
+        if (!match_pattern_chunk(
+                values, pattern.args()[1], candidate, context)
+            || !bind_sequence_name(pattern.args()[0], values, candidate,
+                is_sequence_pattern(pattern.args()[1]))) return false;
+        bindings = std::move(candidate);
+        return true;
+    }
+    if (pattern.has_head("PatternTest") && pattern.args().size() == 2)
+        return match_pattern_chunk(
+            values, pattern.args()[0], bindings, context)
+            && std::all_of(values.begin(), values.end(),
+                [&](const Expr& value) {
+                    return predicate_matches(
+                        value, pattern.args()[1], context);
+                });
     if (pattern.has_head("Optional") && !pattern.args().empty()) {
-        if (!values.empty()) return match_pattern_chunk(values, pattern.args()[0], bindings);
+        if (!values.empty()) return match_pattern_chunk(
+            values, pattern.args()[0], bindings, context);
         if (pattern.args().size() < 2) return false;
         const auto& inner = pattern.args()[0]; if (inner.has_head("Pattern") && inner.args().size() == 2) return bind_sequence_name(inner.args()[0], {pattern.args()[1]}, bindings, false); return false;
     }
@@ -5449,21 +5493,26 @@ bool match_pattern_chunk(const std::vector<Expr>& values, const Expr& pattern, B
     if (pattern.has_head("PatternSequence") || pattern.has_head("OrderlessPatternSequence")) {
         if (pattern.has_head("OrderlessPatternSequence") && values.size() == pattern.args().size()) {
             auto permutation = values; std::sort(permutation.begin(), permutation.end(), expression_less);
-            do { auto candidate = bindings; if (match_argument_sequence(permutation, 0, pattern.args(), 0, candidate)) { bindings = std::move(candidate); return true; } } while (std::next_permutation(permutation.begin(), permutation.end(), expression_less));
+            do { auto candidate = bindings; if (match_argument_sequence(permutation, 0, pattern.args(), 0, candidate, context)) { bindings = std::move(candidate); return true; } } while (std::next_permutation(permutation.begin(), permutation.end(), expression_less));
             return false;
         }
-        return match_argument_sequence(values, 0, pattern.args(), 0, bindings);
+        return match_argument_sequence(
+            values, 0, pattern.args(), 0, bindings, context);
     }
     if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull")) && !pattern.args().empty()) {
         const auto unit_patterns = pattern.args()[0].has_head("PatternSequence") ? pattern.args()[0].args() : std::vector<Expr>{pattern.args()[0]};
         if (unit_patterns.empty() || values.size() % unit_patterns.size() != 0) return false;
-        for (std::size_t offset = 0; offset < values.size(); offset += unit_patterns.size()) { std::vector<Expr> unit(values.begin() + static_cast<std::ptrdiff_t>(offset), values.begin() + static_cast<std::ptrdiff_t>(offset + unit_patterns.size())); if (!match_argument_sequence(unit, 0, unit_patterns, 0, bindings)) return false; }
+        for (std::size_t offset = 0; offset < values.size(); offset += unit_patterns.size()) { std::vector<Expr> unit(values.begin() + static_cast<std::ptrdiff_t>(offset), values.begin() + static_cast<std::ptrdiff_t>(offset + unit_patterns.size())); if (!match_argument_sequence(unit, 0, unit_patterns, 0, bindings, context)) return false; }
         return true;
     }
-    return values.size() == 1 && pattern_match(values[0], pattern, bindings);
+    return values.size() == 1
+        && pattern_match(values[0], pattern, bindings, context);
 }
 
-bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_index, const std::vector<Expr>& patterns, std::size_t pattern_index, Bindings& bindings) {
+bool match_argument_sequence(const std::vector<Expr>& values,
+    std::size_t value_index, const std::vector<Expr>& patterns,
+    std::size_t pattern_index, Bindings& bindings,
+    const PatternEvaluationContext* context) {
     if (pattern_index == patterns.size()) return value_index == values.size();
     const auto available = values.size() - value_index; const auto bounds = sequence_bounds(patterns[pattern_index], available);
     std::size_t remaining_minimum = 0; for (std::size_t index = pattern_index + 1; index < patterns.size(); ++index) remaining_minimum += sequence_bounds(patterns[index], available).first;
@@ -5471,12 +5520,13 @@ bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_
     const auto maximum = std::min(bounds.second, available - remaining_minimum); const bool longest = patterns[pattern_index].has_head("Longest");
     for (std::size_t attempt = bounds.first; attempt <= maximum; ++attempt) {
         const auto length = longest ? maximum - (attempt - bounds.first) : attempt; std::vector<Expr> chunk(values.begin() + static_cast<std::ptrdiff_t>(value_index), values.begin() + static_cast<std::ptrdiff_t>(value_index + length)); auto candidate = bindings;
-        if (match_pattern_chunk(chunk, patterns[pattern_index], candidate) && match_argument_sequence(values, value_index + length, patterns, pattern_index + 1, candidate)) { bindings = std::move(candidate); return true; }
+        if (match_pattern_chunk(chunk, patterns[pattern_index], candidate, context) && match_argument_sequence(values, value_index + length, patterns, pattern_index + 1, candidate, context)) { bindings = std::move(candidate); return true; }
     }
     return false;
 }
 
-bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& bindings) {
+bool pattern_match(const Expr& value, const Expr& raw_pattern,
+    Bindings& bindings, const PatternEvaluationContext* context) {
     if (raw_pattern.has_head("KeyValuePattern") && raw_pattern.args().size() == 1) {
         std::optional<std::vector<Expr>> elements = association_rules(value);
         if (!elements && value.has_head("List") && std::all_of(value.args().begin(), value.args().end(), [](const Expr& item) {
@@ -5491,7 +5541,8 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
             for (std::size_t index = 0; index < elements->size(); ++index) {
                 if (used[index]) continue;
                 auto candidate = current;
-                if (!pattern_match((*elements)[index], patterns[pattern_index], candidate)) continue;
+                if (!pattern_match((*elements)[index],
+                    patterns[pattern_index], candidate, context)) continue;
                 used[index] = true; const auto result = self(self, pattern_index + 1, std::move(candidate)); used[index] = false;
                 if (result) return result;
             }
@@ -5502,8 +5553,14 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
     }
     if (raw_pattern.has_head("Condition") && raw_pattern.args().size() == 2) {
         auto candidate = bindings;
-        if (!pattern_match(value, raw_pattern.args()[0], candidate)) return false;
-        if (simple_truth(substitute_bindings(raw_pattern.args()[1], candidate)).value_or(false)) {
+        if (!pattern_match(
+            value, raw_pattern.args()[0], candidate, context)) return false;
+        const auto condition = substitute_bindings(
+            raw_pattern.args()[1], candidate);
+        const bool succeeds = context
+            ? context->condition(condition)
+            : simple_truth(condition).value_or(false);
+        if (succeeds) {
             bindings = std::move(candidate); return true;
         }
         return false;
@@ -5512,7 +5569,8 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
         const auto pattern = raw_pattern.args()[0].has_head("HoldPattern") && raw_pattern.args()[0].args().size() == 1
             ? raw_pattern.args()[0].args()[0] : raw_pattern.args()[0];
         auto candidate = bindings;
-        if (!pattern_match(active_view(value), active_view(pattern), candidate)) return false;
+        if (!pattern_match(active_view(value), active_view(pattern),
+            candidate, context)) return false;
         for (auto& [name, bound] : candidate) {
             (void)name;
             if (const auto original = recover_inactive_original(value, bound)) bound = *original;
@@ -5521,12 +5579,14 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
         return true;
     }
     if ((raw_pattern.has_head("HoldPattern") || raw_pattern.has_head("Verbatim")) && raw_pattern.args().size() == 1)
-        return pattern_match(value, raw_pattern.args()[0], bindings);
-    if (raw_pattern.has_head("Except") && !raw_pattern.args().empty()) { auto candidate = bindings; const bool excluded = pattern_match(value, raw_pattern.args()[0], candidate); return !excluded && (raw_pattern.args().size() == 1 || pattern_match(value, raw_pattern.args()[1], bindings)); }
-    if (raw_pattern.has_head("PatternTest") && raw_pattern.args().size() == 2) return pattern_match(value, raw_pattern.args()[0], bindings) && predicate_matches(value, raw_pattern.args()[1]);
-    if (raw_pattern.has_head("BlankSequence") || raw_pattern.has_head("BlankNullSequence") || raw_pattern.has_head("Repeated") || raw_pattern.has_head("RepeatedNull") || raw_pattern.has_head("PatternSequence") || raw_pattern.has_head("OptionsPattern")) return match_pattern_chunk({value}, raw_pattern, bindings);
+        return pattern_match(
+            value, raw_pattern.args()[0], bindings, context);
+    if (raw_pattern.has_head("Except") && !raw_pattern.args().empty()) { auto candidate = bindings; const bool excluded = pattern_match(value, raw_pattern.args()[0], candidate, context); return !excluded && (raw_pattern.args().size() == 1 || pattern_match(value, raw_pattern.args()[1], bindings, context)); }
+    if (raw_pattern.has_head("PatternTest") && raw_pattern.args().size() == 2) return pattern_match(value, raw_pattern.args()[0], bindings, context) && predicate_matches(value, raw_pattern.args()[1], context);
+    if (raw_pattern.has_head("BlankSequence") || raw_pattern.has_head("BlankNullSequence") || raw_pattern.has_head("Repeated") || raw_pattern.has_head("RepeatedNull") || raw_pattern.has_head("PatternSequence") || raw_pattern.has_head("OptionsPattern")) return match_pattern_chunk({value}, raw_pattern, bindings, context);
     if (raw_pattern.has_head("Pattern") && raw_pattern.args().size() == 2 && raw_pattern.args()[0].symbol_name()) {
-        if (!pattern_match(value, raw_pattern.args()[1], bindings)) return false;
+        if (!pattern_match(
+            value, raw_pattern.args()[1], bindings, context)) return false;
         const auto name = *raw_pattern.args()[0].symbol_name();
         const auto found = bindings.find(name);
         if (found != bindings.end()) return found->second == value;
@@ -5539,13 +5599,15 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
     if (raw_pattern.has_head("Alternatives")) {
         for (const auto& alternative : raw_pattern.args()) {
             auto candidate = bindings;
-            if (pattern_match(value, alternative, candidate)) { bindings = std::move(candidate); return true; }
+            if (pattern_match(value, alternative, candidate, context)) { bindings = std::move(candidate); return true; }
         }
         return false;
     }
     if (value.kind() != ExprKind::Call || raw_pattern.kind() != ExprKind::Call) return value == raw_pattern;
-    if (!pattern_match(value.head(), raw_pattern.head(), bindings)) return false;
-    return match_argument_sequence(value.args(), 0, raw_pattern.args(), 0, bindings);
+    if (!pattern_match(
+        value.head(), raw_pattern.head(), bindings, context)) return false;
+    return match_argument_sequence(
+        value.args(), 0, raw_pattern.args(), 0, bindings, context);
 }
 
 Expr substitute_bindings(const Expr& expression, const Bindings& bindings) {
@@ -6635,13 +6697,13 @@ Expr Evaluator::evaluate(const Expr& expression) {
         abort_protect_scopes_.clear(); check_abort_depths_.clear();
         active_own_values_.clear();
         reap_stack_.clear();
+        enclose_scopes_.clear();
         message_scopes_.clear();
         time_constraints_.clear();
         time_constraint_suppression_depth_ = 0;
         clear_control();
         thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
+        confirmation_failure_.reset(); confirmation_tag_.reset();
     }
     check_time_constraint();
     if (depth_ >= recursion_limit_) return call("TerminatedEvaluation", {symbol("RecursionLimit")});
@@ -6658,6 +6720,15 @@ Expr Evaluator::evaluate(const Expr& expression) {
             result = call("Throw", std::move(args));
         }
         thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+    }
+    if (root && confirmation_failure_) {
+        const auto message = call("MessageName", {
+            symbol("Confirm"), string("confirmnotag")});
+        emit_message(message,
+            "Confirm::confirmnotag: Message generated.");
+        result = *confirmation_failure_;
+        confirmation_failure_.reset();
+        confirmation_tag_.reset();
     }
     if (root && aborted_) {
         result = symbol("$Aborted");
@@ -6896,9 +6967,6 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             std::optional<Expr> thrown_tag;
             std::optional<Expr> thrown_handler;
             std::optional<Expr> confirmation_failure;
-            std::optional<Expr> confirmation_information;
-            std::optional<Expr> confirmation_function;
-            std::optional<Expr> confirmation_pattern;
             std::optional<Expr> confirmation_tag;
             ControlKind control_kind;
             std::optional<Expr> control_value;
@@ -6912,16 +6980,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         auto capture_pending = [&] {
             return PendingState{aborted_, thrown_, thrown_tag_,
-                thrown_handler_, confirmation_failure_, confirmation_information_,
-                confirmation_function_, confirmation_pattern_, confirmation_tag_,
+                thrown_handler_, confirmation_failure_, confirmation_tag_,
                 control_kind_, control_value_, control_target_};
         };
         auto clear_pending = [&] {
             aborted_ = false;
             thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
-            confirmation_failure_.reset(); confirmation_information_.reset();
-            confirmation_function_.reset(); confirmation_pattern_.reset();
-            confirmation_tag_.reset();
+            confirmation_failure_.reset(); confirmation_tag_.reset();
             clear_control();
         };
         auto restore_pending = [&](const PendingState& pending) {
@@ -6930,9 +6995,6 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             thrown_tag_ = pending.thrown_tag;
             thrown_handler_ = pending.thrown_handler;
             confirmation_failure_ = pending.confirmation_failure;
-            confirmation_information_ = pending.confirmation_information;
-            confirmation_function_ = pending.confirmation_function;
-            confirmation_pattern_ = pending.confirmation_pattern;
             confirmation_tag_ = pending.confirmation_tag;
             control_kind_ = pending.control_kind;
             control_value_ = pending.control_value;
@@ -7073,46 +7135,223 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         check_guard.release();
         return value;
     }
-    if (name == "Enclose" && !raw_args.empty()) {
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
-        const auto value = evaluate(raw_args[0]);
-        if (!confirmation_failure_) return value;
-        if (raw_args.size() >= 3 && (!confirmation_tag_ || *confirmation_tag_ != raw_args[2])) return value;
-        const auto property = raw_args.size() >= 2 && raw_args[1].kind() == ExprKind::String
-            ? raw_args[1].text() : "Expression";
-        Expr result = property == "Information" ? confirmation_information_.value_or(symbol("Automatic"))
-            : property == "Function" ? confirmation_function_.value_or(symbol("Identity"))
-            : property == "Pattern" ? confirmation_pattern_.value_or(call("Blank"))
-            : *confirmation_failure_;
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
-        return result;
-    }
-    if ((name == "Confirm" || name == "ConfirmBy" || name == "ConfirmMatch" || name == "ConfirmAssert")
-        && !raw_args.empty()) {
-        const auto value = evaluate(raw_args[0]);
-        bool success = true;
-        std::size_t information_index = 1;
-        if (name == "Confirm") success = !(value.has_head("Failure") || value.has_head("Missing")
-            || is_symbol(value, "$Failed") || is_symbol(value, "$Canceled") || is_symbol(value, "$Aborted"));
-        else if (name == "ConfirmBy" && raw_args.size() >= 2) {
-            success = is_symbol(evaluate(call(raw_args[1], {value})), "True");
-            confirmation_function_ = raw_args[1]; information_index = 2;
-        } else if (name == "ConfirmMatch" && raw_args.size() >= 2) {
-            Bindings bindings; success = pattern_match(value, raw_args[1], bindings);
-            confirmation_pattern_ = raw_args[1]; information_index = 2;
-        } else if (name == "ConfirmAssert") {
-            success = is_symbol(value, "True");
-            if (success) return symbol("Null");
+    if (name == "Enclose" || name == "Confirm" || name == "ConfirmBy" ||
+        name == "ConfirmMatch" || name == "ConfirmAssert") {
+        PatternEvaluationContext session_pattern_context{
+            [this](const Expr& value, const Expr& predicate) {
+                return is_symbol(evaluate(call(predicate, {value})), "True");
+            },
+            [this](const Expr& condition) {
+                return is_symbol(evaluate(condition), "True");
+            }};
+        auto scope_matches = [&](const EncloseScope& scope,
+                                 const std::optional<Expr>& tag) {
+            if (!scope.form)
+                return !tag.has_value();
+            if (!tag)
+                return false;
+            Bindings bindings;
+            return pattern_match(*tag, *scope.form, bindings,
+                                 &session_pattern_context);
+        };
+        auto emit_unhandled_confirmation = [&] {
+            const auto message = call(
+                "MessageName", {symbol("Confirm"), string("confirmnotag")});
+            emit_message(message, "Confirm::confirmnotag: Message generated.");
+        };
+        auto dispatch_confirmation = [&](const Expr& failure,
+                                         const std::optional<Expr>& tag) {
+            bool matches = false;
+            for (const auto& scope : enclose_scopes_) {
+                if (scope_matches(scope, tag)) {
+                    matches = true;
+                    break;
+                }
+                if (immediate_signal_active())
+                    return failure;
+            }
+            if (matches) {
+                confirmation_failure_ = failure;
+                confirmation_tag_ = tag;
+            } else if (!immediate_signal_active()) {
+                emit_unhandled_confirmation();
+            }
+            return failure;
+        };
+        auto confirmation_failure =
+            [&](const std::string& type, const Expr& value,
+                const Expr& information,
+                std::vector<std::pair<std::string, Expr>> extras = {}) {
+                std::vector<std::pair<std::string, Expr>> fields{
+                    {"ConfirmationType", symbol(type)},
+                    {"Expression", value},
+                    {"Information", information},
+                };
+                fields.insert(fields.end(),
+                              std::make_move_iterator(extras.begin()),
+                              std::make_move_iterator(extras.end()));
+                return structured_failure(symbol("ConfirmationFailed"), fields);
+            };
+        if (name == "Enclose") {
+            if (raw_args.empty() || raw_args.size() > 3)
+                return raw_evaluation_error(
+                    "Enclose expects one, two, or three arguments.");
+
+            std::optional<Expr> form;
+            if (raw_args.size() == 3) {
+                form = evaluate(raw_args[2]);
+                if (immediate_signal_active())
+                    return *form;
+            }
+
+            const auto scope_depth = enclose_scopes_.size();
+            enclose_scopes_.push_back({form});
+            auto scope_guard =
+                scope_exit([&] { enclose_scopes_.resize(scope_depth); });
+            const auto value = evaluate(raw_args[0]);
+            if (!confirmation_failure_) {
+                enclose_scopes_.pop_back();
+                scope_guard.release();
+                return value;
+            }
+
+            const auto pending_failure = *confirmation_failure_;
+            const auto pending_tag = confirmation_tag_;
+            confirmation_failure_.reset();
+            confirmation_tag_.reset();
+            const bool catches =
+                scope_matches(enclose_scopes_.back(), pending_tag);
+            if (immediate_signal_active()) {
+                enclose_scopes_.pop_back();
+                scope_guard.release();
+                return value;
+            }
+            if (!catches) {
+                confirmation_failure_ = pending_failure;
+                confirmation_tag_ = pending_tag;
+                enclose_scopes_.pop_back();
+                scope_guard.release();
+                return value;
+            }
+
+            Expr result = pending_failure;
+            if (raw_args.size() >= 2) {
+                const auto handler = evaluate(raw_args[1]);
+                if (immediate_signal_active()) {
+                    enclose_scopes_.pop_back();
+                    scope_guard.release();
+                    return handler;
+                }
+                result = handler.kind() == ExprKind::String
+                             ? failure_property(pending_failure, handler)
+                             : evaluate(call(handler, {pending_failure}));
+            }
+            enclose_scopes_.pop_back();
+            scope_guard.release();
+            return result;
         }
-        if (success) return value;
-        confirmation_failure_ = value;
-        confirmation_information_ = raw_args.size() > information_index
-            ? raw_args[information_index] : symbol("Automatic");
-        const auto tag_index = information_index + 1;
-        confirmation_tag_ = raw_args.size() > tag_index ? std::optional<Expr>(raw_args[tag_index]) : std::nullopt;
-        return value;
+        if (name == "Confirm") {
+            if (raw_args.empty() || raw_args.size() > 3)
+                return raw_evaluation_error(
+                    "Confirm expects one, two, or three arguments.");
+            const auto value = evaluate(raw_args[0]);
+            if (immediate_signal_active() || !confirmation_failure_value(value))
+                return value;
+            const auto information =
+                raw_args.size() >= 2 ? evaluate(raw_args[1]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 3
+                                 ? std::optional<Expr>(evaluate(raw_args[2]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(value);
+            const auto failure =
+                failure_value(value) && raw_args.size() == 1
+                    ? value
+                    : confirmation_failure("Confirm", value, information);
+            return dispatch_confirmation(failure, tag);
+        }
+        if (name == "ConfirmBy") {
+            if (raw_args.size() < 2 || raw_args.size() > 4)
+                return raw_evaluation_error(
+                    "ConfirmBy expects two, three, or four arguments.");
+            const auto value = evaluate(raw_args[0]);
+            if (immediate_signal_active())
+                return value;
+            const auto function = evaluate(raw_args[1]);
+            if (immediate_signal_active())
+                return function;
+            const auto test = evaluate(call(function, {value}));
+            if (immediate_signal_active())
+                return test;
+            if (is_symbol(test, "True"))
+                return value;
+            const auto information =
+                raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 4
+                                 ? std::optional<Expr>(evaluate(raw_args[3]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(value);
+            return dispatch_confirmation(
+                confirmation_failure("ConfirmBy", value, information,
+                                     {{"Function", function}}),
+                tag);
+        }
+        if (name == "ConfirmMatch") {
+            if (raw_args.size() < 2 || raw_args.size() > 4)
+                return raw_evaluation_error(
+                    "ConfirmMatch expects two, three, or four arguments.");
+            const auto value = evaluate(raw_args[0]);
+            if (immediate_signal_active())
+                return value;
+            Bindings bindings;
+            const bool matches = pattern_match(value, raw_args[1], bindings,
+                                               &session_pattern_context);
+            if (immediate_signal_active())
+                return value;
+            if (matches)
+                return value;
+            const auto information =
+                raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 4
+                                 ? std::optional<Expr>(evaluate(raw_args[3]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(value);
+            return dispatch_confirmation(
+                confirmation_failure("ConfirmMatch", value, information,
+                                     {{"Pattern", raw_args[1]}}),
+                tag);
+        }
+        if (name == "ConfirmAssert") {
+            if (raw_args.empty() || raw_args.size() > 3)
+                return raw_evaluation_error(
+                    "ConfirmAssert expects one, two, or three arguments.");
+            const auto test = evaluate(raw_args[0]);
+            if (immediate_signal_active())
+                return test;
+            if (is_symbol(test, "True"))
+                return symbol("Null");
+            const auto information =
+                raw_args.size() >= 2 ? evaluate(raw_args[1]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 3
+                                 ? std::optional<Expr>(evaluate(raw_args[2]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(test);
+            return dispatch_confirmation(confirmation_failure("ConfirmAssert",
+                                                              test, information,
+                                                              {{"Test", test}}),
+                                         tag);
+        }
     }
     if (name == "AbortProtect" && raw_args.size() == 1) {
         const auto protection_depth = abort_protect_scopes_.size();
