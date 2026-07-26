@@ -56,6 +56,7 @@ import Tungsten.Parser
 import Tungsten.ParserCorpus
 import Tungsten.Repl
 import Tungsten.Session
+import qualified Tungsten.StringSequencePatternTests as StringSequencePatternTests
 import qualified Tungsten.StatisticsTests as StatisticsTests
 import qualified Tungsten.SystemSymbols as SystemSymbols
 import qualified Tungsten.TextualFormsTests as TextualFormsTests
@@ -91,6 +92,7 @@ tests =
   , StatisticsTests.checkStatisticsEvaluator
   , NumericAlgebraTests.checkNumericAlgebraEvaluator
   , TextualFormsTests.checkTextualFormsEvaluator
+  , StringSequencePatternTests.checkStringSequencePatterns
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors

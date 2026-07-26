@@ -56,6 +56,7 @@ import Data.Word (Word8)
 import Text.Read (readMaybe)
 import Tungsten.Expression
 import qualified Tungsten.NumericAlgebra as NumericAlgebra
+import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
   , isSystemSymbol
@@ -691,6 +692,8 @@ reduceBuiltin headName values = case headName of
   "StringFreeQ" -> reduceStringPredicate StringFree values
   "StringStartsQ" -> reduceStringPredicate StringStarts values
   "StringEndsQ" -> reduceStringPredicate StringEnds values
+  "StringCases" -> reduceStringCases values
+  "StringReplace" -> reduceStringReplace values
   "EvenQ" -> Right (reduceParity True headName values)
   "OddQ" -> Right (reduceParity False headName values)
   "First" -> Right (reduceFirstLast True headName values)
@@ -829,6 +832,11 @@ reduceBuiltin headName values = case headName of
   "Partition" -> reducePartition values
   "TakeList" -> reduceTakeList values
   "TakeDrop" -> reduceTakeDropPair values
+  "SequenceFold" -> reduceSequenceFold False values
+  "SequenceFoldList" -> reduceSequenceFold True values
+  "SequenceCases" -> reduceSequenceSearch SequenceCases values
+  "SequencePosition" -> reduceSequenceSearch SequencePosition values
+  "SequenceCount" -> reduceSequenceSearch SequenceCount values
   "Dot" -> reduceDot values
   "Cross" -> reduceCross values
   "Det" -> reduceDet values
@@ -2400,6 +2408,7 @@ data StringPredicateMode
   | StringFree
   | StringStarts
   | StringEnds
+  deriving (Eq, Show)
 
 reduceStringPredicate
   :: StringPredicateMode
@@ -2408,8 +2417,11 @@ reduceStringPredicate
 reduceStringPredicate mode values = case values of
   [_] -> Right (Call (Symbol operation) values)
   [expression, patternExpression] -> do
-    patterns <- literalStringPatterns operation patternExpression
-    stringThread operation (Right . boolean . predicate patterns) expression
+    let specifications = SP.normalizeStringPatternSpecs patternExpression
+    stringThread
+      operation
+      (\source -> boolean <$> stringPredicateMatches mode source specifications)
+      expression
   _ -> Left (EvaluationError (operation <> " expects a string and a pattern."))
  where
   operation = case mode of
@@ -2418,12 +2430,16 @@ reduceStringPredicate mode values = case values of
     StringFree -> "StringFreeQ"
     StringStarts -> "StringStartsQ"
     StringEnds -> "StringEndsQ"
-  predicate patterns value = case mode of
-    StringContains -> any (`T.isInfixOf` value) patterns
-    StringMatches -> any (== value) patterns
-    StringFree -> all (not . (`T.isInfixOf` value)) patterns
-    StringStarts -> any (`T.isPrefixOf` value) patterns
-    StringEnds -> any (`T.isSuffixOf` value) patterns
+  stringPredicateMatches predicateMode source specifications = do
+    let requireStart = predicateMode `elem` [StringMatches, StringStarts]
+        requireEnd = predicateMode `elem` [StringMatches, StringEnds]
+    found <-
+      stringPatternExists
+        source
+        specifications
+        requireStart
+        requireEnd
+    Right (if predicateMode == StringFree then not found else found)
 
 literalStringPatterns :: Text -> Expr -> Either EvaluationError [Text]
 literalStringPatterns operation = \case
@@ -2455,15 +2471,13 @@ reduceStringPosition values = case values of
       )
  where
   positions expression patternExpression limitExpression = do
-    patterns <- literalStringPatterns "StringPosition" patternExpression
     limit <- normalizeStringMatchLimit limitExpression
+    let specifications = SP.normalizeStringPatternSpecs patternExpression
     stringThread
       "StringPosition"
-      (Right . evaluatedList . map pair . takeLimit limit . literalPositions patterns)
+      (\source -> evaluatedList . map pair <$> collectStringPatternSpans source specifications True limit)
       expression
   pair (start, end) = evaluatedList [Integer start, Integer end]
-  takeLimit Nothing = id
-  takeLimit (Just count) = take count
 
 normalizeStringMatchLimit :: Maybe Expr -> Either EvaluationError (Maybe Int)
 normalizeStringMatchLimit Nothing = Right Nothing
@@ -2471,21 +2485,275 @@ normalizeStringMatchLimit (Just (Symbol "Infinity")) = Right Nothing
 normalizeStringMatchLimit (Just expression) =
   Just <$> requireNonnegativeInt "Match limits must be non-negative integers or Infinity." expression
 
-literalPositions :: [Text] -> Text -> [(Integer, Integer)]
-literalPositions patterns source =
-  concat
-    [ [ (fromIntegral start + 1, fromIntegral start + fromIntegral (T.length patternText))
-      | patternText <- patterns
-      , literalMatchesAt source start patternText
-      ]
-    | start <- [0 .. T.length source]
-    ]
+reduceStringCases :: [Expr] -> Either EvaluationError Expr
+reduceStringCases = \case
+  [expression, patternExpression] ->
+    cases expression patternExpression Nothing
+  [expression, patternExpression, limitExpression] ->
+    cases expression patternExpression (Just limitExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          "StringCases expects a string, a pattern or rule, and an optional match limit."
+      )
+ where
+  cases expression patternExpression limitExpression = do
+    limit <- normalizeStringMatchLimit limitExpression
+    let specifications = SP.normalizeStringCasesSpecs patternExpression
+    stringThread
+      "StringCases"
+      (\source -> evaluatedList <$> collectStringCaseResults source specifications limit)
+      expression
 
-literalMatchesAt :: Text -> Int -> Text -> Bool
-literalMatchesAt source start patternText
-  | T.null patternText = start <= T.length source
-  | start >= T.length source = False
-  | otherwise = patternText `T.isPrefixOf` T.drop start source
+reduceStringReplace :: [Expr] -> Either EvaluationError Expr
+reduceStringReplace = \case
+  [expression, rulesExpression] ->
+    replace expression rulesExpression Nothing
+  [expression, rulesExpression, limitExpression] ->
+    replace expression rulesExpression (Just limitExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          "StringReplace expects a string, rules, and an optional replacement limit."
+      )
+ where
+  replace expression rulesExpression limitExpression = do
+    limit <- normalizeStringMatchLimit limitExpression
+    specifications <-
+      either (Left . EvaluationError) Right
+        (SP.normalizeStringReplaceSpecs rulesExpression)
+    stringThread
+      "StringReplace"
+      (\source -> replaceStringPatternMatches source specifications limit)
+      expression
+
+runPureStringPattern
+  :: SP.StringPatternM (Either EvaluationError) value
+  -> Either EvaluationError value
+runPureStringPattern action = do
+  result <- SP.runStringPatternM action
+  either (Left . EvaluationError) Right result
+
+evaluatePureStringExpression
+  :: Map.Map Text Expr
+  -> Expr
+  -> Either EvaluationError Expr
+evaluatePureStringExpression bindings expression =
+  evaluate (substituteNamedSymbols bindings expression)
+
+firstPureStringMatchAt
+  :: Text
+  -> Int
+  -> [SP.StringPatternSpec]
+  -> Either EvaluationError (Maybe SP.StringFoundMatch)
+firstPureStringMatchAt source start specifications =
+  runPureStringPattern
+    ( SP.firstStringPatternMatchAtM
+        evaluatePureStringExpression
+        source
+        start
+        specifications
+    )
+
+firstPureStringMatchAtWithEnd
+  :: Text
+  -> Int
+  -> Int
+  -> [SP.StringPatternSpec]
+  -> Either EvaluationError (Maybe SP.StringFoundMatch)
+firstPureStringMatchAtWithEnd source start requiredEnd specifications =
+  runPureStringPattern
+    ( SP.firstStringPatternMatchAtWithEndM
+        evaluatePureStringExpression
+        source
+        start
+        (Just requiredEnd)
+        specifications
+    )
+
+applyPureStringMatch
+  :: Text
+  -> SP.StringFoundMatch
+  -> Either EvaluationError (Maybe Expr)
+applyPureStringMatch source found =
+  runPureStringPattern
+    ( SP.applyStringPatternSpecM
+        evaluatePureStringExpression
+        source
+        found
+    )
+
+pureStringMatchesForSpecAt
+  :: Text
+  -> Int
+  -> SP.StringPatternSpec
+  -> Either EvaluationError [SP.StringFoundMatch]
+pureStringMatchesForSpecAt source start specification =
+  runPureStringPattern
+    ( SP.stringPatternMatchesForSpecAtM
+        evaluatePureStringExpression
+        source
+        start
+        specification
+    )
+
+stringPatternExists
+  :: Text
+  -> [SP.StringPatternSpec]
+  -> Bool
+  -> Bool
+  -> Either EvaluationError Bool
+stringPatternExists source specifications requireStart requireEnd = go firstStart
+ where
+  firstStart = 0
+  lastStart = if requireStart then 0 else T.length source
+  go start
+    | start > lastStart = Right False
+    | otherwise = do
+        found <- firstMatchingSpecification start specifications
+        case found of
+          Just match
+            | not requireEnd || SP.stringMatchEnd match == T.length source ->
+                Right True
+          _ ->
+            if requireStart
+              then Right False
+              else go (start + 1)
+
+  firstMatchingSpecification _ [] = Right Nothing
+  firstMatchingSpecification start (specification : rest) = do
+    found <-
+      if requireEnd
+        then
+          firstPureStringMatchAtWithEnd
+            source
+            start
+            (T.length source)
+            [specification]
+        else firstPureStringMatchAt source start [specification]
+    case found of
+      Just match
+        | not requireEnd || SP.stringMatchEnd match == T.length source ->
+            Right (Just match)
+      _ -> firstMatchingSpecification start rest
+
+collectStringPatternSpans
+  :: Text
+  -> [SP.StringPatternSpec]
+  -> Bool
+  -> Maybe Int
+  -> Either EvaluationError [(Integer, Integer)]
+collectStringPatternSpans source specifications overlaps limit = go 0 []
+ where
+  go start retained
+    | maybe False (length retained >=) limit = Right retained
+    | start > T.length source = Right retained
+    | otherwise = do
+        found <- firstPureStringMatchAt source start specifications
+        case found of
+          Nothing -> go (start + 1) retained
+          Just match ->
+            let end = SP.stringMatchEnd match
+                next
+                  | overlaps = start + 1
+                  | end > start = end
+                  | otherwise = start + 1
+                spanValue =
+                  ( fromIntegral start + 1
+                  , fromIntegral end
+                  )
+             in go next (retained <> [spanValue])
+
+collectStringCaseResults
+  :: Text
+  -> [SP.StringPatternSpec]
+  -> Maybe Int
+  -> Either EvaluationError [Expr]
+collectStringCaseResults source specifications limit = go 0 []
+ where
+  go position retained
+    | maybe False (length retained >=) limit = Right retained
+    | position > T.length source = Right retained
+    | otherwise = do
+        result <- firstApplicable position specifications
+        case result of
+          Nothing ->
+            if position >= T.length source
+              then Right retained
+              else go (position + 1) retained
+          Just (found, value) ->
+            let end = SP.stringMatchEnd found
+                next = if end > position then end else position + 1
+             in go next (retained <> [value])
+
+  firstApplicable _ [] = Right Nothing
+  firstApplicable position (specification : rest) = do
+    matches <- pureStringMatchesForSpecAt source position specification
+    tryMatches matches
+   where
+    tryMatches [] = firstApplicable position rest
+    tryMatches (match : matches) = do
+      applied <- applyPureStringMatch source match
+      case applied of
+        Just value -> Right (Just (match, value))
+        Nothing -> tryMatches matches
+
+replaceStringPatternMatches
+  :: Text
+  -> [SP.StringPatternSpec]
+  -> Maybe Int
+  -> Either EvaluationError Expr
+replaceStringPatternMatches source specifications limit = go 0 0 []
+ where
+  go position replacementCount pieces
+    | maybe False (replacementCount >=) limit =
+        Right
+          (stringExpressionFromPieces (pieces <> [String (T.drop position source)]))
+    | position > T.length source = Right (stringExpressionFromPieces pieces)
+    | otherwise = do
+        result <- firstApplicable position specifications
+        case result of
+          Nothing ->
+            if position >= T.length source
+              then Right (stringExpressionFromPieces pieces)
+              else
+                go
+                  (position + 1)
+                  replacementCount
+                  (pieces <> [String (T.take 1 (T.drop position source))])
+          Just (found, value) ->
+            let end = SP.stringMatchEnd found
+                next = if end > position then end else position + 1
+             in go next (replacementCount + 1) (pieces <> [value])
+
+  firstApplicable _ [] = Right Nothing
+  firstApplicable position (specification : rest) = do
+    matches <- pureStringMatchesForSpecAt source position specification
+    tryMatches matches
+   where
+    tryMatches [] = firstApplicable position rest
+    tryMatches (match : matches) = do
+      applied <- applyPureStringMatch source match
+      case applied of
+        Just value -> Right (Just (match, value))
+        Nothing -> tryMatches matches
+
+stringExpressionFromPieces :: [Expr] -> Expr
+stringExpressionFromPieces pieces = case merge pieces of
+  [] -> String ""
+  [single] -> single
+  merged
+    | all isString merged -> String (T.concat [value | String value <- merged])
+    | otherwise -> Call (Symbol "StringExpression") merged
+ where
+  merge = foldl append [] . concatMap flatten
+  flatten (Call (Symbol stringExpressionHead) values)
+    | systemHeadIn ["StringExpression"] stringExpressionHead = concatMap flatten values
+  flatten expression = [expression]
+  append retained (String value) = case reverse retained of
+    String previous : rest -> reverse rest <> [String (previous <> value)]
+    _ -> retained <> [String value]
+  append retained value = retained <> [value]
 
 reduceEquality :: Bool -> [Expr] -> Expr
 reduceEquality True values
@@ -8397,6 +8665,194 @@ reduceTakeDropPair [expression, specification] = do
   dropped <- reduceTakeDrop False [expression, specification]
   Right (evaluatedList [taken, dropped])
 reduceTakeDropPair _ = Left (EvaluationError "TakeDrop expects exactly two arguments.")
+
+data SequenceSearchMode
+  = SequenceCases
+  | SequencePosition
+  | SequenceCount
+  deriving (Eq, Show)
+
+reduceSequenceSearch
+  :: SequenceSearchMode
+  -> [Expr]
+  -> Either EvaluationError Expr
+reduceSequenceSearch mode = \case
+  [source, patternExpression] -> do
+    items <- case source of
+      Call (Symbol listHead) values
+        | systemHeadIn ["List"] listHead -> Right values
+      _ ->
+        Left
+          ( EvaluationError
+              (sequenceSearchName mode <> " expects a List as its first argument.")
+          )
+    arity <- sequenceSearchPatternArity patternExpression
+    if arity <= 0
+      then
+        Left
+          ( EvaluationError
+              "SequenceCases / SequencePosition / SequenceCount expect a nonempty fixed-arity List pattern."
+          )
+      else do
+        let spans = sequenceSearchSpans items patternExpression arity
+        Right $ case mode of
+          SequenceCases ->
+            evaluatedList
+              [ evaluatedList (take arity (drop start items))
+              | (start, _) <- spans
+              ]
+          SequencePosition ->
+            evaluatedList
+              [ evaluatedList
+                  [ Integer (fromIntegral start + 1)
+                  , Integer (fromIntegral end)
+                  ]
+              | (start, end) <- spans
+              ]
+          SequenceCount -> Integer (fromIntegral (length spans))
+  _ ->
+    Left
+      ( EvaluationError
+          (sequenceSearchName mode <> " expects a list and a List pattern.")
+      )
+
+sequenceSearchName :: SequenceSearchMode -> Text
+sequenceSearchName = \case
+  SequenceCases -> "SequenceCases"
+  SequencePosition -> "SequencePosition"
+  SequenceCount -> "SequenceCount"
+
+sequenceSearchPatternArity :: Expr -> Either EvaluationError Int
+sequenceSearchPatternArity = go
+ where
+  go = \case
+    Call (Symbol wrapperHead) (inner : _)
+      | systemHeadIn ["Condition", "HoldPattern"] wrapperHead -> go inner
+    Call (Symbol listHead) patterns
+      | systemHeadIn ["List"] listHead -> Right (length patterns)
+    _ ->
+      Left
+        ( EvaluationError
+            "SequenceCases / SequencePosition / SequenceCount expect a fixed-arity List pattern, optionally wrapped in Condition or HoldPattern."
+        )
+
+sequenceSearchSpans :: [Expr] -> Expr -> Int -> [(Int, Int)]
+sequenceSearchSpans items patternExpression arity = go 0
+ where
+  itemCount = length items
+  go start
+    | start >= itemCount = []
+    | start + arity > itemCount = []
+    | matchesPattern
+        (evaluatedList (take arity (drop start items)))
+        patternExpression =
+        (start, start + arity) : go (start + arity)
+    | otherwise = go (start + 1)
+
+reduceSequenceFold
+  :: Bool
+  -> [Expr]
+  -> Either EvaluationError Expr
+reduceSequenceFold returnHistory arguments' = case arguments' of
+  [function, initialExpression, inputsExpression] ->
+    foldSequence function initialExpression inputsExpression Nothing
+  [function, initialExpression, inputsExpression, arityExpression] ->
+    foldSequence function initialExpression inputsExpression (Just arityExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " expects a function, initial values, inputs, and an optional argument count."
+          )
+      )
+ where
+  operation = if returnHistory then "SequenceFoldList" else "SequenceFold"
+
+  foldSequence function initialExpression inputsExpression arityExpression = do
+    initialValues <- sequenceCollectionValues operation initialExpression
+    inputs <- sequenceCollectionValues operation inputsExpression
+    if null initialValues
+      then
+        Left
+          (EvaluationError "SequenceFoldList expects at least one initial value.")
+      else do
+        argumentCount <- case arityExpression of
+          Nothing -> Right (length initialValues + 1)
+          Just (Integer value)
+            | value >= fromIntegral (minBound :: Int)
+            , value <= fromIntegral (maxBound :: Int) -> Right (fromIntegral value)
+          Just _ ->
+            Left
+              (EvaluationError "SequenceFoldList expects an integer argument.")
+        if argumentCount < length initialValues
+          then
+            Left
+              ( EvaluationError
+                  "SequenceFoldList expects an argument count greater than or equal to the number of initial values."
+              )
+          else do
+            let consumedPerStep = argumentCount - length initialValues
+            if consumedPerStep <= 0
+              then
+                Left
+                  ( EvaluationError
+                      "SequenceFoldList currently expects each step to consume at least one input element."
+                  )
+              else do
+                history <-
+                  buildSequenceFoldHistory
+                    function
+                    (length initialValues)
+                    consumedPerStep
+                    initialValues
+                    inputs
+                Right
+                  ( if returnHistory
+                      then evaluatedList history
+                      else last history
+                  )
+
+sequenceCollectionValues :: Text -> Expr -> Either EvaluationError [Expr]
+sequenceCollectionValues operation = \case
+  SparseArray [dimension] entries fill
+    | dimension <= 65536 ->
+        Right
+          [ sparseValueAt entries fill [index]
+          | index <- [1 .. dimension]
+          ]
+    | otherwise ->
+        Left
+          ( EvaluationError
+              (operation <> " exceeds the dense sequence materialization safety limit.")
+          )
+  SparseArray {} ->
+    Left
+      ( EvaluationError
+          (operation <> " expects a one-dimensional SparseArray sequence.")
+      )
+  expression@Call {} -> do
+    items <- orderedItems operation expression
+    Right [value | OrderedItem _ value _ _ <- items]
+  _ ->
+    Left
+      (EvaluationError (operation <> " expects a nonatomic expression."))
+
+buildSequenceFoldHistory
+  :: Expr
+  -> Int
+  -> Int
+  -> [Expr]
+  -> [Expr]
+  -> Either EvaluationError [Expr]
+buildSequenceFoldHistory function stateWidth consumedPerStep = go
+ where
+  go history remaining
+    | length remaining < consumedPerStep = Right history
+    | otherwise = do
+        let state = drop (length history - stateWidth) history
+            (consumed, rest) = splitAt consumedPerStep remaining
+        current <- evaluate (Call function (state <> consumed))
+        go (history <> [current]) rest
 
 denseListValues :: Expr -> Maybe [Expr]
 denseListValues (Call (Symbol "List") values) = Just values

@@ -2003,6 +2003,53 @@ CASES = (
         ),
         0,
     ),
+    (
+        "string pattern cases replacements and positions",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{StringCases[\"abc123def45\", DigitCharacter..], "
+            "StringCases[\"abbcbccaabbabccaa\", x_ ~~ x_], "
+            "StringCases[\"aaaab\", Repeated[\"a\", {2,3}]], "
+            "StringCases[\"abc123\", RegularExpression[\"[a-z]+\"]], "
+            "StringCases[\"on 2026-04-25 ok\", DatePattern[{\"Year\",\"Month\",\"Day\"}]], "
+            "StringPosition[\"ababa\", Shortest[\"a\" ~~ ___ ~~ \"a\"]], "
+            "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "stateful string condition and delayed replacement callbacks",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "i=0; {StringCases[\"a1b2\", _?((i=i+1; True)&) :> \"hit\"], "
+            "StringReplace[\"aba\", x : \"a\" :> (i=i+1; ToUpperCase[x])], i}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sequence searches rolling folds and callback state",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "i=0; {SequenceCases[{1,2,3,4,5,6}, {a_,b_} /; b==a+1], "
+            "SequencePosition[{1,2,3,1,2,3}, {1,2}], "
+            "SequenceCount[{1,2,3}, {x_} /; (i=i+1; EvenQ[x])], "
+            "SequenceFold[f,{x0,x1},{a,b,c}], "
+            "SequenceFoldList[f,{x0,x1},{a,b,c,d,e},4], i}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

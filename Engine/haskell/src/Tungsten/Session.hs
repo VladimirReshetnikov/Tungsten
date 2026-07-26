@@ -32,6 +32,7 @@ import Text.Read (readMaybe)
 import Tungsten.Evaluate
 import Tungsten.Expression
 import Tungsten.PythonSort (pythonStableSortByStateM)
+import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
   , isSystemSymbol
@@ -330,6 +331,11 @@ heldPatternBuiltinHeads =
   , "Count"
   , "FreeQ"
   , "MemberQ"
+  , "SequenceCases"
+  , "SequencePosition"
+  , "SequenceCount"
+  , "StringCases"
+  , "StringReplace"
   ]
 
 evaluatePatternCallback :: Int -> Expr -> PatternSession (Maybe Expr)
@@ -1463,6 +1469,32 @@ evaluateHeldSessionPatternBuiltin headName depth session arguments' =
             subject
             patternExpression
             evaluatedExtras
+    (sequenceHead, [subjectExpression, patternExpression])
+      | sequenceHead `elem` ["SequenceCases", "SequencePosition", "SequenceCount"] -> do
+          (subject, updated) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          evaluateSessionSequenceSearch
+            sequenceHead
+            depth
+            updated
+            subject
+            patternExpression
+    (stringHead, subjectExpression : patternExpression : extras)
+      | stringHead `elem` ["StringCases", "StringReplace"]
+      , length extras <= 1 -> do
+          (subject, subjectSession) <-
+            evaluateSessionAt (depth + 1) session subjectExpression
+          (preparedPattern, patternSession) <-
+            prepareSessionPatternRules depth subjectSession patternExpression
+          (evaluatedExtras, updated) <-
+            evaluateArguments depth patternSession extras
+          evaluateSessionStringTransform
+            stringHead
+            depth
+            updated
+            subject
+            preparedPattern
+            evaluatedExtras
     ("Replace", subjectExpression : rulesExpression : extras)
       | length extras <= 2 -> do
           (subject, subjectSession) <-
@@ -1531,6 +1563,13 @@ heldPatternArityMessage = \case
   "Count" -> "Count expects an expression, a pattern, and an optional levelspec."
   "MemberQ" ->
     "MemberQ expects an expression, a pattern, and an optional level specification."
+  "SequenceCases" -> "SequenceCases expects a list and a List pattern."
+  "SequencePosition" -> "SequencePosition expects a list and a List pattern."
+  "SequenceCount" -> "SequenceCount expects a list and a List pattern."
+  "StringCases" ->
+    "StringCases expects a string, a pattern or rule, and an optional match limit."
+  "StringReplace" ->
+    "StringReplace expects a string, rules, and an optional replacement limit."
   headName -> headName <> " received an unsupported argument list."
 
 patternFailure
@@ -1712,6 +1751,342 @@ evaluateSessionCases depth session subject patternOrRule extras = do
       rule
       (collectPatternRecords includeHeads 0 subject)
   Right (Call (Symbol "List") results, updated)
+
+evaluateSessionSequenceSearch
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionSequenceSearch operation depth session subject patternExpression = do
+  items <- case subject of
+    Call (Symbol listHead) values
+      | isSessionSystemHead "List" listHead -> Right values
+    _ ->
+      patternFailure
+        session
+        (operation <> " expects a List as its first argument.")
+  arity <- case sessionSequencePatternArity patternExpression of
+    Just value
+      | value > 0 -> Right value
+    Just _ ->
+      patternFailure
+        session
+        "SequenceCases / SequencePosition / SequenceCount expect a nonempty fixed-arity List pattern."
+    Nothing ->
+      patternFailure
+        session
+        "SequenceCases / SequencePosition / SequenceCount expect a fixed-arity List pattern, optionally wrapped in Condition or HoldPattern."
+  (spans, updated) <- collect 0 [] session items arity
+  Right
+    ( case operation of
+        "SequenceCases" ->
+          evaluatedList
+            [ evaluatedList (take arity (drop start items))
+            | (start, _) <- spans
+            ]
+        "SequencePosition" ->
+          evaluatedList
+            [ evaluatedList
+                [ Integer (fromIntegral start + 1)
+                , Integer (fromIntegral end)
+                ]
+            | (start, end) <- spans
+            ]
+        _ -> Integer (fromIntegral (length spans))
+    , updated
+    )
+ where
+  collect start retained current items arity
+    | start >= length items = Right (retained, current)
+    | start + arity > length items = Right (retained, current)
+    | otherwise = do
+        let candidate = evaluatedList (take arity (drop start items))
+        (matches, matchedSession) <-
+          sessionPatternMatches depth current candidate patternExpression
+        if matches
+          then
+            collect
+              (start + arity)
+              (retained <> [(start, start + arity)])
+              matchedSession
+              items
+              arity
+          else collect (start + 1) retained matchedSession items arity
+
+sessionSequencePatternArity :: Expr -> Maybe Int
+sessionSequencePatternArity = \case
+  Call (Symbol wrapperHead) (inner : _)
+    | isSessionSystemHead "Condition" wrapperHead
+        || isSessionSystemHead "HoldPattern" wrapperHead ->
+        sessionSequencePatternArity inner
+  Call (Symbol listHead) patterns
+    | isSessionSystemHead "List" listHead -> Just (length patterns)
+  _ -> Nothing
+
+evaluateSessionStringTransform
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionStringTransform operation depth session subject patternExpression extras = do
+  limit <- case extras of
+    [] -> Right Nothing
+    [limitExpression] ->
+      patternSelectionLimit operation session (Just limitExpression)
+    _ -> patternFailure session (heldPatternArityMessage operation)
+  case operation of
+    "StringCases" ->
+      sessionStringThread
+        operation
+        (\current source -> do
+            (results, updated) <-
+              collectSessionStringCases
+                depth
+                current
+                source
+                (SP.normalizeStringCasesSpecs patternExpression)
+                limit
+            Right (evaluatedList results, updated)
+        )
+        session
+        subject
+    _ -> do
+      specifications <- case SP.normalizeStringReplaceSpecs patternExpression of
+        P.Left message -> patternFailure session message
+        P.Right values -> Right values
+      sessionStringThread
+        operation
+        (\current source ->
+            replaceSessionStringMatches
+              depth
+              current
+              source
+              specifications
+              limit
+        )
+        session
+        subject
+
+sessionStringThread
+  :: Text
+  -> (EvaluationSession -> Text -> SessionResult Expr)
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+sessionStringThread operation scalar = go
+ where
+  go current (String source) = scalar current source
+  go current (Call (Symbol listHead) values)
+    | isSessionSystemHead "List" listHead = do
+        (threaded, updated) <- threadValues current values
+        Right (evaluatedList threaded, updated)
+  go current _ =
+    sessionFailure
+      current
+      (operation <> " expects a string or a list of strings.")
+
+  threadValues current [] = Right ([], current)
+  threadValues current (value : rest) = do
+    (threaded, threadedSession) <- go current value
+    (following, updated) <- threadValues threadedSession rest
+    Right (threaded : following, updated)
+
+evaluateSessionStringExpression
+  :: Int
+  -> Map.Map Text Expr
+  -> Expr
+  -> PatternSession Expr
+evaluateSessionStringExpression depth bindings expression =
+  PatternSession $ \session ->
+    evaluateSessionAt
+      (depth + 1)
+      session
+      (substituteNamedSymbols bindings expression)
+
+runSessionStringPattern
+  :: EvaluationSession
+  -> SP.StringPatternM PatternSession value
+  -> SessionResult value
+runSessionStringPattern session action = do
+  (result, updated) <- runPatternSession (SP.runStringPatternM action) session
+  case result of
+    P.Left message -> patternFailure updated message
+    P.Right value -> Right (value, updated)
+
+applySessionStringMatch
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> SP.StringFoundMatch
+  -> SessionResult (Maybe Expr)
+applySessionStringMatch depth session source found =
+  runSessionStringPattern
+    session
+    ( SP.applyStringPatternSpecM
+        (evaluateSessionStringExpression depth)
+        source
+        found
+    )
+
+sessionStringMatchesForSpecAt
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> Int
+  -> SP.StringPatternSpec
+  -> SessionResult [SP.StringFoundMatch]
+sessionStringMatchesForSpecAt depth session source start specification =
+  runSessionStringPattern
+    session
+    ( SP.stringPatternMatchesForSpecAtM
+        (evaluateSessionStringExpression depth)
+        source
+        start
+        specification
+    )
+
+collectSessionStringCases
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [SP.StringPatternSpec]
+  -> Maybe Integer
+  -> SessionResult [Expr]
+collectSessionStringCases depth = go 0 0 []
+ where
+  go position matchCount retained session source specifications remaining
+    | maybe False (matchCount >=) remaining =
+        Right (retained, session)
+    | position > T.length source = Right (retained, session)
+    | otherwise = do
+        (result, matchedSession) <-
+          firstApplicable session source position specifications
+        case result of
+          Nothing ->
+            if position >= T.length source
+              then Right (retained, matchedSession)
+              else
+                go
+                  (position + 1)
+                  matchCount
+                  retained
+                  matchedSession
+                  source
+                  specifications
+                  remaining
+          Just (found, value) ->
+            let end = SP.stringMatchEnd found
+                next = if end > position then end else position + 1
+             in go
+                  next
+                  (matchCount + 1)
+                  (retained <> spliceSessionCaseResult value)
+                  matchedSession
+                  source
+                  specifications
+                  remaining
+
+  firstApplicable session _ _ [] = Right (Nothing, session)
+  firstApplicable session source position (specification : rest) = do
+    (matches, matchedSession) <-
+      sessionStringMatchesForSpecAt depth session source position specification
+    tryMatches matchedSession matches
+   where
+    tryMatches current [] = firstApplicable current source position rest
+    tryMatches current (match : matches) = do
+      (applied, appliedSession) <-
+        applySessionStringMatch depth current source match
+      case applied of
+        Just value -> Right (Just (match, value), appliedSession)
+        Nothing -> tryMatches appliedSession matches
+
+replaceSessionStringMatches
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [SP.StringPatternSpec]
+  -> Maybe Integer
+  -> SessionResult Expr
+replaceSessionStringMatches depth = go 0 0 []
+ where
+  go position replacementCount pieces session source specifications limit
+    | maybe False (replacementCount >=) limit =
+        Right
+          ( sessionStringExpressionFromPieces
+              (pieces <> [String (T.drop position source)])
+          , session
+          )
+    | position > T.length source =
+        Right (sessionStringExpressionFromPieces pieces, session)
+    | otherwise = do
+        (result, matchedSession) <-
+          firstApplicable session source position specifications
+        case result of
+          Nothing ->
+            if position >= T.length source
+              then
+                Right
+                  (sessionStringExpressionFromPieces pieces, matchedSession)
+              else
+                go
+                  (position + 1)
+                  replacementCount
+                  (pieces <> [String (T.take 1 (T.drop position source))])
+                  matchedSession
+                  source
+                  specifications
+                  limit
+          Just (found, value) ->
+            let end = SP.stringMatchEnd found
+                next = if end > position then end else position + 1
+             in go
+                  next
+                  (replacementCount + 1)
+                  (pieces <> [value])
+                  matchedSession
+                  source
+                  specifications
+                  limit
+
+  firstApplicable session _ _ [] = Right (Nothing, session)
+  firstApplicable session source position (specification : rest) = do
+    (matches, matchedSession) <-
+      sessionStringMatchesForSpecAt depth session source position specification
+    tryMatches matchedSession matches
+   where
+    tryMatches current [] = firstApplicable current source position rest
+    tryMatches current (match : matches) = do
+      (applied, appliedSession) <-
+        applySessionStringMatch depth current source match
+      case applied of
+        Just value -> Right (Just (match, value), appliedSession)
+        Nothing -> tryMatches appliedSession matches
+
+sessionStringExpressionFromPieces :: [Expr] -> Expr
+sessionStringExpressionFromPieces pieces = case merge pieces of
+  [] -> String ""
+  [single] -> single
+  merged
+    | all isStringValue merged ->
+        String (T.concat [value | String value <- merged])
+    | otherwise -> Call (Symbol "StringExpression") merged
+ where
+  merge = foldl append [] . concatMap flatten
+  flatten (Call (Symbol stringExpressionHead) values)
+    | isSessionSystemHead "StringExpression" stringExpressionHead =
+        concatMap flatten values
+  flatten expression = [expression]
+  append retained (String value) = case reverse retained of
+    String previous : rest -> reverse rest <> [String (previous <> value)]
+    _ -> retained <> [String value]
+  append retained value = retained <> [value]
+  isStringValue String {} = True
+  isStringValue _ = False
 
 collectSessionCases
   :: Int
@@ -2531,6 +2906,10 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionMapAt depth session values)
   Call (Symbol "Total") values ->
     Just (evaluateSessionTotal depth session values)
+  Call (Symbol "SequenceFold") values ->
+    Just (evaluateSessionSequenceFold False depth session values)
+  Call (Symbol "SequenceFoldList") values ->
+    Just (evaluateSessionSequenceFold True depth session values)
   Call (Symbol "Select") values ->
     Just (evaluateSessionSelect False depth session values)
   Call (Symbol "Discard") values ->
@@ -3177,6 +3556,118 @@ evaluateSessionMap depth session = \case
       (retained <> [replaceSessionItemValue item value])
       updated
       rest
+
+evaluateSessionSequenceFold
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSequenceFold returnHistory depth session arguments' =
+  case arguments' of
+    [function, initialExpression, inputsExpression] ->
+      foldSequence function initialExpression inputsExpression Nothing
+    [function, initialExpression, inputsExpression, arityExpression] ->
+      foldSequence function initialExpression inputsExpression (Just arityExpression)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " expects a function, initial values, inputs, and an optional argument count."
+        )
+ where
+  operation = if returnHistory then "SequenceFoldList" else "SequenceFold"
+
+  foldSequence function initialExpression inputsExpression arityExpression = do
+    initialValues <- sessionSequenceValues session operation initialExpression
+    inputs <- sessionSequenceValues session operation inputsExpression
+    if null initialValues
+      then
+        sessionFailure
+          session
+          "SequenceFoldList expects at least one initial value."
+      else do
+        argumentCount <- case arityExpression of
+          Nothing -> Right (length initialValues + 1)
+          Just (Integer value)
+            | value >= fromIntegral (minBound :: Int)
+            , value <= fromIntegral (maxBound :: Int) -> Right (fromIntegral value)
+          Just _ ->
+            patternFailure
+              session
+              "SequenceFoldList expects an integer argument."
+        if argumentCount < length initialValues
+          then
+            sessionFailure
+              session
+              "SequenceFoldList expects an argument count greater than or equal to the number of initial values."
+          else do
+            let consumedPerStep = argumentCount - length initialValues
+            if consumedPerStep <= 0
+              then
+                sessionFailure
+                  session
+                  "SequenceFoldList currently expects each step to consume at least one input element."
+              else do
+                (history, updated) <-
+                  buildHistory
+                    function
+                    (length initialValues)
+                    consumedPerStep
+                    initialValues
+                    inputs
+                    session
+                Right
+                  ( if returnHistory
+                      then evaluatedList history
+                      else last history
+                  , updated
+                  )
+
+  buildHistory function stateWidth consumedPerStep history remaining current
+    | length remaining < consumedPerStep = Right (history, current)
+    | otherwise = do
+        let state = drop (length history - stateWidth) history
+            (consumed, rest) = splitAt consumedPerStep remaining
+        (value, updated) <-
+          evaluateSessionCallable depth current function (state <> consumed)
+        buildHistory
+          function
+          stateWidth
+          consumedPerStep
+          (history <> [value])
+          rest
+          updated
+
+sessionSequenceValues
+  :: EvaluationSession
+  -> Text
+  -> Expr
+  -> RuntimeResult EvaluationExit [Expr]
+sessionSequenceValues session operation expression = case expression of
+  sparse@(SparseArray dimensions _ _)
+    | length dimensions /= 1 ->
+        patternFailure
+          session
+          (operation <> " expects a one-dimensional SparseArray sequence.")
+    | otherwise -> do
+        dense <-
+          liftPureEvaluation
+            session
+            (reduceEvaluatedCall (Call (Symbol "Normal") [sparse]))
+        case dense of
+          Call (Symbol listHead) values
+            | isSessionSystemHead "List" listHead -> Right values
+          _ ->
+            patternFailure
+              session
+              (operation <> " expects a one-dimensional SparseArray sequence.")
+  _ -> case sessionOrderedCollection expression of
+    Just collection -> Right (map sessionItemValue (sessionCollectionItems collection))
+    Nothing ->
+      patternFailure
+        session
+        (operation <> " expects a nonatomic expression.")
 
 evaluateSessionKeyMap
   :: Int
