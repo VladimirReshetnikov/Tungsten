@@ -39,6 +39,7 @@ std::optional<std::vector<Expr>> association_rules(const Expr& expression);
 std::optional<long> machine_index(const Expr& expression);
 int expression_compare(const Expr& left, const Expr& right);
 void gather_polynomial_symbols(const Expr& expression, std::vector<Expr>& symbols);
+Expr evaluated_list_expr(std::vector<Expr> arguments);
 
 template<typename Function>
 class ScopeExit {
@@ -2468,6 +2469,107 @@ Expr interval_expression(const std::vector<IntervalSegment>& segments) {
 }
 
 constexpr std::size_t maximum_sparse_materialized_nodes = 1000000;
+
+using DenseDimensions = std::vector<mpz_class>;
+
+struct NormalizedDenseDimensions {
+    std::optional<DenseDimensions> values;
+    std::string error;
+};
+
+NormalizedDenseDimensions normalize_dense_dimensions(
+    const Expr& expression, const std::string& function) {
+    DenseDimensions dimensions;
+    if (expression.kind() == ExprKind::Integer) {
+        dimensions.push_back(expression.integer_value());
+    } else if (expression.has_head("List")) {
+        dimensions.reserve(expression.args().size());
+        for (const auto& dimension : expression.args()) {
+            if (dimension.kind() != ExprKind::Integer)
+                return {std::nullopt,
+                    function + " expects an integer argument."};
+            dimensions.push_back(dimension.integer_value());
+        }
+    } else {
+        return {std::nullopt,
+            function
+                + " expects an integer dimension or a list of dimensions."};
+    }
+    if (std::any_of(dimensions.begin(), dimensions.end(),
+            [](const mpz_class& dimension) { return dimension < 0; }))
+        return {std::nullopt,
+            function + " expects non-negative dimensions."};
+    return {std::move(dimensions), {}};
+}
+
+bool dense_materialization_within_limit(
+    const DenseDimensions& dimensions) noexcept {
+    const mpz_class limit(maximum_sparse_materialized_nodes);
+    mpz_class prefix_count = 1;
+    mpz_class node_count = 1;
+    for (const auto& dimension : dimensions) {
+        prefix_count *= dimension;
+        node_count += prefix_count;
+        if (node_count > limit) return false;
+    }
+    return true;
+}
+
+std::optional<std::size_t> bounded_dense_dimension(
+    const mpz_class& dimension) {
+    if (dimension < 0
+        || dimension > mpz_class(maximum_sparse_materialized_nodes))
+        return std::nullopt;
+    return nonnegative_size_t(dimension);
+}
+
+Expr build_dense_array(
+    const DenseDimensions& dimensions,
+    const std::function<Expr(const std::vector<mpz_class>&)>& builder,
+    std::vector<mpz_class>& indices, std::size_t level = 0) {
+    if (level == dimensions.size()) return builder(indices);
+    const auto count = bounded_dense_dimension(dimensions[level]);
+    if (!count) return call("TerminatedEvaluation", {
+        symbol("NativeMaterializationLimit")});
+    std::vector<Expr> values;
+    values.reserve(*count);
+    for (std::size_t index = 1; index <= *count; ++index) {
+        indices.push_back(mpz_class(std::to_string(index), 10));
+        values.push_back(build_dense_array(
+            dimensions, builder, indices, level + 1));
+        indices.pop_back();
+    }
+    return evaluated_list_expr(std::move(values));
+}
+
+Expr build_dense_array(
+    const DenseDimensions& dimensions,
+    const std::function<Expr(const std::vector<mpz_class>&)>& builder) {
+    std::vector<mpz_class> indices;
+    indices.reserve(dimensions.size());
+    return build_dense_array(dimensions, builder, indices);
+}
+
+void append_dense_leaves(const Expr& expression, std::vector<Expr>& values) {
+    if (!expression.has_head("List")) {
+        values.push_back(expression);
+        return;
+    }
+    for (const auto& argument : expression.args())
+        append_dense_leaves(argument, values);
+}
+
+[[maybe_unused]] std::optional<Expr> dense_value_at(
+    const Expr& expression, const std::vector<mpz_class>& indices) {
+    const Expr* current = &expression;
+    for (const auto& index : indices) {
+        if (!current->has_head("List")) return std::nullopt;
+        const auto offset = bounded_dense_dimension(index - 1);
+        if (!offset || *offset >= current->args().size()) return std::nullopt;
+        current = &current->args()[*offset];
+    }
+    return *current;
+}
 
 std::optional<std::size_t> checked_dimension_product(
     const std::vector<std::size_t>& dimensions) noexcept {
@@ -14162,7 +14264,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return boolean(contains_point(args[1]));
         }
     }
-    if ((function == "ArrayReshape" || function == "ArrayPad" || function == "Transpose" || function == "Flatten")
+    if (((function == "ArrayReshape" && evaluated_name && *evaluated_name == "ArrayReshape")
+            || (function == "ArrayPad" && evaluated_name && *evaluated_name == "ArrayPad")
+            || (function == "Transpose" && evaluated_name && *evaluated_name == "Transpose")
+            || function == "Flatten")
         && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
         const auto dense = sparse_dense_value(args[0]);
         if (!dense)
@@ -14529,23 +14634,25 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return boolean(dense_array_leaves_match(args[0], matches_predicate));
     }
-    if (function == "ArrayReshape" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
-        && args[1].has_head("List")) {
-        std::vector<std::size_t> dimensions; bool valid = true;
-        for (const auto& dimension : args[1].args()) {
-            const auto value = machine_index(dimension);
-            if (!value || *value < 0) { valid = false; break; }
-            dimensions.push_back(static_cast<std::size_t>(*value));
-        }
-        if (valid) {
-            const auto padding = args.size() == 3 ? args[2] : integer(0L); std::size_t cursor = 0;
-            auto build = [&](auto&& self, std::size_t level) -> Expr {
-                if (level == dimensions.size()) return cursor < args[0].args().size() ? args[0].args()[cursor++] : padding;
-                std::vector<Expr> values; for (std::size_t index = 0; index < dimensions[level]; ++index) values.push_back(self(self, level + 1));
-                return list(std::move(values));
-            };
-            return build(build, 0);
-        }
+    if (function == "ArrayReshape" && evaluated_name
+        && *evaluated_name == "ArrayReshape") {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayReshape expects an expression, dimensions, and an optional padding value.");
+        const auto normalized = normalize_dense_dimensions(args[1], "ArrayReshape");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+        if (!dense_materialization_within_limit(*normalized.values))
+            return raw_evaluation_error(
+                "ArrayReshape output exceeds the native materialization limit.");
+
+        std::vector<Expr> leaves;
+        append_dense_leaves(args[0], leaves);
+        const auto padding = args.size() == 3 ? args[2] : integer(0L);
+        std::size_t cursor = 0;
+        return build_dense_array(*normalized.values,
+            [&](const std::vector<mpz_class>&) {
+                return cursor < leaves.size() ? leaves[cursor++] : padding;
+            });
     }
     if (function == "ArrayPad" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
         && machine_index(args[1]) && *machine_index(args[1]) >= 0) {
@@ -15467,11 +15574,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return call(collections.front().head(), std::move(result));
         }
     }
-    if (function == "ConstantArray" && args.size() == 2 && args[1].kind() == ExprKind::Integer
-        && args[1].integer_value() >= 0 && args[1].integer_value().fits_ulong_p()) {
-        std::vector<Expr> values(args[1].integer_value().get_ui(), args[0]);
-        values.erase(std::remove_if(values.begin(), values.end(), [](const Expr& value) { return is_symbol(value, "Nothing"); }), values.end());
-        return list(std::move(values));
+    if (function == "ConstantArray" && evaluated_name
+        && *evaluated_name == "ConstantArray") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                "ConstantArray currently supports exactly two arguments.");
+        const auto normalized = normalize_dense_dimensions(args[1], "ConstantArray");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+        if (!dense_materialization_within_limit(*normalized.values))
+            return raw_evaluation_error(
+                "ConstantArray output exceeds the native materialization limit.");
+        return build_dense_array(*normalized.values,
+            [&](const std::vector<mpz_class>&) { return args[0]; });
     }
     if (function == "BlockMap" && args.size() >= 3 && args[1].kind() == ExprKind::Call
         && machine_index(args[2]) && *machine_index(args[2]) > 0) {
@@ -16232,36 +16346,51 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::set<std::string> seen; for (const auto& item : args[0].args()) if (!seen.insert(item.to_full_form()).second) return symbol("False");
         return symbol("True");
     }
-    if (function == "Array" && args.size() >= 2 && args.size() <= 3) {
-        const auto dimension_exprs = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-        const auto origin_exprs = args.size() == 3 ? (args[2].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]})
-            : std::vector<Expr>(dimension_exprs.size(), integer(1L));
-        std::vector<long> dimensions, origins; bool valid = dimension_exprs.size() == origin_exprs.size();
-        for (const auto& item : dimension_exprs) { const auto value = machine_index(item); if (!value || *value < 0) valid = false; else dimensions.push_back(*value); }
-        for (const auto& item : origin_exprs) { const auto value = machine_index(item); if (!value) valid = false; else origins.push_back(*value); }
-        std::size_t element_count = 1;
-        if (valid) for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
-            const auto dimension = static_cast<std::size_t>(dimensions[axis]);
-            if (dimension != 0 && element_count > 1000000 / dimension) {
-                valid = false;
-                break;
-            }
-            element_count *= dimension;
-            if (dimensions[axis] > 0
-                && !checked_signed_sum(origins[axis], dimensions[axis] - 1)) {
-                valid = false;
-                break;
+    if (function == "Array" && evaluated_name && *evaluated_name == "Array") {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error("Array expects two or three arguments.");
+        const auto normalized = normalize_dense_dimensions(args[1], "Array");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+
+        std::vector<mpz_class> origins(normalized.values->size(), mpz_class(1));
+        if (args.size() == 3) {
+            if (args[2].kind() == ExprKind::Integer) {
+                std::fill(origins.begin(), origins.end(), args[2].integer_value());
+            } else if (args[2].has_head("List")) {
+                if (normalized.values->size() == 1 && args[2].args().size() == 2
+                    && std::all_of(args[2].args().begin(), args[2].args().end(),
+                        [](const Expr& value) {
+                            return value.kind() == ExprKind::Integer;
+                        })) {
+                    origins[0] = args[2].args()[0].integer_value();
+                } else if (args[2].args().size() != normalized.values->size()) {
+                    return raw_evaluation_error(
+                        "Array origin list must have one entry per array dimension.");
+                } else {
+                    for (std::size_t axis = 0; axis < origins.size(); ++axis) {
+                        if (args[2].args()[axis].kind() != ExprKind::Integer)
+                            return raw_evaluation_error(
+                                "Array origin entries must be explicit integers.");
+                        origins[axis] = args[2].args()[axis].integer_value();
+                    }
+                }
+            } else {
+                return raw_evaluation_error(
+                    "Array currently expects an integer origin or a list of integer origins.");
             }
         }
-        if (valid) {
-            std::vector<Expr> indices;
-            auto build = [&](auto&& self, std::size_t level) -> Expr {
-                if (level == dimensions.size()) return evaluate(call(args[0], indices));
-                std::vector<Expr> values; for (long index = 0; index < dimensions[level]; ++index) { indices.push_back(integer(origins[level] + index)); const auto value = self(self, level + 1); if (!is_symbol(value, "Nothing")) values.push_back(value); indices.pop_back(); }
-                return list(std::move(values));
-            };
-            return build(build, 0);
-        }
+        if (!dense_materialization_within_limit(*normalized.values))
+            return raw_evaluation_error(
+                "Array output exceeds the native materialization limit.");
+
+        return build_dense_array(*normalized.values,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<Expr> arguments;
+                arguments.reserve(indices.size());
+                for (std::size_t axis = 0; axis < indices.size(); ++axis)
+                    arguments.push_back(integer(origins[axis] + indices[axis] - 1));
+                return evaluate(call(args[0], std::move(arguments)));
+            });
     }
     if (function == "Range" && args.size() >= 1 && args.size() <= 3) {
         if (args.size() == 1 && args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Range", {item}))); return list(std::move(values)); }
