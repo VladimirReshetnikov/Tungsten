@@ -171,6 +171,14 @@ if(BUILD_TESTING)
     tungsten_enable_project_warnings(tungsten_cpp_tests)
     add_test(NAME tungsten_cpp_tests COMMAND tungsten_cpp_tests)
 
+    add_executable(tungsten_evaluator_api_tests
+        cpp/tests/evaluator_api_tests.cpp)
+    target_link_libraries(tungsten_evaluator_api_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_evaluator_api_tests)
+    add_test(
+        NAME tungsten_evaluator_api_tests
+        COMMAND tungsten_evaluator_api_tests)
+
     add_executable(
         tungsten_expression_model_tests
         cpp/tests/expression_model_tests.cpp)
@@ -269,6 +277,20 @@ if(BUILD_TESTING)
             -DSMOKE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/tungsten-cli-smoke
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/cli_smoke.cmake)
     set_tests_properties(tungsten_cli_smoke PROPERTIES TIMEOUT 30)
+
+    add_test(
+        NAME tungsten_installed_consumer
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DTUNGSTEN_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DTUNGSTEN_CONSUMER_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/installed_consumer
+            -DTUNGSTEN_CONSUMER_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}/installed-consumer-build
+            -DTUNGSTEN_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/installed-consumer-prefix
+            -DTUNGSTEN_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+            -DTUNGSTEN_CONFIG=$<CONFIG>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/installed_consumer.cmake)
+    set_tests_properties(
+        tungsten_installed_consumer PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
 endif()
 
 install(

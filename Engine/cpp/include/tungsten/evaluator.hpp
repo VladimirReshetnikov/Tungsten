@@ -29,11 +29,32 @@ struct EvaluationMessage {
     }
 };
 
+struct EvaluationResult {
+    Expr result;
+    std::vector<EvaluationMessage> messages;
+    std::vector<std::string> prints;
+};
+
+struct SymbolInfo {
+    std::string full_name;
+    std::string context;
+    std::string short_name;
+    bool built_in = false;
+    std::set<std::string> attributes;
+};
+
+enum class ValueKind { Own, Down, Up, Sub, N };
+
 class Evaluator {
 public:
     Evaluator();
 
     [[nodiscard]] Expr evaluate(const Expr& expression);
+    [[nodiscard]] EvaluationResult evaluate_result(const Expr& expression);
+    [[nodiscard]] std::optional<SymbolInfo> symbol_info(
+        const Expr& symbol_expression) const;
+    [[nodiscard]] std::vector<Expr> value_rules(
+        const Expr& symbol_expression, ValueKind kind) const;
     [[nodiscard]] const std::vector<Expr>& messages() const noexcept { return messages_; }
     [[nodiscard]] const std::vector<std::string>& message_texts() const noexcept { return message_texts_; }
     [[nodiscard]] const std::vector<std::string>& prints() const noexcept { return prints_; }
@@ -64,6 +85,15 @@ private:
     [[nodiscard]] bool control_active() const noexcept;
     [[nodiscard]] Expr control_expression() const;
     void clear_control() noexcept;
+    [[nodiscard]] std::string resolve_full_symbol_name(
+        const std::string& symbol_name) const;
+    [[nodiscard]] std::string ensure_full_symbol_name(
+        const std::string& symbol_name);
+    [[nodiscard]] bool is_built_in_full_name(
+        const std::string& full_name) const;
+    void register_expression_symbols(const Expr& expression);
+    [[nodiscard]] bool tag_occurs_in_upvalue_position(
+        const std::string& full_tag, const Expr& expression) const;
     [[nodiscard]] Expr normalize_assignment_lhs(const Expr& expression);
     [[nodiscard]] std::set<std::string> attributes_for(const Expr& symbol_expression) const;
     [[nodiscard]] bool symbol_has_attribute(
@@ -85,6 +115,7 @@ private:
     DefinitionTable sub_values_;
     std::unordered_map<std::string, std::set<std::string>> user_attributes_;
     std::set<std::string> unprotected_symbols_;
+    std::set<std::string> known_symbols_;
     std::vector<std::string> active_own_values_;
     std::optional<Expr> thrown_;
     std::optional<Expr> thrown_tag_;

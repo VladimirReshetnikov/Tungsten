@@ -1928,23 +1928,40 @@ const std::map<std::string, std::vector<std::string>>& system_registry() {
     return registry;
 }
 
-std::set<std::string>& user_symbol_registry() {
-    static std::set<std::string> names;
-    return names;
-}
-
 bool wildcard_matches(const std::string& value, const std::string& pattern) {
-    const auto star = pattern.find('*');
-    if (star == std::string::npos) return value == pattern;
-    return value.size() >= pattern.size() - 1 && value.compare(0, star, pattern, 0, star) == 0
-        && value.compare(value.size() - (pattern.size() - star - 1), pattern.size() - star - 1, pattern, star + 1, pattern.size() - star - 1) == 0;
+    std::string expression = "^";
+    auto append_literal = [&](char character) {
+        if (std::string_view(R"(\.^$|()[]{}*+?)").find(character)
+            != std::string_view::npos)
+            expression.push_back('\\');
+        expression.push_back(character);
+    };
+    for (std::size_t index = 0; index < pattern.size(); ++index) {
+        const auto character = pattern[index];
+        if (character == '\\' && index + 1 < pattern.size()) {
+            append_literal(pattern[++index]);
+        } else if (character == '*') {
+            expression += ".*";
+        } else if (character == '@') {
+            expression += "[^A-Z]+";
+        } else {
+            append_literal(character);
+        }
+    }
+    expression.push_back('$');
+    return std::regex_match(value, std::regex(expression));
 }
 
-std::string full_symbol_name(const Expr& expression) {
-    if (!expression.symbol_name()) return {};
-    const auto& name = *expression.symbol_name();
-    if (name.find('`') != std::string::npos) return name;
-    return system_registry().count(name) ? "System`" + name : "Global`" + name;
+bool symbol_name_matches(const std::string& full_name, const std::string& pattern) {
+    const auto marker = full_name.rfind('`');
+    const auto short_name = marker == std::string::npos
+        ? full_name : full_name.substr(marker + 1);
+    if (pattern.find('`') == std::string::npos
+        && full_name.compare(0, 7, "System`") != 0
+        && full_name.compare(0, 7, "Global`") != 0)
+        return false;
+    return wildcard_matches(
+        pattern.find('`') == std::string::npos ? short_name : full_name, pattern);
 }
 
 Expr display_symbol(const std::string& full_name) {
@@ -3403,20 +3420,6 @@ std::optional<AssignmentTarget> assignment_target(const Expr& expression) {
     while (head.kind() == ExprKind::Call) head = head.head();
     if (const auto* name = head.symbol_name()) return AssignmentTarget{AssignmentKind::Sub, *name};
     return std::nullopt;
-}
-
-bool tag_occurs_in_upvalue_position(const std::string& tag, const Expr& expression) {
-    const auto& lhs = definition_pattern(expression);
-    if (lhs.kind() != ExprKind::Call) return false;
-    for (const auto& argument : lhs.args()) {
-        if (argument.symbol_name() && *argument.symbol_name() == tag) return true;
-        auto current = argument;
-        while (current.kind() == ExprKind::Call) {
-            if (current.head().symbol_name() && *current.head().symbol_name() == tag) return true;
-            current = current.head();
-        }
-    }
-    return false;
 }
 
 int definition_specificity(const Expr& expression) {
@@ -5732,13 +5735,116 @@ std::optional<ApproximateComplex> approximate_root(const Expr& expression) {
 } // namespace
 
 Evaluator::Evaluator() {
-    own_values_.emplace("$RecursionLimit", Definition{integer(1024L), false});
-    own_values_.emplace("$IterationLimit", Definition{integer(4096L), false});
-    own_values_.emplace("$HistoryLength", Definition{symbol("Infinity"), false});
-    own_values_.emplace("$MaxExtraPrecision", Definition{integer(50L), false});
-    own_values_.emplace("$MaxRootDegree", Definition{integer(1000L), false});
-    own_values_.emplace("$MessagePrePrint", Definition{symbol("Automatic"), false});
-    own_values_.emplace("$OutputSizeLimit", Definition{integer(12000L), false});
+    own_values_.emplace("System`$RecursionLimit", Definition{integer(1024L), false});
+    own_values_.emplace("System`$IterationLimit", Definition{integer(4096L), false});
+    own_values_.emplace("System`$HistoryLength", Definition{symbol("Infinity"), false});
+    own_values_.emplace("System`$MaxExtraPrecision", Definition{integer(50L), false});
+    own_values_.emplace("System`$MaxRootDegree", Definition{integer(1000L), false});
+    own_values_.emplace("System`$MessagePrePrint", Definition{symbol("Automatic"), false});
+    own_values_.emplace("System`$OutputSizeLimit", Definition{integer(12000L), false});
+}
+
+bool Evaluator::is_built_in_full_name(const std::string& full_name) const {
+    constexpr std::string_view prefix = "System`";
+    return full_name.compare(0, prefix.size(), prefix) == 0
+        && system_registry().count(full_name.substr(prefix.size())) != 0;
+}
+
+std::string Evaluator::resolve_full_symbol_name(const std::string& symbol_name) const {
+    if (symbol_name.find('`') != std::string::npos) return symbol_name;
+    const auto system_name = "System`" + symbol_name;
+    if (system_registry().count(symbol_name) != 0
+        || known_symbols_.count(system_name) != 0)
+        return system_name;
+    return "Global`" + symbol_name;
+}
+
+std::string Evaluator::ensure_full_symbol_name(const std::string& symbol_name) {
+    auto full_name = resolve_full_symbol_name(symbol_name);
+    known_symbols_.insert(full_name);
+    return full_name;
+}
+
+void Evaluator::register_expression_symbols(const Expr& expression) {
+    std::vector<std::string> qualified;
+    std::vector<std::string> bare;
+    std::function<void(const Expr&)> collect = [&](const Expr& current) {
+        if (const auto* name = current.symbol_name()) {
+            (name->find('`') == std::string::npos ? bare : qualified).push_back(*name);
+            return;
+        }
+        if (current.kind() != ExprKind::Call) return;
+        collect(current.head());
+        for (const auto& argument : current.args()) collect(argument);
+    };
+    collect(expression);
+    for (const auto& name : qualified) known_symbols_.insert(name);
+    for (const auto& name : bare) (void)ensure_full_symbol_name(name);
+}
+
+bool Evaluator::tag_occurs_in_upvalue_position(
+    const std::string& full_tag, const Expr& expression) const {
+    const auto& lhs = definition_pattern(expression);
+    if (lhs.kind() != ExprKind::Call) return false;
+    for (const auto& argument : lhs.args()) {
+        if (argument.symbol_name()
+            && resolve_full_symbol_name(*argument.symbol_name()) == full_tag)
+            return true;
+        auto current = argument;
+        while (current.kind() == ExprKind::Call) {
+            if (current.head().symbol_name()
+                && resolve_full_symbol_name(*current.head().symbol_name()) == full_tag)
+                return true;
+            current = current.head();
+        }
+    }
+    return false;
+}
+
+EvaluationResult Evaluator::evaluate_result(const Expr& expression) {
+    EvaluationResult result{evaluate(expression), {}, prints_};
+    const auto count = std::min(messages_.size(), message_texts_.size());
+    result.messages.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+        result.messages.push_back({messages_[index], message_texts_[index]});
+    return result;
+}
+
+std::optional<SymbolInfo> Evaluator::symbol_info(
+    const Expr& symbol_expression) const {
+    const auto* name = symbol_expression.symbol_name();
+    if (name == nullptr) return std::nullopt;
+    const auto full_name = resolve_full_symbol_name(*name);
+    const auto marker = full_name.rfind('`');
+    const auto context = marker == std::string::npos
+        ? std::string{} : full_name.substr(0, marker + 1);
+    const auto short_name = marker == std::string::npos
+        ? full_name : full_name.substr(marker + 1);
+    return SymbolInfo{full_name, context, short_name,
+        is_built_in_full_name(full_name), attributes_for(symbol(full_name))};
+}
+
+std::vector<Expr> Evaluator::value_rules(
+    const Expr& symbol_expression, ValueKind kind) const {
+    const auto* name = symbol_expression.symbol_name();
+    if (name == nullptr) return {};
+    const auto full_name = resolve_full_symbol_name(*name);
+    std::vector<Expr> rules;
+    if (kind == ValueKind::Own) {
+        if (const auto found = own_values_.find(full_name); found != own_values_.end())
+            rules.push_back(call("RuleDelayed", {
+                call("HoldPattern", {display_symbol(full_name)}), found->second.value}));
+        return rules;
+    }
+    const DefinitionTable* table = kind == ValueKind::Down ? &down_values_
+        : kind == ValueKind::Up ? &up_values_
+        : kind == ValueKind::Sub ? &sub_values_ : nullptr;
+    if (table == nullptr) return rules;
+    if (const auto found = table->find(full_name); found != table->end())
+        for (const auto& definition : found->second)
+            rules.push_back(call("RuleDelayed", {
+                call("HoldPattern", {definition.lhs}), definition.value}));
+    return rules;
 }
 
 bool Evaluator::message_is_enabled(const Expr& name) const {
@@ -5787,13 +5893,14 @@ std::set<std::string> Evaluator::attributes_for(const Expr& symbol_expression) c
     std::set<std::string> result;
     const auto* raw_name = symbol_expression.symbol_name();
     if (!raw_name) return result;
-    auto system_name = *raw_name;
-    if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-    if (const auto found = system_registry().find(system_name); found != system_registry().end())
+    const auto full_name = resolve_full_symbol_name(*raw_name);
+    if (is_built_in_full_name(full_name)) {
+        const auto found = system_registry().find(full_name.substr(7));
         result.insert(found->second.begin(), found->second.end());
-    if (const auto found = user_attributes_.find(*raw_name); found != user_attributes_.end())
+    }
+    if (const auto found = user_attributes_.find(full_name); found != user_attributes_.end())
         result.insert(found->second.begin(), found->second.end());
-    if (unprotected_symbols_.count(*raw_name) != 0) result.erase("Protected");
+    if (unprotected_symbols_.count(full_name) != 0) result.erase("Protected");
     return result;
 }
 
@@ -5832,7 +5939,8 @@ Expr Evaluator::normalize_assignment_lhs(const Expr& expression) {
 
 std::optional<Expr> Evaluator::apply_definitions(
     const Expr& expression, const PatternDefinitions& definitions) {
-    for (const auto& definition : definitions) {
+    const auto definitions_snapshot = definitions;
+    for (const auto& definition : definitions_snapshot) {
         Bindings bindings;
         const Expr* pattern = &definition.lhs;
         std::vector<Expr> conditions;
@@ -5873,7 +5981,8 @@ std::optional<Expr> Evaluator::apply_definitions(
 
 std::optional<Expr> Evaluator::apply_down_values(const Expr& expression) {
     if (expression.kind() != ExprKind::Call || !expression.head().symbol_name()) return std::nullopt;
-    const auto found = down_values_.find(*expression.head().symbol_name());
+    const auto found = down_values_.find(
+        resolve_full_symbol_name(*expression.head().symbol_name()));
     return found == down_values_.end() ? std::nullopt : apply_definitions(expression, found->second);
 }
 
@@ -5882,7 +5991,7 @@ std::optional<Expr> Evaluator::apply_sub_values(const Expr& expression) {
     auto head = expression.head();
     while (head.kind() == ExprKind::Call) head = head.head();
     if (!head.symbol_name()) return std::nullopt;
-    const auto found = sub_values_.find(*head.symbol_name());
+    const auto found = sub_values_.find(resolve_full_symbol_name(*head.symbol_name()));
     return found == sub_values_.end() ? std::nullopt : apply_definitions(expression, found->second);
 }
 
@@ -5897,8 +6006,10 @@ std::optional<Expr> Evaluator::apply_up_values(const Expr& expression) {
             candidate = candidate.head();
             if (candidate.symbol_name()) name = *candidate.symbol_name();
         }
-        if (!name || !seen.insert(*name).second) continue;
-        const auto found = up_values_.find(*name);
+        if (!name) continue;
+        const auto full_name = resolve_full_symbol_name(*name);
+        if (!seen.insert(full_name).second) continue;
+        const auto found = up_values_.find(full_name);
         if (found == up_values_.end()) continue;
         if (auto result = apply_definitions(expression, found->second)) return result;
     }
@@ -5908,6 +6019,7 @@ std::optional<Expr> Evaluator::apply_up_values(const Expr& expression) {
 Expr Evaluator::evaluate(const Expr& expression) {
     const bool root = depth_ == 0;
     if (root) {
+        register_expression_symbols(expression);
         messages_.clear(); message_texts_.clear(); prints_.clear(); aborted_ = false;
         deferred_abort_ = false; abort_protection_depth_ = 0;
         message_scopes_.clear();
@@ -5951,11 +6063,12 @@ Expr Evaluator::evaluate_impl(const Expr& expression) {
             for (const auto& message : messages_) held.push_back(call("HoldForm", {message}));
             return list(std::move(held));
         }
-        const auto definition = own_values_.find(expression.text());
+        const auto full_name = resolve_full_symbol_name(expression.text());
+        const auto definition = own_values_.find(full_name);
         if (definition != own_values_.end()) {
-            if (std::find(active_own_values_.begin(), active_own_values_.end(), expression.text())
+            if (std::find(active_own_values_.begin(), active_own_values_.end(), full_name)
                 != active_own_values_.end()) return expression;
-            active_own_values_.push_back(expression.text());
+            active_own_values_.push_back(full_name);
             const auto value = evaluate(definition->second.value);
             active_own_values_.pop_back();
             return value;
@@ -6364,9 +6477,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 const auto suffix = ++module_counter_;
                 std::vector<std::pair<std::string, Expr>> renamed;
                 for (const auto& binding : bindings) {
-                    const auto fresh_name = binding.name + "$" + std::to_string(suffix);
-                    const auto fresh = symbol(fresh_name);
-                    user_symbol_registry().insert("Global`" + fresh_name);
+                    const auto owner = ensure_full_symbol_name(binding.name);
+                    const auto fresh_name = owner + "$" + std::to_string(suffix);
+                    const auto fresh = display_symbol(fresh_name);
+                    known_symbols_.insert(fresh_name);
                     renamed.emplace_back(binding.name, fresh);
                     if (binding.value) own_values_[fresh_name] = {
                         binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
@@ -6395,10 +6509,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         struct Binding { std::string name; std::optional<Expr> value; bool delayed; };
         std::vector<Binding> bindings;
         for (const auto& item : raw_args[0].args()) {
-            if (item.symbol_name()) bindings.push_back({*item.symbol_name(), std::nullopt, false});
+            if (item.symbol_name()) bindings.push_back({
+                ensure_full_symbol_name(*item.symbol_name()), std::nullopt, false});
             else if ((item.has_head("Set") || item.has_head("SetDelayed")) && item.args().size() == 2
                 && item.args()[0].symbol_name())
-                bindings.push_back({*item.args()[0].symbol_name(), item.args()[1], item.has_head("SetDelayed")});
+                bindings.push_back({ensure_full_symbol_name(*item.args()[0].symbol_name()),
+                    item.args()[1], item.has_head("SetDelayed")});
             else return call(raw_head, raw_args);
         }
         auto pattern_snapshot = [](const DefinitionTable& table, const std::string& target)
@@ -6585,7 +6701,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 for (const auto& ignored : iterator.values) { (void)ignored; if (!step()) break; }
                 return;
             }
-            const auto target = *iterator.variable;
+            const auto target = ensure_full_symbol_name(*iterator.variable);
             const auto own = own_values_.find(target);
             const auto saved_own = own == own_values_.end() ? std::nullopt : std::optional<Definition>(own->second);
             const auto saved_down = snapshot_table(down_values_, target);
@@ -6669,7 +6785,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 return;
             }
             if (specification.symbol_name()) {
-                targets.push_back(*specification.symbol_name());
+                targets.push_back(ensure_full_symbol_name(*specification.symbol_name()));
                 return;
             }
             if (specification.kind() != ExprKind::String) return;
@@ -6679,9 +6795,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             for (const auto& [candidate, value] : up_values_) { (void)value; candidates.insert(candidate); }
             for (const auto& [candidate, value] : sub_values_) { (void)value; candidates.insert(candidate); }
             for (const auto& [candidate, value] : user_attributes_) { (void)value; candidates.insert(candidate); }
-            for (const auto& [candidate, value] : system_registry()) { (void)value; candidates.insert(candidate); }
+            candidates.insert(known_symbols_.begin(), known_symbols_.end());
+            for (const auto& [candidate, value] : system_registry()) {
+                (void)value; candidates.insert("System`" + candidate);
+            }
             for (const auto& candidate : candidates)
-                if (wildcard_matches(candidate, specification.text())) targets.push_back(candidate);
+                if (symbol_name_matches(candidate, specification.text())) targets.push_back(candidate);
         };
         for (const auto& specification : raw_args) collect(specification);
         std::vector<Expr> changed;
@@ -6699,9 +6818,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 changed.push_back(string(display_symbol(target).to_input_form()));
             } else if (!protect && was_protected) {
                 user_attributes_[target].erase("Protected");
-                auto system_name = target;
-                if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-                const auto found = system_registry().find(system_name);
+                const auto found = is_built_in_full_name(target)
+                    ? system_registry().find(target.substr(7)) : system_registry().end();
                 if (found != system_registry().end()
                     && std::find(found->second.begin(), found->second.end(), "Protected")
                         != found->second.end())
@@ -6717,7 +6835,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto value = delayed ? raw_args[1] : evaluate(raw_args[1]);
         if (!delayed && raw_args[0].has_head("Attributes") && raw_args[0].args().size() == 1
             && raw_args[0].args()[0].symbol_name()) {
-            const auto target_name = *raw_args[0].args()[0].symbol_name();
+            const auto target_name = ensure_full_symbol_name(
+                *raw_args[0].args()[0].symbol_name());
             if (symbol_has_attribute(target_name, "Locked")) {
                 const auto message = call("MessageName", {symbol("Attributes"), string("locked")});
                 emit_message(message, "Attributes::locked: Symbol "
@@ -6728,9 +6847,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             const auto values = value.has_head("List") ? value.args() : std::vector<Expr>{value};
             for (const auto& attribute : values) if (attribute.symbol_name())
                 replacement.insert(system_dispatch_name(*attribute.symbol_name()));
-            auto system_name = target_name;
-            if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-            const auto system = system_registry().find(system_name);
+            const auto system = is_built_in_full_name(target_name)
+                ? system_registry().find(target_name.substr(7)) : system_registry().end();
             const bool system_protected = system != system_registry().end()
                 && std::find(system->second.begin(), system->second.end(), "Protected")
                     != system->second.end();
@@ -6741,13 +6859,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return value;
         }
         const auto lhs = normalize_assignment_lhs(raw_args[0]);
-        const auto target = assignment_target(lhs);
+        auto target = assignment_target(lhs);
         if (!target) {
             const auto message = call("MessageName", {symbol(name), string("error")});
             emit_message(message, name + "::error: " + name
                 + " does not support this left-hand side in Tungsten yet.");
             return delayed ? symbol("Null") : call(raw_head, {lhs, value});
         }
+        target->owner = ensure_full_symbol_name(target->owner);
         if (symbol_has_attribute(target->owner, "Protected")
             && !protected_value_mutation_exception(target->owner)) {
             const auto message = call("MessageName", {symbol(name), string("wrsym")});
@@ -6806,7 +6925,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto old_value = evaluate(raw_args[0]);
         const auto delta = name == "Increment" || name == "PreIncrement" ? 1L : -1L;
         const auto new_value = evaluate(call("Plus", {old_value, integer(delta)}));
-        own_values_[*raw_args[0].symbol_name()] = {new_value, false};
+        own_values_[ensure_full_symbol_name(*raw_args[0].symbol_name())] = {
+            new_value, false};
         return name == "Increment" || name == "Decrement" ? old_value : new_value;
     }
     if ((name == "Increment" || name == "Decrement" || name == "PreIncrement"
@@ -6820,7 +6940,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (raw_args.size() != 3 || !raw_args[0].symbol_name()) return call(raw_head, raw_args);
         const bool delayed = name == "TagSetDelayed";
         const auto value = delayed ? raw_args[2] : evaluate(raw_args[2]);
-        const auto tag = *raw_args[0].symbol_name();
+        const auto tag = ensure_full_symbol_name(*raw_args[0].symbol_name());
         if (symbol_has_attribute(tag, "Protected")) {
             const auto message = call("MessageName", {symbol(name), string("wrsym")});
             emit_message(message, name + "::wrsym: Symbol "
@@ -6829,6 +6949,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         const auto lhs = normalize_assignment_lhs(raw_args[1]);
         auto natural = assignment_target(lhs);
+        if (natural) natural->owner = ensure_full_symbol_name(natural->owner);
         DefinitionTable* table = nullptr;
         AssignmentKind kind = AssignmentKind::Up;
         if (natural && natural->owner == tag) kind = natural->kind;
@@ -6867,13 +6988,15 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         auto target = assignment_target(lhs);
         if (name == "TagUnset") {
             if (!raw_args[0].symbol_name()) return symbol("$Failed");
-            const auto tag = *raw_args[0].symbol_name();
+            const auto tag = ensure_full_symbol_name(*raw_args[0].symbol_name());
+            if (target) target->owner = ensure_full_symbol_name(target->owner);
             if (!target || target->owner != tag) {
                 if (!tag_occurs_in_upvalue_position(tag, lhs)) return symbol("$Failed");
                 target = AssignmentTarget{AssignmentKind::Up, tag};
             }
         }
         if (!target) return symbol("$Failed");
+        target->owner = ensure_full_symbol_name(target->owner);
         if (symbol_has_attribute(target->owner, "Protected")
             && !protected_value_mutation_exception(target->owner)) {
             const auto message = call("MessageName", {symbol(name), string("wrsym")});
@@ -6896,7 +7019,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return found->second.size() == old_size ? symbol("$Failed") : symbol("Null");
     }
     if (name == "Clear" || name == "ClearAll") {
-        auto clear_name = [&](const std::string& target) {
+        auto clear_name = [&](const std::string& raw_target) {
+            const auto target = ensure_full_symbol_name(raw_target);
             if (symbol_has_attribute(target, "Locked")) {
                 const auto message = call("MessageName", {symbol(name), string("locked")});
                 emit_message(message, name + "::locked: Symbol "
@@ -6924,7 +7048,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 for (const auto& [candidate, value] : down_values_) { (void)value; candidates.insert(candidate); }
                 for (const auto& [candidate, value] : up_values_) { (void)value; candidates.insert(candidate); }
                 for (const auto& [candidate, value] : sub_values_) { (void)value; candidates.insert(candidate); }
-                for (const auto& candidate : candidates) if (wildcard_matches(candidate, target.text())) clear_name(candidate);
+                candidates.insert(known_symbols_.begin(), known_symbols_.end());
+                for (const auto& [candidate, value] : system_registry()) {
+                    (void)value; candidates.insert("System`" + candidate);
+                }
+                for (const auto& candidate : candidates)
+                    if (symbol_name_matches(candidate, target.text())) clear_name(candidate);
             }
         };
         for (const auto& target : raw_args) clear_one(target);
@@ -6936,7 +7065,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto attributes = raw_args[1].has_head("List") ? raw_args[1].args() : std::vector<Expr>{raw_args[1]};
         for (const auto& target : targets) {
             if (!target.symbol_name()) continue;
-            const auto target_name = *target.symbol_name();
+            const auto target_name = ensure_full_symbol_name(*target.symbol_name());
             if (symbol_has_attribute(target_name, "Locked")) {
                 const auto message = call("MessageName", {symbol("Attributes"), string("locked")});
                 emit_message(message, "Attributes::locked: Symbol "
@@ -6952,9 +7081,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 } else {
                     stored.erase(value);
                     if (value == "Protected") {
-                        auto system_name = target_name;
-                        if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-                        const auto system = system_registry().find(system_name);
+                        const auto system = is_built_in_full_name(target_name)
+                            ? system_registry().find(target_name.substr(7)) : system_registry().end();
                         if (system != system_registry().end()
                             && std::find(system->second.begin(), system->second.end(), "Protected")
                                 != system->second.end())
@@ -6982,18 +7110,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         Expr target = raw_args[0];
         if (target.kind() == ExprKind::String) target = symbol(target.text());
         if (!target.symbol_name()) return list({});
-        std::vector<Expr> rules;
-        if (name == "OwnValues") {
-            if (const auto found = own_values_.find(*target.symbol_name()); found != own_values_.end())
-                rules.push_back(call("RuleDelayed", {call("HoldPattern", {target}), found->second.value}));
-        } else {
-            const DefinitionTable* table = name == "DownValues" ? &down_values_
-                : name == "UpValues" ? &up_values_ : name == "SubValues" ? &sub_values_ : nullptr;
-            if (table) if (const auto found = table->find(*target.symbol_name()); found != table->end())
-                for (const auto& definition : found->second)
-                    rules.push_back(call("RuleDelayed", {call("HoldPattern", {definition.lhs}), definition.value}));
-        }
-        return list(std::move(rules));
+        const auto kind = name == "OwnValues" ? ValueKind::Own
+            : name == "DownValues" ? ValueKind::Down
+            : name == "UpValues" ? ValueKind::Up
+            : name == "SubValues" ? ValueKind::Sub : ValueKind::N;
+        return list(value_rules(target, kind));
     }
     if (name == "CompoundExpression") {
         Expr result = symbol("Null");
@@ -7080,7 +7201,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (name == "ValueQ" && raw_args.size() == 1) {
         const auto evaluated = evaluate(raw_args[0]);
-        return boolean(evaluated != raw_args[0] || (raw_args[0].symbol_name() && own_values_.count(*raw_args[0].symbol_name()) != 0));
+        return boolean(evaluated != raw_args[0] || (raw_args[0].symbol_name()
+            && own_values_.count(resolve_full_symbol_name(*raw_args[0].symbol_name())) != 0));
     }
 
     auto head = evaluate(raw_head);
@@ -7261,15 +7383,17 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 values.push_back(evaluate(call("Unique", {item})));
             return list(std::move(values));
         }
-        std::string name;
-        if (args.empty()) name = "$" + std::to_string(++module_counter_);
+        std::string full_name;
+        if (args.empty()) full_name = "Global`$" + std::to_string(++module_counter_);
         else if (args[0].kind() == ExprKind::String)
-            name = args[0].text() + std::to_string(++unique_string_counters_[args[0].text()]);
+            full_name = "Global`" + args[0].text()
+                + std::to_string(++unique_string_counters_[args[0].text()]);
         else if (args[0].symbol_name())
-            name = *args[0].symbol_name() + "$" + std::to_string(++module_counter_);
+            full_name = ensure_full_symbol_name(*args[0].symbol_name())
+                + "$" + std::to_string(++module_counter_);
         else return call(head, args);
-        user_symbol_registry().insert(full_symbol_name(symbol(name)));
-        return symbol(name);
+        known_symbols_.insert(full_name);
+        return display_symbol(full_name);
     }
     if ((function == "Composition" || function == "RightComposition") && !args.empty()) return call(head, args);
     if (function == "SparseArray" && !args.empty() && args.size() <= 3) {
@@ -9526,10 +9650,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if (function == "Symbol" && args.size() == 1 && args[0].kind() == ExprKind::String) {
         const auto& requested = args[0].text();
         if (!requested.empty() && requested.find_first_of(" \t\r\n[]{}(),") == std::string::npos) {
-            std::string full_name;
-            if (requested.find('`') != std::string::npos) full_name = requested;
-            else full_name = system_registry().count(requested) ? "System`" + requested : "Global`" + requested;
-            if (full_name.compare(0, 7, "System`") != 0) user_symbol_registry().insert(full_name);
+            const auto full_name = ensure_full_symbol_name(requested);
             return display_symbol(full_name);
         }
     }
@@ -9539,22 +9660,51 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "Context" && args.empty()) return string("Global`");
     if (function == "Context" && args.size() == 1 && args[0].symbol_name()) {
-        const auto full_name = full_symbol_name(args[0]); const auto marker = full_name.rfind('`');
+        const auto full_name = resolve_full_symbol_name(*args[0].symbol_name());
+        const auto marker = full_name.rfind('`');
         return string(full_name.substr(0, marker + 1));
     }
     if ((function == "Names" || function == "NameQ" || function == "Contexts") && (args.empty() || args.size() == 1)) {
-        const auto pattern = args.empty() ? std::string("*") : args[0].kind() == ExprKind::String ? args[0].text() : std::string();
-        std::set<std::string> names;
-        for (const auto& [name, attributes] : system_registry()) {
-            (void)attributes; const auto full = "System`" + name; const auto& candidate = pattern.find('`') == std::string::npos ? name : full;
-            if (wildcard_matches(candidate, pattern)) names.insert(function == "Contexts" ? "System`" : name);
+        if (function == "Contexts") {
+            if (!args.empty() && args[0].kind() != ExprKind::String)
+                return call(head, args);
+            const auto pattern = args.empty() ? std::string("*") : args[0].text();
+            std::set<std::string> contexts{"Global`", "System`"};
+            for (const auto& full : known_symbols_) {
+                const auto marker = full.rfind('`');
+                if (marker != std::string::npos)
+                    contexts.insert(full.substr(0, marker + 1));
+            }
+            std::vector<Expr> values;
+            for (const auto& context : contexts)
+                if (wildcard_matches(context, pattern)) values.push_back(string(context));
+            return list(std::move(values));
         }
-        for (const auto& full : user_symbol_registry()) {
-            const auto marker = full.rfind('`'); const auto short_name = marker == std::string::npos ? full : full.substr(marker + 1);
-            const auto& candidate = pattern.find('`') == std::string::npos ? short_name : full;
-            if (!wildcard_matches(candidate, pattern)) continue;
-            if (function == "Contexts") names.insert(marker == std::string::npos ? "Global`" : full.substr(0, marker + 1));
-            else names.insert(full.compare(0, 7, "Global`") == 0 ? short_name : full);
+        std::vector<std::string> patterns;
+        if (args.empty()) patterns.push_back("*");
+        else if (args[0].kind() == ExprKind::String) patterns.push_back(args[0].text());
+        else if (args[0].has_head("List")) {
+            for (const auto& item : args[0].args()) {
+                if (item.kind() != ExprKind::String) return call(head, args);
+                patterns.push_back(item.text());
+            }
+        } else return call(head, args);
+        std::set<std::string> names;
+        for (const auto& pattern : patterns) {
+            for (const auto& [name, attributes] : system_registry()) {
+                (void)attributes;
+                const auto full = "System`" + name;
+                if (symbol_name_matches(full, pattern)) names.insert(name);
+            }
+            for (const auto& full : known_symbols_) {
+                if (!symbol_name_matches(full, pattern)) continue;
+                const auto marker = full.rfind('`');
+                const auto short_name = marker == std::string::npos
+                    ? full : full.substr(marker + 1);
+                names.insert(full.compare(0, 7, "Global`") == 0
+                        || full.compare(0, 7, "System`") == 0
+                    ? short_name : full);
+            }
         }
         if (function == "NameQ") return boolean(!names.empty());
         std::vector<Expr> values; for (const auto& name : names) values.push_back(string(name)); return list(std::move(values));
@@ -9565,8 +9715,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args[0].kind() == ExprKind::String) name = args[0].text();
         else if (args[0].symbol_name()) name = *args[0].symbol_name();
         if (!name.empty()) {
-            if (name.compare(0, 7, "System`") == 0) name.erase(0, 7);
-            std::vector<Expr> values; if (const auto found = system_registry().find(name); found != system_registry().end()) for (const auto& attribute : found->second) values.push_back(symbol(attribute));
+            std::vector<Expr> values;
+            for (const auto& attribute : attributes_for(symbol(name)))
+                values.push_back(symbol(attribute));
             return list(std::move(values));
         }
     }
