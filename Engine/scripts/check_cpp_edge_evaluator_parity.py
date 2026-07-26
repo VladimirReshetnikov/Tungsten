@@ -51,7 +51,7 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "rounding", "take-drop", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
-            "strings",
+            "array-shape", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -461,6 +461,122 @@ def collections_cases() -> list[str]:
     return _unique(cases)
 
 
+def array_shape_cases() -> list[str]:
+    """Dense, sparse, ragged, and diagnostic shape contracts."""
+
+    cases = [
+        "Dimensions[5]",
+        "Dimensions[f[a,b]]",
+        "Dimensions[Association[a->1,b->2]]",
+        "Dimensions[{}]",
+        "Dimensions[{{}}]",
+        "Dimensions[{{1,2},{3,4}}]",
+        "Dimensions[{{1,2},{3}}]",
+        "Dimensions[{{{1}},{{2,3}}}]",
+        "Dimensions[{SparseArray[{}, {2,3}],SparseArray[{}, {2,3}]}]",
+        "Dimensions[]",
+        "Dimensions[{},{}]",
+        "ArrayDepth[5]",
+        "ArrayDepth[f[a,b]]",
+        "ArrayDepth[Association[a->1,b->2]]",
+        "ArrayDepth[{}]",
+        "ArrayDepth[{{1},{2,3,4}}]",
+        "ArrayDepth[{{{1}},2}]",
+        "ArrayDepth[{SparseArray[{}, {2,3}]}]",
+        "ArrayDepth[]",
+        "ArrayDepth[{},{}]",
+        "ArrayQ[5]",
+        "ArrayQ[f[a,b]]",
+        "ArrayQ[Association[a->1]]",
+        "ArrayQ[{}]",
+        "ArrayQ[{{}}]",
+        "ArrayQ[{{1,2},{3,4}}]",
+        "ArrayQ[{{1},{2,3}}]",
+        "ArrayQ[{{1}},2,IntegerQ]",
+        "ArrayQ[{{1}},1,IntegerQ]",
+        "ArrayQ[{{1}},-1]",
+        "ArrayQ[{{1}},foo]",
+        "ArrayQ[5,foo]",
+        "ArrayQ[{{1},{2,3}},foo]",
+        "ArrayQ[]",
+        "ArrayQ[{},1,Identity,x]",
+        "VectorQ[5]",
+        "VectorQ[f[a,b]]",
+        "VectorQ[Association[a->1]]",
+        "VectorQ[{}]",
+        "VectorQ[{f[a]}]",
+        "VectorQ[{1,{2}}]",
+        "VectorQ[{1,2,3},IntegerQ]",
+        "VectorQ[]",
+        "VectorQ[{1},IntegerQ,x]",
+        "MatrixQ[5]",
+        "MatrixQ[f[a,b]]",
+        "MatrixQ[Association[a->1]]",
+        "MatrixQ[{}]",
+        "MatrixQ[{{}}]",
+        "MatrixQ[{{1,2},{3,4}}]",
+        "MatrixQ[{{1,2},{3}}]",
+        "MatrixQ[{{1,2},{3,4}},IntegerQ]",
+        "MatrixQ[]",
+        "MatrixQ[{{1}},IntegerQ,x]",
+        "Dimensions[SparseArray[{}, {4294967296}]]",
+        "Dimensions[SparseArray[{}, {4294967296,4294967296}]]",
+        "Dimensions[SparseArray[{}, {0,1000000000}]]",
+        "ArrayDepth[SparseArray[{}, {4294967296,4294967296}]]",
+        "ArrayDepth[SparseArray[{}, {0,1000000000}]]",
+        "ArrayQ[SparseArray[{}, {4294967296}],1]",
+        "ArrayQ[SparseArray[{}, {4294967296}],2]",
+        "ArrayQ[SparseArray[{}, {4294967296}],1,OddQ]",
+        "ArrayQ[SparseArray[{}, {0,1000000000}],2,OddQ]",
+        "VectorQ[SparseArray[{}, {4294967296}],OddQ]",
+        "VectorQ[SparseArray[{}, {0}],OddQ]",
+        "MatrixQ[SparseArray[{}, {4294967296,4294967296}],OddQ]",
+        "MatrixQ[SparseArray[{}, {0,1000000000}],OddQ]",
+        "SparseArray[{}, {4294967296,4294967296}][\"Density\"]",
+        (
+            "SparseArray[{{1,1}->1},{4294967296,4294967296}]"
+            "[\"Density\"]"
+        ),
+        (
+            "ArrayQ[{{1,2},{3,4}},2,Function[x,"
+            "Print[InputForm[x]];IntegerQ[x]]]"
+        ),
+        (
+            "ArrayQ[SparseArray[{{2}->a},{3}],1,Function[x,"
+            "Print[InputForm[x]];True]]"
+        ),
+        (
+            "VectorQ[{1,2,3},Function[x,"
+            "Print[InputForm[x]];IntegerQ[x]]]"
+        ),
+        (
+            "MatrixQ[{{1,2},{3,4}},Function[x,"
+            "Print[InputForm[x]];IntegerQ[x]]]"
+        ),
+        (
+            "MatrixQ[SparseArray[{{2,2}->a},{2,2}],Function[x,"
+            "Print[InputForm[x]];True]]"
+        ),
+        (
+            "Catch[ArrayQ[{{1,2},{3,4}},2,Function[x,"
+            "Print[InputForm[x]];If[SameQ[x,2],Throw[stop]];True]]]"
+        ),
+        (
+            "CheckAbort[VectorQ[{1,2,3},Function[x,"
+            "Print[InputForm[x]];If[SameQ[x,2],Abort[]];True]],caught]"
+        ),
+        (
+            "MatrixQ[SparseArray[{{2,2}->a},{2,2}],Function[x,"
+            "Print[InputForm[x]];False]]"
+        ),
+        (
+            "ArrayQ[SparseArray[{}, {0,1000000000}],2,Function[x,"
+            "Print[\"unexpected\"];False]]"
+        ),
+    ]
+    return _unique(cases)
+
+
 def string_cases() -> list[str]:
     strings = ('""', '"a"', '"ab"', '"aba"', '"a b"', '"café λ"')
     patterns = (
@@ -749,6 +865,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "combinator-state": combinator_state_cases,
     "combinators": combinator_cases,
     "distribution": distribution_cases,
+    "array-shape": array_shape_cases,
     "strings": string_cases,
 }
 

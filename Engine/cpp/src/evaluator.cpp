@@ -2454,6 +2454,53 @@ std::optional<std::vector<std::size_t>> dense_dimensions(const Expr& value) {
     dimensions.insert(dimensions.end(), child->begin(), child->end()); return dimensions;
 }
 
+std::optional<std::vector<std::size_t>> rectangular_array_dimensions(
+    const Expr& value) {
+    if (value.kind() == ExprKind::SparseArray) return value.dimensions();
+    if (!value.has_head("List")) return std::nullopt;
+    return dense_dimensions(value);
+}
+
+std::vector<std::size_t> common_dense_dimensions(const Expr& value) {
+    if (!value.has_head("List")) return {};
+    std::vector<std::size_t> dimensions{value.args().size()};
+    if (value.args().empty()) return dimensions;
+
+    auto common = common_dense_dimensions(value.args().front());
+    for (std::size_t index = 1; index < value.args().size(); ++index) {
+        const auto child = common_dense_dimensions(value.args()[index]);
+        const auto shared = std::mismatch(
+            common.begin(), common.end(), child.begin(), child.end()).first;
+        common.erase(shared, common.end());
+        if (common.empty()) break;
+    }
+    dimensions.insert(dimensions.end(), common.begin(), common.end());
+    return dimensions;
+}
+
+std::vector<std::size_t> common_array_dimensions(const Expr& value) {
+    return value.kind() == ExprKind::SparseArray
+        ? value.dimensions() : common_dense_dimensions(value);
+}
+
+std::size_t maximum_array_depth(const Expr& value) {
+    if (value.kind() == ExprKind::SparseArray) return value.dimensions().size();
+    if (!value.has_head("List")) return 0;
+    std::size_t depth = 1;
+    for (const auto& item : value.args())
+        depth = std::max(depth, maximum_array_depth(item) + 1);
+    return depth;
+}
+
+template<typename Predicate>
+bool dense_array_leaves_match(const Expr& value, Predicate&& predicate) {
+    if (!value.has_head("List")) return predicate(value);
+    return std::all_of(
+        value.args().begin(), value.args().end(), [&](const Expr& item) {
+            return dense_array_leaves_match(item, predicate);
+        });
+}
+
 std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = integer(0L)) {
     const auto dimensions = dense_dimensions(value); if (!dimensions || dimensions->empty()) return std::nullopt;
     std::vector<SparseEntry> entries;
@@ -11248,35 +11295,29 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return call("Association", std::move(result));
     }
     if (function == "ListQ" && args.size() == 1) return boolean(args[0].has_head("List"));
-    if ((function == "VectorQ" || function == "MatrixQ") && !args.empty() && args.size() <= 2) {
-        const auto predicate = args.size() == 2 ? std::optional<Expr>(args[1]) : std::nullopt;
+    if (function == "VectorQ" || function == "MatrixQ") {
+        if (args.empty() || args.size() > 2)
+            return raw_evaluation_error(function
+                + " expects an expression and an optional element predicate.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        const auto expected_rank = function == "VectorQ" ? 1U : 2U;
+        if (!dimensions || dimensions->size() != expected_rank)
+            return symbol("False");
+        if (args.size() == 1) return symbol("True");
+
         auto matches_predicate = [&](const Expr& value) {
-            return !predicate || is_symbol(evaluate(call(*predicate, {value})), "True");
+            return is_symbol(evaluate(call(args[1], {value})), "True");
         };
         if (args[0].kind() == ExprKind::SparseArray) {
-            const auto expected_rank = function == "VectorQ" ? 1U : 2U;
-            bool valid = args[0].dimensions().size() == expected_rank;
-            if (valid && predicate) {
-                if (sparse_has_implicit_values(args[0]))
-                    valid = matches_predicate(args[0].fill_value());
-                for (const auto& entry : args[0].sparse_entries()) valid = valid && matches_predicate(entry.value);
-            }
-            return boolean(valid);
+            if (sparse_has_implicit_values(args[0])
+                && !matches_predicate(args[0].fill_value())) return symbol("False");
+            return boolean(std::all_of(
+                args[0].sparse_entries().begin(), args[0].sparse_entries().end(),
+                [&](const SparseEntry& entry) {
+                    return matches_predicate(entry.value);
+                }));
         }
-        if (function == "VectorQ") {
-            if (!args[0].has_head("List")) return symbol("False");
-            return boolean(std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& value) {
-                return !value.has_head("List") && matches_predicate(value);
-            }));
-        }
-        if (!args[0].has_head("List")) return symbol("False");
-        const auto rows = args[0].args();
-        if (rows.empty()) return symbol("False");
-        if (!std::all_of(rows.begin(), rows.end(), [](const Expr& row) { return row.has_head("List"); })) return symbol("False");
-        const auto columns = rows.front().args().size();
-        return boolean(std::all_of(rows.begin(), rows.end(), [&](const Expr& row) {
-            return row.args().size() == columns && std::all_of(row.args().begin(), row.args().end(), matches_predicate);
-        }));
+        return boolean(dense_array_leaves_match(args[0], matches_predicate));
     }
     if (function == "AtomQ" && args.size() == 1) return boolean(args[0].is_atom());
     if (function == "IntegerQ" && args.size() == 1) return boolean(args[0].kind() == ExprKind::Integer);
@@ -11313,8 +11354,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         && args[0].integer_value() <= mpz_class(std::numeric_limits<std::int64_t>::max()));
     if (function == "Head" && args.size() == 1) return args[0].head();
     if (function == "Length" && args.size() == 1) return integer(args[0].length());
-    if (function == "Dimensions" && args.size() == 1 && args[0].kind() == ExprKind::SparseArray) {
-        std::vector<Expr> values; for (const auto dimension : args[0].dimensions()) values.push_back(integer(dimension)); return list(std::move(values));
+    if (function == "Dimensions") {
+        if (args.size() != 1)
+            return raw_evaluation_error("Dimensions expects exactly one argument.");
+        std::vector<Expr> values;
+        for (const auto dimension : common_array_dimensions(args[0]))
+            values.push_back(integer(dimension));
+        return list(std::move(values));
+    }
+    if (function == "ArrayDepth") {
+        if (args.size() != 1)
+            return raw_evaluation_error("ArrayDepth expects exactly one argument.");
+        return integer(maximum_array_depth(args[0]));
     }
     if (function == "Depth" && args.size() == 1) {
         auto semantic_depth = [&](auto&& self, const Expr& value) -> std::size_t {
@@ -11949,28 +12000,6 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return boolean(contains_point(args[1]));
         }
     }
-    if (function == "ArrayQ" && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        if (args.size() > 3) return call(head, args);
-        bool valid = true;
-        if (args.size() >= 2) {
-            if (args[1].kind() != ExprKind::Integer) valid = false;
-            else {
-                const mpz_class rank(
-                    std::to_string(args[0].dimensions().size()), 10);
-                valid = args[1].integer_value() == rank;
-            }
-        }
-        if (valid && args.size() == 3) {
-            auto matches_predicate = [&](const Expr& value) {
-                return is_symbol(evaluate(call(args[2], {value})), "True");
-            };
-            if (sparse_has_implicit_values(args[0]))
-                valid = matches_predicate(args[0].fill_value());
-            for (const auto& entry : args[0].sparse_entries())
-                valid = valid && matches_predicate(entry.value);
-        }
-        return boolean(valid);
-    }
     if ((function == "ArrayReshape" || function == "ArrayPad" || function == "Transpose" || function == "Flatten")
         && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
         const auto dense = sparse_dense_value(args[0]);
@@ -12309,36 +12338,34 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (is_symbol(args[0], "True")) return integer(1L);
         if (is_symbol(args[0], "False")) return integer(0L);
     }
-    if (function == "ArrayDepth" && args.size() == 1) {
-        if (args[0].kind() == ExprKind::SparseArray)
-            return integer(args[0].dimensions().size());
-        auto depth = [&](auto&& self, const Expr& value) -> std::size_t {
-            if (!value.has_head("List") || value.args().empty()) return value.has_head("List") ? 1 : 0;
-            std::size_t child = self(self, value.args().front());
-            for (const auto& item : value.args()) child = std::min(child, self(self, item));
-            return child + 1;
-        };
-        return integer(static_cast<unsigned long>(depth(depth, args[0])));
-    }
-    if (function == "ArrayQ" && !args.empty() && args.size() <= 3) {
-        std::vector<std::size_t> dimensions;
-        auto shape = [&](auto&& self, const Expr& value, std::size_t level) -> bool {
-            if (!value.has_head("List")) return level == dimensions.size();
-            if (level == dimensions.size()) dimensions.push_back(value.args().size());
-            else if (dimensions[level] != value.args().size()) return false;
-            return std::all_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item, level + 1); });
-        };
-        bool valid = shape(shape, args[0], 0);
-        if (valid && args.size() >= 2 && machine_index(args[1])) valid = dimensions.size() == static_cast<std::size_t>(*machine_index(args[1]));
-        else if (args.size() >= 2) valid = false;
-        if (valid && args.size() == 3) {
-            auto leaves_match = [&](auto&& self, const Expr& value) -> bool {
-                if (!value.has_head("List")) return is_symbol(evaluate(call(args[2], {value})), "True");
-                return std::all_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item); });
-            };
-            valid = leaves_match(leaves_match, args[0]);
+    if (function == "ArrayQ") {
+        if (args.empty() || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayQ expects an expression, optional depth, and optional element test.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        if (!dimensions) return symbol("False");
+        if (args.size() >= 2) {
+            if (args[1].kind() != ExprKind::Integer)
+                return raw_evaluation_error(
+                    "ArrayQ currently expects an explicit integer depth.");
+            const mpz_class rank(std::to_string(dimensions->size()), 10);
+            if (args[1].integer_value() != rank) return symbol("False");
         }
-        return boolean(valid);
+        if (args.size() != 3) return symbol("True");
+
+        auto matches_predicate = [&](const Expr& value) {
+            return is_symbol(evaluate(call(args[2], {value})), "True");
+        };
+        if (args[0].kind() == ExprKind::SparseArray) {
+            if (sparse_has_implicit_values(args[0])
+                && !matches_predicate(args[0].fill_value())) return symbol("False");
+            return boolean(std::all_of(
+                args[0].sparse_entries().begin(), args[0].sparse_entries().end(),
+                [&](const SparseEntry& entry) {
+                    return matches_predicate(entry.value);
+                }));
+        }
+        return boolean(dense_array_leaves_match(args[0], matches_predicate));
     }
     if (function == "ArrayReshape" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
         && args[1].has_head("List")) {

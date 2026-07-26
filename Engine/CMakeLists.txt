@@ -187,6 +187,14 @@ if(BUILD_TESTING)
         NAME tungsten_combinator_state_tests
         COMMAND tungsten_combinator_state_tests)
 
+    add_executable(tungsten_array_shape_tests
+        cpp/tests/array_shape_tests.cpp)
+    target_link_libraries(tungsten_array_shape_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_array_shape_tests)
+    add_test(
+        NAME tungsten_array_shape_tests
+        COMMAND tungsten_array_shape_tests)
+
     add_executable(
         tungsten_expression_model_tests
         cpp/tests/expression_model_tests.cpp)
