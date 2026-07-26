@@ -759,6 +759,7 @@ reduceBuiltin headName values = case headName of
   "Transpose" -> reduceTranspose values
   "UnitVector" -> reduceUnitVector values
   "IdentityMatrix" -> reduceIdentityMatrix values
+  "LeviCivitaTensor" -> reduceLeviCivitaTensor values
   "VectorQ" -> reduceVectorQ values
   "MatrixQ" -> reduceMatrixQ values
   "DiagonalMatrix" -> reduceDiagonalMatrix values
@@ -5476,6 +5477,7 @@ arrayReshape SparseArray {} _ _ =
   Left (EvaluationError "ArrayReshape currently supports dense expressions only.")
 arrayReshape expression dimensionsExpression padding = do
   dimensions <- normalizeDenseDimensions "ArrayReshape" dimensionsExpression
+  guardDenseArrayMaterialization "ArrayReshape" dimensions
   let (result, _) = buildReshaped dimensions (denseLeafValues expression)
   Right result
  where
@@ -5577,10 +5579,13 @@ arrayFlatten (Call (Symbol "List") rowExpressions) = do
     else do
       shapeRows <- traverse (traverse blockShape) blockRows
       rowHeights <- traverse consistentRowHeight (zip [1 :: Int ..] shapeRows)
-      _ <-
+      columnWidths <-
         traverse
           (consistentColumnWidth shapeRows)
           [0 .. columnCount - 1]
+      outputHeight <- checkedDimensionSum "ArrayFlatten" rowHeights
+      outputWidth <- checkedDimensionSum "ArrayFlatten" columnWidths
+      guardDenseArrayMaterialization "ArrayFlatten" [outputHeight, outputWidth]
       let outputRows =
             concat
               [ [ evaluatedList
@@ -5636,6 +5641,17 @@ arrayFlatten (Call (Symbol "List") rowExpressions) = do
   blockMatrixRows _ = []
 arrayFlatten _ =
   Left (EvaluationError "ArrayFlatten expects a rectangular list of array blocks.")
+
+checkedDimensionSum :: Text -> [Int] -> Either EvaluationError Int
+checkedDimensionSum operation dimensions =
+  let total = sum (map toInteger dimensions)
+   in if total > toInteger (maxBound :: Int)
+        then
+          Left
+            ( EvaluationError
+                (operation <> " dimensions are too large for this runtime.")
+            )
+        else Right (fromInteger total)
 
 reduceTranspose :: [Expr] -> Either EvaluationError Expr
 reduceTranspose [expression] = transposeDense expression Nothing
@@ -5725,6 +5741,91 @@ identityMatrix size
       buildDenseArrayM "IdentityMatrix" [dimension, dimension] $ \case
         [row, column] -> Right (Integer (if row == column then 1 else 0))
         _ -> Left (EvaluationError "IdentityMatrix encountered an invalid array index.")
+
+reduceLeviCivitaTensor :: [Expr] -> Either EvaluationError Expr
+reduceLeviCivitaTensor = \case
+  [dimensionExpression] ->
+    leviCivitaTensor dimensionExpression Nothing
+  [dimensionExpression, requestedHead] ->
+    leviCivitaTensor dimensionExpression (Just requestedHead)
+  _ ->
+    Left
+      ( EvaluationError
+          "LeviCivitaTensor expects a dimension and an optional head."
+      )
+
+leviCivitaTensor :: Expr -> Maybe Expr -> Either EvaluationError Expr
+leviCivitaTensor (Integer dimensionValue) requestedHead
+  | dimensionValue < 0 =
+      Left
+        ( EvaluationError
+            "LeviCivitaTensor expects a non-negative dimension."
+        )
+  | otherwise = do
+      dimension <- nonnegativeDimension "LeviCivitaTensor" dimensionValue
+      if sparseRequested requestedHead
+        then sparseLeviCivitaTensor dimension
+        else denseLeviCivitaTensor dimension
+leviCivitaTensor _ _ =
+  Left (EvaluationError "LeviCivitaTensor expects an integer argument.")
+
+sparseRequested :: Maybe Expr -> Bool
+sparseRequested (Just (Symbol headName)) =
+  systemHeadIn ["SparseArray"] headName
+sparseRequested _ = False
+
+denseLeviCivitaTensor :: Int -> Either EvaluationError Expr
+denseLeviCivitaTensor 0 = Right (Integer 1)
+denseLeviCivitaTensor dimension =
+  buildDenseArrayM
+    "LeviCivitaTensor"
+    (replicate dimension dimension)
+    (Right . Integer . fromIntegral . leviCivitaValue)
+ where
+  leviCivitaValue indices
+    | allDistinct indices = permutationSign indices
+    | otherwise = 0
+
+sparseLeviCivitaTensor :: Int -> Either EvaluationError Expr
+sparseLeviCivitaTensor 0 =
+  Left
+    ( EvaluationError
+        "SparseArray rule positions must match the array rank."
+    )
+sparseLeviCivitaTensor dimension = do
+  guardSparseLeviCivitaMaterialization dimension
+  let permutations' = pythonOrderedPermutations [1 .. dimension]
+  Right
+    ( SparseArray
+        (replicate dimension (fromIntegral dimension))
+        [ SparseEntry
+            (map fromIntegral permutation)
+            (Integer (fromIntegral (permutationSign permutation)))
+        | permutation <- permutations'
+        ]
+        (Integer 0)
+    )
+
+guardSparseLeviCivitaMaterialization :: Int -> Either EvaluationError ()
+guardSparseLeviCivitaMaterialization dimension =
+  if factorialWithinLimit dimension maximumEntryCount
+    then Right ()
+    else
+      Left
+        ( EvaluationError
+            "LeviCivitaTensor sparse output exceeds the native materialization limit."
+        )
+ where
+  entryWidth = toInteger dimension + 1
+  maximumEntryCount = maximumDenseArrayMaterializedNodes `div` entryWidth
+
+factorialWithinLimit :: Int -> Integer -> Bool
+factorialWithinLimit dimension limit = go 2 1
+ where
+  go factor value
+    | factor > toInteger dimension = True
+    | value > limit `div` factor = False
+    | otherwise = go (factor + 1) (value * factor)
 
 data DenseSequence
   = DenseCompound !Expr ![Expr]
