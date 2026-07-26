@@ -83,12 +83,15 @@ private:
     };
     using SteadyClock = std::chrono::steady_clock;
     struct TimeConstraintScope {
-        std::size_t id = 0;
-        std::optional<SteadyClock::time_point> deadline;
+      std::size_t id = 0;
+      std::optional<SteadyClock::time_point> deadline;
     };
     enum class ControlKind { None, Break, Continue, Return, Goto };
     Expr evaluate_impl(const Expr& expression);
     Expr evaluate_call(const Expr& head, const std::vector<Expr>& args);
+    [[nodiscard]] bool evaluate_tensor_matrix_call(
+        const Expr& head, const std::vector<Expr>& args,
+        Expr& result, std::string& error);
     void emit_message(const Expr& name, std::string text);
     [[nodiscard]] bool message_is_enabled(const Expr& name) const;
     [[nodiscard]] bool control_active() const noexcept;

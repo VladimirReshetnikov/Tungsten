@@ -8110,6 +8110,1058 @@ Expr Evaluator::evaluate_impl(const Expr& expression) {
     return evaluate_call(expression.head(), expression.args());
 }
 
+bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
+                                            const std::vector<Expr> &args,
+                                            Expr &result, std::string &error) {
+  const auto *symbol_name = head.symbol_name();
+  if (!symbol_name)
+    return false;
+  const auto function = system_dispatch_name(*symbol_name);
+  static const std::set<std::string> tensor_matrix_functions{
+      "Cross", "Det", "Dot", "Inner", "Inverse", "MatrixPower", "Outer", "Tr",
+  };
+  if (tensor_matrix_functions.count(function) == 0)
+    return false;
+
+  // The Python compatibility evaluator dispatches only the exact, bare
+  // system spelling.  Context-qualified lookalikes remain ordinary calls.
+  if (*symbol_name != function) {
+    result = call(head, args);
+    return true;
+  }
+
+  const auto exact_zero = [](const Expr &value) {
+    const auto number = as_rational(value);
+    return number && *number == 0;
+  };
+  const auto exact_one = [](const Expr &value) {
+    const auto number = as_rational(value);
+    return number && *number == 1;
+  };
+  const auto sum = [&](std::vector<Expr> terms) {
+    return terms.empty() ? integer(0L)
+                         : evaluate(call("Plus", std::move(terms)));
+  };
+  const auto product = [&](std::vector<Expr> factors) {
+    return factors.empty() ? integer(1L)
+                           : evaluate(call("Times", std::move(factors)));
+  };
+  const auto negate = [&](const Expr &value) {
+    return exact_zero(value) ? integer(0L)
+                             : evaluate(call("Times", {integer(-1L), value}));
+  };
+  const auto subtract = [&](const Expr &left, const Expr &right) {
+    return exact_zero(right) ? left : sum({left, negate(right)});
+  };
+  const auto reciprocal = [&](const Expr &value) {
+    return exact_one(value) ? integer(1L)
+                            : evaluate(call("Power", {value, integer(-1L)}));
+  };
+  const auto divide = [&](const Expr &numerator, const Expr &denominator) {
+    if (exact_zero(numerator))
+      return integer(0L);
+    if (exact_one(denominator))
+      return numerator;
+    return product({numerator, reciprocal(denominator)});
+  };
+  const auto sparse_value_at = [](const Expr &array,
+                                  const std::vector<std::size_t> &indices) {
+    const auto found = std::find_if(
+        array.sparse_entries().begin(), array.sparse_entries().end(),
+        [&](const SparseEntry &entry) { return entry.indices == indices; });
+    return found == array.sparse_entries().end() ? array.fill_value()
+                                                 : found->value;
+  };
+
+  auto strict_dense_dimensions =
+      [&](const Expr &value, auto &&self,
+          bool &rectangular) -> std::vector<std::size_t> {
+    if (!value.has_head("List"))
+      return {};
+    std::vector<std::size_t> dimensions{value.args().size()};
+    if (value.args().empty())
+      return dimensions;
+    const auto child = self(value.args().front(), self, rectangular);
+    for (std::size_t index = 1; index < value.args().size(); ++index)
+      if (self(value.args()[index], self, rectangular) != child)
+        rectangular = false;
+    dimensions.insert(dimensions.end(), child.begin(), child.end());
+    return dimensions;
+  };
+
+  auto matrix_rows = [&](const Expr &value, const std::string &caller,
+                         std::vector<std::vector<Expr>> &rows) {
+    if (value.kind() == ExprKind::SparseArray) {
+      if (value.dimensions().size() != 2) {
+        error = caller + " expects a matrix.";
+        return false;
+      }
+      const auto dense = sparse_dense_value(value);
+      if (!dense) {
+        error =
+            "SparseArray dimensions exceed the native materialization limit.";
+        return false;
+      }
+      for (const auto &row : dense->args())
+        rows.push_back(row.args());
+      return true;
+    }
+    if (!value.has_head("List") ||
+        std::any_of(value.args().begin(), value.args().end(),
+                    [](const Expr &row) { return !row.has_head("List"); })) {
+      error = caller + " expects a matrix.";
+      return false;
+    }
+    const auto width = value.args().empty()
+                           ? std::size_t{0}
+                           : value.args().front().args().size();
+    if (std::any_of(
+            value.args().begin(), value.args().end(),
+            [&](const Expr &row) { return row.args().size() != width; })) {
+      error = caller + " expects a rectangular matrix.";
+      return false;
+    }
+    for (const auto &row : value.args())
+      rows.push_back(row.args());
+    return true;
+  };
+
+  auto square_matrix_rows = [&](const Expr &value, const std::string &caller,
+                                std::vector<std::vector<Expr>> &rows) {
+    if (!matrix_rows(value, caller, rows))
+      return false;
+    const auto width = rows.empty() ? std::size_t{0} : rows.front().size();
+    if (rows.size() != width) {
+      error = caller + " expects a square matrix.";
+      return false;
+    }
+    return true;
+  };
+
+  auto exact_fraction_matrix =
+      [](const std::vector<std::vector<Expr>> &rows,
+         std::vector<std::vector<mpq_class>> &fractions) {
+        fractions.clear();
+        for (const auto &row : rows) {
+          std::vector<mpq_class> fraction_row;
+          for (const auto &value : row) {
+            const auto number = as_rational(value);
+            if (!number)
+              return false;
+            fraction_row.push_back(*number);
+          }
+          fractions.push_back(std::move(fraction_row));
+        }
+        return true;
+      };
+
+  auto determinant_candidates =
+      [&](const std::vector<std::vector<std::pair<std::size_t, Expr>>>
+              &candidates) {
+        if (candidates.empty())
+          return integer(1L);
+        if (std::any_of(candidates.begin(), candidates.end(),
+                        [](const auto &row) { return row.empty(); }))
+          return integer(0L);
+        std::vector<Expr> terms;
+        std::vector<bool> used(candidates.size(), false);
+        std::vector<std::size_t> columns;
+        std::vector<Expr> factors;
+        auto recurse = [&](auto &&self, std::size_t row) -> void {
+          if (row == candidates.size()) {
+            std::size_t inversions = 0;
+            for (std::size_t left = 0; left < columns.size(); ++left)
+              for (std::size_t right = left + 1; right < columns.size();
+                   ++right)
+                if (columns[left] > columns[right])
+                  ++inversions;
+            auto term_factors = factors;
+            if (inversions % 2 != 0)
+              term_factors.insert(term_factors.begin(), integer(-1L));
+            terms.push_back(product(std::move(term_factors)));
+            return;
+          }
+          for (const auto &[column, value] : candidates[row]) {
+            if (column >= used.size() || used[column] || exact_zero(value))
+              continue;
+            used[column] = true;
+            columns.push_back(column);
+            factors.push_back(value);
+            self(self, row + 1);
+            factors.pop_back();
+            columns.pop_back();
+            used[column] = false;
+            if (immediate_signal_active())
+              return;
+          }
+        };
+        recurse(recurse, 0);
+        return immediate_signal_active() ? control_expression()
+                                         : sum(std::move(terms));
+      };
+
+  auto determinant_rows = [&](const std::vector<std::vector<Expr>> &rows) {
+    std::vector<std::vector<mpq_class>> fractions;
+    if (exact_fraction_matrix(rows, fractions)) {
+      const auto size = fractions.size();
+      if (size == 0)
+        return integer(1L);
+      int sign = 1;
+      for (std::size_t column = 0; column < size; ++column) {
+        auto pivot = column;
+        while (pivot < size && fractions[pivot][column] == 0)
+          ++pivot;
+        if (pivot == size)
+          return integer(0L);
+        if (pivot != column) {
+          std::swap(fractions[pivot], fractions[column]);
+          sign = -sign;
+        }
+        for (std::size_t row = column + 1; row < size; ++row) {
+          if (fractions[row][column] == 0)
+            continue;
+          const mpq_class factor =
+              fractions[row][column] / fractions[column][column];
+          for (std::size_t target = column; target < size; ++target)
+            fractions[row][target] -= factor * fractions[column][target];
+        }
+      }
+      mpq_class value(sign);
+      for (std::size_t index = 0; index < size; ++index)
+        value *= fractions[index][index];
+      return from_rational(value);
+    }
+    std::vector<std::vector<std::pair<std::size_t, Expr>>> candidates;
+    for (const auto &row : rows) {
+      std::vector<std::pair<std::size_t, Expr>> row_candidates;
+      for (std::size_t column = 0; column < row.size(); ++column)
+        if (!exact_zero(row[column]))
+          row_candidates.emplace_back(column, row[column]);
+      candidates.push_back(std::move(row_candidates));
+    }
+    return determinant_candidates(candidates);
+  };
+
+  auto determinant_sparse = [&](const Expr &array) {
+    const auto &dimensions = array.dimensions();
+    if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
+      error = "Det expects a square matrix.";
+      return Expr{};
+    }
+    if (!exact_zero(array.fill_value())) {
+      std::vector<std::vector<Expr>> rows;
+      if (!matrix_rows(array, "Det", rows))
+        return Expr{};
+      return determinant_rows(rows);
+    }
+    const auto size = dimensions[0];
+    if (size == 0)
+      return integer(1L);
+    std::set<std::size_t> occupied_rows;
+    for (const auto &entry : array.sparse_entries())
+      if (!exact_zero(entry.value))
+        occupied_rows.insert(entry.indices[0]);
+    if (occupied_rows.size() != size)
+      return integer(0L);
+    std::vector<std::vector<std::pair<std::size_t, Expr>>> candidates(size);
+    for (const auto &entry : array.sparse_entries())
+      if (!exact_zero(entry.value))
+        candidates[entry.indices[0] - 1].emplace_back(entry.indices[1] - 1,
+                                                      entry.value);
+    return determinant_candidates(candidates);
+  };
+
+  std::function<std::optional<Expr>(const Expr &, const Expr &)> dot_two;
+  dot_two = [&](const Expr &left, const Expr &right) -> std::optional<Expr> {
+    if (left.kind() == ExprKind::SparseArray &&
+        right.kind() == ExprKind::SparseArray) {
+      if (!exact_zero(left.fill_value()) || !exact_zero(right.fill_value())) {
+        const auto dense_left = sparse_dense_value(left);
+        const auto dense_right = sparse_dense_value(right);
+        if (!dense_left || !dense_right) {
+          error =
+              "SparseArray dimensions exceed the native materialization limit.";
+          return std::nullopt;
+        }
+        return dot_two(*dense_left, *dense_right);
+      }
+      const auto left_rank = left.dimensions().size();
+      const auto right_rank = right.dimensions().size();
+      if ((left_rank != 1 && left_rank != 2) ||
+          (right_rank != 1 && right_rank != 2)) {
+        error = "Dot currently supports sparse vectors and matrices only.";
+        return std::nullopt;
+      }
+      auto add_to = [&](std::vector<SparseEntry> &entries,
+                        const std::vector<std::size_t> &indices,
+                        const Expr &contribution) {
+        if (exact_zero(contribution))
+          return;
+        const auto found = std::find_if(
+            entries.begin(), entries.end(),
+            [&](const SparseEntry &entry) { return entry.indices == indices; });
+        if (found == entries.end()) {
+          entries.push_back({indices, contribution});
+          return;
+        }
+        found->value = sum({found->value, contribution});
+        if (exact_zero(found->value))
+          entries.erase(found);
+      };
+      if (left_rank == 1 && right_rank == 1) {
+        if (left.dimensions()[0] != right.dimensions()[0]) {
+          error = "Dot expects vectors of the same length.";
+          return std::nullopt;
+        }
+        std::vector<Expr> terms;
+        for (const auto &left_entry : left.sparse_entries()) {
+          const auto found = std::find_if(
+              right.sparse_entries().begin(), right.sparse_entries().end(),
+              [&](const SparseEntry &entry) {
+                return entry.indices == left_entry.indices;
+              });
+          if (found != right.sparse_entries().end())
+            terms.push_back(product({left_entry.value, found->value}));
+          if (immediate_signal_active())
+            return control_expression();
+        }
+        return sum(std::move(terms));
+      }
+      std::vector<SparseEntry> entries;
+      if (left_rank == 2 && right_rank == 1) {
+        if (left.dimensions()[1] != right.dimensions()[0]) {
+          error = "Dot expects compatible sparse matrix/vector dimensions.";
+          return std::nullopt;
+        }
+        for (const auto &left_entry : left.sparse_entries()) {
+          const auto found = std::find_if(
+              right.sparse_entries().begin(), right.sparse_entries().end(),
+              [&](const SparseEntry &entry) {
+                return entry.indices[0] == left_entry.indices[1];
+              });
+          if (found != right.sparse_entries().end())
+            add_to(entries, {left_entry.indices[0]},
+                   product({left_entry.value, found->value}));
+          if (immediate_signal_active())
+            return control_expression();
+        }
+        return sparse_array({left.dimensions()[0]}, std::move(entries));
+      }
+      if (left_rank == 1 && right_rank == 2) {
+        if (left.dimensions()[0] != right.dimensions()[0]) {
+          error = "Dot expects compatible sparse vector/matrix dimensions.";
+          return std::nullopt;
+        }
+        for (const auto &right_entry : right.sparse_entries()) {
+          const auto found = std::find_if(
+              left.sparse_entries().begin(), left.sparse_entries().end(),
+              [&](const SparseEntry &entry) {
+                return entry.indices[0] == right_entry.indices[0];
+              });
+          if (found != left.sparse_entries().end())
+            add_to(entries, {right_entry.indices[1]},
+                   product({found->value, right_entry.value}));
+          if (immediate_signal_active())
+            return control_expression();
+        }
+        return sparse_array({right.dimensions()[1]}, std::move(entries));
+      }
+      if (left.dimensions()[1] != right.dimensions()[0]) {
+        error = "Dot expects compatible sparse matrix dimensions.";
+        return std::nullopt;
+      }
+      for (const auto &left_entry : left.sparse_entries()) {
+        for (const auto &right_entry : right.sparse_entries())
+          if (left_entry.indices[1] == right_entry.indices[0])
+            add_to(entries, {left_entry.indices[0], right_entry.indices[1]},
+                   product({left_entry.value, right_entry.value}));
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return sparse_array({left.dimensions()[0], right.dimensions()[1]},
+                          std::move(entries));
+    }
+    if (left.kind() == ExprKind::SparseArray) {
+      const auto dense = sparse_dense_value(left);
+      if (!dense) {
+        error =
+            "SparseArray dimensions exceed the native materialization limit.";
+        return std::nullopt;
+      }
+      return dot_two(*dense, right);
+    }
+    if (right.kind() == ExprKind::SparseArray) {
+      const auto dense = sparse_dense_value(right);
+      if (!dense) {
+        error =
+            "SparseArray dimensions exceed the native materialization limit.";
+        return std::nullopt;
+      }
+      return dot_two(left, *dense);
+    }
+
+    const auto list_rows = [](const Expr &value,
+                              std::vector<std::vector<Expr>> &rows) {
+      if (!value.has_head("List"))
+        return false;
+      if (std::any_of(value.args().begin(), value.args().end(),
+                      [](const Expr &row) { return !row.has_head("List"); }))
+        return false;
+      for (const auto &row : value.args())
+        rows.push_back(row.args());
+      return true;
+    };
+    std::vector<std::vector<Expr>> left_rows, right_rows;
+    const bool left_is_matrix = list_rows(left, left_rows);
+    const bool right_is_matrix = list_rows(right, right_rows);
+    if (left.has_head("List") && right.has_head("List") && !left_is_matrix &&
+        !right_is_matrix) {
+      if (left.args().size() != right.args().size()) {
+        error = "Dot expects vectors of the same length.";
+        return std::nullopt;
+      }
+      std::vector<Expr> terms;
+      for (std::size_t index = 0; index < left.args().size(); ++index) {
+        terms.push_back(product({left.args()[index], right.args()[index]}));
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return sum(std::move(terms));
+    }
+    if (left_is_matrix && !right_is_matrix && right.has_head("List")) {
+      std::vector<Expr> values;
+      for (const auto &row : left_rows) {
+        const auto value = dot_two(list(row), right);
+        if (!value)
+          return std::nullopt;
+        values.push_back(*value);
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return list(std::move(values));
+    }
+    if (!left_is_matrix && left.has_head("List") && right_is_matrix) {
+      if (left.args().size() != right_rows.size()) {
+        error = "Dot expects compatible vector/matrix dimensions.";
+        return std::nullopt;
+      }
+      const auto width =
+          right_rows.empty() ? std::size_t{0} : right_rows.front().size();
+      if (std::any_of(right_rows.begin(), right_rows.end(),
+                      [&](const auto &row) { return row.size() != width; })) {
+        error = "Dot currently expects rectangular matrices.";
+        return std::nullopt;
+      }
+      std::vector<Expr> values;
+      for (std::size_t column = 0; column < width; ++column) {
+        std::vector<Expr> column_values;
+        for (const auto &row : right_rows)
+          column_values.push_back(row[column]);
+        const auto value = dot_two(left, list(std::move(column_values)));
+        if (!value)
+          return std::nullopt;
+        values.push_back(*value);
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return list(std::move(values));
+    }
+    if (left_is_matrix && right_is_matrix) {
+      const auto left_width =
+          left_rows.empty() ? std::size_t{0} : left_rows.front().size();
+      if (std::any_of(left_rows.begin(), left_rows.end(), [&](const auto &row) {
+            return row.size() != left_width;
+          })) {
+        error = "Dot currently expects rectangular matrices.";
+        return std::nullopt;
+      }
+      const auto right_width =
+          right_rows.empty() ? std::size_t{0} : right_rows.front().size();
+      if (std::any_of(
+              right_rows.begin(), right_rows.end(),
+              [&](const auto &row) { return row.size() != right_width; }) ||
+          left_width != right_rows.size()) {
+        error = "Dot currently expects compatible matrix dimensions.";
+        return std::nullopt;
+      }
+      std::vector<Expr> values;
+      for (const auto &row : left_rows) {
+        const auto value = dot_two(list(row), right);
+        if (!value)
+          return std::nullopt;
+        values.push_back(*value);
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return list(std::move(values));
+    }
+    error = "Dot currently supports List vectors and List matrices only.";
+    return std::nullopt;
+  };
+
+  if (function == "Dot") {
+    if (args.size() < 2) {
+      error = "Dot expects at least two arguments.";
+      return true;
+    }
+    Expr current = args.front();
+    for (std::size_t index = 1; index < args.size(); ++index) {
+      const auto next = dot_two(current, args[index]);
+      if (!next)
+        return true;
+      current = *next;
+      if (immediate_signal_active()) {
+        result = current;
+        return true;
+      }
+    }
+    result = current;
+    return true;
+  }
+
+  if (function == "Inner") {
+    if (args.size() != 4) {
+      error = "Inner expects exactly four arguments.";
+      return true;
+    }
+    if (args[1].kind() != ExprKind::Call) {
+      error = "Inner expects a nonatomic expression.";
+      return true;
+    }
+    if (args[2].kind() != ExprKind::Call) {
+      error = "Inner expects a nonatomic expression.";
+      return true;
+    }
+    if (args[1].args().size() != args[2].args().size()) {
+      error = "Inner expects expressions with the same length.";
+      return true;
+    }
+    std::vector<Expr> combined;
+    for (std::size_t index = 0; index < args[1].args().size(); ++index) {
+      combined.push_back(evaluate(
+          call(args[0], {args[1].args()[index], args[2].args()[index]})));
+      if (immediate_signal_active()) {
+        result = combined.back();
+        return true;
+      }
+    }
+    result = evaluate(call(args[3], std::move(combined)));
+    return true;
+  }
+
+  if (function == "Outer") {
+    if (args.size() < 2) {
+      error = "Outer expects a function and at least one sequence.";
+      return true;
+    }
+    std::vector<Expr> sequences(args.begin() + 1, args.end());
+    std::vector<std::optional<std::size_t>> levels;
+    while (sequences.size() > 1 &&
+           sequences.back().kind() == ExprKind::Integer) {
+      const auto &requested = sequences.back().integer_value();
+      std::optional<std::size_t> level;
+      if (requested == 0)
+        level = std::size_t{0};
+      else if (requested > 0 && requested.fits_ulong_p())
+        level = static_cast<std::size_t>(requested.get_ui());
+      levels.insert(levels.begin(), level);
+      sequences.pop_back();
+    }
+    for (const auto &sequence : sequences)
+      if (sequence.kind() != ExprKind::Call) {
+        error = "Outer expects a nonatomic expression.";
+        return true;
+      }
+    const auto depth_for = [&](std::size_t index) {
+      if (levels.empty())
+        return std::optional<std::size_t>{};
+      return index < levels.size() ? levels[index] : levels.back();
+    };
+    std::function<Expr(std::size_t, std::vector<Expr>)> combine;
+    combine = [&](std::size_t index, std::vector<Expr> chosen) -> Expr {
+      if (index == sequences.size())
+        return evaluate(call(args[0], std::move(chosen)));
+      std::function<Expr(const Expr &, std::optional<std::size_t>)> descend;
+      descend = [&](const Expr &node,
+                    std::optional<std::size_t> depth) -> Expr {
+        if ((depth && *depth == 0) || node.kind() != ExprKind::Call) {
+          auto next = chosen;
+          next.push_back(node);
+          return combine(index + 1, std::move(next));
+        }
+        const auto next_depth =
+            depth ? std::optional<std::size_t>(*depth - 1) : std::nullopt;
+        std::vector<Expr> children;
+        for (const auto &child : node.args()) {
+          children.push_back(descend(child, next_depth));
+          if (immediate_signal_active())
+            return children.back();
+        }
+        return call(node.head(), std::move(children));
+      };
+      return descend(sequences[index], depth_for(index));
+    };
+    result = combine(0, {});
+    return true;
+  }
+
+  auto vector_values = [&](const Expr &value, std::vector<Expr> &values) {
+    if (value.kind() == ExprKind::SparseArray) {
+      if (value.dimensions().size() != 1) {
+        error = "Cross expects vectors.";
+        return false;
+      }
+      const auto size = value.dimensions()[0];
+      if (size != 2 && size != 3)
+        return true;
+      for (std::size_t index = 1; index <= size; ++index)
+        values.push_back(sparse_value_at(value, {index}));
+      return true;
+    }
+    if (!value.has_head("List")) {
+      error = "Cross expects vectors.";
+      return false;
+    }
+    values = value.args();
+    return true;
+  };
+
+  if (function == "Cross") {
+    if (args.size() != 2) {
+      error = "Cross currently expects exactly two vector arguments.";
+      return true;
+    }
+    std::vector<Expr> left, right;
+    if (!vector_values(args[0], left) || !vector_values(args[1], right))
+      return true;
+    if (left.size() != right.size() || (left.size() != 2 && left.size() != 3)) {
+      error = "Cross currently supports pairs of 2D or 3D vectors.";
+      return true;
+    }
+    if (left.size() == 2) {
+      result =
+          subtract(product({left[0], right[1]}), product({left[1], right[0]}));
+      return true;
+    }
+    std::vector<Expr> values{
+        subtract(product({left[1], right[2]}), product({left[2], right[1]})),
+        subtract(product({left[2], right[0]}), product({left[0], right[2]})),
+        subtract(product({left[0], right[1]}), product({left[1], right[0]})),
+    };
+    if (args[0].kind() == ExprKind::SparseArray ||
+        args[1].kind() == ExprKind::SparseArray) {
+      std::vector<SparseEntry> entries;
+      for (std::size_t index = 0; index < values.size(); ++index)
+        if (!exact_zero(values[index]))
+          entries.push_back({{index + 1}, values[index]});
+      result = sparse_array({3}, std::move(entries));
+    } else
+      result = list(std::move(values));
+    return true;
+  }
+
+  const auto combine_terms = [&](std::vector<Expr> terms,
+                                 const Expr &combiner) {
+    if ((is_symbol(combiner, "Plus") || is_symbol(combiner, "Times"))) {
+      std::optional<std::size_t> list_length;
+      bool incompatible = false;
+      for (const auto &term : terms)
+        if (term.has_head("List")) {
+          if (!list_length)
+            list_length = term.args().size();
+          else if (*list_length != term.args().size())
+            incompatible = true;
+        }
+      if (incompatible) {
+        const auto bare_name = is_symbol(combiner, "Plus")
+                                   ? std::string("Plus")
+                                   : std::string("Times");
+        const auto message =
+            call("MessageName", {symbol(bare_name), string("error")});
+        const auto text = bare_name + "::error: Listable Function arguments "
+                                      "have incompatible list lengths.";
+        emit_message(message, text);
+        // The Python Times path encounters the same incompatible
+        // threading once during product normalization and once on
+        // the rebuilt call; retain that observable message schedule.
+        if (bare_name == "Times")
+          emit_message(message, text);
+      }
+    }
+    return is_symbol(combiner, "Plus")
+               ? sum(std::move(terms))
+               : evaluate(call(combiner, std::move(terms)));
+  };
+
+  if (function == "Tr") {
+    if (args.empty() || args.size() > 3) {
+      error = "Tr expects an array, an optional combiner, and an optional "
+              "rank-restriction integer.";
+      return true;
+    }
+    const auto combiner = args.size() >= 2 ? args[1] : symbol("Plus");
+    if (args.size() < 3) {
+      std::vector<std::size_t> dimensions;
+      if (args[0].kind() == ExprKind::SparseArray)
+        dimensions = args[0].dimensions();
+      else {
+        bool rectangular = true;
+        dimensions = strict_dense_dimensions(args[0], strict_dense_dimensions,
+                                             rectangular);
+        if (!rectangular) {
+          error = "SparseArray dense input must be rectangular.";
+          return true;
+        }
+        if (dimensions.empty()) {
+          error = "Tr expects a rectangular array.";
+          return true;
+        }
+      }
+      if (dimensions.size() == 1) {
+        std::vector<Expr> terms;
+        if (args[0].kind() == ExprKind::SparseArray &&
+            exact_zero(args[0].fill_value()) && is_symbol(combiner, "Plus")) {
+          for (const auto &entry : args[0].sparse_entries())
+            terms.push_back(entry.value);
+        } else if (args[0].kind() == ExprKind::SparseArray) {
+          if (dimensions[0] > maximum_sparse_materialized_nodes) {
+            error = "SparseArray dimensions exceed the native materialization "
+                    "limit.";
+            return true;
+          }
+          for (std::size_t index = 1; index <= dimensions[0]; ++index)
+            terms.push_back(sparse_value_at(args[0], {index}));
+        } else
+          terms = args[0].args();
+        result = combine_terms(std::move(terms), combiner);
+        return true;
+      }
+      if (dimensions.size() != 2) {
+        error = "Tr currently supports vectors and matrices.";
+        return true;
+      }
+      std::vector<Expr> terms;
+      const auto diagonal_count = std::min(dimensions[0], dimensions[1]);
+      if (args[0].kind() == ExprKind::SparseArray &&
+          exact_zero(args[0].fill_value())) {
+        for (const auto &entry : args[0].sparse_entries())
+          if (entry.indices[0] == entry.indices[1] &&
+              entry.indices[0] <= diagonal_count)
+            terms.push_back(entry.value);
+      } else if (args[0].kind() == ExprKind::SparseArray) {
+        if (diagonal_count > maximum_sparse_materialized_nodes) {
+          error =
+              "SparseArray dimensions exceed the native materialization limit.";
+          return true;
+        }
+        for (std::size_t index = 1; index <= diagonal_count; ++index)
+          terms.push_back(sparse_value_at(args[0], {index, index}));
+      } else {
+        for (std::size_t index = 0; index < diagonal_count; ++index)
+          terms.push_back(args[0].args()[index].args()[index]);
+      }
+      result = combine_terms(std::move(terms), combiner);
+      return true;
+    }
+    if (args[2].kind() != ExprKind::Integer || args[2].integer_value() < 1) {
+      error = "Tr level must be a positive integer.";
+      return true;
+    }
+    std::function<std::optional<Expr>(const Expr &, mpz_class)> contract;
+    contract = [&](const Expr &value, mpz_class level) -> std::optional<Expr> {
+      if (level == 1) {
+        if (value.kind() != ExprKind::Call) {
+          error = "Tr expects a nonatomic expression.";
+          return std::nullopt;
+        }
+        if (!value.has_head("List")) {
+          error = "Tr expects a List at every contracted level.";
+          return std::nullopt;
+        }
+        const bool all_rows =
+            !value.args().empty() &&
+            std::all_of(
+                value.args().begin(), value.args().end(),
+                [](const Expr &child) { return child.has_head("List"); });
+        if (all_rows) {
+          const auto width = value.args().front().args().size();
+          if (std::all_of(value.args().begin(), value.args().end(),
+                          [&](const Expr &row) {
+                            return row.args().size() == width;
+                          })) {
+            std::vector<Expr> columns;
+            for (std::size_t column = 0; column < width; ++column) {
+              std::vector<Expr> terms;
+              for (const auto &row : value.args())
+                terms.push_back(row.args()[column]);
+              columns.push_back(combine_terms(std::move(terms), combiner));
+              if (immediate_signal_active())
+                return columns.back();
+            }
+            return list(std::move(columns));
+          }
+        }
+        return combine_terms(value.args(), combiner);
+      }
+      if (value.kind() != ExprKind::Call) {
+        error = "Tr expects a nonatomic expression.";
+        return std::nullopt;
+      }
+      if (!value.has_head("List")) {
+        error = "Tr expects a List at every contracted level.";
+        return std::nullopt;
+      }
+      std::vector<Expr> children;
+      for (const auto &child : value.args()) {
+        const auto contracted = contract(child, level - 1);
+        if (!contracted)
+          return std::nullopt;
+        children.push_back(*contracted);
+        if (immediate_signal_active())
+          return children.back();
+      }
+      return contract(list(std::move(children)), 1);
+    };
+    const auto contracted = contract(args[0], args[2].integer_value());
+    if (contracted)
+      result = *contracted;
+    return true;
+  }
+
+  if (function == "Det") {
+    if (args.size() != 1) {
+      error = "Det expects exactly one matrix argument.";
+      return true;
+    }
+    if (args[0].kind() == ExprKind::SparseArray) {
+      result = determinant_sparse(args[0]);
+      return true;
+    }
+    std::vector<std::vector<Expr>> rows;
+    if (!square_matrix_rows(args[0], "Det", rows))
+      return true;
+    result = determinant_rows(rows);
+    return true;
+  }
+
+  std::function<std::optional<Expr>(const Expr &)> inverse_matrix;
+  inverse_matrix = [&](const Expr &value) -> std::optional<Expr> {
+    if (value.kind() == ExprKind::SparseArray) {
+      const auto &dimensions = value.dimensions();
+      if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
+        error = "Inverse expects a square matrix.";
+        return std::nullopt;
+      }
+      if (exact_zero(value.fill_value())) {
+        bool diagonal = true;
+        for (const auto &entry : value.sparse_entries()) {
+          if (entry.indices[0] != entry.indices[1]) {
+            diagonal = false;
+            break;
+          }
+        }
+        if (diagonal) {
+          if (value.sparse_entries().size() != dimensions[0]) {
+            error = "Inverse expects a nonsingular matrix.";
+            return std::nullopt;
+          }
+          std::vector<const SparseEntry *> entries(dimensions[0], nullptr);
+          for (const auto &entry : value.sparse_entries())
+            entries[entry.indices[0] - 1] = &entry;
+          if (std::any_of(entries.begin(), entries.end(),
+                          [](const auto *entry) { return entry == nullptr; })) {
+            error = "Inverse expects a nonsingular matrix.";
+            return std::nullopt;
+          }
+          std::vector<SparseEntry> inverse_entries;
+          for (std::size_t index = 0; index < entries.size(); ++index) {
+            if (exact_zero(entries[index]->value)) {
+              error = "Inverse expects a nonsingular matrix.";
+              return std::nullopt;
+            }
+            inverse_entries.push_back(
+                {{index + 1, index + 1}, reciprocal(entries[index]->value)});
+          }
+          return sparse_array(dimensions, std::move(inverse_entries));
+        }
+      }
+    }
+    std::vector<std::vector<Expr>> rows;
+    if (!square_matrix_rows(value, "Inverse", rows))
+      return std::nullopt;
+    std::vector<std::vector<mpq_class>> fractions;
+    if (exact_fraction_matrix(rows, fractions)) {
+      const auto size = fractions.size();
+      std::vector<std::vector<mpq_class>> augmented;
+      for (std::size_t row = 0; row < size; ++row) {
+        auto values = fractions[row];
+        for (std::size_t column = 0; column < size; ++column)
+          values.emplace_back(row == column ? 1 : 0);
+        augmented.push_back(std::move(values));
+      }
+      for (std::size_t column = 0; column < size; ++column) {
+        auto pivot = column;
+        while (pivot < size && augmented[pivot][column] == 0)
+          ++pivot;
+        if (pivot == size) {
+          error = "Inverse expects a nonsingular matrix.";
+          return std::nullopt;
+        }
+        if (pivot != column)
+          std::swap(augmented[pivot], augmented[column]);
+        const auto pivot_value = augmented[column][column];
+        for (auto &item : augmented[column])
+          item /= pivot_value;
+        for (std::size_t row = 0; row < size; ++row) {
+          if (row == column || augmented[row][column] == 0)
+            continue;
+          const mpq_class factor = augmented[row][column];
+          for (std::size_t target = 0; target < size * 2; ++target)
+            augmented[row][target] -= factor * augmented[column][target];
+        }
+      }
+      std::vector<Expr> inverse_rows;
+      for (std::size_t row = 0; row < size; ++row) {
+        std::vector<Expr> values;
+        for (std::size_t column = size; column < size * 2; ++column)
+          values.push_back(from_rational(augmented[row][column]));
+        inverse_rows.push_back(list(std::move(values)));
+      }
+      return list(std::move(inverse_rows));
+    }
+    const auto determinant = determinant_rows(rows);
+    if (immediate_signal_active())
+      return determinant;
+    if (exact_zero(determinant)) {
+      error = "Inverse expects a nonsingular matrix.";
+      return std::nullopt;
+    }
+    std::vector<Expr> inverse_rows;
+    for (std::size_t output_row = 0; output_row < rows.size(); ++output_row) {
+      std::vector<Expr> values;
+      for (std::size_t output_column = 0; output_column < rows.size();
+           ++output_column) {
+        std::vector<std::vector<Expr>> minor;
+        for (std::size_t row = 0; row < rows.size(); ++row) {
+          if (row == output_column)
+            continue;
+          std::vector<Expr> minor_row;
+          for (std::size_t column = 0; column < rows.size(); ++column)
+            if (column != output_row)
+              minor_row.push_back(rows[row][column]);
+          minor.push_back(std::move(minor_row));
+        }
+        auto cofactor = determinant_rows(minor);
+        if ((output_row + output_column) % 2 != 0)
+          cofactor = negate(cofactor);
+        values.push_back(divide(cofactor, determinant));
+        if (immediate_signal_active())
+          return values.back();
+      }
+      inverse_rows.push_back(list(std::move(values)));
+    }
+    return list(std::move(inverse_rows));
+  };
+
+  if (function == "Inverse") {
+    if (args.size() != 1) {
+      error = "Inverse expects exactly one matrix argument.";
+      return true;
+    }
+    const auto inverse = inverse_matrix(args[0]);
+    if (inverse)
+      result = *inverse;
+    return true;
+  }
+
+  if (function == "MatrixPower") {
+    if (args.size() != 2) {
+      error = "MatrixPower expects a matrix and an integer exponent.";
+      return true;
+    }
+    if (args[1].kind() != ExprKind::Integer) {
+      error = "MatrixPower expects an integer argument.";
+      return true;
+    }
+    std::size_t size = 0;
+    if (args[0].kind() == ExprKind::SparseArray) {
+      const auto &dimensions = args[0].dimensions();
+      if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
+        error = "MatrixPower expects a square matrix.";
+        return true;
+      }
+      size = dimensions[0];
+    } else {
+      std::vector<std::vector<Expr>> rows;
+      if (!square_matrix_rows(args[0], "MatrixPower", rows))
+        return true;
+      size = rows.size();
+    }
+    auto identity = [&](bool sparse) -> std::optional<Expr> {
+      if (sparse) {
+        if (size > maximum_sparse_materialized_nodes) {
+          error =
+              "SparseArray dimensions exceed the native materialization limit.";
+          return std::nullopt;
+        }
+        std::vector<SparseEntry> entries;
+        entries.reserve(size);
+        for (std::size_t index = 1; index <= size; ++index)
+          entries.push_back({{index, index}, integer(1L)});
+        return sparse_array({size, size}, std::move(entries));
+      }
+      std::vector<Expr> rows;
+      for (std::size_t row = 0; row < size; ++row) {
+        std::vector<Expr> values(size, integer(0L));
+        values[row] = integer(1L);
+        rows.push_back(list(std::move(values)));
+      }
+      return list(std::move(rows));
+    };
+    auto exponent = args[1].integer_value();
+    if (exponent == 0) {
+      const auto value = identity(args[0].kind() == ExprKind::SparseArray);
+      if (value)
+        result = *value;
+      return true;
+    }
+    Expr base = args[0];
+    if (exponent < 0) {
+      const auto inverse = inverse_matrix(base);
+      if (!inverse)
+        return true;
+      base = *inverse;
+      exponent = -exponent;
+    }
+    auto accumulated = identity(base.kind() == ExprKind::SparseArray);
+    if (!accumulated)
+      return true;
+    while (exponent > 0) {
+      if (mpz_odd_p(exponent.get_mpz_t()) != 0) {
+        const auto multiplied = dot_two(*accumulated, base);
+        if (!multiplied)
+          return true;
+        accumulated = evaluate(*multiplied);
+      }
+      exponent /= 2;
+      if (exponent != 0) {
+        const auto squared = dot_two(base, base);
+        if (!squared)
+          return true;
+        base = evaluate(*squared);
+      }
+      if (immediate_signal_active()) {
+        result = *accumulated;
+        return true;
+      }
+    }
+    result = *accumulated;
+    return true;
+  }
+
+  return false;
+}
+
 Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw_args) {
     const auto* raw_name = raw_head.symbol_name();
     const auto name = raw_name ? system_dispatch_name(*raw_name) : std::string{};
@@ -9755,6 +10807,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     const auto* evaluated_name = head.symbol_name();
     const auto function = evaluated_name ? system_dispatch_name(*evaluated_name) : std::string{};
     const auto evaluated_expression = call(head, args);
+    Expr tensor_matrix_result;
+    std::string tensor_matrix_error;
+    if (evaluate_tensor_matrix_call(
+            head, args, tensor_matrix_result, tensor_matrix_error)) {
+        if (!tensor_matrix_error.empty())
+            return raw_evaluation_error(tensor_matrix_error);
+        return tensor_matrix_result;
+    }
     if (call_attributes.count("Listable") != 0) {
         std::optional<std::size_t> list_length;
         bool incompatible = false;

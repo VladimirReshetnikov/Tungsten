@@ -53,7 +53,8 @@ def _arguments() -> argparse.Namespace:
             "rounding", "take-drop", "take-list", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
             "array-shape", "dense-array", "sparse-properties", "sparse-structural",
-            "ordering", "failure-confirmation", "polynomial", "strings",
+            "tensor-matrix", "ordering", "failure-confirmation", "polynomial",
+            "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -978,6 +979,239 @@ def dense_array_cases() -> list[str]:
     return _unique(cases)
 
 
+def tensor_matrix_cases() -> list[str]:
+    """Contractions, products, exact linear algebra, and sparse retention."""
+
+    dense_operands = (
+        "{}",
+        "{a}",
+        "{a,b}",
+        "{a,b,c}",
+        "{{}}",
+        "{{a}}",
+        "{{a,b},{c,d}}",
+        "{{a,b,c},{d,e,f}}",
+        "{{a,b},{c}}",
+        "f[a,b]",
+        "x",
+    )
+    cases = [
+        f"Dot[{left},{right}]"
+        for left, right in itertools.product(dense_operands, repeat=2)
+    ]
+    sparse_operands = (
+        "SparseArray[{}, {0}]",
+        "SparseArray[{{1}->a}, {2}]",
+        "SparseArray[{{1}->a,{3}->b}, {3}]",
+        "SparseArray[{}, {0,3}]",
+        "SparseArray[{{1,2}->a}, {2,3}]",
+        "SparseArray[{{2,1}->b}, {3,2}]",
+        "SparseArray[{{1,1}->a}, {2,2},z]",
+    )
+    cases.extend(
+        f"Dot[{left},{right}]"
+        for left, right in itertools.product(sparse_operands, repeat=2)
+    )
+    cases.extend(
+        (
+            "Dot[]",
+            "Dot[{a}]",
+            "Dot[{1,2},{3,4},{5,6}]",
+            "Dot[{{1,2},{3,4}},{{0,1},{1,0}},{5,6}]",
+            "System`Dot[{1,2},{3,4}]",
+            (
+                "Dot[SparseArray[{}, {1000000000}],"
+                "SparseArray[{}, {1000000000}]]"
+            ),
+            (
+                "Dot[SparseArray[{{1,2}->a},{2,3}],{x,y,z}]"
+            ),
+            (
+                "Dot[{{x,y},{z,w}},SparseArray[{{1}->a,{2}->b},{2}]]"
+            ),
+        )
+    )
+
+    compounds = ("{}", "{a}", "{a,b}", "f[]", "f[a]", "f[a,b]", "x")
+    cases.extend(
+        f"Inner[{multiply},{left},{right},{combine}]"
+        for multiply, left, right, combine in itertools.product(
+            ("f", "Times", "(#1-#2&)", "(Print[InputForm[{##}]];q[##])&"),
+            compounds,
+            compounds,
+            ("g", "Plus"),
+        )
+    )
+    cases.extend(
+        (
+            "Inner[]",
+            "Inner[f,{a,b},{c,d}]",
+            "System`Inner[f,{a,b},{c,d},g]",
+            (
+                "Catch[Inner[Function[{x,y},Print[InputForm[{x,y}]];"
+                "If[SameQ[x,b],Throw[stop]];f[x,y]],{a,b,c},{u,v,w},g]]"
+            ),
+            (
+                "CheckAbort[Inner[Function[{x,y},Print[InputForm[{x,y}]];"
+                "If[SameQ[x,b],Abort[]];f[x,y]],{a,b,c},{u,v,w},g],caught]"
+            ),
+        )
+    )
+
+    cases.extend(
+        (
+            "Outer[]",
+            "Outer[f]",
+            "Outer[f,{a,b}]",
+            "Outer[f,f[a,b]]",
+            "Outer[f,{a,b},{x,y}]",
+            "Outer[f,{a,b},{x,y},{u,v}]",
+            "Outer[f,{},{x,y}]",
+            "Outer[f,{a,b},{}]",
+            "Outer[f,{a,{b,c}},g[x,h[y,z]]]",
+            "Outer[f,{a,{b,c}},g[x,h[y,z]],0]",
+            "Outer[f,{a,{b,c}},g[x,h[y,z]],1]",
+            "Outer[f,{a,{b,c}},g[x,h[y,z]],2]",
+            "Outer[f,{a,{b,c}},g[x,h[y,z]],3]",
+            "Outer[f,{a,b},{x,y},1,2]",
+            "Outer[f,{a,b},{x,y},2,1]",
+            "Outer[f,{a,b},{x,y},-1]",
+            "Outer[f,{a,b},{x,y},999999999999999999999999]",
+            "Outer[f,{a,b},x]",
+            "System`Outer[f,{a,b},{x,y}]",
+            (
+                "Outer[(Print[InputForm[{##}]];q[##])&,{a,b},{x,y}]"
+            ),
+            (
+                "Catch[Outer[(Print[InputForm[{##}]];"
+                "If[SameQ[#1,b],Throw[stop]];q[##])&,{a,b,c},{x,y}]]"
+            ),
+            (
+                "CheckAbort[Outer[(Print[InputForm[{##}]];"
+                "If[SameQ[#1,b],Abort[]];q[##])&,{a,b,c},{x,y}],caught]"
+            ),
+        )
+    )
+
+    vectors = (
+        "{}", "{a}", "{a,b}", "{a,b,c}", "{a,b,c,d}", "f[a,b]",
+        "x", "SparseArray[{{1}->a},{2}]", "SparseArray[{{1}->a},{3}]",
+    )
+    cases.extend(
+        f"Cross[{left},{right}]"
+        for left, right in itertools.product(vectors, repeat=2)
+    )
+    cases.extend(("Cross[]", "Cross[{a,b}]", "System`Cross[{a,b},{c,d}]"))
+
+    arrays = (
+        "{}",
+        "{a,b,c}",
+        "{{}}",
+        "{{a}}",
+        "{{a,b},{c,d}}",
+        "{{a,b,c},{d,e,f}}",
+        "{{a,b},{c}}",
+        "{{{1,2},{3,4}},{{5,6},{7,8}}}",
+        "f[a,b]",
+        "x",
+        "SparseArray[{{1}->a},{3}]",
+        "SparseArray[{{1,1}->a,{2,2}->b},{3,3}]",
+    )
+    cases.extend(
+        f"Tr[{array},{combiner}]"
+        for array, combiner in itertools.product(arrays, ("Plus", "Times", "f"))
+    )
+    cases.extend(
+        f"Tr[{array},{combiner},{level}]"
+        for array, combiner, level in itertools.product(
+            arrays[:8], ("Plus", "Times"), (0, 1, 2, 3)
+        )
+    )
+    cases.extend(
+        (
+            "Tr[]",
+            "Tr[{},Plus,1,2]",
+            "Tr[{{1,2},{3,4}},Plus,x]",
+            "System`Tr[{{a,b},{c,d}}]",
+            "Tr[SparseArray[{}, {1000000000,1000000000}]]",
+            (
+                "Tr[{{a,b},{c,d}},Function[Null,"
+                "Print[InputForm[{##}]];f[##]]]"
+            ),
+            (
+                "Catch[Tr[{{a,b},{c,d}},Function[Null,"
+                "Print[InputForm[{##}]];Throw[stop]]]]"
+            ),
+            (
+                "CheckAbort[Tr[{{a,b},{c,d}},Function[Null,"
+                "Print[InputForm[{##}]];Abort[]]],caught]"
+            ),
+        )
+    )
+
+    matrices = (
+        "{}",
+        "{{}}",
+        "{{1}}",
+        "{{2}}",
+        "{{1,2},{3,4}}",
+        "{{1,2},{2,4}}",
+        "{{1,2,3},{0,1,4},{5,6,0}}",
+        "{{a,b},{c,d}}",
+        "{{a,b,c},{d,e,f},{g,h,i}}",
+        "{{1,2},{3}}",
+        "{{1,2,3},{4,5,6}}",
+        "{1,2}",
+        "x",
+        "SparseArray[{}, {0,0}]",
+        "SparseArray[{{1,1}->2,{2,2}->4},{2,2}]",
+        "SparseArray[{{1,2}->1,{2,1}->1},{2,2}]",
+        "SparseArray[{}, {2,2}]",
+        "SparseArray[{{1,1}->a},{2,2},z]",
+    )
+    cases.extend(f"Det[{matrix}]" for matrix in matrices)
+    cases.extend(f"Inverse[{matrix}]" for matrix in matrices)
+    power_matrices = (
+        "{}",
+        "{{}}",
+        "{{1}}",
+        "{{2}}",
+        "{{1,2},{3,4}}",
+        "{{1,2},{2,4}}",
+        "{{1,2,3},{0,1,4},{5,6,0}}",
+        "{{a,b},{c,d}}",
+        "{{1,2},{3}}",
+        "{{1,2,3},{4,5,6}}",
+        "{1,2}",
+        "x",
+        "SparseArray[{}, {0,0}]",
+        "SparseArray[{{1,1}->2,{2,2}->4},{2,2}]",
+        "SparseArray[{{1,2}->1,{2,1}->1},{2,2}]",
+        "SparseArray[{}, {2,2}]",
+    )
+    cases.extend(
+        f"MatrixPower[{matrix},{exponent}]"
+        for matrix, exponent in itertools.product(
+            power_matrices, ("-3", "-1", "0", "1", "2", "5", "1/2", "x")
+        )
+    )
+    cases.extend(
+        (
+            "Det[]",
+            "Det[{{1}},{{2}}]",
+            "Inverse[]",
+            "Inverse[{{1}},{{2}}]",
+            "MatrixPower[]",
+            "MatrixPower[{{1}}]",
+            "System`Det[{}]",
+            "System`Inverse[{{2}}]",
+            "System`MatrixPower[{{2}},-1]",
+            "Inverse[SparseArray[{}, {1000000000,1000000000}]]",
+        )
+    )
+    return _unique(cases)
+
+
 def string_cases() -> list[str]:
     strings = ('""', '"a"', '"ab"', '"aba"', '"a b"', '"café λ"')
     patterns = (
@@ -1656,6 +1890,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "dense-array": dense_array_cases,
     "sparse-properties": sparse_property_cases,
     "sparse-structural": sparse_structural_cases,
+    "tensor-matrix": tensor_matrix_cases,
     "ordering": ordering_cases,
     "failure-confirmation": failure_confirmation_cases,
     "polynomial": polynomial_cases,
