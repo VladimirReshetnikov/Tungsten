@@ -39,6 +39,7 @@ import qualified Tungsten.ArrayTests as ArrayTests
 import qualified Tungsten.NumericAlgebraTests as NumericAlgebraTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
+import qualified Tungsten.DistributionTests as DistributionTests
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
@@ -82,6 +83,7 @@ tests =
   , checkEvaluator
   , checkEvaluatorErrors
   , ArrayTests.checkArrayEvaluator
+  , DistributionTests.checkDistributionEvaluator
   , IntervalTests.checkIntervalEvaluator
   , StatisticsTests.checkStatisticsEvaluator
   , NumericAlgebraTests.checkNumericAlgebraEvaluator

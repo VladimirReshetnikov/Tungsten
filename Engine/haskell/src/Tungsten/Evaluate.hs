@@ -714,6 +714,9 @@ reduceBuiltin headName values = case headName of
   "Subsets" -> reduceSubsets values
   "Permutations" -> reducePermutations values
   "Permute" -> reducePermute values
+  "PermutationCycles" -> reducePermutationCycles values
+  "PermutationList" -> reducePermutationList values
+  "PermutationOrder" -> reducePermutationOrder values
   "PadLeft" -> reducePad True values
   "PadRight" -> reducePad False values
   "Min" -> Right (reduceMinMax True headName values)
@@ -730,6 +733,10 @@ reduceBuiltin headName values = case headName of
   "CountDistinct" -> reduceCountDistinct values
   "Ratios" -> reduceRatios values
   "Subdivide" -> reduceSubdivide values
+  "Quantile" -> reduceQuantile values
+  "Quartiles" -> reduceQuartiles values
+  "BinCounts" -> reduceBins False values
+  "BinLists" -> reduceBins True values
   "Order" -> Right (reduceOrder values)
   "OrderedQ" -> reduceOrderedQ values
   "Ordering" -> reduceOrderingIndices values
@@ -3594,6 +3601,172 @@ parsePermutation count = \case
       permutation
       (zip (firstPosition : remaining) (remaining <> [firstPosition]))
 
+reducePermutationList :: [Expr] -> Either EvaluationError Expr
+reducePermutationList arguments' = case arguments' of
+  [cyclesExpression] -> build cyclesExpression Nothing
+  [cyclesExpression, lengthExpression] -> build cyclesExpression (Just lengthExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          "PermutationList expects a Cycles expression and an optional length."
+      )
+ where
+  build cyclesExpression requestedLength = do
+    cycles <- parsePermutationCycles "PermutationList" cyclesExpression
+    let inferredLength = maximum (0 : concat cycles)
+    targetLength <- case requestedLength of
+      Nothing -> Right inferredLength
+      Just (Integer value)
+        | value >= 0
+        , value <= toInteger (maxBound :: Int) -> Right (fromInteger value)
+      _ ->
+        Left
+          ( EvaluationError
+              "PermutationList expects a non-negative integer length."
+          )
+    if inferredLength > targetLength
+      then
+        Left
+          ( EvaluationError
+              "PermutationList length is shorter than the largest cycle entry."
+          )
+      else do
+        requirePermutationMaterialization "PermutationList" targetLength
+        pure
+          ( evaluatedList
+              (map (Integer . fromIntegral) (cyclesToPermutation targetLength cycles))
+          )
+
+reducePermutationCycles :: [Expr] -> Either EvaluationError Expr
+reducePermutationCycles [Call (Symbol "List") values] = do
+  let count = length values
+  permutation <- traverse (permutationPosition count) values
+  if not (allDistinct permutation)
+    then invalid
+    else
+      pure
+        ( Call
+            (Symbol "Cycles")
+            [evaluatedList (map (evaluatedList . map (Integer . fromIntegral)) (permutationToCycles permutation))]
+        )
+ where
+  permutationPosition count (Integer value)
+    | value >= 1
+    , value <= fromIntegral count = Right (fromInteger value)
+  permutationPosition _ _ = invalid
+  invalid =
+    Left
+      ( EvaluationError
+          "PermutationCycles expects a permutation of {1, …, n}."
+      )
+reducePermutationCycles [_] =
+  Left (EvaluationError "PermutationCycles expects a List of positive integers.")
+reducePermutationCycles _ =
+  Left (EvaluationError "PermutationCycles expects exactly one argument.")
+
+reducePermutationOrder :: [Expr] -> Either EvaluationError Expr
+reducePermutationOrder [cyclesExpression] = do
+  cycles <- parsePermutationCycles "PermutationOrder" cyclesExpression
+  pure
+    ( Integer
+        ( foldl'
+            lcm
+            1
+            [toInteger (length cycleValues) | cycleValues <- cycles, length cycleValues > 1]
+        )
+    )
+reducePermutationOrder _ =
+  Left (EvaluationError "PermutationOrder expects exactly one Cycles expression.")
+
+parsePermutationCycles :: Text -> Expr -> Either EvaluationError [[Int]]
+parsePermutationCycles operation expression = case expression of
+  Call (Symbol cyclesHead) [Call (Symbol "List") cycleExpressions]
+    | systemHeadIn ["Cycles"] cyclesHead -> do
+        cycles <- traverse parseCycle cycleExpressions
+        let positions = concat cycles
+        if allDistinct positions
+          then Right cycles
+          else
+            Left
+              ( EvaluationError
+                  (operation <> ": cycle entries must be disjoint.")
+              )
+  Call (Symbol cyclesHead) _
+    | systemHeadIn ["Cycles"] cyclesHead ->
+        Left
+          ( EvaluationError
+              ( operation
+                  <> " expects Cycles with exactly one cycle-list argument."
+              )
+          )
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects a Cycles expression.")
+      )
+ where
+  parseCycle (Call (Symbol "List") values) = traverse parsePosition values
+  parseCycle _ =
+    Left
+      ( EvaluationError
+          (operation <> ": every cycle must be a List of positive integers.")
+      )
+  parsePosition (Integer value)
+    | value > 0
+    , value <= toInteger (maxBound :: Int) = Right (fromInteger value)
+  parsePosition _ =
+    Left
+      ( EvaluationError
+          (operation <> ": cycle entries must be positive integers.")
+      )
+
+cyclesToPermutation :: Int -> [[Int]] -> [Int]
+cyclesToPermutation count = foldl' applyCycle [1 .. count]
+ where
+  applyCycle permutation [] = permutation
+  applyCycle permutation [_] = permutation
+  applyCycle permutation cycleValues@(firstPosition : remaining) =
+    foldl'
+      (\result (source, destination) -> replaceListIndex (source - 1) destination result)
+      permutation
+      (zip cycleValues (remaining <> [firstPosition]))
+
+permutationToCycles :: [Int] -> [[Int]]
+permutationToCycles permutation = reverse (go 1 Set.empty [])
+ where
+  count = length permutation
+  go start visited retained
+    | start > count = retained
+    | Set.member start visited = go (start + 1) visited retained
+    | otherwise =
+        let (cycleValues, updated) = follow start visited []
+            nextRetained = if length cycleValues > 1 then cycleValues : retained else retained
+         in go (start + 1) updated nextRetained
+  follow current visited retained
+    | Set.member current visited = (retained, visited)
+    | otherwise = case listElementAt (current - 1) permutation of
+        Just nextPosition ->
+          follow
+            nextPosition
+            (Set.insert current visited)
+            (retained <> [current])
+        Nothing -> (retained, visited)
+
+requirePermutationMaterialization :: Text -> Int -> Either EvaluationError ()
+requirePermutationMaterialization operation count
+  | toInteger count <= maximumDenseArrayMaterializedNodes = Right ()
+  | otherwise =
+      Left
+        ( EvaluationError
+            (operation <> " output exceeds the native materialization limit.")
+        )
+
+listElementAt :: Int -> [value] -> Maybe value
+listElementAt index _ | index < 0 = Nothing
+listElementAt _ [] = Nothing
+listElementAt 0 (value : _) = Just value
+listElementAt index (_ : rest) = listElementAt (index - 1) rest
+
 reducePad :: Bool -> [Expr] -> Either EvaluationError Expr
 reducePad leftMode = \case
   [Call (Symbol "List") values, Integer target] -> pad values target (Integer 0)
@@ -3941,6 +4114,276 @@ reduceSubdivide values = case values of
           ( EvaluationError
               "Subdivide output exceeds the native materialization limit."
           )
+
+reduceQuantile :: [Expr] -> Either EvaluationError Expr
+reduceQuantile arguments' = case arguments' of
+  [subject, probability] -> quantiles subject probability defaultParameters
+  [subject, probability, parametersExpression] -> do
+    parameters <- parseQuantileParameters parametersExpression
+    quantiles subject probability parameters
+  _ ->
+    Left
+      ( EvaluationError
+          "Quantile expects a collection, probabilities, and optional parameters."
+      )
+ where
+  defaultParameters = (Integer 0, Integer 0, Integer 1, Integer 0)
+  quantiles subject probability parameters = do
+    items <- listOrAssociationValues "Quantile" subject
+    sorted <- sortedExplicitRealItems "Quantile" items
+    case sorted of
+      [] -> Left (EvaluationError "Quantile of an empty list is undefined.")
+      _ -> case probability of
+        Call (Symbol "List") probabilities ->
+          evaluatedList <$> traverse (quantileOne sorted parameters) probabilities
+        value -> quantileOne sorted parameters value
+
+reduceQuartiles :: [Expr] -> Either EvaluationError Expr
+reduceQuartiles [subject] = do
+  items <- listOrAssociationValues "Quartiles" subject
+  sorted <- sortedExplicitRealItems "Quartiles" items
+  case sorted of
+    [] -> Left (EvaluationError "Quartiles of an empty list is undefined.")
+    _ ->
+      let parameters = (Rational 1 2, Integer 0, Integer 0, Integer 1)
+       in evaluatedList
+            <$> traverse
+              (quantileOne sorted parameters)
+              [Rational 1 4, Rational 1 2, Rational 3 4]
+reduceQuartiles _ = Left (EvaluationError "Quartiles expects exactly one collection.")
+
+parseQuantileParameters :: Expr -> Either EvaluationError (Expr, Expr, Expr, Expr)
+parseQuantileParameters = \case
+  Call
+    (Symbol "List")
+    [ Call (Symbol "List") [a, b]
+      , Call (Symbol "List") [c, d]
+      ] -> Right (a, b, c, d)
+  _ ->
+    Left
+      ( EvaluationError
+          "Quantile parameters must be a list ``{{a, b}, {c, d}}``."
+      )
+
+sortedExplicitRealItems :: Text -> [Expr] -> Either EvaluationError [Expr]
+sortedExplicitRealItems operation values = do
+  decorated <-
+    maybe
+      ( Left
+          ( EvaluationError
+              (operation <> " currently expects explicit real-valued numbers.")
+          )
+      )
+      Right
+      ( traverse
+          (\value -> (\exactValue -> (value, exactValue)) <$> explicitRealExact value)
+          values
+      )
+  pure (map fst (sortBy (\(_, left) (_, right) -> compareExact left right) decorated))
+
+quantileOne :: [Expr] -> (Expr, Expr, Expr, Expr) -> Expr -> Either EvaluationError Expr
+quantileOne [] _ _ =
+  Left (EvaluationError "Quantile of an empty list is undefined.")
+quantileOne sortedItems@(firstItem : remainingItems) (a, b, c, d) probability = do
+  let count = length sortedItems
+      finalItem = foldl' (\_ value -> value) firstItem remainingItems
+      position =
+        reducePlus
+          [ a
+          , reduceTimes [reducePlus [Integer (fromIntegral count), b], probability]
+          ]
+      integerPosition = reduceRounding RoundFloor "Floor" [position]
+      fraction =
+        reducePlus [position, reduceTimes [Integer (-1), integerPosition]]
+  index <- case integerPosition of
+    Integer value -> Right value
+    _ -> positionError
+  fractionExact <- maybe positionError Right (explicitRealExact fraction)
+  if index < 1
+    then Right firstItem
+    else
+      if index >= fromIntegral count
+        then Right finalItem
+        else
+          case
+              ( listElementAt (fromInteger index - 1) sortedItems
+              , listElementAt (fromInteger index) sortedItems
+              )
+            of
+              (Just base, Just nextValue)
+                | compareExact fractionExact (Exact 0 1) == EQ -> Right base
+                | otherwise ->
+                    let weight = reducePlus [c, reduceTimes [d, fraction]]
+                     in Right
+                          ( reducePlus
+                              [ base
+                              , reduceTimes
+                                  [ weight
+                                  , reducePlus
+                                      [nextValue, reduceTimes [Integer (-1), base]]
+                                  ]
+                              ]
+                          )
+              _ -> positionError
+ where
+  positionError =
+    Left
+      ( EvaluationError
+          "Quantile could not reduce its position calculation to an explicit number."
+      )
+
+data BinBounds = BinBounds !Exact !Exact !Exact
+
+reduceBins :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceBins listMode arguments' = case arguments' of
+  [subject] -> bin subject (Integer 1)
+  [subject, specification] -> bin subject specification
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects a collection and an optional bin specification.")
+      )
+ where
+  operation = if listMode then "BinLists" else "BinCounts"
+  bin subject specification = do
+    items <- listOrAssociationValues operation subject
+    bounds <- binBounds operation items specification
+    count <- binCount operation bounds
+    let emptyBins = replicate count []
+    bins <- foldM (insertBin operation bounds count) emptyBins items
+    pure
+      ( if listMode
+          then evaluatedList (map evaluatedList bins)
+          else evaluatedList (map (Integer . fromIntegral . length) bins)
+      )
+
+binBounds :: Text -> [Expr] -> Expr -> Either EvaluationError BinBounds
+binBounds operation items specification = case specification of
+  Call (Symbol "List") [minimumExpression, maximumExpression, widthExpression] -> do
+    minimumValue <- explicitBound "xmin" minimumExpression
+    maximumValue <- explicitBound "xmax" maximumExpression
+    width <- explicitBound "dx" widthExpression
+    requirePositiveWidth width
+    Right (BinBounds minimumValue maximumValue width)
+  Call (Symbol "List") _ -> specificationError
+  _ -> do
+    width <- maybe specificationError Right (explicitRealExact specification)
+    requirePositiveWidth width
+    exactItems <-
+      maybe
+        ( Left
+            ( EvaluationError
+                (operation <> " currently expects explicit real-valued numbers.")
+            )
+        )
+        Right
+        (traverse explicitRealExact items)
+    case exactItems of
+      [] ->
+        Left
+          ( EvaluationError
+              (operation <> " cannot infer auto bin bounds from an empty list.")
+          )
+      firstValue : rest -> do
+        let minimumValue = foldl' exactMinimum firstValue rest
+            maximumValue = foldl' exactMaximum firstValue rest
+        minimumQuotient <- maybe specificationError Right (divideExact minimumValue width)
+        maximumQuotient <- maybe specificationError Right (divideExact maximumValue width)
+        let lower = multiplyExact (Exact (roundExact RoundFloor minimumQuotient) 1) width
+            upper =
+              multiplyExact
+                (Exact (roundExact RoundFloor maximumQuotient + 1) 1)
+                width
+        Right (BinBounds lower upper width)
+ where
+  explicitBound role expression =
+    maybe
+      ( Left
+          ( EvaluationError
+              (operation <> " " <> role <> " must be an explicit real-valued number.")
+          )
+      )
+      Right
+      (explicitRealExact expression)
+  requirePositiveWidth width
+    | compareExact width (Exact 0 1) == GT = Right ()
+    | otherwise =
+        Left
+          ( EvaluationError
+              (operation <> " requires xmax > xmin and a positive bin width.")
+          )
+  specificationError =
+    Left
+      ( EvaluationError
+          (operation <> " expects a bin spec ``dx`` or ``{xmin, xmax, dx}``.")
+      )
+  exactMinimum left right = if compareExact left right == GT then right else left
+  exactMaximum left right = if compareExact left right == LT then right else left
+
+binCount :: Text -> BinBounds -> Either EvaluationError Int
+binCount operation (BinBounds minimumValue maximumValue width) = do
+  quotient <-
+    maybe
+      invalid
+      Right
+      (divideExact (addExact maximumValue (negateExact minimumValue)) width)
+  let count = roundExact RoundFloor quotient
+  if count <= 0
+    then invalid
+    else
+      if count > maximumDenseArrayMaterializedNodes
+        then
+          Left
+            ( EvaluationError
+                (operation <> " output exceeds the native materialization limit.")
+            )
+        else Right (fromInteger count)
+ where
+  invalid =
+    Left
+      ( EvaluationError
+          (operation <> " requires xmax > xmin and a positive bin width.")
+      )
+
+insertBin
+  :: Text
+  -> BinBounds
+  -> Int
+  -> [[Expr]]
+  -> Expr
+  -> Either EvaluationError [[Expr]]
+insertBin operation (BinBounds minimumValue _ width) count bins value = do
+  exactValue <-
+    maybe
+      ( Left
+          ( EvaluationError
+              (operation <> " currently expects explicit real-valued numbers.")
+          )
+      )
+      Right
+      (explicitRealExact value)
+  let difference = addExact exactValue (negateExact minimumValue)
+  if compareExact difference (Exact 0 1) == LT
+    then Right bins
+    else do
+      quotient <-
+        maybe
+          ( Left
+              ( EvaluationError
+                  (operation <> " requires a positive bin width.")
+              )
+          )
+          Right
+          (divideExact difference width)
+      let index = roundExact RoundFloor quotient
+      if index < 0 || index >= fromIntegral count
+        then Right bins
+        else
+          let offset = fromInteger index
+           in case listElementAt offset bins of
+                Just binValues ->
+                  Right (replaceListIndex offset (binValues <> [value]) bins)
+                Nothing -> Right bins
 
 data OrderedItem = OrderedItem !Int !Expr !(Maybe AssociationEntry) ![Expr]
   deriving (Eq, Show)

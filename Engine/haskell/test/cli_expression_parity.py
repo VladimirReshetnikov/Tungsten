@@ -1550,6 +1550,50 @@ CASES = (
         0,
     ),
     (
+        "quantiles and quartile interpolation",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Quantile[{1,2,3,4,5},2^-1], "
+            "Quantile[{1,2,3,4,5},{4^-1,2^-1,3*4^-1}], "
+            "Quantile[Range[10],2^-1,{{2^-1,0},{0,1}}], "
+            "Quartiles[Range[10]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "numeric bin counts and lists",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{BinCounts[Range[10],{0,10,2}], "
+            "BinCounts[{1.1,2.5,3.7,4.0},{0,5,1}], "
+            "BinCounts[Range[10],2], BinLists[Range[10],{0,10,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "permutation conversions and recoverable diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{PermutationCycles[{2,3,1,4}], "
+            "PermutationList[Cycles[{{1,2},{3,4}}],4], "
+            "PermutationOrder[Cycles[{{1,2,3,4,5},{6,7}}]], "
+            "Quantile[{},2^-1], BinCounts[{},2], PermutationCycles[{1,1}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "exact integer arithmetic and number theory",
         (
             "expr",
