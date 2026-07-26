@@ -5,8 +5,8 @@ module Tungsten.ArrayTests (checkArrayEvaluator) where
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Tungsten.Evaluate (evaluate)
-import Tungsten.Expression (Expr (..), fullForm)
+import Tungsten.Evaluate (EvaluationError (..), evaluate)
+import Tungsten.Expression (Expr (..), SparseEntry (..), fullForm)
 import Tungsten.Parser (parseInputForm)
 import Tungsten.Session (emptySession, evaluateInSession)
 
@@ -14,6 +14,7 @@ checkArrayEvaluator :: IO Bool
 checkArrayEvaluator = do
   valueResults <- traverse checkValue valueCases
   errorResults <- traverse checkError errorCases
+  exactErrorResults <- traverse checkExactError exactErrorCases
   sparseResults <- sequence
     [ checkDirect
         "Dimensions preserves compact SparseArray dimensions"
@@ -23,11 +24,34 @@ checkArrayEvaluator = do
         "ArrayDepth uses compact SparseArray rank"
         (Call (Symbol "ArrayDepth") [SparseArray [2, 3] [] (Integer 0)])
         "2"
+    , checkDirect
+        "ArrayQ accepts a rank-one sparse array"
+        ( Call
+            (Symbol "ArrayQ")
+            [ SparseArray [3] [SparseEntry [2] (Integer 7)] (Integer 0)
+            , Integer 1
+            , Symbol "IntegerQ"
+            ]
+        )
+        "True"
+    , checkDirect
+        "VectorQ tests a sparse implicit value"
+        ( Call
+            (Symbol "VectorQ")
+            [ SparseArray [3] [SparseEntry [2] (Integer 7)] (Symbol "x")
+            , Symbol "IntegerQ"
+            ]
+        )
+        "False"
+    , checkDirect
+        "MatrixQ accepts compact rank-two sparse arrays"
+        (Call (Symbol "MatrixQ") [SparseArray [0, 4] [] (Integer 0)])
+        "True"
     , checkDirectError
         "dense matrix reducers reject SparseArray inputs explicitly"
         (Call (Symbol "Det") [SparseArray [2, 2] [] (Integer 0)])
     ]
-  pure (and (valueResults <> errorResults <> sparseResults))
+  pure (and (valueResults <> errorResults <> exactErrorResults <> sparseResults))
 
 valueCases :: [(Text, Text, Text)]
 valueCases =
@@ -36,9 +60,31 @@ valueCases =
   , ("Dimensions empty List", "Dimensions[{}]", "List[0]")
   , ("ArrayDepth follows List branches", "ArrayDepth[{1,{2,{3}}}]", "3")
   , ("ArrayDepth ignores non-List calls", "ArrayDepth[f[{1,2}]]", "0")
+  , ("Array constructs a vector with one-based indices", "Array[f,3]", "List[f[1], f[2], f[3]]")
+  , ("Array constructs a rank-two tensor", "Array[f,{2,2}]", "List[List[f[1, 1], f[1, 2]], List[f[2, 1], f[2, 2]]]")
+  , ("Array uses a scalar origin on every axis", "Array[f,{2,2},0]", "List[List[f[0, 0], f[0, 1]], List[f[1, 0], f[1, 1]]]")
+  , ("Array uses per-axis origins", "Array[f,{2,2},{0,-1}]", "List[List[f[0, -1], f[0, 0]], List[f[1, -1], f[1, 0]]]")
+  , ("Array accepts the rank-one origin range shorthand", "Array[f,3,{4,6}]", "List[f[4], f[5], f[6]]")
+  , ("Array evaluates pure-function cells", "Array[Function[x,x^2],3]", "List[1, 4, 9]")
+  , ("Array calls its function once for scalar shape", "Array[f,{}]", "f[]")
   , ("ConstantArray rectangular", "ConstantArray[x,{2,3}]", "List[List[x, x, x], List[x, x, x]]")
+  , ("ConstantArray scalar shape", "ConstantArray[x,{}]", "x")
+  , ("ConstantArray preserves leading zero axes", "ConstantArray[x,{2,0,3}]", "List[List[], List[]]")
   , ("ConstantArray filters Nothing", "ConstantArray[Nothing,3]", "List[]")
   , ("nested ConstantArray filters Nothing per List", "ConstantArray[Nothing,{2,2}]", "List[List[], List[]]")
+  , ("ArrayQ recognizes a vector", "ArrayQ[{1,2}]", "True")
+  , ("ArrayQ recognizes a rectangular matrix", "ArrayQ[{{1,2},{3,4}},2,IntegerQ]", "True")
+  , ("ArrayQ rejects ragged lists", "ArrayQ[{{1},{2,3}}]", "False")
+  , ("ArrayQ accepts an empty rank-one array", "ArrayQ[{},1,IntegerQ]", "True")
+  , ("ArrayQ rejects atoms", "ArrayQ[x]", "False")
+  , ("VectorQ accepts an empty vector", "VectorQ[{}]", "True")
+  , ("VectorQ treats non-List calls as elements", "VectorQ[{1,f[a]}]", "True")
+  , ("VectorQ applies an element predicate", "VectorQ[{1,a},IntegerQ]", "False")
+  , ("VectorQ rejects nested lists", "VectorQ[{{}}]", "False")
+  , ("MatrixQ accepts zero-width rows", "MatrixQ[{{}}]", "True")
+  , ("MatrixQ applies an element predicate", "MatrixQ[{{1,a}},IntegerQ]", "False")
+  , ("MatrixQ rejects ragged rows", "MatrixQ[{{1},{2,3}}]", "False")
+  , ("MatrixQ rejects the rank-one empty list", "MatrixQ[{}]", "False")
   , ("ArrayReshape flattens and pads", "ArrayReshape[{{1,2},{3,4}},{3,2},x]", "List[List[1, 2], List[3, 4], List[x, x]]")
   , ("ArrayReshape scalar shape", "ArrayReshape[{1,2},{}]", "1")
   , ("ArrayReshape empty scalar shape uses fill", "ArrayReshape[{},{},x]", "x")
@@ -51,6 +97,7 @@ valueCases =
   , ("Transpose vector identity", "Transpose[{a,b,c}]", "List[a, b, c]")
   , ("UnitVector", "UnitVector[5,3]", "List[0, 0, 1, 0, 0]")
   , ("IdentityMatrix", "IdentityMatrix[3]", "List[List[1, 0, 0], List[0, 1, 0], List[0, 0, 1]]")
+  , ("IdentityMatrix empty matrix", "IdentityMatrix[0]", "List[]")
   , ("DiagonalMatrix offset", "DiagonalMatrix[{a,b},1]", "List[List[0, a, 0], List[0, 0, b], List[0, 0, 0]]")
   , ("DiagonalMatrix negative offset and size", "DiagonalMatrix[{a,b},-1,4]", "List[List[0, 0, 0, 0], List[a, 0, 0, 0], List[0, b, 0, 0], List[0, 0, 0, 0]]")
   , ("Tuples Cartesian product", "Tuples[{{a,b},{1,2}}]", "List[List[a, 1], List[a, 2], List[b, 1], List[b, 2]]")
@@ -101,6 +148,18 @@ errorCases =
   , ("MatrixPower requires an integer exponent", "MatrixPower[{{1}},x]")
   ]
 
+exactErrorCases :: [(Text, Text, Text)]
+exactErrorCases =
+  [ ("Array rejects negative dimensions", "Array[f,-1]", "Array expects non-negative dimensions.")
+  , ("Array rejects a short origin list", "Array[f,{2,3},{4}]", "Array origin list must have one entry per array dimension.")
+  , ("Array rejects symbolic origins", "Array[f,{2,3},{4,x}]", "Array origin entries must be explicit integers.")
+  , ("ArrayQ requires an explicit depth", "ArrayQ[{{1}},x]", "ArrayQ currently expects an explicit integer depth.")
+  , ("VectorQ validates arity", "VectorQ[{1},x,y]", "VectorQ expects an expression and an optional element predicate.")
+  , ("MatrixQ validates arity", "MatrixQ[{{1}},x,y]", "MatrixQ expects an expression and an optional element predicate.")
+  , ("ConstantArray bounds materialization", "ConstantArray[x,1000001]", "ConstantArray output exceeds the native materialization limit.")
+  , ("IdentityMatrix bounds materialization", "IdentityMatrix[1000]", "IdentityMatrix output exceeds the native materialization limit.")
+  ]
+
 checkValue :: (Text, Text, Text) -> IO Bool
 checkValue (label, source, expected) = case parseInputForm source of
   Left parseError -> failCheck label ("parse error: " <> showText parseError)
@@ -131,6 +190,16 @@ checkError (label, source) = case parseInputForm source of
   Left parseError -> failCheck label ("parse error: " <> showText parseError)
   Right expression -> case evaluate expression of
     Left _ -> pure True
+    Right result -> failCheck label ("expected an evaluation error, got " <> fullForm result)
+
+checkExactError :: (Text, Text, Text) -> IO Bool
+checkExactError (label, source, expected) = case parseInputForm source of
+  Left parseError -> failCheck label ("parse error: " <> showText parseError)
+  Right expression -> case evaluate expression of
+    Left (EvaluationError actual)
+      | actual == expected -> pure True
+      | otherwise ->
+          failCheck label ("expected error " <> expected <> ", got " <> actual)
     Right result -> failCheck label ("expected an evaluation error, got " <> fullForm result)
 
 checkDirect :: Text -> Expr -> Text -> IO Bool

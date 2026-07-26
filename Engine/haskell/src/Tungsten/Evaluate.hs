@@ -623,6 +623,7 @@ reduceBuiltin headName values = case headName of
   "Depth" -> Right (unary headName (Integer . fromIntegral . expressionDepth) values)
   "Dimensions" -> reduceDimensions values
   "ArrayDepth" -> reduceArrayDepth values
+  "ArrayQ" -> reduceArrayQ values
   "AtomQ" -> Right (unary headName (boolean . isAtom) values)
   "ListQ" -> Right (unary headName (boolean . hasHead "List") values)
   "Association" -> Right (reduceAssociation values)
@@ -750,6 +751,7 @@ reduceBuiltin headName values = case headName of
   "RotateRight" -> Right (reduceRotate False headName values)
   "Take" -> reduceTakeDrop True values
   "Drop" -> reduceTakeDrop False values
+  "Array" -> reduceArray values
   "ConstantArray" -> reduceConstantArray values
   "ArrayReshape" -> reduceArrayReshape values
   "ArrayPad" -> reduceArrayPad values
@@ -757,6 +759,8 @@ reduceBuiltin headName values = case headName of
   "Transpose" -> reduceTranspose values
   "UnitVector" -> reduceUnitVector values
   "IdentityMatrix" -> reduceIdentityMatrix values
+  "VectorQ" -> reduceVectorQ values
+  "MatrixQ" -> reduceMatrixQ values
   "DiagonalMatrix" -> reduceDiagonalMatrix values
   "Tuples" -> reduceTuples values
   "Partition" -> reducePartition values
@@ -5194,6 +5198,111 @@ arrayDepthValue (Call (Symbol "List") values) =
   1 + maximum (map arrayDepthValue values)
 arrayDepthValue _ = 0
 
+reduceArrayQ :: [Expr] -> Either EvaluationError Expr
+reduceArrayQ = \case
+  [expression] -> Right (boolean (arrayQValue expression Nothing Nothing))
+  [expression, depthExpression] -> do
+    depth <- requireArrayQDepth depthExpression
+    Right (boolean (arrayQValue expression (Just depth) Nothing))
+  [expression, depthExpression, test] -> do
+    depth <- requireArrayQDepth depthExpression
+    Right (boolean (arrayQValue expression (Just depth) (Just test)))
+  _ ->
+    Left
+      ( EvaluationError
+          "ArrayQ expects an expression, optional depth, and optional element test."
+      )
+
+requireArrayQDepth :: Expr -> Either EvaluationError Integer
+requireArrayQDepth (Integer depth) = Right depth
+requireArrayQDepth _ =
+  Left (EvaluationError "ArrayQ currently expects an explicit integer depth.")
+
+arrayQValue :: Expr -> Maybe Integer -> Maybe Expr -> Bool
+arrayQValue expression requestedDepth test = case expression of
+  SparseArray dimensions entries fill ->
+    not (null dimensions)
+      && depthMatches (length dimensions)
+      && sparseValuesPass dimensions entries fill
+  _ -> case strictDenseDimensions expression of
+    Left _ -> False
+    Right dimensions ->
+      not (null dimensions)
+        && depthMatches (length dimensions)
+        && maybe True (allPredicateTrue (denseLeafValues expression)) test
+ where
+  depthMatches actual =
+    maybe True (== fromIntegral actual) requestedDepth
+  sparseValuesPass dimensions entries fill = case test of
+    Nothing -> True
+    Just predicate ->
+      let explicitValues = [value | SparseEntry _ value <- entries]
+          hasImplicit = product dimensions > fromIntegral (length entries)
+       in (not hasImplicit || predicateReturnsTrue predicate fill)
+            && allPredicateTrue explicitValues predicate
+
+reduceVectorQ :: [Expr] -> Either EvaluationError Expr
+reduceVectorQ = \case
+  [expression] -> Right (boolean (vectorQValue expression Nothing))
+  [expression, test] -> Right (boolean (vectorQValue expression (Just test)))
+  _ ->
+    Left
+      ( EvaluationError
+          "VectorQ expects an expression and an optional element predicate."
+      )
+
+vectorQValue :: Expr -> Maybe Expr -> Bool
+vectorQValue expression test = case expression of
+  SparseArray dimensions entries fill ->
+    length dimensions == 1
+      && sparseElementsPass dimensions entries fill test
+  Call (Symbol "List") values ->
+    all (not . hasHead "List") values
+      && maybe True (allPredicateTrue values) test
+  _ -> False
+
+reduceMatrixQ :: [Expr] -> Either EvaluationError Expr
+reduceMatrixQ = \case
+  [expression] -> Right (boolean (matrixQValue expression Nothing))
+  [expression, test] -> Right (boolean (matrixQValue expression (Just test)))
+  _ ->
+    Left
+      ( EvaluationError
+          "MatrixQ expects an expression and an optional element predicate."
+      )
+
+matrixQValue :: Expr -> Maybe Expr -> Bool
+matrixQValue expression test = case expression of
+  SparseArray dimensions entries fill ->
+    length dimensions == 2
+      && sparseElementsPass dimensions entries fill test
+  _ -> case strictDenseDimensions expression of
+    Left _ -> False
+    Right dimensions ->
+      length dimensions == 2
+        && maybe True (allPredicateTrue (denseLeafValues expression)) test
+
+sparseElementsPass
+  :: [Integer]
+  -> [SparseEntry]
+  -> Expr
+  -> Maybe Expr
+  -> Bool
+sparseElementsPass _ _ _ Nothing = True
+sparseElementsPass dimensions entries fill (Just predicate) =
+  let explicitValues = [value | SparseEntry _ value <- entries]
+      hasImplicit = product dimensions > fromIntegral (length entries)
+   in (not hasImplicit || predicateReturnsTrue predicate fill)
+        && allPredicateTrue explicitValues predicate
+
+allPredicateTrue :: [Expr] -> Expr -> Bool
+allPredicateTrue values predicate =
+  all (predicateReturnsTrue predicate) values
+
+predicateReturnsTrue :: Expr -> Expr -> Bool
+predicateReturnsTrue predicate value =
+  evaluate (Call predicate [value]) == Right (Symbol "True")
+
 -- Unlike Dimensions, transformations require a genuinely rectangular List
 -- tree.  An atom has rank zero; callers decide whether rank zero is valid.
 strictDenseDimensions :: Expr -> Either EvaluationError [Int]
@@ -5206,7 +5315,7 @@ strictDenseDimensions (Call (Symbol "List") values) = do
       | all (== firstDimensions) remaining ->
           Right (length values : firstDimensions)
       | otherwise ->
-          Left (EvaluationError "dense List array input must be rectangular")
+          Left (EvaluationError "SparseArray dense input must be rectangular.")
 strictDenseDimensions _ = Right []
 
 requireDenseArrayDimensions :: Text -> Expr -> Either EvaluationError [Int]
@@ -5241,11 +5350,41 @@ nonnegativeDimension operation dimension
       Left (EvaluationError (operation <> " dimension is too large for this runtime."))
   | otherwise = Right (fromInteger dimension)
 
+maximumDenseArrayMaterializedNodes :: Integer
+maximumDenseArrayMaterializedNodes = 1000000
+
+guardDenseArrayMaterialization :: Text -> [Int] -> Either EvaluationError ()
+guardDenseArrayMaterialization operation dimensions =
+  if denseArrayMaterializedNodes dimensions <= maximumDenseArrayMaterializedNodes
+    then Right ()
+    else
+      Left
+        ( EvaluationError
+            (operation <> " output exceeds the native materialization limit.")
+        )
+
+-- Count every materialized element at every rank, rather than only the leaf
+-- product.  Shapes such as {1000001, 0} still allocate one million empty
+-- child lists even though their leaf count is zero.
+denseArrayMaterializedNodes :: [Int] -> Integer
+denseArrayMaterializedNodes = go 1 0
+ where
+  go _ total [] = total
+  go prefix total (dimension : remaining) =
+    let nextPrefix = prefix * fromIntegral dimension
+        nextTotal = total + nextPrefix
+     in if nextTotal > maximumDenseArrayMaterializedNodes
+          then nextTotal
+          else go nextPrefix nextTotal remaining
+
 buildDenseArrayM
-  :: [Int]
+  :: Text
+  -> [Int]
   -> ([Int] -> Either EvaluationError Expr)
   -> Either EvaluationError Expr
-buildDenseArrayM dimensions builder = build [] dimensions
+buildDenseArrayM operation dimensions builder = do
+  guardDenseArrayMaterialization operation dimensions
+  build [] dimensions
  where
   build reversedIndices [] = builder (reverse reversedIndices)
   build reversedIndices (dimension : remaining) =
@@ -5266,10 +5405,58 @@ denseLeafValues :: Expr -> [Expr]
 denseLeafValues (Call (Symbol "List") values) = concatMap denseLeafValues values
 denseLeafValues expression = [expression]
 
+reduceArray :: [Expr] -> Either EvaluationError Expr
+reduceArray = \case
+  [function, dimensionsExpression] ->
+    buildArray function dimensionsExpression Nothing
+  [function, dimensionsExpression, originExpression] ->
+    buildArray function dimensionsExpression (Just originExpression)
+  _ -> Left (EvaluationError "Array expects two or three arguments.")
+
+buildArray :: Expr -> Expr -> Maybe Expr -> Either EvaluationError Expr
+buildArray function dimensionsExpression originExpression = do
+  dimensions <- normalizeDenseDimensions "Array" dimensionsExpression
+  origins <- normalizeArrayOrigins (length dimensions) originExpression
+  buildDenseArrayM "Array" dimensions $ \indices ->
+    evaluate
+      ( Call
+          function
+          [ Integer (origin + fromIntegral index)
+          | (origin, index) <- zip origins indices
+          ]
+      )
+
+normalizeArrayOrigins
+  :: Int
+  -> Maybe Expr
+  -> Either EvaluationError [Integer]
+normalizeArrayOrigins rank Nothing = Right (replicate rank 1)
+normalizeArrayOrigins rank (Just (Integer origin)) =
+  Right (replicate rank origin)
+normalizeArrayOrigins 1 (Just (Call (Symbol "List") [Integer lower, Integer _upper])) =
+  Right [lower]
+normalizeArrayOrigins rank (Just (Call (Symbol "List") values))
+  | length values /= rank =
+      Left
+        ( EvaluationError
+            "Array origin list must have one entry per array dimension."
+        )
+  | otherwise =
+      traverse requireOrigin values
+ where
+  requireOrigin (Integer origin) = Right origin
+  requireOrigin _ =
+    Left (EvaluationError "Array origin entries must be explicit integers.")
+normalizeArrayOrigins _ (Just _) =
+  Left
+    ( EvaluationError
+        "Array currently expects an integer origin or a list of integer origins."
+    )
+
 reduceConstantArray :: [Expr] -> Either EvaluationError Expr
 reduceConstantArray [value, dimensionsExpression] = do
   dimensions <- normalizeDenseDimensions "ConstantArray" dimensionsExpression
-  buildDenseArrayM dimensions (const (Right value))
+  buildDenseArrayM "ConstantArray" dimensions (const (Right value))
 reduceConstantArray _ =
   Left (EvaluationError "ConstantArray currently supports exactly two arguments.")
 
@@ -5358,7 +5545,7 @@ arrayPad expression paddingExpression padding = do
   dimensions <- requireDenseArrayDimensions "ArrayPad" expression
   widths <- normalizeArrayPadding (length dimensions) paddingExpression
   newDimensions <- sequence (zipWith paddedDimension dimensions widths)
-  buildDenseArrayM newDimensions $ \indices -> do
+  buildDenseArrayM "ArrayPad" newDimensions $ \indices -> do
     let sourceCoordinates = zipWith3 sourceCoordinate indices dimensions widths
     case sequence sourceCoordinates of
       Nothing -> Right padding
@@ -5465,7 +5652,7 @@ transposeDense expression permutationExpression = do
     then Right expression
     else do
       let newDimensions = [dimensions !! axis | axis <- permutation]
-      buildDenseArrayM newDimensions $ \outputIndices ->
+      buildDenseArrayM "Transpose" newDimensions $ \outputIndices ->
         denseArrayValueAt expression (sourceIndices permutation outputIndices)
  where
   sourceIndices permutation outputIndices =
@@ -5512,12 +5699,10 @@ reduceUnitVector [Integer lengthValue, Integer position]
         )
   | otherwise = do
       lengthInt <- nonnegativeDimension "UnitVector" lengthValue
-      Right
-        ( evaluatedList
-            [ Integer (if toInteger index == position then 1 else 0)
-            | index <- [1 .. lengthInt]
-            ]
-        )
+      buildDenseArrayM "UnitVector" [lengthInt] $ \case
+        [index] ->
+          Right (Integer (if toInteger (index + 1) == position then 1 else 0))
+        _ -> Left (EvaluationError "UnitVector encountered an invalid array index.")
 reduceUnitVector _ =
   Left
     ( EvaluationError
@@ -5537,13 +5722,9 @@ identityMatrix size
       Left (EvaluationError "IdentityMatrix expects a non-negative integer size.")
   | otherwise = do
       dimension <- nonnegativeDimension "IdentityMatrix" size
-      Right
-        ( evaluatedList
-            [ evaluatedList
-                [Integer (if row == column then 1 else 0) | column <- [1 .. dimension]]
-            | row <- [1 .. dimension]
-            ]
-        )
+      buildDenseArrayM "IdentityMatrix" [dimension, dimension] $ \case
+        [row, column] -> Right (Integer (if row == column then 1 else 0))
+        _ -> Left (EvaluationError "IdentityMatrix encountered an invalid array index.")
 
 data DenseSequence
   = DenseCompound !Expr ![Expr]
