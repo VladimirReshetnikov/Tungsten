@@ -51,8 +51,8 @@ valueCases =
     , "List[25, 29, 11, 17, 5, 7]"
     )
   , ( "modular powers inverses and order"
-    , "{PowerMod[3,5,7],PowerMod[3,-1,7],PowerMod[2,-1,4],ModularInverse[3,7],ModularInverse[2,4],MultiplicativeOrder[2,7],MultiplicativeOrder[2,6]}"
-    , "List[5, 5, PowerMod[2, -1, 4], 5, ModularInverse[2, 4], 3, MultiplicativeOrder[2, 6]]"
+    , "{PowerMod[3,5,7],PowerMod[3,-1,7],PowerMod[2,-1,4],PowerMod[7,0,1],ModularInverse[3,7],ModularInverse[2,4],MultiplicativeOrder[2,7],MultiplicativeOrder[2,6],MultiplicativeOrder[2,1]}"
+    , "List[5, 5, PowerMod[2, -1, 4], 0, 5, ModularInverse[2, 4], 3, MultiplicativeOrder[2, 6], MultiplicativeOrder[2, 1]]"
     )
   , ( "integer digit projections"
     , "{IntegerLength[0],IntegerLength[12345],IntegerDigits[12345],IntegerDigits[12345,16],IntegerDigits[12,2,8],IntegerReverse[-1234],DigitCount[1122],DigitCount[16,2],DigitCount[16,2,0]}"
@@ -75,8 +75,8 @@ valueCases =
     , "List[6, True, Global`GCD[12, 18]]"
     )
   , ( "exact rational and bounded integer factorization"
-    , "{FactorInteger[-12],FactorInteger[18/35],FactorInteger[0],FactorInteger[1],FactorInteger[-1],FactorInteger[210,2],FactorInteger[210,5],FactorInteger[12,GaussianIntegers->False]}"
-    , "List[List[List[-1, 1], List[2, 2], List[3, 1]], List[List[2, 1], List[3, 2], List[5, -1], List[7, -1]], List[List[0, 1]], List[List[1, 1]], List[List[-1, 1]], List[List[2, 1], List[105, 1]], List[List[2, 1], List[3, 1], List[5, 1], List[7, 1]], List[List[2, 2], List[3, 1]]]"
+    , "{FactorInteger[-12],FactorInteger[18/35],FactorInteger[0],FactorInteger[1],FactorInteger[-1],FactorInteger[210,1],FactorInteger[210,2],FactorInteger[210,5],FactorInteger[12,GaussianIntegers->False]}"
+    , "List[List[List[-1, 1], List[2, 2], List[3, 1]], List[List[2, 1], List[3, 2], List[5, -1], List[7, -1]], List[List[0, 1]], List[List[1, 1]], List[List[-1, 1]], List[List[210, 1]], List[List[2, 1], List[105, 1]], List[List[2, 1], List[3, 1], List[5, 1], List[7, 1]], List[List[2, 2], List[3, 1]]]"
     )
   , ( "integer exponent and continued fractions"
     , "{IntegerExponent[1000],IntegerExponent[-81,-3],IntegerExponent[0,10],ContinuedFraction[415/93],ContinuedFraction[415/93,2],ContinuedFraction[-415/93],FromContinuedFraction[{4,2,6,7}],FromContinuedFraction[{}],FromContinuedFraction[{1,0}]}"
@@ -95,8 +95,8 @@ valueCases =
     , "List[List[List[2, 2], List[3, 1]], List[1, 2, 3], 5, 8]"
     )
   , ( "residue symbols and exact integer sequences"
-    , "{JacobiSymbol[1001,9907],KroneckerSymbol[-1,2],KroneckerSymbol[3,0],BernoulliB[0],BernoulliB[1],BernoulliB[2],BernoulliB[10],EulerE[0],EulerE[5],EulerE[6]}"
-    , "List[-1, 1, 0, 1, Rational[-1, 2], Rational[1, 6], Rational[5, 66], 1, 0, -61]"
+    , "{JacobiSymbol[1001,9907],KroneckerSymbol[-1,2],KroneckerSymbol[3,0],KroneckerSymbol[0,4],BernoulliB[0],BernoulliB[1],BernoulliB[2],BernoulliB[10],EulerE[0],EulerE[5],EulerE[6]}"
+    , "List[-1, 1, 0, 0, 1, Rational[-1, 2], Rational[1, 6], Rational[5, 66], 1, 0, -61]"
     )
   , ( "primitive roots and Ramanujan tau"
     , "{PrimitiveRoot[2],PrimitiveRoot[7],PrimitiveRoot[8],RamanujanTau[1],RamanujanTau[2],RamanujanTau[5]}"

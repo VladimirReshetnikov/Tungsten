@@ -275,7 +275,9 @@ factorWithLimit value (Just limit) = partialFactorInteger value limit
 partialFactorInteger :: Integer -> Integer -> [(Integer, Integer)]
 partialFactorInteger value limit = go value candidates
  where
-  candidates = 2 : [3, 5 .. limit]
+  candidates
+    | limit < 2 = []
+    | otherwise = 2 : [3, 5 .. limit]
   go 1 _ = []
   go remaining [] = [(remaining, 1)]
   go remaining (candidate : rest)
@@ -557,8 +559,8 @@ kroneckerSymbol numerator denominator
   | otherwise =
       let (oddDenominator, powersOfTwo) = removeTwos denominator (0 :: Integer)
           atTwo
+            | powersOfTwo > 0 && even numerator = 0
             | even powersOfTwo = 1
-            | even numerator = 0
             | numerator `mod` 8 `elem` [1, 7] = 1
             | otherwise = -1
           oddPart = if oddDenominator == 1 then 1 else jacobiSymbol numerator oddDenominator
@@ -740,7 +742,8 @@ millerRabin value = all passesWitness . filter (< value)
   squareMod operand = (operand * operand) `mod` value
 
 modularPower :: Integer -> Integer -> Integer -> Integer
-modularPower base exponentValue modulus = go (base `mod` modulus) exponentValue 1
+modularPower base exponentValue modulus =
+  go (base `mod` modulus) exponentValue (1 `mod` modulus)
  where
   go _ 0 result = result
   go current exponent' result =
@@ -899,7 +902,7 @@ extendedGcd left right =
 
 reduceMultiplicativeOrder :: [Expr] -> Maybe Expr
 reduceMultiplicativeOrder [Integer value, Integer modulus]
-  | modulus > 0 && gcd value modulus == 1 =
+  | modulus > 1 && gcd value modulus == 1 =
       Just (Integer (multiplicativeOrder value modulus))
 reduceMultiplicativeOrder _ = Nothing
 
