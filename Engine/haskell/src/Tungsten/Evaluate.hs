@@ -8769,8 +8769,8 @@ reduceSequenceFold returnHistory arguments' = case arguments' of
   operation = if returnHistory then "SequenceFoldList" else "SequenceFold"
 
   foldSequence function initialExpression inputsExpression arityExpression = do
-    initialValues <- sequenceCollectionValues operation initialExpression
-    inputs <- sequenceCollectionValues operation inputsExpression
+    initialValues <- sequenceFoldCollectionValues operation initialExpression
+    inputs <- sequenceFoldCollectionValues operation inputsExpression
     if null initialValues
       then
         Left
@@ -8812,8 +8812,8 @@ reduceSequenceFold returnHistory arguments' = case arguments' of
                       else last history
                   )
 
-sequenceCollectionValues :: Text -> Expr -> Either EvaluationError [Expr]
-sequenceCollectionValues operation = \case
+sequenceFoldCollectionValues :: Text -> Expr -> Either EvaluationError [Expr]
+sequenceFoldCollectionValues operation = \case
   SparseArray [dimension] entries fill
     | dimension <= 65536 ->
         Right
