@@ -52,9 +52,9 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "rounding", "take-drop", "take-list", "list", "structural", "traversal",
             "collections", "combinator-state", "combinators", "distribution",
-            "array-shape", "dense-array", "sparse-properties", "sparse-structural",
-            "tensor-matrix", "ordering", "failure-confirmation", "polynomial",
-            "strings",
+            "array-shape", "dense-array", "sparse-properties", "sparse-arithmetic",
+            "sparse-structural", "tensor-matrix", "ordering",
+            "failure-confirmation", "polynomial", "strings",
         ),
         help="Run only this matrix; repeat to select multiple matrices.",
     )
@@ -724,6 +724,110 @@ def sparse_property_cases() -> list[str]:
         f'{array}[]',
         f'{array}["ExplicitLength","ExplicitValues"]',
     ]
+
+
+def sparse_arithmetic_cases() -> list[str]:
+    """Sparse constructors and coordinate-native Plus/Times contracts."""
+
+    cases = [
+        "SparseArray[]",
+        "SparseArray[a,b,c,d]",
+        "SparseArray[{}]",
+        "SparseArray[Automatic]",
+        "SparseArray[Automatic,{}]",
+        "SparseArray[Automatic,3]",
+        "SparseArray[Automatic,{2,3},z]",
+        "SparseArray[{{1}->a},x]",
+        "SparseArray[{{1}->a},{x}]",
+        "SparseArray[{{1}->a},-1]",
+        "SparseArray[{{1}->a},{-1}]",
+        "SparseArray[{{1}->a},{}]",
+        "SparseArray[{{1}->a},{3},z,extra]",
+        "SparseArray[{{1},{2,3}}]",
+        "SparseArray[{{1,2},{3,4}},{4}]",
+        "SparseArray[{{1,2},{3,4}},{2,2},1]",
+        "SparseArray[{{}}]",
+        "SparseArray[{{}}, {1,0},z]",
+        "SparseArray[1->a]",
+        "SparseArray[-1->a]",
+        "SparseArray[0->a]",
+        "SparseArray[{}->a]",
+        "SparseArray[{}->{a}]",
+        "SparseArray[{1,3}->{a,b}]",
+        "SparseArray[{1,3}->{a}]",
+        "SparseArray[{{1,2},{2,1}}->{a,b}]",
+        "SparseArray[{{1,2},{2,1}}->{a}]",
+        "SparseArray[{{1,2},{2,1}}->{a,b},{2,2}]",
+        "SparseArray[{1,2}->{a,b},{2,2}]",
+        "SparseArray[{{1,2}->{a}},{2,2}]",
+        "SparseArray[{{1}->a,{1,2}->b}]",
+        "SparseArray[{{1}->a,{{1}}->b}]",
+        "SparseArray[{{0}->a},{1}]",
+        "SparseArray[{{2}->a},{1}]",
+        "SparseArray[{{1,2}->a},{2}]",
+        "SparseArray[{{1}->z,{1}->a,{2}->b},{3},z]",
+        "SparseArray[{{1}->a,{1}->b},{1}]",
+        "SparseArray[{{1}->a,2},{2}]",
+        "SparseArray[{}, {0,4294967296},z]",
+        "SparseArray[{{4294967296}->a},{4294967296}]",
+        "SparseArray[{{4294967296,4294967296}->a},"
+        "{4294967296,4294967296},z]",
+        "SparseArray[SparseArray[{{1}->a},{3}]]",
+        "SparseArray[SparseArray[{{1}->a},{3}],3]",
+        "SparseArray[SparseArray[{{1}->a},{3}],{2}]",
+        "SparseArray[SparseArray[{{1}->a},{3},z],{3},q]",
+        "SparseArray[SparseArray[{}, {0,3},z],{0,3},q]",
+    ]
+
+    dense_values = (
+        "{0,a,0}", "{z,a,z}", "{{0,a},{b,0}}", "{{z},{a}}",
+    )
+    for value in dense_values:
+        cases.extend((
+            f"SparseArray[{value}]",
+            f"SparseArray[{value},Dimensions[{value}]]",
+            f"SparseArray[{value},Dimensions[{value}],z]",
+        ))
+
+    vectors = (
+        "SparseArray[{}, {3}]",
+        "SparseArray[{{1}->a},{3}]",
+        "SparseArray[{{2}->b},{3},q]",
+        "SparseArray[{{1}->a,{3}->c},{3},z]",
+    )
+    scalars = ("-1", "0", "1", "2", "q")
+    for head in ("Plus", "Times"):
+        for left, right in itertools.product(vectors, repeat=2):
+            cases.append(f"ArrayRules[{head}[{left},{right}]]")
+        for array, scalar in itertools.product(vectors, scalars):
+            cases.extend((
+                f"ArrayRules[{head}[{array},{scalar}]]",
+                f"ArrayRules[{head}[{scalar},{array}]]",
+            ))
+        for array in vectors:
+            cases.append(f"ArrayRules[{head}[{array}]]")
+
+    cases.extend((
+        "ArrayRules[SparseArray[{{1}->a},{3}]+"
+        "SparseArray[{{2}->b},{3}]+1]",
+        "ArrayRules[SparseArray[{{1}->a},{3},z]*"
+        "SparseArray[{{1}->b,{2}->c},{3},q]*r]",
+        "ArrayRules[SparseArray[{{1}->a},{3},z]+"
+        "SparseArray[{{1}->-a},{3},-z]]",
+        "SparseArray[{{1}->a},{3},z]+SparseArray[{{1}->b},{4},q]",
+        "SparseArray[{{1}->a},{3},z]*SparseArray[{{1}->b},{4},q]",
+        "{1,2,3}+SparseArray[{{1}->a},{3}]",
+        "SparseArray[{{1}->a},{3}]*{1,2}",
+        "{1,2}+SparseArray[{{1}->a},{4294967296},z]",
+        "ArrayRules[SparseArray[{{1}->a},{4294967296},z]+"
+        "SparseArray[{{4294967296}->b},{4294967296},q]+r]",
+        "ArrayRules[SparseArray[{{1,1}->a},"
+        "{4294967296,4294967296},z]+"
+        "SparseArray[{{4294967296,4294967296}->b},"
+        "{4294967296,4294967296},q]]",
+        "ArrayRules[0 SparseArray[{{1}->a},{4294967296},z]]",
+    ))
+    return _unique(cases)
 
 
 def sparse_structural_cases() -> list[str]:
@@ -1893,6 +1997,7 @@ CLUSTERS: dict[str, Callable[[], list[str]]] = {
     "array-shape": array_shape_cases,
     "dense-array": dense_array_cases,
     "sparse-properties": sparse_property_cases,
+    "sparse-arithmetic": sparse_arithmetic_cases,
     "sparse-structural": sparse_structural_cases,
     "tensor-matrix": tensor_matrix_cases,
     "ordering": ordering_cases,
