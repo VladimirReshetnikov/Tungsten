@@ -100,10 +100,10 @@ namedFunctionParser = do
 
 compoundExpressionParser :: Parser Expr
 compoundExpressionParser = do
-  firstExpression <- functionParser
+  firstExpression <- assignmentParser
   remaining <- many $ do
     _ <- operator ";" ";"
-    option (Symbol "Null") functionParser
+    option (Symbol "Null") assignmentParser
   pure $ case remaining of
     [] -> firstExpression
     values -> Call (Symbol "CompoundExpression") (firstExpression : values)
@@ -128,13 +128,25 @@ spanParser = do
       )
 
 functionParser :: Parser Expr
-functionParser = assignmentParser >>= functionPostfixes
+functionParser = compositionParser >>= functionPostfixes
  where
   functionPostfixes expression =
     option expression $ do
       _ <- operator "&" "&"
       postfixed <- postfixesParser True (Call (Symbol "Function") [expression])
-      functionPostfixes postfixed
+      continued <- continueAfterFunction postfixed
+      functionPostfixes continued
+
+  -- Function sits below rules, replacement, mapping, and composition but above
+  -- assignment.  A higher-precedence operator can therefore continue after a
+  -- completed postfix function: @p & -> property@ is a rule whose left side is
+  -- @Function[p]@, while @lhs -> rhs &@ wraps the already-completed rule.
+  -- Re-enter the higher-precedence layer with the completed tree parenthesized
+  -- so the recursive-descent grammar can model that Pratt-style continuation.
+  continueAfterFunction expression = do
+    remaining <- getInput
+    Parsec.setInput ("(" <> fullForm expression <> ")" <> remaining)
+    compositionParser
 
 assignmentParser :: Parser Expr
 assignmentParser = do
@@ -142,12 +154,12 @@ assignmentParser = do
   option lhs (assignmentSuffix lhs)
 
 taggedAssignmentPrefixParser :: Parser Expr
-taggedAssignmentPrefixParser = compositionParser >>= gatherPrefixes
+taggedAssignmentPrefixParser = functionParser >>= gatherPrefixes
  where
   gatherPrefixes lhs =
     option lhs $ do
       _ <- operator "/:" ""
-      target <- withTaggedUnsetSuppression True compositionParser
+      target <- withTaggedUnsetSuppression True functionParser
       gatherPrefixes (Call (Symbol "TagSetPrefix") [lhs, target])
 
 assignmentSuffix :: Expr -> Parser Expr
