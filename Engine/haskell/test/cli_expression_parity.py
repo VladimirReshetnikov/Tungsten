@@ -38,6 +38,23 @@ CASES = (
     ),
     ("evaluation success", ("expr", "evaluate", "--code", "1 + 2", "--form", "input"), 0),
     (
+        "numeric constructor evaluation and isolation",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Rational[2,4], Rational[4,2], Rational[0,0], Rational[1,0], "
+            "Rational[x,2], Complex[1,0], Complex[1,0.], Complex[1.,2], "
+            "Complex[1,2.], Complex[x,0], System`Rational[2,4], "
+            "Global`Rational[2+2,4], System`Complex[1,2.], "
+            "Global`Complex[1+1,0], Head[Rational[1,2]], "
+            "AtomQ[Rational[1,2]], Length[Rational[1,2]], $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "flat one-identity downvalue",
         (
             "expr",

@@ -560,8 +560,9 @@ checkFullFormParser = do
         , ("trailing-point precision real", "0.7000`30.", Real "0.7000`30.")
         , ("trailing-point zero-precision real", "0.7`0.", Real "0.7`0.")
         , ("trailing-point accuracy real", "0.7``0.", Real "0.7``0.")
-        , ("normalized rational", "Rational[-6, -8]", Rational 3 4)
-        , ("complex atom", "Complex[Rational[1, 2], -3]", Complex (Rational 1 2) (Integer (-3)))
+        , ("explicit rational constructor", "Rational[-6, -8]", Call (Symbol "Rational") [Integer (-6), Integer (-8)])
+        , ("zero-denominator rational syntax", "Rational[0, 0]", Call (Symbol "Rational") [Integer 0, Integer 0])
+        , ("explicit complex constructor", "Complex[Rational[1, 2], -3]", Call (Symbol "Complex") [Call (Symbol "Rational") [Integer 1, Integer 2], Integer (-3)])
         , ("escaped string", "\"line\\n snowman \\:2603 face \\|01f600\"", String "line\n snowman ☃ face 😀")
         , ("parenthesized head", "(f)[x]", Call (Symbol "f") [Symbol "x"])
         , ("comment-only input", "(* comment *)", Symbol "Null")
@@ -574,7 +575,7 @@ checkFullFormParser = do
 checkFullFormParserErrors :: IO Bool
 checkFullFormParserErrors = do
   first <- assertLeft "reject trailing FullForm input" (parseFullForm "f[x] trailing")
-  second <- assertLeft "reject invalid rational" (parseFullForm "Rational[1, 0]")
+  second <- assertLeft "reject incomplete rational call" (parseFullForm "Rational[1, 0")
   third <- assertLeft "reject malformed real exponent" (parseFullForm "1.2*^3.5")
   fourth <- assertLeft "reject unterminated comment" (parseFullForm "f[1] (* open")
   pure (and [first, second, third, fourth])
@@ -584,6 +585,8 @@ checkInputFormParser = do
   let cases =
         [ ("implicit multiplication and power", "1 + 2 x^3", "Plus[1, Times[2, Power[x, 3]]]")
         , ("numeric adjacency", "2x", "Times[2, x]")
+        , ("explicit rational constructors remain calls", "{Rational[2,4], Rational[4,2], Rational[0,0]}", "List[Rational[2, 4], Rational[4, 2], Rational[0, 0]]")
+        , ("explicit complex constructors remain calls", "{Complex[1,0], Complex[1.,0.], System`Complex[1,2.]}", "List[Complex[1, 0], Complex[1., 0.], System`Complex[1, 2.]]")
         , ("structural exact division", "1/2 + 1/3", "Plus[Times[1, Power[2, -1]], Times[1, Power[3, -1]]]")
         , ("grouped exact division product", "(2/3)(9/4)", "Times[Times[2, Power[3, -1]], Times[9, Power[4, -1]]]")
         , ("structural exact division power", "(1/2)^-2", "Power[Times[1, Power[2, -1]], -2]")
@@ -688,6 +691,14 @@ checkEvaluator :: IO Bool
 checkEvaluator = do
   let inputCases =
         [ ("integer arithmetic", "1 + 2*3", "7")
+        , ("explicit rational constructor normalization", "{Rational[2,4],Rational[4,2],Rational[-2,-4],Rational[2,-4],Rational[0,5],Rational[0,0],Rational[1,0],Rational[-1,0]}", "List[Rational[1, 2], 2, Rational[1, 2], Rational[-1, 2], 0, Indeterminate, ComplexInfinity, ComplexInfinity]")
+        , ("inert rational constructor domains", "{Rational[],Rational[1],Rational[1,2,3],Rational[x,2],Rational[1.,2],Rational[1,2.],Rational[Rational[1,2],3]}", "List[Rational[], Rational[1], Rational[1, 2, 3], Rational[x, 2], Rational[1., 2], Rational[1, 2.], Rational[Rational[1, 2], 3]]")
+        , ("explicit complex constructor normalization", "{Complex[1,2],Complex[1,0],Complex[0.,0],Complex[0,0.],Complex[1.,2],Complex[1,2.],Complex[1.,2.],Complex[1`30,2],Complex[1,2`30],Complex[1,0`20],Complex[Rational[1,2],Rational[-2,4]]}", "List[Complex[1, 2], 1, 0., Complex[0., 0.], Complex[1., 2.], Complex[1., 2.], Complex[1., 2.], Complex[1`30, 2], Complex[1, 2`30], Complex[1, 0`20], Complex[Rational[1, 2], Rational[-1, 2]]]")
+        , ("inert complex constructor domains", "{Complex[],Complex[1],Complex[1,2,3],Complex[x,0],Complex[1,x],Complex[1,I],Complex[Rational[1,0],0]}", "List[Complex[], Complex[1], Complex[1, 2, 3], Complex[x, 0], Complex[1, x], Complex[1, Complex[0, 1]], Complex[ComplexInfinity, 0]]")
+        , ("numeric constructor sequence splicing", "{Rational[Sequence[2,4]],Rational[1,Sequence[]],Complex[Sequence[1,2]],Complex[1,Sequence[]]}", "List[Rational[1, 2], Rational[1], Complex[1, 2], Complex[1]]")
+        , ("qualified numeric constructors and structural atoms", "{System`Rational[2,4],Global`Rational[2+2,4],System`Complex[1,2.],Global`Complex[1+1,0],Head[Rational[1,2]],AtomQ[Rational[1,2]],Length[Rational[1,2]]}", "List[Rational[1, 2], Global`Rational[4, 4], Complex[1., 2.], Global`Complex[2, 0], Rational, True, 0]")
+        , ("numeric constructor structural outcomes", "{Head[Complex[1,2]],AtomQ[Complex[1,2]],Length[Complex[1,2]],Head[Rational[x,2]],AtomQ[Rational[x,2]],Length[Rational[x,2]],Head[Complex[x,2]],AtomQ[Complex[x,2]],Length[Complex[x,2]],Head[Global`Rational[1,2]],AtomQ[Global`Rational[1,2]],Length[Global`Rational[1,2]]}", "List[Complex, True, 0, Rational, False, 2, Complex, False, 2, Global`Rational, False, 2]")
+        , ("held explicit numeric constructor syntax", "{HoldComplete[Rational[2,4],Complex[1,0]],Hold[Rational[2,4],Complex[1,0]]}", "List[HoldComplete[Rational[2, 4], Complex[1, 0]], Hold[Rational[2, 4], Complex[1, 0]]]")
         , ("exact rational sum", "1/2 + 1/3", "Rational[5, 6]")
         , ("exact rational product", "(2/3)(9/4)", "Rational[3, 2]")
         , ("exact rational reciprocal power", "(1/2)^-2", "4")
@@ -1872,7 +1883,25 @@ checkEvaluationSession = do
         , "g::b: Message generated."
         )
       messageCases =
-        [ ( "abort control arity diagnostics"
+        [ ( "numeric constructor edge cases stay diagnostic-free"
+          , "{Rational[0,0], Rational[1,0], Rational[x,2], Rational[1], Complex[1,0], Complex[1,0.], Complex[x,0], Complex[1]}"
+          , "List[Indeterminate, ComplexInfinity, Rational[x, 2], Rational[1], 1, Complex[1., 0.], Complex[x, 0], Complex[1]]"
+          , []
+          )
+        , ( "numeric constructors retain argument diagnostics"
+          , "{Rational[Length[], 2], Complex[1, Length[]]}"
+          , "List[Rational[Length[], 2], Complex[1, Length[]]]"
+          , [ ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            , ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            ]
+          )
+        , ( "abort control arity diagnostics"
           , "{Abort[1], CheckAbort[1], AbortProtect[]}"
           , "List[Abort[1], CheckAbort[1], AbortProtect[]]"
           , [ ( "Abort::error"
@@ -3868,6 +3897,7 @@ checkInputForms :: IO Bool
 checkInputForms = do
   let cases =
         [ ("list and association", "{a, <|x -> 1/2|>}", "{a, <|x -> 1 / 2|>}")
+        , ("explicit numeric constructors", "{Rational[2,4],Complex[1.,0.]}", "{Rational[2, 4], Complex[1., 0.]}")
         , ("operator precedence", "(a + b) * c^(-2)", "(a + b) * c^(-2)")
         , ("dot vectors", "{a,b}.{c,d}", "{a, b} . {c, d}")
         , ("dot pure function", "Hold[#1.#2 &]", "Hold[# . #2 &]")

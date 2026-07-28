@@ -759,20 +759,7 @@ foldCalls expression argumentLists = foldl' step (pure expression) argumentLists
   step accumulated arguments' = accumulated >>= (`canonicalCall` arguments')
 
 canonicalCall :: Expr -> [Expr] -> Parser Expr
-canonicalCall (Symbol "Rational") [Integer numerator, Integer denominator] =
-  either (fail . T.unpack . expressionErrorMessage) pure (rational numerator denominator)
-canonicalCall (Symbol "Complex") [realPart, imaginaryPart] =
-  pure (Complex (canonicalComplexPart realPart) (canonicalComplexPart imaginaryPart))
 canonicalCall expressionHead arguments' = pure (Call expressionHead arguments')
-
-canonicalComplexPart :: Expr -> Expr
-canonicalComplexPart expression = case expression of
-  Call
-    (Symbol "Times")
-    [Integer numerator, Call (Symbol "Power") [Integer denominator, Integer (-1)]]
-      | denominator /= 0 ->
-          either (const expression) id (rational numerator denominator)
-  _ -> expression
 
 argumentsParser :: Parser [Expr]
 argumentsParser =

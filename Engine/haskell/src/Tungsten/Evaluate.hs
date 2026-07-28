@@ -81,6 +81,9 @@ evaluateAt :: Int -> Expr -> Either EvaluationError Expr
 evaluateAt depth expression
   | depth > 1024 = Left (EvaluationError "the evaluation recursion limit was exceeded")
   | otherwise = case expression of
+      Symbol name
+        | systemHeadIn ["I"] name ->
+            Right (Complex (Integer 0) (Integer 1))
       Call (Symbol headName) _
         | systemHeadIn ["HoldComplete", "Unevaluated"] headName ->
             Right expression
@@ -635,6 +638,8 @@ reduceEvaluatedCall = reduceCall
 
 reduceBuiltin :: Text -> [Expr] -> Either EvaluationError Expr
 reduceBuiltin headName values = case headName of
+  "Rational" -> Right (reduceRationalConstructor values)
+  "Complex" -> Right (reduceComplexConstructor values)
   "Plus" -> reduceSparseArithmetic "Plus" values
   "Times" -> reduceSparseArithmetic "Times" values
   "Power" -> Right (reducePower values)
@@ -660,7 +665,9 @@ reduceBuiltin headName values = case headName of
   "GreaterEqual" -> Right (reduceOrdering (/= LT) headName values)
   "Inequality" -> Right (reduceInequality values)
   "Head" -> Right (unary headName headExpr values)
-  "Length" -> Right (unary headName expressionLength values)
+  "Length" -> case values of
+    [value] -> Right (expressionLength value)
+    _ -> Left (EvaluationError "Length expects exactly one argument.")
   "Depth" -> Right (unary headName (Integer . fromIntegral . expressionDepth) values)
   "Dimensions" -> reduceDimensions values
   "ArrayDepth" -> reduceArrayDepth values
@@ -1119,6 +1126,27 @@ makeComplex realPart imaginaryPart
   | isMachineReal realPart || isMachineReal imaginaryPart =
       Complex (toMachineReal realPart) (toMachineReal imaginaryPart)
   | otherwise = Complex realPart imaginaryPart
+
+-- Explicit numeric constructors remain ordinary calls in the parser.  They
+-- become numeric atoms only after their arguments have evaluated, matching
+-- the Python reference and Wolfram's distinction between held syntax and an
+-- evaluated numeric value.
+reduceRationalConstructor :: [Expr] -> Expr
+reduceRationalConstructor values = case values of
+  [Integer numerator, Integer denominator]
+    | denominator == 0 ->
+        if numerator == 0
+          then Symbol "Indeterminate"
+          else Symbol "ComplexInfinity"
+    | otherwise -> fromExact (normalizeExact numerator denominator)
+  _ -> Call (Symbol "Rational") values
+
+reduceComplexConstructor :: [Expr] -> Expr
+reduceComplexConstructor values = case values of
+  [realPart, imaginaryPart]
+    | isExplicitReal realPart
+    , isExplicitReal imaginaryPart -> makeComplex realPart imaginaryPart
+  _ -> Call (Symbol "Complex") values
 
 isMachineReal :: Expr -> Bool
 isMachineReal (Real source) = case parseRealInfo source of
