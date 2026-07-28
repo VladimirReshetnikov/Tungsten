@@ -137,6 +137,29 @@ CASES = (
         0,
     ),
     (
+        "stateful Inner callbacks and validation boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenInnerI,tungstenInnerF,tungstenInnerG];"
+            "tungstenInnerI=0;"
+            "tungstenInnerF[x_,y_]:=(tungstenInnerI++;"
+            "p[tungstenInnerI,x,y]);"
+            "tungstenInnerG[x__]:=(tungstenInnerI++;"
+            "q[tungstenInnerI,x]);"
+            "{Inner[Times,{a,b},{c,d},Plus],"
+            "Inner[tungstenInnerF,{a,b},{c,d},tungstenInnerG],"
+            "tungstenInnerI,Inner[f,{}, {},g],"
+            "System`Inner[Times,{a,b},{c,d},Plus],"
+            "Global`Inner[Times,{a,b},{c,d},Plus],"
+            "Inner[f,{a},{b,c},g],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "complex projections and listable threading",
         (
             "expr",

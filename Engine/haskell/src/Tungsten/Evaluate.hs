@@ -640,7 +640,7 @@ pureReducerDispatchView expression = case expression of
     | isSystemSymbol originalHead
     , Just shortName <- normalizeSystemSymbolName originalHead
     , originalHead /= shortName
-    , shortName `notElem` ["Distribute", "Operate", "Thread"] ->
+    , shortName `notElem` ["Distribute", "Inner", "Operate", "Thread"] ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -733,7 +733,9 @@ restorePureQualifiedOperatorHead qualifiedName shortName = \case
 preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
   Symbol headName ->
-    systemHeadIn ["Sqrt", "Distribute", "Level", "Operate", "Thread"] headName
+    systemHeadIn
+      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Thread"]
+      headName
   _ -> False
 
 -- | Reduce one call whose head and arguments have already been evaluated and
@@ -751,6 +753,7 @@ reduceBuiltin headName values = case headName of
   "Precision" -> Right (reducePrecision values)
   "Accuracy" -> Right (reduceAccuracy values)
   "Distribute" -> reduceDistribute values
+  "Inner" -> reduceInner values
   "Re" -> Right (reduceComplexComponent "Re" values)
   "Im" -> Right (reduceComplexComponent "Im" values)
   "ReIm" -> Right (reduceReIm values)
@@ -1526,6 +1529,21 @@ distributeExpression
             )
       _ -> (found, [prefix <> [value] | prefix <- prefixes])
 distributeExpression expression _ _ _ _ = expression
+
+reduceInner :: [Expr] -> Either EvaluationError Expr
+reduceInner = \case
+  [function, Call _ leftValues, Call _ rightValues, combiner]
+    | length leftValues /= length rightValues ->
+        Left (EvaluationError "Inner expects expressions with the same length.")
+    | otherwise -> do
+        combined <-
+          traverse
+            (\(left, right) -> applyTraversalCallable function [left, right])
+            (zip leftValues rightValues)
+        applyTraversalCallable combiner combined
+  [_, _, _, _] ->
+    Left (EvaluationError "Inner expects a nonatomic expression.")
+  _ -> Left (EvaluationError "Inner expects exactly four arguments.")
 
 precisionValue :: Expr -> PrecisionValue
 precisionValue = \case

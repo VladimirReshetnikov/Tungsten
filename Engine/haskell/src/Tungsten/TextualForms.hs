@@ -8,6 +8,7 @@
 module Tungsten.TextualForms
   ( baseDecodeExpr
   , baseEncodeExpr
+  , displayOutputText
   , exportByteArrayExpr
   , exportStringExpr
   , importByteArrayExpr
@@ -468,6 +469,13 @@ renderDisplayWrapper wrapperName payload = case wrapperName of
   "FortranForm" -> cLikeText True payload
   "TextForm" -> outputFormText payload
   _ -> inputForm payload
+
+displayOutputText :: Expr -> Text
+displayOutputText expression = case displayWrapper expression of
+  Just (wrapperName, payload) -> renderDisplayWrapper wrapperName payload
+  Nothing -> case expression of
+    String value -> value
+    _ -> inputForm expression
 
 mathMlFormText :: Bool -> Expr -> Text
 mathMlFormText includeFinalNewline expression =

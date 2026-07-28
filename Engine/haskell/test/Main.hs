@@ -707,6 +707,7 @@ checkEvaluator = do
         , ("precision and accuracy complex coercion", "{Complex[1.,2`20],Complex[1.,2``20],Precision[Complex[1.,2`20]],Accuracy[Complex[1.,2`20]],Precision[Complex[1.,2``20]],Accuracy[Complex[1.,2``20]],Precision[Complex[1`20,2``20]],Accuracy[Complex[1`20,2``20]],Precision[Complex[Overflow[],1.]],Accuracy[Complex[Overflow[],1.]]}", "List[Complex[1., 2.], Complex[1., 2``20], MachinePrecision, 15.653559774527022, MachinePrecision, 15.954589770191003, 20., 20., MachinePrecision, -Infinity]")
         , ("precision and accuracy decimal log extremes", "{Accuracy[1.*^-400],Precision[1.23``20*^-400],Precision[1.23``20*^400]}", "List[415.954589770191, -379.9100948885606, Overflow[]]")
         , ("structural Distribute products and boundaries", "{Distribute[(a+b)(c+d)],Distribute[f[g[a,b],g[c,d]],g,f,h,k],Distribute[f[g[],x],g],Distribute[x],Distribute[f[g[a,b]],g,q],Distribute[f[g[1+1,3]],g,f,Plus,Times],System`Distribute[(a+b)(c+d)],Global`Distribute[(a+b)(c+d)]}", "List[Plus[Times[a, c], Times[a, d], Times[b, c], Times[b, d]], k[h[a, c], h[a, d], h[b, c], h[b, d]], g[], x, f[g[a, b]], Times[Plus[2], Plus[3]], System`Distribute[Times[Plus[a, b], Plus[c, d]]], Global`Distribute[Times[Plus[a, b], Plus[c, d]]]]")
+        , ("Inner pair callbacks and structural boundaries", "{Inner[Times,{a,b},{c,d},Plus],Inner[f,h[a,b],q[c,d],g],Inner[f,{}, {},g],Inner[Function[{x,y},HoldComplete[x+y]],{1,2},{3,4},List],Inner[f,Sequence[{a},{b}],g],System`Inner[Times,{a,b},{c,d},Plus],Global`Inner[Times,{a,b},{c,d},Plus]}", "List[Plus[Times[a, c], Times[b, d]], g[f[a, c], f[b, d]], g[], List[HoldComplete[Plus[1, 3]], HoldComplete[Plus[2, 4]]], g[f[a, b]], System`Inner[Times, List[a, b], List[c, d], Plus], Global`Inner[Times, List[a, b], List[c, d], Plus]]")
         , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
         , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
         , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
@@ -1328,6 +1329,7 @@ checkEvaluationSession = do
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
         , ("precision and accuracy evaluate arguments once", "i=0; {Precision[(i++;1.)],Accuracy[(i++;1000.)],Precision[(i++;1),(i++;2)],i,$MessageList}", "List[MachinePrecision, 12.954589770191003, Precision[1, 2], 4, List[]]")
         , ("Distribute returns replacement-headed products without reentry", "ClearAll[h,k];h[x_]:=p[x];k[x___]:=q[x];Distribute[f[g[a,b],g[c]],g,f,h,k]", "k[h[a, c], h[b, c]]")
+        , ("Inner threads pair and combiner callback state", "Clear[i,ff,gg];i=0;ff[x_,y_]:=(i++;p[i,x,y]);gg[x__]:=(i++;q[i,x]);{Inner[ff,{a,b},{c,d},gg],i,$MessageList}", "List[q[3, p[1, a, c], p[2, b, d]], 3, List[]]")
         , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
         , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
         , ("operate invokes its selected head callback exactly once", "ClearAll[y];y=0;{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y}", "List[q[f][g][a], 1]")
@@ -1762,7 +1764,12 @@ checkEvaluationSession = do
         , ("module closure multiple arguments", "bin = Module[{f}, f[x_, y_] := x + y; f]; {bin[3, 4], bin[a, b]}", "List[7, Plus[a, b]]")
         ]
       printCases =
-        [ ( "nested abort protection re-defers at compound boundaries"
+        [ ( "Inner invokes pair callbacks before its final combiner"
+          , "Inner[(Print[InputForm[{##}]];q[##])&,{a,b},{x,y},(Print[InputForm[{##}]];g[##])&]"
+          , "g[q[a, x], q[b, y]]"
+          , ["{a, x}", "{b, y}", "{q[a, x], q[b, y]}"]
+          )
+        , ( "nested abort protection re-defers at compound boundaries"
           , "CheckAbort[AbortProtect[AbortProtect[Abort[]; Print[\"innerTail\"]]; Print[\"outerTail\"]], fail]"
           , "fail"
           , ["innerTail", "outerTail"]
@@ -1953,6 +1960,23 @@ checkEvaluationSession = do
             , ( "Distribute::error"
               , "MessageName[Distribute, \"error\"]"
               , "Distribute::error: Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+              )
+            ]
+          )
+        , ( "Inner validates arity compound operands and lengths"
+          , "{Inner[],Inner[f,a,{b},g],Inner[f,{a},{b,c},g],$MessageList}"
+          , "List[Inner[], Inner[f, a, List[b], g], Inner[f, List[a], List[b, c], g], List[HoldForm[MessageName[Inner, \"error\"]], HoldForm[MessageName[Inner, \"error\"]], HoldForm[MessageName[Inner, \"error\"]]]]"
+          , [ ( "Inner::error"
+              , "MessageName[Inner, \"error\"]"
+              , "Inner::error: Inner expects exactly four arguments."
+              )
+            , ( "Inner::error"
+              , "MessageName[Inner, \"error\"]"
+              , "Inner::error: Inner expects a nonatomic expression."
+              )
+            , ( "Inner::error"
+              , "MessageName[Inner, \"error\"]"
+              , "Inner::error: Inner expects expressions with the same length."
               )
             ]
           )

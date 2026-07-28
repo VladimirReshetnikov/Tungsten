@@ -42,6 +42,7 @@ import Tungsten.SystemSymbols
   , systemSymbolAttributes
   , systemSymbolNames
   )
+import qualified Tungsten.TextualForms as TextualForms
 
 data Definition
   = ImmediateValue !Expr
@@ -2984,6 +2985,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionMap depth session values)
   Call (Symbol "Operate") values ->
     Just (evaluateSessionOperate depth session values)
+  Call (Symbol "Inner") values ->
+    Just (evaluateSessionInner depth session values)
   Call (Symbol "MapAll") values ->
     Just (evaluateSessionMapAll depth session values)
   Call (Symbol "MapApply") values ->
@@ -3459,8 +3462,7 @@ evaluateSessionPrint depth session values = do
     )
 
 renderPrintValue :: Expr -> Text
-renderPrintValue (String value) = value
-renderPrintValue expression = inputForm expression
+renderPrintValue = TextualForms.displayOutputText
 
 evaluateSessionSelectionOperator
   :: Text
@@ -3691,6 +3693,35 @@ evaluateSessionOperate depth session = \case
     sessionFailure
       session
       "Operate expects an operator, an expression, and an optional positive level."
+
+evaluateSessionInner
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionInner depth session = \case
+  [function, Call _ leftValues, Call _ rightValues, combiner]
+    | length leftValues /= length rightValues ->
+        sessionFailure session "Inner expects expressions with the same length."
+    | otherwise -> combinePairs function combiner session [] leftValues rightValues
+  [_, _, _, _] ->
+    sessionFailure session "Inner expects a nonatomic expression."
+  _ -> sessionFailure session "Inner expects exactly four arguments."
+ where
+  combinePairs _ combiner current combined [] [] =
+    evaluateSessionCallable depth current combiner (reverse combined)
+  combinePairs function combiner current combined (left : leftRest) (right : rightRest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth current function [left, right]
+    combinePairs
+      function
+      combiner
+      updated
+      (value : combined)
+      leftRest
+      rightRest
+  combinePairs _ _ current _ _ _ =
+    sessionFailure current "Inner expects expressions with the same length."
 
 operateSessionAtLevel
   :: Int
