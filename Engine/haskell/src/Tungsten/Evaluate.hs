@@ -640,7 +640,7 @@ pureReducerDispatchView expression = case expression of
     | isSystemSymbol originalHead
     , Just shortName <- normalizeSystemSymbolName originalHead
     , originalHead /= shortName
-    , shortName `notElem` ["Operate", "Thread"] ->
+    , shortName `notElem` ["Distribute", "Operate", "Thread"] ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -732,7 +732,8 @@ restorePureQualifiedOperatorHead qualifiedName shortName = \case
 
 preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
-  Symbol headName -> systemHeadIn ["Sqrt", "Level", "Operate", "Thread"] headName
+  Symbol headName ->
+    systemHeadIn ["Sqrt", "Distribute", "Level", "Operate", "Thread"] headName
   _ -> False
 
 -- | Reduce one call whose head and arguments have already been evaluated and
@@ -749,6 +750,7 @@ reduceBuiltin headName values = case headName of
   "Underflow" -> Right (reduceSpecialRealConstructor UnderflowReal values)
   "Precision" -> Right (reducePrecision values)
   "Accuracy" -> Right (reduceAccuracy values)
+  "Distribute" -> reduceDistribute values
   "Re" -> Right (reduceComplexComponent "Re" values)
   "Im" -> Right (reduceComplexComponent "Im" values)
   "ReIm" -> Right (reduceReIm values)
@@ -1462,6 +1464,68 @@ reduceAccuracy = \case
           Symbol (if accuracy > 0 then "Infinity" else "-Infinity")
       | otherwise -> machineRealExpr accuracy
   values -> Call (Symbol "Accuracy") values
+
+reduceDistribute :: [Expr] -> Either EvaluationError Expr
+reduceDistribute = \case
+  [expression] ->
+    Right (distributeExpression expression (Symbol "Plus") Nothing Nothing Nothing)
+  [expression, distributedHead] ->
+    Right (distributeExpression expression distributedHead Nothing Nothing Nothing)
+  [expression, distributedHead, outerHead] ->
+    Right
+      ( distributeExpression
+          expression
+          distributedHead
+          (Just outerHead)
+          Nothing
+          Nothing
+      )
+  [expression, distributedHead, outerHead, distributedReplacement, outerReplacement] ->
+    Right
+      ( distributeExpression
+          expression
+          distributedHead
+          (Just outerHead)
+          (Just distributedReplacement)
+          (Just outerReplacement)
+      )
+  _ ->
+    Left
+      ( EvaluationError
+          "Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+      )
+
+distributeExpression
+  :: Expr
+  -> Expr
+  -> Maybe Expr
+  -> Maybe Expr
+  -> Maybe Expr
+  -> Expr
+distributeExpression
+  expression@(Call expressionHead values)
+  distributedHead
+  requiredOuterHead
+  distributedReplacement
+  outerReplacement
+    | maybe False (/= expressionHead) requiredOuterHead = expression
+    | not foundDistributedHead = expression
+    | otherwise =
+        Call
+          resultHead
+          [Call productHead factors | factors <- products]
+   where
+    productHead = maybe expressionHead id distributedReplacement
+    resultHead = maybe distributedHead id outerReplacement
+    (foundDistributedHead, products) = foldl extendProducts (False, [[]]) values
+    extendProducts (found, prefixes) value = case value of
+      Call argumentHead choices
+        | argumentHead == distributedHead ->
+            ( True
+            , [prefix <> [choice] | prefix <- prefixes, choice <- choices]
+            )
+      _ -> (found, [prefix <> [value] | prefix <- prefixes])
+distributeExpression expression _ _ _ _ = expression
 
 precisionValue :: Expr -> PrecisionValue
 precisionValue = \case

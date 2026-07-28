@@ -115,6 +115,28 @@ CASES = (
         0,
     ),
     (
+        "structural Distribute products and raw replacement heads",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenDistributeH,tungstenDistributeK];"
+            "tungstenDistributeH[x_]:=p[x];"
+            "tungstenDistributeK[x___]:=q[x];"
+            "{Distribute[(a+b)(c+d)],"
+            "Distribute[f[g[a,b],g[c,d]],g,f,h,k],"
+            "Distribute[f[g[],x],g],"
+            "Distribute[f[g[1+1,3]],g,f,Plus,Times],"
+            "Distribute[f[g[a,b],g[c]],g,f,"
+            "tungstenDistributeH,tungstenDistributeK],"
+            "System`Distribute[(a+b)(c+d)],"
+            "Global`Distribute[(a+b)(c+d)],Distribute[],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "complex projections and listable threading",
         (
             "expr",

@@ -706,6 +706,7 @@ checkEvaluator = do
         , ("precision and accuracy recursive atomic boundaries", "{Precision[f[1`30,g[2``20]]],Accuracy[f[1`30,g[2``20]]],Precision[f[Overflow[],Underflow[]]],Accuracy[f[Overflow[],Underflow[]]],Precision[SparseArray[{{1}->1.},{2}]],Accuracy[SparseArray[{{1}->1.},{2}]],Precision[Root[#^2-2&,1]],Accuracy[Root[#^2-2&,1]],Precision[f[]],Accuracy[f[]],Precision[f[1.,Overflow[]]],Accuracy[f[1.,Overflow[]]]}", "List[20.30102999566398, 20., 0., -Infinity, Infinity, Infinity, Infinity, Infinity, Infinity, Infinity, MachinePrecision, -Infinity]")
         , ("precision and accuracy complex coercion", "{Complex[1.,2`20],Complex[1.,2``20],Precision[Complex[1.,2`20]],Accuracy[Complex[1.,2`20]],Precision[Complex[1.,2``20]],Accuracy[Complex[1.,2``20]],Precision[Complex[1`20,2``20]],Accuracy[Complex[1`20,2``20]],Precision[Complex[Overflow[],1.]],Accuracy[Complex[Overflow[],1.]]}", "List[Complex[1., 2.], Complex[1., 2``20], MachinePrecision, 15.653559774527022, MachinePrecision, 15.954589770191003, 20., 20., MachinePrecision, -Infinity]")
         , ("precision and accuracy decimal log extremes", "{Accuracy[1.*^-400],Precision[1.23``20*^-400],Precision[1.23``20*^400]}", "List[415.954589770191, -379.9100948885606, Overflow[]]")
+        , ("structural Distribute products and boundaries", "{Distribute[(a+b)(c+d)],Distribute[f[g[a,b],g[c,d]],g,f,h,k],Distribute[f[g[],x],g],Distribute[x],Distribute[f[g[a,b]],g,q],Distribute[f[g[1+1,3]],g,f,Plus,Times],System`Distribute[(a+b)(c+d)],Global`Distribute[(a+b)(c+d)]}", "List[Plus[Times[a, c], Times[a, d], Times[b, c], Times[b, d]], k[h[a, c], h[a, d], h[b, c], h[b, d]], g[], x, f[g[a, b]], Times[Plus[2], Plus[3]], System`Distribute[Times[Plus[a, b], Plus[c, d]]], Global`Distribute[Times[Plus[a, b], Plus[c, d]]]]")
         , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
         , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
         , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
@@ -1326,6 +1327,7 @@ checkEvaluationSession = do
   let cases =
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
         , ("precision and accuracy evaluate arguments once", "i=0; {Precision[(i++;1.)],Accuracy[(i++;1000.)],Precision[(i++;1),(i++;2)],i,$MessageList}", "List[MachinePrecision, 12.954589770191003, Precision[1, 2], 4, List[]]")
+        , ("Distribute returns replacement-headed products without reentry", "ClearAll[h,k];h[x_]:=p[x];k[x___]:=q[x];Distribute[f[g[a,b],g[c]],g,f,h,k]", "k[h[a, c], h[b, c]]")
         , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
         , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
         , ("operate invokes its selected head callback exactly once", "ClearAll[y];y=0;{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y}", "List[q[f][g][a], 1]")
@@ -1936,6 +1938,23 @@ checkEvaluationSession = do
           , "{Precision[],Precision[1,2],Accuracy[],Accuracy[1,2],$MessageList}"
           , "List[Precision[], Precision[1, 2], Accuracy[], Accuracy[1, 2], List[]]"
           , []
+          )
+        , ( "Distribute reports unsupported arities"
+          , "{Distribute[],Distribute[a,b,c,d],Distribute[a,b,c,d,e,f],$MessageList}"
+          , "List[Distribute[], Distribute[a, b, c, d], Distribute[a, b, c, d, e, f], List[HoldForm[MessageName[Distribute, \"error\"]], HoldForm[MessageName[Distribute, \"error\"]], HoldForm[MessageName[Distribute, \"error\"]]]]"
+          , [ ( "Distribute::error"
+              , "MessageName[Distribute, \"error\"]"
+              , "Distribute::error: Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+              )
+            , ( "Distribute::error"
+              , "MessageName[Distribute, \"error\"]"
+              , "Distribute::error: Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+              )
+            , ( "Distribute::error"
+              , "MessageName[Distribute, \"error\"]"
+              , "Distribute::error: Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+              )
+            ]
           )
         , ( "listable complex projections diagnose incompatible lengths"
           , "{Re[{1,2},{3}],$MessageList}"
