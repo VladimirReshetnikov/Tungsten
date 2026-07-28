@@ -183,6 +183,31 @@ CASES = (
         0,
     ),
     (
+        "stateful Through callbacks associations and rebuild boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenThroughI,tungstenThroughF];"
+            "tungstenThroughI=0;"
+            "tungstenThroughF[x__]:=(tungstenThroughI++;"
+            "p[tungstenThroughI,x]);"
+            "{Through[(f+g)[x,y]],"
+            "Through[Unevaluated[q[tungstenThroughF,tungstenThroughF][a,b]]],"
+            "tungstenThroughI,"
+            "Through[Unevaluated[(Identity+Identity)[1]]],"
+            "Through[Unevaluated[<|a->f,b:>g|>[x,y]]],"
+            "Through[Unevaluated[{(Sequence[#,#]&),f}[x]]],"
+            "Through[(f+g)[x],List],Through[x,1],"
+            "System`Through[Unevaluated[(f+g)[x]]],"
+            "Global`Through[Unevaluated[(f+g)[x]]],"
+            "Through[],Through[f[x],1],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "complex projections and listable threading",
         (
             "expr",

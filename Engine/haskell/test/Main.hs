@@ -710,6 +710,9 @@ checkEvaluator = do
         , ("Inner pair callbacks and structural boundaries", "{Inner[Times,{a,b},{c,d},Plus],Inner[f,h[a,b],q[c,d],g],Inner[f,{}, {},g],Inner[Function[{x,y},HoldComplete[x+y]],{1,2},{3,4},List],Inner[f,Sequence[{a},{b}],g],System`Inner[Times,{a,b},{c,d},Plus],Global`Inner[Times,{a,b},{c,d},Plus]}", "List[Plus[Times[a, c], Times[b, d]], g[f[a, c], f[b, d]], g[], List[HoldComplete[Plus[1, 3]], HoldComplete[Plus[2, 4]]], g[f[a, b]], System`Inner[Times, List[a, b], List[c, d], Plus], Global`Inner[Times, List[a, b], List[c, d], Plus]]")
         , ("Outer Cartesian products levels and raw containers", "{Outer[f,{a,b},{x,y}],Outer[f,a+b,{c,d},1],Outer[f,{{a,b},{c}},{{x},{y,z}},1,2],Outer[f,{a,b},{x,y},0,1],Outer[f,h[a,b],q[x,y],-1],Outer[f,{a,b},1,2],Outer[f,h[a][b,c],{x}]}", "List[List[List[f[a, x], f[a, y]], List[f[b, x], f[b, y]]], Plus[List[f[a, c], f[a, d]], List[f[b, c], f[b, d]]], List[List[List[f[List[a, b], x]], List[f[List[a, b], y], f[List[a, b], z]]], List[List[f[List[c], x]], List[f[List[c], y], f[List[c], z]]]], List[f[List[a, b], x], f[List[a, b], y]], h[q[f[a, x], f[a, y]], q[f[b, x], f[b, y]]], List[f[a], f[b]], h[a][List[f[b, x]], List[f[c, x]]]]")
         , ("Outer rebuild normalization and qualification boundaries", "{Outer[Nothing,{a,b}],Outer[Nothing,System`List[a,b]],Outer[f,Unevaluated[{a,b}],{x}],System`Outer[f,{a},{b}],Global`Outer[f,{a},{b}]}", "List[List[], System`List[Nothing, Nothing], List[List[f[a, x]], List[f[b, x]]], System`Outer[f, List[a], List[b]], Global`Outer[f, List[a], List[b]]]")
+        , ("Through distributes compound call heads without final reentry", "{Through[(f+g)[x,y]],Through[p[f,g][x,y]],Through[(f+g)[x,y],List],Through[x],Through[f[x]],Through[x,1],Through[p[][x]],Through[p[f,g][]],Through[Unevaluated[(Identity+Identity)[1]]],System`Through[Unevaluated[(f+g)[x]]],Global`Through[Unevaluated[(f+g)[x]]]}", "List[Plus[f[x, y], g[x, y]], p[f[x, y], g[x, y]], Plus[f, g][x, y], x, f[x], x, p[], p[f[], g[]], Plus[1, 1], System`Through[Plus[f, g][x]], Global`Through[Unevaluated[Plus[f, g][x]]]]")
+        , ("Through normalizes symbol and compound containers distinctly", "{Through[Unevaluated[{(Sequence[#,#]&),f}[x]]],Through[Unevaluated[{(Nothing&),f}[x]]],Through[Unevaluated[{(Splice[{a,b}]&),f}[x]]],Through[Unevaluated[p[(Nothing&),f][x]]],Through[Unevaluated[p[(Splice[{a,b},p]&),f][x]]],Through[Unevaluated[System`List[(Nothing&),f][x]]],Through[Unevaluated[r[s][(Sequence[#,#]&),f][x]]]}", "List[List[x, x, f[x]], List[f[x]], List[a, b, f[x]], p[Nothing, f[x]], p[a, b, f[x]], System`List[Nothing, f[x]], r[s][Sequence[x, x], f[x]]]")
+        , ("Through maps association values and respects restrictions", "{Through[Unevaluated[<|a->f,b:>g|>[x,y]]],Through[Unevaluated[<|a->f,b:>g|>[x]],List]}", "List[Association[Rule[a, f[x, y]], RuleDelayed[b, g[x, y]]], Association[Rule[a, f], RuleDelayed[b, g]][x]]")
         , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
         , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
         , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
@@ -1333,6 +1336,8 @@ checkEvaluationSession = do
         , ("Distribute returns replacement-headed products without reentry", "ClearAll[h,k];h[x_]:=p[x];k[x___]:=q[x];Distribute[f[g[a,b],g[c]],g,f,h,k]", "k[h[a, c], h[b, c]]")
         , ("Inner threads pair and combiner callback state", "Clear[i,ff,gg];i=0;ff[x_,y_]:=(i++;p[i,x,y]);gg[x__]:=(i++;q[i,x]);{Inner[ff,{a,b},{c,d},gg],i,$MessageList}", "List[q[3, p[1, a, c], p[2, b, d]], 3, List[]]")
         , ("Outer threads Cartesian callbacks left to right", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Outer[ff,{a,b},{x,y}],i,$MessageList}", "List[List[List[p[1, a, x], p[2, a, y]], List[p[3, b, x], p[4, b, y]]], 4, List[]]")
+        , ("Through distinguishes eager and transparent callback arguments", "ClearAll[i,ff,first,second];i=0;ff[x__]:=p[i,x];first={Through[q[ff,ff][i++]],i};i=0;second={Through[Unevaluated[q[ff,ff][i++]]],i};{first,second}", "List[List[q[p[1, 0], p[1, 0]], 1], List[q[p[1, 0], p[2, 1]], 2]]")
+        , ("Through threads association callback state", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Through[Unevaluated[<|a->ff,b:>ff|>[x]]],i}", "List[Association[Rule[a, p[1, x]], RuleDelayed[b, p[2, x]]], 2]")
         , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
         , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
         , ("operate invokes its selected head callback exactly once", "ClearAll[y];y=0;{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y}", "List[q[f][g][a], 1]")
@@ -1778,6 +1783,11 @@ checkEvaluationSession = do
           , "List[List[q[a, x], q[a, y]], List[q[b, x], q[b, y]]]"
           , ["{a, x}", "{a, y}", "{b, x}", "{b, y}"]
           )
+        , ( "Through invokes head callbacks left to right"
+          , "ClearAll[i,ff];i=0;ff[x__]:=(i++;Print[InputForm[{i,x}]];q[i,x]);Through[p[ff,ff][a,b]]"
+          , "p[q[1, a, b], q[2, a, b]]"
+          , ["{1, a, b}", "{2, a, b}"]
+          )
         , ( "nested abort protection re-defers at compound boundaries"
           , "CheckAbort[AbortProtect[AbortProtect[Abort[]; Print[\"innerTail\"]]; Print[\"outerTail\"]], fail]"
           , "fail"
@@ -2007,6 +2017,19 @@ checkEvaluationSession = do
             , ( "Outer::error"
               , "MessageName[Outer, \"error\"]"
               , "Outer::error: Outer expects a nonatomic expression."
+              )
+            ]
+          )
+        , ( "Through validates arity and restricting heads"
+          , "{Through[],Through[f[x],1],$MessageList}"
+          , "List[Through[], Through[f[x], 1], List[HoldForm[MessageName[Through, \"error\"]], HoldForm[MessageName[Through, \"error\"]]]]"
+          , [ ( "Through::error"
+              , "MessageName[Through, \"error\"]"
+              , "Through::error: Through expects an expression and an optional restricting head."
+              )
+            , ( "Through::error"
+              , "MessageName[Through, \"error\"]"
+              , "Through::error: Through's second argument must be a Symbol head."
               )
             ]
           )

@@ -2989,6 +2989,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionInner depth session values)
   Call (Symbol "Outer") values ->
     Just (evaluateSessionOuter depth session values)
+  Call (Symbol "Through") values ->
+    Just (evaluateSessionThrough depth session values)
   Call (Symbol "MapAll") values ->
     Just (evaluateSessionMapAll depth session values)
   Call (Symbol "MapApply") values ->
@@ -3772,6 +3774,71 @@ evaluateSessionOuter depth session values =
 
   rebuildOuterCall expressionHead@Symbol {} = rebuildWithSplicing expressionHead
   rebuildOuterCall expressionHead = Call expressionHead
+
+evaluateSessionThrough
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionThrough depth session = \case
+  [subject] -> through subject Nothing
+  [subject, targetHead] -> through subject (Just targetHead)
+  _ ->
+    sessionFailure
+      session
+      "Through expects an expression and an optional restricting head."
+ where
+  through subject@Call {} targetHead = case targetHead of
+    Nothing -> distribute subject
+    Just (Symbol targetName)
+      | targetMatches subject targetName -> distribute subject
+      | otherwise -> Right (subject, session)
+    Just _ ->
+      sessionFailure
+        session
+        "Through's second argument must be a Symbol head."
+  through subject _ = Right (subject, session)
+
+  targetMatches (Call functionsContainer _) targetName =
+    case functionsContainer of
+      Call (Symbol containerHead) _ -> containerHead == targetName
+      _ -> False
+  targetMatches _ _ = False
+
+  distribute subject@(Call functionsContainer callArguments) =
+    case sessionAssociationEntries functionsContainer of
+      Just entries -> mapAssociation callArguments [] session entries
+      Nothing -> case functionsContainer of
+        Call containerHead functions ->
+          mapFunctions containerHead callArguments [] session functions
+        _ -> Right (subject, session)
+  distribute subject = Right (subject, session)
+
+  mapAssociation _ retained current [] =
+    Right (normalizedSessionAssociation (reverse retained), current)
+  mapAssociation callArguments retained current (SessionAssociationEntry ruleHead key function : rest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth current function callArguments
+    mapAssociation
+      callArguments
+      (Call (Symbol ruleHead) [key, value] : retained)
+      updated
+      rest
+
+  mapFunctions containerHead _ retained current [] =
+    Right (rebuildContainer containerHead (reverse retained), current)
+  mapFunctions containerHead callArguments retained current (function : rest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth current function callArguments
+    mapFunctions
+      containerHead
+      callArguments
+      (value : retained)
+      updated
+      rest
+
+  rebuildContainer containerHead@Symbol {} = rebuildWithSplicing containerHead
+  rebuildContainer containerHead = Call containerHead
 
 operateSessionAtLevel
   :: Int
@@ -9614,6 +9681,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "RightComposition"
       , "Operate"
       , "Thread"
+      , "Through"
       ]
       expressionHead =
       map stripSessionDirectUnevaluated

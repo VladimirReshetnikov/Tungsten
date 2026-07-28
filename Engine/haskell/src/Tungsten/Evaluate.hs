@@ -240,6 +240,7 @@ stripPureTransparentUnevaluatedArguments expressionHead
       , "RightComposition"
       , "Operate"
       , "Thread"
+      , "Through"
       ]
       expressionHead =
       map stripDirectUnevaluated
@@ -643,7 +644,7 @@ pureReducerDispatchView expression = case expression of
     , Just shortName <- normalizeSystemSymbolName originalHead
     , originalHead /= shortName
     , shortName
-        `notElem` ["Distribute", "Inner", "Operate", "Outer", "Thread"] ->
+        `notElem` ["Distribute", "Inner", "Operate", "Outer", "Thread", "Through"] ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -737,7 +738,7 @@ preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
   Symbol headName ->
     systemHeadIn
-      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread"]
+      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread", "Through"]
       headName
   _ -> False
 
@@ -1018,6 +1019,7 @@ reduceBuiltin headName values = case headName of
   "Map" -> Right (reduceMap values)
   "Operate" -> reduceOperate values
   "Thread" -> reduceThread values
+  "Through" -> reduceThrough values
   "MapAll" -> reduceMapAll values
   "MapApply" -> reduceMapApply values
   "MapAt" -> Right (reduceMapAt values)
@@ -11010,6 +11012,63 @@ threadOverHead subject@(Call expressionHead values) threadHead =
     ]
 threadOverHead subject _ = Right subject
 
+reduceThrough :: [Expr] -> Either EvaluationError Expr
+reduceThrough = \case
+  [subject] -> throughExpression subject Nothing
+  [subject, targetHead] -> throughExpression subject (Just targetHead)
+  _ ->
+    Left
+      ( EvaluationError
+          "Through expects an expression and an optional restricting head."
+      )
+
+throughExpression
+  :: Expr
+  -> Maybe Expr
+  -> Either EvaluationError Expr
+throughExpression subject@Call {} targetHead = do
+  permitted <- throughTargetMatches subject targetHead
+  if permitted
+    then distributeThrough subject
+    else Right subject
+throughExpression subject _ = Right subject
+
+throughTargetMatches
+  :: Expr
+  -> Maybe Expr
+  -> Either EvaluationError Bool
+throughTargetMatches _ Nothing = Right True
+throughTargetMatches (Call functionsContainer _) (Just (Symbol targetName)) =
+  Right
+    ( case functionsContainer of
+        Call (Symbol containerHead) _ -> containerHead == targetName
+        _ -> False
+    )
+throughTargetMatches _ (Just _) =
+  Left
+    ( EvaluationError
+        "Through's second argument must be a Symbol head."
+    )
+
+distributeThrough :: Expr -> Either EvaluationError Expr
+distributeThrough subject@(Call functionsContainer callArguments)
+  | Just entries <- associationEntries functionsContainer = do
+      mapped <- traverse mapEntry entries
+      Right (associationExpr mapped)
+  | Call containerHead functions <- functionsContainer = do
+      mapped <- traverse (`applyTraversalCallable` callArguments) functions
+      Right
+        ( case containerHead of
+            Symbol {} -> rebuildWithSplicing containerHead mapped
+            _ -> Call containerHead mapped
+        )
+  | otherwise = Right subject
+ where
+  mapEntry (AssociationEntry ruleHead key function) =
+    AssociationEntry ruleHead key
+      <$> applyTraversalCallable function callArguments
+distributeThrough subject = Right subject
+
 reduceMapAll :: [Expr] -> Either EvaluationError Expr
 reduceMapAll values =
   case stripMapAllHeadsOption values of
@@ -11119,6 +11178,12 @@ applyTraversalHead function expression
 applyTraversalCallable :: Expr -> [Expr] -> Either EvaluationError Expr
 applyTraversalCallable (Symbol nothingHead) _
   | systemHeadIn ["Nothing"] nothingHead = Right (Symbol "Nothing")
+applyTraversalCallable function@(Call functionHead@(Symbol functionName) functionArguments) values
+  | systemHeadIn ["Function"] functionName = do
+      instantiated <- applyFunctionWithHead functionHead functionArguments values
+      if instantiated == Call function values
+        then Right instantiated
+        else evaluate instantiated
 applyTraversalCallable function values = evaluate (Call function values)
 
 reduceApply :: [Expr] -> Expr
