@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T13:54:43Z
-- Repository HEAD: bacb2b59d73d9f84238fcd8348bf8629be78665e
+- Updated (UTC): 2026-07-28T14:11:11Z
+- Repository HEAD: c2c41a4d29058c0a8c98d720891c7546ea757969
 
 ## Purpose
 
@@ -127,7 +127,9 @@ state and control propagation, generated-list normalization, and the Python-comp
 between direct and operator forms of explicit `System`` and `Global`` spellings. `MapThread`
 supports depth-zero application and recursive parallel-list threading, row-major callback order,
 incremental validation with retained prior effects, bare generated-list normalization, and exact
-shape diagnostics.
+shape diagnostics. `BlockMap` adds complete-window scheduling with default, overlapping, and
+gapped offsets over arbitrary compound expressions and associations, preserving block heads,
+association rule kinds, callback effects and control, and generated outer-list normalization.
 
 Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
 and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides

@@ -2497,6 +2497,50 @@ CASES = (
         ),
         0,
     ),
+    (
+        "block map windows associations recovery and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenBlockMapI,tungstenBlockMapF,"
+            "tungstenBlockMapSeq,tungstenBlockMapSp];"
+            "tungstenBlockMapI=0;"
+            "tungstenBlockMapF[x_]:=(tungstenBlockMapI++;"
+            "If[tungstenBlockMapI==2,Part[x,99],"
+            "q[tungstenBlockMapI,x]]);"
+            "tungstenBlockMapSeq[x_]:=Sequence[p[x],q[x]];"
+            "tungstenBlockMapSp[x_]:=Splice[{p[x],q[x]},List];"
+            "{BlockMap[f,{a,b,c,d,e},2],"
+            "BlockMap[f,{a,b,c,d,e},2,1],"
+            "BlockMap[f,{a,b,c,d,e,f},2,3],"
+            "BlockMap[f,h[a,b,c,d,e],2],"
+            "BlockMap[HoldComplete,<|a->1,b:>2,c->3,d:>4|>,2,1],"
+            "BlockMap[Function[x,Nothing],{a,b,c,d},2],"
+            "BlockMap[tungstenBlockMapSeq,{a,b,c,d},2],"
+            "BlockMap[tungstenBlockMapSp,{a,b,c,d},2],"
+            "BlockMap[tungstenBlockMapF,{a,b,c,d,e,f},2],"
+            "tungstenBlockMapI,(tungstenBlockMapI=0;"
+            "Catch[BlockMap[(tungstenBlockMapI++;"
+            "If[tungstenBlockMapI==2,Throw[t],"
+            "q[tungstenBlockMapI,#]])&,{a,b,c,d,e,f},2]]),"
+            "tungstenBlockMapI,"
+            "BlockMap[HoldComplete,"
+            "Unevaluated[h[1+1,2+2,3+3,4+4]],2],"
+            "System`BlockMap[HoldComplete,"
+            "Unevaluated[h[1+1,2+2,3+3,4+4]],2],"
+            "Global`BlockMap[HoldComplete,"
+            "Unevaluated[h[1+1,2+2,3+3,4+4]],2],"
+            "BlockMap[],BlockMap[f,x],BlockMap[f,{a},z],"
+            "BlockMap[f,{a},1,z],BlockMap[f,{a},0],"
+            "BlockMap[f,{a},1,-2],BlockMap[f,a,1],"
+            "BlockMap[f,SparseArray[{{1}->a},{2}],1],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

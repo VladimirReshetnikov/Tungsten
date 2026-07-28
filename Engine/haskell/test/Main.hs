@@ -1579,6 +1579,10 @@ checkEvaluationSession = do
         , ("MapThread preserves prior callback state on later shape failure", "ClearAll[i,mt];i=0;mt[x__]:=(i++;q[i,x]);{MapThread[mt,{{{a},{b,c}},{{d},{e}}},2],i,$MessageList}", "List[MapThread[mt, List[List[List[a], List[b, c]], List[List[d], List[e]]], 2], 1, List[HoldForm[MessageName[MapThread, \"error\"]]]]")
         , ("MapThread normalizes generated lists and preserves qualification boundaries", "{MapThread[Function[{x,y},Nothing],{{a,b},{c,d}}],MapThread[Function[{x,y},Splice[{p[x,y],q[x,y]},List]],{{a,b},{c,d}}],MapThread[Function[{x,y},HoldComplete[x,y]],Unevaluated[{{1+1},{2+2}}]],System`MapThread[f,Unevaluated[{{1+1},{2+2}}]],Global`MapThread[f,Unevaluated[{{1+1},{2+2}}]]}", "List[List[], List[p[a, c], q[a, c], p[b, d], q[b, d]], List[HoldComplete[Plus[1, 1], Plus[2, 2]]], System`MapThread[f, List[List[Plus[1, 1]], List[Plus[2, 2]]]], Global`MapThread[f, Unevaluated[List[List[Plus[1, 1]], List[Plus[2, 2]]]]]]")
         , ("MapThread callback control signals retain traversal state", "i=0;{Catch[MapThread[(i++;If[i==2,Throw[t],q[i,##]])&,{{a,b,c},{d,e,f}}]],i}", "List[t, 2]")
+        , ("BlockMap schedules complete overlapping and gapped windows", "{BlockMap[f,{a,b,c,d,e},2],BlockMap[f,{a,b,c,d,e},2,1],BlockMap[f,{a,b,c,d,e,f},2,3],BlockMap[f,h[a,b,c,d,e],2],BlockMap[f,f[],1],BlockMap[f,{a},2]}", "List[List[f[List[a, b]], f[List[c, d]]], List[f[List[a, b]], f[List[b, c]], f[List[c, d]], f[List[d, e]]], List[f[List[a, b]], f[List[d, e]]], List[f[h[a, b]], f[h[c, d]]], List[], List[]]")
+        , ("BlockMap preserves association windows and normalizes generated lists", "ClearAll[seq,sp];seq[x_]:=Sequence[p[x],q[x]];sp[x_]:=Splice[{p[x],q[x]},List];{BlockMap[HoldComplete,<|a->1,b:>2,c->3,d:>4|>,2,1],BlockMap[Function[x,Nothing],{a,b,c,d},2],BlockMap[seq,{a,b,c,d},2],BlockMap[sp,{a,b,c,d},2]}", "List[List[HoldComplete[Association[Rule[a, 1], RuleDelayed[b, 2]]], HoldComplete[Association[RuleDelayed[b, 2], Rule[c, 3]]], HoldComplete[Association[Rule[c, 3], RuleDelayed[d, 4]]]], List[], List[p[List[a, b]], q[List[a, b]], p[List[c, d]], q[List[c, d]]], List[p[List[a, b]], q[List[a, b]], p[List[c, d]], q[List[c, d]]]]")
+        , ("BlockMap continues after recoverable callback errors", "ClearAll[i,bm];i=0;bm[x_]:=(i++;If[i==2,Part[x,99],q[i,x]]);{BlockMap[bm,{a,b,c,d,e,f},2],i,$MessageList}", "List[List[q[1, List[a, b]], Part[List[c, d], 99], q[3, List[e, f]]], 3, List[HoldForm[MessageName[Part, \"error\"]]]]")
+        , ("BlockMap propagates control and preserves qualification boundaries", "i=0;{Catch[BlockMap[(i++;If[i==2,Throw[t],q[i,#]])&,{a,b,c,d,e,f},2]],i,BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2],System`BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2],Global`BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2]}", "List[t, 2, List[HoldComplete[h[Plus[1, 1], Plus[2, 2]]], HoldComplete[h[Plus[3, 3], Plus[4, 4]]]], System`BlockMap[HoldComplete, h[Plus[1, 1], Plus[2, 2], Plus[3, 3], Plus[4, 4]], 2], Global`BlockMap[HoldComplete, Unevaluated[h[Plus[1, 1], Plus[2, 2], Plus[3, 3], Plus[4, 4]]], 2]]")
         , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
         , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
         , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
@@ -3221,6 +3225,43 @@ checkEvaluationSession = do
             , ( "MapThread::error"
               , "MessageName[MapThread, \"error\"]"
               , "MapThread::error: MapThread expects sequences of the same length."
+              )
+            ]
+          )
+        , ( "BlockMap reports arity integer positivity and atomic errors exactly"
+          , "{BlockMap[],BlockMap[f,x],BlockMap[f,{a},z],BlockMap[f,{a},1,z],BlockMap[f,{a},0],BlockMap[f,{a},1,-2],BlockMap[f,a,1],BlockMap[f,SparseArray[{{1}->a},{2}],1]}"
+          , "List[BlockMap[], BlockMap[f, x], BlockMap[f, List[a], z], BlockMap[f, List[a], 1, z], BlockMap[f, List[a], 0], BlockMap[f, List[a], 1, -2], BlockMap[f, a, 1], BlockMap[f, SparseArray[List[Rule[List[1], a]], List[2]], 1]]"
+          , [ ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap currently supports a function, an expression, a block size, and an optional offset."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap currently supports a function, an expression, a block size, and an optional offset."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects an integer argument."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects an integer argument."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects positive integer block sizes and offsets."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects positive integer block sizes and offsets."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects a nonatomic expression."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects a nonatomic expression."
               )
             ]
           )

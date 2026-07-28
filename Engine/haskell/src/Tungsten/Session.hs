@@ -3014,6 +3014,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionMapIndexed depth session values)
   Call (Symbol "MapThread") values ->
     Just (evaluateSessionMapThread depth session values)
+  Call (Symbol "BlockMap") values ->
+    Just (evaluateSessionBlockMap depth session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
   Call (Symbol "Construct") values ->
@@ -3943,6 +3945,68 @@ evaluateSessionMapThread depth session = \case
     collect _ _ ([] : _) = Nothing
     collect retainedHeads retainedTails ((value : rest) : remaining) =
       collect (value : retainedHeads) (rest : retainedTails) remaining
+
+evaluateSessionBlockMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionBlockMap depth session = \case
+  [function, subject, Integer window] ->
+    blockMap function subject window window session
+  [function, subject, Integer window, Integer offset] ->
+    blockMap function subject window offset session
+  [_, _, _] ->
+    sessionFailure session "BlockMap expects an integer argument."
+  [_, _, _, _] ->
+    sessionFailure session "BlockMap expects an integer argument."
+  _ ->
+    sessionFailure
+      session
+      "BlockMap currently supports a function, an expression, a block size, and an optional offset."
+ where
+  blockMap function subject window offset currentSession
+    | window <= 0 || offset <= 0 =
+        sessionFailure
+          currentSession
+          "BlockMap expects positive integer block sizes and offsets."
+    | otherwise = case sessionOrderedCollection subject of
+        Nothing ->
+          sessionFailure
+            currentSession
+            "BlockMap expects a nonatomic expression."
+        Just collection ->
+          mapWindows
+            function
+            collection
+            window
+            offset
+            0
+            []
+            currentSession
+
+  mapWindows function collection window offset start retained currentSession
+    | start + window > itemCount =
+        Right (normalizeEvaluatedCall (Symbol "List") retained, currentSession)
+    | otherwise = do
+        let items = sessionCollectionItems collection
+            blockItems =
+              take
+                (fromIntegral window)
+                (drop (fromIntegral start) items)
+            block = rebuildSessionCollection collection blockItems
+        (mapped, updated) <-
+          evaluateSessionCallable depth currentSession function [block]
+        mapWindows
+          function
+          collection
+          window
+          offset
+          (start + offset)
+          (retained <> [mapped])
+          updated
+   where
+    itemCount = toInteger (length (sessionCollectionItems collection))
 
 evaluateSessionOperate
   :: Int
@@ -10073,6 +10137,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
   | sessionHeadExpressionIsAny
       [ "Composition"
       , "Accuracy"
+      , "BlockMap"
       , "ExactNumberQ"
       , "InexactNumberQ"
       , "MachineIntegerQ"
