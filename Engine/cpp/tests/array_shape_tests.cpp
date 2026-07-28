@@ -99,6 +99,10 @@ void sparse_shape_tests() {
         "SparseArray[{{2}->a,{1}->b},{3},z][\"ExplicitPositions\"]",
         "List[List[1], List[2]]");
     check_case(
+        "SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}][\"ExplicitPositions\"]",
+        "List[List[18446744073709551616]]");
+    check_case(
         "SparseArray[{}, {0,1000000000},z][\"ExplicitLength\"]",
         "0");
     check_case(
@@ -155,6 +159,19 @@ void materialization_guard_tests() {
         "0");
     check_case(
         "Part[SparseArray[{}, {18446744073709551616}],-1]", "0");
+    check_case(
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],18446744073709551616]",
+        "a");
+    check_case(
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],-1]",
+        "a");
+    check_case(
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],All]",
+        "SparseArray[List[Rule[List[18446744073709551616], a]], "
+        "List[18446744073709551616]]");
     check_case(
         "Part[SparseArray[{}, {18446744073709551616}],"
         "18446744073709551617]",

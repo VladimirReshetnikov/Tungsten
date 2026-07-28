@@ -96,6 +96,68 @@ int main() {
     check(wide_native_dimensions_rejected,
         "wide sparse machine-dimension accessor rejects narrowing");
 
+    const mpz_class wide_coordinate("18446744073709551616", 10);
+    const auto wide_entry_sparse = sparse_array(
+        std::vector<mpz_class>{wide_coordinate},
+        {SparseEntry(
+            std::vector<mpz_class>{wide_coordinate}, integer(9L))});
+    check(wide_entry_sparse.sparse_entries().size() == 1
+            && wide_entry_sparse.sparse_entries().front().indices
+                == std::vector<mpz_class>{wide_coordinate},
+        "wide sparse entry keeps arbitrary-precision coordinates");
+    check_equal(wide_entry_sparse.to_full_form(),
+        "SparseArray[List[Rule[List[18446744073709551616], 9]], "
+        "List[18446744073709551616]]",
+        "wide sparse entry full form keeps arbitrary-precision coordinates");
+    check_equal(wide_entry_sparse.to_json(),
+        "{\"type\":\"sparse_array\",\"dimensions\":[18446744073709551616],"
+        "\"fill_value\":{\"type\":\"integer\",\"value\":0},\"entries\":[{"
+        "\"indices\":[18446744073709551616],\"value\":{\"type\":\"integer\","
+        "\"value\":9}}],\"explicit_length\":1}",
+        "wide sparse entry JSON keeps arbitrary-precision coordinates");
+
+    const SparseEntry native_sparse_entry(
+        std::vector<std::size_t>{1, 2}, integer(7L));
+    check(native_sparse_entry.indices
+            == std::vector<mpz_class>{mpz_class(1), mpz_class(2)},
+        "native sparse coordinate adapter preserves integral callers");
+
+    const auto normalized_sparse = sparse_array(
+        std::vector<mpz_class>{mpz_class(3)},
+        {SparseEntry(std::vector<std::size_t>{2}, integer(2L)),
+            SparseEntry(std::vector<std::size_t>{1}, integer(3L)),
+            SparseEntry(std::vector<std::size_t>{1}, integer(4L)),
+            SparseEntry(std::vector<std::size_t>{3}, integer(0L))});
+    check_equal(normalized_sparse.to_full_form(),
+        "SparseArray[List[Rule[List[1], 3], Rule[List[2], 2]], List[3]]",
+        "direct sparse construction sorts, deduplicates, and removes fill entries");
+
+    bool sparse_entry_rank_rejected = false;
+    try {
+        static_cast<void>(sparse_array(
+            std::vector<mpz_class>{wide_coordinate},
+            {SparseEntry(
+                std::vector<mpz_class>{wide_coordinate, mpz_class(1)},
+                integer(1L))}));
+    } catch (const std::invalid_argument&) {
+        sparse_entry_rank_rejected = true;
+    }
+    check(sparse_entry_rank_rejected,
+        "direct sparse construction rejects coordinate rank mismatch");
+
+    bool sparse_entry_range_rejected = false;
+    try {
+        const mpz_class outside_coordinate = wide_coordinate + 1;
+        static_cast<void>(sparse_array(
+            std::vector<mpz_class>{wide_coordinate},
+            {SparseEntry(
+                std::vector<mpz_class>{outside_coordinate}, integer(1L))}));
+    } catch (const std::invalid_argument&) {
+        sparse_entry_range_rejected = true;
+    }
+    check(sparse_entry_range_rejected,
+        "direct sparse construction validates arbitrary-precision coordinates");
+
     const auto wide_trailing_dimension = sparse_array(
         {mpz_class(2), mpz_class("18446744073709551616", 10)}, {},
         integer(0L));

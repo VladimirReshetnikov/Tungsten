@@ -91,6 +91,11 @@ void contraction_tests() {
 void sparse_product_tests() {
   check_case("Dot[SparseArray[{{1}->a},{3}],SparseArray[{{1}->b},{3}]]",
              "Times[a, b]");
+  check_case("Dot[SparseArray[{{18446744073709551616}->a},"
+             "{18446744073709551616}],"
+             "SparseArray[{{18446744073709551616}->b},"
+             "{18446744073709551616}]]",
+             "Times[a, b]");
   check_case("Dot[SparseArray[{{1,2}->a},{2,3}],"
              "SparseArray[{{2,1}->b},{3,2}]]",
              "SparseArray[List[Rule[List[1, 1], Times[a, b]]], List[2, 2]]");

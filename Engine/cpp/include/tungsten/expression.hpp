@@ -95,8 +95,28 @@ private:
 };
 
 struct SparseEntry {
-    std::vector<std::size_t> indices;
+    std::vector<mpz_class> indices;
     Expr value;
+
+    SparseEntry(std::vector<mpz_class> exact_indices, Expr entry_value)
+        : indices(std::move(exact_indices)), value(std::move(entry_value)) {}
+
+    template<typename Integral,
+        std::enable_if_t<std::is_integral_v<std::remove_cv_t<Integral>>, int> = 0>
+    SparseEntry(std::vector<Integral> native_indices, Expr entry_value)
+        : value(std::move(entry_value)) {
+        indices.reserve(native_indices.size());
+        for (const auto index : native_indices) {
+            using Value = std::remove_cv_t<Integral>;
+            if constexpr (std::is_signed_v<Value>) {
+                indices.emplace_back(
+                    std::to_string(static_cast<long long>(index)), 10);
+            } else {
+                indices.emplace_back(
+                    std::to_string(static_cast<unsigned long long>(index)), 10);
+            }
+        }
+    }
 
     friend bool operator==(const SparseEntry& left, const SparseEntry& right) noexcept {
         return left.indices == right.indices && left.value == right.value;

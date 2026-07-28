@@ -2500,6 +2500,7 @@ Expr interval_expression(const std::vector<IntervalSegment>& segments) {
 constexpr std::size_t maximum_sparse_materialized_nodes = 1000000;
 
 using DenseDimensions = std::vector<mpz_class>;
+using SparsePosition = std::vector<mpz_class>;
 
 struct NormalizedDenseDimensions {
     std::optional<DenseDimensions> values;
@@ -2686,7 +2687,7 @@ bool sparse_materialization_within_limit(const Expr& value) noexcept {
 std::optional<Expr> sparse_dense_value(const Expr& value) {
     if (value.kind() != ExprKind::SparseArray) return value;
     if (!sparse_materialization_within_limit(value)) return std::nullopt;
-    auto build = [&](auto&& self, std::vector<std::size_t> prefix) -> Expr {
+    auto build = [&](auto&& self, SparsePosition prefix) -> Expr {
         if (prefix.size() == value.sparse_dimensions().size()) {
             const auto found = std::find_if(value.sparse_entries().begin(), value.sparse_entries().end(),
                 [&](const SparseEntry& entry) { return entry.indices == prefix; });
@@ -2699,7 +2700,9 @@ std::optional<Expr> sparse_dense_value(const Expr& value) {
         std::vector<Expr> items;
         items.reserve(*dimension);
         for (std::size_t index = 1; index <= *dimension; ++index) {
-            auto child = prefix; child.push_back(index); items.push_back(self(self, std::move(child)));
+            auto child = prefix;
+            child.push_back(exact_size_t(index));
+            items.push_back(self(self, std::move(child)));
         }
         return list(std::move(items));
     };
@@ -2777,10 +2780,12 @@ bool dense_array_leaves_match(const Expr& value, Predicate&& predicate) {
 std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = integer(0L)) {
     const auto dimensions = dense_dimensions(value); if (!dimensions || dimensions->empty()) return std::nullopt;
     std::vector<SparseEntry> entries;
-    auto collect = [&](auto&& self, const Expr& item, std::vector<std::size_t> prefix) -> void {
+    auto collect = [&](auto&& self, const Expr& item, SparsePosition prefix) -> void {
         if (prefix.size() == dimensions->size()) { if (item != fill) entries.push_back({std::move(prefix), item}); return; }
         for (std::size_t index = 0; index < item.args().size(); ++index) {
-            auto child = prefix; child.push_back(index + 1); self(self, item.args()[index], std::move(child));
+            auto child = prefix;
+            child.push_back(exact_size_t(index + 1));
+            self(self, item.args()[index], std::move(child));
         }
     };
     collect(collect, value, {}); return sparse_array(*dimensions, std::move(entries), fill);
@@ -2795,44 +2800,42 @@ mpz_class sparse_dimension_product(
 }
 
 mpz_class sparse_linear_offset(
-    const std::vector<std::size_t>& indices,
+    const SparsePosition& indices,
     const DenseDimensions& dimensions) {
     mpz_class offset = 0;
     for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
         offset *= dimensions[axis];
-        offset += mpz_class(std::to_string(indices[axis] - 1), 10);
+        offset += indices[axis] - 1;
     }
     return offset;
 }
 
-std::optional<std::vector<std::size_t>> sparse_indices_from_offset(
+std::optional<SparsePosition> sparse_indices_from_offset(
     mpz_class offset, const DenseDimensions& dimensions) {
-    std::vector<std::size_t> indices(dimensions.size(), 1);
+    SparsePosition indices(dimensions.size(), mpz_class(1));
     for (std::size_t reverse_axis = dimensions.size(); reverse_axis > 0;
          --reverse_axis) {
         const auto axis = reverse_axis - 1;
         if (dimensions[axis] == 0) return std::nullopt;
         const mpz_class remainder = offset % dimensions[axis];
         offset /= dimensions[axis];
-        const auto index = nonnegative_size_t(remainder + 1);
-        if (!index) return std::nullopt;
-        indices[axis] = *index;
+        indices[axis] = remainder + 1;
     }
     return indices;
 }
 
 Expr sparse_coordinate_value(
-    const Expr& array, const std::vector<std::size_t>& indices) {
+    const Expr& array, const SparsePosition& indices) {
     const auto found = std::lower_bound(
         array.sparse_entries().begin(), array.sparse_entries().end(), indices,
-        [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+        [](const SparseEntry& entry, const SparsePosition& target) {
             return entry.indices < target;
         });
     return found != array.sparse_entries().end() && found->indices == indices
         ? found->value : array.fill_value();
 }
 
-using ExactSparsePosition = std::vector<mpz_class>;
+using ExactSparsePosition = SparsePosition;
 
 struct ExactSparseEntry {
     ExactSparsePosition indices;
@@ -2956,18 +2959,8 @@ SparseConstructionResult make_sparse_array(
 
     std::vector<SparseEntry> entries;
     entries.reserve(normalized_entries.size());
-    for (const auto& entry : normalized_entries) {
-        std::vector<std::size_t> indices;
-        indices.reserve(entry.indices.size());
-        for (const auto& index : entry.indices) {
-            const auto native = nonnegative_size_t(index);
-            if (!native)
-                return {std::nullopt,
-                    "SparseArray positions exceed the native representation limit."};
-            indices.push_back(*native);
-        }
-        entries.push_back({std::move(indices), entry.value});
-    }
+    for (const auto& entry : normalized_entries)
+        entries.push_back({entry.indices, entry.value});
     return {sparse_array(
         exact_dimensions, std::move(entries), fill), {}};
 }
@@ -2980,7 +2973,7 @@ SparseConstructionResult reencode_sparse_fill(
             "SparseArray dimensions exceed the native materialization limit."};
 
     std::vector<SparseEntry> entries;
-    std::vector<std::size_t> position;
+    SparsePosition position;
     position.reserve(source.sparse_dimensions().size());
     auto visit = [&](auto&& self, std::size_t axis) -> void {
         if (axis == source.sparse_dimensions().size()) {
@@ -2988,7 +2981,7 @@ SparseConstructionResult reencode_sparse_fill(
                 source.sparse_entries().begin(), source.sparse_entries().end(),
                 position,
                 [](const SparseEntry& entry,
-                    const std::vector<std::size_t>& target) {
+                    const SparsePosition& target) {
                     return entry.indices < target;
                 });
             const auto value = found != source.sparse_entries().end()
@@ -3002,7 +2995,7 @@ SparseConstructionResult reencode_sparse_fill(
         if (!dimension) return;
         for (std::size_t index = 1;
              index <= *dimension; ++index) {
-            position.push_back(index);
+            position.push_back(exact_size_t(index));
             self(self, axis + 1);
             position.pop_back();
         }
@@ -3162,7 +3155,7 @@ SparseArithmeticResult sparse_binary_elementwise(
                     && right.sparse_entries()[right_index].indices
                         < left.sparse_entries()[left_index].indices);
 
-            std::vector<std::size_t> indices;
+            SparsePosition indices;
             Expr left_value = left.fill_value();
             Expr right_value = right.fill_value();
             if (take_left) {
@@ -4012,17 +4005,13 @@ SparsePartResult sparse_part(
         selections.begin(), selections.end(),
         [](const SparseAxisSelection& selection) { return selection.preserve; });
     if (scalar) {
-        std::vector<std::size_t> indices;
+        SparsePosition indices;
         indices.reserve(selections.size());
-        for (const auto& selection : selections) {
-            const auto native = nonnegative_size_t(
-                *selection.scalar_source_index);
-            if (!native) return {array.fill_value(), {}};
-            indices.push_back(*native);
-        }
+        for (const auto& selection : selections)
+            indices.push_back(*selection.scalar_source_index);
         const auto found = std::lower_bound(
             array.sparse_entries().begin(), array.sparse_entries().end(), indices,
-            [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+            [](const SparseEntry& entry, const SparsePosition& target) {
                 return entry.indices < target;
             });
         return {found != array.sparse_entries().end() && found->indices == indices
@@ -4036,14 +4025,14 @@ SparsePartResult sparse_part(
 
     std::vector<SparseEntry> output_entries;
     for (const auto& entry : array.sparse_entries()) {
-        std::vector<std::vector<std::size_t>> output_options;
+        std::vector<SparsePosition> output_options;
         bool include = true;
         for (std::size_t axis = 0; axis < selections.size(); ++axis) {
             const auto& selection = selections[axis];
             const auto source_index = entry.indices[axis];
             if (!selection.preserve) {
                 if (*selection.scalar_source_index
-                    != exact_size_t(source_index)) {
+                    != source_index) {
                     include = false;
                     break;
                 }
@@ -4056,24 +4045,29 @@ SparsePartResult sparse_part(
             std::vector<std::size_t> mapped;
             for (std::size_t output_index = 0;
                  output_index < selection.source_indices.size(); ++output_index)
-                if (selection.source_indices[output_index] == source_index)
+                if (exact_size_t(selection.source_indices[output_index])
+                    == source_index)
                     mapped.push_back(output_index + 1);
             if (mapped.empty()) {
                 include = false;
                 break;
             }
-            output_options.push_back(std::move(mapped));
+            SparsePosition exact_mapped;
+            exact_mapped.reserve(mapped.size());
+            for (const auto index : mapped)
+                exact_mapped.push_back(exact_size_t(index));
+            output_options.push_back(std::move(exact_mapped));
         }
         if (!include) continue;
 
-        std::vector<std::size_t> output_index;
+        SparsePosition output_index;
         output_index.reserve(output_options.size());
         auto append = [&](auto&& self, std::size_t axis) -> void {
             if (axis == output_options.size()) {
                 output_entries.push_back({output_index, entry.value});
                 return;
             }
-            for (const auto index : output_options[axis]) {
+            for (const auto& index : output_options[axis]) {
                 output_index.push_back(index);
                 self(self, axis + 1);
                 output_index.pop_back();
@@ -8304,7 +8298,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
     return product({numerator, reciprocal(denominator)});
   };
   const auto sparse_value_at = [](const Expr &array,
-                                  const std::vector<std::size_t> &indices) {
+                                  const SparsePosition &indices) {
     const auto found = std::find_if(
         array.sparse_entries().begin(), array.sparse_entries().end(),
         [&](const SparseEntry &entry) { return entry.indices == indices; });
@@ -8496,7 +8490,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
     const auto size = dimensions[0];
     if (size == 0)
       return integer(1L);
-    std::set<std::size_t> occupied_rows;
+    std::set<mpz_class> occupied_rows;
     for (const auto &entry : array.sparse_entries())
       if (!exact_zero(entry.value))
         occupied_rows.insert(entry.indices[0]);
@@ -8509,10 +8503,17 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
     }
     std::vector<std::vector<std::pair<std::size_t, Expr>>> candidates(
         *native_size);
-    for (const auto &entry : array.sparse_entries())
-      if (!exact_zero(entry.value))
-        candidates[entry.indices[0] - 1].emplace_back(entry.indices[1] - 1,
-                                                      entry.value);
+    for (const auto &entry : array.sparse_entries()) {
+      if (exact_zero(entry.value))
+        continue;
+      const auto row = nonnegative_size_t(entry.indices[0]);
+      const auto column = nonnegative_size_t(entry.indices[1]);
+      if (!row || !column) {
+        error = "SparseArray positions exceed the native representation limit.";
+        return Expr{};
+      }
+      candidates[*row - 1].emplace_back(*column - 1, entry.value);
+    }
     return determinant_candidates(candidates);
   };
 
@@ -8538,7 +8539,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
         return std::nullopt;
       }
       auto add_to = [&](std::vector<SparseEntry> &entries,
-                        const std::vector<std::size_t> &indices,
+                        const SparsePosition &indices,
                         const Expr &contribution) {
         if (exact_zero(contribution))
           return;
@@ -9123,8 +9124,15 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
             return std::nullopt;
           }
           std::vector<const SparseEntry *> entries(*native_size, nullptr);
-          for (const auto &entry : value.sparse_entries())
-            entries[entry.indices[0] - 1] = &entry;
+          for (const auto &entry : value.sparse_entries()) {
+            const auto index = nonnegative_size_t(entry.indices[0]);
+            if (!index) {
+              error =
+                  "SparseArray positions exceed the native representation limit.";
+              return std::nullopt;
+            }
+            entries[*index - 1] = &entry;
+          }
           if (std::any_of(entries.begin(), entries.end(),
                           [](const auto *entry) { return entry == nullptr; })) {
             error = "Inverse expects a nonsingular matrix.";
@@ -11049,7 +11057,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         if (args[0].text() == "ExplicitPositions") {
             std::vector<Expr> positions;
-            for (const auto& entry : head.sparse_entries()) { std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index)); positions.push_back(list(std::move(indices))); }
+            for (const auto& entry : head.sparse_entries()) { std::vector<Expr> indices; for (const auto& index : entry.indices) indices.push_back(integer(index)); positions.push_back(list(std::move(indices))); }
             return list(std::move(positions));
         }
         if (args[0].text() == "Density") {
@@ -15907,8 +15915,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (dimensions.empty()) {
             if (old_total == 0) return padding;
             return sparse_coordinate_value(args[0],
-                std::vector<std::size_t>(
-                    args[0].sparse_dimensions().size(), 1));
+                SparsePosition(
+                    args[0].sparse_dimensions().size(), mpz_class(1)));
         }
 
         const bool preserves_sparse = new_total <= old_total
@@ -15972,15 +15980,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         entries.reserve(args[0].sparse_entries().size());
         for (const auto& entry : args[0].sparse_entries()) {
             auto indices = entry.indices;
-            for (std::size_t axis = 0; axis < indices.size(); ++axis) {
-                const auto offset = nonnegative_size_t(
-                    (*normalized.widths)[axis].first);
-                if (!offset || indices[axis]
-                    > std::numeric_limits<std::size_t>::max() - *offset)
-                    return raw_evaluation_error(
-                        "ArrayPad dimensions exceed the native representation limit.");
-                indices[axis] += *offset;
-            }
+            for (std::size_t axis = 0; axis < indices.size(); ++axis)
+                indices[axis] += (*normalized.widths)[axis].first;
             entries.push_back({std::move(indices), entry.value});
         }
         return sparse_array(
@@ -16034,7 +16035,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::vector<SparseEntry> entries;
         entries.reserve(args[0].sparse_entries().size());
         for (const auto& entry : args[0].sparse_entries()) {
-            std::vector<std::size_t> indices;
+            SparsePosition indices;
             indices.reserve(rank);
             for (const auto axis : permutation)
                 indices.push_back(entry.indices[axis]);
@@ -16079,15 +16080,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::vector<SparseEntry> entries;
         entries.reserve(args[0].sparse_entries().size());
         for (const auto& entry : args[0].sparse_entries()) {
-            std::vector<std::size_t> prefix(
+            SparsePosition prefix(
                 entry.indices.begin(), entry.indices.begin()
                     + static_cast<std::ptrdiff_t>(collapse_count));
-            const auto collapsed_index = nonnegative_size_t(
-                sparse_linear_offset(prefix, collapsed_dimensions) + 1);
-            if (!collapsed_index)
-                return raw_evaluation_error(
-                    "Flatten dimensions exceed the native representation limit.");
-            std::vector<std::size_t> indices{*collapsed_index};
+            const mpz_class collapsed_index =
+                sparse_linear_offset(prefix, collapsed_dimensions) + 1;
+            SparsePosition indices{collapsed_index};
             indices.insert(indices.end(),
                 entry.indices.begin()
                     + static_cast<std::ptrdiff_t>(collapse_count),
@@ -16606,15 +16604,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                         args[0].args()[block_row].args()[block_column];
                     if (block.kind() == ExprKind::SparseArray) {
                         for (const auto& entry : block.sparse_entries()) {
-                            const auto row_index = nonnegative_size_t(
-                                row_offset + exact_size_t(entry.indices[0]));
-                            const auto column_index = nonnegative_size_t(
-                                column_offset + exact_size_t(entry.indices[1]));
-                            if (!row_index || !column_index)
-                                return raw_evaluation_error(
-                                    "ArrayFlatten positions exceed the native representation limit.");
                             entries.push_back({
-                                {*row_index, *column_index},
+                                {row_offset + entry.indices[0],
+                                    column_offset + entry.indices[1]},
                                 entry.value});
                         }
                     } else {
@@ -16631,15 +16623,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                                 const auto& value =
                                     block.args()[row].args()[column];
                                 if (value != integer(0L)) {
-                                    const auto row_index = nonnegative_size_t(
-                                        row_offset + exact_size_t(row + 1));
-                                    const auto column_index = nonnegative_size_t(
-                                        column_offset + exact_size_t(column + 1));
-                                    if (!row_index || !column_index)
-                                        return raw_evaluation_error(
-                                            "ArrayFlatten positions exceed the native representation limit.");
                                     entries.push_back({
-                                        {*row_index, *column_index},
+                                        {row_offset + exact_size_t(row + 1),
+                                            column_offset + exact_size_t(column + 1)},
                                         value});
                                 }
                             }
@@ -16754,13 +16740,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             if (raw_index == 0) offset = 0;
             else if (raw_index > 0) offset = raw_index - 1;
             else offset = length + raw_index + 1;
-            const auto native_offset = nonnegative_size_t(offset);
-            if (!native_offset || offset > length
-                || *native_offset == std::numeric_limits<std::size_t>::max())
+            if (offset < 0 || offset > length)
                 return invalid_insert(
                     "Insert position is invalid for SparseArray.");
 
-            const auto inserted_index = *native_offset + 1;
+            const mpz_class inserted_index = offset + 1;
             std::vector<SparseEntry> entries;
             entries.reserve(args[0].sparse_entries().size() + 1);
             for (const auto& entry : args[0].sparse_entries()) {
@@ -19086,7 +19070,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if (function == "ArrayRules" && args.size() == 1 && args[0].kind() == ExprKind::SparseArray) {
         std::vector<Expr> rules;
         for (const auto& entry : args[0].sparse_entries()) {
-            std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index));
+            std::vector<Expr> indices; for (const auto& index : entry.indices) indices.push_back(integer(index));
             rules.push_back(call("Rule", {list(std::move(indices)), entry.value}));
         }
         std::vector<Expr> blanks(

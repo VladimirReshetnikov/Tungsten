@@ -78,6 +78,11 @@ void constructor_success_tests() {
     check_case(
         "ArrayRules[SparseArray[{}, {0,4294967296},z]]",
         "List[Rule[List[Blank[], Blank[]], z]]");
+    check_case(
+        "ArrayRules[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}]]",
+        "List[Rule[List[18446744073709551616], a], "
+        "Rule[List[Blank[]], 0]]");
 }
 
 void existing_sparse_constructor_tests() {
@@ -151,6 +156,13 @@ void constructor_diagnostic_tests() {
     check_case(
         "SparseArray[{{0}->a},{1}]",
         "SparseArray[List[Rule[List[0], a]], List[1]]",
+        {"SparseArray::error: SparseArray rule positions must be inside the "
+         "array dimensions."});
+    check_case(
+        "SparseArray[{{18446744073709551617}->a},"
+        "{18446744073709551616}]",
+        "SparseArray[List[Rule[List[18446744073709551617], a]], "
+        "List[18446744073709551616]]",
         {"SparseArray::error: SparseArray rule positions must be inside the "
          "array dimensions."});
     check_case(
@@ -234,6 +246,11 @@ void sparse_arithmetic_shape_and_scale_tests() {
         "List[Rule[List[1], Plus[a, q, r]], "
         "Rule[List[4294967296], Plus[b, r, z]], "
         "Rule[List[Blank[]], Plus[q, r, z]]]");
+    check_case(
+        "ArrayRules[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}]+1]",
+        "List[Rule[List[18446744073709551616], Plus[1, a]], "
+        "Rule[List[Blank[]], 1]]");
     check_case(
         "ArrayRules[SparseArray[{{1,1}->a},"
         "{4294967296,4294967296},z]+"

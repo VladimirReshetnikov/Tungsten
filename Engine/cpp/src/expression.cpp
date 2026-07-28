@@ -9,6 +9,7 @@
 #include <cmath>
 #include <locale>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -367,7 +368,8 @@ std::string Expr::to_full_form() const {
         std::vector<Expr> rules;
         for (const auto& entry : node_->entries) {
             std::vector<Expr> indices;
-            for (const auto index : entry.indices) indices.push_back(integer(index));
+            for (const auto& index : entry.indices)
+                indices.push_back(integer(index));
             rules.push_back(call("Rule", {list(std::move(indices)), entry.value}));
         }
         std::vector<Expr> dimensions;
@@ -454,7 +456,7 @@ std::string Expr::to_json() const {
             output << R"({"indices":[)";
             for (std::size_t part = 0; part < node_->entries[index].indices.size(); ++part) {
                 if (part != 0) output << ',';
-                output << node_->entries[index].indices[part];
+                output << node_->entries[index].indices[part].get_str();
             }
             output << R"(],"value":)" << node_->entries[index].value.to_json() << '}';
         }
@@ -567,7 +569,23 @@ Expr sparse_array(std::vector<mpz_class> dimensions, std::vector<SparseEntry> en
             [](const mpz_class& dimension) { return dimension < 0; }))
         throw std::invalid_argument(
             "SparseArray dimensions must be non-negative.");
-    std::sort(entries.begin(), entries.end(),
+    std::set<std::vector<mpz_class>> seen;
+    std::vector<SparseEntry> normalized_entries;
+    normalized_entries.reserve(entries.size());
+    for (auto& entry : entries) {
+        if (entry.indices.size() != dimensions.size())
+            throw std::invalid_argument(
+                "SparseArray rule positions must match the array rank.");
+        for (std::size_t axis = 0; axis < entry.indices.size(); ++axis)
+            if (entry.indices[axis] < 1
+                || entry.indices[axis] > dimensions[axis])
+                throw std::invalid_argument(
+                    "SparseArray rule positions must be inside the array dimensions.");
+        if (!seen.insert(entry.indices).second) continue;
+        if (entry.value != fill_value)
+            normalized_entries.push_back(std::move(entry));
+    }
+    std::sort(normalized_entries.begin(), normalized_entries.end(),
         [](const SparseEntry& left, const SparseEntry& right) {
             return left.indices < right.indices;
         });
@@ -583,7 +601,7 @@ Expr sparse_array(std::vector<mpz_class> dimensions, std::vector<SparseEntry> en
         }
         node->native_dimensions.push_back(*native);
     }
-    node->dimensions = std::move(dimensions); node->entries = std::move(entries); node->fill = fill_value.node_;
+    node->dimensions = std::move(dimensions); node->entries = std::move(normalized_entries); node->fill = fill_value.node_;
     return Expr(std::move(node));
 }
 Expr call(Expr head, std::vector<Expr> args) {
