@@ -407,6 +407,28 @@ checkNamedCharacters = do
           | (name, codepoint) <- catalogEntries
           , parseFullForm ("\"\\[" <> name <> "]\"") == Right (String (Text.singleton (chr codepoint)))
           ]
+      infixExpected headName =
+        Call (Symbol headName) [Symbol "a", Symbol "b"]
+      escapedInfixParseCount =
+        length
+          [ ()
+          | headName <- namedInfixOperatorNames
+          , parseInputForm ("a \\[" <> headName <> "] b") == Right (infixExpected headName)
+          ]
+      directInfixParseCount =
+        length
+          [ ()
+          | headName <- namedInfixOperatorNames
+          , Just character <- [namedCharacter headName]
+          , parseInputForm ("a " <> Text.singleton character <> " b") == Right (infixExpected headName)
+          ]
+      infixInputRoundTripCount =
+        length
+          [ ()
+          | headName <- namedInfixOperatorNames
+          , let expression = infixExpected headName
+          , parseInputForm (inputForm expression) == Right expression
+          ]
       inputCases =
         [ ("named identifier", "\\[Alpha]", Symbol "α")
         , ("named identifier alias", "\\[Pi]", Symbol "Pi")
@@ -420,6 +442,8 @@ checkNamedCharacters = do
         , ("direct And operator", "a ∧ b", Call (Symbol "And") [Symbol "a", Symbol "b"])
         , ("named rule operator", "a \\[Rule] b", Call (Symbol "Rule") [Symbol "a", Symbol "b"])
         , ("named invisible multiplication", "2 \\[InvisibleTimes] x", Call (Symbol "Times") [Integer 2, Symbol "x"])
+        , ("escaped named infix", "a \\[CirclePlus] b", Call (Symbol "CirclePlus") [Symbol "a", Symbol "b"])
+        , ("direct named infix", "a ⊕ b", Call (Symbol "CirclePlus") [Symbol "a", Symbol "b"])
         , ( "named association delimiters"
           , "\\[LeftAssociation]a -> 1\\[RightAssociation]"
           , Call (Symbol "Association") [Call (Symbol "Rule") [Symbol "a", Integer 1]]
@@ -443,6 +467,10 @@ checkNamedCharacters = do
     , assertEqual "Wolfram Function codepoint" (Just (chr 0xf4a1)) (namedCharacter "Function")
     , assertEqual "Wolfram ImaginaryI codepoint" (Just (chr 0xf74e)) (namedCharacter "ImaginaryI")
     , assertEqual "render symbols with canonical named escapes" "\\[Alpha]" (fullForm (Symbol "α"))
+    , assertEqual "complete named infix catalog size" 202 (length namedInfixOperatorNames)
+    , assertEqual "parse every escaped named infix operator" 202 escapedInfixParseCount
+    , assertEqual "parse every direct named infix operator" 202 directInfixParseCount
+    , assertEqual "round trip every named infix operator in InputForm" 202 infixInputRoundTripCount
     ]
   pure (and (inputChecks <> rejectedChecks <> structuralChecks))
 
@@ -569,6 +597,13 @@ checkInputFormParser = do
         , ("dot grouping and explicit calls", "{(a.b).c, a.(b.c), Dot[a,b].c, a.Dot[b,c]}", "List[Dot[Dot[a, b], c], Dot[a, Dot[b, c]], Dot[Dot[a, b], c], Dot[a, Dot[b, c]]]")
         , ("dot arithmetic precedence", "{-a.b, a*b.c, a.b*c, a^b.c, a.b^c, a^-b.c}", "List[Times[-1, Dot[a, b]], Times[a, Dot[b, c]], Times[Dot[a, b], c], Dot[Power[a, b], c], Dot[a, Power[b, c]], Power[a, Times[-1, Dot[b, c]]]]")
         , ("dot decimal adjacency", "{a.5, a .5, a . 5}", "List[Times[a, .5], Times[a, .5], Dot[a, 5]]")
+        , ("escaped named infix chain", "a \\[CirclePlus] b \\[CirclePlus] c", "CirclePlus[a, b, c]")
+        , ("direct named infix chain", "a ⊕ b ⊕ c", "CirclePlus[a, b, c]")
+        , ("named infix grouping boundary", "(a \\[CirclePlus] b) \\[CirclePlus] c", "CirclePlus[CirclePlus[a, b], c]")
+        , ("named infix precedence hierarchy", "a + b \\[CirclePlus] c * d \\[CircleTimes] e \\[Diamond] f.g", "Plus[a, CirclePlus[b, Times[c, CircleTimes[d, Diamond[e, Dot[f, g]]]]]]")
+        , ("default named infix precedence", "a + b \\[Precedes] c + d", "Precedes[Plus[a, b], Plus[c, d]]")
+        , ("mixed named infix associativity", "a \\[Precedes] b \\[Succeeds] c", "Succeeds[Precedes[a, b], c]")
+        , ("named and builtin comparison associativity", "a < b \\[Precedes] c == d", "Inequality[a, Less, Precedes[b, c], Equal, d]")
         , ("lists and calls", "f[{a, b}, g[x]]", "f[List[a, b], g[x]]")
         , ("uniform comparison", "a < b < c", "Less[a, b, c]")
         , ("mixed comparison", "a < b <= c", "Inequality[a, Less, b, LessEqual, c]")

@@ -302,8 +302,8 @@ andParser = chainl1 comparisonParser (binary "&&" (call2 "And"))
 
 comparisonParser :: Parser Expr
 comparisonParser = do
-  firstExpression <- applyParser
-  comparisons <- many ((,) <$> comparisonOperator <*> applyParser)
+  firstExpression <- defaultNamedInfixParser
+  comparisons <- many ((,) <$> comparisonOperator <*> defaultNamedInfixParser)
   pure (comparisonExpression firstExpression comparisons)
  where
   comparisonOperator = choice
@@ -316,6 +316,31 @@ comparisonParser = do
     , "Less" <$ operator "<" "|>"
     , "Greater" <$ operator ">" "="
     ]
+
+-- Generic named infix operators use the comparison binding power but are
+-- left-associative (their Pratt right binding power is one tick higher).
+-- Parsing them as each built-in comparison operand reproduces that asymmetry:
+-- @a < b \[Precedes] c@ keeps @Precedes[b, c]@ on the comparison's right.
+defaultNamedInfixParser :: Parser Expr
+defaultNamedInfixParser = do
+  firstExpression <- applyParser
+  operations <- many ((,) <$> namedOperator <*> applyParser)
+  pure (namedInfixExpression firstExpression operations)
+ where
+  namedOperator = namedInfixOperatorParser isDefaultNamedInfix
+  isDefaultNamedInfix headName =
+    headName /= "CirclePlus"
+      && headName /= "CircleTimes"
+      && headName /= "Diamond"
+
+namedInfixExpression :: Expr -> [(Text, Expr)] -> Expr
+namedInfixExpression = go
+ where
+  go expression [] = expression
+  go expression ((headName, value) : remaining) =
+    let (sameHead, rest) = span ((== headName) . fst) remaining
+        operands = expression : value : map snd sameHead
+     in go (Call (Symbol headName) operands) rest
 
 comparisonExpression :: Expr -> [(Text, Expr)] -> Expr
 comparisonExpression firstExpression comparisons = case comparisons of
@@ -334,8 +359,15 @@ applyParser = do
   functions <- many (operator "//" ".=@" *> spanParser)
   pure (foldl' (\argument function -> Call function [argument]) firstExpression functions)
 
+-- The three named infix operators with non-default Wolfram precedences each
+-- occupy their own layer.  Gathering operands in the layer itself makes an
+-- unparenthesized chain n-ary while retaining a nested call introduced by
+-- parentheses or an explicit head call as a structural boundary.
+circlePlusParser :: Parser Expr
+circlePlusParser = namedInfixChainParser "CirclePlus" timesParser timesParser
+
 plusParser :: Parser Expr
-plusParser = chainl1 timesParser plusOperator
+plusParser = chainl1 circlePlusParser plusOperator
  where
   plusOperator = choice
     [ binary "<>" (call2 "StringJoin")
@@ -354,7 +386,7 @@ timesParser = do
     , (,) Divide <$> (operator "/" "/:;.@=*" *> unaryParser)
     , try $ do
         notFollowedBy (char '-')
-        (,) Multiply <$> dotParser
+        (,) Multiply <$> circleTimesParser
     ]
   applyTimes (lhs, isUngroupedTimes) (Multiply, rhs) =
     case (isUngroupedTimes, lhs) of
@@ -371,8 +403,43 @@ unaryParser = choice
   [ operator "+" "+=" *> unaryParser
   , negateExpression <$> (operator "-" "-=>" *> unaryParser)
   , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
-  , dotParser
+  , circleTimesParser
   ]
+
+circleTimesParser :: Parser Expr
+circleTimesParser =
+  namedInfixChainParser
+    "CircleTimes"
+    diamondParser
+    (namedHighPrecedenceRightParser diamondParser)
+
+diamondParser :: Parser Expr
+diamondParser =
+  namedInfixChainParser
+    "Diamond"
+    dotParser
+    (namedHighPrecedenceRightParser dotParser)
+
+-- Prefix operators may begin the right operand of a tighter infix operator.
+-- Once a prefix appears, its own lower binding power controls how much of the
+-- remainder it absorbs, mirroring the existing Dot/Power right-side parser.
+namedHighPrecedenceRightParser :: Parser Expr -> Parser Expr
+namedHighPrecedenceRightParser fallback = choice
+  [ operator "+" "+=" *> unaryParser
+  , negateExpression <$> (operator "-" "-=>" *> unaryParser)
+  , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
+  , fallback
+  ]
+
+namedInfixChainParser :: Text -> Parser Expr -> Parser Expr -> Parser Expr
+namedInfixChainParser headName firstParser rightParser = do
+  firstExpression <- firstParser
+  remaining <- many (namedOperator *> rightParser)
+  pure $ case remaining of
+    [] -> firstExpression
+    values -> Call (Symbol headName) (firstExpression : values)
+ where
+  namedOperator = namedInfixOperatorParser (== headName)
 
 -- Wolfram's Dot binds more tightly than Times but less tightly than Power.
 -- Prefix +/- sit between Dot and Times: they absorb a following Dot expression
@@ -617,6 +684,26 @@ binary operatorText constructor = constructor <$ operator operatorText ""
 
 binaryExcept :: Text -> String -> (Expr -> Expr -> Expr) -> Parser (Expr -> Expr -> Expr)
 binaryExcept operatorText blocked constructor = constructor <$ operator operatorText blocked
+
+-- Parse either the canonical escaped spelling (\[Precedes]) or the direct
+-- Unicode codepoint for any head in the complete named-infix catalog.  The
+-- predicate lets precedence layers select only the heads they own without
+-- duplicating the catalog in the grammar.
+namedInfixOperatorParser :: (Text -> Bool) -> Parser Text
+namedInfixOperatorParser accepted = lexeme (try escapedSpelling <|> try directSpelling)
+ where
+  escapedSpelling = try $ do
+    _ <- string "\\["
+    name <- T.pack <$> many1 (satisfy (/= ']'))
+    _ <- char ']'
+    case namedInfixOperatorHead name of
+      Just headName | accepted headName -> pure headName
+      _ -> unexpected "a named infix operator at this precedence"
+  directSpelling = do
+    character <- satisfy isNamedOperatorCharacter
+    case namedInfixOperatorHeadForCharacter character of
+      Just headName | accepted headName -> pure headName
+      _ -> unexpected "a named infix operator at this precedence"
 
 operator :: Text -> String -> Parser Text
 operator operatorText blocked = lexeme (choice (map spellingParser (namedOperatorSpellings operatorText)))

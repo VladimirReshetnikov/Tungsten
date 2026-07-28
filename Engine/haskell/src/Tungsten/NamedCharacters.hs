@@ -9,6 +9,9 @@ module Tungsten.NamedCharacters
   , encodePrintableAscii
   , symbolAliasForCharacter
   , isNamedOperatorCharacter
+  , namedInfixOperatorNames
+  , namedInfixOperatorHead
+  , namedInfixOperatorHeadForCharacter
   , namedInfixOperatorEscape
   , namedOperatorSpellings
   ) where
@@ -93,7 +96,7 @@ namedOperatorCharacters :: Set Char
 namedOperatorCharacters =
   Set.fromList
     [ character
-    | name <- tokenNames <> infixOperatorNames
+    | name <- tokenNames <> namedInfixOperatorNames
     , Just character <- [namedCharacter name]
     ]
 
@@ -111,13 +114,32 @@ namedOperatorSpellings normalized =
 -- Keeping this projection beside the parser's operator catalog prevents the
 -- renderer and lexer from silently drifting to different named-character
 -- subsets.
-namedInfixOperatorEscape :: Text -> Maybe Text
-namedInfixOperatorEscape name
-  | Set.member name infixOperatorNameSet = Just ("\\[" <> name <> "]")
+namedInfixOperatorHead :: Text -> Maybe Text
+namedInfixOperatorHead name
+  | Set.member name infixOperatorNameSet = Just name
   | otherwise = Nothing
 
+-- | Resolve the direct Unicode spelling of a named infix operator to its
+-- Wolfram head.  The Wolfram 15.0 catalog assigns a distinct codepoint to
+-- every member of this operator subset.
+namedInfixOperatorHeadForCharacter :: Char -> Maybe Text
+namedInfixOperatorHeadForCharacter character =
+  Map.lookup character namedInfixOperatorCharacterHeads
+
+namedInfixOperatorCharacterHeads :: Map Char Text
+namedInfixOperatorCharacterHeads =
+  Map.fromList
+    [ (character, name)
+    | name <- namedInfixOperatorNames
+    , Just character <- [namedCharacter name]
+    ]
+
+namedInfixOperatorEscape :: Text -> Maybe Text
+namedInfixOperatorEscape name =
+  ("\\[" <>) . (<> "]") <$> namedInfixOperatorHead name
+
 infixOperatorNameSet :: Set Text
-infixOperatorNameSet = Set.fromList infixOperatorNames
+infixOperatorNameSet = Set.fromList namedInfixOperatorNames
 
 tokenNames :: [Text]
 tokenNames = map fst tokenAliases
@@ -139,8 +161,8 @@ tokenAliases =
   , ("RuleDelayed", ":>")
   ]
 
-infixOperatorNames :: [Text]
-infixOperatorNames =
+namedInfixOperatorNames :: [Text]
+namedInfixOperatorNames =
   [ "Backslash", "Because", "Cap", "CenterDot", "CircleDot", "CircleMinus"
   , "CirclePlus", "CircleTimes", "Congruent", "Coproduct", "Cross", "Cup"
   , "CupCap", "Del", "Diamond", "DirectedEdge", "DiscreteRatio", "DiscreteShift"
