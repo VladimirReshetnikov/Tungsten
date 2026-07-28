@@ -1583,6 +1583,15 @@ checkEvaluationSession = do
         , ("BlockMap preserves association windows and normalizes generated lists", "ClearAll[seq,sp];seq[x_]:=Sequence[p[x],q[x]];sp[x_]:=Splice[{p[x],q[x]},List];{BlockMap[HoldComplete,<|a->1,b:>2,c->3,d:>4|>,2,1],BlockMap[Function[x,Nothing],{a,b,c,d},2],BlockMap[seq,{a,b,c,d},2],BlockMap[sp,{a,b,c,d},2]}", "List[List[HoldComplete[Association[Rule[a, 1], RuleDelayed[b, 2]]], HoldComplete[Association[RuleDelayed[b, 2], Rule[c, 3]]], HoldComplete[Association[Rule[c, 3], RuleDelayed[d, 4]]]], List[], List[p[List[a, b]], q[List[a, b]], p[List[c, d]], q[List[c, d]]], List[p[List[a, b]], q[List[a, b]], p[List[c, d]], q[List[c, d]]]]")
         , ("BlockMap continues after recoverable callback errors", "ClearAll[i,bm];i=0;bm[x_]:=(i++;If[i==2,Part[x,99],q[i,x]]);{BlockMap[bm,{a,b,c,d,e,f},2],i,$MessageList}", "List[List[q[1, List[a, b]], Part[List[c, d], 99], q[3, List[e, f]]], 3, List[HoldForm[MessageName[Part, \"error\"]]]]")
         , ("BlockMap propagates control and preserves qualification boundaries", "i=0;{Catch[BlockMap[(i++;If[i==2,Throw[t],q[i,#]])&,{a,b,c,d,e,f},2]],i,BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2],System`BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2],Global`BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2]}", "List[t, 2, List[HoldComplete[h[Plus[1, 1], Plus[2, 2]]], HoldComplete[h[Plus[3, 3], Plus[4, 4]]]], System`BlockMap[HoldComplete, h[Plus[1, 1], Plus[2, 2], Plus[3, 3], Plus[4, 4]], 2], Global`BlockMap[HoldComplete, Unevaluated[h[Plus[1, 1], Plus[2, 2], Plus[3, 3], Plus[4, 4]]], 2]]")
+        , ("SubsetMap replaces selected items with duplicate and negative positions", "{SubsetMap[Reverse,{a,b,c,d,e},{1,3,5}],SubsetMap[Reverse,{a,b,c,d,e},{{1},{3},{5}}],SubsetMap[Reverse,{a,b,c,d,e},{-1,-3}],SubsetMap[Function[x,{p,q}],{a,b},{1,1}],SubsetMap[Function[x,{}],{a,b},{}],SubsetMap[Reverse,System`List[a,b,c],System`List[1,3]]}", "List[List[e, b, c, d, a], List[e, b, c, d, a], List[a, b, e, d, c], List[q, b], List[a, b], System`List[c, b, a]]")
+        , ("SubsetMap validates every position before invoking its callback", "ClearAll[i,sm];i=0;sm[x_]:=(i++;{p});{SubsetMap[sm,{a,b},{3,{1,2}}],i,$MessageList}", "List[SubsetMap[sm, List[a, b], List[3, List[1, 2]]], 0, List[HoldForm[MessageName[SubsetMap, \"error\"]]]]")
+        , ("SubsetMap preserves recoverable callback diagnostics and effects", "ClearAll[i,sm];i=0;sm[x_]:=(i++;Part[f[x],9]);{SubsetMap[sm,{a,b},{1}],i,$MessageList}", "List[SubsetMap[sm, List[a, b], List[1]], 1, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[SubsetMap, \"error\"]]]]")
+        , ("SubsetMap can succeed after a recoverable callback diagnostic", "ClearAll[i,sm];i=0;sm[x_]:=(i++;Part[f[x],9];{p});{SubsetMap[sm,{a,b},{1}],i,$MessageList}", "List[List[p, b], 1, List[HoldForm[MessageName[Part, \"error\"]]]]")
+        , ("SubsetMap wrong-length recovery retains callback state", "ClearAll[i,sm];i=0;sm[x_]:=(i++;{p,q});{SubsetMap[sm,{a,b},{1}],i,$MessageList}", "List[SubsetMap[sm, List[a, b], List[1]], 1, List[HoldForm[MessageName[SubsetMap, \"error\"]]]]")
+        , ("SubsetMap evaluates arguments left to right but recovers raw syntax", "ClearAll[i];i=0;{SubsetMap[(i++;f),(i++;{a}),(i++;{1}),(i++;z)],i,SubsetMap[(i++;f),(i++;a),(i++;{1})],i}", "List[SubsetMap[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], List[a]], CompoundExpression[Increment[i], List[1]], CompoundExpression[Increment[i], z]], 4, SubsetMap[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], a], CompoundExpression[Increment[i], List[1]]], 7]")
+        , ("SubsetMap direct Unevaluated is held while Evaluate forces its payload", "ClearAll[i];i=0;{SubsetMap[f,Unevaluated[(i++;{a,b})],{1}],i,SubsetMap[f,Evaluate[Unevaluated[(i++;{a,b})]],{1}],i}", "List[SubsetMap[f, Unevaluated[CompoundExpression[Increment[i], List[a, b]]], List[1]], 0, SubsetMap[f, Evaluate[Unevaluated[CompoundExpression[Increment[i], List[a, b]]]], List[1]], 1]")
+        , ("SubsetMap propagates control and preserves qualification boundaries", "ClearAll[i,s,bb];i=0;s=System`SubsetMap;bb=SubsetMap;{Catch[SubsetMap[(i++;Throw[t])&,{a,b},{1}]],i,System`SubsetMap[Reverse,{a,b},{1,2}],Global`SubsetMap[Reverse,{a,b},{1,2}],s[Reverse,{a,b},{1,2}],bb[Reverse,{a,b},{1,2}]}", "List[t, 1, System`SubsetMap[Reverse, List[a, b], List[1, 2]], Global`SubsetMap[Reverse, List[a, b], List[1, 2]], System`SubsetMap[Reverse, List[a, b], List[1, 2]], List[b, a]]")
+        , ("SubsetMap ordinary downvalues take precedence over builtin dispatch", "Unprotect[SubsetMap];ClearAll[SubsetMap];SubsetMap[x__]:=HoldComplete[x];SubsetMap[f,{a,b},{1}]", "HoldComplete[f, List[a, b], List[1]]")
         , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
         , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
         , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
@@ -3262,6 +3271,43 @@ checkEvaluationSession = do
             , ( "BlockMap::error"
               , "MessageName[BlockMap, \"error\"]"
               , "BlockMap::error: BlockMap expects a nonatomic expression."
+              )
+            ]
+          )
+        , ( "SubsetMap reports arity target position and callback errors exactly"
+          , "{SubsetMap[],SubsetMap[f,a,{1}],SubsetMap[f,{a},x],SubsetMap[f,{a},{{1,2}}],SubsetMap[f,{a},{0}],SubsetMap[f,{a},{2}],SubsetMap[First,{a},{1}],SubsetMap[Function[x,{p,q}],{a},{1}]}"
+          , "List[SubsetMap[], SubsetMap[f, a, List[1]], SubsetMap[f, List[a], x], SubsetMap[f, List[a], List[List[1, 2]]], SubsetMap[f, List[a], List[0]], SubsetMap[f, List[a], List[2]], SubsetMap[First, List[a], List[1]], SubsetMap[Function[x, List[p, q]], List[a], List[1]]]"
+          , [ ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects a function, a list, and a list of positions."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap currently expects a List as the second argument."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects a List of positions as the third argument."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap currently supports flat integer positions (or one-element ``{i}`` lists)."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: Only top-level Part specifications may use index 0."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: Part index 2 is out of range for length 1."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects the function to return a List of the same length as the selection."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects the function to return a List of the same length as the selection."
               )
             ]
           )

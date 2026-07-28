@@ -2541,6 +2541,61 @@ CASES = (
         ),
         0,
     ),
+    (
+        "subset map replacement recovery qualification and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenSubsetMapI,tungstenSubsetMapF,"
+            "tungstenSubsetMapGood,tungstenSubsetMapBad,"
+            "tungstenSubsetMapAlias,tungstenSubsetMapBareAlias];"
+            "tungstenSubsetMapI=0;"
+            "tungstenSubsetMapF[x_]:=(tungstenSubsetMapI++;"
+            "Part[f[x],9]);"
+            "tungstenSubsetMapGood[x_]:=(tungstenSubsetMapI++;"
+            "Part[f[x],9];{p});"
+            "tungstenSubsetMapBad[x_]:=(tungstenSubsetMapI++;{p,q});"
+            "tungstenSubsetMapAlias=System`SubsetMap;"
+            "tungstenSubsetMapBareAlias=SubsetMap;"
+            "{SubsetMap[Reverse,{a,b,c,d,e},{1,3,5}],"
+            "SubsetMap[Reverse,{a,b,c,d,e},{{1},{3},{5}}],"
+            "SubsetMap[Reverse,{a,b,c,d,e},{-1,-3}],"
+            "SubsetMap[Function[x,{p,q}],{a,b},{1,1}],"
+            "SubsetMap[Function[x,{}],{a,b},{}],"
+            "SubsetMap[Reverse,System`List[a,b,c],System`List[1,3]],"
+            "(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapGood,{a,b},{1}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapF,{a,b},{1}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapBad,{a,b},{1}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapGood,{a,b},{3,{1,2}}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "Catch[SubsetMap[(tungstenSubsetMapI++;Throw[t])&,"
+            "{a,b},{1}]]),tungstenSubsetMapI,"
+            "System`SubsetMap[Reverse,{a,b},{1,2}],"
+            "Global`SubsetMap[Reverse,{a,b},{1,2}],"
+            "tungstenSubsetMapAlias[Reverse,{a,b},{1,2}],"
+            "tungstenSubsetMapBareAlias[Reverse,{a,b},{1,2}],"
+            "(tungstenSubsetMapI=0;"
+            "SubsetMap[(tungstenSubsetMapI++;f),"
+            "(tungstenSubsetMapI++;{a}),"
+            "(tungstenSubsetMapI++;{1}),"
+            "(tungstenSubsetMapI++;z)]),tungstenSubsetMapI,"
+            "(tungstenSubsetMapI=0;"
+            "SubsetMap[f,Unevaluated[(tungstenSubsetMapI++;{a,b})],"
+            "{1}]),tungstenSubsetMapI,"
+            "SubsetMap[],SubsetMap[f,a,{1}],SubsetMap[f,{a},x],"
+            "SubsetMap[f,{a},{{1,2}}],SubsetMap[f,{a},{0}],"
+            "SubsetMap[f,{a},{2}],SubsetMap[First,{a},{1}],"
+            "SubsetMap[Function[x,{p,q}],{a},{1}],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

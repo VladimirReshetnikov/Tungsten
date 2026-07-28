@@ -3016,6 +3016,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionMapThread depth session values)
   Call (Symbol "BlockMap") values ->
     Just (evaluateSessionBlockMap depth session values)
+  Call (Symbol "SubsetMap") values ->
+    Just (evaluateSessionSubsetMap depth session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
   Call (Symbol "Construct") values ->
@@ -4007,6 +4009,98 @@ evaluateSessionBlockMap depth session = \case
           updated
    where
     itemCount = toInteger (length (sessionCollectionItems collection))
+
+evaluateSessionSubsetMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSubsetMap depth session = \case
+  [function, Call (Symbol targetHead) targetValues, positions]
+    | isSessionSystemHead "List" targetHead ->
+        case positions of
+          Call (Symbol positionsHead) rawPositions
+            | isSessionSystemHead "List" positionsHead ->
+                case traverse normalizePosition rawPositions of
+                  P.Left message -> sessionFailure session message
+                  P.Right requestedPositions ->
+                    case traverse (resolvePosition (length targetValues)) requestedPositions of
+                      P.Left message -> sessionFailure session message
+                      P.Right resolvedPositions ->
+                        case traverse (`sessionListItemAt` targetValues) resolvedPositions of
+                          Nothing ->
+                            sessionFailure
+                              session
+                              "SubsetMap could not resolve a validated position."
+                          Just selectedValues -> do
+                            (callbackResult, callbackSession) <-
+                              evaluateSessionCallable
+                                depth
+                                session
+                                function
+                                [Call (Symbol "List") selectedValues]
+                            (transformed, transformedSession) <-
+                              evaluateSessionAt (depth + 1) callbackSession callbackResult
+                            case transformed of
+                              Call (Symbol transformedHead) transformedValues
+                                | isSessionSystemHead "List" transformedHead
+                                , length transformedValues == length resolvedPositions ->
+                                    Right
+                                      ( normalizeEvaluatedCall
+                                          (Symbol targetHead)
+                                          ( replaceSelectedValues
+                                              targetValues
+                                              (zip resolvedPositions transformedValues)
+                                          )
+                                      , transformedSession
+                                      )
+                              _ -> invalidCallbackResult transformedSession
+          _ ->
+            sessionFailure
+              session
+              "SubsetMap expects a List of positions as the third argument."
+  [_, _, _] ->
+    sessionFailure
+      session
+      "SubsetMap currently expects a List as the second argument."
+  _ ->
+    sessionFailure
+      session
+      "SubsetMap expects a function, a list, and a list of positions."
+ where
+  normalizePosition = \case
+    Integer position -> P.Right position
+    Call (Symbol listHead) [Integer position]
+      | isSessionSystemHead "List" listHead -> P.Right position
+    _ ->
+      P.Left
+        "SubsetMap currently supports flat integer positions (or one-element ``{i}`` lists)."
+
+  resolvePosition count position
+    | position == 0 =
+        P.Left "Only top-level Part specifications may use index 0."
+    | otherwise =
+        case resolveSessionPosition count position of
+          Just resolved -> P.Right resolved
+          Nothing ->
+            P.Left
+              ( "Part index "
+                  <> T.pack (show position)
+                  <> " is out of range for length "
+                  <> T.pack (show count)
+                  <> "."
+              )
+
+  replaceSelectedValues values [] = values
+  replaceSelectedValues values ((index, replacement) : rest) =
+    replaceSelectedValues
+      (replaceSessionListIndex index replacement values)
+      rest
+
+  invalidCallbackResult currentSession =
+    sessionFailure
+      currentSession
+      "SubsetMap expects the function to return a List of the same length as the selection."
 
 evaluateSessionOperate
   :: Int

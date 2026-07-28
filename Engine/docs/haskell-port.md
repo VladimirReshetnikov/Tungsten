@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T14:11:11Z
-- Repository HEAD: c2c41a4d29058c0a8c98d720891c7546ea757969
+- Updated (UTC): 2026-07-28T14:29:09Z
+- Repository HEAD: 3fc49986c3b149d20606ae335af9b177e86f80c7
 
 ## Purpose
 
@@ -130,6 +130,9 @@ incremental validation with retained prior effects, bare generated-list normaliz
 shape diagnostics. `BlockMap` adds complete-window scheduling with default, overlapping, and
 gapped offsets over arbitrary compound expressions and associations, preserving block heads,
 association rule kinds, callback effects and control, and generated outer-list normalization.
+`SubsetMap` validates flat integer positions before its single callback, supports negative and
+duplicate selections with later-replacement precedence, preserves exact List head spelling, and
+retains callback effects and diagnostics through successful or recovered transformations.
 
 Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
 and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides
