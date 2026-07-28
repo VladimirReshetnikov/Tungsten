@@ -62,6 +62,41 @@ void evaluation_result_tests() {
         "EvaluationResult owns independent effect snapshots");
 }
 
+void message_list_without_session_tests() {
+    tungsten::Evaluator evaluator;
+
+    const auto malformed = evaluator.evaluate_result(
+        tungsten::parse_input_form(
+            R"WL(MessageList[Print["must not run"], 1])WL"));
+    check_equal(malformed.result.to_full_form(), "List[]",
+        "MessageList without a session returns an empty list before arity validation");
+    check(malformed.prints.empty() && malformed.messages.empty(),
+        "MessageList without a session evaluates no arguments or diagnostics");
+
+    const auto qualified = evaluator.evaluate_result(
+        tungsten::parse_input_form(R"WL(System`MessageList[Unevaluated[x++]])WL"));
+    check_equal(qualified.result.to_full_form(), "List[]",
+        "qualified MessageList without a session is also empty");
+    check(qualified.prints.empty() && qualified.messages.empty(),
+        "qualified no-session MessageList preserves its held boundary");
+
+    const auto global = evaluator.evaluate_result(
+        tungsten::parse_input_form(R"WL(Global`MessageList[Print["global"]])WL"));
+    check_equal(global.result.to_full_form(), "Global`MessageList[Null]",
+        "Global MessageList stays inert without a session");
+    check(global.prints == std::vector<std::string>{"global"}
+            && global.messages.empty(),
+        "Global MessageList follows ordinary argument evaluation");
+
+    const auto alias = evaluator.evaluate_result(tungsten::parse_input_form(
+        R"WL(mlNoSessionAlias = System`MessageList; mlNoSessionAlias[Print["alias"]])WL"));
+    check_equal(alias.result.to_full_form(), "System`MessageList[Null]",
+        "an alias to MessageList does not acquire raw dispatch");
+    check(alias.prints == std::vector<std::string>{"alias"}
+            && alias.messages.empty(),
+        "an inert MessageList alias still evaluates its argument once");
+}
+
 void symbol_info_tests() {
     tungsten::Evaluator evaluator;
     const auto plus = evaluator.symbol_info(tungsten::symbol("Plus"));
@@ -345,6 +380,7 @@ void module_memoization_regression_tests() {
 
 int main() {
     evaluation_result_tests();
+    message_list_without_session_tests();
     symbol_info_tests();
     concurrent_registry_isolation_tests();
     canonical_own_attribute_and_scope_tests();

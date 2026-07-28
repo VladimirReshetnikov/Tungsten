@@ -44,6 +44,10 @@ struct SessionOutput {
 class EvaluationSession {
 public:
     EvaluationSession();
+    EvaluationSession(const EvaluationSession& other);
+    EvaluationSession(EvaluationSession&& other);
+    EvaluationSession& operator=(const EvaluationSession& other);
+    EvaluationSession& operator=(EvaluationSession&& other);
 
     [[nodiscard]] std::size_t line() const noexcept { return line_; }
     // History lookups return independent snapshots. A missing optional means that the line
@@ -94,6 +98,7 @@ private:
         std::vector<std::string> prints,
         std::vector<Expr> message_names,
         std::vector<std::string> messages);
+    void refresh_evaluator_session_context();
     void prune_history();
 
     Evaluator evaluator_;
@@ -104,6 +109,7 @@ private:
     std::map<std::size_t, std::vector<Expr>> message_history_;
     std::map<std::size_t, std::vector<std::string>> message_text_history_;
     std::map<std::size_t, std::vector<std::string>> print_history_;
+    std::set<std::size_t> evaluating_input_history_;
 };
 
 int run_repl(

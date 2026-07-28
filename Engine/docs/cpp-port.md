@@ -1,11 +1,11 @@
 # Tungsten Engine C++ Runtime and Verification
 
-- Status: Complete Python-reference native port and active verification record
+- Status: Complete measured Python-reference dispatch port and active behavioral verification record
 - Audience: Tungsten maintainers, reviewers, projection authors, and contributors
 - Scope: `Engine/CMakeLists.txt`, `Engine/cpp/`, native projections, and Python-oracle parity tooling
 - Created (UTC): 2026-07-18T01:44:22Z
-- Updated (UTC): 2026-07-28T03:36:42Z
-- Repository HEAD: `7a2d502e32a50e34f7b235fa23546a4f16b8f381`
+- Updated (UTC): 2026-07-28T14:35:54Z
+- Repository HEAD: `e1bcdebb16db3e872a54d7e6d3cbef0da9d558b3`
 
 ## C++ port boundary
 
@@ -25,11 +25,14 @@ with its own Cabal build and compatibility boundary. The former Rust port is sup
 [rust-port.md](./rust-port.md) and the Rust source tree are retained only as historical migration
 records.
 
-At the repository HEAD above, the native implementation owns the complete dispatch surface of the
-Python compatibility reference: 531 heads dispatch in the evaluator and the six history/process
-heads `Exit`, `Quit`, `In`, `InString`, `Out`, and `MessageList` dispatch in the REPL/session layer.
-"Complete" here is scoped to the Python reference. It is not a claim that either runtime implements
-every Wolfram Language head or every kernel algorithm.
+The native implementation owns the complete measured dispatch surface of the Python compatibility
+reference: 535 heads dispatch in the evaluator, while the two process-termination heads `Exit` and
+`Quit` remain owned by the REPL/session layer. Evaluator-owned `In`, `InString`, `Out`, and
+`MessageList` receive their mutable line and history data through session callbacks, so raw
+evaluation order, qualification, control propagation, and no-session behavior remain explicit.
+"Complete" here means dispatch ownership and exact agreement on the maintained differential
+corpora. It is not proof of every unmeasured Python argument shape, nor a claim that either runtime
+implements every Wolfram Language head or every kernel algorithm.
 
 ## Build, test, and install
 
@@ -177,7 +180,16 @@ definition state, messages/control flow, and algebraic-number support. It remain
 bounded rather than a complete Wolfram kernel. Unsupported argument shapes and algorithms stay
 symbolic where possible. The recorded evaluator differential is exact over its current 2,499-call,
 585-test corpus; that result measures Python-oracle compatibility for the exercised forms, not full
-Wolfram-kernel coverage.
+Wolfram-kernel coverage or exhaustive Python semantic parity. Behavioral audits therefore continue
+after a corpus reaches zero mismatches and add every newly discovered raw-evaluation boundary to a
+native regression test and focused differential.
+
+Historical `MessageList[n]` now evaluates its held line specification exactly once, including
+nested `In` and `Out` lookups, preserves effects and non-local control, distinguishes bare/System
+dispatch from Global spellings and evaluated aliases, and reads only visible retained messages.
+Session copy and move operations rebind evaluator callbacks to the destination object. The separate
+current-input `$MessageList` distinction between generated and Quiet-suppressed visible messages is
+tracked by the message-stream audit rather than inferred from historical lookup coverage.
 
 The standalone extractor will continue to report setup-dependent differences even after every
 recorded test is exact. Those are extraction artifacts, not native evaluator failures: literal

@@ -8213,6 +8213,8 @@ Expr Evaluator::evaluate(const Expr& expression) {
 Expr Evaluator::evaluate_impl(const Expr& expression) {
     if (expression.kind() == ExprKind::Symbol) {
         const auto name = system_dispatch_name(expression.text());
+        if (name == "$Line" && session_line_resolver_)
+            return session_line_resolver_();
         if (name == "I") return complex(integer(0L), integer(1L));
         if (name == "$Context") return string("Global`");
         if (name == "$ContextPath") return list({string("System`"), string("Global`")});
@@ -8241,6 +8243,17 @@ Expr Evaluator::evaluate_impl(const Expr& expression) {
     }
     if (expression.kind() != ExprKind::Call) return expression;
     return evaluate_call(expression.head(), expression.args());
+}
+
+void Evaluator::set_session_resolvers(
+    std::function<Expr()> line_resolver,
+    std::function<Expr(const mpz_class&)> message_list_resolver,
+    std::function<Expr(
+        const std::string&, const std::optional<mpz_class>&)>
+        history_resolver) {
+    session_line_resolver_ = std::move(line_resolver);
+    message_list_resolver_ = std::move(message_list_resolver);
+    session_history_resolver_ = std::move(history_resolver);
 }
 
 bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
@@ -9519,6 +9532,49 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, message_prefix + "::error: " + text);
         return call(raw_head, raw_args);
     };
+    if (name == "MessageList") {
+        // Outside an EvaluationSession the Python compatibility evaluator
+        // returns an empty history for every raw MessageList call, before
+        // validating or evaluating any arguments.
+        if (!message_list_resolver_) return list({});
+        auto message_list_error = [&](const std::string& text) {
+            const auto message = call("MessageName", {
+                symbol("MessageList"), string("error")});
+            emit_message(message, "MessageList::error: " + text);
+            return call(raw_head, raw_args);
+        };
+        if (raw_args.size() != 1)
+            return message_list_error(
+                "MessageList expects exactly one line specification.");
+        const auto index = evaluate(raw_args[0]);
+        if (immediate_signal_active()) return index;
+        if (index.kind() != ExprKind::Integer)
+            return message_list_error(
+                "History functions expect an integer line specification.");
+        return message_list_resolver_(index.integer_value());
+    }
+    if (session_history_resolver_
+        && (name == "In" || name == "InString" || name == "Out")) {
+        auto history_error = [&](const std::string& text) {
+            const auto message = call("MessageName", {
+                symbol(name), string("error")});
+            emit_message(message, name + "::error: " + text);
+            return call(raw_head, raw_args);
+        };
+        if (raw_args.size() > 1)
+            return history_error(
+                name + " expects zero or one line specification.");
+        std::optional<mpz_class> requested;
+        if (!raw_args.empty()) {
+            const auto index = evaluate(raw_args[0]);
+            if (immediate_signal_active()) return index;
+            if (index.kind() != ExprKind::Integer)
+                return history_error(
+                    "History functions expect an integer line specification.");
+            requested = index.integer_value();
+        }
+        return session_history_resolver_(name, requested);
+    }
     if (name == "Failsafe") {
         if (raw_args.empty() || raw_args.size() > 3)
             return raw_evaluation_error(

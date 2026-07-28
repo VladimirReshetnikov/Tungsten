@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -150,6 +151,270 @@ void history_pruning_tests() {
         "zero-history value evaluation");
     check_equal(zero.evaluate_input("DownValues[In]").result.to_full_form(),
         "List[]", "history length zero prunes the current input before evaluation");
+}
+
+void message_list_parity_tests() {
+    const auto held = [](const std::string& head, const std::string& tag) {
+        return "HoldForm[MessageName[" + head + ", \"" + tag + "\"]]";
+    };
+    const auto duplicate_history = "List[" + held("f", "a") + ", "
+        + held("f", "a") + "]";
+
+    tungsten::EvaluationSession history;
+    const auto generated = history.evaluate_input(
+        "Message[f::a]; Message[f::a]; Quiet[Message[g::b]]");
+    check(generated.message_names.size() == 2,
+        "historical MessageList stores only visible messages");
+    check_equal(history.evaluate_input(
+        "{MessageList[1], System`MessageList[-1], MessageList[$Line], "
+        "MessageList[0], MessageList[99]}").result.to_full_form(),
+        "List[" + duplicate_history + ", " + duplicate_history
+            + ", List[], List[], List[]]",
+        "MessageList supports absolute relative current and missing indices");
+    check_equal(history.evaluate_input(
+        "mlHistoryI = 1; {MessageList[mlHistoryI++], mlHistoryI}")
+            .result.to_full_form(),
+        "List[" + duplicate_history + ", 2]",
+        "MessageList evaluates a dynamic integer index exactly once");
+    check_equal(history.evaluate_input(
+        "{MessageList[(Message[now::tag]; 1)], $MessageList}")
+            .result.to_full_form(),
+        "List[" + duplicate_history + ", List["
+            + held("now", "tag") + "]]",
+        "messages from index evaluation stay current and do not change old history");
+
+    tungsten::EvaluationSession evaluated_history_index;
+    (void)evaluated_history_index.evaluate_input("Message[indexed::tag]");
+    (void)evaluated_history_index.evaluate_input("1");
+    const auto indexed_message = "List[" + held("indexed", "tag") + "]";
+    check_equal(evaluated_history_index.evaluate_input(
+        "{MessageList[Out[2]], MessageList[In[2]], "
+        "MessageList[Out[2] + In[2] - 1], "
+        "MessageList[Evaluate[Unevaluated[Out[2]]]]}")
+            .result.to_full_form(),
+        "List[" + indexed_message + ", " + indexed_message + ", "
+            + indexed_message + ", " + indexed_message + "]",
+        "MessageList evaluates In and Out history references inside its index");
+    check_equal(evaluated_history_index.evaluate_input(
+        "mlNestedI = 0; {MessageList[Out[(mlNestedI++; 2)]], mlNestedI}")
+            .result.to_full_form(),
+        "List[" + indexed_message + ", 1]",
+        "a nested history index and its effects are evaluated exactly once");
+    const auto held_history = evaluated_history_index.evaluate_input(
+        "MessageList[Unevaluated[Out[2]]]");
+    check_equal(held_history.result.to_full_form(),
+        "MessageList[Unevaluated[Out[2]]]",
+        "direct Unevaluated keeps a nested history lookup held");
+    check(held_history.message_names.size() == 1,
+        "held nested history lookup produces only the outer type diagnostic");
+
+    tungsten::EvaluationSession diagnostics;
+    const auto wrong_arity = diagnostics.evaluate_input(
+        "mlArityI = 0; MessageList[(mlArityI++; 1), (mlArityI++; 2)]");
+    check_equal(wrong_arity.result.to_full_form(),
+        "MessageList[CompoundExpression[Increment[mlArityI], 1], "
+        "CompoundExpression[Increment[mlArityI], 2]]",
+        "wrong-arity MessageList retains its raw call");
+    check_equal(diagnostics.evaluate_input("mlArityI").result.to_full_form(), "0",
+        "wrong-arity MessageList evaluates no arguments");
+    check(wrong_arity.prints.empty() && wrong_arity.message_names.size() == 1,
+        "wrong-arity MessageList emits exactly one diagnostic");
+    if (wrong_arity.message_names.size() == 1)
+        check_equal(wrong_arity.message_names.front().to_full_form(),
+            "MessageName[MessageList, \"error\"]",
+            "wrong-arity MessageList diagnostic name");
+    if (wrong_arity.messages.size() == 1)
+        check_equal(wrong_arity.messages.front(),
+            "MessageList::error: MessageList expects exactly one line specification.",
+            "wrong-arity MessageList diagnostic text");
+
+    const auto invalid_type = diagnostics.evaluate_input(
+        "MessageList[Print[\"bad index\"]; mlMissingIndex]");
+    check_equal(invalid_type.result.to_full_form(),
+        "MessageList[CompoundExpression[Print[\"bad index\"], mlMissingIndex]]",
+        "invalid MessageList index recovers the raw call");
+    check(invalid_type.prints == std::vector<std::string>{"bad index"},
+        "invalid MessageList index retains prior effects");
+    check(invalid_type.message_names.size() == 1,
+        "invalid MessageList index emits one diagnostic");
+    if (invalid_type.messages.size() == 1)
+        check_equal(invalid_type.messages.front(),
+            "MessageList::error: History functions expect an integer line specification.",
+            "invalid MessageList index diagnostic text");
+
+    const auto unevaluated = diagnostics.evaluate_input(
+        "mlUnevaluatedI = 1; "
+        "{MessageList[Unevaluated[mlUnevaluatedI++]], mlUnevaluatedI}");
+    check_equal(unevaluated.result.to_full_form(),
+        "List[MessageList[Unevaluated[Increment[mlUnevaluatedI]]], 1]",
+        "MessageList preserves direct Unevaluated and holds its payload");
+    check_equal(diagnostics.evaluate_input("MessageList[Sequence[1]]")
+            .result.to_full_form(),
+        "MessageList[Sequence[1]]",
+        "MessageList does not splice a raw Sequence index");
+
+    tungsten::EvaluationSession qualification;
+    (void)qualification.evaluate_input("Message[q::tag]");
+    check_equal(qualification.evaluate_input("System`MessageList[Evaluate[1]]")
+            .result.to_full_form(),
+        "List[" + held("q", "tag") + "]",
+        "System MessageList dispatches and Evaluate forces its index");
+    const auto system_error = qualification.evaluate_input("System`MessageList[x]");
+    check_equal(system_error.result.to_full_form(), "System`MessageList[x]",
+        "System MessageList preserves qualified syntax on recovery");
+    check(system_error.message_names.size() == 1,
+        "System MessageList recovery emits one diagnostic");
+    if (system_error.message_names.size() == 1)
+        check_equal(system_error.message_names.front().to_full_form(),
+            "MessageName[MessageList, \"error\"]",
+            "System MessageList uses the canonical diagnostic name");
+
+    tungsten::EvaluationSession history_qualification;
+    (void)history_qualification.evaluate_input("Message[qh::tag]");
+    (void)history_qualification.evaluate_input("1");
+    const auto nested_system_error = history_qualification.evaluate_input(
+        "System`MessageList[System`Out[x]]");
+    check_equal(nested_system_error.result.to_full_form(),
+        "System`MessageList[System`Out[x]]",
+        "qualified nested history recovery preserves both raw heads");
+    check(nested_system_error.message_names.size() == 2,
+        "invalid qualified Out and MessageList emit one diagnostic each");
+    if (nested_system_error.message_names.size() == 2) {
+        check_equal(nested_system_error.message_names[0].to_full_form(),
+            "MessageName[Out, \"error\"]",
+            "qualified Out uses its canonical diagnostic name");
+        check_equal(nested_system_error.message_names[1].to_full_form(),
+            "MessageName[MessageList, \"error\"]",
+            "qualified outer MessageList keeps its canonical diagnostic name");
+    }
+    const auto global_history = history_qualification.evaluate_input(
+        "System`MessageList[Global`Out[2]]");
+    check_equal(global_history.result.to_full_form(),
+        "System`MessageList[Global`Out[2]]",
+        "Global Out stays inert inside qualified MessageList");
+    check(global_history.message_names.size() == 1,
+        "inert Global Out produces only the outer type diagnostic");
+    const auto alias_history = history_qualification.evaluate_input(
+        "mlOutAlias = System`Out; MessageList[mlOutAlias[2]]");
+    check_equal(alias_history.result.to_full_form(),
+        "MessageList[mlOutAlias[2]]",
+        "an alias to Out does not acquire raw history dispatch");
+    check(alias_history.message_names.size() == 1,
+        "an inert Out alias produces only the outer type diagnostic");
+    check_equal(history_qualification.evaluate_input(
+        "System`MessageList[System`Out[2]]").result.to_full_form(),
+        "List[" + held("qh", "tag") + "]",
+        "qualified Out supplies an evaluated integer MessageList index");
+    const auto global = qualification.evaluate_input(
+        "Global`MessageList[Print[\"global index\"]]");
+    check_equal(global.result.to_full_form(), "Global`MessageList[Null]",
+        "Global MessageList stays inert in a session");
+    check(global.prints == std::vector<std::string>{"global index"}
+            && global.message_names.empty(),
+        "Global MessageList evaluates its argument ordinarily");
+    const auto alias = qualification.evaluate_input(
+        "mlSessionAlias = System`MessageList; "
+        "mlSessionAlias[Print[\"alias index\"]]");
+    check_equal(alias.result.to_full_form(), "System`MessageList[Null]",
+        "a session alias to MessageList stays inert");
+    check(alias.prints == std::vector<std::string>{"alias index"}
+            && alias.message_names.empty(),
+        "an inert session alias evaluates its argument once");
+
+    tungsten::EvaluationSession downvalue;
+    check_equal(downvalue.evaluate_input(
+        "Unprotect[MessageList]; MessageList[x_] := owned; MessageList[1]")
+            .result.to_full_form(),
+        "List[]", "raw MessageList dispatch precedes user downvalues");
+
+    tungsten::EvaluationSession controls;
+    const auto caught = controls.evaluate_input(
+        "Catch[MessageList[(Print[\"before throw\"]; Throw[t])]]");
+    check_equal(caught.result.to_full_form(), "t",
+        "MessageList index Throw remains nonlocal");
+    check(caught.prints == std::vector<std::string>{"before throw"}
+            && caught.message_names.empty(),
+        "MessageList Throw retains earlier effects without a diagnostic");
+    check_equal(controls.evaluate_input(
+        "MessageList[(Print[\"before return\"]; Return[r])]")
+            .result.to_full_form(),
+        "Return[r]", "MessageList index Return remains nonlocal");
+    check_equal(controls.evaluate_input(
+        "CheckAbort[MessageList[(Print[\"before abort\"]; Abort[])], caught]")
+            .result.to_full_form(),
+        "caught", "MessageList index Abort remains nonlocal");
+
+    tungsten::EvaluationSession history_controls;
+    (void)history_controls.evaluate_input("Message[hc::tag]");
+    (void)history_controls.evaluate_input("1");
+    const auto nested_throw = history_controls.evaluate_input(
+        "Catch[MessageList[Out[(Print[\"history throw\"]; Throw[t])]]]");
+    check_equal(nested_throw.result.to_full_form(), "t",
+        "Throw from a nested Out index remains nonlocal");
+    check(nested_throw.prints == std::vector<std::string>{"history throw"}
+            && nested_throw.message_names.empty(),
+        "nested Out Throw retains its preceding effect exactly once");
+    const auto nested_abort = history_controls.evaluate_input(
+        "CheckAbort[MessageList[In[(Print[\"history abort\"]; Abort[])]], caught]");
+    check_equal(nested_abort.result.to_full_form(), "caught",
+        "Abort from a nested In index remains nonlocal");
+    check(nested_abort.prints == std::vector<std::string>{"history abort"}
+            && nested_abort.message_names.empty(),
+        "nested In Abort retains its preceding effect exactly once");
+
+    tungsten::EvaluationSession visibility;
+    const auto quieted = visibility.evaluate_input("Quiet[MessageList[x]]");
+    check(quieted.message_names.empty(),
+        "Quiet suppresses an invalid MessageList diagnostic from visible history");
+    check_equal(visibility.evaluate_input("MessageList[1]").result.to_full_form(),
+        "List[]", "quieted MessageList diagnostics are absent from history");
+    const auto checked = visibility.evaluate_input(
+        "Check[MessageList[x], fallback]");
+    check_equal(checked.result.to_full_form(), "fallback",
+        "Check observes an invalid MessageList diagnostic");
+    check_equal(visibility.evaluate_input("MessageList[3]").result.to_full_form(),
+        "List[" + held("MessageList", "error") + "]",
+        "visible MessageList diagnostics are retained historically");
+    (void)visibility.evaluate_input("Off[MessageList::error]");
+    const auto disabled = visibility.evaluate_input("MessageList[x]");
+    check(disabled.message_names.empty(),
+        "Off prevents MessageList diagnostics from entering history");
+
+    tungsten::EvaluationSession finite;
+    (void)finite.evaluate_input("$HistoryLength = 2");
+    (void)finite.evaluate_input("Message[a::x]");
+    (void)finite.evaluate_input("Message[b::x]");
+    check_equal(finite.evaluate_input("{MessageList[2], MessageList[3]}")
+            .result.to_full_form(),
+        "List[List[], List[" + held("b", "x") + "]]",
+        "finite history prunes MessageList entries before the current input");
+    (void)finite.evaluate_input("$HistoryLength = 0; Message[c::x]");
+    check_equal(finite.evaluate_input("MessageList[5]").result.to_full_form(),
+        "List[]", "zero history length removes historical messages at finish");
+
+    tungsten::EvaluationSession lifetime_source;
+    (void)lifetime_source.evaluate_input("Message[lifetime::tag]");
+    (void)lifetime_source.evaluate_input("1");
+    tungsten::EvaluationSession copied(lifetime_source);
+    check_equal(copied.evaluate_input("MessageList[Out[2]]").result.to_full_form(),
+        "List[" + held("lifetime", "tag") + "]",
+        "copied sessions rebind their history resolver to the copy");
+    tungsten::EvaluationSession moved(std::move(copied));
+    check_equal(moved.evaluate_input("MessageList[In[2]]").result.to_full_form(),
+        "List[" + held("lifetime", "tag") + "]",
+        "moved sessions rebind their history resolver to the destination");
+    tungsten::EvaluationSession copy_assigned;
+    copy_assigned = lifetime_source;
+    check_equal(copy_assigned.evaluate_input("MessageList[Out[2]]")
+            .result.to_full_form(),
+        "List[" + held("lifetime", "tag") + "]",
+        "copy-assigned sessions rebind their history resolver");
+    tungsten::EvaluationSession move_assigned;
+    move_assigned = std::move(copy_assigned);
+    check_equal(move_assigned.evaluate_input("MessageList[In[2]]")
+            .result.to_full_form(),
+        "List[" + held("lifetime", "tag") + "]",
+        "move-assigned sessions rebind their history resolver");
 }
 
 void installed_history_api_tests() {
@@ -415,6 +680,7 @@ int main() {
     history_and_exit_tests();
     parsed_input_and_exit_diagnostic_tests();
     history_pruning_tests();
+    message_list_parity_tests();
     installed_history_api_tests();
     display_and_print_tests();
     hook_and_limit_tests();

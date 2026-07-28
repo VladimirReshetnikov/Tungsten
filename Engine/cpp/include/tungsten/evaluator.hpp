@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -11,6 +12,8 @@
 #include <vector>
 
 namespace tungsten {
+
+class EvaluationSession;
 
 struct EvaluationMessage {
     Expr name;
@@ -61,6 +64,8 @@ public:
     [[nodiscard]] const std::vector<std::string>& prints() const noexcept { return prints_; }
 
 private:
+    friend class EvaluationSession;
+
     struct Definition { Expr value; bool delayed = false; };
     struct PatternDefinition {
         Expr lhs;
@@ -89,6 +94,12 @@ private:
     enum class ControlKind { None, Break, Continue, Return, Goto };
     Expr evaluate_impl(const Expr& expression);
     Expr evaluate_call(const Expr& head, const std::vector<Expr>& args);
+    void set_session_resolvers(
+        std::function<Expr()> line_resolver,
+        std::function<Expr(const mpz_class&)> message_list_resolver,
+        std::function<Expr(
+            const std::string&, const std::optional<mpz_class>&)>
+            history_resolver);
     [[nodiscard]] bool evaluate_tensor_matrix_call(
         const Expr& head, const std::vector<Expr>& args,
         Expr& result, std::string& error);
@@ -155,6 +166,11 @@ private:
     std::vector<Expr> messages_;
     std::vector<std::string> message_texts_;
     std::vector<std::string> prints_;
+    std::function<Expr()> session_line_resolver_;
+    std::function<Expr(const mpz_class&)> message_list_resolver_;
+    std::function<Expr(
+        const std::string&, const std::optional<mpz_class>&)>
+        session_history_resolver_;
 };
 
 [[nodiscard]] Expr evaluate(const Expr& expression);

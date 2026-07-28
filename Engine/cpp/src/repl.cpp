@@ -660,6 +660,64 @@ EvaluationSession::EvaluationSession() {
         symbol("$HistoryLength"), symbol("Infinity")}));
     (void)evaluator_.evaluate(call("Set", {
         symbol("$MessagePrePrint"), symbol("Automatic")}));
+    refresh_evaluator_session_context();
+}
+
+EvaluationSession::EvaluationSession(const EvaluationSession& other)
+    : evaluator_(other.evaluator_),
+      line_(other.line_),
+      input_strings_(other.input_strings_),
+      inputs_(other.inputs_),
+      outputs_(other.outputs_),
+      message_history_(other.message_history_),
+      message_text_history_(other.message_text_history_),
+      print_history_(other.print_history_) {
+    refresh_evaluator_session_context();
+}
+
+EvaluationSession::EvaluationSession(EvaluationSession&& other)
+    : evaluator_(std::move(other.evaluator_)),
+      line_(other.line_),
+      input_strings_(std::move(other.input_strings_)),
+      inputs_(std::move(other.inputs_)),
+      outputs_(std::move(other.outputs_)),
+      message_history_(std::move(other.message_history_)),
+      message_text_history_(std::move(other.message_text_history_)),
+      print_history_(std::move(other.print_history_)) {
+    refresh_evaluator_session_context();
+    other.refresh_evaluator_session_context();
+}
+
+EvaluationSession& EvaluationSession::operator=(
+    const EvaluationSession& other) {
+    if (this == &other) return *this;
+    evaluator_ = other.evaluator_;
+    line_ = other.line_;
+    input_strings_ = other.input_strings_;
+    inputs_ = other.inputs_;
+    outputs_ = other.outputs_;
+    message_history_ = other.message_history_;
+    message_text_history_ = other.message_text_history_;
+    print_history_ = other.print_history_;
+    evaluating_input_history_.clear();
+    refresh_evaluator_session_context();
+    return *this;
+}
+
+EvaluationSession& EvaluationSession::operator=(EvaluationSession&& other) {
+    if (this == &other) return *this;
+    evaluator_ = std::move(other.evaluator_);
+    line_ = other.line_;
+    input_strings_ = std::move(other.input_strings_);
+    inputs_ = std::move(other.inputs_);
+    outputs_ = std::move(other.outputs_);
+    message_history_ = std::move(other.message_history_);
+    message_text_history_ = std::move(other.message_text_history_);
+    print_history_ = std::move(other.print_history_);
+    evaluating_input_history_.clear();
+    refresh_evaluator_session_context();
+    other.refresh_evaluator_session_context();
+    return *this;
 }
 
 std::optional<std::string> EvaluationSession::input_string(std::size_t line) const {
@@ -723,12 +781,14 @@ std::optional<std::size_t> EvaluationSession::history_index(
 
 Expr EvaluationSession::replace_session_references(
     const Expr& expression, std::set<std::size_t>& expanding_inputs) {
-    if (expression.kind() == ExprKind::Symbol && is_symbol(expression, "$Line"))
-        return integer(line_);
     if (expression.kind() != ExprKind::Call) return expression;
 
     const auto* raw_name = expression.head().symbol_name();
     const auto name = raw_name == nullptr ? std::string{} : system_dispatch_name(*raw_name);
+    // MessageList owns evaluation of its raw argument.  In particular,
+    // Unevaluated and malformed calls must not be rewritten by this eager
+    // history projection pass before the evaluator can diagnose them.
+    if (name == "MessageList") return expression;
     if (name == "DownValues" && expression.args().size() == 1) {
         const auto* target_name = expression.args()[0].symbol_name();
         const auto target = target_name == nullptr
@@ -772,16 +832,6 @@ Expr EvaluationSession::replace_session_references(
             return call(expression.head(), {integer(*index)});
         }
     }
-    if (name == "MessageList" && expression.args().size() == 1) {
-        if (const auto index = history_index(expression.args())) {
-            std::vector<Expr> held;
-            if (const auto found = message_history_.find(*index); found != message_history_.end())
-                for (const auto& message : found->second)
-                    held.push_back(call("HoldForm", {message}));
-            return list(std::move(held));
-        }
-    }
-
     std::vector<Expr> arguments;
     arguments.reserve(expression.args().size());
     for (const auto& argument : expression.args())
@@ -831,6 +881,7 @@ std::string EvaluationSession::apply_pre_read(
 
 SessionOutput EvaluationSession::evaluate_input(const std::string& source) {
     ++line_;
+    refresh_evaluator_session_context();
     std::vector<std::string> prints;
     std::vector<Expr> message_names;
     std::vector<std::string> messages;
@@ -849,6 +900,7 @@ SessionOutput EvaluationSession::evaluate_expression(
     const std::string& source,
     const Expr& expression) {
     ++line_;
+    refresh_evaluator_session_context();
     return evaluate_prepared_input(source, expression, {}, {}, {});
 }
 
@@ -861,6 +913,7 @@ SessionOutput EvaluationSession::evaluate_prepared_input(
     input_strings_[line_] = source;
     inputs_[line_] = expression;
     prune_history();
+    refresh_evaluator_session_context();
 
     std::set<std::size_t> expanding_inputs;
     auto prepared_expression = replace_session_references(expression, expanding_inputs);
@@ -873,6 +926,7 @@ SessionOutput EvaluationSession::evaluate_prepared_input(
         message_text_history_[line_] = messages;
         print_history_[line_] = prints;
         prune_history();
+        refresh_evaluator_session_context();
     };
     const auto evaluated_exit = exit_result(result);
     if (evaluated_exit.requested()) {
@@ -908,14 +962,71 @@ SessionOutput EvaluationSession::evaluate_prepared_input(
 }
 
 Expr EvaluationSession::preprint(const Expr& result) {
+    refresh_evaluator_session_context();
     return apply_hook("$PrePrint", result, nullptr, nullptr, nullptr);
 }
 
 std::optional<std::size_t> EvaluationSession::output_size_limit() {
+    refresh_evaluator_session_context();
     const auto value = evaluator_.evaluate(symbol("$OutputSizeLimit"));
     if (is_symbol(value, "Infinity")) return std::nullopt;
     if (const auto limit = nonnegative_size(value)) return *limit;
     return 12000;
+}
+
+void EvaluationSession::refresh_evaluator_session_context() {
+    evaluator_.set_session_resolvers(
+        [this] {
+            return integer(mpz_class(std::to_string(line_), 10));
+        },
+        [this](const mpz_class& requested) {
+            const auto current_line = mpz_class(std::to_string(line_), 10);
+            const auto resolved = requested < 0
+                ? requested + current_line : requested;
+            const auto index = nonnegative_size(resolved);
+            if (!index) return list({});
+            std::vector<Expr> held;
+            if (const auto found = message_history_.find(*index);
+                found != message_history_.end()) {
+                held.reserve(found->second.size());
+                for (const auto& message : found->second)
+                    held.push_back(call("HoldForm", {message}));
+            }
+            return list(std::move(held));
+        },
+        [this](const std::string& name,
+               const std::optional<mpz_class>& requested) {
+            const auto current_line = mpz_class(std::to_string(line_), 10);
+            const auto resolved = requested
+                ? (*requested < 0 ? *requested + current_line : *requested)
+                : current_line - 1;
+            const auto unresolved = [&] {
+                return call(name, {integer(resolved)});
+            };
+            const auto index = nonnegative_size(resolved);
+            if (!index) return unresolved();
+            if (name == "Out") {
+                const auto found = outputs_.find(*index);
+                return found == outputs_.end() ? unresolved() : found->second;
+            }
+            if (name == "InString") {
+                const auto found = input_strings_.find(*index);
+                return found == input_strings_.end()
+                    ? unresolved() : string(found->second);
+            }
+            const auto found = inputs_.find(*index);
+            if (found == inputs_.end()
+                || !evaluating_input_history_.insert(*index).second)
+                return unresolved();
+            try {
+                auto value = evaluator_.evaluate(found->second);
+                evaluating_input_history_.erase(*index);
+                return value;
+            } catch (...) {
+                evaluating_input_history_.erase(*index);
+                throw;
+            }
+        });
 }
 
 void EvaluationSession::prune_history() {
