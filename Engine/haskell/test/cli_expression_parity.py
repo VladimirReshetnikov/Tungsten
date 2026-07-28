@@ -55,6 +55,26 @@ CASES = (
         0,
     ),
     (
+        "numeric predicates and symbolic bridge",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{{NumericQ[0],ExactNumberQ[1/2],InexactNumberQ[1.],"
+            "MachineIntegerQ[2^63-1],MachineIntegerQ[2^63],"
+            "MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]},"
+            "{NumericQ[Pi],ExactNumberQ[I Pi],RealValuedNumberQ[Sin[1]],"
+            "NumericQ[Sin[x]],NumericQ[Root[#^2-2&,1]],"
+            "RealValuedNumberQ[Root[#^2+1&,1]]},"
+            "{NumericQ[Overflow[]],InexactNumberQ[Underflow[]],"
+            "ExactNumberQ[Unevaluated[Pi]],NumericQ[Unevaluated[Pi]],"
+            "System`TrueQ[True],Global`NumericQ[1+1],$MessageList}}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "flat one-identity downvalue",
         (
             "expr",

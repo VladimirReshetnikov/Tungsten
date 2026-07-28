@@ -699,6 +699,12 @@ checkEvaluator = do
         , ("qualified numeric constructors and structural atoms", "{System`Rational[2,4],Global`Rational[2+2,4],System`Complex[1,2.],Global`Complex[1+1,0],Head[Rational[1,2]],AtomQ[Rational[1,2]],Length[Rational[1,2]]}", "List[Rational[1, 2], Global`Rational[4, 4], Complex[1., 2.], Global`Complex[2, 0], Rational, True, 0]")
         , ("numeric constructor structural outcomes", "{Head[Complex[1,2]],AtomQ[Complex[1,2]],Length[Complex[1,2]],Head[Rational[x,2]],AtomQ[Rational[x,2]],Length[Rational[x,2]],Head[Complex[x,2]],AtomQ[Complex[x,2]],Length[Complex[x,2]],Head[Global`Rational[1,2]],AtomQ[Global`Rational[1,2]],Length[Global`Rational[1,2]]}", "List[Complex, True, 0, Rational, False, 2, Complex, False, 2, Global`Rational, False, 2]")
         , ("held explicit numeric constructor syntax", "{HoldComplete[Rational[2,4],Complex[1,0]],Hold[Rational[2,4],Complex[1,0]]}", "List[HoldComplete[Rational[2, 4], Complex[1, 0]], Hold[Rational[2, 4], Complex[1, 0]]]")
+        , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
+        , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
+        , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
+        , ("numeric predicate special and machine boundaries", "{{NumericQ[Infinity],NumericQ[-Infinity],NumericQ[ComplexInfinity],NumericQ[Indeterminate]},{NumericQ[Overflow[]],ExactNumberQ[Overflow[]],InexactNumberQ[Overflow[]],MachineNumberQ[Overflow[]],RealValuedNumberQ[Overflow[]]},{NumericQ[Underflow[]],ExactNumberQ[Underflow[]],InexactNumberQ[Underflow[]],MachineNumberQ[Underflow[]],RealValuedNumberQ[Underflow[]]},{MachineIntegerQ[-2^63],MachineIntegerQ[2^63-1],MachineIntegerQ[-2^63-1],MachineIntegerQ[2^63]}}", "List[List[False, False, False, False], List[True, False, True, False, True], List[True, False, True, False, True], List[True, True, False, False]]")
+        , ("numeric predicate arity sequence and unevaluated", "{NumericQ[],NumericQ[1,2],NumericQ[Sequence[1]],NumericQ[Sequence[]],ExactNumberQ[Unevaluated[Pi]],NumberQ[Unevaluated[Pi]],NumericQ[Unevaluated[Pi]],InexactNumberQ[Unevaluated[1.]],MachineIntegerQ[Unevaluated[1]],MachineNumberQ[Unevaluated[1.]],RealValuedNumberQ[Unevaluated[Pi]],TrueQ[Unevaluated[True]]}", "List[NumericQ[], NumericQ[1, 2], True, NumericQ[], True, True, False, True, True, True, True, False]")
+        , ("numeric predicate qualification truth and NumberQ bridge", "{System`NumericQ[Pi],Global`NumericQ[1+1],System`ExactNumberQ[I Pi],Global`ExactNumberQ[1+1],System`TrueQ[True],Global`TrueQ[True],TrueQ[True],TrueQ[False],TrueQ[1==1],NumberQ[Pi],NumberQ[I Pi],NumberQ[Root[#^2-2&,1]]}", "List[True, Global`NumericQ[2], True, Global`ExactNumberQ[2], True, Global`TrueQ[True], True, False, True, True, True, True]")
         , ("exact rational sum", "1/2 + 1/3", "Rational[5, 6]")
         , ("exact rational product", "(2/3)(9/4)", "Rational[3, 2]")
         , ("exact rational reciprocal power", "(1/2)^-2", "4")
@@ -1883,7 +1889,29 @@ checkEvaluationSession = do
         , "g::b: Message generated."
         )
       messageCases =
-        [ ( "numeric constructor edge cases stay diagnostic-free"
+        [ ( "numeric predicate arity stays diagnostic-free"
+          , "{NumericQ[], NumericQ[1,2], ExactNumberQ[], MachineNumberQ[1,2], TrueQ[]}"
+          , "List[NumericQ[], NumericQ[1, 2], ExactNumberQ[], MachineNumberQ[1, 2], TrueQ[]]"
+          , []
+          )
+        , ( "numeric predicates retain argument diagnostics"
+          , "{NumericQ[Length[]], ExactNumberQ[Length[]], TrueQ[Length[]]}"
+          , "List[False, False, False]"
+          , [ ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            , ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            , ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            ]
+          )
+        , ( "numeric constructor edge cases stay diagnostic-free"
           , "{Rational[0,0], Rational[1,0], Rational[x,2], Rational[1], Complex[1,0], Complex[1,0.], Complex[x,0], Complex[1]}"
           , "List[Indeterminate, ComplexInfinity, Rational[x, 2], Rational[1], 1, Complex[1., 0.], Complex[x, 0], Complex[1]]"
           , []

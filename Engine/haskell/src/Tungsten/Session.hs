@@ -1216,6 +1216,7 @@ qualifiedAliasDispatchHeads =
   , "Divisors"
   , "Equal"
   , "EvenQ"
+  , "ExactNumberQ"
   , "EulerPhi"
   , "EulerE"
   , "Expand"
@@ -1245,6 +1246,7 @@ qualifiedAliasDispatchHeads =
   , "IntegerPartitions"
   , "IntegerQ"
   , "IntegerReverse"
+  , "InexactNumberQ"
   , "Inequality"
   , "JacobiSymbol"
   , "JordanTotient"
@@ -1257,6 +1259,8 @@ qualifiedAliasDispatchHeads =
   , "LucasL"
   , "MapAll"
   , "MapApply"
+  , "MachineIntegerQ"
+  , "MachineNumberQ"
   , "Max"
   , "Min"
   , "MissingQ"
@@ -1274,6 +1278,7 @@ qualifiedAliasDispatchHeads =
   , "Numerator"
   , "Not"
   , "NumberQ"
+  , "NumericQ"
   , "OddQ"
   , "Or"
   , "PartitionsP"
@@ -1298,6 +1303,7 @@ qualifiedAliasDispatchHeads =
   , "Rational"
   , "RealAbs"
   , "RealSign"
+  , "RealValuedNumberQ"
   , "Sign"
   , "Sqrt"
   , "Simplify"
@@ -1306,6 +1312,7 @@ qualifiedAliasDispatchHeads =
   , "SymbolName"
   , "Times"
   , "Together"
+  , "TrueQ"
   , "UnitStep"
   , "Unitize"
   , "Unequal"
@@ -9461,7 +9468,16 @@ normalizeSessionSequenceCall expressionHead values =
 stripSessionTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
 stripSessionTransparentUnevaluatedArguments expressionHead
   | sessionHeadExpressionIsAny
-      ["Composition", "Plus", "RightComposition"]
+      [ "Composition"
+      , "ExactNumberQ"
+      , "InexactNumberQ"
+      , "MachineIntegerQ"
+      , "MachineNumberQ"
+      , "NumberQ"
+      , "Plus"
+      , "RealValuedNumberQ"
+      , "RightComposition"
+      ]
       expressionHead =
       map stripSessionDirectUnevaluated
   | otherwise = id

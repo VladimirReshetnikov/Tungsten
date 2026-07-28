@@ -681,7 +681,14 @@ reduceBuiltin headName values = case headName of
   "AssociationQ" -> Right (unary headName (boolean . isAssociation) values)
   "Identity" -> Right (unary headName id values)
   "IntegerQ" -> Right (unary headName (boolean . isInteger) values)
-  "NumberQ" -> Right (unary headName (boolean . isNumber) values)
+  "MachineIntegerQ" -> Right (transparentUnaryPredicate headName isMachineInteger values)
+  "MachineNumberQ" -> Right (transparentUnaryPredicate headName isMachineNumber values)
+  "NumberQ" -> Right (transparentUnaryPredicate headName isNumericValue values)
+  "NumericQ" -> Right (unary headName (boolean . isNumericValue) values)
+  "ExactNumberQ" -> Right (transparentUnaryPredicate headName isExactNumber values)
+  "InexactNumberQ" -> Right (transparentUnaryPredicate headName isInexactNumber values)
+  "RealValuedNumberQ" -> Right (transparentUnaryPredicate headName isRealValuedNumber values)
+  "TrueQ" -> Right (unary headName (boolean . isTrueSymbol) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
   "FailureQ" -> Right (unary headName (boolean . isFailureQValue) values)
   "MissingQ" -> Right (unary headName (boolean . isMissingValue) values)
@@ -11266,12 +11273,378 @@ isInteger :: Expr -> Bool
 isInteger Integer {} = True
 isInteger _ = False
 
-isNumber :: Expr -> Bool
-isNumber Integer {} = True
-isNumber Rational {} = True
-isNumber Real {} = True
-isNumber Complex {} = True
-isNumber _ = False
+transparentUnaryPredicate :: Text -> (Expr -> Bool) -> [Expr] -> Expr
+transparentUnaryPredicate headName predicate =
+  unary headName (boolean . predicate) . map stripDirectUnevaluated
+ where
+  stripDirectUnevaluated = \case
+    Call (Symbol unevaluatedHead) [value]
+      | systemHeadIn ["Unevaluated"] unevaluatedHead -> value
+    value -> value
+
+isMachineInteger :: Expr -> Bool
+isMachineInteger (Integer value) =
+  value >= negate (2 ^ (63 :: Integer))
+    && value <= 2 ^ (63 :: Integer) - 1
+isMachineInteger _ = False
+
+isMachineNumber :: Expr -> Bool
+isMachineNumber value@Real {} = isMachineReal value
+isMachineNumber (Complex realPart imaginaryPart) =
+  isMachineReal realPart && isMachineReal imaginaryPart
+isMachineNumber value
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value =
+      all isExplicitReal [realPart, imaginaryPart]
+        && any isMachineReal [realPart, imaginaryPart]
+isMachineNumber _ = False
+
+isExactNumber :: Expr -> Bool
+isExactNumber value =
+  maybe False (const (not (containsInexactReal value))) (numericValueReality value)
+
+isInexactNumber :: Expr -> Bool
+isInexactNumber Real {} = True
+isInexactNumber value
+  | isSpecialRealValue value = True
+isInexactNumber (Complex realPart imaginaryPart) =
+  containsInexactReal realPart || containsInexactReal imaginaryPart
+isInexactNumber value
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value =
+      containsInexactReal realPart || containsInexactReal imaginaryPart
+isInexactNumber _ = False
+
+isNumericValue :: Expr -> Bool
+isNumericValue = maybe False (const True) . numericValueReality
+
+isRealValuedNumber :: Expr -> Bool
+isRealValuedNumber value = numericValueReality value == Just True
+
+isTrueSymbol :: Expr -> Bool
+isTrueSymbol (Symbol "True") = True
+isTrueSymbol _ = False
+
+-- Python's numeric predicates use a deliberately bounded symbolic bridge:
+-- explicit numeric atoms and Root values, seven named constants, arithmetic,
+-- and the supported transcendental family.  The Bool records whether the
+-- bridge can also prove that the value is real.
+numericValueReality :: Expr -> Maybe Bool
+numericValueReality = \case
+  Integer {} -> Just True
+  Rational {} -> Just True
+  Real {} -> Just True
+  Complex {} -> Just False
+  rootValue@Root {} -> Just (rootValueIsReal rootValue)
+  Symbol name -> Map.lookup name numericConstantReality
+  special
+    | isSpecialRealValue special -> Just True
+  rootCall@(Call (Symbol rootHead) _)
+    | systemHeadIn ["Root"] rootHead -> rootCallReality rootCall
+  Call (Symbol headName) values -> numericCallReality headName values
+  _ -> Nothing
+
+numericConstantReality :: Map.Map Text Bool
+numericConstantReality =
+  Map.fromList
+    [ ("Catalan", True)
+    , ("Degree", True)
+    , ("E", True)
+    , ("EulerGamma", True)
+    , ("GoldenRatio", True)
+    , ("I", False)
+    , ("Pi", True)
+    ]
+
+numericCallReality :: Text -> [Expr] -> Maybe Bool
+numericCallReality headName values
+  | headName `elem` ["Plus", "Times"] =
+      allNumericReality values
+  | headName == "Power" = case values of
+      [base, powerExpression] -> do
+        baseIsReal <- numericValueReality base
+        powerIsReal <- numericValueReality powerExpression
+        pure
+          ( baseIsReal
+              && powerIsReal
+              && (isInteger powerExpression || knownNonNegative base)
+          )
+      _ -> Nothing
+  | headName `elem` ["Abs", "Exp", "Sqrt"] = case values of
+      [value] -> do
+        valueIsReal <- numericValueReality value
+        pure $ case headName of
+          "Abs" -> True
+          "Exp" -> valueIsReal
+          _ -> valueIsReal && knownNonNegative value
+      _ -> Nothing
+  | headName == "Log" = case values of
+      [value] -> numericPositiveArgumentsAreReal [value]
+      [base, value] -> numericPositiveArgumentsAreReal [base, value]
+      _ -> Nothing
+  | headName == "ArcTan" = case values of
+      [value] -> unaryRealFunction value
+      [x, y] -> allNumericReality [x, y]
+      _ -> Nothing
+  | headName `elem` alwaysRealUnaryNumericHeads = case values of
+      [value] -> unaryRealFunction value
+      _ -> Nothing
+  | headName `elem` boundedRealUnaryNumericHeads = case values of
+      [value] -> boundedUnaryReality headName value
+      _ -> Nothing
+  | otherwise = Nothing
+
+allNumericReality :: [Expr] -> Maybe Bool
+allNumericReality values = and <$> traverse numericValueReality values
+
+unaryRealFunction :: Expr -> Maybe Bool
+unaryRealFunction value = numericValueReality value
+
+numericPositiveArgumentsAreReal :: [Expr] -> Maybe Bool
+numericPositiveArgumentsAreReal values = do
+  realities <- traverse numericValueReality values
+  pure (and realities && all knownPositive values)
+
+alwaysRealUnaryNumericHeads :: [Text]
+alwaysRealUnaryNumericHeads =
+  [ "ArcCot"
+  , "ArcCotDegrees"
+  , "ArcSinh"
+  , "ArcTanDegrees"
+  , "Cos"
+  , "CosDegrees"
+  , "Cosh"
+  , "Cot"
+  , "CotDegrees"
+  , "Coth"
+  , "Csc"
+  , "CscDegrees"
+  , "Csch"
+  , "Gudermannian"
+  , "Haversine"
+  , "Sec"
+  , "SecDegrees"
+  , "Sech"
+  , "Sin"
+  , "SinDegrees"
+  , "Sinh"
+  , "Tan"
+  , "TanDegrees"
+  , "Tanh"
+  ]
+
+boundedRealUnaryNumericHeads :: [Text]
+boundedRealUnaryNumericHeads =
+  [ "ArcCos"
+  , "ArcCosDegrees"
+  , "ArcCosh"
+  , "ArcCoth"
+  , "ArcCsc"
+  , "ArcCscDegrees"
+  , "ArcCsch"
+  , "ArcSec"
+  , "ArcSecDegrees"
+  , "ArcSech"
+  , "ArcSin"
+  , "ArcSinDegrees"
+  , "ArcTanh"
+  , "InverseGudermannian"
+  , "InverseHaversine"
+  ]
+
+boundedUnaryReality :: Text -> Expr -> Maybe Bool
+boundedUnaryReality headName value = do
+  valueIsReal <- numericValueReality value
+  pure
+    ( valueIsReal
+        && case explicitRealExact value of
+          Nothing -> False
+          Just exactValue -> case headName of
+            "ArcCos" -> inClosedUnitInterval exactValue
+            "ArcCosDegrees" -> inClosedUnitInterval exactValue
+            "ArcCosh" -> compareExact exactValue oneExact /= LT
+            "ArcCoth" -> outsideClosedUnitInterval exactValue
+            "ArcCsc" -> outsideOpenUnitInterval exactValue
+            "ArcCscDegrees" -> outsideOpenUnitInterval exactValue
+            "ArcCsch" -> compareExact exactValue zeroExact /= EQ
+            "ArcSec" -> outsideOpenUnitInterval exactValue
+            "ArcSecDegrees" -> outsideOpenUnitInterval exactValue
+            "ArcSech" ->
+              compareExact exactValue zeroExact == GT
+                && compareExact exactValue oneExact /= GT
+            "ArcSin" -> inClosedUnitInterval exactValue
+            "ArcSinDegrees" -> inClosedUnitInterval exactValue
+            "ArcTanh" -> inOpenUnitInterval exactValue
+            "InverseHaversine" ->
+              compareExact exactValue zeroExact /= LT
+                && compareExact exactValue oneExact /= GT
+            -- The real Gudermannian range is (-Pi/2, Pi/2).  Exact rational
+            -- values with magnitude at most one are a safe proved subset.
+            "InverseGudermannian" -> inClosedUnitInterval exactValue
+            _ -> False
+    )
+ where
+  zeroExact = Exact 0 1
+  oneExact = Exact 1 1
+  negativeOneExact = Exact (-1) 1
+  inClosedUnitInterval exactValue =
+    compareExact exactValue negativeOneExact /= LT
+      && compareExact exactValue oneExact /= GT
+  inOpenUnitInterval exactValue =
+    compareExact exactValue negativeOneExact == GT
+      && compareExact exactValue oneExact == LT
+  outsideOpenUnitInterval exactValue =
+    compareExact exactValue negativeOneExact /= GT
+      || compareExact exactValue oneExact /= LT
+  outsideClosedUnitInterval exactValue =
+    compareExact exactValue negativeOneExact == LT
+      || compareExact exactValue oneExact == GT
+
+knownNonNegative :: Expr -> Bool
+knownNonNegative value = case explicitRealExact value of
+  Just exactValue -> compareExact exactValue (Exact 0 1) /= LT
+  Nothing -> case value of
+    Symbol name -> name `elem` ["Catalan", "Degree", "E", "EulerGamma", "GoldenRatio", "Pi"]
+    Call (Symbol headName) [_] -> headName `elem` ["Abs", "Exp", "Sqrt"]
+    _ -> False
+
+knownPositive :: Expr -> Bool
+knownPositive value = case explicitRealExact value of
+  Just exactValue -> compareExact exactValue (Exact 0 1) == GT
+  Nothing -> case value of
+    Symbol name -> name `elem` ["Catalan", "Degree", "E", "EulerGamma", "GoldenRatio", "Pi"]
+    Call (Symbol headName) [_] -> headName `elem` ["Exp"]
+    _ -> False
+
+containsInexactReal :: Expr -> Bool
+containsInexactReal Real {} = True
+containsInexactReal value
+  | isSpecialRealValue value = True
+containsInexactReal (Complex realPart imaginaryPart) =
+  containsInexactReal realPart || containsInexactReal imaginaryPart
+containsInexactReal (Call _ values) = any containsInexactReal values
+containsInexactReal _ = False
+
+isSpecialRealValue :: Expr -> Bool
+isSpecialRealValue (Call (Symbol headName) []) =
+  systemHeadIn ["Overflow", "Underflow"] headName
+isSpecialRealValue _ = False
+
+rootValueIsReal :: Expr -> Bool
+rootValueIsReal (Root coefficients _ _) =
+  polynomialHasOnlyRealLinearOrQuadraticRoots
+    ( Map.fromList
+        [ (degree, Exact coefficient 1)
+        | (degree, coefficient) <- zip [0 ..] coefficients
+        , coefficient /= 0
+        ]
+    )
+rootValueIsReal _ = False
+
+rootCallReality :: Expr -> Maybe Bool
+rootCallReality (Call _ values) = do
+  function <- case values of
+    [function, Integer rootIndex]
+      | rootIndex >= 1 -> Just function
+    [function, Integer rootIndex, Integer _]
+      | rootIndex >= 1 -> Just function
+    _ -> Nothing
+  polynomial <- rootFunctionPolynomial function
+  if Map.null polynomial || fst (Map.findMax polynomial) < 1
+    then Nothing
+    else Just (polynomialHasOnlyRealLinearOrQuadraticRoots polynomial)
+rootCallReality _ = Nothing
+
+type PredicatePolynomial = Map.Map Integer Exact
+
+rootFunctionPolynomial :: Expr -> Maybe PredicatePolynomial
+rootFunctionPolynomial = \case
+  Call (Symbol functionHead) [body]
+    | systemHeadIn ["Function"] functionHead ->
+        predicatePolynomial isSlotOne body
+  Call (Symbol functionHead) [parameter@(Symbol _), body]
+    | systemHeadIn ["Function"] functionHead ->
+        predicatePolynomial (== parameter) body
+  _ -> Nothing
+ where
+  isSlotOne (Call (Symbol slotHead) [Integer 1]) =
+    systemHeadIn ["Slot"] slotHead
+  isSlotOne _ = False
+
+predicatePolynomial :: (Expr -> Bool) -> Expr -> Maybe PredicatePolynomial
+predicatePolynomial isVariable expression
+  | isVariable expression = Just (Map.singleton 1 (Exact 1 1))
+predicatePolynomial _ expression
+  | Just exactValue <- toExact expression = Just (constantPolynomial exactValue)
+predicatePolynomial isVariable (Call (Symbol headName) values)
+  | systemHeadIn ["Plus"] headName = do
+      terms <- traverse (predicatePolynomial isVariable) values
+      foldM polynomialAdd Map.empty terms
+  | systemHeadIn ["Times"] headName = do
+      factors <- traverse (predicatePolynomial isVariable) values
+      foldM polynomialMultiply (Map.singleton 0 (Exact 1 1)) factors
+predicatePolynomial isVariable (Call (Symbol headName) [base, Integer powerValue])
+  | systemHeadIn ["Power"] headName
+  , powerValue >= 0 = do
+      polynomial <- predicatePolynomial isVariable base
+      polynomialPower polynomial powerValue
+predicatePolynomial _ _ = Nothing
+
+constantPolynomial :: Exact -> PredicatePolynomial
+constantPolynomial exactValue@(Exact numerator _)
+  | numerator == 0 = Map.empty
+  | otherwise = Map.singleton 0 exactValue
+
+polynomialAdd :: PredicatePolynomial -> PredicatePolynomial -> Maybe PredicatePolynomial
+polynomialAdd left right = boundedPolynomial (Map.unionWith addExact left right)
+
+polynomialMultiply :: PredicatePolynomial -> PredicatePolynomial -> Maybe PredicatePolynomial
+polynomialMultiply left right =
+  boundedPolynomial
+    ( Map.fromListWith
+        addExact
+        [ (leftDegree + rightDegree, multiplyExact leftCoefficient rightCoefficient)
+        | (leftDegree, leftCoefficient) <- Map.toList left
+        , (rightDegree, rightCoefficient) <- Map.toList right
+        ]
+    )
+
+polynomialPower :: PredicatePolynomial -> Integer -> Maybe PredicatePolynomial
+polynomialPower base powerValue = go (Map.singleton 0 (Exact 1 1)) base powerValue
+ where
+  go result _ 0 = Just result
+  go result factor 1 = polynomialMultiply result factor
+  go result factor remaining
+    | odd remaining = do
+        updated <- polynomialMultiply result factor
+        squared <- polynomialMultiply factor factor
+        go updated squared (remaining `div` 2)
+    | otherwise = do
+        squared <- polynomialMultiply factor factor
+        go result squared (remaining `div` 2)
+
+boundedPolynomial :: PredicatePolynomial -> Maybe PredicatePolynomial
+boundedPolynomial polynomial =
+  let retained = Map.filter (\(Exact numerator _) -> numerator /= 0) polynomial
+   in if Map.size retained > 4096
+        then Nothing
+        else Just retained
+
+polynomialHasOnlyRealLinearOrQuadraticRoots :: PredicatePolynomial -> Bool
+polynomialHasOnlyRealLinearOrQuadraticRoots polynomial
+  | Map.null polynomial = False
+  | degree == 1 = True
+  | degree == 2 =
+      compareExact discriminant (Exact 0 1) /= LT
+  | otherwise = False
+ where
+  degree = fst (Map.findMax polynomial)
+  coefficient power = Map.findWithDefault (Exact 0 1) power polynomial
+  a = coefficient 2
+  b = coefficient 1
+  c = coefficient 0
+  discriminant =
+    addExact
+      (multiplyExact b b)
+      (negateExact (multiplyExact (Exact 4 1) (multiplyExact a c)))
 
 isString :: Expr -> Bool
 isString String {} = True
