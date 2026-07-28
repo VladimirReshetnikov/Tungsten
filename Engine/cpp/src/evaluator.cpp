@@ -331,12 +331,26 @@ std::optional<Expr> evaluate_exact_integer_function(
     });
 
     if (function == "Binomial" && args.size() == 2 && all_integers) {
-        if (args[1].integer_value() < 0) return integer(0L);
-        const auto k = bounded_nonnegative_ulong(args[1].integer_value(), 100000UL);
+        const auto& n_value = args[0].integer_value();
+        const auto& k_value = args[1].integer_value();
+        if (k_value < 0) return integer(0L);
+        mpz_class effective_k = k_value;
+        if (n_value >= 0) {
+            if (k_value > n_value) return integer(0L);
+            const mpz_class complement = n_value - k_value;
+            if (complement < effective_k) effective_k = complement;
+            if (effective_k == 0) return integer(1L);
+            if (effective_k == 1) return integer(n_value);
+        }
+        const auto k = bounded_nonnegative_ulong(effective_k, 100000UL);
         if (!k) return std::nullopt;
-        return integer(exact_binomial(args[0].integer_value(), *k));
+        return integer(exact_binomial(n_value, *k));
     }
     if (function == "Multinomial" && all_integers) {
+        if (args.size() == 1) {
+            if (args[0].integer_value() < 0) return std::nullopt;
+            return integer(1L);
+        }
         unsigned long total = 0;
         mpz_class result = 1;
         for (const auto& argument : args) {
@@ -370,10 +384,11 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "BernoulliB" && args.size() == 1
         && args[0].kind() == ExprKind::Integer) {
-        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 256UL);
+        const auto& n_value = args[0].integer_value();
+        if (n_value > 1 && mpz_odd_p(n_value.get_mpz_t())) return integer(0L);
+        const auto n = bounded_nonnegative_ulong(n_value, 256UL);
         if (!n) return std::nullopt;
         if (*n == 1) return rational(-1L, 2L);
-        if (*n > 1 && *n % 2 == 1) return integer(0L);
         std::vector<mpq_class> values(*n + 1);
         for (unsigned long row = 0; row <= *n; ++row) {
             values[row] = mpq_class(1, mpz_class(row + 1));
@@ -386,9 +401,10 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "EulerE" && args.size() == 1
         && args[0].kind() == ExprKind::Integer) {
-        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 256UL);
+        const auto& n_value = args[0].integer_value();
+        if (n_value >= 0 && mpz_odd_p(n_value.get_mpz_t())) return integer(0L);
+        const auto n = bounded_nonnegative_ulong(n_value, 256UL);
         if (!n) return std::nullopt;
-        if (*n % 2 == 1) return integer(0L);
         std::vector<mpz_class> values(*n + 1, 0);
         values[0] = 1;
         for (unsigned long order = 2; order <= *n; order += 2) {
@@ -401,6 +417,7 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "HarmonicNumber" && (args.size() == 1 || args.size() == 2)
         && all_integers) {
+        if (args[0].integer_value() == 0) return integer(0L);
         const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 100000UL);
         const mpz_class order_value = args.size() == 2 ? args[1].integer_value() : mpz_class(1);
         const auto order = bounded_nonnegative_ulong(abs(order_value), 64UL);
@@ -572,11 +589,12 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "JordanTotient" && args.size() == 2 && all_integers
         && args[0].integer_value() >= 0 && args[1].integer_value() > 0) {
+        if (args[0].integer_value() == 0)
+            return integer(args[1].integer_value() == 1 ? 1L : 0L);
         const auto order = bounded_nonnegative_ulong(args[0].integer_value(), 1000UL);
         const auto n = bounded_nonnegative_ulong(args[1].integer_value(), 1000000000UL);
         const auto factors = bounded_factorization(args[1].integer_value());
         if (!order || !n || !factors) return std::nullopt;
-        if (*order == 0) return integer(*n == 1 ? 1L : 0L);
         mpz_class result;
         mpz_pow_ui(result.get_mpz_t(), args[1].integer_value().get_mpz_t(), *order);
         for (const auto& [prime, exponent] : *factors) {
@@ -610,6 +628,8 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "DivisorSigma" && args.size() == 2 && all_integers
         && args[1].integer_value() != 0) {
+        if (args[1].integer_value() == 1 || args[1].integer_value() == -1)
+            return integer(1L);
         const auto order_magnitude = bounded_nonnegative_ulong(abs(args[0].integer_value()), 64UL);
         const auto n = bounded_nonnegative_ulong(abs(args[1].integer_value()), 1000000000UL);
         const auto factors = bounded_factorization(abs(args[1].integer_value()));
@@ -671,7 +691,10 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if ((function == "BitClear" || function == "BitSet" || function == "BitGet")
         && args.size() == 2 && all_integers) {
-        const auto index = bounded_nonnegative_ulong(args[1].integer_value(), 10000000UL);
+        const auto& index_value = args[1].integer_value();
+        if (args[0].integer_value() == 0 && index_value >= 0
+            && (function == "BitClear" || function == "BitGet")) return integer(0L);
+        const auto index = bounded_nonnegative_ulong(index_value, 10000000UL);
         if (!index) return std::nullopt;
         if (function == "BitGet")
             return integer(static_cast<long>(
