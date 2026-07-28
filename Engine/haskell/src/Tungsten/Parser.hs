@@ -342,7 +342,7 @@ timesParser = do
     , (,) Divide <$> (operator "/" "/:;.@=*" *> unaryParser)
     , try $ do
         notFollowedBy (char '-')
-        (,) Multiply <$> powerParser
+        (,) Multiply <$> dotParser
     ]
   applyTimes (lhs, isUngroupedTimes) (Multiply, rhs) =
     case (isUngroupedTimes, lhs) of
@@ -359,16 +359,41 @@ unaryParser = choice
   [ operator "+" "+=" *> unaryParser
   , negateExpression <$> (operator "-" "-=>" *> unaryParser)
   , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
-  , powerParser
+  , dotParser
   ]
+
+-- Wolfram's Dot binds more tightly than Times but less tightly than Power.
+-- Prefix +/- sit between Dot and Times: they absorb a following Dot expression
+-- while leaving a following product outside, so @-a.b*c@ is
+-- @Times[Times[-1, Dot[a, b]], c]@.  A prefix operator may still begin the
+-- right operand of Dot or Power even though its own binding power is lower.
+dotParser :: Parser Expr
+dotParser = do
+  firstFactor <- powerParser
+  remaining <- many (operator "." ".0123456789" *> highPrecedenceRightParser)
+  pure $ case remaining of
+    [] -> firstFactor
+    values -> Call (Symbol "Dot") (firstFactor : values)
 
 powerParser :: Parser Expr
 powerParser = do
   base <- prefixUpdateParser
   option base $ do
     _ <- operator "^" "^:="
-    exponentValue <- unaryParser
+    exponentValue <- highPrecedenceRightParser
     pure (Call (Symbol "Power") [base, exponentValue])
+
+-- Pratt-style prefix parsing permits a sign (or Not) at the start of a
+-- high-precedence right operand.  Once present, the prefix operator applies
+-- its own lower binding power, which is why @a^-b.c@ absorbs @b.c@ into the
+-- exponent while @a^b.c@ leaves Dot outside Power.
+highPrecedenceRightParser :: Parser Expr
+highPrecedenceRightParser = choice
+  [ operator "+" "+=" *> unaryParser
+  , negateExpression <$> (operator "-" "-=>" *> unaryParser)
+  , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
+  , powerParser
+  ]
 
 prefixUpdateParser :: Parser Expr
 prefixUpdateParser = choice
