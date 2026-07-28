@@ -10,14 +10,20 @@ import qualified Data.Text.IO as TextIO
 import Tungsten.Evaluate (EvaluationError (..), evaluate)
 import Tungsten.Expression (Expr, fullForm)
 import Tungsten.Parser (parseInputForm)
-import Tungsten.Session (emptySession, evaluateInSession)
+import Tungsten.Session
+  ( EvaluationMessage (evaluationMessageText)
+  , EvaluationSession (sessionVisibleMessages)
+  , emptySession
+  , evaluateInSession
+  )
 
 checkFunctionalIterationEvaluator :: IO Bool
 checkFunctionalIterationEvaluator = do
   values <- traverse checkValue valueCases
   sessionValues <- traverse checkSessionSource sessionCases
   errors <- traverse checkError errorCases
-  pure (and (values <> sessionValues <> errors))
+  sessionErrors <- traverse checkSessionError sessionErrorCases
+  pure (and (values <> sessionValues <> errors <> sessionErrors))
 
 valueCases :: [(Text, Text, Text)]
 valueCases =
@@ -57,9 +63,21 @@ valueCases =
     , "{FoldList[f,x,{a,b,c}],FoldList[Plus,{1,2,3,4}]}"
     , "List[List[x, f[x, a], f[f[x, a], b], f[f[f[x, a], b], c]], List[1, 3, 6, 10]]"
     )
+  , ( "fold pair result, history, projection, and state"
+    , "{FoldPair[{#1+#2,#1-#2}&,10,{1,2,3}],FoldPairList[{#1+#2,#1-#2}&,10,{1,2,3}],FoldPairList[{#1+#2,#1-#2}&,10,{1,2,3},Last]}"
+    , "List[10, List[11, 11, 10], List[9, 7, 4]]"
+    )
+  , ( "fold pair empty input remains inert"
+    , "{FoldPair[f,x,{}],FoldPairList[f,x,{}],FoldPair[f,x,h[]],FoldPairList[f,x,h[]]}"
+    , "List[FoldPair[f, x, List[]], List[], FoldPair[f, x, h[]], List[]]"
+    )
+  , ( "fold pair filters Nothing projections before selecting a result"
+    , "{FoldPair[List,0,{1},Nothing&],FoldPairList[List,0,{1},Nothing&]}"
+    , "List[FoldPair[List, 0, List[1], Function[Nothing]], List[]]"
+    )
   , ( "qualified System dispatch and Global isolation"
-    , "{System`Nest[f,x,2],System`Fold[Plus,{1,2,3}],Global`Nest[f,x,2]}"
-    , "List[f[f[x]], 6, Global`Nest[f, x, 2]]"
+    , "{System`Nest[f,x,2],System`Fold[Plus,{1,2,3}],System`FoldPair[{#1+#2,#1-#2}&,10,{1,2}],Global`Nest[f,x,2],Global`FoldPair[f,x,{a}]}"
+    , "List[f[f[x]], 6, 11, Global`Nest[f, x, 2], Global`FoldPair[f, x, List[a]]]"
     )
   ]
 
@@ -80,6 +98,10 @@ sessionCases =
   , ( "session callbacks preserve nest while effects"
     , "n=0;t=0; {NestWhile[(n++;#+1)&,0,(t++;#<3)&],NestWhileList[(n++;#+1)&,0,(t++;#<3)&],n,t}"
     , "List[3, List[0, 1, 2, 3], 6, 8]"
+    )
+  , ( "session callbacks and projections preserve fold pair effects"
+    , "c=0;p=0; f[y_,x_]:=(c++;{y+x,y-x}); q[pair_]:=(p++;Last[pair]); {FoldPairList[f,10,{1,2,3},q],FoldPair[f,10,{1,2},q],c,p}"
+    , "List[List[9, 7, 4], 7, 5, 5]"
     )
   ]
 
@@ -108,6 +130,28 @@ errorCases =
   , ( "fold empty sequence"
     , "Fold[f,{}]"
     , "Fold[f, expr] expects a nonempty sequence."
+    )
+  , ( "fold pair arity"
+    , "FoldPair[f,x]"
+    , "FoldPair currently supports a function, an initial value, inputs, and an optional projection."
+    )
+  , ( "fold pair callback shape"
+    , "FoldPairList[f,0,{1}]"
+    , "FoldPairList expects each function application to return a list of two elements, got f[0, 1]."
+    )
+  ]
+
+sessionErrorCases :: [(Text, Text, Text, Text)]
+sessionErrorCases =
+  [ ( "session fold pair callback shape"
+    , "n=0; f[y_,x_]:=(n++; y+x); {FoldPairList[f,0,{1}],n}"
+    , "List[FoldPairList[f, 0, List[1]], 1]"
+    , "FoldPairList::error: FoldPairList expects each function application to return a list of two elements, got 1."
+    )
+  , ( "session fold pair atomic input"
+    , "FoldPair[f,0,x]"
+    , "FoldPair[f, 0, x]"
+    , "FoldPair::error: FoldPairList expects a nonatomic expression."
     )
   ]
 
@@ -149,6 +193,30 @@ checkError (label, source, expected) = case parseInputForm source of
           failCheck label ("expected error " <> expected <> ", got " <> message)
     Right result ->
       failCheck label ("expected an evaluation error, got " <> fullForm result)
+
+checkSessionError :: (Text, Text, Text, Text) -> IO Bool
+checkSessionError (label, source, expectedResult, expectedMessage) = case parseInputForm source of
+  Left parseError -> failCheck label ("parse error: " <> showText parseError)
+  Right expression -> do
+    evaluated <- evaluateInSession emptySession expression
+    case evaluated of
+      Left evaluationError ->
+        failCheck label ("unexpected terminal session error: " <> showText evaluationError)
+      Right (result, updated)
+        | fullForm result /= expectedResult ->
+            failCheck label ("expected inert result " <> expectedResult <> ", got " <> fullForm result)
+        | otherwise -> case reverse (sessionVisibleMessages updated) of
+            message : _
+              | evaluationMessageText message == expectedMessage -> pure True
+              | otherwise ->
+                  failCheck
+                    label
+                    ( "expected session message "
+                        <> expectedMessage
+                        <> ", got "
+                        <> evaluationMessageText message
+                    )
+            [] -> failCheck label "expected a recovered session evaluation message"
 
 failCheck :: Text -> Text -> IO Bool
 failCheck label detail = do

@@ -2056,12 +2056,14 @@ CASES = (
             "expr",
             "evaluate",
             "--code",
-            "i=0; {Construct[# + 1 &, 2], ComposeList[{f,g},x], "
+            "i=0; j=0; {Construct[# + 1 &, 2], ComposeList[{f,g},x], "
             "Nest[f,x,2], NestList[f,x,2], "
             "NestWhile[#+1&,0,#<3&], NestWhileList[#+1&,0,#<3&], "
             "FixedPoint[# /. a -> b &,a], FixedPointList[# /. a -> b &,a], "
             "Fold[Plus,{1,2,3}], FoldList[Plus,{1,2,3}], "
-            "Nest[(i++; #+1)&,0,3], i}",
+            "FoldPairList[(i++;{#1+#2,#1-#2})&,10,{1,2,3},(j++;Last[#])&], "
+            "FoldPair[(i++;{#1+#2,#1-#2})&,10,{1,2}], "
+            "Nest[(i++; #+1)&,0,3], i, j}",
             "--form",
             "input",
         ),

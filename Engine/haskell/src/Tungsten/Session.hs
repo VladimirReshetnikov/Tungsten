@@ -1226,6 +1226,8 @@ qualifiedAliasDispatchHeads =
   , "FixedPointList"
   , "Fold"
   , "FoldList"
+  , "FoldPair"
+  , "FoldPairList"
   , "FromContinuedFraction"
   , "FromDigits"
   , "GCD"
@@ -2950,6 +2952,10 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionFold False depth session values)
   Call (Symbol "FoldList") values ->
     Just (evaluateSessionFold True depth session values)
+  Call (Symbol "FoldPair") values ->
+    Just (evaluateSessionFoldPair False depth session values)
+  Call (Symbol "FoldPairList") values ->
+    Just (evaluateSessionFoldPair True depth session values)
   Call (Symbol "Total") values ->
     Just (evaluateSessionTotal depth session values)
   Call (Symbol "SequenceFold") values ->
@@ -3855,6 +3861,69 @@ evaluateSessionFold returnHistory depth session = \case
       remaining
       (retained <> [updated])
       nextSession
+
+evaluateSessionFoldPair
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFoldPair returnHistory depth session arguments' =
+  case arguments' of
+    [function, initial, subject] ->
+      foldPairs function initial subject Nothing
+    [function, initial, subject, projection] ->
+      foldPairs function initial subject (Just projection)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " currently supports a function, an initial value, inputs, and an optional projection."
+        )
+ where
+  operation = if returnHistory then "FoldPairList" else "FoldPair"
+  foldPairs function initial subject projection = do
+    inputs <- sessionSequenceValues session "FoldPairList" subject
+    (projected, updated) <-
+      build function projection initial inputs [] session
+    let retained = filter (/= Symbol "Nothing") projected
+    case retained of
+      []
+        | returnHistory -> Right (evaluatedList [], updated)
+        | otherwise -> Right (Call (Symbol "FoldPair") arguments', updated)
+      _
+        | returnHistory -> Right (evaluatedList retained, updated)
+        | otherwise -> Right (last retained, updated)
+
+  build _ _ _ [] retained currentSession = Right (retained, currentSession)
+  build function projection current (inputValue : remaining) retained currentSession = do
+    (pairExpression, pairSession) <-
+      evaluateSessionCallable depth currentSession function [current, inputValue]
+    case pairExpression of
+      Call (Symbol listHead) [first, second]
+        | isSessionSystemHead "List" listHead -> do
+            (projected, projectionSession) <- case projection of
+              Nothing -> Right (first, pairSession)
+              Just projectionFunction ->
+                evaluateSessionCallable
+                  depth
+                  pairSession
+                  projectionFunction
+                  [evaluatedList [first, second]]
+            build
+              function
+              projection
+              second
+              remaining
+              (retained <> [projected])
+              projectionSession
+      _ ->
+        sessionFailure
+          pairSession
+          ( "FoldPairList expects each function application to return a list of two elements, got "
+              <> inputForm pairExpression
+              <> "."
+          )
 
 sessionNonNegativeIterationCount
   :: Text

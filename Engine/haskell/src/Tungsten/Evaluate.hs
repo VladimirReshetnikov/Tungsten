@@ -863,6 +863,8 @@ reduceBuiltin headName values = case headName of
   "FixedPointList" -> reduceFixedPoint True values
   "Fold" -> reduceFold False values
   "FoldList" -> reduceFold True values
+  "FoldPair" -> reduceFoldPair False values
+  "FoldPairList" -> reduceFoldPair True values
   "Replace" -> reduceReplace values
   "ReplaceAt" -> reduceReplaceAt values
   "ReplaceAll" -> reduceReplaceAll values
@@ -8991,6 +8993,56 @@ buildFoldHistory _ _ [] retained = Right retained
 buildFoldHistory function current (value : remaining) retained = do
   updated <- evaluate (Call function [current, value])
   buildFoldHistory function updated remaining (retained <> [updated])
+
+reduceFoldPair :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFoldPair returnHistory arguments' = case arguments' of
+  [function, initial, subject] ->
+    foldPairs function initial subject Nothing
+  [function, initial, subject, projection] ->
+    foldPairs function initial subject (Just projection)
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " currently supports a function, an initial value, inputs, and an optional projection."
+          )
+      )
+ where
+  operation = if returnHistory then "FoldPairList" else "FoldPair"
+  foldPairs function initial subject projection = do
+    inputs <- sequenceFoldCollectionValues "FoldPairList" subject
+    projected <- build function projection initial inputs []
+    let retained = filter (/= Symbol "Nothing") projected
+    case retained of
+      []
+        | returnHistory -> Right (evaluatedList [])
+        | otherwise -> Right (Call (Symbol "FoldPair") arguments')
+      _
+        | returnHistory -> Right (evaluatedList retained)
+        | otherwise -> Right (last retained)
+
+  build _ _ _ [] retained = Right retained
+  build function projection current (inputValue : remaining) retained = do
+    pairExpression <- evaluate (Call function [current, inputValue])
+    (projected, next) <- projectPair projection pairExpression
+    build function projection next remaining (retained <> [projected])
+
+  projectPair projection pairExpression = case pairExpression of
+    Call (Symbol listHead) [first, second]
+      | systemHeadIn ["List"] listHead -> do
+          projected <- case projection of
+            Nothing -> Right first
+            Just function ->
+              evaluate (Call function [evaluatedList [first, second]])
+          Right (projected, second)
+    _ ->
+      Left
+        ( EvaluationError
+            ( "FoldPairList expects each function application to return a list of two elements, got "
+                <> inputForm pairExpression
+                <> "."
+            )
+        )
 
 nonNegativeIterationCount
   :: Text
