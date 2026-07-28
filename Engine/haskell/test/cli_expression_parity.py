@@ -75,6 +75,27 @@ CASES = (
         0,
     ),
     (
+        "complex projections and listable threading",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{{Re[3],Im[-1/2],ReIm[-1/2],Arg[0],Arg[-1],Conjugate[-1/2]},"
+            "{Re[I],Im[I],ReIm[I],Arg[I],Arg[-I],Conjugate[I]},"
+            "{Re[1/2-3/4I],Im[1/2-3/4I],ReIm[1/2-3/4I],"
+            "Arg[1/2-3/4I],Conjugate[1/2-3/4I]},"
+            "{Re[1.+2.I],Im[1.+2.I],ReIm[1.+2.I],Arg[1.+2.I],"
+            "Conjugate[1.+2.I]},{Arg[Complex[0,2.]],Arg[Complex[-2.,-0.]],"
+            "Arg[Complex[-3/4,2.5]],Conjugate[Complex[1.,0.]],"
+            "Conjugate[Complex[1.,-0.]]},Re[{1,I,1+I}],"
+            "Arg[{{1,-1},{I,-I}}],"
+            "System`Re[1+2I],Global`Re[1+2I],Re[{1,2},{3}],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "flat one-identity downvalue",
         (
             "expr",

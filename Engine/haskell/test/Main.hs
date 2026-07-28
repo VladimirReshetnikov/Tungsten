@@ -705,6 +705,13 @@ checkEvaluator = do
         , ("numeric predicate special and machine boundaries", "{{NumericQ[Infinity],NumericQ[-Infinity],NumericQ[ComplexInfinity],NumericQ[Indeterminate]},{NumericQ[Overflow[]],ExactNumberQ[Overflow[]],InexactNumberQ[Overflow[]],MachineNumberQ[Overflow[]],RealValuedNumberQ[Overflow[]]},{NumericQ[Underflow[]],ExactNumberQ[Underflow[]],InexactNumberQ[Underflow[]],MachineNumberQ[Underflow[]],RealValuedNumberQ[Underflow[]]},{MachineIntegerQ[-2^63],MachineIntegerQ[2^63-1],MachineIntegerQ[-2^63-1],MachineIntegerQ[2^63]}}", "List[List[False, False, False, False], List[True, False, True, False, True], List[True, False, True, False, True], List[True, True, False, False]]")
         , ("numeric predicate arity sequence and unevaluated", "{NumericQ[],NumericQ[1,2],NumericQ[Sequence[1]],NumericQ[Sequence[]],ExactNumberQ[Unevaluated[Pi]],NumberQ[Unevaluated[Pi]],NumericQ[Unevaluated[Pi]],InexactNumberQ[Unevaluated[1.]],MachineIntegerQ[Unevaluated[1]],MachineNumberQ[Unevaluated[1.]],RealValuedNumberQ[Unevaluated[Pi]],TrueQ[Unevaluated[True]]}", "List[NumericQ[], NumericQ[1, 2], True, NumericQ[], True, True, False, True, True, True, True, False]")
         , ("numeric predicate qualification truth and NumberQ bridge", "{System`NumericQ[Pi],Global`NumericQ[1+1],System`ExactNumberQ[I Pi],Global`ExactNumberQ[1+1],System`TrueQ[True],Global`TrueQ[True],TrueQ[True],TrueQ[False],TrueQ[1==1],NumberQ[Pi],NumberQ[I Pi],NumberQ[Root[#^2-2&,1]]}", "List[True, Global`NumericQ[2], True, Global`ExactNumberQ[2], True, Global`TrueQ[True], True, False, True, True, True, True]")
+        , ("complex projections over exact scalars", "{{Re[3],Im[-1/2],ReIm[-1/2],Arg[0],Arg[-1],Conjugate[-1/2]},{Re[I],Im[I],ReIm[I],Arg[I],Arg[-I],Conjugate[I]},{Re[1/2-3/4I],Im[1/2-3/4I],ReIm[1/2-3/4I],Arg[1/2-3/4I],Conjugate[1/2-3/4I]}}", "List[List[3, 0, List[Rational[-1, 2], 0], 0, Pi, Rational[-1, 2]], List[0, 1, List[0, 1], Times[Rational[1, 2], Pi], Times[Rational[-1, 2], Pi], Complex[0, -1]], List[Rational[1, 2], Rational[-3, 4], List[Rational[1, 2], Rational[-3, 4]], ArcTan[Rational[1, 2], Rational[-3, 4]], Complex[Rational[1, 2], Rational[3, 4]]]]")
+        , ("complex projections over machine values and exact quadrants", "{{Re[1.+2.I],Im[1.+2.I],ReIm[1.+2.I],Arg[1.+2.I],Conjugate[1.+2.I]},{Arg[1+I],Arg[-1+I],Arg[-1-I],Arg[1-I],Arg[2],Arg[-2]}}", "List[List[1., 2., List[1., 2.], 1.1071487177940904, Complex[1., -2.]], List[Times[Rational[1, 4], Pi], Times[Rational[3, 4], Pi], Times[Rational[-3, 4], Pi], Times[Rational[-1, 4], Pi], 0, Pi]]")
+        , ("machine complex axes signed zero and C atan2 parity", "{Arg[Complex[0,2.]],Arg[Complex[-2.,-0.]],Arg[Complex[-3/4,2.5]],Conjugate[Complex[1.,0.]],Conjugate[Complex[1.,-0.]]}", "List[Times[Rational[1, 2], Pi], Pi, 1.8622531212727638, Complex[1., 0.], Complex[1., 0.]]")
+        , ("complex projection symbolic boundaries", "{{Re[Pi],Im[Pi],ReIm[Pi],Arg[Pi],Conjugate[Pi]},{Re[Pi+I],Im[Pi+I],ReIm[Pi+I],Arg[Pi+I],Conjugate[Pi+I]},{Re[x+I],Im[x+I],ReIm[x+I],Arg[x+I],Conjugate[x+I]}}", "List[List[Re[Pi], Im[Pi], List[Pi, 0], 0, Conjugate[Pi]], List[Re[Plus[Complex[0, 1], Pi]], Im[Plus[Complex[0, 1], Pi]], List[Pi, 1], ArcTan[Pi, 1], Conjugate[Plus[Complex[0, 1], Pi]]], List[Re[Plus[Complex[0, 1], x]], Im[Plus[Complex[0, 1], x]], ReIm[Plus[Complex[0, 1], x]], Arg[Plus[Complex[0, 1], x]], Conjugate[Plus[Complex[0, 1], x]]]]")
+        , ("complex projections thread over nested lists", "{Re[{1,I,1+I}],Im[{{I},2}],ReIm[{1,I}],Arg[{1,-1,I}],Conjugate[{1,I,1+I}],Re[{1,2},{3,4}]}", "List[List[1, 0, 1], List[List[1], 0], List[List[1, 0], List[0, 1]], List[0, Pi, Times[Rational[1, 2], Pi]], List[1, Complex[0, -1], Complex[1, -1]], List[Re[1, 3], Re[2, 4]]]")
+        , ("complex projection arity sequence and qualification", "{Re[],Re[1,2],Re[Sequence[1]],Re[Sequence[]],System`Re[1+2I],Global`Re[1+2I],System`Arg[-I],Global`Arg[-I]}", "List[Re[], Re[1, 2], 1, Re[], 1, Global`Re[Complex[1, 2]], Times[Rational[-1, 2], Pi], Global`Arg[Complex[0, -1]]]")
+        , ("explicit complex arithmetic normalizes before projection", "{Re[(1+I)+(2+3I)],Im[(1+I)(2+3I)],Conjugate[(1+I)^3],ReIm[(1-I)^4],Arg[(1+I)^2]}", "List[3, 5, Complex[-2, -2], List[-4, 0], Times[Rational[1, 2], Pi]]")
         , ("exact rational sum", "1/2 + 1/3", "Rational[5, 6]")
         , ("exact rational product", "(2/3)(9/4)", "Rational[3, 2]")
         , ("exact rational reciprocal power", "(1/2)^-2", "4")
@@ -1050,6 +1057,10 @@ checkEvaluatorErrors = do
     assertLeft
       "reject invalid Activate arity"
       (parseInputForm "Activate[]" >>= mapLeftEvaluation . evaluate)
+  fourteenth <-
+    assertLeft
+      "reject incompatible pure Listable argument lengths"
+      (parseInputForm "Re[{1,2},{3}]" >>= mapLeftEvaluation . evaluate)
   pure
     ( and
         [ first
@@ -1065,6 +1076,7 @@ checkEvaluatorErrors = do
         , eleventh
         , twelfth
         , thirteenth
+        , fourteenth
         ]
     )
  where
@@ -1295,6 +1307,7 @@ checkEvaluationSession :: IO Bool
 checkEvaluationSession = do
   let cases =
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
+        , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
         , ( "failure and missing predicates preserve the Python value domain"
           , "{FailureQ[Failure[\"x\", <||>]], FailureQ[$Failed], FailureQ[$Canceled], FailureQ[$Aborted], FailureQ[Missing[\"x\"]], MissingQ[Missing[\"x\"]], MissingQ[$Failed], System`FailureQ[System`Failure[\"x\", <||>]]}"
           , "List[True, True, True, True, False, True, False, True]"
@@ -1893,6 +1906,15 @@ checkEvaluationSession = do
           , "{NumericQ[], NumericQ[1,2], ExactNumberQ[], MachineNumberQ[1,2], TrueQ[]}"
           , "List[NumericQ[], NumericQ[1, 2], ExactNumberQ[], MachineNumberQ[1, 2], TrueQ[]]"
           , []
+          )
+        , ( "listable complex projections diagnose incompatible lengths"
+          , "{Re[{1,2},{3}],$MessageList}"
+          , "List[Re[List[1, 2], List[3]], List[HoldForm[MessageName[Re, \"error\"]]]]"
+          , [ ( "Re::error"
+              , "MessageName[Re, \"error\"]"
+              , "Re::error: Listable Function arguments have incompatible list lengths."
+              )
+            ]
           )
         , ( "numeric predicates retain argument diagnostics"
           , "{NumericQ[Length[]], ExactNumberQ[Length[]], TrueQ[Length[]]}"

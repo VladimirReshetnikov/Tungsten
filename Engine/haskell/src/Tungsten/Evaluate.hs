@@ -53,6 +53,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word8)
+import Foreign.C.Types (CDouble (..))
 import Text.Read (readMaybe)
 import Tungsten.Expression
 import qualified Tungsten.NumericAlgebra as NumericAlgebra
@@ -65,6 +66,16 @@ import Tungsten.SystemSymbols
   , systemSymbolAttributes
   )
 import qualified Tungsten.TextualForms as TextualForms
+
+-- GHC's pure Double atan2 differs from CPython's C-library result by up to a
+-- few ulps on some quadrants.  Tungsten's JSON contract preserves the exact
+-- machine-real spelling, so use the same C ABI operation as the reference.
+foreign import ccall unsafe "atan2" cAtan2 :: CDouble -> CDouble -> CDouble
+
+pythonAtan2 :: Double -> Double -> Double
+pythonAtan2 imaginaryPart realPart =
+  realToFrac
+    (cAtan2 (realToFrac imaginaryPart) (realToFrac realPart))
 
 newtype EvaluationError = EvaluationError {evaluationErrorMessage :: Text}
   deriving (Eq, Show)
@@ -171,15 +182,67 @@ evaluateAt depth expression
           _ -> do
             evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
             let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
-            reduced <- reducePureCallForDispatch evaluatedCall
-            -- Some Python reducers deliberately return a final structural value:
-            -- Sqrt preserves its raw nested Times shape for negative composite
-            -- radicands, while Level exposes selected held subexpressions without
-            -- evaluating them again.
-            if reduced == evaluatedCall || preservesFinalReducerResult evaluatedHead
-              then Right reduced
-              else evaluateAt (depth + 1) reduced
+            threaded <- threadPureListableCall depth evaluatedCall
+            case threaded of
+              Just result -> Right result
+              Nothing -> do
+                reduced <- reducePureCallForDispatch evaluatedCall
+                -- Some Python reducers deliberately return a final structural value:
+                -- Sqrt preserves its raw nested Times shape for negative composite
+                -- radicands, while Level exposes selected held subexpressions without
+                -- evaluating them again.
+                if reduced == evaluatedCall || preservesFinalReducerResult evaluatedHead
+                  then Right reduced
+                  else evaluateAt (depth + 1) reduced
       _ -> Right expression
+
+threadPureListableCall :: Int -> Expr -> Either EvaluationError (Maybe Expr)
+threadPureListableCall depth (Call expressionHead values)
+  | staticSystemHeadHasAttribute Listable expressionHead = do
+      rows <- pureListableArgumentRows values
+      case rows of
+        Nothing -> Right Nothing
+        Just argumentRows -> do
+          results <-
+            traverse
+              (evaluateAt (depth + 1) . Call expressionHead)
+              argumentRows
+          Right (Just (evaluatedList results))
+threadPureListableCall _ _ = Right Nothing
+
+staticSystemHeadHasAttribute :: SymbolAttribute -> Expr -> Bool
+staticSystemHeadHasAttribute attribute (Symbol name) =
+  isSystemSymbol name
+    && maybe False (Set.member attribute) (systemSymbolAttributes name)
+staticSystemHeadHasAttribute _ _ = False
+
+pureListableArgumentRows :: [Expr] -> Either EvaluationError (Maybe [[Expr]])
+pureListableArgumentRows values = case listLengths of
+  [] -> Right Nothing
+  firstLength : remainingLengths
+    | all (== firstLength) remainingLengths ->
+        Right
+          ( Just
+              [ [ case value of
+                    Call (Symbol listHead) elements
+                      | systemHeadIn ["List"] listHead -> elements !! index
+                    scalar -> scalar
+                | value <- values
+                ]
+              | index <- [0 .. firstLength - 1]
+              ]
+          )
+    | otherwise ->
+        Left
+          ( EvaluationError
+              "Listable Function arguments have incompatible list lengths."
+          )
+ where
+  listLengths =
+    [ length elements
+    | Call (Symbol listHead) elements <- values
+    , systemHeadIn ["List"] listHead
+    ]
 
 -- | Construct an ordinary evaluated call after applying the transparent
 -- argument normalization shared by Wolfram heads.  Each enclosing call gets
@@ -640,6 +703,11 @@ reduceBuiltin :: Text -> [Expr] -> Either EvaluationError Expr
 reduceBuiltin headName values = case headName of
   "Rational" -> Right (reduceRationalConstructor values)
   "Complex" -> Right (reduceComplexConstructor values)
+  "Re" -> Right (reduceComplexComponent "Re" values)
+  "Im" -> Right (reduceComplexComponent "Im" values)
+  "ReIm" -> Right (reduceReIm values)
+  "Arg" -> Right (reduceArg values)
+  "Conjugate" -> Right (reduceConjugate values)
   "Plus" -> reduceSparseArithmetic "Plus" values
   "Times" -> reduceSparseArithmetic "Times" values
   "Power" -> Right (reducePower values)
@@ -1090,34 +1158,103 @@ roundScalar _ _ = Nothing
 
 explicitComplexParts :: Expr -> Maybe (Expr, Expr)
 explicitComplexParts (Complex realPart imaginaryPart) = Just (realPart, imaginaryPart)
-explicitComplexParts (Symbol "I") = Just (Integer 0, Integer 1)
+explicitComplexParts (Symbol name)
+  | systemHeadIn ["I"] name = Just (Integer 0, Integer 1)
 explicitComplexParts expression
-  | Just coefficient <- imaginaryCoefficient expression = Just (Integer 0, coefficient)
-explicitComplexParts (Call (Symbol "Plus") [left, right])
-  | isExplicitReal left
-  , Just coefficient <- imaginaryCoefficient right = Just (left, coefficient)
-  | Just coefficient <- imaginaryCoefficient left
-  , isExplicitReal right = Just (right, coefficient)
+  | isExplicitReal expression || isSpecialRealValue expression =
+      Just (expression, Integer 0)
+explicitComplexParts (Call (Symbol headName) values)
+  | systemHeadIn ["Plus"] headName = do
+      components <- traverse explicitComplexParts values
+      pure (foldl' addComplexComponents (Integer 0, Integer 0) components)
+  | systemHeadIn ["Times"] headName = do
+      components <- traverse explicitComplexParts values
+      pure (foldl' multiplyComplexComponents (Integer 1, Integer 0) components)
+explicitComplexParts (Call (Symbol headName) [base, Integer powerValue])
+  | systemHeadIn ["Power"] headName
+  , powerValue >= 0
+  , powerValue <= 1024 = do
+      components <- explicitComplexParts base
+      pure (powerComplexComponents components powerValue)
 explicitComplexParts _ = Nothing
 
-imaginaryCoefficient :: Expr -> Maybe Expr
-imaginaryCoefficient (Symbol "I") = Just (Integer 1)
-imaginaryCoefficient (Call (Symbol "Times") [coefficient, Symbol "I"])
-  | isExplicitReal coefficient = Just coefficient
-imaginaryCoefficient (Call (Symbol "Times") [Symbol "I", coefficient])
-  | isExplicitReal coefficient = Just coefficient
-imaginaryCoefficient (Call (Symbol "Times") [coefficient, imaginaryUnit])
-  | isExplicitReal coefficient
-  , isExplicitImaginaryUnit imaginaryUnit = Just coefficient
-imaginaryCoefficient (Call (Symbol "Times") [imaginaryUnit, coefficient])
-  | isExplicitImaginaryUnit imaginaryUnit
-  , isExplicitReal coefficient = Just coefficient
-imaginaryCoefficient _ = Nothing
+addComplexComponents :: (Expr, Expr) -> (Expr, Expr) -> (Expr, Expr)
+addComplexComponents (leftReal, leftImaginary) (rightReal, rightImaginary) =
+  ( reduceExplicitRealPlus [leftReal, rightReal]
+  , reduceExplicitRealPlus [leftImaginary, rightImaginary]
+  )
 
-isExplicitImaginaryUnit :: Expr -> Bool
-isExplicitImaginaryUnit (Complex realPart imaginaryPart) =
-  exactZero realPart && exactOne imaginaryPart
-isExplicitImaginaryUnit _ = False
+multiplyComplexComponents :: (Expr, Expr) -> (Expr, Expr) -> (Expr, Expr)
+multiplyComplexComponents (leftReal, leftImaginary) (rightReal, rightImaginary) =
+  ( reduceExplicitRealPlus
+      [ reduceExplicitRealTimes [leftReal, rightReal]
+      , negateExplicitReal
+          (reduceExplicitRealTimes [leftImaginary, rightImaginary])
+      ]
+  , reduceExplicitRealPlus
+      [ reduceExplicitRealTimes [leftReal, rightImaginary]
+      , reduceExplicitRealTimes [leftImaginary, rightReal]
+      ]
+  )
+
+powerComplexComponents :: (Expr, Expr) -> Integer -> (Expr, Expr)
+powerComplexComponents base powerValue = go (Integer 1, Integer 0) base powerValue
+ where
+  go result _ 0 = result
+  go result factor 1 = multiplyComplexComponents result factor
+  go result factor remaining
+    | odd remaining =
+        go
+          (multiplyComplexComponents result factor)
+          (multiplyComplexComponents factor factor)
+          (remaining `div` 2)
+    | otherwise =
+        go result (multiplyComplexComponents factor factor) (remaining `div` 2)
+
+reduceExplicitRealPlus :: [Expr] -> Expr
+reduceExplicitRealPlus values
+  | any isMachineReal values
+  , Just machineValues <- traverse explicitRealDouble values =
+      Real (formatMachineReal (sum machineValues))
+  | otherwise = reducePlus values
+
+reduceExplicitRealTimes :: [Expr] -> Expr
+reduceExplicitRealTimes values
+  | any isMachineReal values
+  , Just machineValues <- traverse explicitRealDouble values =
+      Real (formatMachineReal (product machineValues))
+  | otherwise = reduceTimes values
+
+explicitRealDouble :: Expr -> Maybe Double
+explicitRealDouble value
+  | Just (Exact numerator denominator) <- toExact value =
+      Just (fromInteger numerator / fromInteger denominator)
+explicitRealDouble (Real source) = do
+  RealInfo (Exact numerator denominator) kind _ _ machineSource <- parseRealInfo source
+  case kind of
+    MachineReal -> readMaybe (T.unpack machineSource)
+    MarkedReal _ -> Just (fromInteger numerator / fromInteger denominator)
+explicitRealDouble _ = Nothing
+
+negateExplicitReal :: Expr -> Expr
+negateExplicitReal value
+  | Just exactValue <- toExact value = fromExact (negateExact exactValue)
+negateExplicitReal value@(Real source)
+  | explicitRealExact value == Just (Exact 0 1) = Real (positiveRealZeroSource source)
+  | otherwise = Real (negateRealSource source)
+negateExplicitReal value = reduceTimes [Integer (-1), value]
+
+positiveRealZeroSource :: Text -> Text
+positiveRealZeroSource source = case T.uncons source of
+  Just ('-', rest) -> rest
+  Just ('+', rest) -> rest
+  _ -> source
+
+negateRealSource :: Text -> Text
+negateRealSource source = case T.uncons source of
+  Just ('-', rest) -> rest
+  Just ('+', rest) -> "-" <> rest
+  _ -> "-" <> source
 
 isExplicitReal :: Expr -> Bool
 isExplicitReal value
@@ -1133,6 +1270,106 @@ makeComplex realPart imaginaryPart
   | isMachineReal realPart || isMachineReal imaginaryPart =
       Complex (toMachineReal realPart) (toMachineReal imaginaryPart)
   | otherwise = Complex realPart imaginaryPart
+
+reduceComplexComponent :: Text -> [Expr] -> Expr
+reduceComplexComponent component values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- explicitComplexParts value ->
+        if component == "Re" then realPart else imaginaryPart
+  _ -> Call (Symbol component) values
+
+reduceReIm :: [Expr] -> Expr
+reduceReIm values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- broadComplexParts value ->
+        evaluatedList [realPart, imaginaryPart]
+  _ -> Call (Symbol "ReIm") values
+
+reduceConjugate :: [Expr] -> Expr
+reduceConjugate values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- explicitComplexParts value ->
+        makeComplex realPart (negateExplicitReal imaginaryPart)
+  _ -> Call (Symbol "Conjugate") values
+
+reduceArg :: [Expr] -> Expr
+reduceArg values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- broadComplexParts value
+    , Just result <- argFromComponents realPart imaginaryPart -> result
+  _ -> Call (Symbol "Arg") values
+
+broadComplexParts :: Expr -> Maybe (Expr, Expr)
+broadComplexParts value
+  | Just components <- explicitComplexParts value = Just components
+  | numericValueReality value == Just True = Just (value, Integer 0)
+broadComplexParts (Call (Symbol headName) values)
+  | systemHeadIn ["Plus"] headName = do
+      components <- traverse broadComplexParts values
+      pure (foldl' addComplexComponents (Integer 0, Integer 0) components)
+  | systemHeadIn ["Times"] headName = do
+      components <- traverse broadComplexParts values
+      pure (foldl' multiplyComplexComponents (Integer 1, Integer 0) components)
+broadComplexParts _ = Nothing
+
+argFromComponents :: Expr -> Expr -> Maybe Expr
+argFromComponents realPart imaginaryPart = do
+  realSign <- knownRealSign realPart
+  imaginarySign <- knownRealSign imaginaryPart
+  case (realSign, imaginarySign) of
+    (EQ, EQ) -> Just (Integer 0)
+    (_, EQ) ->
+      Just (if realSign == LT then Symbol "Pi" else Integer 0)
+    (EQ, _) ->
+      Just
+        ( piMultiple
+            (if imaginarySign == LT then Exact (-1) 2 else Exact 1 2)
+        )
+    _
+      | isMachineReal realPart || isMachineReal imaginaryPart -> do
+          realValue <- explicitRealDouble realPart
+          imaginaryValue <- explicitRealDouble imaginaryPart
+          pure (Real (formatMachineReal (pythonAtan2 imaginaryValue realValue)))
+      | containsInexactReal realPart || containsInexactReal imaginaryPart -> Nothing
+      | equalExplicitMagnitude realPart imaginaryPart ->
+          Just
+            ( piMultiple
+                ( case (realSign, imaginarySign) of
+                    (GT, GT) -> Exact 1 4
+                    (LT, GT) -> Exact 3 4
+                    (LT, LT) -> Exact (-3) 4
+                    _ -> Exact (-1) 4
+                )
+            )
+      | isNumericValue realPart && isNumericValue imaginaryPart ->
+          Just (Call (Symbol "ArcTan") [realPart, imaginaryPart])
+      | otherwise -> Nothing
+
+knownRealSign :: Expr -> Maybe Ordering
+knownRealSign value
+  | Just exactValue <- explicitRealExact value =
+      Just (compareExact exactValue (Exact 0 1))
+  | isSpecialRealValue value = Just GT
+  | knownPositive value = Just GT
+knownRealSign (Call (Symbol headName) values)
+  | systemHeadIn ["Times"] headName = do
+      signs <- traverse knownRealSign values
+      pure
+        ( if EQ `elem` signs
+            then EQ
+            else if odd (length (filter (== LT) signs)) then LT else GT
+        )
+knownRealSign _ = Nothing
+
+equalExplicitMagnitude :: Expr -> Expr -> Bool
+equalExplicitMagnitude left right = case (explicitRealExact left, explicitRealExact right) of
+  (Just (Exact leftNumerator leftDenominator), Just (Exact rightNumerator rightDenominator)) ->
+    abs leftNumerator * rightDenominator
+      == abs rightNumerator * leftDenominator
+  _ -> False
+
+piMultiple :: Exact -> Expr
+piMultiple coefficient = reduceTimes [fromExact coefficient, Symbol "Pi"]
 
 -- Explicit numeric constructors remain ordinary calls in the parser.  They
 -- become numeric atoms only after their arguments have evaluated, matching
@@ -1365,14 +1602,17 @@ formatFixedExact (Exact numerator denominator) scale negativeZero =
 reducePlus :: [Expr] -> Expr
 reducePlus originalValues =
   let values = concatMap (flattenHead "Plus") originalValues
-      exactSum = foldl' addExact (Exact 0 1) (mapMaybe toExact values)
-      symbolic = filter (not . isExact) values
-      collected = collectLikeTerms symbolic
-      combined = (if exactSum == Exact 0 1 then [] else [fromExact exactSum]) <> collected
-   in case combined of
-        [] -> Integer 0
-        [single] -> single
-        _ -> Call (Symbol "Plus") combined
+   in case reduceExplicitComplexValues addComplexComponents (Integer 0, Integer 0) values of
+        Just complexResult -> complexResult
+        Nothing ->
+          let exactSum = foldl' addExact (Exact 0 1) (mapMaybe toExact values)
+              symbolic = sortBy canonicalCompare (filter (not . isExact) values)
+              collected = collectLikeTerms symbolic
+              combined = (if exactSum == Exact 0 1 then [] else [fromExact exactSum]) <> collected
+           in case combined of
+                [] -> Integer 0
+                [single] -> single
+                _ -> Call (Symbol "Plus") combined
  where
   collectLikeTerms terms = retainFirst Set.empty decomposed
    where
@@ -1403,19 +1643,35 @@ reducePlus originalValues =
 reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =
   let values = concatMap (flattenHead "Times") originalValues
-      exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
-      symbolic = sortBy canonicalCompare (filter (not . isExact) values)
-      collected = collectRepeated collectFactor symbolic
-      combined
-        | exactProduct == Exact 0 1 = [Integer 0]
-        | exactProduct == Exact 1 1 && not (null collected) = collected
-        | otherwise = fromExact exactProduct : collected
-   in case combined of
-        [] -> Integer 1
-        [single] -> single
-        _ -> Call (Symbol "Times") combined
+   in case reduceExplicitComplexValues multiplyComplexComponents (Integer 1, Integer 0) values of
+        Just complexResult -> complexResult
+        Nothing ->
+          let exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
+              symbolic = sortBy canonicalCompare (filter (not . isExact) values)
+              collected = collectRepeated collectFactor symbolic
+              combined
+                | exactProduct == Exact 0 1 = [Integer 0]
+                | exactProduct == Exact 1 1 && not (null collected) = collected
+                | otherwise = fromExact exactProduct : collected
+           in case combined of
+                [] -> Integer 1
+                [single] -> single
+                _ -> Call (Symbol "Times") combined
  where
  collectFactor factor count = reducePower [factor, Integer count]
+
+reduceExplicitComplexValues
+  :: ((Expr, Expr) -> (Expr, Expr) -> (Expr, Expr))
+  -> (Expr, Expr)
+  -> [Expr]
+  -> Maybe Expr
+reduceExplicitComplexValues combine identity values = do
+  components <- traverse explicitComplexParts values
+  if any (not . exactZero . snd) components
+    then
+      let (realPart, imaginaryPart) = foldl' combine identity components
+       in Just (makeComplex realPart imaginaryPart)
+    else Nothing
 
 reduceSparseArithmetic
   :: Text
