@@ -61,6 +61,7 @@ import Foreign.C.Types (CDouble (..))
 import Text.Read (readMaybe)
 import Tungsten.Expression
 import qualified Tungsten.NumericAlgebra as NumericAlgebra
+import qualified Tungsten.NumericPrecision as NumericPrecision
 import qualified Tungsten.PolynomialAlgebra as PolynomialAlgebra
 import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
@@ -236,9 +237,12 @@ stripPureTransparentUnevaluatedArguments expressionHead
       , "MachineIntegerQ"
       , "MachineNumberQ"
       , "NumberQ"
+      , "N"
       , "Outer"
       , "Plus"
       , "Precision"
+      , "SetAccuracy"
+      , "SetPrecision"
       , "RealValuedNumberQ"
       , "RightComposition"
       , "Operate"
@@ -742,7 +746,7 @@ preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
   Symbol headName ->
     systemHeadIn
-      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread", "Through", "Tr"]
+      ["ComplexExpand", "Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread", "Through", "Tr"]
       headName
   _ -> False
 
@@ -760,6 +764,51 @@ reduceBuiltin headName values = case headName of
   "Underflow" -> Right (reduceSpecialRealConstructor UnderflowReal values)
   "Precision" -> Right (reducePrecision values)
   "Accuracy" -> Right (reduceAccuracy values)
+  "N" -> Right (numericPrecisionResult headName values)
+  "SetPrecision" -> Right (numericPrecisionResult headName values)
+  "SetAccuracy" -> Right (numericPrecisionResult headName values)
+  "Exp" -> Right (numericTranscendentalResult headName values)
+  "Log" -> Right (numericTranscendentalResult headName values)
+  "Sin" -> Right (numericTranscendentalResult headName values)
+  "Cos" -> Right (numericTranscendentalResult headName values)
+  "Tan" -> Right (numericTranscendentalResult headName values)
+  "Cot" -> Right (numericTranscendentalResult headName values)
+  "Sec" -> Right (numericTranscendentalResult headName values)
+  "Csc" -> Right (numericTranscendentalResult headName values)
+  "ArcSin" -> Right (numericTranscendentalResult headName values)
+  "ArcCos" -> Right (numericTranscendentalResult headName values)
+  "ArcTan" -> Right (numericTranscendentalResult headName values)
+  "ArcCot" -> Right (numericTranscendentalResult headName values)
+  "ArcSec" -> Right (numericTranscendentalResult headName values)
+  "ArcCsc" -> Right (numericTranscendentalResult headName values)
+  "Sinh" -> Right (numericTranscendentalResult headName values)
+  "Cosh" -> Right (numericTranscendentalResult headName values)
+  "Tanh" -> Right (numericTranscendentalResult headName values)
+  "Coth" -> Right (numericTranscendentalResult headName values)
+  "Sech" -> Right (numericTranscendentalResult headName values)
+  "Csch" -> Right (numericTranscendentalResult headName values)
+  "ArcSinh" -> Right (numericTranscendentalResult headName values)
+  "ArcCosh" -> Right (numericTranscendentalResult headName values)
+  "ArcTanh" -> Right (numericTranscendentalResult headName values)
+  "ArcCoth" -> Right (numericTranscendentalResult headName values)
+  "ArcSech" -> Right (numericTranscendentalResult headName values)
+  "ArcCsch" -> Right (numericTranscendentalResult headName values)
+  "Haversine" -> Right (numericTranscendentalResult headName values)
+  "InverseHaversine" -> Right (numericTranscendentalResult headName values)
+  "Gudermannian" -> Right (numericTranscendentalResult headName values)
+  "InverseGudermannian" -> Right (numericTranscendentalResult headName values)
+  "SinDegrees" -> Right (numericTranscendentalResult headName values)
+  "CosDegrees" -> Right (numericTranscendentalResult headName values)
+  "TanDegrees" -> Right (numericTranscendentalResult headName values)
+  "CotDegrees" -> Right (numericTranscendentalResult headName values)
+  "SecDegrees" -> Right (numericTranscendentalResult headName values)
+  "CscDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcSinDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcCosDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcTanDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcCotDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcSecDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcCscDegrees" -> Right (numericTranscendentalResult headName values)
   "Distribute" -> reduceDistribute values
   "Inner" -> reduceInner values
   "Outer" -> reduceOuter values
@@ -768,6 +817,7 @@ reduceBuiltin headName values = case headName of
   "ReIm" -> Right (reduceReIm values)
   "Arg" -> Right (reduceArg values)
   "Conjugate" -> Right (reduceConjugate values)
+  "ComplexExpand" -> Right (reduceComplexExpand values)
   "Plus" -> reduceSparseArithmetic "Plus" values
   "Times" -> reduceSparseArithmetic "Times" values
   "Power" -> Right (reducePower values)
@@ -1050,16 +1100,37 @@ reduceBuiltin headName values = case headName of
   "ReplaceAll" -> reduceReplaceAll values
   "ReplaceRepeated" -> reduceReplaceRepeated values
   "CompoundExpression" -> Right (if null values then Symbol "Null" else last values)
-  _ -> case NumericAlgebra.reduceNumericBuiltin headName values of
-    Left message -> Left (EvaluationError message)
-    Right (Just result) -> Right result
-    Right Nothing ->
-      Right
-        ( maybe
-            (Call (Symbol headName) values)
-            id
-            (PolynomialAlgebra.reducePolynomialBuiltin canonicalCompare headName values)
-        )
+  _ -> case NumericPrecision.exactNumericCallReduction headName values of
+    Just result -> Right result
+    Nothing -> case NumericPrecision.approximateInexactNumericCall headName values of
+      Just result -> Right result
+      Nothing -> case NumericAlgebra.reduceNumericBuiltin headName values of
+        Left message -> Left (EvaluationError message)
+        Right (Just result) -> Right result
+        Right Nothing ->
+          Right
+            ( maybe
+                (Call (Symbol headName) values)
+                id
+                (PolynomialAlgebra.reducePolynomialBuiltin canonicalCompare headName values)
+            )
+
+numericPrecisionResult :: Text -> [Expr] -> Expr
+numericPrecisionResult headName values =
+  maybe
+    (Call (Symbol headName) values)
+    id
+    (NumericPrecision.reduceNumericPrecisionBuiltin headName values)
+
+numericTranscendentalResult :: Text -> [Expr] -> Expr
+numericTranscendentalResult headName values =
+  case NumericPrecision.exactNumericCallReduction headName values of
+    Just result -> result
+    Nothing ->
+      maybe
+        (Call (Symbol headName) values)
+        id
+        (NumericPrecision.approximateInexactNumericCall headName values)
 
 data Exact = Exact !Integer !Integer
   deriving (Eq, Ord, Show)
@@ -1367,6 +1438,870 @@ reduceArg values = case values of
     | Just (realPart, imaginaryPart) <- broadComplexParts value
     , Just result <- argFromComponents realPart imaginaryPart -> result
   _ -> Call (Symbol "Arg") values
+
+reduceComplexExpand :: [Expr] -> Expr
+reduceComplexExpand values = case values of
+  [value] ->
+    maybe
+      (Call (Symbol "ComplexExpand") values)
+      id
+      (complexExpandScalar value)
+  _ -> Call (Symbol "ComplexExpand") values
+
+complexExpandScalar :: Expr -> Maybe Expr
+complexExpandScalar (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead =
+      evaluatedList <$> traverse complexExpandScalar values
+complexExpandScalar value@(Call (Symbol headName) [argument])
+  | systemHeadIn ["ArcSin"] headName
+  , Just exactArgument <- explicitRealExact argument
+  , compareExact exactArgument (Exact (-1) 1) == LT = do
+      (realPart, imaginaryPart) <- complexExpandComponents value
+      pure
+        ( Call
+            (Symbol "Plus")
+            [ complexExpandSimplify realPart
+            , complexExpandImaginaryTerm
+                (complexExpandSimplify imaginaryPart)
+            ]
+        )
+complexExpandScalar value = do
+  (realPart, imaginaryPart) <- complexExpandComponents value
+  pure (complexExpandFromComponents realPart imaginaryPart)
+
+complexExpandComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandComponents value
+  | Just components <- explicitComplexParts value = Just components
+complexExpandComponents rootValue@Root {} =
+  complexExpandRootComponents rootValue
+complexExpandComponents callValue@(Call (Symbol originalHead) values)
+  | numericValueReality callValue == Just True
+  , dispatchedHead
+      `notElem` ["Abs", "Arg", "Conjugate", "Im", "Re"] =
+      Just (callValue, Integer 0)
+  | otherwise = case dispatchedHead of
+    "Plus" -> do
+      components <- traverse complexExpandComponents values
+      pure
+        ( complexExpandSimplify
+            (Call (Symbol "Plus") (map fst components))
+        , complexExpandSimplify
+            (Call (Symbol "Plus") (map snd components))
+        )
+    "Times" -> do
+      components <- traverse complexExpandComponents values
+      pure
+        ( foldl'
+            complexExpandMultiplyComponents
+            (Integer 1, Integer 0)
+            components
+        )
+    "Power" -> case values of
+      [base, exponentValue] ->
+        complexExpandPowerComponents base exponentValue
+      _ -> Nothing
+    "Sqrt" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        pure (complexExpandSqrtComponents realPart imaginaryPart)
+      _ -> Nothing
+    "Re" -> case values of
+      [argument] -> do
+        (realPart, _) <- complexExpandComponents argument
+        pure (realPart, Integer 0)
+      _ -> Nothing
+    "Im" -> case values of
+      [argument] -> do
+        (_, imaginaryPart) <- complexExpandComponents argument
+        pure (imaginaryPart, Integer 0)
+      _ -> Nothing
+    "Conjugate" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        pure (realPart, complexExpandNegate imaginaryPart)
+      _ -> Nothing
+    "Abs" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        pure (complexExpandAbsFromComponents realPart imaginaryPart, Integer 0)
+      _ -> Nothing
+    "Arg" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        argumentValue <- argFromComponents realPart imaginaryPart
+        pure (argumentValue, Integer 0)
+      _ -> Nothing
+    "Exp" -> case values of
+      [argument] -> complexExpandExponentialComponents argument
+      _ -> Nothing
+    "Log" -> complexExpandLogComponents values
+    "ArcSin" -> case values of
+      [argument]
+        | Just components <- complexExpandArcSinRealComponents argument ->
+            Just components
+      _ -> do
+        rewritten <- complexExpandRewriteElementaryCall dispatchedHead values
+        complexExpandComponents rewritten
+    "Tan"
+      | "System`" `T.isPrefixOf` originalHead -> case values of
+          [argument] -> do
+            (_, imaginaryPart) <- complexExpandComponents argument
+            rewritten <-
+              complexExpandRewriteElementaryCall dispatchedHead values
+            if complexExpandIsZero imaginaryPart
+              then Just (rewritten, Integer 0)
+              else complexExpandComponents rewritten
+          _ -> Nothing
+    directHead
+      | directHead `elem` ["Sin", "Cos", "Tan", "Sinh", "Cosh"] ->
+          case values of
+            [argument] -> complexExpandDirectFunctionComponents directHead argument
+            _ -> Nothing
+    headName -> do
+      rewritten <- complexExpandRewriteElementaryCall headName values
+      complexExpandComponents rewritten
+ where
+  dispatchedHead = complexExpandDispatchHead originalHead
+complexExpandComponents value
+  | numericValueReality value == Just True = Just (value, Integer 0)
+complexExpandComponents _ = Nothing
+
+complexExpandDispatchHead :: Text -> Text
+complexExpandDispatchHead originalHead
+  | isSystemSymbol originalHead =
+      maybe originalHead id (normalizeSystemSymbolName originalHead)
+  | otherwise = originalHead
+
+complexExpandRootComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandRootComponents rootValue@(Root coefficients rootIndex _)
+  | rootValueIsReal rootValue = Just (rootValue, Integer 0)
+  | length coefficients == 3
+  , rootIndex `elem` [0, 1]
+  , let constant = coefficients !! 0
+        linear = coefficients !! 1
+        quadratic = coefficients !! 2
+        discriminant = linear * linear - 4 * quadratic * constant
+  , quadratic /= 0
+  , discriminant < 0 =
+      let realPart =
+            fromExact (normalizeExact (negate linear) (2 * quadratic))
+          imaginaryMagnitude =
+            complexExpandSimplify
+              ( Call
+                  (Symbol "Times")
+                  [ fromExact
+                      ( normalizeExact
+                          1
+                          (2 * abs quadratic)
+                      )
+                  , Call
+                      (Symbol "Power")
+                      [ Integer (negate discriminant)
+                      , Rational 1 2
+                      ]
+                  ]
+              )
+          imaginaryPart =
+            if rootIndex == 0
+              then complexExpandNegate imaginaryMagnitude
+              else imaginaryMagnitude
+       in Just (realPart, imaginaryPart)
+  | otherwise = Nothing
+complexExpandRootComponents _ = Nothing
+
+complexExpandPowerComponents :: Expr -> Expr -> Maybe (Expr, Expr)
+complexExpandPowerComponents base@(Symbol baseName) exponentValue
+  | systemHeadIn ["E"] baseName
+  , pureImaginaryIntegralPiMultiple exponentValue =
+      Just
+        ( Call (Symbol "Power") [base, exponentValue]
+        , Integer 0
+        )
+complexExpandPowerComponents base (Integer exponentValue)
+  | exponentValue == 0 = Just (Integer 1, Integer 0)
+  | exponentValue < 0 = do
+      positive <- complexExpandPowerComponents base (Integer (negate exponentValue))
+      pure
+        ( complexExpandDivideComponents
+            (Integer 1, Integer 0)
+            positive
+        )
+  | otherwise = do
+      factor <- complexExpandComponents base
+      pure (raise (Integer 1, Integer 0) factor exponentValue)
+ where
+  raise result _ 0 = result
+  raise result factor remaining
+    | odd remaining =
+        raise
+          (complexExpandMultiplyComponents result factor)
+          (complexExpandMultiplyComponents factor factor)
+          (remaining `div` 2)
+    | otherwise =
+        raise
+          result
+          (complexExpandMultiplyComponents factor factor)
+          (remaining `div` 2)
+complexExpandPowerComponents base (Rational 1 2) = do
+  (realPart, imaginaryPart) <- complexExpandComponents base
+  pure (complexExpandSqrtComponents realPart imaginaryPart)
+complexExpandPowerComponents base exponentValue = do
+  (exponentReal, exponentImaginary) <- complexExpandComponents exponentValue
+  if complexExpandIsZero exponentImaginary
+    then
+      complexExpandComponents
+        ( Call
+            (Symbol "Exp")
+            [ Call
+                (Symbol "Times")
+                [ exponentReal
+                , Call (Symbol "Log") [base]
+                ]
+            ]
+        )
+    else Nothing
+
+pureImaginaryIntegralPiMultiple :: Expr -> Bool
+pureImaginaryIntegralPiMultiple (Call (Symbol timesHead) factors)
+  | systemHeadIn ["Times"] timesHead =
+      case factors of
+        [ Complex (Integer 0) (Integer _)
+          , Symbol constantName
+          ] -> systemHeadIn ["Pi"] constantName
+        _ -> False
+pureImaginaryIntegralPiMultiple _ = False
+
+complexExpandExponentialComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandExponentialComponents argument = do
+  (realPart, imaginaryPart) <- complexExpandComponents argument
+  let scale =
+        case explicitRealExact realPart of
+          Just (Exact 0 _) -> Integer 1
+          Just (Exact 1 1) -> Symbol "E"
+          _ -> complexExpandSimplify (Call (Symbol "Exp") [realPart])
+  pure
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Times")
+            [scale, Call (Symbol "Cos") [imaginaryPart]]
+        )
+    , complexExpandSimplify
+        ( Call
+            (Symbol "Times")
+            [scale, Call (Symbol "Sin") [imaginaryPart]]
+        )
+    )
+
+complexExpandLogComponents :: [Expr] -> Maybe (Expr, Expr)
+complexExpandLogComponents [argument] = do
+  (realPart, imaginaryPart) <- complexExpandComponents argument
+  argumentValue <- complexExpandArgFromComponents realPart imaginaryPart
+  pure
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Log")
+            [complexExpandAbsFromComponents realPart imaginaryPart]
+        )
+    , argumentValue
+    )
+complexExpandLogComponents [base, argument] = do
+  numerator <- complexExpandLogComponents [argument]
+  denominator <- complexExpandLogComponents [base]
+  pure (complexExpandDivideComponents numerator denominator)
+complexExpandLogComponents _ = Nothing
+
+complexExpandDirectFunctionComponents
+  :: Text
+  -> Expr
+  -> Maybe (Expr, Expr)
+complexExpandDirectFunctionComponents functionName argument = do
+  (realPart, imaginaryPart) <- complexExpandComponents argument
+  pure $ case functionName of
+    "Sin" ->
+      ( productOf [callOne "Sin" realPart, callOne "Cosh" imaginaryPart]
+      , productOf [callOne "Cos" realPart, callOne "Sinh" imaginaryPart]
+      )
+    "Cos" ->
+      ( productOf [callOne "Cos" realPart, callOne "Cosh" imaginaryPart]
+      , productOf
+          [ Integer (-1)
+          , callOne "Sin" realPart
+          , callOne "Sinh" imaginaryPart
+          ]
+      )
+    "Tan" ->
+      let denominator =
+            sumOf
+              [ callOne "Cos" (twice realPart)
+              , callOne "Cosh" (twice imaginaryPart)
+              ]
+       in ( quotient (callOne "Sin" (twice realPart)) denominator
+          , quotient (callOne "Sinh" (twice imaginaryPart)) denominator
+          )
+    "Sinh" ->
+      ( productOf [callOne "Sinh" realPart, callOne "Cos" imaginaryPart]
+      , productOf [callOne "Cosh" realPart, callOne "Sin" imaginaryPart]
+      )
+    "Cosh" ->
+      ( productOf [callOne "Cosh" realPart, callOne "Cos" imaginaryPart]
+      , productOf [callOne "Sinh" realPart, callOne "Sin" imaginaryPart]
+      )
+    _ -> (Call (Symbol functionName) [argument], Integer 0)
+ where
+  callOne headName value = Call (Symbol headName) [value]
+  productOf = complexExpandSimplify . Call (Symbol "Times")
+  sumOf = complexExpandSimplify . Call (Symbol "Plus")
+  twice value = productOf [Integer 2, value]
+  quotient numerator denominator =
+    productOf
+      [ numerator
+      , Call (Symbol "Power") [denominator, Integer (-1)]
+      ]
+
+complexExpandArcSinRealComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandArcSinRealComponents argument = do
+  exactArgument <- explicitRealExact argument
+  let sign = compareExact exactArgument (Exact 0 1)
+      magnitude =
+        if sign == LT
+          then complexExpandNegate argument
+          else argument
+  if compareExact (absoluteExact exactArgument) (Exact 1 1) /= GT
+    then Nothing
+    else
+      let logarithm =
+            complexExpandSimplify
+              ( Call
+                  (Symbol "Log")
+                  [ Call
+                      (Symbol "Plus")
+                      [ magnitude
+                      , if sign == LT
+                          then complexExpandNegate radical
+                          else radical
+                      ]
+                  ]
+              )
+          radical =
+            complexExpandRealSqrt
+              ( complexExpandSimplify
+                  ( Call
+                      (Symbol "Plus")
+                      [ Call (Symbol "Power") [magnitude, Integer 2]
+                      , Integer (-1)
+                      ]
+                  )
+              )
+          realPart =
+            complexExpandSimplify
+              ( Call
+                  (Symbol "Times")
+                  [ Rational (if sign == LT then -1 else 1) 2
+                  , Symbol "Pi"
+                  ]
+              )
+          imaginaryPart = complexExpandNegate logarithm
+       in Just (realPart, imaginaryPart)
+ where
+  absoluteExact exactValue
+    | compareExact exactValue (Exact 0 1) == LT = negateExact exactValue
+    | otherwise = exactValue
+
+complexExpandSqrtComponents :: Expr -> Expr -> (Expr, Expr)
+complexExpandSqrtComponents rawReal rawImaginary =
+  case (knownRealSign imaginaryPart, knownRealSign realPart) of
+    (Just EQ, Just realSign)
+      | realSign /= LT ->
+          (complexExpandRealSqrt realPart, Integer 0)
+      | otherwise ->
+          (Integer 0, complexExpandRealSqrt (complexExpandNegate realPart))
+    (imaginarySign, _) ->
+      let magnitude = complexExpandAbsFromComponents realPart imaginaryPart
+          realResult =
+            complexExpandRealSqrt
+              ( halfOf
+                  ( Call
+                      (Symbol "Plus")
+                      [magnitude, realPart]
+                  )
+              )
+          imaginaryMagnitude =
+            complexExpandRealSqrt
+              ( halfOf
+                  ( Call
+                      (Symbol "Plus")
+                      [magnitude, complexExpandNegate realPart]
+                  )
+              )
+          signValue = case imaginarySign of
+            Just GT -> Integer 1
+            Just _ -> Integer (-1)
+            Nothing -> Call (Symbol "Sign") [imaginaryPart]
+       in ( realResult
+          , complexExpandSimplify
+              ( Call
+                  (Symbol "Times")
+                  [signValue, imaginaryMagnitude]
+              )
+          )
+ where
+  realPart = complexExpandSimplify rawReal
+  imaginaryPart = complexExpandSimplify rawImaginary
+  halfOf value =
+    complexExpandSimplify
+      (Call (Symbol "Times") [Rational 1 2, value])
+
+complexExpandMultiplyComponents
+  :: (Expr, Expr)
+  -> (Expr, Expr)
+  -> (Expr, Expr)
+complexExpandMultiplyComponents
+  (leftReal, leftImaginary)
+  (rightReal, rightImaginary) =
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [leftReal, rightReal]
+            , Call
+                (Symbol "Times")
+                [Integer (-1), leftImaginary, rightImaginary]
+            ]
+        )
+    , complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [leftReal, rightImaginary]
+            , Call (Symbol "Times") [leftImaginary, rightReal]
+            ]
+        )
+    )
+
+complexExpandDivideComponents
+  :: (Expr, Expr)
+  -> (Expr, Expr)
+  -> (Expr, Expr)
+complexExpandDivideComponents
+  (leftReal, leftImaginary)
+  (rightReal, rightImaginary) =
+    ( quotient realNumerator
+    , quotient imaginaryNumerator
+    )
+ where
+  denominator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Plus")
+          [ powerTwo rightReal
+          , powerTwo rightImaginary
+          ]
+      )
+  realNumerator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Plus")
+          [ Call (Symbol "Times") [leftReal, rightReal]
+          , Call (Symbol "Times") [leftImaginary, rightImaginary]
+          ]
+      )
+  imaginaryNumerator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Plus")
+          [ Call (Symbol "Times") [leftImaginary, rightReal]
+          , Call
+              (Symbol "Times")
+              [Integer (-1), leftReal, rightImaginary]
+          ]
+      )
+  quotient numerator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Times")
+          [ numerator
+          , Call (Symbol "Power") [denominator, Integer (-1)]
+          ]
+      )
+  powerTwo value = Call (Symbol "Power") [value, Integer 2]
+
+complexExpandAbsFromComponents :: Expr -> Expr -> Expr
+complexExpandAbsFromComponents realPart imaginaryPart =
+  complexExpandRealSqrt
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Power") [realPart, Integer 2]
+            , Call (Symbol "Power") [imaginaryPart, Integer 2]
+            ]
+        )
+    )
+
+complexExpandArgFromComponents :: Expr -> Expr -> Maybe Expr
+complexExpandArgFromComponents realPart imaginaryPart
+  | Just exactReal <- explicitRealExact realPart
+  , Just exactImaginary <- explicitRealExact imaginaryPart
+  , let realSign = compareExact exactReal (Exact 0 1)
+        imaginarySign = compareExact exactImaginary (Exact 0 1)
+  , realSign /= EQ
+  , imaginarySign /= EQ
+  , Just ratio <-
+      divideExact
+        (absoluteExactValue exactImaginary)
+        (absoluteExactValue exactReal) =
+      let angle = Call (Symbol "ArcTan") [fromExact ratio]
+       in Just
+            ( complexExpandSimplify
+                ( case (realSign, imaginarySign) of
+                    (GT, GT) -> angle
+                    (GT, LT) -> Call (Symbol "Times") [Integer (-1), angle]
+                    (LT, GT) ->
+                      Call
+                        (Symbol "Plus")
+                        [ Symbol "Pi"
+                        , Call (Symbol "Times") [Integer (-1), angle]
+                        ]
+                    _ ->
+                      Call
+                        (Symbol "Plus")
+                        [ angle
+                        , Call (Symbol "Times") [Integer (-1), Symbol "Pi"]
+                        ]
+                )
+            )
+  | otherwise = argFromComponents realPart imaginaryPart
+
+absoluteExactValue :: Exact -> Exact
+absoluteExactValue value
+  | compareExact value (Exact 0 1) == LT = negateExact value
+  | otherwise = value
+
+complexExpandFromComponents :: Expr -> Expr -> Expr
+complexExpandFromComponents rawReal rawImaginary
+  | complexExpandIsZero imaginaryPart = realPart
+  | otherwise =
+      complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ realPart
+            , complexExpandImaginaryTerm imaginaryPart
+            ]
+        )
+ where
+  realPart = complexExpandSimplify rawReal
+  imaginaryPart = complexExpandSimplify rawImaginary
+
+complexExpandImaginaryTerm :: Expr -> Expr
+complexExpandImaginaryTerm = \case
+  Integer coefficient -> Complex (Integer 0) (Integer coefficient)
+  Rational numerator denominator ->
+    Complex (Integer 0) (Rational numerator denominator)
+  Call (Symbol timesHead) (Integer coefficient : factors)
+    | systemHeadIn ["Times"] timesHead ->
+        complexExpandSimplify
+          ( Call
+              (Symbol "Times")
+              (Complex (Integer 0) (Integer coefficient) : factors)
+          )
+  Call (Symbol timesHead) (Rational numerator denominator : factors)
+    | systemHeadIn ["Times"] timesHead ->
+        complexExpandSimplify
+          ( Call
+              (Symbol "Times")
+              (Complex (Integer 0) (Rational numerator denominator) : factors)
+          )
+  value ->
+    complexExpandSimplify
+      (Call (Symbol "Times") [Complex (Integer 0) (Integer 1), value])
+
+complexExpandRealSqrt :: Expr -> Expr
+complexExpandRealSqrt value =
+  complexExpandSimplify
+    (Call (Symbol "Power") [value, Rational 1 2])
+
+complexExpandNegate :: Expr -> Expr
+complexExpandNegate value =
+  complexExpandSimplify
+    (Call (Symbol "Times") [Integer (-1), value])
+
+complexExpandIsZero :: Expr -> Bool
+complexExpandIsZero value =
+  case explicitRealExact (complexExpandSimplify value) of
+    Just (Exact numerator _) -> numerator == 0
+    Nothing -> False
+
+complexExpandSimplify :: Expr -> Expr
+complexExpandSimplify (Call (Symbol headName) [Integer 0])
+  | systemHeadIn ["Exp"] headName = Integer 1
+complexExpandSimplify (Call (Symbol headName) [Integer 1])
+  | systemHeadIn ["Exp"] headName = Symbol "E"
+  | systemHeadIn ["Log"] headName = Integer 0
+complexExpandSimplify (Call (Symbol headName) [Symbol constantName])
+  | systemHeadIn ["Log"] headName
+  , systemHeadIn ["E"] constantName = Integer 1
+complexExpandSimplify expression =
+  either (const expression) id (evaluate expression)
+
+complexExpandRewriteElementaryCall :: Text -> [Expr] -> Maybe Expr
+complexExpandRewriteElementaryCall headName [argument] =
+  case headName of
+    "Tan" -> Just (ratio "Sin" "Cos")
+    "Cot" -> Just (ratio "Cos" "Sin")
+    "Sec" -> Just (reciprocal "Cos")
+    "Csc" -> Just (reciprocal "Sin")
+    "Tanh" -> Just (ratio "Sinh" "Cosh")
+    "Coth" -> Just (ratio "Cosh" "Sinh")
+    "Sech" -> Just (reciprocal "Cosh")
+    "Csch" -> Just (reciprocal "Sinh")
+    "ArcSin" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Integer (-1)
+            , Symbol "I"
+            , Call
+                (Symbol "Log")
+                [ Call
+                    (Symbol "Plus")
+                    [ Call (Symbol "Times") [Symbol "I", argument]
+                    , Call
+                        (Symbol "Sqrt")
+                        [ Call
+                            (Symbol "Plus")
+                            [ Integer 1
+                            , Call
+                                (Symbol "Times")
+                                [ Integer (-1)
+                                , Call (Symbol "Power") [argument, Integer 2]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCos" ->
+      Just
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [Rational 1 2, Symbol "Pi"]
+            , Call
+                (Symbol "Times")
+                [Integer (-1), Call (Symbol "ArcSin") [argument]]
+            ]
+        )
+    "ArcTan" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Rational 1 2
+            , Symbol "I"
+            , Call
+                (Symbol "Plus")
+                [ Call
+                    (Symbol "Log")
+                    [ Call
+                        (Symbol "Plus")
+                        [ Integer 1
+                        , Call
+                            (Symbol "Times")
+                            [Integer (-1), Symbol "I", argument]
+                        ]
+                    ]
+                , Call
+                    (Symbol "Times")
+                    [ Integer (-1)
+                    , Call
+                        (Symbol "Log")
+                        [ Call
+                            (Symbol "Plus")
+                            [ Integer 1
+                            , Call (Symbol "Times") [Symbol "I", argument]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCot" ->
+      Just
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [Rational 1 2, Symbol "Pi"]
+            , Call
+                (Symbol "Times")
+                [Integer (-1), Call (Symbol "ArcTan") [argument]]
+            ]
+        )
+    "ArcSec" -> Just (inverseCall "ArcCos")
+    "ArcCsc" -> Just (inverseCall "ArcSin")
+    "ArcSinh" ->
+      Just
+        ( Call
+            (Symbol "Log")
+            [ Call
+                (Symbol "Plus")
+                [ argument
+                , Call
+                    (Symbol "Sqrt")
+                    [ Call
+                        (Symbol "Plus")
+                        [ Call (Symbol "Power") [argument, Integer 2]
+                        , Integer 1
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCosh" ->
+      Just
+        ( Call
+            (Symbol "Log")
+            [ Call
+                (Symbol "Plus")
+                [ argument
+                , Call
+                    (Symbol "Times")
+                    [ Call
+                        (Symbol "Sqrt")
+                        [Call (Symbol "Plus") [argument, Integer 1]]
+                    , Call
+                        (Symbol "Sqrt")
+                        [Call (Symbol "Plus") [argument, Integer (-1)]]
+                    ]
+                ]
+            ]
+        )
+    "ArcTanh" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Rational 1 2
+            , Call
+                (Symbol "Plus")
+                [ Call
+                    (Symbol "Log")
+                    [Call (Symbol "Plus") [Integer 1, argument]]
+                , Call
+                    (Symbol "Times")
+                    [ Integer (-1)
+                    , Call
+                        (Symbol "Log")
+                        [ Call
+                            (Symbol "Plus")
+                            [ Integer 1
+                            , Call (Symbol "Times") [Integer (-1), argument]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCoth" -> Just (inverseCall "ArcTanh")
+    "ArcSech" -> Just (inverseCall "ArcCosh")
+    "ArcCsch" -> Just (inverseCall "ArcSinh")
+    "Haversine" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Rational 1 2
+            , Call
+                (Symbol "Plus")
+                [ Integer 1
+                , Call
+                    (Symbol "Times")
+                    [Integer (-1), Call (Symbol "Cos") [argument]]
+                ]
+            ]
+        )
+    "InverseHaversine" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Integer 2
+            , Call
+                (Symbol "ArcSin")
+                [Call (Symbol "Sqrt") [argument]]
+            ]
+        )
+    "Gudermannian" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Integer 2
+            , Call
+                (Symbol "ArcTan")
+                [ Call
+                    (Symbol "Tanh")
+                    [Call (Symbol "Times") [Rational 1 2, argument]]
+                ]
+            ]
+        )
+    "InverseGudermannian" ->
+      Just
+        ( Call
+            (Symbol "Log")
+            [ Call
+                (Symbol "Tan")
+                [ Call
+                    (Symbol "Plus")
+                    [ Call (Symbol "Times") [Rational 1 4, Symbol "Pi"]
+                    , Call (Symbol "Times") [Rational 1 2, argument]
+                    ]
+                ]
+            ]
+        )
+    degreeHead
+      | Just baseHead <- complexExpandDegreeBase degreeHead ->
+          Just
+            ( if "Arc" `T.isPrefixOf` baseHead
+                then
+                  Call
+                    (Symbol "Times")
+                    [ Call (Symbol baseHead) [argument]
+                    , Integer 180
+                    , Call (Symbol "Power") [Symbol "Pi", Integer (-1)]
+                    ]
+                else
+                  Call
+                    (Symbol baseHead)
+                    [Call (Symbol "Times") [argument, Symbol "Degree"]]
+            )
+    _ -> Nothing
+ where
+  functionCall functionName = Call (Symbol functionName) [argument]
+  reciprocal functionName =
+    Call (Symbol "Power") [functionCall functionName, Integer (-1)]
+  ratio numerator denominator =
+    Call
+      (Symbol "Times")
+      [ functionCall numerator
+      , reciprocal denominator
+      ]
+  inverseCall functionName =
+    Call
+      (Symbol functionName)
+      [Call (Symbol "Power") [argument, Integer (-1)]]
+complexExpandRewriteElementaryCall _ _ = Nothing
+
+complexExpandDegreeBase :: Text -> Maybe Text
+complexExpandDegreeBase headName = do
+  baseName <- T.stripSuffix "Degrees" headName
+  if
+      baseName
+        `elem` [ "Sin"
+               , "Cos"
+               , "Tan"
+               , "Cot"
+               , "Sec"
+               , "Csc"
+               , "ArcSin"
+               , "ArcCos"
+               , "ArcTan"
+               , "ArcCot"
+               , "ArcSec"
+               , "ArcCsc"
+               ]
+    then Just baseName
+    else Nothing
 
 broadComplexParts :: Expr -> Maybe (Expr, Expr)
 broadComplexParts value

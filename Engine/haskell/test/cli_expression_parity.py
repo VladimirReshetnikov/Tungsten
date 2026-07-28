@@ -115,6 +115,52 @@ CASES = (
         0,
     ),
     (
+        "numeric precision conversion constants roots state and contexts",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenNumericPrecisionCliI];"
+            "tungstenNumericPrecisionCliI=0;"
+            "{N[Pi,20],N[Gudermannian[1],30],"
+            "N[Root[#^3-2&,1],30],SetPrecision[1/3,20],"
+            "SetAccuracy[1/3,20],"
+            "N[Exp[-1000],20],"
+            "N[Exp[Complex[0,1/10^400]],50],"
+            "Sin[1.2],Coth[0.],"
+            "N[(tungstenNumericPrecisionCliI++;Pi),"
+            "(tungstenNumericPrecisionCliI++;20)],"
+            "tungstenNumericPrecisionCliI,System`N[Pi,20],"
+            "Global`N[Pi,20],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "collect exponent callbacks and ComplexExpand qualification",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenPolynomialCliI,tungstenPolynomialCliK];"
+            "tungstenPolynomialCliI=0;"
+            "tungstenPolynomialCliK[z_]:=(tungstenPolynomialCliI++;"
+            "q[tungstenPolynomialCliI,z]);"
+            "{Collect[a x^2+b x+c,x,tungstenPolynomialCliK],"
+            "Exponent[x^3+x+1,x,List],tungstenPolynomialCliI,"
+            "System`Collect[a x+b,x],Global`Collect[a x+b,x],"
+            "System`Exponent[x^2+x+1,x],"
+            "Global`Exponent[x^2+x+1,x],"
+            "System`ComplexExpand[1+I],"
+            "Global`ComplexExpand[1+I],ComplexExpand[1+I,x],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "structural Distribute products and raw replacement heads",
         (
             "expr",

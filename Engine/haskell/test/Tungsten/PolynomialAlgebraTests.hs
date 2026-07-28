@@ -43,6 +43,18 @@ valueCases =
     , "{System`MonomialList[x^2+x,x],Global`MonomialList[x^2+x,x]}"
     , "List[List[Power[x, 2], x], Global`MonomialList[Plus[x, Power[x, 2]], x]]"
     )
+  , ( "polynomial collection and exponent sets"
+    , "{Collect[a x^2+b x+c,x],Collect[a x^2+b x y+c y^2+d x+e y+f,{x,y}],Collect[a (x y)^2+b x y+c,x y],Collect[a f[t]^2+b f[t]+c,f[t]],Collect[x+y,{}],Collect[0,x],Collect[0,x,g],Exponent[x^3+x+1,x],Exponent[x^5 y^3+x^2 y+1,x^2 y],Exponent[f[t]^3+f[t]+1,f[t]],Exponent[x^2 y^4+x y+1,{x,y,x y}],Exponent[x^3+x+1,x,h],Exponent[0,x],Exponent[0,x,h],Exponent[0,{x,y},h],Exponent[x+y,{}],Exponent[1,x],Exponent[1,1],Exponent[0,1]}"
+    , "List[Plus[c, Times[a, Power[x, 2]], Times[b, x]], Plus[f, Times[a, Power[x, 2]], Times[c, Power[y, 2]], Times[e, y], Times[x, Plus[d, Times[b, y]]]], Plus[c, Times[a, Power[x, 2], Power[y, 2]], Times[b, x, y]], Plus[c, Times[a, Power[f[t], 2]], Times[b, f[t]]], Plus[x, y], 0, g[0], 3, 2, 3, List[2, 4, 2], h[0, 1, 3], -Infinity, h[-Infinity], List[h[-Infinity], h[-Infinity]], List[], 0, 0, -Infinity]"
+    )
+  , ( "collection and exponent soft domains"
+    , "{Collect[],Collect[x],Collect[x,y,z,w],Collect[f[x]+x,x],Collect[f[x]+x,{x,f[x]}],Collect[x+y,{x,x}],Collect[x,x+y],Exponent[],Exponent[x],Exponent[x,y,z,w],Exponent[f[x]+x,x],Exponent[f[x]+x,f[x]],Exponent[x^2+x+1,2x],Exponent[x^2+x+1,x^-1],Exponent[x^2+x+1,x^(1/2)],Exponent[x^2+x+1,x+y],Exponent[0,2x],Exponent[f[x]+x,{x,f[x]},h]}"
+    , "List[Collect[], Collect[x], Collect[x, y, z, w], Collect[Plus[x, f[x]], x], Plus[x, f[x]], Plus[x, y], x, Exponent[], Exponent[x], Exponent[x, y, z, w], Exponent[Plus[x, f[x]], x], 1, Exponent[Plus[1, x, Power[x, 2]], Times[2, x]], Exponent[Plus[1, x, Power[x, 2]], Power[x, -1]], Exponent[Plus[1, x, Power[x, 2]], Power[x, Rational[1, 2]]], 0, -Infinity, List[Exponent[Plus[x, f[x]], x, h], h[0, 1]]]"
+    )
+  , ( "qualified collection and exponent dispatch"
+    , "{System`Collect[a x+b,x],Global`Collect[a x+b,x],System`Exponent[x^2+x+1,x],Global`Exponent[x^2+x+1,x]}"
+    , "List[Plus[b, Times[a, x]], Global`Collect[Plus[b, Times[a, x]], x], 2, Global`Exponent[Plus[1, x, Power[x, 2]], x]]"
+    )
   , ( "single coefficients"
     , "{Coefficient[2x^2 y+3x y+y,x,1],Coefficient[x^2y^2+3x y+1,x y,2]}"
     , "List[Times[3, y], 1]"

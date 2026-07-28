@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T16:00:00Z
-- Repository HEAD: 793c0b68abec8e08fc8b44929217678f82b8c6f0
+- Updated (UTC): 2026-07-28T17:42:52Z
+- Repository HEAD: 927aaf913a4c6d8c0bbcbb71dd8f9905606c474b
 
 ## Purpose
 
@@ -167,6 +167,21 @@ ordinary and Gaussian factorization, divisor and prime arithmetic, modular arith
 symbols, continued fractions, integer partitions, digit/base conversion, Chinese remaindering,
 special integer sequences, and arbitrary-precision bit operations.
 
+Bounded numeric conversion now covers `N`, `SetPrecision`, and `SetAccuracy` for exact integers,
+rationals, explicit complex values, supported algebraic roots, and the standard numeric constants.
+A private constructive-real layer supplies requested decimal digits for the supported elementary,
+inverse, hyperbolic, degree, haversine, and Gudermannian families, while machine requests retain the
+Python-compatible binary64 projection. Oversized requests and unsupported shapes recover to their
+original symbolic calls. Exact identities and proved singularities are resolved before constructive
+evaluation so reciprocal poles do not enter a nonterminating real computation.
+
+`ComplexExpand` supports explicit exact numeric components, lists, arithmetic powers and square
+roots, projections, magnitude and argument, logarithms, and the covered elementary function
+families. Its branch conventions, signed trig normalization, exact logarithm quadrants, qualified
+dispatch, and symbolic fallback are tested against the Python reference. This is a deliberately
+bounded numeric subset: arbitrary algebraic-root projection, session-defined rewrites of generated
+function calls, and broader real-domain proofs remain part of the compatibility boundary.
+
 Exact polynomial support now includes `MonomialList` with implicit, explicit, and partial variable
 sets, all six Python-compatible lexicographic order directions, Gaussian coefficients, and the
 reference's zero conventions. `PolynomialMod` maps integer and invertible rational coefficients into
@@ -177,6 +192,13 @@ polynomial division without a fixed degree cutoff; constants, zero polynomials, 
 qualified heads, and unsupported-domain fallback follow the Python reference. Shared `Plus`
 normalization also factors the best common symbolic subset with real or complex numeric
 coefficients, matching the reference's deterministic rebuilt forms.
+
+Polynomial collection now includes scalar, list, composite, and opaque forms. The optional third
+argument is invoked through the session in the reference's coefficient order, retaining effects,
+recoverable diagnostics, and non-local control. `Exponent` returns maxima or sorted distinct power
+sets, threads over supported list arguments, handles composite forms and zero conventions, and uses
+the same stateful callback boundary. Bare and explicit `System`` spellings dispatch; `Global``
+spellings remain isolated.
 
 ## Compatibility boundary
 
@@ -191,8 +213,9 @@ features yet:
 - nested positional-slot scope diagnostics, session-aware callback evaluation for aggregation and array reducers
   beyond the selection, map, sort, string-pattern, and pattern/rewrite families, the base
   encoding, import/export, and textual-form character-encoding surface, broader loop control, real-valued iteration,
-  polynomial/SymPy bridges, broad
-  number theory, and inexact numeric semantics;
+  the remaining polynomial decomposition/reduction/Groebner and algebraic-root/Solve bridges, broad
+  number theory, certified arbitrary-precision domain classification, very-large-exponent handling,
+  stored-real quantization, and complete numeric identity coverage;
 - global message-stream recovery in the exported pure `Tungsten.Evaluate.evaluate` API, which
   remains fatal while session, CLI, protocol, and REPL evaluation recover nonfatal diagnostics;
 - Python-specific `RegularExpression` constructs outside the POSIX TDFA intersection, including

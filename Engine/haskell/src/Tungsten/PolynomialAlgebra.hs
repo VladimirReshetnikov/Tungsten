@@ -7,7 +7,10 @@
 -- monomials use nonnegative machine-sized exponents.  Expressions outside
 -- that ring are rejected so the evaluator can preserve them symbolically.
 module Tungsten.PolynomialAlgebra
-  ( reducePolynomialBuiltin
+  ( CollectPlan (..)
+  , collectCoefficientPlan
+  , exponentValuesForForm
+  , reducePolynomialBuiltin
   ) where
 
 import Prelude hiding (exponent)
@@ -27,6 +30,14 @@ data Gaussian = Gaussian !Exact !Exact
 newtype Polynomial = Polynomial {polynomialTerms :: Map.Map [Int] Gaussian}
   deriving (Eq, Show)
 
+-- | Exact callback work produced for the three-argument form of 'Collect'.
+-- Direct plans match the empty-variable and zero-polynomial conventions;
+-- term plans retain SymPy's descending lexicographic callback schedule.
+data CollectPlan
+  = CollectDirect !Expr
+  | CollectTerms ![(Expr, Expr)]
+  deriving (Eq, Show)
+
 type CanonicalCompare = Expr -> Expr -> Ordering
 
 reducePolynomialBuiltin :: CanonicalCompare -> Text -> [Expr] -> Maybe Expr
@@ -37,7 +48,9 @@ reducePolynomialBuiltin compareExpression headName values = case headName of
   "PolynomialQ" -> reducePolynomialQ compareExpression values
   "Variables" -> reduceVariables compareExpression values
   "MonomialList" -> reduceMonomialList compareExpression values
+  "Collect" -> reduceCollect compareExpression values
   "Coefficient" -> reduceCoefficient compareExpression values
+  "Exponent" -> reduceExponent compareExpression values
   "CoefficientList" -> reduceCoefficientList compareExpression values
   "Numerator" -> reduceFractionPart compareExpression True values
   "Denominator" -> reduceFractionPart compareExpression False values
@@ -254,6 +267,338 @@ groupedMonomialToExpr
         take orderingDimensions (zip variables powers)
     , exponent > 0
     ]
+
+reduceCollect :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceCollect compareExpression arguments = case arguments of
+  [expression, variableSpec] ->
+    collectExpression compareExpression expression variableSpec
+  [expression, variableSpec, function] -> do
+    plan <- collectCoefficientPlan compareExpression expression variableSpec
+    pure (collectPlanExpression compareExpression function plan)
+  _ -> Nothing
+
+collectExpression :: CanonicalCompare -> Expr -> Expr -> Maybe Expr
+collectExpression compareExpression expression variableSpec = do
+  explicitVariables <- variableExpressions variableSpec
+  let variables =
+        discoverVariables compareExpression explicitVariables [expression]
+      explicitCount = length explicitVariables
+  polynomial <- expressionToPolynomial variables expression
+  if explicitCount == 0
+    then pure (polynomialToExpr compareExpression variables polynomial)
+    else
+      pure
+        ( makePlus
+            compareExpression
+            [ makeTimes
+                compareExpression
+                [ collectMonomialExpression
+                    compareExpression
+                    explicitVariables
+                    selected
+                , polynomialToExpr compareExpression variables coefficient
+                ]
+            | (selected, coefficient) <-
+                Map.toList (collectGroups explicitCount polynomial)
+            ]
+        )
+
+collectGroups
+  :: Int
+  -> Polynomial
+  -> Map.Map (Maybe (Int, Int)) Polynomial
+collectGroups explicitCount (Polynomial terms) =
+  Map.fromListWith addPolynomial
+    [ ( selected
+      , Polynomial
+          ( Map.singleton
+              ( maybe powers (\(index, _) -> replaceAt index 0 powers) selected
+              )
+              coefficient
+          )
+      )
+    | (powers, coefficient) <- Map.toList terms
+    , let selected = firstPositivePower explicitCount powers
+    ]
+
+firstPositivePower :: Int -> [Int] -> Maybe (Int, Int)
+firstPositivePower explicitCount powers =
+  firstPositive (take explicitCount (zip [0 ..] powers))
+ where
+  firstPositive [] = Nothing
+  firstPositive ((index, power) : rest)
+    | power > 0 = Just (index, power)
+    | otherwise = firstPositive rest
+
+collectMonomialExpression
+  :: CanonicalCompare
+  -> [Expr]
+  -> Maybe (Int, Int)
+  -> Expr
+collectMonomialExpression _ _ Nothing = Integer 1
+collectMonomialExpression compareExpression variables (Just (index, power)) =
+  collectedPositivePowerExpression
+    compareExpression
+    (variables !! index)
+    power
+
+-- | Build the exact coefficient callback schedule for @Collect[p, vars, f]@.
+-- Coefficients remain expressions in all implicit variables.
+collectCoefficientPlan
+  :: CanonicalCompare
+  -> Expr
+  -> Expr
+  -> Maybe CollectPlan
+collectCoefficientPlan compareExpression expression variableSpec = do
+  explicitVariables <- variableExpressions variableSpec
+  if null explicitVariables
+    then
+      if bridgeConvertible [] expression
+        then Just (CollectDirect expression)
+        else Nothing
+    else
+      if hasDuplicateExpressions explicitVariables
+        then Nothing
+        else do
+          let variables =
+                discoverVariables compareExpression explicitVariables [expression]
+              explicitCount = length explicitVariables
+          polynomial <- expressionToPolynomial variables expression
+          if isZeroPolynomial polynomial
+            then Just (CollectDirect (Integer 0))
+            else
+              let orderedGroups =
+                    sortBy
+                      (\(left, _) (right, _) -> compare right left)
+                      ( Map.toList
+                          (groupMonomialTerms explicitCount polynomial)
+                      )
+               in Just
+                    ( CollectTerms
+                        [ ( fullMonomialExpression
+                              compareExpression
+                              explicitVariables
+                              powers
+                          , polynomialToExpr
+                              compareExpression
+                              variables
+                              coefficient
+                          )
+                        | (powers, coefficient) <- orderedGroups
+                        ]
+                    )
+
+collectPlanExpression
+  :: CanonicalCompare
+  -> Expr
+  -> CollectPlan
+  -> Expr
+collectPlanExpression _ function (CollectDirect coefficient) =
+  Call function [coefficient]
+collectPlanExpression compareExpression function (CollectTerms terms) =
+  makePlus
+    compareExpression
+    [ makeTimes compareExpression [monomial, Call function [coefficient]]
+    | (monomial, coefficient) <- terms
+    ]
+
+fullMonomialExpression
+  :: CanonicalCompare
+  -> [Expr]
+  -> [Int]
+  -> Expr
+fullMonomialExpression compareExpression variables powers =
+  makeTimes
+    compareExpression
+    [ collectedPositivePowerExpression compareExpression variable power
+    | (variable, power) <- zip variables powers
+    , power > 0
+    ]
+
+collectedPositivePowerExpression
+  :: CanonicalCompare
+  -> Expr
+  -> Int
+  -> Expr
+collectedPositivePowerExpression compareExpression variable outerPower =
+  case naturalMonomialFactorization variable of
+    Just (coefficient, factors)
+      | coefficient == oneExact ->
+          makeTimes
+            compareExpression
+            [ positiveIntegerPowerExpression
+                factor
+                (factorPower * toInteger outerPower)
+            | (factor, factorPower) <- factors
+            ]
+    _ -> positivePowerExpression variable outerPower
+
+positivePowerExpression :: Expr -> Int -> Expr
+positivePowerExpression variable power =
+  positiveIntegerPowerExpression variable (toInteger power)
+
+positiveIntegerPowerExpression :: Expr -> Integer -> Expr
+positiveIntegerPowerExpression variable power
+  | power == 1 = variable
+  | otherwise =
+      Call (Symbol "Power") [variable, Integer power]
+
+reduceExponent :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceExponent compareExpression arguments = case arguments of
+  [expression, form] -> do
+    values <- exponentValuesForForm compareExpression expression form
+    case reverse values of
+      maximumValue : _ -> Just maximumValue
+      [] -> Nothing
+  [expression, form, function] -> do
+    values <- exponentValuesForForm compareExpression expression form
+    pure (Call function values)
+  _ -> Nothing
+
+-- | Return the distinct exponents supplied to the optional third argument of
+-- 'Exponent', sorted from least to greatest.
+exponentValuesForForm
+  :: CanonicalCompare
+  -> Expr
+  -> Expr
+  -> Maybe [Expr]
+exponentValuesForForm compareExpression expression form
+  | expressionIsExactZero expression = Just [Symbol "-Infinity"]
+  | bridgeConvertible [] expression && bridgeConvertible [] form = do
+      formPowers <- naturalMonomialPowers form
+      exponentValuesWithPowers compareExpression expression formPowers
+  | bridgeConvertible [form] expression =
+      exponentValuesWithPowers compareExpression expression [(form, 1)]
+  | otherwise = Nothing
+
+exponentValuesWithPowers
+  :: CanonicalCompare
+  -> Expr
+  -> [(Expr, Int)]
+  -> Maybe [Expr]
+exponentValuesWithPowers compareExpression expression formPowers = do
+  let bases = map fst formPowers
+      variables = discoverVariables compareExpression bases [expression]
+  polynomial <- expressionToPolynomial variables expression
+  if isZeroPolynomial polynomial
+    then Just [Symbol "-Infinity"]
+    else
+      pure
+        ( map
+            Integer
+            ( Set.toAscList
+                ( Set.fromList
+                    [ exponentForPowers formPowers powers
+                    | powers <- Map.keys (polynomialTerms polynomial)
+                    ]
+                )
+            )
+        )
+
+exponentForPowers :: [(Expr, Int)] -> [Int] -> Integer
+exponentForPowers [] _ = 0
+exponentForPowers formPowers powers =
+  minimum
+    [ max 0 (toInteger termPower `div` toInteger formPower)
+    | (termPower, (_, formPower)) <- zip powers formPowers
+    ]
+
+naturalMonomialPowers :: Expr -> Maybe [(Expr, Int)]
+naturalMonomialPowers expression = do
+  (coefficient, powers) <- naturalMonomialFactorization expression
+  if coefficient /= oneExact
+    then Nothing
+    else traverse boundedPower powers
+ where
+  boundedPower (base, power)
+    | power > 0
+    , power <= toInteger (maxBound :: Int) =
+        Just (base, fromInteger power)
+    | otherwise = Nothing
+
+naturalMonomialFactorization :: Expr -> Maybe (Exact, [(Expr, Integer)])
+naturalMonomialFactorization expression
+  | Just coefficient <- exactRealExpression expression =
+      Just (coefficient, [])
+naturalMonomialFactorization (Call (Symbol headName) factors)
+  | systemHeadIn "Times" headName =
+      foldl' combineNaturalFactors (Just (oneExact, [])) factors
+naturalMonomialFactorization (Call (Symbol headName) [base, Integer power])
+  | systemHeadIn "Power" headName
+  , power > 0 = do
+      (coefficient, powers) <- naturalMonomialFactorization base
+      pure
+        ( exactPower coefficient power
+        , foldl'
+            (\retained (factor, factorPower) ->
+              insertNaturalPower factor (factorPower * power) retained
+            )
+            []
+            powers
+        )
+naturalMonomialFactorization (Call (Symbol headName) _)
+  | systemHeadIn "Power" headName = Nothing
+naturalMonomialFactorization expression = Just (oneExact, [(expression, 1)])
+
+combineNaturalFactors
+  :: Maybe (Exact, [(Expr, Integer)])
+  -> Expr
+  -> Maybe (Exact, [(Expr, Integer)])
+combineNaturalFactors accumulated expression = do
+  (leftCoefficient, leftPowers) <- accumulated
+  (rightCoefficient, rightPowers) <- naturalMonomialFactorization expression
+  pure
+    ( multiplyExact leftCoefficient rightCoefficient
+    , foldl'
+        (\retained (base, power) -> insertNaturalPower base power retained)
+        leftPowers
+        rightPowers
+    )
+
+insertNaturalPower
+  :: Expr
+  -> Integer
+  -> [(Expr, Integer)]
+  -> [(Expr, Integer)]
+insertNaturalPower base power [] = [(base, power)]
+insertNaturalPower base power ((existingBase, existingPower) : rest)
+  | base == existingBase = (existingBase, existingPower + power) : rest
+  | otherwise =
+      (existingBase, existingPower) : insertNaturalPower base power rest
+
+exactRealExpression :: Expr -> Maybe Exact
+exactRealExpression expression = do
+  Gaussian real imaginary <- exactGaussian expression
+  if imaginary == zeroExact then Just real else Nothing
+
+exactPower :: Exact -> Integer -> Exact
+exactPower (Exact numerator denominator) power =
+  exact (numerator ^ power) (denominator ^ power)
+
+expressionIsExactZero :: Expr -> Bool
+expressionIsExactZero expression =
+  exactGaussian expression == Just zeroGaussian
+
+-- This mirrors the Python bridge's natural arithmetic subset.  An explicit
+-- form is checked before descending so opaque composites such as @f[t]@ can
+-- still be treated as polynomial variables.
+bridgeConvertible :: [Expr] -> Expr -> Bool
+bridgeConvertible explicit expression
+  | expression `elem` explicit = True
+bridgeConvertible _ (Integer _) = True
+bridgeConvertible _ (Rational _ denominator) = denominator /= 0
+bridgeConvertible explicit (Complex realPart imaginaryPart) =
+  bridgeConvertible explicit realPart
+    && bridgeConvertible explicit imaginaryPart
+bridgeConvertible _ (Symbol _) = True
+bridgeConvertible explicit (Call (Symbol headName) values)
+  | systemHeadIn "Plus" headName || systemHeadIn "Times" headName =
+      all (bridgeConvertible explicit) values
+  | systemHeadIn "Power" headName
+  , [base, power] <- values =
+      bridgeConvertible explicit base
+        && bridgeConvertible explicit power
+bridgeConvertible _ _ = False
 
 reduceCoefficient :: CanonicalCompare -> [Expr] -> Maybe Expr
 reduceCoefficient compareExpression arguments = case arguments of

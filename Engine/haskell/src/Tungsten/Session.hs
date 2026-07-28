@@ -32,6 +32,7 @@ import qualified Prelude as P
 import Text.Read (readMaybe)
 import Tungsten.Evaluate
 import Tungsten.Expression
+import qualified Tungsten.PolynomialAlgebra as PolynomialAlgebra
 import Tungsten.PythonSort (pythonStableSortByStateM)
 import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
@@ -1228,10 +1229,12 @@ qualifiedAliasDispatchHeads =
   , "Cancel"
   , "ChineseRemainder"
   , "Complex"
+  , "ComplexExpand"
   , "CompositeQ"
   , "Conjugate"
   , "Coefficient"
   , "CoefficientList"
+  , "Collect"
   , "Comap"
   , "ComapApply"
   , "ComposeList"
@@ -1251,6 +1254,7 @@ qualifiedAliasDispatchHeads =
   , "EulerPhi"
   , "EulerE"
   , "Expand"
+  , "Exponent"
   , "FailureQ"
   , "FactorInteger"
   , "Factor"
@@ -1321,6 +1325,8 @@ qualifiedAliasDispatchHeads =
   , "Power"
   , "PowerMod"
   , "Precision"
+  , "SetAccuracy"
+  , "SetPrecision"
   , "Prime"
   , "PrimePi"
   , "PrimePowerQ"
@@ -1358,6 +1364,19 @@ qualifiedAliasDispatchHeads =
   , "Unequal"
   , "Unique"
   , "Variables"
+  ] <> numericTranscendentalDispatchHeads
+
+numericTranscendentalDispatchHeads :: [Text]
+numericTranscendentalDispatchHeads =
+  [ "Exp", "Log"
+  , "Sin", "Cos", "Tan", "Cot", "Sec", "Csc"
+  , "ArcSin", "ArcCos", "ArcTan", "ArcCot", "ArcSec", "ArcCsc"
+  , "Sinh", "Cosh", "Tanh", "Coth", "Sech", "Csch"
+  , "ArcSinh", "ArcCosh", "ArcTanh", "ArcCoth", "ArcSech", "ArcCsch"
+  , "Haversine", "InverseHaversine", "Gudermannian", "InverseGudermannian"
+  , "SinDegrees", "CosDegrees", "TanDegrees", "CotDegrees", "SecDegrees", "CscDegrees"
+  , "ArcSinDegrees", "ArcCosDegrees", "ArcTanDegrees", "ArcCotDegrees"
+  , "ArcSecDegrees", "ArcCscDegrees"
   ]
 
 directSessionDispatchHead :: Text -> Bool
@@ -2953,9 +2972,13 @@ reduceSessionEvaluatedCall depth session = \case
     Just $ do
       parsed <- liftPureEvaluation session (reduceEvaluatedCall expression)
       evaluateSessionAt (depth + 1) session parsed
+  Call (Symbol "Collect") values@[_, _, _] ->
+    Just (evaluateSessionCollect depth session values)
+  Call (Symbol "Exponent") values@[_, _, _] ->
+    Just (evaluateSessionExponent depth session values)
   expression@(Call (Symbol normalizationHead) _)
     | normalizationHead
-        `elem` ["Discriminant", "MonomialList", "PolynomialMod", "Resultant"] ->
+        `elem` ["Collect", "Discriminant", "MonomialList", "N", "PolynomialMod", "Resultant", "SetAccuracy", "SetPrecision"] ->
     Just $ do
       reduced <- liftPureEvaluation session (reduceEvaluatedCall expression)
       if reduced == expression
@@ -3146,6 +3169,60 @@ reduceSessionEvaluatedCall depth session = \case
   Call (Symbol "KeySelect") values ->
     Just (evaluateSessionKeySelect depth session values)
   _ -> Nothing
+
+evaluateSessionCollect
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCollect depth session values = case values of
+  [expression, variableSpec, function] ->
+    case
+      PolynomialAlgebra.collectCoefficientPlan
+        canonicalCompare
+        expression
+        variableSpec of
+      Nothing -> Right (Call (Symbol "Collect") values, session)
+      Just (PolynomialAlgebra.CollectDirect coefficient) ->
+        evaluateSessionCallable depth session function [coefficient]
+      Just (PolynomialAlgebra.CollectTerms terms) ->
+        applyTerms function [] session terms
+   where
+    applyTerms _ retained currentSession [] =
+      evaluateSessionAt
+        (depth + 1)
+        currentSession
+        (Call (Symbol "Plus") (reverse retained))
+    applyTerms callback retained currentSession ((monomial, coefficient) : rest) = do
+      (transformed, transformedSession) <-
+        evaluateSessionCallable depth currentSession callback [coefficient]
+      (term, termSession) <-
+        if monomial == Integer 1
+          then Right (transformed, transformedSession)
+          else
+            evaluateSessionAt
+              (depth + 1)
+              transformedSession
+              (Call (Symbol "Times") [monomial, transformed])
+      applyTerms callback (term : retained) termSession rest
+  _ -> Right (Call (Symbol "Collect") values, session)
+
+evaluateSessionExponent
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionExponent depth session values = case values of
+  [expression, form, function] ->
+    case
+      PolynomialAlgebra.exponentValuesForForm
+        canonicalCompare
+        expression
+        form of
+      Nothing -> Right (Call (Symbol "Exponent") values, session)
+      Just exponentValues ->
+        evaluateSessionCallable depth session function exponentValues
+  _ -> Right (Call (Symbol "Exponent") values, session)
 
 reduceSessionEvaluatedCallForDispatch
   :: Bool
@@ -10909,10 +10986,13 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "MaximalBy"
       , "MinimalBy"
       , "NumberQ"
+      , "N"
       , "OrderingBy"
       , "Outer"
       , "Plus"
       , "Precision"
+      , "SetAccuracy"
+      , "SetPrecision"
       , "RealValuedNumberQ"
       , "RightComposition"
       , "Scan"
