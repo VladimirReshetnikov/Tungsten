@@ -276,15 +276,20 @@ mpz_class bounded_euler_phi(unsigned long value,
     return result;
 }
 
-std::vector<unsigned long> integer_digits(unsigned long value, unsigned long base) {
-    if (value == 0) return {0};
-    std::vector<unsigned long> digits;
-    while (value != 0) {
-        digits.push_back(value % base);
-        value /= base;
+template<typename Consumer>
+void for_each_integer_digit(mpz_class value, unsigned long base, Consumer consumer) {
+    if (value < 0) value = -value;
+    if (value == 0) {
+        consumer(0UL);
+        return;
     }
-    std::reverse(digits.begin(), digits.end());
-    return digits;
+    while (value != 0) {
+        mpz_class quotient;
+        const auto digit = mpz_tdiv_q_ui(
+            quotient.get_mpz_t(), value.get_mpz_t(), base);
+        consumer(digit);
+        value = std::move(quotient);
+    }
 }
 
 void append_integer_partitions(unsigned long remaining, unsigned long maximum_part,
@@ -653,32 +658,29 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if ((function == "IntegerReverse" || function == "DigitCount") && !args.empty()
         && args.size() <= (function == "DigitCount" ? 3U : 2U)
-        && args[0].kind() == ExprKind::Integer) {
-        const mpz_class base_value = args.size() >= 2 && args[1].kind() == ExprKind::Integer
+        && all_integers) {
+        const mpz_class base_value = args.size() >= 2
             ? args[1].integer_value() : mpz_class(10);
         const auto base = bounded_nonnegative_ulong(base_value, 4096UL);
-        const auto value = bounded_nonnegative_ulong(abs(args[0].integer_value()),
-            std::numeric_limits<unsigned long>::max());
-        if (!base || *base < 2 || !value) return std::nullopt;
-        const auto digits = integer_digits(*value, *base);
+        if (!base || *base < 2) return std::nullopt;
         if (function == "IntegerReverse") {
             mpz_class result = 0;
-            for (auto iterator = digits.rbegin(); iterator != digits.rend(); ++iterator)
-                result = result * *base + *iterator;
+            for_each_integer_digit(args[0].integer_value(), *base,
+                [&](unsigned long digit) { result = result * *base + digit; });
             return integer(result);
         }
-        std::vector<unsigned long> counts(*base, 0);
-        for (const auto digit : digits) ++counts[digit];
+        std::vector<mpz_class> counts(*base, 0);
+        for_each_integer_digit(args[0].integer_value(), *base,
+            [&](unsigned long digit) { ++counts[digit]; });
         if (args.size() == 3) {
-            if (args[2].kind() != ExprKind::Integer) return std::nullopt;
             const auto digit = bounded_nonnegative_ulong(args[2].integer_value(), *base - 1);
             if (!digit) return std::nullopt;
-            return integer(mpz_class(counts[*digit]));
+            return integer(counts[*digit]);
         }
         std::vector<Expr> result;
         for (unsigned long digit = 1; digit < *base; ++digit)
-            result.push_back(integer(mpz_class(counts[digit])));
-        result.push_back(integer(mpz_class(counts[0])));
+            result.push_back(integer(counts[digit]));
+        result.push_back(integer(counts[0]));
         return list(std::move(result));
     }
     if ((function == "BitNot" || function == "BitLength") && args.size() == 1
