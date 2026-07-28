@@ -485,6 +485,20 @@ reduceCall expression = case expression of
         ( EvaluationError
             "ComapApply[functions] expects exactly one argument when used as an operator."
         )
+  Call (Call (Symbol "MapAll") [function]) values -> case values of
+    [subject] -> reduceMapAll [function, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "MapAll[f] expects exactly one argument when used as an operator."
+        )
+  Call (Call (Symbol "MapApply") [function]) values -> case values of
+    [subject] -> reduceMapApply [function, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "MapApply[f] expects exactly one argument when used as an operator."
+        )
   Call (Call (Symbol "Select") [criterion]) [subject] ->
     reduceBuiltin "Select" [subject, criterion]
   Call (Call (Symbol "Discard") [criterion]) [subject] ->
@@ -865,6 +879,8 @@ reduceBuiltin headName values = case headName of
   "Insert" -> reduceInsert values
   "ReplacePart" -> Right (reduceReplacePart values)
   "Map" -> Right (reduceMap values)
+  "MapAll" -> reduceMapAll values
+  "MapApply" -> reduceMapApply values
   "MapAt" -> Right (reduceMapAt values)
   "Apply" -> Right (reduceApply values)
   "Construct" -> reduceConstruct values
@@ -10288,6 +10304,117 @@ reduceMap [function, association]
 reduceMap [function, Call expressionHead values] =
   Call expressionHead [Call function [value] | value <- values]
 reduceMap values = Call (Symbol "Map") values
+
+reduceMapAll :: [Expr] -> Either EvaluationError Expr
+reduceMapAll values =
+  case stripMapAllHeadsOption values of
+    (_includeHeads, [_function]) ->
+      Right (Call (Symbol "MapAll") values)
+    (includeHeads, [function, subject]) ->
+      mapAllTree includeHeads function subject
+    _ ->
+      Left
+        ( EvaluationError
+            "MapAll currently supports exactly two arguments."
+        )
+
+stripMapAllHeadsOption :: [Expr] -> (Bool, [Expr])
+stripMapAllHeadsOption values = case reverse values of
+  Call (Symbol ruleHead) [Symbol "Heads", Symbol value] : rest
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead
+    , value `elem` ["True", "False"] ->
+        (value == "True", reverse rest)
+  _ -> (False, values)
+
+mapAllTree :: Bool -> Expr -> Expr -> Either EvaluationError Expr
+mapAllTree includeHeads function expression
+  | Just entries <- associationEntries expression = do
+      mappedEntries <- traverse mapEntry entries
+      applyTraversalCallable function [associationExpr mappedEntries]
+  | Call expressionHead values <- expression = do
+      mappedValues <- traverse (mapAllTree includeHeads function) values
+      mappedHead <-
+        if includeHeads
+          then mapAllTree includeHeads function expressionHead
+          else Right expressionHead
+      applyTraversalCallable
+        function
+        [normalizeEvaluatedCall mappedHead mappedValues]
+  | otherwise = applyTraversalCallable function [expression]
+ where
+  mapEntry (AssociationEntry ruleHead key value) =
+    AssociationEntry ruleHead key <$> mapAllTree includeHeads function value
+
+reduceMapApply :: [Expr] -> Either EvaluationError Expr
+reduceMapApply = \case
+  [function] -> Right (Call (Symbol "MapApply") [function])
+  [function, subject] -> mapApplyImmediate function subject
+  [function, subject, levelSpecification] -> do
+    bounds <- normalizeLevelSpec levelSpecification
+    mapApplyTree function bounds 0 subject
+  _ ->
+    Left
+      ( EvaluationError
+          "MapApply expects a function, an expression, and an optional level specification."
+      )
+
+mapApplyImmediate :: Expr -> Expr -> Either EvaluationError Expr
+mapApplyImmediate function expression
+  | Just entries <- associationEntries expression =
+      associationExpr <$> traverse mapEntry entries
+  | Call expressionHead values <- expression =
+      normalizeEvaluatedCall expressionHead
+        <$> traverse (applyTraversalHead function) values
+  | otherwise = Right expression
+ where
+  mapEntry (AssociationEntry ruleHead key value) =
+    AssociationEntry ruleHead key <$> applyTraversalHead function value
+
+mapApplyTree
+  :: Expr
+  -> LevelBounds
+  -> Int
+  -> Expr
+  -> Either EvaluationError Expr
+mapApplyTree function bounds positive expression
+  | Just entries <- associationEntries expression = do
+      mappedEntries <- traverse mapEntry entries
+      let rebuilt = associationExpr mappedEntries
+      if selected
+        then applyTraversalHead function rebuilt
+        else Right rebuilt
+  | Call expressionHead values <- expression = do
+      mappedValues <-
+        traverse (mapApplyTree function bounds (positive + 1)) values
+      let rebuilt = normalizeEvaluatedCall expressionHead mappedValues
+      if selected
+        then applyTraversalHead function rebuilt
+        else Right rebuilt
+  | otherwise = Right expression
+ where
+  selected =
+    positive >= 1
+      && levelMatches
+        bounds
+        positive
+        (negate (expressionDepth expression))
+  mapEntry (AssociationEntry ruleHead key value) =
+    AssociationEntry ruleHead key
+      <$> mapApplyTree function bounds (positive + 1) value
+
+applyTraversalHead :: Expr -> Expr -> Either EvaluationError Expr
+applyTraversalHead function expression
+  | Just entries <- associationEntries expression =
+      applyTraversalCallable
+        function
+        [value | AssociationEntry _ _ value <- entries]
+  | Call _ values <- expression = applyTraversalCallable function values
+  | otherwise = Right expression
+
+applyTraversalCallable :: Expr -> [Expr] -> Either EvaluationError Expr
+applyTraversalCallable (Symbol nothingHead) _
+  | systemHeadIn ["Nothing"] nothingHead = Right (Symbol "Nothing")
+applyTraversalCallable function values = evaluate (Call function values)
 
 reduceApply :: [Expr] -> Expr
 reduceApply [newHead, association]

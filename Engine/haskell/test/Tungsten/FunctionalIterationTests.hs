@@ -47,6 +47,34 @@ valueCases =
     , "{System`Comap[{f,g},x],System`ComapApply[{f,g}][h[x,y]],Global`Comap[{f,g},x],Global`Comap[{f,g}][x]}"
     , "List[List[f[x], g[x]], List[f[x, y], g[x, y]], Global`Comap[List[f, g], x], Global`Comap[List[f, g]][x]]"
     )
+  , ( "map all and map apply direct operator and infix forms"
+    , "{MapAll[f,g[a,h[b]]],f//@g[a],MapAll[f][g[a]],MapApply[f,{g[a,b],x,h[c]}],f@@@{g[a,b],x,h[c]},MapApply[f][{g[a,b]}]}"
+    , "List[f[g[f[a], f[h[f[b]]]]], f[g[f[a]]], f[g[f[a]]], List[f[a, b], x, f[c]], List[f[a, b], x, f[c]], List[f[a, b]]]"
+    )
+  , ( "map apply honors exact bounded and negative levels"
+    , "{MapApply[q,g[a,h[b,c],k[l[d]]],{1}],MapApply[q,g[a,h[b,c],k[l[d]]],{2}],MapApply[q,g[a,h[b,c],k[l[d]]],2],MapApply[q,g[a,h[b,c],k[l[d]]],Infinity],MapApply[q,g[a,h[b,c],k[l[d]]],{0}],MapApply[q,g[a,h[b,c],k[l[d]]],{-2}]}"
+    , "List[g[a, q[b, c], q[l[d]]], g[a, h[b, c], k[q[d]]], g[a, q[b, c], q[q[d]]], g[a, q[b, c], q[q[d]]], g[a, h[b, c], k[l[d]]], g[a, q[b, c], k[q[d]]]]"
+    )
+  , ( "map traversal preserves associations and maps optional heads"
+    , "{MapAll[f,<|a->x,b:>g[y]|>],MapAll[f,g[a,b],Heads->True],MapAll[f,<|a->x|>,Heads->True],MapApply[f,<|a->g[x,y],b:>h[z],c->q|>]}"
+    , "List[f[Association[Rule[a, f[x]], RuleDelayed[b, f[g[f[y]]]]]], f[f[g][f[a], f[b]]], f[Association[Rule[a, f[x]]]], Association[Rule[a, f[x, y]], RuleDelayed[b, f[z]], Rule[c, q]]]"
+    )
+  , ( "map traversal normalizes Nothing and Sequence at collection boundaries"
+    , "{MapApply[Nothing,{g[a],x,h[b]}],MapApply[Nothing,<|a->g[x],b->y|>],MapApply[Sequence,{g[a,b],h[c]}],MapAll[Sequence,g[a,b]]}"
+    , "List[List[x], Association[Rule[a, Nothing], Rule[b, y]], List[a, b, c], g[a, b]]"
+    )
+  , ( "map all permits Nothing to remove its enclosing list element"
+    , "MapAll[Nothing,g[a,b]]"
+    , "Nothing"
+    )
+  , ( "map traversal preserves partial operator forms"
+    , "{MapAll[f],MapAll[f,Heads->True],MapApply[f]}"
+    , "List[MapAll[f], MapAll[f, Rule[Heads, True]], MapApply[f]]"
+    )
+  , ( "map traversal qualified System dispatch and Global isolation"
+    , "{System`MapAll[f,g[a]],System`MapAll[f][g[a]],Global`MapAll[f,g[a]],Global`MapAll[f][g[a]],System`MapApply[f,{g[a,b]}],System`MapApply[f][{g[a,b]}],Global`MapApply[f,{g[a,b]}],Global`MapApply[f][{g[a,b]}]}"
+    , "List[f[g[f[a]]], f[g[f[a]]], Global`MapAll[f, g[a]], Global`MapAll[f][g[a]], List[f[a, b]], List[f[a, b]], Global`MapApply[f, List[g[a, b]]], Global`MapApply[f][List[g[a, b]]]]"
+    )
   , ( "nest and nest list"
     , "{Nest[f,x,3],NestList[f,x,3]}"
     , "List[f[f[f[x]]], List[x, f[x], f[f[x]], f[f[f[x]]]]]"
@@ -123,6 +151,14 @@ sessionCases =
     , "ClearAll[f,g,c]; c=0; f[x_]:=(c++;x+1); g[x___]:=(c++;HoldComplete[x]); {Comap[{f,g},3],Comap[{f,g}][4],ComapApply[{g,g},h[a,b]],Comap[{(c++;Nothing)&,f},5],c}"
     , "List[List[4, HoldComplete[3]], List[5, HoldComplete[4]], List[HoldComplete[a, b], HoldComplete[a, b]], List[6], 8]"
     )
+  , ( "session map traversal callbacks run postorder and skip MapApply atoms"
+    , "ClearAll[f,c]; c=0; f[x___]:=(c++;HoldComplete[x]); {MapAll[f,g[a,h[b,z]]],c,MapApply[f,{g[a,b],x,h[z]}],c}"
+    , "List[HoldComplete[g[HoldComplete[a], HoldComplete[h[HoldComplete[b], HoldComplete[z]]]]], 5, List[HoldComplete[a, b], x, HoldComplete[z]], 7]"
+    )
+  , ( "session map apply levels thread nested callback effects"
+    , "ClearAll[q,n]; n=0; q[x___]:=(n++;HoldComplete[x]); {MapApply[q,g[h[a],k[l[b]]],Infinity],n}"
+    , "List[g[HoldComplete[a], HoldComplete[HoldComplete[b]]], 3]"
+    )
   , ( "session callbacks preserve fixed point effects"
     , "n=0; {FixedPoint[(n++;Min[#+1,2])&,0],n}"
     , "List[2, 3]"
@@ -158,6 +194,26 @@ errorCases =
   , ( "comap apply operator arity"
     , "ComapApply[{f,g}][x,y]"
     , "ComapApply[functions] expects exactly one argument when used as an operator."
+    )
+  , ( "map all direct arity"
+    , "MapAll[]"
+    , "MapAll currently supports exactly two arguments."
+    )
+  , ( "map all operator arity"
+    , "MapAll[f][x,y]"
+    , "MapAll[f] expects exactly one argument when used as an operator."
+    )
+  , ( "map apply direct arity"
+    , "MapApply[]"
+    , "MapApply expects a function, an expression, and an optional level specification."
+    )
+  , ( "map apply level specification"
+    , "MapApply[f,x,z]"
+    , "an unsupported level specification was provided"
+    )
+  , ( "map apply operator arity"
+    , "MapApply[f][x,y]"
+    , "MapApply[f] expects exactly one argument when used as an operator."
     )
   , ( "nest count domain"
     , "Nest[f,x,-1]"
@@ -212,6 +268,26 @@ sessionErrorCases =
     , "Comap[{f,g}][x,y]"
     , "Comap[List[f, g]][x, y]"
     , "General::error: Comap[functions] expects exactly one argument when used as an operator."
+    )
+  , ( "session map all direct arity"
+    , "MapAll[]"
+    , "MapAll[]"
+    , "MapAll::error: MapAll currently supports exactly two arguments."
+    )
+  , ( "session map all operator arity"
+    , "MapAll[f][x,y]"
+    , "MapAll[f][x, y]"
+    , "General::error: MapAll[f] expects exactly one argument when used as an operator."
+    )
+  , ( "session map apply level specification"
+    , "MapApply[f,x,z]"
+    , "MapApply[f, x, z]"
+    , "MapApply::error: Unsupported Level specification: 'z'."
+    )
+  , ( "session map apply operator arity"
+    , "MapApply[f][x,y]"
+    , "MapApply[f][x, y]"
+    , "General::error: MapApply[f] expects exactly one argument when used as an operator."
     )
   , ( "session fold while preserves effects before a trailing-count failure"
     , "n=0;t=0; f[x_,y_]:=(n++;x+y); q[x_]:=(t++;x<1); {FoldWhileList[f,0,{1},q,1,x],n,t}"

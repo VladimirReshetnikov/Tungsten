@@ -2109,6 +2109,23 @@ CASES = (
         ),
         0,
     ),
+    (
+        "map all and map apply traversal parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "c=0; f[x___]:=(c++;HoldComplete[x]); "
+            "{MapAll[f,g[a,h[b,z]]], MapAll[q,g[a,b],Heads->True], "
+            "MapApply[f,{g[a,b],x,h[z]}], "
+            "MapApply[q,g[a,h[b,d]],{1}], MapApply[q,g[a,h[b,d]],{2}], "
+            "MapAll[q][g[x]], MapApply[q][{g[x,y]}], "
+            "System`MapAll[q][g[x]], Global`MapAll[q][g[x]], c}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

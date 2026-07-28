@@ -1254,6 +1254,8 @@ qualifiedAliasDispatchHeads =
   , "LessEqual"
   , "LiouvilleLambda"
   , "LucasL"
+  , "MapAll"
+  , "MapApply"
   , "Max"
   , "Min"
   , "MissingQ"
@@ -2938,6 +2940,20 @@ reduceSessionEvaluatedCall depth session = \case
         sessionFailure
           session
           "ComapApply[functions] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MapAll") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionMapAll depth session [function, subject]
+      _ ->
+        sessionFailure
+          session
+          "MapAll[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MapApply") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionMapApply depth session [function, subject]
+      _ ->
+        sessionFailure
+          session
+          "MapApply[f] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
   Call (Symbol "Apply") values ->
@@ -2948,6 +2964,10 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionKeyValueMap depth session values)
   Call (Symbol "Map") values ->
     Just (evaluateSessionMap depth session values)
+  Call (Symbol "MapAll") values ->
+    Just (evaluateSessionMapAll depth session values)
+  Call (Symbol "MapApply") values ->
+    Just (evaluateSessionMapApply depth session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
   Call (Symbol "Construct") values ->
@@ -3634,6 +3654,243 @@ evaluateSessionMap depth session = \case
       (retained <> [replaceSessionItemValue item value])
       updated
       rest
+
+evaluateSessionMapAll
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapAll depth session values =
+  case stripSessionHeadsOption False values of
+    (_includeHeads, [_function]) ->
+      Right (Call (Symbol "MapAll") values, session)
+    (includeHeads, [function, subject]) ->
+      mapTree includeHeads function session subject
+    _ ->
+      sessionFailure
+        session
+        "MapAll currently supports exactly two arguments."
+ where
+  mapTree includeHeads function currentSession expression =
+    case sessionOrderedCollection expression of
+      Just collection
+        | sessionCollectionAssociation collection -> do
+            (mappedItems, updated) <-
+              mapItems
+                includeHeads
+                function
+                []
+                currentSession
+                (sessionCollectionItems collection)
+            evaluateSessionCallable
+              depth
+              updated
+              function
+              [rebuildSessionCollection collection mappedItems]
+      _ -> case expression of
+        Call expressionHead arguments' -> do
+          (mappedArguments, argumentsSession) <-
+            mapValues
+              includeHeads
+              function
+              []
+              currentSession
+              arguments'
+          (mappedHead, headSession) <-
+            if includeHeads
+              then mapTree includeHeads function argumentsSession expressionHead
+              else Right (expressionHead, argumentsSession)
+          evaluateSessionCallable
+            depth
+            headSession
+            function
+            [normalizeEvaluatedCall mappedHead mappedArguments]
+        _ ->
+          evaluateSessionCallable
+            depth
+            currentSession
+            function
+            [expression]
+
+  mapItems _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapItems includeHeads function retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      mapTree
+        includeHeads
+        function
+        currentSession
+        (sessionItemValue item)
+    mapItems
+      includeHeads
+      function
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  mapValues _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapValues includeHeads function retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      mapTree includeHeads function currentSession value
+    mapValues
+      includeHeads
+      function
+      (retained <> [mapped])
+      updated
+      rest
+
+evaluateSessionMapApply
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapApply depth session = \case
+  [function] -> Right (Call (Symbol "MapApply") [function], session)
+  [function, subject] -> mapImmediate function session subject
+  [function, subject, levelSpecification] -> do
+    (bounds, boundsSession) <-
+      liftSessionLevelBounds session levelSpecification
+    mapTree function bounds 0 boundsSession subject
+  _ ->
+    sessionFailure
+      session
+      "MapApply expects a function, an expression, and an optional level specification."
+ where
+  mapImmediate function currentSession expression =
+    case sessionOrderedCollection expression of
+      Just collection
+        | sessionCollectionAssociation collection -> do
+            (mappedItems, updated) <-
+              mapImmediateItems
+                function
+                []
+                currentSession
+                (sessionCollectionItems collection)
+            Right (rebuildSessionCollection collection mappedItems, updated)
+      _ -> case expression of
+        Call expressionHead arguments' -> do
+          (mappedArguments, updated) <-
+            mapImmediateValues function [] currentSession arguments'
+          Right
+            ( normalizeEvaluatedCall expressionHead mappedArguments
+            , updated
+            )
+        _ -> Right (expression, currentSession)
+
+  mapImmediateItems _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapImmediateItems function retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      evaluateSessionTraversalHead
+        depth
+        function
+        currentSession
+        (sessionItemValue item)
+    mapImmediateItems
+      function
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  mapImmediateValues _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapImmediateValues function retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      evaluateSessionTraversalHead depth function currentSession value
+    mapImmediateValues
+      function
+      (retained <> [mapped])
+      updated
+      rest
+
+  mapTree function bounds positive currentSession expression =
+    case sessionOrderedCollection expression of
+      Just collection
+        | sessionCollectionAssociation collection -> do
+            (mappedItems, updated) <-
+              mapTreeItems
+                function
+                bounds
+                (positive + 1)
+                []
+                currentSession
+                (sessionCollectionItems collection)
+            let rebuilt = rebuildSessionCollection collection mappedItems
+            if selected bounds positive expression
+              then
+                evaluateSessionTraversalHead depth function updated rebuilt
+              else Right (rebuilt, updated)
+      _ -> case expression of
+        Call expressionHead arguments' -> do
+          (mappedArguments, updated) <-
+            mapTreeValues
+              function
+              bounds
+              (positive + 1)
+              []
+              currentSession
+              arguments'
+          let rebuilt = normalizeEvaluatedCall expressionHead mappedArguments
+          if selected bounds positive expression
+            then
+              evaluateSessionTraversalHead depth function updated rebuilt
+            else
+              Right (rebuilt, updated)
+        _ -> Right (expression, currentSession)
+
+  selected bounds positive expression =
+    positive >= 1 && sessionLevelMatches bounds positive expression
+
+  mapTreeItems _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapTreeItems function bounds positive retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      mapTree
+        function
+        bounds
+        positive
+        currentSession
+        (sessionItemValue item)
+    mapTreeItems
+      function
+      bounds
+      positive
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  mapTreeValues _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapTreeValues function bounds positive retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      mapTree function bounds positive currentSession value
+    mapTreeValues
+      function
+      bounds
+      positive
+      (retained <> [mapped])
+      updated
+      rest
+
+evaluateSessionTraversalHead
+  :: Int
+  -> Expr
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionTraversalHead depth function session expression =
+  case sessionOrderedCollection expression of
+    Just collection
+      | sessionCollectionAssociation collection ->
+          evaluateSessionCallable
+            depth
+            session
+            function
+            (map sessionItemValue (sessionCollectionItems collection))
+    _ -> case expression of
+      Call _ values -> evaluateSessionCallable depth session function values
+      _ -> Right (expression, session)
 
 evaluateSessionConstruct
   :: Int
