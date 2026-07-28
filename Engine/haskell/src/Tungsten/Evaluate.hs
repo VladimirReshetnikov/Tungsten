@@ -852,6 +852,14 @@ reduceBuiltin headName values = case headName of
   "Map" -> Right (reduceMap values)
   "MapAt" -> Right (reduceMapAt values)
   "Apply" -> Right (reduceApply values)
+  "Construct" -> reduceConstruct values
+  "ComposeList" -> reduceComposeList values
+  "Nest" -> reduceNest False values
+  "NestList" -> reduceNest True values
+  "FixedPoint" -> reduceFixedPoint False values
+  "FixedPointList" -> reduceFixedPoint True values
+  "Fold" -> reduceFold False values
+  "FoldList" -> reduceFold True values
   "Replace" -> reduceReplace values
   "ReplaceAt" -> reduceReplaceAt values
   "ReplaceAll" -> reduceReplaceAll values
@@ -8748,6 +8756,153 @@ sequenceSearchSpans items patternExpression arity = go 0
         patternExpression =
         (start, start + arity) : go (start + arity)
     | otherwise = go (start + 1)
+
+reduceConstruct :: [Expr] -> Either EvaluationError Expr
+reduceConstruct [] =
+  Left (EvaluationError "Construct expects at least one argument.")
+reduceConstruct (function : functionArguments) =
+  evaluate (Call function functionArguments)
+
+reduceComposeList :: [Expr] -> Either EvaluationError Expr
+reduceComposeList [Call _ functions, initial] =
+  compose functions initial [initial]
+ where
+  compose [] _ retained = Right (evaluatedList retained)
+  compose (function : remaining) current retained = do
+    updated <- evaluate (Call function [current])
+    compose remaining updated (retained <> [updated])
+reduceComposeList [_functions, _initial] =
+  Left
+    ( EvaluationError
+        "ComposeList expects a list or other nonatomic expression of functions."
+    )
+reduceComposeList _ =
+  Left (EvaluationError "ComposeList expects exactly two arguments.")
+
+reduceNest :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceNest returnHistory [function, initial, countExpression] = do
+  iterations <-
+    nonNegativeIterationCount
+      operation
+      "expects a non-negative integer iteration count."
+      countExpression
+  nested <- buildNestHistory function iterations [initial]
+  Right (if returnHistory then evaluatedList nested else last nested)
+ where
+  operation = if returnHistory then "NestList" else "Nest"
+reduceNest returnHistory _ =
+  Left
+    ( EvaluationError
+        ( (if returnHistory then "NestList" else "Nest")
+            <> " expects exactly three arguments."
+        )
+    )
+
+buildNestHistory
+  :: Expr
+  -> Integer
+  -> [Expr]
+  -> Either EvaluationError [Expr]
+buildNestHistory _ 0 retained = Right retained
+buildNestHistory function remaining retained = do
+  updated <- evaluate (Call function [last retained])
+  buildNestHistory function (remaining - 1) (retained <> [updated])
+
+reduceFixedPoint :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFixedPoint returnHistory = \case
+  [function, initial] ->
+    findFixedPoint function initial iterationSafetyLimit False
+  [function, initial, countExpression] -> do
+    limit <-
+      nonNegativeIterationCount
+        operation
+        "expects a non-negative maximum iteration count."
+        countExpression
+    findFixedPoint function initial limit True
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " expects a function, an expression, and an optional iteration limit."
+          )
+      )
+ where
+  operation = if returnHistory then "FixedPointList" else "FixedPoint"
+  findFixedPoint function initial limit explicitLimit =
+    iterateUntilStable limit initial [initial]
+   where
+    iterateUntilStable 0 current retained
+      | explicitLimit = finish current retained
+      | otherwise =
+          Left
+            ( EvaluationError
+                (operation <> " exceeded the Tungsten iteration safety limit.")
+            )
+    iterateUntilStable remaining current retained = do
+      updated <- evaluate (Call function [current])
+      let nextRetained = retained <> [updated]
+      if updated == current
+        then finish current nextRetained
+        else iterateUntilStable (remaining - 1) updated nextRetained
+    finish current retained =
+      Right (if returnHistory then evaluatedList retained else current)
+
+reduceFold :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFold returnHistory = \case
+  [function, subject] -> do
+    values <- sequenceFoldCollectionValues operation subject
+    case values of
+      []
+        | returnHistory -> Right (evaluatedList [])
+        | otherwise ->
+            Left (EvaluationError "Fold[f, expr] expects a nonempty sequence.")
+      initial : remaining -> finish function initial remaining
+  [function, initial, subject] -> do
+    values <- sequenceFoldCollectionValues operation subject
+    finish function initial values
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects two or three arguments.")
+      )
+ where
+  operation = if returnHistory then "FoldList" else "Fold"
+  finish function initial values = do
+    history <- buildFoldHistory function initial values [initial]
+    Right (if returnHistory then evaluatedList history else last history)
+
+buildFoldHistory
+  :: Expr
+  -> Expr
+  -> [Expr]
+  -> [Expr]
+  -> Either EvaluationError [Expr]
+buildFoldHistory _ _ [] retained = Right retained
+buildFoldHistory function current (value : remaining) retained = do
+  updated <- evaluate (Call function [current, value])
+  buildFoldHistory function updated remaining (retained <> [updated])
+
+nonNegativeIterationCount
+  :: Text
+  -> Text
+  -> Expr
+  -> Either EvaluationError Integer
+nonNegativeIterationCount operation negativeMessage = \case
+  Integer value
+    | value >= 0 -> Right value
+    | otherwise ->
+        Left
+          ( EvaluationError
+              (operation <> " " <> negativeMessage)
+          )
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects an integer argument.")
+      )
+
+iterationSafetyLimit :: Integer
+iterationSafetyLimit = 65536
 
 reduceSequenceFold
   :: Bool

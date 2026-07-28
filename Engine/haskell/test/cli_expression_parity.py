@@ -2050,6 +2050,22 @@ CASES = (
         ),
         0,
     ),
+    (
+        "functional iteration and stateful callbacks",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "i=0; {Construct[# + 1 &, 2], ComposeList[{f,g},x], "
+            "Nest[f,x,2], NestList[f,x,2], "
+            "FixedPoint[# /. a -> b &,a], FixedPointList[# /. a -> b &,a], "
+            "Fold[Plus,{1,2,3}], FoldList[Plus,{1,2,3}], "
+            "Nest[(i++; #+1)&,0,3], i}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

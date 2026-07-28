@@ -1197,6 +1197,8 @@ qualifiedAliasDispatchHeads =
   , "CarmichaelLambda"
   , "ChineseRemainder"
   , "CompositeQ"
+  , "ComposeList"
+  , "Construct"
   , "ContinuedFraction"
   , "Context"
   , "Contexts"
@@ -1211,6 +1213,10 @@ qualifiedAliasDispatchHeads =
   , "FailureQ"
   , "FactorInteger"
   , "Fibonacci"
+  , "FixedPoint"
+  , "FixedPointList"
+  , "Fold"
+  , "FoldList"
   , "FromContinuedFraction"
   , "FromDigits"
   , "GCD"
@@ -1244,6 +1250,8 @@ qualifiedAliasDispatchHeads =
   , "N"
   , "NameQ"
   , "Names"
+  , "Nest"
+  , "NestList"
   , "NextPrime"
   , "Not"
   , "NumberQ"
@@ -2904,6 +2912,22 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionMap depth session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
+  Call (Symbol "Construct") values ->
+    Just (evaluateSessionConstruct depth session values)
+  Call (Symbol "ComposeList") values ->
+    Just (evaluateSessionComposeList depth session values)
+  Call (Symbol "Nest") values ->
+    Just (evaluateSessionNest False depth session values)
+  Call (Symbol "NestList") values ->
+    Just (evaluateSessionNest True depth session values)
+  Call (Symbol "FixedPoint") values ->
+    Just (evaluateSessionFixedPoint False depth session values)
+  Call (Symbol "FixedPointList") values ->
+    Just (evaluateSessionFixedPoint True depth session values)
+  Call (Symbol "Fold") values ->
+    Just (evaluateSessionFold False depth session values)
+  Call (Symbol "FoldList") values ->
+    Just (evaluateSessionFold True depth session values)
   Call (Symbol "Total") values ->
     Just (evaluateSessionTotal depth session values)
   Call (Symbol "SequenceFold") values ->
@@ -3556,6 +3580,175 @@ evaluateSessionMap depth session = \case
       (retained <> [replaceSessionItemValue item value])
       updated
       rest
+
+evaluateSessionConstruct
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionConstruct _ session [] =
+  sessionFailure session "Construct expects at least one argument."
+evaluateSessionConstruct depth session (function : functionArguments) =
+  evaluateSessionCallable depth session function functionArguments
+
+evaluateSessionComposeList
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionComposeList depth session = \case
+  [Call _ functions, initial] ->
+    compose functions initial [initial] session
+  [_functions, _initial] ->
+    sessionFailure
+      session
+      "ComposeList expects a list or other nonatomic expression of functions."
+  _ -> sessionFailure session "ComposeList expects exactly two arguments."
+ where
+  compose [] _ retained currentSession =
+    Right (evaluatedList retained, currentSession)
+  compose (function : remaining) current retained currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable depth currentSession function [current]
+    compose remaining updated (retained <> [updated]) nextSession
+
+evaluateSessionNest
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionNest returnHistory depth session = \case
+  [function, initial, countExpression] -> do
+    iterations <-
+      sessionNonNegativeIterationCount
+        operation
+        "expects a non-negative integer iteration count."
+        session
+        countExpression
+    build function iterations [initial] session
+  _ ->
+    sessionFailure
+      session
+      (operation <> " expects exactly three arguments.")
+ where
+  operation = if returnHistory then "NestList" else "Nest"
+  build _ 0 retained currentSession =
+    Right
+      ( if returnHistory then evaluatedList retained else last retained
+      , currentSession
+      )
+  build function remaining retained currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable depth currentSession function [last retained]
+    build function (remaining - 1) (retained <> [updated]) nextSession
+
+evaluateSessionFixedPoint
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFixedPoint returnHistory depth session = \case
+  [function, initial] ->
+    findFixedPoint function initial sessionIterationSafetyLimit False
+  [function, initial, countExpression] -> do
+    limit <-
+      sessionNonNegativeIterationCount
+        operation
+        "expects a non-negative maximum iteration count."
+        session
+        countExpression
+    findFixedPoint function initial limit True
+  _ ->
+    sessionFailure
+      session
+      ( operation
+          <> " expects a function, an expression, and an optional iteration limit."
+      )
+ where
+  operation = if returnHistory then "FixedPointList" else "FixedPoint"
+  findFixedPoint callback initial limit explicitLimit =
+    iterateUntilStable limit initial [initial] session
+   where
+    iterateUntilStable 0 current retained currentSession
+      | explicitLimit = finish current retained currentSession
+      | otherwise =
+          sessionFailure
+            currentSession
+            (operation <> " exceeded the Tungsten iteration safety limit.")
+    iterateUntilStable remaining current retained currentSession = do
+      (updated, nextSession) <-
+        evaluateSessionCallable depth currentSession callback [current]
+      let nextRetained = retained <> [updated]
+      if updated == current
+        then finish current nextRetained nextSession
+        else
+          iterateUntilStable
+            (remaining - 1)
+            updated
+            nextRetained
+            nextSession
+    finish current retained currentSession =
+      Right
+        (if returnHistory then evaluatedList retained else current, currentSession)
+
+evaluateSessionFold
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFold returnHistory depth session = \case
+  [function, subject] -> do
+    values <- sessionSequenceValues session operation subject
+    case values of
+      []
+        | returnHistory -> Right (evaluatedList [], session)
+        | otherwise ->
+            sessionFailure
+              session
+              "Fold[f, expr] expects a nonempty sequence."
+      initial : remaining -> finish function initial remaining
+  [function, initial, subject] -> do
+    values <- sessionSequenceValues session operation subject
+    finish function initial values
+  _ ->
+    sessionFailure
+      session
+      (operation <> " expects two or three arguments.")
+ where
+  operation = if returnHistory then "FoldList" else "Fold"
+  finish function initial values =
+    build function initial values [initial] session
+  build _ current [] retained currentSession =
+    Right
+      (if returnHistory then evaluatedList retained else current, currentSession)
+  build function current (value : remaining) retained currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable depth currentSession function [current, value]
+    build
+      function
+      updated
+      remaining
+      (retained <> [updated])
+      nextSession
+
+sessionNonNegativeIterationCount
+  :: Text
+  -> Text
+  -> EvaluationSession
+  -> Expr
+  -> RuntimeResult EvaluationExit Integer
+sessionNonNegativeIterationCount operation negativeMessage session = \case
+  Integer value
+    | value >= 0 -> Right value
+    | otherwise ->
+        patternFailure session (operation <> " " <> negativeMessage)
+  _ -> patternFailure session (operation <> " expects an integer argument.")
+
+sessionIterationSafetyLimit :: Integer
+sessionIterationSafetyLimit = 65536
 
 evaluateSessionSequenceFold
   :: Bool

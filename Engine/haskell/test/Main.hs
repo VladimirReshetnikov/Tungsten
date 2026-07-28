@@ -41,6 +41,7 @@ import qualified Tungsten.NumericAlgebraTests as NumericAlgebraTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
 import qualified Tungsten.DistributionTests as DistributionTests
+import qualified Tungsten.FunctionalIterationTests as FunctionalIterationTests
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
@@ -88,6 +89,7 @@ tests =
   , ArrayTests.checkArrayEvaluator
   , CollectionExtensionsTests.checkCollectionExtensions
   , DistributionTests.checkDistributionEvaluator
+  , FunctionalIterationTests.checkFunctionalIterationEvaluator
   , IntervalTests.checkIntervalEvaluator
   , StatisticsTests.checkStatisticsEvaluator
   , NumericAlgebraTests.checkNumericAlgebraEvaluator
