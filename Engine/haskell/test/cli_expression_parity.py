@@ -113,6 +113,24 @@ CASES = (
         0,
     ),
     (
+        "stateful Operate and nested head boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[y];y=0;"
+            "{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y,"
+            "Operate[p,f[g][h][x],0],Operate[p,f[g][h][x],3],"
+            "Operate[p,f[g][h][x],4],Operate[p,Unevaluated[f[a]],1],"
+            "System`Operate[p,Unevaluated[f[a]]],"
+            "Global`Operate[p,Unevaluated[f[a]]],"
+            "Operate[p,f[a],-1],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "flat one-identity downvalue",
         (
             "expr",

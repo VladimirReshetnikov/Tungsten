@@ -2978,6 +2978,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionKeyValueMap depth session values)
   Call (Symbol "Map") values ->
     Just (evaluateSessionMap depth session values)
+  Call (Symbol "Operate") values ->
+    Just (evaluateSessionOperate depth session values)
   Call (Symbol "MapAll") values ->
     Just (evaluateSessionMapAll depth session values)
   Call (Symbol "MapApply") values ->
@@ -3668,6 +3670,46 @@ evaluateSessionMap depth session = \case
       (retained <> [replaceSessionItemValue item value])
       updated
       rest
+
+evaluateSessionOperate
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOperate depth session = \case
+  [operator, subject] -> operateSessionAtLevel depth session operator subject 1
+  [operator, subject, Integer level]
+    | level >= 0 -> operateSessionAtLevel depth session operator subject level
+    | otherwise ->
+        sessionFailure session "Operate expects a non-negative integer level."
+  [_, _, _] -> sessionFailure session "Operate expects an integer argument."
+  _ ->
+    sessionFailure
+      session
+      "Operate expects an operator, an expression, and an optional positive level."
+
+operateSessionAtLevel
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> Integer
+  -> SessionResult Expr
+operateSessionAtLevel depth session operator subject level
+  | level == 0 = evaluateSessionCallable depth session operator [subject]
+  | level > toInteger (sessionCallHeadDepth subject) = Right (subject, session)
+  | otherwise = descend level session subject
+ where
+  descend 0 current value =
+    evaluateSessionCallable depth current operator [value]
+  descend remaining current (Call expressionHead values) = do
+    (operatedHead, updated) <- descend (remaining - 1) current expressionHead
+    Right (Call operatedHead values, updated)
+  descend _ current value = Right (value, current)
+
+sessionCallHeadDepth :: Expr -> Int
+sessionCallHeadDepth (Call expressionHead _) = 1 + sessionCallHeadDepth expressionHead
+sessionCallHeadDepth _ = 0
 
 evaluateSessionMapAll
   :: Int
@@ -9482,6 +9524,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "Plus"
       , "RealValuedNumberQ"
       , "RightComposition"
+      , "Operate"
       , "Thread"
       ]
       expressionHead =

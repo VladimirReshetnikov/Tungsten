@@ -1065,6 +1065,10 @@ checkEvaluatorErrors = do
     assertLeft
       "reject unequal Thread argument lengths"
       (parseInputForm "Thread[f[{a,b},{c}]]" >>= mapLeftEvaluation . evaluate)
+  sixteenth <-
+    assertLeft
+      "reject negative Operate levels"
+      (parseInputForm "Operate[p,f[a],-1]" >>= mapLeftEvaluation . evaluate)
   pure
     ( and
         [ first
@@ -1082,6 +1086,7 @@ checkEvaluatorErrors = do
         , thirteenth
         , fourteenth
         , fifteenth
+        , sixteenth
         ]
     )
  where
@@ -1314,6 +1319,7 @@ checkEvaluationSession = do
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
         , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
         , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
+        , ("operate invokes its selected head callback exactly once", "ClearAll[y];y=0;{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y}", "List[q[f][g][a], 1]")
         , ( "failure and missing predicates preserve the Python value domain"
           , "{FailureQ[Failure[\"x\", <||>]], FailureQ[$Failed], FailureQ[$Canceled], FailureQ[$Aborted], FailureQ[Missing[\"x\"]], MissingQ[Missing[\"x\"]], MissingQ[$Failed], System`FailureQ[System`Failure[\"x\", <||>]]}"
           , "List[True, True, True, True, False, True, False, True]"
@@ -1537,6 +1543,8 @@ checkEvaluationSession = do
         , ("map callbacks thread session state", "y = 0; {Map[Function[x, y = y + 1; x], {a, b}], y}", "List[List[a, b], 2]")
         , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
         , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
+        , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
+        , ("operate preserves callback and qualification boundaries", "{Operate[Function[x,Nothing],f[a],0],Operate[Function[x,Nothing],f[a],1],Operate[Function[x,Sequence[p,q]],f[a],1],Operate[p,Sequence[f[a]]],Operate[p,f[a],Sequence[]],Operate[p,Unevaluated[f[a]],1],System`Operate[p,Unevaluated[f[a]]],Global`Operate[p,Unevaluated[f[a]]]}", "List[Nothing[a], p[a], p[f][a], p[f][a], p[f][a], System`Operate[p, f[a]], Global`Operate[p, Unevaluated[f[a]]]]")
         , ("map level specifications", "{Map[f, {a, b}, {0}], Map[f, {a, {b, c}}, {2}], Map[f, {a, {b, c}}, {1, 2}]}", "List[f[List[a, b]], List[a, List[f[b], f[c]]], List[f[a], f[List[f[b], f[c]]]]]")
         , ("apply level specifications", "{Apply[f, {a, b}, {0}], Apply[f, {a, {b, c}}, {2}], Apply[f, {a, {b, c}}, {1, 2}]}", "List[f[a, b], List[a, List[b, c]], List[a, f[b, c]]]")
         , ("map normalizes generated Nothing", "Map[Nothing &, {a, b}]", "List[]")
@@ -1934,6 +1942,23 @@ checkEvaluationSession = do
             , ( "Thread::error"
               , "MessageName[Thread, \"error\"]"
               , "Thread::error: Thread expects an expression and an optional thread head."
+              )
+            ]
+          )
+        , ( "operate distinguishes level and arity diagnostics"
+          , "{Operate[p,f[a],-1],Operate[p,f[a],x],Operate[],$MessageList}"
+          , "List[Operate[p, f[a], -1], Operate[p, f[a], x], Operate[], List[HoldForm[MessageName[Operate, \"error\"]], HoldForm[MessageName[Operate, \"error\"]], HoldForm[MessageName[Operate, \"error\"]]]]"
+          , [ ( "Operate::error"
+              , "MessageName[Operate, \"error\"]"
+              , "Operate::error: Operate expects a non-negative integer level."
+              )
+            , ( "Operate::error"
+              , "MessageName[Operate, \"error\"]"
+              , "Operate::error: Operate expects an integer argument."
+              )
+            , ( "Operate::error"
+              , "MessageName[Operate, \"error\"]"
+              , "Operate::error: Operate expects an operator, an expression, and an optional positive level."
               )
             ]
           )

@@ -226,6 +226,7 @@ stripPureTransparentUnevaluatedArguments expressionHead
       , "Plus"
       , "RealValuedNumberQ"
       , "RightComposition"
+      , "Operate"
       , "Thread"
       ]
       expressionHead =
@@ -629,7 +630,7 @@ pureReducerDispatchView expression = case expression of
     | isSystemSymbol originalHead
     , Just shortName <- normalizeSystemSymbolName originalHead
     , originalHead /= shortName
-    , shortName /= "Thread" ->
+    , shortName `notElem` ["Operate", "Thread"] ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -721,7 +722,7 @@ restorePureQualifiedOperatorHead qualifiedName shortName = \case
 
 preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
-  Symbol headName -> systemHeadIn ["Sqrt", "Level", "Thread"] headName
+  Symbol headName -> systemHeadIn ["Sqrt", "Level", "Operate", "Thread"] headName
   _ -> False
 
 -- | Reduce one call whose head and arguments have already been evaluated and
@@ -992,6 +993,7 @@ reduceBuiltin headName values = case headName of
   "Insert" -> reduceInsert values
   "ReplacePart" -> Right (reduceReplacePart values)
   "Map" -> Right (reduceMap values)
+  "Operate" -> reduceOperate values
   "Thread" -> reduceThread values
   "MapAll" -> reduceMapAll values
   "MapApply" -> reduceMapApply values
@@ -10627,6 +10629,36 @@ reduceMap [function, association]
 reduceMap [function, Call expressionHead values] =
   Call expressionHead [Call function [value] | value <- values]
 reduceMap values = Call (Symbol "Map") values
+
+reduceOperate :: [Expr] -> Either EvaluationError Expr
+reduceOperate = \case
+  [operator, subject] -> operateAtLevel operator subject 1
+  [operator, subject, Integer level]
+    | level >= 0 -> operateAtLevel operator subject level
+    | otherwise ->
+        Left (EvaluationError "Operate expects a non-negative integer level.")
+  [_, _, _] -> Left (EvaluationError "Operate expects an integer argument.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Operate expects an operator, an expression, and an optional positive level."
+      )
+
+operateAtLevel :: Expr -> Expr -> Integer -> Either EvaluationError Expr
+operateAtLevel operator subject level
+  | level == 0 = applyTraversalCallable operator [subject]
+  | level > toInteger (callHeadDepth subject) = Right subject
+  | otherwise = descend level subject
+ where
+  descend 0 value = applyTraversalCallable operator [value]
+  descend remaining (Call expressionHead values) = do
+    operatedHead <- descend (remaining - 1) expressionHead
+    Right (Call operatedHead values)
+  descend _ value = Right value
+
+callHeadDepth :: Expr -> Int
+callHeadDepth (Call expressionHead _) = 1 + callHeadDepth expressionHead
+callHeadDepth _ = 0
 
 reduceThread :: [Expr] -> Either EvaluationError Expr
 reduceThread = \case
