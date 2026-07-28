@@ -194,8 +194,9 @@ valid CLI workflows:
   `list.insert` clamping;
 - `SourceSpan::start()` and `SourceSpan::end()` are offsets into the immutable UTF-8 byte buffer,
   not Python Unicode code-point offsets;
-- arbitrary-size CLI integer options accept signed ASCII decimal digits (and valid ASCII
-  underscore separators), not Python's wider set of Unicode decimal digits;
+- parser-corpus CLI integer options accept Python-compatible signs, Unicode whitespace and decimal
+  digits, and valid single underscore separators; arbitrary values stay GMP-backed until an option
+  must be translated to a native collection size, where values above `std::size_t` saturate;
 - negative worker, batch, preview, maximum-file, and sample inputs may be normalized to their
   operational values in summary JSON instead of echoing the raw spelling;
 - exact `Root` index and method fields use native `std::size_t` and `long` widths; callers must not

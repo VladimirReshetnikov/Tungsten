@@ -29,9 +29,10 @@
 - Kernel-backed commands depend on a real local Wolfram installation.
 - Kernel-free commands such as notebook file inspection and expression parsing do not require a
   running kernel.
-- Arbitrary-size integer option parsing uses signed ASCII decimal digits with valid ASCII
-  underscore separators. It intentionally does not accept Python's additional Unicode decimal
-  digit classes; normal documented command lines are unchanged.
+- Arbitrary-size integer option parsing matches Python's lexical contract: ASCII signs, Unicode
+  whitespace, Unicode decimal digits, and valid single underscore separators are accepted.
+  Parser-corpus values remain arbitrary precision; options backed by a native collection size
+  saturate only at that operational boundary.
 
 ## Exit codes
 
