@@ -26,6 +26,7 @@ HASKELL_EVALUATOR = HASKELL_SOURCE / "Evaluate.hs"
 HASKELL_EXPRESSION = HASKELL_SOURCE / "Expression.hs"
 HASKELL_NUMERIC = HASKELL_SOURCE / "NumericAlgebra.hs"
 HASKELL_POLYNOMIAL = HASKELL_SOURCE / "PolynomialAlgebra.hs"
+HASKELL_ALGEBRAIC = HASKELL_SOURCE / "AlgebraicRoots.hs"
 HASKELL_STRING_PATTERNS = HASKELL_SOURCE / "StringPatterns.hs"
 HASKELL_TEXTUAL_FORMS = HASKELL_SOURCE / "TextualForms.hs"
 HASKELL_SESSION = HASKELL_SOURCE / "Session.hs"
@@ -62,6 +63,7 @@ EVALUATOR_CASE_BINDINGS = {
 }
 NUMERIC_DISPATCH_BINDING = "reduceNumericBuiltin"
 POLYNOMIAL_DISPATCH_BINDING = "reducePolynomialBuiltin"
+ALGEBRAIC_DISPATCH_BINDING = "reduceAlgebraicRootBuiltin"
 # These bindings dispatch Wolfram heads inside the string-pattern evaluator.
 # Date-element and rendering cases are intentionally absent: their string
 # tags are data formats, not evaluator dispatch ownership.
@@ -490,6 +492,9 @@ def haskell_evaluator_heads() -> set[str]:
     polynomial_source = _strip_haskell_comments(
         HASKELL_POLYNOMIAL.read_text(encoding="utf-8")
     )
+    algebraic_source = _strip_haskell_comments(
+        HASKELL_ALGEBRAIC.read_text(encoding="utf-8")
+    )
     string_pattern_source = _strip_haskell_comments(
         HASKELL_STRING_PATTERNS.read_text(encoding="utf-8")
     )
@@ -542,6 +547,18 @@ def haskell_evaluator_heads() -> set[str]:
             "The polynomial dispatch binding is no longer connected to reduceBuiltin."
         )
     heads.update(_case_dispatch_heads(polynomial_binding))
+
+    algebraic_binding = _binding_source(
+        algebraic_source, ALGEBRAIC_DISPATCH_BINDING
+    )
+    if (
+        "AlgebraicRoots.reduceAlgebraicRootBuiltin"
+        not in evaluator_bindings["reduceBuiltin"]
+    ):
+        raise RuntimeError(
+            "The algebraic-root dispatch binding is no longer connected to reduceBuiltin."
+        )
+    heads.update(_case_dispatch_heads(algebraic_binding))
 
     if "TextualForms." not in evaluator_bindings["reduceBuiltin"]:
         raise RuntimeError(

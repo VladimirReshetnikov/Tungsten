@@ -35,11 +35,13 @@ import System.IO (hClose, hSetEncoding, openTempFile, utf8)
 import System.FilePath ((</>))
 import Text.Read (readMaybe)
 import Tungsten.Cli
+import qualified Tungsten.AlgebraicRootsTests as AlgebraicRootsTests
 import qualified Tungsten.ArrayTests as ArrayTests
 import qualified Tungsten.CollectionExtensionsTests as CollectionExtensionsTests
 import qualified Tungsten.NumericAlgebraTests as NumericAlgebraTests
 import qualified Tungsten.NumericPrecisionTests as NumericPrecisionTests
 import qualified Tungsten.PolynomialAlgebraTests as PolynomialAlgebraTests
+import qualified Tungsten.RandomTests as RandomTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
 import qualified Tungsten.DistributionTests as DistributionTests
@@ -88,6 +90,7 @@ tests =
   , checkInputFormParserErrors
   , checkEvaluator
   , checkEvaluatorErrors
+  , AlgebraicRootsTests.checkAlgebraicRootsEvaluator
   , ArrayTests.checkArrayEvaluator
   , CollectionExtensionsTests.checkCollectionExtensions
   , DistributionTests.checkDistributionEvaluator
@@ -97,6 +100,7 @@ tests =
   , NumericAlgebraTests.checkNumericAlgebraEvaluator
   , NumericPrecisionTests.checkNumericPrecisionEvaluator
   , PolynomialAlgebraTests.checkPolynomialAlgebraEvaluator
+  , RandomTests.checkRandomPlanning
   , TextualFormsTests.checkTextualFormsEvaluator
   , StringSequencePatternTests.checkStringSequencePatterns
   , checkCliArguments
@@ -106,6 +110,7 @@ tests =
   , checkNotebookPatchJson
   , checkEvaluationSession
   , checkSessionTimingRuntime
+  , checkSessionRandomRuntime
   , checkRepl
   , checkHistoricalMessageList
   , checkDiscovery
@@ -3930,6 +3935,8 @@ checkSessionTimingRuntime = do
           { sessionRuntimeMonotonicSeconds = readIORef clock
           , sessionRuntimeSleepSeconds = \seconds ->
               modifyIORef' clock (+ seconds)
+          , sessionRuntimeRandomBelow =
+              sessionRuntimeRandomBelow defaultSessionRuntime
           }
       deterministicCases =
         [ ( "time remaining uses the active deadline"
@@ -4127,6 +4134,62 @@ checkSessionTimingRuntime = do
   realValue source =
     readMaybe
       (Text.unpack (Text.replace "*^" "e" source))
+
+checkSessionRandomRuntime :: IO Bool
+checkSessionRandomRuntime = do
+  poolSample <-
+    checkScripted
+      "session random pool sample"
+      "RandomSample[{a,b,c,d},2]"
+      [3, 1]
+      ("List[d, b]", [4, 3])
+  transparentAlias <-
+    checkScripted
+      "session random alias preserves direct Unevaluated contents"
+      "sampleAlias=RandomSample;sampleAlias[Unevaluated[{1+1,3}],All]"
+      [0, 0]
+      ("List[Plus[1, 1], 3]", [2, 1])
+  rawAssociation <-
+    checkScripted
+      "session random return boundary preserves raw duplicate Association entries"
+      "RandomSample[Unevaluated[Association[Sequence[a->1,a->2]]],All]"
+      [0]
+      ("Association[Rule[a, 1], Rule[a, 2]]", [1])
+  permutation <-
+    checkScripted
+      "session random Fisher-Yates permutation"
+      "RandomPermutation[5]"
+      [0, 0, 0, 0]
+      ("Cycles[List[List[1, 2, 3, 4, 5]]]", [5, 4, 3, 2])
+  pure (and [poolSample, transparentAlias, rawAssociation, permutation])
+ where
+  checkScripted label source scriptedDraws expected = do
+    actual <- evaluateScripted source scriptedDraws
+    assertEqual label (Right expected) actual
+
+  evaluateScripted source scriptedDraws = case parseInputForm source of
+    Left parseError -> pure (Left (Text.pack (show parseError)))
+    Right expression -> do
+      draws <- newIORef scriptedDraws
+      bounds <- newIORef []
+      let drawBelow exclusiveUpperBound = do
+            modifyIORef' bounds (exclusiveUpperBound :)
+            atomicModifyIORef' draws $ \case
+              draw : remaining -> (remaining, draw)
+              [] -> ([], -1)
+          runtime =
+            defaultSessionRuntime
+              { sessionRuntimeRandomBelow = drawBelow
+              }
+      evaluated <- evaluateInSessionWithRuntime runtime emptySession expression
+      observedBounds <- reverse <$> readIORef bounds
+      remainingDraws <- readIORef draws
+      pure $ case evaluated of
+        Left evaluationError -> Left (evaluationErrorMessage evaluationError)
+        Right (value, _) ->
+          if null remainingDraws
+            then Right (fullForm value, observedBounds)
+            else Left "scripted random runtime left unused draws"
 
 checkRepl :: IO Bool
 checkRepl = do

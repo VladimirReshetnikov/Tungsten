@@ -59,13 +59,17 @@ reducePolynomialBuiltin compareExpression headName values = case headName of
   "Apart" -> reduceApart compareExpression values
   "Factor" -> reduceFactor compareExpression False values
   "FactorList" -> reduceFactor compareExpression True values
+  "Decompose" -> reduceDecompose compareExpression values
   "PolynomialGCD" -> reducePolynomialGcdLcm compareExpression False values
   "PolynomialLCM" -> reducePolynomialGcdLcm compareExpression True values
   "PolynomialMod" -> reducePolynomialMod compareExpression values
   "PolynomialQuotient" -> reducePolynomialDivision compareExpression True values
   "PolynomialRemainder" -> reducePolynomialDivision compareExpression False values
+  "PolynomialReduce" -> reducePolynomialReduce compareExpression values
   "Resultant" -> reduceResultant compareExpression values
   "Discriminant" -> reduceDiscriminant compareExpression values
+  "Subresultants" -> reduceSubresultants compareExpression values
+  "GroebnerBasis" -> reduceGroebnerBasis compareExpression values
   _ -> Nothing
 
 unaryIdentity :: [Expr] -> Maybe Expr
@@ -736,6 +740,202 @@ acceptsRationalFactorOption (Call (Symbol ruleHead) [Symbol optionName, Symbol v
        )
 acceptsRationalFactorOption _ = False
 
+reduceDecompose :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceDecompose compareExpression [expression, variableSpec] = do
+  [variable] <- variableExpressions variableSpec
+  let variables = discoverVariables compareExpression [variable] [expression]
+      dimensions = length variables
+  polynomial <- expressionToPolynomial variables expression
+  decomposition <- decomposePolynomial dimensions polynomial
+  pure
+    ( Call
+        (Symbol "List")
+        (map (polynomialToExpr compareExpression variables) decomposition)
+    )
+reduceDecompose _ _ = Nothing
+
+-- SymPy's univariate decomposition normalizes every non-linear right
+-- component to be monic with zero constant term.  That normalization makes
+-- the candidate deterministic: once an inner degree is chosen, its
+-- coefficients are forced by the highest coefficients of the input.
+-- Restrict the constructive search to modest degrees so adversarial expanded
+-- powers recover symbolically instead of allocating an unbounded tower.
+decomposePolynomial :: Int -> Polynomial -> Maybe [Polynomial]
+decomposePolynomial dimensions polynomial = do
+  degree <- case leadingVariableDegree polynomial of
+    Nothing -> Just 0
+    Just value
+      | value <= 64 -> Just value
+      | otherwise -> Nothing
+  native <- decomposePolynomialNative dimensions degree polynomial
+  case native of
+    [single] ->
+      Just
+        ( maybe
+            native
+            (\(outer, inner) -> [outer, inner])
+            (exponentGcdDecomposition dimensions single)
+        )
+    _ -> Just native
+
+decomposePolynomialNative :: Int -> Int -> Polynomial -> Maybe [Polynomial]
+decomposePolynomialNative dimensions degree polynomial =
+  case firstPolynomialDecomposition candidateDegrees of
+    Nothing -> Just [polynomial]
+    Just (outer, inner) -> do
+      outerDegree <- leadingVariableDegree outer
+      innerDegree <- leadingVariableDegree inner
+      outerParts <- decomposePolynomialNative dimensions outerDegree outer
+      innerParts <- decomposePolynomialNative dimensions innerDegree inner
+      pure (outerParts <> innerParts)
+ where
+  candidateDegrees =
+    [ innerDegree
+    | innerDegree <- [2 .. degree `div` 2]
+    , degree `mod` innerDegree == 0
+    ]
+  firstPolynomialDecomposition [] = Nothing
+  firstPolynomialDecomposition (innerDegree : rest) =
+    case polynomialCompositionForInnerDegree dimensions degree innerDegree polynomial of
+      Just decomposition -> Just decomposition
+      Nothing -> firstPolynomialDecomposition rest
+
+polynomialCompositionForInnerDegree
+  :: Int
+  -> Int
+  -> Int
+  -> Polynomial
+  -> Maybe (Polynomial, Polynomial)
+polynomialCompositionForInnerDegree dimensions degree innerDegree polynomial = do
+  let outerDegree = degree `div` innerDegree
+      leadingCoefficient = coefficientInLeadingVariable dimensions degree polynomial
+  leadingScalar <- constantPolynomialGaussian dimensions leadingCoefficient
+  let leadingDivisor =
+        multiplyGaussian
+          (Gaussian (Exact (fromIntegral outerDegree) 1) zeroExact)
+          leadingScalar
+  leadingDivisorInverse <- reciprocalGaussian leadingDivisor
+  inner <-
+    buildInner
+      leadingScalar
+      leadingDivisorInverse
+      outerDegree
+      1
+      (powerPolynomial (variablePolynomial dimensions 0) (fromIntegral innerDegree))
+  outer <- solveOuter outerDegree inner polynomial (zeroPolynomial dimensions)
+  pure (outer, inner)
+ where
+  buildInner leadingScalar leadingDivisorInverse outerDegree offset inner
+    | offset >= innerDegree = Just inner
+    | otherwise = do
+        let targetDegree = degree - offset
+            target = coefficientInLeadingVariable dimensions targetDegree polynomial
+            current =
+              coefficientInLeadingVariable
+                dimensions
+                targetDegree
+                ( scalePolynomial
+                    leadingScalar
+                    (powerPolynomial inner (fromIntegral outerDegree))
+                )
+            coefficient =
+              scalePolynomial
+                leadingDivisorInverse
+                (subtractPolynomial target current)
+            updated =
+              addPolynomial
+                inner
+                (shiftLeadingVariablePower dimensions (innerDegree - offset) coefficient)
+        buildInner leadingScalar leadingDivisorInverse outerDegree (offset + 1) updated
+
+  solveOuter power inner residual outer
+    | power < 0 =
+        if isZeroPolynomial residual
+          then Just outer
+          else Nothing
+    | otherwise =
+        let coefficient =
+              coefficientInLeadingVariable
+                dimensions
+                (power * innerDegree)
+                residual
+            outerTerm = shiftLeadingVariablePower dimensions power coefficient
+            nextResidual =
+              subtractPolynomial
+                residual
+                (multiplyPolynomial coefficient (powerPolynomial inner (fromIntegral power)))
+         in solveOuter
+              (power - 1)
+              inner
+              nextResidual
+              (addPolynomial outer outerTerm)
+
+exponentGcdDecomposition :: Int -> Polynomial -> Maybe (Polynomial, Polynomial)
+exponentGcdDecomposition dimensions polynomial = do
+  let positiveExponents =
+        Set.toList
+          ( Set.fromList
+              [ firstPower powers
+              | (powers, _) <- Map.toList (polynomialTerms polynomial)
+              , firstPower powers > 0
+              ]
+          )
+      constantCoefficient = coefficientInLeadingVariable dimensions 0 polynomial
+  if length positiveExponents < 2 && isZeroPolynomial constantCoefficient
+    then Nothing
+    else do
+      exponentDivisor <- case positiveExponents of
+        [] -> Nothing
+        firstExponent : rest -> Just (foldl' gcd firstExponent rest)
+      if exponentDivisor <= 1
+        then Nothing
+        else
+          let outer =
+                Polynomial
+                  ( Map.fromListWith
+                      addGaussian
+                      [ ( replaceAt
+                            0
+                            (firstPower powers `div` exponentDivisor)
+                            powers
+                        , coefficient
+                        )
+                      | (powers, coefficient) <- Map.toList (polynomialTerms polynomial)
+                      ]
+                  )
+              inner =
+                powerPolynomial
+                  (variablePolynomial dimensions 0)
+                  (fromIntegral exponentDivisor)
+           in if outer == variablePolynomial dimensions 0
+                then Nothing
+                else Just (outer, inner)
+
+coefficientInLeadingVariable :: Int -> Int -> Polynomial -> Polynomial
+coefficientInLeadingVariable dimensions degree polynomial =
+  Map.findWithDefault
+    (zeroPolynomial dimensions)
+    degree
+    (leadingVariableCoefficients dimensions polynomial)
+
+constantPolynomialGaussian :: Int -> Polynomial -> Maybe Gaussian
+constantPolynomialGaussian dimensions (Polynomial terms) =
+  case Map.toList terms of
+    [(powers, coefficient)]
+      | powers == replicate dimensions 0 -> Just coefficient
+    _ -> Nothing
+
+shiftLeadingVariablePower :: Int -> Int -> Polynomial -> Polynomial
+shiftLeadingVariablePower dimensions power (Polynomial terms) =
+  Polynomial
+    ( Map.fromListWith
+        addGaussian
+        [ (replaceAt 0 (firstPower powers + power) powers, coefficient)
+        | (powers, coefficient) <- Map.toList terms
+        , length powers == dimensions
+        ]
+    )
+
 reducePolynomialGcdLcm :: CanonicalCompare -> Bool -> [Expr] -> Maybe Expr
 reducePolynomialGcdLcm _ False [] = Just (Integer 0)
 reducePolynomialGcdLcm _ True [] = Just (Integer 1)
@@ -841,6 +1041,204 @@ reduceDiscriminant compareExpression [expression, variableSpec] = do
             | otherwise = quotient
       pure (polynomialToExpr compareExpression variables signed)
 reduceDiscriminant _ _ = Nothing
+
+reduceSubresultants :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceSubresultants
+  compareExpression
+  [leftExpression, rightExpression, variableSpec] = do
+    [variable] <- variableExpressions variableSpec
+    let variables =
+          discoverVariables
+            compareExpression
+            [variable]
+            [leftExpression, rightExpression]
+        dimensions = length variables
+    left <- expressionToPolynomial variables leftExpression
+    right <- expressionToPolynomial variables rightExpression
+    leftDegree <- leadingVariableDegree left
+    rightDegree <- leadingVariableDegree right
+    if leftDegree + rightDegree > 64
+      then Nothing
+      else do
+        coefficients <-
+          principalSubresultantCoefficients
+            dimensions
+            leftDegree
+            rightDegree
+            left
+            right
+        pure
+          ( Call
+              (Symbol "List")
+              (map (polynomialToExpr compareExpression variables) coefficients)
+          )
+reduceSubresultants _ _ = Nothing
+
+-- SymPy obtains these values from its subresultant polynomial remainder
+-- sequence rather than directly from Sylvester minors.  That distinction is
+-- observable for defective sequences: when a remainder drops by more than one
+-- degree, Brown's exact scaling produces a different principal coefficient.
+-- Keep the whole sequence so equal-degree inputs also retain SymPy's
+-- last-polynomial-wins convention.
+principalSubresultantCoefficients
+  :: Int
+  -> Int
+  -> Int
+  -> Polynomial
+  -> Polynomial
+  -> Maybe [Polynomial]
+principalSubresultantCoefficients dimensions leftDegree rightDegree left right = do
+  sequenceValues <-
+    subresultantPolynomialSequence
+      dimensions
+      leftDegree
+      rightDegree
+      left
+      right
+  let lowerDegree = min leftDegree rightDegree
+      degreeToPolynomial =
+        Map.fromList
+          [ (degree, polynomial)
+          | polynomial <- sequenceValues
+          , Just degree <- [leadingVariableDegree polynomial]
+          , degree <= lowerDegree
+          ]
+  pure
+    [ maybe
+        (zeroPolynomial dimensions)
+        (coefficientInLeadingVariable dimensions index)
+        (Map.lookup index degreeToPolynomial)
+    | index <- [0 .. lowerDegree]
+    ]
+
+-- Brown's subresultant PRS, matching SymPy's dup/dmp_inner_subresultants.
+-- Coefficients are themselves exact polynomials in every implicit variable;
+-- each quotient below is therefore required to divide exactly in Q(i)[vars].
+subresultantPolynomialSequence
+  :: Int
+  -> Int
+  -> Int
+  -> Polynomial
+  -> Polynomial
+  -> Maybe [Polynomial]
+subresultantPolynomialSequence dimensions leftDegree rightDegree left right = do
+  let (higherDegree, lowerDegree, higher, lower)
+        | leftDegree < rightDegree = (rightDegree, leftDegree, right, left)
+        | otherwise = (leftDegree, rightDegree, left, right)
+      degreeDifference = higherDegree - lowerDegree
+  rawRemainder <-
+    pseudoRemainderInLeadingVariable dimensions higher lower
+  lowerLeading <-
+    leadingVariableCoefficient dimensions lowerDegree lower
+  let initialRemainder
+        | odd (degreeDifference + 1) = negatePolynomial rawRemainder
+        | otherwise = rawRemainder
+      initialScale =
+        negatePolynomial
+          (powerPolynomial lowerLeading (fromIntegral degreeDifference))
+  continue
+    [higher, lower]
+    lower
+    lowerDegree
+    initialRemainder
+    lowerLeading
+    initialScale
+ where
+  continue retained previous previousDegree remainder previousLeading scale
+    | isZeroPolynomial remainder = Just retained
+    | otherwise = do
+        remainderDegree <- leadingVariableDegree remainder
+        let degreeDrop = previousDegree - remainderDegree
+            updatedRetained = retained <> [remainder]
+            quotientDivisor =
+              negatePolynomial
+                ( multiplyPolynomial
+                    previousLeading
+                    (powerPolynomial scale (fromIntegral degreeDrop))
+                )
+        rawNext <-
+          pseudoRemainderInLeadingVariable dimensions previous remainder
+        if isZeroPolynomial rawNext
+          then Just updatedRetained
+          else do
+            next <-
+              dividePolynomialExactly dimensions rawNext quotientDivisor
+            remainderLeading <-
+              leadingVariableCoefficient
+                dimensions
+                remainderDegree
+                remainder
+            nextScale <-
+              if degreeDrop > 1
+                then
+                  dividePolynomialExactly
+                    dimensions
+                    ( powerPolynomial
+                        (negatePolynomial remainderLeading)
+                        (fromIntegral degreeDrop)
+                    )
+                    (powerPolynomial scale (fromIntegral (degreeDrop - 1)))
+                else Just (negatePolynomial remainderLeading)
+            continue
+              updatedRetained
+              remainder
+              remainderDegree
+              next
+              remainderLeading
+              nextScale
+
+pseudoRemainderInLeadingVariable
+  :: Int
+  -> Polynomial
+  -> Polynomial
+  -> Maybe Polynomial
+pseudoRemainderInLeadingVariable dimensions dividend divisor = do
+  dividendDegree <- leadingVariableDegree dividend
+  divisorDegree <- leadingVariableDegree divisor
+  if dividendDegree < divisorDegree
+    then Just dividend
+    else do
+      divisorLeading <-
+        leadingVariableCoefficient dimensions divisorDegree divisor
+      reduce
+        divisorDegree
+        divisorLeading
+        dividend
+        dividendDegree
+        (dividendDegree - divisorDegree + 1)
+ where
+  reduce divisorDegree divisorLeading remainder remainderDegree remainingPower = do
+    remainderLeading <-
+      leadingVariableCoefficient dimensions remainderDegree remainder
+    let degreeShift = remainderDegree - divisorDegree
+        nextPower = remainingPower - 1
+        scaledRemainder = multiplyPolynomial remainder divisorLeading
+        scaledDivisor =
+          shiftLeadingVariablePower
+            dimensions
+            degreeShift
+            (multiplyPolynomial divisor remainderLeading)
+        nextRemainder = subtractPolynomial scaledRemainder scaledDivisor
+    case leadingVariableDegree nextRemainder of
+      Nothing -> Just (zeroPolynomial dimensions)
+      Just nextDegree
+        | nextDegree < divisorDegree ->
+            if nextPower < 0
+              then Nothing
+              else
+                Just
+                  ( multiplyPolynomial
+                      nextRemainder
+                      (powerPolynomial divisorLeading (fromIntegral nextPower))
+                  )
+        | nextDegree < remainderDegree && nextPower >= 0 ->
+            reduce
+              divisorDegree
+              divisorLeading
+              nextRemainder
+              nextDegree
+              nextPower
+        | otherwise -> Nothing
 
 resultantPolynomial
   :: Int
@@ -1108,6 +1506,332 @@ reducePolynomialDivision compareExpression selectQuotient [dividendExpr, divisor
             (if selectQuotient then quotient else remainder)
         )
 reducePolynomialDivision _ _ _ = Nothing
+
+reducePolynomialReduce :: CanonicalCompare -> [Expr] -> Maybe Expr
+reducePolynomialReduce
+  compareExpression
+  [dividendExpression, Call (Symbol listHead) reducerExpressions, variableSpec]
+    | systemHeadIn "List" listHead = do
+        explicitVariables <- variableExpressions variableSpec
+        if null explicitVariables || hasDuplicateExpressions explicitVariables
+          then Nothing
+          else do
+            let variables =
+                  discoverVariables
+                    compareExpression
+                    explicitVariables
+                    (dividendExpression : reducerExpressions)
+                dimensions = length variables
+                explicitDimensions = length explicitVariables
+            dividend <- expressionToPolynomial variables dividendExpression
+            reducers <- traverse (expressionToPolynomial variables) reducerExpressions
+            if any isZeroPolynomial reducers
+                || any
+                  (not . hasScalarLeadingCoefficient explicitDimensions)
+                  reducers
+              then Nothing
+              else do
+                (quotients, remainder) <-
+                  reducePolynomialByList dimensions dividend reducers
+                pure
+                  ( Call
+                      (Symbol "List")
+                      [ Call
+                          (Symbol "List")
+                          (map (polynomialToExpr compareExpression variables) quotients)
+                      , polynomialToExpr compareExpression variables remainder
+                      ]
+                  )
+reducePolynomialReduce _ _ = Nothing
+
+-- Symbols not named as generators are coefficients in the Python bridge.
+-- The native representation can still reduce by monic/scalar-leading
+-- divisors because those operations never invert a symbolic coefficient.
+-- Reject other divisors rather than accidentally treating their coefficient
+-- symbols as additional Groebner generators.
+hasScalarLeadingCoefficient :: Int -> Polynomial -> Bool
+hasScalarLeadingCoefficient explicitDimensions (Polynomial terms) =
+  case Map.keys terms of
+    [] -> False
+    powers ->
+      let leadingExplicit = maximum (map (take explicitDimensions) powers)
+       in all
+            (\current ->
+                take explicitDimensions current /= leadingExplicit
+                  || all (== 0) (drop explicitDimensions current)
+            )
+            powers
+
+reducePolynomialByList
+  :: Int
+  -> Polynomial
+  -> [Polynomial]
+  -> Maybe ([Polynomial], Polynomial)
+reducePolynomialByList dimensions dividend divisors
+  | any isZeroPolynomial divisors = Nothing
+  | otherwise =
+      go
+        (replicate (length divisors) (zeroPolynomial dimensions))
+        (zeroPolynomial dimensions)
+        dividend
+        0
+ where
+  go
+    :: [Polynomial]
+    -> Polynomial
+    -> Polynomial
+    -> Int
+    -> Maybe ([Polynomial], Polynomial)
+  go quotients remainder current steps
+    | steps > 200000 = Nothing
+    | otherwise = case leadingTerm current of
+        Nothing -> Just (quotients, remainder)
+        Just (currentPowers, currentCoefficient) ->
+          case firstReduction currentPowers currentCoefficient 0 divisors of
+            Just (index, term) ->
+              go
+                (replaceAt index (addPolynomial (quotients !! index) term) quotients)
+                remainder
+                (subtractPolynomial current (multiplyPolynomial term (divisors !! index)))
+                (steps + 1)
+            Nothing ->
+              let leading =
+                    Polynomial
+                      (Map.singleton currentPowers currentCoefficient)
+               in go
+                    quotients
+                    (addPolynomial remainder leading)
+                    (subtractPolynomial current leading)
+                    (steps + 1)
+
+  firstReduction _ _ _ [] = Nothing
+  firstReduction currentPowers currentCoefficient index (divisor : rest) =
+    case leadingTerm divisor of
+      Just (divisorPowers, divisorCoefficient)
+        | monomialDivides divisorPowers currentPowers ->
+            case divideGaussian currentCoefficient divisorCoefficient of
+              Just coefficient ->
+                Just
+                  ( index
+                  , Polynomial
+                      ( Map.singleton
+                          (zipWith (-) currentPowers divisorPowers)
+                          coefficient
+                      )
+                  )
+              Nothing -> firstReduction currentPowers currentCoefficient (index + 1) rest
+      _ -> firstReduction currentPowers currentCoefficient (index + 1) rest
+
+reduceGroebnerBasis :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceGroebnerBasis
+  compareExpression
+  [Call (Symbol listHead) polynomialExpressions, variableSpec]
+    | systemHeadIn "List" listHead = do
+        explicitVariables <- variableExpressions variableSpec
+        if null explicitVariables || hasDuplicateExpressions explicitVariables
+          then Nothing
+          else do
+            let variables =
+                  discoverVariables
+                    compareExpression
+                    explicitVariables
+                    polynomialExpressions
+            polynomials <-
+              traverse
+                (expressionToPolynomial variables)
+                polynomialExpressions
+            if any ((> 64) . polynomialTotalDegree) polynomials
+                || sum (map (Map.size . polynomialTerms) polynomials) > 4096
+              then Nothing
+              else
+                if variables /= explicitVariables
+                  then do
+                    basis <-
+                      symbolicHomogeneousFullRankBasis
+                        (length explicitVariables)
+                        (length variables)
+                        polynomials
+                    pure (Call (Symbol "List") [explicitVariables !! index | index <- basis])
+                  else do
+                    basis <- groebnerBasis (length variables) polynomials
+                    let expressions =
+                          sortBy
+                            compareExpression
+                            (map (polynomialToExpr compareExpression variables) basis)
+                    pure (Call (Symbol "List") expressions)
+reduceGroebnerBasis _ _ = Nothing
+
+-- A square homogeneous linear system with a nonzero determinant generates
+-- every named variable over Python's rational-function coefficient field.
+-- Proving that determinant in the polynomial ring avoids assuming that two
+-- structurally similar symbolic rows are independent.
+symbolicHomogeneousFullRankBasis
+  :: Int
+  -> Int
+  -> [Polynomial]
+  -> Maybe [Int]
+symbolicHomogeneousFullRankBasis explicitDimensions dimensions polynomials = do
+  let symbolicDimensions = dimensions - explicitDimensions
+  if symbolicDimensions <= 0
+      || length polynomials /= explicitDimensions
+    then Nothing
+    else do
+      coefficientRows <-
+        traverse
+          (symbolicLinearCoefficientRow explicitDimensions dimensions)
+          polynomials
+      determinant <- polynomialDeterminant symbolicDimensions coefficientRows
+      if isZeroPolynomial determinant
+        then Nothing
+        else Just [0 .. explicitDimensions - 1]
+
+symbolicLinearCoefficientRow
+  :: Int
+  -> Int
+  -> Polynomial
+  -> Maybe [Polynomial]
+symbolicLinearCoefficientRow explicitDimensions dimensions (Polynomial terms) = do
+  indexedTerms <- traverse variableTerm (Map.toList terms)
+  pure
+    [ Polynomial
+        ( Map.filter
+            (/= zeroGaussian)
+            ( Map.fromListWith
+                addGaussian
+                [ (coefficientPowers, coefficient)
+                | (variableIndex, coefficientPowers, coefficient) <- indexedTerms
+                , variableIndex == targetIndex
+                ]
+            )
+        )
+    | targetIndex <- [0 .. explicitDimensions - 1]
+    ]
+ where
+  variableTerm (powers, coefficient) = do
+    if length powers /= dimensions
+      then Nothing
+      else case
+        [ index
+        | (index, exponentValue) <- zip [0 :: Int ..] (take explicitDimensions powers)
+        , exponentValue == 1
+        ] of
+        [variableIndex]
+          | sum (take explicitDimensions powers) == 1 ->
+              Just (variableIndex, drop explicitDimensions powers, coefficient)
+        _ -> Nothing
+
+groebnerBasis :: Int -> [Polynomial] -> Maybe [Polynomial]
+groebnerBasis dimensions polynomials = do
+  normalized <- traverse monicPolynomial (filter (not . isZeroPolynomial) polynomials)
+  let initial = uniquePolynomials normalized
+  if any isOnePolynomial initial
+    then Just [onePolynomial dimensions]
+    else do
+      completed <-
+        complete
+          initial
+          [ (left, right)
+          | left <- [0 .. length initial - 1]
+          , right <- [left + 1 .. length initial - 1]
+          ]
+          0
+      reducedGroebnerBasis dimensions completed
+ where
+  complete
+    :: [Polynomial]
+    -> [(Int, Int)]
+    -> Int
+    -> Maybe [Polynomial]
+  complete basis [] _ = Just basis
+  complete basis ((leftIndex, rightIndex) : pairs) processed
+    | processed > 20000 = Nothing
+    | leftIndex >= length basis || rightIndex >= length basis = Nothing
+    | otherwise = do
+        sPolynomial <- makeSPolynomial (basis !! leftIndex) (basis !! rightIndex)
+        (_, remainder) <- reducePolynomialByList dimensions sPolynomial basis
+        if isZeroPolynomial remainder
+          then complete basis pairs (processed + 1)
+          else do
+            normalizedRemainder <- monicPolynomial remainder
+            if normalizedRemainder `elem` basis
+              then complete basis pairs (processed + 1)
+              else
+                if length basis >= 128
+                    || Map.size (polynomialTerms normalizedRemainder) > 4096
+                  then Nothing
+                  else
+                    let newIndex = length basis
+                        updatedBasis = basis <> [normalizedRemainder]
+                        updatedPairs =
+                          pairs <> [(index, newIndex) | index <- [0 .. newIndex - 1]]
+                     in complete updatedBasis updatedPairs (processed + 1)
+
+makeSPolynomial :: Polynomial -> Polynomial -> Maybe Polynomial
+makeSPolynomial left right = do
+  (leftPowers, leftCoefficient) <- leadingTerm left
+  (rightPowers, rightCoefficient) <- leadingTerm right
+  leftInverse <- reciprocalGaussian leftCoefficient
+  rightInverse <- reciprocalGaussian rightCoefficient
+  let commonPowers = zipWith max leftPowers rightPowers
+      scaledLeft =
+        shiftScalePolynomial
+          (zipWith (-) commonPowers leftPowers)
+          leftInverse
+          left
+      scaledRight =
+        shiftScalePolynomial
+          (zipWith (-) commonPowers rightPowers)
+          rightInverse
+          right
+  pure (subtractPolynomial scaledLeft scaledRight)
+
+reducedGroebnerBasis :: Int -> [Polynomial] -> Maybe [Polynomial]
+reducedGroebnerBasis dimensions basis = do
+  let minimal = minimalGroebnerBasis basis
+  reduced <- traverse (reduceOne minimal) (zip [0 :: Int ..] minimal)
+  normalized <- traverse monicPolynomial (filter (not . isZeroPolynomial) reduced)
+  let unique = uniquePolynomials normalized
+  if any isOnePolynomial unique
+    then Just [onePolynomial dimensions]
+    else Just unique
+ where
+  reduceOne minimal (index, polynomial) = do
+    let others =
+          [ other
+          | (otherIndex, other) <- zip [0 :: Int ..] minimal
+          , otherIndex /= index
+          ]
+    if null others
+      then Just polynomial
+      else snd <$> reducePolynomialByList dimensions polynomial others
+
+minimalGroebnerBasis :: [Polynomial] -> [Polynomial]
+minimalGroebnerBasis basis =
+  let indexed = zip [0 :: Int ..] basis
+   in
+    [ polynomial
+    | (index, polynomial) <- indexed
+    , Just (powers, _) <- [leadingTerm polynomial]
+    , not
+        ( any
+            (\(otherIndex, other) ->
+                case leadingTerm other of
+                  Just (otherPowers, _) ->
+                    otherIndex /= index
+                      && monomialDivides otherPowers powers
+                      && (otherPowers /= powers || otherIndex < index)
+                  Nothing -> False
+            )
+            indexed
+        )
+    ]
+
+uniquePolynomials :: [Polynomial] -> [Polynomial]
+uniquePolynomials = foldl' retain []
+ where
+  retain retained polynomial
+    | polynomial `elem` retained = retained
+    | otherwise = retained <> [polynomial]
 
 coefficientListWith
   :: CanonicalCompare

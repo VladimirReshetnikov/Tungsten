@@ -32,6 +32,7 @@ library
   import:          common-settings
   hs-source-dirs:  haskell/src
   exposed-modules:
+    Tungsten.AlgebraicRoots
     Tungsten.Assistant
     Tungsten.Cli
     Tungsten.Discovery
@@ -50,6 +51,7 @@ library
     Tungsten.ParserCorpus
     Tungsten.PolynomialAlgebra
     Tungsten.PythonSort
+    Tungsten.Random
     Tungsten.Repl
     Tungsten.Session
     Tungsten.SystemSymbols
@@ -67,6 +69,7 @@ library
     numbers    >= 3000.2 && < 3000.3,
     parsec     >= 3.1  && < 3.2,
     process    >= 1.6  && < 1.7,
+    random     >= 1.2  && < 1.4,
     regex-tdfa >= 1.3  && < 1.4,
     text       >= 2.1  && < 2.2,
     time       >= 1.12 && < 1.15,
@@ -92,6 +95,7 @@ test-suite tungsten-engine-test
   hs-source-dirs:  haskell/test
   main-is:         Main.hs
   other-modules:
+    Tungsten.AlgebraicRootsTests
     Tungsten.ArrayTests
     Tungsten.CollectionExtensionsTests
     Tungsten.DistributionTests
@@ -101,6 +105,7 @@ test-suite tungsten-engine-test
     Tungsten.NumericAlgebraTests
     Tungsten.NumericPrecisionTests
     Tungsten.PolynomialAlgebraTests
+    Tungsten.RandomTests
     Tungsten.TextualFormsTests
     Tungsten.StringSequencePatternTests
   build-depends:

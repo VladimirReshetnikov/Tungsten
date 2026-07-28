@@ -29,11 +29,14 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Numeric (showHex)
 import Prelude hiding (Left, Right)
 import qualified Prelude as P
+import System.Random (randomRIO)
 import Text.Read (readMaybe)
+import qualified Tungsten.AlgebraicRoots as AlgebraicRoots
 import Tungsten.Evaluate
 import Tungsten.Expression
 import qualified Tungsten.PolynomialAlgebra as PolynomialAlgebra
 import Tungsten.PythonSort (pythonStableSortByStateM)
+import qualified Tungsten.Random as Random
 import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
@@ -253,6 +256,7 @@ data EvaluationExit
 data SessionEffect value where
   ReadMonotonicTime :: SessionEffect Double
   SleepForSeconds :: !Double -> SessionEffect ()
+  RandomBelow :: !Integer -> SessionEffect Integer
 
 data RuntimeResult failure value where
   Left :: !failure -> RuntimeResult failure value
@@ -293,6 +297,7 @@ type SessionResult value =
 data SessionRuntime = SessionRuntime
   { sessionRuntimeMonotonicSeconds :: IO Double
   , sessionRuntimeSleepSeconds :: Double -> IO ()
+  , sessionRuntimeRandomBelow :: Integer -> IO Integer
   }
 
 defaultSessionRuntime :: SessionRuntime
@@ -304,6 +309,10 @@ defaultSessionRuntime =
         if seconds <= 0
           then pure ()
           else threadDelay (ceiling (seconds * 1000000))
+    , sessionRuntimeRandomBelow = \exclusiveUpperBound ->
+        if exclusiveUpperBound <= 0
+          then ioError (userError "random-below requires a positive upper bound")
+          else randomRIO (0, exclusiveUpperBound - 1)
     }
 
 -- Pattern matching can invoke arbitrary Condition and PatternTest callbacks.
@@ -552,6 +561,9 @@ runRuntimeResult runtime = \case
   RuntimeEffect (SleepForSeconds seconds) resume ->
     sessionRuntimeSleepSeconds runtime seconds
       >> runRuntimeResult runtime (resume ())
+  RuntimeEffect (RandomBelow exclusiveUpperBound) resume ->
+    sessionRuntimeRandomBelow runtime exclusiveUpperBound
+      >>= runRuntimeResult runtime . resume
 
 inspectRuntimeResult
   :: RuntimeResult failure value
@@ -1242,6 +1254,8 @@ qualifiedAliasDispatchHeads =
   , "ContinuedFraction"
   , "Context"
   , "Contexts"
+  , "CountRoots"
+  , "Decompose"
   , "Denominator"
   , "DigitCount"
   , "Discriminant"
@@ -1274,6 +1288,7 @@ qualifiedAliasDispatchHeads =
   , "GCD"
   , "Greater"
   , "GreaterEqual"
+  , "GroebnerBasis"
   , "HarmonicNumber"
   , "IntegerDigits"
   , "IntegerExponent"
@@ -1284,6 +1299,7 @@ qualifiedAliasDispatchHeads =
   , "InexactNumberQ"
   , "Im"
   , "Inequality"
+  , "IsolatingInterval"
   , "JacobiSymbol"
   , "JordanTotient"
   , "KroneckerDelta"
@@ -1299,6 +1315,7 @@ qualifiedAliasDispatchHeads =
   , "MachineNumberQ"
   , "Max"
   , "Min"
+  , "MinimalPolynomial"
   , "MissingQ"
   , "Mod"
   , "MonomialList"
@@ -1336,11 +1353,14 @@ qualifiedAliasDispatchHeads =
   , "PolynomialLCM"
   , "PolynomialMod"
   , "PolynomialQuotient"
+  , "PolynomialReduce"
   , "PolynomialRemainder"
   , "PrimitiveRoot"
   , "Quotient"
   , "QuotientRemainder"
   , "Ramp"
+  , "RandomPermutation"
+  , "RandomSample"
   , "RamanujanTau"
   , "Rational"
   , "Re"
@@ -1349,13 +1369,20 @@ qualifiedAliasDispatchHeads =
   , "RealValuedNumberQ"
   , "ReIm"
   , "Resultant"
+  , "Root"
+  , "RootIntervals"
+  , "RootReduce"
+  , "RootSum"
   , "Sign"
   , "Sqrt"
   , "Simplify"
+  , "Solve"
   , "StringQ"
+  , "Subresultants"
   , "Symbol"
   , "SymbolName"
   , "Times"
+  , "ToRadicals"
   , "Together"
   , "TrueQ"
   , "UnitStep"
@@ -2976,9 +3003,28 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionCollect depth session values)
   Call (Symbol "Exponent") values@[_, _, _] ->
     Just (evaluateSessionExponent depth session values)
+  Call (Symbol "Normal") [expression]
+    | Just expanded <-
+        AlgebraicRoots.expandRootSumForNormal
+          (sessionAlgebraicRootContext session)
+          expression ->
+        Just (evaluateSessionAt (depth + 1) session expanded)
   expression@(Call (Symbol normalizationHead) _)
     | normalizationHead
-        `elem` ( ["Collect", "Discriminant", "MonomialList", "N", "PolynomialMod", "Resultant", "SetAccuracy", "SetPrecision"]
+        `elem` ( [ "Collect"
+                 , "Decompose"
+                 , "Discriminant"
+                 , "GroebnerBasis"
+                 , "MonomialList"
+                 , "N"
+                 , "Normal"
+                 , "PolynomialMod"
+                 , "PolynomialReduce"
+                 , "Resultant"
+                 , "SetAccuracy"
+                 , "SetPrecision"
+                 , "Subresultants"
+                 ]
                    <> numericTranscendentalDispatchHeads
                ) ->
     Just $ do
@@ -2986,6 +3032,32 @@ reduceSessionEvaluatedCall depth session = \case
       if reduced == expression
         then Right (reduced, session)
         else evaluateSessionAt (depth + 1) session reduced
+  expression@(Call (Symbol algebraicHead) values)
+    | algebraicHead `elem` algebraicRootDispatchHeads ->
+        Just $ case
+          AlgebraicRoots.reduceAlgebraicRootBuiltin
+            (sessionAlgebraicRootContext session)
+            algebraicHead
+            values of
+          Nothing -> Right (expression, session)
+          Just reduced
+            | reduced == expression -> Right (reduced, session)
+            | otherwise -> evaluateSessionAt (depth + 1) session reduced
+  Call (Symbol "RandomSample") values ->
+    Just $ case values of
+      [expression] ->
+        evaluateSessionRandomPlan session (Random.randomSamplePlan expression Nothing)
+      [expression, count] ->
+        evaluateSessionRandomPlan session (Random.randomSamplePlan expression (Just count))
+      _ ->
+        sessionFailure
+          session
+          "RandomSample expects an expression and an optional count."
+  Call (Symbol "RandomPermutation") values ->
+    Just $ case values of
+      [lengthExpression] ->
+        evaluateSessionRandomPlan session (Random.randomPermutationPlan lengthExpression)
+      _ -> sessionFailure session "RandomPermutation expects an integer length."
   Call (Symbol "Symbol") values ->
     Just (evaluateSessionSymbol session values)
   Call (Symbol "SymbolName") values ->
@@ -3171,6 +3243,50 @@ reduceSessionEvaluatedCall depth session = \case
   Call (Symbol "KeySelect") values ->
     Just (evaluateSessionKeySelect depth session values)
   _ -> Nothing
+
+evaluateSessionRandomPlan
+  :: EvaluationSession
+  -> Random.RandomPlan Expr
+  -> SessionResult Expr
+evaluateSessionRandomPlan session = \case
+  Random.RandomDone value -> Right (value, session)
+  Random.RandomFailed failure ->
+    sessionFailure session (Random.randomPlanErrorMessage failure)
+  Random.RandomBelow exclusiveUpperBound resume ->
+    RuntimeEffect
+      (RandomBelow exclusiveUpperBound)
+      (evaluateSessionRandomPlan session . resume)
+
+algebraicRootDispatchHeads :: [Text]
+algebraicRootDispatchHeads =
+  [ "CountRoots"
+  , "IsolatingInterval"
+  , "MinimalPolynomial"
+  , "Root"
+  , "RootIntervals"
+  , "RootReduce"
+  , "RootSum"
+  , "Solve"
+  , "ToRadicals"
+  ]
+
+sessionAlgebraicRootContext
+  :: EvaluationSession
+  -> AlgebraicRoots.AlgebraicRootContext
+sessionAlgebraicRootContext session =
+  AlgebraicRoots.defaultAlgebraicRootContext
+    { AlgebraicRoots.simplifyAlgebraicExpression = simplifyGenerated
+    , AlgebraicRoots.maximumAlgebraicRootDegree = maximumDegree
+    }
+ where
+  maximumDegree = case currentSpecialSessionSettingValue "$MaxRootDegree" session of
+    Integer value -> value
+    _ -> 1000
+
+  simplifyGenerated expression =
+    case evaluate expression of
+      P.Left _ -> expression
+      P.Right result -> result
 
 evaluateSessionCollect
   :: Int
@@ -10993,6 +11109,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "Outer"
       , "Plus"
       , "Precision"
+      , "RandomSample"
       , "SetAccuracy"
       , "SetPrecision"
       , "RealValuedNumberQ"

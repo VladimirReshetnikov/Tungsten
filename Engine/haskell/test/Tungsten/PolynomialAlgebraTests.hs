@@ -87,6 +87,30 @@ valueCases =
     , "{PolynomialGCD[x^2-1,x^2-x],PolynomialLCM[x-1,x+1],PolynomialQuotient[x^3-1,x-1,x],PolynomialRemainder[x^3-1,x-1,x]}"
     , "List[Plus[-1, x], Times[Plus[-1, x], Plus[1, x]], Plus[1, x, Power[x, 2]], 0]"
     )
+  , ( "univariate polynomial decomposition"
+    , "{Decompose[(x^2+1)^3+2,x],Decompose[x^2+I,x],Decompose[x^4+x^2,x],Decompose[(x^2+I x+1)^2,x]}"
+    , "List[List[Plus[3, Power[x, 3], Times[3, x], Times[3, Power[x, 2]]], Power[x, 2]], List[Plus[Complex[0, 1], x], Power[x, 2]], List[Plus[x, Power[x, 2]], Power[x, 2]], List[Plus[1, Power[x, 2], Times[2, x]], Plus[Power[x, 2], Times[Complex[0, 1], x]]]]"
+    )
+  , ( "recursive decomposition and symbolic recovery"
+    , "{Decompose[x^8,x],Decompose[x^6+x^3+1,x],Decompose[3x^2,x],Decompose[Sin[x],x],Decompose[],Decompose[x]}"
+    , "List[List[Power[x, 2], Power[x, 2], Power[x, 2]], List[Plus[1, x, Power[x, 2]], Power[x, 3]], List[Times[3, Power[x, 2]]], Decompose[Sin[x], x], Decompose[], Decompose[x]]"
+    )
+  , ( "multivariate polynomial reduction"
+    , "{PolynomialReduce[x^2+y^2,{x+y},{x,y}],PolynomialReduce[x^2+y^2,{x+y},{y,x}],PolynomialReduce[x^2+1,{2x+1},x],PolynomialReduce[x^2+a x+b,{x+c},x],PolynomialReduce[x^2,{x,x^2},x],PolynomialReduce[x,{},x]}"
+    , "List[List[List[Plus[x, Times[-1, y]]], Times[2, Power[y, 2]]], List[List[Plus[y, Times[-1, x]]], Times[2, Power[x, 2]]], List[List[Plus[Rational[-1, 4], Times[Rational[1, 2], x]]], Rational[5, 4]], List[List[Plus[a, x, Times[-1, c]]], Plus[b, Power[c, 2], Times[-1, a, c]]], List[List[x, 0], 0], List[List[], x]]"
+    )
+  , ( "polynomial reduction domain boundaries"
+    , "{PolynomialReduce[],PolynomialReduce[x,x,x],PolynomialReduce[x,{x},{}],PolynomialReduce[x,{0},x],PolynomialReduce[Sin[x],{x},x]}"
+    , "List[PolynomialReduce[], PolynomialReduce[x, x, x], PolynomialReduce[x, List[x], List[]], PolynomialReduce[x, List[0], x], PolynomialReduce[Sin[x], List[x], x]]"
+    )
+  , ( "reduced lexicographic Groebner bases"
+    , "{GroebnerBasis[{x^2-y,x y-1},{x,y}],GroebnerBasis[{x^2-y,x y-1},{y,x}],GroebnerBasis[{2x+2y,x-y},{x,y}],GroebnerBasis[{x^2+I y,x y-1},{x,y}],GroebnerBasis[{},x],GroebnerBasis[{2},x],GroebnerBasis[{f[x]^2-f[x]},f[x]]}"
+    , "List[List[Plus[-1, Power[y, 3]], Plus[x, Times[-1, Power[y, 2]]]], List[Plus[-1, Power[x, 3]], Plus[y, Times[-1, Power[x, 2]]]], List[x, y], List[Plus[Complex[0, -1], Power[y, 3]], Plus[x, Times[Complex[0, 1], Power[y, 2]]]], List[], List[1], List[Plus[Power[f[x], 2], Times[-1, f[x]]]]]"
+    )
+  , ( "Groebner basis domain boundaries"
+    , "{GroebnerBasis[],GroebnerBasis[x,x],GroebnerBasis[{x},{}],GroebnerBasis[{Sin[x]},x],GroebnerBasis[{a x+y,x-y},{x,y}]}"
+    , "List[GroebnerBasis[], GroebnerBasis[x, x], GroebnerBasis[List[x], List[]], GroebnerBasis[List[Sin[x]], x], List[x, y]]"
+    )
   , ( "polynomial modular coefficients"
     , "{PolynomialMod[x^2+2x+3,5],PolynomialMod[-x^2-2x-3,5],PolynomialMod[x/2+2/3,5],PolynomialMod[x y+7x+12,5],PolynomialMod[3,5]}"
     , "List[Plus[3, Power[x, 2], Times[2, x]], Plus[2, Times[3, x], Times[4, Power[x, 2]]], Plus[4, Times[3, x]], Plus[2, Times[x, Plus[2, y]]], 3]"
@@ -102,6 +126,18 @@ valueCases =
   , ( "exact polynomial discriminants"
     , "{Discriminant[x^3+x+1,x],Discriminant[a x^2+b x+c,x],Discriminant[3,x],Discriminant[0,x],Discriminant[x,x],Discriminant[x^2+I x+1,x]}"
     , "List[-31, Plus[Power[b, 2], Times[-4, a, c]], 0, 0, 1, -5]"
+    )
+  , ( "principal subresultant coefficients"
+    , "{Subresultants[x^3+a x+b,x^2+c,x],Subresultants[x^2-1,x^2-2x+1,x],Subresultants[a x^2+b x+c,d x+e,x],Subresultants[2x^4+x+1,3x^2+2,x],Subresultants[3x^2+2,2x^4+x+1,x],Subresultants[1,2,x]}"
+    , "List[List[Plus[Power[b, 2], Power[c, 3], Times[-2, a, Power[c, 2]], Times[c, Power[a, 2]]], Plus[a, Times[-1, c]], 1], List[0, -2, 1], List[Plus[Times[-1, b, d, e], Times[a, Power[e, 2]], Times[c, Power[d, 2]]], d], List[343, -27, 3], List[343, -27, 3], List[2]]"
+    )
+  , ( "defective subresultant degree drops"
+    , "{Subresultants[2-2x^2,2-3x^2,x],Subresultants[3x^2-x+1,3x^2-x,x]}"
+    , "List[List[2, 0, -3], List[-3, 0, 3]]"
+    )
+  , ( "subresultant qualification and zero boundaries"
+    , "{Subresultants[],Subresultants[x,x],Subresultants[0,x,x],Subresultants[x,0,x],Subresultants[x^2-1,x-1,{x,y}],Subresultants[Sin[x],x,x]}"
+    , "List[Subresultants[], Subresultants[x, x], Subresultants[0, x, x], Subresultants[x, 0, x], Subresultants[Plus[-1, Power[x, 2]], Plus[-1, x], List[x, y]], Subresultants[Sin[x], x, x]]"
     )
   , ( "fraction-free high-degree resultants"
     , "{Resultant[x^9-y,x^8+y,x],Discriminant[x^9+x+1,x]}"

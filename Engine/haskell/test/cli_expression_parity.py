@@ -161,6 +161,21 @@ CASES = (
         0,
     ),
     (
+        "exact complex transcendentals and session re-entry",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Unprotect[Cos];Cos[z_]:=q;"
+            "{Exp[1+I],Sin[1+I],Cos[1+I],Tan[1+I],"
+            "Sinh[1+I],Cosh[1+I],Tanh[1+I],Log[1+I],"
+            "ComplexExpand[Tan[1+I]],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "structural Distribute products and raw replacement heads",
         (
             "expr",
@@ -2879,6 +2894,58 @@ CASES = (
             "PolynomialMod[1/5+x,5],PolynomialMod[x+I,5],"
             "PolynomialMod[3,1],System`PolynomialMod[x+7,5],"
             "Global`PolynomialMod[x+7,5],2x+x y+2,$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "decomposition Groebner reduction and subresultants",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Decompose[x^4+2x^2+1,x],"
+            "PolynomialReduce[x^2+1,{x+1},x],"
+            "GroebnerBasis[{x y-1,y^2-1},{x,y}],"
+            "GroebnerBasis[{a x+y,x-y},{x,y}],"
+            "Subresultants[x^3-2x+1,x^2+1,x],"
+            "Subresultants[2-2x^2,2-3x^2,x],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "exact algebraic roots intervals sums radicals and solve",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Root[2#^3-4&,2],"
+            "RootReduce[1/Root[#^3-2&,1]],"
+            "MinimalPolynomial[Root[#^3-2&,1]^2,x],"
+            "CountRoots[(x-1)^2(x+1),{x,-2,2}],"
+            "IsolatingInterval[Root[#^2-2&,1]],"
+            "RootSum[#^2-2&,(#^2&)],"
+            "ToRadicals[Root[#^3-2&,1]],"
+            "Solve[{x+y==3,x-y==1},{x,y}],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "runtime random zero-draw boundaries and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{RandomSample[{},All],RandomSample[f[],0],"
+            "RandomPermutation[0],RandomPermutation[1],"
+            "RandomSample[a],RandomPermutation[-1],"
+            "Global`RandomSample[{},All],"
+            "Global`RandomPermutation[0],$MessageList}",
             "--form",
             "input",
         ),

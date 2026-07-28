@@ -59,6 +59,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Word (Word8)
 import Foreign.C.Types (CDouble (..))
 import Text.Read (readMaybe)
+import qualified Tungsten.AlgebraicRoots as AlgebraicRoots
 import Tungsten.Expression
 import qualified Tungsten.NumericAlgebra as NumericAlgebra
 import qualified Tungsten.NumericPrecision as NumericPrecision
@@ -71,6 +72,17 @@ import Tungsten.SystemSymbols
   , systemSymbolAttributes
   )
 import qualified Tungsten.TextualForms as TextualForms
+
+algebraicRootContext :: AlgebraicRoots.AlgebraicRootContext
+algebraicRootContext =
+  AlgebraicRoots.defaultAlgebraicRootContext
+    { AlgebraicRoots.simplifyAlgebraicExpression = simplifyGeneratedAlgebraic
+    }
+ where
+  simplifyGeneratedAlgebraic expression =
+    case evaluate expression of
+      Left _ -> expression
+      Right result -> result
 
 -- GHC's pure Double atan2 differs from CPython's C-library result by up to a
 -- few ulps on some quadrants.  Tungsten's JSON contract preserves the exact
@@ -1110,7 +1122,15 @@ reduceBuiltin headName values = case headName of
         Right Nothing ->
           Right
             ( maybe
-                (Call (Symbol headName) values)
+                ( maybe
+                    (Call (Symbol headName) values)
+                    id
+                    ( AlgebraicRoots.reduceAlgebraicRootBuiltin
+                        algebraicRootContext
+                        headName
+                        values
+                    )
+                )
                 id
                 (PolynomialAlgebra.reducePolynomialBuiltin canonicalCompare headName values)
             )
@@ -1430,6 +1450,13 @@ reduceConjugate values = case values of
   [value]
     | Just (realPart, imaginaryPart) <- explicitComplexParts value ->
         makeComplex realPart (negateExplicitReal imaginaryPart)
+  [value]
+    | Just reduced <-
+        AlgebraicRoots.reduceAlgebraicRootBuiltin
+          algebraicRootContext
+          "RootReduce"
+          [Call (Symbol "Conjugate") [value]] ->
+        reduced
   _ -> Call (Symbol "Conjugate") values
 
 reduceArg :: [Expr] -> Expr
@@ -5239,6 +5266,10 @@ reduceValues values = Right (Call (Symbol "Values") values)
 
 reduceNormal :: [Expr] -> Either EvaluationError Expr
 reduceNormal [sparse@SparseArray {}] = sparseArrayNormal sparse
+reduceNormal [expression]
+  | Just expanded <-
+      AlgebraicRoots.expandRootSumForNormal algebraicRootContext expression =
+      Right expanded
 reduceNormal [association] = case associationEntries association of
   Just entries ->
     pure
