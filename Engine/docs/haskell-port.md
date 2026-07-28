@@ -1,11 +1,11 @@
 # Tungsten Engine Haskell port
 
-- Status: Active incremental port and compatibility boundary
+- Status: Complete measured dispatch ownership with active behavioral compatibility gaps
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T17:42:52Z
-- Repository HEAD: 927aaf913a4c6d8c0bbcbb71dd8f9905606c474b
+- Updated (UTC): 2026-07-28T18:53:25Z
+- Repository HEAD: 287961861337179c83ae1af94e2d1174dcae0a4d
 
 ## Purpose
 
@@ -16,6 +16,10 @@ runtime trees currently coexist under the same `Engine` ownership boundary.
 
 The port favors immutable values, exact arithmetic, explicit errors, and JSON process boundaries.
 Unknown evaluator forms remain symbolic instead of silently receiving guessed semantics.
+
+All 537 evaluator heads in the maintained Python dispatch inventory now have an explicit Haskell
+owner. That is a dispatch-completeness measurement, not a claim of unrestricted semantic parity:
+the bounded numeric and algebraic domains listed below still contain known behavioral gaps.
 
 ## Build and run
 
@@ -51,6 +55,17 @@ cabal run tungsten-hs -- expr parse --file example.wl --form input
 cabal run tungsten-hs -- expr evaluate --code 'Plus[1, Times[2, 3]]' --form fullform
 ```
 
+The verification checkpoint recorded at the provenance commit passed:
+
+- `cabal test all -j1 --ghc-options=-Werror`;
+- a warnings-as-errors build of `tungsten-hs`;
+- 171/171 exact Python/Haskell expression CLI comparisons;
+- 1,414/1,414 parser-corpus comparisons; and
+- 537/537 static Python dispatch owners.
+
+The static inventory is always paired with behavioral differentials because recognizing a head is
+not evidence that every input shape or numerical boundary has the same result.
+
 Run the newline-delimited JSON process protocol:
 
 ```bash
@@ -69,11 +84,11 @@ Haskell process clients.
 symbolic at that API boundary. Stateful callers use `Tungsten.Session.evaluateInSession`, whose
 result is in `IO`; the CLI, protocol server, and REPL all use this session entry point.
 
-`evaluateInSessionWithRuntime` accepts a `SessionRuntime` containing monotonic-clock and sleep
-handlers. Production code uses `defaultSessionRuntime`, while tests can inject deterministic
-handlers. The immutable evaluator constructs explicit clock-read and sleep requests and only the
-session entry point interprets them, so timing does not rely on `unsafePerformIO` or hidden mutable
-process state.
+`evaluateInSessionWithRuntime` accepts a `SessionRuntime` containing monotonic-clock, sleep, and
+bounded-random-integer handlers. Production code uses `defaultSessionRuntime`, while tests can
+inject deterministic handlers. The immutable evaluator constructs explicit clock-read, sleep, and
+random-draw requests and only the session entry point interprets them, so timing and sampling do
+not rely on `unsafePerformIO` or hidden mutable process state.
 
 ## Implemented surface
 
@@ -200,6 +215,28 @@ sets, threads over supported list arguments, handles composite forms and zero co
 the same stateful callback boundary. Bare and explicit `System`` spellings dispatch; `Global``
 spellings remain isolated.
 
+The remaining measured polynomial heads now have bounded exact implementations. `Decompose`
+performs recursive normalized composition search, `PolynomialReduce` uses ordered multivariate
+division, `GroebnerBasis` uses Buchberger completion over exact Gaussian rationals with a proved
+homogeneous full-rank symbolic-coefficient case, and `Subresultants` uses Brown's exact PRS with
+defective degree-drop scaling. Safety caps and coefficient domains outside those rings return the
+original symbolic call.
+
+The algebraic reducer now owns `Root`, `RootReduce`, `MinimalPolynomial`, `ToRadicals`,
+`RootIntervals`, `IsolatingInterval`, `CountRoots`, `RootSum`, and `Solve`. It provides exact
+rational-polynomial arithmetic, square-free normalization, algebraic resultants, rational-angle
+trigonometry, Sturm counting on real intervals, supported radical conversion, root sums, and
+bounded univariate or square-linear solving. Sessions supply their live `$MaxRootDegree` value.
+This family is not yet full parity: factor selection for reducible candidates, certified isolation,
+nested algebraic coefficients, general cubic/quartic radicals, and some floating or symbolic-linear
+canonical forms remain open.
+
+`RandomSample` and `RandomPermutation` are session-runtime operations. Their pure plans reproduce
+CPython's pool-versus-rejection sampling schedule and descending Fisher-Yates draws, preserve raw
+sequence and association reconstruction boundaries, and allow deterministic injected draws in
+tests. The exported pure `evaluate` function deliberately leaves runtime-backed randomness to the
+session API.
+
 ## Compatibility boundary
 
 The following Engine areas still use the Python implementation and are not represented as Haskell
@@ -207,14 +244,16 @@ features yet:
 
 - the complete Wolfram tokenizer, box-language and StandardForm parser, including the broad named infix-operator precedence table;
 - operational enforcement
-  of the mutable iteration, precision, root-degree, and output-size settings, plus main-loop
+  of the mutable iteration, precision, and output-size settings, plus main-loop
   `$PreRead`/`$Pre`/`$Post`/`$PrePrint` hook application; `$MessagePrePrint` is implemented for
-  explicit `Message` insertions and assertion diagnostics;
+  explicit `Message` insertions and assertion diagnostics, while `$MaxRootDegree` is enforced by
+  the session algebraic reducer;
 - nested positional-slot scope diagnostics, session-aware callback evaluation for aggregation and array reducers
   beyond the selection, map, sort, string-pattern, and pattern/rewrite families, the base
   encoding, import/export, and textual-form character-encoding surface, broader loop control, real-valued iteration,
-  the remaining polynomial decomposition/reduction/Groebner and algebraic-root/Solve bridges, broad
-  number theory, certified arbitrary-precision domain classification, very-large-exponent handling,
+  certified algebraic factor selection and root isolation, nested algebraic-coefficient reduction,
+  general cubic/quartic radical conversion, broader floating and symbolic `Solve` canonicalization,
+  certified arbitrary-precision domain classification, very-large-exponent handling,
   stored-real quantization, and complete numeric identity coverage;
 - global message-stream recovery in the exported pure `Tungsten.Evaluate.evaluate` API, which
   remains fatal while session, CLI, protocol, and REPL evaluation recover nonfatal diagnostics;
