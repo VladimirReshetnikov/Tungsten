@@ -35,6 +35,18 @@ valueCases =
     , "ComposeList[{f,g,h},x]"
     , "List[x, f[x], g[f[x]], h[g[f[x]]]]"
     )
+  , ( "comap direct and operator forms rebuild nonatomic collections"
+    , "{Comap[{#+1&,f},2],Comap[{f,g}][x],ComapApply[{f,g},h[x,y]],ComapApply[{f,g}][h[x,y]],ComapApply[{f,g},<|a->x,b:>y|>],Comap[f,x],ComapApply[{f,g},x],Comap[foo[f,g],x],Comap[<|a->f,b:>g|>,x]}"
+    , "List[List[3, f[2]], List[f[x], g[x]], List[f[x, y], g[x, y]], List[f[x, y], g[x, y]], List[f[x, y], g[x, y]], f, List[x, x], foo[f[x], g[x]], Association[Rule[a, f[x]], RuleDelayed[b, g[x]]]]"
+    )
+  , ( "comap preserves Nothing boundaries by collection head"
+    , "{Comap[{Nothing,f},x],ComapApply[{Nothing,f},h[x,y]],Comap[foo[Nothing,f],x],Comap[Association[a->Nothing,b->f],x]}"
+    , "List[List[f[x]], List[f[x, y]], foo[Nothing, f[x]], Association[Rule[a, Nothing], Rule[b, f[x]]]]"
+    )
+  , ( "comap qualified System dispatch and Global isolation"
+    , "{System`Comap[{f,g},x],System`ComapApply[{f,g}][h[x,y]],Global`Comap[{f,g},x],Global`Comap[{f,g}][x]}"
+    , "List[List[f[x], g[x]], List[f[x, y], g[x, y]], Global`Comap[List[f, g], x], Global`Comap[List[f, g]][x]]"
+    )
   , ( "nest and nest list"
     , "{Nest[f,x,3],NestList[f,x,3]}"
     , "List[f[f[f[x]]], List[x, f[x], f[f[x]], f[f[f[x]]]]]"
@@ -107,6 +119,10 @@ sessionCases =
     , "n=0; f[x_,y_]:=(n++;x+y); {Fold[f,0,{1,2,3}],n}"
     , "List[6, 3]"
     )
+  , ( "session comap callbacks preserve definitions effects and Nothing"
+    , "ClearAll[f,g,c]; c=0; f[x_]:=(c++;x+1); g[x___]:=(c++;HoldComplete[x]); {Comap[{f,g},3],Comap[{f,g}][4],ComapApply[{g,g},h[a,b]],Comap[{(c++;Nothing)&,f},5],c}"
+    , "List[List[4, HoldComplete[3]], List[5, HoldComplete[4]], List[HoldComplete[a, b], HoldComplete[a, b]], List[6], 8]"
+    )
   , ( "session callbacks preserve fixed point effects"
     , "n=0; {FixedPoint[(n++;Min[#+1,2])&,0],n}"
     , "List[2, 3]"
@@ -134,6 +150,14 @@ errorCases =
   , ( "compose list subject"
     , "ComposeList[x,0]"
     , "ComposeList expects a list or other nonatomic expression of functions."
+    )
+  , ( "comap arity"
+    , "Comap[]"
+    , "Comap expects exactly two arguments."
+    )
+  , ( "comap apply operator arity"
+    , "ComapApply[{f,g}][x,y]"
+    , "ComapApply[functions] expects exactly one argument when used as an operator."
     )
   , ( "nest count domain"
     , "Nest[f,x,-1]"
@@ -179,7 +203,17 @@ errorCases =
 
 sessionErrorCases :: [(Text, Text, Text, Text)]
 sessionErrorCases =
-  [ ( "session fold while preserves effects before a trailing-count failure"
+  [ ( "session comap direct arity"
+    , "Comap[]"
+    , "Comap[]"
+    , "Comap::error: Comap expects exactly two arguments."
+    )
+  , ( "session comap operator arity"
+    , "Comap[{f,g}][x,y]"
+    , "Comap[List[f, g]][x, y]"
+    , "General::error: Comap[functions] expects exactly one argument when used as an operator."
+    )
+  , ( "session fold while preserves effects before a trailing-count failure"
     , "n=0;t=0; f[x_,y_]:=(n++;x+y); q[x_]:=(t++;x<1); {FoldWhileList[f,0,{1},q,1,x],n,t}"
     , "List[FoldWhileList[f, 0, List[1], q, 1, x], 1, 2]"
     , "FoldWhileList::error: FoldWhileList expects an integer argument."

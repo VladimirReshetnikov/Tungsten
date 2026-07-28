@@ -1201,6 +1201,8 @@ qualifiedAliasDispatchHeads =
   , "CompositeQ"
   , "Coefficient"
   , "CoefficientList"
+  , "Comap"
+  , "ComapApply"
   , "ComposeList"
   , "Construct"
   , "ContinuedFraction"
@@ -2922,6 +2924,20 @@ reduceSessionEvaluatedCall depth session = \case
         sessionFailure
           session
           "ReverseSortBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "Comap") [functions]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionComap False depth session [functions, subject]
+      _ ->
+        sessionFailure
+          session
+          "Comap[functions] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "ComapApply") [functions]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionComap True depth session [functions, subject]
+      _ ->
+        sessionFailure
+          session
+          "ComapApply[functions] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
   Call (Symbol "Apply") values ->
@@ -2938,6 +2954,10 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionConstruct depth session values)
   Call (Symbol "ComposeList") values ->
     Just (evaluateSessionComposeList depth session values)
+  Call (Symbol "Comap") values ->
+    Just (evaluateSessionComap False depth session values)
+  Call (Symbol "ComapApply") values ->
+    Just (evaluateSessionComap True depth session values)
   Call (Symbol "Nest") values ->
     Just (evaluateSessionNest False depth session values)
   Call (Symbol "NestList") values ->
@@ -3645,6 +3665,64 @@ evaluateSessionComposeList depth session = \case
     (updated, nextSession) <-
       evaluateSessionCallable depth currentSession function [current]
     compose remaining updated (retained <> [updated]) nextSession
+
+evaluateSessionComap
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionComap applyToArguments depth session arguments' =
+  case arguments' of
+    [functions] -> Right (Call (Symbol operation) [functions], session)
+    [functions, subject] -> mapFunctions functions subject
+    _ ->
+      sessionFailure
+        session
+        (operation <> " expects exactly two arguments.")
+ where
+  operation = if applyToArguments then "ComapApply" else "Comap"
+
+  mapFunctions functions subject = case sessionOrderedCollection functions of
+    Nothing -> Right (functions, session)
+    Just collection -> do
+      (mapped, updated) <-
+        mapItems subject [] session (sessionCollectionItems collection)
+      Right (rebuildSessionCollection collection mapped, updated)
+
+  mapItems _ retained currentSession [] = Right (retained, currentSession)
+  mapItems subject retained currentSession (item : rest) = do
+    (value, updated) <-
+      applyFunction subject currentSession (sessionItemValue item)
+    mapItems
+      subject
+      (retained <> [replaceComapItemValue item value])
+      updated
+      rest
+
+  applyFunction subject currentSession function
+    | applyToArguments = case comapApplyArguments subject of
+        Nothing -> Right (subject, currentSession)
+        Just values ->
+          evaluateSessionCallable depth currentSession function values
+    | otherwise =
+        evaluateSessionCallable depth currentSession function [subject]
+
+  comapApplyArguments subject = case sessionOrderedCollection subject of
+    Just collection
+      | sessionCollectionAssociation collection ->
+          Just (map sessionItemValue (sessionCollectionItems collection))
+    _ -> case subject of
+      Call _ values -> Just values
+      _ -> Nothing
+
+  replaceComapItemValue item value =
+    item
+      { sessionItemValue = value
+      , sessionItemOriginal = case sessionItemOriginal item of
+          Call ruleHead [key, _] -> Call ruleHead [key, value]
+          _ -> value
+      }
 
 evaluateSessionNest
   :: Bool

@@ -471,6 +471,20 @@ reduceCall expression = case expression of
     reduceBuiltin "SortBy" [subject, function]
   Call (Call (Symbol "ReverseSortBy") [function]) [subject] ->
     reduceBuiltin "ReverseSortBy" [subject, function]
+  Call (Call (Symbol "Comap") [functions]) values -> case values of
+    [subject] -> reduceComap False [functions, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "Comap[functions] expects exactly one argument when used as an operator."
+        )
+  Call (Call (Symbol "ComapApply") [functions]) values -> case values of
+    [subject] -> reduceComap True [functions, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "ComapApply[functions] expects exactly one argument when used as an operator."
+        )
   Call (Call (Symbol "Select") [criterion]) [subject] ->
     reduceBuiltin "Select" [subject, criterion]
   Call (Call (Symbol "Discard") [criterion]) [subject] ->
@@ -855,6 +869,8 @@ reduceBuiltin headName values = case headName of
   "Apply" -> Right (reduceApply values)
   "Construct" -> reduceConstruct values
   "ComposeList" -> reduceComposeList values
+  "Comap" -> reduceComap False values
+  "ComapApply" -> reduceComap True values
   "Nest" -> reduceNest False values
   "NestList" -> reduceNest True values
   "NestWhile" -> reduceNestWhile False values
@@ -8798,6 +8814,42 @@ reduceComposeList [_functions, _initial] =
     )
 reduceComposeList _ =
   Left (EvaluationError "ComposeList expects exactly two arguments.")
+
+reduceComap :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceComap applyToArguments arguments' = case arguments' of
+  [functions] -> Right (Call (Symbol operation) [functions])
+  [functions, subject] -> mapFunctions functions subject
+  _ -> Left (EvaluationError (operation <> " expects exactly two arguments."))
+ where
+  operation = if applyToArguments then "ComapApply" else "Comap"
+
+  mapFunctions functions subject = case associationEntries functions of
+    Just entries -> associationExpr <$> traverse (mapEntry subject) entries
+    Nothing -> case functions of
+      Call expressionHead values -> do
+        mapped <- traverse (applyFunction subject) values
+        Right (normalizeEvaluatedCall expressionHead mapped)
+      _ -> Right functions
+
+  mapEntry subject (AssociationEntry ruleHead key function) =
+    AssociationEntry ruleHead key <$> applyFunction subject function
+
+  applyFunction subject function
+    | applyToArguments = case comapApplyArguments subject of
+        Nothing -> Right subject
+        Just values -> applyCallable function values
+    | otherwise = applyCallable function [subject]
+
+  applyCallable (Symbol nothingHead) _
+    | systemHeadIn ["Nothing"] nothingHead = Right (Symbol "Nothing")
+  applyCallable function values = evaluate (Call function values)
+
+  comapApplyArguments subject = case associationEntries subject of
+    Just entries ->
+      Just [value | AssociationEntry _ _ value <- entries]
+    Nothing -> case subject of
+      Call _ values -> Just values
+      _ -> Nothing
 
 reduceNest :: Bool -> [Expr] -> Either EvaluationError Expr
 reduceNest returnHistory [function, initial, countExpression] = do

@@ -2092,6 +2092,23 @@ CASES = (
         ),
         0,
     ),
+    (
+        "comap collections operators and callback state",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "c=0; f[x___]:=(c++;HoldComplete[x]); "
+            "{Comap[{Nothing,f},x], Comap[{f,g}][y], "
+            "ComapApply[{f,g},h[a,b]], ComapApply[{f}][h[d,e]], "
+            "Comap[foo[f,g],z], Comap[<|a->f,b:>g|>,q], "
+            "Comap[u,q], ComapApply[{f,g},atom], "
+            "System`Comap[{f,g}][s], Global`Comap[{f,g}][s], c}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
