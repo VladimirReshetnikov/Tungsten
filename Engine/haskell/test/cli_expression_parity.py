@@ -2066,6 +2066,25 @@ CASES = (
         ),
         0,
     ),
+    (
+        "exact polynomial and rational algebra",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Expand[(x+1)^3], Coefficient[2x^2 y+3x y+y,x], "
+            "CoefficientList[x^2+3x+2,x], Together[1/x+1/y], "
+            "Cancel[(x^2-1)/(x-1)], Apart[(x+1)/(x^2-1)], "
+            "Factor[x^2-1], FactorList[2x^2-2], "
+            "PolynomialGCD[x^2-1,x^2-x], PolynomialLCM[x-1,x+1], "
+            "PolynomialQuotient[x^3-1,x-1,x], "
+            "PolynomialRemainder[x^3-1,x-1,x], "
+            "Variables[(x+y)^2+3z], PolynomialQ[1/x,x]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
