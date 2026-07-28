@@ -95,6 +95,17 @@ void existing_sparse_constructor_tests() {
 
 void constructor_diagnostic_tests() {
     check_case(
+        "SparseArray[{{1,1}->a},{18446744073709551616}]",
+        "SparseArray[List[Rule[List[1, 1], a]], "
+        "List[18446744073709551616]]",
+        {"SparseArray::error: SparseArray currently supports explicit integer "
+         "positions, not patterns or Band."});
+    check_case(
+        "SparseArray[{{1}->a},{18446744073709551616,-1}]",
+        "SparseArray[List[Rule[List[1], a]], "
+        "List[18446744073709551616, -1]]",
+        {"SparseArray::error: SparseArray expects non-negative dimensions."});
+    check_case(
         "SparseArray[]", "SparseArray[]",
         {"SparseArray::error: SparseArray expects data, optional dimensions, "
          "and an optional implicit value."});

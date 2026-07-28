@@ -33,6 +33,10 @@ void check_case(
 
 void reshape_tests() {
     check_case(
+        "ArrayReshape[SparseArray[{}, {18446744073709551616}],"
+        "{2,9223372036854775808}]",
+        "SparseArray[List[], List[2, 9223372036854775808]]");
+    check_case(
         "ArrayReshape[SparseArray[{{1}->a,{4}->d},{5}],{2,3}]",
         "SparseArray[List[Rule[List[1, 1], a], Rule[List[2, 1], d]], "
         "List[2, 3]]");
@@ -49,6 +53,12 @@ void reshape_tests() {
 }
 
 void padding_and_transpose_tests() {
+    check_case(
+        "ArrayPad[SparseArray[{}, {18446744073709551616}],1]",
+        "SparseArray[List[], List[18446744073709551618]]");
+    check_case(
+        "Transpose[SparseArray[{}, {18446744073709551616,2}]]",
+        "SparseArray[List[], List[2, 18446744073709551616]]");
     check_case(
         "ArrayPad[SparseArray[{{1,1}->a,{2,3}->f},{2,3}],"
         "{{1,0},{2,3}},0]",
@@ -70,6 +80,9 @@ void padding_and_transpose_tests() {
 }
 
 void flatten_tests() {
+    check_case(
+        "Flatten[SparseArray[{}, {18446744073709551616,2}]]",
+        "SparseArray[List[], List[36893488147419103232]]");
     check_case(
         "Flatten[SparseArray[{{1,1,2}->x,{2,3,4}->y},{2,3,4},z],1]",
         "SparseArray[List[Rule[List[1, 2], x], Rule[List[6, 4], y]], "

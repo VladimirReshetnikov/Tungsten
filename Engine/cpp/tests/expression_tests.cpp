@@ -9,6 +9,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,6 +72,44 @@ int main() {
     check(sparse.fill_value() == integer(-1L), "sparse fill value");
     check_equal(sparse.to_full_form(),
         "SparseArray[List[Rule[List[1, 2], 9]], List[3, 4], -1]", "sparse full form");
+
+    const auto wide_sparse = sparse_array(
+        {mpz_class("18446744073709551616", 10)}, {}, integer(0L));
+    check(wide_sparse.kind() == ExprKind::SparseArray,
+        "wide sparse expression kind");
+    check(wide_sparse.is_atom(), "wide sparse atom model");
+    check(wide_sparse.sparse_dimensions()
+            == std::vector<mpz_class>{
+                mpz_class("18446744073709551616", 10)},
+        "wide sparse exact dimensions");
+    check_equal(wide_sparse.to_json(),
+        "{\"type\":\"sparse_array\",\"dimensions\":[18446744073709551616],"
+        "\"fill_value\":{\"type\":\"integer\",\"value\":0},\"entries\":[],"
+        "\"explicit_length\":0}",
+        "wide sparse JSON keeps arbitrary-precision dimensions");
+    bool wide_native_dimensions_rejected = false;
+    try {
+        static_cast<void>(wide_sparse.dimensions());
+    } catch (const std::overflow_error&) {
+        wide_native_dimensions_rejected = true;
+    }
+    check(wide_native_dimensions_rejected,
+        "wide sparse machine-dimension accessor rejects narrowing");
+
+    const auto wide_trailing_dimension = sparse_array(
+        {mpz_class(2), mpz_class("18446744073709551616", 10)}, {},
+        integer(0L));
+    check(wide_trailing_dimension.length() == 2,
+        "sparse native length ignores non-native trailing axes");
+    bool negative_sparse_dimension_rejected = false;
+    try {
+        static_cast<void>(sparse_array(
+            {mpz_class(-1)}, {}, integer(0L)));
+    } catch (const std::invalid_argument&) {
+        negative_sparse_dimension_rejected = true;
+    }
+    check(negative_sparse_dimension_rejected,
+        "direct exact sparse construction rejects negative dimensions");
 
     check_equal(wl_string("a\\b\n\"c"), "\"a\\\\b\\n\\\"c\"", "Wolfram string encoder");
     check_equal(parse_wl_string_literal("\"\\[Alpha]\\:03b2\\141\""), u8"\u03b1\u03b2a",
