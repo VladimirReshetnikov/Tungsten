@@ -166,6 +166,7 @@ valueCases =
   , ("Cross exact 2D", "Cross[{1,2},{3,4}]", "-2")
   , ("Cross symbolic canonical signs", "Cross[{a,b,c},{d,e,f}]", "List[Plus[Times[-1, c, e], Times[b, f]], Plus[Times[-1, a, f], Times[c, d]], Plus[Times[-1, b, d], Times[a, e]]]")
   , ("Cross cancels equal symbolic products", "Cross[{a,a},{a,a}]", "0")
+  , ("Tr preserves sparse vector matrix and fill semantics", "{Tr[SparseArray[{{2}->a},{4}],Plus],Tr[SparseArray[{{2}->a},{4}],Times],Tr[SparseArray[{{2}->a},{4}],f],Tr[SparseArray[{{1,1}->a},{3,3}],Times],Tr[SparseArray[{{1,1}->a},{3,3},z],f],Tr[SparseArray[{}, {1000000000,1000000000}]]}", "List[a, 0, f[0, a, 0, 0], a, f[a, z, z], 0]")
   , ("Det exact", "Det[{{1,2},{3,4}}]", "-2")
   , ("Det empty identity", "Det[{}]", "1")
   , ("Det symbolic canonical sign", "Det[{{a,b},{c,d}}]", "Plus[Times[-1, b, c], Times[a, d]]")

@@ -21,7 +21,7 @@ import Control.Concurrent (threadDelay)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Char (isAlpha, isAlphaNum, isPrint, ord)
-import Data.List (sortBy)
+import Data.List (sortBy, transpose)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
@@ -2991,6 +2991,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionOuter depth session values)
   Call (Symbol "Through") values ->
     Just (evaluateSessionThrough depth session values)
+  Call (Symbol "Tr") values ->
+    Just (evaluateSessionTr depth session values)
   Call (Symbol "MapAll") values ->
     Just (evaluateSessionMapAll depth session values)
   Call (Symbol "MapApply") values ->
@@ -3839,6 +3841,81 @@ evaluateSessionThrough depth session = \case
 
   rebuildContainer containerHead@Symbol {} = rebuildWithSplicing containerHead
   rebuildContainer containerHead = Call containerHead
+
+evaluateSessionTr
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTr depth session trInputs =
+  case trEvaluationPlan trInputs of
+    P.Left (EvaluationError message) -> sessionFailure session message
+    P.Right (TrTermsPlan combiner terms) ->
+      combineTerms combiner terms session
+    P.Right (TrLevelPlan combiner subject level) ->
+      contractLevel combiner subject level session
+ where
+  combineTerms combiner terms current = case combiner of
+    Symbol combinerName
+      | isSessionSystemHead "Plus" combinerName ->
+          evaluateSessionAt
+            (depth + 1)
+            current
+            (Call (Symbol "Plus") terms)
+    _ -> do
+      (combined, updated) <-
+        evaluateSessionCallable depth current combiner terms
+      evaluateSessionAt (depth + 1) updated combined
+
+  contractLevel combiner subject level current
+    | level == 1 = case requireList subject of
+        P.Left message -> sessionFailure current message
+        P.Right values -> case equalWidthRows values of
+          Just rows -> combineColumns combiner [] current (transpose rows)
+          Nothing -> combineTerms combiner values current
+    | otherwise = case requireList subject of
+        P.Left message -> sessionFailure current message
+        P.Right values ->
+          contractChildren combiner (level - 1) [] current values
+
+  contractChildren combiner _ retained current [] =
+    contractLevel
+      combiner
+      (Call (Symbol "List") (reverse retained))
+      1
+      current
+  contractChildren combiner level retained current (value : rest) = do
+    (contracted, updated) <- contractLevel combiner value level current
+    contractChildren combiner level (contracted : retained) updated rest
+
+  combineColumns _ retained current [] =
+    Right
+      ( rebuildWithSplicing (Symbol "List") (reverse retained)
+      , current
+      )
+  combineColumns combiner retained current (column : rest) = do
+    (combined, updated) <- combineTerms combiner column current
+    combineColumns combiner (combined : retained) updated rest
+
+  requireList expression = case listValues expression of
+    Just values -> P.Right values
+    Nothing -> case expression of
+      Call {} ->
+        P.Left "Tr expects a List at every contracted level."
+      _ -> P.Left "Tr expects a nonatomic expression."
+
+  equalWidthRows [] = Nothing
+  equalWidthRows values = do
+    rows <- traverse listValues values
+    case rows of
+      [] -> Nothing
+      firstRow : remaining
+        | all ((== length firstRow) . length) remaining -> Just rows
+        | otherwise -> Nothing
+
+  listValues (Call (Symbol listHead) listItems)
+    | isSessionSystemHead "List" listHead = Just listItems
+  listValues _ = Nothing
 
 operateSessionAtLevel
   :: Int
@@ -9682,6 +9759,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "Operate"
       , "Thread"
       , "Through"
+      , "Tr"
       ]
       expressionHead =
       map stripSessionDirectUnevaluated

@@ -713,6 +713,9 @@ checkEvaluator = do
         , ("Through distributes compound call heads without final reentry", "{Through[(f+g)[x,y]],Through[p[f,g][x,y]],Through[(f+g)[x,y],List],Through[x],Through[f[x]],Through[x,1],Through[p[][x]],Through[p[f,g][]],Through[Unevaluated[(Identity+Identity)[1]]],System`Through[Unevaluated[(f+g)[x]]],Global`Through[Unevaluated[(f+g)[x]]]}", "List[Plus[f[x, y], g[x, y]], p[f[x, y], g[x, y]], Plus[f, g][x, y], x, f[x], x, p[], p[f[], g[]], Plus[1, 1], System`Through[Plus[f, g][x]], Global`Through[Unevaluated[Plus[f, g][x]]]]")
         , ("Through normalizes symbol and compound containers distinctly", "{Through[Unevaluated[{(Sequence[#,#]&),f}[x]]],Through[Unevaluated[{(Nothing&),f}[x]]],Through[Unevaluated[{(Splice[{a,b}]&),f}[x]]],Through[Unevaluated[p[(Nothing&),f][x]]],Through[Unevaluated[p[(Splice[{a,b},p]&),f][x]]],Through[Unevaluated[System`List[(Nothing&),f][x]]],Through[Unevaluated[r[s][(Sequence[#,#]&),f][x]]]}", "List[List[x, x, f[x]], List[f[x]], List[a, b, f[x]], p[Nothing, f[x]], p[a, b, f[x]], System`List[Nothing, f[x]], r[s][Sequence[x, x], f[x]]]")
         , ("Through maps association values and respects restrictions", "{Through[Unevaluated[<|a->f,b:>g|>[x,y]]],Through[Unevaluated[<|a->f,b:>g|>[x]],List]}", "List[Association[Rule[a, f[x, y]], RuleDelayed[b, g[x, y]]], Association[Rule[a, f], RuleDelayed[b, g]][x]]")
+        , ("Tr dense arrays selective evaluation and qualification", "{Tr[{a,b,c}],Tr[{{a,b},{c,d}}],Tr[{{a,b,c},{d,e,f}}],Tr[{}],Tr[{{}}],Tr[{{a,b},{c,d}},f],Tr[Unevaluated[{{1+1,Print[\"off\"]},{Print[\"off2\"],3+1}}]],Tr[Unevaluated[{{1+1,Print[\"off\"]},{Print[\"off2\"],3+1}}],HoldComplete],System`Tr[Unevaluated[{{1+1,b},{c,3+1}}]],Global`Tr[Unevaluated[{{1+1,b},{c,3+1}}]]}", "List[Plus[a, b, c], Plus[a, d], Plus[a, e], 0, 0, f[a, d], 6, HoldComplete[Plus[1, 1], Plus[3, 1]], System`Tr[List[List[Plus[1, 1], b], List[c, Plus[3, 1]]]], Global`Tr[Unevaluated[List[List[Plus[1, 1], b], List[c, Plus[3, 1]]]]]]")
+        , ("Tr rank-restricted recursive contractions", "{Tr[{},f,1],Tr[{{}},f,1],Tr[{a,b,c},f,1],Tr[{{a,b},{c,d}},f,1],Tr[{{a,b},{c,d}},f,2],Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},q,1],Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},q,2],Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},q,3]}", "List[f[], List[], f[a, b, c], List[f[a, c], f[b, d]], f[f[a, b], f[c, d]], List[q[List[a, b], List[e, f]], q[List[c, d], List[g, h]]], List[q[q[a, c], q[e, g]], q[q[b, d], q[f, h]]], q[q[q[a, b], q[c, d]], q[q[e, f], q[g, h]]]]")
+        , ("Tr normalizes generated column values and ragged fallback", "{Tr[{{a,b},{c,d}},Nothing,1],Tr[{{a,b},{c,d}},Function[Null,Sequence[##]],1],Tr[{{a,b},{c,d}},Function[Null,Splice[{##}]],1],Tr[{{a,b},{c}},f,1]}", "List[List[], List[a, c, b, d], List[a, c, b, d], f[List[a, b], List[c]]]")
         , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
         , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
         , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
@@ -1338,6 +1341,9 @@ checkEvaluationSession = do
         , ("Outer threads Cartesian callbacks left to right", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Outer[ff,{a,b},{x,y}],i,$MessageList}", "List[List[List[p[1, a, x], p[2, a, y]], List[p[3, b, x], p[4, b, y]]], 4, List[]]")
         , ("Through distinguishes eager and transparent callback arguments", "ClearAll[i,ff,first,second];i=0;ff[x__]:=p[i,x];first={Through[q[ff,ff][i++]],i};i=0;second={Through[Unevaluated[q[ff,ff][i++]]],i};{first,second}", "List[List[q[p[1, 0], p[1, 0]], 1], List[q[p[1, 0], p[2, 1]], 2]]")
         , ("Through threads association callback state", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Through[Unevaluated[<|a->ff,b:>ff|>[x]]],i}", "List[Association[Rule[a, p[1, x]], RuleDelayed[b, p[2, x]]], 2]")
+        , ("Tr threads default and recursive combiner state", "ClearAll[tungstenTrI,tungstenTrF];tungstenTrI=0;tungstenTrF[x__]:=(tungstenTrI++;p[tungstenTrI,x]);{Tr[{{a,b},{c,d}},tungstenTrF],tungstenTrI,Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},tungstenTrF,2],tungstenTrI,$MessageList}", "List[p[1, a, d], 1, List[p[6, p[2, a, c], p[4, e, g]], p[7, p[3, b, d], p[5, f, h]]], 7, List[]]")
+        , ("Tr retains earlier callback state on later shape failure", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Tr[{{a},{b},c},ff,2],i,$MessageList}", "List[Tr[List[List[a], List[b], c], ff, 2], 2, List[HoldForm[MessageName[Tr, \"error\"]]]]")
+        , ("Tr re-enters recovered non-Plus combiner calls", "ClearAll[tungstenTrI,tungstenTrA,tungstenTrB];tungstenTrI=0;tungstenTrA[]:=(tungstenTrI++;{a});tungstenTrB[]:=(tungstenTrI++;{b,c});{Tr[Unevaluated[{tungstenTrA[],tungstenTrB[]}],Times,1],tungstenTrI,$MessageList}", "List[Times[tungstenTrA[], tungstenTrB[]], 4, List[HoldForm[MessageName[Times, \"error\"]], HoldForm[MessageName[Times, \"error\"]]]]")
         , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
         , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
         , ("operate invokes its selected head callback exactly once", "ClearAll[y];y=0;{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y}", "List[q[f][g][a], 1]")
@@ -1788,6 +1794,11 @@ checkEvaluationSession = do
           , "p[q[1, a, b], q[2, a, b]]"
           , ["{1, a, b}", "{2, a, b}"]
           )
+        , ( "Tr invokes recursive contractions in depth-first order"
+          , "Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},(Print[InputForm[{##}]];q[##])&,2]"
+          , "List[q[q[a, c], q[e, g]], q[q[b, d], q[f, h]]]"
+          , ["{a, c}", "{b, d}", "{e, g}", "{f, h}", "{q[a, c], q[e, g]}", "{q[b, d], q[f, h]}"]
+          )
         , ( "nested abort protection re-defers at compound boundaries"
           , "CheckAbort[AbortProtect[AbortProtect[Abort[]; Print[\"innerTail\"]]; Print[\"outerTail\"]], fail]"
           , "fail"
@@ -2030,6 +2041,89 @@ checkEvaluationSession = do
             , ( "Through::error"
               , "MessageName[Through, \"error\"]"
               , "Through::error: Through's second argument must be a Symbol head."
+              )
+            ]
+          )
+        , ( "Tr validates arrays rank restrictions and contracted levels"
+          , "{Tr[],Tr[{},Plus,1,2],Tr[x],Tr[{{a},{b,c}}],Tr[{a,b},f,0],Tr[{{a},b},f,2],Tr[{f[a],{b}},f,2],Tr[SparseArray[{}, {2,2}],f,1],Tr[SparseArray[{}, {2,2,2}]],$MessageList}"
+          , "List[Tr[], Tr[List[], Plus, 1, 2], Tr[x], Tr[List[List[a], List[b, c]]], Tr[List[a, b], f, 0], Tr[List[List[a], b], f, 2], Tr[List[f[a], List[b]], f, 2], Tr[SparseArray[List[], List[2, 2]], f, 1], Tr[SparseArray[List[], List[2, 2, 2]]], List[HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]]]]"
+          , [ ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects an array, an optional combiner, and an optional rank-restriction integer."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects an array, an optional combiner, and an optional rank-restriction integer."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a rectangular array."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: SparseArray dense input must be rectangular."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr level must be a positive integer."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a nonatomic expression."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a List at every contracted level."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a nonatomic expression."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr currently supports vectors and matrices."
+              )
+            ]
+          )
+        , ( "Tr preserves repeated Times listable diagnostics"
+          , "{Tr[{{{a}},{{b,c}}},Times,1],$MessageList}"
+          , "List[List[Times[List[a], List[b, c]]], List[HoldForm[MessageName[Times, \"error\"]], HoldForm[MessageName[Times, \"error\"]]]]"
+          , [ ( "Times::error"
+              , "MessageName[Times, \"error\"]"
+              , "Times::error: Listable Function arguments have incompatible list lengths."
+              )
+            , ( "Times::error"
+              , "MessageName[Times, \"error\"]"
+              , "Times::error: Listable Function arguments have incompatible list lengths."
+              )
+            ]
+          )
+        , ( "Tr re-enters recoverable non-Plus combiner errors"
+          , "{Tr[{a,b},Cross,1],Tr[{a,b},Det,1],Tr[{a,b},Inverse,1],$MessageList}"
+          , "List[Cross[a, b], Det[a, b], Inverse[a, b], List[HoldForm[MessageName[Cross, \"error\"]], HoldForm[MessageName[Cross, \"error\"]], HoldForm[MessageName[Det, \"error\"]], HoldForm[MessageName[Det, \"error\"]], HoldForm[MessageName[Inverse, \"error\"]], HoldForm[MessageName[Inverse, \"error\"]]]]"
+          , [ ( "Cross::error"
+              , "MessageName[Cross, \"error\"]"
+              , "Cross::error: Cross expects vectors."
+              )
+            , ( "Cross::error"
+              , "MessageName[Cross, \"error\"]"
+              , "Cross::error: Cross expects vectors."
+              )
+            , ( "Det::error"
+              , "MessageName[Det, \"error\"]"
+              , "Det::error: Det expects exactly one matrix argument."
+              )
+            , ( "Det::error"
+              , "MessageName[Det, \"error\"]"
+              , "Det::error: Det expects exactly one matrix argument."
+              )
+            , ( "Inverse::error"
+              , "MessageName[Inverse, \"error\"]"
+              , "Inverse::error: Inverse expects exactly one matrix argument."
+              )
+            , ( "Inverse::error"
+              , "MessageName[Inverse, \"error\"]"
+              , "Inverse::error: Inverse expects exactly one matrix argument."
               )
             ]
           )

@@ -8,6 +8,7 @@
 module Tungsten.Evaluate
   ( EvaluationError (..)
   , LevelBounds (..)
+  , TrEvaluationPlan (..)
   , PathSelector (..)
   , PatternPathRecord (..)
   , PatternRecord (..)
@@ -39,6 +40,7 @@ module Tungsten.Evaluate
   , selectionLimit
   , sortOperationPaths
   , substituteNamedSymbols
+  , trEvaluationPlan
   ) where
 
 import Control.Monad ((<=<), foldM)
@@ -241,6 +243,7 @@ stripPureTransparentUnevaluatedArguments expressionHead
       , "Operate"
       , "Thread"
       , "Through"
+      , "Tr"
       ]
       expressionHead =
       map stripDirectUnevaluated
@@ -644,7 +647,7 @@ pureReducerDispatchView expression = case expression of
     , Just shortName <- normalizeSystemSymbolName originalHead
     , originalHead /= shortName
     , shortName
-        `notElem` ["Distribute", "Inner", "Operate", "Outer", "Thread", "Through"] ->
+        `notElem` ["Distribute", "Inner", "Operate", "Outer", "Thread", "Through", "Tr"] ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -738,7 +741,7 @@ preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
   Symbol headName ->
     systemHeadIn
-      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread", "Through"]
+      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread", "Through", "Tr"]
       headName
   _ -> False
 
@@ -1006,6 +1009,7 @@ reduceBuiltin headName values = case headName of
   "SequenceCount" -> reduceSequenceSearch SequenceCount values
   "Dot" -> reduceDot values
   "Cross" -> reduceCross values
+  "Tr" -> reduceTr values
   "Det" -> reduceDet values
   "Inverse" -> reduceInverse values
   "MatrixPower" -> reduceMatrixPower values
@@ -10300,6 +10304,175 @@ reduceCross [left, right] = do
           )
 reduceCross _ =
   Left (EvaluationError "Cross currently expects exactly two vector arguments.")
+
+data TrEvaluationPlan
+  = TrTermsPlan !Expr ![Expr]
+  | TrLevelPlan !Expr !Expr !Integer
+  deriving (Eq, Show)
+
+reduceTr :: [Expr] -> Either EvaluationError Expr
+reduceTr values = do
+  plan <- trEvaluationPlan values
+  case plan of
+    TrTermsPlan combiner terms -> combineTrTermsPure combiner terms
+    TrLevelPlan combiner subject level ->
+      contractTrLevelPure combiner subject level
+
+trEvaluationPlan :: [Expr] -> Either EvaluationError TrEvaluationPlan
+trEvaluationPlan = \case
+  [subject] -> ordinary subject (Symbol "Plus")
+  [subject, combiner] -> ordinary subject combiner
+  [subject, combiner, Integer level]
+    | level >= 1 -> Right (TrLevelPlan combiner subject level)
+    | otherwise -> invalidLevel
+  [_, _, _] -> invalidLevel
+  _ ->
+    Left
+      ( EvaluationError
+          "Tr expects an array, an optional combiner, and an optional rank-restriction integer."
+      )
+ where
+  ordinary subject combiner =
+    TrTermsPlan combiner <$> ordinaryTrTerms subject combiner
+  invalidLevel =
+    Left (EvaluationError "Tr level must be a positive integer.")
+
+ordinaryTrTerms :: Expr -> Expr -> Either EvaluationError [Expr]
+ordinaryTrTerms subject combiner = case subject of
+  SparseArray dimensions entries fill ->
+    sparseTerms dimensions entries fill
+  _ -> do
+    dimensions <- trDenseDimensions subject
+    case dimensions of
+      [] -> Left (EvaluationError "Tr expects a rectangular array.")
+      [_] -> maybe invalidArray Right (trListValues subject)
+      [rows, columns] ->
+        traverse
+          (\index -> trDenseArrayValueAt subject [index, index])
+          [0 .. min rows columns - 1]
+      _ -> Left (EvaluationError "Tr currently supports vectors and matrices.")
+ where
+  invalidArray = Left (EvaluationError "Tr expects a rectangular array.")
+  sparseTerms dimensions entries fill = case dimensions of
+    [size]
+      | exactZero fill
+      , trPlusCombiner combiner ->
+          Right [value | SparseEntry _ value <- entries]
+      | otherwise ->
+          materializeSparseTerms size
+            (\index -> sparseValueAt entries fill [index])
+    [rows, columns]
+      | exactZero fill ->
+          Right
+            [ value
+            | SparseEntry [row, column] value <- entries
+            , row == column
+            , row <= min rows columns
+            ]
+      | otherwise ->
+          materializeSparseTerms (min rows columns)
+            (\index -> sparseValueAt entries fill [index, index])
+    _ -> Left (EvaluationError "Tr currently supports vectors and matrices.")
+
+materializeSparseTerms
+  :: Integer
+  -> (Integer -> Expr)
+  -> Either EvaluationError [Expr]
+materializeSparseTerms count build
+  | count > maximumDenseArrayMaterializedNodes =
+      Left
+        ( EvaluationError
+            "SparseArray dimensions exceed the native materialization limit."
+        )
+  | otherwise = Right [build index | index <- [1 .. count]]
+
+trDenseDimensions :: Expr -> Either EvaluationError [Int]
+trDenseDimensions expression = case trListValues expression of
+  Nothing -> Right []
+  Just [] -> Right [0]
+  Just values -> do
+    childDimensions <- traverse trDenseDimensions values
+    case childDimensions of
+      [] -> Right [0]
+      firstDimensions : remaining
+        | all (== firstDimensions) remaining ->
+            Right (length values : firstDimensions)
+        | otherwise ->
+            Left
+              ( EvaluationError
+                  "SparseArray dense input must be rectangular."
+              )
+
+trDenseArrayValueAt :: Expr -> [Int] -> Either EvaluationError Expr
+trDenseArrayValueAt = foldM select
+ where
+  select expression index = case trListValues expression of
+    Just values
+      | index >= 0
+      , index < length values -> Right (values !! index)
+    _ -> Left (EvaluationError "Expected a rectangular List array.")
+
+trListValues :: Expr -> Maybe [Expr]
+trListValues (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = Just values
+trListValues _ = Nothing
+
+trPlusCombiner :: Expr -> Bool
+trPlusCombiner (Symbol combinerName) =
+  systemHeadIn ["Plus"] combinerName
+trPlusCombiner _ = False
+
+combineTrTermsPure :: Expr -> [Expr] -> Either EvaluationError Expr
+combineTrTermsPure combiner terms
+  | trPlusCombiner combiner = evaluate (Call (Symbol "Plus") terms)
+  | otherwise = do
+      combined <- applyTraversalCallable combiner terms
+      evaluate combined
+
+contractTrLevelPure
+  :: Expr
+  -> Expr
+  -> Integer
+  -> Either EvaluationError Expr
+contractTrLevelPure combiner subject level
+  | level == 1 = do
+      values <- requireTrLevelList subject
+      case equalWidthTrRows values of
+        Just rows -> do
+          columns <- traverse (combineTrTermsPure combiner) (transpose rows)
+          Right (rebuildWithSplicing (Symbol "List") columns)
+        Nothing -> combineTrTermsPure combiner values
+  | otherwise = do
+      values <- requireTrLevelList subject
+      contracted <-
+        traverse
+          (\value -> contractTrLevelPure combiner value (level - 1))
+          values
+      contractTrLevelPure
+        combiner
+        (Call (Symbol "List") contracted)
+        1
+
+requireTrLevelList :: Expr -> Either EvaluationError [Expr]
+requireTrLevelList expression = case trListValues expression of
+  Just values -> Right values
+  Nothing -> case expression of
+    Call {} ->
+      Left
+        ( EvaluationError
+            "Tr expects a List at every contracted level."
+        )
+    _ -> Left (EvaluationError "Tr expects a nonatomic expression.")
+
+equalWidthTrRows :: [Expr] -> Maybe [[Expr]]
+equalWidthTrRows [] = Nothing
+equalWidthTrRows values = do
+  rows <- traverse trListValues values
+  case rows of
+    [] -> Nothing
+    firstRow : remaining
+      | all ((== length firstRow) . length) remaining -> Just rows
+      | otherwise -> Nothing
 
 requireDenseVector :: Text -> Expr -> Either EvaluationError [Expr]
 requireDenseVector _operation (Call (Symbol "List") values) = Right values

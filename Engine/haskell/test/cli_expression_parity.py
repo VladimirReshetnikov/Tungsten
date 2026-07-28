@@ -208,6 +208,37 @@ CASES = (
         0,
     ),
     (
+        "dense sparse and rank-restricted Tr parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenTrI,tungstenTrF,tungstenTrA,tungstenTrB];"
+            "tungstenTrI=0;"
+            "tungstenTrF[x__]:=(tungstenTrI++;p[tungstenTrI,x]);"
+            "tungstenTrA[]:=(tungstenTrI++;{a});"
+            "tungstenTrB[]:=(tungstenTrI++;{b,c});"
+            "{Tr[{{a,b},{c,d}}],"
+            "Tr[{{a,b},{c,d}},tungstenTrF],tungstenTrI,"
+            "Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},tungstenTrF,2],"
+            "tungstenTrI,Tr[SparseArray[{{2}->a},{4}],Plus],"
+            "Tr[SparseArray[{{1,1}->a},{3,3}],Times],"
+            "Tr[SparseArray[{{1,1}->a},{3,3},z],f],"
+            "Tr[Unevaluated[{{1+1,x},{y,3+1}}],HoldComplete],"
+            "System`Tr[Unevaluated[{{1+1,b},{c,3+1}}]],"
+            "Global`Tr[Unevaluated[{{1+1,b},{c,3+1}}]],"
+            "Tr[{{{a}},{{b,c}}},Times,1],"
+            "Tr[Unevaluated[{Sequence[{a},{b,c}]}],Times,1],"
+            "Tr[Unevaluated[{Splice[{System`List[a],System`List[b,c]},System`Times]}],System`Times,1],"
+            "Tr[Unevaluated[{tungstenTrA[],tungstenTrB[]}],Times,1],"
+            "tungstenTrI,Tr[{a,b},Cross,1],Tr[{a,b},Det,1],"
+            "Tr[{a,b},tungstenTrF,0],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "complex projections and listable threading",
         (
             "expr",
