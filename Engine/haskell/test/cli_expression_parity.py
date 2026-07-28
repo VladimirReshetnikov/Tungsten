@@ -160,6 +160,29 @@ CASES = (
         0,
     ),
     (
+        "stateful Outer traversal levels and rebuild boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenOuterI,tungstenOuterF];"
+            "tungstenOuterI=0;"
+            "tungstenOuterF[x__]:=(tungstenOuterI++;"
+            "p[tungstenOuterI,x]);"
+            "{Outer[f,{a,b},{x,y}],"
+            "Outer[tungstenOuterF,{a,b},{x,y}],tungstenOuterI,"
+            "Outer[f,a+b,{c,d},1],"
+            "Outer[f,{{a,b},{c}},{{x},{y,z}},1,2],"
+            "Outer[f,{a,b},1,2],Outer[Nothing,{a,b}],"
+            "Outer[Nothing,System`List[a,b]],"
+            "System`Outer[f,{a},{b}],Global`Outer[f,{a},{b}],"
+            "Outer[f,{a},x],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "complex projections and listable threading",
         (
             "expr",

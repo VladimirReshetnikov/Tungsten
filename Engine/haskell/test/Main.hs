@@ -708,6 +708,8 @@ checkEvaluator = do
         , ("precision and accuracy decimal log extremes", "{Accuracy[1.*^-400],Precision[1.23``20*^-400],Precision[1.23``20*^400]}", "List[415.954589770191, -379.9100948885606, Overflow[]]")
         , ("structural Distribute products and boundaries", "{Distribute[(a+b)(c+d)],Distribute[f[g[a,b],g[c,d]],g,f,h,k],Distribute[f[g[],x],g],Distribute[x],Distribute[f[g[a,b]],g,q],Distribute[f[g[1+1,3]],g,f,Plus,Times],System`Distribute[(a+b)(c+d)],Global`Distribute[(a+b)(c+d)]}", "List[Plus[Times[a, c], Times[a, d], Times[b, c], Times[b, d]], k[h[a, c], h[a, d], h[b, c], h[b, d]], g[], x, f[g[a, b]], Times[Plus[2], Plus[3]], System`Distribute[Times[Plus[a, b], Plus[c, d]]], Global`Distribute[Times[Plus[a, b], Plus[c, d]]]]")
         , ("Inner pair callbacks and structural boundaries", "{Inner[Times,{a,b},{c,d},Plus],Inner[f,h[a,b],q[c,d],g],Inner[f,{}, {},g],Inner[Function[{x,y},HoldComplete[x+y]],{1,2},{3,4},List],Inner[f,Sequence[{a},{b}],g],System`Inner[Times,{a,b},{c,d},Plus],Global`Inner[Times,{a,b},{c,d},Plus]}", "List[Plus[Times[a, c], Times[b, d]], g[f[a, c], f[b, d]], g[], List[HoldComplete[Plus[1, 3]], HoldComplete[Plus[2, 4]]], g[f[a, b]], System`Inner[Times, List[a, b], List[c, d], Plus], Global`Inner[Times, List[a, b], List[c, d], Plus]]")
+        , ("Outer Cartesian products levels and raw containers", "{Outer[f,{a,b},{x,y}],Outer[f,a+b,{c,d},1],Outer[f,{{a,b},{c}},{{x},{y,z}},1,2],Outer[f,{a,b},{x,y},0,1],Outer[f,h[a,b],q[x,y],-1],Outer[f,{a,b},1,2],Outer[f,h[a][b,c],{x}]}", "List[List[List[f[a, x], f[a, y]], List[f[b, x], f[b, y]]], Plus[List[f[a, c], f[a, d]], List[f[b, c], f[b, d]]], List[List[List[f[List[a, b], x]], List[f[List[a, b], y], f[List[a, b], z]]], List[List[f[List[c], x]], List[f[List[c], y], f[List[c], z]]]], List[f[List[a, b], x], f[List[a, b], y]], h[q[f[a, x], f[a, y]], q[f[b, x], f[b, y]]], List[f[a], f[b]], h[a][List[f[b, x]], List[f[c, x]]]]")
+        , ("Outer rebuild normalization and qualification boundaries", "{Outer[Nothing,{a,b}],Outer[Nothing,System`List[a,b]],Outer[f,Unevaluated[{a,b}],{x}],System`Outer[f,{a},{b}],Global`Outer[f,{a},{b}]}", "List[List[], System`List[Nothing, Nothing], List[List[f[a, x]], List[f[b, x]]], System`Outer[f, List[a], List[b]], Global`Outer[f, List[a], List[b]]]")
         , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
         , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
         , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
@@ -1330,6 +1332,7 @@ checkEvaluationSession = do
         , ("precision and accuracy evaluate arguments once", "i=0; {Precision[(i++;1.)],Accuracy[(i++;1000.)],Precision[(i++;1),(i++;2)],i,$MessageList}", "List[MachinePrecision, 12.954589770191003, Precision[1, 2], 4, List[]]")
         , ("Distribute returns replacement-headed products without reentry", "ClearAll[h,k];h[x_]:=p[x];k[x___]:=q[x];Distribute[f[g[a,b],g[c]],g,f,h,k]", "k[h[a, c], h[b, c]]")
         , ("Inner threads pair and combiner callback state", "Clear[i,ff,gg];i=0;ff[x_,y_]:=(i++;p[i,x,y]);gg[x__]:=(i++;q[i,x]);{Inner[ff,{a,b},{c,d},gg],i,$MessageList}", "List[q[3, p[1, a, c], p[2, b, d]], 3, List[]]")
+        , ("Outer threads Cartesian callbacks left to right", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Outer[ff,{a,b},{x,y}],i,$MessageList}", "List[List[List[p[1, a, x], p[2, a, y]], List[p[3, b, x], p[4, b, y]]], 4, List[]]")
         , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
         , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
         , ("operate invokes its selected head callback exactly once", "ClearAll[y];y=0;{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y}", "List[q[f][g][a], 1]")
@@ -1558,6 +1561,7 @@ checkEvaluationSession = do
         , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
         , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
         , ("operate preserves callback and qualification boundaries", "{Operate[Function[x,Nothing],f[a],0],Operate[Function[x,Nothing],f[a],1],Operate[Function[x,Sequence[p,q]],f[a],1],Operate[p,Sequence[f[a]]],Operate[p,f[a],Sequence[]],Operate[p,Unevaluated[f[a]],1],System`Operate[p,Unevaluated[f[a]]],Global`Operate[p,Unevaluated[f[a]]]}", "List[Nothing[a], p[a], p[f][a], p[f][a], p[f][a], System`Operate[p, f[a]], Global`Operate[p, Unevaluated[f[a]]]]")
+        , ("outer normalizes generated Sequence Splice and Nothing", "ClearAll[seq,sp,tsp,nt];seq[x__]:=Sequence[p[x],q[x]];sp[x__]:=Splice[{p[x],q[x]}];tsp[x__]:=Splice[{p[x],q[x]},h];nt[x__]:=Nothing;{Outer[seq,{a,b},{x}],Outer[sp,{a,b},{x}],Outer[tsp,h[a,b]],Outer[nt,{a,b},{x}],Outer[nt,System`List[a,b],{x}]}", "List[List[List[p[a, x], q[a, x]], List[p[b, x], q[b, x]]], List[List[p[a, x], q[a, x]], List[p[b, x], q[b, x]]], h[p[a], q[a], p[b], q[b]], List[List[], List[]], System`List[List[], List[]]]")
         , ("map level specifications", "{Map[f, {a, b}, {0}], Map[f, {a, {b, c}}, {2}], Map[f, {a, {b, c}}, {1, 2}]}", "List[f[List[a, b]], List[a, List[f[b], f[c]]], List[f[a], f[List[f[b], f[c]]]]]")
         , ("apply level specifications", "{Apply[f, {a, b}, {0}], Apply[f, {a, {b, c}}, {2}], Apply[f, {a, {b, c}}, {1, 2}]}", "List[f[a, b], List[a, List[b, c]], List[a, f[b, c]]]")
         , ("map normalizes generated Nothing", "Map[Nothing &, {a, b}]", "List[]")
@@ -1769,6 +1773,11 @@ checkEvaluationSession = do
           , "g[q[a, x], q[b, y]]"
           , ["{a, x}", "{b, y}", "{q[a, x], q[b, y]}"]
           )
+        , ( "Outer invokes Cartesian callbacks in depth-first order"
+          , "Outer[(Print[InputForm[{##}]];q[##])&,{a,b},{x,y}]"
+          , "List[List[q[a, x], q[a, y]], List[q[b, x], q[b, y]]]"
+          , ["{a, x}", "{a, y}", "{b, x}", "{b, y}"]
+          )
         , ( "nested abort protection re-defers at compound boundaries"
           , "CheckAbort[AbortProtect[AbortProtect[Abort[]; Print[\"innerTail\"]]; Print[\"outerTail\"]], fail]"
           , "fail"
@@ -1977,6 +1986,27 @@ checkEvaluationSession = do
             , ( "Inner::error"
               , "MessageName[Inner, \"error\"]"
               , "Inner::error: Inner expects expressions with the same length."
+              )
+            ]
+          )
+        , ( "Outer validates arity and compound sequences"
+          , "{Outer[],Outer[f],Outer[f,a],Outer[f,{a},x],$MessageList}"
+          , "List[Outer[], Outer[f], Outer[f, a], Outer[f, List[a], x], List[HoldForm[MessageName[Outer, \"error\"]], HoldForm[MessageName[Outer, \"error\"]], HoldForm[MessageName[Outer, \"error\"]], HoldForm[MessageName[Outer, \"error\"]]]]"
+          , [ ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a function and at least one sequence."
+              )
+            , ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a function and at least one sequence."
+              )
+            , ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a nonatomic expression."
+              )
+            , ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a nonatomic expression."
               )
             ]
           )

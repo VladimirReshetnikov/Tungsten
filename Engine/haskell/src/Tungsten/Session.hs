@@ -2987,6 +2987,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionOperate depth session values)
   Call (Symbol "Inner") values ->
     Just (evaluateSessionInner depth session values)
+  Call (Symbol "Outer") values ->
+    Just (evaluateSessionOuter depth session values)
   Call (Symbol "MapAll") values ->
     Just (evaluateSessionMapAll depth session values)
   Call (Symbol "MapApply") values ->
@@ -3722,6 +3724,54 @@ evaluateSessionInner depth session = \case
       rightRest
   combinePairs _ _ current _ _ _ =
     sessionFailure current "Inner expects expressions with the same length."
+
+evaluateSessionOuter
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOuter depth session values =
+  case outerTraversalPlan values of
+    P.Left (EvaluationError message) -> sessionFailure session message
+    P.Right (function, sequences) -> recurse function sequences [] session
+ where
+  recurse function [] chosen current =
+    evaluateSessionCallable depth current function (reverse chosen)
+  recurse function ((node, remainingDepth) : rest) chosen current =
+    descend function node remainingDepth rest chosen current
+
+  descend function node (Just 0) rest chosen current =
+    recurse function rest (node : chosen) current
+  descend function (Call expressionHead children) remainingDepth rest chosen current = do
+    (descended, updated) <-
+      descendChildren
+        function
+        (fmap (subtract 1) remainingDepth)
+        rest
+        chosen
+        []
+        current
+        children
+    Right (rebuildOuterCall expressionHead descended, updated)
+  descend function node _ rest chosen current =
+    recurse function rest (node : chosen) current
+
+  descendChildren _ _ _ _ retained current [] =
+    Right (reverse retained, current)
+  descendChildren function remainingDepth rest chosen retained current (child : children) = do
+    (descended, updated) <-
+      descend function child remainingDepth rest chosen current
+    descendChildren
+      function
+      remainingDepth
+      rest
+      chosen
+      (descended : retained)
+      updated
+      children
+
+  rebuildOuterCall expressionHead@Symbol {} = rebuildWithSplicing expressionHead
+  rebuildOuterCall expressionHead = Call expressionHead
 
 operateSessionAtLevel
   :: Int
@@ -9557,6 +9607,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "MachineIntegerQ"
       , "MachineNumberQ"
       , "NumberQ"
+      , "Outer"
       , "Plus"
       , "Precision"
       , "RealValuedNumberQ"

@@ -30,6 +30,7 @@ module Tungsten.Evaluate
   , normalizeEvaluatedCall
   , normalizeLevelSpec
   , operationPositionPaths
+  , outerTraversalPlan
   , pathExpression
   , rebuildWithSplicing
   , reduceEvaluatedCall
@@ -232,6 +233,7 @@ stripPureTransparentUnevaluatedArguments expressionHead
       , "MachineIntegerQ"
       , "MachineNumberQ"
       , "NumberQ"
+      , "Outer"
       , "Plus"
       , "Precision"
       , "RealValuedNumberQ"
@@ -640,7 +642,8 @@ pureReducerDispatchView expression = case expression of
     | isSystemSymbol originalHead
     , Just shortName <- normalizeSystemSymbolName originalHead
     , originalHead /= shortName
-    , shortName `notElem` ["Distribute", "Inner", "Operate", "Thread"] ->
+    , shortName
+        `notElem` ["Distribute", "Inner", "Operate", "Outer", "Thread"] ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -734,7 +737,7 @@ preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
   Symbol headName ->
     systemHeadIn
-      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Thread"]
+      ["Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread"]
       headName
   _ -> False
 
@@ -754,6 +757,7 @@ reduceBuiltin headName values = case headName of
   "Accuracy" -> Right (reduceAccuracy values)
   "Distribute" -> reduceDistribute values
   "Inner" -> reduceInner values
+  "Outer" -> reduceOuter values
   "Re" -> Right (reduceComplexComponent "Re" values)
   "Im" -> Right (reduceComplexComponent "Im" values)
   "ReIm" -> Right (reduceReIm values)
@@ -1544,6 +1548,60 @@ reduceInner = \case
   [_, _, _, _] ->
     Left (EvaluationError "Inner expects a nonatomic expression.")
   _ -> Left (EvaluationError "Inner expects exactly four arguments.")
+
+reduceOuter :: [Expr] -> Either EvaluationError Expr
+reduceOuter values = do
+  (function, sequences) <- outerTraversalPlan values
+  outerTraversePure function sequences []
+
+outerTraversalPlan
+  :: [Expr]
+  -> Either EvaluationError (Expr, [(Expr, Maybe Integer)])
+outerTraversalPlan = \case
+  function : operands@(_ : _) -> do
+    let (sequences, levels) = splitTrailingLevels operands []
+    if all isCall sequences
+      then Right (function, zip sequences (broadcastLevels (length sequences) levels))
+      else Left (EvaluationError "Outer expects a nonatomic expression.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Outer expects a function and at least one sequence."
+      )
+ where
+  isCall Call {} = True
+  isCall _ = False
+  splitTrailingLevels sequences levels
+    | _ : _ <- sequences
+    , Integer level <- last sequences =
+        splitTrailingLevels (init sequences) (level : levels)
+    | otherwise = (sequences, levels)
+  broadcastLevels count [] = replicate count Nothing
+  broadcastLevels count levels =
+    map Just (take count (levels <> repeat (last levels)))
+
+outerTraversePure
+  :: Expr
+  -> [(Expr, Maybe Integer)]
+  -> [Expr]
+  -> Either EvaluationError Expr
+outerTraversePure function = recurse
+ where
+  recurse [] chosen = applyTraversalCallable function (reverse chosen)
+  recurse ((node, remainingDepth) : rest) chosen =
+    descend node remainingDepth rest chosen
+  descend node (Just 0) rest chosen = recurse rest (node : chosen)
+  descend (Call expressionHead values) remainingDepth rest chosen = do
+    descended <-
+      traverse
+        (\value -> descend value (fmap (subtract 1) remainingDepth) rest chosen)
+        values
+    Right (rebuildOuterCall expressionHead descended)
+  descend node _ rest chosen = recurse rest (node : chosen)
+
+rebuildOuterCall :: Expr -> [Expr] -> Expr
+rebuildOuterCall expressionHead@Symbol {} = rebuildWithSplicing expressionHead
+rebuildOuterCall expressionHead = Call expressionHead
 
 precisionValue :: Expr -> PrecisionValue
 precisionValue = \case
@@ -11296,6 +11354,14 @@ rebuildWithSplicing expressionHead values =
     | otherwise = concatMap splice values
   splice (Call (Symbol sequenceHead) sequenceValues)
     | systemHeadIn ["Sequence"] sequenceHead = sequenceValues
+  splice (Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues])
+    | systemHeadIn ["Splice"] spliceHead
+    , systemHeadIn ["List"] listHead
+    , expressionHead == Symbol "List" = spliceValues
+  splice (Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues, target])
+    | systemHeadIn ["Splice"] spliceHead
+    , systemHeadIn ["List"] listHead
+    , target == expressionHead = spliceValues
   splice value = [value]
   filterNothing
     | expressionHead `elem` [Symbol "Association", Symbol "List"] =
