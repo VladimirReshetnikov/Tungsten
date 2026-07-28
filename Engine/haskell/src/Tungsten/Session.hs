@@ -1226,6 +1226,8 @@ qualifiedAliasDispatchHeads =
   , "FixedPointList"
   , "Fold"
   , "FoldList"
+  , "FoldWhile"
+  , "FoldWhileList"
   , "FoldPair"
   , "FoldPairList"
   , "FromContinuedFraction"
@@ -2952,6 +2954,10 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionFold False depth session values)
   Call (Symbol "FoldList") values ->
     Just (evaluateSessionFold True depth session values)
+  Call (Symbol "FoldWhile") values ->
+    Just (evaluateSessionFoldWhile False depth session values)
+  Call (Symbol "FoldWhileList") values ->
+    Just (evaluateSessionFoldWhile True depth session values)
   Call (Symbol "FoldPair") values ->
     Just (evaluateSessionFoldPair False depth session values)
   Call (Symbol "FoldPairList") values ->
@@ -3861,6 +3867,148 @@ evaluateSessionFold returnHistory depth session = \case
       remaining
       (retained <> [updated])
       nextSession
+
+evaluateSessionFoldWhile
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFoldWhile returnHistory depth session arguments' =
+  case arguments' of
+    [function, initial, subject, test] ->
+      foldWhile function initial subject test Nothing Nothing
+    [function, initial, subject, test, historyExpression] ->
+      foldWhile function initial subject test (Just historyExpression) Nothing
+    [function, initial, subject, test, historyExpression, trailingExpression] ->
+      foldWhile
+        function
+        initial
+        subject
+        test
+        (Just historyExpression)
+        (Just trailingExpression)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " currently supports a function, an initial value, inputs, a test, and optional history and trailing counts."
+        )
+ where
+  operation = if returnHistory then "FoldWhileList" else "FoldWhile"
+
+  foldWhile function initial subject test historyExpression trailingExpression = do
+    inputs <- sessionSequenceValues session "FoldWhileList" subject
+    historySize <- normalizeHistory historyExpression
+    (initialSucceeds, testedSession) <-
+      testHistory test historySize [initial] session
+    if initialSucceeds
+      then
+        foldInputs
+          function
+          test
+          historySize
+          trailingExpression
+          [initial]
+          inputs
+          testedSession
+      else finish [initial] testedSession
+
+  normalizeHistory Nothing = Right (Just 1)
+  normalizeHistory (Just (Integer value))
+    | value > 0 = Right (Just value)
+  normalizeHistory (Just (Symbol name))
+    | isSessionSystemHead "All" name = Right Nothing
+  normalizeHistory _ =
+    patternFailure
+      session
+      "FoldWhileList expects a positive history length or All."
+
+  foldInputs _ _ _ _ results [] currentSession = finish results currentSession
+  foldInputs function test historySize trailingExpression results (inputValue : remaining) currentSession = do
+    (updated, functionSession) <-
+      evaluateSessionCallable
+        depth
+        currentSession
+        function
+        [last results, inputValue]
+    let nextResults = results <> [updated]
+    (predicateSucceeds, testedSession) <-
+      testHistory test historySize nextResults functionSession
+    if predicateSucceeds
+      then
+        foldInputs
+          function
+          test
+          historySize
+          trailingExpression
+          nextResults
+          remaining
+          testedSession
+      else
+        finishFailure
+          function
+          trailingExpression
+          nextResults
+          remaining
+          testedSession
+
+  finishFailure function trailingExpression results remaining currentSession =
+    case trailingExpression of
+      Nothing -> finish results currentSession
+      Just (Integer trailing)
+        | trailing < 0 ->
+            let retainedCount =
+                  min
+                    (toInteger (length results))
+                    (max 1 (toInteger (length results) + trailing))
+             in finish (take (fromInteger retainedCount) results) currentSession
+        | otherwise ->
+            appendTrailing function trailing results remaining currentSession
+      Just _ ->
+        patternFailure
+          currentSession
+          "FoldWhileList expects an integer argument."
+
+  appendTrailing _ 0 results _ currentSession = finish results currentSession
+  appendTrailing _ _ results [] currentSession = finish results currentSession
+  appendTrailing function remainingCount results (inputValue : remaining) currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable
+        depth
+        currentSession
+        function
+        [last results, inputValue]
+    appendTrailing
+      function
+      (remainingCount - 1)
+      (results <> [updated])
+      remaining
+      nextSession
+
+  testHistory test historySize history currentSession = do
+    (result, updated) <-
+      evaluateSessionCallable
+        depth
+        currentSession
+        test
+        (historyArguments historySize history)
+    Right (result == Symbol "True", updated)
+
+  historyArguments Nothing history = history
+  historyArguments (Just required) history
+    | required >= toInteger (length history) = history
+    | otherwise = drop (length history - fromInteger required) history
+
+  finish results currentSession =
+    let retained = filter (/= Symbol "Nothing") results
+     in Right
+          ( case (returnHistory, retained) of
+              (True, _) -> evaluatedList retained
+              (False, []) -> Symbol "Nothing"
+              (False, _) -> last retained
+          , currentSession
+          )
 
 evaluateSessionFoldPair
   :: Bool

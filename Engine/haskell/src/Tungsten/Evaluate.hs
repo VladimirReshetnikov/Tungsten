@@ -863,6 +863,8 @@ reduceBuiltin headName values = case headName of
   "FixedPointList" -> reduceFixedPoint True values
   "Fold" -> reduceFold False values
   "FoldList" -> reduceFold True values
+  "FoldWhile" -> reduceFoldWhile False values
+  "FoldWhileList" -> reduceFoldWhile True values
   "FoldPair" -> reduceFoldPair False values
   "FoldPairList" -> reduceFoldPair True values
   "Replace" -> reduceReplace values
@@ -8993,6 +8995,108 @@ buildFoldHistory _ _ [] retained = Right retained
 buildFoldHistory function current (value : remaining) retained = do
   updated <- evaluate (Call function [current, value])
   buildFoldHistory function updated remaining (retained <> [updated])
+
+reduceFoldWhile :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFoldWhile returnHistory arguments' = case arguments' of
+  [function, initial, subject, test] ->
+    foldWhile function initial subject test Nothing Nothing
+  [function, initial, subject, test, historyExpression] ->
+    foldWhile function initial subject test (Just historyExpression) Nothing
+  [function, initial, subject, test, historyExpression, trailingExpression] ->
+    foldWhile
+      function
+      initial
+      subject
+      test
+      (Just historyExpression)
+      (Just trailingExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " currently supports a function, an initial value, inputs, a test, and optional history and trailing counts."
+          )
+      )
+ where
+  operation = if returnHistory then "FoldWhileList" else "FoldWhile"
+
+  foldWhile function initial subject test historyExpression trailingExpression = do
+    inputs <- sequenceFoldCollectionValues "FoldWhileList" subject
+    historySize <- normalizeFoldWhileHistory historyExpression
+    initialSucceeds <- foldWhilePredicate test historySize [initial]
+    if initialSucceeds
+      then foldInputs function test historySize trailingExpression [initial] inputs
+      else finish [initial]
+
+  foldInputs _ _ _ _ results [] = finish results
+  foldInputs function test historySize trailingExpression results (inputValue : remaining) = do
+    updated <- evaluate (Call function [last results, inputValue])
+    let nextResults = results <> [updated]
+    predicateSucceeds <- foldWhilePredicate test historySize nextResults
+    if predicateSucceeds
+      then foldInputs function test historySize trailingExpression nextResults remaining
+      else finishFailure function trailingExpression nextResults remaining
+
+  finishFailure function trailingExpression results remaining =
+    case trailingExpression of
+      Nothing -> finish results
+      Just (Integer trailing)
+        | trailing < 0 ->
+            let retainedCount =
+                  min
+                    (toInteger (length results))
+                    (max 1 (toInteger (length results) + trailing))
+             in finish (take (fromInteger retainedCount) results)
+        | otherwise -> appendTrailing function trailing results remaining
+      Just _ ->
+        Left
+          (EvaluationError "FoldWhileList expects an integer argument.")
+
+  appendTrailing _ 0 results _ = finish results
+  appendTrailing _ _ results [] = finish results
+  appendTrailing function remainingCount results (inputValue : remaining) = do
+    updated <- evaluate (Call function [last results, inputValue])
+    appendTrailing
+      function
+      (remainingCount - 1)
+      (results <> [updated])
+      remaining
+
+  finish results =
+    let retained = filter (/= Symbol "Nothing") results
+     in Right $ case (returnHistory, retained) of
+          (True, _) -> evaluatedList retained
+          (False, []) -> Symbol "Nothing"
+          (False, _) -> last retained
+
+normalizeFoldWhileHistory
+  :: Maybe Expr
+  -> Either EvaluationError (Maybe Integer)
+normalizeFoldWhileHistory Nothing = Right (Just 1)
+normalizeFoldWhileHistory (Just (Integer value))
+  | value > 0 = Right (Just value)
+normalizeFoldWhileHistory (Just (Symbol name))
+  | systemHeadIn ["All"] name = Right Nothing
+normalizeFoldWhileHistory _ =
+  Left
+    ( EvaluationError
+        "FoldWhileList expects a positive history length or All."
+    )
+
+foldWhilePredicate
+  :: Expr
+  -> Maybe Integer
+  -> [Expr]
+  -> Either EvaluationError Bool
+foldWhilePredicate test historySize history = do
+  result <- evaluate (Call test (foldWhileHistoryArguments historySize history))
+  Right (result == Symbol "True")
+
+foldWhileHistoryArguments :: Maybe Integer -> [Expr] -> [Expr]
+foldWhileHistoryArguments Nothing history = history
+foldWhileHistoryArguments (Just required) history
+  | required >= toInteger (length history) = history
+  | otherwise = drop (length history - fromInteger required) history
 
 reduceFoldPair :: Bool -> [Expr] -> Either EvaluationError Expr
 reduceFoldPair returnHistory arguments' = case arguments' of

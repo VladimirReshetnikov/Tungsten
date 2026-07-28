@@ -63,6 +63,22 @@ valueCases =
     , "{FoldList[f,x,{a,b,c}],FoldList[Plus,{1,2,3,4}]}"
     , "List[List[x, f[x, a], f[f[x, a], b], f[f[f[x, a], b], c]], List[1, 3, 6, 10]]"
     )
+  , ( "fold while retains the first failing result"
+    , "{FoldWhile[Plus,0,{1,2,3,4},#<4&],FoldWhileList[Plus,0,{1,2,3,4},#<4&]}"
+    , "List[6, List[0, 1, 3, 6]]"
+    )
+  , ( "fold while history and trailing controls"
+    , "{FoldWhileList[Plus,0,{1,2,3,4},Length[{##}]<2||Last[{##}]<4&,2],FoldWhileList[Plus,0,{1,2,3,4},Length[{##}]<4&,All],FoldWhileList[Plus,0,{1,2,3,4,5},#<4&,1,2],FoldWhileList[Plus,0,{1,2,3,4},#<4&,1,-1],FoldWhileList[Plus,0,{1,2,3,4},#<4&,1,-99]}"
+    , "List[List[0, 1, 3, 6], List[0, 1, 3, 6], List[0, 1, 3, 6, 10, 15], List[0, 1, 3], List[0]]"
+    )
+  , ( "fold while skips unused trailing-count validation"
+    , "{FoldWhileList[Plus,99,{1,2},False&,1,x],FoldWhileList[Plus,0,{1,2},True&,1,x]}"
+    , "List[List[99], List[0, 1, 3]]"
+    )
+  , ( "fold while filters Nothing results before selecting its output"
+    , "{FoldWhile[Function[{y,x},Nothing],0,{1},True&],FoldWhileList[Function[{y,x},Nothing],0,{1},True&]}"
+    , "List[0, List[0]]"
+    )
   , ( "fold pair result, history, projection, and state"
     , "{FoldPair[{#1+#2,#1-#2}&,10,{1,2,3}],FoldPairList[{#1+#2,#1-#2}&,10,{1,2,3}],FoldPairList[{#1+#2,#1-#2}&,10,{1,2,3},Last]}"
     , "List[10, List[11, 11, 10], List[9, 7, 4]]"
@@ -76,8 +92,8 @@ valueCases =
     , "List[FoldPair[List, 0, List[1], Function[Nothing]], List[]]"
     )
   , ( "qualified System dispatch and Global isolation"
-    , "{System`Nest[f,x,2],System`Fold[Plus,{1,2,3}],System`FoldPair[{#1+#2,#1-#2}&,10,{1,2}],Global`Nest[f,x,2],Global`FoldPair[f,x,{a}]}"
-    , "List[f[f[x]], 6, 11, Global`Nest[f, x, 2], Global`FoldPair[f, x, List[a]]]"
+    , "{System`Nest[f,x,2],System`Fold[Plus,{1,2,3}],System`FoldWhile[Plus,0,{1,2,3},#<3&],System`FoldPair[{#1+#2,#1-#2}&,10,{1,2}],Global`Nest[f,x,2],Global`FoldWhile[f,x,{a},True&],Global`FoldPair[f,x,{a}]}"
+    , "List[f[f[x]], 6, 3, 11, Global`Nest[f, x, 2], Global`FoldWhile[f, x, List[a], Function[True]], Global`FoldPair[f, x, List[a]]]"
     )
   ]
 
@@ -98,6 +114,10 @@ sessionCases =
   , ( "session callbacks preserve nest while effects"
     , "n=0;t=0; {NestWhile[(n++;#+1)&,0,(t++;#<3)&],NestWhileList[(n++;#+1)&,0,(t++;#<3)&],n,t}"
     , "List[3, List[0, 1, 2, 3], 6, 8]"
+    )
+  , ( "session callbacks preserve fold while effects"
+    , "n=0;t=0; f[x_,y_]:=(n++;x+y); q[x___]:=(t++;Last[{x}]<4); {FoldWhileList[f,0,{1,2,3,4,5},q,All,1],n,t}"
+    , "List[List[0, 1, 3, 6, 10], 4, 4]"
     )
   , ( "session callbacks and projections preserve fold pair effects"
     , "c=0;p=0; f[y_,x_]:=(c++;{y+x,y-x}); q[pair_]:=(p++;Last[pair]); {FoldPairList[f,10,{1,2,3},q],FoldPair[f,10,{1,2},q],c,p}"
@@ -131,6 +151,22 @@ errorCases =
     , "Fold[f,{}]"
     , "Fold[f, expr] expects a nonempty sequence."
     )
+  , ( "fold while arity"
+    , "FoldWhile[f,0,{1}]"
+    , "FoldWhile currently supports a function, an initial value, inputs, a test, and optional history and trailing counts."
+    )
+  , ( "fold while atomic input"
+    , "FoldWhile[f,0,x,True&]"
+    , "FoldWhileList expects a nonatomic expression."
+    )
+  , ( "fold while history domain"
+    , "FoldWhileList[Plus,0,{1},True&,0]"
+    , "FoldWhileList expects a positive history length or All."
+    )
+  , ( "fold while trailing count domain"
+    , "FoldWhileList[Plus,0,{1},#<1&,1,x]"
+    , "FoldWhileList expects an integer argument."
+    )
   , ( "fold pair arity"
     , "FoldPair[f,x]"
     , "FoldPair currently supports a function, an initial value, inputs, and an optional projection."
@@ -143,7 +179,12 @@ errorCases =
 
 sessionErrorCases :: [(Text, Text, Text, Text)]
 sessionErrorCases =
-  [ ( "session fold pair callback shape"
+  [ ( "session fold while preserves effects before a trailing-count failure"
+    , "n=0;t=0; f[x_,y_]:=(n++;x+y); q[x_]:=(t++;x<1); {FoldWhileList[f,0,{1},q,1,x],n,t}"
+    , "List[FoldWhileList[f, 0, List[1], q, 1, x], 1, 2]"
+    , "FoldWhileList::error: FoldWhileList expects an integer argument."
+    )
+  , ( "session fold pair callback shape"
     , "n=0; f[y_,x_]:=(n++; y+x); {FoldPairList[f,0,{1}],n}"
     , "List[FoldPairList[f, 0, List[1]], 1]"
     , "FoldPairList::error: FoldPairList expects each function application to return a list of two elements, got 1."

@@ -2061,9 +2061,13 @@ CASES = (
             "NestWhile[#+1&,0,#<3&], NestWhileList[#+1&,0,#<3&], "
             "FixedPoint[# /. a -> b &,a], FixedPointList[# /. a -> b &,a], "
             "Fold[Plus,{1,2,3}], FoldList[Plus,{1,2,3}], "
+            "FoldWhile[Plus,0,{1,2,3,4},#<4&], "
+            "FoldWhileList[Plus,0,{1,2,3,4},#<4&,1,-1], "
             "FoldPairList[(i++;{#1+#2,#1-#2})&,10,{1,2,3},(j++;Last[#])&], "
             "FoldPair[(i++;{#1+#2,#1-#2})&,10,{1,2}], "
-            "Nest[(i++; #+1)&,0,3], i, j}",
+            "Nest[(i++; #+1)&,0,3], "
+            "k=0; l=0; FoldWhileList[(k++;#1+#2)&,0,{1,2,3,4},(l++;#<4)&,1,1], "
+            "i, j, k, l}",
             "--form",
             "input",
         ),
