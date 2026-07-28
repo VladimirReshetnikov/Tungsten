@@ -2938,6 +2938,10 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionNest False depth session values)
   Call (Symbol "NestList") values ->
     Just (evaluateSessionNest True depth session values)
+  Call (Symbol "NestWhile") values ->
+    Just (evaluateSessionNestWhile False depth session values)
+  Call (Symbol "NestWhileList") values ->
+    Just (evaluateSessionNestWhile True depth session values)
   Call (Symbol "FixedPoint") values ->
     Just (evaluateSessionFixedPoint False depth session values)
   Call (Symbol "FixedPointList") values ->
@@ -3660,6 +3664,106 @@ evaluateSessionNest returnHistory depth session = \case
     (updated, nextSession) <-
       evaluateSessionCallable depth currentSession function [last retained]
     build function (remaining - 1) (retained <> [updated]) nextSession
+
+evaluateSessionNestWhile
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionNestWhile returnHistory depth session arguments' =
+  case arguments' of
+    [function, initial, test] ->
+      nestWhile function initial test Nothing Nothing
+    [function, initial, test, historyExpression] ->
+      nestWhile function initial test (Just historyExpression) Nothing
+    [function, initial, test, historyExpression, maximumExpression] ->
+      nestWhile
+        function
+        initial
+        test
+        (Just historyExpression)
+        (Just maximumExpression)
+    _ ->
+      sessionFailure
+        session
+        (operation <> " expects f, expr, test, optional m, optional max.")
+ where
+  operation = if returnHistory then "NestWhileList" else "NestWhile"
+
+  nestWhile function initial test historyExpression maximumExpression = do
+    historySize <- normalizeHistory historyExpression
+    maximumIterations <- normalizeMaximum maximumExpression
+    iterateWhile function test historySize maximumIterations 0 [initial] session
+
+  normalizeHistory Nothing = Right (Just 1)
+  normalizeHistory (Just (Integer value))
+    | value >= 1 = Right (Just value)
+  normalizeHistory (Just (Symbol name))
+    | isSessionSystemHead "All" name = Right Nothing
+  normalizeHistory _ =
+    patternFailure
+      session
+      "NestWhile history size must be a positive integer or All."
+
+  normalizeMaximum Nothing = Right Nothing
+  normalizeMaximum (Just (Integer value)) = Right (Just (max 0 value))
+  normalizeMaximum (Just (Symbol name))
+    | isSessionSystemHead "Infinity" name = Right Nothing
+  normalizeMaximum _ =
+    patternFailure
+      session
+      "NestWhile max iterations must be a non-negative integer or Infinity."
+
+  iterateWhile function test historySize maximumIterations iterations history currentSession = do
+    (predicateResult, testedSession) <-
+      predicateWithHistory test historySize history currentSession
+    if not predicateResult
+      then finish history testedSession
+      else
+        if iterations >= sessionIterationSafetyLimit
+          then
+            sessionFailure
+              testedSession
+              (operation <> " exceeded the Tungsten iteration safety limit.")
+          else case maximumIterations of
+            Just maximumValue
+              | iterations >= maximumValue -> finish history testedSession
+            _ -> do
+              (updated, nextSession) <-
+                evaluateSessionCallable
+                  depth
+                  testedSession
+                  function
+                  [last history]
+              iterateWhile
+                function
+                test
+                historySize
+                maximumIterations
+                (iterations + 1)
+                (history <> [updated])
+                nextSession
+
+  predicateWithHistory test historySize history currentSession =
+    case historySize of
+      Just required
+        | fromIntegral (length history) < required -> Right (True, currentSession)
+        | otherwise ->
+            applyPredicate
+              test
+              (drop (length history - fromIntegral required) history)
+              currentSession
+      Nothing -> applyPredicate test history currentSession
+
+  applyPredicate test predicateArguments currentSession = do
+    (result, updated) <-
+      evaluateSessionCallable depth currentSession test predicateArguments
+    Right (result == Symbol "True", updated)
+
+  finish history currentSession =
+    Right
+      (if returnHistory then evaluatedList history else last history, currentSession)
 
 evaluateSessionFixedPoint
   :: Bool

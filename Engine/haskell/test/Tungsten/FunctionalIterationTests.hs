@@ -37,6 +37,14 @@ valueCases =
     , "{FixedPoint[#/.a->b&,a],FixedPointList[#/.a->b&,a]}"
     , "List[b, List[a, b, b]]"
     )
+  , ( "nest while and nest while list"
+    , "{NestWhile[#+1&,0,#<3&],NestWhileList[#+1&,0,#<3&]}"
+    , "List[3, List[0, 1, 2, 3]]"
+    )
+  , ( "nest while history and maximum controls"
+    , "{NestWhile[#/2&,100,#>1&,2],NestWhileList[#+1&,0,#<10&,1,3]}"
+    , "List[Rational[25, 64], List[0, 1, 2, 3]]"
+    )
   , ( "fixed point explicit limit is soft"
     , "{FixedPoint[#-1&,5,2],FixedPoint[#-1&,5,0]}"
     , "List[3, 5]"
@@ -69,6 +77,10 @@ sessionCases =
     , "n=0; {FixedPoint[(n++;Min[#+1,2])&,0],n}"
     , "List[2, 3]"
     )
+  , ( "session callbacks preserve nest while effects"
+    , "n=0;t=0; {NestWhile[(n++;#+1)&,0,(t++;#<3)&],NestWhileList[(n++;#+1)&,0,(t++;#<3)&],n,t}"
+    , "List[3, List[0, 1, 2, 3], 6, 8]"
+    )
   ]
 
 errorCases :: [(Text, Text, Text)]
@@ -88,6 +100,10 @@ errorCases =
   , ( "fixed point limit domain"
     , "FixedPoint[f,x,-1]"
     , "FixedPoint expects a non-negative maximum iteration count."
+    )
+  , ( "nest while history domain"
+    , "NestWhile[f,x,True,0]"
+    , "NestWhile history size must be a positive integer or All."
     )
   , ( "fold empty sequence"
     , "Fold[f,{}]"

@@ -626,10 +626,10 @@ reduceBuiltin headName values = case headName of
   "Unequal" -> Right (reduceEquality False values)
   "SameQ" -> Right (boolean (allEqual values))
   "UnsameQ" -> Right (boolean (allDistinct values))
-  "Less" -> Right (reduceOrdering (<) headName values)
-  "LessEqual" -> Right (reduceOrdering (<=) headName values)
-  "Greater" -> Right (reduceOrdering (>) headName values)
-  "GreaterEqual" -> Right (reduceOrdering (>=) headName values)
+  "Less" -> Right (reduceOrdering (== LT) headName values)
+  "LessEqual" -> Right (reduceOrdering (/= GT) headName values)
+  "Greater" -> Right (reduceOrdering (== GT) headName values)
+  "GreaterEqual" -> Right (reduceOrdering (/= LT) headName values)
   "Inequality" -> Right (reduceInequality values)
   "Head" -> Right (unary headName headExpr values)
   "Length" -> Right (unary headName expressionLength values)
@@ -857,6 +857,8 @@ reduceBuiltin headName values = case headName of
   "ComposeList" -> reduceComposeList values
   "Nest" -> reduceNest False values
   "NestList" -> reduceNest True values
+  "NestWhile" -> reduceNestWhile False values
+  "NestWhileList" -> reduceNestWhile True values
   "FixedPoint" -> reduceFixedPoint False values
   "FixedPointList" -> reduceFixedPoint True values
   "Fold" -> reduceFold False values
@@ -2784,11 +2786,18 @@ reduceEquality False values
       boolean (allDistinct numericValues)
   | otherwise = Call (Symbol "Unequal") values
 
-reduceOrdering :: (Exact -> Exact -> Bool) -> Text -> [Expr] -> Expr
+reduceOrdering :: (Ordering -> Bool) -> Text -> [Expr] -> Expr
 reduceOrdering relation headName values
   | length values < 2 = Symbol "True"
   | Just exactValues <- traverse toExact values =
-      boolean (and (zipWith relation exactValues (drop 1 exactValues)))
+      boolean
+        ( and
+            ( zipWith
+                (\left right -> relation (compareExact left right))
+                exactValues
+                (drop 1 exactValues)
+            )
+        )
   | otherwise = Call (Symbol headName) values
 
 reduceInequality :: [Expr] -> Expr
@@ -2811,14 +2820,14 @@ reduceInequality values
     exactLeft <- toExact left
     exactRight <- toExact right
     relation <- case comparison of
-      "Less" -> Just (<)
-      "LessEqual" -> Just (<=)
-      "Greater" -> Just (>)
-      "GreaterEqual" -> Just (>=)
-      "Equal" -> Just (==)
-      "Unequal" -> Just (/=)
+      "Less" -> Just (== LT)
+      "LessEqual" -> Just (/= GT)
+      "Greater" -> Just (== GT)
+      "GreaterEqual" -> Just (/= LT)
+      "Equal" -> Just (== EQ)
+      "Unequal" -> Just (/= EQ)
       _ -> Nothing
-    pure (relation exactLeft exactRight)
+    pure (relation (compareExact exactLeft exactRight))
 
 unary :: Text -> (Expr -> Expr) -> [Expr] -> Expr
 unary _ function [value] = function value
@@ -8814,6 +8823,100 @@ buildNestHistory _ 0 retained = Right retained
 buildNestHistory function remaining retained = do
   updated <- evaluate (Call function [last retained])
   buildNestHistory function (remaining - 1) (retained <> [updated])
+
+reduceNestWhile :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceNestWhile returnHistory arguments' = case arguments' of
+  [function, initial, test] ->
+    nestWhile function initial test Nothing Nothing
+  [function, initial, test, historyExpression] ->
+    nestWhile function initial test (Just historyExpression) Nothing
+  [function, initial, test, historyExpression, maximumExpression] ->
+    nestWhile
+      function
+      initial
+      test
+      (Just historyExpression)
+      (Just maximumExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " expects f, expr, test, optional m, optional max."
+          )
+      )
+ where
+  operation = if returnHistory then "NestWhileList" else "NestWhile"
+  nestWhile function initial test historyExpression maximumExpression = do
+    historySize <- normalizeNestWhileHistory historyExpression
+    maximumIterations <- normalizeNestWhileMaximum maximumExpression
+    history <- iterateWhile function test historySize maximumIterations 0 [initial]
+    Right (if returnHistory then evaluatedList history else last history)
+
+  iterateWhile function test historySize maximumIterations iterations history = do
+    predicateResult <- nestWhilePredicate test historySize history
+    if not predicateResult
+      then Right history
+      else
+        if iterations >= iterationSafetyLimit
+          then
+            Left
+              ( EvaluationError
+                  (operation <> " exceeded the Tungsten iteration safety limit.")
+              )
+          else case maximumIterations of
+            Just maximumValue
+              | iterations >= maximumValue -> Right history
+            _ -> do
+              updated <- evaluate (Call function [last history])
+              iterateWhile
+                function
+                test
+                historySize
+                maximumIterations
+                (iterations + 1)
+                (history <> [updated])
+
+normalizeNestWhileHistory
+  :: Maybe Expr
+  -> Either EvaluationError (Maybe Integer)
+normalizeNestWhileHistory Nothing = Right (Just 1)
+normalizeNestWhileHistory (Just (Integer value))
+  | value >= 1 = Right (Just value)
+normalizeNestWhileHistory (Just (Symbol name))
+  | systemHeadIn ["All"] name = Right Nothing
+normalizeNestWhileHistory _ =
+  Left
+    ( EvaluationError
+        "NestWhile history size must be a positive integer or All."
+    )
+
+normalizeNestWhileMaximum
+  :: Maybe Expr
+  -> Either EvaluationError (Maybe Integer)
+normalizeNestWhileMaximum Nothing = Right Nothing
+normalizeNestWhileMaximum (Just (Integer value)) = Right (Just (max 0 value))
+normalizeNestWhileMaximum (Just (Symbol name))
+  | systemHeadIn ["Infinity"] name = Right Nothing
+normalizeNestWhileMaximum _ =
+  Left
+    ( EvaluationError
+        "NestWhile max iterations must be a non-negative integer or Infinity."
+    )
+
+nestWhilePredicate
+  :: Expr
+  -> Maybe Integer
+  -> [Expr]
+  -> Either EvaluationError Bool
+nestWhilePredicate test historySize history = case historySize of
+  Just required
+    | fromIntegral (length history) < required -> Right True
+    | otherwise -> applyPredicate (drop (length history - fromIntegral required) history)
+  Nothing -> applyPredicate history
+ where
+  applyPredicate predicateArguments = do
+    result <- evaluate (Call test predicateArguments)
+    Right (result == Symbol "True")
 
 reduceFixedPoint :: Bool -> [Expr] -> Either EvaluationError Expr
 reduceFixedPoint returnHistory = \case
