@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T15:35:00Z
-- Repository HEAD: 246116285509020e028057aed96f21dc12b69ea1
+- Updated (UTC): 2026-07-28T16:00:00Z
+- Repository HEAD: 793c0b68abec8e08fc8b44929217678f82b8c6f0
 
 ## Purpose
 
@@ -171,8 +171,12 @@ Exact polynomial support now includes `MonomialList` with implicit, explicit, an
 sets, all six Python-compatible lexicographic order directions, Gaussian coefficients, and the
 reference's zero conventions. `PolynomialMod` maps integer and invertible rational coefficients into
 positive residue representatives over arbitrary-size moduli while preserving unsupported domains
-symbolically. Shared `Plus` normalization also factors the best common symbolic subset with real or
-complex numeric coefficients, matching the reference's deterministic rebuilt forms.
+symbolically. Exact `Resultant` and `Discriminant` evaluation works over Gaussian-rational
+multivariate polynomial rings, using a pivoted fraction-free Sylvester determinant and exact
+polynomial division without a fixed degree cutoff; constants, zero polynomials, list threading,
+qualified heads, and unsupported-domain fallback follow the Python reference. Shared `Plus`
+normalization also factors the best common symbolic subset with real or complex numeric
+coefficients, matching the reference's deterministic rebuilt forms.
 
 ## Compatibility boundary
 

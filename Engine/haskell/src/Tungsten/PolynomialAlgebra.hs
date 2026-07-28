@@ -51,6 +51,8 @@ reducePolynomialBuiltin compareExpression headName values = case headName of
   "PolynomialMod" -> reducePolynomialMod compareExpression values
   "PolynomialQuotient" -> reducePolynomialDivision compareExpression True values
   "PolynomialRemainder" -> reducePolynomialDivision compareExpression False values
+  "Resultant" -> reduceResultant compareExpression values
+  "Discriminant" -> reduceDiscriminant compareExpression values
   _ -> Nothing
 
 unaryIdentity :: [Expr] -> Maybe Expr
@@ -459,6 +461,291 @@ extendedGreatestCommonDivisor left right =
       , remainderCoefficient
       , rightCoefficient - (left `div` right) * remainderCoefficient
       )
+
+reduceResultant :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceResultant compareExpression [leftExpression, rightExpression, variableSpec] = do
+  [variable] <- variableExpressions variableSpec
+  let variables =
+        discoverVariables
+          compareExpression
+          [variable]
+          [leftExpression, rightExpression]
+      dimensions = length variables
+  left <- expressionToPolynomial variables leftExpression
+  right <- expressionToPolynomial variables rightExpression
+  result <- resultantPolynomial dimensions left right
+  pure (polynomialToExpr compareExpression variables result)
+reduceResultant _ _ = Nothing
+
+reduceDiscriminant :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceDiscriminant compareExpression [expression, variableSpec] = do
+  [variable] <- variableExpressions variableSpec
+  let variables = discoverVariables compareExpression [variable] [expression]
+      dimensions = length variables
+  polynomial <- expressionToPolynomial variables expression
+  case leadingVariableDegree polynomial of
+    Nothing -> Just (Integer 0)
+    Just 0 -> Just (Integer 0)
+    Just degree -> do
+      derivative <- derivativeInLeadingVariable dimensions polynomial
+      resultant <- resultantPolynomial dimensions polynomial derivative
+      leadingCoefficient <- leadingVariableCoefficient dimensions degree polynomial
+      quotient <- dividePolynomialExactly dimensions resultant leadingCoefficient
+      let signed
+            | odd (degree * (degree - 1) `div` 2) = negatePolynomial quotient
+            | otherwise = quotient
+      pure (polynomialToExpr compareExpression variables signed)
+reduceDiscriminant _ _ = Nothing
+
+resultantPolynomial
+  :: Int
+  -> Polynomial
+  -> Polynomial
+  -> Maybe Polynomial
+resultantPolynomial dimensions left right
+  | isZeroPolynomial left || isZeroPolynomial right =
+      Just (zeroPolynomial dimensions)
+  | otherwise =
+      polynomialDeterminant
+        dimensions
+        ( sylvesterMatrix
+            dimensions
+            leftDegree
+            rightDegree
+            leftCoefficients
+            rightCoefficients
+        )
+ where
+  leftDegree = maybe 0 id (leadingVariableDegree left)
+  rightDegree = maybe 0 id (leadingVariableDegree right)
+  leftCoefficients = descendingLeadingVariableCoefficients dimensions leftDegree left
+  rightCoefficients = descendingLeadingVariableCoefficients dimensions rightDegree right
+
+leadingVariableDegree :: Polynomial -> Maybe Int
+leadingVariableDegree (Polynomial terms) =
+  case Map.keys terms of
+    [] -> Nothing
+    powers -> Just (maximum (map firstPower powers))
+
+leadingVariableCoefficient
+  :: Int
+  -> Int
+  -> Polynomial
+  -> Maybe Polynomial
+leadingVariableCoefficient dimensions degree polynomial =
+  Map.lookup degree (leadingVariableCoefficients dimensions polynomial)
+
+leadingVariableCoefficients
+  :: Int
+  -> Polynomial
+  -> Map.Map Int Polynomial
+leadingVariableCoefficients dimensions (Polynomial terms) =
+  Map.fromListWith addPolynomial
+    [ ( firstPower powers
+      , Polynomial
+          (Map.singleton (0 : drop 1 powers) coefficient)
+      )
+    | (powers, coefficient) <- Map.toList terms
+    , length powers == dimensions
+    ]
+
+descendingLeadingVariableCoefficients
+  :: Int
+  -> Int
+  -> Polynomial
+  -> [Polynomial]
+descendingLeadingVariableCoefficients dimensions degree polynomial =
+  [ Map.findWithDefault
+      (zeroPolynomial dimensions)
+      currentDegree
+      coefficients
+  | currentDegree <- [degree, degree - 1 .. 0]
+  ]
+ where
+  coefficients = leadingVariableCoefficients dimensions polynomial
+
+derivativeInLeadingVariable :: Int -> Polynomial -> Maybe Polynomial
+derivativeInLeadingVariable dimensions (Polynomial terms)
+  | all ((== dimensions) . length . fst) (Map.toList terms) =
+      Just
+        ( Polynomial
+            ( Map.fromListWith
+                addGaussian
+                [ ( (power - 1) : drop 1 powers
+                  , multiplyGaussian
+                      (Gaussian (Exact (fromIntegral power) 1) zeroExact)
+                      coefficient
+                  )
+                | (powers, coefficient) <- Map.toList terms
+                , let power = firstPower powers
+                , power > 0
+                ]
+            )
+        )
+  | otherwise = Nothing
+
+sylvesterMatrix
+  :: Int
+  -> Int
+  -> Int
+  -> [Polynomial]
+  -> [Polynomial]
+  -> [[Polynomial]]
+sylvesterMatrix dimensions leftDegree rightDegree left right =
+  [ shiftedPolynomialRow dimensions total shift left
+  | shift <- [0 .. rightDegree - 1]
+  ]
+    <> [ shiftedPolynomialRow dimensions total shift right
+       | shift <- [0 .. leftDegree - 1]
+       ]
+ where
+  total = leftDegree + rightDegree
+
+shiftedPolynomialRow
+  :: Int
+  -> Int
+  -> Int
+  -> [Polynomial]
+  -> [Polynomial]
+shiftedPolynomialRow dimensions total shift coefficients =
+  replicate shift (zeroPolynomial dimensions)
+    <> coefficients
+    <> replicate
+      (max 0 (total - shift - length coefficients))
+      (zeroPolynomial dimensions)
+
+polynomialDeterminant
+  :: Int
+  -> [[Polynomial]]
+  -> Maybe Polynomial
+polynomialDeterminant dimensions matrix
+  | any ((/= size) . length) matrix = Nothing
+  | size == 0 = Just (onePolynomial dimensions)
+  | otherwise = bareiss 0 (onePolynomial dimensions) False matrix
+ where
+  size = length matrix
+
+  bareiss
+    :: Int
+    -> Polynomial
+    -> Bool
+    -> [[Polynomial]]
+    -> Maybe Polynomial
+  bareiss column previousPivot negated rows
+    | column == size - 1 =
+        let determinant = rows !! column !! column
+         in Just
+              (if negated then negatePolynomial determinant else determinant)
+    | otherwise = case
+        [ rowIndex
+        | rowIndex <- [column .. size - 1]
+        , not (isZeroPolynomial (rows !! rowIndex !! column))
+        ] of
+        [] -> Just (zeroPolynomial dimensions)
+        pivotIndex : _ -> do
+          let swapped = swapRows column pivotIndex rows
+              pivotRow = swapped !! column
+              pivot = pivotRow !! column
+              nextNegated = negated /= (pivotIndex /= column)
+          reduced <-
+            traverse
+              (reduceRow column previousPivot pivot pivotRow)
+              (zip [0 :: Int ..] swapped)
+          bareiss (column + 1) pivot nextNegated reduced
+
+  reduceRow
+    :: Int
+    -> Polynomial
+    -> Polynomial
+    -> [Polynomial]
+    -> (Int, [Polynomial])
+    -> Maybe [Polynomial]
+  reduceRow column previousPivot pivot pivotRow (rowIndex, row)
+    | rowIndex <= column = Just row
+    | otherwise = do
+        suffix <-
+          traverse
+            (reduceEntry column previousPivot pivot pivotRow row)
+            [column + 1 .. size - 1]
+        pure
+          ( take column row
+              <> [zeroPolynomial dimensions]
+              <> suffix
+          )
+
+  reduceEntry
+    :: Int
+    -> Polynomial
+    -> Polynomial
+    -> [Polynomial]
+    -> [Polynomial]
+    -> Int
+    -> Maybe Polynomial
+  reduceEntry column previousPivot pivot pivotRow row targetColumn =
+    dividePolynomialExactly
+      dimensions
+      ( subtractPolynomial
+          (multiplyPolynomial (row !! targetColumn) pivot)
+          (multiplyPolynomial (row !! column) (pivotRow !! targetColumn))
+      )
+      previousPivot
+
+  swapRows :: Int -> Int -> [[Polynomial]] -> [[Polynomial]]
+  swapRows leftIndex rightIndex rows
+    | leftIndex == rightIndex = rows
+    | otherwise =
+        replaceAt
+          rightIndex
+          (rows !! leftIndex)
+          (replaceAt leftIndex (rows !! rightIndex) rows)
+
+dividePolynomialExactly
+  :: Int
+  -> Polynomial
+  -> Polynomial
+  -> Maybe Polynomial
+dividePolynomialExactly dimensions dividend divisor
+  | isZeroPolynomial divisor = Nothing
+  | otherwise = go (zeroPolynomial dimensions) dividend (zeroPolynomial dimensions) 0
+ where
+  go :: Polynomial -> Polynomial -> Polynomial -> Int -> Maybe Polynomial
+  go quotient remaining remainder steps
+    | steps > 200000 = Nothing
+    | otherwise = case leadingTerm remaining of
+        Nothing
+          | isZeroPolynomial remainder -> Just quotient
+          | otherwise -> Nothing
+        Just (remainingPowers, remainingCoefficient) ->
+          case leadingTerm divisor of
+            Nothing -> Nothing
+            Just (divisorPowers, divisorCoefficient)
+              | monomialDivides divisorPowers remainingPowers -> do
+                  coefficient <-
+                    divideGaussian remainingCoefficient divisorCoefficient
+                  let powerDifference =
+                        zipWith (-) remainingPowers divisorPowers
+                      term =
+                        Polynomial
+                          (Map.singleton powerDifference coefficient)
+                  go
+                    (addPolynomial quotient term)
+                    (subtractPolynomial remaining (multiplyPolynomial term divisor))
+                    remainder
+                    (steps + 1)
+              | otherwise ->
+                  let leading =
+                        Polynomial
+                          (Map.singleton remainingPowers remainingCoefficient)
+                   in go
+                        quotient
+                        (subtractPolynomial remaining leading)
+                        (addPolynomial remainder leading)
+                        (steps + 1)
+
+monomialDivides :: [Int] -> [Int] -> Bool
+monomialDivides divisor dividend =
+  length divisor == length dividend
+    && and (zipWith (<=) divisor dividend)
 
 reducePolynomialDivision :: CanonicalCompare -> Bool -> [Expr] -> Maybe Expr
 reducePolynomialDivision compareExpression selectQuotient [dividendExpr, divisorExpr, variable] = do

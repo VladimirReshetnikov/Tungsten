@@ -83,6 +83,22 @@ valueCases =
     , "{PolynomialMod[1/5+x,5],PolynomialMod[x+I,5],PolynomialMod[3,1],System`PolynomialMod[x+7,5],Global`PolynomialMod[x+7,5]}"
     , "List[PolynomialMod[Plus[Rational[1, 5], x], 5], PolynomialMod[Plus[Complex[0, 1], x], 5], PolynomialMod[3, 1], Plus[2, x], Global`PolynomialMod[Plus[7, x], 5]]"
     )
+  , ( "exact polynomial resultants"
+    , "{Resultant[x^2-y,x-y,x],Resultant[x-a,x-b,x],Resultant[0,x+1,x],Resultant[0,0,x],Resultant[3,x^2+1,x],Resultant[x^2+1,3,x],Resultant[3,4,x],Resultant[x+I,x-I,x],Resultant[x^2+a x+b,2x+c,x]}"
+    , "List[Plus[Power[y, 2], Times[-1, y]], Plus[a, Times[-1, b]], 0, 0, 9, 9, 1, Complex[0, -2], Plus[Power[c, 2], Times[-2, a, c], Times[4, b]]]"
+    )
+  , ( "exact polynomial discriminants"
+    , "{Discriminant[x^3+x+1,x],Discriminant[a x^2+b x+c,x],Discriminant[3,x],Discriminant[0,x],Discriminant[x,x],Discriminant[x^2+I x+1,x]}"
+    , "List[-31, Plus[Power[b, 2], Times[-4, a, c]], 0, 0, 1, -5]"
+    )
+  , ( "fraction-free high-degree resultants"
+    , "{Resultant[x^9-y,x^8+y,x],Discriminant[x^9+x+1,x]}"
+    , "List[Plus[Power[y, 8], Power[y, 9]], 404197705]"
+    )
+  , ( "resultant and discriminant qualification and domain boundaries"
+    , "{System`Resultant[x^2-1,x-1,{x}],Global`Resultant[x^2-1,x-1,x],System`Discriminant[x^2+b x+c,x],Global`Discriminant[x^2+b x+c,x],Resultant[Sin[x],x,x],Resultant[x,x,{x,y}],Discriminant[Sin[x],x]}"
+    , "List[List[0], Global`Resultant[Plus[-1, Power[x, 2]], Plus[-1, x], x], Plus[Power[b, 2], Times[-4, c]], Global`Discriminant[Plus[c, Power[x, 2], Times[b, x]], x], Resultant[Sin[x], x, x], List[0, 1], Discriminant[Sin[x], x]]"
+    )
   , ( "best-subset additive factoring with real and complex coefficients"
     , "{2x+x y+2,I x+I y+x y,(1+I)x+(1+I)y}"
     , "List[Plus[2, Times[x, Plus[2, y]]], Plus[Times[Complex[0, 1], y], Times[x, Plus[Complex[0, 1], y]]], Plus[Times[Complex[1, 1], x], Times[Complex[1, 1], y]]]"

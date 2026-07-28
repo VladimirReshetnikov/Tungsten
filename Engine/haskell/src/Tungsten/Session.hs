@@ -1241,6 +1241,7 @@ qualifiedAliasDispatchHeads =
   , "Contexts"
   , "Denominator"
   , "DigitCount"
+  , "Discriminant"
   , "DiscreteDelta"
   , "DivisorSigma"
   , "Divisors"
@@ -1341,6 +1342,7 @@ qualifiedAliasDispatchHeads =
   , "RealSign"
   , "RealValuedNumberQ"
   , "ReIm"
+  , "Resultant"
   , "Sign"
   , "Sqrt"
   , "Simplify"
@@ -2952,7 +2954,8 @@ reduceSessionEvaluatedCall depth session = \case
       parsed <- liftPureEvaluation session (reduceEvaluatedCall expression)
       evaluateSessionAt (depth + 1) session parsed
   expression@(Call (Symbol normalizationHead) _)
-    | normalizationHead `elem` ["MonomialList", "PolynomialMod"] ->
+    | normalizationHead
+        `elem` ["Discriminant", "MonomialList", "PolynomialMod", "Resultant"] ->
     Just $ do
       reduced <- liftPureEvaluation session (reduceEvaluatedCall expression)
       if reduced == expression
