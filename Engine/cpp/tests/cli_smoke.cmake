@@ -22,6 +22,74 @@ if(NOT expr_full_form STREQUAL "Plus[1, Times[2, Power[x, 3]]]")
 endif()
 
 execute_process(
+    COMMAND "${CLI}" expr evaluate --code "$Line"
+    RESULT_VARIABLE session_line_status
+    OUTPUT_VARIABLE session_line_json
+    ERROR_VARIABLE session_line_error)
+if(NOT session_line_status EQUAL 0)
+    message(FATAL_ERROR "session-backed expr evaluation failed: ${session_line_error}")
+endif()
+string(JSON session_line GET "${session_line_json}" result full_form)
+if(NOT session_line STREQUAL "1")
+    message(FATAL_ERROR "expr evaluation did not expose session line one")
+endif()
+
+execute_process(
+    COMMAND "${CLI}" expr evaluate --code "InString[1]"
+    RESULT_VARIABLE in_string_status
+    OUTPUT_VARIABLE in_string_json
+    ERROR_VARIABLE in_string_error)
+if(NOT in_string_status EQUAL 0)
+    message(FATAL_ERROR "session InString evaluation failed: ${in_string_error}")
+endif()
+string(JSON in_string_result GET "${in_string_json}" result full_form)
+if(NOT in_string_result STREQUAL "\"InString[1]\"")
+    message(FATAL_ERROR "expr evaluation did not record its exact source string")
+endif()
+
+execute_process(
+    COMMAND "${CLI}" expr evaluate --code "DownValues[In]"
+    RESULT_VARIABLE in_downvalues_status
+    OUTPUT_VARIABLE in_downvalues_json
+    ERROR_VARIABLE in_downvalues_error)
+if(NOT in_downvalues_status EQUAL 0)
+    message(FATAL_ERROR "session DownValues evaluation failed: ${in_downvalues_error}")
+endif()
+string(JSON in_downvalues_result GET "${in_downvalues_json}" result full_form)
+if(NOT in_downvalues_result STREQUAL
+    "List[RuleDelayed[HoldPattern[In[1]], DownValues[In]]]")
+    message(FATAL_ERROR "expr evaluation did not record its parsed input tree")
+endif()
+
+execute_process(
+    COMMAND "${CLI}" expr evaluate --code "Exit[x]"
+    RESULT_VARIABLE invalid_exit_status
+    OUTPUT_VARIABLE invalid_exit_json
+    ERROR_VARIABLE invalid_exit_error)
+if(NOT invalid_exit_status EQUAL 0)
+    message(FATAL_ERROR "invalid Exit was treated as a process exit: ${invalid_exit_error}")
+endif()
+string(JSON invalid_exit_result GET "${invalid_exit_json}" result full_form)
+string(JSON invalid_exit_name GET "${invalid_exit_json}" messages 0 full_name)
+string(JSON invalid_exit_text GET "${invalid_exit_json}" messages 0 text)
+if(NOT invalid_exit_result STREQUAL "Exit[x]"
+    OR NOT invalid_exit_name STREQUAL "MessageName[Exit, \"error\"]"
+    OR NOT invalid_exit_text STREQUAL
+        "Exit::error: Exit and Quit expect an optional integer exit code.")
+    message(FATAL_ERROR "invalid Exit did not remain inert with its exact diagnostic")
+endif()
+
+execute_process(
+    COMMAND "${CLI}" expr evaluate --code "Exit[7]"
+    RESULT_VARIABLE valid_exit_status
+    OUTPUT_VARIABLE valid_exit_output
+    ERROR_VARIABLE valid_exit_error)
+if(NOT valid_exit_status EQUAL 7 OR NOT valid_exit_output STREQUAL ""
+    OR NOT valid_exit_error STREQUAL "")
+    message(FATAL_ERROR "valid Exit did not return its requested process status")
+endif()
+
+execute_process(
     COMMAND "${CLI}" eval --code "10^400 + 1." --input-form
     RESULT_VARIABLE machine_overflow_status
     OUTPUT_VARIABLE machine_overflow_output
@@ -61,6 +129,47 @@ foreach(group IN ITEMS
             "${group} without a subcommand returned ${missing_subcommand_status}; expected 2")
     endif()
 endforeach()
+
+set(missing_wolfram_home "${SMOKE_ROOT}/missing-wolfram-home")
+execute_process(
+    COMMAND
+        "${CMAKE_COMMAND}" -E env
+        "TUNGSTEN_WOLFRAM_HOME=${missing_wolfram_home}"
+        "${CLI}" frontend probe
+    RESULT_VARIABLE frontend_unavailable_status
+    OUTPUT_VARIABLE frontend_unavailable_json
+    ERROR_VARIABLE frontend_unavailable_error)
+if(NOT frontend_unavailable_status EQUAL 0)
+    message(FATAL_ERROR
+        "non-strict unavailable FrontEnd probe returned "
+        "${frontend_unavailable_status}: ${frontend_unavailable_error}")
+endif()
+string(JSON frontend_unavailable_type
+    GET "${frontend_unavailable_json}" failure_type)
+if(NOT frontend_unavailable_type STREQUAL "KernelNotFound")
+    message(FATAL_ERROR
+        "non-strict unavailable FrontEnd probe lost its structured failure")
+endif()
+
+execute_process(
+    COMMAND
+        "${CMAKE_COMMAND}" -E env
+        "TUNGSTEN_WOLFRAM_HOME=${missing_wolfram_home}"
+        "${CLI}" frontend probe --require-success
+    RESULT_VARIABLE frontend_strict_status
+    OUTPUT_VARIABLE frontend_strict_json
+    ERROR_VARIABLE frontend_strict_error)
+if(NOT frontend_strict_status EQUAL 1)
+    message(FATAL_ERROR
+        "strict unavailable FrontEnd probe returned ${frontend_strict_status}; "
+        "expected 1: ${frontend_strict_error}")
+endif()
+string(JSON frontend_strict_type
+    GET "${frontend_strict_json}" failure_type)
+if(NOT frontend_strict_type STREQUAL "KernelNotFound")
+    message(FATAL_ERROR
+        "strict unavailable FrontEnd probe lost its structured failure")
+endif()
 
 execute_process(
     COMMAND "${CLI}" expr parse --code "1+1" --help

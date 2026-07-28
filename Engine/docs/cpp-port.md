@@ -1,11 +1,11 @@
 # Tungsten Engine C++ Runtime and Verification
 
-- Status: Active incomplete native-port and verification record
+- Status: Complete Python-reference native port and active verification record
 - Audience: Tungsten maintainers, reviewers, projection authors, and contributors
 - Scope: `Engine/CMakeLists.txt`, `Engine/cpp/`, native projections, and Python-oracle parity tooling
 - Created (UTC): 2026-07-18T01:44:22Z
-- Updated (UTC): 2026-07-22T19:30:17Z
-- Repository HEAD: `b6e36d4fcd683cb312b5bf4000be5da0205356cf`
+- Updated (UTC): 2026-07-28T03:36:42Z
+- Repository HEAD: `7a2d502e32a50e34f7b235fa23546a4f16b8f381`
 
 ## C++ port boundary
 
@@ -24,6 +24,12 @@ production fallback. The Haskell port under `haskell/` remains an independent ty
 with its own Cabal build and compatibility boundary. The former Rust port is superseded;
 [rust-port.md](./rust-port.md) and the Rust source tree are retained only as historical migration
 records.
+
+At the repository HEAD above, the native implementation owns the complete dispatch surface of the
+Python compatibility reference: 531 heads dispatch in the evaluator and the six history/process
+heads `Exit`, `Quit`, `In`, `InString`, `Out`, and `MessageList` dispatch in the REPL/session layer.
+"Complete" here is scoped to the Python reference. It is not a claim that either runtime implements
+every Wolfram Language head or every kernel algorithm.
 
 ## Build, test, and install
 
@@ -84,8 +90,9 @@ The C++ tree contains native implementations for:
 - parser-corpus discovery and optional held-Wolfram comparison;
 - the stateful kernel-free REPL and compatible JSON-first CLI command tree.
 
-This list describes the native component map, not perfect semantic parity. Unsupported expressions
-remain symbolic where possible, and the differential results below identify known gaps.
+This list describes the native component map. Every Python-reference dispatch head has a native
+owner, and unsupported forms outside that bounded reference surface remain symbolic where possible.
+The differential results below measure semantic parity within that scope.
 
 ## Verification record
 
@@ -118,6 +125,27 @@ The C++ branch at `b6e36d4fcd683cb312b5bf4000be5da0205356cf` was integrated with
 | .NET projection suite | 14/14 Release tests passed |
 | Coexisting Haskell suite | Warning-as-error Cabal test passed after integration |
 
+### 2026-07-28 full Python-scope closure
+
+The feature branch at `7a2d502e32a50e34f7b235fa23546a4f16b8f381` was validated again from a
+clean GCC build directory after the complete Python dispatch inventory was made executable as a
+repository gate:
+
+| Gate | Result |
+|---|---|
+| Static dispatch ownership | 537/537 Python heads have native owners: 531 evaluator heads and 6 REPL/session heads |
+| GCC 11.4 strict Release | 73/73 Ninja compile/link steps completed with `-Wall -Wextra -Wpedantic -Werror`; zero warnings and zero errors |
+| Fresh GCC CTest | 27/27 passed, including focused evaluator families, CLI smoke, and the installed external consumer |
+| Staged install and CLI smoke | Library, headers, CMake package, and CLI installed; installed `tungsten-cpp` evaluated `2+2` to exact integer `4` |
+| Clang 21 Release CTest | 27/27 passed against the same C++ source state |
+| Python compatibility-reference suite | 846 tests passed, with 4 skipped and 2 expected failures |
+| Parser differential | 1,414 unique literals compared; one shared rejection; zero mismatches |
+| Recorded evaluator differential | 2,499/2,499 calls matched across 585 tests; zero mismatches |
+| Stateful evaluator differential | 94/94 steps matched across 11 fresh-process scenarios; zero mismatches |
+| Generated evaluator edge differential | 8,354/8,354 cases matched across 20 behavior clusters; zero mismatches |
+| Extended random/timing acceptance | 83/83 checks passed; zero failures |
+| Native/Python CLI differential | 126/126 command cases passed; zero failures |
+
 The Clang exception is a host-toolchain interaction inside libstdc++'s implementation of
 `std::stable_sort`, not a warning in Tungsten source. A normal Clang build completes without any
 special option; the exemption is needed only when globally promoting every deprecation from the
@@ -126,6 +154,7 @@ host standard library to an error.
 Run the compatibility gates from `Engine/` with:
 
 ```powershell
+uv run python scripts/check_cpp_dispatch_coverage.py
 uv run python scripts/check_cpp_parser_parity.py --no-build
 uv run python scripts/check_cpp_evaluator_parity.py --no-build --tests tests
 uv run python scripts/check_cpp_stateful_evaluator_parity.py --no-build --require-perfect

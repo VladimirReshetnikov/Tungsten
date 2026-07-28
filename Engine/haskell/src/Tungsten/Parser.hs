@@ -253,11 +253,17 @@ conditionParser = chainl1 patternDefaultParser (binary "/;" (call2 "Condition"))
 
 patternDefaultParser :: Parser Expr
 patternDefaultParser = do
-  lhs <- alternativesParser
+  lhs <- stringExpressionParser
   option lhs $ do
     _ <- operator ":" "=>"
     rhs <- patternDefaultParser
     pure (patternColonExpression lhs rhs)
+
+stringExpressionParser :: Parser Expr
+stringExpressionParser =
+  chainl1
+    alternativesParser
+    (binary "~~" (call2 "StringExpression"))
 
 patternColonExpression :: Expr -> Expr -> Expr
 patternColonExpression lhs@(Call (Symbol "Pattern") [_, _]) defaultValue =
@@ -314,7 +320,8 @@ plusParser :: Parser Expr
 plusParser = chainl1 timesParser plusOperator
  where
   plusOperator = choice
-    [ binaryExcept "+" "=" (flatCall2 "Plus")
+    [ binary "<>" (call2 "StringJoin")
+    , binaryExcept "+" "=" (flatCall2 "Plus")
     , binaryExcept "-" "=>" (\lhs rhs -> flatCall2 "Plus" lhs (negateExpression rhs))
     ]
 

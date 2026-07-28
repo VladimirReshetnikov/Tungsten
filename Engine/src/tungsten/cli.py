@@ -755,14 +755,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.frontend_command == "probe":
             payload = controller.probe()
             _json_dump(payload)
-            if args.require_success and payload.get("success") is False:
+            if args.require_success and payload.get("success") is not True:
                 return 1
             return 0
 
         if args.frontend_command == "open-notebook":
             result = controller.open_notebook(args.file)
             _json_dump(result.to_dict())
-            if args.require_success and result.success is False:
+            if args.require_success and result.success is not True:
                 return 1
             return 0
 
@@ -772,21 +772,21 @@ def main(argv: list[str] | None = None) -> int:
                 index_path=args.index_path,
             )
             _json_dump(result.to_dict())
-            if args.require_success and result.success is False:
+            if args.require_success and result.success is not True:
                 return 1
             return 0
 
         if args.frontend_command == "run":
             result = controller.run(args.code, wrap_using_front_end=not args.no_wrap)
             _json_dump(result.to_dict())
-            if args.require_success and result.success is False:
+            if args.require_success and result.success is not True:
                 return 1
             return 0
 
         if args.frontend_command == "token":
             result = controller.execute_token(args.token, notebook_path=args.file)
             _json_dump(result.to_dict())
-            if args.require_success and result.success is False:
+            if args.require_success and result.success is not True:
                 return 1
             return 0
 

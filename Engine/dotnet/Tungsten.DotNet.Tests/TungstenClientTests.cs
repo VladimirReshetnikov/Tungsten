@@ -144,6 +144,35 @@ public sealed class TungstenClientTests
     }
 
     [Fact]
+    public async Task ProbeFrontEndAsync_StrictUnavailableResultThrowsAsync()
+    {
+        var tempRoot = CreateTempDirectory();
+        try
+        {
+            var scriptPath = await WriteFakeScriptAsync(tempRoot);
+            var client = new TungstenClient(
+                new TungstenClientOptions
+                {
+                    ExecutablePath = "pwsh",
+                    LauncherArguments = ["-NoLogo", "-NoProfile", "-File", scriptPath],
+                });
+
+            var nonStrict = await client.ProbeFrontEndAsync(requireSuccess: false);
+            Assert.Null(nonStrict.Success);
+            Assert.Equal("KernelNotFound", nonStrict.FailureType);
+
+            var exception = await Assert.ThrowsAsync<TungstenCommandException>(
+                () => client.ProbeFrontEndAsync(requireSuccess: true));
+            Assert.Equal(1, exception.ExitCode);
+            Assert.Contains("KernelNotFound", exception.StandardOutput);
+        }
+        finally
+        {
+            DeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
     public async Task AskNotebookAssistantAsync_ParsesTypedPayloadAndForwardsOptionsAsync()
     {
         var tempRoot = CreateTempDirectory();
@@ -571,6 +600,25 @@ switch ($ForwardedArgs[0]) {
         exit 0
     }
     "frontend" {
+        if ($ForwardedArgs[1] -eq "probe") {
+            Write-Json @{
+                command = @()
+                exit_code = 127
+                success = $null
+                failure_type = "KernelNotFound"
+                result = $null
+                result_head = $null
+                messages = @()
+                messages_text = @()
+                output = @()
+                evaluation_available = $false
+                forwarded_args = $ForwardedArgs
+            }
+            if ($ForwardedArgs -contains "--require-success") {
+                exit 1
+            }
+            exit 0
+        }
         Write-Json @{
             command = @("wolfram.exe", "-script", "frontend.wl")
             exit_code = 0

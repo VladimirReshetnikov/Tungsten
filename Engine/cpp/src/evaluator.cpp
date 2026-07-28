@@ -1,5 +1,7 @@
 #include "tungsten/bundled_data.hpp"
 #include "tungsten/detail/numeric.hpp"
+#include "tungsten/detail/python_sort.hpp"
+#include "tungsten/detail/unicode.hpp"
 #include "tungsten/evaluator.hpp"
 #include "tungsten/parser.hpp"
 #include "tungsten/wolfram_strings.hpp"
@@ -7,20 +9,27 @@
 #include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <exception>
 #include <fstream>
+#include <functional>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <locale>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 
 namespace tungsten {
@@ -29,6 +38,102 @@ namespace {
 std::optional<std::vector<Expr>> association_rules(const Expr& expression);
 std::optional<long> machine_index(const Expr& expression);
 int expression_compare(const Expr& left, const Expr& right);
+void gather_polynomial_symbols(const Expr& expression, std::vector<Expr>& symbols);
+Expr evaluated_list_expr(std::vector<Expr> arguments);
+
+template<typename Function>
+class ScopeExit {
+public:
+    explicit ScopeExit(Function function) : function_(std::move(function)) {}
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ScopeExit(ScopeExit&& other) noexcept
+        : function_(std::move(other.function_)), active_(other.active_) {
+        other.active_ = false;
+    }
+    ~ScopeExit() {
+        if (active_) function_();
+    }
+    void release() noexcept { active_ = false; }
+
+private:
+    Function function_;
+    bool active_ = true;
+};
+
+template<typename Function>
+ScopeExit<Function> scope_exit(Function function) {
+    return ScopeExit<Function>(std::move(function));
+}
+
+class TimeConstraintExpired final : public std::exception {
+public:
+    explicit TimeConstraintExpired(std::size_t owner) noexcept : owner_(owner) {}
+    [[nodiscard]] std::size_t owner() const noexcept { return owner_; }
+    [[nodiscard]] const char* what() const noexcept override {
+        return "Tungsten time constraint expired";
+    }
+
+private:
+    std::size_t owner_;
+};
+
+std::mutex& process_random_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::mt19937_64& process_random_engine() {
+    static std::mt19937_64 engine([] {
+        std::random_device source;
+        std::seed_seq seed{source(), source(), source(), source(),
+            source(), source(), source(), source()};
+        return std::mt19937_64(seed);
+    }());
+    return engine;
+}
+
+bool unevaluated_transparent_head(const std::string& name) {
+    // Kept in lockstep with the Python compatibility evaluator's pinned
+    // _UNEVALUATED_TRANSPARENT_HEADS registry.  Argument normalization happens
+    // while wrappers are intact; only these evaluated heads strip them.
+    static const std::set<std::string> names{
+        "Abs", "Accuracy", "AlphabeticSort", "And", "Append", "AppendTo",
+        "Apply", "Array", "ArrayDepth", "ArrayFlatten", "ArrayPad", "ArrayQ",
+        "ArrayReshape", "ArrayRules", "AtomQ", "BaseDecode", "BaseEncode", "BlockMap",
+        "Boole", "ByteArray", "ByteArrayQ", "ByteArrayToString", "Cases", "Characters",
+        "Clip", "Comap", "ComapApply", "ComposeList", "Composition", "Conjugate",
+        "ConstantArray", "Construct", "Cross", "Delete", "DeleteAdjacentDuplicates", "DeleteCases",
+        "DeleteDuplicates", "DeleteDuplicatesBy", "Depth", "Det", "Dimensions", "Discard",
+        "DiscreteDelta", "Dot", "Drop", "DuplicateFreeQ", "Equal", "ExactNumberQ",
+        "Extract", "First", "FirstCase", "FixedPoint", "FixedPointList", "Flatten",
+        "FlattenAt", "Fold", "FoldList", "FoldPair", "FoldPairList", "FoldWhile",
+        "FoldWhileList", "FreeQ", "FromCharacterCode", "Greater", "GreaterEqual", "Head",
+        "Identity", "If", "Im", "InexactNumberQ", "Insert", "IntegerQ",
+        "Inverse", "Join", "KroneckerDelta", "Last", "Length", "LengthWhile",
+        "Less", "LessEqual", "Level", "LeviCivitaTensor", "LexicographicOrder", "LexicographicSort",
+        "Lookup", "MachineIntegerQ", "MachineNumberQ", "Map", "MapAll", "MapApply",
+        "MapAt", "MapIndexed", "MapThread", "MatchQ", "MatrixPower", "Max",
+        "MaximalBy", "MemberQ", "Min", "MinimalBy", "Mod", "Most",
+        "N", "Nest", "NestList", "NestWhile", "NestWhileList", "Normal",
+        "Not", "NumberQ", "NumericalSort", "Operate", "Or", "Order",
+        "OrderedQ", "Ordering", "OrderingBy", "Outer", "Part", "Partition",
+        "Pick", "Plus", "Position", "Power", "Precision", "Prepend",
+        "Quotient", "QuotientRemainder", "Ramp", "RandomSample", "Range", "Re",
+        "RealAbs", "RealSign", "RealValuedNumberQ", "Replace", "ReplaceAll", "ReplaceAt",
+        "ReplacePart", "ReplaceRepeated", "Rest", "Reverse", "ReverseSort", "ReverseSortBy",
+        "RightComposition", "RotateLeft", "RotateRight", "SameQ", "Scan", "Select",
+        "SelectFirst", "SequenceFold", "SequenceFoldList", "SetAccuracy", "SetPrecision", "Sign",
+        "Sort", "SortBy", "SparseArray", "SparseArrayQ", "Split", "SplitBy",
+        "StringContainsQ", "StringDrop", "StringEndsQ", "StringFreeQ", "StringInsert", "StringJoin",
+        "StringLength", "StringMatchQ", "StringPosition", "StringReplace", "StringReverse", "StringStartsQ",
+        "StringTake", "StringToByteArray", "Subsequences", "Switch", "Take", "TakeDrop",
+        "TakeList", "TakeWhile", "Thread", "Through", "Times", "ToCharacterCode",
+        "Tr", "Transpose", "Tuples", "UnitStep", "UnitVector", "Unitize",
+        "UnsameQ", "Which",
+    };
+    return names.count(name) != 0;
+}
 
 bool is_symbol(const Expr& value, const std::string& name) {
     const auto* symbol_name = value.symbol_name();
@@ -79,11 +184,6 @@ std::optional<unsigned long> bounded_nonnegative_ulong(
 unsigned long unsigned_magnitude(long value) noexcept {
     const auto converted = static_cast<unsigned long>(value);
     return value < 0 ? 0UL - converted : converted;
-}
-
-std::size_t clamped_signed_magnitude(long value, std::size_t maximum) noexcept {
-    const auto magnitude = unsigned_magnitude(value);
-    return magnitude > maximum ? maximum : static_cast<std::size_t>(magnitude);
 }
 
 std::optional<std::size_t> nonnegative_size_t(const mpz_class& value) {
@@ -1247,19 +1347,20 @@ bool numeric_q_value(const Expr& value) {
         && std::all_of(value.args().begin(), value.args().end(), numeric_q_value);
 }
 
-double requested_pause(const Expr& expression) {
-    if (expression.has_head("Pause") && expression.args().size() == 1)
-        return numeric_real(expression.args()[0]).value_or(0.0);
-    if (expression.kind() != ExprKind::Call) return 0.0;
-    double result = 0.0;
-    for (const auto& argument : expression.args()) result += requested_pause(argument);
-    return result;
-}
-
 std::string real_text(double value) {
     if (std::isnan(value)) return "Indeterminate";
     if (std::isinf(value)) return value < 0 ? "-Infinity" : "Infinity";
     return detail::python_machine_real_text(value);
+}
+
+std::chrono::steady_clock::time_point steady_deadline_after(double seconds) {
+    using Clock = std::chrono::steady_clock;
+    using Seconds = std::chrono::duration<double>;
+    const auto now = Clock::now();
+    const auto available = std::chrono::duration_cast<Seconds>(
+        Clock::time_point::max() - now).count();
+    if (seconds >= available) return Clock::time_point::max();
+    return now + std::chrono::duration_cast<Clock::duration>(Seconds(seconds));
 }
 
 std::optional<double> explicit_real_precision(const std::string& text) {
@@ -1588,40 +1689,137 @@ std::vector<std::string> utf8_characters(const std::string& source) {
     return output;
 }
 
-std::optional<std::vector<std::size_t>> string_selector_indices(std::size_t length, const Expr& specification) {
-    if (specification.has_head("UpTo") && specification.args().size() == 1 && machine_index(specification.args()[0])) {
-        const auto requested = *machine_index(specification.args()[0]);
-        const auto count = clamped_signed_magnitude(requested, length);
-        std::vector<std::size_t> indices(count);
-        if (requested >= 0) std::iota(indices.begin(), indices.end(), 0);
-        else std::iota(indices.begin(), indices.end(), length - count);
-        return indices;
-    }
-    if (const auto count = machine_index(specification)) {
-        const auto raw_amount = unsigned_magnitude(*count);
-        if (raw_amount > length) return std::nullopt;
-        const auto amount = static_cast<std::size_t>(raw_amount);
-        std::vector<std::size_t> indices;
-        if (*count >= 0) for (std::size_t index = 0; index < amount; ++index) indices.push_back(index);
-        else for (std::size_t index = length - amount; index < length; ++index) indices.push_back(index);
-        return indices;
-    }
-    if (specification.has_head("List") && (specification.args().size() == 2 || specification.args().size() == 3)) {
-        const auto start = machine_index(specification.args()[0]); const auto end = machine_index(specification.args()[1]);
-        const auto step = specification.args().size() == 3 ? machine_index(specification.args()[2]) : std::optional<long>(1);
-        if (!start || !end || !step || *step == 0) return std::nullopt;
-        auto normalize = [length](long value) { return value > 0 ? value - 1 : static_cast<long>(length) + value; };
-        const auto first = normalize(*start), last = normalize(*end); std::vector<std::size_t> indices;
-        for (long index = first; *step > 0 ? index <= last : index >= last;) {
-            if (index < 0 || index >= static_cast<long>(length)) return std::nullopt;
-            indices.push_back(static_cast<std::size_t>(index));
-            const auto next = checked_signed_sum(index, *step);
-            if (!next) break;
-            index = *next;
+struct StringSelectorResult {
+    std::vector<std::size_t> indices;
+    std::string error;
+};
+
+StringSelectorResult string_selector_indices(
+    std::size_t length, const Expr& specification,
+    const std::string& function_name) {
+    StringSelectorResult result;
+    const mpz_class length_value(std::to_string(length), 10);
+
+    auto append_selector = [&](const mpz_class& selector) {
+        if (selector == 0) {
+            result.error = "Only top-level Part specifications may use index 0.";
+            return false;
         }
-        return indices;
+        mpz_class resolved = selector;
+        if (selector > 0) --resolved;
+        else resolved += length_value;
+        if (resolved < 0 || resolved >= length_value) {
+            result.error = "Part index " + selector.get_str()
+                + " is out of range for length " + std::to_string(length) + ".";
+            return false;
+        }
+        result.indices.push_back(nonnegative_size_t(resolved).value_or(0));
+        return true;
+    };
+
+    auto append_count = [&](const mpz_class& count) {
+        if (count >= 0) {
+            for (mpz_class selector = 1; selector <= count; ++selector)
+                if (!append_selector(selector)) return;
+            return;
+        }
+        for (mpz_class selector = length_value + count + 1;
+             selector <= length_value; ++selector)
+            if (!append_selector(selector)) return;
+    };
+
+    auto append_span = [&](const std::vector<Expr>& components) {
+        if (components.size() != 2 && components.size() != 3) {
+            result.error = "Span must contain two or three arguments.";
+            return;
+        }
+        auto endpoint = [&](const Expr& value, const mpz_class& fallback) {
+            if (is_symbol(value, "All")) return length_value;
+            if (value.kind() != ExprKind::Integer) return fallback;
+            mpz_class normalized = value.integer_value();
+            if (normalized < 0) normalized += length_value + 1;
+            return normalized;
+        };
+        const auto first = endpoint(components[0], mpz_class(1));
+        const auto last = endpoint(components[1], length_value);
+        mpz_class step = 1;
+        if (components.size() == 3) {
+            if (components[2].kind() != ExprKind::Integer) {
+                result.error = "Span steps must be integers.";
+                return;
+            }
+            step = components[2].integer_value();
+        }
+        if (step == 0) {
+            result.error = "Span step cannot be zero.";
+            return;
+        }
+        for (mpz_class selector = first;
+             step > 0 ? selector <= last : selector >= last;
+             selector += step)
+            if (!append_selector(selector)) return;
+    };
+
+    auto append_up_to = [&](const Expr& up_to) {
+        if (up_to.args().size() != 1
+            || up_to.args()[0].kind() != ExprKind::Integer) {
+            result.error = function_name
+                + " currently supports only integer UpTo specifications.";
+            return;
+        }
+        const auto& requested = up_to.args()[0].integer_value();
+        mpz_class magnitude = requested;
+        if (magnitude < 0) magnitude = -magnitude;
+        const mpz_class count = std::min(magnitude, length_value);
+        if (requested >= 0) {
+            for (mpz_class selector = 1; selector <= count; ++selector)
+                (void)append_selector(selector);
+        } else {
+            for (mpz_class selector = length_value - count + 1;
+                 selector <= length_value; ++selector)
+                (void)append_selector(selector);
+        }
+    };
+
+    if (specification.kind() == ExprKind::Integer) {
+        append_count(specification.integer_value());
+        return result;
     }
-    return std::nullopt;
+    if (is_symbol(specification, "All")) {
+        append_count(length_value);
+        return result;
+    }
+    if (specification.has_head("UpTo")) {
+        append_up_to(specification);
+        return result;
+    }
+    if (specification.has_head("Span")) {
+        append_span(specification.args());
+        return result;
+    }
+    if (specification.has_head("List")) {
+        if (specification.args().size() == 1) {
+            const auto& item = specification.args()[0];
+            if (item.kind() == ExprKind::Integer)
+                (void)append_selector(item.integer_value());
+            else if (is_symbol(item, "All")) append_count(length_value);
+            else if (item.has_head("UpTo")) append_up_to(item);
+            else result.error = function_name
+                + " single-element list specifications must contain an integer, All, or UpTo[n].";
+            return result;
+        }
+        if (specification.args().size() == 2
+            || specification.args().size() == 3) {
+            append_span(specification.args());
+            return result;
+        }
+        result.error = function_name
+            + " list specifications must contain one, two, or three items.";
+        return result;
+    }
+    result.error = "Unsupported " + function_name + " specification: "
+        + specification.to_input_form() + ".";
+    return result;
 }
 
 int lexicographic_compare(const Expr& left, const Expr& right) {
@@ -1770,23 +1968,40 @@ const std::map<std::string, std::vector<std::string>>& system_registry() {
     return registry;
 }
 
-std::set<std::string>& user_symbol_registry() {
-    static std::set<std::string> names;
-    return names;
-}
-
 bool wildcard_matches(const std::string& value, const std::string& pattern) {
-    const auto star = pattern.find('*');
-    if (star == std::string::npos) return value == pattern;
-    return value.size() >= pattern.size() - 1 && value.compare(0, star, pattern, 0, star) == 0
-        && value.compare(value.size() - (pattern.size() - star - 1), pattern.size() - star - 1, pattern, star + 1, pattern.size() - star - 1) == 0;
+    std::string expression = "^";
+    auto append_literal = [&](char character) {
+        if (std::string_view(R"(\.^$|()[]{}*+?)").find(character)
+            != std::string_view::npos)
+            expression.push_back('\\');
+        expression.push_back(character);
+    };
+    for (std::size_t index = 0; index < pattern.size(); ++index) {
+        const auto character = pattern[index];
+        if (character == '\\' && index + 1 < pattern.size()) {
+            append_literal(pattern[++index]);
+        } else if (character == '*') {
+            expression += ".*";
+        } else if (character == '@') {
+            expression += "[^A-Z]+";
+        } else {
+            append_literal(character);
+        }
+    }
+    expression.push_back('$');
+    return std::regex_match(value, std::regex(expression));
 }
 
-std::string full_symbol_name(const Expr& expression) {
-    if (!expression.symbol_name()) return {};
-    const auto& name = *expression.symbol_name();
-    if (name.find('`') != std::string::npos) return name;
-    return system_registry().count(name) ? "System`" + name : "Global`" + name;
+bool symbol_name_matches(const std::string& full_name, const std::string& pattern) {
+    const auto marker = full_name.rfind('`');
+    const auto short_name = marker == std::string::npos
+        ? full_name : full_name.substr(marker + 1);
+    if (pattern.find('`') == std::string::npos
+        && full_name.compare(0, 7, "System`") != 0
+        && full_name.compare(0, 7, "Global`") != 0)
+        return false;
+    return wildcard_matches(
+        pattern.find('`') == std::string::npos ? short_name : full_name, pattern);
 }
 
 Expr display_symbol(const std::string& full_name) {
@@ -2102,17 +2317,94 @@ int numeric_type_rank(const Expr& value) {
     return 7;
 }
 
+std::optional<std::pair<Expr, Expr>> orderable_numeric_parts(
+    const Expr& value) {
+    if (value.kind() == ExprKind::Complex)
+        return std::pair{value.real_part(), value.imaginary_part()};
+    if (as_rational(value) || value.kind() == ExprKind::Real
+        || value.kind() == ExprKind::SpecialReal
+        || is_symbol(value, "Infinity") || is_symbol(value, "-Infinity"))
+        return std::pair{value, integer(0L)};
+    return std::nullopt;
+}
+
+std::optional<int> compare_orderable_real(
+    const Expr& left, const Expr& right) {
+    if (left == right) return 0;
+
+    // SpecialReal participates in numeric ordering before the infinity
+    // sentinels.  Overflow is greater than every other real value, while
+    // Underflow models a positive value too small for machine precision.
+    // Keep the comparison in this order to match the compatibility runtime:
+    // in particular, Overflow[] sorts after Infinity.
+    if (left.kind() == ExprKind::SpecialReal
+        || right.kind() == ExprKind::SpecialReal) {
+        if (left.kind() == ExprKind::SpecialReal && left.text() == "Overflow")
+            return 1;
+        if (right.kind() == ExprKind::SpecialReal && right.text() == "Overflow")
+            return -1;
+        if (left.kind() == ExprKind::SpecialReal && left.text() == "Underflow") {
+            const auto right_value = numeric_real(right);
+            if (!right_value) return std::nullopt;
+            return *right_value <= 0 ? 1 : -1;
+        }
+        if (right.kind() == ExprKind::SpecialReal && right.text() == "Underflow") {
+            const auto left_value = numeric_real(left);
+            if (!left_value) return std::nullopt;
+            return *left_value <= 0 ? -1 : 1;
+        }
+    }
+
+    if (is_symbol(left, "-Infinity")) return -1;
+    if (is_symbol(right, "-Infinity")) return 1;
+    if (is_symbol(left, "Infinity")) return 1;
+    if (is_symbol(right, "Infinity")) return -1;
+
+    const auto contains_machine_real = [](const Expr& value) {
+        return value.kind() == ExprKind::Real
+            && value.text().find('`') == std::string::npos;
+    };
+    if (contains_machine_real(left) || contains_machine_real(right)) {
+        const auto left_approximate = numeric_real(left);
+        const auto right_approximate = numeric_real(right);
+        if (!left_approximate || !right_approximate) return std::nullopt;
+        if (*left_approximate < *right_approximate) return -1;
+        if (*left_approximate > *right_approximate) return 1;
+        return 0;
+    }
+
+    auto exact_decimal = [](const Expr& value) -> std::optional<mpq_class> {
+        if (const auto exact = as_rational(value)) return exact;
+        if (value.kind() == ExprKind::Real)
+            return decimal_rational(value.text());
+        return std::nullopt;
+    };
+    const auto left_exact = exact_decimal(left);
+    const auto right_exact = exact_decimal(right);
+    if (left_exact && right_exact)
+        return *left_exact < *right_exact ? -1 : *left_exact > *right_exact ? 1 : 0;
+
+    const auto left_approximate = numeric_real(left);
+    const auto right_approximate = numeric_real(right);
+    if (!left_approximate || !right_approximate) return std::nullopt;
+    if (*left_approximate < *right_approximate) return -1;
+    if (*left_approximate > *right_approximate) return 1;
+    return 0;
+}
+
 int expression_compare(const Expr& left, const Expr& right) {
     if (left == right) return 0;
-    auto numeric_value = [](const Expr& value) -> std::optional<std::pair<double, double>> {
-        if (is_symbol(value, "-Infinity")) return std::pair{-std::numeric_limits<double>::infinity(), 0.0};
-        if (is_symbol(value, "Infinity")) return std::pair{std::numeric_limits<double>::infinity(), 0.0};
-        return numeric_complex(value);
-    };
-    const auto left_numeric = numeric_value(left), right_numeric = numeric_value(right);
+    const auto left_numeric = orderable_numeric_parts(left);
+    const auto right_numeric = orderable_numeric_parts(right);
     if (left_numeric && right_numeric) {
-        if (left_numeric->first != right_numeric->first) return left_numeric->first < right_numeric->first ? -1 : 1;
-        if (left_numeric->second != right_numeric->second) return left_numeric->second < right_numeric->second ? -1 : 1;
+        if (const auto real_order = compare_orderable_real(
+                left_numeric->first, right_numeric->first);
+            real_order && *real_order != 0)
+            return *real_order;
+        if (const auto imaginary_order = compare_orderable_real(
+                left_numeric->second, right_numeric->second);
+            imaginary_order && *imaginary_order != 0)
+            return *imaginary_order;
         if (numeric_type_rank(left) != numeric_type_rank(right)) return numeric_type_rank(left) < numeric_type_rank(right) ? -1 : 1;
     }
     const auto left_rank = expression_rank(left);
@@ -2176,8 +2468,215 @@ Expr interval_expression(const std::vector<IntervalSegment>& segments) {
     return call("Interval", std::move(arguments));
 }
 
-Expr sparse_dense_value(const Expr& value) {
+constexpr std::size_t maximum_sparse_materialized_nodes = 1000000;
+
+using DenseDimensions = std::vector<mpz_class>;
+
+struct NormalizedDenseDimensions {
+    std::optional<DenseDimensions> values;
+    std::string error;
+};
+
+NormalizedDenseDimensions normalize_dense_dimensions(
+    const Expr& expression, const std::string& function) {
+    DenseDimensions dimensions;
+    if (expression.kind() == ExprKind::Integer) {
+        dimensions.push_back(expression.integer_value());
+    } else if (expression.has_head("List")) {
+        dimensions.reserve(expression.args().size());
+        for (const auto& dimension : expression.args()) {
+            if (dimension.kind() != ExprKind::Integer)
+                return {std::nullopt,
+                    function + " expects an integer argument."};
+            dimensions.push_back(dimension.integer_value());
+        }
+    } else {
+        return {std::nullopt,
+            function
+                + " expects an integer dimension or a list of dimensions."};
+    }
+    if (std::any_of(dimensions.begin(), dimensions.end(),
+            [](const mpz_class& dimension) { return dimension < 0; }))
+        return {std::nullopt,
+            function + " expects non-negative dimensions."};
+    return {std::move(dimensions), {}};
+}
+
+bool dense_materialization_within_limit(
+    const DenseDimensions& dimensions) noexcept {
+    const mpz_class limit(maximum_sparse_materialized_nodes);
+    mpz_class prefix_count = 1;
+    mpz_class node_count = 1;
+    for (const auto& dimension : dimensions) {
+        prefix_count *= dimension;
+        node_count += prefix_count;
+        if (node_count > limit) return false;
+    }
+    return true;
+}
+
+std::optional<std::size_t> bounded_dense_dimension(
+    const mpz_class& dimension) {
+    if (dimension < 0
+        || dimension > mpz_class(maximum_sparse_materialized_nodes))
+        return std::nullopt;
+    return nonnegative_size_t(dimension);
+}
+
+Expr build_dense_array(
+    const DenseDimensions& dimensions,
+    const std::function<Expr(const std::vector<mpz_class>&)>& builder,
+    const std::function<bool()>& interrupted,
+    std::vector<mpz_class>& indices, std::size_t level = 0) {
+    if (level == dimensions.size()) return builder(indices);
+    const auto count = bounded_dense_dimension(dimensions[level]);
+    if (!count) return call("TerminatedEvaluation", {
+        symbol("NativeMaterializationLimit")});
+    std::vector<Expr> values;
+    values.reserve(*count);
+    for (std::size_t index = 1; index <= *count; ++index) {
+        indices.push_back(mpz_class(std::to_string(index), 10));
+        auto value = build_dense_array(
+            dimensions, builder, interrupted, indices, level + 1);
+        indices.pop_back();
+        if (interrupted && interrupted()) return value;
+        values.push_back(std::move(value));
+    }
+    return evaluated_list_expr(std::move(values));
+}
+
+Expr build_dense_array(
+    const DenseDimensions& dimensions,
+    const std::function<Expr(const std::vector<mpz_class>&)>& builder,
+    const std::function<bool()>& interrupted = {}) {
+    std::vector<mpz_class> indices;
+    indices.reserve(dimensions.size());
+    return build_dense_array(dimensions, builder, interrupted, indices);
+}
+
+void append_dense_leaves(const Expr& expression, std::vector<Expr>& values) {
+    if (!expression.has_head("List")) {
+        values.push_back(expression);
+        return;
+    }
+    for (const auto& argument : expression.args())
+        append_dense_leaves(argument, values);
+}
+
+std::optional<Expr> dense_value_at(
+    const Expr& expression, const std::vector<mpz_class>& indices) {
+    const Expr* current = &expression;
+    for (const auto& index : indices) {
+        if (!current->has_head("List")) return std::nullopt;
+        const auto offset = bounded_dense_dimension(index - 1);
+        if (!offset || *offset >= current->args().size()) return std::nullopt;
+        current = &current->args()[*offset];
+    }
+    return *current;
+}
+
+struct NormalizedDensePadding {
+    std::optional<std::vector<std::pair<mpz_class, mpz_class>>> widths;
+    std::string error;
+};
+
+NormalizedDensePadding normalize_dense_padding(
+    const Expr& expression, std::size_t rank) {
+    using Width = std::pair<mpz_class, mpz_class>;
+    if (expression.kind() == ExprKind::Integer) {
+        if (expression.integer_value() < 0)
+            return {std::nullopt,
+                "ArrayPad expects non-negative padding widths."};
+        return {std::vector<Width>(rank,
+            {expression.integer_value(), expression.integer_value()}), {}};
+    }
+    if (!expression.has_head("List"))
+        return {std::nullopt,
+            "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."};
+
+    const auto& arguments = expression.args();
+    const auto all_integers = std::all_of(
+        arguments.begin(), arguments.end(), [](const Expr& value) {
+            return value.kind() == ExprKind::Integer;
+        });
+    if (rank == 1 && arguments.size() == 2 && all_integers) {
+        if (arguments[0].integer_value() < 0
+            || arguments[1].integer_value() < 0)
+            return {std::nullopt,
+                "ArrayPad expects non-negative padding widths."};
+        return {std::vector<Width>{{arguments[0].integer_value(),
+            arguments[1].integer_value()}}, {}};
+    }
+    if (arguments.size() == rank && all_integers) {
+        std::vector<Width> widths;
+        widths.reserve(rank);
+        for (const auto& value : arguments) {
+            if (value.integer_value() < 0)
+                return {std::nullopt,
+                    "ArrayPad expects non-negative padding widths."};
+            widths.emplace_back(value.integer_value(), value.integer_value());
+        }
+        return {std::move(widths), {}};
+    }
+    if (arguments.size() == rank) {
+        std::vector<Width> widths;
+        widths.reserve(rank);
+        for (const auto& value : arguments) {
+            if (!value.has_head("List") || value.args().size() != 2)
+                return {std::nullopt,
+                    "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."};
+            if (value.args()[0].kind() != ExprKind::Integer
+                || value.args()[1].kind() != ExprKind::Integer)
+                return {std::nullopt,
+                    "ArrayPad padding widths must be explicit integers."};
+            if (value.args()[0].integer_value() < 0
+                || value.args()[1].integer_value() < 0)
+                return {std::nullopt,
+                    "ArrayPad expects non-negative padding widths."};
+            widths.emplace_back(value.args()[0].integer_value(),
+                value.args()[1].integer_value());
+        }
+        return {std::move(widths), {}};
+    }
+    return {std::nullopt,
+        "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."};
+}
+
+std::optional<std::size_t> checked_dimension_product(
+    const std::vector<std::size_t>& dimensions) noexcept {
+    std::size_t product = 1;
+    for (const auto dimension : dimensions) {
+        if (dimension != 0
+            && product > std::numeric_limits<std::size_t>::max() / dimension)
+            return std::nullopt;
+        product *= dimension;
+    }
+    return product;
+}
+
+bool sparse_has_implicit_values(const Expr& value) noexcept {
+    const auto product = checked_dimension_product(value.dimensions());
+    return !product || *product > value.sparse_entries().size();
+}
+
+bool sparse_materialization_within_limit(const Expr& value) noexcept {
+    std::size_t prefix_count = 1;
+    std::size_t node_count = 1;
+    for (const auto dimension : value.dimensions()) {
+        if (dimension != 0
+            && prefix_count > maximum_sparse_materialized_nodes / dimension)
+            return false;
+        prefix_count *= dimension;
+        if (prefix_count > maximum_sparse_materialized_nodes - node_count)
+            return false;
+        node_count += prefix_count;
+    }
+    return true;
+}
+
+std::optional<Expr> sparse_dense_value(const Expr& value) {
     if (value.kind() != ExprKind::SparseArray) return value;
+    if (!sparse_materialization_within_limit(value)) return std::nullopt;
     auto build = [&](auto&& self, std::vector<std::size_t> prefix) -> Expr {
         if (prefix.size() == value.dimensions().size()) {
             const auto found = std::find_if(value.sparse_entries().begin(), value.sparse_entries().end(),
@@ -2185,6 +2684,7 @@ Expr sparse_dense_value(const Expr& value) {
             return found == value.sparse_entries().end() ? value.fill_value() : found->value;
         }
         std::vector<Expr> items;
+        items.reserve(value.dimensions()[prefix.size()]);
         for (std::size_t index = 1; index <= value.dimensions()[prefix.size()]; ++index) {
             auto child = prefix; child.push_back(index); items.push_back(self(self, std::move(child)));
         }
@@ -2202,6 +2702,53 @@ std::optional<std::vector<std::size_t>> dense_dimensions(const Expr& value) {
     dimensions.insert(dimensions.end(), child->begin(), child->end()); return dimensions;
 }
 
+std::optional<std::vector<std::size_t>> rectangular_array_dimensions(
+    const Expr& value) {
+    if (value.kind() == ExprKind::SparseArray) return value.dimensions();
+    if (!value.has_head("List")) return std::nullopt;
+    return dense_dimensions(value);
+}
+
+std::vector<std::size_t> common_dense_dimensions(const Expr& value) {
+    if (!value.has_head("List")) return {};
+    std::vector<std::size_t> dimensions{value.args().size()};
+    if (value.args().empty()) return dimensions;
+
+    auto common = common_dense_dimensions(value.args().front());
+    for (std::size_t index = 1; index < value.args().size(); ++index) {
+        const auto child = common_dense_dimensions(value.args()[index]);
+        const auto shared = std::mismatch(
+            common.begin(), common.end(), child.begin(), child.end()).first;
+        common.erase(shared, common.end());
+        if (common.empty()) break;
+    }
+    dimensions.insert(dimensions.end(), common.begin(), common.end());
+    return dimensions;
+}
+
+std::vector<std::size_t> common_array_dimensions(const Expr& value) {
+    return value.kind() == ExprKind::SparseArray
+        ? value.dimensions() : common_dense_dimensions(value);
+}
+
+std::size_t maximum_array_depth(const Expr& value) {
+    if (value.kind() == ExprKind::SparseArray) return value.dimensions().size();
+    if (!value.has_head("List")) return 0;
+    std::size_t depth = 1;
+    for (const auto& item : value.args())
+        depth = std::max(depth, maximum_array_depth(item) + 1);
+    return depth;
+}
+
+template<typename Predicate>
+bool dense_array_leaves_match(const Expr& value, Predicate&& predicate) {
+    if (!value.has_head("List")) return predicate(value);
+    return std::all_of(
+        value.args().begin(), value.args().end(), [&](const Expr& item) {
+            return dense_array_leaves_match(item, predicate);
+        });
+}
+
 std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = integer(0L)) {
     const auto dimensions = dense_dimensions(value); if (!dimensions || dimensions->empty()) return std::nullopt;
     std::vector<SparseEntry> entries;
@@ -2214,31 +2761,509 @@ std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = inte
     collect(collect, value, {}); return sparse_array(*dimensions, std::move(entries), fill);
 }
 
+mpz_class sparse_dimension_product(
+    const std::vector<std::size_t>& dimensions) {
+    mpz_class product = 1;
+    for (const auto dimension : dimensions)
+        product *= mpz_class(std::to_string(dimension), 10);
+    return product;
+}
+
+mpz_class sparse_linear_offset(
+    const std::vector<std::size_t>& indices,
+    const std::vector<std::size_t>& dimensions) {
+    mpz_class offset = 0;
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        offset *= mpz_class(std::to_string(dimensions[axis]), 10);
+        offset += mpz_class(std::to_string(indices[axis] - 1), 10);
+    }
+    return offset;
+}
+
+std::optional<std::vector<std::size_t>> sparse_indices_from_offset(
+    mpz_class offset, const std::vector<std::size_t>& dimensions) {
+    std::vector<std::size_t> indices(dimensions.size(), 1);
+    for (std::size_t reverse_axis = dimensions.size(); reverse_axis > 0;
+         --reverse_axis) {
+        const auto axis = reverse_axis - 1;
+        if (dimensions[axis] == 0) return std::nullopt;
+        const mpz_class dimension(std::to_string(dimensions[axis]), 10);
+        const mpz_class remainder = offset % dimension;
+        offset /= dimension;
+        const auto index = nonnegative_size_t(remainder + 1);
+        if (!index) return std::nullopt;
+        indices[axis] = *index;
+    }
+    return indices;
+}
+
+std::optional<std::vector<std::size_t>> native_sparse_dimensions(
+    const DenseDimensions& dimensions) {
+    std::vector<std::size_t> native;
+    native.reserve(dimensions.size());
+    for (const auto& dimension : dimensions) {
+        const auto value = nonnegative_size_t(dimension);
+        if (!value) return std::nullopt;
+        native.push_back(*value);
+    }
+    return native;
+}
+
+Expr sparse_coordinate_value(
+    const Expr& array, const std::vector<std::size_t>& indices) {
+    const auto found = std::lower_bound(
+        array.sparse_entries().begin(), array.sparse_entries().end(), indices,
+        [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+            return entry.indices < target;
+        });
+    return found != array.sparse_entries().end() && found->indices == indices
+        ? found->value : array.fill_value();
+}
+
+using ExactSparsePosition = std::vector<mpz_class>;
+
+struct ExactSparseEntry {
+    ExactSparsePosition indices;
+    Expr value;
+};
+
+struct SparseConstructionResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+std::optional<ExactSparsePosition> sparse_position_from_expression(
+    const Expr& expression, std::optional<std::size_t> rank_hint) {
+    if (expression.kind() == ExprKind::Integer) {
+        if (rank_hint && *rank_hint != 1) return std::nullopt;
+        return ExactSparsePosition{expression.integer_value()};
+    }
+    if (!expression.has_head("List")
+        || !std::all_of(expression.args().begin(), expression.args().end(),
+            [](const Expr& value) {
+                return value.kind() == ExprKind::Integer;
+            }))
+        return std::nullopt;
+    if (rank_hint && expression.args().size() != *rank_hint)
+        return std::nullopt;
+    ExactSparsePosition result;
+    result.reserve(expression.args().size());
+    for (const auto& value : expression.args())
+        result.push_back(value.integer_value());
+    return result;
+}
+
+bool sparse_rule_expression(const Expr& expression) {
+    return (expression.has_head("Rule")
+        || expression.has_head("RuleDelayed"))
+        && expression.args().size() == 2;
+}
+
+struct SparseRuleExpansionResult {
+    std::optional<std::vector<ExactSparseEntry>> entries;
+    std::string error;
+};
+
+SparseRuleExpansionResult expand_sparse_rule(
+    const Expr& rule, std::optional<std::size_t> rank_hint) {
+    if (!sparse_rule_expression(rule))
+        return {std::nullopt,
+            "SparseArray expects rules or a dense list."};
+
+    const auto& positions = rule.args()[0];
+    const auto& values = rule.args()[1];
+    if (positions.has_head("List") && values.has_head("List")) {
+        if (positions.args().size() != values.args().size())
+            return {std::nullopt,
+                "SparseArray position and value lists must have the same length."};
+
+        if ((!rank_hint || *rank_hint == 1)
+            && std::all_of(positions.args().begin(), positions.args().end(),
+                [](const Expr& value) {
+                    return value.kind() == ExprKind::Integer;
+                })) {
+            std::vector<ExactSparseEntry> result;
+            result.reserve(positions.args().size());
+            for (std::size_t index = 0; index < positions.args().size(); ++index)
+                result.push_back({
+                    {positions.args()[index].integer_value()},
+                    values.args()[index]});
+            return {std::move(result), {}};
+        }
+
+        std::vector<ExactSparseEntry> expanded;
+        expanded.reserve(positions.args().size());
+        bool vectorized = true;
+        for (std::size_t index = 0; index < positions.args().size(); ++index) {
+            const auto position = sparse_position_from_expression(
+                positions.args()[index], rank_hint);
+            if (!position) {
+                vectorized = false;
+                break;
+            }
+            expanded.push_back({*position, values.args()[index]});
+        }
+        if (vectorized) return {std::move(expanded), {}};
+    }
+
+    const auto position = sparse_position_from_expression(
+        positions, rank_hint);
+    if (!position)
+        return {std::nullopt,
+            "SparseArray currently supports explicit integer positions, not patterns or Band."};
+    return {std::vector<ExactSparseEntry>{{*position, values}}, {}};
+}
+
+SparseConstructionResult make_native_sparse_array(
+    const DenseDimensions& exact_dimensions,
+    const std::vector<ExactSparseEntry>& exact_entries,
+    const Expr& fill) {
+    if (exact_dimensions.empty())
+        return {std::nullopt,
+            "SparseArray expects at least one dimension."};
+    if (std::any_of(exact_dimensions.begin(), exact_dimensions.end(),
+            [](const mpz_class& dimension) { return dimension < 0; }))
+        return {std::nullopt,
+            "SparseArray dimensions must be non-negative."};
+
+    std::set<ExactSparsePosition> seen;
+    std::vector<ExactSparseEntry> normalized_entries;
+    normalized_entries.reserve(exact_entries.size());
+    for (const auto& entry : exact_entries) {
+        if (entry.indices.size() != exact_dimensions.size())
+            return {std::nullopt,
+                "SparseArray rule positions must match the array rank."};
+        if (!seen.insert(entry.indices).second) continue;
+        for (std::size_t axis = 0; axis < entry.indices.size(); ++axis)
+            if (entry.indices[axis] < 1
+                || entry.indices[axis] > exact_dimensions[axis])
+                return {std::nullopt,
+                    "SparseArray rule positions must be inside the array dimensions."};
+        if (entry.value != fill) normalized_entries.push_back(entry);
+    }
+
+    std::vector<std::size_t> dimensions;
+    dimensions.reserve(exact_dimensions.size());
+    for (const auto& dimension : exact_dimensions) {
+        const auto native = nonnegative_size_t(dimension);
+        if (!native)
+            return {std::nullopt,
+                "SparseArray dimensions exceed the native representation limit."};
+        dimensions.push_back(*native);
+    }
+
+    std::vector<SparseEntry> entries;
+    entries.reserve(normalized_entries.size());
+    for (const auto& entry : normalized_entries) {
+        std::vector<std::size_t> indices;
+        indices.reserve(entry.indices.size());
+        for (const auto& index : entry.indices) {
+            const auto native = nonnegative_size_t(index);
+            if (!native)
+                return {std::nullopt,
+                    "SparseArray positions exceed the native representation limit."};
+            indices.push_back(*native);
+        }
+        entries.push_back({std::move(indices), entry.value});
+    }
+    return {sparse_array(
+        std::move(dimensions), std::move(entries), fill), {}};
+}
+
+SparseConstructionResult reencode_sparse_fill(
+    const Expr& source, const Expr& fill) {
+    if (source.fill_value() == fill) return {source, {}};
+    if (!sparse_materialization_within_limit(source))
+        return {std::nullopt,
+            "SparseArray dimensions exceed the native materialization limit."};
+
+    std::vector<SparseEntry> entries;
+    std::vector<std::size_t> position;
+    position.reserve(source.dimensions().size());
+    auto visit = [&](auto&& self, std::size_t axis) -> void {
+        if (axis == source.dimensions().size()) {
+            const auto found = std::lower_bound(
+                source.sparse_entries().begin(), source.sparse_entries().end(),
+                position,
+                [](const SparseEntry& entry,
+                    const std::vector<std::size_t>& target) {
+                    return entry.indices < target;
+                });
+            const auto value = found != source.sparse_entries().end()
+                    && found->indices == position
+                ? found->value : source.fill_value();
+            if (value != fill) entries.push_back({position, value});
+            return;
+        }
+        for (std::size_t index = 1;
+             index <= source.dimensions()[axis]; ++index) {
+            position.push_back(index);
+            self(self, axis + 1);
+            position.pop_back();
+        }
+    };
+    visit(visit, 0);
+    return {sparse_array(
+        source.dimensions(), std::move(entries), fill), {}};
+}
+
+SparseConstructionResult construct_sparse_array(
+    const std::vector<Expr>& arguments) {
+    if (arguments.empty() || arguments.size() > 3)
+        return {std::nullopt,
+            "SparseArray expects data, optional dimensions, and an optional implicit value."};
+
+    const auto& data = arguments[0];
+    const auto fill = arguments.size() == 3
+        ? arguments[2] : integer(0L);
+    std::optional<DenseDimensions> dimensions;
+    if (arguments.size() >= 2) {
+        const auto normalized = normalize_dense_dimensions(
+            arguments[1], "SparseArray");
+        if (!normalized.values)
+            return {std::nullopt, normalized.error};
+        dimensions = *normalized.values;
+    }
+
+    if (data.kind() == ExprKind::SparseArray) {
+        DenseDimensions source_dimensions;
+        source_dimensions.reserve(data.dimensions().size());
+        for (const auto dimension : data.dimensions())
+            source_dimensions.emplace_back(std::to_string(dimension), 10);
+        if (dimensions && *dimensions != source_dimensions)
+            return {std::nullopt,
+                "SparseArray cannot reinterpret an existing sparse array with different dimensions."};
+        return reencode_sparse_fill(data, fill);
+    }
+
+    if (is_symbol(data, "Automatic") && dimensions)
+        return make_native_sparse_array(*dimensions, {}, fill);
+
+    std::optional<std::vector<Expr>> rule_expressions;
+    if (sparse_rule_expression(data)) {
+        rule_expressions = std::vector<Expr>{data};
+    } else if (data.has_head("List")
+        && std::all_of(data.args().begin(), data.args().end(),
+            sparse_rule_expression)) {
+        rule_expressions = data.args();
+    }
+
+    if (rule_expressions) {
+        std::vector<ExactSparseEntry> entries;
+        const auto rank_hint = dimensions
+            ? std::optional<std::size_t>(dimensions->size())
+            : std::nullopt;
+        for (const auto& rule : *rule_expressions) {
+            auto expanded = expand_sparse_rule(rule, rank_hint);
+            if (!expanded.entries)
+                return {std::nullopt, expanded.error};
+            entries.insert(entries.end(), expanded.entries->begin(),
+                expanded.entries->end());
+        }
+
+        DenseDimensions final_dimensions;
+        if (dimensions) {
+            final_dimensions = *dimensions;
+        } else {
+            if (entries.empty())
+                return {std::nullopt,
+                    "SparseArray dimensions cannot be inferred from an empty rule set."};
+            const auto rank = entries.front().indices.size();
+            if (rank == 0
+                || std::any_of(entries.begin(), entries.end(),
+                    [&](const ExactSparseEntry& entry) {
+                        return entry.indices.size() != rank;
+                    }))
+                return {std::nullopt,
+                    "SparseArray rule positions must have a consistent rank."};
+            final_dimensions = entries.front().indices;
+            for (const auto& entry : entries)
+                for (std::size_t axis = 0; axis < rank; ++axis)
+                    final_dimensions[axis] = std::max(
+                        final_dimensions[axis], entry.indices[axis]);
+        }
+        return make_native_sparse_array(
+            final_dimensions, entries, fill);
+    }
+
+    const auto inferred_dimensions = dense_dimensions(data);
+    if (!inferred_dimensions)
+        return {std::nullopt,
+            "SparseArray dense input must be rectangular."};
+    if (inferred_dimensions->empty())
+        return {std::nullopt,
+            "SparseArray expects a rule specification or a rectangular dense list."};
+    DenseDimensions exact_inferred_dimensions;
+    exact_inferred_dimensions.reserve(inferred_dimensions->size());
+    for (const auto dimension : *inferred_dimensions)
+        exact_inferred_dimensions.emplace_back(std::to_string(dimension), 10);
+    if (dimensions && *dimensions != exact_inferred_dimensions)
+        return {std::nullopt,
+            "SparseArray dense input dimensions do not match the explicit dimensions."};
+    const auto result = sparse_from_dense(data, fill);
+    if (!result)
+        return {std::nullopt,
+            "SparseArray expects a rule specification or a rectangular dense list."};
+    return {*result, {}};
+}
+
+struct SparseArithmeticResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+SparseArithmeticResult sparse_binary_elementwise(
+    const std::string& function, const Expr& left, const Expr& right,
+    const std::function<Expr(const Expr&)>& evaluate_expression) {
+    auto evaluated_binary = [&](const Expr& lhs, const Expr& rhs) {
+        return evaluate_expression(call(function, {lhs, rhs}));
+    };
+
+    if (left.has_head("List")) {
+        const auto dense_right = right.kind() == ExprKind::SparseArray
+            ? sparse_dense_value(right) : std::optional<Expr>(right);
+        if (!dense_right)
+            return {std::nullopt,
+                "SparseArray dimensions exceed the native materialization limit."};
+        return {evaluated_binary(left, *dense_right), {}};
+    }
+    if (right.has_head("List")) {
+        const auto dense_left = left.kind() == ExprKind::SparseArray
+            ? sparse_dense_value(left) : std::optional<Expr>(left);
+        if (!dense_left)
+            return {std::nullopt,
+                "SparseArray dimensions exceed the native materialization limit."};
+        return {evaluated_binary(*dense_left, right), {}};
+    }
+
+    if (left.kind() == ExprKind::SparseArray
+        && right.kind() == ExprKind::SparseArray) {
+        if (left.dimensions() != right.dimensions())
+            return {std::nullopt, function
+                + " expects SparseArray dimensions to agree."};
+
+        const auto fill = evaluated_binary(
+            left.fill_value(), right.fill_value());
+        std::vector<SparseEntry> entries;
+        entries.reserve(left.sparse_entries().size()
+            + right.sparse_entries().size());
+        std::size_t left_index = 0;
+        std::size_t right_index = 0;
+        while (left_index < left.sparse_entries().size()
+            || right_index < right.sparse_entries().size()) {
+            const bool take_left = right_index >= right.sparse_entries().size()
+                || (left_index < left.sparse_entries().size()
+                    && left.sparse_entries()[left_index].indices
+                        < right.sparse_entries()[right_index].indices);
+            const bool take_right = left_index >= left.sparse_entries().size()
+                || (right_index < right.sparse_entries().size()
+                    && right.sparse_entries()[right_index].indices
+                        < left.sparse_entries()[left_index].indices);
+
+            std::vector<std::size_t> indices;
+            Expr left_value = left.fill_value();
+            Expr right_value = right.fill_value();
+            if (take_left) {
+                const auto& entry = left.sparse_entries()[left_index++];
+                indices = entry.indices;
+                left_value = entry.value;
+            } else if (take_right) {
+                const auto& entry = right.sparse_entries()[right_index++];
+                indices = entry.indices;
+                right_value = entry.value;
+            } else {
+                const auto& left_entry = left.sparse_entries()[left_index++];
+                const auto& right_entry = right.sparse_entries()[right_index++];
+                indices = left_entry.indices;
+                left_value = left_entry.value;
+                right_value = right_entry.value;
+            }
+            const auto value = evaluated_binary(left_value, right_value);
+            if (value != fill)
+                entries.push_back({std::move(indices), value});
+        }
+        return {sparse_array(
+            left.dimensions(), std::move(entries), fill), {}};
+    }
+
+    if (left.kind() == ExprKind::SparseArray) {
+        const auto fill = evaluated_binary(left.fill_value(), right);
+        std::vector<SparseEntry> entries;
+        entries.reserve(left.sparse_entries().size());
+        for (const auto& entry : left.sparse_entries()) {
+            const auto value = evaluated_binary(entry.value, right);
+            if (value != fill)
+                entries.push_back({entry.indices, value});
+        }
+        return {sparse_array(
+            left.dimensions(), std::move(entries), fill), {}};
+    }
+
+    if (right.kind() == ExprKind::SparseArray) {
+        const auto fill = evaluated_binary(left, right.fill_value());
+        std::vector<SparseEntry> entries;
+        entries.reserve(right.sparse_entries().size());
+        for (const auto& entry : right.sparse_entries()) {
+            const auto value = evaluated_binary(left, entry.value);
+            if (value != fill)
+                entries.push_back({entry.indices, value});
+        }
+        return {sparse_array(
+            right.dimensions(), std::move(entries), fill), {}};
+    }
+
+    return {evaluated_binary(left, right), {}};
+}
+
 constexpr long level_infinity = 1000000000L;
-struct LevelBounds { long minimum; long maximum; bool valid; };
+struct LevelBounds {
+    long minimum;
+    long maximum;
+    bool valid;
+    std::string error;
+
+    LevelBounds(long minimum_value, long maximum_value, bool is_valid,
+        std::string error_message = {})
+        : minimum(minimum_value), maximum(maximum_value), valid(is_valid),
+          error(std::move(error_message)) {}
+};
+
+std::optional<long> normalized_level_integer(const Expr& expression) {
+    if (expression.kind() != ExprKind::Integer) return std::nullopt;
+    const auto& value = expression.integer_value();
+    if (value > level_infinity) return level_infinity;
+    if (value < -level_infinity) return -level_infinity;
+    return value.get_si();
+}
 
 LevelBounds normalize_level_spec(const Expr& specification) {
     if (is_symbol(specification, "Infinity")) return {1, level_infinity, true};
-    if (const auto level = machine_index(specification)) return *level >= 0
+    if (const auto level = normalized_level_integer(specification)) return *level >= 0
         ? LevelBounds{*level == 0 ? 0 : 1, *level, true} : LevelBounds{1, *level, true};
     if (specification.has_head("List") && specification.args().size() == 1) {
         if (is_symbol(specification.args()[0], "Infinity")) return {level_infinity, level_infinity, true};
-        if (const auto level = machine_index(specification.args()[0])) return {*level, *level, true};
+        if (const auto level = normalized_level_integer(specification.args()[0]))
+            return {*level, *level, true};
+        return {0, 0, false, "Unsupported level bound: "
+            + specification.args()[0].to_input_form() + "."};
     }
     if (specification.has_head("List") && specification.args().size() == 2) {
-        const auto lower = machine_index(specification.args()[0]);
+        const auto lower = normalized_level_integer(specification.args()[0]);
         const auto upper = is_symbol(specification.args()[1], "Infinity") ? std::optional<long>(level_infinity)
-            : machine_index(specification.args()[1]);
+            : normalized_level_integer(specification.args()[1]);
         if (lower && upper) return {*lower, *upper, true};
     }
-    return {0, 0, false};
+    return {0, 0, false, "Unsupported Level specification: '"
+        + specification.to_input_form() + "'."};
 }
 
 std::size_t semantic_expression_depth(const Expr& value) {
     if (const auto rules = association_rules(value)) {
+        if (rules->empty()) return 2;
         std::size_t depth = 1; for (const auto& rule : *rules) depth = std::max(depth, semantic_expression_depth(rule.args()[1]) + 1); return depth;
     }
     if (value.kind() != ExprKind::Call) return 1;
+    if (value.args().empty()) return 2;
     std::size_t depth = 1; for (const auto& item : value.args()) depth = std::max(depth, semantic_expression_depth(item) + 1); return depth;
 }
 
@@ -2564,6 +3589,38 @@ std::vector<Expr> splice_sequences(const std::vector<Expr>& args) {
     return result;
 }
 
+Expr rebuild_evaluated_call(Expr head, std::vector<Expr> arguments) {
+    std::vector<Expr> normalized;
+    for (const auto& argument : arguments) {
+        if (argument.has_head("Sequence")) {
+            normalized.insert(
+                normalized.end(), argument.args().begin(), argument.args().end());
+            continue;
+        }
+        if (argument.has_head("Splice") && !argument.args().empty()
+            && argument.args().size() <= 2
+            && argument.args()[0].has_head("List")) {
+            const auto target = argument.args().size() == 2
+                ? argument.args()[1] : symbol("List");
+            if (target == head) {
+                normalized.insert(normalized.end(), argument.args()[0].args().begin(),
+                    argument.args()[0].args().end());
+                continue;
+            }
+        }
+        normalized.push_back(argument);
+    }
+    if (is_symbol(head, "List") || is_symbol(head, "Association"))
+        normalized.erase(std::remove_if(normalized.begin(), normalized.end(),
+            [](const Expr& value) { return is_symbol(value, "Nothing"); }),
+            normalized.end());
+    return call(std::move(head), std::move(normalized));
+}
+
+Expr evaluated_list_expr(std::vector<Expr> arguments) {
+    return rebuild_evaluated_call(symbol("List"), std::move(arguments));
+}
+
 Expr replace_slots(const Expr& expression, const std::vector<Expr>& args, const Expr& self) {
     if (expression.has_head("Function")) return expression;
     if (expression.has_head("Slot") && expression.args().empty()) return args.empty() ? expression : args[0];
@@ -2608,6 +3665,683 @@ std::optional<Expr> selector_key(const Expr& selector) {
     return std::nullopt;
 }
 
+struct StructuralSelector {
+    std::optional<std::size_t> index;
+    std::optional<Expr> key;
+};
+
+struct StructuralSelection {
+    StructuralSelector selector;
+    Expr child;
+    std::optional<Expr> association_rule;
+};
+
+struct StructuralSelectionResult {
+    std::vector<StructuralSelection> selections;
+    bool invalid = false;
+    std::string error;
+};
+
+struct StructuralNumericResult {
+    std::vector<std::size_t> indices;
+    bool invalid = false;
+    std::string error;
+};
+
+enum class StructuralSelectorKind { None, Numeric, Key };
+
+StructuralSelectorKind structural_selector_kind(const Expr& expression) {
+    if (expression.kind() == ExprKind::Integer || is_symbol(expression, "All")
+        || expression.has_head("Span")) return StructuralSelectorKind::Numeric;
+    if (expression.kind() == ExprKind::String || selector_key(expression))
+        return StructuralSelectorKind::Key;
+    return StructuralSelectorKind::None;
+}
+
+std::optional<std::size_t> structural_index(
+    const mpz_class& raw_index, std::size_t length) {
+    if (raw_index == 0) return std::nullopt;
+    const mpz_class one_based = raw_index > 0
+        ? raw_index : mpz_class(std::to_string(length)) + raw_index + 1;
+    if (one_based < 1 || one_based > mpz_class(std::to_string(length)))
+        return std::nullopt;
+    return nonnegative_size_t(one_based);
+}
+
+StructuralNumericResult structural_numeric_selectors(
+    std::size_t length, const Expr& component, const std::string& function_name,
+    bool allow_head) {
+    StructuralNumericResult result;
+    const mpz_class length_value(std::to_string(length));
+
+    if (component.kind() == ExprKind::Integer) {
+        const auto raw_index = component.integer_value();
+        if (raw_index == 0) {
+            if (allow_head) result.indices.push_back(0);
+            else result.error = function_name
+                + " does not support index 0 in this position.";
+            return result;
+        }
+        const auto one_based = structural_index(raw_index, length);
+        if (!one_based) result.invalid = true;
+        else result.indices.push_back(*one_based);
+        return result;
+    }
+
+    if (is_symbol(component, "All")) {
+        result.indices.reserve(length);
+        for (std::size_t index = 1; index <= length; ++index)
+            result.indices.push_back(index);
+        return result;
+    }
+
+    if (component.has_head("Span")) {
+        if (component.args().size() != 2 && component.args().size() != 3) {
+            result.error = "Span must contain two or three arguments.";
+            return result;
+        }
+        auto endpoint = [&](const Expr& expression, const mpz_class& fallback) {
+            if (is_symbol(expression, "All")) return length_value;
+            if (expression.kind() != ExprKind::Integer) return fallback;
+            auto value = expression.integer_value();
+            if (value < 0) value += length_value + 1;
+            return value;
+        };
+        const auto first = endpoint(component.args()[0], mpz_class(1));
+        const auto last = endpoint(component.args()[1], length_value);
+        mpz_class step = 1;
+        if (component.args().size() == 3) {
+            if (component.args()[2].kind() != ExprKind::Integer) {
+                result.error = "Span steps must be integers.";
+                return result;
+            }
+            step = component.args()[2].integer_value();
+        }
+        if (step == 0) {
+            result.error = "Span step cannot be zero.";
+            return result;
+        }
+        for (auto raw_index = first;
+             step > 0 ? raw_index <= last : raw_index >= last;
+             raw_index += step) {
+            const auto one_based = structural_index(raw_index, length);
+            if (!one_based) result.invalid = true;
+            else result.indices.push_back(*one_based);
+        }
+        return result;
+    }
+
+    if (component.has_head("List")) {
+        for (const auto& item : component.args()) {
+            if (structural_selector_kind(item) == StructuralSelectorKind::Key) {
+                result.error = "Unsupported selector inside " + function_name
+                    + " specification: " + item.to_input_form() + ".";
+                return result;
+            }
+            const auto nested = structural_numeric_selectors(
+                length, item, function_name, false);
+            if (!nested.error.empty()) {
+                result.error = nested.error;
+                return result;
+            }
+            result.invalid = result.invalid || nested.invalid;
+            result.indices.insert(result.indices.end(),
+                nested.indices.begin(), nested.indices.end());
+        }
+        return result;
+    }
+
+    result.error = "Unsupported " + function_name + " specification: "
+        + component.to_input_form() + ".";
+    return result;
+}
+
+StructuralSelectionResult structural_component_selections(
+    const Expr& expression, const Expr& component, bool allow_head,
+    const std::string& function_name) {
+    StructuralSelectionResult result;
+    if (component.kind() == ExprKind::Integer
+        && component.integer_value() == 0) {
+        if (!allow_head) {
+            result.error = function_name
+                + " does not support index 0 in this position.";
+            return result;
+        }
+        result.selections.push_back({
+            StructuralSelector{std::size_t(0), std::nullopt}, expression.head(),
+            std::nullopt});
+        return result;
+    }
+
+    if (const auto rules = association_rules(expression)) {
+        auto append_key = [&](const Expr& key) {
+            const auto found = std::find_if(rules->begin(), rules->end(),
+                [&](const Expr& rule) { return rule.args()[0] == key; });
+            if (found == rules->end()) {
+                result.invalid = true;
+                return;
+            }
+            result.selections.push_back({
+                StructuralSelector{std::nullopt, key}, found->args()[1], *found});
+        };
+
+        if (component.kind() == ExprKind::String || selector_key(component)) {
+            append_key(selector_key(component).value_or(component));
+            return result;
+        }
+
+        if (component.has_head("List")) {
+            bool has_numeric = false;
+            bool has_key = false;
+            for (const auto& item : component.args()) {
+                const auto kind = structural_selector_kind(item);
+                if (kind == StructuralSelectorKind::None) {
+                    result.error = "Unsupported selector inside " + function_name
+                        + " specification: " + component.to_input_form() + ".";
+                    return result;
+                }
+                has_numeric = has_numeric || kind == StructuralSelectorKind::Numeric;
+                has_key = has_key || kind == StructuralSelectorKind::Key;
+            }
+            if (has_numeric && has_key) {
+                result.error =
+                    "Association selector lists may not mix numeric and key selectors.";
+                return result;
+            }
+            if (has_key) {
+                for (const auto& item : component.args())
+                    append_key(selector_key(item).value_or(item));
+                return result;
+            }
+        }
+
+        const auto numeric = structural_numeric_selectors(
+            rules->size(), component, function_name, false);
+        result.invalid = numeric.invalid;
+        result.error = numeric.error;
+        if (!result.error.empty()) return result;
+        for (const auto one_based : numeric.indices) {
+            const auto& rule = (*rules)[one_based - 1];
+            result.selections.push_back({
+                StructuralSelector{one_based, std::nullopt}, rule.args()[1], rule});
+        }
+        return result;
+    }
+
+    if (expression.kind() != ExprKind::Call) {
+        result.invalid = true;
+        return result;
+    }
+
+    const auto numeric = structural_numeric_selectors(
+        expression.args().size(), component, function_name, allow_head);
+    result.invalid = numeric.invalid;
+    result.error = numeric.error;
+    if (!result.error.empty()) return result;
+    for (const auto one_based : numeric.indices) {
+        result.selections.push_back({
+            StructuralSelector{one_based, std::nullopt},
+            one_based == 0 ? expression.head() : expression.args()[one_based - 1],
+            std::nullopt});
+    }
+    return result;
+}
+
+bool structural_multi_component(const Expr& component) {
+    return is_symbol(component, "All") || component.has_head("Span")
+        || component.has_head("List");
+}
+
+struct StructuralPartResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+StructuralPartResult structural_part(
+    const Expr& expression, const std::vector<Expr>& components,
+    std::size_t depth = 0) {
+    if (depth == components.size()) return {expression, {}};
+    const auto& component = components[depth];
+    const auto selected = structural_component_selections(
+        expression, component, true, "Part");
+    if (!selected.error.empty()) return {std::nullopt, selected.error};
+    const bool multi = structural_multi_component(component);
+    if (selected.invalid || (selected.selections.empty() && !multi)) {
+        return {std::nullopt, "Part specifications are invalid for "
+            + expression.to_input_form() + "."};
+    }
+    if (!multi) {
+        if (depth + 1 == components.size())
+            return {selected.selections.front().child, {}};
+        return structural_part(
+            selected.selections.front().child, components, depth + 1);
+    }
+
+    std::vector<Expr> transformed;
+    transformed.reserve(selected.selections.size());
+    for (const auto& selection : selected.selections) {
+        if (depth + 1 == components.size()) {
+            transformed.push_back(selection.child);
+            continue;
+        }
+        const auto child = structural_part(selection.child, components, depth + 1);
+        if (!child.error.empty()) return child;
+        transformed.push_back(*child.value);
+    }
+
+    if (association_rules(expression)) {
+        std::vector<Expr> entries;
+        entries.reserve(transformed.size());
+        for (std::size_t index = 0; index < transformed.size(); ++index) {
+            if (!selected.selections[index].association_rule) continue;
+            const auto& rule = *selected.selections[index].association_rule;
+            entries.push_back(call(rule.head(), {rule.args()[0], transformed[index]}));
+        }
+        return {call("Association", std::move(entries)), {}};
+    }
+    return {call(expression.head(), std::move(transformed)), {}};
+}
+
+struct SparseAxisSelection {
+    bool preserve = false;
+    bool identity = false;
+    std::vector<std::size_t> source_indices;
+    std::size_t output_dimension = 0;
+};
+
+struct SparsePartResult {
+    std::optional<Expr> value;
+    std::string error;
+};
+
+SparsePartResult sparse_part(
+    const Expr& array, const std::vector<Expr>& specifications) {
+    const auto& dimensions = array.dimensions();
+    if (specifications.size() > dimensions.size())
+        return {std::nullopt,
+            "Part received too many specifications for SparseArray."};
+
+    std::vector<SparseAxisSelection> selections;
+    selections.reserve(dimensions.size());
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        if (axis >= specifications.size()
+            || is_symbol(specifications[axis], "All")) {
+            selections.push_back({true, true, {}, dimensions[axis]});
+            continue;
+        }
+
+        const auto& specification = specifications[axis];
+        const bool preserve = specification.has_head("Span")
+            || specification.has_head("List");
+        if (specification.kind() != ExprKind::Integer && !preserve) {
+            return {std::nullopt, "Unsupported Part specification for SparseArray: "
+                + specification.to_input_form() + "."};
+        }
+
+        const auto numeric = structural_numeric_selectors(
+            dimensions[axis], specification, "Part", false);
+        if (!numeric.error.empty()) return {std::nullopt, numeric.error};
+        if (numeric.invalid || (!preserve && numeric.indices.size() != 1))
+            return {std::nullopt,
+                "Part specifications are invalid for SparseArray."};
+        selections.push_back({preserve, false, numeric.indices,
+            preserve ? numeric.indices.size() : 0});
+    }
+
+    const bool scalar = std::none_of(
+        selections.begin(), selections.end(),
+        [](const SparseAxisSelection& selection) { return selection.preserve; });
+    if (scalar) {
+        std::vector<std::size_t> indices;
+        indices.reserve(selections.size());
+        for (const auto& selection : selections)
+            indices.push_back(selection.source_indices.front());
+        const auto found = std::lower_bound(
+            array.sparse_entries().begin(), array.sparse_entries().end(), indices,
+            [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+                return entry.indices < target;
+            });
+        return {found != array.sparse_entries().end() && found->indices == indices
+                ? found->value : array.fill_value(), {}};
+    }
+
+    std::vector<std::size_t> output_dimensions;
+    for (const auto& selection : selections)
+        if (selection.preserve)
+            output_dimensions.push_back(selection.output_dimension);
+
+    std::vector<SparseEntry> output_entries;
+    for (const auto& entry : array.sparse_entries()) {
+        std::vector<std::vector<std::size_t>> output_options;
+        bool include = true;
+        for (std::size_t axis = 0; axis < selections.size(); ++axis) {
+            const auto& selection = selections[axis];
+            const auto source_index = entry.indices[axis];
+            if (!selection.preserve) {
+                if (selection.source_indices.front() != source_index) {
+                    include = false;
+                    break;
+                }
+                continue;
+            }
+            if (selection.identity) {
+                output_options.push_back({source_index});
+                continue;
+            }
+            std::vector<std::size_t> mapped;
+            for (std::size_t output_index = 0;
+                 output_index < selection.source_indices.size(); ++output_index)
+                if (selection.source_indices[output_index] == source_index)
+                    mapped.push_back(output_index + 1);
+            if (mapped.empty()) {
+                include = false;
+                break;
+            }
+            output_options.push_back(std::move(mapped));
+        }
+        if (!include) continue;
+
+        std::vector<std::size_t> output_index;
+        output_index.reserve(output_options.size());
+        auto append = [&](auto&& self, std::size_t axis) -> void {
+            if (axis == output_options.size()) {
+                output_entries.push_back({output_index, entry.value});
+                return;
+            }
+            for (const auto index : output_options[axis]) {
+                output_index.push_back(index);
+                self(self, axis + 1);
+                output_index.pop_back();
+            }
+        };
+        append(append, 0);
+    }
+    return {sparse_array(
+        std::move(output_dimensions), std::move(output_entries),
+        array.fill_value()), {}};
+}
+
+bool structural_selector_equal(
+    const StructuralSelector& left, const StructuralSelector& right) {
+    return left.index == right.index && left.key == right.key;
+}
+
+using StructuralPath = std::vector<StructuralSelector>;
+
+bool structural_path_equal(
+    const StructuralPath& left, const StructuralPath& right) {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index)
+        if (!structural_selector_equal(left[index], right[index])) return false;
+    return true;
+}
+
+bool structural_path_descending(
+    const StructuralPath& left, const StructuralPath& right) {
+    if (left.size() != right.size()) return left.size() > right.size();
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        const auto& lhs = left[index];
+        const auto& rhs = right[index];
+        if (structural_selector_equal(lhs, rhs)) continue;
+        if (lhs.key.has_value() != rhs.key.has_value()) return lhs.key.has_value();
+        if (lhs.index && rhs.index) return *lhs.index > *rhs.index;
+        return lhs.key->to_input_form() > rhs.key->to_input_form();
+    }
+    return false;
+}
+
+bool structural_position_component(const Expr& expression) {
+    if (structural_selector_kind(expression) != StructuralSelectorKind::None)
+        return true;
+    return expression.has_head("List")
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            [](const Expr& item) {
+                return structural_selector_kind(item)
+                    != StructuralSelectorKind::None;
+            });
+}
+
+bool structural_position_collection(const Expr& expression) {
+    return expression.has_head("List") && !expression.args().empty()
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            [](const Expr& item) {
+                return item.has_head("List")
+                    && std::all_of(item.args().begin(), item.args().end(),
+                        structural_position_component);
+            });
+}
+
+bool structural_single_position(const Expr& expression) {
+    if (expression.kind() == ExprKind::Integer
+        || expression.kind() == ExprKind::String || selector_key(expression))
+        return true;
+    return expression.has_head("List")
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            structural_position_component);
+}
+
+std::vector<Expr> structural_position_components(const Expr& expression) {
+    if (expression.has_head("List")) return expression.args();
+    return {expression};
+}
+
+struct StructuralPathResult {
+    std::vector<StructuralPath> paths;
+    bool invalid = false;
+    std::string error;
+};
+
+StructuralPathResult structural_exact_paths(
+    const Expr& expression, const std::vector<Expr>& components,
+    std::size_t depth = 0) {
+    if (depth == components.size()) return {{{}}, false, {}};
+    const auto selected = structural_component_selections(
+        expression, components[depth], false, "Position");
+    if (!selected.error.empty()) return {{}, false, selected.error};
+    StructuralPathResult result;
+    result.invalid = selected.invalid;
+    for (const auto& selection : selected.selections) {
+        auto children = structural_exact_paths(
+            selection.child, components, depth + 1);
+        if (!children.error.empty()) return children;
+        result.invalid = result.invalid || children.invalid;
+        for (auto& child : children.paths) {
+            child.insert(child.begin(), selection.selector);
+            result.paths.push_back(std::move(child));
+        }
+    }
+    return result;
+}
+
+StructuralPathResult structural_operation_paths(
+    const Expr& expression, const Expr& specification) {
+    StructuralPathResult result;
+    if (structural_position_collection(specification)) {
+        for (const auto& item : specification.args()) {
+            auto expanded = structural_exact_paths(
+                expression, structural_position_components(item));
+            if (!expanded.error.empty()) return expanded;
+            result.invalid = result.invalid || expanded.invalid;
+            result.paths.insert(result.paths.end(),
+                std::make_move_iterator(expanded.paths.begin()),
+                std::make_move_iterator(expanded.paths.end()));
+        }
+        return result;
+    }
+    if (structural_single_position(specification))
+        return structural_exact_paths(
+            expression, structural_position_components(specification));
+    result.error = "Unsupported position specification: "
+        + specification.to_input_form() + ".";
+    return result;
+}
+
+std::vector<StructuralPath> unique_structural_paths(
+    const std::vector<StructuralPath>& paths) {
+    std::vector<StructuralPath> result;
+    for (const auto& path : paths) {
+        if (std::none_of(result.begin(), result.end(), [&](const auto& existing) {
+            return structural_path_equal(path, existing);
+        })) result.push_back(path);
+    }
+    return result;
+}
+
+std::optional<std::size_t> structural_association_selection(
+    const std::vector<Expr>& rules, const StructuralSelector& selector) {
+    if (selector.index) {
+        if (*selector.index == 0 || *selector.index > rules.size())
+            return std::nullopt;
+        return *selector.index - 1;
+    }
+    if (!selector.key) return std::nullopt;
+    for (std::size_t index = 0; index < rules.size(); ++index)
+        if (rules[index].args()[0] == *selector.key) return index;
+    return std::nullopt;
+}
+
+std::pair<Expr, bool> structural_delete_at_path(
+    const Expr& expression, const StructuralPath& path,
+    std::size_t depth = 0) {
+    if (depth >= path.size()) return {expression, false};
+    if (const auto rules = association_rules(expression)) {
+        const auto selected = structural_association_selection(*rules, path[depth]);
+        if (!selected) return {expression, false};
+        auto entries = *rules;
+        if (depth + 1 == path.size()) {
+            entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(*selected));
+        } else {
+            auto child = structural_delete_at_path(
+                entries[*selected].args()[1], path, depth + 1);
+            if (!child.second) return {expression, false};
+            entries[*selected] = call(entries[*selected].head(),
+                {entries[*selected].args()[0], child.first});
+        }
+        return {call("Association", std::move(entries)), true};
+    }
+    if (expression.kind() != ExprKind::Call || !path[depth].index
+        || *path[depth].index == 0 || *path[depth].index > expression.args().size())
+        return {expression, false};
+    auto arguments = expression.args();
+    const auto selected = *path[depth].index - 1;
+    if (depth + 1 == path.size()) {
+        arguments.erase(arguments.begin() + static_cast<std::ptrdiff_t>(selected));
+    } else {
+        auto child = structural_delete_at_path(
+            arguments[selected], path, depth + 1);
+        if (!child.second) return {expression, false};
+        arguments[selected] = child.first;
+    }
+    return {call(expression.head(), std::move(arguments)), true};
+}
+
+std::pair<Expr, bool> structural_replace_at_path(
+    const Expr& expression, const StructuralPath& path, const Expr& replacement,
+    std::size_t depth = 0) {
+    if (depth == path.size()) return {replacement, true};
+    if (const auto rules = association_rules(expression)) {
+        const auto selected = structural_association_selection(*rules, path[depth]);
+        if (!selected) return {expression, false};
+        auto entries = *rules;
+        auto child = structural_replace_at_path(
+            entries[*selected].args()[1], path, replacement, depth + 1);
+        if (!child.second) return {expression, false};
+        entries[*selected] = call(entries[*selected].head(),
+            {entries[*selected].args()[0], child.first});
+        return {call("Association", std::move(entries)), true};
+    }
+    if (expression.kind() != ExprKind::Call || !path[depth].index
+        || *path[depth].index == 0 || *path[depth].index > expression.args().size())
+        return {expression, false};
+    auto arguments = expression.args();
+    const auto selected = *path[depth].index - 1;
+    auto child = structural_replace_at_path(
+        arguments[selected], path, replacement, depth + 1);
+    if (!child.second) return {expression, false};
+    arguments[selected] = child.first;
+    return {call(expression.head(), std::move(arguments)), true};
+}
+
+using InsertPath = std::vector<mpz_class>;
+
+struct InsertPathResult {
+    std::vector<InsertPath> paths;
+    std::string error;
+};
+
+InsertPathResult structural_insert_paths(const Expr& specification) {
+    if (specification.kind() == ExprKind::Integer)
+        return {{{specification.integer_value()}}, {}};
+    if (!specification.has_head("List")) {
+        return {{}, "Insert expects an integer position, a position list, or a "
+            "list of position lists."};
+    }
+    if (std::all_of(specification.args().begin(), specification.args().end(),
+        [](const Expr& item) { return item.kind() == ExprKind::Integer; })) {
+        InsertPath path;
+        for (const auto& item : specification.args())
+            path.push_back(item.integer_value());
+        return {{std::move(path)}, {}};
+    }
+    InsertPathResult result;
+    for (const auto& item : specification.args()) {
+        if (!item.has_head("List")
+            || !std::all_of(item.args().begin(), item.args().end(),
+                [](const Expr& component) {
+                    return component.kind() == ExprKind::Integer;
+                })) {
+            result.error = "Insert expects an integer position, a position list, "
+                "or a list of position lists.";
+            result.paths.clear();
+            return result;
+        }
+        InsertPath path;
+        for (const auto& component : item.args())
+            path.push_back(component.integer_value());
+        result.paths.push_back(std::move(path));
+    }
+    return result;
+}
+
+bool insert_path_descending(const InsertPath& left, const InsertPath& right) {
+    if (left.size() != right.size()) return left.size() > right.size();
+    return std::lexicographical_compare(right.begin(), right.end(),
+        left.begin(), left.end());
+}
+
+std::optional<std::size_t> structural_insert_offset(
+    const mpz_class& raw_index, std::size_t length) {
+    const mpz_class length_value(std::to_string(length));
+    mpz_class offset;
+    if (raw_index == 0) offset = 0;
+    else if (raw_index > 0) offset = raw_index - 1;
+    else offset = length_value + raw_index + 1;
+    if (offset < 0 || offset > length_value) return std::nullopt;
+    return nonnegative_size_t(offset);
+}
+
+std::pair<Expr, bool> structural_insert_at_path(
+    const Expr& expression, const InsertPath& path, const Expr& item,
+    std::size_t depth = 0) {
+    if (depth >= path.size() || expression.kind() != ExprKind::Call)
+        return {expression, false};
+    auto arguments = expression.args();
+    if (depth + 1 == path.size()) {
+        const auto offset = structural_insert_offset(
+            path[depth], arguments.size());
+        if (!offset) return {expression, false};
+        arguments.insert(arguments.begin() + static_cast<std::ptrdiff_t>(*offset), item);
+        return {call(expression.head(), std::move(arguments)), true};
+    }
+    const auto selected = structural_index(path[depth], arguments.size());
+    if (!selected) return {expression, false};
+    auto child = structural_insert_at_path(
+        arguments[*selected - 1], path, item, depth + 1);
+    if (!child.second) return {expression, false};
+    arguments[*selected - 1] = child.first;
+    return {call(expression.head(), std::move(arguments)), true};
+}
+
 std::optional<Expr> value_at_path(const Expr& target, const std::vector<Expr>& path, std::size_t depth = 0) {
     if (depth == path.size()) return target;
     if (const auto rules = association_rules(target)) {
@@ -2641,30 +4375,38 @@ Expr replace_at_path(const Expr& target, const std::vector<Expr>& path, std::siz
     return call(target.head(), std::move(args));
 }
 
-Expr delete_at_path(const Expr& target, const std::vector<Expr>& path, std::size_t depth) {
-    if (target.kind() != ExprKind::Call || depth >= path.size()) return target;
-    if (const auto rules = association_rules(target)) {
-        auto values = *rules; std::optional<std::size_t> selected;
-        if (const auto key = selector_key(path[depth])) { for (std::size_t index = 0; index < values.size(); ++index) if (values[index].args()[0] == *key) { selected = index; break; } }
-        else selected = normalized_index(path[depth], values.size());
-        if (!selected) return target;
-        if (depth + 1 == path.size()) values.erase(values.begin() + static_cast<std::ptrdiff_t>(*selected));
-        else values[*selected] = call(values[*selected].head(), {values[*selected].args()[0], delete_at_path(values[*selected].args()[1], path, depth + 1)});
-        return call("Association", std::move(values));
-    }
-    const auto index = normalized_index(path[depth], target.args().size());
-    if (!index) return target;
-    auto args = target.args();
-    if (depth + 1 == path.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(*index));
-    else args[*index] = delete_at_path(args[*index], path, depth + 1);
-    return call(target.head(), std::move(args));
-}
-
 Expr remove_nothing_from_list_like(Expr expression) {
     if (!expression.has_head("List") && !expression.has_head("Association")) return expression;
     std::vector<Expr> values;
     for (const auto& value : expression.args()) if (!is_symbol(value, "Nothing")) values.push_back(value);
     return call(expression.head(), std::move(values));
+}
+
+std::vector<Expr> structural_children(const Expr& expression) {
+    if (const auto rules = association_rules(expression)) {
+        std::vector<Expr> values;
+        values.reserve(rules->size());
+        for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        return values;
+    }
+    return expression.kind() == ExprKind::Call ? expression.args() : std::vector<Expr>{};
+}
+
+Expr rebuild_structural_children(const Expr& expression, std::vector<Expr> children,
+                                 const std::optional<Expr>& replacement_head = std::nullopt) {
+    if (const auto rules = association_rules(expression)) {
+        if (children.size() != rules->size()) return expression;
+        std::vector<Expr> rebuilt;
+        rebuilt.reserve(rules->size());
+        for (std::size_t index = 0; index < rules->size(); ++index) {
+            const auto& rule = (*rules)[index];
+            rebuilt.push_back(call(rule.head(), {rule.args()[0], std::move(children[index])}));
+        }
+        return call(expression.head(), std::move(rebuilt));
+    }
+    if (expression.kind() != ExprKind::Call) return expression;
+    return remove_nothing_from_list_like(call(
+        replacement_head.value_or(expression.head()), std::move(children)));
 }
 
 std::optional<std::vector<Expr>> normalized_association_rules(const std::vector<Expr>& source) {
@@ -2706,20 +4448,6 @@ std::optional<AssignmentTarget> assignment_target(const Expr& expression) {
     while (head.kind() == ExprKind::Call) head = head.head();
     if (const auto* name = head.symbol_name()) return AssignmentTarget{AssignmentKind::Sub, *name};
     return std::nullopt;
-}
-
-bool tag_occurs_in_upvalue_position(const std::string& tag, const Expr& expression) {
-    const auto& lhs = definition_pattern(expression);
-    if (lhs.kind() != ExprKind::Call) return false;
-    for (const auto& argument : lhs.args()) {
-        if (argument.symbol_name() && *argument.symbol_name() == tag) return true;
-        auto current = argument;
-        while (current.kind() == ExprKind::Call) {
-            if (current.head().symbol_name() && *current.head().symbol_name() == tag) return true;
-            current = current.head();
-        }
-    }
-    return false;
 }
 
 int definition_specificity(const Expr& expression) {
@@ -2767,11 +4495,319 @@ std::optional<std::vector<Expr>> association_rules(const Expr& expression) {
     return normalized_association_rules(expression.args());
 }
 
+struct TakeDropSelectorResult {
+    std::vector<std::size_t> indices;
+    std::string error;
+};
+
+TakeDropSelectorResult normalize_take_drop_selectors(
+    const Expr& value, const Expr& specification,
+    const std::string& function_name) {
+    TakeDropSelectorResult result;
+    const auto count = value.args().size();
+    const mpz_class length(std::to_string(count));
+
+    auto append_selector = [&](const mpz_class& selector) {
+        if (selector == 0) {
+            result.error = "Only top-level Part specifications may use index 0.";
+            return false;
+        }
+        mpz_class resolved = selector;
+        if (selector > 0) --resolved;
+        else resolved += length;
+        if (resolved < 0 || resolved >= length) {
+            result.error = "Part index " + selector.get_str()
+                + " is out of range for length " + length.get_str() + ".";
+            return false;
+        }
+        const auto index = nonnegative_size_t(resolved);
+        if (!index || *index >= count) {
+            result.error = "Part index " + selector.get_str()
+                + " is out of range for length " + length.get_str() + ".";
+            return false;
+        }
+        result.indices.push_back(*index);
+        return true;
+    };
+
+    auto append_count = [&](const mpz_class& requested) {
+        if (requested >= 0) {
+            if (requested > length) {
+                (void)append_selector(length + 1);
+                return;
+            }
+            const auto amount = nonnegative_size_t(requested);
+            if (!amount) {
+                (void)append_selector(length + 1);
+                return;
+            }
+            result.indices.reserve(*amount);
+            for (std::size_t index = 0; index < *amount; ++index)
+                result.indices.push_back(index);
+            return;
+        }
+
+        mpz_class first = length + requested + 1;
+        if (first < -length) {
+            (void)append_selector(first);
+            return;
+        }
+        if (first <= 0) {
+            // Values from -length through -1 are valid, but Python's range
+            // reaches 0 next and reports that selector.
+            (void)append_selector(0);
+            return;
+        }
+        const auto amount = nonnegative_size_t(-requested);
+        if (!amount || *amount > count) {
+            (void)append_selector(first);
+            return;
+        }
+        result.indices.reserve(*amount);
+        for (std::size_t index = count - *amount; index < count; ++index)
+            result.indices.push_back(index);
+    };
+
+    auto append_span = [&](const std::vector<Expr>& span) {
+        if (span.size() != 2 && span.size() != 3) {
+            result.error = "Span must contain two or three arguments.";
+            return;
+        }
+        auto endpoint = [&](const Expr& item, const mpz_class& fallback) {
+            if (is_symbol(item, "All")) return length;
+            if (item.kind() != ExprKind::Integer) return fallback;
+            mpz_class endpoint_value = item.integer_value();
+            if (endpoint_value < 0) endpoint_value += length + 1;
+            return endpoint_value;
+        };
+        const auto first = endpoint(span[0], mpz_class(1));
+        const auto last = endpoint(span[1], length);
+        mpz_class step = 1;
+        if (span.size() == 3) {
+            if (span[2].kind() != ExprKind::Integer) {
+                result.error = "Span steps must be integers.";
+                return;
+            }
+            step = span[2].integer_value();
+        }
+        if (step == 0) {
+            result.error = "Span step cannot be zero.";
+            return;
+        }
+        for (auto selector = first;
+             step > 0 ? selector <= last : selector >= last;
+             selector += step) {
+            if (!append_selector(selector)) return;
+        }
+    };
+
+    if (specification.kind() == ExprKind::Integer) {
+        append_count(specification.integer_value());
+        return result;
+    }
+    if (is_symbol(specification, "All")) {
+        result.indices.resize(count);
+        std::iota(result.indices.begin(), result.indices.end(), 0);
+        return result;
+    }
+    if (is_symbol(specification, "None")) return result;
+    if (specification.has_head("Span")) {
+        append_span(specification.args());
+        return result;
+    }
+    if (specification.has_head("List")) {
+        if (specification.args().size() == 1) {
+            const auto& item = specification.args()[0];
+            if (item.kind() == ExprKind::Integer) {
+                (void)append_selector(item.integer_value());
+                return result;
+            }
+            if (is_symbol(item, "All")) {
+                result.indices.resize(count);
+                std::iota(result.indices.begin(), result.indices.end(), 0);
+                return result;
+            }
+            result.error = function_name
+                + " single-element list specifications must contain an integer or All.";
+            return result;
+        }
+        if (specification.args().size() == 2
+            || specification.args().size() == 3) {
+            append_span(specification.args());
+            return result;
+        }
+        result.error = function_name
+            + " list specifications must contain one, two, or three items.";
+        return result;
+    }
+    result.error = "Unsupported " + function_name + " specification: '"
+        + specification.to_input_form() + "'.";
+    return result;
+}
+
+std::optional<Expr> take_or_drop_one(
+    const Expr& value, const Expr& specification, bool drop,
+    const std::string& function_name, std::string& failure) {
+    if (value.kind() != ExprKind::Call) {
+        failure = function_name + " expects a nonatomic expression.";
+        return std::nullopt;
+    }
+    const auto rules = association_rules(value);
+    if (rules && specification.has_head("List")
+        && !specification.args().empty()
+        && std::any_of(specification.args().begin(), specification.args().end(),
+            [](const Expr& item) {
+                return item.has_head("Key") || item.kind() == ExprKind::String;
+            })) {
+        failure = function_name
+            + " on associations currently supports only numeric or span selectors; "
+              "key-list selectors such as ``{Key[a], …}`` are not yet implemented.";
+        return std::nullopt;
+    }
+
+    const auto selection = normalize_take_drop_selectors(
+        value, specification, function_name);
+    if (!selection.error.empty()) {
+        failure = selection.error;
+        return std::nullopt;
+    }
+    const auto& source = rules ? *rules : value.args();
+    std::vector<Expr> output;
+    if (drop) {
+        const std::set<std::size_t> removed(
+            selection.indices.begin(), selection.indices.end());
+        output.reserve(source.size() - removed.size());
+        for (std::size_t index = 0; index < source.size(); ++index)
+            if (removed.count(index) == 0) output.push_back(source[index]);
+    } else {
+        output.reserve(selection.indices.size());
+        for (const auto index : selection.indices) output.push_back(source[index]);
+    }
+    return rebuild_evaluated_call(value.head(), std::move(output));
+}
+
+std::optional<Expr> apply_take_or_drop_specs(
+    const Expr& value, const std::vector<Expr>& specifications,
+    std::size_t dimension, bool drop, const std::string& function_name,
+    std::string& failure) {
+    auto sliced = take_or_drop_one(value, specifications[dimension], drop,
+        function_name, failure);
+    if (!sliced || dimension + 1 == specifications.size()) return sliced;
+    std::vector<Expr> children;
+    children.reserve(sliced->args().size());
+    for (const auto& child : sliced->args()) {
+        auto transformed = apply_take_or_drop_specs(child, specifications,
+            dimension + 1, drop, function_name, failure);
+        if (!transformed) return std::nullopt;
+        children.push_back(std::move(*transformed));
+    }
+    return rebuild_evaluated_call(sliced->head(), std::move(children));
+}
+
+bool failure_value(const Expr& expression) {
+    return expression.kind() == ExprKind::Call
+        && expression.has_head("Failure");
+}
+
+bool failure_symbol(const Expr& expression) {
+    return is_symbol(expression, "$Failed")
+        || is_symbol(expression, "$Canceled")
+        || is_symbol(expression, "$Aborted");
+}
+
+bool confirmation_failure_value(const Expr& expression) {
+    return failure_value(expression) || failure_symbol(expression)
+        || expression.has_head("Missing");
+}
+
+std::vector<Expr> failure_detail_rules(const Expr& expression) {
+    if (!failure_value(expression) || expression.args().size() < 2)
+        return std::vector<Expr>{};
+    const auto& details = expression.args()[1];
+    if (const auto rules = association_rules(details)) return *rules;
+    if (details.has_head("List")) {
+        std::vector<Expr> rules;
+        for (const auto& item : details.args()) {
+            if ((item.has_head("Rule") || item.has_head("RuleDelayed"))
+                && item.args().size() == 2)
+                rules.push_back(item);
+        }
+        return rules;
+    }
+    return std::vector<Expr>{};
+}
+
+Expr failure_property(const Expr& failure, const Expr& key) {
+    if ((key.text() == "Type" || key.text() == "FailureType")
+        && !failure.args().empty())
+        return failure.args()[0];
+    const auto rules = failure_detail_rules(failure);
+    const auto found = std::find_if(
+        rules.begin(), rules.end(), [&](const Expr& rule) {
+            return rule.args()[0] == key;
+        });
+    if (found != rules.end()) return found->args()[1];
+    return call("Missing", {string("KeyAbsent"), key});
+}
+
+Expr structured_failure(const Expr& type,
+    const std::vector<std::pair<std::string, Expr>>& fields) {
+    std::vector<Expr> rules;
+    rules.reserve(fields.size());
+    for (const auto& [name, value] : fields)
+        rules.push_back(call("Rule", {string(name), value}));
+    return call("Failure", {type, call("Association", std::move(rules))});
+}
+
+std::optional<std::vector<Expr>> list_or_association_values(
+    const Expr& expression) {
+    if (expression.has_head("List")) return expression.args();
+    const auto rules = association_rules(expression);
+    if (!rules) return std::nullopt;
+    std::vector<Expr> values;
+    values.reserve(rules->size());
+    for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+    return values;
+}
+
+std::optional<std::vector<Expr>> compound_sequence_values(
+    const Expr& expression) {
+    if (const auto rules = association_rules(expression)) {
+        std::vector<Expr> values;
+        values.reserve(rules->size());
+        for (const auto& rule : *rules) values.push_back(rule.args()[1]);
+        return values;
+    }
+    if (expression.kind() != ExprKind::Call) return std::nullopt;
+    return expression.args();
+}
+
+std::optional<std::vector<Expr>> sequence_fold_values(
+    const Expr& expression, std::string& error) {
+    if (expression.kind() == ExprKind::SparseArray) {
+        if (expression.dimensions().size() != 1) {
+            error = "SequenceFoldList expects a one-dimensional SparseArray sequence.";
+            return std::nullopt;
+        }
+        const auto dense = sparse_dense_value(expression);
+        if (!dense) {
+            error = "SequenceFoldList SparseArray sequence exceeds the native materialization limit.";
+            return std::nullopt;
+        }
+        return dense->args();
+    }
+    const auto values = compound_sequence_values(expression);
+    if (!values)
+        error = "SequenceFoldList expects a nonatomic expression.";
+    return values;
+}
+
 using Bindings = std::map<std::string, Expr>;
 
 struct CompiledStringPattern {
     std::regex regex;
     std::map<std::string, std::vector<std::size_t>> bindings;
+    std::optional<Expr> codepoint_pattern;
 };
 
 std::string regex_escape(const std::string& source, bool character_class = false) {
@@ -2781,11 +4817,1075 @@ std::string regex_escape(const std::string& source, bool character_class = false
     return output;
 }
 
+bool unicode_string_class_matches(
+    const std::string& name, std::uint32_t value) {
+    if (name == "DigitCharacter") return detail::unicode_is_digit(value);
+    if (name == "HexadecimalCharacter")
+        return (value >= '0' && value <= '9')
+            || (value >= 'A' && value <= 'F')
+            || (value >= 'a' && value <= 'f');
+    if (name == "LetterCharacter") return detail::unicode_is_letter(value);
+    if (name == "PunctuationCharacter")
+        return detail::unicode_is_punctuation(value);
+    if (name == "WhitespaceCharacter")
+        return detail::unicode_is_whitespace(value);
+    if (name == "WordCharacter")
+        return detail::unicode_is_alphanumeric(value) || value == '_';
+    return false;
+}
+
+bool unicode_string_class_symbol(const Expr& pattern) {
+    if (!pattern.symbol_name()) return false;
+    const auto name = system_dispatch_name(*pattern.symbol_name());
+    return name == "DigitCharacter" || name == "HexadecimalCharacter"
+        || name == "LetterCharacter" || name == "PunctuationCharacter"
+        || name == "WhitespaceCharacter" || name == "WordCharacter";
+}
+
+enum class UnicodeRegexKind {
+    Empty,
+    Literal,
+    Dot,
+    CharacterClass,
+    Sequence,
+    Alternatives,
+    Repeat,
+    Start,
+    End,
+    AbsoluteEnd,
+    WordBoundary,
+};
+
+struct UnicodeRegexClassItem {
+    enum class Kind { Range, Decimal, Whitespace, Word };
+    Kind kind = Kind::Range;
+    std::uint32_t first = 0;
+    std::uint32_t last = 0;
+    bool negated = false;
+};
+
+struct UnicodeRegexNode {
+    UnicodeRegexKind kind = UnicodeRegexKind::Empty;
+    std::uint32_t literal = 0;
+    std::vector<UnicodeRegexClassItem> class_items;
+    bool class_negated = false;
+    std::vector<UnicodeRegexNode> children;
+    std::size_t minimum = 1;
+    std::optional<std::size_t> maximum = 1;
+    bool greedy = true;
+};
+
+struct ParsedUnicodeRegex {
+    UnicodeRegexNode root;
+    bool ignore_case = false;
+};
+
+class UnicodeRegexParser {
+public:
+    explicit UnicodeRegexParser(const std::string& expression)
+        : input_(utf8_codepoints(expression)) {}
+
+    std::optional<ParsedUnicodeRegex> parse() {
+        if (starts_with({'(', '?', 'i', ')'})) {
+            ignore_case_ = true;
+            position_ += 4;
+        }
+        const auto root = parse_alternatives();
+        if (!root || position_ != input_.size()) return std::nullopt;
+        return ParsedUnicodeRegex{*root, ignore_case_};
+    }
+
+private:
+    bool starts_with(std::initializer_list<std::uint32_t> values) const {
+        if (position_ + values.size() > input_.size()) return false;
+        return std::equal(values.begin(), values.end(),
+            input_.begin() + static_cast<std::ptrdiff_t>(position_));
+    }
+
+    std::optional<std::size_t> parse_count() {
+        if (position_ >= input_.size()
+            || input_[position_] < '0' || input_[position_] > '9')
+            return std::nullopt;
+        std::size_t value = 0;
+        while (position_ < input_.size()
+            && input_[position_] >= '0' && input_[position_] <= '9') {
+            const auto digit = static_cast<std::size_t>(
+                input_[position_++] - '0');
+            if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10)
+                return std::nullopt;
+            value = value * 10 + digit;
+        }
+        return value;
+    }
+
+    std::optional<UnicodeRegexNode> parse_alternatives() {
+        std::vector<UnicodeRegexNode> branches;
+        const auto first = parse_sequence();
+        if (!first) return std::nullopt;
+        branches.push_back(*first);
+        while (position_ < input_.size() && input_[position_] == '|') {
+            ++position_;
+            const auto branch = parse_sequence();
+            if (!branch) return std::nullopt;
+            branches.push_back(*branch);
+        }
+        if (branches.size() == 1) return branches.front();
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::Alternatives;
+        result.children = std::move(branches);
+        return result;
+    }
+
+    std::optional<UnicodeRegexNode> parse_sequence() {
+        std::vector<UnicodeRegexNode> elements;
+        while (position_ < input_.size()
+            && input_[position_] != ')' && input_[position_] != '|') {
+            const auto element = parse_quantified_atom();
+            if (!element) return std::nullopt;
+            elements.push_back(*element);
+        }
+        if (elements.empty()) return UnicodeRegexNode{};
+        if (elements.size() == 1) return elements.front();
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::Sequence;
+        result.children = std::move(elements);
+        return result;
+    }
+
+    std::optional<UnicodeRegexNode> parse_quantified_atom() {
+        const auto atom = parse_atom();
+        if (!atom) return std::nullopt;
+        std::size_t minimum = 1;
+        std::optional<std::size_t> maximum = 1;
+        bool quantified = false;
+        if (position_ < input_.size()) {
+            const auto quantifier = input_[position_];
+            if (quantifier == '*' || quantifier == '+' || quantifier == '?') {
+                ++position_;
+                quantified = true;
+                minimum = quantifier == '+' ? 1 : 0;
+                maximum = quantifier == '?' ? std::optional<std::size_t>(1)
+                                             : std::nullopt;
+            } else if (quantifier == '{') {
+                ++position_;
+                quantified = true;
+                const auto low = parse_count();
+                if (!low) return std::nullopt;
+                minimum = *low;
+                if (position_ < input_.size() && input_[position_] == '}') {
+                    ++position_;
+                    maximum = minimum;
+                } else if (position_ < input_.size()
+                    && input_[position_] == ',') {
+                    ++position_;
+                    if (position_ < input_.size() && input_[position_] == '}') {
+                        ++position_;
+                        maximum = std::nullopt;
+                    } else {
+                        const auto high = parse_count();
+                        if (!high || *high < minimum
+                            || position_ >= input_.size()
+                            || input_[position_] != '}') return std::nullopt;
+                        ++position_;
+                        maximum = *high;
+                    }
+                } else {
+                    return std::nullopt;
+                }
+            }
+        }
+        if (!quantified) return atom;
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::Repeat;
+        result.children = {*atom};
+        result.minimum = minimum;
+        result.maximum = maximum;
+        if (position_ < input_.size() && input_[position_] == '?') {
+            ++position_;
+            result.greedy = false;
+        }
+        return result;
+    }
+
+    static std::optional<std::uint32_t> escaped_literal(
+        std::uint32_t value, bool character_class) {
+        if (value == 'a') return 0x07U;
+        if (value == 'b' && character_class) return 0x08U;
+        if (value == 'n') return '\n';
+        if (value == 'r') return '\r';
+        if (value == 't') return '\t';
+        if (value == 'f') return '\f';
+        if (value == 'v') return '\v';
+        if ((value >= 'A' && value <= 'Z')
+            || (value >= 'a' && value <= 'z')) return std::nullopt;
+        return value;
+    }
+
+    static std::optional<std::uint32_t> hex_digit(std::uint32_t value) {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return std::nullopt;
+    }
+
+    std::optional<std::uint32_t> parse_hex_escape(std::size_t digits) {
+        if (position_ + digits > input_.size()) return std::nullopt;
+        std::uint32_t result = 0;
+        for (std::size_t index = 0; index < digits; ++index) {
+            const auto digit = hex_digit(input_[position_++]);
+            if (!digit) return std::nullopt;
+            result = (result << 4U) | *digit;
+        }
+        if (result > 0x10ffffU
+            || (result >= 0xd800U && result <= 0xdfffU))
+            return std::nullopt;
+        return result;
+    }
+
+    std::optional<UnicodeRegexClassItem> parse_class_item() {
+        if (position_ >= input_.size()) return std::nullopt;
+        UnicodeRegexClassItem item;
+        if (input_[position_] != '\\') {
+            item.first = item.last = input_[position_++];
+            return item;
+        }
+        if (++position_ >= input_.size()) return std::nullopt;
+        const auto escape = input_[position_++];
+        const auto lower = escape <= 0x7fU
+            ? static_cast<std::uint32_t>(std::tolower(
+                static_cast<unsigned char>(escape))) : escape;
+        if (lower == 'd') item.kind = UnicodeRegexClassItem::Kind::Decimal;
+        else if (lower == 's') item.kind = UnicodeRegexClassItem::Kind::Whitespace;
+        else if (lower == 'w') item.kind = UnicodeRegexClassItem::Kind::Word;
+        else if (escape == 'x' || escape == 'u' || escape == 'U') {
+            const auto value = parse_hex_escape(
+                escape == 'x' ? 2 : escape == 'u' ? 4 : 8);
+            if (!value) return std::nullopt;
+            item.first = item.last = *value;
+        } else {
+            const auto value = escaped_literal(escape, true);
+            if (!value) return std::nullopt;
+            item.first = item.last = *value;
+        }
+        item.negated = escape == 'D' || escape == 'S' || escape == 'W';
+        return item;
+    }
+
+    std::optional<UnicodeRegexNode> parse_character_class() {
+        UnicodeRegexNode result;
+        result.kind = UnicodeRegexKind::CharacterClass;
+        if (position_ < input_.size() && input_[position_] == '^') {
+            result.class_negated = true;
+            ++position_;
+        }
+        bool first_item = true;
+        while (position_ < input_.size()) {
+            if (input_[position_] == ']' && !first_item) {
+                ++position_;
+                return result;
+            }
+            auto item = parse_class_item();
+            if (!item) return std::nullopt;
+            first_item = false;
+            if (item->kind == UnicodeRegexClassItem::Kind::Range
+                && position_ + 1 < input_.size()
+                && input_[position_] == '-' && input_[position_ + 1] != ']') {
+                ++position_;
+                const auto end = parse_class_item();
+                if (!end || end->kind != UnicodeRegexClassItem::Kind::Range)
+                    return std::nullopt;
+                item->last = end->first;
+                if (item->last < item->first) return std::nullopt;
+            }
+            result.class_items.push_back(*item);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<UnicodeRegexNode> parse_atom() {
+        if (position_ >= input_.size()) return std::nullopt;
+        const auto value = input_[position_++];
+        UnicodeRegexNode result;
+        if (value == '(') {
+            if (position_ < input_.size() && input_[position_] == '?') {
+                if (position_ + 1 >= input_.size()
+                    || input_[position_ + 1] != ':') return std::nullopt;
+                position_ += 2;
+            }
+            const auto group = parse_alternatives();
+            if (!group || position_ >= input_.size()
+                || input_[position_] != ')') return std::nullopt;
+            ++position_;
+            return group;
+        }
+        if (value == '[') return parse_character_class();
+        if (value == '.') { result.kind = UnicodeRegexKind::Dot; return result; }
+        if (value == '^') { result.kind = UnicodeRegexKind::Start; return result; }
+        if (value == '$') { result.kind = UnicodeRegexKind::End; return result; }
+        if (value == '*' || value == '+' || value == '?' || value == '{')
+            return std::nullopt;
+        if (value != '\\') {
+            result.kind = UnicodeRegexKind::Literal;
+            result.literal = value;
+            return result;
+        }
+        if (position_ >= input_.size()) return std::nullopt;
+        const auto escape = input_[position_++];
+        const auto lower = escape <= 0x7fU
+            ? static_cast<std::uint32_t>(std::tolower(
+                static_cast<unsigned char>(escape))) : escape;
+        if (lower == 'b') {
+            result.kind = UnicodeRegexKind::WordBoundary;
+            result.class_negated = escape == 'B';
+            return result;
+        }
+        if (lower == 'd' || lower == 's' || lower == 'w') {
+            result.kind = UnicodeRegexKind::CharacterClass;
+            UnicodeRegexClassItem item;
+            item.kind = lower == 'd' ? UnicodeRegexClassItem::Kind::Decimal
+                : lower == 's' ? UnicodeRegexClassItem::Kind::Whitespace
+                               : UnicodeRegexClassItem::Kind::Word;
+            item.negated = escape == 'D' || escape == 'S' || escape == 'W';
+            result.class_items.push_back(item);
+            return result;
+        }
+        if (escape == 'A') {
+            result.kind = UnicodeRegexKind::Start;
+            return result;
+        }
+        if (escape == 'Z') {
+            result.kind = UnicodeRegexKind::AbsoluteEnd;
+            return result;
+        }
+        if (escape == 'x' || escape == 'u' || escape == 'U') {
+            const auto value = parse_hex_escape(
+                escape == 'x' ? 2 : escape == 'u' ? 4 : 8);
+            if (!value) return std::nullopt;
+            result.kind = UnicodeRegexKind::Literal;
+            result.literal = *value;
+            return result;
+        }
+        if (escape >= '0' && escape <= '9') return std::nullopt;
+        const auto literal = escaped_literal(escape, false);
+        if (!literal) return std::nullopt;
+        result.kind = UnicodeRegexKind::Literal;
+        result.literal = *literal;
+        return result;
+    }
+
+    std::vector<std::uint32_t> input_;
+    std::size_t position_ = 0;
+    bool ignore_case_ = false;
+};
+
+bool regular_expression_needs_codepoint_matching(const std::string& source) {
+    if (source.compare(0, 4, "(?i)") == 0) return true;
+    bool escaped = false;
+    for (const auto value : utf8_codepoints(source)) {
+        if (value >= 0x80U) return true;
+        if (escaped) {
+            if (value == 'd' || value == 'D' || value == 's' || value == 'S'
+                || value == 'w' || value == 'W' || value == 'b'
+                || value == 'B') return true;
+            escaped = false;
+        } else if (value == '\\') {
+            escaped = true;
+        } else if (value == '.') {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ascii_text(const std::string& source) {
+    return std::all_of(source.begin(), source.end(),
+        [](unsigned char value) { return value < 0x80U; });
+}
+
+bool contains_regular_expression(const Expr& pattern) {
+    if (pattern.has_head("RegularExpression")) return true;
+    if (pattern.kind() != ExprKind::Call) return false;
+    return std::any_of(pattern.args().begin(), pattern.args().end(),
+        contains_regular_expression);
+}
+
+bool contains_date_pattern(const Expr& pattern) {
+    if (pattern.has_head("DatePattern")) return true;
+    if (pattern.kind() != ExprKind::Call) return false;
+    return std::any_of(pattern.args().begin(), pattern.args().end(),
+        contains_date_pattern);
+}
+
+bool unsupported_byte_regular_expression_is_safe(
+    const std::string& expression) {
+    bool escaped = false;
+    bool character_class = false;
+    unsigned char previous = 0;
+    for (const auto value : expression) {
+        const auto character = static_cast<unsigned char>(value);
+        if (escaped) {
+            if ((character >= '0' && character <= '9')
+                || (character >= 'A' && character <= 'Z')
+                || (character >= 'a' && character <= 'z')) return false;
+            escaped = false;
+            previous = 0;
+            continue;
+        }
+        if (character == '\\') { escaped = true; continue; }
+        if (character == '[') { character_class = true; previous = 0; continue; }
+        if (character == ']' && character_class) {
+            character_class = false;
+            previous = 0;
+            continue;
+        }
+        if (character_class) continue;
+        if (character == '^' || character == '$') return false;
+        if (character == '+'
+            && (previous == '*' || previous == '+'
+                || previous == '?' || previous == '}')) return false;
+        previous = character;
+    }
+    return !escaped;
+}
+
+std::optional<std::regex> compile_byte_regular_expression(
+    const std::string& expression) {
+    auto source = expression;
+    auto flags = std::regex_constants::ECMAScript;
+    if (source.compare(0, 4, "(?i)") == 0) {
+        flags |= std::regex_constants::icase;
+        source.erase(0, 4);
+    }
+    try {
+        return std::regex(source, flags);
+    } catch (const std::regex_error&) {
+        return std::nullopt;
+    }
+}
+
+bool needs_codepoint_string_matcher(
+    const Expr& pattern, bool include_regular_expressions = true) {
+    if (unicode_string_class_symbol(pattern)
+        && !is_symbol(pattern, "HexadecimalCharacter")) return true;
+    if (is_symbol(pattern, "Whitespace")
+        || is_symbol(pattern, "WordBoundary")
+        || is_symbol(pattern, "NumberString")
+        || is_symbol(pattern, "StartOfLine")
+        || is_symbol(pattern, "EndOfLine")) return true;
+    if (pattern.has_head("PatternTest") && pattern.args().size() == 2
+        && (is_symbol(pattern.args()[1], "DigitQ")
+            || is_symbol(pattern.args()[1], "LetterQ"))) return true;
+    if (pattern.has_head("CharacterRange") || pattern.has_head("Except"))
+        return true;
+    if (include_regular_expressions
+        && pattern.has_head("RegularExpression")
+        && pattern.args().size() == 1
+        && pattern.args()[0].kind() == ExprKind::String
+        && regular_expression_needs_codepoint_matching(
+            pattern.args()[0].text())) return true;
+    if (pattern.kind() != ExprKind::Call) return false;
+    return std::any_of(pattern.args().begin(), pattern.args().end(),
+        [&](const Expr& argument) {
+            return needs_codepoint_string_matcher(
+                argument, include_regular_expressions);
+        });
+}
+
+bool codepoint_regular_expressions_supported(
+    const Expr& pattern, bool source_ascii) {
+    if (pattern.has_head("RegularExpression")) {
+        if (pattern.args().size() != 1
+            || pattern.args()[0].kind() != ExprKind::String) return false;
+        const auto& expression = pattern.args()[0].text();
+        return UnicodeRegexParser(expression).parse().has_value()
+            || (source_ascii && ascii_text(expression)
+                && unsupported_byte_regular_expression_is_safe(expression)
+                && compile_byte_regular_expression(expression).has_value());
+    }
+    if (pattern.kind() != ExprKind::Call) return true;
+    return std::all_of(pattern.args().begin(), pattern.args().end(),
+        [&](const Expr& argument) {
+            return codepoint_regular_expressions_supported(
+                argument, source_ascii);
+        });
+}
+
+struct CodePointPatternSource {
+    explicit CodePointPatternSource(const std::string& value)
+        : text(value), codepoints(utf8_codepoints(value)),
+          boundaries(detail::utf8_code_point_boundaries(value)),
+          ascii(ascii_text(value)) {}
+
+    std::string substring(std::size_t first, std::size_t last) const {
+        return text.substr(boundaries[first], boundaries[last] - boundaries[first]);
+    }
+
+    const std::optional<ParsedUnicodeRegex>& unicode_regular_expression(
+        const std::string& expression) const {
+        const auto found = unicode_regular_expressions.find(expression);
+        if (found != unicode_regular_expressions.end()) return found->second;
+        return unicode_regular_expressions.emplace(expression,
+            UnicodeRegexParser(expression).parse()).first->second;
+    }
+
+    const std::optional<std::regex>& byte_regular_expression(
+        const std::string& expression) const {
+        const auto found = byte_regular_expressions.find(expression);
+        if (found != byte_regular_expressions.end()) return found->second;
+        return byte_regular_expressions.emplace(expression,
+            compile_byte_regular_expression(expression)).first->second;
+    }
+
+    const std::string& text;
+    std::vector<std::uint32_t> codepoints;
+    std::vector<std::size_t> boundaries;
+    bool ascii;
+    mutable std::map<std::string, std::optional<ParsedUnicodeRegex>>
+        unicode_regular_expressions;
+    mutable std::map<std::string, std::optional<std::regex>>
+        byte_regular_expressions;
+};
+
+struct CodePointPatternState {
+    std::size_t end;
+    Bindings bindings;
+};
+
+void order_codepoint_states(
+    std::vector<CodePointPatternState>& states, bool longest) {
+    std::stable_sort(states.begin(), states.end(),
+        [=](const CodePointPatternState& left,
+            const CodePointPatternState& right) {
+            return longest ? left.end > right.end : left.end < right.end;
+        });
+}
+
+std::vector<CodePointPatternState> match_codepoint_string_pattern(
+    const Expr& pattern, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings, bool longest = true);
+
+std::vector<CodePointPatternState> match_codepoint_string_sequence(
+    const std::vector<Expr>& patterns, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings, bool longest) {
+    std::vector<CodePointPatternState> states{{start, bindings}};
+    for (const auto& pattern : patterns) {
+        std::vector<CodePointPatternState> next;
+        for (const auto& state : states) {
+            auto matches = match_codepoint_string_pattern(
+                pattern, source, state.end, state.bindings, longest);
+            next.insert(next.end(),
+                std::make_move_iterator(matches.begin()),
+                std::make_move_iterator(matches.end()));
+        }
+        if (next.empty()) return {};
+        order_codepoint_states(next, longest);
+        states = std::move(next);
+    }
+    return states;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>>
+codepoint_repetition_bounds(const Expr& pattern, std::size_t available) {
+    std::size_t minimum = pattern.has_head("RepeatedNull") ? 0 : 1;
+    std::size_t maximum = available + 1;
+    if (pattern.args().size() == 1) return std::pair{minimum, maximum};
+    if (pattern.args().size() != 2) return std::nullopt;
+    const auto normalize = [&](const Expr& value) -> std::optional<std::size_t> {
+        if (is_symbol(value, "Infinity")) return available + 1;
+        if (value.kind() != ExprKind::Integer || value.integer_value() < 0)
+            return std::nullopt;
+        return nonnegative_size_t(value.integer_value()).value_or(available + 1);
+    };
+    const auto& specification = pattern.args()[1];
+    if (specification.kind() == ExprKind::Integer
+        || is_symbol(specification, "Infinity")) {
+        const auto bound = normalize(specification);
+        if (!bound) return std::nullopt;
+        return std::pair{minimum, std::min(*bound, available + 1)};
+    }
+    if (!specification.has_head("List")
+        || specification.args().empty()
+        || specification.args().size() > 2) return std::nullopt;
+    const auto low = normalize(specification.args()[0]);
+    const auto high = specification.args().size() == 2
+        ? normalize(specification.args()[1]) : low;
+    if (!low || !high) return std::nullopt;
+    return std::pair{std::min(*low, available + 1),
+        std::min(*high, available + 1)};
+}
+
+bool codepoint_pattern_test_succeeds(
+    const Expr& test, const CodePointPatternSource& source,
+    std::size_t first, std::size_t last) {
+    auto all_match = [&](const std::string& class_name) {
+        return std::all_of(
+            source.codepoints.begin() + static_cast<std::ptrdiff_t>(first),
+            source.codepoints.begin() + static_cast<std::ptrdiff_t>(last),
+            [&](std::uint32_t value) {
+                return unicode_string_class_matches(class_name, value);
+            });
+    };
+    if (is_symbol(test, "DigitQ")) return all_match("DigitCharacter");
+    if (is_symbol(test, "LetterQ")) return all_match("LetterCharacter");
+    if (test.has_head("Function") && !test.args().empty()
+        && test.args()[0].has_head("StringMatchQ")
+        && test.args()[0].args().size() == 2
+        && unicode_string_class_symbol(test.args()[0].args()[1])) {
+        const auto name = system_dispatch_name(
+            *test.args()[0].args()[1].symbol_name());
+        return all_match(name);
+    }
+    return true;
+}
+
+std::vector<CodePointPatternState> match_number_string(
+    const CodePointPatternSource& source, std::size_t start,
+    const Bindings& bindings) {
+    auto cursor = start;
+    if (cursor < source.codepoints.size()
+        && (source.codepoints[cursor] == '+'
+            || source.codepoints[cursor] == '-')) ++cursor;
+    const auto integer_start = cursor;
+    while (cursor < source.codepoints.size()
+        && detail::unicode_is_decimal(source.codepoints[cursor])) ++cursor;
+    const bool integer_digits = cursor > integer_start;
+    bool fraction_digits = false;
+    if (cursor < source.codepoints.size() && source.codepoints[cursor] == '.') {
+        ++cursor;
+        const auto fraction_start = cursor;
+        while (cursor < source.codepoints.size()
+            && detail::unicode_is_decimal(source.codepoints[cursor])) ++cursor;
+        fraction_digits = cursor > fraction_start;
+    }
+    if (!integer_digits && !fraction_digits) return {};
+    auto exponent = cursor;
+    if (exponent < source.codepoints.size()
+        && (source.codepoints[exponent] == 'e'
+            || source.codepoints[exponent] == 'E')) {
+        ++exponent;
+    } else if (exponent + 1 < source.codepoints.size()
+        && source.codepoints[exponent] == '*'
+        && source.codepoints[exponent + 1] == '^') {
+        exponent += 2;
+    } else {
+        return {{cursor, bindings}};
+    }
+    if (exponent < source.codepoints.size()
+        && (source.codepoints[exponent] == '+'
+            || source.codepoints[exponent] == '-')) ++exponent;
+    const auto exponent_start = exponent;
+    while (exponent < source.codepoints.size()
+        && detail::unicode_is_decimal(source.codepoints[exponent])) ++exponent;
+    return {{exponent > exponent_start ? exponent : cursor, bindings}};
+}
+
+bool unicode_regex_codepoint_equal(
+    std::uint32_t left, std::uint32_t right, bool ignore_case) {
+    if (left == right) return true;
+    if (!ignore_case) return false;
+    return detail::unicode_regex_case_equivalent(left, right);
+}
+
+bool unicode_regex_class_item_matches(const UnicodeRegexClassItem& item,
+    std::uint32_t value, bool ignore_case) {
+    bool matches = false;
+    if (item.kind == UnicodeRegexClassItem::Kind::Decimal) {
+        matches = detail::unicode_is_decimal(value);
+    } else if (item.kind == UnicodeRegexClassItem::Kind::Whitespace) {
+        matches = detail::unicode_is_whitespace(value);
+    } else if (item.kind == UnicodeRegexClassItem::Kind::Word) {
+        matches = detail::unicode_is_alphanumeric(value) || value == '_';
+    } else if (item.first == item.last) {
+        matches = unicode_regex_codepoint_equal(
+            value, item.first, ignore_case);
+    } else {
+        matches = ignore_case
+            ? detail::unicode_regex_case_matches_range(
+                value, item.first, item.last)
+            : value >= item.first && value <= item.last;
+    }
+    return item.negated ? !matches : matches;
+}
+
+void stable_unique_regex_ends(std::vector<std::size_t>& values) {
+    std::set<std::size_t> seen;
+    values.erase(std::remove_if(values.begin(), values.end(),
+        [&](std::size_t value) { return !seen.insert(value).second; }),
+        values.end());
+}
+
+std::vector<std::size_t> match_unicode_regex_node(
+    const UnicodeRegexNode& node, const CodePointPatternSource& source,
+    std::size_t start, bool ignore_case) {
+    if (node.kind == UnicodeRegexKind::Empty) return {start};
+    if (node.kind == UnicodeRegexKind::Start)
+        return start == 0 ? std::vector<std::size_t>{start}
+                          : std::vector<std::size_t>{};
+    if (node.kind == UnicodeRegexKind::End) {
+        const bool matches = start == source.codepoints.size()
+            || (start + 1 == source.codepoints.size()
+                && source.codepoints[start] == '\n');
+        return matches ? std::vector<std::size_t>{start}
+                       : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::AbsoluteEnd)
+        return start == source.codepoints.size()
+            ? std::vector<std::size_t>{start} : std::vector<std::size_t>{};
+    if (node.kind == UnicodeRegexKind::WordBoundary) {
+        const bool previous = start > 0
+            && (detail::unicode_is_alphanumeric(source.codepoints[start - 1])
+                || source.codepoints[start - 1] == '_');
+        const bool next = start < source.codepoints.size()
+            && (detail::unicode_is_alphanumeric(source.codepoints[start])
+                || source.codepoints[start] == '_');
+        const bool boundary = previous != next;
+        return boundary != node.class_negated
+            ? std::vector<std::size_t>{start} : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::Literal) {
+        return start < source.codepoints.size()
+            && unicode_regex_codepoint_equal(
+                source.codepoints[start], node.literal, ignore_case)
+            ? std::vector<std::size_t>{start + 1}
+            : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::Dot) {
+        return start < source.codepoints.size()
+            && source.codepoints[start] != '\n'
+            ? std::vector<std::size_t>{start + 1}
+            : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::CharacterClass) {
+        if (start >= source.codepoints.size()) return {};
+        const bool included = std::any_of(node.class_items.begin(),
+            node.class_items.end(), [&](const UnicodeRegexClassItem& item) {
+                return unicode_regex_class_item_matches(
+                    item, source.codepoints[start], ignore_case);
+            });
+        return included != node.class_negated
+            ? std::vector<std::size_t>{start + 1}
+            : std::vector<std::size_t>{};
+    }
+    if (node.kind == UnicodeRegexKind::Sequence) {
+        std::vector<std::size_t> states{start};
+        for (const auto& child : node.children) {
+            std::vector<std::size_t> next;
+            for (const auto state : states) {
+                auto matches = match_unicode_regex_node(
+                    child, source, state, ignore_case);
+                next.insert(next.end(), matches.begin(), matches.end());
+            }
+            stable_unique_regex_ends(next);
+            if (next.empty()) return {};
+            states = std::move(next);
+        }
+        return states;
+    }
+    if (node.kind == UnicodeRegexKind::Alternatives) {
+        std::vector<std::size_t> results;
+        for (const auto& child : node.children) {
+            auto matches = match_unicode_regex_node(
+                child, source, start, ignore_case);
+            results.insert(results.end(), matches.begin(), matches.end());
+        }
+        stable_unique_regex_ends(results);
+        return results;
+    }
+    if (node.kind == UnicodeRegexKind::Repeat && !node.children.empty()) {
+        std::vector<std::vector<std::size_t>> accepted;
+        std::vector<std::size_t> frontier{start};
+        if (node.minimum == 0) accepted.push_back(frontier);
+        const auto maximum = node.maximum.value_or(std::max(
+            node.minimum, source.codepoints.size() - start + 1));
+        for (std::size_t count = 1; count <= maximum; ++count) {
+            std::vector<std::size_t> next;
+            for (const auto state : frontier) {
+                auto matches = match_unicode_regex_node(
+                    node.children.front(), source, state, ignore_case);
+                for (const auto match : matches)
+                    next.push_back(match);
+            }
+            stable_unique_regex_ends(next);
+            if (next.empty()) break;
+            const bool stable = next.size() == frontier.size()
+                && std::all_of(next.begin(), next.end(),
+                    [&](std::size_t end) {
+                        return std::find(frontier.begin(), frontier.end(), end)
+                            != frontier.end();
+                    });
+            frontier = std::move(next);
+            if (count >= node.minimum) accepted.push_back(frontier);
+            if (stable) {
+                if (count < node.minimum && node.minimum <= maximum)
+                    accepted.push_back(frontier);
+                break;
+            }
+        }
+        if (node.greedy) std::reverse(accepted.begin(), accepted.end());
+        std::vector<std::size_t> results;
+        for (const auto& level : accepted)
+            results.insert(results.end(), level.begin(), level.end());
+        stable_unique_regex_ends(results);
+        return results;
+    }
+    return {};
+}
+
+std::vector<CodePointPatternState> match_simple_unicode_regex(
+    const std::string& expression, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings) {
+    const auto& parsed = source.unicode_regular_expression(expression);
+    if (parsed) {
+        const auto ends = match_unicode_regex_node(
+            parsed->root, source, start, parsed->ignore_case);
+        return ends.empty()
+            ? std::vector<CodePointPatternState>{}
+            : std::vector<CodePointPatternState>{{ends.front(), bindings}};
+    }
+    if (!source.ascii || !ascii_text(expression)) return {};
+    const auto& regex = source.byte_regular_expression(expression);
+    if (!regex) return {};
+    const auto byte_start = source.boundaries[start];
+    const auto first = source.text.begin()
+        + static_cast<std::ptrdiff_t>(byte_start);
+    auto flags = std::regex_constants::match_continuous;
+    if (byte_start != 0) flags |= std::regex_constants::match_prev_avail;
+    std::match_results<std::string::const_iterator> match;
+    if (!std::regex_search(first, source.text.end(), match, *regex, flags))
+        return {};
+    const auto byte_end = byte_start
+        + static_cast<std::size_t>(match.length(0));
+    const auto boundary = std::lower_bound(
+        source.boundaries.begin(), source.boundaries.end(), byte_end);
+    if (boundary == source.boundaries.end() || *boundary != byte_end) return {};
+    return {{static_cast<std::size_t>(
+        boundary - source.boundaries.begin()), bindings}};
+}
+
+std::vector<CodePointPatternState> match_codepoint_string_pattern(
+    const Expr& pattern, const CodePointPatternSource& source,
+    std::size_t start, const Bindings& bindings, bool longest) {
+    if (pattern.kind() == ExprKind::String) {
+        const auto expected = utf8_codepoints(pattern.text());
+        if (start + expected.size() > source.codepoints.size()
+            || !std::equal(expected.begin(), expected.end(),
+                source.codepoints.begin() + static_cast<std::ptrdiff_t>(start)))
+            return {};
+        return {{start + expected.size(), bindings}};
+    }
+    if (pattern.symbol_name()) {
+        const auto name = system_dispatch_name(*pattern.symbol_name());
+        if (name == "Whitespace") {
+            auto end = start;
+            while (end < source.codepoints.size()
+                && detail::unicode_is_whitespace(source.codepoints[end])) ++end;
+            return end > start ? std::vector<CodePointPatternState>{{end, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "StartOfString")
+            return start == 0 ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        if (name == "EndOfString")
+            return start == source.codepoints.size()
+                ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        if (name == "StartOfLine") {
+            const bool match = start == 0
+                || source.codepoints[start - 1] == '\n';
+            return match ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "EndOfLine") {
+            const bool match = start == source.codepoints.size()
+                || source.codepoints[start] == '\n'
+                || source.codepoints[start] == '\r';
+            return match ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "WordBoundary") {
+            const bool previous = start > 0
+                && (detail::unicode_is_alphanumeric(source.codepoints[start - 1])
+                    || source.codepoints[start - 1] == '_');
+            const bool next = start < source.codepoints.size()
+                && (detail::unicode_is_alphanumeric(source.codepoints[start])
+                    || source.codepoints[start] == '_');
+            return previous != next
+                ? std::vector<CodePointPatternState>{{start, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        if (name == "NumberString") return match_number_string(source, start, bindings);
+        if (unicode_string_class_symbol(pattern)) {
+            return start < source.codepoints.size()
+                && unicode_string_class_matches(name, source.codepoints[start])
+                ? std::vector<CodePointPatternState>{{start + 1, bindings}}
+                : std::vector<CodePointPatternState>{};
+        }
+        return {};
+    }
+    if (pattern.kind() != ExprKind::Call) return {};
+    if (pattern.has_head("HoldPattern") && !pattern.args().empty())
+        return match_codepoint_string_pattern(pattern.args()[0], source, start,
+            bindings, longest);
+    if (pattern.has_head("Longest") && !pattern.args().empty())
+        return match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, true);
+    if (pattern.has_head("Shortest") && !pattern.args().empty())
+        return match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, false);
+    if (pattern.has_head("StringExpression"))
+        return match_codepoint_string_sequence(
+            pattern.args(), source, start, bindings, longest);
+    if (pattern.has_head("Alternatives") || pattern.has_head("List")) {
+        std::vector<CodePointPatternState> matches;
+        for (const auto& branch : pattern.args()) {
+            auto branch_matches = match_codepoint_string_pattern(
+                branch, source, start, bindings, longest);
+            matches.insert(matches.end(),
+                std::make_move_iterator(branch_matches.begin()),
+                std::make_move_iterator(branch_matches.end()));
+        }
+        return matches;
+    }
+    if (pattern.has_head("Pattern") && pattern.args().size() == 2
+        && pattern.args()[0].symbol_name()) {
+        auto matches = match_codepoint_string_pattern(
+            pattern.args()[1], source, start, bindings, longest);
+        std::vector<CodePointPatternState> bound;
+        const auto name = *pattern.args()[0].symbol_name();
+        for (auto& match : matches) {
+            const auto value = string(source.substring(start, match.end));
+            const auto existing = match.bindings.find(name);
+            if (existing != match.bindings.end() && existing->second != value)
+                continue;
+            match.bindings[name] = value;
+            bound.push_back(std::move(match));
+        }
+        return bound;
+    }
+    if (pattern.has_head("Blank") && pattern.args().empty())
+        return start < source.codepoints.size()
+            ? std::vector<CodePointPatternState>{{start + 1, bindings}}
+            : std::vector<CodePointPatternState>{};
+    if ((pattern.has_head("BlankSequence")
+        || pattern.has_head("BlankNullSequence")) && pattern.args().empty()) {
+        const auto minimum = pattern.has_head("BlankSequence") ? start + 1 : start;
+        if (minimum > source.codepoints.size()) return {};
+        std::vector<CodePointPatternState> matches;
+        if (longest) {
+            for (auto end = source.codepoints.size() + 1; end-- > minimum;)
+                matches.push_back({end, bindings});
+        } else {
+            for (auto end = minimum; end <= source.codepoints.size(); ++end)
+                matches.push_back({end, bindings});
+        }
+        return matches;
+    }
+    if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull"))
+        && !pattern.args().empty()) {
+        const auto bounds = codepoint_repetition_bounds(
+            pattern, source.codepoints.size() - start);
+        if (!bounds || bounds->first > bounds->second) return {};
+        std::vector<CodePointPatternState> results;
+        std::vector<CodePointPatternState> frontier{{start, bindings}};
+        if (bounds->first == 0) results = frontier;
+        for (std::size_t count = 1; count <= bounds->second; ++count) {
+            std::vector<CodePointPatternState> next;
+            for (const auto& state : frontier) {
+                auto matches = match_codepoint_string_pattern(
+                    pattern.args()[0], source, state.end, state.bindings, longest);
+                for (auto& match : matches)
+                    if (match.end > state.end) next.push_back(std::move(match));
+            }
+            if (next.empty()) break;
+            order_codepoint_states(next, longest);
+            frontier = std::move(next);
+            if (count >= bounds->first)
+                results.insert(results.end(), frontier.begin(), frontier.end());
+        }
+        order_codepoint_states(results, longest);
+        return results;
+    }
+    if (pattern.has_head("PatternTest") && pattern.args().size() == 2) {
+        auto matches = match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, longest);
+        matches.erase(std::remove_if(matches.begin(), matches.end(),
+            [&](const CodePointPatternState& match) {
+                return !codepoint_pattern_test_succeeds(
+                    pattern.args()[1], source, start, match.end);
+            }), matches.end());
+        return matches;
+    }
+    if (pattern.has_head("Except") && !pattern.args().empty()
+        && pattern.args().size() <= 2) {
+        const auto allowed_pattern = pattern.args().size() == 2
+            ? pattern.args()[1] : call("Blank");
+        auto allowed = match_codepoint_string_pattern(
+            allowed_pattern, source, start, bindings, longest);
+        auto disallowed = match_codepoint_string_pattern(
+            pattern.args()[0], source, start, bindings, longest);
+        allowed.erase(std::remove_if(allowed.begin(), allowed.end(),
+            [&](const CodePointPatternState& candidate) {
+                return std::any_of(disallowed.begin(), disallowed.end(),
+                    [&](const CodePointPatternState& excluded) {
+                        return excluded.end == candidate.end;
+                    });
+            }), allowed.end());
+        return allowed;
+    }
+    if (pattern.has_head("CharacterRange") && pattern.args().size() == 2
+        && pattern.args()[0].kind() == ExprKind::String
+        && pattern.args()[1].kind() == ExprKind::String) {
+        const auto first = utf8_codepoints(pattern.args()[0].text());
+        const auto last = utf8_codepoints(pattern.args()[1].text());
+        return first.size() == 1 && last.size() == 1
+            && start < source.codepoints.size()
+            && source.codepoints[start] >= first[0]
+            && source.codepoints[start] <= last[0]
+            ? std::vector<CodePointPatternState>{{start + 1, bindings}}
+            : std::vector<CodePointPatternState>{};
+    }
+    if (pattern.has_head("RegularExpression") && pattern.args().size() == 1
+        && pattern.args()[0].kind() == ExprKind::String)
+        return match_simple_unicode_regex(
+            pattern.args()[0].text(), source, start, bindings);
+    return {};
+}
+
+std::size_t regex_capture_count(const std::string& source) {
+    std::size_t count = 0;
+    bool escaped = false;
+    bool character_class = false;
+    for (std::size_t index = 0; index < source.size(); ++index) {
+        const auto character = source[index];
+        if (escaped) { escaped = false; continue; }
+        if (character == '\\') { escaped = true; continue; }
+        if (character == '[') { character_class = true; continue; }
+        if (character == ']' && character_class) { character_class = false; continue; }
+        if (character != '(' || character_class) continue;
+        if (index + 1 >= source.size() || source[index + 1] != '?') ++count;
+    }
+    return count;
+}
+
 class StringPatternCompiler {
 public:
-    std::optional<CompiledStringPattern> compile(const Expr& pattern) {
+    std::optional<CompiledStringPattern> compile(
+        const Expr& pattern, bool source_has_non_ascii = true) {
+        if (contains_regular_expression(pattern)
+            || needs_codepoint_string_matcher(pattern)) {
+            if (contains_date_pattern(pattern)) return std::nullopt;
+            if (!codepoint_regular_expressions_supported(
+                    pattern, !source_has_non_ascii))
+                return std::nullopt;
+            return CompiledStringPattern{std::regex{}, {}, pattern};
+        }
         const auto source = fragment(pattern, false); if (!source) return std::nullopt;
-        try { return CompiledStringPattern{std::regex(*source, flags_), bindings_}; } catch (const std::regex_error&) { return std::nullopt; }
+        try {
+            return CompiledStringPattern{
+                std::regex(*source, flags_), bindings_, std::nullopt};
+        } catch (const std::regex_error&) {
+            return std::nullopt;
+        }
     }
 private:
     std::optional<std::string> class_contents(const Expr& pattern) {
@@ -2815,19 +5915,30 @@ private:
             if (name == "Whitespace") return R"([[:space:]]+)";
             if (name == "NumberString") return R"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))";
             if (name == "WordBoundary") return R"(\b)";
-            if (name == "StartOfLine") return "^";
-            if (name == "EndOfLine") return "$";
+            if (name == "StartOfLine") {
+                flags_ |= std::regex_constants::multiline;
+                return "^";
+            }
+            if (name == "EndOfLine") {
+                flags_ |= std::regex_constants::multiline;
+                return "$";
+            }
         }
         if ((pattern.has_head("HoldPattern") || pattern.has_head("Longest") || pattern.has_head("Shortest")) && !pattern.args().empty())
             return fragment(pattern.args()[0], pattern.has_head("Shortest"));
         if (pattern.has_head("StringExpression")) { std::string output; for (const auto& part : pattern.args()) { const auto value = fragment(part, shortest); if (!value) return std::nullopt; output += *value; } return output; }
         if (pattern.has_head("Alternatives") && !pattern.args().empty()) { std::vector<std::string> values; for (const auto& part : pattern.args()) { const auto value = fragment(part, shortest); if (!value) return std::nullopt; values.push_back(*value); } std::string output = "(?:"; for (std::size_t index = 0; index < values.size(); ++index) { if (index) output += '|'; output += values[index]; } return output + ')'; }
-        if (pattern.has_head("RegularExpression") && pattern.args().size() == 1 && pattern.args()[0].kind() == ExprKind::String) { auto source = pattern.args()[0].text(); if (source.compare(0, 4, "(?i)") == 0) { flags_ |= std::regex_constants::icase; source.erase(0, 4); } return "(?:" + source + ')'; }
+        if (pattern.has_head("RegularExpression") && pattern.args().size() == 1 && pattern.args()[0].kind() == ExprKind::String) { auto source = pattern.args()[0].text(); if (source.compare(0, 4, "(?i)") == 0) { flags_ |= std::regex_constants::icase; source.erase(0, 4); } captures_ += regex_capture_count(source); return "(?:" + source + ')'; }
         if (pattern.has_head("CharacterRange") && pattern.args().size() == 2 && pattern.args()[0].kind() == ExprKind::String && pattern.args()[1].kind() == ExprKind::String)
             return "[" + regex_escape(pattern.args()[0].text(), true) + "-" + regex_escape(pattern.args()[1].text(), true) + "]";
-        if (pattern.has_head("Blank") && pattern.args().empty()) return R"([\s\S])";
-        if (pattern.has_head("BlankSequence") && pattern.args().empty()) return std::string(R"([\s\S]+)") + (shortest ? "?" : "");
-        if (pattern.has_head("BlankNullSequence") && pattern.args().empty()) return std::string(R"([\s\S]*)") + (shortest ? "?" : "");
+        static const std::string any_utf8_code_point =
+            R"((?:[\x00-\x7F]|[\xC2-\xDF][\x80-\xBF]|[\xE0-\xEF][\x80-\xBF]{2}|[\xF0-\xF4][\x80-\xBF]{3}))";
+        if (pattern.has_head("Blank") && pattern.args().empty())
+            return any_utf8_code_point;
+        if (pattern.has_head("BlankSequence") && pattern.args().empty())
+            return "(?:" + any_utf8_code_point + ")+" + (shortest ? "?" : "");
+        if (pattern.has_head("BlankNullSequence") && pattern.args().empty())
+            return "(?:" + any_utf8_code_point + ")*" + (shortest ? "?" : "");
         if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull")) && !pattern.args().empty() && pattern.args().size() <= 2) {
             const auto inner = fragment(pattern.args()[0], shortest); if (!inner) return std::nullopt; std::string quantifier = pattern.has_head("RepeatedNull") ? "*" : "+";
             if (pattern.args().size() == 2) {
@@ -2850,7 +5961,7 @@ private:
         if (pattern.has_head("Except") && !pattern.args().empty() && pattern.args().size() <= 2) { const auto excluded = class_contents(pattern.args()[0]); if (!excluded) return std::nullopt; return "[^" + *excluded + "]"; }
         if (pattern.has_head("DatePattern") && !pattern.args().empty() && pattern.args().size() <= 2 && pattern.args()[0].has_head("List")) {
             const auto separator = pattern.args().size() == 2 ? fragment(pattern.args()[1], shortest) : std::optional<std::string>(R"((?:[-/.[:space:]]+))"); if (!separator) return std::nullopt; std::string output;
-            for (std::size_t index = 0; index < pattern.args()[0].args().size(); ++index) { if (index) output += *separator; const auto& item = pattern.args()[0].args()[index]; if (item.kind() != ExprKind::String) return std::nullopt; const auto& name = item.text(); if (name == "Year") output += R"([0-9]{1,4})"; else if (name == "Month") output += R"((1[0-2]|0?[1-9]))"; else if (name == "Day") output += R"(([12][0-9]|3[01]|0?[1-9]))"; else if (name == "Hour") output += R"((2[0-3]|[01]?[0-9]))"; else if (name == "Minute" || name == "Second") output += R"([0-5]?[0-9])"; else return std::nullopt; }
+            for (std::size_t index = 0; index < pattern.args()[0].args().size(); ++index) { if (index) output += *separator; const auto& item = pattern.args()[0].args()[index]; if (item.kind() != ExprKind::String) return std::nullopt; const auto& name = item.text(); if (name == "Year") output += R"([0-9]{1,4})"; else if (name == "Month") output += R"((?:1[0-2]|0?[1-9]))"; else if (name == "Day") output += R"((?:[12][0-9]|3[01]|0?[1-9]))"; else if (name == "Hour") output += R"((?:2[0-3]|[01]?[0-9]))"; else if (name == "Minute" || name == "Second") output += R"([0-5]?[0-9])"; else return std::nullopt; }
             return output;
         }
         return std::nullopt;
@@ -2858,21 +5969,92 @@ private:
     std::size_t captures_ = 0;
     std::map<std::string, std::vector<std::size_t>> bindings_;
     std::regex_constants::syntax_option_type flags_ =
-        std::regex_constants::ECMAScript | std::regex_constants::multiline;
+        std::regex_constants::ECMAScript;
 };
 
 struct StringMatchResult { std::size_t start; std::size_t end; Bindings bindings; };
 
-std::optional<StringMatchResult> string_pattern_match(const CompiledStringPattern& pattern, const std::string& source, std::size_t start) {
+Expr normalize_string_expression(std::vector<Expr> pieces) {
+    std::vector<Expr> flattened;
+    const auto append = [&](const auto& self, const Expr& piece) -> void {
+        if (piece.has_head("StringExpression")) {
+            for (const auto& argument : piece.args()) self(self, argument);
+            return;
+        }
+        if (piece.kind() == ExprKind::String && !flattened.empty()
+            && flattened.back().kind() == ExprKind::String) {
+            flattened.back() = string(
+                flattened.back().text() + piece.text());
+            return;
+        }
+        flattened.push_back(piece);
+    };
+    for (const auto& piece : pieces) append(append, piece);
+    if (flattened.empty()) return string("");
+    if (flattened.size() == 1) return flattened.front();
+    return call("StringExpression", std::move(flattened));
+}
+
+bool is_string_or_string_list(const Expr& expression) {
+    if (expression.kind() == ExprKind::String) return true;
+    return expression.has_head("List")
+        && std::all_of(expression.args().begin(), expression.args().end(),
+            is_string_or_string_list);
+}
+
+std::optional<StringMatchResult> string_pattern_match(
+    const CompiledStringPattern& pattern, const std::string& source,
+    std::size_t start, const CodePointPatternSource* decoded_source = nullptr,
+    std::optional<std::size_t> required_end = std::nullopt) {
+    if (pattern.codepoint_pattern) {
+        const std::optional<CodePointPatternSource> local_source =
+            decoded_source ? std::nullopt
+                           : std::optional<CodePointPatternSource>(source);
+        const auto& decoded = decoded_source ? *decoded_source : *local_source;
+        const auto boundary = std::lower_bound(
+            decoded.boundaries.begin(), decoded.boundaries.end(), start);
+        if (boundary == decoded.boundaries.end() || *boundary != start)
+            return std::nullopt;
+        const auto codepoint_start = static_cast<std::size_t>(
+            boundary - decoded.boundaries.begin());
+        const auto matches = match_codepoint_string_pattern(
+            *pattern.codepoint_pattern, decoded, codepoint_start, {}, true);
+        if (matches.empty()) return std::nullopt;
+        auto selected = matches.begin();
+        if (required_end) {
+            const auto end_boundary = std::lower_bound(decoded.boundaries.begin(),
+                decoded.boundaries.end(), *required_end);
+            if (end_boundary == decoded.boundaries.end()
+                || *end_boundary != *required_end) return std::nullopt;
+            const auto codepoint_end = static_cast<std::size_t>(
+                end_boundary - decoded.boundaries.begin());
+            selected = std::find_if(matches.begin(), matches.end(),
+                [&](const CodePointPatternState& match) {
+                    return match.end == codepoint_end;
+                });
+            if (selected == matches.end()) return std::nullopt;
+        }
+        return StringMatchResult{start, decoded.boundaries[selected->end],
+            selected->bindings};
+    }
     std::match_results<std::string::const_iterator> match;
-    if (!std::regex_search(source.begin() + static_cast<std::ptrdiff_t>(start), source.end(), match, pattern.regex, std::regex_constants::match_continuous)) return std::nullopt;
+    const auto first = source.begin() + static_cast<std::ptrdiff_t>(start);
+    const bool matched = required_end
+        ? *required_end >= start && *required_end <= source.size()
+            && std::regex_match(first,
+                source.begin() + static_cast<std::ptrdiff_t>(*required_end),
+                match, pattern.regex)
+        : std::regex_search(first, source.end(), match, pattern.regex,
+            std::regex_constants::match_continuous);
+    if (!matched) return std::nullopt;
     Bindings bindings;
     for (const auto& [name, groups] : pattern.bindings) {
         std::optional<std::string> value;
         for (const auto group : groups) { if (group >= match.size() || !match[group].matched) return std::nullopt; const auto current = match[group].str(); if (value && *value != current) return std::nullopt; value = current; }
         bindings.emplace(name, string(value.value_or("")));
     }
-    return StringMatchResult{start, start + match.length(0), std::move(bindings)};
+    return StringMatchResult{start,
+        required_end.value_or(start + match.length(0)), std::move(bindings)};
 }
 Expr substitute_bindings(const Expr& expression, const Bindings& bindings);
 
@@ -2881,6 +6063,10 @@ std::optional<bool> simple_truth(const Expr& expression) {
     if (is_symbol(expression, "False")) return false;
     if (expression.kind() != ExprKind::Call || expression.args().size() != 2) return std::nullopt;
     const auto* name = expression.head().symbol_name();
+    if (!name) return std::nullopt;
+    const auto operation = system_dispatch_name(*name);
+    if (operation == "SameQ") return expression.args()[0] == expression.args()[1];
+    if (operation == "UnsameQ") return expression.args()[0] != expression.args()[1];
     auto simple_value = [](auto&& self, const Expr& value) -> std::optional<double> {
         if (const auto number = numeric_real(value)) return number;
         if (value.has_head("Length") && value.args().size() == 1) return static_cast<double>(value.args()[0].length());
@@ -2911,8 +6097,7 @@ std::optional<bool> simple_truth(const Expr& expression) {
     };
     const auto left = simple_value(simple_value, expression.args()[0]);
     const auto right = simple_value(simple_value, expression.args()[1]);
-    if (!name || !left || !right) return std::nullopt;
-    const auto operation = system_dispatch_name(*name);
+    if (!left || !right) return std::nullopt;
     if (operation == "Equal") return *left == *right;
     if (operation == "Unequal") return *left != *right;
     if (operation == "Less") return *left < *right;
@@ -2938,9 +6123,18 @@ std::optional<Expr> recover_inactive_original(const Expr& original, const Expr& 
     return recover_inactive_original(original.head(), active);
 }
 
-bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& bindings);
+struct PatternEvaluationContext {
+    std::function<bool(const Expr&, const Expr&)> predicate;
+    std::function<bool(const Expr&)> condition;
+};
 
-bool predicate_matches(const Expr& value, const Expr& predicate) {
+bool pattern_match(const Expr& value, const Expr& raw_pattern,
+    Bindings& bindings,
+    const PatternEvaluationContext* context = nullptr);
+
+bool predicate_matches(const Expr& value, const Expr& predicate,
+    const PatternEvaluationContext* context) {
+    if (context) return context->predicate(value, predicate);
     if (is_symbol(predicate, "IntegerQ")) return value.kind() == ExprKind::Integer;
     if (is_symbol(predicate, "StringQ")) return value.kind() == ExprKind::String;
     if (is_symbol(predicate, "NumberQ") || is_symbol(predicate, "NumericQ")) return numeric_q_value(value);
@@ -2983,7 +6177,10 @@ std::pair<std::size_t, std::size_t> sequence_bounds(const Expr& pattern, std::si
     return {1, 1};
 }
 
-bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_index, const std::vector<Expr>& patterns, std::size_t pattern_index, Bindings& bindings);
+bool match_argument_sequence(const std::vector<Expr>& values,
+    std::size_t value_index, const std::vector<Expr>& patterns,
+    std::size_t pattern_index, Bindings& bindings,
+    const PatternEvaluationContext* context);
 
 bool bind_sequence_name(const Expr& name, const std::vector<Expr>& values, Bindings& bindings, bool sequence) {
     if (!name.symbol_name()) return false;
@@ -2992,13 +6189,46 @@ bool bind_sequence_name(const Expr& name, const std::vector<Expr>& values, Bindi
     bindings.emplace(*name.symbol_name(), value); return true;
 }
 
-bool match_pattern_chunk(const std::vector<Expr>& values, const Expr& pattern, Bindings& bindings) {
-    if ((pattern.has_head("Longest") || pattern.has_head("Shortest") || pattern.has_head("HoldPattern")) && !pattern.args().empty()) return match_pattern_chunk(values, pattern.args()[0], bindings);
-    if (pattern.has_head("Condition") && pattern.args().size() == 2) { auto candidate = bindings; if (!match_pattern_chunk(values, pattern.args()[0], candidate)) return false; if (!simple_truth(substitute_bindings(pattern.args()[1], candidate)).value_or(false)) return false; bindings = std::move(candidate); return true; }
-    if (pattern.has_head("Pattern") && pattern.args().size() == 2) { auto candidate = bindings; if (!match_pattern_chunk(values, pattern.args()[1], candidate) || !bind_sequence_name(pattern.args()[0], values, candidate, is_sequence_pattern(pattern.args()[1]))) return false; bindings = std::move(candidate); return true; }
-    if (pattern.has_head("PatternTest") && pattern.args().size() == 2) return match_pattern_chunk(values, pattern.args()[0], bindings) && std::all_of(values.begin(), values.end(), [&](const Expr& value) { return predicate_matches(value, pattern.args()[1]); });
+bool match_pattern_chunk(const std::vector<Expr>& values,
+    const Expr& pattern, Bindings& bindings,
+    const PatternEvaluationContext* context) {
+    if ((pattern.has_head("Longest") || pattern.has_head("Shortest")
+        || pattern.has_head("HoldPattern")) && !pattern.args().empty())
+        return match_pattern_chunk(
+            values, pattern.args()[0], bindings, context);
+    if (pattern.has_head("Condition") && pattern.args().size() == 2) {
+        auto candidate = bindings;
+        if (!match_pattern_chunk(
+            values, pattern.args()[0], candidate, context)) return false;
+        const auto condition = substitute_bindings(
+            pattern.args()[1], candidate);
+        const bool succeeds = context
+            ? context->condition(condition)
+            : simple_truth(condition).value_or(false);
+        if (!succeeds) return false;
+        bindings = std::move(candidate);
+        return true;
+    }
+    if (pattern.has_head("Pattern") && pattern.args().size() == 2) {
+        auto candidate = bindings;
+        if (!match_pattern_chunk(
+                values, pattern.args()[1], candidate, context)
+            || !bind_sequence_name(pattern.args()[0], values, candidate,
+                is_sequence_pattern(pattern.args()[1]))) return false;
+        bindings = std::move(candidate);
+        return true;
+    }
+    if (pattern.has_head("PatternTest") && pattern.args().size() == 2)
+        return match_pattern_chunk(
+            values, pattern.args()[0], bindings, context)
+            && std::all_of(values.begin(), values.end(),
+                [&](const Expr& value) {
+                    return predicate_matches(
+                        value, pattern.args()[1], context);
+                });
     if (pattern.has_head("Optional") && !pattern.args().empty()) {
-        if (!values.empty()) return match_pattern_chunk(values, pattern.args()[0], bindings);
+        if (!values.empty()) return match_pattern_chunk(
+            values, pattern.args()[0], bindings, context);
         if (pattern.args().size() < 2) return false;
         const auto& inner = pattern.args()[0]; if (inner.has_head("Pattern") && inner.args().size() == 2) return bind_sequence_name(inner.args()[0], {pattern.args()[1]}, bindings, false); return false;
     }
@@ -3010,21 +6240,26 @@ bool match_pattern_chunk(const std::vector<Expr>& values, const Expr& pattern, B
     if (pattern.has_head("PatternSequence") || pattern.has_head("OrderlessPatternSequence")) {
         if (pattern.has_head("OrderlessPatternSequence") && values.size() == pattern.args().size()) {
             auto permutation = values; std::sort(permutation.begin(), permutation.end(), expression_less);
-            do { auto candidate = bindings; if (match_argument_sequence(permutation, 0, pattern.args(), 0, candidate)) { bindings = std::move(candidate); return true; } } while (std::next_permutation(permutation.begin(), permutation.end(), expression_less));
+            do { auto candidate = bindings; if (match_argument_sequence(permutation, 0, pattern.args(), 0, candidate, context)) { bindings = std::move(candidate); return true; } } while (std::next_permutation(permutation.begin(), permutation.end(), expression_less));
             return false;
         }
-        return match_argument_sequence(values, 0, pattern.args(), 0, bindings);
+        return match_argument_sequence(
+            values, 0, pattern.args(), 0, bindings, context);
     }
     if ((pattern.has_head("Repeated") || pattern.has_head("RepeatedNull")) && !pattern.args().empty()) {
         const auto unit_patterns = pattern.args()[0].has_head("PatternSequence") ? pattern.args()[0].args() : std::vector<Expr>{pattern.args()[0]};
         if (unit_patterns.empty() || values.size() % unit_patterns.size() != 0) return false;
-        for (std::size_t offset = 0; offset < values.size(); offset += unit_patterns.size()) { std::vector<Expr> unit(values.begin() + static_cast<std::ptrdiff_t>(offset), values.begin() + static_cast<std::ptrdiff_t>(offset + unit_patterns.size())); if (!match_argument_sequence(unit, 0, unit_patterns, 0, bindings)) return false; }
+        for (std::size_t offset = 0; offset < values.size(); offset += unit_patterns.size()) { std::vector<Expr> unit(values.begin() + static_cast<std::ptrdiff_t>(offset), values.begin() + static_cast<std::ptrdiff_t>(offset + unit_patterns.size())); if (!match_argument_sequence(unit, 0, unit_patterns, 0, bindings, context)) return false; }
         return true;
     }
-    return values.size() == 1 && pattern_match(values[0], pattern, bindings);
+    return values.size() == 1
+        && pattern_match(values[0], pattern, bindings, context);
 }
 
-bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_index, const std::vector<Expr>& patterns, std::size_t pattern_index, Bindings& bindings) {
+bool match_argument_sequence(const std::vector<Expr>& values,
+    std::size_t value_index, const std::vector<Expr>& patterns,
+    std::size_t pattern_index, Bindings& bindings,
+    const PatternEvaluationContext* context) {
     if (pattern_index == patterns.size()) return value_index == values.size();
     const auto available = values.size() - value_index; const auto bounds = sequence_bounds(patterns[pattern_index], available);
     std::size_t remaining_minimum = 0; for (std::size_t index = pattern_index + 1; index < patterns.size(); ++index) remaining_minimum += sequence_bounds(patterns[index], available).first;
@@ -3032,12 +6267,13 @@ bool match_argument_sequence(const std::vector<Expr>& values, std::size_t value_
     const auto maximum = std::min(bounds.second, available - remaining_minimum); const bool longest = patterns[pattern_index].has_head("Longest");
     for (std::size_t attempt = bounds.first; attempt <= maximum; ++attempt) {
         const auto length = longest ? maximum - (attempt - bounds.first) : attempt; std::vector<Expr> chunk(values.begin() + static_cast<std::ptrdiff_t>(value_index), values.begin() + static_cast<std::ptrdiff_t>(value_index + length)); auto candidate = bindings;
-        if (match_pattern_chunk(chunk, patterns[pattern_index], candidate) && match_argument_sequence(values, value_index + length, patterns, pattern_index + 1, candidate)) { bindings = std::move(candidate); return true; }
+        if (match_pattern_chunk(chunk, patterns[pattern_index], candidate, context) && match_argument_sequence(values, value_index + length, patterns, pattern_index + 1, candidate, context)) { bindings = std::move(candidate); return true; }
     }
     return false;
 }
 
-bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& bindings) {
+bool pattern_match(const Expr& value, const Expr& raw_pattern,
+    Bindings& bindings, const PatternEvaluationContext* context) {
     if (raw_pattern.has_head("KeyValuePattern") && raw_pattern.args().size() == 1) {
         std::optional<std::vector<Expr>> elements = association_rules(value);
         if (!elements && value.has_head("List") && std::all_of(value.args().begin(), value.args().end(), [](const Expr& item) {
@@ -3052,7 +6288,8 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
             for (std::size_t index = 0; index < elements->size(); ++index) {
                 if (used[index]) continue;
                 auto candidate = current;
-                if (!pattern_match((*elements)[index], patterns[pattern_index], candidate)) continue;
+                if (!pattern_match((*elements)[index],
+                    patterns[pattern_index], candidate, context)) continue;
                 used[index] = true; const auto result = self(self, pattern_index + 1, std::move(candidate)); used[index] = false;
                 if (result) return result;
             }
@@ -3063,8 +6300,14 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
     }
     if (raw_pattern.has_head("Condition") && raw_pattern.args().size() == 2) {
         auto candidate = bindings;
-        if (!pattern_match(value, raw_pattern.args()[0], candidate)) return false;
-        if (simple_truth(substitute_bindings(raw_pattern.args()[1], candidate)).value_or(false)) {
+        if (!pattern_match(
+            value, raw_pattern.args()[0], candidate, context)) return false;
+        const auto condition = substitute_bindings(
+            raw_pattern.args()[1], candidate);
+        const bool succeeds = context
+            ? context->condition(condition)
+            : simple_truth(condition).value_or(false);
+        if (succeeds) {
             bindings = std::move(candidate); return true;
         }
         return false;
@@ -3073,7 +6316,8 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
         const auto pattern = raw_pattern.args()[0].has_head("HoldPattern") && raw_pattern.args()[0].args().size() == 1
             ? raw_pattern.args()[0].args()[0] : raw_pattern.args()[0];
         auto candidate = bindings;
-        if (!pattern_match(active_view(value), active_view(pattern), candidate)) return false;
+        if (!pattern_match(active_view(value), active_view(pattern),
+            candidate, context)) return false;
         for (auto& [name, bound] : candidate) {
             (void)name;
             if (const auto original = recover_inactive_original(value, bound)) bound = *original;
@@ -3082,12 +6326,14 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
         return true;
     }
     if ((raw_pattern.has_head("HoldPattern") || raw_pattern.has_head("Verbatim")) && raw_pattern.args().size() == 1)
-        return pattern_match(value, raw_pattern.args()[0], bindings);
-    if (raw_pattern.has_head("Except") && !raw_pattern.args().empty()) { auto candidate = bindings; const bool excluded = pattern_match(value, raw_pattern.args()[0], candidate); return !excluded && (raw_pattern.args().size() == 1 || pattern_match(value, raw_pattern.args()[1], bindings)); }
-    if (raw_pattern.has_head("PatternTest") && raw_pattern.args().size() == 2) return pattern_match(value, raw_pattern.args()[0], bindings) && predicate_matches(value, raw_pattern.args()[1]);
-    if (raw_pattern.has_head("BlankSequence") || raw_pattern.has_head("BlankNullSequence") || raw_pattern.has_head("Repeated") || raw_pattern.has_head("RepeatedNull") || raw_pattern.has_head("PatternSequence") || raw_pattern.has_head("OptionsPattern")) return match_pattern_chunk({value}, raw_pattern, bindings);
+        return pattern_match(
+            value, raw_pattern.args()[0], bindings, context);
+    if (raw_pattern.has_head("Except") && !raw_pattern.args().empty()) { auto candidate = bindings; const bool excluded = pattern_match(value, raw_pattern.args()[0], candidate, context); return !excluded && (raw_pattern.args().size() == 1 || pattern_match(value, raw_pattern.args()[1], bindings, context)); }
+    if (raw_pattern.has_head("PatternTest") && raw_pattern.args().size() == 2) return pattern_match(value, raw_pattern.args()[0], bindings, context) && predicate_matches(value, raw_pattern.args()[1], context);
+    if (raw_pattern.has_head("BlankSequence") || raw_pattern.has_head("BlankNullSequence") || raw_pattern.has_head("Repeated") || raw_pattern.has_head("RepeatedNull") || raw_pattern.has_head("PatternSequence") || raw_pattern.has_head("OptionsPattern")) return match_pattern_chunk({value}, raw_pattern, bindings, context);
     if (raw_pattern.has_head("Pattern") && raw_pattern.args().size() == 2 && raw_pattern.args()[0].symbol_name()) {
-        if (!pattern_match(value, raw_pattern.args()[1], bindings)) return false;
+        if (!pattern_match(
+            value, raw_pattern.args()[1], bindings, context)) return false;
         const auto name = *raw_pattern.args()[0].symbol_name();
         const auto found = bindings.find(name);
         if (found != bindings.end()) return found->second == value;
@@ -3100,13 +6346,15 @@ bool pattern_match(const Expr& value, const Expr& raw_pattern, Bindings& binding
     if (raw_pattern.has_head("Alternatives")) {
         for (const auto& alternative : raw_pattern.args()) {
             auto candidate = bindings;
-            if (pattern_match(value, alternative, candidate)) { bindings = std::move(candidate); return true; }
+            if (pattern_match(value, alternative, candidate, context)) { bindings = std::move(candidate); return true; }
         }
         return false;
     }
     if (value.kind() != ExprKind::Call || raw_pattern.kind() != ExprKind::Call) return value == raw_pattern;
-    if (!pattern_match(value.head(), raw_pattern.head(), bindings)) return false;
-    return match_argument_sequence(value.args(), 0, raw_pattern.args(), 0, bindings);
+    if (!pattern_match(
+        value.head(), raw_pattern.head(), bindings, context)) return false;
+    return match_argument_sequence(
+        value.args(), 0, raw_pattern.args(), 0, bindings, context);
 }
 
 Expr substitute_bindings(const Expr& expression, const Bindings& bindings) {
@@ -3510,6 +6758,226 @@ private:
     Evaluate evaluate_;
 };
 
+NativePolynomial scale_native_polynomial(const NativePolynomialContext& context,
+    const NativePolynomial& polynomial, const Expr& factor) {
+    auto result = context.zero();
+    for (const auto& [monomial, coefficient] : polynomial.terms)
+        result = context.add(result, context.monomial_polynomial(monomial,
+            context.coefficient_multiply(factor, coefficient)));
+    return result;
+}
+
+NativePolynomial divide_native_polynomial_by_scalar(
+    const NativePolynomialContext& context, const NativePolynomial& polynomial,
+    const Expr& divisor) {
+    auto result = context.zero();
+    for (const auto& [monomial, coefficient] : polynomial.terms)
+        result = context.add(result, context.monomial_polynomial(monomial,
+            context.coefficient_divide(coefficient, divisor)));
+    return result;
+}
+
+Expr native_coefficient_power(const NativePolynomialContext& context,
+    const Expr& base, long exponent) {
+    Expr result = integer(1L);
+    for (long index = 0; index < exponent; ++index)
+        result = context.coefficient_multiply(result, base);
+    return result;
+}
+
+NativePolynomial pseudo_remainder(const NativePolynomialContext& context,
+    NativePolynomial dividend, const NativePolynomial& divisor) {
+    if (divisor.empty()) return dividend;
+    const auto divisor_degree = context.degree(divisor);
+    const auto divisor_leading = context.leading_term(divisor).second;
+    long remaining_power = context.degree(dividend) - divisor_degree + 1;
+    std::size_t iterations = 0;
+    while (!dividend.empty() && context.degree(dividend) >= divisor_degree
+        && iterations++ < 10000) {
+        const auto dividend_degree = context.degree(dividend);
+        const auto dividend_leading = context.leading_term(dividend).second;
+        const auto offset = dividend_degree - divisor_degree;
+        const auto shifted_divisor = context.multiply(divisor,
+            context.monomial_polynomial(NativeMonomial{offset}, integer(1L)));
+        dividend = context.subtract(
+            scale_native_polynomial(context, dividend, divisor_leading),
+            scale_native_polynomial(context, shifted_divisor, dividend_leading));
+        --remaining_power;
+    }
+    if (iterations >= 10000) return context.zero();
+    return scale_native_polynomial(context, dividend,
+        native_coefficient_power(context, divisor_leading,
+            std::max(0L, remaining_power)));
+}
+
+std::optional<std::vector<NativePolynomial>> native_subresultant_sequence(
+    const NativePolynomialContext& context, NativePolynomial left,
+    NativePolynomial right) {
+    if (context.variables().size() != 1 || left.empty()) return std::nullopt;
+    if (right.empty()) return std::vector<NativePolynomial>{std::move(left)};
+    auto left_degree = context.degree(left);
+    auto right_degree = context.degree(right);
+    if (left_degree < right_degree) {
+        std::swap(left, right);
+        std::swap(left_degree, right_degree);
+    }
+    std::vector<NativePolynomial> sequence{left, right};
+    long difference = left_degree - right_degree;
+    const Expr sign = ((difference + 1) & 1L) == 0
+        ? integer(1L) : integer(-1L);
+    auto next = scale_native_polynomial(
+        context, pseudo_remainder(context, left, right), sign);
+    Expr leading = context.leading_term(right).second;
+    Expr scale = native_coefficient_power(context, leading, difference);
+    Expr negative_scale = context.coefficient_multiply(integer(-1L), scale);
+    std::size_t iterations = 0;
+    while (!next.empty() && iterations++ < 1000) {
+        const auto next_degree = context.degree(next);
+        sequence.push_back(next);
+        left = std::move(right);
+        right = std::move(next);
+        const auto previous_degree = right_degree;
+        right_degree = next_degree;
+        difference = previous_degree - next_degree;
+        const auto divisor = context.coefficient_multiply(integer(-1L),
+            context.coefficient_multiply(leading,
+                native_coefficient_power(context, negative_scale, difference)));
+        next = divide_native_polynomial_by_scalar(context,
+            pseudo_remainder(context, left, right), divisor);
+        leading = context.leading_term(right).second;
+        if (difference > 1) {
+            const auto numerator = native_coefficient_power(context,
+                context.coefficient_multiply(integer(-1L), leading), difference);
+            const auto denominator = native_coefficient_power(
+                context, negative_scale, difference - 1);
+            negative_scale = context.coefficient_divide(numerator, denominator);
+        } else negative_scale = context.coefficient_multiply(integer(-1L), leading);
+    }
+    if (iterations >= 1000) return std::nullopt;
+    return sequence;
+}
+
+Expr factor_common_additive_expression(const Expr& expression,
+    const NativePolynomialContext::Evaluate& evaluate, std::size_t depth = 0) {
+    if (!expression.has_head("Plus") || depth >= 32) return expression;
+    auto terms = expression.args();
+    std::vector<Expr> variables;
+    for (const auto& term : terms) gather_polynomial_symbols(term, variables);
+    std::sort(variables.begin(), variables.end(), expression_less);
+    auto monomial_exponents = [&](const Expr& term) {
+        std::vector<long> exponents(variables.size(), 0);
+        const auto factors = term.has_head("Times")
+            ? term.args() : std::vector<Expr>{term};
+        for (const auto& factor : factors) {
+            Expr base = factor;
+            long exponent = 1;
+            if (factor.has_head("Power") && factor.args().size() == 2
+                && factor.args()[1].kind() == ExprKind::Integer
+                && factor.args()[1].integer_value() >= 0
+                && factor.args()[1].integer_value().fits_slong_p()) {
+                base = factor.args()[0];
+                exponent = factor.args()[1].integer_value().get_si();
+            }
+            const auto found = std::find(variables.begin(), variables.end(), base);
+            if (found != variables.end())
+                exponents[static_cast<std::size_t>(found - variables.begin())] += exponent;
+        }
+        return exponents;
+    };
+    std::stable_sort(terms.begin(), terms.end(), [&](const Expr& left, const Expr& right) {
+        const auto left_exponents = monomial_exponents(left);
+        const auto right_exponents = monomial_exponents(right);
+        if (left_exponents != right_exponents)
+            return std::lexicographical_compare(
+                right_exponents.begin(), right_exponents.end(),
+                left_exponents.begin(), left_exponents.end());
+        return expression_less(left, right);
+    });
+    struct DecomposedTerm {
+        Expr coefficient = integer(1L);
+        std::vector<Expr> factors;
+    };
+    std::vector<DecomposedTerm> decomposed;
+    decomposed.reserve(terms.size());
+    for (const auto& term : terms) {
+        DecomposedTerm value;
+        if (const auto numeric = as_rational(term)) {
+            value.coefficient = from_rational(*numeric);
+        } else if (term.has_head("Times")) {
+            mpq_class coefficient = 1;
+            for (const auto& factor : term.args()) {
+                if (const auto numeric = as_rational(factor)) coefficient *= *numeric;
+                else value.factors.push_back(factor);
+            }
+            value.coefficient = from_rational(coefficient);
+        } else value.factors.push_back(term);
+        decomposed.push_back(std::move(value));
+    }
+    std::vector<Expr> unique_factors;
+    for (const auto& term : decomposed)
+        for (const auto& factor : term.factors)
+            if (std::find(unique_factors.begin(), unique_factors.end(), factor)
+                == unique_factors.end()) unique_factors.push_back(factor);
+
+    std::vector<std::size_t> best_indices;
+    std::vector<Expr> best_common;
+    for (const auto& candidate : unique_factors) {
+        std::vector<std::size_t> indices;
+        for (std::size_t index = 0; index < decomposed.size(); ++index)
+            if (std::find(decomposed[index].factors.begin(),
+                    decomposed[index].factors.end(), candidate)
+                != decomposed[index].factors.end()) indices.push_back(index);
+        if (indices.size() < 2) continue;
+        std::vector<Expr> common;
+        auto remaining = decomposed[indices.front()].factors;
+        for (const auto& factor : remaining) {
+            bool present = true;
+            for (std::size_t position = 1; position < indices.size(); ++position)
+                if (std::find(decomposed[indices[position]].factors.begin(),
+                        decomposed[indices[position]].factors.end(), factor)
+                    == decomposed[indices[position]].factors.end()) {
+                    present = false;
+                    break;
+                }
+            if (present) common.push_back(factor);
+        }
+        if (common.empty()) continue;
+        if (indices.size() > best_indices.size()
+            || (indices.size() == best_indices.size()
+                && common.size() > best_common.size())) {
+            best_indices = std::move(indices);
+            best_common = std::move(common);
+        }
+    }
+    if (best_indices.empty()) return expression;
+    std::set<std::size_t> selected(best_indices.begin(), best_indices.end());
+    std::vector<Expr> quotients;
+    for (const auto index : best_indices) {
+        auto factors = decomposed[index].factors;
+        for (const auto& common : best_common) {
+            const auto found = std::find(factors.begin(), factors.end(), common);
+            if (found != factors.end()) factors.erase(found);
+        }
+        if (decomposed[index].coefficient != integer(1L))
+            factors.insert(factors.begin(), decomposed[index].coefficient);
+        quotients.push_back(evaluate(call("Times", std::move(factors))));
+    }
+    const auto common = evaluate(call("Times", best_common));
+    const auto inner = factor_common_additive_expression(
+        simplify_plus(quotients, false), evaluate, depth + 1);
+    const auto factored = evaluate(call("Times", {common, inner}));
+    std::vector<Expr> rebuilt;
+    bool inserted = false;
+    for (std::size_t index = 0; index < terms.size(); ++index) {
+        if (selected.count(index) != 0) {
+            if (!inserted) { rebuilt.push_back(factored); inserted = true; }
+        } else rebuilt.push_back(terms[index]);
+    }
+    const auto result = simplify_plus(rebuilt, false);
+    if (result == expression) return expression;
+    return factor_common_additive_expression(result, evaluate, depth + 1);
+}
+
 void gather_polynomial_symbols(const Expr& expression, std::vector<Expr>& symbols) {
     if (expression.kind() == ExprKind::Symbol) {
         if (std::find(symbols.begin(), symbols.end(), expression) == symbols.end()) symbols.push_back(expression);
@@ -3650,6 +7118,173 @@ RationalPolynomial rational_polynomial_gcd(
     return monic_polynomial(std::move(left));
 }
 
+std::vector<mpz_class> primitive_integer_polynomial(
+    const RationalPolynomial& polynomial);
+mpq_class evaluate_polynomial(
+    const RationalPolynomial& polynomial, const mpq_class& value);
+
+std::vector<std::pair<RationalPolynomial, long>> rational_square_free_factors(
+    RationalPolynomial polynomial) {
+    std::vector<std::pair<RationalPolynomial, long>> factors;
+    polynomial = monic_polynomial(std::move(polynomial));
+    if (polynomial_degree(polynomial) <= 0) return factors;
+    auto repeated = rational_polynomial_gcd(
+        polynomial, polynomial_derivative(polynomial));
+    auto square_free = rational_polynomial_divide(polynomial, repeated).first;
+    for (long multiplicity = 1; polynomial_degree(square_free) > 0; ++multiplicity) {
+        const auto common = rational_polynomial_gcd(square_free, repeated);
+        auto factor = monic_polynomial(
+            rational_polynomial_divide(square_free, common).first);
+        if (polynomial_degree(factor) > 0)
+            factors.emplace_back(std::move(factor), multiplicity);
+        square_free = common;
+        repeated = rational_polynomial_divide(repeated, common).first;
+    }
+    return factors;
+}
+
+std::optional<std::vector<mpz_class>> bounded_positive_divisors(
+    mpz_class value, unsigned long maximum_value = 1000000UL) {
+    if (value < 0) value = -value;
+    if (value == 0) return std::vector<mpz_class>{0};
+    if (!value.fits_ulong_p() || value.get_ui() > maximum_value) return std::nullopt;
+    const auto raw = value.get_ui();
+    std::vector<mpz_class> divisors;
+    for (unsigned long candidate = 1; candidate <= raw / candidate; ++candidate) {
+        if (raw % candidate != 0) continue;
+        divisors.emplace_back(candidate);
+        if (candidate != raw / candidate) divisors.emplace_back(raw / candidate);
+    }
+    std::sort(divisors.begin(), divisors.end());
+    return divisors;
+}
+
+std::optional<mpq_class> bounded_rational_root(
+    const RationalPolynomial& polynomial) {
+    const auto integer_coefficients = primitive_integer_polynomial(polynomial);
+    if (integer_coefficients.size() <= 1) return std::nullopt;
+    if (integer_coefficients.front() == 0) return mpq_class(0);
+    const auto numerators = bounded_positive_divisors(integer_coefficients.front());
+    const auto denominators = bounded_positive_divisors(integer_coefficients.back());
+    if (!numerators || !denominators) return std::nullopt;
+    std::set<mpq_class> candidates;
+    for (const auto& numerator : *numerators)
+        for (const auto& denominator : *denominators) {
+            mpq_class candidate(numerator, denominator);
+            candidate.canonicalize();
+            candidates.insert(candidate);
+            candidates.insert(-candidate);
+        }
+    for (auto candidate = candidates.rbegin(); candidate != candidates.rend(); ++candidate)
+        if (evaluate_polynomial(polynomial, *candidate) == 0) return *candidate;
+    return std::nullopt;
+}
+
+std::optional<RationalPolynomial> bounded_nontrivial_rational_factor(
+    const RationalPolynomial& polynomial) {
+    const auto integer_coefficients = primitive_integer_polynomial(polynomial);
+    const auto degree = polynomial_degree(polynomial);
+    if (degree < 4 || integer_coefficients.empty()
+        || integer_coefficients.front() == 0) return std::nullopt;
+    const auto constant_divisors = bounded_positive_divisors(integer_coefficients.front());
+    const auto leading_divisors = bounded_positive_divisors(integer_coefficients.back());
+    if (!constant_divisors || !leading_divisors) return std::nullopt;
+    long coefficient_bound = 4;
+    for (const auto& coefficient : integer_coefficients) {
+        if (!coefficient.fits_slong_p()) return std::nullopt;
+        mpz_class magnitude = coefficient < 0 ? -coefficient : coefficient;
+        const auto local_bound = magnitude > 16 ? 32L
+            : static_cast<long>(magnitude.get_ui() * 2UL);
+        coefficient_bound = std::max(coefficient_bound, local_bound);
+    }
+    for (long factor_degree = 2; factor_degree <= degree / 2; ++factor_degree)
+        for (const auto& leading : *leading_divisors)
+            for (const auto& constant_magnitude : *constant_divisors)
+                for (const long sign : {-1L, 1L}) {
+                    RationalPolynomial candidate(
+                        static_cast<std::size_t>(factor_degree + 1));
+                    candidate.front() = sign * constant_magnitude;
+                    candidate.back() = leading;
+                    std::optional<RationalPolynomial> found;
+                    std::function<void(long)> search = [&](long exponent) {
+                        if (found) return;
+                        if (exponent == factor_degree) {
+                            auto monic_candidate = monic_polynomial(candidate);
+                            const auto division = rational_polynomial_divide(
+                                polynomial, monic_candidate);
+                            if (division.second.empty()
+                                && polynomial_degree(division.first) > 0)
+                                found = std::move(monic_candidate);
+                            return;
+                        }
+                        for (long coefficient = -coefficient_bound;
+                            coefficient <= coefficient_bound; ++coefficient) {
+                            candidate[static_cast<std::size_t>(exponent)] = coefficient;
+                            search(exponent + 1);
+                            if (found) return;
+                        }
+                    };
+                    search(1);
+                    if (found) return found;
+                }
+    return std::nullopt;
+}
+
+std::vector<RationalPolynomial> factor_square_free_rational_polynomial(
+    RationalPolynomial polynomial, std::size_t depth = 0) {
+    polynomial = monic_polynomial(std::move(polynomial));
+    if (polynomial_degree(polynomial) <= 0) return {};
+    if (depth >= 16) return {std::move(polynomial)};
+    if (const auto root = bounded_rational_root(polynomial)) {
+        RationalPolynomial linear{-*root, 1};
+        auto quotient = rational_polynomial_divide(polynomial, linear).first;
+        auto rest = factor_square_free_rational_polynomial(
+            std::move(quotient), depth + 1);
+        rest.insert(rest.begin(), std::move(linear));
+        return rest;
+    }
+    if (const auto factor = bounded_nontrivial_rational_factor(polynomial)) {
+        auto quotient = rational_polynomial_divide(polynomial, *factor).first;
+        auto left = factor_square_free_rational_polynomial(*factor, depth + 1);
+        auto right = factor_square_free_rational_polynomial(
+            std::move(quotient), depth + 1);
+        left.insert(left.end(), std::make_move_iterator(right.begin()),
+            std::make_move_iterator(right.end()));
+        return left;
+    }
+    return {std::move(polynomial)};
+}
+
+struct ExactRationalFactorization {
+    mpq_class content = 0;
+    std::vector<std::pair<std::vector<mpz_class>, long>> factors;
+};
+
+ExactRationalFactorization factor_rational_polynomial(
+    RationalPolynomial polynomial) {
+    trim_polynomial(polynomial);
+    if (polynomial.empty()) return {};
+    if (polynomial_degree(polynomial) == 0)
+        return ExactRationalFactorization{polynomial.front(), {}};
+
+    ExactRationalFactorization result;
+    result.content = polynomial.back();
+    polynomial = monic_polynomial(std::move(polynomial));
+    for (auto [factor, multiplicity] : rational_square_free_factors(polynomial)) {
+        for (const auto& irreducible : factor_square_free_rational_polynomial(
+            std::move(factor))) {
+            const auto primitive = primitive_integer_polynomial(irreducible);
+            const auto leading = primitive.back();
+            mpq_class scale(1, leading);
+            for (long count = 0; count < multiplicity; ++count)
+                result.content *= scale;
+            result.factors.emplace_back(primitive, multiplicity);
+        }
+    }
+    result.content.canonicalize();
+    return result;
+}
+
 RationalPolynomial square_free_polynomial(const RationalPolynomial& polynomial) {
     auto value = monic_polynomial(polynomial);
     if (polynomial_degree(value) <= 0) return value;
@@ -3779,6 +7414,316 @@ long real_root_count_with_multiplicity(RationalPolynomial polynomial,
     return result;
 }
 
+using IntegerPolynomial = std::vector<mpz_class>;
+
+void trim_integer_polynomial(IntegerPolynomial& polynomial) {
+    while (!polynomial.empty() && polynomial.back() == 0) polynomial.pop_back();
+}
+
+IntegerPolynomial shift_integer_polynomial(
+    const IntegerPolynomial& polynomial, const mpz_class& amount) {
+    IntegerPolynomial result;
+    for (auto iterator = polynomial.rbegin(); iterator != polynomial.rend(); ++iterator) {
+        IntegerPolynomial shifted(result.size() + (result.empty() ? 0 : 1));
+        for (std::size_t index = 0; index < result.size(); ++index) {
+            shifted[index] += amount * result[index];
+            shifted[index + 1] += result[index];
+        }
+        result = std::move(shifted);
+        if (result.empty()) result.resize(1);
+        result.front() += *iterator;
+        trim_integer_polynomial(result);
+    }
+    return result;
+}
+
+IntegerPolynomial reverse_integer_polynomial(IntegerPolynomial polynomial) {
+    std::reverse(polynomial.begin(), polynomial.end());
+    trim_integer_polynomial(polynomial);
+    return polynomial;
+}
+
+IntegerPolynomial mirror_integer_polynomial(IntegerPolynomial polynomial) {
+    for (std::size_t index = 1; index < polynomial.size(); index += 2)
+        polynomial[index] = -polynomial[index];
+    return polynomial;
+}
+
+int integer_polynomial_sign_variations(const IntegerPolynomial& polynomial) {
+    int previous = 0;
+    int variations = 0;
+    for (auto iterator = polynomial.rbegin(); iterator != polynomial.rend(); ++iterator) {
+        const int sign = *iterator < 0 ? -1 : *iterator > 0 ? 1 : 0;
+        if (sign == 0) continue;
+        if (previous != 0 && previous != sign) ++variations;
+        previous = sign;
+    }
+    return variations;
+}
+
+long floor_quotient(long numerator, long positive_denominator) {
+    if (numerator >= 0) return numerator / positive_denominator;
+    return -((-numerator + positive_denominator - 1) / positive_denominator);
+}
+
+std::optional<long> integer_polynomial_upper_bound_exponent(
+    IntegerPolynomial polynomial) {
+    if (polynomial.empty()) return std::nullopt;
+    if (polynomial.back() < 0)
+        for (auto& coefficient : polynomial) coefficient = -coefficient;
+    std::vector<long> adjustments(polynomial.size(), 1L);
+    std::vector<long> bounds;
+    for (std::size_t index = 0; index < polynomial.size(); ++index) {
+        if (polynomial[index] >= 0) continue;
+        const mpz_class negative_magnitude = -polynomial[index];
+        const auto negative_bits = mpz_sizeinbase(
+            negative_magnitude.get_mpz_t(), 2) - 1;
+        if (negative_bits > static_cast<std::size_t>(std::numeric_limits<long>::max()))
+            return std::nullopt;
+        std::optional<std::pair<long, std::size_t>> best;
+        for (std::size_t candidate = index + 1; candidate < polynomial.size(); ++candidate) {
+            if (polynomial[candidate] <= 0) continue;
+            const auto positive_bits = mpz_sizeinbase(
+                polynomial[candidate].get_mpz_t(), 2) - 1;
+            if (positive_bits > static_cast<std::size_t>(std::numeric_limits<long>::max()))
+                return std::nullopt;
+            const auto numerator = adjustments[candidate]
+                + static_cast<long>(negative_bits) - static_cast<long>(positive_bits);
+            const auto quotient = floor_quotient(
+                numerator, static_cast<long>(candidate - index));
+            const std::pair<long, std::size_t> value{quotient, candidate};
+            if (!best || value < *best) best = value;
+        }
+        if (!best) continue;
+        ++adjustments[best->second];
+        bounds.push_back(best->first);
+    }
+    if (bounds.empty()) return std::nullopt;
+    return *std::max_element(bounds.begin(), bounds.end()) + 1L;
+}
+
+std::optional<mpz_class> integer_polynomial_root_lower_shift(
+    const IntegerPolynomial& polynomial) {
+    const auto exponent = integer_polynomial_upper_bound_exponent(
+        reverse_integer_polynomial(polynomial));
+    if (!exponent) return mpz_class(0);
+    const auto lower_exponent = -*exponent;
+    if (lower_exponent < 0) return mpz_class(0);
+    if (lower_exponent > 20) return std::nullopt;
+    mpz_class result;
+    mpz_ui_pow_ui(result.get_mpz_t(), 2UL, static_cast<unsigned long>(lower_exponent));
+    return result;
+}
+
+struct MobiusTransform {
+    mpz_class a = 1;
+    mpz_class b = 0;
+    mpz_class c = 0;
+    mpz_class d = 1;
+};
+
+struct ExactRootInterval {
+    mpq_class lower;
+    mpq_class upper;
+};
+
+ExactRootInterval mobius_interval(const MobiusTransform& transform) {
+    mpq_class first(transform.a, transform.c);
+    mpq_class second(transform.b, transform.d);
+    first.canonicalize();
+    second.canonicalize();
+    return first <= second ? ExactRootInterval{first, second}
+        : ExactRootInterval{second, first};
+}
+
+std::optional<std::pair<IntegerPolynomial, MobiusTransform>>
+refine_positive_root(IntegerPolynomial polynomial, MobiusTransform transform) {
+    for (std::size_t iteration = 0; transform.c == 0 && iteration < 100000; ++iteration) {
+        if (transform.a == transform.b && transform.c == transform.d)
+            return std::pair{std::move(polynomial), std::move(transform)};
+        const auto shift = integer_polynomial_root_lower_shift(polynomial);
+        if (!shift) return std::nullopt;
+        if (*shift >= 1) {
+            polynomial = shift_integer_polynomial(polynomial, *shift);
+            transform.b = *shift * transform.a + transform.b;
+            transform.d = *shift * transform.c + transform.d;
+            if (!polynomial.empty() && polynomial.front() == 0) {
+                transform = MobiusTransform{transform.b, transform.b,
+                    transform.d, transform.d};
+                return std::pair{std::move(polynomial), std::move(transform)};
+            }
+        }
+        auto shifted = shift_integer_polynomial(polynomial, 1);
+        MobiusTransform left{transform.a, transform.a + transform.b,
+            transform.c, transform.c + transform.d};
+        if (!shifted.empty() && shifted.front() == 0) {
+            left = MobiusTransform{left.b, left.b, left.d, left.d};
+            return std::pair{std::move(shifted), std::move(left)};
+        }
+        if (integer_polynomial_sign_variations(shifted) == 1) {
+            polynomial = std::move(shifted);
+            transform = std::move(left);
+        } else {
+            polynomial = shift_integer_polynomial(
+                reverse_integer_polynomial(std::move(polynomial)), 1);
+            if (!polynomial.empty() && polynomial.front() == 0)
+                polynomial.erase(polynomial.begin());
+            transform = MobiusTransform{transform.b, transform.a + transform.b,
+                transform.d, transform.c + transform.d};
+        }
+    }
+    if (transform.c == 0) return std::nullopt;
+    return std::pair{std::move(polynomial), std::move(transform)};
+}
+
+std::optional<std::vector<ExactRootInterval>> isolate_positive_roots(
+    const IntegerPolynomial& source) {
+    const auto variations = integer_polynomial_sign_variations(source);
+    if (variations == 0) return std::vector<ExactRootInterval>{};
+    if (variations == 1) {
+        const auto refined = refine_positive_root(source, {});
+        if (!refined) return std::nullopt;
+        return std::vector<ExactRootInterval>{mobius_interval(refined->second)};
+    }
+    struct State {
+        IntegerPolynomial polynomial;
+        MobiusTransform transform;
+        int variations = 0;
+    };
+    std::vector<State> stack{{source, {}, variations}};
+    std::vector<ExactRootInterval> roots;
+    std::size_t iterations = 0;
+    while (!stack.empty() && iterations++ < 100000) {
+        auto state = std::move(stack.back());
+        stack.pop_back();
+        auto shift = integer_polynomial_root_lower_shift(state.polynomial);
+        if (!shift) return std::nullopt;
+        if (*shift >= 1) {
+            state.polynomial = shift_integer_polynomial(state.polynomial, *shift);
+            state.transform.b = *shift * state.transform.a + state.transform.b;
+            state.transform.d = *shift * state.transform.c + state.transform.d;
+            if (!state.polynomial.empty() && state.polynomial.front() == 0) {
+                const auto point = mpq_class(state.transform.b, state.transform.d);
+                roots.push_back({point, point});
+                state.polynomial.erase(state.polynomial.begin());
+            }
+            state.variations = integer_polynomial_sign_variations(state.polynomial);
+            if (state.variations == 0) continue;
+            if (state.variations == 1) {
+                const auto refined = refine_positive_root(
+                    std::move(state.polynomial), std::move(state.transform));
+                if (!refined) return std::nullopt;
+                roots.push_back(mobius_interval(refined->second));
+                continue;
+            }
+        }
+
+        std::optional<IntegerPolynomial> left_polynomial =
+            shift_integer_polynomial(state.polynomial, 1);
+        MobiusTransform left{state.transform.a, state.transform.a + state.transform.b,
+            state.transform.c, state.transform.c + state.transform.d};
+        int exact = 0;
+        if (!left_polynomial->empty() && left_polynomial->front() == 0) {
+            const auto point = mpq_class(left.b, left.d);
+            roots.push_back({point, point});
+            left_polynomial->erase(left_polynomial->begin());
+            exact = 1;
+        }
+        int left_variations = integer_polynomial_sign_variations(*left_polynomial);
+        int right_variations = state.variations - left_variations - exact;
+        std::optional<IntegerPolynomial> right_polynomial;
+        if (right_variations > 1) {
+            right_polynomial = shift_integer_polynomial(
+                reverse_integer_polynomial(state.polynomial), 1);
+            if (!right_polynomial->empty() && right_polynomial->front() == 0)
+                right_polynomial->erase(right_polynomial->begin());
+            right_variations = integer_polynomial_sign_variations(*right_polynomial);
+        }
+        MobiusTransform right{state.transform.b, state.transform.a + state.transform.b,
+            state.transform.d, state.transform.c + state.transform.d};
+        if (left_variations < right_variations) {
+            std::swap(left, right);
+            std::swap(left_polynomial, right_polynomial);
+            std::swap(left_variations, right_variations);
+        }
+        if (left_variations != 0) {
+            if (!left_polynomial) {
+                left_polynomial = shift_integer_polynomial(
+                    reverse_integer_polynomial(state.polynomial), 1);
+                if (!left_polynomial->empty() && left_polynomial->front() == 0)
+                    left_polynomial->erase(left_polynomial->begin());
+            }
+            if (left_variations == 1) {
+                const auto refined = refine_positive_root(
+                    std::move(*left_polynomial), std::move(left));
+                if (!refined) return std::nullopt;
+                roots.push_back(mobius_interval(refined->second));
+            } else stack.push_back({std::move(*left_polynomial),
+                std::move(left), left_variations});
+        }
+        if (right_variations != 0) {
+            if (!right_polynomial) {
+                right_polynomial = shift_integer_polynomial(
+                    reverse_integer_polynomial(state.polynomial), 1);
+                if (!right_polynomial->empty() && right_polynomial->front() == 0)
+                    right_polynomial->erase(right_polynomial->begin());
+            }
+            if (right_variations == 1) {
+                const auto refined = refine_positive_root(
+                    std::move(*right_polynomial), std::move(right));
+                if (!refined) return std::nullopt;
+                roots.push_back(mobius_interval(refined->second));
+            } else stack.push_back({std::move(*right_polynomial),
+                std::move(right), right_variations});
+        }
+    }
+    if (!stack.empty()) return std::nullopt;
+    return roots;
+}
+
+std::optional<std::vector<ExactRootInterval>> isolate_real_roots(
+    const RationalPolynomial& polynomial) {
+    auto square_free = primitive_integer_polynomial(
+        square_free_polynomial(polynomial));
+    std::vector<ExactRootInterval> intervals;
+    if (!square_free.empty() && square_free.front() == 0) {
+        intervals.push_back({0, 0});
+        square_free.erase(square_free.begin());
+    }
+    if (polynomial_degree(rational_polynomial(square_free)) <= 0) return intervals;
+    const auto positive = isolate_positive_roots(square_free);
+    const auto negative_source = mirror_integer_polynomial(square_free);
+    const auto negative = isolate_positive_roots(negative_source);
+    if (!positive || !negative) return std::nullopt;
+    for (const auto& interval : *negative)
+        intervals.push_back({-interval.upper, -interval.lower});
+    intervals.insert(intervals.end(), positive->begin(), positive->end());
+    std::sort(intervals.begin(), intervals.end(), [](const auto& left, const auto& right) {
+        return left.lower < right.lower
+            || (left.lower == right.lower && left.upper < right.upper);
+    });
+    return intervals;
+}
+
+long isolated_root_multiplicity(const RationalPolynomial& polynomial,
+    const ExactRootInterval& interval) {
+    if (interval.lower == interval.upper)
+        return root_multiplicity_at(polynomial, interval.lower);
+    for (const auto& [factor, multiplicity] : rational_square_free_factors(polynomial)) {
+        auto interior = factor;
+        if (evaluate_polynomial(interior, interval.lower) == 0)
+            interior = rational_polynomial_divide(interior,
+                {-interval.lower, 1}).first;
+        if (evaluate_polynomial(interior, interval.upper) == 0)
+            interior = rational_polynomial_divide(interior,
+                {-interval.upper, 1}).first;
+        if (distinct_real_root_count(
+                interior, interval.lower, interval.upper) != 0)
+            return multiplicity;
+    }
+    return 1;
+}
+
 ApproximateComplex evaluate_complex_polynomial(
     const std::vector<ApproximateComplex>& coefficients, ApproximateComplex value) {
     ApproximateComplex result{};
@@ -3885,13 +7830,116 @@ std::optional<ApproximateComplex> approximate_root(const Expr& expression) {
 } // namespace
 
 Evaluator::Evaluator() {
-    own_values_.emplace("$RecursionLimit", Definition{integer(1024L), false});
-    own_values_.emplace("$IterationLimit", Definition{integer(4096L), false});
-    own_values_.emplace("$HistoryLength", Definition{symbol("Infinity"), false});
-    own_values_.emplace("$MaxExtraPrecision", Definition{integer(50L), false});
-    own_values_.emplace("$MaxRootDegree", Definition{integer(1000L), false});
-    own_values_.emplace("$MessagePrePrint", Definition{symbol("Automatic"), false});
-    own_values_.emplace("$OutputSizeLimit", Definition{integer(12000L), false});
+    own_values_.emplace("System`$RecursionLimit", Definition{integer(1024L), false});
+    own_values_.emplace("System`$IterationLimit", Definition{integer(4096L), false});
+    own_values_.emplace("System`$HistoryLength", Definition{symbol("Infinity"), false});
+    own_values_.emplace("System`$MaxExtraPrecision", Definition{integer(50L), false});
+    own_values_.emplace("System`$MaxRootDegree", Definition{integer(1000L), false});
+    own_values_.emplace("System`$MessagePrePrint", Definition{symbol("Automatic"), false});
+    own_values_.emplace("System`$OutputSizeLimit", Definition{integer(12000L), false});
+}
+
+bool Evaluator::is_built_in_full_name(const std::string& full_name) const {
+    constexpr std::string_view prefix = "System`";
+    return full_name.compare(0, prefix.size(), prefix) == 0
+        && system_registry().count(full_name.substr(prefix.size())) != 0;
+}
+
+std::string Evaluator::resolve_full_symbol_name(const std::string& symbol_name) const {
+    if (symbol_name.find('`') != std::string::npos) return symbol_name;
+    const auto system_name = "System`" + symbol_name;
+    if (system_registry().count(symbol_name) != 0
+        || known_symbols_.count(system_name) != 0)
+        return system_name;
+    return "Global`" + symbol_name;
+}
+
+std::string Evaluator::ensure_full_symbol_name(const std::string& symbol_name) {
+    auto full_name = resolve_full_symbol_name(symbol_name);
+    known_symbols_.insert(full_name);
+    return full_name;
+}
+
+void Evaluator::register_expression_symbols(const Expr& expression) {
+    std::vector<std::string> qualified;
+    std::vector<std::string> bare;
+    std::function<void(const Expr&)> collect = [&](const Expr& current) {
+        if (const auto* name = current.symbol_name()) {
+            (name->find('`') == std::string::npos ? bare : qualified).push_back(*name);
+            return;
+        }
+        if (current.kind() != ExprKind::Call) return;
+        collect(current.head());
+        for (const auto& argument : current.args()) collect(argument);
+    };
+    collect(expression);
+    for (const auto& name : qualified) known_symbols_.insert(name);
+    for (const auto& name : bare) (void)ensure_full_symbol_name(name);
+}
+
+bool Evaluator::tag_occurs_in_upvalue_position(
+    const std::string& full_tag, const Expr& expression) const {
+    const auto& lhs = definition_pattern(expression);
+    if (lhs.kind() != ExprKind::Call) return false;
+    for (const auto& argument : lhs.args()) {
+        if (argument.symbol_name()
+            && resolve_full_symbol_name(*argument.symbol_name()) == full_tag)
+            return true;
+        auto current = argument;
+        while (current.kind() == ExprKind::Call) {
+            if (current.head().symbol_name()
+                && resolve_full_symbol_name(*current.head().symbol_name()) == full_tag)
+                return true;
+            current = current.head();
+        }
+    }
+    return false;
+}
+
+EvaluationResult Evaluator::evaluate_result(const Expr& expression) {
+    EvaluationResult result{evaluate(expression), {}, prints_};
+    const auto count = std::min(messages_.size(), message_texts_.size());
+    result.messages.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+        result.messages.push_back({messages_[index], message_texts_[index]});
+    return result;
+}
+
+std::optional<SymbolInfo> Evaluator::symbol_info(
+    const Expr& symbol_expression) const {
+    const auto* name = symbol_expression.symbol_name();
+    if (name == nullptr) return std::nullopt;
+    const auto full_name = resolve_full_symbol_name(*name);
+    const auto marker = full_name.rfind('`');
+    const auto context = marker == std::string::npos
+        ? std::string{} : full_name.substr(0, marker + 1);
+    const auto short_name = marker == std::string::npos
+        ? full_name : full_name.substr(marker + 1);
+    return SymbolInfo{full_name, context, short_name,
+        is_built_in_full_name(full_name), attributes_for(symbol(full_name))};
+}
+
+std::vector<Expr> Evaluator::value_rules(
+    const Expr& symbol_expression, ValueKind kind) const {
+    const auto* name = symbol_expression.symbol_name();
+    if (name == nullptr) return {};
+    const auto full_name = resolve_full_symbol_name(*name);
+    std::vector<Expr> rules;
+    if (kind == ValueKind::Own) {
+        if (const auto found = own_values_.find(full_name); found != own_values_.end())
+            rules.push_back(call("RuleDelayed", {
+                call("HoldPattern", {display_symbol(full_name)}), found->second.value}));
+        return rules;
+    }
+    const DefinitionTable* table = kind == ValueKind::Down ? &down_values_
+        : kind == ValueKind::Up ? &up_values_
+        : kind == ValueKind::Sub ? &sub_values_ : nullptr;
+    if (table == nullptr) return rules;
+    if (const auto found = table->find(full_name); found != table->end())
+        for (const auto& definition : found->second)
+            rules.push_back(call("RuleDelayed", {
+                call("HoldPattern", {definition.lhs}), definition.value}));
+    return rules;
 }
 
 bool Evaluator::message_is_enabled(const Expr& name) const {
@@ -3917,6 +7965,11 @@ bool Evaluator::control_active() const noexcept {
     return control_kind_ != ControlKind::None;
 }
 
+bool Evaluator::immediate_signal_active() const noexcept {
+    return aborted_ || thrown_.has_value()
+        || confirmation_failure_.has_value() || control_active();
+}
+
 Expr Evaluator::control_expression() const {
     if (control_kind_ == ControlKind::Break) return call("Break");
     if (control_kind_ == ControlKind::Continue) return call("Continue");
@@ -3936,17 +7989,35 @@ void Evaluator::clear_control() noexcept {
     control_target_.reset();
 }
 
+std::optional<Evaluator::TimeConstraintScope>
+Evaluator::active_time_constraint() const {
+    if (time_constraint_suppression_depth_ != 0) return std::nullopt;
+    std::optional<TimeConstraintScope> active;
+    for (const auto& scope : time_constraints_) {
+        if (!scope.deadline) continue;
+        if (!active || *scope.deadline < *active->deadline) active = scope;
+    }
+    return active;
+}
+
+void Evaluator::check_time_constraint() const {
+    const auto active = active_time_constraint();
+    if (active && SteadyClock::now() >= *active->deadline)
+        throw TimeConstraintExpired(active->id);
+}
+
 std::set<std::string> Evaluator::attributes_for(const Expr& symbol_expression) const {
     std::set<std::string> result;
     const auto* raw_name = symbol_expression.symbol_name();
     if (!raw_name) return result;
-    auto system_name = *raw_name;
-    if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-    if (const auto found = system_registry().find(system_name); found != system_registry().end())
+    const auto full_name = resolve_full_symbol_name(*raw_name);
+    if (is_built_in_full_name(full_name)) {
+        const auto found = system_registry().find(full_name.substr(7));
         result.insert(found->second.begin(), found->second.end());
-    if (const auto found = user_attributes_.find(*raw_name); found != user_attributes_.end())
+    }
+    if (const auto found = user_attributes_.find(full_name); found != user_attributes_.end())
         result.insert(found->second.begin(), found->second.end());
-    if (unprotected_symbols_.count(*raw_name) != 0) result.erase("Protected");
+    if (unprotected_symbols_.count(full_name) != 0) result.erase("Protected");
     return result;
 }
 
@@ -3985,7 +8056,8 @@ Expr Evaluator::normalize_assignment_lhs(const Expr& expression) {
 
 std::optional<Expr> Evaluator::apply_definitions(
     const Expr& expression, const PatternDefinitions& definitions) {
-    for (const auto& definition : definitions) {
+    const auto definitions_snapshot = definitions;
+    for (const auto& definition : definitions_snapshot) {
         Bindings bindings;
         const Expr* pattern = &definition.lhs;
         std::vector<Expr> conditions;
@@ -4026,7 +8098,8 @@ std::optional<Expr> Evaluator::apply_definitions(
 
 std::optional<Expr> Evaluator::apply_down_values(const Expr& expression) {
     if (expression.kind() != ExprKind::Call || !expression.head().symbol_name()) return std::nullopt;
-    const auto found = down_values_.find(*expression.head().symbol_name());
+    const auto found = down_values_.find(
+        resolve_full_symbol_name(*expression.head().symbol_name()));
     return found == down_values_.end() ? std::nullopt : apply_definitions(expression, found->second);
 }
 
@@ -4035,7 +8108,7 @@ std::optional<Expr> Evaluator::apply_sub_values(const Expr& expression) {
     auto head = expression.head();
     while (head.kind() == ExprKind::Call) head = head.head();
     if (!head.symbol_name()) return std::nullopt;
-    const auto found = sub_values_.find(*head.symbol_name());
+    const auto found = sub_values_.find(resolve_full_symbol_name(*head.symbol_name()));
     return found == sub_values_.end() ? std::nullopt : apply_definitions(expression, found->second);
 }
 
@@ -4050,8 +8123,10 @@ std::optional<Expr> Evaluator::apply_up_values(const Expr& expression) {
             candidate = candidate.head();
             if (candidate.symbol_name()) name = *candidate.symbol_name();
         }
-        if (!name || !seen.insert(*name).second) continue;
-        const auto found = up_values_.find(*name);
+        if (!name) continue;
+        const auto full_name = resolve_full_symbol_name(*name);
+        if (!seen.insert(full_name).second) continue;
+        const auto found = up_values_.find(full_name);
         if (found == up_values_.end()) continue;
         if (auto result = apply_definitions(expression, found->second)) return result;
     }
@@ -4061,18 +8136,26 @@ std::optional<Expr> Evaluator::apply_up_values(const Expr& expression) {
 Expr Evaluator::evaluate(const Expr& expression) {
     const bool root = depth_ == 0;
     if (root) {
+        register_expression_symbols(expression);
         messages_.clear(); message_texts_.clear(); prints_.clear(); aborted_ = false;
-        deferred_abort_ = false; abort_protection_depth_ = 0;
+        abort_protect_scopes_.clear(); check_abort_depths_.clear();
+        active_own_values_.clear();
+        reap_stack_.clear();
+        enclose_scopes_.clear();
         message_scopes_.clear();
+        time_constraints_.clear();
+        time_constraint_suppression_depth_ = 0;
         clear_control();
         thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
+        confirmation_failure_.reset(); confirmation_tag_.reset();
     }
+    check_time_constraint();
     if (depth_ >= recursion_limit_) return call("TerminatedEvaluation", {symbol("RecursionLimit")});
     ++depth_;
+    auto depth_guard = scope_exit([&] { --depth_; });
     auto result = evaluate_impl(expression);
     --depth_;
+    depth_guard.release();
     if (root && thrown_) {
         if (thrown_handler_) result = evaluate(call(*thrown_handler_, {*thrown_, thrown_tag_.value_or(symbol("Null"))}));
         else {
@@ -4081,6 +8164,19 @@ Expr Evaluator::evaluate(const Expr& expression) {
             result = call("Throw", std::move(args));
         }
         thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+    }
+    if (root && confirmation_failure_) {
+        const auto message = call("MessageName", {
+            symbol("Confirm"), string("confirmnotag")});
+        emit_message(message,
+            "Confirm::confirmnotag: Message generated.");
+        result = *confirmation_failure_;
+        confirmation_failure_.reset();
+        confirmation_tag_.reset();
+    }
+    if (root && aborted_) {
+        result = symbol("$Aborted");
+        aborted_ = false;
     }
     if (root && control_active()) {
         result = control_expression();
@@ -4104,19 +8200,1074 @@ Expr Evaluator::evaluate_impl(const Expr& expression) {
             for (const auto& message : messages_) held.push_back(call("HoldForm", {message}));
             return list(std::move(held));
         }
-        const auto definition = own_values_.find(expression.text());
+        const auto full_name = resolve_full_symbol_name(expression.text());
+        const auto definition = own_values_.find(full_name);
         if (definition != own_values_.end()) {
-            if (std::find(active_own_values_.begin(), active_own_values_.end(), expression.text())
+            if (std::find(active_own_values_.begin(), active_own_values_.end(), full_name)
                 != active_own_values_.end()) return expression;
-            active_own_values_.push_back(expression.text());
+            active_own_values_.push_back(full_name);
+            auto active_guard = scope_exit([&] { active_own_values_.pop_back(); });
             const auto value = evaluate(definition->second.value);
             active_own_values_.pop_back();
+            active_guard.release();
             return value;
         }
         return expression;
     }
     if (expression.kind() != ExprKind::Call) return expression;
     return evaluate_call(expression.head(), expression.args());
+}
+
+bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
+                                            const std::vector<Expr> &args,
+                                            Expr &result, std::string &error) {
+  const auto *symbol_name = head.symbol_name();
+  if (!symbol_name)
+    return false;
+  const auto function = system_dispatch_name(*symbol_name);
+  static const std::set<std::string> tensor_matrix_functions{
+      "Cross", "Det", "Dot", "Inner", "Inverse", "MatrixPower", "Outer", "Tr",
+  };
+  if (tensor_matrix_functions.count(function) == 0)
+    return false;
+
+  // The Python compatibility evaluator dispatches only the exact, bare
+  // system spelling.  Context-qualified lookalikes remain ordinary calls.
+  if (*symbol_name != function) {
+    result = call(head, args);
+    return true;
+  }
+
+  const auto exact_zero = [](const Expr &value) {
+    const auto number = as_rational(value);
+    return number && *number == 0;
+  };
+  const auto exact_one = [](const Expr &value) {
+    const auto number = as_rational(value);
+    return number && *number == 1;
+  };
+  const auto sum = [&](std::vector<Expr> terms) {
+    return terms.empty() ? integer(0L)
+                         : evaluate(call("Plus", std::move(terms)));
+  };
+  const auto product = [&](std::vector<Expr> factors) {
+    return factors.empty() ? integer(1L)
+                           : evaluate(call("Times", std::move(factors)));
+  };
+  const auto negate = [&](const Expr &value) {
+    return exact_zero(value) ? integer(0L)
+                             : evaluate(call("Times", {integer(-1L), value}));
+  };
+  const auto subtract = [&](const Expr &left, const Expr &right) {
+    return exact_zero(right) ? left : sum({left, negate(right)});
+  };
+  const auto reciprocal = [&](const Expr &value) {
+    return exact_one(value) ? integer(1L)
+                            : evaluate(call("Power", {value, integer(-1L)}));
+  };
+  const auto divide = [&](const Expr &numerator, const Expr &denominator) {
+    if (exact_zero(numerator))
+      return integer(0L);
+    if (exact_one(denominator))
+      return numerator;
+    return product({numerator, reciprocal(denominator)});
+  };
+  const auto sparse_value_at = [](const Expr &array,
+                                  const std::vector<std::size_t> &indices) {
+    const auto found = std::find_if(
+        array.sparse_entries().begin(), array.sparse_entries().end(),
+        [&](const SparseEntry &entry) { return entry.indices == indices; });
+    return found == array.sparse_entries().end() ? array.fill_value()
+                                                 : found->value;
+  };
+
+  auto strict_dense_dimensions =
+      [&](const Expr &value, auto &&self,
+          bool &rectangular) -> std::vector<std::size_t> {
+    if (!value.has_head("List"))
+      return {};
+    std::vector<std::size_t> dimensions{value.args().size()};
+    if (value.args().empty())
+      return dimensions;
+    const auto child = self(value.args().front(), self, rectangular);
+    for (std::size_t index = 1; index < value.args().size(); ++index)
+      if (self(value.args()[index], self, rectangular) != child)
+        rectangular = false;
+    dimensions.insert(dimensions.end(), child.begin(), child.end());
+    return dimensions;
+  };
+
+  auto matrix_rows = [&](const Expr &value, const std::string &caller,
+                         std::vector<std::vector<Expr>> &rows) {
+    if (value.kind() == ExprKind::SparseArray) {
+      if (value.dimensions().size() != 2) {
+        error = caller + " expects a matrix.";
+        return false;
+      }
+      const auto dense = sparse_dense_value(value);
+      if (!dense) {
+        error =
+            "SparseArray dimensions exceed the native materialization limit.";
+        return false;
+      }
+      for (const auto &row : dense->args())
+        rows.push_back(row.args());
+      return true;
+    }
+    if (!value.has_head("List") ||
+        std::any_of(value.args().begin(), value.args().end(),
+                    [](const Expr &row) { return !row.has_head("List"); })) {
+      error = caller + " expects a matrix.";
+      return false;
+    }
+    const auto width = value.args().empty()
+                           ? std::size_t{0}
+                           : value.args().front().args().size();
+    if (std::any_of(
+            value.args().begin(), value.args().end(),
+            [&](const Expr &row) { return row.args().size() != width; })) {
+      error = caller + " expects a rectangular matrix.";
+      return false;
+    }
+    for (const auto &row : value.args())
+      rows.push_back(row.args());
+    return true;
+  };
+
+  auto square_matrix_rows = [&](const Expr &value, const std::string &caller,
+                                std::vector<std::vector<Expr>> &rows) {
+    if (!matrix_rows(value, caller, rows))
+      return false;
+    const auto width = rows.empty() ? std::size_t{0} : rows.front().size();
+    if (rows.size() != width) {
+      error = caller + " expects a square matrix.";
+      return false;
+    }
+    return true;
+  };
+
+  auto exact_fraction_matrix =
+      [](const std::vector<std::vector<Expr>> &rows,
+         std::vector<std::vector<mpq_class>> &fractions) {
+        fractions.clear();
+        for (const auto &row : rows) {
+          std::vector<mpq_class> fraction_row;
+          for (const auto &value : row) {
+            const auto number = as_rational(value);
+            if (!number)
+              return false;
+            fraction_row.push_back(*number);
+          }
+          fractions.push_back(std::move(fraction_row));
+        }
+        return true;
+      };
+
+  auto determinant_candidates =
+      [&](const std::vector<std::vector<std::pair<std::size_t, Expr>>>
+              &candidates) {
+        if (candidates.empty())
+          return integer(1L);
+        if (std::any_of(candidates.begin(), candidates.end(),
+                        [](const auto &row) { return row.empty(); }))
+          return integer(0L);
+        std::vector<Expr> terms;
+        std::vector<bool> used(candidates.size(), false);
+        std::vector<std::size_t> columns;
+        std::vector<Expr> factors;
+        auto recurse = [&](auto &&self, std::size_t row) -> void {
+          if (row == candidates.size()) {
+            std::size_t inversions = 0;
+            for (std::size_t left = 0; left < columns.size(); ++left)
+              for (std::size_t right = left + 1; right < columns.size();
+                   ++right)
+                if (columns[left] > columns[right])
+                  ++inversions;
+            auto term_factors = factors;
+            if (inversions % 2 != 0)
+              term_factors.insert(term_factors.begin(), integer(-1L));
+            terms.push_back(product(std::move(term_factors)));
+            return;
+          }
+          for (const auto &[column, value] : candidates[row]) {
+            if (column >= used.size() || used[column] || exact_zero(value))
+              continue;
+            used[column] = true;
+            columns.push_back(column);
+            factors.push_back(value);
+            self(self, row + 1);
+            factors.pop_back();
+            columns.pop_back();
+            used[column] = false;
+            if (immediate_signal_active())
+              return;
+          }
+        };
+        recurse(recurse, 0);
+        return immediate_signal_active() ? control_expression()
+                                         : sum(std::move(terms));
+      };
+
+  auto determinant_rows = [&](const std::vector<std::vector<Expr>> &rows) {
+    std::vector<std::vector<mpq_class>> fractions;
+    if (exact_fraction_matrix(rows, fractions)) {
+      const auto size = fractions.size();
+      if (size == 0)
+        return integer(1L);
+      int sign = 1;
+      for (std::size_t column = 0; column < size; ++column) {
+        auto pivot = column;
+        while (pivot < size && fractions[pivot][column] == 0)
+          ++pivot;
+        if (pivot == size)
+          return integer(0L);
+        if (pivot != column) {
+          std::swap(fractions[pivot], fractions[column]);
+          sign = -sign;
+        }
+        for (std::size_t row = column + 1; row < size; ++row) {
+          if (fractions[row][column] == 0)
+            continue;
+          const mpq_class factor =
+              fractions[row][column] / fractions[column][column];
+          for (std::size_t target = column; target < size; ++target)
+            fractions[row][target] -= factor * fractions[column][target];
+        }
+      }
+      mpq_class value(sign);
+      for (std::size_t index = 0; index < size; ++index)
+        value *= fractions[index][index];
+      return from_rational(value);
+    }
+    std::vector<std::vector<std::pair<std::size_t, Expr>>> candidates;
+    for (const auto &row : rows) {
+      std::vector<std::pair<std::size_t, Expr>> row_candidates;
+      for (std::size_t column = 0; column < row.size(); ++column)
+        if (!exact_zero(row[column]))
+          row_candidates.emplace_back(column, row[column]);
+      candidates.push_back(std::move(row_candidates));
+    }
+    return determinant_candidates(candidates);
+  };
+
+  auto determinant_sparse = [&](const Expr &array) {
+    const auto &dimensions = array.dimensions();
+    if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
+      error = "Det expects a square matrix.";
+      return Expr{};
+    }
+    if (!exact_zero(array.fill_value())) {
+      std::vector<std::vector<Expr>> rows;
+      if (!matrix_rows(array, "Det", rows))
+        return Expr{};
+      return determinant_rows(rows);
+    }
+    const auto size = dimensions[0];
+    if (size == 0)
+      return integer(1L);
+    std::set<std::size_t> occupied_rows;
+    for (const auto &entry : array.sparse_entries())
+      if (!exact_zero(entry.value))
+        occupied_rows.insert(entry.indices[0]);
+    if (occupied_rows.size() != size)
+      return integer(0L);
+    std::vector<std::vector<std::pair<std::size_t, Expr>>> candidates(size);
+    for (const auto &entry : array.sparse_entries())
+      if (!exact_zero(entry.value))
+        candidates[entry.indices[0] - 1].emplace_back(entry.indices[1] - 1,
+                                                      entry.value);
+    return determinant_candidates(candidates);
+  };
+
+  std::function<std::optional<Expr>(const Expr &, const Expr &)> dot_two;
+  dot_two = [&](const Expr &left, const Expr &right) -> std::optional<Expr> {
+    if (left.kind() == ExprKind::SparseArray &&
+        right.kind() == ExprKind::SparseArray) {
+      if (!exact_zero(left.fill_value()) || !exact_zero(right.fill_value())) {
+        const auto dense_left = sparse_dense_value(left);
+        const auto dense_right = sparse_dense_value(right);
+        if (!dense_left || !dense_right) {
+          error =
+              "SparseArray dimensions exceed the native materialization limit.";
+          return std::nullopt;
+        }
+        return dot_two(*dense_left, *dense_right);
+      }
+      const auto left_rank = left.dimensions().size();
+      const auto right_rank = right.dimensions().size();
+      if ((left_rank != 1 && left_rank != 2) ||
+          (right_rank != 1 && right_rank != 2)) {
+        error = "Dot currently supports sparse vectors and matrices only.";
+        return std::nullopt;
+      }
+      auto add_to = [&](std::vector<SparseEntry> &entries,
+                        const std::vector<std::size_t> &indices,
+                        const Expr &contribution) {
+        if (exact_zero(contribution))
+          return;
+        const auto found = std::find_if(
+            entries.begin(), entries.end(),
+            [&](const SparseEntry &entry) { return entry.indices == indices; });
+        if (found == entries.end()) {
+          entries.push_back({indices, contribution});
+          return;
+        }
+        found->value = sum({found->value, contribution});
+        if (exact_zero(found->value))
+          entries.erase(found);
+      };
+      if (left_rank == 1 && right_rank == 1) {
+        if (left.dimensions()[0] != right.dimensions()[0]) {
+          error = "Dot expects vectors of the same length.";
+          return std::nullopt;
+        }
+        std::vector<Expr> terms;
+        for (const auto &left_entry : left.sparse_entries()) {
+          const auto found = std::find_if(
+              right.sparse_entries().begin(), right.sparse_entries().end(),
+              [&](const SparseEntry &entry) {
+                return entry.indices == left_entry.indices;
+              });
+          if (found != right.sparse_entries().end())
+            terms.push_back(product({left_entry.value, found->value}));
+          if (immediate_signal_active())
+            return control_expression();
+        }
+        return sum(std::move(terms));
+      }
+      std::vector<SparseEntry> entries;
+      if (left_rank == 2 && right_rank == 1) {
+        if (left.dimensions()[1] != right.dimensions()[0]) {
+          error = "Dot expects compatible sparse matrix/vector dimensions.";
+          return std::nullopt;
+        }
+        for (const auto &left_entry : left.sparse_entries()) {
+          const auto found = std::find_if(
+              right.sparse_entries().begin(), right.sparse_entries().end(),
+              [&](const SparseEntry &entry) {
+                return entry.indices[0] == left_entry.indices[1];
+              });
+          if (found != right.sparse_entries().end())
+            add_to(entries, {left_entry.indices[0]},
+                   product({left_entry.value, found->value}));
+          if (immediate_signal_active())
+            return control_expression();
+        }
+        return sparse_array({left.dimensions()[0]}, std::move(entries));
+      }
+      if (left_rank == 1 && right_rank == 2) {
+        if (left.dimensions()[0] != right.dimensions()[0]) {
+          error = "Dot expects compatible sparse vector/matrix dimensions.";
+          return std::nullopt;
+        }
+        for (const auto &right_entry : right.sparse_entries()) {
+          const auto found = std::find_if(
+              left.sparse_entries().begin(), left.sparse_entries().end(),
+              [&](const SparseEntry &entry) {
+                return entry.indices[0] == right_entry.indices[0];
+              });
+          if (found != left.sparse_entries().end())
+            add_to(entries, {right_entry.indices[1]},
+                   product({found->value, right_entry.value}));
+          if (immediate_signal_active())
+            return control_expression();
+        }
+        return sparse_array({right.dimensions()[1]}, std::move(entries));
+      }
+      if (left.dimensions()[1] != right.dimensions()[0]) {
+        error = "Dot expects compatible sparse matrix dimensions.";
+        return std::nullopt;
+      }
+      for (const auto &left_entry : left.sparse_entries()) {
+        for (const auto &right_entry : right.sparse_entries())
+          if (left_entry.indices[1] == right_entry.indices[0])
+            add_to(entries, {left_entry.indices[0], right_entry.indices[1]},
+                   product({left_entry.value, right_entry.value}));
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return sparse_array({left.dimensions()[0], right.dimensions()[1]},
+                          std::move(entries));
+    }
+    if (left.kind() == ExprKind::SparseArray) {
+      const auto dense = sparse_dense_value(left);
+      if (!dense) {
+        error =
+            "SparseArray dimensions exceed the native materialization limit.";
+        return std::nullopt;
+      }
+      return dot_two(*dense, right);
+    }
+    if (right.kind() == ExprKind::SparseArray) {
+      const auto dense = sparse_dense_value(right);
+      if (!dense) {
+        error =
+            "SparseArray dimensions exceed the native materialization limit.";
+        return std::nullopt;
+      }
+      return dot_two(left, *dense);
+    }
+
+    const auto list_rows = [](const Expr &value,
+                              std::vector<std::vector<Expr>> &rows) {
+      if (!value.has_head("List"))
+        return false;
+      if (std::any_of(value.args().begin(), value.args().end(),
+                      [](const Expr &row) { return !row.has_head("List"); }))
+        return false;
+      for (const auto &row : value.args())
+        rows.push_back(row.args());
+      return true;
+    };
+    std::vector<std::vector<Expr>> left_rows, right_rows;
+    const bool left_is_matrix = list_rows(left, left_rows);
+    const bool right_is_matrix = list_rows(right, right_rows);
+    if (left.has_head("List") && right.has_head("List") && !left_is_matrix &&
+        !right_is_matrix) {
+      if (left.args().size() != right.args().size()) {
+        error = "Dot expects vectors of the same length.";
+        return std::nullopt;
+      }
+      std::vector<Expr> terms;
+      for (std::size_t index = 0; index < left.args().size(); ++index) {
+        terms.push_back(product({left.args()[index], right.args()[index]}));
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return sum(std::move(terms));
+    }
+    if (left_is_matrix && !right_is_matrix && right.has_head("List")) {
+      std::vector<Expr> values;
+      for (const auto &row : left_rows) {
+        const auto value = dot_two(list(row), right);
+        if (!value)
+          return std::nullopt;
+        values.push_back(*value);
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return list(std::move(values));
+    }
+    if (!left_is_matrix && left.has_head("List") && right_is_matrix) {
+      if (left.args().size() != right_rows.size()) {
+        error = "Dot expects compatible vector/matrix dimensions.";
+        return std::nullopt;
+      }
+      const auto width =
+          right_rows.empty() ? std::size_t{0} : right_rows.front().size();
+      if (std::any_of(right_rows.begin(), right_rows.end(),
+                      [&](const auto &row) { return row.size() != width; })) {
+        error = "Dot currently expects rectangular matrices.";
+        return std::nullopt;
+      }
+      std::vector<Expr> values;
+      for (std::size_t column = 0; column < width; ++column) {
+        std::vector<Expr> column_values;
+        for (const auto &row : right_rows)
+          column_values.push_back(row[column]);
+        const auto value = dot_two(left, list(std::move(column_values)));
+        if (!value)
+          return std::nullopt;
+        values.push_back(*value);
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return list(std::move(values));
+    }
+    if (left_is_matrix && right_is_matrix) {
+      const auto left_width =
+          left_rows.empty() ? std::size_t{0} : left_rows.front().size();
+      if (std::any_of(left_rows.begin(), left_rows.end(), [&](const auto &row) {
+            return row.size() != left_width;
+          })) {
+        error = "Dot currently expects rectangular matrices.";
+        return std::nullopt;
+      }
+      const auto right_width =
+          right_rows.empty() ? std::size_t{0} : right_rows.front().size();
+      if (std::any_of(
+              right_rows.begin(), right_rows.end(),
+              [&](const auto &row) { return row.size() != right_width; }) ||
+          left_width != right_rows.size()) {
+        error = "Dot currently expects compatible matrix dimensions.";
+        return std::nullopt;
+      }
+      std::vector<Expr> values;
+      for (const auto &row : left_rows) {
+        const auto value = dot_two(list(row), right);
+        if (!value)
+          return std::nullopt;
+        values.push_back(*value);
+        if (immediate_signal_active())
+          return control_expression();
+      }
+      return list(std::move(values));
+    }
+    error = "Dot currently supports List vectors and List matrices only.";
+    return std::nullopt;
+  };
+
+  if (function == "Dot") {
+    if (args.size() < 2) {
+      error = "Dot expects at least two arguments.";
+      return true;
+    }
+    Expr current = args.front();
+    for (std::size_t index = 1; index < args.size(); ++index) {
+      const auto next = dot_two(current, args[index]);
+      if (!next)
+        return true;
+      current = *next;
+      if (immediate_signal_active()) {
+        result = current;
+        return true;
+      }
+    }
+    result = current;
+    return true;
+  }
+
+  if (function == "Inner") {
+    if (args.size() != 4) {
+      error = "Inner expects exactly four arguments.";
+      return true;
+    }
+    if (args[1].kind() != ExprKind::Call) {
+      error = "Inner expects a nonatomic expression.";
+      return true;
+    }
+    if (args[2].kind() != ExprKind::Call) {
+      error = "Inner expects a nonatomic expression.";
+      return true;
+    }
+    if (args[1].args().size() != args[2].args().size()) {
+      error = "Inner expects expressions with the same length.";
+      return true;
+    }
+    std::vector<Expr> combined;
+    for (std::size_t index = 0; index < args[1].args().size(); ++index) {
+      combined.push_back(evaluate(
+          call(args[0], {args[1].args()[index], args[2].args()[index]})));
+      if (immediate_signal_active()) {
+        result = combined.back();
+        return true;
+      }
+    }
+    result = evaluate(call(args[3], std::move(combined)));
+    return true;
+  }
+
+  if (function == "Outer") {
+    if (args.size() < 2) {
+      error = "Outer expects a function and at least one sequence.";
+      return true;
+    }
+    std::vector<Expr> sequences(args.begin() + 1, args.end());
+    std::vector<std::optional<std::size_t>> levels;
+    while (sequences.size() > 1 &&
+           sequences.back().kind() == ExprKind::Integer) {
+      const auto &requested = sequences.back().integer_value();
+      std::optional<std::size_t> level;
+      if (requested == 0)
+        level = std::size_t{0};
+      else if (requested > 0 && requested.fits_ulong_p())
+        level = static_cast<std::size_t>(requested.get_ui());
+      levels.insert(levels.begin(), level);
+      sequences.pop_back();
+    }
+    for (const auto &sequence : sequences)
+      if (sequence.kind() != ExprKind::Call) {
+        error = "Outer expects a nonatomic expression.";
+        return true;
+      }
+    const auto depth_for = [&](std::size_t index) {
+      if (levels.empty())
+        return std::optional<std::size_t>{};
+      return index < levels.size() ? levels[index] : levels.back();
+    };
+    std::function<Expr(std::size_t, std::vector<Expr>)> combine;
+    combine = [&](std::size_t index, std::vector<Expr> chosen) -> Expr {
+      if (index == sequences.size())
+        return evaluate(call(args[0], std::move(chosen)));
+      std::function<Expr(const Expr &, std::optional<std::size_t>)> descend;
+      descend = [&](const Expr &node,
+                    std::optional<std::size_t> depth) -> Expr {
+        if ((depth && *depth == 0) || node.kind() != ExprKind::Call) {
+          auto next = chosen;
+          next.push_back(node);
+          return combine(index + 1, std::move(next));
+        }
+        const auto next_depth =
+            depth ? std::optional<std::size_t>(*depth - 1) : std::nullopt;
+        std::vector<Expr> children;
+        for (const auto &child : node.args()) {
+          children.push_back(descend(child, next_depth));
+          if (immediate_signal_active())
+            return children.back();
+        }
+        return call(node.head(), std::move(children));
+      };
+      return descend(sequences[index], depth_for(index));
+    };
+    result = combine(0, {});
+    return true;
+  }
+
+  auto vector_values = [&](const Expr &value, std::vector<Expr> &values) {
+    if (value.kind() == ExprKind::SparseArray) {
+      if (value.dimensions().size() != 1) {
+        error = "Cross expects vectors.";
+        return false;
+      }
+      const auto size = value.dimensions()[0];
+      if (size != 2 && size != 3)
+        return true;
+      for (std::size_t index = 1; index <= size; ++index)
+        values.push_back(sparse_value_at(value, {index}));
+      return true;
+    }
+    if (!value.has_head("List")) {
+      error = "Cross expects vectors.";
+      return false;
+    }
+    values = value.args();
+    return true;
+  };
+
+  if (function == "Cross") {
+    if (args.size() != 2) {
+      error = "Cross currently expects exactly two vector arguments.";
+      return true;
+    }
+    std::vector<Expr> left, right;
+    if (!vector_values(args[0], left) || !vector_values(args[1], right))
+      return true;
+    if (left.size() != right.size() || (left.size() != 2 && left.size() != 3)) {
+      error = "Cross currently supports pairs of 2D or 3D vectors.";
+      return true;
+    }
+    if (left.size() == 2) {
+      result =
+          subtract(product({left[0], right[1]}), product({left[1], right[0]}));
+      return true;
+    }
+    std::vector<Expr> values{
+        subtract(product({left[1], right[2]}), product({left[2], right[1]})),
+        subtract(product({left[2], right[0]}), product({left[0], right[2]})),
+        subtract(product({left[0], right[1]}), product({left[1], right[0]})),
+    };
+    if (args[0].kind() == ExprKind::SparseArray ||
+        args[1].kind() == ExprKind::SparseArray) {
+      std::vector<SparseEntry> entries;
+      for (std::size_t index = 0; index < values.size(); ++index)
+        if (!exact_zero(values[index]))
+          entries.push_back({{index + 1}, values[index]});
+      result = sparse_array({3}, std::move(entries));
+    } else
+      result = list(std::move(values));
+    return true;
+  }
+
+  const auto combine_terms = [&](std::vector<Expr> terms,
+                                 const Expr &combiner) {
+    if ((is_symbol(combiner, "Plus") || is_symbol(combiner, "Times"))) {
+      std::optional<std::size_t> list_length;
+      bool incompatible = false;
+      for (const auto &term : terms)
+        if (term.has_head("List")) {
+          if (!list_length)
+            list_length = term.args().size();
+          else if (*list_length != term.args().size())
+            incompatible = true;
+        }
+      if (incompatible) {
+        const auto bare_name = is_symbol(combiner, "Plus")
+                                   ? std::string("Plus")
+                                   : std::string("Times");
+        const auto message =
+            call("MessageName", {symbol(bare_name), string("error")});
+        const auto text = bare_name + "::error: Listable Function arguments "
+                                      "have incompatible list lengths.";
+        emit_message(message, text);
+        // The Python Times path encounters the same incompatible
+        // threading once during product normalization and once on
+        // the rebuilt call; retain that observable message schedule.
+        if (bare_name == "Times")
+          emit_message(message, text);
+      }
+    }
+    return is_symbol(combiner, "Plus")
+               ? sum(std::move(terms))
+               : evaluate(call(combiner, std::move(terms)));
+  };
+
+  if (function == "Tr") {
+    if (args.empty() || args.size() > 3) {
+      error = "Tr expects an array, an optional combiner, and an optional "
+              "rank-restriction integer.";
+      return true;
+    }
+    const auto combiner = args.size() >= 2 ? args[1] : symbol("Plus");
+    if (args.size() < 3) {
+      std::vector<std::size_t> dimensions;
+      if (args[0].kind() == ExprKind::SparseArray)
+        dimensions = args[0].dimensions();
+      else {
+        bool rectangular = true;
+        dimensions = strict_dense_dimensions(args[0], strict_dense_dimensions,
+                                             rectangular);
+        if (!rectangular) {
+          error = "SparseArray dense input must be rectangular.";
+          return true;
+        }
+        if (dimensions.empty()) {
+          error = "Tr expects a rectangular array.";
+          return true;
+        }
+      }
+      if (dimensions.size() == 1) {
+        std::vector<Expr> terms;
+        if (args[0].kind() == ExprKind::SparseArray &&
+            exact_zero(args[0].fill_value()) && is_symbol(combiner, "Plus")) {
+          for (const auto &entry : args[0].sparse_entries())
+            terms.push_back(entry.value);
+        } else if (args[0].kind() == ExprKind::SparseArray) {
+          if (dimensions[0] > maximum_sparse_materialized_nodes) {
+            error = "SparseArray dimensions exceed the native materialization "
+                    "limit.";
+            return true;
+          }
+          for (std::size_t index = 1; index <= dimensions[0]; ++index)
+            terms.push_back(sparse_value_at(args[0], {index}));
+        } else
+          terms = args[0].args();
+        result = combine_terms(std::move(terms), combiner);
+        return true;
+      }
+      if (dimensions.size() != 2) {
+        error = "Tr currently supports vectors and matrices.";
+        return true;
+      }
+      std::vector<Expr> terms;
+      const auto diagonal_count = std::min(dimensions[0], dimensions[1]);
+      if (args[0].kind() == ExprKind::SparseArray &&
+          exact_zero(args[0].fill_value())) {
+        for (const auto &entry : args[0].sparse_entries())
+          if (entry.indices[0] == entry.indices[1] &&
+              entry.indices[0] <= diagonal_count)
+            terms.push_back(entry.value);
+      } else if (args[0].kind() == ExprKind::SparseArray) {
+        if (diagonal_count > maximum_sparse_materialized_nodes) {
+          error =
+              "SparseArray dimensions exceed the native materialization limit.";
+          return true;
+        }
+        for (std::size_t index = 1; index <= diagonal_count; ++index)
+          terms.push_back(sparse_value_at(args[0], {index, index}));
+      } else {
+        for (std::size_t index = 0; index < diagonal_count; ++index)
+          terms.push_back(args[0].args()[index].args()[index]);
+      }
+      result = combine_terms(std::move(terms), combiner);
+      return true;
+    }
+    if (args[2].kind() != ExprKind::Integer || args[2].integer_value() < 1) {
+      error = "Tr level must be a positive integer.";
+      return true;
+    }
+    std::function<std::optional<Expr>(const Expr &, mpz_class)> contract;
+    contract = [&](const Expr &value, mpz_class level) -> std::optional<Expr> {
+      if (level == 1) {
+        if (value.kind() != ExprKind::Call) {
+          error = "Tr expects a nonatomic expression.";
+          return std::nullopt;
+        }
+        if (!value.has_head("List")) {
+          error = "Tr expects a List at every contracted level.";
+          return std::nullopt;
+        }
+        const bool all_rows =
+            !value.args().empty() &&
+            std::all_of(
+                value.args().begin(), value.args().end(),
+                [](const Expr &child) { return child.has_head("List"); });
+        if (all_rows) {
+          const auto width = value.args().front().args().size();
+          if (std::all_of(value.args().begin(), value.args().end(),
+                          [&](const Expr &row) {
+                            return row.args().size() == width;
+                          })) {
+            std::vector<Expr> columns;
+            for (std::size_t column = 0; column < width; ++column) {
+              std::vector<Expr> terms;
+              for (const auto &row : value.args())
+                terms.push_back(row.args()[column]);
+              columns.push_back(combine_terms(std::move(terms), combiner));
+              if (immediate_signal_active())
+                return columns.back();
+            }
+            return list(std::move(columns));
+          }
+        }
+        return combine_terms(value.args(), combiner);
+      }
+      if (value.kind() != ExprKind::Call) {
+        error = "Tr expects a nonatomic expression.";
+        return std::nullopt;
+      }
+      if (!value.has_head("List")) {
+        error = "Tr expects a List at every contracted level.";
+        return std::nullopt;
+      }
+      std::vector<Expr> children;
+      for (const auto &child : value.args()) {
+        const auto contracted = contract(child, level - 1);
+        if (!contracted)
+          return std::nullopt;
+        children.push_back(*contracted);
+        if (immediate_signal_active())
+          return children.back();
+      }
+      return contract(list(std::move(children)), 1);
+    };
+    const auto contracted = contract(args[0], args[2].integer_value());
+    if (contracted)
+      result = *contracted;
+    return true;
+  }
+
+  if (function == "Det") {
+    if (args.size() != 1) {
+      error = "Det expects exactly one matrix argument.";
+      return true;
+    }
+    if (args[0].kind() == ExprKind::SparseArray) {
+      result = determinant_sparse(args[0]);
+      return true;
+    }
+    std::vector<std::vector<Expr>> rows;
+    if (!square_matrix_rows(args[0], "Det", rows))
+      return true;
+    result = determinant_rows(rows);
+    return true;
+  }
+
+  std::function<std::optional<Expr>(const Expr &)> inverse_matrix;
+  inverse_matrix = [&](const Expr &value) -> std::optional<Expr> {
+    if (value.kind() == ExprKind::SparseArray) {
+      const auto &dimensions = value.dimensions();
+      if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
+        error = "Inverse expects a square matrix.";
+        return std::nullopt;
+      }
+      if (exact_zero(value.fill_value())) {
+        bool diagonal = true;
+        for (const auto &entry : value.sparse_entries()) {
+          if (entry.indices[0] != entry.indices[1]) {
+            diagonal = false;
+            break;
+          }
+        }
+        if (diagonal) {
+          if (value.sparse_entries().size() != dimensions[0]) {
+            error = "Inverse expects a nonsingular matrix.";
+            return std::nullopt;
+          }
+          std::vector<const SparseEntry *> entries(dimensions[0], nullptr);
+          for (const auto &entry : value.sparse_entries())
+            entries[entry.indices[0] - 1] = &entry;
+          if (std::any_of(entries.begin(), entries.end(),
+                          [](const auto *entry) { return entry == nullptr; })) {
+            error = "Inverse expects a nonsingular matrix.";
+            return std::nullopt;
+          }
+          std::vector<SparseEntry> inverse_entries;
+          for (std::size_t index = 0; index < entries.size(); ++index) {
+            if (exact_zero(entries[index]->value)) {
+              error = "Inverse expects a nonsingular matrix.";
+              return std::nullopt;
+            }
+            inverse_entries.push_back(
+                {{index + 1, index + 1}, reciprocal(entries[index]->value)});
+          }
+          return sparse_array(dimensions, std::move(inverse_entries));
+        }
+      }
+    }
+    std::vector<std::vector<Expr>> rows;
+    if (!square_matrix_rows(value, "Inverse", rows))
+      return std::nullopt;
+    std::vector<std::vector<mpq_class>> fractions;
+    if (exact_fraction_matrix(rows, fractions)) {
+      const auto size = fractions.size();
+      std::vector<std::vector<mpq_class>> augmented;
+      for (std::size_t row = 0; row < size; ++row) {
+        auto values = fractions[row];
+        for (std::size_t column = 0; column < size; ++column)
+          values.emplace_back(row == column ? 1 : 0);
+        augmented.push_back(std::move(values));
+      }
+      for (std::size_t column = 0; column < size; ++column) {
+        auto pivot = column;
+        while (pivot < size && augmented[pivot][column] == 0)
+          ++pivot;
+        if (pivot == size) {
+          error = "Inverse expects a nonsingular matrix.";
+          return std::nullopt;
+        }
+        if (pivot != column)
+          std::swap(augmented[pivot], augmented[column]);
+        const auto pivot_value = augmented[column][column];
+        for (auto &item : augmented[column])
+          item /= pivot_value;
+        for (std::size_t row = 0; row < size; ++row) {
+          if (row == column || augmented[row][column] == 0)
+            continue;
+          const mpq_class factor = augmented[row][column];
+          for (std::size_t target = 0; target < size * 2; ++target)
+            augmented[row][target] -= factor * augmented[column][target];
+        }
+      }
+      std::vector<Expr> inverse_rows;
+      for (std::size_t row = 0; row < size; ++row) {
+        std::vector<Expr> values;
+        for (std::size_t column = size; column < size * 2; ++column)
+          values.push_back(from_rational(augmented[row][column]));
+        inverse_rows.push_back(list(std::move(values)));
+      }
+      return list(std::move(inverse_rows));
+    }
+    const auto determinant = determinant_rows(rows);
+    if (immediate_signal_active())
+      return determinant;
+    if (exact_zero(determinant)) {
+      error = "Inverse expects a nonsingular matrix.";
+      return std::nullopt;
+    }
+    std::vector<Expr> inverse_rows;
+    for (std::size_t output_row = 0; output_row < rows.size(); ++output_row) {
+      std::vector<Expr> values;
+      for (std::size_t output_column = 0; output_column < rows.size();
+           ++output_column) {
+        std::vector<std::vector<Expr>> minor;
+        for (std::size_t row = 0; row < rows.size(); ++row) {
+          if (row == output_column)
+            continue;
+          std::vector<Expr> minor_row;
+          for (std::size_t column = 0; column < rows.size(); ++column)
+            if (column != output_row)
+              minor_row.push_back(rows[row][column]);
+          minor.push_back(std::move(minor_row));
+        }
+        auto cofactor = determinant_rows(minor);
+        if ((output_row + output_column) % 2 != 0)
+          cofactor = negate(cofactor);
+        values.push_back(divide(cofactor, determinant));
+        if (immediate_signal_active())
+          return values.back();
+      }
+      inverse_rows.push_back(list(std::move(values)));
+    }
+    return list(std::move(inverse_rows));
+  };
+
+  if (function == "Inverse") {
+    if (args.size() != 1) {
+      error = "Inverse expects exactly one matrix argument.";
+      return true;
+    }
+    const auto inverse = inverse_matrix(args[0]);
+    if (inverse)
+      result = *inverse;
+    return true;
+  }
+
+  if (function == "MatrixPower") {
+    if (args.size() != 2) {
+      error = "MatrixPower expects a matrix and an integer exponent.";
+      return true;
+    }
+    if (args[1].kind() != ExprKind::Integer) {
+      error = "MatrixPower expects an integer argument.";
+      return true;
+    }
+    std::size_t size = 0;
+    if (args[0].kind() == ExprKind::SparseArray) {
+      const auto &dimensions = args[0].dimensions();
+      if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
+        error = "MatrixPower expects a square matrix.";
+        return true;
+      }
+      size = dimensions[0];
+    } else {
+      std::vector<std::vector<Expr>> rows;
+      if (!square_matrix_rows(args[0], "MatrixPower", rows))
+        return true;
+      size = rows.size();
+    }
+    auto identity = [&](bool sparse) -> std::optional<Expr> {
+      if (sparse) {
+        if (size > maximum_sparse_materialized_nodes) {
+          error =
+              "SparseArray dimensions exceed the native materialization limit.";
+          return std::nullopt;
+        }
+        std::vector<SparseEntry> entries;
+        entries.reserve(size);
+        for (std::size_t index = 1; index <= size; ++index)
+          entries.push_back({{index, index}, integer(1L)});
+        return sparse_array({size, size}, std::move(entries));
+      }
+      std::vector<Expr> rows;
+      for (std::size_t row = 0; row < size; ++row) {
+        std::vector<Expr> values(size, integer(0L));
+        values[row] = integer(1L);
+        rows.push_back(list(std::move(values)));
+      }
+      return list(std::move(rows));
+    };
+    auto exponent = args[1].integer_value();
+    if (exponent == 0) {
+      const auto value = identity(args[0].kind() == ExprKind::SparseArray);
+      if (value)
+        result = *value;
+      return true;
+    }
+    Expr base = args[0];
+    if (exponent < 0) {
+      const auto inverse = inverse_matrix(base);
+      if (!inverse)
+        return true;
+      base = *inverse;
+      exponent = -exponent;
+    }
+    auto accumulated = identity(base.kind() == ExprKind::SparseArray);
+    if (!accumulated)
+      return true;
+    while (exponent > 0) {
+      if (mpz_odd_p(exponent.get_mpz_t()) != 0) {
+        const auto multiplied = dot_two(*accumulated, base);
+        if (!multiplied)
+          return true;
+        accumulated = evaluate(*multiplied);
+      }
+      exponent /= 2;
+      if (exponent != 0) {
+        const auto squared = dot_two(base, base);
+        if (!squared)
+          return true;
+        base = evaluate(*squared);
+      }
+      if (immediate_signal_active()) {
+        result = *accumulated;
+        return true;
+      }
+    }
+    result = *accumulated;
+    return true;
+  }
+
+  return false;
 }
 
 Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw_args) {
@@ -4207,18 +9358,24 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         MessageScope scope;
         if (raw_args.size() >= 3)
             scope.selectors.assign(raw_args.begin() + 2, raw_args.end());
+        const auto scope_depth = message_scopes_.size();
         message_scopes_.push_back(std::move(scope));
+        auto scope_guard = scope_exit([&] { message_scopes_.resize(scope_depth); });
         const auto value = evaluate(raw_args[0]);
         const bool triggered = message_scopes_.back().triggered;
         message_scopes_.pop_back();
+        scope_guard.release();
         return triggered ? evaluate(raw_args[1]) : value;
     }
     if (name == "Quiet" && !raw_args.empty()) {
         MessageScope scope;
         scope.quiet = true;
+        const auto scope_depth = message_scopes_.size();
         message_scopes_.push_back(std::move(scope));
+        auto scope_guard = scope_exit([&] { message_scopes_.resize(scope_depth); });
         const auto value = evaluate(raw_args[0]);
         message_scopes_.pop_back();
+        scope_guard.release();
         return value;
     }
     if ((name == "Off" || name == "On") && !raw_args.empty()) {
@@ -4273,37 +9430,138 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message_name, std::move(text));
         return symbol("Null");
     }
-    if (name == "WithCleanup" && (raw_args.size() == 2 || raw_args.size() == 3)) {
-        const auto expression_index = raw_args.size() == 2 ? 0U : 1U;
-        if (raw_args.size() == 3) (void)evaluate(raw_args[0]);
-        const auto value = evaluate(raw_args[expression_index]);
-        const bool saved_aborted = aborted_;
-        const auto saved_thrown = thrown_;
-        const auto saved_thrown_tag = thrown_tag_;
-        const auto saved_thrown_handler = thrown_handler_;
-        const auto saved_confirmation_failure = confirmation_failure_;
-        const auto saved_confirmation_information = confirmation_information_;
-        const auto saved_confirmation_function = confirmation_function_;
-        const auto saved_confirmation_pattern = confirmation_pattern_;
-        const auto saved_confirmation_tag = confirmation_tag_;
-        const auto saved_control_kind = control_kind_;
-        const auto saved_control_value = control_value_;
-        const auto saved_control_target = control_target_;
-        aborted_ = false;
-        thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
-        clear_control();
-        (void)evaluate(raw_args.back());
-        aborted_ = saved_aborted;
-        thrown_ = saved_thrown; thrown_tag_ = saved_thrown_tag; thrown_handler_ = saved_thrown_handler;
-        confirmation_failure_ = saved_confirmation_failure;
-        confirmation_information_ = saved_confirmation_information;
-        confirmation_function_ = saved_confirmation_function;
-        confirmation_pattern_ = saved_confirmation_pattern; confirmation_tag_ = saved_confirmation_tag;
-        control_kind_ = saved_control_kind;
-        control_value_ = saved_control_value;
-        control_target_ = saved_control_target;
+    auto raw_evaluation_error = [&](const std::string& text) {
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + text);
+        return call(raw_head, raw_args);
+    };
+    if (name == "Failsafe") {
+        if (raw_args.empty() || raw_args.size() > 3)
+            return raw_evaluation_error(
+                "Failsafe expects one, two, or three arguments.");
+        std::vector<Expr> arguments;
+        arguments.reserve(raw_args.size());
+        for (const auto& argument : raw_args) {
+            arguments.push_back(evaluate(argument));
+            if (immediate_signal_active()) return arguments.back();
+        }
+        return call(raw_head, std::move(arguments));
+    }
+    if (name == "WithCleanup") {
+        if (raw_args.size() != 2 && raw_args.size() != 3)
+            return raw_evaluation_error(
+                "WithCleanup expects two or three arguments.");
+
+        struct PendingState {
+            bool aborted;
+            std::optional<Expr> thrown;
+            std::optional<Expr> thrown_tag;
+            std::optional<Expr> thrown_handler;
+            std::optional<Expr> confirmation_failure;
+            std::optional<Expr> confirmation_tag;
+            ControlKind control_kind;
+            std::optional<Expr> control_value;
+            std::optional<Expr> control_target;
+
+            [[nodiscard]] bool active() const noexcept {
+                return aborted || thrown.has_value()
+                    || confirmation_failure.has_value()
+                    || control_kind != ControlKind::None;
+            }
+        };
+        auto capture_pending = [&] {
+            return PendingState{aborted_, thrown_, thrown_tag_,
+                thrown_handler_, confirmation_failure_, confirmation_tag_,
+                control_kind_, control_value_, control_target_};
+        };
+        auto clear_pending = [&] {
+            aborted_ = false;
+            thrown_.reset(); thrown_tag_.reset(); thrown_handler_.reset();
+            confirmation_failure_.reset(); confirmation_tag_.reset();
+            clear_control();
+        };
+        auto restore_pending = [&](const PendingState& pending) {
+            aborted_ = pending.aborted;
+            thrown_ = pending.thrown;
+            thrown_tag_ = pending.thrown_tag;
+            thrown_handler_ = pending.thrown_handler;
+            confirmation_failure_ = pending.confirmation_failure;
+            confirmation_tag_ = pending.confirmation_tag;
+            control_kind_ = pending.control_kind;
+            control_value_ = pending.control_value;
+            control_target_ = pending.control_target;
+        };
+        auto protected_suppressed_evaluate = [&](const Expr& expression) {
+            ++time_constraint_suppression_depth_;
+            auto suppression_guard = scope_exit(
+                [&] { --time_constraint_suppression_depth_; });
+            const auto protection_depth = abort_protect_scopes_.size();
+            abort_protect_scopes_.push_back(false);
+            auto protection_guard = scope_exit(
+                [&] { abort_protect_scopes_.resize(protection_depth); });
+            auto value = evaluate(expression);
+            const bool superseded = thrown_ || confirmation_failure_
+                || control_active();
+            bool pending_abort = abort_protect_scopes_.back();
+            if (aborted_) {
+                aborted_ = false;
+                if (!superseded) {
+                    pending_abort = true;
+                    value = symbol("Null");
+                }
+            }
+            abort_protect_scopes_.pop_back();
+            protection_guard.release();
+            --time_constraint_suppression_depth_;
+            suppression_guard.release();
+            if (pending_abort && !superseded) {
+                aborted_ = true;
+                return symbol("$Aborted");
+            }
+            return value;
+        };
+
+        Expr value = symbol("Null");
+        std::optional<PendingState> pending;
+        std::exception_ptr pending_exception;
+        auto record_pending_state = [&] {
+            auto state = capture_pending();
+            if (!state.active()) return false;
+            pending = std::move(state);
+            clear_pending();
+            return true;
+        };
+
+        if (raw_args.size() == 3) {
+            try {
+                (void)protected_suppressed_evaluate(raw_args[0]);
+                if (!record_pending_state()) check_time_constraint();
+            } catch (...) {
+                pending_exception = std::current_exception();
+                (void)record_pending_state();
+            }
+        }
+        if (!pending && !pending_exception) {
+            try {
+                value = evaluate(raw_args[raw_args.size() == 2 ? 0U : 1U]);
+            } catch (...) {
+                pending_exception = std::current_exception();
+            }
+            (void)record_pending_state();
+        }
+
+        const auto cleanup_value
+            = protected_suppressed_evaluate(raw_args.back());
+        auto cleanup_state = capture_pending();
+        if (cleanup_state.active()) return cleanup_value;
+        clear_pending();
+        if (pending) restore_pending(*pending);
+        if (pending_exception) std::rethrow_exception(pending_exception);
         return value;
     }
     if (name == "Break" && raw_args.empty()) {
@@ -4327,8 +9585,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return control_expression();
     }
     if (name == "Abort" && raw_args.empty()) {
-        if (abort_protection_depth_ != 0) deferred_abort_ = true;
-        else aborted_ = true;
+        const auto protection_depth = abort_protect_scopes_.size();
+        const bool same_depth_check = !check_abort_depths_.empty()
+            && check_abort_depths_.back() == protection_depth;
+        if (protection_depth != 0 && !same_depth_check) {
+            abort_protect_scopes_.back() = true;
+            return symbol("Null");
+        }
+        aborted_ = true;
         return symbol("$Aborted");
     }
     if ((name == "Overflow" || name == "Underflow") && raw_args.empty()) return special_real(name);
@@ -4354,76 +9618,362 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return value;
     }
     if (name == "CheckAbort" && raw_args.size() == 2) {
-        const auto value = evaluate(raw_args[0]);
-        if (aborted_ || deferred_abort_) {
-            aborted_ = false; deferred_abort_ = false;
-            return evaluate(raw_args[1]);
+        const auto check_depth = check_abort_depths_.size();
+        check_abort_depths_.push_back(abort_protect_scopes_.size());
+        auto check_guard = scope_exit(
+            [&] { check_abort_depths_.resize(check_depth); });
+        auto value = evaluate(raw_args[0]);
+        if (aborted_) {
+            aborted_ = false;
+            value = evaluate(raw_args[1]);
         }
+        check_abort_depths_.pop_back();
+        check_guard.release();
         return value;
     }
-    if (name == "Enclose" && !raw_args.empty()) {
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
-        const auto value = evaluate(raw_args[0]);
-        if (!confirmation_failure_) return value;
-        if (raw_args.size() >= 3 && (!confirmation_tag_ || *confirmation_tag_ != raw_args[2])) return value;
-        const auto property = raw_args.size() >= 2 && raw_args[1].kind() == ExprKind::String
-            ? raw_args[1].text() : "Expression";
-        Expr result = property == "Information" ? confirmation_information_.value_or(symbol("Automatic"))
-            : property == "Function" ? confirmation_function_.value_or(symbol("Identity"))
-            : property == "Pattern" ? confirmation_pattern_.value_or(call("Blank"))
-            : *confirmation_failure_;
-        confirmation_failure_.reset(); confirmation_information_.reset(); confirmation_function_.reset();
-        confirmation_pattern_.reset(); confirmation_tag_.reset();
-        return result;
-    }
-    if ((name == "Confirm" || name == "ConfirmBy" || name == "ConfirmMatch" || name == "ConfirmAssert")
-        && !raw_args.empty()) {
-        const auto value = evaluate(raw_args[0]);
-        bool success = true;
-        std::size_t information_index = 1;
-        if (name == "Confirm") success = !(value.has_head("Failure") || value.has_head("Missing")
-            || is_symbol(value, "$Failed") || is_symbol(value, "$Canceled") || is_symbol(value, "$Aborted"));
-        else if (name == "ConfirmBy" && raw_args.size() >= 2) {
-            success = is_symbol(evaluate(call(raw_args[1], {value})), "True");
-            confirmation_function_ = raw_args[1]; information_index = 2;
-        } else if (name == "ConfirmMatch" && raw_args.size() >= 2) {
-            Bindings bindings; success = pattern_match(value, raw_args[1], bindings);
-            confirmation_pattern_ = raw_args[1]; information_index = 2;
-        } else if (name == "ConfirmAssert") {
-            success = is_symbol(value, "True");
-            if (success) return symbol("Null");
+    if (name == "Enclose" || name == "Confirm" || name == "ConfirmBy" ||
+        name == "ConfirmMatch" || name == "ConfirmAssert") {
+        PatternEvaluationContext session_pattern_context{
+            [this](const Expr& value, const Expr& predicate) {
+                return is_symbol(evaluate(call(predicate, {value})), "True");
+            },
+            [this](const Expr& condition) {
+                return is_symbol(evaluate(condition), "True");
+            }};
+        auto scope_matches = [&](const EncloseScope& scope,
+                                 const std::optional<Expr>& tag) {
+            if (!scope.form)
+                return !tag.has_value();
+            if (!tag)
+                return false;
+            Bindings bindings;
+            return pattern_match(*tag, *scope.form, bindings,
+                                 &session_pattern_context);
+        };
+        auto emit_unhandled_confirmation = [&] {
+            const auto message = call(
+                "MessageName", {symbol("Confirm"), string("confirmnotag")});
+            emit_message(message, "Confirm::confirmnotag: Message generated.");
+        };
+        auto dispatch_confirmation = [&](const Expr& failure,
+                                         const std::optional<Expr>& tag) {
+            bool matches = false;
+            for (const auto& scope : enclose_scopes_) {
+                if (scope_matches(scope, tag)) {
+                    matches = true;
+                    break;
+                }
+                if (immediate_signal_active())
+                    return failure;
+            }
+            if (matches) {
+                confirmation_failure_ = failure;
+                confirmation_tag_ = tag;
+            } else if (!immediate_signal_active()) {
+                emit_unhandled_confirmation();
+            }
+            return failure;
+        };
+        auto confirmation_failure =
+            [&](const std::string& type, const Expr& value,
+                const Expr& information,
+                std::vector<std::pair<std::string, Expr>> extras = {}) {
+                std::vector<std::pair<std::string, Expr>> fields{
+                    {"ConfirmationType", symbol(type)},
+                    {"Expression", value},
+                    {"Information", information},
+                };
+                fields.insert(fields.end(),
+                              std::make_move_iterator(extras.begin()),
+                              std::make_move_iterator(extras.end()));
+                return structured_failure(symbol("ConfirmationFailed"), fields);
+            };
+        if (name == "Enclose") {
+            if (raw_args.empty() || raw_args.size() > 3)
+                return raw_evaluation_error(
+                    "Enclose expects one, two, or three arguments.");
+
+            std::optional<Expr> form;
+            if (raw_args.size() == 3) {
+                form = evaluate(raw_args[2]);
+                if (immediate_signal_active())
+                    return *form;
+            }
+
+            const auto scope_depth = enclose_scopes_.size();
+            enclose_scopes_.push_back({form});
+            auto scope_guard =
+                scope_exit([&] { enclose_scopes_.resize(scope_depth); });
+            const auto value = evaluate(raw_args[0]);
+            if (!confirmation_failure_) {
+                enclose_scopes_.pop_back();
+                scope_guard.release();
+                return value;
+            }
+
+            const auto pending_failure = *confirmation_failure_;
+            const auto pending_tag = confirmation_tag_;
+            confirmation_failure_.reset();
+            confirmation_tag_.reset();
+            const bool catches =
+                scope_matches(enclose_scopes_.back(), pending_tag);
+            if (immediate_signal_active()) {
+                enclose_scopes_.pop_back();
+                scope_guard.release();
+                return value;
+            }
+            if (!catches) {
+                confirmation_failure_ = pending_failure;
+                confirmation_tag_ = pending_tag;
+                enclose_scopes_.pop_back();
+                scope_guard.release();
+                return value;
+            }
+
+            Expr result = pending_failure;
+            if (raw_args.size() >= 2) {
+                const auto handler = evaluate(raw_args[1]);
+                if (immediate_signal_active()) {
+                    enclose_scopes_.pop_back();
+                    scope_guard.release();
+                    return handler;
+                }
+                result = handler.kind() == ExprKind::String
+                             ? failure_property(pending_failure, handler)
+                             : evaluate(call(handler, {pending_failure}));
+            }
+            enclose_scopes_.pop_back();
+            scope_guard.release();
+            return result;
         }
-        if (success) return value;
-        confirmation_failure_ = value;
-        confirmation_information_ = raw_args.size() > information_index
-            ? raw_args[information_index] : symbol("Automatic");
-        const auto tag_index = information_index + 1;
-        confirmation_tag_ = raw_args.size() > tag_index ? std::optional<Expr>(raw_args[tag_index]) : std::nullopt;
-        return value;
+        if (name == "Confirm") {
+            if (raw_args.empty() || raw_args.size() > 3)
+                return raw_evaluation_error(
+                    "Confirm expects one, two, or three arguments.");
+            const auto value = evaluate(raw_args[0]);
+            if (immediate_signal_active() || !confirmation_failure_value(value))
+                return value;
+            const auto information =
+                raw_args.size() >= 2 ? evaluate(raw_args[1]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 3
+                                 ? std::optional<Expr>(evaluate(raw_args[2]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(value);
+            const auto failure =
+                failure_value(value) && raw_args.size() == 1
+                    ? value
+                    : confirmation_failure("Confirm", value, information);
+            return dispatch_confirmation(failure, tag);
+        }
+        if (name == "ConfirmBy") {
+            if (raw_args.size() < 2 || raw_args.size() > 4)
+                return raw_evaluation_error(
+                    "ConfirmBy expects two, three, or four arguments.");
+            const auto value = evaluate(raw_args[0]);
+            if (immediate_signal_active())
+                return value;
+            const auto function = evaluate(raw_args[1]);
+            if (immediate_signal_active())
+                return function;
+            const auto test = evaluate(call(function, {value}));
+            if (immediate_signal_active())
+                return test;
+            if (is_symbol(test, "True"))
+                return value;
+            const auto information =
+                raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 4
+                                 ? std::optional<Expr>(evaluate(raw_args[3]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(value);
+            return dispatch_confirmation(
+                confirmation_failure("ConfirmBy", value, information,
+                                     {{"Function", function}}),
+                tag);
+        }
+        if (name == "ConfirmMatch") {
+            if (raw_args.size() < 2 || raw_args.size() > 4)
+                return raw_evaluation_error(
+                    "ConfirmMatch expects two, three, or four arguments.");
+            const auto value = evaluate(raw_args[0]);
+            if (immediate_signal_active())
+                return value;
+            Bindings bindings;
+            const bool matches = pattern_match(value, raw_args[1], bindings,
+                                               &session_pattern_context);
+            if (immediate_signal_active())
+                return value;
+            if (matches)
+                return value;
+            const auto information =
+                raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 4
+                                 ? std::optional<Expr>(evaluate(raw_args[3]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(value);
+            return dispatch_confirmation(
+                confirmation_failure("ConfirmMatch", value, information,
+                                     {{"Pattern", raw_args[1]}}),
+                tag);
+        }
+        if (name == "ConfirmAssert") {
+            if (raw_args.empty() || raw_args.size() > 3)
+                return raw_evaluation_error(
+                    "ConfirmAssert expects one, two, or three arguments.");
+            const auto test = evaluate(raw_args[0]);
+            if (immediate_signal_active())
+                return test;
+            if (is_symbol(test, "True"))
+                return symbol("Null");
+            const auto information =
+                raw_args.size() >= 2 ? evaluate(raw_args[1]) : symbol("Null");
+            if (immediate_signal_active())
+                return information;
+            const auto tag = raw_args.size() == 3
+                                 ? std::optional<Expr>(evaluate(raw_args[2]))
+                                 : std::nullopt;
+            if (immediate_signal_active())
+                return tag.value_or(test);
+            return dispatch_confirmation(confirmation_failure("ConfirmAssert",
+                                                              test, information,
+                                                              {{"Test", test}}),
+                                         tag);
+        }
     }
     if (name == "AbortProtect" && raw_args.size() == 1) {
-        const bool outermost = abort_protection_depth_ == 0;
-        ++abort_protection_depth_;
-        const auto value = evaluate(raw_args[0]);
-        --abort_protection_depth_;
-        if (outermost && deferred_abort_) {
-            deferred_abort_ = false;
+        const auto protection_depth = abort_protect_scopes_.size();
+        abort_protect_scopes_.push_back(false);
+        auto protection_guard = scope_exit(
+            [&] { abort_protect_scopes_.resize(protection_depth); });
+        auto value = evaluate(raw_args[0]);
+        const bool superseded = thrown_ || confirmation_failure_
+            || control_active();
+        bool pending_abort = abort_protect_scopes_.back();
+        if (aborted_) {
+            aborted_ = false;
+            if (!superseded) {
+                pending_abort = true;
+                value = symbol("Null");
+            }
+        }
+        abort_protect_scopes_.pop_back();
+        protection_guard.release();
+        if (pending_abort && !superseded) {
             aborted_ = true;
             return symbol("$Aborted");
         }
         return value;
     }
-    if (name == "Pause" && raw_args.size() == 1) return symbol("Null");
-    if (name == "TimeRemaining" && raw_args.empty()) return symbol("Infinity");
-    if (name == "TimeConstrained" && raw_args.size() >= 2) {
-        const auto limit = numeric_real(evaluate(raw_args[1]));
-        if (limit && requested_pause(raw_args[0]) > *limit)
-            return raw_args.size() >= 3 ? evaluate(raw_args[2]) : symbol("$Aborted");
-        if (raw_args[0].has_head("TimeRemaining")) return real(real_text(limit.value_or(0.0)));
-        return evaluate(raw_args[0]);
+    if (name == "Pause") {
+        if (raw_args.size() != 1)
+            return raw_evaluation_error("Pause expects exactly one argument.");
+        const auto duration = evaluate(raw_args[0]);
+        if (aborted_ || thrown_ || confirmation_failure_
+            || control_active()) return duration;
+        if (duration.kind() != ExprKind::Integer
+            && duration.kind() != ExprKind::Real)
+            return raw_evaluation_error(
+                "Pause expects a numeric time in seconds.");
+        const auto seconds = numeric_real(duration);
+        if (!seconds)
+            return raw_evaluation_error(
+                "Pause expects a numeric time in seconds.");
+        if (!std::isfinite(*seconds) || *seconds < 0.0)
+            return raw_evaluation_error(
+                "Pause expects a non-negative finite number of seconds.");
+
+        const auto pause_end = steady_deadline_after(*seconds);
+        while (true) {
+            check_time_constraint();
+            const auto now = SteadyClock::now();
+            if (now >= pause_end) return symbol("Null");
+            auto wake = pause_end;
+            if (const auto constraint = active_time_constraint();
+                constraint && *constraint->deadline < wake)
+                wake = *constraint->deadline;
+            const auto slice = now + std::chrono::milliseconds(50);
+            std::this_thread::sleep_until(std::min(wake, slice));
+        }
     }
-    if (name == "AbsoluteTiming" && raw_args.size() == 1) return list({real("0."), evaluate(raw_args[0])});
+    if (name == "TimeRemaining") {
+        if (!raw_args.empty())
+            return raw_evaluation_error(
+                "TimeRemaining expects no arguments.");
+        const auto constraint = active_time_constraint();
+        if (!constraint) return symbol("Infinity");
+        const auto remaining = std::chrono::duration<double>(
+            *constraint->deadline - SteadyClock::now()).count();
+        return real(real_text(std::max(0.0, remaining)));
+    }
+    if (name == "TimeConstrained") {
+        if (raw_args.size() != 2 && raw_args.size() != 3)
+            return raw_evaluation_error(
+                "TimeConstrained expects two or three arguments.");
+        const auto duration = evaluate(raw_args[1]);
+        if (aborted_ || thrown_ || confirmation_failure_
+            || control_active()) return duration;
+        const bool infinite = is_symbol(duration, "Infinity");
+        if (!infinite && duration.kind() != ExprKind::Integer
+            && duration.kind() != ExprKind::Real)
+            return raw_evaluation_error(
+                "TimeConstrained expects a numeric time in seconds.");
+        const auto parsed_seconds = infinite
+            ? std::optional<double>(std::numeric_limits<double>::infinity())
+            : numeric_real(duration);
+        if (!parsed_seconds)
+            return raw_evaluation_error(
+                "TimeConstrained expects a numeric time in seconds.");
+        const auto seconds = *parsed_seconds < 0.0 ? 0.0 : *parsed_seconds;
+        const auto constraint_id = ++time_constraint_counter_;
+        const auto constraint_depth = time_constraints_.size();
+        time_constraints_.push_back({constraint_id,
+            std::isinf(seconds)
+                ? std::nullopt
+                : std::optional<SteadyClock::time_point>(
+                    steady_deadline_after(seconds))});
+        auto constraint_guard = scope_exit(
+            [&] { time_constraints_.resize(constraint_depth); });
+
+        std::optional<Expr> result;
+        bool timed_out = false;
+        try {
+            result = evaluate(raw_args[0]);
+            const bool pending_control = aborted_ || thrown_
+                || confirmation_failure_ || control_active();
+            if (!pending_control && !std::isinf(seconds))
+                check_time_constraint();
+        } catch (const TimeConstraintExpired& expired) {
+            if (expired.owner() != constraint_id) throw;
+            timed_out = true;
+        }
+        time_constraints_.resize(constraint_depth);
+        constraint_guard.release();
+        if (timed_out)
+            return raw_args.size() == 3
+                ? evaluate(raw_args[2]) : symbol("$Aborted");
+        return *result;
+    }
+    if (name == "AbsoluteTiming") {
+        if (raw_args.size() != 1)
+            return raw_evaluation_error(
+                "AbsoluteTiming expects exactly one argument.");
+        const auto started = SteadyClock::now();
+        const auto value = evaluate(raw_args[0]);
+        if (aborted_ || thrown_ || confirmation_failure_
+            || control_active()) return value;
+        const auto elapsed = std::chrono::duration<double>(
+            SteadyClock::now() - started).count();
+        return list({real(real_text(elapsed)), value});
+    }
     if (name == "Sow" && (raw_args.size() == 1 || raw_args.size() == 2)) {
         const auto value = evaluate(raw_args[0]);
         auto tags = raw_args.size() == 1 ? std::vector<Expr>{symbol("None")}
@@ -4437,9 +9987,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (name == "Reap" && !raw_args.empty() && raw_args.size() <= 3) {
         const auto selector = raw_args.size() >= 2 ? raw_args[1] : call("Blank");
+        const auto reap_depth = reap_stack_.size();
         reap_stack_.push_back({selector, {}});
+        auto reap_guard = scope_exit([&] { reap_stack_.resize(reap_depth); });
         const auto value = evaluate(raw_args[0]);
         auto scope = std::move(reap_stack_.back()); reap_stack_.pop_back();
+        reap_guard.release();
         std::vector<Expr> tags;
         std::vector<std::vector<Expr>> groups;
         for (const auto& [tag, item] : scope.entries) {
@@ -4517,9 +10070,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 const auto suffix = ++module_counter_;
                 std::vector<std::pair<std::string, Expr>> renamed;
                 for (const auto& binding : bindings) {
-                    const auto fresh_name = binding.name + "$" + std::to_string(suffix);
-                    const auto fresh = symbol(fresh_name);
-                    user_symbol_registry().insert("Global`" + fresh_name);
+                    const auto owner = ensure_full_symbol_name(binding.name);
+                    const auto fresh_name = owner + "$" + std::to_string(suffix);
+                    const auto fresh = display_symbol(fresh_name);
+                    known_symbols_.insert(fresh_name);
                     renamed.emplace_back(binding.name, fresh);
                     if (binding.value) own_values_[fresh_name] = {
                         binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
@@ -4548,10 +10102,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         struct Binding { std::string name; std::optional<Expr> value; bool delayed; };
         std::vector<Binding> bindings;
         for (const auto& item : raw_args[0].args()) {
-            if (item.symbol_name()) bindings.push_back({*item.symbol_name(), std::nullopt, false});
+            if (item.symbol_name()) bindings.push_back({
+                ensure_full_symbol_name(*item.symbol_name()), std::nullopt, false});
             else if ((item.has_head("Set") || item.has_head("SetDelayed")) && item.args().size() == 2
                 && item.args()[0].symbol_name())
-                bindings.push_back({*item.args()[0].symbol_name(), item.args()[1], item.has_head("SetDelayed")});
+                bindings.push_back({ensure_full_symbol_name(*item.args()[0].symbol_name()),
+                    item.args()[1], item.has_head("SetDelayed")});
             else return call(raw_head, raw_args);
         }
         auto pattern_snapshot = [](const DefinitionTable& table, const std::string& target)
@@ -4567,19 +10123,25 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 pattern_snapshot(down_values_, binding.name), pattern_snapshot(up_values_, binding.name),
                 pattern_snapshot(sub_values_, binding.name)});
         }
-        for (const auto& binding : bindings) if (binding.value)
-            own_values_[binding.name] = {binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
-        auto result = evaluate(raw_args[1]);
         auto restore_patterns = [](DefinitionTable& table, const std::string& target,
             const std::optional<PatternDefinitions>& value) {
             if (value) table[target] = *value; else table.erase(target);
         };
-        for (const auto& snapshot : snapshots) {
-            if (snapshot.own) own_values_[snapshot.name] = *snapshot.own; else own_values_.erase(snapshot.name);
-            restore_patterns(down_values_, snapshot.name, snapshot.down);
-            restore_patterns(up_values_, snapshot.name, snapshot.up);
-            restore_patterns(sub_values_, snapshot.name, snapshot.sub);
-        }
+        auto restore_snapshots = [&] {
+            for (const auto& snapshot : snapshots) {
+                if (snapshot.own) own_values_[snapshot.name] = *snapshot.own;
+                else own_values_.erase(snapshot.name);
+                restore_patterns(down_values_, snapshot.name, snapshot.down);
+                restore_patterns(up_values_, snapshot.name, snapshot.up);
+                restore_patterns(sub_values_, snapshot.name, snapshot.sub);
+            }
+        };
+        auto snapshot_guard = scope_exit(restore_snapshots);
+        for (const auto& binding : bindings) if (binding.value)
+            own_values_[binding.name] = {binding.delayed ? *binding.value : evaluate(*binding.value), binding.delayed};
+        auto result = evaluate(raw_args[1]);
+        restore_snapshots();
+        snapshot_guard.release();
         if (control_kind_ == ControlKind::Return && control_target_
             && is_symbol(*control_target_, "Block")) {
             result = control_value_.value_or(symbol("Null"));
@@ -4738,20 +10300,29 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 for (const auto& ignored : iterator.values) { (void)ignored; if (!step()) break; }
                 return;
             }
-            const auto target = *iterator.variable;
+            const auto target = ensure_full_symbol_name(*iterator.variable);
             const auto own = own_values_.find(target);
             const auto saved_own = own == own_values_.end() ? std::nullopt : std::optional<Definition>(own->second);
             const auto saved_down = snapshot_table(down_values_, target);
             const auto saved_up = snapshot_table(up_values_, target);
             const auto saved_sub = snapshot_table(sub_values_, target);
+            auto restore_iterator = [&] {
+                if (saved_own) own_values_[target] = *saved_own;
+                else own_values_.erase(target);
+                if (saved_down) down_values_[target] = *saved_down;
+                else down_values_.erase(target);
+                if (saved_up) up_values_[target] = *saved_up;
+                else up_values_.erase(target);
+                if (saved_sub) sub_values_[target] = *saved_sub;
+                else sub_values_.erase(target);
+            };
+            auto iterator_guard = scope_exit(restore_iterator);
             for (const auto& value : iterator.values) {
                 own_values_[target] = {value, false};
                 if (!step()) break;
             }
-            if (saved_own) own_values_[target] = *saved_own; else own_values_.erase(target);
-            if (saved_down) down_values_[target] = *saved_down; else down_values_.erase(target);
-            if (saved_up) up_values_[target] = *saved_up; else up_values_.erase(target);
-            if (saved_sub) sub_values_[target] = *saved_sub; else sub_values_.erase(target);
+            restore_iterator();
+            iterator_guard.release();
         };
         if (name == "Table") {
             bool valid = true;
@@ -4822,7 +10393,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 return;
             }
             if (specification.symbol_name()) {
-                targets.push_back(*specification.symbol_name());
+                targets.push_back(ensure_full_symbol_name(*specification.symbol_name()));
                 return;
             }
             if (specification.kind() != ExprKind::String) return;
@@ -4832,9 +10403,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             for (const auto& [candidate, value] : up_values_) { (void)value; candidates.insert(candidate); }
             for (const auto& [candidate, value] : sub_values_) { (void)value; candidates.insert(candidate); }
             for (const auto& [candidate, value] : user_attributes_) { (void)value; candidates.insert(candidate); }
-            for (const auto& [candidate, value] : system_registry()) { (void)value; candidates.insert(candidate); }
+            candidates.insert(known_symbols_.begin(), known_symbols_.end());
+            for (const auto& [candidate, value] : system_registry()) {
+                (void)value; candidates.insert("System`" + candidate);
+            }
             for (const auto& candidate : candidates)
-                if (wildcard_matches(candidate, specification.text())) targets.push_back(candidate);
+                if (symbol_name_matches(candidate, specification.text())) targets.push_back(candidate);
         };
         for (const auto& specification : raw_args) collect(specification);
         std::vector<Expr> changed;
@@ -4852,9 +10426,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 changed.push_back(string(display_symbol(target).to_input_form()));
             } else if (!protect && was_protected) {
                 user_attributes_[target].erase("Protected");
-                auto system_name = target;
-                if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-                const auto found = system_registry().find(system_name);
+                const auto found = is_built_in_full_name(target)
+                    ? system_registry().find(target.substr(7)) : system_registry().end();
                 if (found != system_registry().end()
                     && std::find(found->second.begin(), found->second.end(), "Protected")
                         != found->second.end())
@@ -4870,7 +10443,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto value = delayed ? raw_args[1] : evaluate(raw_args[1]);
         if (!delayed && raw_args[0].has_head("Attributes") && raw_args[0].args().size() == 1
             && raw_args[0].args()[0].symbol_name()) {
-            const auto target_name = *raw_args[0].args()[0].symbol_name();
+            const auto target_name = ensure_full_symbol_name(
+                *raw_args[0].args()[0].symbol_name());
             if (symbol_has_attribute(target_name, "Locked")) {
                 const auto message = call("MessageName", {symbol("Attributes"), string("locked")});
                 emit_message(message, "Attributes::locked: Symbol "
@@ -4881,9 +10455,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             const auto values = value.has_head("List") ? value.args() : std::vector<Expr>{value};
             for (const auto& attribute : values) if (attribute.symbol_name())
                 replacement.insert(system_dispatch_name(*attribute.symbol_name()));
-            auto system_name = target_name;
-            if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-            const auto system = system_registry().find(system_name);
+            const auto system = is_built_in_full_name(target_name)
+                ? system_registry().find(target_name.substr(7)) : system_registry().end();
             const bool system_protected = system != system_registry().end()
                 && std::find(system->second.begin(), system->second.end(), "Protected")
                     != system->second.end();
@@ -4894,13 +10467,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return value;
         }
         const auto lhs = normalize_assignment_lhs(raw_args[0]);
-        const auto target = assignment_target(lhs);
+        auto target = assignment_target(lhs);
         if (!target) {
             const auto message = call("MessageName", {symbol(name), string("error")});
             emit_message(message, name + "::error: " + name
                 + " does not support this left-hand side in Tungsten yet.");
             return delayed ? symbol("Null") : call(raw_head, {lhs, value});
         }
+        target->owner = ensure_full_symbol_name(target->owner);
         if (symbol_has_attribute(target->owner, "Protected")
             && !protected_value_mutation_exception(target->owner)) {
             const auto message = call("MessageName", {symbol(name), string("wrsym")});
@@ -4959,7 +10533,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto old_value = evaluate(raw_args[0]);
         const auto delta = name == "Increment" || name == "PreIncrement" ? 1L : -1L;
         const auto new_value = evaluate(call("Plus", {old_value, integer(delta)}));
-        own_values_[*raw_args[0].symbol_name()] = {new_value, false};
+        own_values_[ensure_full_symbol_name(*raw_args[0].symbol_name())] = {
+            new_value, false};
         return name == "Increment" || name == "Decrement" ? old_value : new_value;
     }
     if ((name == "Increment" || name == "Decrement" || name == "PreIncrement"
@@ -4973,7 +10548,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (raw_args.size() != 3 || !raw_args[0].symbol_name()) return call(raw_head, raw_args);
         const bool delayed = name == "TagSetDelayed";
         const auto value = delayed ? raw_args[2] : evaluate(raw_args[2]);
-        const auto tag = *raw_args[0].symbol_name();
+        const auto tag = ensure_full_symbol_name(*raw_args[0].symbol_name());
         if (symbol_has_attribute(tag, "Protected")) {
             const auto message = call("MessageName", {symbol(name), string("wrsym")});
             emit_message(message, name + "::wrsym: Symbol "
@@ -4982,6 +10557,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         const auto lhs = normalize_assignment_lhs(raw_args[1]);
         auto natural = assignment_target(lhs);
+        if (natural) natural->owner = ensure_full_symbol_name(natural->owner);
         DefinitionTable* table = nullptr;
         AssignmentKind kind = AssignmentKind::Up;
         if (natural && natural->owner == tag) kind = natural->kind;
@@ -5020,13 +10596,15 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         auto target = assignment_target(lhs);
         if (name == "TagUnset") {
             if (!raw_args[0].symbol_name()) return symbol("$Failed");
-            const auto tag = *raw_args[0].symbol_name();
+            const auto tag = ensure_full_symbol_name(*raw_args[0].symbol_name());
+            if (target) target->owner = ensure_full_symbol_name(target->owner);
             if (!target || target->owner != tag) {
                 if (!tag_occurs_in_upvalue_position(tag, lhs)) return symbol("$Failed");
                 target = AssignmentTarget{AssignmentKind::Up, tag};
             }
         }
         if (!target) return symbol("$Failed");
+        target->owner = ensure_full_symbol_name(target->owner);
         if (symbol_has_attribute(target->owner, "Protected")
             && !protected_value_mutation_exception(target->owner)) {
             const auto message = call("MessageName", {symbol(name), string("wrsym")});
@@ -5049,7 +10627,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return found->second.size() == old_size ? symbol("$Failed") : symbol("Null");
     }
     if (name == "Clear" || name == "ClearAll") {
-        auto clear_name = [&](const std::string& target) {
+        auto clear_name = [&](const std::string& raw_target) {
+            const auto target = ensure_full_symbol_name(raw_target);
             if (symbol_has_attribute(target, "Locked")) {
                 const auto message = call("MessageName", {symbol(name), string("locked")});
                 emit_message(message, name + "::locked: Symbol "
@@ -5077,7 +10656,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 for (const auto& [candidate, value] : down_values_) { (void)value; candidates.insert(candidate); }
                 for (const auto& [candidate, value] : up_values_) { (void)value; candidates.insert(candidate); }
                 for (const auto& [candidate, value] : sub_values_) { (void)value; candidates.insert(candidate); }
-                for (const auto& candidate : candidates) if (wildcard_matches(candidate, target.text())) clear_name(candidate);
+                candidates.insert(known_symbols_.begin(), known_symbols_.end());
+                for (const auto& [candidate, value] : system_registry()) {
+                    (void)value; candidates.insert("System`" + candidate);
+                }
+                for (const auto& candidate : candidates)
+                    if (symbol_name_matches(candidate, target.text())) clear_name(candidate);
             }
         };
         for (const auto& target : raw_args) clear_one(target);
@@ -5089,7 +10673,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto attributes = raw_args[1].has_head("List") ? raw_args[1].args() : std::vector<Expr>{raw_args[1]};
         for (const auto& target : targets) {
             if (!target.symbol_name()) continue;
-            const auto target_name = *target.symbol_name();
+            const auto target_name = ensure_full_symbol_name(*target.symbol_name());
             if (symbol_has_attribute(target_name, "Locked")) {
                 const auto message = call("MessageName", {symbol("Attributes"), string("locked")});
                 emit_message(message, "Attributes::locked: Symbol "
@@ -5105,9 +10689,8 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 } else {
                     stored.erase(value);
                     if (value == "Protected") {
-                        auto system_name = target_name;
-                        if (system_name.compare(0, 7, "System`") == 0) system_name.erase(0, 7);
-                        const auto system = system_registry().find(system_name);
+                        const auto system = is_built_in_full_name(target_name)
+                            ? system_registry().find(target_name.substr(7)) : system_registry().end();
                         if (system != system_registry().end()
                             && std::find(system->second.begin(), system->second.end(), "Protected")
                                 != system->second.end())
@@ -5135,18 +10718,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         Expr target = raw_args[0];
         if (target.kind() == ExprKind::String) target = symbol(target.text());
         if (!target.symbol_name()) return list({});
-        std::vector<Expr> rules;
-        if (name == "OwnValues") {
-            if (const auto found = own_values_.find(*target.symbol_name()); found != own_values_.end())
-                rules.push_back(call("RuleDelayed", {call("HoldPattern", {target}), found->second.value}));
-        } else {
-            const DefinitionTable* table = name == "DownValues" ? &down_values_
-                : name == "UpValues" ? &up_values_ : name == "SubValues" ? &sub_values_ : nullptr;
-            if (table) if (const auto found = table->find(*target.symbol_name()); found != table->end())
-                for (const auto& definition : found->second)
-                    rules.push_back(call("RuleDelayed", {call("HoldPattern", {definition.lhs}), definition.value}));
-        }
-        return list(std::move(rules));
+        const auto kind = name == "OwnValues" ? ValueKind::Own
+            : name == "DownValues" ? ValueKind::Down
+            : name == "UpValues" ? ValueKind::Up
+            : name == "SubValues" ? ValueKind::Sub : ValueKind::N;
+        return list(value_rules(target, kind));
     }
     if (name == "CompoundExpression") {
         Expr result = symbol("Null");
@@ -5154,6 +10730,12 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::size_t jumps = 0;
         while (cursor < raw_args.size() && jumps < 100000) {
             result = evaluate(raw_args[cursor++]);
+            if (aborted_ && !abort_protect_scopes_.empty()) {
+                aborted_ = false;
+                abort_protect_scopes_.back() = true;
+                result = symbol("Null");
+                continue;
+            }
             if (control_kind_ == ControlKind::Goto && control_target_) {
                 const auto label = std::find_if(raw_args.begin(), raw_args.end(), [&](const Expr& candidate) {
                     return candidate.has_head("Label") && candidate.args().size() == 1
@@ -5233,10 +10815,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (name == "ValueQ" && raw_args.size() == 1) {
         const auto evaluated = evaluate(raw_args[0]);
-        return boolean(evaluated != raw_args[0] || (raw_args[0].symbol_name() && own_values_.count(*raw_args[0].symbol_name()) != 0));
+        return boolean(evaluated != raw_args[0] || (raw_args[0].symbol_name()
+            && own_values_.count(resolve_full_symbol_name(*raw_args[0].symbol_name())) != 0));
     }
 
     auto head = evaluate(raw_head);
+    const auto argument_dispatch_name = head.symbol_name()
+        ? system_dispatch_name(*head.symbol_name()) : std::string{};
     const auto call_attributes = attributes_for(head);
     const bool hold_all_complete = call_attributes.count("HoldAllComplete") != 0;
     const bool hold_all = hold_all_complete || call_attributes.count("HoldAll") != 0;
@@ -5245,11 +10830,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     std::vector<Expr> args;
     for (std::size_t argument_index = 0; argument_index < raw_args.size(); ++argument_index) {
         const auto& argument = raw_args[argument_index];
-        const bool pattern_held = argument_index >= 1 && (name == "MatchQ" || name == "FreeQ" || name == "Cases" || name == "DeleteCases"
+        const bool pattern_held = (argument_index == 1
+                && (name == "StringCases" || name == "StringReplace"))
+            || (argument_index >= 1 && (name == "MatchQ" || name == "FreeQ" || name == "Cases" || name == "DeleteCases"
             || name == "Count" || name == "MemberQ" || name == "FirstCase" || name == "Position" || name == "ReplaceAll"
-            || name == "ReplaceRepeated" || name == "Replace" || name == "ReplaceAt");
+            || name == "ReplaceRepeated" || name == "Replace" || name == "ReplaceAt"));
         const bool held = hold_all || (hold_first && argument_index == 0) || (hold_rest && argument_index > 0);
-        if (argument.has_head("Unevaluated") && argument.args().size() == 1) args.push_back(argument.args()[0]);
+        if (argument.has_head("Unevaluated") && argument.args().size() == 1)
+            args.push_back(argument);
         else if (held) {
             if (!hold_all_complete && argument.has_head("Evaluate") && argument.args().size() == 1)
                 args.push_back(evaluate(argument.args()[0]));
@@ -5269,7 +10857,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         for (const auto& argument : args) {
             if (argument.has_head("Splice") && !argument.args().empty() && argument.args().size() <= 2) {
                 const auto target_head = argument.args().size() == 2 ? argument.args()[1] : symbol("List");
-                if (head == target_head && argument.args()[0].kind() == ExprKind::Call) {
+                if (head == target_head && argument.args()[0].has_head("List")) {
                     spliced.insert(spliced.end(), argument.args()[0].args().begin(), argument.args()[0].args().end());
                     changed = true;
                     continue;
@@ -5289,6 +10877,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         args = std::move(flattened);
     }
     if (call_attributes.count("Orderless") != 0) std::sort(args.begin(), args.end(), expression_less);
+    if (unevaluated_transparent_head(argument_dispatch_name)) {
+        for (auto& argument : args)
+            if (argument.has_head("Unevaluated") && argument.args().size() == 1)
+                argument = argument.args()[0];
+    }
 
     if (head.has_head("Function") && !head.args().empty()) {
         if (head.args().size() >= 2 && !args.empty() && !is_symbol(head.args()[0], "Null")) {
@@ -5309,9 +10902,27 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (found != rules->end()) return evaluate(found->args()[1]);
         return call("Missing", {string("KeyAbsent"), key});
     }
+    if (failure_value(head)) {
+        if (args.size() != 1) return call(head, args);
+        if (args[0].kind() == ExprKind::String)
+            return failure_property(head, args[0]);
+        const auto message = call("MessageName", {
+            symbol("General"), string("error")});
+        emit_message(message,
+            "General::error: Failure property lookup expects a string key.");
+        return call(head, args);
+    }
     const auto* evaluated_name = head.symbol_name();
     const auto function = evaluated_name ? system_dispatch_name(*evaluated_name) : std::string{};
     const auto evaluated_expression = call(head, args);
+    Expr tensor_matrix_result;
+    std::string tensor_matrix_error;
+    if (evaluate_tensor_matrix_call(
+            head, args, tensor_matrix_result, tensor_matrix_error)) {
+        if (!tensor_matrix_error.empty())
+            return raw_evaluation_error(tensor_matrix_error);
+        return tensor_matrix_result;
+    }
     if (call_attributes.count("Listable") != 0) {
         std::optional<std::size_t> list_length;
         bool incompatible = false;
@@ -5320,7 +10931,20 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             if (!list_length) list_length = argument.args().size();
             else if (*list_length != argument.args().size()) incompatible = true;
         }
-        if (incompatible) return evaluated_expression;
+        if (incompatible) {
+            if (function == "CompositeQ") {
+                const auto message_head = raw_head.symbol_name()
+                    ? raw_head : symbol("General");
+                const auto message_prefix = message_head.symbol_name()
+                    ? system_dispatch_name(*message_head.symbol_name()) : "General";
+                const auto message = call("MessageName", {
+                    message_head, string("error")});
+                emit_message(message, message_prefix
+                    + "::error: Listable Function arguments have incompatible list lengths.");
+                return call(raw_head, raw_args);
+            }
+            return evaluated_expression;
+        }
         if (list_length) {
             std::vector<Expr> threaded;
             for (std::size_t index = 0; index < *list_length; ++index) {
@@ -5333,33 +10957,70 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return list(std::move(threaded));
         }
     }
+    if (head.has_head("Function")) return evaluate(call(head, args));
     if (!hold_all_complete) if (auto result = apply_up_values(evaluated_expression)) return *result;
     if (evaluated_name) {
         if (auto result = apply_down_values(evaluated_expression)) return *result;
     } else {
         if (auto result = apply_sub_values(evaluated_expression)) return *result;
     }
-    if (head.kind() == ExprKind::SparseArray && args.size() == 1 && args[0].kind() == ExprKind::String) {
+    if (head.kind() == ExprKind::SparseArray && args.size() == 1) {
+        if (args[0].kind() != ExprKind::String) {
+            const auto message = call("MessageName", {
+                symbol("General"), string("error")});
+            emit_message(message,
+                "General::error: SparseArray properties must be requested by string name.");
+            return call(raw_head, raw_args);
+        }
+        if (args[0].text() == "ImplicitValue")
+            return head.fill_value();
+        if (args[0].text() == "ExplicitLength")
+            return integer(mpz_class(
+                std::to_string(head.sparse_entries().size()), 10));
+        if (args[0].text() == "ExplicitValues") {
+            std::vector<Expr> values;
+            values.reserve(head.sparse_entries().size());
+            for (const auto& entry : head.sparse_entries())
+                values.push_back(entry.value);
+            return rebuild_evaluated_call(symbol("List"), std::move(values));
+        }
         if (args[0].text() == "ExplicitPositions") {
             std::vector<Expr> positions;
             for (const auto& entry : head.sparse_entries()) { std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index)); positions.push_back(list(std::move(indices))); }
             return list(std::move(positions));
         }
         if (args[0].text() == "Density") {
-            std::size_t count = 1; for (const auto dimension : head.dimensions()) count *= dimension;
-            return count == 0 ? integer(0L) : rational(mpz_class(head.sparse_entries().size()), mpz_class(count));
+            mpz_class count = 1;
+            for (const auto dimension : head.dimensions())
+                count *= mpz_class(std::to_string(dimension), 10);
+            return count == 0 ? integer(0L)
+                : rational(mpz_class(head.sparse_entries().size()), std::move(count));
         }
+        const auto message = call("MessageName", {
+            symbol("General"), string("error")});
+        emit_message(message, "General::error: Unsupported SparseArray property: "
+            + args[0].text() + ".");
+        return call(raw_head, raw_args);
     }
     if (head.has_head("SameAs") && head.args().size() == 1)
         return boolean(args.size() == 1 && args[0] == head.args()[0]);
     if (head.has_head("UnsameAs") && head.args().size() == 1)
         return boolean(args.size() == 1 && args[0] != head.args()[0]);
-    if (head.has_head("Failsafe") && !head.args().empty()) {
-        for (const auto& argument : args) if (argument.has_head("Missing") || argument.has_head("Failure")) return argument;
-        bool valid = true;
-        if (head.args().size() >= 2) valid = is_symbol(evaluate(call(head.args()[1], args)), "True");
-        if (!valid) return head.args().size() >= 3 ? evaluate(call(head.args()[2], args)) : symbol("FailsafeFailed");
-        return evaluate(call(head.args()[0], args));
+    if (head.has_head("Failsafe") && !head.args().empty()
+        && head.args().size() <= 3) {
+        if (head.args().size() == 1) {
+            for (const auto& argument : args)
+                if (confirmation_failure_value(argument)) return argument;
+            return evaluate(call(head.args()[0], args));
+        }
+        const auto test = evaluate(call(head.args()[1], args));
+        if (immediate_signal_active()) return test;
+        if (is_symbol(test, "True"))
+            return evaluate(call(head.args()[0], args));
+        if (head.args().size() == 3)
+            return evaluate(call(head.args()[2], args));
+        return structured_failure(symbol("FailsafeFailed"), {
+            {"Arguments", call("Hold", args)}});
     }
     if ((head.has_head("Composition") || head.has_head("RightComposition")) && args.size() == 1) {
         auto functions = head.args();
@@ -5367,16 +11028,16 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         Expr value = args[0]; for (const auto& callable : functions) value = evaluate(call(callable, {value}));
         return value;
     }
-    if (head.has_head("MapApply") && head.args().size() == 1 && args.size() == 1 && args[0].kind() == ExprKind::Call) {
-        std::vector<Expr> values;
-        for (const auto& item : args[0].args()) values.push_back(item.kind() == ExprKind::Call
-            ? evaluate(call(head.args()[0], item.args())) : evaluate(call(head.args()[0], {item})));
-        return call(args[0].head(), std::move(values));
-    }
+    if ((head.has_head("MapApply") || head.has_head("MapIndexed"))
+        && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call(head.head(), {head.args()[0], args[0]}));
     if (head.has_head("KeySelect") && head.args().size() == 1 && args.size() == 1)
         return evaluate(call("KeySelect", {args[0], head.args()[0]}));
     if (head.has_head("Select") && head.args().size() == 1 && args.size() == 1)
         return evaluate(call("Select", {args[0], head.args()[0]}));
+    if ((head.has_head("Comap") || head.has_head("ComapApply"))
+        && head.args().size() == 1 && args.size() == 1)
+        return evaluate(call(head.head(), {head.args()[0], args[0]}));
     if ((head.has_head("SortBy") || head.has_head("ReverseSortBy") || head.has_head("OrderingBy")) && head.args().size() == 1 && args.size() == 1)
         return evaluate(call(head.head(), {args[0], head.args()[0]}));
     if ((head.has_head("StringPosition") || head.has_head("StringContainsQ") || head.has_head("StringStartsQ") || head.has_head("StringEndsQ") || head.has_head("StringMatchQ"))
@@ -5391,55 +11052,35 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 values.push_back(evaluate(call("Unique", {item})));
             return list(std::move(values));
         }
-        std::string name;
-        if (args.empty()) name = "$" + std::to_string(++module_counter_);
+        std::string full_name;
+        if (args.empty()) full_name = "Global`$" + std::to_string(++module_counter_);
         else if (args[0].kind() == ExprKind::String)
-            name = args[0].text() + std::to_string(++unique_string_counters_[args[0].text()]);
+            full_name = "Global`" + args[0].text()
+                + std::to_string(++unique_string_counters_[args[0].text()]);
         else if (args[0].symbol_name())
-            name = *args[0].symbol_name() + "$" + std::to_string(++module_counter_);
+            full_name = ensure_full_symbol_name(*args[0].symbol_name())
+                + "$" + std::to_string(++module_counter_);
         else return call(head, args);
-        user_symbol_registry().insert(full_symbol_name(symbol(name)));
-        return symbol(name);
+        known_symbols_.insert(full_name);
+        return display_symbol(full_name);
     }
     if ((function == "Composition" || function == "RightComposition") && !args.empty()) return call(head, args);
-    if (function == "SparseArray" && !args.empty() && args.size() <= 3) {
-        const auto fill = args.size() == 3 ? args[2] : integer(0L);
-        if (args[0].has_head("List") && (!args[0].args().empty() && !args[0].args().front().has_head("Rule")
-            && !args[0].args().front().has_head("RuleDelayed"))) {
-            if (const auto result = sparse_from_dense(args[0], fill)) return *result;
-        }
-        std::vector<std::size_t> dimensions;
-        if (args.size() >= 2 && args[1].has_head("List")) {
-            bool valid = true; for (const auto& item : args[1].args()) { const auto value = machine_index(item); if (!value || *value < 0) { valid = false; break; } dimensions.push_back(static_cast<std::size_t>(*value)); }
-            if (!valid) return call(head, args);
-        }
-        std::vector<SparseEntry> entries;
-        auto add = [&](std::vector<std::size_t> indices, const Expr& value) {
-            if (value == fill || std::any_of(indices.begin(), indices.end(), [](std::size_t index) { return index == 0; })) return;
-            if (dimensions.size() < indices.size()) dimensions.resize(indices.size(), 0);
-            for (std::size_t index = 0; index < indices.size(); ++index) dimensions[index] = std::max(dimensions[index], indices[index]);
-            if (std::none_of(entries.begin(), entries.end(), [&](const SparseEntry& entry) { return entry.indices == indices; })) entries.push_back({std::move(indices), value});
-        };
-        const auto source = args[0].has_head("List") ? args[0].args() : std::vector<Expr>{args[0]};
-        for (const auto& rule : source) {
-            if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed")) || rule.args().size() != 2 || !rule.args()[0].has_head("List")) continue;
-            if (source.size() == 1 && rule.args()[1].has_head("List") && rule.args()[0].args().size() == rule.args()[1].args().size()
-                && std::all_of(rule.args()[0].args().begin(), rule.args()[0].args().end(), [](const Expr& item) { return machine_index(item).has_value(); })) {
-                for (std::size_t index = 0; index < rule.args()[0].args().size(); ++index)
-                    add({static_cast<std::size_t>(*machine_index(rule.args()[0].args()[index]))}, rule.args()[1].args()[index]);
-                continue;
-            }
-            std::vector<std::size_t> indices; bool valid = true;
-            for (const auto& item : rule.args()[0].args()) { const auto value = machine_index(item); if (!value || *value <= 0) { valid = false; break; } indices.push_back(static_cast<std::size_t>(*value)); }
-            if (valid) add(std::move(indices), rule.args()[1]);
-        }
-        if (!dimensions.empty()) return sparse_array(std::move(dimensions), std::move(entries), fill);
+    if (function == "SparseArray") {
+        const auto result = construct_sparse_array(args);
+        if (result.value) return *result.value;
+        return raw_evaluation_error(result.error);
     }
     if ((function == "Plus" || function == "Times") && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.kind() == ExprKind::SparseArray; })) {
-        std::vector<Expr> dense; for (const auto& value : args) dense.push_back(sparse_dense_value(value));
-        const auto result = evaluate(call(function, std::move(dense)));
-        if (const auto sparse = sparse_from_dense(result)) return *sparse;
-        return result;
+        auto current = args.front();
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            const auto result = sparse_binary_elementwise(
+                function, current, args[index],
+                [this](const Expr& value) { return evaluate(value); });
+            if (!result.value)
+                return raw_evaluation_error(result.error);
+            current = *result.value;
+        }
+        return current;
     }
     if ((function == "Plus" || function == "Times" || function == "Power")
         && std::any_of(args.begin(), args.end(), [](const Expr& value) { return value.has_head("List"); })) {
@@ -6010,31 +11651,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             const auto parsed = context.parse(args[0]);
             const auto coefficients = parsed ? rational_coefficients(context, *parsed) : std::nullopt;
             if (coefficients && polynomial_degree(*coefficients) > 0) {
-                std::vector<std::pair<mpq_class, long>> exact_roots;
-                std::set<std::string> seen;
-                for (long denominator = 1; denominator <= 128; ++denominator)
-                    for (long numerator = -512; numerator <= 512; ++numerator) {
-                        if (std::gcd(std::abs(numerator), denominator) != 1) continue;
-                        mpq_class candidate(numerator, denominator);
-                        if (evaluate_polynomial(*coefficients, candidate) != 0) continue;
-                        if (!seen.insert(candidate.get_str()).second) continue;
-                        exact_roots.emplace_back(candidate,
-                            root_multiplicity_at(*coefficients, candidate));
-                    }
-                std::sort(exact_roots.begin(), exact_roots.end(), [](const auto& left, const auto& right) {
-                    return left.first < right.first;
-                });
-                RationalPolynomial remaining = *coefficients;
-                for (const auto& [value, multiplicity] : exact_roots)
-                    for (long count = 0; count < multiplicity; ++count)
-                        remaining = rational_polynomial_divide(remaining, {-value, 1}).first;
-                if (distinct_real_root_count(remaining) == 0) {
+                if (const auto roots = isolate_real_roots(*coefficients)) {
                     std::vector<Expr> intervals;
                     std::vector<Expr> multiplicities;
-                    for (const auto& [value, multiplicity] : exact_roots) {
-                        const auto expression = from_rational(value);
-                        intervals.push_back(list({expression, expression}));
-                        multiplicities.push_back(list({integer(multiplicity)}));
+                    for (const auto& interval : *roots) {
+                        intervals.push_back(list({from_rational(interval.lower),
+                            from_rational(interval.upper)}));
+                        multiplicities.push_back(list({integer(
+                            isolated_root_multiplicity(*coefficients, interval))}));
                     }
                     return list({list(std::move(intervals)), list(std::move(multiplicities))});
                 }
@@ -6429,34 +12053,61 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             if (function == "Resultant") {
                 const auto other = context.parse(args[1]);
                 if (other) if (const auto value = polynomial_resultant(context, *polynomial, *other)) return *value;
-            } else if (!polynomial->empty()) {
+            } else if (polynomial->empty() || context.degree(*polynomial) <= 0) {
+                return integer(0L);
+            } else {
                 const auto degree = context.degree(*polynomial); const auto derivative = context.derivative(*polynomial);
                 if (const auto value = polynomial_resultant(context, *polynomial, derivative)) {
-                    auto result = context.coefficient_divide(*value,
-                        context.coefficient(*polynomial, NativeMonomial{degree}));
+                    const auto leading = context.coefficient(
+                        *polynomial, NativeMonomial{degree});
+                    Expr result;
+                    if (const auto exact_numerator = as_rational(*value),
+                        exact_denominator = as_rational(leading);
+                        exact_numerator && exact_denominator && *exact_denominator != 0) {
+                        result = from_rational(*exact_numerator / *exact_denominator);
+                    } else {
+                        const auto coefficient_variables = polynomial_variables({*value, leading});
+                        const auto coefficient_context = polynomial_context(coefficient_variables);
+                        const auto parsed_numerator = coefficient_context.parse(*value);
+                        const auto parsed_denominator = coefficient_context.parse(leading);
+                        if (parsed_numerator && parsed_denominator && !parsed_denominator->empty()) {
+                            const auto division = coefficient_context.divide(
+                                *parsed_numerator, {*parsed_denominator});
+                            result = division.second.empty()
+                                ? coefficient_context.expression(division.first[0])
+                                : context.coefficient_divide(*value, leading);
+                        } else result = context.coefficient_divide(*value, leading);
+                    }
                     if (((degree * (degree - 1) / 2) & 1L) != 0)
                         result = context.coefficient_multiply(integer(-1L), result);
-                    return result;
+                    const auto expanded = evaluate(call("Expand", {result}));
+                    return factor_common_additive_expression(expanded,
+                        [this](const Expr& value) { return evaluate(value); });
                 }
             }
         }
     }
     if (function == "Subresultants" && args.size() == 3) {
-        const auto variable = args[2].has_head("List") && args[2].args().size() == 1 ? args[2].args()[0] : args[2];
+        if (args[2].has_head("List") && args[2].args().size() != 1)
+            return call(head, args);
+        const auto variable = args[2].has_head("List") ? args[2].args()[0] : args[2];
         const auto context = polynomial_context({variable}); const auto left = context.parse(args[0]), right = context.parse(args[1]);
         if (left && right && !left->empty() && !right->empty()) {
             const auto limit = std::min(context.degree(*left), context.degree(*right));
             std::vector<Expr> coefficients(static_cast<std::size_t>(limit + 1), integer(0L));
-            if (const auto resultant = polynomial_resultant(context, *left, *right)) coefficients[0] = *resultant;
-            auto previous = *left, current = *right;
-            while (!current.empty()) {
-                const auto degree = context.degree(current);
-                if (degree >= 1 && degree <= limit)
-                    coefficients[static_cast<std::size_t>(degree)] = context.coefficient(current, NativeMonomial{degree});
-                auto remainder = context.divide(previous, {current}).second;
-                previous = std::move(current); current = std::move(remainder);
+            if (const auto sequence = native_subresultant_sequence(context, *left, *right)) {
+                for (const auto& polynomial : *sequence) {
+                    const auto degree = context.degree(polynomial);
+                    if (degree >= 0 && degree <= limit) {
+                        const auto expanded = evaluate(call("Expand", {
+                            context.coefficient(polynomial, NativeMonomial{degree})}));
+                        coefficients[static_cast<std::size_t>(degree)] =
+                            factor_common_additive_expression(expanded,
+                                [this](const Expr& value) { return evaluate(value); });
+                    }
+                }
+                return list(std::move(coefficients));
             }
-            return list(std::move(coefficients));
         }
     }
     if ((function == "PolynomialGCD" || function == "PolynomialLCM") && !args.empty()) {
@@ -6785,10 +12436,216 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return {value, integer(1L)};
         };
         const auto parts = split(split, args[0]);
-        auto variables = args.size() == 2 ? std::vector<Expr>{args[1]} : polynomial_variables({parts.first, parts.second});
+        auto variables = args.size() == 2 ? std::vector<Expr>{args[1]}
+            : polynomial_variables({parts.first, parts.second});
         if (!variables.empty()) {
-            const auto context = polynomial_context(variables); const auto numerator = context.parse(parts.first), denominator = context.parse(parts.second);
+            const auto context = polynomial_context(
+                function == "Apart" ? std::vector<Expr>{variables.front()} : variables);
+            const auto numerator = context.parse(parts.first);
+            const auto denominator = context.parse(parts.second);
             if (numerator && denominator && !denominator->empty()) {
+                if (function == "Apart" && context.variables().size() == 1) {
+                    struct ApartFactor {
+                        NativePolynomial polynomial;
+                        Expr expression;
+                        long multiplicity = 1;
+                    };
+                    std::vector<ApartFactor> factors;
+                    std::optional<Expr> outside_scalar;
+                    auto scaled_numerator = *numerator;
+                    const auto exact_denominator = rational_coefficients(context, *denominator);
+                    if (!exact_denominator && context.degree(*denominator) == 1
+                        && context.degree(*numerator) < 1)
+                        return args[0];
+                    if (exact_denominator) {
+                        const auto factorization = factor_rational_polynomial(*exact_denominator);
+                        if (factorization.content == 0) return call(head, args);
+                        scaled_numerator = scale_native_polynomial(context, scaled_numerator,
+                            from_rational(1 / factorization.content));
+                        for (const auto& [integer_factor, multiplicity] : factorization.factors) {
+                            auto native_factor = context.zero();
+                            for (std::size_t exponent = 0; exponent < integer_factor.size(); ++exponent) {
+                                if (integer_factor[exponent] == 0) continue;
+                                native_factor = context.add(native_factor,
+                                    context.monomial_polynomial(
+                                        NativeMonomial{static_cast<long>(exponent)},
+                                        integer(integer_factor[exponent])));
+                            }
+                            factors.push_back({native_factor,
+                                context.expression(native_factor), multiplicity});
+                        }
+                    } else if (context.degree(*denominator) == 1) {
+                        const auto leading = context.coefficient(
+                            *denominator, NativeMonomial{1});
+                        auto normalized = context.zero();
+                        for (const auto& [monomial, coefficient] : denominator->terms)
+                            normalized = context.add(normalized,
+                                context.monomial_polynomial(monomial,
+                                    context.coefficient_divide(coefficient, leading)));
+                        outside_scalar = leading;
+                        factors.push_back({normalized,
+                            context.expression(normalized), 1L});
+                    } else if (denominator->terms.size() == 1) {
+                        const auto& [monomial, coefficient] = *denominator->terms.begin();
+                        if (monomial.size() == 1 && monomial[0] > 0) {
+                            outside_scalar = coefficient;
+                            const auto native_factor = context.monomial_polynomial(
+                                NativeMonomial{1}, integer(1L));
+                            factors.push_back({native_factor,
+                                context.variables()[0], monomial[0]});
+                        }
+                    }
+                    if (!factors.empty()) {
+                        auto factored_denominator = context.constant(integer(1L));
+                        for (const auto& factor : factors) {
+                            factored_denominator = context.multiply(factored_denominator,
+                                context.power(factor.polynomial,
+                                    static_cast<unsigned long>(factor.multiplicity)));
+                        }
+                        const auto division = context.divide(
+                            scaled_numerator, {factored_denominator});
+                        const auto& quotient = division.first[0];
+                        const auto& remainder = division.second;
+                        const auto degree = context.degree(factored_denominator);
+                        if (degree > 0 && degree <= 64) {
+                            struct ApartBasis {
+                                std::size_t factor = 0;
+                                long power = 1;
+                                long numerator_degree = 0;
+                                NativePolynomial polynomial;
+                            };
+                            std::vector<ApartBasis> basis;
+                            for (std::size_t factor_index = 0;
+                                factor_index < factors.size(); ++factor_index) {
+                                const auto& native_factor = factors[factor_index].polynomial;
+                                const auto factor_degree = context.degree(native_factor);
+                                for (long power = 1;
+                                    power <= factors[factor_index].multiplicity; ++power) {
+                                    const auto divisor = context.power(native_factor,
+                                        static_cast<unsigned long>(power));
+                                    const auto complement = context.divide(
+                                        factored_denominator, {divisor});
+                                    if (!complement.second.empty()) continue;
+                                    for (long numerator_degree = 0;
+                                        numerator_degree < factor_degree; ++numerator_degree) {
+                                        const auto monomial = context.monomial_polynomial(
+                                            NativeMonomial{numerator_degree}, integer(1L));
+                                        basis.push_back({factor_index, power,
+                                            numerator_degree,
+                                            context.multiply(complement.first[0], monomial)});
+                                    }
+                                }
+                            }
+                            if (basis.size() == static_cast<std::size_t>(degree)) {
+                                std::vector<std::vector<mpq_class>> matrix(
+                                    static_cast<std::size_t>(degree),
+                                    std::vector<mpq_class>(basis.size()));
+                                bool exact_matrix = true;
+                                for (std::size_t column = 0; column < basis.size(); ++column)
+                                    for (long row = 0; row < degree; ++row) {
+                                        const auto coefficient = as_rational(context.coefficient(
+                                            basis[column].polynomial, NativeMonomial{row}));
+                                        if (!coefficient) { exact_matrix = false; break; }
+                                        matrix[static_cast<std::size_t>(row)][column] = *coefficient;
+                                    }
+                                std::vector<Expr> solution(static_cast<std::size_t>(degree));
+                                for (long row = 0; row < degree; ++row)
+                                    solution[static_cast<std::size_t>(row)] = context.coefficient(
+                                        remainder, NativeMonomial{row});
+                                if (exact_matrix) {
+                                    for (std::size_t column = 0; column < basis.size(); ++column) {
+                                        auto pivot = column;
+                                        while (pivot < matrix.size() && matrix[pivot][column] == 0)
+                                            ++pivot;
+                                        if (pivot == matrix.size()) { exact_matrix = false; break; }
+                                        if (pivot != column) {
+                                            std::swap(matrix[pivot], matrix[column]);
+                                            std::swap(solution[pivot], solution[column]);
+                                        }
+                                        const auto pivot_value = matrix[column][column];
+                                        for (std::size_t inner = column; inner < basis.size(); ++inner)
+                                            matrix[column][inner] /= pivot_value;
+                                        solution[column] = context.coefficient_multiply(
+                                            from_rational(1 / pivot_value), solution[column]);
+                                        for (std::size_t row = 0; row < matrix.size(); ++row) {
+                                            if (row == column || matrix[row][column] == 0) continue;
+                                            const auto multiplier = matrix[row][column];
+                                            for (std::size_t inner = column; inner < basis.size(); ++inner)
+                                                matrix[row][inner] -= multiplier * matrix[column][inner];
+                                            solution[row] = context.coefficient_add(solution[row],
+                                                context.coefficient_multiply(from_rational(-multiplier),
+                                                    solution[column]));
+                                        }
+                                    }
+                                }
+                                if (exact_matrix) {
+                                    std::vector<NativePolynomial> numerators;
+                                    numerators.reserve(factors.size());
+                                    for (const auto& factor : factors)
+                                        for (long power = 0; power < factor.multiplicity; ++power)
+                                            numerators.push_back(context.zero());
+                                    std::vector<std::size_t> offsets(factors.size());
+                                    std::size_t running = 0;
+                                    for (std::size_t index = 0; index < factors.size(); ++index) {
+                                        offsets[index] = running;
+                                        running += static_cast<std::size_t>(factors[index].multiplicity);
+                                    }
+                                    for (std::size_t index = 0; index < basis.size(); ++index) {
+                                        const auto slot = offsets[basis[index].factor]
+                                            + static_cast<std::size_t>(basis[index].power - 1);
+                                        numerators[slot] = context.add(numerators[slot],
+                                            context.monomial_polynomial(
+                                                NativeMonomial{basis[index].numerator_degree},
+                                                solution[index]));
+                                    }
+                                    std::vector<Expr> terms;
+                                    if (!quotient.empty()) terms.push_back(context.expression(quotient));
+                                    auto factored_numerator_expression = [&](const NativePolynomial& value) {
+                                        const auto coefficients = rational_coefficients(context, value);
+                                        if (!coefficients) return context.expression(value);
+                                        const auto factorization = factor_rational_polynomial(*coefficients);
+                                        std::vector<Expr> product;
+                                        if (factorization.content != 1 || factorization.factors.empty())
+                                            product.push_back(from_rational(factorization.content));
+                                        for (const auto& [factor, multiplicity] : factorization.factors) {
+                                            auto native_factor = context.zero();
+                                            for (std::size_t exponent = 0; exponent < factor.size(); ++exponent) {
+                                                if (factor[exponent] == 0) continue;
+                                                native_factor = context.add(native_factor,
+                                                    context.monomial_polynomial(
+                                                        NativeMonomial{static_cast<long>(exponent)},
+                                                        integer(factor[exponent])));
+                                            }
+                                            auto factor_expression = context.expression(native_factor);
+                                            if (multiplicity != 1)
+                                                factor_expression = call("Power", {
+                                                    factor_expression, integer(multiplicity)});
+                                            product.push_back(std::move(factor_expression));
+                                        }
+                                        return evaluate(call("Times", std::move(product)));
+                                    };
+                                    for (std::size_t factor_index = 0;
+                                        factor_index < factors.size(); ++factor_index)
+                                        for (long power = 1;
+                                            power <= factors[factor_index].multiplicity; ++power) {
+                                            const auto& value = numerators[offsets[factor_index]
+                                                + static_cast<std::size_t>(power - 1)];
+                                            if (value.empty()) continue;
+                                            terms.push_back(evaluate(call("Times", {
+                                                factored_numerator_expression(value),
+                                                call("Power", {factors[factor_index].expression,
+                                                    integer(-power)})})));
+                                        }
+                                    auto result = evaluate(call("Plus", std::move(terms)));
+                                    if (outside_scalar)
+                                        result = evaluate(call("Times", {result,
+                                            call("Power", {*outside_scalar, integer(-1L)})}));
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+                }
                 const auto common = polynomial_gcd(context, *numerator, *denominator);
                 const auto reduced_numerator = context.divide(*numerator, {common}).first[0];
                 const auto reduced_denominator = context.divide(*denominator, {common}).first[0];
@@ -6917,27 +12774,325 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return value;
     }
-    if (function == "FactorList" && args.size() > 1) {
-        std::vector<Expr> factor_arguments{args[0]}; factor_arguments.insert(factor_arguments.end(), args.begin() + 1, args.end());
-        const auto factored = evaluate(call("Factor", factor_arguments));
-        if (!factored.has_head("Factor")) {
-            std::vector<Expr> result{list({integer(1L), integer(1L)})};
-            const auto factors = factored.has_head("Times") ? factored.args() : std::vector<Expr>{factored};
-            for (const auto& factor : factors) {
-                if (factor.has_head("Power") && factor.args().size() == 2 && factor.args()[1].kind() == ExprKind::Integer)
-                    result.push_back(list({factor.args()[0], factor.args()[1]}));
-                else result.push_back(list({factor, integer(1L)}));
+    if (function == "FactorList" && !args.empty()) {
+        bool gaussian = false;
+        bool valid_options = true;
+        std::optional<unsigned long> modulus;
+        for (std::size_t index = 1; index < args.size(); ++index) {
+            if (!args[index].has_head("Rule") || args[index].args().size() != 2
+                || !args[index].args()[0].symbol_name()) {
+                valid_options = false;
+                break;
             }
-            return list(std::move(result));
+            const auto option = system_dispatch_name(
+                *args[index].args()[0].symbol_name());
+            const auto& value = args[index].args()[1];
+            if (option == "GaussianIntegers"
+                && (is_symbol(value, "True") || is_symbol(value, "False"))) {
+                gaussian = gaussian || is_symbol(value, "True");
+            } else if (option == "Extension") {
+                const auto extensions = value.has_head("List")
+                    ? value.args() : std::vector<Expr>{value};
+                if (is_symbol(value, "None") || extensions.empty()) continue;
+                if (!std::all_of(extensions.begin(), extensions.end(), [](const Expr& extension) {
+                        return extension.kind() == ExprKind::Complex
+                            && extension.real_part() == integer(0L)
+                            && extension.imaginary_part() == integer(1L);
+                    })) {
+                    valid_options = false;
+                    break;
+                }
+                gaussian = true;
+            } else if (option == "Modulus" && value.kind() == ExprKind::Integer
+                && value.integer_value() > 1 && value.integer_value().fits_ulong_p()
+                && value.integer_value().get_ui() <= 10000UL) {
+                modulus = value.integer_value().get_ui();
+            } else {
+                valid_options = false;
+                break;
+            }
         }
-    }
-    if (function == "FactorList" && args.size() == 1) {
-        if (args[0] == integer(0L)) return list({list({integer(0L), integer(1L)})});
-        const auto factored = evaluate(call("Factor", {args[0]}));
-        const auto factors = factored.has_head("Times") ? factored.args() : std::vector<Expr>{factored}; std::vector<Expr> result;
-        for (const auto& factor : factors)
-            result.push_back(list({factor, integer(1L)}));
-        return list(std::move(result));
+        if (!valid_options || (gaussian && modulus)) {
+            // Unsupported domains stay inert, matching the compatibility evaluator.
+        } else {
+            const auto variables = polynomial_variables({args[0]});
+            const auto context = polynomial_context(variables);
+            const auto parsed = context.parse(args[0]);
+            if (parsed) {
+                auto polynomial_from_integers = [&](const std::vector<mpz_class>& coefficients) {
+                    auto polynomial = context.zero();
+                    for (std::size_t exponent = 0; exponent < coefficients.size(); ++exponent) {
+                        if (coefficients[exponent] == 0) continue;
+                        NativeMonomial monomial(variables.size(), 0);
+                        if (!monomial.empty()) monomial[0] = static_cast<long>(exponent);
+                        polynomial = context.add(polynomial,
+                            context.monomial_polynomial(monomial,
+                                integer(coefficients[exponent])));
+                    }
+                    return context.expression(polynomial);
+                };
+                auto finish = [&](Expr content,
+                    std::vector<std::pair<Expr, long>> factors,
+                    bool preserve_order = false) {
+                    std::vector<std::pair<Expr, long>> merged;
+                    for (auto& factor_entry : factors) {
+                        auto& factor = factor_entry.first;
+                        const auto multiplicity = factor_entry.second;
+                        const auto found = std::find_if(merged.begin(), merged.end(),
+                            [&](const auto& item) { return item.first == factor; });
+                        if (found == merged.end())
+                            merged.emplace_back(std::move(factor), multiplicity);
+                        else found->second += multiplicity;
+                    }
+                    if (!preserve_order)
+                        std::stable_sort(merged.begin(), merged.end(), [](const auto& left, const auto& right) {
+                            return expression_less(left.first, right.first);
+                        });
+                    std::vector<Expr> entries{list({std::move(content), integer(1L)})};
+                    for (auto& [factor, multiplicity] : merged)
+                        entries.push_back(list({std::move(factor), integer(multiplicity)}));
+                    return list(std::move(entries));
+                };
+
+                if (variables.empty()) {
+                    if (const auto value = as_rational(args[0]))
+                        return finish(from_rational(*value), {});
+                } else if (variables.size() == 1) {
+                    const auto coefficients = rational_coefficients(context, *parsed);
+                    if (coefficients) {
+                        if (modulus) {
+                            const auto prime = mpz_class(*modulus);
+                            std::vector<mpz_class> modular_coefficients;
+                            modular_coefficients.reserve(coefficients->size());
+                            bool supported = true;
+                            for (const auto& coefficient : *coefficients) {
+                                mpz_class denominator = coefficient.get_den() % prime;
+                                if (denominator < 0) denominator += prime;
+                                mpz_class inverse;
+                                if (mpz_invert(inverse.get_mpz_t(), denominator.get_mpz_t(),
+                                        prime.get_mpz_t()) == 0) {
+                                    supported = false;
+                                    break;
+                                }
+                                mpz_class residue = (coefficient.get_num() % prime) * inverse % prime;
+                                if (residue < 0) residue += prime;
+                                modular_coefficients.push_back(std::move(residue));
+                            }
+                            if (supported && !modular_coefficients.empty()
+                                && modular_coefficients.back() != 0) {
+                                auto balanced = [&](mpz_class value) {
+                                    value %= prime;
+                                    if (value < 0) value += prime;
+                                    if (value * 2 > prime) value -= prime;
+                                    return value;
+                                };
+                                mpz_class leading_inverse;
+                                mpz_invert(leading_inverse.get_mpz_t(),
+                                    modular_coefficients.back().get_mpz_t(), prime.get_mpz_t());
+                                const auto content = balanced(modular_coefficients.back());
+                                for (auto& coefficient : modular_coefficients)
+                                    coefficient = (coefficient * leading_inverse) % prime;
+                                std::vector<std::pair<Expr, long>> factors;
+                                for (long root = static_cast<long>(*modulus) - 1; root >= 0; --root) {
+                                    long multiplicity = 0;
+                                    while (modular_coefficients.size() > 1) {
+                                        mpz_class value = 0;
+                                        for (auto iterator = modular_coefficients.rbegin();
+                                            iterator != modular_coefficients.rend(); ++iterator)
+                                            value = (value * root + *iterator) % prime;
+                                        if (value != 0) break;
+                                        std::vector<mpz_class> quotient(
+                                            modular_coefficients.size() - 1);
+                                        quotient.back() = modular_coefficients.back();
+                                        for (std::size_t index = quotient.size() - 1; index > 0; --index)
+                                            quotient[index - 1] = (modular_coefficients[index]
+                                                + root * quotient[index]) % prime;
+                                        modular_coefficients = std::move(quotient);
+                                        ++multiplicity;
+                                    }
+                                    if (multiplicity != 0) {
+                                        const auto constant = balanced(-mpz_class(root));
+                                        factors.emplace_back(polynomial_from_integers({constant, 1}),
+                                            multiplicity);
+                                    }
+                                }
+                                if (modular_coefficients.size() > 1) {
+                                    for (auto& coefficient : modular_coefficients)
+                                        coefficient = balanced(coefficient);
+                                    factors.emplace_back(
+                                        polynomial_from_integers(modular_coefficients), 1L);
+                                }
+                                return finish(integer(content), std::move(factors), true);
+                            }
+                        } else {
+                            const auto factorization = factor_rational_polynomial(*coefficients);
+                            std::vector<std::pair<Expr, long>> factors;
+                            auto ordered_factors = factorization.factors;
+                            std::stable_sort(ordered_factors.begin(), ordered_factors.end(),
+                                [](const auto& left, const auto& right) {
+                                    if (left.first.size() != right.first.size())
+                                        return left.first.size() < right.first.size();
+                                    if (left.first.back() != right.first.back())
+                                        return left.first.back() < right.first.back();
+                                    return std::lexicographical_compare(
+                                        left.first.begin(), left.first.end(),
+                                        right.first.begin(), right.first.end());
+                                });
+                            for (const auto& [factor, multiplicity] : ordered_factors) {
+                                if (gaussian && factor == std::vector<mpz_class>{1, 0, 1}) {
+                                    factors.emplace_back(evaluate(call("Plus", {variables[0],
+                                        complex(integer(0L), integer(-1L))})), multiplicity);
+                                    factors.emplace_back(evaluate(call("Plus", {variables[0],
+                                        complex(integer(0L), integer(1L))})), multiplicity);
+                                } else factors.emplace_back(
+                                    polynomial_from_integers(factor), multiplicity);
+                            }
+                            return finish(from_rational(factorization.content),
+                                std::move(factors), true);
+                        }
+                    }
+                } else if (!gaussian && !modulus && !parsed->empty()) {
+                    std::vector<mpq_class> coefficients;
+                    bool exact = true;
+                    for (const auto& [monomial, coefficient] : parsed->terms) {
+                        (void)monomial;
+                        const auto value = as_rational(coefficient);
+                        if (!value) { exact = false; break; }
+                        coefficients.push_back(*value);
+                    }
+                    if (exact) {
+                        const auto primitive_coefficients =
+                            primitive_integer_polynomial(coefficients);
+                        mpq_class content = coefficients.back()
+                            / primitive_coefficients.back();
+                        auto primitive = context.zero();
+                        NativeMonomial common(variables.size(),
+                            std::numeric_limits<long>::max());
+                        std::size_t coefficient_index = 0;
+                        for (const auto& [monomial, coefficient] : parsed->terms) {
+                            for (std::size_t index = 0; index < monomial.size(); ++index)
+                                common[index] = std::min(common[index], monomial[index]);
+                            primitive = context.add(primitive,
+                                context.monomial_polynomial(monomial,
+                                    integer(primitive_coefficients[coefficient_index++])));
+                        }
+                        std::vector<std::pair<Expr, long>> factors;
+                        if (std::any_of(common.begin(), common.end(), [](long value) {
+                                return value > 0;
+                            })) {
+                            for (std::size_t index = common.size(); index-- > 0; )
+                                if (common[index] > 0)
+                                    factors.emplace_back(variables[index], common[index]);
+                            auto reduced = context.zero();
+                            for (const auto& [monomial, coefficient] : primitive.terms) {
+                                auto reduced_monomial = monomial;
+                                for (std::size_t index = 0; index < common.size(); ++index)
+                                    reduced_monomial[index] -= common[index];
+                                reduced = context.add(reduced,
+                                    context.monomial_polynomial(reduced_monomial, coefficient));
+                            }
+                            primitive = std::move(reduced);
+                        }
+                        bool perfect_square = false;
+                        if (primitive.terms.size() == 3) {
+                            struct SquareTerm {
+                                NativeMonomial root_monomial;
+                                mpz_class root_coefficient;
+                            };
+                            std::vector<SquareTerm> squares;
+                            std::optional<std::pair<NativeMonomial, mpz_class>> cross;
+                            for (const auto& [monomial, coefficient] : primitive.terms) {
+                                if (coefficient.kind() != ExprKind::Integer) continue;
+                                const auto integer_coefficient = coefficient.integer_value();
+                                const bool even_monomial = std::all_of(
+                                    monomial.begin(), monomial.end(),
+                                    [](long exponent) { return (exponent & 1L) == 0; });
+                                mpz_class root;
+                                if (integer_coefficient > 0 && even_monomial
+                                    && mpz_root(root.get_mpz_t(),
+                                        integer_coefficient.get_mpz_t(), 2UL) != 0
+                                    && root * root == integer_coefficient) {
+                                    auto root_monomial = monomial;
+                                    for (auto& exponent : root_monomial) exponent /= 2;
+                                    squares.push_back({std::move(root_monomial),
+                                        std::move(root)});
+                                } else cross = std::pair{monomial, integer_coefficient};
+                            }
+                            if (squares.size() == 2 && cross) {
+                                NativeMonomial expected_cross(variables.size(), 0);
+                                for (std::size_t index = 0; index < variables.size(); ++index)
+                                    expected_cross[index] = squares[0].root_monomial[index]
+                                        + squares[1].root_monomial[index];
+                                const mpz_class expected_coefficient = 2
+                                    * squares[0].root_coefficient
+                                    * squares[1].root_coefficient;
+                                if (cross->first == expected_cross
+                                    && (cross->second == expected_coefficient
+                                        || cross->second == -expected_coefficient)) {
+                                    const auto left = context.term_expression(
+                                        squares[0].root_monomial,
+                                        integer(squares[0].root_coefficient));
+                                    auto right = context.term_expression(
+                                        squares[1].root_monomial,
+                                        integer(squares[1].root_coefficient));
+                                    if (cross->second < 0)
+                                        right = evaluate(call("Times", {integer(-1L), right}));
+                                    factors.emplace_back(evaluate(call("Plus", {left, right})), 2L);
+                                    perfect_square = true;
+                                }
+                            }
+                        }
+                        bool difference_of_squares = primitive.terms.size() == 2;
+                        std::optional<std::pair<NativeMonomial, mpz_class>> positive;
+                        std::optional<std::pair<NativeMonomial, mpz_class>> negative;
+                        if (perfect_square) {
+                            // The square factor was emitted above.
+                        } else if (difference_of_squares) {
+                            for (const auto& [monomial, coefficient] : primitive.terms) {
+                                if (coefficient.kind() != ExprKind::Integer) {
+                                    difference_of_squares = false;
+                                    break;
+                                }
+                                auto magnitude = coefficient.integer_value();
+                                const bool is_negative = magnitude < 0;
+                                if (is_negative) magnitude = -magnitude;
+                                mpz_class root;
+                                if (mpz_root(root.get_mpz_t(), magnitude.get_mpz_t(), 2UL) == 0
+                                    || root * root != magnitude
+                                    || std::any_of(monomial.begin(), monomial.end(),
+                                        [](long exponent) { return (exponent & 1L) != 0; })) {
+                                    difference_of_squares = false;
+                                    break;
+                                }
+                                auto square_root_monomial = monomial;
+                                for (auto& exponent : square_root_monomial) exponent /= 2;
+                                if (is_negative) negative = std::pair{
+                                    std::move(square_root_monomial), std::move(root)};
+                                else positive = std::pair{
+                                    std::move(square_root_monomial), std::move(root)};
+                            }
+                            difference_of_squares = difference_of_squares
+                                && positive.has_value() && negative.has_value();
+                        }
+                        if (perfect_square) {
+                            // The square factor was emitted above.
+                        } else if (difference_of_squares) {
+                            const auto left = context.term_expression(
+                                positive->first, integer(positive->second));
+                            const auto right = context.term_expression(
+                                negative->first, integer(negative->second));
+                            factors.emplace_back(evaluate(call("Plus", {left,
+                                evaluate(call("Times", {integer(-1L), right}))})), 1L);
+                            factors.emplace_back(evaluate(call("Plus", {left, right})), 1L);
+                        } else if (!primitive.empty()
+                            && context.expression(primitive) != integer(1L)) {
+                            factors.emplace_back(context.expression(primitive), 1L);
+                        }
+                        return finish(from_rational(content), std::move(factors), true);
+                    }
+                }
+            }
+        }
     }
     if (function == "Decompose" && args.size() == 2) {
         const auto variables = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
@@ -7021,13 +13176,41 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("StringLength", {item}))); return list(std::move(values)); }
         if (args[0].kind() == ExprKind::String) return integer(utf8_codepoints(args[0].text()).size());
     }
-    if ((function == "StringTake" || function == "StringDrop") && args.size() == 2) {
-        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call(function, {item, args[1]}))); return list(std::move(values)); }
-        if (args[0].kind() == ExprKind::String) if (const auto selected = string_selector_indices(utf8_codepoints(args[0].text()).size(), args[1])) {
-            const auto characters = utf8_characters(args[0].text()); std::string output;
-            for (std::size_t index = 0; index < characters.size(); ++index) if ((std::find(selected->begin(), selected->end(), index) != selected->end()) != (function == "StringDrop")) output += characters[index];
-            return string(output);
+    if (function == "StringTake" || function == "StringDrop") {
+        std::string error;
+        if (args.size() != 2) {
+            error = function + " expects exactly two arguments.";
+        } else if (!is_string_or_string_list(args[0])) {
+            error = function + " expects a string or a list of strings.";
+        } else if (args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args())
+                values.push_back(evaluate(call(function, {item, args[1]})));
+            return list(std::move(values));
+        } else {
+            const auto characters = utf8_characters(args[0].text());
+            const auto selected = string_selector_indices(
+                characters.size(), args[1], function);
+            if (!selected.error.empty()) {
+                error = selected.error;
+            } else {
+                std::string output;
+                if (function == "StringTake") {
+                    for (const auto index : selected.indices)
+                        output += characters[index];
+                } else {
+                    std::vector<bool> removed(characters.size());
+                    for (const auto index : selected.indices) removed[index] = true;
+                    for (std::size_t index = 0; index < characters.size(); ++index)
+                        if (!removed[index]) output += characters[index];
+                }
+                return string(std::move(output));
+            }
         }
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return evaluated_expression;
     }
     if (function == "StringJoin") {
         std::string output; bool valid = true;
@@ -7044,39 +13227,119 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("StringReverse", {item}))); return list(std::move(values)); }
         if (args[0].kind() == ExprKind::String) { auto characters = utf8_characters(args[0].text()); std::reverse(characters.begin(), characters.end()); return string(std::accumulate(characters.begin(), characters.end(), std::string())); }
     }
-    if ((function == "ToUpperCase" || function == "ToLowerCase" || function == "Capitalize")
-        && args.size() == 1 && args[0].kind() == ExprKind::String) {
-        auto output = args[0].text();
-        if (function == "Capitalize") { if (!output.empty()) output[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(output[0]))); }
-        else std::transform(output.begin(), output.end(), output.begin(), [&](unsigned char value) {
-            return static_cast<char>(function == "ToUpperCase" ? std::toupper(value) : std::tolower(value));
-        });
-        return string(std::move(output));
-    }
-    if (function == "StringSplit" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::String) {
-        std::vector<std::string> pieces;
-        if (args.size() == 1) {
-            std::string current;
-            for (const unsigned char value : args[0].text()) {
-                if (std::isspace(value)) { if (!current.empty()) { pieces.push_back(std::move(current)); current.clear(); } }
-                else current.push_back(static_cast<char>(value));
-            }
-            if (!current.empty()) pieces.push_back(std::move(current));
+    if (function == "ToUpperCase" || function == "ToLowerCase"
+        || function == "Capitalize") {
+        std::string error;
+        if (args.size() != 1) {
+            error = function + " expects exactly one argument.";
+        } else if (args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args())
+                values.push_back(evaluate(call(function, {item})));
+            return list(std::move(values));
+        } else if (args[0].kind() != ExprKind::String) {
+            error = function + " expects a string or a list of strings.";
+        } else if (function == "ToUpperCase") {
+            return string(detail::unicode_to_upper(args[0].text()));
+        } else if (function == "ToLowerCase") {
+            return string(detail::unicode_to_lower(args[0].text()));
         } else {
-            const auto separators = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-            if (std::all_of(separators.begin(), separators.end(), [](const Expr& value) { return value.kind() == ExprKind::String && !value.text().empty(); })) {
-                std::size_t start = 0;
-                while (start <= args[0].text().size()) {
-                    std::size_t next = std::string::npos, width = 0;
-                    for (const auto& separator : separators) { const auto found = args[0].text().find(separator.text(), start); if (found < next) { next = found; width = separator.text().size(); } }
-                    if (next == std::string::npos) { if (start < args[0].text().size()) pieces.push_back(args[0].text().substr(start)); break; }
-                    if (next > start)
-                        pieces.push_back(args[0].text().substr(start, next - start));
-                    start = next + width;
-                }
-            } else return call(head, args);
+            const auto& source = args[0].text();
+            if (source.empty()) return args[0];
+            const auto first = detail::decode_utf8_code_point(source, 0);
+            return string(detail::unicode_to_upper(
+                std::string_view(source).substr(0, first.length))
+                + source.substr(first.length));
         }
-        std::vector<Expr> values; for (auto& piece : pieces) values.push_back(string(std::move(piece))); return list(std::move(values));
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return evaluated_expression;
+    }
+    if (function == "StringSplit") {
+        std::string error;
+        if (args.empty() || args.size() > 2) {
+            error = "StringSplit currently expects a string and an optional separator.";
+        } else if (!is_string_or_string_list(args[0])) {
+            error = "StringSplit expects a string or a list of strings.";
+        } else if (args[0].has_head("List")) {
+            std::vector<Expr> values;
+            for (const auto& item : args[0].args()) {
+                auto threaded = args;
+                threaded[0] = item;
+                values.push_back(evaluate(call("StringSplit", threaded)));
+            }
+            return list(std::move(values));
+        } else {
+            std::vector<std::string> separators;
+            if (args.size() == 2) {
+                if (args[1].kind() == ExprKind::String) {
+                    separators.push_back(args[1].text());
+                } else if (args[1].has_head("List")) {
+                    for (const auto& separator : args[1].args()) {
+                        if (separator.kind() != ExprKind::String) {
+                            error = "StringSplit currently expects literal-string separators.";
+                            break;
+                        }
+                        separators.push_back(separator.text());
+                    }
+                } else {
+                    error = "StringSplit currently expects a literal-string separator or a list of them.";
+                }
+            }
+            if (error.empty()) {
+                std::vector<std::string> pieces;
+                const auto& source = args[0].text();
+                if (args.size() == 1) {
+                    std::string current;
+                    for (std::size_t offset = 0; offset < source.size();) {
+                        const auto decoded = detail::decode_utf8_code_point(
+                            source, offset);
+                        if (detail::unicode_is_whitespace(decoded.value)) {
+                            if (!current.empty()) {
+                                pieces.push_back(std::move(current));
+                                current.clear();
+                            }
+                        } else {
+                            current.append(source, offset, decoded.length);
+                        }
+                        offset += decoded.length;
+                    }
+                    if (!current.empty()) pieces.push_back(std::move(current));
+                } else {
+                    std::size_t cursor = 0;
+                    while (cursor <= source.size()) {
+                        std::size_t next = std::string::npos;
+                        std::size_t width = 0;
+                        for (const auto& separator : separators) {
+                            if (separator.empty()) continue;
+                            const auto found = source.find(separator, cursor);
+                            if (found < next
+                                || (found == next && separator.size() > width)) {
+                                next = found;
+                                width = separator.size();
+                            }
+                        }
+                        if (next == std::string::npos) {
+                            pieces.push_back(source.substr(cursor));
+                            break;
+                        }
+                        pieces.push_back(source.substr(cursor, next - cursor));
+                        cursor = next + width;
+                    }
+                    pieces.erase(std::remove(pieces.begin(), pieces.end(), ""),
+                        pieces.end());
+                }
+                std::vector<Expr> values;
+                for (auto& piece : pieces)
+                    values.push_back(string(std::move(piece)));
+                return list(std::move(values));
+            }
+        }
+        const auto message = call("MessageName", {
+            symbol("StringSplit"), string("error")});
+        emit_message(message, "StringSplit::error: " + error);
+        return evaluated_expression;
     }
     if (function == "StringRiffle" && !args.empty() && args.size() <= 2 && args[0].has_head("List")
         && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) {
@@ -7125,48 +13388,146 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         } else return call(head, args);
         return string(std::move(output));
     }
-    if ((function == "StringPosition" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ" || function == "StringMatchQ") && args.size() >= 2) {
-        if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) { auto threaded = args; threaded[0] = item; values.push_back(evaluate(call(function, threaded))); } return list(std::move(values)); }
-        if (args[0].kind() == ExprKind::String) {
-            const auto patterns = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-            if (std::all_of(patterns.begin(), patterns.end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) {
-                std::vector<std::pair<std::size_t, std::size_t>> positions;
-                for (const auto& pattern : patterns) {
-                    if (pattern.text().empty()) for (std::size_t index = 0; index <= args[0].text().size(); ++index) positions.emplace_back(index + 1, index);
-                    else for (std::size_t start = 0; (start = args[0].text().find(pattern.text(), start)) != std::string::npos; ++start) positions.emplace_back(start + 1, start + pattern.text().size());
-                }
-                std::sort(positions.begin(), positions.end()); positions.erase(std::unique(positions.begin(), positions.end()), positions.end());
-                if (function == "StringContainsQ") return boolean(!positions.empty());
-                if (function == "StringStartsQ") return boolean(std::any_of(positions.begin(), positions.end(), [](const auto& value) { return value.first == 1; }));
-                if (function == "StringEndsQ") return boolean(std::any_of(positions.begin(), positions.end(), [&](const auto& value) { return value.second == args[0].text().size(); }));
-                if (function == "StringMatchQ") return boolean(std::any_of(positions.begin(), positions.end(), [&](const auto& value) { return value.first == 1 && value.second == args[0].text().size(); }));
-                std::vector<Expr> result; for (const auto& [start, end] : positions) result.push_back(list({integer(start), integer(end)})); return list(std::move(result));
-            }
-        }
+    const bool boolean_string_matcher = function == "StringMatchQ"
+        || function == "StringFreeQ" || function == "StringContainsQ"
+        || function == "StringStartsQ" || function == "StringEndsQ";
+    const bool string_matcher_family = boolean_string_matcher
+        || function == "StringPosition" || function == "StringCases"
+        || function == "StringReplace";
+    if (boolean_string_matcher && (args.empty() || args.size() > 2)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + function
+            + " expects a string and a pattern.");
+        return evaluated_expression;
     }
-    if ((function == "StringMatchQ" || function == "StringFreeQ" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ"
-            || function == "StringPosition" || function == "StringCases" || function == "StringReplace") && args.size() >= 2 && args.size() <= 3) {
+    if (function == "StringPosition"
+        && (args.empty() || args.size() > 3)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message,
+            "StringPosition::error: StringPosition expects a string, a pattern, and an optional match limit.");
+        return evaluated_expression;
+    }
+    if (function == "StringCases" && (args.size() < 2 || args.size() > 3)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message,
+            "StringCases::error: StringCases expects a string, a pattern or rule, and an optional match limit.");
+        return evaluated_expression;
+    }
+    if (function == "StringReplace" && (args.size() < 2 || args.size() > 3)) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message,
+            "StringReplace::error: StringReplace expects a string, rules, and an optional replacement limit.");
+        return evaluated_expression;
+    }
+    const bool matcher_arity = boolean_string_matcher ? args.size() == 2
+        : args.size() >= 2 && args.size() <= 3;
+    if (string_matcher_family && matcher_arity
+        && !is_string_or_string_list(args[0])) {
+        const auto message = call("MessageName", {
+            symbol(function), string("error")});
+        emit_message(message, function + "::error: " + function
+            + " expects a string or a list of strings.");
+        return evaluated_expression;
+    }
+    if (string_matcher_family && matcher_arity) {
         if (args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) { auto threaded = args; threaded[0] = item; values.push_back(evaluate(call(function, threaded))); } return list(std::move(values)); }
         if (args[0].kind() == ExprKind::String) {
             struct Spec { CompiledStringPattern pattern; std::optional<Expr> replacement; };
-            const auto raw_specs = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]}; std::vector<Spec> specs; bool valid = true;
+            std::vector<Expr> raw_specs;
+            const auto append_specs = [&](const auto& self,
+                const Expr& specification) -> void {
+                if ((function == "StringCases" || function == "StringReplace")
+                    && specification.has_head("List")) {
+                    for (const auto& item : specification.args())
+                        self(self, item);
+                } else {
+                    raw_specs.push_back(specification);
+                }
+            };
+            if (function == "StringCases" || function == "StringReplace") {
+                append_specs(append_specs, args[1]);
+            } else {
+                raw_specs = args[1].has_head("List") ? args[1].args()
+                    : std::vector<Expr>{args[1]};
+            }
+            std::vector<Spec> specs;
+            bool valid = true;
+            std::optional<Expr> failed_string_pattern;
             for (const auto& raw_spec : raw_specs) {
                 const bool rule = (raw_spec.has_head("Rule") || raw_spec.has_head("RuleDelayed")) && raw_spec.args().size() == 2;
-                const auto& pattern_expression = rule ? raw_spec.args()[0] : raw_spec; const auto compiled = StringPatternCompiler().compile(pattern_expression);
-                if (!compiled) { valid = false; break; } specs.push_back({*compiled, rule ? std::optional<Expr>(raw_spec.args()[1]) : std::nullopt});
+                if (function == "StringReplace" && !rule) {
+                    const auto message = call("MessageName", {
+                        symbol(function), string("error")});
+                    emit_message(message, function
+                        + "::error: StringReplace expects a rule or a list of rules.");
+                    return evaluated_expression;
+                }
+                std::optional<Expr> replacement;
+                if (rule) replacement = raw_spec.has_head("Rule")
+                    ? evaluate(raw_spec.args()[1]) : raw_spec.args()[1];
+                const auto& pattern_expression = rule
+                    ? raw_spec.args()[0] : raw_spec;
+                const bool unicode_source = std::any_of(
+                    args[0].text().begin(), args[0].text().end(),
+                    [](unsigned char value) { return value >= 0x80U; });
+                const auto compiled = StringPatternCompiler().compile(
+                    pattern_expression, unicode_source);
+                if (!compiled) {
+                    valid = false;
+                    failed_string_pattern = pattern_expression;
+                    break;
+                }
+                specs.push_back({*compiled, std::move(replacement)});
             }
             if (valid) {
                 std::optional<std::size_t> limit = std::nullopt;
                 if (args.size() == 3) {
-                    if (const auto requested_limit = machine_index(args[2])) {
-                        limit = static_cast<std::size_t>(
-                            std::max<long>(0, *requested_limit));
+                    if (args[2].kind() == ExprKind::Integer
+                        && args[2].integer_value() >= 0) {
+                        limit = nonnegative_size_t(args[2].integer_value());
+                    } else if (!is_symbol(args[2], "Infinity")) {
+                        const auto message = call("MessageName", {
+                            symbol(function), string("error")});
+                        emit_message(message, function
+                            + "::error: Match limits must be non-negative integers or Infinity.");
+                        return evaluated_expression;
                     }
                 }
-                auto first_at = [&](std::size_t start) -> std::optional<std::pair<StringMatchResult, std::size_t>> { for (std::size_t index = 0; index < specs.size(); ++index) if (const auto found = string_pattern_match(specs[index].pattern, args[0].text(), start)) return std::pair{*found, index}; return std::nullopt; };
+                const auto boundaries = detail::utf8_code_point_boundaries(
+                    args[0].text());
+                std::optional<CodePointPatternSource> decoded_source;
+                if (std::any_of(specs.begin(), specs.end(), [](const Spec& spec) {
+                        return spec.pattern.codepoint_pattern.has_value();
+                    })) decoded_source.emplace(args[0].text());
+                auto first_at = [&](std::size_t start,
+                    std::optional<std::size_t> required_end)
+                    -> std::optional<std::pair<StringMatchResult, std::size_t>> {
+                    for (std::size_t index = 0; index < specs.size(); ++index) {
+                        if (const auto found = string_pattern_match(
+                                specs[index].pattern, args[0].text(), start,
+                                decoded_source ? &*decoded_source : nullptr,
+                                required_end)) {
+                            if (std::binary_search(boundaries.begin(), boundaries.end(),
+                                    found->end))
+                                return std::pair{*found, index};
+                        }
+                    }
+                    return std::nullopt;
+                };
                 if (function == "StringMatchQ" || function == "StringFreeQ" || function == "StringContainsQ" || function == "StringStartsQ" || function == "StringEndsQ") {
                     bool matched = false;
-                    for (std::size_t start = 0; start <= args[0].text().size() && !matched; ++start) if (const auto found = first_at(start)) {
+                    for (const auto start : boundaries) {
+                        if (matched) break;
+                        const auto found = first_at(start,
+                            function == "StringMatchQ"
+                                || function == "StringEndsQ"
+                            ? std::optional<std::size_t>(args[0].text().size())
+                            : std::nullopt);
+                        if (!found) continue;
                         matched = function == "StringMatchQ" ? found->first.start == 0 && found->first.end == args[0].text().size()
                             : function == "StringStartsQ" ? found->first.start == 0
                             : function == "StringEndsQ" ? found->first.end == args[0].text().size() : true;
@@ -7175,34 +13536,67 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 }
                 if (function == "StringPosition") {
                     std::vector<std::pair<std::size_t, std::size_t>> positions;
-                    for (std::size_t start = 0; start <= args[0].text().size() && (!limit || positions.size() < *limit); ++start) if (const auto found = first_at(start)) positions.emplace_back(found->first.start, found->first.end);
+                    for (const auto start : boundaries) {
+                        if (limit && positions.size() >= *limit) break;
+                        if (const auto found = first_at(start, std::nullopt))
+                            positions.emplace_back(
+                                found->first.start, found->first.end);
+                    }
                     std::sort(positions.begin(), positions.end()); positions.erase(std::unique(positions.begin(), positions.end()), positions.end()); std::vector<Expr> values;
                     for (const auto& [start, end] : positions) values.push_back(list({integer(utf8_codepoints(args[0].text().substr(0, start)).size() + 1), integer(utf8_codepoints(args[0].text().substr(0, end)).size())}));
                     return list(std::move(values));
                 }
                 if (function == "StringCases") {
-                    std::vector<Expr> values; std::size_t position = 0;
-                    while (position <= args[0].text().size() && (!limit || values.size() < *limit)) {
-                        const auto found = first_at(position); if (!found) { ++position; continue; }
+                    std::vector<Expr> values;
+                    std::size_t boundary_index = 0;
+                    while (boundary_index < boundaries.size()
+                        && (!limit || values.size() < *limit)) {
+                        const auto position = boundaries[boundary_index];
+                        const auto found = first_at(position, std::nullopt);
+                        if (!found) { ++boundary_index; continue; }
                         if (specs[found->second].replacement) values.push_back(evaluate(substitute_bindings(*specs[found->second].replacement, found->first.bindings)));
                         else values.push_back(string(args[0].text().substr(found->first.start, found->first.end - found->first.start)));
-                        position = found->first.end > position ? found->first.end : position + 1;
+                        if (found->first.end > position) {
+                            boundary_index = static_cast<std::size_t>(
+                                std::lower_bound(boundaries.begin(), boundaries.end(),
+                                    found->first.end) - boundaries.begin());
+                        } else {
+                            ++boundary_index;
+                        }
                     }
-                    return list(std::move(values));
+                    return evaluate(list(std::move(values)));
                 }
                 if (function == "StringReplace" && std::all_of(specs.begin(), specs.end(), [](const Spec& spec) { return spec.replacement.has_value(); })) {
-                    std::vector<Expr> pieces; std::string literal; std::size_t position = 0, replacements = 0;
-                    while (position <= args[0].text().size() && (!limit || replacements < *limit)) {
-                        const auto found = first_at(position); if (!found) { if (position < args[0].text().size()) literal.push_back(args[0].text()[position]); ++position; continue; }
+                    std::vector<Expr> pieces;
+                    std::string literal;
+                    std::size_t boundary_index = 0;
+                    std::size_t replacements = 0;
+                    while (boundary_index < boundaries.size()
+                        && (!limit || replacements < *limit)) {
+                        const auto position = boundaries[boundary_index];
+                        const auto found = first_at(position, std::nullopt);
+                        if (!found) {
+                            if (boundary_index + 1 < boundaries.size())
+                                literal.append(args[0].text(), position,
+                                    boundaries[boundary_index + 1] - position);
+                            ++boundary_index;
+                            continue;
+                        }
                         if (!literal.empty()) { pieces.push_back(string(literal)); literal.clear(); }
                         pieces.push_back(evaluate(substitute_bindings(*specs[found->second].replacement, found->first.bindings))); ++replacements;
-                        position = found->first.end > position ? found->first.end : position + 1;
+                        if (found->first.end > position) {
+                            boundary_index = static_cast<std::size_t>(
+                                std::lower_bound(boundaries.begin(), boundaries.end(),
+                                    found->first.end) - boundaries.begin());
+                        } else {
+                            ++boundary_index;
+                        }
                     }
-                    if (position < args[0].text().size())
-                        literal += args[0].text().substr(position);
+                    if (boundary_index < boundaries.size()
+                        && boundaries[boundary_index] < args[0].text().size())
+                        literal += args[0].text().substr(boundaries[boundary_index]);
                     if (!literal.empty()) pieces.push_back(string(literal));
-                    if (std::all_of(pieces.begin(), pieces.end(), [](const Expr& value) { return value.kind() == ExprKind::String; })) { std::string output; for (const auto& piece : pieces) output += piece.text(); return string(output); }
-                    return call("StringExpression", std::move(pieces));
+                    return normalize_string_expression(std::move(pieces));
                 }
             }
             if (!valid) {
@@ -7213,8 +13607,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     if (value.kind() == ExprKind::Call)
                         for (const auto& item : value.args()) locate(item);
                 };
-                locate(args[1]);
-                std::string rendered = unsupported ? unsupported->to_input_form() : args[1].to_input_form();
+                const auto& diagnostic_pattern = failed_string_pattern
+                    ? *failed_string_pattern : args[1];
+                locate(diagnostic_pattern);
+                std::string rendered = unsupported ? unsupported->to_input_form()
+                    : diagnostic_pattern.to_input_form();
                 if (unsupported && unsupported->args().size() == 1)
                     rendered = unsupported->args()[0].to_input_form() + ".";
                 const auto message = call("MessageName", {symbol(function), string("error")});
@@ -7414,10 +13811,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if (function == "Symbol" && args.size() == 1 && args[0].kind() == ExprKind::String) {
         const auto& requested = args[0].text();
         if (!requested.empty() && requested.find_first_of(" \t\r\n[]{}(),") == std::string::npos) {
-            std::string full_name;
-            if (requested.find('`') != std::string::npos) full_name = requested;
-            else full_name = system_registry().count(requested) ? "System`" + requested : "Global`" + requested;
-            if (full_name.compare(0, 7, "System`") != 0) user_symbol_registry().insert(full_name);
+            const auto full_name = ensure_full_symbol_name(requested);
             return display_symbol(full_name);
         }
     }
@@ -7427,22 +13821,51 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "Context" && args.empty()) return string("Global`");
     if (function == "Context" && args.size() == 1 && args[0].symbol_name()) {
-        const auto full_name = full_symbol_name(args[0]); const auto marker = full_name.rfind('`');
+        const auto full_name = resolve_full_symbol_name(*args[0].symbol_name());
+        const auto marker = full_name.rfind('`');
         return string(full_name.substr(0, marker + 1));
     }
     if ((function == "Names" || function == "NameQ" || function == "Contexts") && (args.empty() || args.size() == 1)) {
-        const auto pattern = args.empty() ? std::string("*") : args[0].kind() == ExprKind::String ? args[0].text() : std::string();
-        std::set<std::string> names;
-        for (const auto& [name, attributes] : system_registry()) {
-            (void)attributes; const auto full = "System`" + name; const auto& candidate = pattern.find('`') == std::string::npos ? name : full;
-            if (wildcard_matches(candidate, pattern)) names.insert(function == "Contexts" ? "System`" : name);
+        if (function == "Contexts") {
+            if (!args.empty() && args[0].kind() != ExprKind::String)
+                return call(head, args);
+            const auto pattern = args.empty() ? std::string("*") : args[0].text();
+            std::set<std::string> contexts{"Global`", "System`"};
+            for (const auto& full : known_symbols_) {
+                const auto marker = full.rfind('`');
+                if (marker != std::string::npos)
+                    contexts.insert(full.substr(0, marker + 1));
+            }
+            std::vector<Expr> values;
+            for (const auto& context : contexts)
+                if (wildcard_matches(context, pattern)) values.push_back(string(context));
+            return list(std::move(values));
         }
-        for (const auto& full : user_symbol_registry()) {
-            const auto marker = full.rfind('`'); const auto short_name = marker == std::string::npos ? full : full.substr(marker + 1);
-            const auto& candidate = pattern.find('`') == std::string::npos ? short_name : full;
-            if (!wildcard_matches(candidate, pattern)) continue;
-            if (function == "Contexts") names.insert(marker == std::string::npos ? "Global`" : full.substr(0, marker + 1));
-            else names.insert(full.compare(0, 7, "Global`") == 0 ? short_name : full);
+        std::vector<std::string> patterns;
+        if (args.empty()) patterns.push_back("*");
+        else if (args[0].kind() == ExprKind::String) patterns.push_back(args[0].text());
+        else if (args[0].has_head("List")) {
+            for (const auto& item : args[0].args()) {
+                if (item.kind() != ExprKind::String) return call(head, args);
+                patterns.push_back(item.text());
+            }
+        } else return call(head, args);
+        std::set<std::string> names;
+        for (const auto& pattern : patterns) {
+            for (const auto& [name, attributes] : system_registry()) {
+                (void)attributes;
+                const auto full = "System`" + name;
+                if (symbol_name_matches(full, pattern)) names.insert(name);
+            }
+            for (const auto& full : known_symbols_) {
+                if (!symbol_name_matches(full, pattern)) continue;
+                const auto marker = full.rfind('`');
+                const auto short_name = marker == std::string::npos
+                    ? full : full.substr(marker + 1);
+                names.insert(full.compare(0, 7, "Global`") == 0
+                        || full.compare(0, 7, "System`") == 0
+                    ? short_name : full);
+            }
         }
         if (function == "NameQ") return boolean(!names.empty());
         std::vector<Expr> values; for (const auto& name : names) values.push_back(string(name)); return list(std::move(values));
@@ -7453,8 +13876,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args[0].kind() == ExprKind::String) name = args[0].text();
         else if (args[0].symbol_name()) name = *args[0].symbol_name();
         if (!name.empty()) {
-            if (name.compare(0, 7, "System`") == 0) name.erase(0, 7);
-            std::vector<Expr> values; if (const auto found = system_registry().find(name); found != system_registry().end()) for (const auto& attribute : found->second) values.push_back(symbol(attribute));
+            std::vector<Expr> values;
+            for (const auto& attribute : attributes_for(symbol(name)))
+                values.push_back(symbol(attribute));
             return list(std::move(values));
         }
     }
@@ -7982,95 +14406,280 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         if (known) return boolean(result);
     }
-    if (function == "Order" && args.size() == 2) return integer(expression_compare(args[0], args[1]) < 0 ? 1L : expression_compare(args[0], args[1]) > 0 ? -1L : 0L);
+    if (function == "Order") {
+        if (args.size() != 2)
+            return raw_evaluation_error("Order expects exactly two arguments.");
+        const auto order = expression_compare(args[0], args[1]);
+        return integer(order < 0 ? 1L : order > 0 ? -1L : 0L);
+    }
     if (function == "LexicographicOrder" && args.size() == 2) return integer(lexicographic_compare(args[0], args[1]) < 0 ? 1L : lexicographic_compare(args[0], args[1]) > 0 ? -1L : 0L);
     if (function == "LexicographicSort" && args.size() == 1 && args[0].has_head("List")) {
         auto values = args[0].args(); std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) { return lexicographic_compare(left, right) < 0; }); return list(std::move(values));
     }
-    if (function == "OrderedQ" && (args.size() == 1 || args.size() == 2) && args[0].has_head("List")) {
-        const bool descending = args.size() == 2 && is_symbol(args[1], "Greater");
-        return boolean(std::adjacent_find(args[0].args().begin(), args[0].args().end(), [&](const Expr& left, const Expr& right) {
-            const auto order = expression_compare(left, right); return descending ? order < 0 : order > 0;
-        }) == args[0].args().end());
+    struct OrderingSignal {};
+    Expr ordering_signal_value = symbol("Null");
+    auto evaluate_ordering_callable = [&](const Expr& callable,
+                                          std::vector<Expr> values) {
+        auto result = evaluate(call(callable, std::move(values)));
+        if (immediate_signal_active()) {
+            ordering_signal_value = result;
+            throw OrderingSignal{};
+        }
+        return result;
+    };
+    auto ordering_compare = [&](const std::optional<Expr>& callable,
+                                const Expr& left, const Expr& right) {
+        if (!callable) return expression_compare(left, right);
+        const auto first = evaluate_ordering_callable(
+            *callable, {left, right});
+        if (is_symbol(first, "True")) return -1;
+        if (is_symbol(first, "False")) {
+            const auto reverse = evaluate_ordering_callable(
+                *callable, {right, left});
+            if (is_symbol(reverse, "True")) return 1;
+            if (is_symbol(reverse, "False")) return 0;
+            if (reverse.kind() == ExprKind::Integer)
+                return reverse.integer_value() < 0 ? -1
+                    : reverse.integer_value() > 0 ? 1 : 0;
+            return 0;
+        }
+        if (first.kind() == ExprKind::Integer)
+            return first.integer_value() < 0 ? 1
+                : first.integer_value() > 0 ? -1 : 0;
+        return expression_compare(left, right);
+    };
+    auto same_test_succeeds = [&](const std::optional<Expr>& same_test,
+                                  const Expr& left, const Expr& right) {
+        return same_test && is_symbol(evaluate_ordering_callable(
+            *same_test, {left, right}), "True");
+    };
+
+    struct OrderedItem {
+        Expr original;
+        Expr value;
+        std::vector<Expr> keys;
+        std::size_t index;
+    };
+    auto ordered_items = [&](const Expr& subject)
+        -> std::optional<std::vector<OrderedItem>> {
+        std::vector<OrderedItem> result;
+        if (const auto rules = association_rules(subject)) {
+            result.reserve(rules->size());
+            for (std::size_t index = 0; index < rules->size(); ++index)
+                result.push_back({(*rules)[index], (*rules)[index].args()[1],
+                    {}, index});
+            return result;
+        }
+        if (subject.kind() != ExprKind::Call) return std::nullopt;
+        result.reserve(subject.args().size());
+        for (std::size_t index = 0; index < subject.args().size(); ++index)
+            result.push_back({subject.args()[index], subject.args()[index],
+                {}, index});
+        return result;
+    };
+    auto rebuild_ordered = [&](const Expr& subject,
+                               const std::vector<OrderedItem>& items) {
+        std::vector<Expr> result;
+        result.reserve(items.size());
+        const bool association = association_rules(subject).has_value();
+        for (const auto& item : items)
+            result.push_back(association ? item.original : item.value);
+        return call(association ? symbol("Association") : subject.head(),
+            std::move(result));
+    };
+    auto slice_ordered_count = [&](std::vector<OrderedItem>& items,
+                                   const std::optional<Expr>& count,
+                                   const std::string& operation) {
+        if (!count || is_symbol(*count, "All")) return std::string{};
+        if (count->kind() != ExprKind::Integer)
+            return operation + " expects an integer or All count.";
+        const auto length = mpz_class(std::to_string(items.size()), 10);
+        if (count->integer_value() >= 0) {
+            if (count->integer_value() < length)
+                items.resize(nonnegative_size_t(
+                    count->integer_value()).value_or(0));
+        } else {
+            const auto magnitude = -count->integer_value();
+            if (magnitude < length) {
+                const auto retained = nonnegative_size_t(magnitude).value_or(0);
+                items.erase(items.begin(), items.end()
+                    - static_cast<std::ptrdiff_t>(retained));
+            }
+        }
+        return std::string{};
+    };
+    struct OrderingArguments {
+        std::vector<Expr> values;
+        std::optional<Expr> same_test;
+        std::string error;
+    };
+    auto split_ordering_options = [&](const std::string& operation) {
+        OrderingArguments result{args, std::nullopt, {}};
+        std::size_t option_start = result.values.size();
+        while (option_start != 0) {
+            const auto& option = result.values[option_start - 1];
+            if ((!option.has_head("Rule") && !option.has_head("RuleDelayed"))
+                || option.args().size() != 2
+                || !option.args()[0].symbol_name())
+                break;
+            --option_start;
+        }
+        for (std::size_t index = option_start;
+             index < result.values.size(); ++index) {
+            const auto& option = result.values[index];
+            if (!is_symbol(option.args()[0], "SameTest")) {
+                result.error = operation
+                    + " currently supports only the SameTest option.";
+                return result;
+            }
+            result.same_test = is_symbol(option.args()[1], "Automatic")
+                ? std::nullopt : std::optional<Expr>(option.args()[1]);
+        }
+        result.values.resize(option_start);
+        return result;
+    };
+
+    if (function == "OrderedQ") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "OrderedQ expects an expression and an optional ordering function.");
+        auto items = ordered_items(args[0]);
+        if (!items)
+            return raw_evaluation_error(
+                "OrderedQ expects a nonatomic expression.");
+        const auto callable = args.size() == 2
+            ? std::optional<Expr>(args[1]) : std::nullopt;
+        try {
+            for (std::size_t index = 1; index < items->size(); ++index)
+                if (ordering_compare(callable, (*items)[index - 1].value,
+                    (*items)[index].value) > 0)
+                    return boolean(false);
+        } catch (const OrderingSignal&) {
+            return ordering_signal_value;
+        }
+        return boolean(true);
     }
-    if ((function == "Sort" || function == "ReverseSort" || function == "Ordering") && !args.empty()) {
-        const auto rules = association_rules(args[0]);
-        if (rules || args[0].kind() == ExprKind::Call) {
-            std::vector<Expr> items = rules ? *rules : args[0].args(); std::vector<std::size_t> indices(items.size()); std::iota(indices.begin(), indices.end(), 0);
-            bool greater = function == "ReverseSort"; std::optional<long> count; std::optional<Expr> same_test;
-            for (std::size_t index = 1; index < args.size(); ++index) {
-                if (is_symbol(args[index], "Greater")) greater = !greater;
-                else if (is_symbol(args[index], "Less")) {}
-                else if (args[index].kind() == ExprKind::Integer && args[index].integer_value().fits_slong_p()) count = args[index].integer_value().get_si();
-                else if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "SameTest")) same_test = args[index].args()[1];
-            }
-            auto compare_indices = [&](std::size_t left, std::size_t right) {
-                const auto& left_value = rules ? items[left].args()[0] : items[left]; const auto& right_value = rules ? items[right].args()[0] : items[right];
-                const auto order = expression_compare(left_value, right_value); return greater ? order > 0 : order < 0;
-            };
-            if (!same_test) std::stable_sort(indices.begin(), indices.end(), compare_indices);
-            else for (std::size_t index = 1; index < indices.size(); ++index) {
-                auto insertion = index;
-                while (insertion > 0) {
-                    const auto& left = rules ? items[indices[insertion - 1]].args()[0] : items[indices[insertion - 1]];
-                    const auto& right = rules ? items[indices[insertion]].args()[0] : items[indices[insertion]];
-                    if (is_symbol(evaluate(call(*same_test, {left, right})), "True") || !compare_indices(indices[insertion], indices[insertion - 1])) break;
-                    std::swap(indices[insertion - 1], indices[insertion]); --insertion;
-                }
-            }
-            if (count) {
-                const auto amount = clamped_signed_magnitude(*count, indices.size());
-                if (*count >= 0) indices.resize(amount); else indices.erase(indices.begin(), indices.end() - static_cast<std::ptrdiff_t>(amount));
-            }
+    if (function == "Sort" || function == "ReverseSort"
+        || function == "Ordering") {
+        auto parsed = split_ordering_options(function);
+        if (!parsed.error.empty()) return raw_evaluation_error(parsed.error);
+        const bool ordering = function == "Ordering";
+        const bool reverse = function == "ReverseSort";
+        const bool valid_arity
+            = parsed.values.size() >= 1 && parsed.values.size() <= 3;
+        if (!valid_arity) {
+            return raw_evaluation_error(ordering
+                ? "Ordering expects an expression, optional count, optional ordering function, and optional SameTest rule."
+                : function + " expects an expression, optional ordering function, optional count, and optional SameTest rule.");
+        }
+        auto items = ordered_items(parsed.values[0]);
+        if (!items)
+            return raw_evaluation_error(ordering
+                ? "Ordering expects a nonatomic expression."
+                : "Sort expects a nonatomic expression.");
+        const auto count = ordering
+            ? parsed.values.size() >= 2
+                ? std::optional<Expr>(parsed.values[1]) : std::nullopt
+            : parsed.values.size() >= 3
+                ? std::optional<Expr>(parsed.values[2]) : std::nullopt;
+        const auto callable = ordering
+            ? parsed.values.size() >= 3
+                ? std::optional<Expr>(parsed.values[2]) : std::nullopt
+            : parsed.values.size() >= 2
+                ? std::optional<Expr>(parsed.values[1]) : std::nullopt;
+        try {
+            *items = detail::python_stable_sort(std::move(*items),
+                [&](const OrderedItem& left, const OrderedItem& right) {
+                    if (same_test_succeeds(
+                            parsed.same_test, left.value, right.value))
+                        return false;
+                    const auto order = ordering_compare(
+                        callable, left.value, right.value);
+                    return reverse ? order > 0 : order < 0;
+                });
+        } catch (const OrderingSignal&) {
+            return ordering_signal_value;
+        }
+        if (const auto error = slice_ordered_count(
+                *items, count, ordering ? "Ordering" : "Sort");
+            !error.empty())
+            return raw_evaluation_error(error);
+        if (ordering) {
             std::vector<Expr> result;
-            for (const auto index : indices) result.push_back(function == "Ordering" ? integer(index + 1) : items[index]);
-            if (function == "Ordering") return list(std::move(result));
-            return call(rules ? symbol("Association") : args[0].head(), std::move(result));
+            result.reserve(items->size());
+            for (const auto& item : *items)
+                result.push_back(integer(item.index + 1));
+            return list(std::move(result));
         }
+        return rebuild_ordered(parsed.values[0], *items);
     }
-    if ((function == "SortBy" || function == "ReverseSortBy" || function == "OrderingBy") && args.size() >= 2) {
-        const auto rules = association_rules(args[0]);
-        if (rules || args[0].kind() == ExprKind::Call) {
-            std::vector<Expr> items = rules ? *rules : args[0].args();
-            const bool multiple = args[1].has_head("List"); const auto functions = multiple ? args[1].args() : std::vector<Expr>{args[1]};
-            std::optional<Expr> same_test; std::optional<long> count; bool greater = false;
-            for (std::size_t index = 2; index < args.size(); ++index) {
-                if (args[index].has_head("Rule") && args[index].args().size() == 2 && is_symbol(args[index].args()[0], "SameTest")) same_test = args[index].args()[1];
-                else if (is_symbol(args[index], "Greater")) greater = true;
-                else if (is_symbol(args[index], "Less")) greater = false;
-                else if (is_symbol(args[index], "All")) {}
-                else if (args[index].kind() == ExprKind::Integer && args[index].integer_value().fits_slong_p()) count = args[index].integer_value().get_si();
-            }
-            struct Keyed { Expr item; Expr value; std::vector<Expr> keys; std::size_t index; };
-            std::vector<Keyed> keyed;
-            for (std::size_t index = 0; index < items.size(); ++index) {
-                const auto value = rules ? items[index].args()[1] : items[index]; std::vector<Expr> keys;
-                for (const auto& callable : functions) keys.push_back(evaluate(call(callable, {value})));
-                keyed.push_back({items[index], value, std::move(keys), index});
-            }
-            for (std::size_t index = 1; index < keyed.size(); ++index) {
-                auto insertion = index;
-                while (insertion > 0) {
-                    int order = 0;
-                    for (std::size_t key = 0; key < keyed[insertion - 1].keys.size(); ++key) {
-                        const auto& left = keyed[insertion - 1].keys[key]; const auto& right = keyed[insertion].keys[key];
-                        if (same_test && is_symbol(evaluate(call(*same_test, {left, right})), "True")) continue;
-                        order = expression_compare(left, right); if (order != 0) break;
-                    }
-                    if (order == 0 && !same_test && !multiple) order = expression_compare(keyed[insertion - 1].value, keyed[insertion].value);
-                    if (greater) order = -order;
-                    if (function == "ReverseSortBy") order = -order;
-                    if (order <= 0) break;
-                    std::swap(keyed[insertion - 1], keyed[insertion]); --insertion;
-                }
-            }
-            if (count) {
-                const auto amount = clamped_signed_magnitude(*count, keyed.size());
-                if (*count >= 0) keyed.resize(amount); else keyed.erase(keyed.begin(), keyed.end() - static_cast<std::ptrdiff_t>(amount));
-            }
-            std::vector<Expr> result; for (const auto& item : keyed) result.push_back(function == "OrderingBy" ? integer(item.index + 1) : item.item);
-            return function == "OrderingBy" ? list(std::move(result)) : call(rules ? symbol("Association") : args[0].head(), std::move(result));
+    if (function == "SortBy" || function == "ReverseSortBy"
+        || function == "OrderingBy") {
+        auto parsed = split_ordering_options(function);
+        if (!parsed.error.empty()) return raw_evaluation_error(parsed.error);
+        const bool ordering = function == "OrderingBy";
+        const bool reverse = function == "ReverseSortBy";
+        if ((parsed.values.size() == 1 && !parsed.same_test)
+            || (ordering && parsed.values.size() == 1))
+            return call(raw_head, raw_args);
+        const bool valid_arity = ordering
+            ? parsed.values.size() >= 2 && parsed.values.size() <= 4
+            : parsed.values.size() >= 2 && parsed.values.size() <= 3;
+        if (!valid_arity) {
+            return raw_evaluation_error(ordering
+                ? "OrderingBy expects an expression, functions, optional count, optional ordering function, and optional SameTest rule."
+                : function + " expects an expression, functions, optional ordering function, and optional SameTest rule.");
         }
+        auto items = ordered_items(parsed.values[0]);
+        if (!items)
+            return raw_evaluation_error(
+                "SortBy expects a nonatomic expression.");
+        const bool key_specification_is_list
+            = parsed.values[1].has_head("List");
+        const auto key_functions = key_specification_is_list
+            ? parsed.values[1].args() : std::vector<Expr>{parsed.values[1]};
+        const auto count = ordering && parsed.values.size() >= 3
+            ? std::optional<Expr>(parsed.values[2]) : std::nullopt;
+        const auto callable = ordering
+            ? parsed.values.size() >= 4
+                ? std::optional<Expr>(parsed.values[3]) : std::nullopt
+            : parsed.values.size() >= 3
+                ? std::optional<Expr>(parsed.values[2]) : std::nullopt;
+        try {
+            for (auto& item : *items)
+                for (const auto& key_function : key_functions)
+                    item.keys.push_back(evaluate_ordering_callable(
+                        key_function, {item.value}));
+            *items = detail::python_stable_sort(std::move(*items),
+                [&](const OrderedItem& left, const OrderedItem& right) {
+                    int order = 0;
+                    for (std::size_t key = 0; key < left.keys.size(); ++key) {
+                        if (same_test_succeeds(parsed.same_test,
+                                left.keys[key], right.keys[key]))
+                            continue;
+                        order = ordering_compare(callable,
+                            left.keys[key], right.keys[key]);
+                        if (order != 0) break;
+                    }
+                    if (order == 0 && !parsed.same_test
+                        && !key_specification_is_list)
+                        order = expression_compare(left.value, right.value);
+                    return reverse ? order > 0 : order < 0;
+                });
+        } catch (const OrderingSignal&) {
+            return ordering_signal_value;
+        }
+        if (const auto error = slice_ordered_count(
+                *items, count, "OrderingBy"); !error.empty())
+            return raw_evaluation_error(error);
+        if (ordering) {
+            std::vector<Expr> result;
+            result.reserve(items->size());
+            for (const auto& item : *items)
+                result.push_back(integer(item.index + 1));
+            return list(std::move(result));
+        }
+        return rebuild_ordered(parsed.values[0], *items);
     }
     if ((function == "MinimalBy" || function == "MaximalBy") && (args.size() == 2 || args.size() == 3)) {
         const auto rules = association_rules(args[0]);
@@ -8085,6 +14694,117 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             std::vector<Expr> result; for (std::size_t index = 0; index < amount; ++index) result.push_back(keyed[index].item);
             return call(rules ? symbol("Association") : args[0].head(), std::move(result));
         }
+    }
+    if (function == "RandomSample") {
+        std::string error;
+        if (args.size() != 1 && args.size() != 2) {
+            error = "RandomSample expects an expression and an optional count.";
+        } else if (args[0].kind() != ExprKind::Call) {
+            error = "RandomSample expects a nonatomic expression.";
+        } else {
+            std::optional<std::vector<Expr>> rules;
+            if (args[0].has_head("Association")
+                && std::all_of(args[0].args().begin(), args[0].args().end(),
+                    [](const Expr& entry) {
+                        return (entry.has_head("Rule")
+                                || entry.has_head("RuleDelayed"))
+                            && entry.args().size() == 2;
+                    })) {
+                rules = args[0].args();
+            }
+            auto items = rules ? *rules : args[0].args();
+            const mpz_class length(std::to_string(items.size()), 10);
+            std::optional<std::size_t> count;
+            bool valid_count_syntax = true;
+
+            if (args.size() == 1 || is_symbol(args[1], "All")) {
+                count = items.size();
+            } else if (args[1].kind() == ExprKind::Integer) {
+                const auto& requested = args[1].integer_value();
+                if (requested < 0 || requested > length) {
+                    error = "RandomSample count must be between 0 and the sequence length.";
+                } else {
+                    count = nonnegative_size_t(requested);
+                }
+            } else if (args[1].has_head("UpTo") && args[1].args().size() == 1
+                && args[1].args()[0].kind() == ExprKind::Integer) {
+                const auto& requested = args[1].args()[0].integer_value();
+                if (requested < 0) {
+                    error = "RandomSample count must be between 0 and the sequence length.";
+                } else if (requested >= length) {
+                    count = items.size();
+                } else {
+                    count = nonnegative_size_t(requested);
+                }
+            } else {
+                valid_count_syntax = false;
+            }
+
+            if (!valid_count_syntax) {
+                error = "RandomSample expects an integer, UpTo[n], All, or no count.";
+            } else if (error.empty() && count) {
+                if (*count != 0) {
+                    std::lock_guard<std::mutex> lock(process_random_mutex());
+                    auto& engine = process_random_engine();
+                    for (std::size_t index = 0; index < *count; ++index) {
+                        std::uniform_int_distribution<std::size_t> choose(
+                            index, items.size() - 1);
+                        std::swap(items[index], items[choose(engine)]);
+                    }
+                }
+                items.resize(*count);
+                if (rules)
+                    return call("Association",
+                        *normalized_association_rules(items));
+                auto rebuilt = items;
+                const auto* rebuild_head = args[0].head().symbol_name();
+                const auto rebuild_name = rebuild_head
+                    ? system_dispatch_name(*rebuild_head) : std::string{};
+                const bool normalize_first_level = rebuild_head
+                    && rebuild_name != "HoldComplete" && rebuild_name != "Rule"
+                    && rebuild_name != "RuleDelayed"
+                    && rebuild_name != "Unevaluated";
+                if (normalize_first_level) {
+                    rebuilt.clear();
+                    for (const auto& item : items) {
+                        if (item.has_head("Sequence")) {
+                            rebuilt.insert(rebuilt.end(), item.args().begin(),
+                                item.args().end());
+                            continue;
+                        }
+                        if (item.has_head("Splice") && !item.args().empty()
+                            && item.args().size() <= 2
+                            && item.args()[0].has_head("List")) {
+                            const auto target_head = item.args().size() == 2
+                                ? item.args()[1] : symbol("List");
+                            if (args[0].head() == target_head) {
+                                rebuilt.insert(rebuilt.end(),
+                                    item.args()[0].args().begin(),
+                                    item.args()[0].args().end());
+                                continue;
+                            }
+                        }
+                        rebuilt.push_back(item);
+                    }
+                }
+                if (args[0].has_head("List")
+                    || args[0].has_head("Association")) {
+                    rebuilt.erase(std::remove_if(rebuilt.begin(), rebuilt.end(),
+                        [](const Expr& item) {
+                            return is_symbol(item, "Nothing");
+                        }), rebuilt.end());
+                }
+                return call(args[0].head(), std::move(rebuilt));
+            }
+        }
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + error);
+        return call(raw_head, raw_args);
     }
     if (function == "Inequality" && args.size() >= 3 && args.size() % 2 == 1) {
         for (std::size_t index = 1; index < args.size(); index += 2) {
@@ -8414,36 +15134,29 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         return call("Association", std::move(result));
     }
     if (function == "ListQ" && args.size() == 1) return boolean(args[0].has_head("List"));
-    if ((function == "VectorQ" || function == "MatrixQ") && !args.empty() && args.size() <= 2) {
-        const auto predicate = args.size() == 2 ? std::optional<Expr>(args[1]) : std::nullopt;
+    if (function == "VectorQ" || function == "MatrixQ") {
+        if (args.empty() || args.size() > 2)
+            return raw_evaluation_error(function
+                + " expects an expression and an optional element predicate.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        const auto expected_rank = function == "VectorQ" ? 1U : 2U;
+        if (!dimensions || dimensions->size() != expected_rank)
+            return symbol("False");
+        if (args.size() == 1) return symbol("True");
+
         auto matches_predicate = [&](const Expr& value) {
-            return !predicate || is_symbol(evaluate(call(*predicate, {value})), "True");
+            return is_symbol(evaluate(call(args[1], {value})), "True");
         };
         if (args[0].kind() == ExprKind::SparseArray) {
-            const auto expected_rank = function == "VectorQ" ? 1U : 2U;
-            bool valid = args[0].dimensions().size() == expected_rank;
-            if (valid && predicate) {
-                std::size_t total = 1;
-                for (const auto dimension : args[0].dimensions()) total *= dimension;
-                if (total > args[0].sparse_entries().size()) valid = matches_predicate(args[0].fill_value());
-                for (const auto& entry : args[0].sparse_entries()) valid = valid && matches_predicate(entry.value);
-            }
-            return boolean(valid);
+            if (sparse_has_implicit_values(args[0])
+                && !matches_predicate(args[0].fill_value())) return symbol("False");
+            return boolean(std::all_of(
+                args[0].sparse_entries().begin(), args[0].sparse_entries().end(),
+                [&](const SparseEntry& entry) {
+                    return matches_predicate(entry.value);
+                }));
         }
-        if (function == "VectorQ") {
-            if (!args[0].has_head("List")) return symbol("False");
-            return boolean(std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& value) {
-                return !value.has_head("List") && matches_predicate(value);
-            }));
-        }
-        if (!args[0].has_head("List")) return symbol("False");
-        const auto rows = args[0].args();
-        if (rows.empty()) return symbol("False");
-        if (!std::all_of(rows.begin(), rows.end(), [](const Expr& row) { return row.has_head("List"); })) return symbol("False");
-        const auto columns = rows.front().args().size();
-        return boolean(std::all_of(rows.begin(), rows.end(), [&](const Expr& row) {
-            return row.args().size() == columns && std::all_of(row.args().begin(), row.args().end(), matches_predicate);
-        }));
+        return boolean(dense_array_leaves_match(args[0], matches_predicate));
     }
     if (function == "AtomQ" && args.size() == 1) return boolean(args[0].is_atom());
     if (function == "IntegerQ" && args.size() == 1) return boolean(args[0].kind() == ExprKind::Integer);
@@ -8480,8 +15193,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         && args[0].integer_value() <= mpz_class(std::numeric_limits<std::int64_t>::max()));
     if (function == "Head" && args.size() == 1) return args[0].head();
     if (function == "Length" && args.size() == 1) return integer(args[0].length());
-    if (function == "Dimensions" && args.size() == 1 && args[0].kind() == ExprKind::SparseArray) {
-        std::vector<Expr> values; for (const auto dimension : args[0].dimensions()) values.push_back(integer(dimension)); return list(std::move(values));
+    if (function == "Dimensions") {
+        if (args.size() != 1)
+            return raw_evaluation_error("Dimensions expects exactly one argument.");
+        std::vector<Expr> values;
+        for (const auto dimension : common_array_dimensions(args[0]))
+            values.push_back(integer(dimension));
+        return list(std::move(values));
+    }
+    if (function == "ArrayDepth") {
+        if (args.size() != 1)
+            return raw_evaluation_error("ArrayDepth expects exactly one argument.");
+        return integer(maximum_array_depth(args[0]));
     }
     if (function == "Depth" && args.size() == 1) {
         auto semantic_depth = [&](auto&& self, const Expr& value) -> std::size_t {
@@ -8494,143 +15217,58 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (association_rules(args[0])) return integer(semantic_depth(semantic_depth, args[0]));
         return integer(args[0].depth());
     }
-    if (function == "Level" && args.size() >= 2) {
-        if (args[1].has_head("List") && args[1].args().size() == 1
-            && machine_index(args[1].args()[0])
-            && *machine_index(args[1].args()[0]) == -1) {
-            std::vector<Expr> atoms;
-            auto collect_atoms = [&](auto&& self, const Expr& value) -> void {
-                if (value.kind() != ExprKind::Call) {
-                    if (!is_symbol(value, "Nothing")) atoms.push_back(value);
-                    return;
-                }
-                for (const auto& item : value.args()) self(self, item);
-            };
-            if (args[0].kind() == ExprKind::Call)
-                for (const auto& item : args[0].args()) collect_atoms(collect_atoms, item);
-            return list(std::move(atoms));
+    auto invalid_traversal_call = [&](const std::string& detail) {
+        const auto message_head = raw_head.symbol_name() ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + detail);
+        return call(raw_head, raw_args);
+    };
+    if (function == "Level") {
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "Level expects an expression, a level specification, and an optional heads flag.");
+        if (args.size() == 3) {
+            if (!is_symbol(args[2], "True") && !is_symbol(args[2], "False"))
+                return invalid_traversal_call(
+                    "The optional third Level argument must be True or False.");
+            if (is_symbol(args[2], "True"))
+                return invalid_traversal_call("Level[..., ..., True] is not implemented yet.");
         }
-        std::vector<Expr> atoms, compounds;
-        auto collect = [&](auto&& self, const Expr& value) -> void {
-            if (value.kind() != ExprKind::Call) { if (!is_symbol(value, "Nothing")) atoms.push_back(value); return; }
-            for (const auto& item : value.args()) self(self, item);
-            compounds.push_back(value);
+        const auto bounds = normalize_level_spec(args[1]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        std::vector<Expr> values;
+        auto collect = [&](auto&& self, const Expr& value, long positive) -> void {
+            if (value.kind() == ExprKind::Call)
+                for (const auto& child : structural_children(value))
+                    self(self, child, positive + 1);
+            if (level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                values.push_back(value);
         };
-        if (args[0].kind() == ExprKind::Call) for (const auto& item : args[0].args()) collect(collect, item);
-        atoms.insert(atoms.end(), compounds.begin(), compounds.end()); return list(std::move(atoms));
+        collect(collect, args[0], 0);
+        return remove_nothing_from_list_like(list(std::move(values)));
     }
-    if (function == "Part" && args.size() >= 2) {
+    if (function == "Part") {
         auto invalid_part = [&](const std::string& detail) {
             const auto message = call("MessageName", {symbol("Part"), string("error")});
-            const auto text = detail.empty()
-                ? "Part::error: Part specifications are invalid for " + args[0].to_input_form() + "."
-                : "Part::error: " + detail;
-            emit_message(message, text);
+            emit_message(message, "Part::error: " + detail);
             return call(head, args);
         };
+        if (args.size() < 2)
+            return invalid_part(
+                "Part expects an expression and at least one part specification.");
         if (args[0].kind() == ExprKind::SparseArray) {
-            const auto dense = sparse_dense_value(args[0]);
-            auto select = [&](auto&& self, const Expr& value, std::size_t selector) -> std::optional<Expr> {
-                if (selector == args.size()) return value;
-                if (!value.has_head("List")) return std::nullopt;
-                if (is_symbol(args[selector], "All")) {
-                    std::vector<Expr> selected; for (const auto& item : value.args()) { const auto child = self(self, item, selector + 1); if (!child) return std::nullopt; selected.push_back(*child); }
-                    return list(std::move(selected));
-                }
-                if (args[selector].has_head("List")) {
-                    std::vector<Expr> selected;
-                    for (const auto& specification : args[selector].args()) { const auto index = normalized_index(specification, value.args().size()); if (!index) return std::nullopt; const auto child = self(self, value.args()[*index], selector + 1); if (!child) return std::nullopt; selected.push_back(*child); }
-                    return list(std::move(selected));
-                }
-                const auto index = normalized_index(args[selector], value.args().size()); if (!index) return std::nullopt;
-                return self(self, value.args()[*index], selector + 1);
-            };
-            if (const auto selected = select(select, dense, 1)) {
-                if (selected->has_head("List")) return *sparse_from_dense(*selected, args[0].fill_value());
-                return *selected;
-            }
+            const std::vector<Expr> specifications(args.begin() + 1, args.end());
+            const auto selected = sparse_part(args[0], specifications);
+            if (!selected.error.empty()) return invalid_part(selected.error);
+            return *selected.value;
         }
-        Expr target = args[0];
-        for (std::size_t part = 1; part < args.size(); ++part) {
-            if (const auto rules = association_rules(target)) {
-                if (args[part].has_head("List")) {
-                    const bool has_key = std::any_of(args[part].args().begin(), args[part].args().end(),
-                        [](const Expr& value) { return value.has_head("Key") || value.kind() == ExprKind::String; });
-                    const bool has_numeric = std::any_of(args[part].args().begin(), args[part].args().end(),
-                        [](const Expr& value) { return value.kind() == ExprKind::Integer; });
-                    if (has_key && has_numeric)
-                        return invalid_part("Association selector lists may not mix numeric and key selectors.");
-                    std::vector<Expr> selected;
-                    for (const auto& specification : args[part].args()) {
-                        const auto key = selector_key(specification); if (!key) return invalid_part("");
-                        const auto found = std::find_if(rules->begin(), rules->end(), [&](const Expr& rule) { return rule.args()[0] == *key; }); if (found == rules->end()) return invalid_part(""); selected.push_back(*found);
-                    }
-                    target = call("Association", std::move(selected)); continue;
-                }
-                const auto key = selector_key(args[part]).value_or(args[part]);
-                if (args[part].has_head("Key") || args[part].kind() == ExprKind::String) {
-                    const auto found = std::find_if(rules->begin(), rules->end(), [&](const Expr& rule) { return rule.args()[0] == key; }); if (found == rules->end()) return call(head, args); target = found->args()[1]; continue;
-                }
-                const auto index = normalized_index(args[part], rules->size()); if (!index) return invalid_part(""); target = (*rules)[*index].args()[1]; continue;
-            }
-            if (is_symbol(args[part], "All") || args[part].has_head("Span")) {
-                if (target.kind() != ExprKind::Call) return invalid_part("");
-                std::vector<std::size_t> selected_indices;
-                const auto length = static_cast<long>(target.args().size());
-                if (is_symbol(args[part], "All")) {
-                    for (std::size_t index = 0; index < target.args().size(); ++index)
-                        selected_indices.push_back(index);
-                } else {
-                    const auto& specification = args[part];
-                    if (specification.args().size() > 3) return invalid_part("");
-                    const auto step = specification.args().size() >= 3
-                        ? machine_index(specification.args()[2]) : std::optional<long>(1);
-                    if (!step || *step == 0) return invalid_part("");
-                    auto endpoint = [&](std::size_t position, bool start) -> std::optional<long> {
-                        if (position >= specification.args().size()
-                            || is_symbol(specification.args()[position], "All"))
-                            return *step > 0 ? (start ? 1 : length) : (start ? length : 1);
-                        const auto value = machine_index(specification.args()[position]);
-                        if (!value || *value == 0) return std::nullopt;
-                        const auto normalized = *value < 0 ? length + *value + 1 : *value;
-                        if (normalized < 1 || normalized > length) return std::nullopt;
-                        return normalized;
-                    };
-                    const auto first = endpoint(0, true);
-                    const auto last = endpoint(1, false);
-                    if (!first || !last) return invalid_part("");
-                    for (long index = *first;
-                        *step > 0 ? index <= *last : index >= *last;) {
-                        selected_indices.push_back(static_cast<std::size_t>(index - 1));
-                        const auto next = checked_signed_sum(index, *step);
-                        if (!next) break;
-                        index = *next;
-                    }
-                }
-                std::vector<Expr> selected;
-                for (const auto index : selected_indices) selected.push_back(target.args()[index]);
-                target = call(target.head(), std::move(selected));
-                continue;
-            }
-            if (args[part].has_head("List")) {
-                std::vector<Expr> selected;
-                for (const auto& spec : args[part].args()) {
-                    const auto index = normalized_index(spec, target.args().size());
-                    if (!index) return invalid_part("");
-                    selected.push_back(target.args()[*index]);
-                }
-                target = call(target.head(), std::move(selected));
-                continue;
-            }
-            if (args[part].kind() != ExprKind::Integer || !args[part].integer_value().fits_slong_p()) return invalid_part("");
-            const auto raw_index = args[part].integer_value().get_si();
-            const auto length = static_cast<long>(target.args().size());
-            const auto index = raw_index < 0 ? length + raw_index : raw_index - 1;
-            if (raw_index == 0) target = target.head();
-            else if (index >= 0 && index < length) target = target.args()[static_cast<std::size_t>(index)];
-            else return invalid_part("");
-        }
-        return target;
+        const std::vector<Expr> components(args.begin() + 1, args.end());
+        const auto result = structural_part(args[0], components);
+        if (!result.error.empty()) return invalid_part(result.error);
+        return *result.value;
     }
     if (function == "First") {
         std::string error;
@@ -8693,46 +15331,152 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, function + "::error: " + error);
         return call(raw_head, raw_args);
     }
-    if (function == "Map" && args.size() == 3 && args[2].has_head("Rule")
-        && args[2].args().size() == 2 && is_symbol(args[2].args()[0], "Heads")
-        && args[1].kind() == ExprKind::Call) {
-        const bool include_heads = is_symbol(args[2].args()[1], "True");
-        Expr mapped_head = args[1].head();
-        if (include_heads) mapped_head = evaluate(call(args[0], {mapped_head}));
-        std::vector<Expr> values;
-        for (const auto& item : args[1].args()) values.push_back(evaluate(call(args[0], {item})));
-        return call(mapped_head, std::move(values));
+    if (function == "Apply") {
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "Apply expects a head, an expression, and an optional level specification.");
+        auto apply_head = [&](const Expr& value) {
+            if (value.kind() != ExprKind::Call) return value;
+            return evaluate(call(args[0], structural_children(value)));
+        };
+        if (args.size() == 2) return apply_head(args[1]);
+        const auto bounds = normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto transform = [&](auto&& self, const Expr& value, long positive) -> Expr {
+            Expr rebuilt = value;
+            if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children;
+                for (const auto& child : structural_children(value))
+                    children.push_back(self(self, child, positive + 1));
+                rebuilt = rebuild_structural_children(value, std::move(children));
+            }
+            if (!level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                return rebuilt;
+            return apply_head(rebuilt);
+        };
+        return transform(transform, args[1], 0);
     }
-    if ((function == "Apply" || function == "Map") && args.size() == 3) {
-        long minimum = -1, maximum = -1;
-        if (args[2].has_head("List") && args[2].args().size() == 1 && machine_index(args[2].args()[0])) minimum = maximum = *machine_index(args[2].args()[0]);
-        else if (args[2].has_head("List") && args[2].args().size() == 2 && machine_index(args[2].args()[0]) && machine_index(args[2].args()[1])) {
-            minimum = *machine_index(args[2].args()[0]); maximum = *machine_index(args[2].args()[1]);
+    if (function == "Map") {
+        std::size_t argument_count = args.size();
+        bool include_heads = false;
+        if (argument_count != 0 && args[argument_count - 1].has_head("Rule")
+            && args[argument_count - 1].args().size() == 2
+            && is_symbol(args[argument_count - 1].args()[0], "Heads")) {
+            include_heads = is_symbol(args[argument_count - 1].args()[1], "True");
+            --argument_count;
         }
-        if (minimum >= 0 && maximum >= minimum) {
-            auto transform = [&](auto&& self, const Expr& value, long depth) -> Expr {
-                Expr current = value;
-                if (value.kind() == ExprKind::Call) { std::vector<Expr> children; for (const auto& child : value.args()) children.push_back(self(self, child, depth + 1)); current = call(value.head(), std::move(children)); }
-                if (depth < minimum || depth > maximum) return current;
-                return function == "Map" ? evaluate(call(args[0], {current}))
-                    : current.kind() == ExprKind::Call ? call(args[0], current.args()) : current;
-            };
-            return transform(transform, args[1], 0);
-        }
+        if (argument_count != 2 && argument_count != 3)
+            return invalid_traversal_call(
+                "Map expects a function, an expression, and an optional level specification.");
+        const auto bounds = argument_count == 2
+            ? LevelBounds{1, 1, true} : normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto transform = [&](auto&& self, const Expr& value, long positive) -> Expr {
+            Expr rebuilt = value;
+            if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children;
+                for (const auto& child : structural_children(value))
+                    children.push_back(self(self, child, positive + 1));
+                std::optional<Expr> mapped_head;
+                if (include_heads && !association_rules(value))
+                    mapped_head = self(self, value.head(), positive + 1);
+                rebuilt = rebuild_structural_children(
+                    value, std::move(children), mapped_head);
+            }
+            if (!level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                return rebuilt;
+            return evaluate(call(args[0], {rebuilt}));
+        };
+        return transform(transform, args[1], 0);
     }
-    if ((function == "Apply" || function == "Map") && args.size() == 2) {
-        if (args[1].kind() != ExprKind::Call) return args[1];
-        if (const auto rules = association_rules(args[1])) {
-            if (function == "Apply") { std::vector<Expr> values; for (const auto& rule : *rules) values.push_back(rule.args()[1]); return evaluate(call(args[0], values)); }
-            std::vector<Expr> mapped; for (const auto& rule : *rules) mapped.push_back(call("Rule", {rule.args()[0], evaluate(call(args[0], {rule.args()[1]}))}));
-            return call("Association", std::move(mapped));
+    if (function == "Discard") {
+        if (args.size() == 1)
+            return call("Function", {
+                call("Discard", {call("Slot", {}), args[0]})});
+        if (args.size() != 2 && args.size() != 3)
+            return raw_evaluation_error(
+                "Discard expects an expression, a criterion or property "
+                "specification, and an optional limit.");
+
+        const auto rules = association_rules(args[0]);
+        if (!rules && args[0].kind() != ExprKind::Call)
+            return raw_evaluation_error(
+                "Discard expects a nonatomic expression.");
+
+        Expr criterion = args[1];
+        std::optional<std::vector<std::string>> properties;
+        bool property_list_mode = false;
+        if (criterion.has_head("Rule")) {
+            if (criterion.args().size() != 2)
+                return raw_evaluation_error(
+                    "Discard property specifications must contain exactly two arguments.");
+            const auto property_specification = criterion.args()[1];
+            criterion = criterion.args()[0];
+            property_list_mode = property_specification.has_head("List");
+            std::vector<Expr> property_values = property_specification.has_head("List")
+                ? property_specification.args()
+                : std::vector<Expr>{property_specification};
+            properties.emplace();
+            for (const auto& property : property_values) {
+                if (property.kind() != ExprKind::String
+                    || (property.text() != "Element" && property.text() != "Index"))
+                    return raw_evaluation_error(
+                        "Discard currently supports only \"Element\" and \"Index\" properties.");
+                properties->push_back(property.text());
+            }
         }
-        if (function == "Apply") return evaluate(call(args[0], args[1].args()));
-        std::vector<Expr> values;
-        for (const auto& item : args[1].args()) values.push_back(evaluate(call(args[0], {item})));
-        return remove_nothing_from_list_like(call(args[1].head(), std::move(values)));
+
+        std::optional<mpz_class> remaining;
+        if (args.size() == 3 && !is_symbol(args[2], "Infinity")) {
+            if (args[2].kind() != ExprKind::Integer || args[2].integer_value() < 0)
+                return raw_evaluation_error(
+                    "Match limits must be non-negative integers or Infinity.");
+            remaining = args[2].integer_value();
+        }
+
+        std::vector<Expr> source;
+        if (rules) {
+            source.reserve(rules->size());
+            for (const auto& rule : *rules) source.push_back(rule.args()[1]);
+        } else source = args[0].args();
+
+        std::vector<Expr> retained_elements;
+        std::vector<Expr> retained_indices;
+        std::vector<Expr> retained_rules;
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            bool discard_item = false;
+            if (!remaining || *remaining != 0) {
+                const auto outcome = evaluate(call(criterion, {source[index]}));
+                if (immediate_signal_active()) return outcome;
+                discard_item = is_symbol(outcome, "True");
+                if (discard_item && remaining) --*remaining;
+            }
+            if (discard_item) continue;
+            retained_elements.push_back(source[index]);
+            retained_indices.push_back(integer(index + 1));
+            if (rules) retained_rules.push_back((*rules)[index]);
+        }
+
+        auto elements_projection = [&] {
+            return rules ? call("Association", retained_rules)
+                         : call(args[0].head(), retained_elements);
+        };
+        if (!properties) return elements_projection();
+        if (!property_list_mode)
+            return properties->front() == "Element"
+                ? elements_projection() : list(retained_indices);
+
+        std::vector<Expr> projected_rules;
+        projected_rules.reserve(properties->size());
+        for (const auto& property : *properties)
+            projected_rules.push_back(call("Rule", {
+                string(property), property == "Element"
+                    ? elements_projection() : list(retained_indices)}));
+        return call("Association", std::move(projected_rules));
     }
-    if ((function == "Select" || function == "Discard" || function == "SelectFirst") && args.size() >= 2) {
+    if ((function == "Select" || function == "SelectFirst") && args.size() >= 2) {
         const auto rules = association_rules(args[0]);
         if (!rules && args[0].kind() != ExprKind::Call) return call(head, args);
         Expr criterion = args[1]; std::optional<Expr> property;
@@ -8743,12 +15487,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         const auto limit = args.size() >= 3 && machine_index(args[2]) ? std::max<long>(0, *machine_index(args[2])) : 1000000L;
         std::size_t remaining = static_cast<std::size_t>(limit);
         for (std::size_t index = 0; index < source.size(); ++index) {
-            const bool matches = is_symbol(evaluate(call(criterion, {source[index]})), "True");
             bool selected = false;
-            if (function == "Discard") {
-                if (matches && remaining > 0) { --remaining; continue; }
-                selected = true;
-            } else if (matches && remaining > 0) {
+            const auto outcome = evaluate(call(criterion, {source[index]}));
+            if (immediate_signal_active()) return outcome;
+            if (is_symbol(outcome, "True") && remaining > 0) {
                 selected = true;
                 --remaining;
             }
@@ -8812,26 +15554,32 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         if (bounds.valid) { scan(scan, args[1], 0); return symbol("Null"); }
     }
-    if (function == "MapApply" && args.size() == 3) {
-        const auto bounds = normalize_level_spec(args[2]);
-        auto map_apply = [&](auto&& self, const Expr& value, long positive) -> Expr {
+    if (function == "MapApply") {
+        if (args.size() == 1) return call(head, args);
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "MapApply expects a function, an expression, and an optional level specification.");
+        const auto bounds = args.size() == 2
+            ? LevelBounds{1, 1, true} : normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto apply_head = [&](const Expr& value) {
+            if (value.kind() != ExprKind::Call) return value;
+            return evaluate(call(args[0], structural_children(value)));
+        };
+        auto transform = [&](auto&& self, const Expr& value, long positive) -> Expr {
             Expr rebuilt = value;
             if (value.kind() == ExprKind::Call) {
                 std::vector<Expr> children;
-                for (const auto& child : value.args()) children.push_back(self(self, child, positive + 1));
-                rebuilt = call(value.head(), std::move(children));
+                for (const auto& child : structural_children(value))
+                    children.push_back(self(self, child, positive + 1));
+                rebuilt = rebuild_structural_children(value, std::move(children));
             }
-            if (!level_matches(positive, -static_cast<long>(semantic_expression_depth(rebuilt)), bounds)) return rebuilt;
-            return rebuilt.kind() == ExprKind::Call
-                ? evaluate(call(args[0], rebuilt.args())) : evaluate(call(args[0], {rebuilt}));
+            if (positive < 1 || !level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(value)), bounds))
+                return rebuilt;
+            return apply_head(rebuilt);
         };
-        if (bounds.valid) return map_apply(map_apply, args[1], 0);
-    }
-    if (function == "MapApply" && args.size() == 2 && args[1].kind() == ExprKind::Call) {
-        std::vector<Expr> values;
-        for (const auto& item : args[1].args()) values.push_back(item.kind() == ExprKind::Call
-            ? evaluate(call(args[0], item.args())) : evaluate(call(args[0], {item})));
-        return call(args[1].head(), std::move(values));
+        return transform(transform, args[1], 0);
     }
     if (function == "MapAll" && (args.size() == 2 || (args.size() == 3 && args[2].has_head("Rule")
         && args[2].args().size() == 2 && is_symbol(args[2].args()[0], "Heads")))) {
@@ -8844,32 +15592,113 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         };
         return map_all(map_all, args[1]);
     }
-    if (function == "MapIndexed" && args.size() == 2 && args[1].kind() == ExprKind::Call) {
-        if (const auto rules = association_rules(args[1])) {
-            std::vector<Expr> mapped;
-            for (const auto& rule : *rules) mapped.push_back(call("Rule", {rule.args()[0],
-                evaluate(call(args[0], {rule.args()[1], list({call("Key", {rule.args()[0]})})}))}));
-            return call("Association", std::move(mapped));
-        }
-        std::vector<Expr> values;
-        for (std::size_t index = 0; index < args[1].args().size(); ++index)
-            values.push_back(evaluate(call(args[0], {args[1].args()[index], list({integer(index + 1)})})));
-        return call(args[1].head(), std::move(values));
+    if (function == "MapIndexed") {
+        if (args.size() == 1) return call(head, args);
+        if (args.size() != 2 && args.size() != 3)
+            return invalid_traversal_call(
+                "MapIndexed expects a function, an expression, and an optional level specification.");
+        const auto bounds = args.size() == 2
+            ? LevelBounds{1, 1, true} : normalize_level_spec(args[2]);
+        if (!bounds.valid) return invalid_traversal_call(bounds.error);
+        auto transform = [&](auto&& self, const Expr& value, std::vector<Expr> path) -> Expr {
+            Expr rebuilt = value;
+            if (const auto rules = association_rules(value)) {
+                std::vector<Expr> children;
+                children.reserve(rules->size());
+                for (const auto& rule : *rules) {
+                    auto child_path = path;
+                    child_path.push_back(call("Key", {rule.args()[0]}));
+                    children.push_back(self(self, rule.args()[1], std::move(child_path)));
+                }
+                rebuilt = rebuild_structural_children(value, std::move(children));
+            } else if (value.kind() == ExprKind::Call) {
+                std::vector<Expr> children;
+                children.reserve(value.args().size());
+                for (std::size_t index = 0; index < value.args().size(); ++index) {
+                    auto child_path = path;
+                    child_path.push_back(integer(index + 1));
+                    children.push_back(self(self, value.args()[index], std::move(child_path)));
+                }
+                rebuilt = rebuild_structural_children(value, std::move(children));
+            }
+            const auto positive = static_cast<long>(path.size());
+            if (positive < 1 || !level_matches(positive,
+                    -static_cast<long>(semantic_expression_depth(rebuilt)), bounds))
+                return rebuilt;
+            return evaluate(call(args[0], {rebuilt, list(std::move(path))}));
+        };
+        return transform(transform, args[1], {});
     }
     if (function == "Construct" && args.size() >= 1)
         return evaluate(call(args[0], std::vector<Expr>(args.begin() + 1, args.end())));
-    if (function == "Operate" && args.size() >= 2 && args.size() <= 3 && args[1].kind() == ExprKind::Call) {
-        const auto level = args.size() == 3 ? machine_index(args[2]) : std::optional<long>(1);
-        if (level && *level == 0) return evaluate(call(args[0], {args[1]}));
-        if (level && *level == 1) return call(call(args[0], {args[1].head()}), args[1].args());
+    if (function == "Operate") {
+        if (args.size() != 2 && args.size() != 3)
+            return raw_evaluation_error(
+                "Operate expects an operator, an expression, and an optional positive level.");
+        mpz_class level = 1;
+        if (args.size() == 3) {
+            if (args[2].kind() != ExprKind::Integer)
+                return raw_evaluation_error("Operate expects an integer argument.");
+            level = args[2].integer_value();
+        }
+        if (level < 0)
+            return raw_evaluation_error(
+                "Operate expects a non-negative integer level.");
+
+        auto operate = [&](auto&& self, const Expr& expression,
+                           const mpz_class& current_level) -> Expr {
+            if (current_level == 0) {
+                const auto outcome = evaluate(call(args[0], {expression}));
+                return outcome;
+            }
+            if (expression.kind() != ExprKind::Call) return expression;
+            Expr replaced_head;
+            if (current_level == 1) {
+                replaced_head = evaluate(call(args[0], {expression.head()}));
+                if (immediate_signal_active()) return replaced_head;
+            } else {
+                if (expression.head().kind() != ExprKind::Call) return expression;
+                replaced_head = self(self, expression.head(), current_level - 1);
+                if (immediate_signal_active()) return replaced_head;
+            }
+            return call(std::move(replaced_head), expression.args());
+        };
+        return operate(operate, args[1], level);
     }
-    if (function == "Comap" && args.size() == 2 && args[0].has_head("List")) {
-        std::vector<Expr> values; for (const auto& callable : args[0].args()) values.push_back(evaluate(call(callable, {args[1]})));
-        return list(std::move(values));
-    }
-    if (function == "ComapApply" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")) {
-        std::vector<Expr> values; for (const auto& callable : args[0].args()) values.push_back(evaluate(call(callable, args[1].args())));
-        return list(std::move(values));
+    if (function == "Comap" || function == "ComapApply") {
+        if (args.size() == 1) return call(head, args);
+        if (args.size() != 2)
+            return raw_evaluation_error(function + " expects exactly two arguments.");
+
+        const auto function_rules = association_rules(args[0]);
+        if (!function_rules && args[0].kind() != ExprKind::Call) return args[0];
+
+        std::vector<Expr> application_arguments;
+        bool application_is_atomic = false;
+        if (function == "ComapApply") {
+            if (const auto argument_rules = association_rules(args[1])) {
+                application_arguments.reserve(argument_rules->size());
+                for (const auto& rule : *argument_rules)
+                    application_arguments.push_back(rule.args()[1]);
+            } else if (args[1].kind() == ExprKind::Call) {
+                application_arguments = args[1].args();
+            } else application_is_atomic = true;
+        } else application_arguments = {args[1]};
+
+        std::vector<Expr> rebuilt;
+        const auto& function_values = function_rules ? *function_rules : args[0].args();
+        rebuilt.reserve(function_values.size());
+        for (const auto& item : function_values) {
+            const auto& callable = function_rules ? item.args()[1] : item;
+            const auto value = application_is_atomic
+                ? args[1] : evaluate(call(callable, application_arguments));
+            if (immediate_signal_active()) return value;
+            if (function_rules)
+                rebuilt.push_back(call(item.head(), {item.args()[0], value}));
+            else rebuilt.push_back(value);
+        }
+        return function_rules ? call("Association", std::move(rebuilt))
+                              : call(args[0].head(), std::move(rebuilt));
     }
     if (function == "Through" && args.size() == 1 && args[0].kind() == ExprKind::Call
         && args[0].head().kind() == ExprKind::Call) {
@@ -8991,27 +15820,217 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return boolean(contains_point(args[1]));
         }
     }
-    if (function == "ArrayQ" && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); return evaluate(call("ArrayQ", std::move(dense_args)));
+    if (function == "ArrayReshape" && evaluated_name
+        && *evaluated_name == "ArrayReshape" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayReshape expects an expression, dimensions, and an optional padding value.");
+        const auto normalized = normalize_dense_dimensions(args[1], "ArrayReshape");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+        const auto dimensions = native_sparse_dimensions(*normalized.values);
+        if (!dimensions)
+            return raw_evaluation_error(
+                "ArrayReshape dimensions exceed the native representation limit.");
+
+        const auto padding = args.size() == 3 ? args[2] : integer(0L);
+        const auto old_total = sparse_dimension_product(args[0].dimensions());
+        mpz_class new_total = 1;
+        for (const auto& dimension : *normalized.values)
+            new_total *= dimension;
+        if (dimensions->empty()) {
+            if (old_total == 0) return padding;
+            return sparse_coordinate_value(args[0],
+                std::vector<std::size_t>(args[0].dimensions().size(), 1));
+        }
+
+        const bool preserves_sparse = new_total <= old_total
+            || args[0].fill_value() == padding;
+        if (!preserves_sparse) {
+            const auto dense = sparse_dense_value(args[0]);
+            if (!dense || !dense_materialization_within_limit(*normalized.values))
+                return raw_evaluation_error(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            auto dense_args = args;
+            dense_args[0] = *dense;
+            return evaluate(call("ArrayReshape", std::move(dense_args)));
+        }
+
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            const auto linear = sparse_linear_offset(
+                entry.indices, args[0].dimensions());
+            if (linear >= new_total) continue;
+            const auto indices = sparse_indices_from_offset(linear, *dimensions);
+            if (indices) entries.push_back({*indices, entry.value});
+        }
+        const auto output_fill = new_total <= old_total
+            ? args[0].fill_value() : padding;
+        return sparse_array(*dimensions, std::move(entries), output_fill);
     }
-    if ((function == "ArrayReshape" || function == "ArrayPad" || function == "Transpose" || function == "Flatten")
-        && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); const auto result = evaluate(call(function, std::move(dense_args)));
-        if (const auto sparse = sparse_from_dense(result, args[0].fill_value())) return *sparse;
-        return result;
+    if (function == "ArrayPad" && evaluated_name
+        && *evaluated_name == "ArrayPad" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayPad expects an array, padding widths, and an optional padding value.");
+        const auto normalized = normalize_dense_padding(
+            args[1], args[0].dimensions().size());
+        if (!normalized.widths)
+            return raw_evaluation_error(normalized.error);
+        DenseDimensions output_dimensions;
+        output_dimensions.reserve(args[0].dimensions().size());
+        for (std::size_t axis = 0; axis < args[0].dimensions().size(); ++axis)
+            output_dimensions.push_back(
+                mpz_class(std::to_string(args[0].dimensions()[axis]), 10)
+                + (*normalized.widths)[axis].first
+                + (*normalized.widths)[axis].second);
+        const auto dimensions = native_sparse_dimensions(output_dimensions);
+        if (!dimensions)
+            return raw_evaluation_error(
+                "ArrayPad dimensions exceed the native representation limit.");
+        const auto padding = args.size() == 3 ? args[2] : integer(0L);
+        if (padding != args[0].fill_value()) {
+            const auto dense = sparse_dense_value(args[0]);
+            if (!dense || !dense_materialization_within_limit(output_dimensions))
+                return raw_evaluation_error(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            auto dense_args = args;
+            dense_args[0] = *dense;
+            return evaluate(call("ArrayPad", std::move(dense_args)));
+        }
+
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            auto indices = entry.indices;
+            for (std::size_t axis = 0; axis < indices.size(); ++axis) {
+                const auto offset = nonnegative_size_t(
+                    (*normalized.widths)[axis].first);
+                if (!offset || indices[axis]
+                    > std::numeric_limits<std::size_t>::max() - *offset)
+                    return raw_evaluation_error(
+                        "ArrayPad dimensions exceed the native representation limit.");
+                indices[axis] += *offset;
+            }
+            entries.push_back({std::move(indices), entry.value});
+        }
+        return sparse_array(
+            *dimensions, std::move(entries), args[0].fill_value());
     }
-    if ((function == "Tr" || function == "Det") && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); return evaluate(call(function, std::move(dense_args)));
+    if (function == "Transpose" && evaluated_name
+        && *evaluated_name == "Transpose" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Transpose expects an array and an optional permutation.");
+        const auto rank = args[0].dimensions().size();
+        std::vector<std::size_t> permutation(rank);
+        std::iota(permutation.begin(), permutation.end(), std::size_t{0});
+        if (args.size() == 1) {
+            if (rank >= 2) std::swap(permutation[0], permutation[1]);
+        } else {
+            if (!args[1].has_head("List"))
+                return raw_evaluation_error(
+                    "Transpose expects a permutation list as its second argument.");
+            if (args[1].args().size() != rank
+                || !std::all_of(args[1].args().begin(), args[1].args().end(),
+                    [](const Expr& value) {
+                        return value.kind() == ExprKind::Integer;
+                    }))
+                return raw_evaluation_error(
+                    "Transpose permutation length must match the array rank.");
+            for (std::size_t axis = 0; axis < rank; ++axis) {
+                const auto& value = args[1].args()[axis].integer_value();
+                if (value < 1
+                    || value > mpz_class(std::to_string(rank), 10))
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
+                permutation[axis] = *nonnegative_size_t(value - 1);
+            }
+            auto sorted = permutation;
+            std::sort(sorted.begin(), sorted.end());
+            for (std::size_t axis = 0; axis < rank; ++axis)
+                if (sorted[axis] != axis)
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
+        }
+        if (std::is_sorted(permutation.begin(), permutation.end()))
+            return args[0];
+
+        std::vector<std::size_t> dimensions;
+        dimensions.reserve(rank);
+        for (const auto axis : permutation)
+            dimensions.push_back(args[0].dimensions()[axis]);
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            std::vector<std::size_t> indices;
+            indices.reserve(rank);
+            for (const auto axis : permutation)
+                indices.push_back(entry.indices[axis]);
+            entries.push_back({std::move(indices), entry.value});
+        }
+        return sparse_array(
+            std::move(dimensions), std::move(entries), args[0].fill_value());
     }
-    if ((function == "Inverse" || function == "MatrixPower") && !args.empty() && args[0].kind() == ExprKind::SparseArray) {
-        auto dense_args = args; dense_args[0] = sparse_dense_value(args[0]); const auto result = evaluate(call(function, std::move(dense_args)));
-        if (const auto sparse = sparse_from_dense(result)) return *sparse;
-        return result;
-    }
-    if (function == "Dot" && args.size() == 2 && (args[0].kind() == ExprKind::SparseArray || args[1].kind() == ExprKind::SparseArray)) {
-        const auto result = evaluate(call("Dot", {sparse_dense_value(args[0]), sparse_dense_value(args[1])}));
-        if (const auto sparse = sparse_from_dense(result)) return *sparse;
-        return result;
+    if (function == "Flatten" && !args.empty()
+        && args[0].kind() == ExprKind::SparseArray) {
+        if (args.size() == 3)
+            return raw_evaluation_error(
+                "Flatten currently does not implement the 3-argument head-selecting form for SparseArray inputs.");
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Flatten expects an expression, an optional level specification, and an optional head.");
+        std::optional<std::size_t> level;
+        if (args.size() == 2 && !is_symbol(args[1], "Infinity")) {
+            if (args[1].kind() != ExprKind::Integer
+                || args[1].integer_value() < 0)
+                return raw_evaluation_error(
+                    "Flatten levels must be a non-negative integer or Infinity.");
+            level = nonnegative_size_t(args[1].integer_value());
+            if (!level)
+                return raw_evaluation_error(
+                    "Flatten level exceeds the native representation limit.");
+        }
+        const auto rank = args[0].dimensions().size();
+        if ((level && *level == 0) || rank <= 1) return args[0];
+        const auto collapse_count = level
+            ? (*level >= rank ? rank : *level + 1) : rank;
+        std::vector<std::size_t> collapsed_dimensions(
+            args[0].dimensions().begin(),
+            args[0].dimensions().begin()
+                + static_cast<std::ptrdiff_t>(collapse_count));
+        const auto collapsed = checked_dimension_product(collapsed_dimensions);
+        if (!collapsed)
+            return raw_evaluation_error(
+                "Flatten dimensions exceed the native representation limit.");
+        std::vector<std::size_t> dimensions{*collapsed};
+        dimensions.insert(dimensions.end(),
+            args[0].dimensions().begin()
+                + static_cast<std::ptrdiff_t>(collapse_count),
+            args[0].dimensions().end());
+        std::vector<SparseEntry> entries;
+        entries.reserve(args[0].sparse_entries().size());
+        for (const auto& entry : args[0].sparse_entries()) {
+            std::vector<std::size_t> prefix(
+                entry.indices.begin(), entry.indices.begin()
+                    + static_cast<std::ptrdiff_t>(collapse_count));
+            const auto collapsed_index = nonnegative_size_t(
+                sparse_linear_offset(prefix, collapsed_dimensions) + 1);
+            if (!collapsed_index)
+                return raw_evaluation_error(
+                    "Flatten dimensions exceed the native representation limit.");
+            std::vector<std::size_t> indices{*collapsed_index};
+            indices.insert(indices.end(),
+                entry.indices.begin()
+                    + static_cast<std::ptrdiff_t>(collapse_count),
+                entry.indices.end());
+            entries.push_back({std::move(indices), entry.value});
+        }
+        return sparse_array(
+            std::move(dimensions), std::move(entries), args[0].fill_value());
     }
     if (function == "PadLeft" || function == "PadRight") {
         std::string error;
@@ -9080,7 +16099,20 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::vector<Expr> rules; for (std::size_t index = 0; index < keys.size(); ++index) { Expr value = list(groups[index]); if (aggregator) value = evaluate(call(*aggregator, {value})); rules.push_back(call("Rule", {keys[index], value})); }
         return call("Association", std::move(rules));
     }
-    if ((function == "Gather" || function == "GatherBy") && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+    if (function == "GatherBy" && args.size() != 2) {
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix
+            + "::error: GatherBy currently expects two arguments.");
+        return call(raw_head, raw_args);
+    }
+    if (((function == "Gather" && args.size() == 1)
+            || (function == "GatherBy" && args.size() == 2))
+        && args[0].kind() == ExprKind::Call) {
         std::vector<Expr> keys; std::vector<std::vector<Expr>> groups;
         for (const auto& item : args[0].args()) { const auto key = function == "GatherBy" ? evaluate(call(args[1], {item})) : item; const auto found = std::find(keys.begin(), keys.end(), key); if (found == keys.end()) { keys.push_back(key); groups.push_back({item}); } else groups[found - keys.begin()].push_back(item); }
         std::vector<Expr> values; for (auto& group : groups) values.push_back(call(args[0].head(), std::move(group))); return list(std::move(values));
@@ -9112,17 +16144,28 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (values.empty()) return list({symbol("Infinity"), call("Times", {integer(-1L), symbol("Infinity")})});
         return list({evaluate(call("Min", values)), evaluate(call("Max", std::move(values)))});
     }
-    if ((function == "RankedMin" || function == "RankedMax") && args.size() == 2
-        && args[0].kind() == ExprKind::Call
-        && args[1].kind() == ExprKind::Integer) {
-        const auto rules = association_rules(args[0]);
+    if (function == "RankedMin" || function == "RankedMax") {
+        std::string error;
         std::vector<Expr> values;
-        if (rules) {
+        if (args.size() != 2) {
+            error = function + " expects a list and an integer rank.";
+        } else if (const auto rules = association_rules(args[0])) {
             for (const auto& rule : *rules) values.push_back(rule.args()[1]);
-        } else values = args[0].args();
-        if (!values.empty() && std::all_of(values.begin(), values.end(), [](const Expr& value) {
+        } else if (args[0].has_head("List")) {
+            values = args[0].args();
+        } else {
+            error = function + " expects a list or association.";
+        }
+        if (error.empty() && args[1].kind() != ExprKind::Integer)
+            error = function + " expects an explicit integer rank.";
+        if (error.empty() && values.empty())
+            error = function + " requires a nonempty list.";
+        if (error.empty() && !std::all_of(values.begin(), values.end(), [](const Expr& value) {
                 return numeric_real(value).has_value();
             })) {
+            error = function + " currently expects explicit real-valued numbers.";
+        }
+        if (error.empty()) {
             std::stable_sort(values.begin(), values.end(), [](const Expr& left, const Expr& right) {
                 return *numeric_real(left) < *numeric_real(right);
             });
@@ -9136,7 +16179,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 if (const auto index = nonnegative_size_t(count + rank))
                     return values[*index];
             }
+            error = function + " rank " + rank.get_str()
+                + " is out of range for a list of length "
+                + std::to_string(values.size()) + ".";
         }
+        const auto message = call("MessageName", {symbol(function), string("error")});
+        emit_message(message, function + "::error: " + error);
+        return evaluated_expression;
     }
     if (function == "Mode" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
         const auto rules = association_rules(args[0]);
@@ -9285,110 +16334,392 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (is_symbol(args[0], "True")) return integer(1L);
         if (is_symbol(args[0], "False")) return integer(0L);
     }
-    if (function == "ArrayDepth" && args.size() == 1) {
-        auto depth = [&](auto&& self, const Expr& value) -> std::size_t {
-            if (!value.has_head("List") || value.args().empty()) return value.has_head("List") ? 1 : 0;
-            std::size_t child = self(self, value.args().front());
-            for (const auto& item : value.args()) child = std::min(child, self(self, item));
-            return child + 1;
+    if (function == "ArrayQ") {
+        if (args.empty() || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayQ expects an expression, optional depth, and optional element test.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        if (!dimensions) return symbol("False");
+        if (args.size() >= 2) {
+            if (args[1].kind() != ExprKind::Integer)
+                return raw_evaluation_error(
+                    "ArrayQ currently expects an explicit integer depth.");
+            const mpz_class rank(std::to_string(dimensions->size()), 10);
+            if (args[1].integer_value() != rank) return symbol("False");
+        }
+        if (args.size() != 3) return symbol("True");
+
+        auto matches_predicate = [&](const Expr& value) {
+            return is_symbol(evaluate(call(args[2], {value})), "True");
         };
-        return integer(static_cast<unsigned long>(depth(depth, args[0])));
-    }
-    if (function == "ArrayQ" && !args.empty() && args.size() <= 3) {
-        std::vector<std::size_t> dimensions;
-        auto shape = [&](auto&& self, const Expr& value, std::size_t level) -> bool {
-            if (!value.has_head("List")) return level == dimensions.size();
-            if (level == dimensions.size()) dimensions.push_back(value.args().size());
-            else if (dimensions[level] != value.args().size()) return false;
-            return std::all_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item, level + 1); });
-        };
-        bool valid = shape(shape, args[0], 0);
-        if (valid && args.size() >= 2 && machine_index(args[1])) valid = dimensions.size() == static_cast<std::size_t>(*machine_index(args[1]));
-        else if (args.size() >= 2) valid = false;
-        if (valid && args.size() == 3) {
-            auto leaves_match = [&](auto&& self, const Expr& value) -> bool {
-                if (!value.has_head("List")) return is_symbol(evaluate(call(args[2], {value})), "True");
-                return std::all_of(value.args().begin(), value.args().end(), [&](const Expr& item) { return self(self, item); });
-            };
-            valid = leaves_match(leaves_match, args[0]);
+        if (args[0].kind() == ExprKind::SparseArray) {
+            if (sparse_has_implicit_values(args[0])
+                && !matches_predicate(args[0].fill_value())) return symbol("False");
+            return boolean(std::all_of(
+                args[0].sparse_entries().begin(), args[0].sparse_entries().end(),
+                [&](const SparseEntry& entry) {
+                    return matches_predicate(entry.value);
+                }));
         }
-        return boolean(valid);
+        return boolean(dense_array_leaves_match(args[0], matches_predicate));
     }
-    if (function == "ArrayReshape" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
-        && args[1].has_head("List")) {
-        std::vector<std::size_t> dimensions; bool valid = true;
-        for (const auto& dimension : args[1].args()) {
-            const auto value = machine_index(dimension);
-            if (!value || *value < 0) { valid = false; break; }
-            dimensions.push_back(static_cast<std::size_t>(*value));
-        }
-        if (valid) {
-            const auto padding = args.size() == 3 ? args[2] : integer(0L); std::size_t cursor = 0;
-            auto build = [&](auto&& self, std::size_t level) -> Expr {
-                if (level == dimensions.size()) return cursor < args[0].args().size() ? args[0].args()[cursor++] : padding;
-                std::vector<Expr> values; for (std::size_t index = 0; index < dimensions[level]; ++index) values.push_back(self(self, level + 1));
-                return list(std::move(values));
-            };
-            return build(build, 0);
-        }
-    }
-    if (function == "ArrayPad" && args.size() >= 2 && args.size() <= 3 && args[0].has_head("List")
-        && machine_index(args[1]) && *machine_index(args[1]) >= 0) {
-        const auto width = static_cast<std::size_t>(*machine_index(args[1]));
+    if (function == "ArrayReshape" && evaluated_name
+        && *evaluated_name == "ArrayReshape") {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayReshape expects an expression, dimensions, and an optional padding value.");
+        const auto normalized = normalize_dense_dimensions(args[1], "ArrayReshape");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+        if (!dense_materialization_within_limit(*normalized.values))
+            return raw_evaluation_error(
+                "ArrayReshape output exceeds the native materialization limit.");
+
+        std::vector<Expr> leaves;
+        append_dense_leaves(args[0], leaves);
         const auto padding = args.size() == 3 ? args[2] : integer(0L);
-        if (std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
-            const auto columns = args[0].args().empty() ? 0 : args[0].args().front().args().size();
-            std::vector<Expr> rows(width, list(std::vector<Expr>(columns + 2 * width, padding)));
-            for (const auto& row : args[0].args()) {
-                auto values = row.args(); values.insert(values.begin(), width, padding); values.insert(values.end(), width, padding);
-                rows.push_back(list(std::move(values)));
-            }
-            rows.insert(rows.end(), width, list(std::vector<Expr>(columns + 2 * width, padding)));
-            return list(std::move(rows));
-        }
-        auto values = args[0].args(); values.insert(values.begin(), width, padding); values.insert(values.end(), width, padding);
-        return list(std::move(values));
+        std::size_t cursor = 0;
+        return build_dense_array(*normalized.values,
+            [&](const std::vector<mpz_class>&) {
+                return cursor < leaves.size() ? leaves[cursor++] : padding;
+            });
     }
-    if (function == "ArrayFlatten" && args.size() == 1 && args[0].has_head("List")) {
-        std::vector<Expr> result; bool valid = true;
-        for (const auto& block_row : args[0].args()) {
-            if (!block_row.has_head("List")) { valid = false; break; }
-            std::size_t height = 0;
-            for (const auto& block : block_row.args()) {
-                if (!block.has_head("List")) { valid = false; break; }
-                height = std::max(height, block.args().size());
-            }
-            if (!valid) break;
-            for (std::size_t row_index = 0; row_index < height; ++row_index) {
-                std::vector<Expr> row;
-                for (const auto& block : block_row.args()) {
-                    if (row_index >= block.args().size() || !block.args()[row_index].has_head("List")) { valid = false; break; }
-                    const auto& block_values = block.args()[row_index].args(); row.insert(row.end(), block_values.begin(), block_values.end());
+    if (function == "ArrayPad" && evaluated_name
+        && *evaluated_name == "ArrayPad") {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error(
+                "ArrayPad expects an array, padding widths, and an optional padding value.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        if (!dimensions) return raw_evaluation_error(args[0].has_head("List")
+            ? "SparseArray dense input must be rectangular."
+            : "ArrayPad expects a rectangular array.");
+        const auto normalized = normalize_dense_padding(
+            args[1], dimensions->size());
+        if (!normalized.widths)
+            return raw_evaluation_error(normalized.error);
+
+        DenseDimensions output_dimensions;
+        output_dimensions.reserve(dimensions->size());
+        for (std::size_t axis = 0; axis < dimensions->size(); ++axis)
+            output_dimensions.push_back(
+                mpz_class(std::to_string((*dimensions)[axis]), 10)
+                + (*normalized.widths)[axis].first
+                + (*normalized.widths)[axis].second);
+        if (!dense_materialization_within_limit(output_dimensions))
+            return raw_evaluation_error(
+                "ArrayPad output exceeds the native materialization limit.");
+
+        const auto padding = args.size() == 3 ? args[2] : integer(0L);
+        return build_dense_array(output_dimensions,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<mpz_class> source_indices;
+                source_indices.reserve(indices.size());
+                for (std::size_t axis = 0; axis < indices.size(); ++axis) {
+                    const auto source_index = indices[axis]
+                        - (*normalized.widths)[axis].first;
+                    if (source_index < 1
+                        || source_index
+                            > mpz_class(std::to_string((*dimensions)[axis]), 10))
+                        return padding;
+                    source_indices.push_back(source_index);
                 }
-                if (!valid) break;
-                result.push_back(list(std::move(row)));
+                return dense_value_at(args[0], source_indices).value_or(padding);
+            });
+    }
+    if (function == "ArrayFlatten" && evaluated_name
+        && *evaluated_name == "ArrayFlatten") {
+        if (args.size() != 1)
+            return raw_evaluation_error(
+                "ArrayFlatten expects exactly one argument.");
+        if (!args[0].has_head("List"))
+            return raw_evaluation_error(
+                "ArrayFlatten expects a rectangular list of array blocks.");
+        for (const auto& row : args[0].args())
+            if (!row.has_head("List"))
+                return raw_evaluation_error(
+                    "ArrayFlatten expects a rectangular list of array blocks.");
+        if (args[0].args().empty()) return evaluated_list_expr({});
+
+        const auto column_count = args[0].args().front().args().size();
+        if (column_count == 0
+            || std::any_of(args[0].args().begin(), args[0].args().end(),
+                [&](const Expr& row) {
+                    return row.args().size() != column_count;
+                }))
+            return raw_evaluation_error(
+                "ArrayFlatten expects a rectangular block matrix.");
+
+        std::vector<std::vector<std::pair<std::size_t, std::size_t>>> shapes;
+        shapes.reserve(args[0].args().size());
+        bool any_sparse = false;
+        bool nonzero_sparse_fill = false;
+        for (const auto& block_row : args[0].args()) {
+            std::vector<std::pair<std::size_t, std::size_t>> shape_row;
+            shape_row.reserve(column_count);
+            for (const auto& block : block_row.args()) {
+                if (block.kind() == ExprKind::SparseArray) {
+                    if (block.dimensions().size() != 2)
+                        return raw_evaluation_error(
+                            "ArrayFlatten currently expects rank-2 SparseArray blocks.");
+                    any_sparse = true;
+                    nonzero_sparse_fill = nonzero_sparse_fill
+                        || block.fill_value() != integer(0L);
+                    shape_row.emplace_back(
+                        block.dimensions()[0], block.dimensions()[1]);
+                    continue;
+                }
+                const auto dimensions = dense_dimensions(block);
+                if (!dimensions)
+                    return raw_evaluation_error(
+                        "SparseArray dense input must be rectangular.");
+                if (dimensions->size() != 2)
+                    return raw_evaluation_error(
+                        "ArrayFlatten currently expects rank-2 array blocks.");
+                shape_row.emplace_back((*dimensions)[0], (*dimensions)[1]);
+            }
+            shapes.push_back(std::move(shape_row));
+        }
+
+        std::vector<std::size_t> row_heights;
+        row_heights.reserve(shapes.size());
+        for (std::size_t row = 0; row < shapes.size(); ++row) {
+            const auto height = shapes[row][0].first;
+            if (std::any_of(shapes[row].begin(), shapes[row].end(),
+                    [&](const auto& shape) { return shape.first != height; }))
+                return raw_evaluation_error(
+                    "ArrayFlatten block row " + std::to_string(row + 1)
+                        + " has inconsistent heights.");
+            row_heights.push_back(height);
+        }
+        std::vector<std::size_t> column_widths;
+        column_widths.reserve(column_count);
+        for (std::size_t column = 0; column < column_count; ++column) {
+            const auto width = shapes[0][column].second;
+            if (std::any_of(shapes.begin(), shapes.end(),
+                    [&](const auto& shape_row) {
+                        return shape_row[column].second != width;
+                    }))
+                return raw_evaluation_error(
+                    "ArrayFlatten block column " + std::to_string(column + 1)
+                        + " has inconsistent widths.");
+            column_widths.push_back(width);
+        }
+
+        const auto row_total = std::accumulate(row_heights.begin(),
+            row_heights.end(), mpz_class(0),
+            [](mpz_class total, std::size_t value) -> mpz_class {
+                return total + mpz_class(std::to_string(value), 10);
+            });
+        const auto column_total = std::accumulate(column_widths.begin(),
+            column_widths.end(), mpz_class(0),
+            [](mpz_class total, std::size_t value) -> mpz_class {
+                return total + mpz_class(std::to_string(value), 10);
+            });
+        if (nonzero_sparse_fill) {
+            std::vector<Expr> dense_rows;
+            dense_rows.reserve(args[0].args().size());
+            for (const auto& block_row : args[0].args()) {
+                std::vector<Expr> dense_blocks;
+                dense_blocks.reserve(block_row.args().size());
+                for (const auto& block : block_row.args()) {
+                    const auto dense = sparse_dense_value(block);
+                    if (!dense)
+                        return raw_evaluation_error(
+                            "SparseArray dimensions exceed the native materialization limit.");
+                    dense_blocks.push_back(*dense);
+                }
+                dense_rows.push_back(evaluated_list_expr(
+                    std::move(dense_blocks)));
+            }
+            return evaluate(call("ArrayFlatten", {
+                evaluated_list_expr(std::move(dense_rows))}));
+        }
+        if (any_sparse) {
+            const auto output_rows = nonnegative_size_t(row_total);
+            const auto output_columns = nonnegative_size_t(column_total);
+            if (!output_rows || !output_columns)
+                return raw_evaluation_error(
+                    "ArrayFlatten dimensions exceed the native representation limit.");
+            std::vector<SparseEntry> entries;
+            std::size_t row_offset = 0;
+            for (std::size_t block_row = 0;
+                 block_row < args[0].args().size(); ++block_row) {
+                std::size_t column_offset = 0;
+                for (std::size_t block_column = 0;
+                     block_column < column_count; ++block_column) {
+                    const auto& block =
+                        args[0].args()[block_row].args()[block_column];
+                    if (block.kind() == ExprKind::SparseArray) {
+                        for (const auto& entry : block.sparse_entries())
+                            entries.push_back({
+                                {row_offset + entry.indices[0],
+                                    column_offset + entry.indices[1]},
+                                entry.value});
+                    } else {
+                        const auto [height, width] =
+                            shapes[block_row][block_column];
+                        for (std::size_t row = 0; row < height; ++row)
+                            for (std::size_t column = 0; column < width;
+                                 ++column) {
+                                const auto& value =
+                                    block.args()[row].args()[column];
+                                if (value != integer(0L))
+                                    entries.push_back({
+                                        {row_offset + row + 1,
+                                            column_offset + column + 1},
+                                        value});
+                            }
+                    }
+                    column_offset += column_widths[block_column];
+                }
+                row_offset += row_heights[block_row];
+            }
+            return sparse_array(
+                {*output_rows, *output_columns}, std::move(entries),
+                integer(0L));
+        }
+        if (!dense_materialization_within_limit({row_total, column_total}))
+            return raw_evaluation_error(
+                "ArrayFlatten output exceeds the native materialization limit.");
+
+        std::vector<Expr> rows;
+        const auto row_count = *bounded_dense_dimension(row_total);
+        rows.reserve(row_count);
+        for (std::size_t block_row = 0;
+             block_row < args[0].args().size(); ++block_row) {
+            for (std::size_t local_row = 0;
+                 local_row < row_heights[block_row]; ++local_row) {
+                std::vector<Expr> values;
+                for (const auto& block : args[0].args()[block_row].args()) {
+                    const auto& block_values = block.args()[local_row].args();
+                    values.insert(values.end(),
+                        block_values.begin(), block_values.end());
+                }
+                rows.push_back(evaluated_list_expr(std::move(values)));
             }
         }
-        if (valid) return list(std::move(result));
+        return evaluated_list_expr(std::move(rows));
     }
-    if (function == "Transpose" && args.size() == 1 && args[0].has_head("List") && !args[0].args().empty()
-        && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
-        const auto columns = args[0].args().front().args().size();
-        if (std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& row) { return row.args().size() == columns; })) {
-            std::vector<Expr> result;
-            for (std::size_t column = 0; column < columns; ++column) {
-                std::vector<Expr> row; for (const auto& source_row : args[0].args()) row.push_back(source_row.args()[column]);
-                result.push_back(list(std::move(row)));
+    if (function == "Transpose" && evaluated_name
+        && *evaluated_name == "Transpose") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Transpose expects an array and an optional permutation.");
+        const auto dimensions = rectangular_array_dimensions(args[0]);
+        if (!dimensions) return raw_evaluation_error(args[0].has_head("List")
+            ? "SparseArray dense input must be rectangular."
+            : "Transpose expects a rectangular array.");
+
+        std::vector<std::size_t> permutation(dimensions->size());
+        std::iota(permutation.begin(), permutation.end(), std::size_t{0});
+        if (args.size() == 1) {
+            if (permutation.size() >= 2)
+                std::swap(permutation[0], permutation[1]);
+        } else {
+            if (!args[1].has_head("List"))
+                return raw_evaluation_error(
+                    "Transpose expects a permutation list as its second argument.");
+            if (args[1].args().size() != dimensions->size()
+                || !std::all_of(args[1].args().begin(), args[1].args().end(),
+                    [](const Expr& value) {
+                        return value.kind() == ExprKind::Integer;
+                    }))
+                return raw_evaluation_error(
+                    "Transpose permutation length must match the array rank.");
+            for (std::size_t axis = 0; axis < permutation.size(); ++axis) {
+                const auto& value = args[1].args()[axis].integer_value();
+                if (value < 1
+                    || value > mpz_class(std::to_string(permutation.size()), 10))
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
+                permutation[axis] = *nonnegative_size_t(value - 1);
             }
-            return list(std::move(result));
+            auto sorted = permutation;
+            std::sort(sorted.begin(), sorted.end());
+            for (std::size_t axis = 0; axis < sorted.size(); ++axis)
+                if (sorted[axis] != axis)
+                    return raw_evaluation_error(
+                        "Transpose expects a permutation of array axes.");
         }
+        if (std::is_sorted(permutation.begin(), permutation.end()))
+            return args[0];
+
+        DenseDimensions output_dimensions;
+        output_dimensions.reserve(dimensions->size());
+        for (const auto axis : permutation)
+            output_dimensions.emplace_back(
+                std::to_string((*dimensions)[axis]), 10);
+        if (!dense_materialization_within_limit(output_dimensions))
+            return raw_evaluation_error(
+                "Transpose output exceeds the native materialization limit.");
+        return build_dense_array(output_dimensions,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<mpz_class> source_indices(
+                    dimensions->size(), mpz_class(1));
+                for (std::size_t output_axis = 0;
+                     output_axis < permutation.size(); ++output_axis)
+                    source_indices[permutation[output_axis]] = indices[output_axis];
+                return *dense_value_at(args[0], source_indices);
+            });
     }
-    if (function == "Insert" && args.size() == 3 && args[0].kind() == ExprKind::Call && machine_index(args[2])) {
-        auto position = *machine_index(args[2]); const auto length = static_cast<long>(args[0].args().size());
-        if (position < 0) position = length + position + 2;
-        if (position >= 1 && position <= length + 1) {
-            auto values = args[0].args(); values.insert(values.begin() + position - 1, args[1]); return call(args[0].head(), std::move(values));
+    if (function == "Insert") {
+        auto invalid_insert = [&](const std::string& detail) {
+            const auto message = call("MessageName", {symbol("Insert"), string("error")});
+            emit_message(message, "Insert::error: " + detail);
+            return call(head, args);
+        };
+        if (args.size() != 3)
+            return invalid_insert("Insert expects exactly three arguments.");
+        if (args[0].kind() == ExprKind::SparseArray
+            && args[0].dimensions().size() == 1
+            && args[2].kind() == ExprKind::Integer) {
+            const auto length = args[0].dimensions().front();
+            if (length == std::numeric_limits<std::size_t>::max())
+                return invalid_insert(
+                    "SparseArray length exceeds the native representation limit.");
+            const mpz_class length_value(std::to_string(length), 10);
+            const auto& raw_index = args[2].integer_value();
+            mpz_class offset;
+            if (raw_index == 0) offset = 0;
+            else if (raw_index > 0) offset = raw_index - 1;
+            else offset = length_value + raw_index + 1;
+            const auto native_offset = nonnegative_size_t(offset);
+            if (!native_offset || *native_offset > length)
+                return invalid_insert(
+                    "Insert position is invalid for SparseArray.");
+
+            const auto inserted_index = *native_offset + 1;
+            std::vector<SparseEntry> entries;
+            entries.reserve(args[0].sparse_entries().size() + 1);
+            for (const auto& entry : args[0].sparse_entries()) {
+                auto indices = entry.indices;
+                if (indices.front() >= inserted_index) ++indices.front();
+                entries.push_back({std::move(indices), entry.value});
+            }
+            if (args[1] != args[0].fill_value())
+                entries.push_back({{inserted_index}, args[1]});
+            return sparse_array(
+                {length + 1}, std::move(entries), args[0].fill_value());
         }
+        auto paths = structural_insert_paths(args[2]);
+        if (!paths.error.empty()) return invalid_insert(paths.error);
+        std::stable_sort(paths.paths.begin(), paths.paths.end(), insert_path_descending);
+        auto result = args[0];
+        if (result.kind() == ExprKind::SparseArray) {
+            const auto dense = sparse_dense_value(result);
+            if (!dense)
+                return invalid_insert(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            result = *dense;
+        }
+        for (const auto& path : paths.paths) {
+            auto inserted = structural_insert_at_path(result, path, args[1]);
+            if (!inserted.second) {
+                return invalid_insert("Insert positions are invalid for "
+                    + args[0].to_input_form() + ".");
+            }
+            result = std::move(inserted.first);
+        }
+        return result;
     }
     if (function == "FlattenAt" && args.size() == 2 && args[0].kind() == ExprKind::Call && machine_index(args[1])) {
         const auto position = normalized_index(args[1], args[0].args().size());
@@ -9473,85 +16804,76 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         });
         return call(args[0].head(), std::move(values));
     }
-    if (function == "Tr" && !args.empty() && args[0].has_head("List")) {
-        if (args.size() == 3 && machine_index(args[2]) && *machine_index(args[2]) == 1)
-            return evaluate(call("Total", {args[0]}));
-        if (args.size() <= 2 && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
-            std::vector<Expr> diagonal;
-            for (std::size_t index = 0; index < args[0].args().size(); ++index)
-                if (index < args[0].args()[index].args().size()) diagonal.push_back(args[0].args()[index].args()[index]);
-            return evaluate(call(args.size() == 2 ? args[1] : symbol("Plus"), std::move(diagonal)));
-        }
-    }
-    if (function == "Det" && args.size() == 1 && args[0].has_head("List")) {
-        const auto& rows = args[0].args();
-        if (!rows.empty() && std::all_of(rows.begin(), rows.end(), [&](const Expr& row) { return row.has_head("List") && row.args().size() == rows.size(); })) {
-            auto determinant = [&](auto&& self, const std::vector<std::vector<Expr>>& matrix) -> Expr {
-                if (matrix.empty()) return integer(1L);
-                if (matrix.size() == 1) return matrix[0][0];
-                std::vector<Expr> terms;
-                for (std::size_t column = 0; column < matrix.size(); ++column) {
-                    std::vector<std::vector<Expr>> minor;
-                    for (std::size_t row = 1; row < matrix.size(); ++row) {
-                        std::vector<Expr> minor_row;
-                        for (std::size_t other = 0; other < matrix.size(); ++other) if (other != column) minor_row.push_back(matrix[row][other]);
-                        minor.push_back(std::move(minor_row));
-                    }
-                    std::vector<Expr> factors{matrix[0][column], self(self, minor)};
-                    if (column % 2) factors.insert(factors.begin(), integer(-1L));
-                    terms.push_back(evaluate(call("Times", std::move(factors))));
-                }
-                return evaluate(call("Plus", std::move(terms)));
-            };
-            std::vector<std::vector<Expr>> matrix; for (const auto& row : rows) matrix.push_back(row.args());
-            return determinant(determinant, matrix);
-        }
-    }
-    if (function == "Inverse" && args.size() == 1 && args[0].has_head("List") && args[0].args().size() == 2
-        && args[0].args()[0].has_head("List") && args[0].args()[1].has_head("List")
-        && args[0].args()[0].args().size() == 2 && args[0].args()[1].args().size() == 2) {
-        const auto& a = args[0].args()[0].args()[0]; const auto& b = args[0].args()[0].args()[1];
-        const auto& c = args[0].args()[1].args()[0]; const auto& d = args[0].args()[1].args()[1];
-        const auto determinant = evaluate(call("Plus", {evaluate(call("Times", {a, d})), evaluate(call("Times", {integer(-1L), b, c}))}));
-        auto divide = [&](const Expr& numerator) { return evaluate(call("Times", {numerator, call("Power", {determinant, integer(-1L)})})); };
-        return list({list({divide(d), divide(evaluate(call("Times", {integer(-1L), b})))}),
-            list({divide(evaluate(call("Times", {integer(-1L), c}))), divide(a)})});
-    }
-    if (function == "MatrixPower" && args.size() == 2 && args[0].has_head("List") && machine_index(args[1])
-        && *machine_index(args[1]) >= 0) {
-        const auto size = args[0].args().size();
-        if (std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& row) { return row.has_head("List") && row.args().size() == size; })) {
-            auto multiply = [&](const Expr& left, const Expr& right) {
-                std::vector<Expr> rows;
-                for (std::size_t row = 0; row < size; ++row) {
-                    std::vector<Expr> values;
-                    for (std::size_t column = 0; column < size; ++column) {
-                        std::vector<Expr> products;
-                        for (std::size_t index = 0; index < size; ++index)
-                            products.push_back(evaluate(call("Times", {left.args()[row].args()[index], right.args()[index].args()[column]})));
-                        values.push_back(evaluate(call("Plus", std::move(products))));
-                    }
-                    rows.push_back(list(std::move(values)));
-                }
-                return list(std::move(rows));
-            };
-            std::vector<Expr> identity_rows;
-            for (std::size_t row = 0; row < size; ++row) { std::vector<Expr> values(size, integer(0L)); values[row] = integer(1L); identity_rows.push_back(list(std::move(values))); }
-            Expr result = list(std::move(identity_rows)), base = args[0]; long exponent = *machine_index(args[1]);
-            while (exponent > 0) { if (exponent % 2) result = multiply(result, base); exponent /= 2; if (exponent) base = multiply(base, base); }
-            return result;
-        }
-    }
-    if (function == "Cross" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")
-        && args[0].args().size() == 3 && args[1].args().size() == 3) {
-        const auto& a = args[0].args(); const auto& b = args[1].args();
-        auto component = [&](std::size_t i, std::size_t j, std::size_t k, std::size_t l) {
-            return evaluate(call("Plus", {evaluate(call("Times", {a[i], b[j]})), evaluate(call("Times", {integer(-1L), a[k], b[l]}))}));
+    if (function == "LeviCivitaTensor" && evaluated_name
+        && *evaluated_name == "LeviCivitaTensor") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "LeviCivitaTensor expects a dimension and an optional head.");
+        if (args[0].kind() != ExprKind::Integer)
+            return raw_evaluation_error(
+                "LeviCivitaTensor expects an integer argument.");
+        if (args[0].integer_value() < 0)
+            return raw_evaluation_error(
+                "LeviCivitaTensor expects a non-negative dimension.");
+
+        const bool sparse_requested = args.size() == 2
+            && is_symbol(args[1], "SparseArray");
+        if (sparse_requested && args[0].integer_value() == 0)
+            return raw_evaluation_error(
+                "SparseArray rule positions must match the array rank.");
+        const auto dimension = bounded_dense_dimension(args[0].integer_value());
+        if (!dimension)
+            return raw_evaluation_error(
+                "LeviCivitaTensor output exceeds the native materialization limit.");
+
+        auto permutation_sign = [](const std::vector<std::size_t>& indices) {
+            std::size_t inversions = 0;
+            for (std::size_t left = 0; left < indices.size(); ++left)
+                for (std::size_t right = left + 1;
+                     right < indices.size(); ++right)
+                    if (indices[left] > indices[right]) ++inversions;
+            return inversions % 2 == 0 ? 1L : -1L;
         };
-        return list({component(1, 2, 2, 1), component(2, 0, 0, 2), component(0, 1, 1, 0)});
+        if (sparse_requested) {
+            std::size_t entry_count = 1;
+            for (std::size_t factor = 2; factor <= *dimension; ++factor) {
+                if (entry_count > maximum_sparse_materialized_nodes / factor)
+                    return raw_evaluation_error(
+                        "LeviCivitaTensor output exceeds the native materialization limit.");
+                entry_count *= factor;
+            }
+            std::vector<std::size_t> permutation(*dimension);
+            std::iota(permutation.begin(), permutation.end(), std::size_t{1});
+            std::vector<SparseEntry> entries;
+            entries.reserve(entry_count);
+            do {
+                entries.push_back({permutation,
+                    integer(permutation_sign(permutation))});
+            } while (std::next_permutation(
+                permutation.begin(), permutation.end()));
+            return sparse_array(
+                std::vector<std::size_t>(*dimension, *dimension),
+                std::move(entries), integer(0L));
+        }
+
+        DenseDimensions dimensions(*dimension, args[0].integer_value());
+        if (!dense_materialization_within_limit(dimensions))
+            return raw_evaluation_error(
+                "LeviCivitaTensor output exceeds the native materialization limit.");
+        if (*dimension == 0) return integer(1L);
+        return build_dense_array(dimensions,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<std::size_t> permutation;
+                permutation.reserve(indices.size());
+                for (const auto& index : indices)
+                    permutation.push_back(*nonnegative_size_t(index));
+                auto sorted = permutation;
+                std::sort(sorted.begin(), sorted.end());
+                if (std::adjacent_find(sorted.begin(), sorted.end())
+                    != sorted.end()) return integer(0L);
+                return integer(permutation_sign(permutation));
+            });
     }
-    if (function == "LeviCivitaTensor" && args.size() == 1 && machine_index(args[0]) && *machine_index(args[0]) == 2)
-        return list({list({integer(0L), integer(1L)}), list({integer(-1L), integer(0L)})});
     if (function == "Total" && !args.empty() && args.size() <= 2) {
         auto total_default = [&](const Expr& value) -> std::optional<Expr> {
             std::vector<Expr> values;
@@ -9602,19 +16924,32 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             }
         }
     }
-    if ((function == "Tally" || function == "Counts") && !args.empty() && args.size() <= 2
-        && args[0].kind() == ExprKind::Call) {
+    if (function == "Tally" || function == "Counts") {
+        if (args.empty() || args.size() > 2)
+            return raw_evaluation_error(function == "Tally"
+                ? "Tally expects a list and an optional binary test."
+                : "Counts expects a list or association and an optional binary test.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                function + " expects a list or association.");
         struct Group { Expr representative; std::size_t count; };
         std::vector<Group> groups;
-        auto equivalent = [&](const Expr& left, const Expr& right) {
-            return args.size() == 1 ? left == right
-                : is_symbol(evaluate(call(args[1], {left, right})), "True");
-        };
-        for (const auto& item : args[0].args()) {
-            const auto found = std::find_if(groups.begin(), groups.end(), [&](const Group& group) {
-                return equivalent(item, group.representative);
-            });
-            if (found == groups.end()) groups.push_back({item, 1}); else ++found->count;
+        for (const auto& item : *source) {
+            std::optional<std::size_t> found;
+            for (std::size_t index = 0; index < groups.size(); ++index) {
+                bool equivalent = groups[index].representative == item;
+                if (args.size() == 2) {
+                    const auto outcome = evaluate(call(
+                        args[1], {groups[index].representative, item}));
+                    if (aborted_ || thrown_ || confirmation_failure_
+                        || control_active()) return outcome;
+                    equivalent = is_symbol(outcome, "True");
+                }
+                if (equivalent) { found = index; break; }
+            }
+            if (found) ++groups[*found].count;
+            else groups.push_back({item, 1});
         }
         std::vector<Expr> values;
         for (const auto& group : groups) values.push_back(function == "Tally"
@@ -9622,22 +16957,34 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             : call("Rule", {group.representative, integer(static_cast<unsigned long>(group.count))}));
         return call(function == "Tally" ? "List" : "Association", std::move(values));
     }
-    if (function == "CountDistinct" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
-        const auto rules = association_rules(args[0]);
+    if (function == "CountDistinct") {
+        if (args.size() != 1)
+            return raw_evaluation_error(
+                "CountDistinct expects exactly one argument.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                "CountDistinct expects a list or association.");
         std::vector<Expr> unique;
-        for (const auto& item : rules ? *rules : args[0].args()) {
-            const auto& value = rules ? item.args()[1] : item;
+        for (const auto& value : *source) {
             if (std::find(unique.begin(), unique.end(), value) == unique.end()) unique.push_back(value);
         }
         return integer(static_cast<unsigned long>(unique.size()));
     }
-    if (function == "CountsBy" && args.size() == 2 && args[0].kind() == ExprKind::Call) {
-        const auto input_rules = association_rules(args[0]);
+    if (function == "CountsBy") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                "CountsBy expects a list and a key function.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                "CountsBy expects a list or association.");
         std::vector<Expr> keys;
         std::vector<std::size_t> counts;
-        for (const auto& item : input_rules ? *input_rules : args[0].args()) {
-            const auto& value = input_rules ? item.args()[1] : item;
+        for (const auto& value : *source) {
             const auto key = evaluate(call(args[1], {value}));
+            if (aborted_ || thrown_ || confirmation_failure_
+                || control_active()) return key;
             const auto found = std::find(keys.begin(), keys.end(), key);
             if (found == keys.end()) {
                 keys.push_back(key);
@@ -9702,17 +17049,34 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             if (valid) if (const auto result = multidimensional(multidimensional, args[0], 0)) return *result;
         }
     }
-    if (function == "Accumulate" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
+    if (function == "Accumulate") {
+        if (args.empty() || args.size() > 2)
+            return raw_evaluation_error(
+                "Accumulate expects a list and an optional binary combiner.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                "Accumulate expects a list or association.");
         const auto rules = association_rules(args[0]);
         const auto combine = args.size() == 2 ? args[1] : symbol("Plus");
         std::vector<Expr> values;
-        bool first = true; Expr total = integer(0L);
-        for (const auto& item : rules ? *rules : args[0].args()) {
-            const auto& value = rules ? item.args()[1] : item;
-            total = first ? value : evaluate(call(combine, {total, value})); first = false;
-            values.push_back(rules ? call("Rule", {item.args()[0], total}) : total);
+        values.reserve(source->size());
+        std::optional<Expr> total;
+        for (std::size_t index = 0; index < source->size(); ++index) {
+            if (!total) total = (*source)[index];
+            else {
+                const auto outcome = evaluate(call(
+                    combine, {*total, (*source)[index]}));
+                if (aborted_ || thrown_ || confirmation_failure_
+                    || control_active()) return outcome;
+                total = outcome;
+            }
+            values.push_back(rules
+                ? call((*rules)[index].head(), {
+                    (*rules)[index].args()[0], *total})
+                : *total);
         }
-        return call(rules ? symbol("Association") : args[0].head(), std::move(values));
+        return call(rules ? "Association" : "List", std::move(values));
     }
     if (function == "Riffle") {
         std::string error;
@@ -9786,53 +17150,93 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, "Riffle::error: " + error);
         return call(raw_head, raw_args);
     }
-    if ((function == "AllTrue" || function == "AnyTrue" || function == "NoneTrue")
-        && args.size() == 2 && args[0].kind() == ExprKind::Call) {
-        bool any = false; bool all = true;
-        for (const auto& item : args[0].args()) {
-            const bool truth = is_symbol(evaluate(call(args[1], {item})), "True");
-            any = any || truth; all = all && truth;
+    if (function == "AllTrue" || function == "AnyTrue"
+        || function == "NoneTrue") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                function + " expects a list and a test function.");
+        const auto source = list_or_association_values(args[0]);
+        if (!source)
+            return raw_evaluation_error(
+                function + " expects a list or association.");
+        for (const auto& item : *source) {
+            const auto outcome = evaluate(call(args[1], {item}));
+            if (aborted_ || thrown_ || confirmation_failure_
+                || control_active()) return outcome;
+            const bool truth = is_symbol(outcome, "True");
+            if (function == "AllTrue" && !truth) return boolean(false);
+            if (function == "AnyTrue" && truth) return boolean(true);
+            if (function == "NoneTrue" && truth) return boolean(false);
         }
-        return boolean(function == "AllTrue" ? all : function == "AnyTrue" ? any : !any);
+        return boolean(function != "AnyTrue");
     }
-    if ((function == "ContainsAll" || function == "ContainsAny" || function == "ContainsNone"
-        || function == "ContainsExactly") && args.size() == 2 && args[0].kind() == ExprKind::Call
-        && args[1].kind() == ExprKind::Call) {
+    if (function == "ContainsAll" || function == "ContainsAny"
+        || function == "ContainsNone" || function == "ContainsExactly") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                function + " expects exactly two arguments.");
+        const auto left = list_or_association_values(args[0]);
+        const auto right = list_or_association_values(args[1]);
+        if (!left || !right)
+            return raw_evaluation_error(
+                function + " expects a list or association.");
         auto contains = [](const std::vector<Expr>& values, const Expr& target) {
             return std::find(values.begin(), values.end(), target) != values.end();
         };
-        const bool all = std::all_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& value) {
-            return contains(args[0].args(), value);
+        const bool all = std::all_of(right->begin(), right->end(), [&](const Expr& value) {
+            return contains(*left, value);
         });
-        const bool any = std::any_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& value) {
-            return contains(args[0].args(), value);
+        const bool any = std::any_of(right->begin(), right->end(), [&](const Expr& value) {
+            return contains(*left, value);
         });
-        const bool reverse_all = std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& value) {
-            return contains(args[1].args(), value);
+        const bool reverse_all = std::all_of(left->begin(), left->end(), [&](const Expr& value) {
+            return contains(*right, value);
         });
         return boolean(function == "ContainsAll" ? all : function == "ContainsAny" ? any
             : function == "ContainsNone" ? !any : all && reverse_all);
     }
-    if (function == "ContainsOnly" && args.size() >= 2 && args.size() <= 3
-        && args[0].kind() == ExprKind::Call && args[1].kind() == ExprKind::Call) {
+    if (function == "ContainsOnly") {
+        std::size_t data_count = args.size();
+        while (data_count > 0) {
+            const auto& option = args[data_count - 1];
+            if ((!option.has_head("Rule") && !option.has_head("RuleDelayed"))
+                || option.args().size() != 2
+                || !option.args()[0].symbol_name()) break;
+            --data_count;
+        }
         std::optional<Expr> same_test;
-        if (args.size() == 3 && args[2].has_head("Rule") && args[2].args().size() == 2
-            && is_symbol(args[2].args()[0], "SameTest")) same_test = args[2].args()[1];
-        else if (args.size() == 3) return call(head, args);
-        auto values_of = [](const Expr& value) {
-            std::vector<Expr> values;
-            if (const auto rules = association_rules(value)) {
-                for (const auto& rule : *rules) values.push_back(rule.args()[1]);
-            } else values = value.args();
-            return values;
-        };
-        const auto left = values_of(args[0]);
-        const auto right = values_of(args[1]);
-        return boolean(std::all_of(left.begin(), left.end(), [&](const Expr& value) {
-            return std::any_of(right.begin(), right.end(), [&](const Expr& candidate) {
-                return same_test ? is_symbol(evaluate(call(*same_test, {value, candidate})), "True") : value == candidate;
-            });
-        }));
+        for (std::size_t index = data_count; index < args.size(); ++index) {
+            const auto& option = args[index];
+            if (!is_symbol(option.args()[0], "SameTest"))
+                return raw_evaluation_error(
+                    "ContainsOnly currently supports only the SameTest option.");
+            same_test = is_symbol(option.args()[1], "Automatic")
+                ? std::nullopt : std::optional<Expr>(option.args()[1]);
+        }
+        if (data_count != 2)
+            return raw_evaluation_error(
+                "ContainsOnly expects two arguments and an optional SameTest rule.");
+        const auto left = list_or_association_values(args[0]);
+        const auto right = list_or_association_values(args[1]);
+        if (!left || !right)
+            return raw_evaluation_error(
+                "ContainsOnly expects a list or association.");
+        for (const auto& value : *left) {
+            bool found = false;
+            for (const auto& candidate : *right) {
+                bool equivalent = value == candidate;
+                if (same_test) {
+                    const auto outcome = evaluate(call(
+                        *same_test, {value, candidate}));
+                    if (aborted_ || thrown_ || confirmation_failure_
+                        || control_active()) return outcome;
+                    equivalent = is_symbol(outcome, "True");
+                }
+                if (equivalent) { found = true; break; }
+            }
+            if (!found) return boolean(false);
+        }
+        return boolean(true);
     }
     if (function == "Subsets" && !args.empty() && args.size() <= 2 && args[0].kind() == ExprKind::Call) {
         long minimum = 0, maximum = static_cast<long>(args[0].args().size()), step = 1;
@@ -9937,8 +17341,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     else valid = false;
             }
         } else valid = false;
+        if (valid && permutation.empty() && args[0].has_head("List"))
+            return args[0];
         std::set<long> positions(permutation.begin(), permutation.end());
-        if (valid && positions.size() == permutation.size() && *positions.begin() == 1
+        if (valid && !positions.empty() && positions.size() == permutation.size()
+            && *positions.begin() == 1
             && *positions.rbegin() == static_cast<long>(permutation.size())) {
             std::vector<Expr> values(args[0].args().size());
             for (std::size_t index = 0; index < values.size(); ++index) values[permutation[index] - 1] = args[0].args()[index];
@@ -10017,8 +17424,53 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return integer(order);
         }
     }
-    if (function == "RandomPermutation" && args.size() == 1 && machine_index(args[0]) && *machine_index(args[0]) == 0)
-        return call("Cycles", {list({})});
+    if (function == "RandomPermutation") {
+        std::string error;
+        if (args.size() != 1) {
+            error = "RandomPermutation expects an integer length.";
+        } else if (args[0].kind() != ExprKind::Integer) {
+            error = "RandomPermutation currently expects an integer length.";
+        } else if (args[0].integer_value() < 0) {
+            error = "RandomPermutation expects a non-negative integer.";
+        } else if (const auto length = nonnegative_size_t(args[0].integer_value())) {
+            std::vector<std::size_t> permutation(*length);
+            std::iota(permutation.begin(), permutation.end(), std::size_t{1});
+            {
+                std::lock_guard<std::mutex> lock(process_random_mutex());
+                std::shuffle(permutation.begin(), permutation.end(),
+                    process_random_engine());
+            }
+
+            std::vector<bool> visited(*length);
+            std::vector<Expr> cycles;
+            for (std::size_t start = 0; start < *length; ++start) {
+                if (visited[start]) continue;
+                std::vector<Expr> cycle;
+                auto current = start;
+                while (!visited[current]) {
+                    visited[current] = true;
+                    cycle.push_back(integer(mpz_class(
+                        std::to_string(current + 1), 10)));
+                    current = permutation[current] - 1;
+                }
+                if (cycle.size() > 1) cycles.push_back(list(std::move(cycle)));
+            }
+            return call("Cycles", {list(std::move(cycles))});
+        } else {
+            // A non-negative Integer wider than size_t cannot be materialized by
+            // this native process.  Keep the evaluated call inert, as the
+            // reference would likewise be unable to construct its permutation.
+            return evaluated_expression;
+        }
+        const auto message_head = raw_head.symbol_name()
+            ? raw_head : symbol("General");
+        const auto message_prefix = message_head.symbol_name()
+            ? system_dispatch_name(*message_head.symbol_name()) : "General";
+        const auto message = call("MessageName", {
+            message_head, string("error")});
+        emit_message(message, message_prefix + "::error: " + error);
+        return call(raw_head, raw_args);
+    }
     if ((function == "Union" || function == "Intersection" || function == "Complement") && !args.empty()) {
         std::vector<Expr> collections; std::optional<Expr> same_test;
         for (const auto& argument : args) {
@@ -10069,11 +17521,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return call(collections.front().head(), std::move(result));
         }
     }
-    if (function == "ConstantArray" && args.size() == 2 && args[1].kind() == ExprKind::Integer
-        && args[1].integer_value() >= 0 && args[1].integer_value().fits_ulong_p()) {
-        std::vector<Expr> values(args[1].integer_value().get_ui(), args[0]);
-        values.erase(std::remove_if(values.begin(), values.end(), [](const Expr& value) { return is_symbol(value, "Nothing"); }), values.end());
-        return list(std::move(values));
+    if (function == "ConstantArray" && evaluated_name
+        && *evaluated_name == "ConstantArray") {
+        if (args.size() != 2)
+            return raw_evaluation_error(
+                "ConstantArray currently supports exactly two arguments.");
+        const auto normalized = normalize_dense_dimensions(args[1], "ConstantArray");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+        if (!dense_materialization_within_limit(*normalized.values))
+            return raw_evaluation_error(
+                "ConstantArray output exceeds the native materialization limit.");
+        return build_dense_array(*normalized.values,
+            [&](const std::vector<mpz_class>&) { return args[0]; });
     }
     if (function == "BlockMap" && args.size() >= 3 && args[1].kind() == ExprKind::Call
         && machine_index(args[2]) && *machine_index(args[2]) > 0) {
@@ -10087,31 +17546,51 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         return list(std::move(values));
     }
-    if (function == "Distribute" && !args.empty() && args[0].kind() == ExprKind::Call) {
+    if (function == "Distribute") {
+        if (args.size() != 1 && args.size() != 2
+            && args.size() != 3 && args.size() != 5)
+            return raw_evaluation_error(
+                "Distribute expects an expression, optional distributed/outer heads, "
+                "and an optional ``gp, fp`` replacement pair.");
+        if (args[0].kind() != ExprKind::Call) return args[0];
+
         const auto distribution_head = args.size() >= 2 ? args[1] : symbol("Plus");
-        if (args.size() == 5 && args[0].head() != args[2]) return args[0];
+        const bool restrict_outer_head = args.size() == 3 || args.size() == 5;
+        if (restrict_outer_head && args[0].head() != args[2]) return args[0];
         const auto product_head = args.size() == 5 ? args[3] : args[0].head();
         const auto result_head = args.size() == 5 ? args[4] : distribution_head;
         std::vector<std::vector<Expr>> products{{}};
+        bool found = false;
         for (const auto& argument : args[0].args()) {
-            const auto choices = argument.kind() == ExprKind::Call && argument.head() == distribution_head
-                ? argument.args() : std::vector<Expr>{argument};
+            const bool distributes = argument.kind() == ExprKind::Call
+                && argument.head() == distribution_head;
+            if (distributes) found = true;
+            const auto choices = distributes ? argument.args() : std::vector<Expr>{argument};
             std::vector<std::vector<Expr>> next;
             for (const auto& prefix : products) for (const auto& choice : choices) { auto value = prefix; value.push_back(choice); next.push_back(std::move(value)); }
             products = std::move(next);
         }
+        if (!found) return args[0];
         std::vector<Expr> terms; for (auto& product : products) terms.push_back(call(product_head, std::move(product)));
-        const auto result = call(result_head, std::move(terms));
-        return args.size() == 5 ? result : evaluate(result);
+        return call(result_head, std::move(terms));
     }
     if ((function == "Nest" || function == "NestList") && args.size() == 3 && machine_index(args[2]) && *machine_index(args[2]) >= 0) {
         Expr value = args[1]; std::vector<Expr> values{value};
         for (long index = 0; index < *machine_index(args[2]); ++index) { value = evaluate(call(args[0], {value})); values.push_back(value); }
         return function == "Nest" ? value : list(std::move(values));
     }
-    if (function == "ComposeList" && args.size() == 2 && args[0].has_head("List")) {
+    if (function == "ComposeList") {
+        if (args.size() != 2)
+            return raw_evaluation_error("ComposeList expects exactly two arguments.");
+        if (args[0].kind() != ExprKind::Call)
+            return raw_evaluation_error(
+                "ComposeList expects a list or other nonatomic expression of functions.");
         Expr value = args[1]; std::vector<Expr> values{value};
-        for (const auto& callable : args[0].args()) { value = evaluate(call(callable, {value})); values.push_back(value); }
+        for (const auto& callable : args[0].args()) {
+            value = evaluate(call(callable, {value}));
+            if (immediate_signal_active()) return value;
+            values.push_back(value);
+        }
         return list(std::move(values));
     }
     if ((function == "NestWhile" || function == "NestWhileList")
@@ -10188,97 +17667,36 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return list(std::move(values));
         }
     }
-    if (function == "Thread" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
-        if (const auto threaded = thread_lists(args[0].head().to_full_form(), args[0].args())) return *threaded;
-    }
-    if (function == "Dot" && args.size() == 2
-        && args[0].has_head("List") && args[1].has_head("List")
-        && std::all_of(args[0].args().begin(), args[0].args().end(),
-            [](const Expr& row) { return row.has_head("List"); })
-        && std::none_of(args[1].args().begin(), args[1].args().end(),
-            [](const Expr& value) { return value.has_head("List"); })
-        && std::all_of(args[0].args().begin(), args[0].args().end(),
-            [&](const Expr& row) { return row.args().size() == args[1].args().size(); })) {
-        std::vector<Expr> values;
-        for (const auto& row : args[0].args()) {
-            std::vector<Expr> products;
-            for (std::size_t index = 0; index < row.args().size(); ++index)
-                products.push_back(evaluate(call("Times", {
-                    row.args()[index], args[1].args()[index]})));
-            values.push_back(evaluate(call("Plus", std::move(products))));
+    if (function == "Thread") {
+        if (args.size() != 1 && args.size() != 2)
+            return raw_evaluation_error(
+                "Thread expects an expression and an optional thread head.");
+        if (args[0].kind() != ExprKind::Call) return args[0];
+
+        const auto thread_head = args.size() == 2 ? args[1] : symbol("List");
+        std::optional<std::size_t> threaded_length;
+        for (const auto& argument : args[0].args()) {
+            if (argument.kind() != ExprKind::Call || argument.head() != thread_head)
+                continue;
+            if (!threaded_length) threaded_length = argument.args().size();
+            else if (*threaded_length != argument.args().size())
+                return raw_evaluation_error(
+                    "Thread expects all threaded arguments to have the same length.");
         }
-        return list(std::move(values));
-    }
-    if (function == "Dot" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")
-        && !args[0].args().empty() && !args[1].args().empty()
-        && std::all_of(args[0].args().begin(), args[0].args().end(), [](const Expr& row) { return row.has_head("List"); })
-        && std::all_of(args[1].args().begin(), args[1].args().end(), [](const Expr& row) { return row.has_head("List"); })) {
-        const auto inner = args[1].args().size();
-        if (std::all_of(args[0].args().begin(), args[0].args().end(), [&](const Expr& row) { return row.args().size() == inner; })) {
-            const auto columns = args[1].args().front().args().size();
-            if (std::all_of(args[1].args().begin(), args[1].args().end(), [&](const Expr& row) { return row.args().size() == columns; })) {
-                std::vector<Expr> rows;
-                for (const auto& left_row : args[0].args()) {
-                    std::vector<Expr> values;
-                    for (std::size_t column = 0; column < columns; ++column) {
-                        std::vector<Expr> products;
-                        for (std::size_t index = 0; index < inner; ++index)
-                            products.push_back(evaluate(call("Times", {left_row.args()[index], args[1].args()[index].args()[column]})));
-                        values.push_back(evaluate(call("Plus", std::move(products))));
-                    }
-                    rows.push_back(list(std::move(values)));
-                }
-                return list(std::move(rows));
-            }
+        if (!threaded_length) return args[0];
+
+        std::vector<Expr> threaded;
+        threaded.reserve(*threaded_length);
+        for (std::size_t index = 0; index < *threaded_length; ++index) {
+            std::vector<Expr> threaded_arguments;
+            threaded_arguments.reserve(args[0].args().size());
+            for (const auto& argument : args[0].args())
+                threaded_arguments.push_back(
+                    argument.kind() == ExprKind::Call && argument.head() == thread_head
+                    ? argument.args()[index] : argument);
+            threaded.push_back(call(args[0].head(), std::move(threaded_arguments)));
         }
-    }
-    if ((function == "Dot" || function == "Inner") && ((function == "Dot" && args.size() == 2)
-        || (function == "Inner" && args.size() == 4)) && args[function == "Dot" ? 0 : 1].has_head("List")
-        && args[function == "Dot" ? 1 : 2].has_head("List")) {
-        const auto& left = args[function == "Dot" ? 0 : 1].args(); const auto& right = args[function == "Dot" ? 1 : 2].args();
-        if (left.size() == right.size()) {
-            std::vector<Expr> products;
-            const auto multiply = function == "Dot" ? symbol("Times") : args[0];
-            for (std::size_t index = 0; index < left.size(); ++index) products.push_back(evaluate(call(multiply, {left[index], right[index]})));
-            return evaluate(call(function == "Dot" ? symbol("Plus") : args[3], std::move(products)));
-        }
-    }
-    if (function == "Outer" && args.size() >= 3) {
-        std::size_t input_end = args.size();
-        std::optional<std::size_t> level;
-        if (args.size() >= 4) {
-            if (const auto requested = machine_index(args.back())) {
-                if (*requested < 0) return call(head, args);
-                level = static_cast<std::size_t>(*requested);
-                --input_end;
-            }
-        }
-        std::vector<Expr> inputs(args.begin() + 1,
-            args.begin() + static_cast<std::ptrdiff_t>(input_end));
-        if (inputs.size() >= 2) {
-            std::function<Expr(std::size_t, std::vector<Expr>)> combine;
-            combine = [&](std::size_t input, std::vector<Expr> selected) -> Expr {
-                if (input == inputs.size()) return evaluate(call(args[0], std::move(selected)));
-                const auto sequence_head = inputs[input].kind() == ExprKind::Call
-                    ? std::optional<Expr>(inputs[input].head()) : std::nullopt;
-                std::function<Expr(const Expr&, std::size_t)> descend;
-                descend = [&](const Expr& value, std::size_t depth) -> Expr {
-                    const bool can_descend = sequence_head && value.kind() == ExprKind::Call
-                        && value.head() == *sequence_head && (!level || depth < *level);
-                    if (!can_descend) {
-                        auto next = selected;
-                        next.push_back(value);
-                        return combine(input + 1, std::move(next));
-                    }
-                    std::vector<Expr> values;
-                    for (const auto& item : value.args())
-                        values.push_back(descend(item, depth + 1));
-                    return call(value.head(), std::move(values));
-                };
-                return descend(inputs[input], 0);
-            };
-            return combine(0, {});
-        }
+        return call(thread_head, std::move(threaded));
     }
     if (function == "Tuples" && args.size() == 2 && args[0].has_head("List")) {
         auto tuple_power = [](const std::vector<Expr>& choices, std::size_t width) {
@@ -10516,58 +17934,254 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, "Partition::error: " + error);
         return call(raw_head, raw_args);
     }
-    if (function == "TakeDrop" && args.size() == 2) return list({evaluate(call("Take", args)), evaluate(call("Drop", args))});
-    if (function == "TakeList" && args.size() == 2 && args[0].has_head("List") && args[1].has_head("List")) {
-        std::vector<Expr> chunks; std::size_t offset = 0;
-        for (const auto& count_expr : args[1].args()) {
-            const auto count = machine_index(count_expr); if (!count || *count < 0) return call(head, args);
-            const auto end = std::min(args[0].args().size(), offset + static_cast<std::size_t>(*count));
-            chunks.push_back(list(std::vector<Expr>(args[0].args().begin() + offset, args[0].args().begin() + end))); offset = end;
+    if (function == "TakeDrop") {
+        if (args.size() != 2)
+            return raw_evaluation_error("TakeDrop expects exactly two arguments.");
+        std::string error;
+        auto taken = take_or_drop_one(args[0], args[1], false, "Take", error);
+        if (!taken) return raw_evaluation_error(error);
+        auto dropped = take_or_drop_one(args[0], args[1], true, "Drop", error);
+        if (!dropped) return raw_evaluation_error(error);
+        return evaluated_list_expr({std::move(*taken), std::move(*dropped)});
+    }
+    if (function == "TakeList") {
+        if (args.size() != 2)
+            return raw_evaluation_error("TakeList expects exactly two arguments.");
+        if (!args[1].has_head("List"))
+            return raw_evaluation_error(
+                "TakeList expects a list of specifications.");
+
+        Expr remaining = args[0];
+        std::vector<Expr> chunks;
+        chunks.reserve(args[1].args().size());
+        for (const auto& specification : args[1].args()) {
+            if (is_symbol(specification, "All")) {
+                chunks.push_back(remaining);
+                if (remaining.kind() == ExprKind::Call)
+                    remaining = call(remaining.head(), {});
+                continue;
+            }
+
+            std::string error;
+            auto taken = take_or_drop_one(
+                remaining, specification, false, "Take", error);
+            if (!taken) return raw_evaluation_error(error);
+            auto dropped = take_or_drop_one(
+                remaining, specification, true, "Drop", error);
+            if (!dropped) return raw_evaluation_error(error);
+            chunks.push_back(std::move(*taken));
+            remaining = std::move(*dropped);
         }
-        return list(std::move(chunks));
+        return evaluated_list_expr(std::move(chunks));
     }
     if ((function == "Fold" || function == "FoldList") && ((args.size() == 3 && args[2].has_head("List"))
         || (args.size() == 2 && args[1].has_head("List") && !args[1].args().empty()))) {
         const auto& source = args.size() == 3 ? args[2].args() : args[1].args();
         Expr value = args.size() == 3 ? args[1] : source.front(); std::vector<Expr> values{value};
         const auto start = args.size() == 3 ? 0U : 1U;
-        for (std::size_t index = start; index < source.size(); ++index) { value = evaluate(call(args[0], {value, source[index]})); values.push_back(value); }
+        for (std::size_t index = start; index < source.size(); ++index) {
+            value = evaluate(call(args[0], {value, source[index]}));
+            if (immediate_signal_active()) return value;
+            values.push_back(value);
+        }
         return function == "Fold" ? value : list(std::move(values));
     }
-    if ((function == "SequenceFold" || function == "SequenceFoldList") && args.size() == 3
-        && args[1].has_head("List") && args[2].has_head("List")) {
-        auto window = args[1].args(); std::vector<Expr> values = window;
-        if (window.empty()) return function == "SequenceFold" ? args[1] : list(values);
-        for (const auto& item : args[2].args()) {
-            auto call_args = window; call_args.push_back(item); const auto next = evaluate(call(args[0], call_args));
-            window.erase(window.begin()); window.push_back(next); values.push_back(next);
+    if (function == "SequenceFold" || function == "SequenceFoldList") {
+        if (args.size() != 3 && args.size() != 4)
+            return raw_evaluation_error(function
+                + " expects a function, initial values, inputs, and an optional "
+                  "argument count.");
+        std::string sequence_error;
+        const auto initial_values = sequence_fold_values(args[1], sequence_error);
+        if (!initial_values) return raw_evaluation_error(sequence_error);
+        const auto inputs = sequence_fold_values(args[2], sequence_error);
+        if (!inputs) return raw_evaluation_error(sequence_error);
+        if (initial_values->empty())
+            return raw_evaluation_error(
+                "SequenceFoldList expects at least one initial value.");
+
+        const auto state_count = initial_values->size();
+        std::size_t consumed_per_step = 1;
+        if (args.size() == 4) {
+            if (args[3].kind() != ExprKind::Integer)
+                return raw_evaluation_error(
+                    "SequenceFoldList expects an integer argument.");
+            const mpz_class state_count_value(std::to_string(state_count));
+            const auto argument_count = args[3].integer_value();
+            if (argument_count < state_count_value)
+                return raw_evaluation_error(
+                    "SequenceFoldList expects an argument count greater than or equal "
+                    "to the number of initial values.");
+            const auto consumed = argument_count - state_count_value;
+            if (consumed <= 0)
+                return raw_evaluation_error(
+                    "SequenceFoldList currently expects each step to consume at least "
+                    "one input element.");
+            const auto native_consumed = nonnegative_size_t(consumed);
+            if (!native_consumed || *native_consumed > inputs->size())
+                return function == "SequenceFold"
+                    ? initial_values->back() : list(*initial_values);
+            consumed_per_step = *native_consumed;
         }
-        return function == "SequenceFold" ? window.back() : list(std::move(values));
-    }
-    if ((function == "FoldWhile" || function == "FoldWhileList") && args.size() >= 4 && args[2].has_head("List")) {
-        Expr value = args[1]; std::vector<Expr> values{value}; std::size_t extra = 0;
-        for (const auto& item : args[2].args()) {
-            const bool keep_going = is_symbol(evaluate(call(args[3], {value})), "True");
-            if (!keep_going && extra == 0) extra = args.size() >= 5 && machine_index(args[4])
-                ? static_cast<std::size_t>(std::max<long>(0, *machine_index(args[4]))) : 0;
-            if (!keep_going && extra == 0) break;
-            value = evaluate(call(args[0], {value, item})); values.push_back(value);
-            if (!keep_going && extra > 0) --extra;
+
+        std::vector<Expr> values = *initial_values;
+        std::size_t index = 0;
+        while (index <= inputs->size()
+            && consumed_per_step <= inputs->size() - index) {
+            std::vector<Expr> call_arguments(
+                values.end() - static_cast<std::ptrdiff_t>(state_count),
+                values.end());
+            call_arguments.insert(call_arguments.end(),
+                inputs->begin() + static_cast<std::ptrdiff_t>(index),
+                inputs->begin()
+                    + static_cast<std::ptrdiff_t>(index + consumed_per_step));
+            const auto next = evaluate(call(args[0], std::move(call_arguments)));
+            if (immediate_signal_active()) return next;
+            values.push_back(next);
+            index += consumed_per_step;
         }
-        return function == "FoldWhile" ? value : list(std::move(values));
+        return function == "SequenceFold" ? values.back() : list(std::move(values));
     }
-    if ((function == "FoldPair" || function == "FoldPairList") && args.size() >= 3 && args[2].has_head("List")) {
-        Expr state = args[1]; Expr last_emitted = state; std::vector<Expr> emitted;
-        for (const auto& item : args[2].args()) {
+    if (function == "FoldWhile" || function == "FoldWhileList") {
+        if (args.size() < 4 || args.size() > 6)
+            return raw_evaluation_error(function
+                + " currently supports a function, an initial value, inputs, a test, "
+                  "and optional history and trailing counts.");
+        const auto inputs = compound_sequence_values(args[2]);
+        if (!inputs)
+            return raw_evaluation_error(
+                "FoldWhileList expects a nonatomic expression.");
+
+        bool all_history = false;
+        std::optional<mpz_class> history_length;
+        if (args.size() >= 5) {
+            if (is_symbol(args[4], "All")) {
+                all_history = true;
+            } else if (args[4].kind() != ExprKind::Integer) {
+                return raw_evaluation_error(
+                    "FoldWhileList expects an integer argument.");
+            } else if (args[4].integer_value() <= 0) {
+                return raw_evaluation_error(
+                    "FoldWhileList expects a positive history length or All.");
+            } else {
+                history_length = args[4].integer_value();
+            }
+        } else {
+            history_length = 1;
+        }
+
+        std::vector<Expr> values{args[1]};
+        auto predicate_arguments = [&] {
+            const auto native_history = history_length
+                ? nonnegative_size_t(*history_length) : std::nullopt;
+            if (all_history || !native_history
+                || *native_history >= values.size())
+                return values;
+            const auto count = *native_history;
+            return std::vector<Expr>(values.end()
+                    - static_cast<std::ptrdiff_t>(count),
+                values.end());
+        };
+        std::optional<Expr> predicate_signal;
+        auto predicate_succeeds = [&]() -> std::optional<bool> {
+            const auto outcome = evaluate(call(args[3], predicate_arguments()));
+            if (immediate_signal_active()) {
+                predicate_signal = outcome;
+                return std::nullopt;
+            }
+            return is_symbol(outcome, "True");
+        };
+        auto finish = [&] {
+            return function == "FoldWhile" ? values.back() : list(values);
+        };
+
+        const auto initial_test = predicate_succeeds();
+        if (!initial_test) return *predicate_signal;
+        if (!*initial_test) return finish();
+
+        bool failure_detected = false;
+        std::size_t index = 0;
+        for (; index < inputs->size(); ++index) {
+            const auto updated = evaluate(call(args[0], {values.back(), (*inputs)[index]}));
+            if (immediate_signal_active()) return updated;
+            values.push_back(updated);
+            const auto keep_going = predicate_succeeds();
+            if (!keep_going) return *predicate_signal;
+            if (!*keep_going) {
+                failure_detected = true;
+                ++index;
+                break;
+            }
+        }
+        if (!failure_detected) return finish();
+
+        mpz_class trailing = 0;
+        if (args.size() == 6) {
+            if (args[5].kind() != ExprKind::Integer)
+                return raw_evaluation_error(
+                    "FoldWhileList expects an integer argument.");
+            trailing = args[5].integer_value();
+        }
+        if (trailing < 0) {
+            const mpz_class requested = -trailing;
+            const auto native_requested = nonnegative_size_t(requested);
+            const auto removal = !native_requested
+                    || *native_requested >= values.size()
+                ? values.size() - 1 : *native_requested;
+            values.resize(values.size() - removal);
+            return finish();
+        }
+        while (trailing > 0 && index < inputs->size()) {
+            const auto updated = evaluate(call(args[0], {values.back(), (*inputs)[index]}));
+            if (immediate_signal_active()) return updated;
+            values.push_back(updated);
+            --trailing;
+            ++index;
+        }
+        return finish();
+    }
+    if (function == "FoldPair" || function == "FoldPairList") {
+        if (args.size() != 3 && args.size() != 4)
+            return raw_evaluation_error(function
+                + " currently supports a function, an initial value, inputs, and an "
+                  "optional projection.");
+        const auto inputs = compound_sequence_values(args[2]);
+        if (!inputs)
+            return raw_evaluation_error(
+                "FoldPairList expects a nonatomic expression.");
+
+        Expr state = args[1];
+        std::vector<Expr> emitted;
+        for (const auto& item : *inputs) {
             const auto pair = evaluate(call(args[0], {state, item}));
-            if (!pair.has_head("List") || pair.args().size() < 2) return call(head, args);
-            const bool last = args.size() >= 4 && is_symbol(args[3], "Last");
-            last_emitted = pair.args()[last ? 1 : 0]; emitted.push_back(last_emitted); state = pair.args()[1];
+            if (immediate_signal_active()) return pair;
+            if (!pair.has_head("List") || pair.args().size() != 2)
+                return raw_evaluation_error(
+                    "FoldPairList expects each function application to return a list "
+                    "of two elements, got " + pair.to_input_form() + ".");
+            auto projected = args.size() == 4
+                ? evaluate(call(args[3], {pair})) : pair.args()[0];
+            if (immediate_signal_active()) return projected;
+            emitted.push_back(std::move(projected));
+            state = pair.args()[1];
         }
-        return function == "FoldPair" ? last_emitted : list(std::move(emitted));
+        if (function == "FoldPairList") return list(std::move(emitted));
+        return emitted.empty() ? call(head, args) : emitted.back();
     }
-    if (function == "LengthWhile" && args.size() == 2 && args[0].has_head("List")) {
-        std::size_t count = 0; for (const auto& item : args[0].args()) { if (!is_symbol(evaluate(call(args[1], {item})), "True")) break; ++count; }
+    if (function == "LengthWhile") {
+        if (args.size() != 2)
+            return raw_evaluation_error("LengthWhile expects exactly two arguments.");
+        const auto inputs = compound_sequence_values(args[0]);
+        if (!inputs)
+            return raw_evaluation_error(
+                "LengthWhile expects a nonatomic expression.");
+        std::size_t count = 0;
+        for (const auto& item : *inputs) {
+            const auto outcome = evaluate(call(args[1], {item}));
+            if (immediate_signal_active()) return outcome;
+            if (!is_symbol(outcome, "True")) break;
+            ++count;
+        }
         return integer(count);
     }
     if (function == "DeleteDuplicates" && args.size() == 1 && args[0].kind() == ExprKind::Call) {
@@ -10590,36 +18204,51 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         std::set<std::string> seen; for (const auto& item : args[0].args()) if (!seen.insert(item.to_full_form()).second) return symbol("False");
         return symbol("True");
     }
-    if (function == "Array" && args.size() >= 2 && args.size() <= 3) {
-        const auto dimension_exprs = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-        const auto origin_exprs = args.size() == 3 ? (args[2].has_head("List") ? args[2].args() : std::vector<Expr>{args[2]})
-            : std::vector<Expr>(dimension_exprs.size(), integer(1L));
-        std::vector<long> dimensions, origins; bool valid = dimension_exprs.size() == origin_exprs.size();
-        for (const auto& item : dimension_exprs) { const auto value = machine_index(item); if (!value || *value < 0) valid = false; else dimensions.push_back(*value); }
-        for (const auto& item : origin_exprs) { const auto value = machine_index(item); if (!value) valid = false; else origins.push_back(*value); }
-        std::size_t element_count = 1;
-        if (valid) for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
-            const auto dimension = static_cast<std::size_t>(dimensions[axis]);
-            if (dimension != 0 && element_count > 1000000 / dimension) {
-                valid = false;
-                break;
-            }
-            element_count *= dimension;
-            if (dimensions[axis] > 0
-                && !checked_signed_sum(origins[axis], dimensions[axis] - 1)) {
-                valid = false;
-                break;
+    if (function == "Array" && evaluated_name && *evaluated_name == "Array") {
+        if (args.size() < 2 || args.size() > 3)
+            return raw_evaluation_error("Array expects two or three arguments.");
+        const auto normalized = normalize_dense_dimensions(args[1], "Array");
+        if (!normalized.values) return raw_evaluation_error(normalized.error);
+
+        std::vector<mpz_class> origins(normalized.values->size(), mpz_class(1));
+        if (args.size() == 3) {
+            if (args[2].kind() == ExprKind::Integer) {
+                std::fill(origins.begin(), origins.end(), args[2].integer_value());
+            } else if (args[2].has_head("List")) {
+                if (normalized.values->size() == 1 && args[2].args().size() == 2
+                    && std::all_of(args[2].args().begin(), args[2].args().end(),
+                        [](const Expr& value) {
+                            return value.kind() == ExprKind::Integer;
+                        })) {
+                    origins[0] = args[2].args()[0].integer_value();
+                } else if (args[2].args().size() != normalized.values->size()) {
+                    return raw_evaluation_error(
+                        "Array origin list must have one entry per array dimension.");
+                } else {
+                    for (std::size_t axis = 0; axis < origins.size(); ++axis) {
+                        if (args[2].args()[axis].kind() != ExprKind::Integer)
+                            return raw_evaluation_error(
+                                "Array origin entries must be explicit integers.");
+                        origins[axis] = args[2].args()[axis].integer_value();
+                    }
+                }
+            } else {
+                return raw_evaluation_error(
+                    "Array currently expects an integer origin or a list of integer origins.");
             }
         }
-        if (valid) {
-            std::vector<Expr> indices;
-            auto build = [&](auto&& self, std::size_t level) -> Expr {
-                if (level == dimensions.size()) return evaluate(call(args[0], indices));
-                std::vector<Expr> values; for (long index = 0; index < dimensions[level]; ++index) { indices.push_back(integer(origins[level] + index)); const auto value = self(self, level + 1); if (!is_symbol(value, "Nothing")) values.push_back(value); indices.pop_back(); }
-                return list(std::move(values));
-            };
-            return build(build, 0);
-        }
+        if (!dense_materialization_within_limit(*normalized.values))
+            return raw_evaluation_error(
+                "Array output exceeds the native materialization limit.");
+
+        return build_dense_array(*normalized.values,
+            [&](const std::vector<mpz_class>& indices) {
+                std::vector<Expr> arguments;
+                arguments.reserve(indices.size());
+                for (std::size_t axis = 0; axis < indices.size(); ++axis)
+                    arguments.push_back(integer(origins[axis] + indices[axis] - 1));
+                return evaluate(call(args[0], std::move(arguments)));
+            }, [&] { return immediate_signal_active(); });
     }
     if (function == "Range" && args.size() >= 1 && args.size() <= 3) {
         if (args.size() == 1 && args[0].has_head("List")) { std::vector<Expr> values; for (const auto& item : args[0].args()) values.push_back(evaluate(call("Range", {item}))); return list(std::move(values)); }
@@ -10692,212 +18321,18 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if (function == "Take" || function == "Drop") {
         const bool drop = function == "Drop";
         std::string error;
-
-        struct SelectorResult {
-            std::vector<std::size_t> indices;
-            std::string error;
-        };
-
-        auto normalize_selectors = [&](const Expr& value, const Expr& specification) {
-            SelectorResult result;
-            const auto count = value.args().size();
-            const mpz_class length(std::to_string(count));
-
-            auto append_selector = [&](const mpz_class& selector) {
-                if (selector == 0) {
-                    result.error = "Only top-level Part specifications may use index 0.";
-                    return false;
-                }
-                mpz_class resolved = selector;
-                if (selector > 0) --resolved;
-                else resolved += length;
-                if (resolved < 0 || resolved >= length) {
-                    result.error = "Part index " + selector.get_str()
-                        + " is out of range for length " + length.get_str() + ".";
-                    return false;
-                }
-                const auto index = nonnegative_size_t(resolved);
-                if (!index || *index >= count) {
-                    result.error = "Part index " + selector.get_str()
-                        + " is out of range for length " + length.get_str() + ".";
-                    return false;
-                }
-                result.indices.push_back(*index);
-                return true;
-            };
-
-            auto append_count = [&](const mpz_class& requested) {
-                if (requested >= 0) {
-                    if (requested > length) {
-                        (void)append_selector(length + 1);
-                        return;
-                    }
-                    const auto amount = nonnegative_size_t(requested);
-                    if (!amount) {
-                        (void)append_selector(length + 1);
-                        return;
-                    }
-                    result.indices.reserve(*amount);
-                    for (std::size_t index = 0; index < *amount; ++index)
-                        result.indices.push_back(index);
-                    return;
-                }
-
-                mpz_class first = length + requested + 1;
-                if (first < -length) {
-                    (void)append_selector(first);
-                    return;
-                }
-                if (first <= 0) {
-                    // Values from -length through -1 are valid, but Python's
-                    // range reaches 0 next and reports that selector.
-                    (void)append_selector(0);
-                    return;
-                }
-                const auto amount = nonnegative_size_t(-requested);
-                if (!amount || *amount > count) {
-                    (void)append_selector(first);
-                    return;
-                }
-                result.indices.reserve(*amount);
-                for (std::size_t index = count - *amount; index < count; ++index)
-                    result.indices.push_back(index);
-            };
-
-            auto append_span = [&](const std::vector<Expr>& span) {
-                if (span.size() != 2 && span.size() != 3) {
-                    result.error = "Span must contain two or three arguments.";
-                    return;
-                }
-                auto endpoint = [&](const Expr& item, const mpz_class& fallback) -> mpz_class {
-                    if (is_symbol(item, "All")) return length;
-                    if (item.kind() != ExprKind::Integer) return fallback;
-                    mpz_class endpoint_value = item.integer_value();
-                    if (endpoint_value < 0) endpoint_value += length + 1;
-                    return endpoint_value;
-                };
-                const auto first = endpoint(span[0], mpz_class(1));
-                const auto last = endpoint(span[1], length);
-                mpz_class step = 1;
-                if (span.size() == 3) {
-                    if (span[2].kind() != ExprKind::Integer) {
-                        result.error = "Span steps must be integers.";
-                        return;
-                    }
-                    step = span[2].integer_value();
-                }
-                if (step == 0) {
-                    result.error = "Span step cannot be zero.";
-                    return;
-                }
-                for (auto selector = first;
-                     step > 0 ? selector <= last : selector >= last;
-                     selector += step) {
-                    if (!append_selector(selector)) return;
-                }
-            };
-
-            if (specification.kind() == ExprKind::Integer) {
-                append_count(specification.integer_value());
-                return result;
-            }
-            if (is_symbol(specification, "All")) {
-                result.indices.resize(count);
-                std::iota(result.indices.begin(), result.indices.end(), 0);
-                return result;
-            }
-            if (is_symbol(specification, "None")) return result;
-            if (specification.has_head("Span")) {
-                append_span(specification.args());
-                return result;
-            }
-            if (specification.has_head("List")) {
-                if (specification.args().size() == 1) {
-                    const auto& item = specification.args()[0];
-                    if (item.kind() == ExprKind::Integer) {
-                        (void)append_selector(item.integer_value());
-                        return result;
-                    }
-                    if (is_symbol(item, "All")) {
-                        result.indices.resize(count);
-                        std::iota(result.indices.begin(), result.indices.end(), 0);
-                        return result;
-                    }
-                    result.error = function
-                        + " single-element list specifications must contain an integer or All.";
-                    return result;
-                }
-                if (specification.args().size() == 2 || specification.args().size() == 3) {
-                    append_span(specification.args());
-                    return result;
-                }
-                result.error = function
-                    + " list specifications must contain one, two, or three items.";
-                return result;
-            }
-            result.error = "Unsupported " + function + " specification: '"
-                + specification.to_input_form() + "'.";
-            return result;
-        };
-
-        auto take_or_drop_one = [&](const Expr& value, const Expr& specification,
-                                    std::string& failure) -> std::optional<Expr> {
-            if (value.kind() != ExprKind::Call) {
-                failure = function + " expects a nonatomic expression.";
-                return std::nullopt;
-            }
-            const auto rules = association_rules(value);
-            if (rules && specification.has_head("List") && !specification.args().empty()
-                && std::any_of(specification.args().begin(), specification.args().end(),
-                    [](const Expr& item) {
-                        return item.has_head("Key") || item.kind() == ExprKind::String;
-                    })) {
-                failure = function
-                    + " on associations currently supports only numeric or span selectors; "
-                      "key-list selectors such as ``{Key[a], …}`` are not yet implemented.";
-                return std::nullopt;
-            }
-
-            const auto selection = normalize_selectors(value, specification);
-            if (!selection.error.empty()) {
-                failure = selection.error;
-                return std::nullopt;
-            }
-            const auto& source = rules ? *rules : value.args();
-            std::vector<Expr> output;
-            if (drop) {
-                const std::set<std::size_t> removed(
-                    selection.indices.begin(), selection.indices.end());
-                output.reserve(source.size() - removed.size());
-                for (std::size_t index = 0; index < source.size(); ++index)
-                    if (removed.count(index) == 0) output.push_back(source[index]);
-            } else {
-                output.reserve(selection.indices.size());
-                for (const auto index : selection.indices) output.push_back(source[index]);
-            }
-            return call(value.head(), std::move(output));
-        };
-
         if (args.size() < 2) {
             error = function + " expects at least one specification.";
         } else {
-            std::function<std::optional<Expr>(const Expr&, std::size_t)> apply_specs;
-            apply_specs = [&](const Expr& value, std::size_t dimension) -> std::optional<Expr> {
-                auto sliced = take_or_drop_one(value, args[dimension], error);
-                if (!sliced || dimension + 1 == args.size()) return sliced;
-                std::vector<Expr> children;
-                children.reserve(sliced->args().size());
-                for (const auto& child : sliced->args()) {
-                    auto transformed = apply_specs(child, dimension + 1);
-                    if (!transformed) return std::nullopt;
-                    children.push_back(std::move(*transformed));
-                }
-                return call(sliced->head(), std::move(children));
-            };
-            if (auto result = apply_specs(args[0], 1)) return *result;
+            const std::vector<Expr> specifications(
+                args.begin() + 1, args.end());
+            if (auto result = apply_take_or_drop_specs(args[0], specifications,
+                    0, drop, function, error))
+                return *result;
         }
 
-        const auto message = call("MessageName", {symbol(function), string("error")});
+        const auto message = call(
+            "MessageName", {symbol(function), string("error")});
         emit_message(message, function + "::error: " + error);
         return call(raw_head, raw_args);
     }
@@ -11033,35 +18468,123 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         for (const auto& item : args[0].args()) flatten(flatten, item, level, values);
         return call(selected_head, std::move(values));
     }
-    if (function == "Extract" && args.size() == 2) {
-        auto extract_one = [&](const Expr& position) {
-            const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position};
-            return value_at_path(args[0], path).value_or(call("Extract", {args[0], position}));
+    if (function == "Extract") {
+        auto invalid_extract = [&](const std::string& detail) {
+            const auto message = call("MessageName", {symbol("Extract"), string("error")});
+            emit_message(message, "Extract::error: " + detail);
+            return call(head, args);
         };
-        if (args[1].has_head("List") && !args[1].args().empty() && args[1].args()[0].has_head("List")) {
-            std::vector<Expr> values; for (const auto& path : args[1].args()) values.push_back(extract_one(path));
+        if (args.size() != 2)
+            return invalid_extract("Extract expects exactly two arguments.");
+        if (structural_position_collection(args[1])) {
+            std::vector<Expr> values;
+            values.reserve(args[1].args().size());
+            for (const auto& position : args[1].args()) {
+                const auto components = structural_position_components(position);
+                if (args[0].kind() == ExprKind::SparseArray) {
+                    const auto selected = sparse_part(args[0], components);
+                    if (!selected.error.empty())
+                        return invalid_extract(selected.error);
+                    values.push_back(*selected.value);
+                } else {
+                    const auto selected = structural_part(args[0], components);
+                    if (!selected.error.empty())
+                        return invalid_extract(selected.error);
+                    values.push_back(*selected.value);
+                }
+            }
             return list(std::move(values));
         }
-        return extract_one(args[1]);
+        if (!structural_single_position(args[1])) {
+            return invalid_extract(
+                "Extract positions must be a position list or a list of position lists.");
+        }
+        const auto components = structural_position_components(args[1]);
+        if (args[0].kind() == ExprKind::SparseArray) {
+            const auto selected = sparse_part(args[0], components);
+            if (!selected.error.empty()) return invalid_extract(selected.error);
+            return *selected.value;
+        }
+        const auto selected = structural_part(args[0], components);
+        if (!selected.error.empty()) return invalid_extract(selected.error);
+        return *selected.value;
     }
-    if (function == "Delete" && args.size() == 2) {
-        std::vector<Expr> positions = args[1].has_head("List") && !args[1].args().empty()
-            && args[1].args()[0].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-        std::reverse(positions.begin(), positions.end());
+    if (function == "Delete") {
+        auto invalid_delete = [&](const std::string& detail) {
+            const auto message = call("MessageName", {symbol("Delete"), string("error")});
+            emit_message(message, "Delete::error: " + detail);
+            return call(head, args);
+        };
+        if (args.size() != 2)
+            return invalid_delete("Delete expects exactly two arguments.");
+        const auto expanded = structural_operation_paths(args[0], args[1]);
+        if (!expanded.error.empty()) return invalid_delete(expanded.error);
+        auto paths = unique_structural_paths(expanded.paths);
+        if (expanded.invalid || std::any_of(paths.begin(), paths.end(),
+            [](const auto& path) { return path.empty(); })) {
+            return invalid_delete("Delete positions are invalid for "
+                + args[0].to_input_form() + ".");
+        }
+        std::stable_sort(paths.begin(), paths.end(), structural_path_descending);
         auto result = args[0];
-        for (const auto& position : positions) {
-            const auto path = position.has_head("List") ? position.args() : std::vector<Expr>{position};
-            result = delete_at_path(result, path, 0);
+        for (const auto& path : paths) {
+            auto deleted = structural_delete_at_path(result, path);
+            if (!deleted.second) {
+                return invalid_delete("Delete positions are invalid for "
+                    + args[0].to_input_form() + ".");
+            }
+            result = std::move(deleted.first);
         }
         return remove_nothing_from_list_like(result);
     }
-    if (function == "ReplacePart" && args.size() == 2) {
-        std::vector<Expr> rules = args[1].has_head("List") ? args[1].args() : std::vector<Expr>{args[1]};
-        auto result = args[0];
+    if (function == "ReplacePart") {
+        auto invalid_replace = [&](const std::string& detail) {
+            const auto message = call(
+                "MessageName", {symbol("ReplacePart"), string("error")});
+            emit_message(message, "ReplacePart::error: " + detail);
+            return call(head, args);
+        };
+        if (args.size() != 2)
+            return invalid_replace("ReplacePart expects exactly two arguments.");
+
+        std::vector<Expr> rules;
+        if ((args[1].has_head("Rule") || args[1].has_head("RuleDelayed"))) {
+            if (args[1].args().size() != 2)
+                return invalid_replace(
+                    "ReplacePart rules must contain exactly two arguments.");
+            rules.push_back(args[1]);
+        } else if (args[1].has_head("List")) {
+            for (const auto& rule : args[1].args()) {
+                if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed"))
+                    || rule.args().size() != 2) {
+                    return invalid_replace(
+                        "ReplacePart expects a rule or a list of rules.");
+                }
+                rules.push_back(rule);
+            }
+        } else {
+            return invalid_replace("ReplacePart expects a rule or a list of rules.");
+        }
+
+        std::vector<std::pair<StructuralPath, Expr>> planned;
         for (const auto& rule : rules) {
-            if ((!rule.has_head("Rule") && !rule.has_head("RuleDelayed")) || rule.args().size() != 2) continue;
-            const auto path = rule.args()[0].has_head("List") ? rule.args()[0].args() : std::vector<Expr>{rule.args()[0]};
-            result = replace_at_path(result, path, 0, rule.args()[1]);
+            auto expanded = structural_operation_paths(args[0], rule.args()[0]);
+            if (!expanded.error.empty()) return invalid_replace(expanded.error);
+            for (auto& path : expanded.paths) {
+                if (std::any_of(planned.begin(), planned.end(), [&](const auto& item) {
+                    return structural_path_equal(item.first, path);
+                })) continue;
+                planned.emplace_back(std::move(path), rule.args()[1]);
+            }
+        }
+        std::stable_sort(planned.begin(), planned.end(),
+            [](const auto& left, const auto& right) {
+                return structural_path_descending(left.first, right.first);
+            });
+        auto result = args[0];
+        for (const auto& [path, replacement] : planned) {
+            auto replaced = structural_replace_at_path(result, path, replacement);
+            if (replaced.second) result = std::move(replaced.first);
         }
         return remove_nothing_from_list_like(result);
     }
@@ -11133,14 +18656,51 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "Min" && args.empty()) return symbol("Infinity");
     if (function == "Max" && args.empty()) return symbol("-Infinity");
-    if (function == "Clip" && args.size() >= 1 && args.size() <= 3) {
-        const auto value = numeric_real(args[0]); Expr lower = integer(-1L), upper = integer(1L);
-        if (args.size() >= 2 && args[1].has_head("List") && args[1].args().size() == 2) { lower = args[1].args()[0]; upper = args[1].args()[1]; }
-        const auto low = numeric_real(lower), high = numeric_real(upper);
-        if (value && low && high) {
-            Expr below = lower, above = upper; if (args.size() == 3 && args[2].has_head("List") && args[2].args().size() == 2) { below = args[2].args()[0]; above = args[2].args()[1]; }
-            return *value < *low ? below : *value > *high ? above : args[0];
+    if (function == "Clip" && evaluated_name && *evaluated_name == "Clip") {
+        if (args.empty() || args.size() > 3)
+            return raw_evaluation_error(
+                "Clip expects one, two, or three arguments.");
+        auto is_explicit_real = [](const Expr& value) {
+            return value.kind() == ExprKind::Integer
+                || value.kind() == ExprKind::Rational
+                || value.kind() == ExprKind::Real
+                || value.kind() == ExprKind::SpecialReal;
+        };
+        if (!is_explicit_real(args[0]))
+            return raw_evaluation_error(
+                "Clip currently evaluates only for explicit real numeric arguments.");
+
+        Expr lower = integer(-1L);
+        Expr upper = integer(1L);
+        if (args.size() >= 2) {
+            if (!args[1].has_head("List") || args[1].args().size() != 2)
+                return raw_evaluation_error(
+                    "Clip currently expects bounds of the form {min, max}.");
+            lower = args[1].args()[0];
+            upper = args[1].args()[1];
+            if (!is_explicit_real(lower) || !is_explicit_real(upper))
+                return raw_evaluation_error(
+                    "Clip currently evaluates only for explicit real numeric bounds.");
         }
+
+        const auto lower_order = compare_orderable_real(args[0], lower);
+        const auto upper_order = compare_orderable_real(args[0], upper);
+        if (!lower_order || !upper_order)
+            return raw_evaluation_error(args.size() == 1
+                ? "Clip could not compare the input with default bounds."
+                : "Clip could not compare the input with the supplied bounds.");
+
+        if (*lower_order < 0 || *upper_order > 0) {
+            if (args.size() == 3) {
+                if (!args[2].has_head("List") || args[2].args().size() != 2)
+                    return raw_evaluation_error(
+                        "Clip currently expects replacement values of the form {vmin, vmax}.");
+                return *lower_order < 0
+                    ? args[2].args()[0] : args[2].args()[1];
+            }
+            return *lower_order < 0 ? lower : upper;
+        }
+        return args[0];
     }
     if (function == "KroneckerDelta" && !args.empty()) return integer(std::adjacent_find(args.begin(), args.end(), std::not_equal_to<Expr>()) == args.end() ? 1L : 0L);
     if (function == "DiscreteDelta" && !args.empty() && std::all_of(args.begin(), args.end(), [](const Expr& value) { return as_rational(value).has_value(); }))
@@ -11227,10 +18787,22 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 const auto rounded_value = function == "Floor" ? std::floor(quotient)
                     : function == "Ceiling" ? std::ceil(quotient)
                     : round_binary64_ties_to_even(quotient);
-                const auto rounded = rounded_value == 0.0 ? 0.0 : rounded_value;
-                const auto product = *machine_unit * rounded;
-                return std::isfinite(product) ? real(real_text(product))
-                    : special_real("Overflow");
+                mpz_class rounded;
+                mpz_set_d(rounded.get_mpz_t(), rounded_value);
+                const mpq_class exact_product = *unit * rounded;
+                if (args[1].kind() != ExprKind::Real)
+                    return from_rational(exact_product);
+                if (is_machine_number(args[1])) {
+                    const auto product = *machine_unit
+                        * (rounded_value == 0.0 ? 0.0 : rounded_value);
+                    return std::isfinite(product) ? real(real_text(product))
+                        : special_real("Overflow");
+                }
+                const auto precision = explicit_real_precision(args[1].text());
+                if (!precision || !std::isfinite(*precision)
+                    || *precision > 1000000.0) return call(head, args);
+                return arbitrary_real_from_rational(exact_product,
+                    static_cast<std::size_t>(std::max(1.0, *precision)));
             }
             const mpq_class ratio = *value / *unit;
             mpz_class rounded = ratio.get_num() / ratio.get_den();
@@ -11246,16 +18818,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     : lower % 2 == 0 ? lower : lower + 1;
             }
             const mpq_class product = *unit * rounded;
-            if (args[0].kind() != ExprKind::Real && args[1].kind() != ExprKind::Real)
+            if (args[1].kind() != ExprKind::Real)
                 return from_rational(product);
-            double precision = 1000000.0;
-            for (const auto& argument : args) if (argument.kind() == ExprKind::Real) {
-                const auto requested = explicit_real_precision(argument.text());
-                if (!requested || !std::isfinite(*requested)) return call(head, args);
-                precision = std::min(precision, *requested);
-            }
+            const auto requested = explicit_real_precision(args[1].text());
+            if (!requested || !std::isfinite(*requested)
+                || *requested > 1000000.0) return call(head, args);
             return arbitrary_real_from_rational(product,
-                static_cast<std::size_t>(std::max(1.0, precision)));
+                static_cast<std::size_t>(std::max(1.0, *requested)));
         }
     }
     if (function == "Min" || function == "Max") {
@@ -11288,6 +18857,9 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     }
     if (function == "PrimeQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer)
         return boolean(args[0].integer_value() > 1 && mpz_probab_prime_p(args[0].integer_value().get_mpz_t(), 25) != 0);
+    if (function == "CompositeQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer)
+        return boolean(args[0].integer_value() >= 4
+            && mpz_probab_prime_p(args[0].integer_value().get_mpz_t(), 25) == 0);
     if (function == "PrimePowerQ" && args.size() == 1 && args[0].kind() == ExprKind::Integer) {
         mpz_class value = abs(args[0].integer_value()); if (value <= 1) return symbol("False");
         for (unsigned long exponent = 1; exponent <= mpz_sizeinbase(value.get_mpz_t(), 2); ++exponent) {
@@ -11425,7 +18997,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 }
             }
         }
-        if (args[0].kind() == ExprKind::SparseArray) return sparse_dense_value(args[0]);
+        if (args[0].kind() == ExprKind::SparseArray) {
+            const auto dense = sparse_dense_value(args[0]);
+            if (!dense)
+                return raw_evaluation_error(
+                    "SparseArray dimensions exceed the native materialization limit.");
+            return *dense;
+        }
         if (args[0].kind() == ExprKind::ByteArray) {
             std::vector<Expr> values; for (const auto value : args[0].bytes()) values.push_back(integer(static_cast<long>(value)));
             return list(std::move(values));

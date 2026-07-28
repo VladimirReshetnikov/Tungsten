@@ -7,6 +7,7 @@
 -- order.
 module Tungsten.PythonSort
   ( pythonStableSortByState
+  , pythonStableSortByStateM
   ) where
 
 -- CPython's listsort uses 64 as both the largest minimum-run value and the
@@ -31,30 +32,30 @@ data SortMachine s item = SortMachine
   , machineListLength :: !Int
   }
 
-data SortEnvironment err s item = SortEnvironment
-  { environmentCompare :: s -> item -> item -> Either err (Ordering, s)
+data SortEnvironment m s item = SortEnvironment
+  { environmentCompare :: s -> item -> item -> m (Ordering, s)
   , environmentMachine :: !(SortMachine s item)
   }
 
-newtype SortAction err s item result = SortAction
+newtype SortAction m s item result = SortAction
   { runSortAction
-      :: SortEnvironment err s item
-      -> Either err (result, SortEnvironment err s item)
+      :: SortEnvironment m s item
+      -> m (result, SortEnvironment m s item)
   }
 
-instance Functor (SortAction err s item) where
+instance Monad m => Functor (SortAction m s item) where
   fmap transform action = SortAction $ \environment -> do
     (value, updated) <- runSortAction action environment
-    Right (transform value, updated)
+    pure (transform value, updated)
 
-instance Applicative (SortAction err s item) where
-  pure value = SortAction $ \environment -> Right (value, environment)
+instance Monad m => Applicative (SortAction m s item) where
+  pure value = SortAction $ \environment -> pure (value, environment)
   functionAction <*> valueAction = SortAction $ \environment -> do
     (function, functionEnvironment) <- runSortAction functionAction environment
     (value, valueEnvironment) <- runSortAction valueAction functionEnvironment
-    Right (function value, valueEnvironment)
+    pure (function value, valueEnvironment)
 
-instance Monad (SortAction err s item) where
+instance Monad m => Monad (SortAction m s item) where
   action >>= continue = SortAction $ \environment -> do
     (value, updated) <- runSortAction action environment
     runSortAction (continue value) updated
@@ -70,7 +71,18 @@ pythonStableSortByState
   -> s
   -> [item]
   -> Either err ([item], s)
-pythonStableSortByState compareItems initialState items = do
+pythonStableSortByState = pythonStableSortByStateM
+
+-- | Monad-polymorphic form of 'pythonStableSortByState'.  Session evaluation
+-- uses this variant so explicit runtime effects can suspend and resume without
+-- changing CPython's observable comparator schedule.
+pythonStableSortByStateM
+  :: Monad m
+  => (s -> item -> item -> m (Ordering, s))
+  -> s
+  -> [item]
+  -> m ([item], s)
+pythonStableSortByStateM compareItems initialState items = do
   let itemCount = length items
       initialMachine =
         SortMachine
@@ -87,9 +99,9 @@ pythonStableSortByState compareItems initialState items = do
           }
   (_, finalEnvironment) <- runSortAction pythonSort initialEnvironment
   let finalMachine = environmentMachine finalEnvironment
-  Right (machineItems finalMachine, machineUserState finalMachine)
+  pure (machineItems finalMachine, machineUserState finalMachine)
 
-pythonSort :: SortAction err s item ()
+pythonSort :: Monad m => SortAction m s item ()
 pythonSort = do
   total <- getsMachine machineListLength
   if total < 2
@@ -99,7 +111,7 @@ pythonSort = do
       discoverRuns minimumRun 0 total
       forceCollapseRuns
 
-discoverRuns :: Int -> Int -> Int -> SortAction err s item ()
+discoverRuns :: Monad m => Int -> Int -> Int -> SortAction m s item ()
 discoverRuns minimumRun start remaining
   | remaining <= 0 = pure ()
   | otherwise = do
@@ -120,32 +132,36 @@ discoverRuns minimumRun start remaining
           }
       discoverRuns minimumRun (start + runLength) (remaining - runLength)
 
-compareLess :: item -> item -> SortAction err s item Bool
+compareLess :: Monad m => item -> item -> SortAction m s item Bool
 compareLess left right = SortAction $ \environment -> do
   let machine = environmentMachine environment
   (ordering, updatedState) <-
     environmentCompare environment (machineUserState machine) left right
   let updatedMachine = machine {machineUserState = updatedState}
-  Right (ordering == LT, environment {environmentMachine = updatedMachine})
+  pure (ordering == LT, environment {environmentMachine = updatedMachine})
 
-compareAt :: Int -> Int -> SortAction err s item Bool
+compareAt :: Monad m => Int -> Int -> SortAction m s item Bool
 compareAt leftIndex rightIndex = do
   left <- itemAt leftIndex
   right <- itemAt rightIndex
   compareLess left right
 
-itemAt :: Int -> SortAction err s item item
+itemAt :: Monad m => Int -> SortAction m s item item
 itemAt index = getsMachine (listItemAt index . machineItems)
 
-getsMachine :: (SortMachine s item -> value) -> SortAction err s item value
+getsMachine
+  :: Monad m
+  => (SortMachine s item -> value)
+  -> SortAction m s item value
 getsMachine project = SortAction $ \environment ->
-  Right (project (environmentMachine environment), environment)
+  pure (project (environmentMachine environment), environment)
 
 modifyMachine
-  :: (SortMachine s item -> SortMachine s item)
-  -> SortAction err s item ()
+  :: Monad m
+  => (SortMachine s item -> SortMachine s item)
+  -> SortAction m s item ()
 modifyMachine transform = SortAction $ \environment ->
-  Right
+  pure
     ( ()
     , environment
         { environmentMachine = transform (environmentMachine environment)
@@ -171,7 +187,7 @@ replaceSlice :: Int -> Int -> [item] -> [item] -> [item]
 replaceSlice start width replacement values =
   take start values ++ replacement ++ drop (start + width) values
 
-setSlice :: Int -> Int -> [item] -> SortAction err s item ()
+setSlice :: Monad m => Int -> Int -> [item] -> SortAction m s item ()
 setSlice start width replacement =
   modifyMachine $ \machine ->
     machine
@@ -179,7 +195,7 @@ setSlice start width replacement =
           replaceSlice start width replacement (machineItems machine)
       }
 
-reverseSlice :: Int -> Int -> SortAction err s item ()
+reverseSlice :: Monad m => Int -> Int -> SortAction m s item ()
 reverseSlice start width = do
   values <- getsMachine machineItems
   let reversed = reverse (take width (drop start values))
@@ -188,7 +204,7 @@ reverseSlice start width = do
 -- This is a direct structural translation of CPython 3.13's count_run().
 -- Its special handling of equal stretches is important both for stability and
 -- for matching comparison traces on descending inputs containing duplicates.
-countRun :: Int -> Int -> SortAction err s item Int
+countRun :: Monad m => Int -> Int -> SortAction m s item Int
 countRun start remaining
   | remaining <= 0 = pure 0
   | otherwise = ascend 1
@@ -244,7 +260,7 @@ countRun start remaining
           then pure n
           else extendAscending (n + 1)
 
-binarySort :: Int -> Int -> Int -> SortAction err s item ()
+binarySort :: Monad m => Int -> Int -> Int -> SortAction m s item ()
 binarySort start width sortedCount = insertFrom initialCount
  where
   initialCount
@@ -300,7 +316,7 @@ powerLoop firstStart firstLength secondLength totalLength =
     | midpointB >= totalLength = result + 1
     | otherwise = go (result + 1) (2 * midpointA) (2 * midpointB)
 
-foundNewRun :: Int -> SortAction err s item ()
+foundNewRun :: Monad m => Int -> SortAction m s item ()
 foundNewRun newLength = do
   runs <- getsMachine machinePendingRuns
   totalLength <- getsMachine machineListLength
@@ -334,7 +350,7 @@ modifyLast _ [] = []
 modifyLast transform values =
   take (length values - 1) values ++ [transform (lastItem values)]
 
-forceCollapseRuns :: SortAction err s item ()
+forceCollapseRuns :: Monad m => SortAction m s item ()
 forceCollapseRuns = do
   runs <- getsMachine machinePendingRuns
   let runCount = length runs
@@ -351,7 +367,7 @@ forceCollapseRuns = do
       mergeAt mergeIndex
       forceCollapseRuns
 
-mergeAt :: Int -> SortAction err s item ()
+mergeAt :: Monad m => Int -> SortAction m s item ()
 mergeAt runIndex = do
   runs <- getsMachine machinePendingRuns
   let firstRun = listItemAt runIndex runs
@@ -397,11 +413,12 @@ mergeAt runIndex = do
             merged
 
 gallopLeft
-  :: item
+  :: Monad m
+  => item
   -> [item]
   -> Int
   -> Int
-  -> SortAction err s item Int
+  -> SortAction m s item Int
 gallopLeft key values width hint = do
   hintIsSmaller <- compareLess (listItemAt hint values) key
   (lastOffset, offset) <-
@@ -443,11 +460,12 @@ gallopLeft key values width hint = do
           else binarySearch left middle
 
 gallopRight
-  :: item
+  :: Monad m
+  => item
   -> [item]
   -> Int
   -> Int
-  -> SortAction err s item Int
+  -> SortAction m s item Int
 gallopRight key values width hint = do
   keyIsSmaller <- compareLess key (listItemAt hint values)
   (lastOffset, offset) <-
@@ -488,7 +506,7 @@ gallopRight key values width hint = do
           then binarySearch left middle
           else binarySearch (middle + 1) right
 
-mergeLow :: [item] -> [item] -> SortAction err s item [item]
+mergeLow :: Monad m => [item] -> [item] -> SortAction m s item [item]
 mergeLow firstValues secondValues =
   case secondValues of
     [] -> pure firstValues
@@ -585,7 +603,7 @@ mergeLow firstValues secondValues =
                           0
                           0
 
-mergeHigh :: [item] -> [item] -> SortAction err s item [item]
+mergeHigh :: Monad m => [item] -> [item] -> SortAction m s item [item]
 mergeHigh firstValues secondValues =
   case reverse firstValues of
     [] -> pure secondValues

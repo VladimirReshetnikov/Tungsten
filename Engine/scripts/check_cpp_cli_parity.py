@@ -146,6 +146,8 @@ class Audit:
                 python_value=python_value,
             )
             return python, native
+        python_value = normalize_platform_payload(python_value)
+        native_value = normalize_platform_payload(native_value)
         if normalize is not None:
             python_value = normalize(python_value)
             native_value = normalize(native_value)
@@ -250,6 +252,43 @@ def normalize_parser_corpus(payload: Any) -> Any:
     return result
 
 
+def normalize_platform_payload(payload: Any) -> Any:
+    """Remove only intentional host-layout differences from CLI JSON.
+
+    The Python compatibility reference discovers the Windows Wolfram layout on
+    every host.  Native Tungsten additionally discovers POSIX installations,
+    cache roots, and license files.  Preserve the common discovery contract and
+    all operational fields while ignoring those deliberately host-specific
+    paths and the corresponding unavailable-kernel wording.
+    """
+
+    result = copy.deepcopy(payload)
+    if os.name == "nt":
+        return result
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            if "available_installations" in value:
+                value.pop("system_base", None)
+                value.pop("mathpass_candidates", None)
+            if value.get("failure_type") == "KernelNotFound":
+                value["stderr"] = "No local Wolfram kernel installation was discovered."
+            if (
+                value.get("error_type") == "EvaluationUnavailable"
+                and isinstance(value.get("error"), str)
+                and value["error"].startswith("No local ")
+            ):
+                value["error"] = "No local Wolfram kernel installation was discovered."
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(result)
+    return result
+
+
 def normalize_parser_corpus_report(source: str) -> str:
     lines: list[str] = []
     in_timings = False
@@ -271,13 +310,21 @@ def normalize_parser_corpus_report(source: str) -> str:
 def make_isolated_environment(root: Path) -> dict[str, str]:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(ENGINE_ROOT / "src")
-    environment.pop("TUNGSTEN_WOLFRAM_HOME", None)
+    # An explicit nonexistent root prevents native POSIX discovery from
+    # finding a real installation under /opt, /usr/local, or /Applications.
+    environment["TUNGSTEN_WOLFRAM_HOME"] = str(root / "missing-wolfram-home")
     environment.pop("TUNGSTEN_WOLFRAM_PRODUCT", None)
     environment["APPDATA"] = str(root / "appdata")
     environment["LOCALAPPDATA"] = str(root / "localappdata")
     environment["ProgramData"] = str(root / "programdata")
     environment["ProgramFiles"] = str(root / "programfiles")
     environment["HOME"] = str(root / "home")
+    # Native POSIX discovery follows the XDG base-directory specification.
+    # Point it at the same fixture roots used by the Windows-only Python
+    # compatibility reference so both implementations see identical docs and
+    # an empty, deterministic license-process cache.
+    environment["XDG_DATA_HOME"] = environment["APPDATA"]
+    environment["XDG_CACHE_HOME"] = environment["LOCALAPPDATA"]
     return environment
 
 
@@ -358,11 +405,21 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
     isolated = make_isolated_environment(root)
     index = root / "docs.sqlite3"
 
-    audit.json_case("env show", ["env", "show"], expected_exit=0)
-    audit.json_case("env show --probe", ["env", "show", "--probe"], expected_exit=0)
+    audit.json_case(
+        "env show", ["env", "show"], environment=isolated, expected_exit=0
+    )
+    audit.json_case(
+        "env show --probe",
+        ["env", "show", "--probe"],
+        environment=isolated,
+        expected_exit=0,
+    )
 
     audit.json_case(
-        "kernel unavailable code", ["kernel", "eval", "--code", "2+2"], expected_exit=2
+        "kernel unavailable code",
+        ["kernel", "eval", "--code", "2+2"],
+        environment=isolated,
+        expected_exit=2,
     )
     audit.json_case(
         "kernel unavailable file/options",
@@ -376,6 +433,7 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
             "--front-end",
             "--require-success",
         ],
+        environment=isolated,
         expected_exit=2,
     )
 
@@ -410,6 +468,41 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
         "expr evaluate",
         ["expr", "evaluate", "--code", "Length[{a,b,c}]"],
         expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate session line",
+        ["expr", "evaluate", "--code", "$Line"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate session input string",
+        ["expr", "evaluate", "--code", "InString[1]"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate session input downvalues",
+        ["expr", "evaluate", "--code", "DownValues[In]"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate session message history",
+        ["expr", "evaluate", "--code", "MessageList[1]"],
+        expected_exit=0,
+    )
+    audit.json_case(
+        "expr evaluate invalid Exit diagnostic",
+        ["expr", "evaluate", "--code", "Exit[x]"],
+        expected_exit=0,
+    )
+    audit.expected_exit_difference(
+        "expr evaluate valid Exit",
+        ["expr", "evaluate", "--code", "Exit[7]"],
+        python_exit=1,
+        native_exit=7,
+        reason=(
+            "the Python oracle CLI leaves TungstenExitRequested uncaught; the native session "
+            "returns the requested process status without emitting JSON"
+        ),
     )
 
     audit.json_case(
@@ -811,7 +904,7 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
         "frontend probe unavailable required",
         ["frontend", "probe", "--require-success"],
         environment=isolated,
-        expected_exit=0,
+        expected_exit=1,
     )
     audit.json_case(
         "frontend open notebook unavailable",
@@ -829,13 +922,26 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
             "--require-success",
         ],
         environment=isolated,
-        expected_exit=0,
+        expected_exit=1,
     )
     audit.json_case(
         "frontend open documentation unavailable",
         ["frontend", "open-doc", "Foo", "--index-path", str(index)],
         environment=isolated,
         expected_exit=0,
+    )
+    audit.json_case(
+        "frontend open documentation unavailable required",
+        [
+            "frontend",
+            "open-doc",
+            "Foo",
+            "--index-path",
+            str(index),
+            "--require-success",
+        ],
+        environment=isolated,
+        expected_exit=1,
     )
     audit.json_case(
         "frontend run unavailable",
@@ -847,7 +953,7 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
         "frontend run wrapped unavailable",
         ["frontend", "run", "--code", "NotebookCreate[]", "--require-success"],
         environment=isolated,
-        expected_exit=0,
+        expected_exit=1,
     )
     audit.json_case(
         "frontend token unavailable",
@@ -865,7 +971,7 @@ def audit_json_commands(audit: Audit, root: Path, fixtures: dict[str, Path]) -> 
         "frontend token without notebook unavailable",
         ["frontend", "token", "EvaluateCells", "--require-success"],
         environment=isolated,
-        expected_exit=0,
+        expected_exit=1,
     )
 
     audit.json_case(

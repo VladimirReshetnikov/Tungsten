@@ -204,7 +204,9 @@ Optional controls on the CLI side include:
 
 - `--extra-instructions` for extra prompt guidance;
 - `--model-service` and `--model-name` for model overrides;
-- `--close-assistant-notebook` to close the temporary hidden chat notebook after the request.
+- `--close-assistant-notebook` to close the hidden chat notebook after the request. Without
+  this option, the notebook remains available in the Wolfram session and the result reports
+  `assistant_notebook_closed` as `false`.
 
 ## Result payloads to expect
 
@@ -216,6 +218,7 @@ The returned object includes:
 - `assistant.wolfram_code_blocks`
 - `assistant.inserted`
 - `assistant.saved_notebook`
+- `assistant.assistant_notebook_closed`
 
 If something goes wrong, important fields often include:
 

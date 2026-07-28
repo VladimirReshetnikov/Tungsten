@@ -212,6 +212,8 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
             while (index < text.size()
                 && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
             if (exponent == index) syntax("Malformed Wolfram numeric exponent.");
+            if (index < text.size() && text[index] == '.' && !starts_with(text, index, ".."))
+                syntax("Malformed Wolfram numeric exponent.");
         }
         const auto raw = text.substr(start, index - start);
         if (!dot && !precision && !magnitude) {
@@ -255,6 +257,8 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
         while (index < text.size()
             && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
         if (exponent == index) syntax("Malformed Wolfram numeric exponent.");
+        if (index < text.size() && text[index] == '.' && !starts_with(text, index, ".."))
+            syntax("Malformed Wolfram numeric exponent.");
     }
     const auto raw = text.substr(start, index - start);
     if (!digits || raw == ".") syntax("Malformed Wolfram number near " + raw + ".");

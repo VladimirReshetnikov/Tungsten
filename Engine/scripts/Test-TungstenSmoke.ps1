@@ -208,8 +208,17 @@ Cell["hello \!\(\*StyleBox[\"Hi\", FontWeight->Bold]\)", "Text", CellID->2001]
         if (-not $wolframAvailable) {
             throw "FrontEnd smoke requires a local Wolfram runtime."
         }
-        $null = Open-TungstenNotebook -Path $tempNotebook -RequireSuccess
-        $null = Open-TungstenDocumentation -Identifier "paclet:ref/NotebookGet" -RequireSuccess
+        $openedNotebook = Open-TungstenNotebook -Path $tempNotebook -RequireSuccess
+        if ($openedNotebook.success -ne $true) {
+            throw "FrontEnd notebook-open smoke returned a structured failure."
+        }
+
+        $openedDocumentation = Open-TungstenDocumentation `
+            -Identifier "paclet:ref/NotebookGet" `
+            -RequireSuccess
+        if ($openedDocumentation.success -ne $true) {
+            throw "FrontEnd documentation-open smoke returned a structured failure."
+        }
         Start-Sleep -Seconds 2
 
         if ($UseWinDesk) {

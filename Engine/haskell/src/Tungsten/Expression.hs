@@ -353,6 +353,14 @@ formatRegularInputCall expressionHead values = case expressionHead of
         , precedencePart
         )
     [] -> genericInputCall expressionHead values
+  Symbol headName
+    | Just (operator, operatorPrecedence) <- escapedInfixInputOperator headName
+    , length values >= 2 ->
+        ( T.intercalate
+            (" " <> operator <> " ")
+            (map (formatInput (operatorPrecedence + 1)) values)
+        , operatorPrecedence
+        )
   Symbol headName -> case infixInputOperator headName of
     Just operator
       | length values >= 2 ->
@@ -366,6 +374,13 @@ formatRegularInputCall expressionHead values = case expressionHead of
           )
     _ -> genericInputCall expressionHead values
   _ -> genericInputCall expressionHead values
+
+escapedInfixInputOperator :: Text -> Maybe (Text, Int)
+escapedInfixInputOperator name = case name of
+  "CirclePlus" -> Just ("\\[CirclePlus]", 125)
+  "CircleTimes" -> Just ("\\[CircleTimes]", 142)
+  "Diamond" -> Just ("\\[Diamond]", 144)
+  _ -> Nothing
 
 formatBlank :: Text -> [Expr] -> Maybe Text
 formatBlank headName values = do

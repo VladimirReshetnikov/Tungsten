@@ -304,13 +304,14 @@ std::string message_name(const tungsten::Expr& message) {
     return message.to_input_form();
 }
 
-std::string message_payloads(const tungsten::Evaluator& evaluator) {
+std::string message_payloads(
+    const std::vector<tungsten::Expr>& names,
+    const std::vector<std::string>& texts) {
     std::string output = "[";
-    for (std::size_t index = 0; index < evaluator.messages().size(); ++index) {
+    for (std::size_t index = 0; index < names.size(); ++index) {
         if (index) output.push_back(',');
-        const auto& message = evaluator.messages()[index];
-        const auto text = index < evaluator.message_texts().size()
-            ? evaluator.message_texts()[index] : std::string{};
+        const auto& message = names[index];
+        const auto text = index < texts.size() ? texts[index] : std::string{};
         output += "{\"name\":" + json_escape(message_name(message))
             + ",\"full_name\":" + json_escape(message.to_full_form())
             + ",\"text\":" + json_escape(text) + "}";
@@ -426,16 +427,19 @@ int execute_expr_command(int argc, char** argv) {
         return 0;
     }
 
-    tungsten::Evaluator evaluator;
+    tungsten::EvaluationSession session;
     try {
-        const auto result = evaluator.evaluate(parsed);
+        const auto evaluation = session.evaluate_expression(source, parsed);
+        if (evaluation.is_exit()) return evaluation.exit_code;
+        const auto& result = evaluation.result;
         std::cout << "{\"command\":\"evaluate\",\"form\":" + json_escape(form_label)
             + ",\"source\":" + json_escape(source)
             + ",\"parsed_input_form\":" + json_escape(parsed.to_input_form())
             + ",\"parsed_full_form\":" + json_escape(parsed.to_full_form())
             + ",\"result\":" + expression_payload(result)
-            + ",\"messages\":" + message_payloads(evaluator)
-            + ",\"prints\":" + string_array(evaluator.prints()) + "}" << '\n';
+            + ",\"messages\":"
+            + message_payloads(evaluation.message_names, evaluation.messages)
+            + ",\"prints\":" + string_array(evaluation.prints) + "}" << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cout << expression_error_payload(
@@ -1100,7 +1104,7 @@ int execute_frontend_command(int argc, char** argv) {
         else if (command == "run") result = controller.run(*code, !no_wrap);
         else result = controller.execute_token(*positional, file);
         std::cout << result.to_json().dump_pretty(2) << '\n';
-        return require_success && result.success == std::optional<bool>(false) ? 1 : 0;
+        return require_success && result.success != std::optional<bool>(true) ? 1 : 0;
     } catch (const std::exception& error) {
         std::cerr << "tungsten-cpp: frontend " << command
                   << " failed: " << error.what() << '\n';

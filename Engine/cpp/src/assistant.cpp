@@ -142,6 +142,7 @@ tungstenSettings = ImportString[__SETTINGS__, "RawJSON"];
 tungstenQuestion = __QUESTION__;
 tungstenNotebookPath = __NOTEBOOK_PATH__;
 tungstenExtraInstructions = __INSTRUCTIONS__;
+tungstenCloseAssistantNotebook = __CLOSE__;
 tungstenChatCellEvaluate = Symbol["Wolfram`Chatbook`ChatCellEvaluate"];
 tungstenCellToString = Symbol["Wolfram`Chatbook`CellToString"];
 
@@ -161,7 +162,8 @@ tungstenChatSettings[nbo_NotebookObject] := Quiet @ Check[
     CurrentValue[nbo, {TaggingRules, "ChatNotebookSettings"}] = tungstenSettings, Null];
 
 tungstenResult = Module[
-    {sourceNotebook, sourceCell, assistantNotebook, promptCell, chatCell, chatObject, chatRaw},
+    {sourceNotebook, sourceCell, assistantNotebook, promptCell, chatCell, chatObject, chatRaw,
+     assistantNotebookClosed = False},
     sourceNotebook = tungstenResolveNotebook @ tungstenNotebookPath;
     If[AssociationQ @ sourceNotebook, sourceNotebook,
         SetSelectedNotebook @ sourceNotebook;
@@ -189,12 +191,14 @@ tungstenResult = Module[
                 chatObject = Quiet @ Check[If[MatchQ[chatCell, _CellObject],
                     tungstenChatCellEvaluate[chatCell, assistantNotebook], $Failed], $Failed];
                 chatRaw = ToString[chatObject, InputForm, PageWidth -> Infinity];
-                Quiet @ Check[NotebookClose @ assistantNotebook, Null];
+                If[TrueQ @ tungstenCloseAssistantNotebook,
+                    assistantNotebookClosed = TrueQ @ Quiet @ Check[
+                        (NotebookClose @ assistantNotebook; True), False]];
                 <|"success" -> True, "notebook_path" -> tungstenNotebookPath,
                   "question" -> tungstenQuestion, "selector" -> tungstenSelector,
                   "source_cell" -> tungstenCellMetadata @ sourceCell,
                   "assistant_notebook_mode" -> "TemporaryHiddenChatNotebook",
-                  "assistant_notebook_closed" -> True,
+                  "assistant_notebook_closed" -> assistantNotebookClosed,
                   "assistant_chat_object_string" -> chatRaw|>
             ]
         ]
@@ -540,98 +544,16 @@ std::vector<JsonValue> insertable_blocks(const std::vector<JsonValue>& blocks) {
     return result;
 }
 
-void append_utf8(std::string& output, std::uint32_t value) {
-    if (value <= 0x7f) output.push_back(static_cast<char>(value));
-    else if (value <= 0x7ff) {
-        output.push_back(static_cast<char>(0xc0 | (value >> 6)));
-        output.push_back(static_cast<char>(0x80 | (value & 0x3f)));
-    } else if (value <= 0xffff) {
-        output.push_back(static_cast<char>(0xe0 | (value >> 12)));
-        output.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3f)));
-        output.push_back(static_cast<char>(0x80 | (value & 0x3f)));
-    } else if (value <= 0x10ffff) {
-        output.push_back(static_cast<char>(0xf0 | (value >> 18)));
-        output.push_back(static_cast<char>(0x80 | ((value >> 12) & 0x3f)));
-        output.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3f)));
-        output.push_back(static_cast<char>(0x80 | (value & 0x3f)));
-    }
-}
-
-std::optional<std::uint32_t> hex_value(
-    const std::string& value, std::size_t position, std::size_t digits) {
-    if (position + digits > value.size()) return std::nullopt;
-    std::uint32_t result = 0;
-    for (std::size_t index = 0; index < digits; ++index) {
-        const unsigned char character = static_cast<unsigned char>(value[position + index]);
-        result <<= 4;
-        if (character >= '0' && character <= '9') result |= character - '0';
-        else if (character >= 'a' && character <= 'f') result |= character - 'a' + 10;
-        else if (character >= 'A' && character <= 'F') result |= character - 'A' + 10;
-        else return std::nullopt;
-    }
-    return result;
-}
-
-std::string decode_backslash_escapes(const std::string& value) {
-    std::string output;
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        if (value[index] != '\\' || index + 1 >= value.size()) {
-            output.push_back(value[index]);
-            continue;
-        }
-        const char escaped = value[++index];
-        switch (escaped) {
-        case 'n': output.push_back('\n'); break;
-        case 'r': output.push_back('\r'); break;
-        case 't': output.push_back('\t'); break;
-        case 'b': output.push_back('\b'); break;
-        case 'f': output.push_back('\f'); break;
-        case '"': output.push_back('"'); break;
-        case '\\': output.push_back('\\'); break;
-        case '/': output.push_back('/'); break;
-        case 'x': {
-            const auto decoded = hex_value(value, index + 1, 2);
-            if (decoded) {
-                append_utf8(output, *decoded);
-                index += 2;
-            } else output += "\\x";
-            break;
-        }
-        case 'u': {
-            const auto decoded = hex_value(value, index + 1, 4);
-            if (decoded) {
-                append_utf8(output, *decoded);
-                index += 4;
-            } else output += "\\u";
-            break;
-        }
-        default:
-            output.push_back('\\');
-            output.push_back(escaped);
-            break;
-        }
-    }
-    return output;
-}
-
-std::string decode_chat_string(const std::string& value) {
-    std::string decoded = value;
-    try {
-        const auto parsed = JsonValue::parse('"' + value + '"');
-        if (parsed.is_string()) decoded = parsed.as_string();
-    } catch (const std::exception&) {
-    }
-    if (decoded.find("\\n") != std::string::npos
-        || decoded.find("\\t") != std::string::npos
-        || decoded.find("\\\"") != std::string::npos
-        || decoded.find("\\\\") != std::string::npos)
-        return decode_backslash_escapes(decoded);
-    return decoded;
-}
-
 void skip_pattern_space(const std::string& value, std::size_t& position) noexcept {
-    while (position < value.size()
-        && detail::ascii_is_space(static_cast<unsigned char>(value[position]))) ++position;
+    while (position < value.size()) {
+        while (position < value.size()
+            && detail::ascii_is_space(static_cast<unsigned char>(value[position]))) ++position;
+        if (position + 1 >= value.size()
+            || value[position] != '(' || value[position + 1] != '*') break;
+        const auto after_comment = skip_wl_comment(value, position);
+        if (after_comment <= position) break;
+        position = after_comment;
+    }
 }
 
 bool consume_pattern_token(
@@ -642,105 +564,308 @@ bool consume_pattern_token(
     return true;
 }
 
+struct ParsedWolframString {
+    std::string value;
+    std::size_t begin;
+    std::size_t end;
+};
+
+std::optional<ParsedWolframString> parse_wolfram_string_at(
+    const std::string& value, std::size_t position) {
+    if (position >= value.size() || value[position] != '"') return std::nullopt;
+    const auto end = skip_wl_string(value, position);
+    if (end <= position + 1 || end > value.size() || value[end - 1] != '"')
+        return std::nullopt;
+    return ParsedWolframString{
+        parse_wl_string_literal(value.substr(position, end - position)), position, end};
+}
+
+std::optional<ParsedWolframString> next_wolfram_string(
+    const std::string& value, std::size_t search_from) {
+    for (auto position = search_from; position < value.size();) {
+        if (value[position] == '"') return parse_wolfram_string_at(value, position);
+        if (position + 1 < value.size()
+            && value[position] == '(' && value[position + 1] == '*') {
+            position = skip_wl_comment(value, position);
+            continue;
+        }
+        ++position;
+    }
+    return std::nullopt;
+}
+
+std::optional<ParsedWolframString> next_named_wolfram_string(
+    const std::string& value, std::size_t search_from, const std::string& name) {
+    while (const auto token = next_wolfram_string(value, search_from)) {
+        if (token->value == name) return token;
+        search_from = token->end;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::size_t> matching_list_close(
+    const std::string& value, std::size_t opening) {
+    if (opening >= value.size() || value[opening] != '{') return std::nullopt;
+    std::size_t depth = 1;
+    for (auto position = opening + 1; position < value.size();) {
+        if (value[position] == '"') {
+            const auto string = parse_wolfram_string_at(value, position);
+            if (!string) return std::nullopt;
+            position = string->end;
+            continue;
+        }
+        if (position + 1 < value.size()
+            && value[position] == '(' && value[position + 1] == '*') {
+            position = skip_wl_comment(value, position);
+            continue;
+        }
+        if (value[position] == '{') ++depth;
+        else if (value[position] == '}' && --depth == 0) return position;
+        ++position;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::size_t> matching_association_close(
+    const std::string& value, std::size_t opening) {
+    if (opening + 1 >= value.size()
+        || value[opening] != '<' || value[opening + 1] != '|') return std::nullopt;
+    std::size_t depth = 1;
+    for (auto position = opening + 2; position < value.size();) {
+        if (value[position] == '"') {
+            const auto string = parse_wolfram_string_at(value, position);
+            if (!string) return std::nullopt;
+            position = string->end;
+            continue;
+        }
+        if (position + 1 < value.size()
+            && value[position] == '(' && value[position + 1] == '*') {
+            position = skip_wl_comment(value, position);
+            continue;
+        }
+        if (position + 1 < value.size()
+            && value[position] == '<' && value[position + 1] == '|') {
+            ++depth;
+            position += 2;
+            continue;
+        }
+        if (position + 1 < value.size()
+            && value[position] == '|' && value[position + 1] == '>') {
+            if (--depth == 0) return position;
+            position += 2;
+            continue;
+        }
+        ++position;
+    }
+    return std::nullopt;
+}
+
+std::size_t direct_association_field_end(
+    const std::string& value, std::size_t start, std::size_t association_close) {
+    std::size_t association_depth = 0;
+    std::size_t brace_depth = 0;
+    std::size_t bracket_depth = 0;
+    std::size_t parenthesis_depth = 0;
+    for (auto position = start; position < association_close;) {
+        if (value[position] == '"') {
+            const auto string = parse_wolfram_string_at(value, position);
+            if (!string || string->end > association_close) return association_close;
+            position = string->end;
+            continue;
+        }
+        if (position + 1 < association_close
+            && value[position] == '(' && value[position + 1] == '*') {
+            const auto after_comment = skip_wl_comment(value, position);
+            if (after_comment > association_close) return association_close;
+            position = after_comment;
+            continue;
+        }
+        if (position + 1 < association_close
+            && value[position] == '<' && value[position + 1] == '|') {
+            ++association_depth;
+            position += 2;
+            continue;
+        }
+        if (position + 1 < association_close
+            && value[position] == '|' && value[position + 1] == '>'
+            && association_depth != 0) {
+            --association_depth;
+            position += 2;
+            continue;
+        }
+        const bool nested = association_depth != 0 || brace_depth != 0
+            || bracket_depth != 0 || parenthesis_depth != 0;
+        if (value[position] == ',' && !nested) return position;
+        if (value[position] == '{') ++brace_depth;
+        else if (value[position] == '}' && brace_depth != 0) --brace_depth;
+        else if (value[position] == '[') ++bracket_depth;
+        else if (value[position] == ']' && bracket_depth != 0) --bracket_depth;
+        else if (value[position] == '(') ++parenthesis_depth;
+        else if (value[position] == ')' && parenthesis_depth != 0)
+            --parenthesis_depth;
+        ++position;
+    }
+    return association_close;
+}
+
+bool only_pattern_space(
+    const std::string& value, std::size_t position, std::size_t end) noexcept {
+    skip_pattern_space(value, position);
+    return position == end;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> assistant_content_in_message(
+    const std::string& value, std::size_t opening, std::size_t close) {
+    std::optional<std::string> role;
+    std::optional<std::pair<std::size_t, std::size_t>> content;
+    bool has_metadata = false;
+    auto position = opening + 2;
+    while (position < close) {
+        skip_pattern_space(value, position);
+        if (position >= close) break;
+        const auto field_end = direct_association_field_end(value, position, close);
+        const auto key = parse_wolfram_string_at(value, position);
+        if (key && key->end <= field_end) {
+            auto value_start = key->end;
+            skip_pattern_space(value, value_start);
+            if (consume_pattern_token(value, value_start, "->")) {
+                skip_pattern_space(value, value_start);
+                if (key->value == "Role") {
+                    const auto role_value = parse_wolfram_string_at(value, value_start);
+                    if (role_value && role_value->end <= field_end
+                        && only_pattern_space(value, role_value->end, field_end))
+                        role = role_value->value;
+                } else if (key->value == "Content"
+                    && value_start < field_end && value[value_start] == '{') {
+                    const auto list_close = matching_list_close(value, value_start);
+                    if (list_close && *list_close < field_end
+                        && only_pattern_space(value, *list_close + 1, field_end))
+                        content = std::pair<std::size_t, std::size_t>{
+                            value_start + 1, *list_close};
+                } else if (key->value == "Metadata" && value_start < field_end) {
+                    has_metadata = true;
+                }
+            }
+        }
+        position = field_end == close ? close : field_end + 1;
+    }
+    if (role != "Assistant" || !content || !has_metadata) return std::nullopt;
+    return content;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> messages_list_bounds(
+    const std::string& value) {
+    std::size_t search_from = 0;
+    while (const auto messages = next_named_wolfram_string(value, search_from, "Messages")) {
+        auto position = messages->end;
+        skip_pattern_space(value, position);
+        if (consume_pattern_token(value, position, "->")) {
+            skip_pattern_space(value, position);
+            if (position < value.size() && value[position] == '{') {
+                const auto close = matching_list_close(value, position);
+                if (close) return std::pair<std::size_t, std::size_t>{position, *close};
+            }
+        }
+        search_from = messages->end;
+    }
+    return std::nullopt;
+}
+
 std::optional<std::pair<std::string, std::size_t>> next_assistant_section(
     const std::string& value, std::size_t search_from) {
-    constexpr const char* role_marker = R"(<|"Role")";
-    while (true) {
-        const auto marker = value.find(role_marker, search_from);
-        if (marker == std::string::npos) return std::nullopt;
-        auto position = marker + std::char_traits<char>::length(role_marker);
-        skip_pattern_space(value, position);
-        if (!consume_pattern_token(value, position, "->")) {
-            search_from = marker + 1;
+    const auto messages = messages_list_bounds(value);
+    if (!messages) return std::nullopt;
+    auto position = std::max(search_from, messages->first + 1);
+    std::size_t brace_depth = 0;
+    std::size_t bracket_depth = 0;
+    std::size_t parenthesis_depth = 0;
+    while (position < messages->second) {
+        if (value[position] == '"') {
+            const auto string = parse_wolfram_string_at(value, position);
+            if (!string || string->end > messages->second) return std::nullopt;
+            position = string->end;
             continue;
         }
-        skip_pattern_space(value, position);
-        if (!consume_pattern_token(value, position, R"("Assistant")")) {
-            search_from = marker + 1;
+        if (position + 1 < messages->second
+            && value[position] == '(' && value[position + 1] == '*') {
+            const auto after_comment = skip_wl_comment(value, position);
+            if (after_comment > messages->second) return std::nullopt;
+            position = after_comment;
             continue;
         }
-        const auto content_marker = value.find(R"("Content")", position);
-        if (content_marker == std::string::npos) return std::nullopt;
-        position = content_marker + std::char_traits<char>::length(R"("Content")");
-        skip_pattern_space(value, position);
-        if (!consume_pattern_token(value, position, "->")) {
-            search_from = marker + 1;
-            continue;
-        }
-        skip_pattern_space(value, position);
-        if (!consume_pattern_token(value, position, "{")) {
-            search_from = marker + 1;
-            continue;
-        }
-        const auto section_start = position;
-        auto close = value.find('}', section_start);
-        while (close != std::string::npos) {
-            auto after = close + 1;
-            skip_pattern_space(value, after);
-            if (!consume_pattern_token(value, after, ",")) {
-                close = value.find('}', close + 1);
-                continue;
+        if (position + 1 < messages->second
+            && value[position] == '<' && value[position + 1] == '|') {
+            const auto association_close = matching_association_close(value, position);
+            if (!association_close || *association_close + 1 >= messages->second)
+                return std::nullopt;
+            const bool direct = brace_depth == 0 && bracket_depth == 0
+                && parenthesis_depth == 0;
+            if (direct) {
+                const auto content = assistant_content_in_message(
+                    value, position, *association_close);
+                if (content) {
+                    return std::pair<std::string, std::size_t>{
+                        value.substr(content->first, content->second - content->first),
+                        *association_close + 2};
+                }
             }
-            skip_pattern_space(value, after);
-            if (!consume_pattern_token(value, after, R"("Metadata")")) {
-                close = value.find('}', close + 1);
-                continue;
-            }
-            skip_pattern_space(value, after);
-            if (!consume_pattern_token(value, after, "->")) {
-                close = value.find('}', close + 1);
-                continue;
-            }
-            return std::pair<std::string, std::size_t>{
-                value.substr(section_start, close - section_start), after};
+            position = *association_close + 2;
+            continue;
         }
-        search_from = marker + 1;
+        if (value[position] == '{') ++brace_depth;
+        else if (value[position] == '}' && brace_depth != 0) --brace_depth;
+        else if (value[position] == '[') ++bracket_depth;
+        else if (value[position] == ']' && bracket_depth != 0) --bracket_depth;
+        else if (value[position] == '(') ++parenthesis_depth;
+        else if (value[position] == ')' && parenthesis_depth != 0)
+            --parenthesis_depth;
+        ++position;
     }
+    return std::nullopt;
 }
 
 std::vector<std::string> assistant_text_chunks(const std::string& section) {
     std::vector<std::string> chunks;
     std::size_t search_from = 0;
-    constexpr const char* type_marker = R"("Type")";
-    while (true) {
-        const auto marker = section.find(type_marker, search_from);
-        if (marker == std::string::npos) break;
-        auto position = marker + std::char_traits<char>::length(type_marker);
+    while (const auto type = next_named_wolfram_string(section, search_from, "Type")) {
+        auto position = type->end;
         skip_pattern_space(section, position);
         if (!consume_pattern_token(section, position, "->")) {
-            search_from = marker + 1;
+            search_from = type->end;
             continue;
         }
         skip_pattern_space(section, position);
-        if (!consume_pattern_token(section, position, R"("Text")")) {
-            search_from = marker + 1;
+        const auto type_value = parse_wolfram_string_at(section, position);
+        if (!type_value || type_value->value != "Text") {
+            search_from = type->end;
             continue;
         }
+        position = type_value->end;
         skip_pattern_space(section, position);
         if (!consume_pattern_token(section, position, ",")) {
-            search_from = marker + 1;
+            search_from = type->end;
             continue;
         }
         skip_pattern_space(section, position);
-        if (!consume_pattern_token(section, position, R"("Data")")) {
-            search_from = marker + 1;
+        const auto data_key = parse_wolfram_string_at(section, position);
+        if (!data_key || data_key->value != "Data") {
+            search_from = type->end;
             continue;
         }
+        position = data_key->end;
         skip_pattern_space(section, position);
         if (!consume_pattern_token(section, position, "->")) {
-            search_from = marker + 1;
+            search_from = type->end;
             continue;
         }
         skip_pattern_space(section, position);
-        if (!consume_pattern_token(section, position, "\"")) {
-            search_from = marker + 1;
+        const auto data = parse_wolfram_string_at(section, position);
+        if (!data) {
+            search_from = type->end;
             continue;
         }
-        const auto close = section.find('"', position);
-        if (close == std::string::npos) break;
-        auto decoded = decode_chat_string(section.substr(position, close - position));
-        if (!decoded.empty()) chunks.push_back(std::move(decoded));
-        search_from = close + 1;
+        if (!data->value.empty()) chunks.push_back(data->value);
+        search_from = data->end;
     }
     return chunks;
 }
@@ -995,6 +1120,8 @@ std::string build_assistant_ask_cell_script(
     if (options.extra_instructions && !options.extra_instructions->empty())
         instructions += "\n\n" + *options.extra_instructions;
     replace_all(script, "__INSTRUCTIONS__", wl_string(instructions));
+    replace_all(script, "__CLOSE__",
+        options.close_assistant_notebook ? "True" : "False");
     replace_all(script, "__HELPERS__", helper_block(
         "tungstenCellToString @ cellExpr",
         {"tungstenPromptCell", "tungstenChatSettings"}));

@@ -33,11 +33,11 @@
 ## Summary
 
 Tungsten is a multi-runtime automation and symbolic-computation workspace for a local Wolfram
-installation. The Python implementation remains the broad executable compatibility reference. An
-in-progress C++17 runtime provides an installable native library and CLI and is the target of the
-PowerShell and .NET projections, while the active Haskell port provides an independent typed
-expression, parser, evaluator, structural-notebook, CLI, and JSON-protocol foundation. Tungsten
-exists for the
+installation. The Python implementation remains the executable compatibility reference. The C++17
+runtime owns that reference's complete dispatch surface, provides an installable native library and
+CLI, and is the target of the PowerShell and .NET projections, while the active Haskell port
+provides an independent typed expression, parser, evaluator, structural-notebook, CLI, and
+JSON-protocol foundation. Tungsten exists for the
 workflows that are awkward in the traditional Mathematica GUI but natural for agents, scripts, and
 typed host applications:
 
@@ -127,8 +127,8 @@ The current workspace is built around eight complementary capabilities:
    `##`, `##n`, and `Function[Null, body, attrs]`, supports named pure functions such as
    `Function[x, body]`, `Function[params, body, attrs]`, `x |-> body`, and
    `x \[Function] body` with capture-avoiding parameter renaming and the pure-function attribute
-   subset for hold, sequence, and listable behavior. The native evaluator covers a broad but
-   incomplete portion of the Python-oracle compatibility inventory, including hold-like
+   subset for hold, sequence, and listable behavior. The native evaluator covers the complete
+   Python-oracle dispatch inventory with the same bounded algorithmic scope, including hold-like
    conditionals (`If`, `Which`, `Switch`, `Piecewise`),
    integer arithmetic and relational heads, simple predicates such as `IntegerQ`, `NumericQ`, `StringQ`,
    `DigitQ`, `LetterQ`, `EvenQ`, and `SparseArrayQ`, integer-only numeric heads such as `UnitStep`, `Mod`,
@@ -182,8 +182,9 @@ The current workspace is built around eight complementary capabilities:
    built-ins are discoverable even when Tungsten does not implement their evaluation rules; the
    evaluator consults those attributes plus process-local user mutations for common hold,
    sequence, listable, flat, orderless, and one-identity matching behavior.
-   This is a broad compatibility implementation, not a claim of complete Python- or Wolfram-kernel parity;
-   unsupported heads and edge cases remain symbolic or are documented as gaps.
+   This is the complete native port of the reviewed Python-reference surface, not a claim of
+   complete Wolfram-kernel parity; forms beyond that shared boundary remain symbolic or are
+   documented as intentional limits.
 5. A console-mode `tungsten-cpp repl` interpreter (also exposed by the .NET `tungsten.exe`
    projection) with `wolfram.exe`-style
    `In[n]:=` / `Out[n]=` prompts, `$Line`, `In`, `InString`, `Out`, read-only history
@@ -225,8 +226,8 @@ The current workspace is built around eight complementary capabilities:
   [`Tools`](https://github.com/VladimirReshetnikov/Tools) repository. To use the WinDesk path, build
   `WinDesk.PowerShell` from that repository and either pre-import the module or set
   `$env:TUNGSTEN_WINDESK_MODULE_PATH` to the built `WinDesk.PowerShell.dll`.
-- The expression subsystem covers a pragmatic StandardForm and box subset and a broad but still
-  incomplete built-in evaluation surface. Unsupported forms remain symbolic.
+- The expression subsystem covers the same pragmatic StandardForm, box, and bounded built-in
+  evaluation surface as the Python reference. Forms beyond that reference surface remain symbolic.
 - FrontEnd automation is intentionally selective rather than exhaustive.
 
 ## Tech stack and operating assumptions
@@ -345,9 +346,9 @@ cabal run tungsten-hs -- inline-box from-cell --file example.nb --cell-index 0 -
 cabal run tungsten-hs -- docs search NotebookGet
 ```
 
-The Haskell port currently covers the kernel-free expression, structural notebook, Wolfram-string,
-inline-box, and documentation-index foundations, plus typed discovery, kernel, and FrontEnd
-operations. See
+The Haskell port currently covers the kernel-free expression, stateful session and explicit timing
+runtime, structural notebook, Wolfram-string, inline-box, and documentation-index foundations,
+plus typed discovery, kernel, and FrontEnd operations. See
 [Haskell Port](./docs/haskell-port.md) for its exact compatibility boundary and migration order.
 
 ### PowerShell

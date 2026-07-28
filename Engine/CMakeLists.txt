@@ -122,6 +122,7 @@ add_library(tungsten_cpp STATIC
     cpp/src/parser.cpp
     cpp/src/parser_corpus.cpp
     cpp/src/repl.cpp
+    cpp/src/unicode.cpp
     cpp/src/wolfram_strings.cpp
     cpp/src/wolfram_processes.cpp
 )
@@ -169,6 +170,88 @@ if(BUILD_TESTING)
     target_link_libraries(tungsten_cpp_tests PRIVATE tungsten_cpp)
     tungsten_enable_project_warnings(tungsten_cpp_tests)
     add_test(NAME tungsten_cpp_tests COMMAND tungsten_cpp_tests)
+
+    add_executable(tungsten_evaluator_api_tests
+        cpp/tests/evaluator_api_tests.cpp)
+    target_link_libraries(tungsten_evaluator_api_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_evaluator_api_tests)
+    add_test(
+        NAME tungsten_evaluator_api_tests
+        COMMAND tungsten_evaluator_api_tests)
+
+    add_executable(tungsten_combinator_state_tests
+        cpp/tests/combinator_state_tests.cpp)
+    target_link_libraries(tungsten_combinator_state_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_combinator_state_tests)
+    add_test(
+        NAME tungsten_combinator_state_tests
+        COMMAND tungsten_combinator_state_tests)
+
+    add_executable(tungsten_failure_confirmation_tests
+        cpp/tests/failure_confirmation_tests.cpp)
+    target_link_libraries(
+        tungsten_failure_confirmation_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_failure_confirmation_tests)
+    add_test(
+        NAME tungsten_failure_confirmation_tests
+        COMMAND tungsten_failure_confirmation_tests)
+
+    add_executable(tungsten_array_shape_tests
+        cpp/tests/array_shape_tests.cpp)
+    target_link_libraries(tungsten_array_shape_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_array_shape_tests)
+    add_test(
+        NAME tungsten_array_shape_tests
+        COMMAND tungsten_array_shape_tests)
+
+    add_executable(tungsten_dense_array_tests
+        cpp/tests/dense_array_tests.cpp)
+    target_link_libraries(tungsten_dense_array_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_dense_array_tests)
+    add_test(
+        NAME tungsten_dense_array_tests
+        COMMAND tungsten_dense_array_tests)
+
+    add_executable(tungsten_sparse_transform_tests
+        cpp/tests/sparse_transform_tests.cpp)
+    target_link_libraries(tungsten_sparse_transform_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_sparse_transform_tests)
+    add_test(
+        NAME tungsten_sparse_transform_tests
+        COMMAND tungsten_sparse_transform_tests)
+
+    add_executable(tungsten_sparse_arithmetic_tests
+        cpp/tests/sparse_arithmetic_tests.cpp)
+    target_link_libraries(
+        tungsten_sparse_arithmetic_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_sparse_arithmetic_tests)
+    add_test(
+        NAME tungsten_sparse_arithmetic_tests
+        COMMAND tungsten_sparse_arithmetic_tests)
+
+    add_executable(tungsten_tensor_matrix_tests
+        cpp/tests/tensor_matrix_tests.cpp)
+    target_link_libraries(tungsten_tensor_matrix_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_tensor_matrix_tests)
+    add_test(
+        NAME tungsten_tensor_matrix_tests
+        COMMAND tungsten_tensor_matrix_tests)
+
+    add_executable(tungsten_take_list_tests
+        cpp/tests/take_list_tests.cpp)
+    target_link_libraries(tungsten_take_list_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_take_list_tests)
+    add_test(
+        NAME tungsten_take_list_tests
+        COMMAND tungsten_take_list_tests)
+
+    add_executable(tungsten_polynomial_algebra_tests
+        cpp/tests/polynomial_algebra_tests.cpp)
+    target_link_libraries(tungsten_polynomial_algebra_tests PRIVATE tungsten_cpp)
+    tungsten_enable_project_warnings(tungsten_polynomial_algebra_tests)
+    add_test(
+        NAME tungsten_polynomial_algebra_tests
+        COMMAND tungsten_polynomial_algebra_tests)
 
     add_executable(
         tungsten_expression_model_tests
@@ -268,6 +351,20 @@ if(BUILD_TESTING)
             -DSMOKE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/tungsten-cli-smoke
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/cli_smoke.cmake)
     set_tests_properties(tungsten_cli_smoke PROPERTIES TIMEOUT 30)
+
+    add_test(
+        NAME tungsten_installed_consumer
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DTUNGSTEN_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DTUNGSTEN_CONSUMER_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/installed_consumer
+            -DTUNGSTEN_CONSUMER_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}/installed-consumer-build
+            -DTUNGSTEN_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/installed-consumer-prefix
+            -DTUNGSTEN_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+            -DTUNGSTEN_CONFIG=$<CONFIG>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/installed_consumer.cmake)
+    set_tests_properties(
+        tungsten_installed_consumer PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
 endif()
 
 install(

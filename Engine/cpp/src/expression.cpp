@@ -536,6 +536,10 @@ Expr root(std::vector<mpz_class> coefficients, std::size_t index, long method) {
     return Expr(std::move(node));
 }
 Expr sparse_array(std::vector<std::size_t> dimensions, std::vector<SparseEntry> entries, Expr fill_value) {
+    std::sort(entries.begin(), entries.end(),
+        [](const SparseEntry& left, const SparseEntry& right) {
+            return left.indices < right.indices;
+        });
     auto node = std::make_shared<ExprNode>(); node->kind = ExprKind::SparseArray;
     node->dimensions = std::move(dimensions); node->entries = std::move(entries); node->fill = fill_value.node_;
     return Expr(std::move(node));

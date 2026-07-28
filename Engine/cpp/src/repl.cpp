@@ -549,13 +549,23 @@ std::string normalize_print_text(const std::string& text) {
 }
 
 struct ExitResult {
-    bool requested = false;
+    enum class Kind { None, Requested, Invalid };
+
+    Kind kind = Kind::None;
     int code = 0;
+    std::string head;
+    std::string error;
+
+    [[nodiscard]] bool requested() const noexcept { return kind == Kind::Requested; }
+    [[nodiscard]] bool invalid() const noexcept { return kind == Kind::Invalid; }
 };
 
 ExitResult exit_result(const Expr& expression) {
     if (expression.kind() == ExprKind::Symbol) {
-        if (is_symbol(expression, "Exit") || is_symbol(expression, "Quit")) return {true, 0};
+        if (is_symbol(expression, "Exit"))
+            return {ExitResult::Kind::Requested, 0, "Exit", {}};
+        if (is_symbol(expression, "Quit"))
+            return {ExitResult::Kind::Requested, 0, "Quit", {}};
         return {};
     }
     if (expression.kind() != ExprKind::Call) return {};
@@ -563,18 +573,44 @@ ExitResult exit_result(const Expr& expression) {
     if (raw_name == nullptr) return {};
     const auto name = system_dispatch_name(*raw_name);
     if (name != "Exit" && name != "Quit") return {};
-    if (expression.args().empty()) return {true, 0};
-    if (expression.args().size() != 1 || expression.args()[0].kind() != ExprKind::Integer)
-        throw std::runtime_error("Exit and Quit expect an optional integer exit code.");
+    if (expression.args().empty())
+        return {ExitResult::Kind::Requested, 0, name, {}};
+    if (expression.args().size() != 1)
+        return {ExitResult::Kind::Invalid, 0, name,
+            "Exit and Quit expect zero or one argument."};
+    if (expression.args()[0].kind() != ExprKind::Integer)
+        return {ExitResult::Kind::Invalid, 0, name,
+            "Exit and Quit expect an optional integer exit code."};
     if (!expression.args()[0].integer_value().fits_sint_p())
-        throw std::runtime_error("Exit code is outside the supported native integer range.");
-    return {true, static_cast<int>(expression.args()[0].integer_value().get_si())};
+        return {ExitResult::Kind::Invalid, 0, name,
+            "Exit code is outside the supported native integer range."};
+    return {ExitResult::Kind::Requested,
+        static_cast<int>(expression.args()[0].integer_value().get_si()), name, {}};
 }
 
 bool blank_source(const std::string& source) {
     return std::all_of(source.begin(), source.end(), [](unsigned char value) {
         return detail::ascii_is_space(value);
     });
+}
+
+template<typename Value>
+std::optional<Value> history_snapshot(
+    const std::map<std::size_t, Value>& history, std::size_t line) {
+    const auto found = history.find(line);
+    if (found == history.end()) return std::nullopt;
+    return found->second;
+}
+
+std::vector<EvaluationMessage> zip_evaluation_messages(
+    const std::vector<Expr>& names,
+    const std::vector<std::string>& texts) {
+    const auto count = std::min(names.size(), texts.size());
+    std::vector<EvaluationMessage> messages;
+    messages.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+        messages.push_back({names[index], texts[index]});
+    return messages;
 }
 
 } // namespace
@@ -613,6 +649,10 @@ std::string apply_output_size_limit(
     return center_truncate(shortened.empty() ? text : shortened, *limit);
 }
 
+std::vector<EvaluationMessage> SessionOutput::evaluation_messages() const {
+    return zip_evaluation_messages(message_names, messages);
+}
+
 EvaluationSession::EvaluationSession() {
     (void)evaluator_.evaluate(call("Set", {
         symbol("$OutputSizeLimit"), integer(12000L)}));
@@ -620,6 +660,39 @@ EvaluationSession::EvaluationSession() {
         symbol("$HistoryLength"), symbol("Infinity")}));
     (void)evaluator_.evaluate(call("Set", {
         symbol("$MessagePrePrint"), symbol("Automatic")}));
+}
+
+std::optional<std::string> EvaluationSession::input_string(std::size_t line) const {
+    return history_snapshot(input_strings_, line);
+}
+
+std::optional<Expr> EvaluationSession::input(std::size_t line) const {
+    return history_snapshot(inputs_, line);
+}
+
+std::optional<Expr> EvaluationSession::output(std::size_t line) const {
+    return history_snapshot(outputs_, line);
+}
+
+std::optional<std::vector<Expr>> EvaluationSession::message_names(std::size_t line) const {
+    return history_snapshot(message_history_, line);
+}
+
+std::optional<std::vector<std::string>> EvaluationSession::message_texts(
+    std::size_t line) const {
+    return history_snapshot(message_text_history_, line);
+}
+
+std::optional<std::vector<EvaluationMessage>>
+EvaluationSession::evaluation_messages(std::size_t line) const {
+    const auto names = message_names(line);
+    const auto texts = message_texts(line);
+    if (!names || !texts) return std::nullopt;
+    return zip_evaluation_messages(*names, *texts);
+}
+
+std::optional<std::vector<std::string>> EvaluationSession::prints(std::size_t line) const {
+    return history_snapshot(print_history_, line);
 }
 
 void EvaluationSession::collect_effects(
@@ -764,29 +837,74 @@ SessionOutput EvaluationSession::evaluate_input(const std::string& source) {
 
     const auto prepared_source = apply_pre_read(source, prints, message_names, messages);
     const auto parsed = parse_input_form(prepared_source);
-    input_strings_[line_] = prepared_source;
-    inputs_[line_] = parsed;
+    return evaluate_prepared_input(
+        prepared_source,
+        parsed,
+        std::move(prints),
+        std::move(message_names),
+        std::move(messages));
+}
+
+SessionOutput EvaluationSession::evaluate_expression(
+    const std::string& source,
+    const Expr& expression) {
+    ++line_;
+    return evaluate_prepared_input(source, expression, {}, {}, {});
+}
+
+SessionOutput EvaluationSession::evaluate_prepared_input(
+    const std::string& source,
+    const Expr& expression,
+    std::vector<std::string> prints,
+    std::vector<Expr> message_names,
+    std::vector<std::string> messages) {
+    input_strings_[line_] = source;
+    inputs_[line_] = expression;
+    prune_history();
 
     std::set<std::size_t> expanding_inputs;
-    auto prepared_expression = replace_session_references(parsed, expanding_inputs);
+    auto prepared_expression = replace_session_references(expression, expanding_inputs);
     prepared_expression = apply_hook(
         "$Pre", prepared_expression, &prints, &message_names, &messages);
     auto result = evaluator_.evaluate(prepared_expression);
     collect_effects(prints, message_names, messages);
-    if (const auto exit = exit_result(result); exit.requested)
-        return {SessionOutput::Kind::Exit, exit.code, line_, result,
-            std::move(prints), std::move(messages)};
+    const auto finish_effect_history = [&]() {
+        message_history_[line_] = message_names;
+        message_text_history_[line_] = messages;
+        print_history_[line_] = prints;
+        prune_history();
+    };
+    const auto evaluated_exit = exit_result(result);
+    if (evaluated_exit.requested()) {
+        finish_effect_history();
+        return {SessionOutput::Kind::Exit, evaluated_exit.code, line_, result,
+            std::move(prints), std::move(messages), std::move(message_names)};
+    }
+    if (evaluated_exit.invalid()) {
+        message_names.push_back(call("MessageName", {
+            symbol(evaluated_exit.head), string("error")}));
+        messages.push_back(evaluated_exit.head + "::error: " + evaluated_exit.error);
+    }
 
+    const auto result_before_post = result;
     result = apply_hook("$Post", result, &prints, &message_names, &messages);
-    if (const auto exit = exit_result(result); exit.requested)
-        return {SessionOutput::Kind::Exit, exit.code, line_, result,
-            std::move(prints), std::move(messages)};
+    const auto post_exit = exit_result(result);
+    if (post_exit.requested()) {
+        finish_effect_history();
+        return {SessionOutput::Kind::Exit, post_exit.code, line_, result,
+            std::move(prints), std::move(messages), std::move(message_names)};
+    }
+    if (post_exit.invalid()
+        && (!evaluated_exit.invalid() || result != result_before_post)) {
+        message_names.push_back(call("MessageName", {
+            symbol(post_exit.head), string("error")}));
+        messages.push_back(post_exit.head + "::error: " + post_exit.error);
+    }
 
     outputs_[line_] = history_output_expression(result);
-    message_history_[line_] = message_names;
-    prune_history();
+    finish_effect_history();
     return {SessionOutput::Kind::Value, 0, line_, result,
-        std::move(prints), std::move(messages)};
+        std::move(prints), std::move(messages), std::move(message_names)};
 }
 
 Expr EvaluationSession::preprint(const Expr& result) {
@@ -814,6 +932,8 @@ void EvaluationSession::prune_history() {
     prune(inputs_);
     prune(outputs_);
     prune(message_history_);
+    prune(message_text_history_);
+    prune(print_history_);
 }
 
 int run_repl(

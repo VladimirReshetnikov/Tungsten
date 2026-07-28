@@ -113,6 +113,45 @@ SCENARIOS: dict[str, list[str]] = {
         "AppendTo[TungstenStateAppend, b]",
         "TungstenStateAppend",
     ],
+    "failure_confirmation": [
+        "ClearAll[TungstenConfirmTagTest,TungstenConfirmGuard,"
+        "TungstenConfirmRecover]",
+        (
+            "TungstenConfirmTagTest[x_] := "
+            "(Print[InputForm[x]]; SameQ[x,tag])"
+        ),
+        (
+            "Enclose[Confirm[$Failed,info,tag],\"Information\","
+            "PatternTest[Blank[],TungstenConfirmTagTest]]"
+        ),
+        "Confirm[$Failed]",
+        (
+            "TungstenConfirmRecover[failure_Failure] := "
+            "failure[\"Information\"]"
+        ),
+        (
+            "Enclose[ConfirmBy[3,StringQ,recovered],"
+            "TungstenConfirmRecover]"
+        ),
+        (
+            "TungstenConfirmGuard[arguments___] := "
+            "(Print[Hold[arguments]]; SameQ[arguments])"
+        ),
+        "Failsafe[f,TungstenConfirmGuard][1,1]",
+        "Failsafe[f,TungstenConfirmGuard][1,2][\"Arguments\"]",
+        (
+            "Catch[Enclose[ConfirmBy[1,Function[x,Throw[boom]]]]];"
+            "Confirm[$Failed]"
+        ),
+        (
+            "CheckAbort[Enclose[ConfirmMatch[1,PatternTest[Blank[],"
+            "Function[x,Abort[]]]]],caught];Confirm[$Failed]"
+        ),
+        (
+            "Enclose[WithCleanup[Confirm[$Failed,cleaned],"
+            "Print[\"cleanup\"]],\"Information\"]"
+        ),
+    ],
 }
 
 

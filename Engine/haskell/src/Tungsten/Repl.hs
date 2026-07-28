@@ -46,12 +46,12 @@ initialReplState =
     , replOutputHistory = Map.empty
     }
 
-evaluateReplLine :: ReplState -> Text -> ReplStep
+evaluateReplLine :: ReplState -> Text -> IO ReplStep
 evaluateReplLine state source
-  | T.null (T.strip source) = ReplEmpty state
+  | T.null (T.strip source) = pure (ReplEmpty state)
   | otherwise = case parseInputForm source of
-      Left parseError -> ReplFailure (parseErrorMessage parseError) transientState
-      Right parsed ->
+      Left parseError -> pure (ReplFailure (parseErrorMessage parseError) transientState)
+      Right parsed -> do
         let line = replNextLine state
             withInput =
               transientState
@@ -59,21 +59,23 @@ evaluateReplLine state source
                 , replInputStrings = Map.insert line source (replInputStrings state)
                 }
             resolved = resolveHistory withInput parsed
-         in case evaluateInSession transientSession resolved of
-              Left evaluationError ->
-                ReplFailure
+        evaluateInSession transientSession resolved >>= \case
+          Left evaluationError ->
+            pure
+              ( ReplFailure
                   (evaluationErrorMessage evaluationError)
                   withInput {replNextLine = line + 1}
-              Right (result, updatedSession) -> case exitCode result of
-                Just code -> ReplExit code withInput {replSession = updatedSession}
-                Nothing ->
-                  let updated =
-                        withInput
-                          { replSession = updatedSession
-                          , replNextLine = line + 1
-                          , replOutputHistory = Map.insert line result (replOutputHistory state)
-                          }
-                   in ReplValue line result updated
+              )
+          Right (result, updatedSession) -> pure $ case exitCode result of
+            Just code -> ReplExit code withInput {replSession = updatedSession}
+            Nothing ->
+              let updated =
+                    withInput
+                      { replSession = updatedSession
+                      , replNextLine = line + 1
+                      , replOutputHistory = Map.insert line result (replOutputHistory state)
+                      }
+               in ReplValue line result updated
  where
   transientSession =
     (replSession state)
@@ -127,7 +129,7 @@ runRepl showBanner = do
       then TextIO.putStrLn "" *> pure 0
       else do
         source <- TextIO.getLine
-        case evaluateReplLine state source of
+        evaluateReplLine state source >>= \case
           ReplEmpty updated -> loop updated
           ReplFailure message updated -> TextIO.putStrLn ("Error: " <> message) *> loop updated
           ReplExit code updated -> emitSessionStreams updated *> pure code

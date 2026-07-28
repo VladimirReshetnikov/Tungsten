@@ -6,7 +6,13 @@ module Main (main) where
 import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import Data.Char (chr)
-import Data.IORef (atomicModifyIORef', newIORef)
+import Data.IORef
+  ( atomicModifyIORef'
+  , modifyIORef'
+  , newIORef
+  , readIORef
+  , writeIORef
+  )
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -27,15 +33,20 @@ import System.Exit (exitFailure)
 import System.Info (os)
 import System.IO (hClose, hSetEncoding, openTempFile, utf8)
 import System.FilePath ((</>))
+import Text.Read (readMaybe)
 import Tungsten.Cli
 import qualified Tungsten.ArrayTests as ArrayTests
+import qualified Tungsten.CollectionExtensionsTests as CollectionExtensionsTests
+import qualified Tungsten.NumericAlgebraTests as NumericAlgebraTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
+import qualified Tungsten.DistributionTests as DistributionTests
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
 import Tungsten.Frontend
 import Tungsten.InlineBoxes
+import qualified Tungsten.IntervalTests as IntervalTests
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Licensing
@@ -45,7 +56,10 @@ import Tungsten.Parser
 import Tungsten.ParserCorpus
 import Tungsten.Repl
 import Tungsten.Session
+import qualified Tungsten.StringSequencePatternTests as StringSequencePatternTests
+import qualified Tungsten.StatisticsTests as StatisticsTests
 import qualified Tungsten.SystemSymbols as SystemSymbols
+import qualified Tungsten.TextualFormsTests as TextualFormsTests
 import Tungsten.WolframString
 import Tungsten.WolframProcesses
 
@@ -72,12 +86,20 @@ tests =
   , checkEvaluator
   , checkEvaluatorErrors
   , ArrayTests.checkArrayEvaluator
+  , CollectionExtensionsTests.checkCollectionExtensions
+  , DistributionTests.checkDistributionEvaluator
+  , IntervalTests.checkIntervalEvaluator
+  , StatisticsTests.checkStatisticsEvaluator
+  , NumericAlgebraTests.checkNumericAlgebraEvaluator
+  , TextualFormsTests.checkTextualFormsEvaluator
+  , StringSequencePatternTests.checkStringSequencePatterns
   , checkCliArguments
   , checkNotebookModel
   , checkNotebookErrors
   , checkNotebookPatches
   , checkNotebookPatchJson
   , checkEvaluationSession
+  , checkSessionTimingRuntime
   , checkRepl
   , checkDiscovery
   , checkDocumentationIndex
@@ -863,9 +885,12 @@ checkEvaluator = do
   evaluateCase parser (label, source, expected) = do
     let parsed = parser source
         pureResult = fullForm <$> (parsed >>= mapLeftEvaluation . evaluate)
-        sessionResult = do
-          expression <- parsed
-          (value, _) <- mapLeftEvaluation (evaluateInSession emptySession expression)
+    sessionResult <- case parsed of
+      Left parseError -> pure (Left parseError)
+      Right expression -> do
+        evaluated <- evaluateInSession emptySession expression
+        pure $ do
+          (value, _) <- mapLeftEvaluation evaluated
           pure (fullForm value)
     pureCheck <-
       assertEqual
@@ -1180,6 +1205,42 @@ checkEvaluationSession :: IO Bool
 checkEvaluationSession = do
   let cases =
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
+        , ( "failure and missing predicates preserve the Python value domain"
+          , "{FailureQ[Failure[\"x\", <||>]], FailureQ[$Failed], FailureQ[$Canceled], FailureQ[$Aborted], FailureQ[Missing[\"x\"]], MissingQ[Missing[\"x\"]], MissingQ[$Failed], System`FailureQ[System`Failure[\"x\", <||>]]}"
+          , "List[True, True, True, True, False, True, False, True]"
+          )
+        , ( "failure property lookup accepts associations and rule lists"
+          , "{Failure[\"bad\", <|\"x\" -> 1|>][\"x\"], Failure[\"bad\", <||>][\"Type\"], Failure[\"bad\", {\"x\" -> 2}][\"x\"], Failure[\"bad\", <||>][\"absent\"], System`Failure[\"bad\", <|\"x\" -> 3|>][\"x\"]}"
+          , "List[1, \"bad\", 2, Missing[\"KeyAbsent\", \"absent\"], 3]"
+          )
+        , ( "failsafe guards dispatch success failure and custom callbacks"
+          , "{Failsafe[f][1, 2], Failsafe[f][1, Missing[\"x\"], Failure[\"bad\", <||>]], Failsafe[f, SameQ][1, 1], Failsafe[f, SameQ][1, 2][\"Type\"], Failsafe[f, SameQ, g][1, 2], System`Failsafe[f][1, 2]}"
+          , "List[f[1, 2], Missing[\"x\"], f[1, 1], FailsafeFailed, g[1, 2], f[1, 2]]"
+          )
+        , ( "failsafe callback control signals remain nonlocal"
+          , "{Catch[Failsafe[f, Function[x, Throw[x]]][1]], CheckAbort[Failsafe[f, Function[x, Abort[]]][1], caught]}"
+          , "List[1, caught]"
+          )
+        , ( "confirmation controls return values and project failure properties"
+          , "{Enclose[1 + Confirm[2]], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Expression\"], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Information\"], Enclose[ConfirmBy[3, IntegerQ]], Enclose[ConfirmBy[3, StringQ, \"info\"], \"Function\"], Enclose[ConfirmMatch[3, _Integer]], Enclose[ConfirmMatch[3, _String, \"info\"], \"Pattern\"]}"
+          , "List[3, Missing[\"Nope\"], \"info\", 3, StringQ, 3, Blank[String]]"
+          )
+        , ( "tagged confirmations route to the nearest matching enclose"
+          , "{Enclose[Confirm[$Failed, \"info\", tag], \"Information\", tag], Enclose[Enclose[Confirm[$Failed, \"outer\", outer], inner, inner], \"Information\", outer]}"
+          , "List[\"info\", \"outer\"]"
+          )
+        , ( "confirmation predicates and tag patterns thread session effects"
+          , "c = 0; {Enclose[Confirm[$Failed, Null, 1], \"Information\", x_ /; (c = c + 1; True)], c, Enclose[ConfirmMatch[1, x_ /; (c = c + 1; False), c], \"Information\"], c}"
+          , "List[Null, 2, 3, 3]"
+          )
+        , ( "enclose restores its scope across existing nonlocal exits"
+          , "{Catch[Enclose[Throw[x]]], CheckAbort[Enclose[Abort[]], caught], (Enclose[Goto[out]]; never; Label[out]; reached)}"
+          , "List[x, caught, reached]"
+          )
+        , ( "unsupported confirm quiet and fail when remain symbolic"
+          , "{ConfirmQuiet[Failure[\"x\", <||>]], FailWhen[1, True]}"
+          , "List[ConfirmQuiet[Failure[\"x\", Association[]]], FailWhen[1, True]]"
+          )
         , ("right-associated assignment", "a = b = 5; a + b", "10")
         , ("immediate value captures current result", "a = 1; x = a; a = 2; x", "1")
         , ("immediate symbolic value reevaluates", "x = y; y = 3; x", "3")
@@ -1431,6 +1492,28 @@ checkEvaluationSession = do
         , ("catch handlers", "{Catch[Throw[x, tag], tag, h], Catch[Throw[x, tag], tag, Function[{v, t}, h[v, t]]], Catch[Throw[x, tag], tag, Hold]}", "List[h[x, tag], h[x, tag], Hold[x, tag]]")
         , ("catch setup effects", "x = 0; {Catch[Throw[v, tag], (x = x + 1; tag), (x = x + 1; h)], x}", "List[h[v, tag], 2]")
         , ("throw argument effects", "x = 0; Catch[Throw[x = x + 1, tag, x = x + 1], tag]; x", "2")
+        , ("root abort becomes aborted", "Abort[]", "$Aborted")
+        , ("check abort catches its body abort", "CheckAbort[Abort[], caught]", "caught")
+        , ("abort protect releases its pending abort at the boundary", "CheckAbort[AbortProtect[Abort[]; 7], caught]", "caught")
+        , ("same-depth check abort handles a fresh abort inside protection", "AbortProtect[CheckAbort[Abort[], inner]]", "inner")
+        , ("abort scopes restore across throw and return", "ClearAll[f]; f[] := AbortProtect[Return[returned]]; {Catch[AbortProtect[Throw[thrown]]], f[], CheckAbort[Abort[], caught]}", "List[thrown, returned, caught]")
+        , ("with cleanup evaluates init body and cleanup exactly once", "x = 0; result = WithCleanup[x = x + 1, x = x + 10, x = x + 100]; {result, x}", "List[11, 111]")
+        , ("cleanup abort supersedes a completed body", "WithCleanup[7, Abort[]]", "$Aborted")
+        , ("cleanup throw supersedes a body throw", "Catch[WithCleanup[Throw[body], Throw[cleanup]]]", "cleanup")
+        , ("cleanup return supersedes a body return", "WithCleanup[Return[body], Return[cleanup]]", "Return[cleanup]")
+        , ("cleanup throw supersedes a body abort", "CheckAbort[Catch[WithCleanup[Abort[], Throw[cleanup]]], caught]", "cleanup")
+        , ("cleanup return and throw cross definition boundaries", "ClearAll[f, g]; f[] := Catch[WithCleanup[Throw[body], Return[cleanup]]]; g[] := Catch[WithCleanup[Return[body], Throw[cleanup]]]; {f[], g[]}", "List[cleanup, cleanup]")
+        , ("sow outside reap returns its evaluated value", "x = 0; {Sow[x = x + 1], x}", "List[1, 1]")
+        , ("reap collects default and distinct tags in order", "{Reap[Sow[1]; Sow[2]; 3], Reap[Sow[1, a]; Sow[2, b]; Sow[3, a]; 4]}", "List[List[3, List[List[1, 2]]], List[4, List[List[1, 3], List[2]]]]")
+        , ("reap literal and typed pattern selectors filter tags", "{Reap[Sow[1, a]; Sow[2, b]; 3, a], Reap[Sow[1, a]; Sow[2, 2]; 3, {_Symbol, _Integer}]}", "List[List[3, List[List[1]]], List[3, List[List[List[1]], List[List[2]]]]]")
+        , ("sow list tags populate each selector bucket", "Reap[Sow[1, {a, b}]; 3, {a, b}]", "List[3, List[List[List[1]], List[List[1]]]]")
+        , ("reap combiners receive each tag and ordered value list", "{Reap[Sow[1, a]; Sow[2, a]; 3, _, f], Reap[Sow[1]; 3, _, f]}", "List[List[3, List[f[a, List[1, 2]]]], List[3, List[f[None, List[1]]]]]")
+        , ("nested reap routes to the nearest matching scope", "{Reap[Reap[Sow[1, a]; 2, a], _], Reap[Reap[Sow[1, b]; 2, a], _]}", "List[List[List[2, List[List[1]]], List[]], List[List[2, List[]], List[List[1]]]]")
+        , ("reap pops before its combiner so sow reaches the outer scope", "Reap[Reap[Sow[1, a], a, Function[{tag, values}, Sow[values, outer]]], outer]", "List[List[1, List[List[1]]], List[List[List[1]]]]")
+        , ("reap evaluates selector and combiner before the body", "x = 0; result = Reap[(x = 100; Sow[x, a]), (x = x + 1; a), (x = x + 10; f)]; {result, x}", "List[List[100, List[f[a, List[100]]]], 100]")
+        , ("reap scopes restore across throw abort and goto", "{Catch[Reap[Sow[1]; Throw[thrown]]], CheckAbort[Reap[Sow[2]; Abort[]], caught], (Reap[Sow[3]; Goto[out]]; never; Label[out]; reached), Sow[4]}", "List[thrown, caught, reached, 4]")
+        , ("reap remains popped when a combiner exits by control", "{Catch[Reap[Sow[1, a], _, Function[{tag, values}, Throw[done]]]], Sow[2]}", "List[done, 2]")
+        , ("qualified reap and sow share native collection scopes", "System`Reap[System`Sow[1]; 2]", "List[2, List[List[1]]]")
         , ("goto supports forward and backward labels", "ClearAll[x]; first = (Goto[end]; never; Label[end]; reached); x = 0; second = (Label[start]; x = x + 1; If[x < 3, Goto[start]]; x); {first, second}", "List[reached, 3]")
         , ("goto catches at the nearest matching compound expression", "ClearAll[x]; x = 0; {(Label[a]; x = x + 1; If[x == 1, Goto[a]]; Label[a]; x), ((Goto[inner]; never; Label[inner]; reached)), ((Goto[out]; innerNever; Label[other]); outerNever; Label[out]; reached)}", "List[2, reached, reached]")
         , ("goto compares evaluated targets with raw label tags", "ClearAll[x]; x = end; (Goto[x]; never; Label[x]; reached)", "Goto[end]")
@@ -1549,7 +1632,77 @@ checkEvaluationSession = do
         , ("module closure multiple arguments", "bin = Module[{f}, f[x_, y_] := x + y; f]; {bin[3, 4], bin[a, b]}", "List[7, Plus[a, b]]")
         ]
       printCases =
-        [ ( "pattern callbacks preserve prints in traversal order"
+        [ ( "nested abort protection re-defers at compound boundaries"
+          , "CheckAbort[AbortProtect[AbortProtect[Abort[]; Print[\"innerTail\"]]; Print[\"outerTail\"]], fail]"
+          , "fail"
+          , ["innerTail", "outerTail"]
+          )
+        , ( "failsafe evaluates constructors in order and short circuits failure calls"
+          , "{Failsafe[(Print[\"function\"]; f), (Print[\"test\"]; SameQ)][1, 1], Failsafe[Function[x, Print[\"not-called\"]]][Missing[\"x\"]]}"
+          , "List[f[1, 1], Missing[\"x\"]]"
+          , ["function", "test"]
+          )
+        , ( "malformed failsafe construction suppresses argument effects"
+          , "Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]"
+          , "Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]"
+          , []
+          )
+        , ( "confirmation information tags and handlers preserve effect order"
+          , "Enclose[Confirm[Missing[\"x\"], (Print[\"info\"]; \"i\"), (Print[\"tag\"]; tag)], (Print[\"handler\"]; \"Information\"), tag]"
+          , "\"i\""
+          , ["info", "tag", "handler"]
+          )
+        , ( "with cleanup runs before an enclosed confirmation handler"
+          , "Enclose[WithCleanup[Confirm[$Failed, \"bad\"], Print[\"cleanup\"]], \"Information\"]"
+          , "\"bad\""
+          , ["cleanup"]
+          )
+        , ( "malformed confirmation controls suppress all held effects"
+          , "probe[Enclose[Print[\"body\"], Print[\"handler\"], Print[\"form\"], Print[\"extra\"]], Confirm[], ConfirmBy[Print[\"by\"]], ConfirmMatch[Print[\"match\"]]]"
+          , "probe[Enclose[Print[\"body\"], Print[\"handler\"], Print[\"form\"], Print[\"extra\"]], Confirm[], ConfirmBy[Print[\"by\"]], ConfirmMatch[Print[\"match\"]]]"
+          , []
+          )
+        , ( "same-depth check abort catches only its fresh abort"
+          , "CheckAbort[AbortProtect[Abort[]; Print[CheckAbort[1, inner]]; Print[CheckAbort[Abort[], inner]]; Print[\"tail\"]], fail]"
+          , "fail"
+          , ["1", "inner", "tail"]
+          )
+        , ( "unprotected abort skips the remaining compound tail"
+          , "CheckAbort[Print[\"before\"]; Abort[]; Print[\"after\"], caught]"
+          , "caught"
+          , ["before"]
+          )
+        , ( "with cleanup runs after a body abort"
+          , "CheckAbort[WithCleanup[Print[\"expr1\"]; Abort[]; Print[\"expr2\"], Print[\"cleanup\"]], caught]"
+          , "caught"
+          , ["expr1", "cleanup"]
+          )
+        , ( "with cleanup protects init and skips body after init control"
+          , "CheckAbort[WithCleanup[Print[\"init1\"]; Abort[]; Print[\"init2\"], Print[\"body\"], Print[\"cleanup\"]], caught]"
+          , "caught"
+          , ["init1", "init2", "cleanup"]
+          )
+        , ( "with cleanup preserves an enclosing pending abort"
+          , "CheckAbort[AbortProtect[Abort[]; WithCleanup[Print[\"init\"], Print[\"body\"], Print[\"cleanup\"]]; Print[\"after\"]], caught]"
+          , "caught"
+          , ["init", "body", "cleanup", "after"]
+          )
+        , ( "with cleanup runs for throw return break and goto exits"
+          , "ClearAll[f]; f[] := WithCleanup[Return[returned], Print[\"returnCleanup\"]]; {Catch[WithCleanup[Throw[thrown], Print[\"throwCleanup\"]]], f[], Do[WithCleanup[Break[], Print[\"breakCleanup\"]], {i, 3}], (WithCleanup[Goto[out], Print[\"gotoCleanup\"]]; never; Label[out]; reached)}"
+          , "List[thrown, returned, Null, reached]"
+          , ["throwCleanup", "returnCleanup", "breakCleanup", "gotoCleanup"]
+          )
+        , ( "sow evaluates values before tags exactly once"
+          , "Reap[Sow[(Print[\"value\"]; 1), (Print[\"tag\"]; a)]; 2]"
+          , "List[2, List[List[1]]]"
+          , ["value", "tag"]
+          )
+        , ( "reap combiner effects run after the scope is popped"
+          , "Reap[Sow[1, a]; 2, _, Function[{tag, values}, Print[tag]; values]]"
+          , "List[2, List[List[1]]]"
+          , ["a"]
+          )
+        , ( "pattern callbacks preserve prints in traversal order"
           , "p[x_] := (Print[x]; x > 1); Cases[{1, 2, 3}, x_ /; p[x]]"
           , "List[2, 3]"
           , ["1", "2", "3"]
@@ -1646,7 +1799,114 @@ checkEvaluationSession = do
         , "g::b: Message generated."
         )
       messageCases =
-        [ ( "Composition preserves invalid Function diagnostics"
+        [ ( "abort control arity diagnostics"
+          , "{Abort[1], CheckAbort[1], AbortProtect[]}"
+          , "List[Abort[1], CheckAbort[1], AbortProtect[]]"
+          , [ ( "Abort::error"
+              , "MessageName[Abort, \"error\"]"
+              , "Abort::error: Abort expects no arguments."
+              )
+            , ( "CheckAbort::error"
+              , "MessageName[CheckAbort, \"error\"]"
+              , "CheckAbort::error: CheckAbort expects exactly two arguments."
+              )
+            , ( "AbortProtect::error"
+              , "MessageName[AbortProtect, \"error\"]"
+              , "AbortProtect::error: AbortProtect expects exactly one argument."
+              )
+            ]
+          )
+        , ( "failure properties and failsafe constructors report exact diagnostics"
+          , "{Failure[\"x\", <||>][1], Failsafe[], Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]}"
+          , "List[Failure[\"x\", Association[]][1], Failsafe[], Failsafe[Print[\"f\"], Print[\"test\"], Print[\"failure\"], Print[\"extra\"]]]"
+          , [ ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Failure property lookup expects a string key."
+              )
+            , ( "Failsafe::error"
+              , "MessageName[Failsafe, \"error\"]"
+              , "Failsafe::error: Failsafe expects one, two, or three arguments."
+              )
+            , ( "Failsafe::error"
+              , "MessageName[Failsafe, \"error\"]"
+              , "Failsafe::error: Failsafe expects one, two, or three arguments."
+              )
+            ]
+          )
+        , ( "unhandled confirmations emit the canonical message"
+          , "Confirm[$Failed]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
+        , ( "confirmation handlers cannot recatch their own failure"
+          , "Enclose[Confirm[$Failed], Function[failure, Confirm[$Failed]]]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
+        , ( "malformed confirmation controls report exact arity errors"
+          , "{Enclose[], Confirm[], ConfirmBy[Print[\"value\"]], ConfirmMatch[Print[\"value\"]]}"
+          , "List[Enclose[], Confirm[], ConfirmBy[Print[\"value\"]], ConfirmMatch[Print[\"value\"]]]"
+          , [ ( "Enclose::error"
+              , "MessageName[Enclose, \"error\"]"
+              , "Enclose::error: Enclose expects one, two, or three arguments."
+              )
+            , ( "Confirm::error"
+              , "MessageName[Confirm, \"error\"]"
+              , "Confirm::error: Confirm expects one, two, or three arguments."
+              )
+            , ( "ConfirmBy::error"
+              , "MessageName[ConfirmBy, \"error\"]"
+              , "ConfirmBy::error: ConfirmBy expects two, three, or four arguments."
+              )
+            , ( "ConfirmMatch::error"
+              , "MessageName[ConfirmMatch, \"error\"]"
+              , "ConfirmMatch::error: ConfirmMatch expects two, three, or four arguments."
+              )
+            ]
+          )
+        , ( "with cleanup arity diagnostics"
+          , "{WithCleanup[1], WithCleanup[1, 2, 3, 4]}"
+          , "List[WithCleanup[1], WithCleanup[1, 2, 3, 4]]"
+          , [ ( "WithCleanup::error"
+              , "MessageName[WithCleanup, \"error\"]"
+              , "WithCleanup::error: WithCleanup expects two or three arguments."
+              )
+            , ( "WithCleanup::error"
+              , "MessageName[WithCleanup, \"error\"]"
+              , "WithCleanup::error: WithCleanup expects two or three arguments."
+              )
+            ]
+          )
+        , ( "reap and sow arity diagnostics"
+          , "{Sow[], Sow[1, 2, 3], Reap[], Reap[1, 2, 3, 4]}"
+          , "List[Sow[], Sow[1, 2, 3], Reap[], Reap[1, 2, 3, 4]]"
+          , [ ( "Sow::error"
+              , "MessageName[Sow, \"error\"]"
+              , "Sow::error: Sow expects one or two arguments."
+              )
+            , ( "Sow::error"
+              , "MessageName[Sow, \"error\"]"
+              , "Sow::error: Sow expects one or two arguments."
+              )
+            , ( "Reap::error"
+              , "MessageName[Reap, \"error\"]"
+              , "Reap::error: Reap expects one, two, or three arguments."
+              )
+            , ( "Reap::error"
+              , "MessageName[Reap, \"error\"]"
+              , "Reap::error: Reap expects one, two, or three arguments."
+              )
+            ]
+          )
+        , ( "Composition preserves invalid Function diagnostics"
           , "Composition[Function[f[x], x]][a]"
           , "Function[f[x], x][a]"
           , [ ( "General::error"
@@ -2649,6 +2909,16 @@ checkEvaluationSession = do
           , []
           , [partArityMessage, partArityMessage]
           )
+        , ( "Quiet hides unhandled confirmation messages without blocking generation"
+          , "Quiet[Confirm[$Failed]]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , []
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
         , ( "Quiet on specifications override off specifications"
           , "Quiet[Message[f::a]; Message[g::b], All, f::a]; $MessageList"
           , "List[HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[g, \"b\"]]]"
@@ -2687,64 +2957,79 @@ checkEvaluationSession = do
   pure (and (caseResults <> printResults <> messageResults <> scopedMessageResults))
  where
   evaluateSessionCase (label, source, expected) = do
-    let result = do
-          expression <- parseInputForm source
-          (value, _) <- either (Left . ParseError . evaluationErrorMessage) Right (evaluateInSession emptySession expression)
-          pure (fullForm value)
-    assertEqual ("evaluation session: " <> label) (Right expected) result
+    result <- fmap
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , null (sessionAbortProtectScopes updated)
+              , null (sessionCheckAbortScopes updated)
+              , null (sessionReapScopes updated)
+              , null (sessionEncloseScopes updated)
+              )
+          )
+      )
+      (evaluateSessionSource source)
+    assertEqual
+      ("evaluation session: " <> label)
+      (Right (expected, True, True, True, True))
+      result
 
   evaluatePrintCase (label, source, expectedValue, expectedPrints) = do
-    let result = do
-          expression <- parseInputForm source
-          (value, updated) <-
-            either
-              (Left . ParseError . evaluationErrorMessage)
-              Right
-              (evaluateInSession emptySession expression)
-          pure (fullForm value, sessionPrints updated)
+    result <- fmap
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , sessionPrints updated
+              , null (sessionAbortProtectScopes updated)
+              , null (sessionCheckAbortScopes updated)
+              , null (sessionReapScopes updated)
+              , null (sessionEncloseScopes updated)
+              )
+          )
+      )
+      (evaluateSessionSource source)
     assertEqual
       ("evaluation session prints: " <> label)
-      (Right (expectedValue, expectedPrints))
+      (Right (expectedValue, expectedPrints, True, True, True, True))
       result
 
   evaluateMessageCase (label, source, expectedValue, expectedMessages) = do
-    let result = do
-          expression <- parseInputForm source
-          (value, updated) <-
-            either
-              (Left . ParseError . evaluationErrorMessage)
-              Right
-              (evaluateInSession emptySession expression)
-          pure
-            ( fullForm value
-            , map messageTuple (sessionVisibleMessages updated)
-            , map messageTuple (sessionGeneratedMessages updated)
-            )
-        expected =
-          Right (expectedValue, expectedMessages, expectedMessages)
+    result <- fmap
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , map messageTuple (sessionVisibleMessages updated)
+              , map messageTuple (sessionGeneratedMessages updated)
+              , null (sessionEncloseScopes updated)
+              )
+          )
+      )
+      (evaluateSessionSource source)
+    let expected =
+          Right (expectedValue, expectedMessages, expectedMessages, True)
     assertEqual ("evaluation session messages: " <> label) expected result
 
   evaluateScopedMessageCase
     (label, source, expectedValue, expectedVisible, expectedGenerated) = do
-      let result = do
-            expression <- parseInputForm source
-            (value, updated) <-
-              either
-                (Left . ParseError . evaluationErrorMessage)
-                Right
-                (evaluateInSession emptySession expression)
-            pure
-              ( fullForm value
-              , map messageTuple (sessionVisibleMessages updated)
-              , map messageTuple (sessionGeneratedMessages updated)
-              , null (sessionQuietScopes updated)
-              , null (sessionMessageCollectors updated)
-              )
-          expected =
+      result <- fmap
+        ( fmap
+            ( \(value, updated) ->
+                ( fullForm value
+                , map messageTuple (sessionVisibleMessages updated)
+                , map messageTuple (sessionGeneratedMessages updated)
+                , null (sessionQuietScopes updated)
+                , null (sessionMessageCollectors updated)
+                , null (sessionEncloseScopes updated)
+                )
+            )
+        )
+        (evaluateSessionSource source)
+      let expected =
             Right
               ( expectedValue
               , expectedVisible
               , expectedGenerated
+              , True
               , True
               , True
               )
@@ -2756,41 +3041,256 @@ checkEvaluationSession = do
     , evaluationMessageText message
     )
 
+checkSessionTimingRuntime :: IO Bool
+checkSessionTimingRuntime = do
+  pureBoundary <-
+    assertEqual
+      "pure evaluator leaves runtime timing effects symbolic"
+      (Right "Pause[0]")
+      (pureTimingFullForm "Pause[0]")
+  clock <- newIORef 100.0
+  let runtime =
+        SessionRuntime
+          { sessionRuntimeMonotonicSeconds = readIORef clock
+          , sessionRuntimeSleepSeconds = \seconds ->
+              modifyIORef' clock (+ seconds)
+          }
+      deterministicCases =
+        [ ( "time remaining uses the active deadline"
+          , "TimeConstrained[TimeRemaining[], 2, fail]"
+          , "2."
+          , []
+          )
+        , ( "pause cooperatively expires its deadline"
+          , "TimeConstrained[Pause[2]; 7, 1, timeout]"
+          , "timeout"
+          , []
+          )
+        , ( "inner deadline owns its timeout"
+          , "TimeConstrained[TimeConstrained[Pause[2]; 7, 1, inner], 5, outer]"
+          , "inner"
+          , []
+          )
+        , ( "outer deadline remains authoritative"
+          , "TimeConstrained[TimeConstrained[Pause[2]; 7, 5, inner], 1, outer]"
+          , "outer"
+          , []
+          )
+        , ( "time expiration crosses AbortProtect without becoming Abort"
+          , "CheckAbort[AbortProtect[TimeConstrained[Pause[2], 1, inner]], fail]"
+          , "inner"
+          , []
+          )
+        , ( "body cleanup suppresses an expired deadline"
+          , "TimeConstrained[WithCleanup[Pause[2]; 7, Print[TimeRemaining[]]], 1, timeout]"
+          , "timeout"
+          , ["Infinity"]
+          )
+        , ( "initializer and cleanup suppress an expired deadline"
+          , "TimeConstrained[WithCleanup[Pause[2], 7, Print[TimeRemaining[]]], 1, timeout]"
+          , "timeout"
+          , ["Infinity"]
+          )
+        , ( "cleanup throw supersedes a pending timeout"
+          , "TimeConstrained[WithCleanup[Pause[2], Throw[cleanup]], 1, timeout]"
+          , "Throw[cleanup]"
+          , []
+          )
+        , ( "time scope restores across Throw"
+          , "Catch[TimeConstrained[Throw[x], 1, timeout]]"
+          , "x"
+          , []
+          )
+        , ( "time scope restores across ConfirmationFailed"
+          , "Enclose[TimeConstrained[Confirm[$Failed], 1, timeout]]"
+          , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
+          , []
+          )
+        , ( "time scope restores across Abort"
+          , "CheckAbort[TimeConstrained[Abort[], 1, timeout], caught]"
+          , "caught"
+          , []
+          )
+        , ( "time scope restores across Break"
+          , "Do[TimeConstrained[Break[], 1, timeout], {i, 1}]"
+          , "Null"
+          , []
+          )
+        , ( "time scope restores across Continue"
+          , "Do[TimeConstrained[Continue[], 1, timeout], {i, 1}]"
+          , "Null"
+          , []
+          )
+        , ( "time scope restores across Return"
+          , "ClearAll[f]; f[] := TimeConstrained[Return[x], 1, timeout]; f[]"
+          , "x"
+          , []
+          )
+        , ( "time scope restores across a targeted Return"
+          , "Module[{}, TimeConstrained[Return[x, Module], 1, timeout]]"
+          , "x"
+          , []
+          )
+        , ( "time scope restores across Goto"
+          , "(TimeConstrained[Goto[out], 1, timeout]; never; Label[out]; reached)"
+          , "reached"
+          , []
+          )
+        , ( "evaluation diagnostics recover after a runtime suspension"
+          , "Quiet[TimeConstrained[1, AbsoluteTiming[1], fail]]"
+          , "TimeConstrained[1, AbsoluteTiming[1], fail]"
+          , []
+          )
+        ]
+  deterministicResults <- traverse (runCase runtime clock) deterministicCases
+  fakeTiming <- runAbsoluteTimingCase runtime clock
+  realTiming <- runRealAbsoluteTimingCase
+  realTimeout <- runRealTimeoutCase
+  pure
+    ( pureBoundary
+        && and (deterministicResults <> [fakeTiming, realTiming, realTimeout])
+    )
+ where
+  pureTimingFullForm source = do
+    expression <- parseInputForm source
+    case evaluate expression of
+      Left evaluationError ->
+        Left (ParseError (evaluationErrorMessage evaluationError))
+      Right value -> Right (fullForm value)
+
+  runCase runtime clock (label, source, expected, expectedPrints) = do
+    writeIORef clock 100.0
+    evaluated <- evaluateWith runtime source
+    assertEqual
+      ("session timing: " <> label)
+      (Right (expected, expectedPrints, True, 0, True, True, True, True, True))
+      ( fmap
+          ( \(value, updated) ->
+              ( fullForm value
+              , sessionPrints updated
+              , null (sessionTimeConstraintScopes updated)
+              , sessionTimeConstraintSuppressionDepth updated
+              , null (sessionAbortProtectScopes updated)
+              , null (sessionCheckAbortScopes updated)
+              , null (sessionReapScopes updated)
+              , null (sessionEncloseScopes updated)
+              , null (sessionQuietScopes updated)
+              )
+          )
+          evaluated
+      )
+
+  runAbsoluteTimingCase runtime clock = do
+    writeIORef clock 100.0
+    evaluated <- evaluateWith runtime "AbsoluteTiming[Pause[0.25]; 3]"
+    case evaluated of
+      Right
+        ( Call (Symbol "List") [Real elapsedSource, Integer 3]
+          , updated
+          ) ->
+            assertEqual
+              "session timing: deterministic AbsoluteTiming structure"
+              True
+              ( maybe False (\elapsed -> elapsed >= 0.24 && elapsed <= 0.26) (realValue elapsedSource)
+                  && timingScopesRestored updated
+              )
+      other ->
+        assertEqual
+          "session timing: deterministic AbsoluteTiming result"
+          "List[Real, 3]"
+          (either (Text.pack . show) (fullForm . fst) other)
+
+  runRealAbsoluteTimingCase = do
+    evaluated <- evaluateWith defaultSessionRuntime "AbsoluteTiming[Pause[0.03]]"
+    case evaluated of
+      Right
+        ( Call (Symbol "List") [Real elapsedSource, Symbol "Null"]
+          , updated
+          ) ->
+            assertEqual
+              "session timing: real AbsoluteTiming deadline margin"
+              True
+              ( maybe False (\elapsed -> elapsed >= 0.02 && elapsed < 2.0) (realValue elapsedSource)
+                  && timingScopesRestored updated
+              )
+      other ->
+        assertEqual
+          "session timing: real AbsoluteTiming result"
+          "List[Real, Null]"
+          (either (Text.pack . show) (fullForm . fst) other)
+
+  runRealTimeoutCase = do
+    evaluated <-
+      evaluateWith
+        defaultSessionRuntime
+        "TimeConstrained[Pause[0.2], 0.03, timeout]"
+    assertEqual
+      "session timing: real timeout uses a robust margin"
+      (Right ("timeout", True))
+      ( fmap
+          (\(value, updated) -> (fullForm value, timingScopesRestored updated))
+          evaluated
+      )
+
+  evaluateWith runtime source = case parseInputForm source of
+    Left parseError -> pure (Left parseError)
+    Right expression -> do
+      evaluated <- evaluateInSessionWithRuntime runtime emptySession expression
+      pure
+        ( either
+            (Left . ParseError . evaluationErrorMessage)
+            Right
+            evaluated
+        )
+
+  timingScopesRestored session =
+    null (sessionTimeConstraintScopes session)
+      && sessionTimeConstraintSuppressionDepth session == 0
+
+  realValue :: Text -> Maybe Double
+  realValue source =
+    readMaybe
+      (Text.unpack (Text.replace "*^" "e" source))
+
 checkRepl :: IO Bool
 checkRepl = do
-  let firstStep = evaluateReplLine initialReplState "x = 2"
-      firstState = replStateFrom firstStep
-      secondStep = evaluateReplLine firstState "x^3"
-      secondState = replStateFrom secondStep
-      thirdStep = evaluateReplLine secondState "% + %%"
-      thirdState = replStateFrom thirdStep
-      messageStep =
-        evaluateReplLine
-          thirdState
-          "x = 5; {Part[f[x = x + 1], 2], x}"
-      messageState = replStateFrom messageStep
-      persistedAfterMessageStep = evaluateReplLine messageState "x"
-      parseFailureAfterMessage = evaluateReplLine messageState "1 +"
-      offStep = evaluateReplLine initialReplState "Off[f::tag]"
-      suppressedMessageStep =
-        evaluateReplLine
-          (replStateFrom offStep)
-          "Message[f::tag]; $MessageList"
-      onStep = evaluateReplLine (replStateFrom suppressedMessageStep) "On[f::tag]"
-      enabledMessageStep =
-        evaluateReplLine
-          (replStateFrom onStep)
-          "Message[f::tag]; $MessageList"
-      resetMessageListStep =
-        evaluateReplLine (replStateFrom enabledMessageStep) "$MessageList"
-      printStep = evaluateReplLine thirdState "Print[\"x\", 2]; 1"
-      printSequenceStep = evaluateReplLine thirdState "Print[Sequence[1, 2]]"
-      printRationalStep = evaluateReplLine thirdState "Print[1/2]"
-      printAliasStep = evaluateReplLine thirdState "p = Print; p[1/2]"
-      lineStep = evaluateReplLine thirdState "$Line"
-      historyStep = evaluateReplLine thirdState "{Out[1], InString[2]}"
-      exitStep = evaluateReplLine thirdState "Exit[7]"
-      checks =
+  firstStep <- evaluateReplLine initialReplState "x = 2"
+  let firstState = replStateFrom firstStep
+  secondStep <- evaluateReplLine firstState "x^3"
+  let secondState = replStateFrom secondStep
+  thirdStep <- evaluateReplLine secondState "% + %%"
+  let thirdState = replStateFrom thirdStep
+  messageStep <-
+    evaluateReplLine
+      thirdState
+      "x = 5; {Part[f[x = x + 1], 2], x}"
+  let messageState = replStateFrom messageStep
+  persistedAfterMessageStep <- evaluateReplLine messageState "x"
+  parseFailureAfterMessage <- evaluateReplLine messageState "1 +"
+  offStep <- evaluateReplLine initialReplState "Off[f::tag]"
+  suppressedMessageStep <-
+    evaluateReplLine
+      (replStateFrom offStep)
+      "Message[f::tag]; $MessageList"
+  onStep <- evaluateReplLine (replStateFrom suppressedMessageStep) "On[f::tag]"
+  enabledMessageStep <-
+    evaluateReplLine
+      (replStateFrom onStep)
+      "Message[f::tag]; $MessageList"
+  resetMessageListStep <-
+    evaluateReplLine (replStateFrom enabledMessageStep) "$MessageList"
+  printStep <- evaluateReplLine thirdState "Print[\"x\", 2]; 1"
+  printSequenceStep <- evaluateReplLine thirdState "Print[Sequence[1, 2]]"
+  printRationalStep <- evaluateReplLine thirdState "Print[1/2]"
+  printAliasStep <- evaluateReplLine thirdState "p = Print; p[1/2]"
+  timingStep <-
+    evaluateReplLine
+      thirdState
+      "TimeConstrained[Pause[0]; 7, 1, fail]"
+  lineStep <- evaluateReplLine thirdState "$Line"
+  historyStep <- evaluateReplLine thirdState "{Out[1], InString[2]}"
+  exitStep <- evaluateReplLine thirdState "Exit[7]"
+  let checks =
         [ assertEqual "REPL assignment result" (Just (Integer 2)) (replValueFrom firstStep)
         , assertEqual "REPL persistent definition" (Just (Integer 8)) (replValueFrom secondStep)
         , assertEqual "REPL percent history" (Just (Integer 10)) (replValueFrom thirdStep)
@@ -2889,6 +3389,10 @@ checkRepl = do
             "REPL Print aliases do not capture output"
             []
             (sessionPrints (replSession (replStateFrom printAliasStep)))
+        , assertEqual
+            "REPL executes session runtime timing effects"
+            (Just (Integer 7))
+            (replValueFrom timingStep)
         , assertEqual "REPL line counter" (Just (Integer 4)) (replValueFrom lineStep)
         , assertEqual
             "REPL explicit history"
@@ -3417,8 +3921,8 @@ checkProtocol = do
               )
           )
       request = expectRight (decodeRequestLine requestLine)
-      response = handleProtocolRequest request
-      encoded = encodeResponseLine response
+  response <- handleProtocolRequest request
+  let encoded = encodeResponseLine response
       decodedResponse = parseJson (withoutNewline encoded)
       expectedResult =
         JsonObject
@@ -3455,7 +3959,8 @@ checkProtocolErrors = do
           , protocolResponseCommand = "unknown"
           , protocolError = "unsupported command: unknown"
           }
-  second <- assertEqual "unknown protocol command" expected (handleProtocolRequest request)
+  actual <- handleProtocolRequest request
+  second <- assertEqual "unknown protocol command" expected actual
   third <- assertLeft "protocol source must be a string" (decodeRequestLine "{\"command\":\"parse\",\"source\":42}")
   pure (first && second && third)
 
@@ -3467,12 +3972,14 @@ checkParserEvaluatorProtocol = do
       isolatedEvaluateRequest = expectRight (decodeRequestLine "{\"id\":4,\"command\":\"evaluate\",\"source\":\"x\"}")
       messageEvaluateRequest = expectRight (decodeRequestLine "{\"id\":5,\"command\":\"evaluate\",\"source\":\"Part[f[a], 2]\"}")
       printEvaluateRequest = expectRight (decodeRequestLine "{\"id\":6,\"command\":\"evaluate\",\"source\":\"Print[\\\"x\\\"]; 1\"}")
-      parseResponse = handleProtocolRequest parseRequest
-      evaluateResponse = handleProtocolRequest evaluateRequest
-      sessionEvaluateResponse = handleProtocolRequest sessionEvaluateRequest
-      isolatedEvaluateResponse = handleProtocolRequest isolatedEvaluateRequest
-      messageEvaluateResponse = handleProtocolRequest messageEvaluateRequest
-      printEvaluateResponse = handleProtocolRequest printEvaluateRequest
+      timingEvaluateRequest = expectRight (decodeRequestLine "{\"id\":7,\"command\":\"evaluate\",\"source\":\"TimeConstrained[Pause[0]; 7, 1, fail]\"}")
+  parseResponse <- handleProtocolRequest parseRequest
+  evaluateResponse <- handleProtocolRequest evaluateRequest
+  sessionEvaluateResponse <- handleProtocolRequest sessionEvaluateRequest
+  isolatedEvaluateResponse <- handleProtocolRequest isolatedEvaluateRequest
+  messageEvaluateResponse <- handleProtocolRequest messageEvaluateRequest
+  printEvaluateResponse <- handleProtocolRequest printEvaluateRequest
+  timingEvaluateResponse <- handleProtocolRequest timingEvaluateRequest
   first <- case parseResponse of
     ProtocolSuccess {protocolResult = JsonObject result} ->
       case Map.lookup "full_form" result of
@@ -3517,7 +4024,12 @@ checkParserEvaluatorProtocol = do
         (Map.lookup "prints" outer)
     other -> assertEqual "protocol Print response" True (isSuccess other)
   eighth <- assertProtocolEvaluation "protocol Print result" "1" printEvaluateResponse
-  pure (and [first, second, third, fourth, fifth, sixth, seventh, eighth])
+  ninth <-
+    assertProtocolEvaluation
+      "protocol executes session runtime timing effects"
+      "7"
+      timingEvaluateResponse
+  pure (and [first, second, third, fourth, fifth, sixth, seventh, eighth, ninth])
  where
   assertProtocolEvaluation label expected response = case response of
     ProtocolSuccess {protocolResult = JsonObject outer} ->
@@ -3535,6 +4047,20 @@ withoutNewline :: Text -> Text
 withoutNewline value = case Text.unsnoc value of
   Just (prefix, '\n') -> prefix
   _ -> value
+
+evaluateSessionSource
+  :: Text
+  -> IO (Either ParseError (Expr, EvaluationSession))
+evaluateSessionSource source = case parseInputForm source of
+  Left parseError -> pure (Left parseError)
+  Right expression -> do
+    evaluated <- evaluateInSession emptySession expression
+    pure
+      ( either
+          (Left . ParseError . evaluationErrorMessage)
+          Right
+          evaluated
+      )
 
 assertEqual :: (Eq value, Show value) => Text -> value -> value -> IO Bool
 assertEqual label expected actual

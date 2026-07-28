@@ -1069,6 +1069,987 @@ CASES = (
         ),
         0,
     ),
+    (
+        "abort protect ownership and compound re-deferral",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'CheckAbort[AbortProtect[AbortProtect[Abort[]; '
+            'Print["innerTail"]]; Print["outerTail"]], fail]',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "same-depth check abort catches only its fresh abort",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "CheckAbort[AbortProtect[Abort[]; "
+            "Print[CheckAbort[1, inner]]; "
+            "Print[CheckAbort[Abort[], inner]]; "
+            'Print["tail"]], fail]',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "abort scopes restore across throw and return",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[] := AbortProtect[Return[returned]]; "
+            "{Catch[AbortProtect[Throw[thrown]]], f[], "
+            "CheckAbort[Abort[], caught]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "abort control arity diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Abort[1], CheckAbort[1], AbortProtect[]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup executes every stage exactly once",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "x = 0; result = WithCleanup[x = x + 1, x = x + 10, "
+            "x = x + 100]; {result, x}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup body and initializer abort effects",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = CheckAbort[WithCleanup[Print["expr1"]; Abort[]; '
+            'Print["expr2"], Print["cleanup1"]], caught1]; '
+            'second = CheckAbort[WithCleanup[Print["init1"]; Abort[]; '
+            'Print["init2"], Print["body"], Print["cleanup2"]], caught2]; '
+            "{first, second}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup preserves an enclosing pending abort",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'CheckAbort[AbortProtect[Abort[]; WithCleanup[Print["init"], '
+            'Print["body"], Print["cleanup"]]; Print["after"]], caught]',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup covers every existing control exit",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'ClearAll[f]; f[] := WithCleanup[Return[returned], '
+            'Print["returnCleanup"]]; '
+            '{Catch[WithCleanup[Throw[thrown], Print["throwCleanup"]]], '
+            'f[], Do[WithCleanup[Break[], Print["breakCleanup"]], {i, 3}], '
+            '(WithCleanup[Goto[out], Print["gotoCleanup"]]; never; '
+            "Label[out]; reached)}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "with cleanup signal precedence and arity diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[] := WithCleanup[Return[body], Return[cleanup]]; "
+            "{Catch[WithCleanup[Throw[body], Throw[cleanup]]], f[], "
+            "CheckAbort[Catch[WithCleanup[Abort[], Throw[cleanup]]], caught], "
+            "WithCleanup[1], WithCleanup[1, 2, 3, 4]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "timing zero duration qualification and structural timing",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Pause[0], TimeRemaining[], "
+            "TimeConstrained[Pause[0]; 7, 1, fail], "
+            "System`Pause[0], "
+            "System`TimeConstrained[Pause[0]; 8, 1, fail], "
+            "MatchQ[AbsoluteTiming[1 + 2], {_Real, 3}], "
+            "MatchQ[TimeConstrained[TimeRemaining[], 1, fail], _Real]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "nested timing deadlines and abort protection",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{TimeConstrained[Pause[.1]; 7, .02, timeout], "
+            "TimeConstrained[TimeConstrained[Pause[.1]; 7, .02, inner], .2, outer], "
+            "TimeConstrained[TimeConstrained[Pause[.1]; 7, .2, inner], .02, outer], "
+            "CheckAbort[AbortProtect[TimeConstrained[Pause[.1], .02, inner]], fail]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "timed cleanup suppresses an expired deadline",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "TimeConstrained[WithCleanup[Pause[.1]; 7, "
+            "Print[TimeRemaining[]]], .02, timeout]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "time scopes restore across every control signal",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f]; f[] := TimeConstrained[Return[r], 1, timeout]; "
+            "{Catch[TimeConstrained[Throw[t], 1, timeout]], "
+            "Enclose[TimeConstrained[Confirm[$Failed], 1, timeout]], "
+            "CheckAbort[TimeConstrained[Abort[], 1, timeout], a], "
+            "Do[TimeConstrained[Break[], 1, timeout], {i, 1}], "
+            "Do[TimeConstrained[Continue[], 1, timeout], {i, 1}], f[], "
+            "(TimeConstrained[Goto[out], 1, timeout]; never; Label[out]; g)}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "timing diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Pause[], Pause[-1], Pause[Infinity], TimeConstrained[1], "
+            "TimeConstrained[1, x], TimeRemaining[1], AbsoluteTiming[], "
+            "System`Pause[], System`TimeConstrained[1], "
+            "System`TimeRemaining[1], System`AbsoluteTiming[]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "reap tag selectors and combiners",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Reap[Sow[1]; Sow[2]; 3], "
+            "Reap[Sow[1, a]; Sow[2, b]; Sow[3, a]; 4], "
+            "Reap[Sow[1, a]; Sow[2, 2]; 3, {_Symbol, _Integer}], "
+            "Reap[Sow[1, a]; Sow[2, a]; 3, _, f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "nested reap chooses the nearest matching scope",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Reap[Reap[Sow[1, a]; 2, a], _], "
+            "Reap[Reap[Sow[1, b]; 2, a], _], "
+            "Reap[Sow[1, {a, b}]; 3, {a, b}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "reap pops before applying its combiner",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Reap[Reap[Sow[1, a], a, "
+            "Function[{tag, values}, Sow[values, outer]]], outer]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "reap effect order and control-scope restoration",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Reap[Sow[(Print["value"]; 1), '
+            '(Print["tag"]; a)]; 2]; '
+            "second = Catch[Reap[Sow[1]; Throw[thrown]]]; "
+            "third = CheckAbort[Reap[Sow[2]; Abort[]], caught]; "
+            "fourth = (Reap[Sow[3]; Goto[out]]; never; Label[out]; reached); "
+            "fifth = Catch[Reap[Sow[5, a], _, "
+            "Function[{tag, values}, Throw[done]]]]; "
+            "{first, second, third, fourth, fifth, Sow[4]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "qualified reap sow and arity diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{System`Reap[System`Sow[1]; 2], "
+            "Sow[], Sow[1, 2, 3], Reap[], Reap[1, 2, 3, 4]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "failure predicates and properties",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            '{FailureQ[Failure["x", <||>]], FailureQ[$Failed], '
+            'FailureQ[$Canceled], FailureQ[$Aborted], '
+            'FailureQ[Missing["x"]], MissingQ[Missing["x"]], '
+            'MissingQ[$Failed], Failure["bad", <|"x" -> 1|>]["x"], '
+            'Failure["bad", <||>]["Type"], '
+            'Failure["bad", <||>]["absent"], '
+            'System`FailureQ[System`Failure["x", <||>]]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "failsafe guards and qualified operator",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            '{Failsafe[f][1, 2], '
+            'Failsafe[f][1, Missing["x"], Failure["bad", <||>]], '
+            'Failsafe[f, SameQ][1, 1], '
+            'Failsafe[f, SameQ][1, 2]["Type"], '
+            'Failsafe[f, SameQ, g][1, 2], System`Failsafe[f][1, 2]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "failsafe effects diagnostics and nonlocal exits",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Failsafe[(Print["function"]; f), '
+            '(Print["test"]; SameQ)][1, 1]; '
+            'second = Catch[Failsafe[f, Function[x, Throw[x]]][1]]; '
+            'third = CheckAbort[Failsafe[f, Function[x, Abort[]]][1], caught]; '
+            'Failure["x", <||>][1]; '
+            'Failsafe[Print["f"], Print["test"], Print["failure"], '
+            'Print["extra"]]; {first, second, third}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "confirmation values predicates and property handlers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            '{Enclose[1 + Confirm[2]], '
+            'Enclose[Confirm[Missing["Nope"], "info"], "Expression"], '
+            'Enclose[Confirm[Missing["Nope"], "info"], "Information"], '
+            'Enclose[ConfirmBy[3, IntegerQ]], '
+            'Enclose[ConfirmBy[3, StringQ, "info"], "Function"], '
+            'Enclose[ConfirmMatch[3, _Integer]], '
+            'Enclose[ConfirmMatch[3, _String, "info"], "Pattern"]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "tagged nested confirmation scopes and patterns",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'c = 0; first = Enclose[Confirm[$Failed, "info", tag], '
+            '"Information", tag]; second = Enclose['
+            'Enclose[Confirm[$Failed, "outer", outer], inner, inner], '
+            '"Information", outer]; third = Enclose['
+            'Confirm[$Failed, Null, 1], "Information", '
+            'x_ /; (c = c + 1; True)]; '
+            'fourth = Enclose[ConfirmMatch[1, '
+            'x_ /; (c = c + 1; False), c], "Information"]; '
+            '{first, second, third, fourth, c}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "confirmation effects cleanup and nonlocal exits",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Enclose[Confirm[Missing["x"], '
+            '(Print["info"]; "i"), (Print["tag"]; tag)], '
+            '(Print["handler"]; "Information"), tag]; '
+            'second = Enclose[WithCleanup[Confirm[$Failed, "bad"], '
+            'Print["cleanup"]], "Information"]; '
+            'third = Catch[Enclose[Throw[x]]]; '
+            'fourth = CheckAbort[Enclose[Abort[]], caught]; '
+            'fifth = (Enclose[Goto[out]]; never; Label[out]; reached); '
+            '{first, second, third, fourth, fifth}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "confirmation messages malformed calls and unsupported heads",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first = Quiet[Confirm[$Failed]]; '
+            'second = Enclose[Confirm[$Failed], '
+            'Function[failure, Confirm[$Failed]]]; '
+            'malformed = {Enclose[], Confirm[], '
+            'ConfirmBy[Print["value"]], ConfirmMatch[Print["value"]]}; '
+            '{first, second, malformed, '
+            'ConfirmQuiet[Failure["x", <||>]], FailWhen[1, True], '
+            'System`Enclose[System`Confirm[$Failed], "Expression"]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense array construction origins and callables",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Array[f,{2,2},{0,-1}], Array[Function[x,x^2],3], "
+            "Array[f,{}], ConstantArray[x,{2,0,3}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense array shape predicates",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ArrayQ[{{1,2},{3,4}},2,IntegerQ], "
+            "ArrayQ[{{1},{2,3}}], ArrayQ[{}], ArrayQ[x,bad], "
+            "ArrayQ[{{1},{2,3}},bad], "
+            "VectorQ[{1,a},IntegerQ], MatrixQ[{{}}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "rank N dense array transformations",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ArrayReshape[{{1,2},{3,4}},{3,2},x], "
+            "ArrayReshape[{{}},{2,0,3}], "
+            "ArrayPad[{{1,2},{3,4}},{{1,0},{0,1}},x], "
+            "ArrayFlatten[{{{{1,2},{3,4}},{{5},{6}}},{{{7,8}},{{9}}}}], "
+            "Transpose[{{{a,b},{c,d}},{{e,f},{g,h}}},{3,1,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense vector matrix and antisymmetric constructors",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{IdentityMatrix[0], UnitVector[5,3], LeviCivitaTensor[0], "
+            "LeviCivitaTensor[2], LeviCivitaTensor[2,f]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense array diagnostics remain nonfatal",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Array[f,{2,3},{4}], ArrayQ[{{1}},x], "
+            "ArrayPad[{{1,2},{3}},1], ArrayFlatten[{{}}], "
+            "Transpose[{{1,2},{3,4}},{1,1}], LeviCivitaTensor[-1]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "clipping splitting and contiguous subsequences",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Clip[-3],Clip[9,{-5,5}],Clip[-7,{-5,5},{100,200}], "
+            "Split[{a,a,b,b,a}],SplitBy[{1,3,2,4,5},EvenQ], "
+            "DeleteAdjacentDuplicates[{a,a,b,a,a}], "
+            "Subsequences[{a,b,c},{0,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "alphabetic numerical and lexicographic ordering",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{AlphabeticSort[{\"beta\",\"Alpha\",\"gamma\"}], "
+            "NumericalSort[{\"x10\",\"x2\",\"x1\"}], "
+            "LexicographicOrder[{1,2},{1,3}], "
+            "LexicographicOrder[\"a\",\"aa\"], "
+            "LexicographicSort[{{1,3},{1,2},{0,9}}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "duplicate containment counts and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{DeleteDuplicates[{a,b,a,c,b}], "
+            "DeleteDuplicatesBy[{{a},{b,c},{d},{e,f}},Length], "
+            "DeleteDuplicatesBy[{1,2,3,4,5,6},Mod[#,3]&,SameQ], "
+            "DuplicateFreeQ[{a,b,a}], "
+            "ContainsOnly[{1.0,2},{1,2,3},SameTest->Equal], "
+            "CountsBy[{1.5,1.7,1.9,2.5,3.7},Floor], "
+            "Clip[x],Subsequences[{a,b},{0,1,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "quantiles and quartile interpolation",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Quantile[{1,2,3,4,5},2^-1], "
+            "Quantile[{1,2,3,4,5},{4^-1,2^-1,3*4^-1}], "
+            "Quantile[Range[10],2^-1,{{2^-1,0},{0,1}}], "
+            "Quartiles[Range[10]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "numeric bin counts and lists",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{BinCounts[Range[10],{0,10,2}], "
+            "BinCounts[{1.1,2.5,3.7,4.0},{0,5,1}], "
+            "BinCounts[Range[10],2], BinLists[Range[10],{0,10,2}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "permutation conversions and recoverable diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{PermutationCycles[{2,3,1,4}], "
+            "PermutationList[Cycles[{{1,2},{3,4}}],4], "
+            "PermutationOrder[Cycles[{{1,2,3,4,5},{6,7}}]], "
+            "Quantile[{},2^-1], BinCounts[{},2], PermutationCycles[{1,1}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "exact integer arithmetic and number theory",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Binomial[-3,2],Multinomial[2,3,4],Fibonacci[-6],LucasL[-6],"
+            "HarmonicNumber[5,2],Mod[-14,5],QuotientRemainder[-14,5],"
+            "GCD[-12,18,30],LCM[-4,6],Divisors[-12],PrimeQ[1000000007],"
+            "EulerPhi[12],CarmichaelLambda[12],MoebiusMu[6],"
+            "JordanTotient[2,10],DivisorSigma[-1,6],PrimePi[100],Prime[10],"
+            "NextPrime[10,3],PowerMod[3,-1,7],MultiplicativeOrder[2,7]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "structured exact number reducers",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{FactorInteger[-12],FactorInteger[FromContinuedFraction[{0,1,1,17}]],"
+            "FactorInteger[210,2],IntegerExponent[1000],"
+            "ContinuedFraction[FromContinuedFraction[{4,2,6,7}]],"
+            "FromContinuedFraction[{4,2,6,7}],IntegerPartitions[4,{2}],"
+            "FromDigits[{1,2,3,4},16],FromDigits[\"abc\",16],"
+            "ChineseRemainder[{2,3,2},{3,5,7}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "exact residue sequences and Gaussian factors",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{JacobiSymbol[1001,9907],KroneckerSymbol[-1,2],BernoulliB[10],"
+            "EulerE[6],PrimitiveRoot[7],PrimitiveRoot[8],RamanujanTau[5],"
+            "FactorInteger[5,GaussianIntegers->True],"
+            "FactorInteger[3+4 I,GaussianIntegers->True]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "FromDigits exact diagnostic parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "FromDigits[\"g\",16]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ChineseRemainder exact diagnostic parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ChineseRemainder[{0,1},{2,4}]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sparse array result JSON metadata",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "SparseArray[{{2}->a,{1}->b},{3},z]",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sparse construction properties and selection",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Normal[SparseArray[{{1,2}->a,{2,3}->b},{2,3}]], "
+            "ArrayRules[SparseArray[{{0,1},{2,0}}]], "
+            "SparseArray[{{1,2}->a},{2,3}][[1]], "
+            "Extract[SparseArray[{{2,3}->b},{2,3}],{2,3}], "
+            "SparseArray[{{1}->a},{3}][\"Density\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sparse structural transformations",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ArrayReshape[SparseArray[{{2}->a,{5}->b},{6}],{2,3}], "
+            "ArrayPad[SparseArray[{{2}->a},{3}],1], "
+            "Transpose[SparseArray[{{1,2}->a,{2,1}->b},{2,3}]], "
+            "Flatten[SparseArray[{{1,2}->a,{2,1}->b},{2,3}]], "
+            "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2}],{{b},{c}}}}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sparse arithmetic and dot products",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{SparseArray[{{1,2}->a},{2,3}] + "
+            "SparseArray[{{2,3}->b},{2,3}], "
+            "2 SparseArray[{{1}->a},{3}] + 1, "
+            "z + SparseArray[{{1}->b},{2}], "
+            "Dot[SparseArray[{{1}->a,{3}->c},{3}],"
+            "SparseArray[{{1}->b,{2}->d},{3}]], "
+            "Dot[SparseArray[{{1,2}->a},{2,3}],"
+            "SparseArray[{{2,1}->b},{3,2}]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "huge sparse dimensions remain compact",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Part[SparseArray[{{1}->a},{1000000000}],1000000000], "
+            "ArrayPad[SparseArray[{{1000000000}->a},{1000000000}],{2,3}], "
+            "Flatten[SparseArray[{{1,1}->a},{1000000000,1000000000}]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "canonical interval construction and set operations",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Interval[], Interval[3], Interval[{3,1}], "
+            "Interval[{1,3},{2,5}], Interval[{3,4},{1,2}], "
+            "Interval[{-Infinity,0},{0,Infinity}], "
+            "IntervalUnion[], "
+            "IntervalUnion[Interval[{1,2}],Interval[{2,4}]], "
+            "IntervalIntersection[], "
+            "IntervalIntersection[Interval[{1,2},{4,5}],Interval[{2,4}]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "interval scalar vector and subinterval membership",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{IntervalMemberQ[Interval[{1,3}],2], "
+            "IntervalMemberQ[Interval[{1,3}],{1,4}], "
+            "IntervalMemberQ[Interval[{1,3}],Interval[{2,3}]], "
+            "IntervalMemberQ[Interval[{1,3}],Interval[{0,2}]], "
+            "IntervalMemberQ[Interval[],Interval[]], "
+            "IntervalMemberQ[Interval[{1,3}],x], IntervalMemberQ[x,1]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "symbolic malformed and qualified intervals",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Interval[{a,b}], IntervalMemberQ[Interval[{1,3}]], "
+            "System`Interval[{3,1}], "
+            "System`IntervalMemberQ[Interval[{1,3}],2]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "collection statistics and vector norms",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Variance[{1,2,3,4,5}], StandardDeviation[{1,2,3,4,5}], "
+            "Norm[{3,4}], Norm[{1,2,3},2], "
+            "Norm[{1,-2,3},Infinity], Norm[{}]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ranked extrema modes and distinct counts",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{MinMax[{3,1,4,1,5}], MinMax[{}], "
+            "RankedMin[{3,1,4,1,5},2], RankedMax[{3,1,4,1,5},2], "
+            "RankedMin[{3,1,4,1},-1], Mode[{3,1,3,2,1}], Mode[{}], "
+            "CountDistinct[{a,b,a,c,b}], CountDistinct[<|a->1,b->2,c->1|>]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "ratios subdivision and recoverable diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Ratios[{2,6,3,12}], Ratios[{a,b,c}], Subdivide[4], "
+            "Subdivide[10,4], Subdivide[1,10,4], Subdivide[x,4], "
+            "Variance[{1}], Norm[x], RankedMin[{1},0], Subdivide[0]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "base encodings and permissive decoders",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{BaseEncode[ByteArray[{65,66,67}]], "
+            "BaseEncode[ByteArray[{0,255}],\"Base16\"], "
+            "BaseEncode[ByteArray[{0,0,0,0}],\"Base85ASCII\"], "
+            "Normal[BaseDecode[\"Q U!J@D\",\"Base64\"]], "
+            "Normal[BaseDecode[\"00-ff\",\"Base16\"]], "
+            "Normal[BaseDecode[\"z\",\"Base85ASCII\"]]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "textual forms and named operators",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ToString[HoldComplete[1+2],InputForm], "
+            "ToString[HoldComplete[f@x//g],StandardForm], "
+            "ToString[1+x,OutputForm], ToString[x^2,CForm], "
+            "ToString[x^2,FortranForm], ToString[x^2,TextForm], "
+            "ToString[1+x,TeXForm], ToString[x^2,TeXForm], "
+            "ToString[1+x,TraditionalForm], "
+            "ToString[CirclePlus[a,b],InputForm], "
+            "ToString[CirclePlus[a,b],TeXForm], "
+            "ToString[CirclePlus[a,b],MathMLForm]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "expression parsing boxes and syntax",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ToExpression[\"1+2\"], "
+            "ToExpression[\"1+2\",InputForm,HoldComplete], "
+            "ToExpression[\"f@x//g\",StandardForm,HoldComplete], "
+            "ToExpression[{\"1+2\",\"f[x]\"},InputForm,HoldComplete], "
+            "ToExpression[\"a\\\\oplus b\",TeXForm,HoldComplete], "
+            "ToExpression[ToString[x^2,TeXForm],TeXForm,HoldComplete], "
+            "ToExpression[ToString[x^2,MathMLForm],MathMLForm,HoldComplete], "
+            "MakeBoxes[1+2,StandardForm], ToBoxes[1+2,StandardForm], "
+            "MakeBoxes[1+x,TraditionalForm], ToBoxes[1+x,TraditionalForm], "
+            "MakeExpression[RowBox[{\"1\",\"+\",\"2\"}],StandardForm], "
+            "StripBoxes[RowBox[{\"1\",\" \",StyleBox[\"+\",Red],\"2\"}]], "
+            "SyntaxQ[\"1+2\"], SyntaxQ[\"1+\"], "
+            "SyntaxQ[RowBox[{\"1\",\"+\",\"2\"}]], "
+            "SyntaxLength[\"1+2\"], SyntaxLength[\"1+\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "direct string import and export formats",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ImportString[\"abc\",\"Text\"], "
+            "ImportString[\"abc\",\"Byte\"], "
+            "ImportString[\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\",\"JSON\"], "
+            "ImportString[\"{\\\"a\\\":1}\",\"RawJSON\"], "
+            "ImportString[\"1,2\\n3,4\\n\",\"CSV\"], "
+            "ImportString[\"1\\t2\\n3\\t4\\n\",\"TSV\"], "
+            "ImportString[\"1 2\\n3 4\\n\",\"Table\"], "
+            "ImportString[\"f[a,1]\",\"WL\"], "
+            "ExportString[{97,98,99},\"Byte\"], "
+            "ExportString[f[a,1],\"WL\"], "
+            "ImportString[ExportString[{{1,2},{3,4}},\"CSV\"],\"CSV\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "byte array import export and JSON round trips",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{ImportByteArray[ByteArray[{97,98,99}],\"Byte\"], "
+            "ImportByteArray[ByteArray[{97,98,99}],\"String\"], "
+            "Normal[ExportByteArray[{97,98,99},\"Byte\"]], "
+            "Normal[ExportByteArray[\"abc\",\"String\"]], "
+            "ImportString[ExportString[{\"a\"->1,\"b\"->{2,3}},\"JSON\"],\"JSON\"], "
+            "ImportString[ExportString[<|\"a\"->1|>,\"JSON\"],\"JSON\"], "
+            "ImportString[ExportString[<|\"a\"->1,\"b\"->{2,3}|>,\"RawJSON\"],\"RawJSON\"], "
+            "ImportByteArray[ExportByteArray[<|\"a\"->1|>,\"RawJSON\"],\"RawJSON\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "textual conversion recoverable diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{BaseEncode[{1}], BaseDecode[1], "
+            "ToExpression[\"x\",OutputForm], ToBoxes[x,TeXForm], "
+            "SyntaxQ[1], ImportString[1,\"Text\"], "
+            "ExportString[{256},\"Byte\"], "
+            "ExportString[{\"a\"->1},\"RawJSON\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "string pattern cases replacements and positions",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{StringCases[\"abc123def45\", DigitCharacter..], "
+            "StringCases[\"abbcbccaabbabccaa\", x_ ~~ x_], "
+            "StringCases[\"aaaab\", Repeated[\"a\", {2,3}]], "
+            "StringCases[\"abc123\", RegularExpression[\"[a-z]+\"]], "
+            "StringCases[\"on 2026-04-25 ok\", DatePattern[{\"Year\",\"Month\",\"Day\"}]], "
+            "StringPosition[\"ababa\", Shortest[\"a\" ~~ ___ ~~ \"a\"]], "
+            "StringReplace[\"abc123def\", x : DigitCharacter.. :> \"[\" <> x <> \"]\"]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "stateful string condition and delayed replacement callbacks",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "i=0; {StringCases[\"a1b2\", _?((i=i+1; True)&) :> \"hit\"], "
+            "StringReplace[\"aba\", x : \"a\" :> (i=i+1; ToUpperCase[x])], i}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "sequence searches rolling folds and callback state",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "i=0; {SequenceCases[{1,2,3,4,5,6}, {a_,b_} /; b==a+1], "
+            "SequencePosition[{1,2,3,1,2,3}, {1,2}], "
+            "SequenceCount[{1,2,3}, {x_} /; (i=i+1; EvenQ[x])], "
+            "SequenceFold[f,{x0,x1},{a,b,c}], "
+            "SequenceFoldList[f,{x0,x1},{a,b,c,d,e},4], i}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
