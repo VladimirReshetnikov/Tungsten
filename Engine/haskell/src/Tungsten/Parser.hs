@@ -430,6 +430,13 @@ postfixesParser allowPatternTest expression =
         _ <- operator "!" "!="
         postfixesParser allowPatternTest (Call (Symbol "Factorial") [expression])
     , do
+        primes <- many1 (operator "'" "")
+        let derivative =
+              Call
+                (Call (Symbol "Derivative") [Integer (toInteger (length primes))])
+                [expression]
+        postfixesParser allowPatternTest derivative
+    , do
         updateHead <- choice
           [ "Increment" <$ operator "++" ""
           , "Decrement" <$ operator "--" ""
@@ -508,6 +515,7 @@ inputAtomParser = lexeme $ choice
   [ try numberParser
   , String <$> stringLiteralParser
   , listParser
+  , try getParser
   , associationParser
   , percentHistoryParser
   , slotParser
@@ -515,6 +523,28 @@ inputAtomParser = lexeme $ choice
   , Symbol <$> symbolParser
   , between (symbolChar '(') (symbolChar ')') nestedInputExpressionParser
   ]
+
+getParser :: Parser Expr
+getParser = do
+  _ <- string "<<"
+  fileName <- try contextualBareFileName <|> regularFileName
+  pure (Call (Symbol "Get") [String fileName])
+ where
+  -- Get and Put use a context-sensitive filename token.  Only spaces and tabs,
+  -- plus at most one line continuation, are skipped before scanning its broad
+  -- path alphabet.  A plain newline or comment falls back to ordinary symbol
+  -- tokenization, so @<<foo.wl@ and @<<\nfoo.wl@ intentionally parse
+  -- differently just as they do in the Python reference.
+  contextualBareFileName = do
+    horizontalSpace
+    _ <- optionMaybe lineContinuation
+    horizontalSpace
+    T.pack <$> many1 (satisfy isFileNameCharacter)
+  regularFileName = ignored *> (stringLiteralParser <|> symbolParser)
+  horizontalSpace = skipMany (void (oneOf " \t"))
+  isFileNameCharacter character =
+    isAlphaNum character
+      || character `elem` ("_-*:/\\.`$!?~" :: String)
 
 percentHistoryParser :: Parser Expr
 percentHistoryParser = do
