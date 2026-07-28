@@ -64,6 +64,10 @@ valueCases =
     , "{Sin[1.2],Sin[1.2`20],Exp[1.2],Log[1.2]}"
     , "List[0.9320390859672264, 0.93203908596722634967`20., 3.3201169227365477, 0.18232155679395462]"
     )
+  , ( "ordinary exact complex transcendental calls use exact component formulas"
+    , "{Exp[1+I],Sin[1+I],Cos[1+I],Tan[1+I],Sinh[1+I],Cosh[1+I],Tanh[1+I],Log[1+I]}"
+    , "List[Times[E, Plus[Cos[1], Times[Complex[0, 1], Sin[1]]]], Plus[Times[Complex[0, 1], Cos[1], Sinh[1]], Times[Cosh[1], Sin[1]]], Plus[Times[Complex[0, -1], Sin[1], Sinh[1]], Times[Cos[1], Cosh[1]]], Times[Plus[Sin[2], Times[Complex[0, 1], Sinh[2]]], Power[Plus[Cos[2], Cosh[2]], -1]], Plus[Times[Complex[0, 1], Cosh[1], Sin[1]], Times[Cos[1], Sinh[1]]], Plus[Times[Complex[0, 1], Sin[1], Sinh[1]], Times[Cos[1], Cosh[1]]], Times[Plus[Times[Complex[0, 1], Cos[1], Sin[1]], Times[Cosh[1], Sinh[1]]], Power[Plus[Power[Cos[1], 2], Power[Sinh[1], 2]], -1]], Plus[Log[Power[2, Rational[1, 2]]], Times[Complex[0, Rational[1, 4]], Pi]]]"
+    )
   , ( "ordinary exact transcendental degree and singular outcomes"
     , "{Exp[0],Exp[1],Log[E],SinDegrees[30],CosDegrees[60],TanDegrees[45],ArcSinDegrees[1],ArcCotDegrees[-1],Tan[Pi/2],Sec[Pi/2],Cot[0.],Csc[0.],Coth[0.],ArcSec[0.],ArcCsc[0.],ArcCoth[0],ArcCoth[0.],ArcSech[0],ArcSech[0.],ArcCsch[0.],ArcTan[0.,0.],Log[1,2],Log[1,1],Log[2,0.]}"
     , "List[1, E, 1, Rational[1, 2], Rational[1, 2], 1, 90, 135, ComplexInfinity, ComplexInfinity, ComplexInfinity, ComplexInfinity, ComplexInfinity, ComplexInfinity, ComplexInfinity, Times[Complex[0, Rational[1, 2]], Pi], Complex[0., 1.5707963267948966], Infinity, ComplexInfinity, ComplexInfinity, Indeterminate, ComplexInfinity, Indeterminate, -Infinity]"
@@ -99,6 +103,10 @@ sessionCases =
   , ( "transcendental aliases and explicit contexts dispatch without Global leakage"
     , "ClearAll[sinAlias];sinAlias=Sin;{sinAlias[1.2],System`Sin[1.2],Global`Sin[1.2],System`SinDegrees[30],Global`SinDegrees[30],$MessageList}"
     , "List[0.9320390859672264, 0.9320390859672264, Global`Sin[1.2], Rational[1, 2], Global`SinDegrees[30], List[]]"
+    )
+  , ( "exact complex transcendental results re-enter active session definitions"
+    , "Unprotect[Cos];Cos[z_]:=q;{Tan[1+I],ComplexExpand[Tan[1+I]],$MessageList}"
+    , "List[Times[Plus[Sin[2], Times[Complex[0, 1], Sinh[2]]], Power[Plus[q, Cosh[2]], -1]], ComplexExpand[Times[Plus[Sin[2], Times[Complex[0, 1], Sinh[2]]], Power[Plus[q, Cosh[2]], -1]]], List[]]"
     )
   ]
 

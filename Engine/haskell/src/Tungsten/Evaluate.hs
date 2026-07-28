@@ -13471,6 +13471,10 @@ knownPositive value = case explicitRealExact value of
   Nothing -> case value of
     Symbol name -> name `elem` ["Catalan", "Degree", "E", "EulerGamma", "GoldenRatio", "Pi"]
     Call (Symbol headName) [_] -> headName `elem` ["Exp"]
+    Call (Symbol headName) [base, exponentValue]
+      | systemHeadIn ["Power"] headName ->
+          knownPositive base
+            && numericValueReality exponentValue == Just True
     _ -> False
 
 containsInexactReal :: Expr -> Bool

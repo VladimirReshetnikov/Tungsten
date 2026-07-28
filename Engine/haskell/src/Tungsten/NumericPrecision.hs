@@ -1016,6 +1016,10 @@ exactNumericReduction (Call (Symbol headName) values) = do
     ("Log", [Integer 1]) -> Just (Integer 0)
     ("Log", [Symbol name])
       | systemSymbolIs "E" name -> Just (Integer 1)
+    (name, [Complex realPart imaginaryPart])
+      | not (containsInexactReal realPart || containsInexactReal imaginaryPart)
+      , Just result <- exactComplexFunctionReduction name realPart imaginaryPart ->
+          Just result
     ("Log", [value])
       | exactNegativeOne value ->
           Just
@@ -1125,6 +1129,154 @@ exactComplexExponential realPart imaginaryPart =
     | exactZero realPart = Integer 1
     | exactOne realPart = Symbol "E"
     | otherwise = Call (Symbol "Power") [Symbol "E", realPart]
+
+exactComplexFunctionReduction :: Text -> Expr -> Expr -> Maybe Expr
+exactComplexFunctionReduction headName realPart imaginaryPart =
+  case headName of
+    "Sin" ->
+      Just
+        ( plus
+            [ times [imaginaryUnit, unary "Cos" realPart, unary "Sinh" imaginaryPart]
+            , times [unary "Cosh" imaginaryPart, unary "Sin" realPart]
+            ]
+        )
+    "Cos" ->
+      Just
+        ( plus
+            [ times [negativeImaginaryUnit, unary "Sin" realPart, unary "Sinh" imaginaryPart]
+            , times [unary "Cos" realPart, unary "Cosh" imaginaryPart]
+            ]
+        )
+    "Tan" ->
+      Just
+        ( quotient
+            (plus [unary "Sin" (twice realPart), times [imaginaryUnit, unary "Sinh" (twice imaginaryPart)]])
+            (plus [unary "Cos" (twice realPart), unary "Cosh" (twice imaginaryPart)])
+        )
+    "Sinh" ->
+      Just
+        ( plus
+            [ times [imaginaryUnit, unary "Cosh" realPart, unary "Sin" imaginaryPart]
+            , times [unary "Cos" imaginaryPart, unary "Sinh" realPart]
+            ]
+        )
+    "Cosh" ->
+      Just
+        ( plus
+            [ times [imaginaryUnit, unary "Sin" realPart, unary "Sinh" imaginaryPart]
+            , times [unary "Cos" realPart, unary "Cosh" imaginaryPart]
+            ]
+        )
+    "Tanh" ->
+      Just
+        ( quotient
+            ( plus
+                [ times [imaginaryUnit, unary "Cos" imaginaryPart, unary "Sin" imaginaryPart]
+                , times [unary "Cosh" realPart, unary "Sinh" realPart]
+                ]
+            )
+            ( plus
+                [ Call (Symbol "Power") [unary "Cos" imaginaryPart, Integer 2]
+                , Call (Symbol "Power") [unary "Sinh" realPart, Integer 2]
+                ]
+            )
+        )
+    "Log" -> exactComplexLog realPart imaginaryPart
+    _ -> Nothing
+ where
+  imaginaryUnit = Complex (Integer 0) (Integer 1)
+  negativeImaginaryUnit = Complex (Integer 0) (Integer (-1))
+  unary name value = Call (Symbol name) [value]
+  plus = Call (Symbol "Plus")
+  times = Call (Symbol "Times")
+  twice value = times [Integer 2, value]
+  quotient dividend divisor =
+    times [dividend, Call (Symbol "Power") [divisor, Integer (-1)]]
+
+exactComplexLog :: Expr -> Expr -> Maybe Expr
+exactComplexLog realPart imaginaryPart = do
+  realValue <- asExactRational realPart
+  imaginaryValue <- asExactRational imaginaryPart
+  argument <- exactComplexArgument realValue imaginaryValue
+  let magnitudeSquared = realValue * realValue + imaginaryValue * imaginaryValue
+      magnitude =
+        Call
+          (Symbol "Power")
+          [rationalExpression magnitudeSquared, Rational 1 2]
+  pure
+    ( Call
+        (Symbol "Plus")
+        [ Call (Symbol "Log") [magnitude]
+        , exactImaginaryMultiple argument
+        ]
+    )
+
+exactImaginaryMultiple :: Expr -> Expr
+exactImaginaryMultiple (Integer 0) = Integer 0
+exactImaginaryMultiple (Symbol name)
+  | systemSymbolIs "Pi" name =
+      Call
+        (Symbol "Times")
+        [Complex (Integer 0) (Integer 1), Symbol "Pi"]
+exactImaginaryMultiple (Call (Symbol timesHead) [Rational numeratorValue denominatorValue, Symbol name])
+  | systemSymbolIs "Times" timesHead
+  , systemSymbolIs "Pi" name =
+      Call
+        (Symbol "Times")
+        [ Complex
+            (Integer 0)
+            (Rational numeratorValue denominatorValue)
+        , Symbol "Pi"
+        ]
+exactImaginaryMultiple argument =
+  Call
+    (Symbol "Times")
+    [Complex (Integer 0) (Integer 1), argument]
+
+exactComplexArgument :: Rational -> Rational -> Maybe Expr
+exactComplexArgument realValue imaginaryValue
+  | realValue == 0 && imaginaryValue == 0 = Nothing
+  | imaginaryValue == 0 =
+      Just (if realValue > 0 then Integer 0 else Symbol "Pi")
+  | realValue == 0 =
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Rational (if imaginaryValue > 0 then 1 else -1) 2
+            , Symbol "Pi"
+            ]
+        )
+  | abs realValue == abs imaginaryValue =
+      let coefficient = case (compare realValue 0, compare imaginaryValue 0) of
+            (GT, GT) -> 1 % 4
+            (LT, GT) -> 3 % 4
+            (GT, LT) -> (-1) % 4
+            _ -> (-3) % 4
+       in Just
+            ( Call
+                (Symbol "Times")
+                [rationalExpression coefficient, Symbol "Pi"]
+            )
+  | otherwise =
+      let angle =
+            Call
+              (Symbol "ArcTan")
+              [rationalExpression (abs imaginaryValue / abs realValue)]
+       in Just $ case (compare realValue 0, compare imaginaryValue 0) of
+            (GT, GT) -> angle
+            (GT, LT) -> Call (Symbol "Times") [Integer (-1), angle]
+            (LT, GT) ->
+              Call
+                (Symbol "Plus")
+                [ Symbol "Pi"
+                , Call (Symbol "Times") [Integer (-1), angle]
+                ]
+            _ ->
+              Call
+                (Symbol "Plus")
+                [ angle
+                , Call (Symbol "Times") [Integer (-1), Symbol "Pi"]
+                ]
 
 exactSin :: Expr -> Maybe Expr
 exactSin value

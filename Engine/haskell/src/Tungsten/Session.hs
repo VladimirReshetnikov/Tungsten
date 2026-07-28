@@ -2978,7 +2978,9 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionExponent depth session values)
   expression@(Call (Symbol normalizationHead) _)
     | normalizationHead
-        `elem` ["Collect", "Discriminant", "MonomialList", "N", "PolynomialMod", "Resultant", "SetAccuracy", "SetPrecision"] ->
+        `elem` ( ["Collect", "Discriminant", "MonomialList", "N", "PolynomialMod", "Resultant", "SetAccuracy", "SetPrecision"]
+                   <> numericTranscendentalDispatchHeads
+               ) ->
     Just $ do
       reduced <- liftPureEvaluation session (reduceEvaluatedCall expression)
       if reduced == expression
