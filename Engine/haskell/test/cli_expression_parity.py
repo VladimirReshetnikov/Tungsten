@@ -2462,6 +2462,41 @@ CASES = (
         ),
         0,
     ),
+    (
+        "map thread depths state normalization and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenMapThreadI,tungstenMapThreadF];"
+            "tungstenMapThreadI=0;"
+            "tungstenMapThreadF[x__]:=(tungstenMapThreadI++;"
+            "q[tungstenMapThreadI,x]);"
+            "{MapThread[f,{{a,b},{c,d}}],"
+            "MapThread[f,{{{a,b},{c,d}},{{e,f},{g,h}}},2],"
+            "MapThread[f,{a,b},0],MapThread[f,{},0],"
+            "MapThread[tungstenMapThreadF,"
+            "{{{a},{b,c}},{{d},{e}}},2],tungstenMapThreadI,"
+            "MapThread[Function[{x,y},Nothing],{{a,b},{c,d}}],"
+            "MapThread[Function[{x,y},"
+            "Splice[{p[x,y],q[x,y]},List]],{{a,b},{c,d}}],"
+            "MapThread[Function[{x,y},HoldComplete[x,y]],"
+            "Unevaluated[{{1+1},{2+2}}]],"
+            "System`MapThread[f,Unevaluated[{{1+1},{2+2}}]],"
+            "Global`MapThread[f,Unevaluated[{{1+1},{2+2}}]],"
+            "(tungstenMapThreadI=0;"
+            "Catch[MapThread[(tungstenMapThreadI++;"
+            "If[tungstenMapThreadI==2,Throw[t],"
+            "q[tungstenMapThreadI,##]])&,{{a,b,c},{d,e,f}}]]),"
+            "tungstenMapThreadI,MapThread[],MapThread[f,x],"
+            "MapThread[f,{{a}},z],MapThread[f,{{a}},-1],"
+            "MapThread[f,{{a},b},2],MapThread[f,{{a,b},{c}},1],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

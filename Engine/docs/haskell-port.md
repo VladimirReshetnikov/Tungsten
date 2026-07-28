@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T13:38:17Z
-- Repository HEAD: d6f93568d24d62c7db75072e35c2a6530c1e0415
+- Updated (UTC): 2026-07-28T13:54:43Z
+- Repository HEAD: bacb2b59d73d9f84238fcd8348bf8629be78665e
 
 ## Purpose
 
@@ -124,7 +124,10 @@ matching the Python reference's cleanup guarantee.
 Session mapping includes bottom-up `MapIndexed` traversal with positive and negative level
 specifications, integer and association `Key[...]` paths, callback-created child rebuilding,
 state and control propagation, generated-list normalization, and the Python-compatible distinction
-between direct and operator forms of explicit `System`` and `Global`` spellings.
+between direct and operator forms of explicit `System`` and `Global`` spellings. `MapThread`
+supports depth-zero application and recursive parallel-list threading, row-major callback order,
+incremental validation with retained prior effects, bare generated-list normalization, and exact
+shape diagnostics.
 
 Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
 and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides

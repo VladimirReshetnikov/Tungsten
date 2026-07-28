@@ -1575,6 +1575,10 @@ checkEvaluationSession = do
         , ("MapIndexed walks bottom up with paths and callback state", "ClearAll[i,mi];i=0;mi[x_,p_]:=(i++;q[i,x,p]);{MapIndexed[mi,h[a,g[b,c]],Infinity],i}", "List[h[q[1, a, List[1]], q[4, g[q[2, b, List[2, 1]], q[3, c, List[2, 2]]], List[2]]], 4]")
         , ("MapIndexed preserves association keys rules and operator boundaries", "{MapIndexed[Function[{value,path},path],<|a->x,b:>g[y]|>,Infinity],MapIndexed[q][f[a,g[b]]],System`MapIndexed[q][f[a]],Global`MapIndexed[q][f[a]],System`MapIndexed[q,f[a]],MapIndexed[q,a,Infinity],MapIndexed[q,f[a],{0}]}", "List[Association[Rule[a, List[Key[a]]], RuleDelayed[b, List[Key[b]]]], f[q[a, List[1]], q[g[b], List[2]]], f[q[a, List[1]]], Global`MapIndexed[q][f[a]], System`MapIndexed[q, f[a]], a, f[a]]")
         , ("MapIndexed normalizes callback results and direct Unevaluated arguments", "{MapIndexed[Function[{x,p},Nothing],{a,b}],MapIndexed[Function[{x,p},Sequence[x,p]],{a,b}],MapIndexed[q,Unevaluated[f[1+1]],Unevaluated[Infinity]],System`MapIndexed[q,Unevaluated[f[1+1]]],Global`MapIndexed[q,Unevaluated[f[1+1]]],MapIndexed[q,f[],{-2}]}", "List[List[], List[a, b], f[q[Plus[q[1, List[1, 1]], q[1, List[1, 2]]], List[1]]], System`MapIndexed[q, f[Plus[1, 1]]], Global`MapIndexed[q, Unevaluated[f[Plus[1, 1]]]], f[]]")
+        , ("MapThread supports default positive zero and empty depths", "{MapThread[f,{{a,b},{c,d}}],MapThread[f,{{{a,b},{c,d}},{{e,f},{g,h}}},2],MapThread[f,{a,b},0],MapThread[f,{},0],MapThread[f,{},3]}", "List[List[f[a, c], f[b, d]], List[List[f[a, e], f[b, f]], List[f[c, g], f[d, h]]], f[a, b], List[], List[]]")
+        , ("MapThread preserves prior callback state on later shape failure", "ClearAll[i,mt];i=0;mt[x__]:=(i++;q[i,x]);{MapThread[mt,{{{a},{b,c}},{{d},{e}}},2],i,$MessageList}", "List[MapThread[mt, List[List[List[a], List[b, c]], List[List[d], List[e]]], 2], 1, List[HoldForm[MessageName[MapThread, \"error\"]]]]")
+        , ("MapThread normalizes generated lists and preserves qualification boundaries", "{MapThread[Function[{x,y},Nothing],{{a,b},{c,d}}],MapThread[Function[{x,y},Splice[{p[x,y],q[x,y]},List]],{{a,b},{c,d}}],MapThread[Function[{x,y},HoldComplete[x,y]],Unevaluated[{{1+1},{2+2}}]],System`MapThread[f,Unevaluated[{{1+1},{2+2}}]],Global`MapThread[f,Unevaluated[{{1+1},{2+2}}]]}", "List[List[], List[p[a, c], q[a, c], p[b, d], q[b, d]], List[HoldComplete[Plus[1, 1], Plus[2, 2]]], System`MapThread[f, List[List[Plus[1, 1]], List[Plus[2, 2]]]], Global`MapThread[f, Unevaluated[List[List[Plus[1, 1]], List[Plus[2, 2]]]]]]")
+        , ("MapThread callback control signals retain traversal state", "i=0;{Catch[MapThread[(i++;If[i==2,Throw[t],q[i,##]])&,{{a,b,c},{d,e,f}}]],i}", "List[t, 2]")
         , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
         , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
         , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
@@ -3184,6 +3188,39 @@ checkEvaluationSession = do
             , ( "General::error"
               , "MessageName[General, \"error\"]"
               , "General::error: MapIndexed[f] expects exactly one argument when used as an operator."
+              )
+            ]
+          )
+        , ( "MapThread reports arity depth and parallel-shape errors exactly"
+          , "{MapThread[],MapThread[f],MapThread[f,x],MapThread[f,{{a}},z],MapThread[f,{{a}},-1],MapThread[f,{{a},b},2],MapThread[f,{{a,b},{c}},1]}"
+          , "List[MapThread[], MapThread[f], MapThread[f, x], MapThread[f, List[List[a]], z], MapThread[f, List[List[a]], -1], MapThread[f, List[List[a], b], 2], MapThread[f, List[List[a, b], List[c]], 1]]"
+          , [ ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a function, a list of sequences, and an optional level."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a function, a list of sequences, and an optional level."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a list of sequences."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects an integer argument."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a non-negative depth."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects parallel List structures down to the requested depth."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects sequences of the same length."
               )
             ]
           )

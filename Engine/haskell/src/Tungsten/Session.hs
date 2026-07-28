@@ -3012,6 +3012,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionMapApply depth session values)
   Call (Symbol "MapIndexed") values ->
     Just (evaluateSessionMapIndexed depth session values)
+  Call (Symbol "MapThread") values ->
+    Just (evaluateSessionMapThread depth session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
   Call (Symbol "Construct") values ->
@@ -3839,6 +3841,108 @@ evaluateSessionMapIndexed depth session = \case
       (retained <> [mapped])
       updated
       rest
+
+evaluateSessionMapThread
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapThread depth session = \case
+  [function, sequences] ->
+    threadSequences function sequences 1 session
+  [function, sequences, Integer requestedDepth]
+    | requestedDepth < 0 ->
+        sessionFailure session "MapThread expects a non-negative depth."
+    | requestedDepth > fromIntegral (maxBound :: Int) ->
+        threadSequences function sequences maxBound session
+    | otherwise ->
+        threadSequences function sequences (fromIntegral requestedDepth) session
+  [_, _, _] ->
+    sessionFailure session "MapThread expects an integer argument."
+  _ ->
+    sessionFailure
+      session
+      "MapThread expects a function, a list of sequences, and an optional level."
+ where
+  threadSequences
+    :: Expr
+    -> Expr
+    -> Int
+    -> EvaluationSession
+    -> SessionResult Expr
+  threadSequences function sequences requestedDepth currentSession =
+    case sequences of
+      Call (Symbol listHead) sequenceValues
+        | isSessionSystemHead "List" listHead ->
+            if null sequenceValues
+              then Right (Call (Symbol "List") [], currentSession)
+              else threadAtDepth function requestedDepth currentSession sequenceValues
+      _ ->
+        sessionFailure
+          currentSession
+          "MapThread expects a list of sequences."
+
+  threadAtDepth
+    :: Expr
+    -> Int
+    -> EvaluationSession
+    -> [Expr]
+    -> SessionResult Expr
+  threadAtDepth function remaining currentSession sequenceValues
+    | remaining == 0 =
+        evaluateSessionCallable depth currentSession function sequenceValues
+    | otherwise =
+        case traverse parallelListValues sequenceValues of
+          Nothing ->
+            sessionFailure
+              currentSession
+              "MapThread expects parallel List structures down to the requested depth."
+          Just parallelValues -> case parallelValues of
+            [] -> Right (Call (Symbol "List") [], currentSession)
+            firstValues : remainingValues
+              | any ((/= length firstValues) . length) remainingValues ->
+                  sessionFailure
+                    currentSession
+                    "MapThread expects sequences of the same length."
+              | otherwise ->
+                  threadColumns
+                    function
+                    (remaining - 1)
+                    []
+                    currentSession
+                    parallelValues
+
+  parallelListValues :: Expr -> Maybe [Expr]
+  parallelListValues = \case
+    Call (Symbol listHead) values
+      | isSessionSystemHead "List" listHead -> Just values
+    _ -> Nothing
+
+  threadColumns
+    :: Expr
+    -> Int
+    -> [Expr]
+    -> EvaluationSession
+    -> [[Expr]]
+    -> SessionResult Expr
+  threadColumns function remaining retained currentSession parallelValues =
+    case splitParallelValues parallelValues of
+      Nothing ->
+        Right (normalizeEvaluatedCall (Symbol "List") retained, currentSession)
+      Just (column, rest) -> do
+        (mapped, updated) <-
+          threadAtDepth function remaining currentSession column
+        threadColumns function remaining (retained <> [mapped]) updated rest
+
+  splitParallelValues :: [[Expr]] -> Maybe ([Expr], [[Expr]])
+  splitParallelValues [] = Nothing
+  splitParallelValues values = collect [] [] values
+   where
+    collect retainedHeads retainedTails [] =
+      Just (reverse retainedHeads, reverse retainedTails)
+    collect _ _ ([] : _) = Nothing
+    collect retainedHeads retainedTails ((value : rest) : remaining) =
+      collect (value : retainedHeads) (rest : retainedTails) remaining
 
 evaluateSessionOperate
   :: Int
@@ -9974,6 +10078,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "MachineIntegerQ"
       , "MachineNumberQ"
       , "MapIndexed"
+      , "MapThread"
       , "NumberQ"
       , "Outer"
       , "Plus"
