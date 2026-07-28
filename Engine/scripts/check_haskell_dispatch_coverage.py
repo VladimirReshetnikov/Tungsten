@@ -90,9 +90,10 @@ SESSION_COLLECTION_BINDINGS = {
 # directSessionDispatchHead do not reduce anything themselves and therefore do
 # not establish ownership.  heldPatternBuiltinHeads is similarly not credited
 # wholesale; its implemented keys are read from the handler's case arms.
+# History heads are session evaluator dispatch now; the REPL only owns exit
+# recognition and supplies retained history through EvaluationSession.
 REPL_CASE_BINDINGS = {
     "exitCode",
-    "resolveHistory",
 }
 
 _TOP_LEVEL_DECLARATION = re.compile(

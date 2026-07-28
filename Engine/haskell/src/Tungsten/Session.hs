@@ -15,6 +15,7 @@ module Tungsten.Session
   , emptySession
   , evaluateInSession
   , evaluateInSessionWithRuntime
+  , sessionHistoryLengthLimit
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -160,6 +161,12 @@ data EvaluationSession = EvaluationSession
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
+  , sessionHistoryLine :: !(Maybe Integer)
+  , sessionInputHistory :: !(Map.Map Integer Expr)
+  , sessionInputStringHistory :: !(Map.Map Integer Text)
+  , sessionOutputHistory :: !(Map.Map Integer Expr)
+  , sessionMessageHistory :: !(Map.Map Integer [EvaluationMessage])
+  , sessionExpandingInputHistory :: !(Set.Set Integer)
   }
   deriving (Eq, Show)
 
@@ -183,6 +190,12 @@ emptySession =
     , sessionGeneratedMessages = []
     , sessionVisibleMessages = []
     , sessionPrints = []
+    , sessionHistoryLine = Nothing
+    , sessionInputHistory = Map.empty
+    , sessionInputStringHistory = Map.empty
+    , sessionOutputHistory = Map.empty
+    , sessionMessageHistory = Map.empty
+    , sessionExpandingInputHistory = Set.empty
     }
 
 initialSessionSymbols :: Map.Map Text SymbolState
@@ -507,6 +520,7 @@ evaluateInSessionWithRuntime runtime session expression = do
                 , sessionGeneratedMessages = []
                 , sessionVisibleMessages = []
                 , sessionPrints = []
+                , sessionExpandingInputHistory = Set.empty
                 }
               expression
           )
@@ -666,6 +680,9 @@ evaluateSessionAtRaw
   -> SessionResult Expr
 evaluateSessionAtRaw depth session expression = case expression of
       Symbol name
+        | resolvedSymbolStorageName name session == "$Line"
+        , Just line <- sessionHistoryLine session ->
+            Right (Integer line, session)
         | resolvedSymbolStorageName name session == "$MessageList" ->
             Right (currentSessionMessageList session, session)
         | resolvedSymbolStorageName name session == "$Context" ->
@@ -731,6 +748,11 @@ evaluateSessionAtRaw depth session expression = case expression of
                   session
                   (Symbol qualifiedName)
                   arguments'
+      Call (Symbol "MessageList") arguments' ->
+        evaluateSessionHistoricalMessageList depth session arguments'
+      Call (Symbol historyHead) arguments'
+        | historyHead `elem` ["In", "InString", "Out"] ->
+            evaluateSessionHistoryCall historyHead depth session arguments'
       Call (Symbol "TagSet") arguments' ->
         evaluateSessionTagSet False depth session arguments'
       Call (Symbol "TagSetDelayed") arguments' ->
@@ -1382,6 +1404,10 @@ directSessionDispatchHead name =
              , "Label"
              , "Goto"
              , "Message"
+             , "MessageList"
+             , "In"
+             , "InString"
+             , "Out"
              , "Off"
              , "On"
              , "Quiet"
@@ -2951,6 +2977,29 @@ reduceSessionEvaluatedCall depth session = \case
         sessionFailure
           session
           "ReverseSortBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "OrderingBy") [functions]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionOrderingBy depth session [subject, functions]
+      _ ->
+        sessionFailure
+          session
+          "OrderingBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MinimalBy") [functions]) values ->
+    Just $ case values of
+      [subject] ->
+        evaluateSessionExtremeBy False depth session [subject, functions]
+      _ ->
+        sessionFailure
+          session
+          "MinimalBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MaximalBy") [functions]) values ->
+    Just $ case values of
+      [subject] ->
+        evaluateSessionExtremeBy True depth session [subject, functions]
+      _ ->
+        sessionFailure
+          session
+          "MaximalBy[f] expects exactly one argument when used as an operator."
   Call (Call (Symbol "Comap") [functions]) values ->
     Just $ case values of
       [subject] -> evaluateSessionComap False depth session [functions, subject]
@@ -3020,6 +3069,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionBlockMap depth session values)
   Call (Symbol "SubsetMap") values ->
     Just (evaluateSessionSubsetMap depth session values)
+  Call (Symbol "FlattenAt") values ->
+    Just (evaluateSessionFlattenAt session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
   Call (Symbol "Construct") values ->
@@ -3070,6 +3121,12 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionSortBy False depth session values)
   Call (Symbol "ReverseSortBy") values ->
     Just (evaluateSessionSortBy True depth session values)
+  Call (Symbol "OrderingBy") values ->
+    Just (evaluateSessionOrderingBy depth session values)
+  Call (Symbol "MinimalBy") values ->
+    Just (evaluateSessionExtremeBy False depth session values)
+  Call (Symbol "MaximalBy") values ->
+    Just (evaluateSessionExtremeBy True depth session values)
   Call (Symbol "TakeWhile") values ->
     Just (evaluateSessionTakeWhile depth session values)
   Call (Symbol "LengthWhile") values ->
@@ -3451,6 +3508,127 @@ currentSessionMessageList session =
     [ Call (Symbol "HoldForm") [evaluationMessageFullName message]
     | message <- sessionGeneratedMessages session
     ]
+
+evaluateSessionHistoricalMessageList
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionHistoricalMessageList depth session arguments' =
+  case sessionHistoryLine session of
+    Nothing -> Right (evaluatedList [], session)
+    Just currentLine -> case arguments' of
+      [lineSpecification] -> do
+        (evaluatedIndex, updated) <-
+          evaluateSessionAt (depth + 1) session lineSpecification
+        case evaluatedIndex of
+          Integer requested ->
+            let resolved =
+                  if requested < 0
+                    then currentLine + requested
+                    else requested
+                messages =
+                  Map.findWithDefault [] resolved (sessionMessageHistory updated)
+             in Right
+                  ( Call
+                      (Symbol "List")
+                      [ Call
+                          (Symbol "HoldForm")
+                          [evaluationMessageFullName message]
+                      | message <- messages
+                      ]
+                  , updated
+                  )
+          _ ->
+            sessionFailure
+              updated
+              "History functions expect an integer line specification."
+      _ ->
+        sessionFailure
+          session
+          "MessageList expects exactly one line specification."
+
+evaluateSessionHistoryCall
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionHistoryCall headName depth session arguments' =
+  case sessionHistoryLine session of
+    Nothing -> Right (Call (Symbol headName) arguments', session)
+    Just currentLine -> case arguments' of
+      [] -> resolveAt (currentLine - 1) session
+      [lineSpecification] -> do
+        (evaluatedIndex, updated) <-
+          evaluateSessionAt (depth + 1) session lineSpecification
+        case evaluatedIndex of
+          Integer requested ->
+            resolveAt
+              (if requested < 0 then currentLine + requested else requested)
+              updated
+          _ ->
+            sessionFailure
+              updated
+              "History functions expect an integer line specification."
+      _ ->
+        sessionFailure
+          session
+          (headName <> " expects zero or one line specification.")
+ where
+  unresolved index = Call (Symbol headName) [Integer index]
+
+  resolveAt index current = case headName of
+    "Out" ->
+      Right
+        ( Map.findWithDefault
+            (unresolved index)
+            index
+            (sessionOutputHistory current)
+        , current
+        )
+    "InString" ->
+      Right
+        ( maybe
+            (unresolved index)
+            String
+            (Map.lookup index (sessionInputStringHistory current))
+        , current
+        )
+    _ -> case Map.lookup index (sessionInputHistory current) of
+      Nothing -> Right (unresolved index, current)
+      Just stored
+        | Set.member index (sessionExpandingInputHistory current) ->
+            Right (unresolved index, current)
+        | otherwise ->
+            restoreSessionInputExpansion
+              (sessionExpandingInputHistory current)
+              ( evaluateSessionAt
+                  (depth + 1)
+                  current
+                    { sessionExpandingInputHistory =
+                        Set.insert index (sessionExpandingInputHistory current)
+                    }
+                  stored
+              )
+
+restoreSessionInputExpansion
+  :: Set.Set Integer
+  -> SessionResult Expr
+  -> SessionResult Expr
+restoreSessionInputExpansion expanding result =
+  inspectRuntimeResult result $ \case
+    P.Right (value, session) ->
+      Right
+        ( value
+        , session {sessionExpandingInputHistory = expanding}
+        )
+    P.Left evaluationExit ->
+      Left
+        ( mapEvaluationExitSession
+            (\session -> session {sessionExpandingInputHistory = expanding})
+            evaluationExit
+        )
 
 isSessionMessageName :: Expr -> Bool
 isSessionMessageName = \case
@@ -5717,6 +5895,104 @@ data SessionPathSelector
   | SessionKeySelector !Expr
   deriving (Eq, Show)
 
+evaluateSessionFlattenAt
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFlattenAt session = \case
+  [target, positions] -> do
+    (subject, subjectSession) <- densifyTarget target
+    case expandSessionPositionPaths subject positions of
+      P.Left message -> sessionFailure subjectSession message
+      P.Right (resolvedPaths, invalid)
+        | invalid || any null uniquePaths -> invalidPositions subjectSession subject
+        | otherwise ->
+            flattenPaths
+              subject
+              subject
+              subjectSession
+              (sortSessionPaths uniquePaths)
+       where
+        uniquePaths = deduplicateSessionPaths resolvedPaths
+  _ -> sessionFailure session "FlattenAt expects exactly two arguments."
+ where
+  densifyTarget sparse@SparseArray {} = do
+    dense <-
+      liftPureEvaluation
+        session
+        (reduceEvaluatedCall (Call (Symbol "Normal") [sparse]))
+    Right (dense, session)
+  densifyTarget target = Right (target, session)
+
+  flattenPaths _ result currentSession [] = Right (result, currentSession)
+  flattenPaths originalSubject result currentSession (path : rest) =
+    case flattenSessionAtPath result path of
+      Nothing -> invalidPositions currentSession originalSubject
+      Just updated ->
+        flattenPaths originalSubject updated currentSession rest
+
+  invalidPositions currentSession subject =
+    sessionFailure
+      currentSession
+      ("FlattenAt positions are invalid for " <> inputForm subject <> ".")
+
+deduplicateSessionPaths :: [[SessionPathSelector]] -> [[SessionPathSelector]]
+deduplicateSessionPaths = foldl retain []
+ where
+  retain paths path
+    | path `elem` paths = paths
+    | otherwise = paths <> [path]
+
+flattenSessionAtPath :: Expr -> [SessionPathSelector] -> Maybe Expr
+flattenSessionAtPath _ [] = Nothing
+flattenSessionAtPath expression (selector : remaining) = case (expression, selector) of
+  (Call expressionHead values, SessionArgumentSelector position) -> do
+    index <- resolveSessionPosition (length values) position
+    selected <- sessionListItemAt index values
+    if null remaining
+      then case selected of
+        Call _ nestedValues ->
+          Just
+            ( rebuildSessionFlattenAtCall
+                expressionHead
+                (take index values <> nestedValues <> drop (index + 1) values)
+            )
+        _ -> Nothing
+      else do
+        updated <- flattenSessionAtPath selected remaining
+        Just
+          ( rebuildSessionFlattenAtCall
+              expressionHead
+              (replaceSessionListIndex index updated values)
+          )
+  _ -> Nothing
+
+rebuildSessionFlattenAtCall :: Expr -> [Expr] -> Expr
+rebuildSessionFlattenAtCall expressionHead values = case expressionHead of
+  Symbol headName -> Call expressionHead retained
+   where
+    spliced
+      | headName `elem` ["HoldComplete", "Rule", "RuleDelayed", "Unevaluated"] =
+          values
+      | otherwise = concatMap spliceArgument values
+    retained
+      | headName `elem` ["Association", "List"] =
+          filter (/= Symbol "Nothing") spliced
+      | otherwise = spliced
+    spliceArgument = \case
+      Call (Symbol sequenceHead) sequenceValues
+        | isSessionSystemHead "Sequence" sequenceHead -> sequenceValues
+      Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues]
+        | isSessionSystemHead "Splice" spliceHead
+        , isSessionSystemHead "List" listHead
+        , expressionHead == Symbol "List" -> spliceValues
+      Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues, target]
+        | isSessionSystemHead "Splice" spliceHead
+        , isSessionSystemHead "List" listHead
+        , target == expressionHead -> spliceValues
+      value -> [value]
+  _ -> Call expressionHead values
+
 evaluateSessionMapAt
   :: Int
   -> EvaluationSession
@@ -5830,8 +6106,9 @@ expandSessionPositionPaths
 expandSessionPositionPaths expression specification
   | isSessionPositionCollection specification =
       case specification of
-        Call (Symbol "List") pathExpressions ->
-          expandPaths [] False pathExpressions
+        Call (Symbol listHead) pathExpressions
+          | isSessionSystemHead "List" listHead ->
+              expandPaths [] False pathExpressions
         _ -> unsupportedPositionSpecification specification
   | isSingleSessionPositionSpecification specification =
       expandSessionExactPath
@@ -5905,16 +6182,17 @@ resolveSessionAssociationComponent
 resolveSessionAssociationComponent items component
   | Just key <- sessionKeySelectorValue component =
       selectSessionAssociationKeys items [key]
-resolveSessionAssociationComponent items component@(Call (Symbol "List") selectors) =
-  case traverse sessionAssociationSelectorKind selectors of
-    Nothing -> unsupportedSelectorInsidePosition component
-    Just kinds
-      | any id kinds && any not kinds ->
-          P.Left "Association selector lists may not mix numeric and key selectors."
-      | any id kinds ->
-          selectKeys
-            (mapMaybeSession sessionKeySelectorValue selectors)
-      | otherwise -> selectNumeric
+resolveSessionAssociationComponent items component@(Call (Symbol listHead) selectors)
+  | isSessionSystemHead "List" listHead =
+      case traverse sessionAssociationSelectorKind selectors of
+        Nothing -> unsupportedSelectorInsidePosition component
+        Just kinds
+          | any id kinds && any not kinds ->
+              P.Left "Association selector lists may not mix numeric and key selectors."
+          | any id kinds ->
+              selectKeys
+                (mapMaybeSession sessionKeySelectorValue selectors)
+          | otherwise -> selectNumeric
  where
   selectNumeric = do
     (indices, invalid) <-
@@ -5975,14 +6253,17 @@ resolveSessionNumericSelectors count component = case component of
    where
     resolved = resolveSessionPosition count position
   Symbol "All" -> P.Right ([0 .. count - 1], False)
-  spanSpecification@(Call (Symbol "Span") _) -> do
-    positions <- expandSessionPositionSpan count spanSpecification
-    let resolved = map (resolveSessionPosition count) positions
-    P.Right
-      ( mapMaybeSession id resolved
-      , any (maybe True (const False)) resolved
-      )
-  Call (Symbol "List") selectors -> appendSelectors [] False selectors
+  spanSpecification@(Call (Symbol spanHead) _)
+    | isSessionSystemHead "Span" spanHead -> do
+        positions <- expandSessionPositionSpan count spanSpecification
+        let resolved = map (resolveSessionPosition count) positions
+        P.Right
+          ( mapMaybeSession id resolved
+          , any (maybe True (const False)) resolved
+          )
+  Call (Symbol listHead) selectors
+    | isSessionSystemHead "List" listHead ->
+        appendSelectors [] False selectors
   _ ->
     P.Left
       ( "Unsupported Position specification: "
@@ -6002,13 +6283,14 @@ resolveSessionNumericSelectors count component = case component of
           rest
 
 expandSessionPositionSpan :: Int -> Expr -> Either Text [Integer]
-expandSessionPositionSpan count (Call (Symbol "Span") arguments') =
-  case arguments' of
-    [startExpression, endExpression] ->
-      expand startExpression endExpression (Integer 1)
-    [startExpression, endExpression, stepExpression] ->
-      expand startExpression endExpression stepExpression
-    _ -> P.Left "Span must contain two or three arguments."
+expandSessionPositionSpan count (Call (Symbol spanHead) arguments')
+  | isSessionSystemHead "Span" spanHead =
+      case arguments' of
+        [startExpression, endExpression] ->
+          expand startExpression endExpression (Integer 1)
+        [startExpression, endExpression, stepExpression] ->
+          expand startExpression endExpression stepExpression
+        _ -> P.Left "Span must contain two or three arguments."
  where
   expand startExpression endExpression stepExpression = do
     step <- case stepExpression of
@@ -6033,28 +6315,33 @@ expandSessionPositionSpan count (Call (Symbol "Span") arguments') =
 expandSessionPositionSpan _ _ = P.Left "Span must contain two or three arguments."
 
 isSessionPositionCollection :: Expr -> Bool
-isSessionPositionCollection (Call (Symbol "List") values) =
-  not (null values) && all isExplicitSessionPositionPath values
+isSessionPositionCollection (Call (Symbol listHead) values) =
+  isSessionSystemHead "List" listHead
+    && not (null values)
+    && all isExplicitSessionPositionPath values
 isSessionPositionCollection _ = False
 
 isExplicitSessionPositionPath :: Expr -> Bool
-isExplicitSessionPositionPath (Call (Symbol "List") components) =
-  all isSessionPositionComponent components
+isExplicitSessionPositionPath (Call (Symbol listHead) components) =
+  isSessionSystemHead "List" listHead
+    && all isSessionPositionComponent components
 isExplicitSessionPositionPath _ = False
 
 isSingleSessionPositionSpecification :: Expr -> Bool
 isSingleSessionPositionSpecification Integer {} = True
 isSingleSessionPositionSpecification expression
   | isSessionKeySelector expression = True
-isSingleSessionPositionSpecification (Call (Symbol "List") components) =
-  all isSessionPositionComponent components
+isSingleSessionPositionSpecification (Call (Symbol listHead) components) =
+  isSessionSystemHead "List" listHead
+    && all isSessionPositionComponent components
 isSingleSessionPositionSpecification _ = False
 
 isSessionPositionComponent :: Expr -> Bool
 isSessionPositionComponent expression
   | isSessionSelectorAtom expression = True
-isSessionPositionComponent (Call (Symbol "List") selectors) =
-  all isSessionSelectorAtom selectors
+isSessionPositionComponent (Call (Symbol listHead) selectors) =
+  isSessionSystemHead "List" listHead
+    && all isSessionSelectorAtom selectors
 isSessionPositionComponent _ = False
 
 isSessionSelectorAtom :: Expr -> Bool
@@ -6064,7 +6351,8 @@ isSessionSelectorAtom expression =
 isSessionNumericSelectorAtom :: Expr -> Bool
 isSessionNumericSelectorAtom Integer {} = True
 isSessionNumericSelectorAtom (Symbol "All") = True
-isSessionNumericSelectorAtom (Call (Symbol "Span") _) = True
+isSessionNumericSelectorAtom (Call (Symbol spanHead) _) =
+  isSessionSystemHead "Span" spanHead
 isSessionNumericSelectorAtom _ = False
 
 isSessionKeySelector :: Expr -> Bool
@@ -6072,7 +6360,8 @@ isSessionKeySelector = maybe False (const True) . sessionKeySelectorValue
 
 sessionKeySelectorValue :: Expr -> Maybe Expr
 sessionKeySelectorValue key@String {} = Just key
-sessionKeySelectorValue (Call (Symbol "Key") [key]) = Just key
+sessionKeySelectorValue (Call (Symbol keyHead) [key])
+  | isSessionSystemHead "Key" keyHead = Just key
 sessionKeySelectorValue _ = Nothing
 
 sessionAssociationSelectorKind :: Expr -> Maybe Bool
@@ -6082,7 +6371,8 @@ sessionAssociationSelectorKind expression
 sessionAssociationSelectorKind _ = Nothing
 
 sessionPositionComponents :: Expr -> [Expr]
-sessionPositionComponents (Call (Symbol "List") components) = components
+sessionPositionComponents (Call (Symbol listHead) components)
+  | isSessionSystemHead "List" listHead = components
 sessionPositionComponents expression = [expression]
 
 unsupportedPositionSpecification
@@ -6248,9 +6538,8 @@ evaluateSessionSortBy reverseMode depth session values =
     case sessionOrderedCollection subject of
       Nothing -> sessionFailure session "SortBy expects a nonatomic expression."
       Just collection -> do
-        let (keyFunctions, keySpecIsList) = case functions of
-              Call (Symbol "List") functionList -> (functionList, True)
-              _ -> ([functions], False)
+        let (keyFunctions, keySpecIsList) =
+              sessionOrderingKeyFunctions functions
         (decorated, keySession) <-
           decorateSessionItems
             depth
@@ -6274,6 +6563,242 @@ evaluateSessionSortBy reverseMode depth session values =
               (map decoratedSessionItem sorted)
           , updated
           )
+
+evaluateSessionOrderingBy
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOrderingBy depth session values =
+  case splitSessionSameTestOptions "OrderingBy" values of
+    P.Left message -> sessionFailure session message
+    P.Right (orderingArguments, sameTest) -> case orderingArguments of
+      [_]
+        | sameTest == Nothing ->
+            Right (Call (Symbol "OrderingBy") values, session)
+      [subject, functions] ->
+        orderSubject subject functions Nothing Nothing sameTest
+      [subject, functions, count] ->
+        orderSubject subject functions (Just count) Nothing sameTest
+      [subject, functions, count, orderingFunction] ->
+        orderSubject
+          subject
+          functions
+          (Just count)
+          (Just orderingFunction)
+          sameTest
+      _ ->
+        sessionFailure
+          session
+          "OrderingBy expects an expression, functions, optional count, optional ordering function, and optional SameTest rule."
+ where
+  orderSubject subject functions count orderingFunction sameTest =
+    case sessionOrderedCollection subject of
+      Nothing ->
+        sessionFailure session "OrderingBy expects a nonatomic expression."
+      Just collection -> do
+        let (keyFunctions, keySpecIsList) =
+              sessionOrderingKeyFunctions functions
+        (decorated, keySession) <-
+          decorateSessionItems
+            depth
+            keyFunctions
+            session
+            (sessionCollectionItems collection)
+        (sorted, sortedSession) <-
+          pythonStableSortByStateM
+            ( compareDecoratedSessionItems
+                False
+                keySpecIsList
+                depth
+                orderingFunction
+                sameTest
+            )
+            keySession
+            decorated
+        case sliceSessionOrderingCount count sorted of
+          P.Left message -> sessionFailure sortedSession message
+          P.Right selected ->
+            Right
+              ( evaluatedList
+                  ( map
+                      ( Integer
+                          . sessionItemIndex
+                          . decoratedSessionItem
+                      )
+                      selected
+                  )
+              , sortedSession
+              )
+
+evaluateSessionExtremeBy
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionExtremeBy maximal depth session values =
+  case values of
+    [_] -> Right (Call (Symbol operation) values, session)
+    [subject, functions] ->
+      selectSubject subject functions Nothing Nothing
+    [subject, functions, count] ->
+      selectSubject subject functions (Just count) Nothing
+    [subject, functions, count, orderingFunction] ->
+      selectSubject
+        subject
+        functions
+        (Just count)
+        (Just orderingFunction)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " expects data, a function specification, optional count, and optional ordering function."
+        )
+ where
+  operation = if maximal then "MaximalBy" else "MinimalBy"
+
+  selectSubject subject functions count orderingFunction =
+    case sessionOrderedCollection subject of
+      Nothing ->
+        sessionFailure
+          session
+          (operation <> " expects a nonatomic expression.")
+      Just collection -> do
+        let (keyFunctions, _) = sessionOrderingKeyFunctions functions
+        (decorated, keySession) <-
+          decorateSessionItems
+            depth
+            keyFunctions
+            session
+            (sessionCollectionItems collection)
+        case decorated of
+          [] ->
+            Right (rebuildSessionCollection collection [], keySession)
+          first : rest -> case count of
+            Nothing -> do
+              (selected, updated) <-
+                selectTiedExtrema
+                  orderingFunction
+                  first
+                  [first]
+                  keySession
+                  rest
+              Right
+                ( rebuildSessionCollection
+                    collection
+                    (map decoratedSessionItem selected)
+                , updated
+                )
+            Just countExpression -> do
+              (sorted, sortedSession) <-
+                pythonStableSortByStateM
+                  ( compareDecoratedSessionItems
+                      maximal
+                      True
+                      depth
+                      orderingFunction
+                      Nothing
+                  )
+                  keySession
+                  decorated
+              case sliceSessionExtremeCount operation countExpression sorted of
+                P.Left message -> sessionFailure sortedSession message
+                P.Right selected ->
+                  Right
+                    ( rebuildSessionCollection
+                        collection
+                        (map decoratedSessionItem selected)
+                    , sortedSession
+                    )
+
+  selectTiedExtrema _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  selectTiedExtrema
+    orderingFunction
+    best
+    retained
+    currentSession
+    (item : rest) = do
+      (ordering, updated) <-
+        compareDecoratedSessionItems
+          False
+          True
+          depth
+          orderingFunction
+          Nothing
+          currentSession
+          item
+          best
+      if ordering == preferredOrdering
+        then
+          selectTiedExtrema
+            orderingFunction
+            item
+            [item]
+            updated
+            rest
+        else
+          selectTiedExtrema
+            orderingFunction
+            best
+            (if ordering == EQ then retained <> [item] else retained)
+            updated
+            rest
+
+  preferredOrdering = if maximal then GT else LT
+
+sessionOrderingKeyFunctions :: Expr -> ([Expr], Bool)
+sessionOrderingKeyFunctions = \case
+  Call (Symbol listHead) functions
+    | isSessionSystemHead "List" listHead -> (functions, True)
+  function -> ([function], False)
+
+sliceSessionOrderingCount
+  :: Maybe Expr
+  -> [value]
+  -> Either Text [value]
+sliceSessionOrderingCount count values = case count of
+  Nothing -> P.Right values
+  Just (Symbol "All") -> P.Right values
+  Just (Integer amount)
+    | amount >= 0 -> P.Right (takeSessionInteger amount values)
+    | negate amount > toInteger (length values) -> P.Right values
+    | otherwise ->
+        P.Right
+          ( drop
+              (length values - fromInteger (negate amount))
+              values
+          )
+  Just _ -> P.Left "OrderingBy expects an integer or All count."
+
+sliceSessionExtremeCount
+  :: Text
+  -> Expr
+  -> [value]
+  -> Either Text [value]
+sliceSessionExtremeCount operation count values = case count of
+  Symbol "All" -> P.Right values
+  Integer amount
+    | amount < 0 ->
+        P.Left (operation <> " expects a non-negative count.")
+    | otherwise -> P.Right (takeSessionInteger amount values)
+  Call (Symbol upToHead) [Integer amount]
+    | isSessionSystemHead "UpTo" upToHead ->
+        P.Right (takeSessionInteger (max 0 amount) values)
+  Call (Symbol upToHead) [_]
+    | isSessionSystemHead "UpTo" upToHead ->
+        P.Left (operation <> " expects UpTo[n] with an integer n.")
+  _ ->
+    P.Left
+      (operation <> " expects an integer, UpTo[n], or All count.")
+
+takeSessionInteger :: Integer -> [value] -> [value]
+takeSessionInteger amount values
+  | amount <= 0 = []
+  | amount >= toInteger (length values) = values
+  | otherwise = take (fromInteger amount) values
 
 decorateSessionItems
   :: Int
@@ -10363,12 +10888,16 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "Accuracy"
       , "BlockMap"
       , "ExactNumberQ"
+      , "FlattenAt"
       , "InexactNumberQ"
       , "MachineIntegerQ"
       , "MachineNumberQ"
       , "MapIndexed"
       , "MapThread"
+      , "MaximalBy"
+      , "MinimalBy"
       , "NumberQ"
+      , "OrderingBy"
       , "Outer"
       , "Plus"
       , "Precision"
@@ -11130,6 +11659,12 @@ currentSpecialSessionSettingValue name session =
     Just (ImmediateValue value) -> value
     Just (DelayedValue value) -> value
     Nothing -> maybe (Symbol name) id (lookup name specialSessionSettingDefaults)
+
+sessionHistoryLengthLimit :: EvaluationSession -> Maybe Integer
+sessionHistoryLengthLimit session =
+  case currentSpecialSessionSettingValue "$HistoryLength" session of
+    Integer value -> Just value
+    _ -> Nothing
 
 appendSpecialSettingLimitMessage
   :: Text

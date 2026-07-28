@@ -53,6 +53,7 @@ import Tungsten.ParserCorpus
 import Tungsten.Repl (runRepl)
 import Tungsten.Session
   ( EvaluationMessage (..)
+  , EvaluationSession (..)
   , emptySession
   , evaluateInSession
   , sessionPrints
@@ -960,7 +961,13 @@ runExpressionCommand command sourceSpec requestedForm = do
           emitJson (parsePayload normalizedForm source expression)
           pure 0
         EvaluateCommand ->
-          evaluateInSession emptySession expression >>= \case
+          let activeSession =
+                emptySession
+                  { sessionHistoryLine = Just 1
+                  , sessionInputHistory = Map.singleton 1 expression
+                  , sessionInputStringHistory = Map.singleton 1 source
+                  }
+           in evaluateInSession activeSession expression >>= \case
             Left evaluationError ->
               emitError
                 command

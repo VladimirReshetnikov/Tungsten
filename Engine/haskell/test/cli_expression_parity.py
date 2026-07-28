@@ -1169,6 +1169,22 @@ CASES = (
         0,
     ),
     (
+        "historical MessageList active-line dispatch and held boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[i,ml];i=0;ml=System`MessageList;"
+            "{MessageList[(i++;1),(i++;2)],i,System`MessageList[x],"
+            "Global`MessageList[Print[\"global\"]],"
+            "ml[Print[\"alias\"]],"
+            "MessageList[1][Print[\"operator\"]],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "message suppression general tags and reactivation",
         (
             "expr",
@@ -2597,6 +2613,77 @@ CASES = (
         0,
     ),
     (
+        "flatten at traversal recovery qualification and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenFlattenAtI,tungstenFlattenAtSystemAlias,"
+            "tungstenFlattenAtBareAlias];"
+            "tungstenFlattenAtI=0;"
+            "tungstenFlattenAtSystemAlias=System`FlattenAt;"
+            "tungstenFlattenAtBareAlias=FlattenAt;"
+            "{FlattenAt[{x,{a,b},y},2],"
+            "FlattenAt[f[g[a,h[b,c]],d],{1,2}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{1},{1},{3}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{{1,3}}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{1;;3;;2}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{All}}],"
+            "FlattenAt[f[g[h[a,b],c],k[d,e]],{{1,1},{1}}],"
+            "FlattenAt[f[g[a,b]],{{{}}}],"
+            "FlattenAt[SparseArray[{{2}->g[a,b]},{3}],2],"
+            "FlattenAt[<|a->g[x,y],b:>h[p,q]|>,{{1},{2}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],"
+            "System`List[System`List[System`Span[1,3,2]]]],"
+            "FlattenAt[Unevaluated[HoldComplete[f[Sequence[a,b]]]],1],"
+            "FlattenAt[Unevaluated[System`HoldComplete["
+            "f[Sequence[a,b]]]],1],"
+            "FlattenAt[Unevaluated[List["
+            "f[Nothing,Sequence[a,b]]]],1],"
+            "FlattenAt[Unevaluated[System`List["
+            "f[Nothing,Sequence[a,b]]]],1],"
+            "(tungstenFlattenAtI=0;FlattenAt["
+            "(tungstenFlattenAtI++;f[g[x,y]]),"
+            "(tungstenFlattenAtI++;1),(tungstenFlattenAtI++;z)]),"
+            "tungstenFlattenAtI,"
+            "(tungstenFlattenAtI=0;FlattenAt[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[1+1,2+2]])],Unevaluated["
+            "(tungstenFlattenAtI++;1)]]),tungstenFlattenAtI,"
+            "(tungstenFlattenAtI=0;FlattenAt[Evaluate[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[x,y]])]],1]),"
+            "tungstenFlattenAtI,"
+            "System`FlattenAt[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[x,y]])],Unevaluated["
+            "(tungstenFlattenAtI++;1)]],tungstenFlattenAtI,"
+            "Global`FlattenAt[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[x,y]])],Unevaluated["
+            "(tungstenFlattenAtI++;1)]],tungstenFlattenAtI,"
+            "tungstenFlattenAtSystemAlias[f[g[x,y]],1],"
+            "tungstenFlattenAtBareAlias[f[g[x,y]],1],"
+            "FlattenAt[1][f[g[x,y]]],"
+            "FlattenAt[Part[f[g[a,b]],9],1],"
+            "(tungstenFlattenAtI=0;Catch[FlattenAt["
+            "(tungstenFlattenAtI++;Throw[t]),"
+            "(tungstenFlattenAtI++;1)]]),tungstenFlattenAtI,"
+            "(tungstenFlattenAtI=0;CheckAbort[FlattenAt["
+            "(tungstenFlattenAtI++;Abort[]),"
+            "(tungstenFlattenAtI++;1)],caught]),tungstenFlattenAtI,"
+            "FlattenAt[],FlattenAt[f[g[a,b]],All],"
+            "FlattenAt[f[g[a,b]],{}],FlattenAt[f[g[a,b]],{0}],"
+            "FlattenAt[f[a],1],FlattenAt[f[g[a,b]],{{Span[1]}}],"
+            "FlattenAt[f[g[a,b]],{{1;;1;;x}}],"
+            "FlattenAt[f[g[a,b]],{{1;;1;;0}}],"
+            "FlattenAt[<|a->g[x,y]|>,{{{1,Key[a]}}}],"
+            "FlattenAt[<|a->g[x,y]|>,Key[a]],$MessageList,"
+            "(Unprotect[FlattenAt];ClearAll[FlattenAt];"
+            "FlattenAt[q__]:=HoldComplete[q];"
+            "FlattenAt[f[g[a,b]],1])}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "scan traversal levels recovery operators and diagnostics",
         (
             "expr",
@@ -2653,6 +2740,70 @@ CASES = (
             "tungstenScanI,$MessageList,"
             "(Unprotect[Scan];ClearAll[Scan];"
             "Scan[x__]:=HoldComplete[x];Scan[f,{a,b}])}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "OrderingBy MinimalBy and MaximalBy ordering recovery and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenByI,tungstenByJ,tungstenByKey,"
+            "tungstenByCompare,tungstenByLog,tungstenByK1,"
+            "tungstenByK2,tungstenByOrderingAlias,"
+            "tungstenByMinimalAlias];"
+            "tungstenByI=0;tungstenByJ=0;tungstenByLog={};"
+            "tungstenByKey[x_]:=(tungstenByI++;Part[f[x],99];x);"
+            "tungstenByCompare[a_,b_]:=(tungstenByJ++;Less[a,b]);"
+            "tungstenByK1[x_]:=(AppendTo[tungstenByLog,"
+            "HoldComplete[k1,x]];Last[x]);"
+            "tungstenByK2[x_]:=(AppendTo[tungstenByLog,"
+            "HoldComplete[k2,x]];First[x]);"
+            "tungstenByOrderingAlias=OrderingBy;"
+            "tungstenByMinimalAlias=System`MinimalBy;"
+            "{OrderingBy[{{a,2},{b,1},{c,3}},Last],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},Last],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},{Last}],"
+            "OrderingBy[{d,c,b,a},Identity,-2],"
+            "OrderingBy[{d,c,b,a},Identity,0],"
+            "OrderingBy[{3,1,2},Identity,All,Greater],"
+            "OrderingBy[f[c,a,b],Identity],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},"
+            "{tungstenByK1,tungstenByK2}],tungstenByLog,"
+            "OrderingBy[{{c,2},{a,2},{b,1}},Last,All,Less,"
+            "SameTest->(True&)],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},{Last},All,Less,"
+            "SameTest->(False&)],"
+            "MinimalBy[{{a,1},{b,2},{c,1}},Last],"
+            "MinimalBy[{3,1,2,1},Identity,2],"
+            "MaximalBy[{3,1,3,2},Identity,3],"
+            "MaximalBy[{3,1,2},Identity,UpTo[2]],"
+            "MinimalBy[<|a->2,b:>1,c->1|>,Identity],"
+            "MaximalBy[h[1,3,2],Identity,2],"
+            "MinimalBy[System`List[3,1,2],System`List[Identity]],"
+            "MinimalBy[f[],Identity,bad],"
+            "MaximalBy[<||>,Identity,-1],"
+            "OrderingBy[Last][{{a,2},{b,1}}],"
+            "System`OrderingBy[Last][{{a,2},{b,1}}],"
+            "Global`OrderingBy[Last][{{a,2},{b,1}}],"
+            "tungstenByOrderingAlias[Last][{{a,2},{b,1}}],"
+            "tungstenByMinimalAlias[Identity][{3,1,2}],"
+            "System`OrderingBy[Unevaluated[g[1+1]],Last],"
+            "Global`OrderingBy[Unevaluated[g[1+1]],Last],"
+            "OrderingBy[{3,1,2},tungstenByKey,bad,"
+            "tungstenByCompare],tungstenByI,tungstenByJ,"
+            "OrderingBy[],OrderingBy[a,Identity],"
+            "OrderingBy[{1},Identity,All,Less,Foo->bar],"
+            "OrderingBy[Identity][a,b],MinimalBy[],"
+            "MinimalBy[a,Identity],MinimalBy[{1},Identity,-1],"
+            "MinimalBy[{1},Identity,UpTo[x]],"
+            "MinimalBy[{1},Identity,UpTo[]],"
+            "MinimalBy[Identity][a,b],MaximalBy[],"
+            "MaximalBy[a,Identity],MaximalBy[{1},Identity,-1],"
+            "$MessageList}",
             "--form",
             "input",
         ),

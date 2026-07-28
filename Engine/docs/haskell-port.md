@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T14:50:11Z
-- Repository HEAD: 7408f48d46284855b78f5575b50b079785aa2c37
+- Updated (UTC): 2026-07-28T15:32:50Z
+- Repository HEAD: 138333075d9897a3b9c7245a9b0dfe9483dbdb9b
 
 ## Purpose
 
@@ -137,6 +137,18 @@ adds postorder level traversal with optional ordinary-call head visits, associat
 semantics, ignored callback results, recoverable continuation, and exact direct/operator context
 boundaries.
 
+Ordered keyed selection now includes `OrderingBy`, `MinimalBy`, and `MaximalBy`, with Python-stable
+callback scheduling, scalar-versus-list tie behavior, custom ordering and `SameTest`, count forms,
+association-preserving extrema, post-decoration validation, and exact direct/operator context
+boundaries. `FlattenAt` applies deduplicated nested and batched selectors deepest/rightmost first,
+including sparse densification, association raw-rule behavior, qualified selector constructors,
+effect retention, and normalized rebuilt arguments.
+
+Persistent sessions now own raw `In`, `InString`, `Out`, and historical `MessageList[n]` dispatch.
+Line specifications evaluate exactly once with effects and non-local control intact; message lookup
+projects the retained visible stream, while current `$MessageList` remains the generated stream.
+`$HistoryLength` pruning keeps input, output, source, print, and visible-message histories aligned.
+
 Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
 and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides
 dynamic `Enclose` scopes plus `Confirm`, `ConfirmBy`, `ConfirmMatch`, and `ConfirmAssert`.
@@ -162,7 +174,7 @@ features yet:
 
 - the complete Wolfram tokenizer, box-language and StandardForm parser, including the broad named infix-operator precedence table;
 - operational enforcement
-  of the mutable iteration, precision, root-degree, history, and output-size settings, plus main-loop
+  of the mutable iteration, precision, root-degree, and output-size settings, plus main-loop
   `$PreRead`/`$Pre`/`$Post`/`$PrePrint` hook application; `$MessagePrePrint` is implemented for
   explicit `Message` insertions and assertion diagnostics;
 - nested positional-slot scope diagnostics, session-aware callback evaluation for aggregation and array reducers

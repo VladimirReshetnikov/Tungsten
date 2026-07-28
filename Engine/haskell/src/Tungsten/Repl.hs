@@ -26,6 +26,7 @@ data ReplState = ReplState
   , replInputHistory :: !(Map.Map Integer Expr)
   , replInputStrings :: !(Map.Map Integer Text)
   , replOutputHistory :: !(Map.Map Integer Expr)
+  , replMessageHistory :: !(Map.Map Integer [EvaluationMessage])
   }
   deriving (Eq, Show)
 
@@ -44,6 +45,7 @@ initialReplState =
     , replInputHistory = Map.empty
     , replInputStrings = Map.empty
     , replOutputHistory = Map.empty
+    , replMessageHistory = Map.empty
     }
 
 evaluateReplLine :: ReplState -> Text -> IO ReplStep
@@ -53,29 +55,39 @@ evaluateReplLine state source
       Left parseError -> pure (ReplFailure (parseErrorMessage parseError) transientState)
       Right parsed -> do
         let line = replNextLine state
-            withInput =
+            withUnprunedInput =
               transientState
                 { replInputHistory = Map.insert line parsed (replInputHistory state)
                 , replInputStrings = Map.insert line source (replInputStrings state)
                 }
-            resolved = resolveHistory withInput parsed
-        evaluateInSession transientSession resolved >>= \case
+            withInput =
+              pruneReplHistory
+                line
+                transientSession
+                withUnprunedInput
+            activeSession = installReplHistory line withInput transientSession
+            activeState = withInput {replSession = activeSession}
+        evaluateInSession activeSession parsed >>= \case
           Left evaluationError ->
             pure
               ( ReplFailure
                   (evaluationErrorMessage evaluationError)
-                  withInput {replNextLine = line + 1}
+                  activeState {replNextLine = line + 1}
               )
           Right (result, updatedSession) -> pure $ case exitCode result of
-            Just code -> ReplExit code withInput {replSession = updatedSession}
+            Just code ->
+              let finished =
+                    finishReplHistory
+                      line
+                      Nothing
+                      activeState
+                      updatedSession
+               in ReplExit code finished
             Nothing ->
-              let updated =
-                    withInput
-                      { replSession = updatedSession
-                      , replNextLine = line + 1
-                      , replOutputHistory = Map.insert line result (replOutputHistory state)
-                      }
-               in ReplValue line result updated
+              ReplValue
+                line
+                result
+                (finishReplHistory line (Just result) activeState updatedSession)
  where
   transientSession =
     (replSession state)
@@ -85,24 +97,59 @@ evaluateReplLine state source
       }
   transientState = state {replSession = transientSession}
 
-resolveHistory :: ReplState -> Expr -> Expr
-resolveHistory state expression = case expression of
-  Symbol "$Line" -> Integer (replNextLine state)
-  Call (Symbol "Out") [] -> outputAt (replNextLine state - 1)
-  Call (Symbol "Out") [Integer index]
-    | index < 0 -> outputAt (replNextLine state + index)
-    | otherwise -> outputAt index
-  Call (Symbol "In") [Integer index] ->
-    maybe expression id (Map.lookup index (replInputHistory state))
-  Call (Symbol "InString") [Integer index] ->
-    maybe expression String (Map.lookup index (replInputStrings state))
-  Call (Symbol headName) _
-    | headName `elem` ["Hold", "HoldForm", "Unevaluated"] -> expression
-  Call expressionHead arguments' ->
-    Call (resolveHistory state expressionHead) (map (resolveHistory state) arguments')
-  _ -> expression
- where
-  outputAt index = maybe expression id (Map.lookup index (replOutputHistory state))
+installReplHistory
+  :: Integer
+  -> ReplState
+  -> EvaluationSession
+  -> EvaluationSession
+installReplHistory line state session =
+  session
+    { sessionHistoryLine = Just line
+    , sessionInputHistory = replInputHistory state
+    , sessionInputStringHistory = replInputStrings state
+    , sessionOutputHistory = replOutputHistory state
+    , sessionMessageHistory = replMessageHistory state
+    }
+
+finishReplHistory
+  :: Integer
+  -> Maybe Expr
+  -> ReplState
+  -> EvaluationSession
+  -> ReplState
+finishReplHistory line output state session =
+  let withEffects =
+        state
+          { replNextLine = line + 1
+          , replOutputHistory =
+              maybe
+                (replOutputHistory state)
+                (\value -> Map.insert line value (replOutputHistory state))
+                output
+          , replMessageHistory =
+              Map.insert
+                line
+                (sessionVisibleMessages session)
+                (replMessageHistory state)
+          }
+      retained = pruneReplHistory line session withEffects
+   in retained
+        { replSession = installReplHistory line retained session
+        }
+
+pruneReplHistory :: Integer -> EvaluationSession -> ReplState -> ReplState
+pruneReplHistory line session state =
+  case sessionHistoryLengthLimit session of
+    Nothing -> state
+    Just retainedLength ->
+      let cutoff = line - retainedLength + 1
+          retained = Map.filterWithKey (\index _ -> index >= cutoff)
+       in state
+            { replInputHistory = retained (replInputHistory state)
+            , replInputStrings = retained (replInputStrings state)
+            , replOutputHistory = retained (replOutputHistory state)
+            , replMessageHistory = retained (replMessageHistory state)
+            }
 
 exitCode :: Expr -> Maybe Int
 exitCode = \case
