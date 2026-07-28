@@ -1736,6 +1736,60 @@ CASES = (
         0,
     ),
     (
+        "confirm assert and assertion state effects and messages",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first=Enclose[ConfirmAssert[True]];'
+            'second=Enclose[ConfirmAssert[False,info],"Test"];'
+            'third=Enclose[ConfirmAssert[(Print["test"];False),'
+            '(Print["info"];info),(Print["tag"];tag)],'
+            '(Print["handler"];"Information"),tag];'
+            'disabled=System`Assert[Print["held"];False];'
+            'On[System`Assert];'
+            'success=Assert[(Print["true-test"];True),'
+            '(Print["skipped-tag"];tag)];'
+            'failure=Check[Assert[(Print["false-test"];False),'
+            '(Print["failure-tag"];tag)],caught];'
+            'quieted=Check[Quiet[Assert[False]],missed];'
+            'Off[Assert::asrtfl];silent=Check[Assert[False],missed];'
+            'On[Assert::asrtfl];'
+            'control=Catch[ConfirmAssert[Throw[x],Print["late"]]];'
+            'malformed={ConfirmAssert[],Assert[]};Off[Assert];'
+            '{first,second,third,disabled,success,failure,quieted,silent,'
+            'control,malformed,Global`ConfirmAssert[1+1,2+2],'
+            'Global`Assert[1+1;False],$MessageList}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "message pre-print hooks transform insertions and skip disabled messages",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'i=0;j=0;$MessagePrePrint=Function[x,'
+            '(i++;If[i==1,($MessagePrePrint=FullForm;HoldForm[x]),x])];'
+            'Off[g::tag];Message[g::tag,(j=1;a)];'
+            'Message[f::tag,{a},{b}];'
+            '$MessagePrePrint=Function[x,(Off[h::tag];HoldForm[x])];'
+            'Message[h::tag,c];Message[h::tag,d];'
+            '$MessagePrePrint=OutputForm;'
+            'Message[output::tag,1+2 I,a[b]];'
+            '$MessagePrePrint=CForm;'
+            'Message[cform::tag,1+2 I,a[b]];'
+            'asserted=(On[Assert];$MessagePrePrint=HoldForm;'
+            'Check[Assert[False,1+1],caught]);'
+            '{i,j,asserted,$MessagePrePrint,$MessageList}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "dense array construction origins and callables",
         (
             "expr",

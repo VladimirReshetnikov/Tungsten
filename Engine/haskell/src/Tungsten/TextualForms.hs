@@ -500,6 +500,8 @@ cLikeText fortran = go
     Rational numerator denominator ->
       "(" <> T.pack (show numerator) <> (if fortran then ".0/" else "/") <> T.pack (show denominator) <> ")"
     Real source -> source
+    Complex realPart imaginaryPart ->
+      "Complex(" <> go realPart <> "," <> go imaginaryPart <> ")"
     SpecialReal kind -> specialRealName kind
     String source -> wlString source
     Call (Symbol name) values -> case (shortSystemName name, values) of

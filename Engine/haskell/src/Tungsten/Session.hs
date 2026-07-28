@@ -839,6 +839,10 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionConfirmBy depth session arguments'
       Call (Symbol "ConfirmMatch") arguments' ->
         evaluateSessionConfirmMatch depth session arguments'
+      Call (Symbol "ConfirmAssert") arguments' ->
+        evaluateSessionConfirmAssert depth session arguments'
+      Call (Symbol "Assert") arguments' ->
+        evaluateSessionAssert depth session arguments'
       Call (Symbol "Abort") arguments' ->
         evaluateSessionAbort session arguments'
       Call (Symbol "CheckAbort") arguments' ->
@@ -1359,6 +1363,8 @@ directSessionDispatchHead name =
              , "Confirm"
              , "ConfirmBy"
              , "ConfirmMatch"
+             , "ConfirmAssert"
+             , "Assert"
              , "Abort"
              , "CheckAbort"
              , "AbortProtect"
@@ -3199,16 +3205,7 @@ evaluateSessionMessage depth session = \case
     | isSessionMessageName messageName -> do
         (insertions, updated) <-
           evaluateArguments depth session insertionExpressions
-        Right
-          ( Symbol "Null"
-          , appendSessionMessage
-              messageName
-              ( if null insertions
-                  then "Message generated."
-                  else T.intercalate ", " (map renderMessageInsertion insertions)
-              )
-              updated
-          )
+        appendSessionMessageInsertions depth updated messageName insertions
     | otherwise ->
         sessionFailure
           session
@@ -3444,13 +3441,63 @@ isSessionMessageName = \case
   _ -> False
 
 renderMessageInsertion :: Expr -> Text
-renderMessageInsertion = \case
-  Call (Symbol formHead) (payload : _)
-    | isSessionSystemHead "FullForm" formHead -> fullForm payload
-    | any (`isSessionSystemHead` formHead) ["InputForm", "StandardForm"] ->
-        inputForm payload
-  String value -> value
-  expression -> inputForm expression
+renderMessageInsertion = TextualForms.displayOutputText
+
+appendSessionMessageInsertions
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+appendSessionMessageInsertions depth session messageName insertions
+  | sessionMessageIsDisabled messageName session =
+      Right
+        ( Symbol "Null"
+        , appendSessionMessage messageName "Message generated." session
+        )
+  | otherwise = do
+      (messageText, formattedSession) <-
+        formatSessionMessageInsertions depth session insertions
+      Right
+        ( Symbol "Null"
+        , appendEnabledSessionMessage messageName messageText formattedSession
+        )
+
+formatSessionMessageInsertions
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Text
+formatSessionMessageInsertions depth = go []
+ where
+  go rendered session [] =
+    Right
+      ( if null rendered
+          then "Message generated."
+          else T.intercalate ", " (reverse rendered)
+      , session
+      )
+  go rendered session (insertion : rest) = do
+    (transformed, updated) <-
+      applySessionMessagePrePrint depth session insertion
+    go (renderMessageInsertion transformed : rendered) updated rest
+
+applySessionMessagePrePrint
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+applySessionMessagePrePrint depth session insertion =
+  case symbolOwnValueFor "$MessagePrePrint" session of
+    Nothing -> Right (insertion, session)
+    Just _ -> do
+      (function, updated) <-
+        evaluateSessionAt (depth + 1) session (Symbol "$MessagePrePrint")
+      case function of
+        Symbol name
+          | isSessionSystemHead "Automatic" name ->
+              Right (insertion, updated)
+        _ -> evaluateSessionCallable depth updated function [insertion]
 
 evaluateSessionPrint
   :: Int
@@ -8448,6 +8495,72 @@ evaluateSessionConfirmMatch depth session arguments'
   | otherwise =
       sessionFailure session "ConfirmMatch expects two, three, or four arguments."
 
+evaluateSessionConfirmAssert
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionConfirmAssert depth session arguments'
+  | length arguments' `notElem` [1, 2, 3] =
+      sessionFailure
+        session
+        "ConfirmAssert expects one, two, or three arguments."
+  | testExpression : _ <- arguments' = do
+      (testResult, testedSession) <-
+        evaluateSessionAt (depth + 1) session testExpression
+      if testResult == Symbol "True"
+        then Right (Symbol "Null", testedSession)
+        else do
+          (information, informationSession) <-
+            evaluateConfirmationInformation depth testedSession arguments' 1
+          (tag, taggedSession) <-
+            evaluateConfirmationTag depth informationSession arguments' 2
+          raiseSessionConfirmation
+            depth
+            taggedSession
+            ( sessionConfirmationFailure
+                "ConfirmAssert"
+                testResult
+                information
+                [("Test", testResult)]
+            )
+            tag
+  | otherwise =
+      sessionFailure
+        session
+        "ConfirmAssert expects one, two, or three arguments."
+
+evaluateSessionAssert
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAssert depth session arguments'
+  | length arguments' `notElem` [1, 2] =
+      sessionFailure session "Assert expects one or two arguments."
+  | not (sessionAssertEnabled session) =
+      Right (Call (Symbol "Assert") arguments', session)
+  | testExpression : _ <- arguments' = do
+      (testResult, testedSession) <-
+        evaluateSessionAt (depth + 1) session testExpression
+      if testResult == Symbol "True"
+        then Right (Symbol "Null", testedSession)
+        else do
+          (tag, taggedSession) <- case drop 1 arguments' of
+            tagExpression : _ ->
+              evaluateSessionAt (depth + 1) testedSession tagExpression
+            [] -> Right (Symbol "Null", testedSession)
+          appendSessionMessageInsertions
+            depth
+            taggedSession
+            ( Call
+                (Symbol "MessageName")
+                [Symbol "Assert", String "asrtfl"]
+            )
+            [testResult, tag]
+  | otherwise =
+      sessionFailure session "Assert expects one or two arguments."
+
 evaluateConfirmationInformation
   :: Int
   -> EvaluationSession
@@ -10078,18 +10191,40 @@ appendSessionMessage :: Expr -> Text -> EvaluationSession -> EvaluationSession
 appendSessionMessage fullName messageText session =
   if sessionMessageIsDisabled fullName attempted
     then attempted
-    else case suppressedDepth of
-      Nothing ->
-        recorded
-          { sessionVisibleMessages =
-              sessionVisibleMessages recorded <> [message]
-          }
-      Just _ -> recorded
+    else recordEnabledSessionMessage fullName messageText attempted
  where
   attempted =
     session
       { sessionMessageAttemptCount = sessionMessageAttemptCount session + 1
       }
+
+appendEnabledSessionMessage
+  :: Expr
+  -> Text
+  -> EvaluationSession
+  -> EvaluationSession
+appendEnabledSessionMessage fullName messageText session =
+  recordEnabledSessionMessage fullName messageText attempted
+ where
+  attempted =
+    session
+      { sessionMessageAttemptCount = sessionMessageAttemptCount session + 1
+      }
+
+recordEnabledSessionMessage
+  :: Expr
+  -> Text
+  -> EvaluationSession
+  -> EvaluationSession
+recordEnabledSessionMessage fullName messageText attempted =
+  case suppressedDepth of
+    Nothing ->
+      recorded
+        { sessionVisibleMessages =
+            sessionVisibleMessages recorded <> [message]
+        }
+    Just _ -> recorded
+ where
   suppressedDepth =
     quietSuppressionDepth fullName (sessionQuietScopes attempted)
   recorded =

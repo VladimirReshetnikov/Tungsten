@@ -1367,6 +1367,10 @@ checkEvaluationSession = do
           , "{Enclose[1 + Confirm[2]], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Expression\"], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Information\"], Enclose[ConfirmBy[3, IntegerQ]], Enclose[ConfirmBy[3, StringQ, \"info\"], \"Function\"], Enclose[ConfirmMatch[3, _Integer]], Enclose[ConfirmMatch[3, _String, \"info\"], \"Pattern\"]}"
           , "List[3, Missing[\"Nope\"], \"info\", 3, StringQ, 3, Blank[String]]"
           )
+        , ( "confirm assert values assertion state and qualification"
+          , "{Enclose[ConfirmAssert[True]],Enclose[ConfirmAssert[False,info],\"Information\"],Enclose[ConfirmAssert[False,info],\"Test\"],System`ConfirmAssert[True],Global`ConfirmAssert[1+1,2+2],System`Assert[1+1;False],Global`Assert[1+1;False],On[System`Assert],Assert[True],Off[System`Assert],Assert[False]}"
+          , "List[Null, info, False, Null, Global`ConfirmAssert[2, 4], Assert[CompoundExpression[Plus[1, 1], False]], Global`Assert[False], Null, Null, Null, Assert[False]]"
+          )
         , ( "tagged confirmations route to the nearest matching enclose"
           , "{Enclose[Confirm[$Failed, \"info\", tag], \"Information\", tag], Enclose[Enclose[Confirm[$Failed, \"outer\", outer], inner, inner], \"Information\", outer]}"
           , "List[\"info\", \"outer\"]"
@@ -1819,6 +1823,21 @@ checkEvaluationSession = do
           , "\"i\""
           , ["info", "tag", "handler"]
           )
+        , ( "confirm assert preserves test information tag and handler order"
+          , "Enclose[ConfirmAssert[(Print[\"test\"];False),(Print[\"info\"];info),(Print[\"tag\"];tag)],(Print[\"handler\"];\"Information\"),tag]"
+          , "info"
+          , ["test", "info", "tag", "handler"]
+          )
+        , ( "assert state holds disabled calls and skips successful tags"
+          , "{Assert[Print[\"disabled\"];False],On[Assert],Assert[(Print[\"true-test\"];True),(Print[\"skipped-tag\"];tag)],Check[Assert[(Print[\"false-test\"];False),(Print[\"failure-tag\"];tag)],caught],Off[Assert],Assert[Print[\"held-again\"];False]}"
+          , "List[Assert[CompoundExpression[Print[\"disabled\"], False]], Null, Null, caught, Null, Assert[CompoundExpression[Print[\"held-again\"], False]]]"
+          , ["true-test", "false-test", "failure-tag"]
+          )
+        , ( "confirm assert and assert propagate test control before later arguments"
+          , "{Catch[ConfirmAssert[(Print[\"test\"];Throw[x]),Print[\"info\"],Print[\"tag\"]]],CheckAbort[ConfirmAssert[Abort[],Print[\"info2\"],Print[\"tag2\"]],caught],On[Assert],Catch[Assert[Throw[y],Print[\"assert-tag\"]]],CheckAbort[Assert[Abort[],Print[\"assert-tag2\"]],caught2],Off[Assert]}"
+          , "List[x, caught, Null, y, caught2, Null]"
+          , ["test"]
+          )
         , ( "with cleanup runs before an enclosed confirmation handler"
           , "Enclose[WithCleanup[Confirm[$Failed, \"bad\"], Print[\"cleanup\"]], \"Information\"]"
           , "\"bad\""
@@ -2244,6 +2263,77 @@ checkEvaluationSession = do
               )
             ]
           )
+        , ( "unhandled confirm asserts preserve test failure fields"
+          , "{ConfirmAssert[False],ConfirmAssert[False,info],$MessageList}"
+          , "List[Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", ConfirmAssert], Rule[\"Expression\", False], Rule[\"Information\", Null], Rule[\"Test\", False]]], Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", ConfirmAssert], Rule[\"Expression\", False], Rule[\"Information\", info], Rule[\"Test\", False]]], List[HoldForm[MessageName[Confirm, \"confirmnotag\"]], HoldForm[MessageName[Confirm, \"confirmnotag\"]]]]"
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            , ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
+        , ( "assert failures render tests and string tags exactly"
+          , "On[Assert];{Assert[False,tag],Assert[\"bad\",\"tag\"],$MessageList}"
+          , "List[Null, Null, List[HoldForm[MessageName[Assert, \"asrtfl\"]], HoldForm[MessageName[Assert, \"asrtfl\"]]]]"
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, tag"
+              )
+            , ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: bad, tag"
+              )
+            ]
+          )
+        , ( "assert failures apply the message pre-print hook"
+          , "$MessagePrePrint=HoldForm;On[Assert];Assert[False,1+1]"
+          , "Null"
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: HoldForm[False], HoldForm[2]"
+              )
+            ]
+          )
+        , ( "message pre-print hooks thread state and skip disabled messages"
+          , "i=0;j=0;$MessagePrePrint=Function[x,(i++;If[i==1,($MessagePrePrint=FullForm;HoldForm[x]),x])];Off[g::tag];Message[g::tag,(j=1;a)];Message[f::tag,{a},{b}];{i,j,$MessagePrePrint,$MessageList}"
+          , "List[1, 1, FullForm, List[HoldForm[MessageName[f, \"tag\"]]]]"
+          , [ ( "f::tag"
+              , "MessageName[f, \"tag\"]"
+              , "f::tag: HoldForm[{a}], List[b]"
+              )
+            ]
+          )
+        , ( "message pre-print hooks render output and C forms"
+          , "$MessagePrePrint=OutputForm;Message[f::x,1+2 I,a[b]];$MessagePrePrint=CForm;Message[g::x,1+2 I,a[b]]"
+          , "Null"
+          , [ ( "f::x"
+              , "MessageName[f, \"x\"]"
+              , "f::x: 1 + 2*I, a[b]"
+              )
+            , ( "g::x"
+              , "MessageName[g, \"x\"]"
+              , "g::x: Complex(1,2), a(b)"
+              )
+            ]
+          )
+        , ( "message pre-print control signals stop message generation"
+          , "$MessagePrePrint=Function[x,Throw[hooked]];Catch[Message[f::tag,a]]"
+          , "hooked"
+          , []
+          )
+        , ( "message enablement is fixed before pre-print hooks run"
+          , "$MessagePrePrint=Function[x,(Off[f::tag];HoldForm[x])];Message[f::tag,a];{Message[f::tag,b],$MessageList}"
+          , "List[Null, List[HoldForm[MessageName[f, \"tag\"]]]]"
+          , [ ( "f::tag"
+              , "MessageName[f, \"tag\"]"
+              , "f::tag: HoldForm[a]"
+              )
+            ]
+          )
         , ( "confirmation handlers cannot recatch their own failure"
           , "Enclose[Confirm[$Failed], Function[failure, Confirm[$Failed]]]"
           , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
@@ -2271,6 +2361,27 @@ checkEvaluationSession = do
             , ( "ConfirmMatch::error"
               , "MessageName[ConfirmMatch, \"error\"]"
               , "ConfirmMatch::error: ConfirmMatch expects two, three, or four arguments."
+              )
+            ]
+          )
+        , ( "malformed confirm assert and assert calls hold every argument"
+          , "{ConfirmAssert[],ConfirmAssert[Print[\"t\"],Print[\"i\"],Print[\"tag\"],Print[\"extra\"]],Assert[],Assert[Print[\"a\"],Print[\"b\"],Print[\"c\"]],$MessageList}"
+          , "List[ConfirmAssert[], ConfirmAssert[Print[\"t\"], Print[\"i\"], Print[\"tag\"], Print[\"extra\"]], Assert[], Assert[Print[\"a\"], Print[\"b\"], Print[\"c\"]], List[HoldForm[MessageName[ConfirmAssert, \"error\"]], HoldForm[MessageName[ConfirmAssert, \"error\"]], HoldForm[MessageName[Assert, \"error\"]], HoldForm[MessageName[Assert, \"error\"]]]]"
+          , [ ( "ConfirmAssert::error"
+              , "MessageName[ConfirmAssert, \"error\"]"
+              , "ConfirmAssert::error: ConfirmAssert expects one, two, or three arguments."
+              )
+            , ( "ConfirmAssert::error"
+              , "MessageName[ConfirmAssert, \"error\"]"
+              , "ConfirmAssert::error: ConfirmAssert expects one, two, or three arguments."
+              )
+            , ( "Assert::error"
+              , "MessageName[Assert, \"error\"]"
+              , "Assert::error: Assert expects one or two arguments."
+              )
+            , ( "Assert::error"
+              , "MessageName[Assert, \"error\"]"
+              , "Assert::error: Assert expects one or two arguments."
               )
             ]
           )
@@ -3321,6 +3432,24 @@ checkEvaluationSession = do
               )
             ]
           )
+        , ( "assert messages respect Quiet Off On and Check scopes"
+          , "On[Assert];{Check[Quiet[Assert[False]],caught],Off[Assert::asrtfl],Check[Assert[False],caught],On[Assert::asrtfl],Check[Assert[False],caught],$MessageList}"
+          , "List[Null, Null, Null, Null, caught, List[HoldForm[MessageName[Assert, \"asrtfl\"]], HoldForm[MessageName[Assert, \"asrtfl\"]]]]"
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, Null"
+              )
+            ]
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, Null"
+              )
+            , ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, Null"
+              )
+            ]
+          )
         , ( "Quiet on specifications override off specifications"
           , "Quiet[Message[f::a]; Message[g::b], All, f::a]; $MessageList"
           , "List[HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[g, \"b\"]]]"
@@ -3681,6 +3810,16 @@ checkRepl = do
       "Message[f::tag]; $MessageList"
   resetMessageListStep <-
     evaluateReplLine (replStateFrom enabledMessageStep) "$MessageList"
+  assertOnStep <- evaluateReplLine initialReplState "On[Assert]"
+  assertedStep <-
+    evaluateReplLine
+      (replStateFrom assertOnStep)
+      "Check[Assert[False], caught]"
+  assertOffStep <- evaluateReplLine (replStateFrom assertedStep) "Off[Assert]"
+  heldAssertStep <-
+    evaluateReplLine
+      (replStateFrom assertOffStep)
+      "Assert[Print[\"held\"]; False]"
   printStep <- evaluateReplLine thirdState "Print[\"x\", 2]; 1"
   printSequenceStep <- evaluateReplLine thirdState "Print[Sequence[1, 2]]"
   printRationalStep <- evaluateReplLine thirdState "Print[1/2]"
@@ -3771,6 +3910,28 @@ checkRepl = do
             "REPL current message list resets on the next input"
             (Just (Call (Symbol "List") []))
             (replValueFrom resetMessageListStep)
+        , assertEqual
+            "REPL assertion enabling persists across inputs"
+            (Just (Symbol "caught"))
+            (replValueFrom assertedStep)
+        , assertEqual
+            "REPL assertion disabling restores held evaluation"
+            ( Just
+                ( Call
+                    (Symbol "Assert")
+                    [ Call
+                        (Symbol "CompoundExpression")
+                        [ Call (Symbol "Print") [String "held"]
+                        , Symbol "False"
+                        ]
+                    ]
+                )
+            )
+            (replValueFrom heldAssertStep)
+        , assertEqual
+            "REPL disabled assertions suppress held effects"
+            []
+            (sessionPrints (replSession (replStateFrom heldAssertStep)))
         , assertEqual
             "REPL captures Print output"
             ["x2"]
