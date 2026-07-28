@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,6 +24,7 @@ std::vector<std::size_t> utf8_code_point_boundaries(std::string_view text);
 bool unicode_is_letter(std::uint32_t value) noexcept;
 bool unicode_is_digit(std::uint32_t value) noexcept;
 bool unicode_is_decimal(std::uint32_t value) noexcept;
+std::optional<unsigned> unicode_decimal_value(std::uint32_t value) noexcept;
 bool unicode_is_punctuation(std::uint32_t value) noexcept;
 bool unicode_is_alphanumeric(std::uint32_t value) noexcept;
 bool unicode_is_whitespace(std::uint32_t value) noexcept;

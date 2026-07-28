@@ -20,6 +20,20 @@ string(JSON expr_full_form GET "${expr_json}" full_form)
 if(NOT expr_full_form STREQUAL "Plus[1, Times[2, Power[x, 3]]]")
     message(FATAL_ERROR "unexpected expr result: ${expr_full_form}")
 endif()
+execute_process(
+    COMMAND "${CLI}" expr parse --code "List[1٢३, 1_000]" --form input
+    RESULT_VARIABLE unicode_expr_status
+    OUTPUT_VARIABLE unicode_expr_json
+    ERROR_VARIABLE unicode_expr_error)
+if(NOT unicode_expr_status EQUAL 0)
+    message(FATAL_ERROR "Unicode integer expr parse failed: ${unicode_expr_error}")
+endif()
+string(JSON unicode_expr_full_form GET "${unicode_expr_json}" full_form)
+if(NOT unicode_expr_full_form STREQUAL "List[123, Times[1, Blank[], 0]]")
+    message(FATAL_ERROR
+        "Unicode digits or Wolfram underscore syntax parsed incorrectly: "
+        "${unicode_expr_full_form}")
+endif()
 
 execute_process(
     COMMAND "${CLI}" expr evaluate --code "$Line"
@@ -341,13 +355,73 @@ string(JSON wide_seed_first GET "${wide_seed_json}" sample_files 0 relative_path
 if(NOT wide_seed_first STREQUAL "01.wl")
     message(FATAL_ERROR "wide parser-corpus seed did not match CPython")
 endif()
+execute_process(
+    COMMAND "${CLI}" parser-corpus discover --corpus-root "${seed_corpus_root}"
+        --shuffle --seed 1_361_129_467_683_753_853_853_498_429_727_072_858_169
+        --sample 1
+    RESULT_VARIABLE separated_seed_status
+    OUTPUT_VARIABLE separated_seed_json
+    ERROR_VARIABLE separated_seed_error)
+if(NOT separated_seed_status EQUAL 0)
+    message(FATAL_ERROR
+        "underscore-separated parser-corpus seed failed: ${separated_seed_error}")
+endif()
+string(JSON separated_seed_first GET "${separated_seed_json}" sample_files 0 relative_path)
+if(NOT separated_seed_first STREQUAL "01.wl")
+    message(FATAL_ERROR "underscore-separated seed did not match CPython")
+endif()
+execute_process(
+    COMMAND "${CLI}" parser-corpus discover --corpus-root "${seed_corpus_root}"
+        --shuffle --seed -١ --sample ١
+    RESULT_VARIABLE unicode_integer_status
+    OUTPUT_VARIABLE unicode_integer_json
+    ERROR_VARIABLE unicode_integer_error)
+if(NOT unicode_integer_status EQUAL 0)
+    message(FATAL_ERROR
+        "Unicode decimal parser-corpus options failed: ${unicode_integer_error}")
+endif()
+string(JSON unicode_integer_first GET "${unicode_integer_json}" sample_files 0 relative_path)
+if(NOT unicode_integer_first STREQUAL "07.wl")
+    message(FATAL_ERROR "Unicode decimal seed did not match CPython")
+endif()
+string(REPEAT "9" 128 arbitrary_integer_option)
+execute_process(
+    COMMAND "${CLI}" parser-corpus discover --corpus-root "${seed_corpus_root}"
+        --max-files "${arbitrary_integer_option}"
+        --sample "${arbitrary_integer_option}"
+    RESULT_VARIABLE arbitrary_integer_status
+    OUTPUT_VARIABLE arbitrary_integer_json
+    ERROR_VARIABLE arbitrary_integer_error)
+if(NOT arbitrary_integer_status EQUAL 0)
+    message(FATAL_ERROR
+        "arbitrary-width parser-corpus options failed: ${arbitrary_integer_error}")
+endif()
+string(JSON arbitrary_integer_sample_count LENGTH
+    "${arbitrary_integer_json}" sample_files)
+if(NOT arbitrary_integer_sample_count EQUAL 12)
+    message(FATAL_ERROR
+        "arbitrary-width parser-corpus options did not preserve all files")
+endif()
+foreach(invalid_integer IN ITEMS "1__0" "1²" "١a")
+    execute_process(
+        COMMAND "${CLI}" parser-corpus discover --corpus-root "${seed_corpus_root}"
+            --shuffle --seed "${invalid_integer}" --sample 1
+        RESULT_VARIABLE invalid_integer_status
+        OUTPUT_VARIABLE invalid_integer_json
+        ERROR_VARIABLE invalid_integer_error)
+    if(NOT invalid_integer_status EQUAL 2)
+        message(FATAL_ERROR
+            "invalid integer ${invalid_integer} was accepted: "
+            "${invalid_integer_error}${invalid_integer_json}")
+    endif()
+endforeach()
 
 set(empty_corpus_root "${SMOKE_ROOT}/empty-corpus")
 file(MAKE_DIRECTORY "${empty_corpus_root}")
 file(WRITE "${empty_corpus_root}/empty.wl" "")
 execute_process(
     COMMAND "${CLI}" parser-corpus compare --corpus-root "${empty_corpus_root}"
-        --max-bytes -1 --skip-wolfram --no-write --include-results
+        --max-bytes -١ --skip-wolfram --no-write --include-results
     RESULT_VARIABLE negative_bytes_status
     OUTPUT_VARIABLE negative_bytes_json
     ERROR_VARIABLE negative_bytes_error)

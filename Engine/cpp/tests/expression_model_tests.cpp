@@ -271,6 +271,35 @@ void exact_binary64_tests() {
 
 void parser_helper_tests() {
     using namespace tungsten;
+    const auto wide_integer = std::string(512, '9');
+    check_equal(parse_input_form(wide_integer).to_full_form(), wide_integer,
+        "decimal integer parsing preserves arbitrary width");
+    check_equal(parse_input_form(u8"1٢३").to_full_form(), "123",
+        "ASCII-led Unicode Nd integer digits normalize to decimal values");
+    check_equal(parse_input_form(u8"1𝟚").to_full_form(), "12",
+        "supplementary-plane Unicode Nd integer digits normalize to decimal values");
+    check_equal(parse_input_form(u8"1٦^^f").to_full_form(), "15",
+        "Unicode Nd digits participate in an ASCII-led base prefix");
+    check_equal(parse_input_form(u8"%١٢").to_full_form(), "Out[12]",
+        "Unicode Nd digits normalize in output-history indices");
+    check_equal(parse_input_form(u8".٢").to_full_form(), u8".٢",
+        "Unicode digit real literals retain their source spelling");
+    check_equal(parse_input_form("1_000").to_full_form(),
+        "Times[1, Blank[], 0]",
+        "underscores retain Wolfram blank syntax rather than becoming separators");
+    check_equal(parse_input_form(u8"١٢٣").to_full_form(),
+        R"(\:0661\:0662\:0663)",
+        "a Unicode-led digit run retains the Python parser's symbol contract");
+
+    bool invalid_digit_rejected = false;
+    try {
+        (void)parse_input_form(u8"1²");
+    } catch (const ParseError&) {
+        invalid_digit_rejected = true;
+    }
+    check(invalid_digit_rejected,
+        "non-decimal Unicode digit characters are rejected in integer literals");
+
     for (const auto& source : {"Hold[1*^3.5]", "Hold[16^^f*^3.5]"}) {
         try {
             (void)parse_input_form(source);
