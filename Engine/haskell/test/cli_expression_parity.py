@@ -95,6 +95,26 @@ CASES = (
         0,
     ),
     (
+        "precision and accuracy metadata, effects, and contexts",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenPrecisionCliI];tungstenPrecisionCliI=0;"
+            "{Precision[1.23``20],Accuracy[1.23`20],"
+            "Precision[Complex[1.,2`20]],"
+            "Accuracy[Complex[1.,2``20]],"
+            "Precision[f[Overflow[],Underflow[]]],"
+            "Accuracy[f[Overflow[],Underflow[]]],"
+            "Precision[(tungstenPrecisionCliI++;1),"
+            "(tungstenPrecisionCliI++;2)],tungstenPrecisionCliI,"
+            "System`Precision[1.],Global`Accuracy[1.],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "complex projections and listable threading",
         (
             "expr",

@@ -1179,6 +1179,7 @@ evaluatedHeadAllowsDispatch _ evaluatedHead = case evaluatedHead of
 qualifiedAliasDispatchHeads :: [Text]
 qualifiedAliasDispatchHeads =
   [ "Abs"
+  , "Accuracy"
   , "Apart"
   , "And"
   , "Arg"
@@ -1290,6 +1291,7 @@ qualifiedAliasDispatchHeads =
   , "Plus"
   , "Power"
   , "PowerMod"
+  , "Precision"
   , "Prime"
   , "PrimePi"
   , "PrimePowerQ"
@@ -9518,12 +9520,14 @@ stripSessionTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
 stripSessionTransparentUnevaluatedArguments expressionHead
   | sessionHeadExpressionIsAny
       [ "Composition"
+      , "Accuracy"
       , "ExactNumberQ"
       , "InexactNumberQ"
       , "MachineIntegerQ"
       , "MachineNumberQ"
       , "NumberQ"
       , "Plus"
+      , "Precision"
       , "RealValuedNumberQ"
       , "RightComposition"
       , "Operate"

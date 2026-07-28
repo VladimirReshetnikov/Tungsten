@@ -45,7 +45,7 @@ import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import Data.Char (chr, isDigit, ord, toUpper)
 import Data.Functor.Identity (Identity (..))
-import Data.List (permutations, sort, sortBy, transpose)
+import Data.List (findIndex, permutations, sort, sortBy, transpose)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -72,10 +72,18 @@ import qualified Tungsten.TextualForms as TextualForms
 -- machine-real spelling, so use the same C ABI operation as the reference.
 foreign import ccall unsafe "atan2" cAtan2 :: CDouble -> CDouble -> CDouble
 
+-- Precision and accuracy metadata are serialized as exact machine-real text.
+-- Use the C-library logarithm chosen by CPython so boundary results retain the
+-- same final ulp instead of drifting through Haskell's generic logBase path.
+foreign import ccall unsafe "log10" cLog10 :: CDouble -> CDouble
+
 pythonAtan2 :: Double -> Double -> Double
 pythonAtan2 imaginaryPart realPart =
   realToFrac
     (cAtan2 (realToFrac imaginaryPart) (realToFrac realPart))
+
+pythonLog10 :: Double -> Double
+pythonLog10 value = realToFrac (cLog10 (realToFrac value))
 
 newtype EvaluationError = EvaluationError {evaluationErrorMessage :: Text}
   deriving (Eq, Show)
@@ -218,12 +226,14 @@ stripPureTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
 stripPureTransparentUnevaluatedArguments expressionHead
   | pureHeadExpressionIsAny
       [ "Composition"
+      , "Accuracy"
       , "ExactNumberQ"
       , "InexactNumberQ"
       , "MachineIntegerQ"
       , "MachineNumberQ"
       , "NumberQ"
       , "Plus"
+      , "Precision"
       , "RealValuedNumberQ"
       , "RightComposition"
       , "Operate"
@@ -737,6 +747,8 @@ reduceBuiltin headName values = case headName of
   "Complex" -> Right (reduceComplexConstructor values)
   "Overflow" -> Right (reduceSpecialRealConstructor OverflowReal values)
   "Underflow" -> Right (reduceSpecialRealConstructor UnderflowReal values)
+  "Precision" -> Right (reducePrecision values)
+  "Accuracy" -> Right (reduceAccuracy values)
   "Re" -> Right (reduceComplexComponent "Re" values)
   "Im" -> Right (reduceComplexComponent "Im" values)
   "ReIm" -> Right (reduceReIm values)
@@ -1046,10 +1058,17 @@ data RoundingOperation
 
 data RealKind
   = MachineReal
-  | MarkedReal !Integer
+  | PrecisionReal !Integer
+  | AccuracyReal !Integer
   deriving (Eq, Show)
 
 data RealInfo = RealInfo !Exact !RealKind !Int !Bool !Text
+  deriving (Eq, Show)
+
+data PrecisionValue
+  = InfinitePrecision
+  | MachinePrecisionValue
+  | FinitePrecision !Double
   deriving (Eq, Show)
 
 -- | Expand an inclusive exact integer/rational range.  Iterator evaluation
@@ -1266,10 +1285,8 @@ explicitRealDouble value
   | Just (Exact numerator denominator) <- toExact value =
       Just (fromInteger numerator / fromInteger denominator)
 explicitRealDouble (Real source) = do
-  RealInfo (Exact numerator denominator) kind _ _ machineSource <- parseRealInfo source
-  case kind of
-    MachineReal -> readMaybe (T.unpack machineSource)
-    MarkedReal _ -> Just (fromInteger numerator / fromInteger denominator)
+  RealInfo _ _ _ _ machineSource <- parseRealInfo source
+  readMaybe (T.unpack machineSource)
 explicitRealDouble _ = Nothing
 
 negateExplicitReal :: Expr -> Expr
@@ -1428,6 +1445,137 @@ reduceSpecialRealConstructor kind = \case
   [] -> SpecialReal kind
   values -> Call (Symbol (specialRealName kind)) values
 
+reducePrecision :: [Expr] -> Expr
+reducePrecision = \case
+  [value] -> case precisionValue value of
+    InfinitePrecision -> Symbol "Infinity"
+    MachinePrecisionValue -> Symbol "MachinePrecision"
+    FinitePrecision precision -> machineRealExpr precision
+  values -> Call (Symbol "Precision") values
+
+reduceAccuracy :: [Expr] -> Expr
+reduceAccuracy = \case
+  [value] -> case accuracyValue value of
+    Nothing -> Symbol "Infinity"
+    Just accuracy
+      | isInfinite accuracy ->
+          Symbol (if accuracy > 0 then "Infinity" else "-Infinity")
+      | otherwise -> machineRealExpr accuracy
+  values -> Call (Symbol "Accuracy") values
+
+precisionValue :: Expr -> PrecisionValue
+precisionValue = \case
+  Integer {} -> InfinitePrecision
+  Rational {} -> InfinitePrecision
+  Root {} -> InfinitePrecision
+  SpecialReal {} -> FinitePrecision 0
+  Real source -> case parseRealInfo source of
+    Nothing -> MachinePrecisionValue
+    Just info@(RealInfo _ kind _ _ _) -> case kind of
+      MachineReal -> MachinePrecisionValue
+      PrecisionReal precision -> FinitePrecision (fromInteger precision)
+      AccuracyReal accuracy ->
+        FinitePrecision
+          ( case decimalLog10Abs info of
+              Nothing -> 0
+              Just logarithm -> fromInteger accuracy + logarithm
+          )
+  Complex realPart imaginaryPart ->
+    combinePrecisionValues
+      [precisionValue realPart, precisionValue imaginaryPart]
+  Call _ values -> combinePrecisionValues (map precisionValue values)
+  _ -> InfinitePrecision
+
+combinePrecisionValues :: [PrecisionValue] -> PrecisionValue
+combinePrecisionValues values
+  | any isMachine values = MachinePrecisionValue
+  | finiteValues@(_ : _) <- [value | FinitePrecision value <- values] =
+      FinitePrecision (minimum finiteValues)
+  | otherwise = InfinitePrecision
+ where
+  isMachine MachinePrecisionValue = True
+  isMachine _ = False
+
+accuracyValue :: Expr -> Maybe Double
+accuracyValue = \case
+  Integer {} -> Nothing
+  Rational {} -> Nothing
+  Root {} -> Nothing
+  SpecialReal OverflowReal -> Just (negate (1 / 0))
+  SpecialReal UnderflowReal -> Just (1 / 0)
+  Real source -> do
+    info@(RealInfo _ kind _ _ _) <- parseRealInfo source
+    case kind of
+      AccuracyReal accuracy -> Just (fromInteger accuracy)
+      PrecisionReal precision ->
+        Just
+          ( case decimalLog10Abs info of
+              Nothing -> fromInteger precision
+              Just logarithm -> fromInteger precision - logarithm
+          )
+      MachineReal ->
+        let logarithm =
+              case decimalLog10Abs info of
+                Just value -> value
+                Nothing -> pythonLog10 (encodeFloat 1 (-1022))
+         in Just (53 * pythonLog10 2 - logarithm)
+  Complex realPart imaginaryPart ->
+    minimumAccuracy [accuracyValue realPart, accuracyValue imaginaryPart]
+  Call _ values -> minimumAccuracy (map accuracyValue values)
+  _ -> Nothing
+
+minimumAccuracy :: [Maybe Double] -> Maybe Double
+minimumAccuracy values = case [value | Just value <- values] of
+  [] -> Nothing
+  explicit -> Just (minimum explicit)
+
+decimalLog10Abs :: RealInfo -> Maybe Double
+decimalLog10Abs (RealInfo exactValue _ _ _ machineSource)
+  | exactValue == Exact 0 1 = Nothing
+  | otherwise =
+      case readMaybe (T.unpack machineSource) :: Maybe Double of
+        Just machineValue
+          | machineValue /= 0 -> Just (pythonLog10 (abs machineValue))
+        _ -> decimalLog10Fallback machineSource
+
+decimalLog10Fallback :: Text -> Maybe Double
+decimalLog10Fallback source = do
+  let (mantissaSource, exponentSuffix) =
+        T.break (`elem` ("eE" :: String)) source
+      exponentSource = T.drop 1 exponentSuffix
+  magnitudePower <-
+    if T.null exponentSuffix
+      then Just 0
+      else readMaybe (T.unpack exponentSource)
+  let unsignedMantissa = case T.uncons mantissaSource of
+        Just ('-', rest) -> rest
+        Just ('+', rest) -> rest
+        _ -> mantissaSource
+      (whole, fractionWithPoint) = T.breakOn "." unsignedMantissa
+      fraction =
+        if T.null fractionWithPoint
+          then ""
+          else T.drop 1 fractionWithPoint
+      digits = whole <> fraction
+  firstNonzero <- findIndex (/= '0') (T.unpack digits)
+  let significant = T.drop firstNonzero digits
+      remainingDigits = T.drop 1 significant
+      scaledSource =
+        T.take 1 significant
+          <> "."
+          <> if T.null remainingDigits then "0" else remainingDigits
+      adjusted =
+        magnitudePower
+          + toInteger (T.length whole - firstNonzero - 1)
+  scaled <- readMaybe (T.unpack scaledSource)
+  Just (fromInteger adjusted + pythonLog10 scaled)
+
+machineRealExpr :: Double -> Expr
+machineRealExpr value
+  | isNaN value = Symbol "Indeterminate"
+  | isInfinite value = SpecialReal OverflowReal
+  | otherwise = Real (formatMachineReal value)
+
 reduceComplexConstructor :: [Expr] -> Expr
 reduceComplexConstructor values = case values of
   [realPart, imaginaryPart]
@@ -1447,7 +1595,9 @@ isMachineReal _ = False
 toMachineReal :: Expr -> Expr
 toMachineReal value@(Real source) = case parseRealInfo source of
   Just (RealInfo _ MachineReal _ _ _) -> value
-  Just (RealInfo exactValue _ _ _ _) -> exactToMachineReal exactValue
+  Just (RealInfo _ (AccuracyReal _) _ _ _) -> value
+  Just (RealInfo _ (PrecisionReal _) _ _ machineSource) ->
+    maybe value machineRealExpr (readMaybe (T.unpack machineSource))
   Nothing -> value
 toMachineReal value
   | Just exactValue <- toExact value = exactToMachineReal exactValue
@@ -1455,7 +1605,7 @@ toMachineReal value = value
 
 exactToMachineReal :: Exact -> Expr
 exactToMachineReal (Exact numerator denominator) =
-  Real (formatMachineReal (fromInteger numerator / fromInteger denominator))
+  machineRealExpr (fromInteger numerator / fromInteger denominator)
 
 roundExactExpr :: RoundingOperation -> Exact -> Expr
 roundExactExpr RoundFractionalPart value = fromExact (fractionalExact value)
@@ -1487,11 +1637,18 @@ roundReal RoundFractionalPart (RealInfo _ MachineReal _ _ machineSource) = do
     else
       let remainder = machineValue - fromInteger (truncate machineValue)
        in Just (Real (formatMachineReal remainder))
-roundReal RoundFractionalPart (RealInfo value (MarkedReal precision) scale negativeZero _) =
+roundReal RoundFractionalPart (RealInfo value (PrecisionReal precision) scale negativeZero _) =
   Just
     ( Real
         ( formatFixedExact (fractionalExact value) scale negativeZero
             <> "`" <> T.pack (show precision) <> "."
+        )
+    )
+roundReal RoundFractionalPart (RealInfo value (AccuracyReal _) scale negativeZero _) =
+  Just
+    ( Real
+        ( formatFixedExact (fractionalExact value) scale negativeZero
+            <> "`0."
         )
     )
 roundReal operation (RealInfo value _ _ _ _) = Just (Integer (roundExact operation value))
@@ -1557,8 +1714,8 @@ parseRealKind :: Text -> RealKind
 parseRealKind markerSource
   | T.null markerSource = MachineReal
   | T.null specification = MachineReal
-  | isAccuracy = MarkedReal 0
-  | otherwise = MarkedReal (parseMarkerValue specification)
+  | isAccuracy = AccuracyReal (parseMarkerValue specification)
+  | otherwise = PrecisionReal (parseMarkerValue specification)
  where
   afterFirst = T.drop 1 markerSource
   isAccuracy = T.isPrefixOf "`" afterFirst
