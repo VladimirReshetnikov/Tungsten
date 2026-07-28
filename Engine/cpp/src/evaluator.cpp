@@ -8934,9 +8934,17 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
           emit_message(message, text);
       }
     }
-    return is_symbol(combiner, "Plus")
-               ? sum(std::move(terms))
-               : evaluate(call(combiner, std::move(terms)));
+    if (is_symbol(combiner, "Plus"))
+      return sum(std::move(terms));
+
+    const auto application = call(combiner, std::move(terms));
+    auto combined = evaluate(application);
+    // Python's outer evaluator re-enters an unchanged callable result once
+    // after Tr's internal combiner evaluation.  Preserve that observable
+    // diagnostic schedule without re-running successful reductions.
+    if (!immediate_signal_active() && combined == application)
+      combined = evaluate(combined);
+    return combined;
   };
 
   if (function == "Tr") {
