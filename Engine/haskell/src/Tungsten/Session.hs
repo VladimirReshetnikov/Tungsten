@@ -2996,6 +2996,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionKeyValueMap depth session values)
   Call (Symbol "Map") values ->
     Just (evaluateSessionMap depth session values)
+  Call (Symbol "Scan") values ->
+    Just (evaluateSessionScan depth session values)
   Call (Symbol "Operate") values ->
     Just (evaluateSessionOperate depth session values)
   Call (Symbol "Inner") values ->
@@ -3574,6 +3576,31 @@ evaluateSessionCallable depth session function arguments' = case function of
   Call (Symbol compositionHead) functions
     | isSessionSystemHead "RightComposition" compositionHead ->
         evaluateSessionComposition True depth session functions arguments'
+  Call (Symbol scanHead) scanArguments
+    | isSessionSystemHead "Scan" scanHead ->
+        case scanArguments of
+          [callbackFunction] -> case arguments' of
+            [subject] ->
+              evaluateSessionScan depth session [callbackFunction, subject]
+            _ ->
+              sessionFailure
+                session
+                "Scan[f] expects exactly one argument when used as an operator."
+          [callbackFunction, levelSpecification] -> case arguments' of
+            [subject] ->
+              evaluateSessionScan
+                depth
+                session
+                [callbackFunction, subject, levelSpecification]
+            _ ->
+              sessionFailure
+                session
+                "Scan[f, levelspec] expects exactly one argument when used as an operator."
+          _ ->
+            evaluateSessionAt
+              (depth + 1)
+              session
+              (Call function arguments')
   Call (Symbol associationHead) associationValues
     | isSessionSystemHead "Association" associationHead
     , [key] <- arguments'
@@ -3623,6 +3650,9 @@ isSessionStructuralCallable = \case
   Call (Symbol callableHead) arguments' ->
     isSessionSystemHead "Composition" callableHead
       || isSessionSystemHead "RightComposition" callableHead
+      || ( isSessionSystemHead "Scan" callableHead
+             && length arguments' `elem` [1, 2]
+         )
       || ( isSessionSystemHead "Failsafe" callableHead
              && length arguments' `elem` [1, 2, 3]
          )
@@ -3744,6 +3774,106 @@ evaluateSessionMap depth session = \case
       (retained <> [replaceSessionItemValue item value])
       updated
       rest
+
+evaluateSessionScan
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionScan depth session values =
+  case stripSessionHeadsOption False values of
+    (_includeHeads, [_function]) ->
+      Right (Call (Symbol "Scan") values, session)
+    (includeHeads, [function, subject]) ->
+      scanWithBounds
+        includeHeads
+        function
+        (SessionLevelBounds 1 1)
+        session
+        subject
+    (includeHeads, [function, subject, levelSpecification]) -> do
+      (bounds, boundsSession) <-
+        liftSessionLevelBounds session levelSpecification
+      scanWithBounds includeHeads function bounds boundsSession subject
+    _ ->
+      sessionFailure
+        session
+        "Scan expects a function, an expression, and an optional level specification."
+ where
+  scanWithBounds includeHeads function bounds currentSession subject = do
+    (_, updated) <-
+      scanTree includeHeads function bounds 0 currentSession subject
+    Right (Symbol "Null", updated)
+
+  scanTree includeHeads function bounds positive currentSession expression = do
+    (_, descendantsSession) <-
+      case sessionOrderedCollection expression of
+        Just collection
+          | sessionCollectionAssociation collection ->
+              scanItems
+                includeHeads
+                function
+                bounds
+                positive
+                currentSession
+                (sessionCollectionItems collection)
+        _ -> case expression of
+          Call expressionHead arguments' -> do
+            (_, headSession) <-
+              if includeHeads
+                then
+                  scanTree
+                    includeHeads
+                    function
+                    bounds
+                    (positive + 1)
+                    currentSession
+                    expressionHead
+                else Right (expressionHead, currentSession)
+            scanValues
+              includeHeads
+              function
+              bounds
+              positive
+              headSession
+              arguments'
+          _ -> Right (expression, currentSession)
+    if sessionLevelMatches bounds positive expression
+      then do
+        (_, callbackSession) <-
+          evaluateSessionCallable
+            depth
+            descendantsSession
+            function
+            [expression]
+        Right (expression, callbackSession)
+      else Right (expression, descendantsSession)
+
+  scanItems _ _ _ _ currentSession [] =
+    Right (Symbol "Null", currentSession)
+  scanItems includeHeads function bounds positive currentSession (item : rest) = do
+    (_, updated) <-
+      scanTree
+        includeHeads
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        (sessionItemValue item)
+    scanItems includeHeads function bounds positive updated rest
+
+  scanValues _ _ _ _ currentSession [] =
+    Right (Symbol "Null", currentSession)
+  scanValues includeHeads function bounds positive currentSession (value : rest) = do
+    (_, updated) <-
+      scanTree
+        includeHeads
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        value
+    scanValues includeHeads function bounds positive updated rest
 
 evaluateSessionMapIndexed
   :: Int
@@ -10244,6 +10374,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "Precision"
       , "RealValuedNumberQ"
       , "RightComposition"
+      , "Scan"
       , "Operate"
       , "Thread"
       , "Through"

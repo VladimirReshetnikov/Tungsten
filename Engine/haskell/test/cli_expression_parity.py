@@ -2596,6 +2596,68 @@ CASES = (
         ),
         0,
     ),
+    (
+        "scan traversal levels recovery operators and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenScanI,tungstenScanCallback,"
+            "tungstenScanSystemAlias,tungstenScanBareAlias];"
+            "tungstenScanI=0;"
+            "tungstenScanCallback[x_]:=(tungstenScanI++;"
+            "Part[f[x],99]);"
+            "tungstenScanSystemAlias=System`Scan;"
+            "tungstenScanBareAlias=Scan;"
+            "{Reap[Scan[Sow,g[a,h[b,c]]]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b,c]],{0,Infinity}]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b,c]],{-1}]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b,c]],-2]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b]],{0,Infinity},"
+            "Heads->True]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b]],{0,Infinity},"
+            "Heads:>False]][[2,1]],"
+            "Reap[Scan[Sow,f[g][h][x],{0,Infinity},"
+            "Heads->True]][[2,1]],"
+            "Reap[Scan[Sow,<|a->x,b:>h[y]|>,{0,Infinity},"
+            "Heads->True]][[2,1]],"
+            "Scan[tungstenScanCallback,g[a,b],{0,Infinity}],"
+            "tungstenScanI,Scan[Function[x,Nothing],{a,b}],"
+            "Scan[Function[x,Sequence[p,q]],{a,b}],"
+            "Scan[Function[x,Splice[{p,q}]],{a,b}],"
+            "(tungstenScanI=0;Catch[Scan[(tungstenScanI++;"
+            "Throw[t])&,{a,b}]]),tungstenScanI,"
+            "(tungstenScanI=0;CheckAbort["
+            "Scan[(tungstenScanI++;Abort[])&,{a,b}],caught]),"
+            "tungstenScanI,"
+            "Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],"
+            "Unevaluated[g[1+1]]]][[2,1]],"
+            "Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],"
+            "Evaluate[Unevaluated[g[1+1]]]]][[2,1]],"
+            "Reap[Scan[Sow][g[a,c]]][[2,1]],"
+            "Reap[System`Scan[Sow][g[a,c]]][[2,1]],"
+            "Reap[System`Scan[Sow,{0,Infinity}][g[a,c]]][[2,1]],"
+            "Global`Scan[Sow][g[a,c]],"
+            "Scan[f,{0,Infinity}][g[a,c]],"
+            "Reap[tungstenScanSystemAlias[Sow][g[a,c]]][[2,1]],"
+            "Reap[tungstenScanBareAlias[Sow][g[a,c]]][[2,1]],"
+            "System`Scan[HoldComplete,Unevaluated[g[1+1]]],"
+            "Global`Scan[HoldComplete,Unevaluated[g[1+1]]],"
+            "Scan[f],Scan[f][a,b],Scan[],Scan[f,a,b,c,d],"
+            "Scan[f,g[a],x],System`Scan[f][a,b],"
+            "System`Scan[f,{0,Infinity}][a,b],"
+            "Scan[f,g[a],1,Heads->x],"
+            "(tungstenScanI=0;Scan[(tungstenScanI++;f),"
+            "(tungstenScanI++;g[a]),(tungstenScanI++;1),"
+            "(tungstenScanI++;2),(tungstenScanI++;z)]),"
+            "tungstenScanI,$MessageList,"
+            "(Unprotect[Scan];ClearAll[Scan];"
+            "Scan[x__]:=HoldComplete[x];Scan[f,{a,b}])}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

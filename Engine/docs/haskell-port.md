@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T14:29:09Z
-- Repository HEAD: 3fc49986c3b149d20606ae335af9b177e86f80c7
+- Updated (UTC): 2026-07-28T14:50:11Z
+- Repository HEAD: 7408f48d46284855b78f5575b50b079785aa2c37
 
 ## Purpose
 
@@ -132,7 +132,10 @@ gapped offsets over arbitrary compound expressions and associations, preserving 
 association rule kinds, callback effects and control, and generated outer-list normalization.
 `SubsetMap` validates flat integer positions before its single callback, supports negative and
 duplicate selections with later-replacement precedence, preserves exact List head spelling, and
-retains callback effects and diagnostics through successful or recovered transformations.
+retains callback effects and diagnostics through successful or recovered transformations. `Scan`
+adds postorder level traversal with optional ordinary-call head visits, association value-only
+semantics, ignored callback results, recoverable continuation, and exact direct/operator context
+boundaries.
 
 Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
 and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides

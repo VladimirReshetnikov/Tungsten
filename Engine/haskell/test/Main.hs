@@ -1592,6 +1592,16 @@ checkEvaluationSession = do
         , ("SubsetMap direct Unevaluated is held while Evaluate forces its payload", "ClearAll[i];i=0;{SubsetMap[f,Unevaluated[(i++;{a,b})],{1}],i,SubsetMap[f,Evaluate[Unevaluated[(i++;{a,b})]],{1}],i}", "List[SubsetMap[f, Unevaluated[CompoundExpression[Increment[i], List[a, b]]], List[1]], 0, SubsetMap[f, Evaluate[Unevaluated[CompoundExpression[Increment[i], List[a, b]]]], List[1]], 1]")
         , ("SubsetMap propagates control and preserves qualification boundaries", "ClearAll[i,s,bb];i=0;s=System`SubsetMap;bb=SubsetMap;{Catch[SubsetMap[(i++;Throw[t])&,{a,b},{1}]],i,System`SubsetMap[Reverse,{a,b},{1,2}],Global`SubsetMap[Reverse,{a,b},{1,2}],s[Reverse,{a,b},{1,2}],bb[Reverse,{a,b},{1,2}]}", "List[t, 1, System`SubsetMap[Reverse, List[a, b], List[1, 2]], Global`SubsetMap[Reverse, List[a, b], List[1, 2]], System`SubsetMap[Reverse, List[a, b], List[1, 2]], List[b, a]]")
         , ("SubsetMap ordinary downvalues take precedence over builtin dispatch", "Unprotect[SubsetMap];ClearAll[SubsetMap];SubsetMap[x__]:=HoldComplete[x];SubsetMap[f,{a,b},{1}]", "HoldComplete[f, List[a, b], List[1]]")
+        , ("Scan follows postorder at default root infinite and negative levels", "{Reap[Scan[Sow,g[a,h[b,c]]]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],{0,Infinity}]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],{-1}]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],-2]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],{0}]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],Infinity]][[2,1]]}", "List[List[a, h[b, c]], List[a, b, c, h[b, c], g[a, h[b, c]]], List[a, b, c], List[h[b, c]], List[g[a, h[b, c]]], List[a, b, c, h[b, c]]]")
+        , ("Scan Heads visits nested ordinary heads while associations expose only values", "{Reap[Scan[Sow,g[a,h[b]],{0,Infinity},Heads->True]][[2,1]],Reap[Scan[Sow,g[a,h[b]],{0,Infinity},Heads:>False]][[2,1]],Reap[Scan[Sow,f[g][h][x],{0,Infinity},Heads->True]][[2,1]],Reap[Scan[Sow,<|a->x,b:>h[y]|>,{0,Infinity},Heads->True]][[2,1]]}", "List[List[g, a, h, b, h[b], g[a, h[b]]], List[a, b, h[b], g[a, h[b]]], List[f, g, f[g], h, f[g][h], x, f[g][h][x]], List[x, h, y, h[y], Association[Rule[a, x], RuleDelayed[b, h[y]]]]]")
+        , ("Scan continues after recoverable callback diagnostics", "ClearAll[i,sc];i=0;sc[x_]:=(i++;Part[f[x],99]);{Scan[sc,g[a,b],{0,Infinity}],i,$MessageList}", "List[Null, 3, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]]]]")
+        , ("Scan ignores Nothing Sequence and Splice callback results", "ClearAll[i];i=0;{Scan[(i++;Nothing)&,{a,b}],i,Scan[Sequence[p,q]&,{a,b}],Scan[Splice[{p,q}]&,{a,b}]}", "List[Null, 2, Null, Null]")
+        , ("Scan propagates Throw and Abort with prior callback state", "ClearAll[i];i=0;{Catch[Scan[(i++;Throw[t])&,{a,b}]],i,CheckAbort[Scan[(i++;Abort[])&,{a,b}],caught],i}", "List[t, 1, caught, 2]")
+        , ("Scan propagates Return immediately", "ClearAll[i];i=0;Scan[(i++;Return[r])&,{a,b}];i", "Return[r]")
+        , ("Scan strips direct Unevaluated while Evaluate forces its payload", "{Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],Unevaluated[g[1+1]]]][[2,1]],Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],Evaluate[Unevaluated[g[1+1]]]]][[2,1]]}", "List[List[HoldComplete[Plus[1, 1]]], List[HoldComplete[2]]]")
+        , ("Scan preserves direct qualification and operator boundaries", "ClearAll[scanSystemAlias,scanBareAlias];scanSystemAlias=System`Scan;scanBareAlias=Scan;{Reap[Scan[Sow][g[a,c]]][[2,1]],Reap[System`Scan[Sow][g[a,c]]][[2,1]],Reap[System`Scan[Sow,{0,Infinity}][g[a,c]]][[2,1]],Global`Scan[Sow][g[a,c]],Scan[f,{0,Infinity}][g[a,c]],Reap[scanSystemAlias[Sow][g[a,c]]][[2,1]],Reap[scanBareAlias[Sow][g[a,c]]][[2,1]],System`Scan[HoldComplete,Unevaluated[g[1+1]]],Global`Scan[HoldComplete,Unevaluated[g[1+1]]]}", "List[List[a, c], List[a, c], List[a, c, g[a, c]], Global`Scan[Sow][g[a, c]], Null[g[a, c]], List[a, c], List[a, c], System`Scan[HoldComplete, g[Plus[1, 1]]], Global`Scan[HoldComplete, Unevaluated[g[Plus[1, 1]]]]]")
+        , ("Scan evaluates failing arguments left to right and recovers raw syntax", "ClearAll[i];i=0;{Scan[(i++;f),(i++;g[a]),(i++;1),(i++;2),(i++;z)],i,Scan[(i++;f),(i++;g[a]),(i++;x)],i,$MessageList}", "List[Scan[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], g[a]], CompoundExpression[Increment[i], 1], CompoundExpression[Increment[i], 2], CompoundExpression[Increment[i], z]], 5, Scan[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], g[a]], CompoundExpression[Increment[i], x]], 8, List[HoldForm[MessageName[Scan, \"error\"]], HoldForm[MessageName[Scan, \"error\"]]]]")
+        , ("Scan ordinary downvalues take precedence over builtin dispatch", "Unprotect[Scan];ClearAll[Scan];Scan[x__]:=HoldComplete[x];Scan[f,{a,b}]", "HoldComplete[f, List[a, b]]")
         , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
         , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
         , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
@@ -3308,6 +3318,39 @@ checkEvaluationSession = do
             , ( "SubsetMap::error"
               , "MessageName[SubsetMap, \"error\"]"
               , "SubsetMap::error: SubsetMap expects the function to return a List of the same length as the selection."
+              )
+            ]
+          )
+        , ( "Scan reports direct operator level and option errors exactly"
+          , "{Scan[],Scan[f,a,b,c,d],Scan[f,g[a],x],Scan[f][a,b],System`Scan[f][a,b],System`Scan[f,{0,Infinity}][a,b],Scan[f,g[a],1,Heads->x]}"
+          , "List[Scan[], Scan[f, a, b, c, d], Scan[f, g[a], x], Scan[f][a, b], System`Scan[f][a, b], System`Scan[f, List[0, Infinity]][a, b], Scan[f, g[a], 1, Rule[Heads, x]]]"
+          , [ ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Scan expects a function, an expression, and an optional level specification."
+              )
+            , ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Scan expects a function, an expression, and an optional level specification."
+              )
+            , ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Unsupported Level specification: 'x'."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Scan[f] expects exactly one argument when used as an operator."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Scan[f] expects exactly one argument when used as an operator."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Scan[f, levelspec] expects exactly one argument when used as an operator."
+              )
+            , ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Scan expects a function, an expression, and an optional level specification."
               )
             ]
           )
